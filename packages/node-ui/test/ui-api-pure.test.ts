@@ -37,6 +37,9 @@ import {
   subscribeToContextGraph,
   shutdownNode,
   promoteAssertion,
+  createKnowledgeAsset,
+  knowledgeAssetPublish,
+  knowledgeAssetFinalize,
 } from '../src/ui/api.js';
 
 let server: Server;
@@ -300,6 +303,85 @@ describe('UI API tests', () => {
     it('publishSharedMemory keeps the UI-side single-root guard', async () => {
       expect(() => publishSharedMemory('cg-1', ['urn:root:a', 'urn:root:b'])).toThrow(/exactly one root entity/i);
       expect(requestLog.some(r => r.url.includes('/api/shared-memory/publish'))).toBe(false);
+    });
+
+    it('knowledgeAssetPublish rejects non-decimal publisher identity overrides before POSTing', async () => {
+      expect(() =>
+        knowledgeAssetPublish('cg-1', 'f', { publisherNodeIdentityIdOverride: 'abc' }),
+      ).toThrow('publisherNodeIdentityIdOverride must be passed as a decimal string');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('knowledgeAssetPublish rejects negative publisher identity overrides before POSTing', async () => {
+      expect(() =>
+        knowledgeAssetPublish('cg-1', 'f', { publisherNodeIdentityIdOverride: '-1' }),
+      ).toThrow('publisherNodeIdentityIdOverride must be passed as a decimal string');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('knowledgeAssetPublish rejects unsupported publish options before POSTing', async () => {
+      expect(() =>
+        knowledgeAssetPublish('cg-1', 'f', { publishEpoch: 3 } as any),
+      ).toThrow('Unsupported finalized publish option(s): publishEpoch');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('createKnowledgeAsset normalizes context graph URIs before POSTing', async () => {
+      await createKnowledgeAsset('did:dkg:context-graph:cg-1', 'f');
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/knowledge-assets'));
+      const body = JSON.parse(call?.body ?? '{}');
+      expect(body.contextGraphId).toBe('cg-1');
+      expect(body.name).toBe('f');
+    });
+
+    it('createKnowledgeAsset rejects mutually exclusive authorship fields before POSTing', () => {
+      expect(() =>
+        createKnowledgeAsset('cg-1', 'f', {
+          authorAgentAddress: '0xauthor',
+          preSignedAuthorAttestation: { address: '0xauthor', signature: { r: '0xr', vs: '0xvs' } },
+        }),
+      ).toThrow('authorAgentAddress and preSignedAuthorAttestation are mutually exclusive');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('createKnowledgeAsset rejects finalized publish fields without quads before POSTing', () => {
+      expect(() =>
+        createKnowledgeAsset('cg-1', 'f', {
+          authorAgentAddress: '0xauthor',
+        }),
+      ).toThrow('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('createKnowledgeAsset treats empty alsoPublishVm options as default publish', async () => {
+      await createKnowledgeAsset('cg-1', 'f', { alsoPublishVm: {} });
+      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/knowledge-assets'));
+      const body = JSON.parse(call?.body ?? '{}');
+      expect(body.alsoPublishVm).toEqual({});
+    });
+
+    it('createKnowledgeAsset rejects unsupported alsoPublishVm options before POSTing', () => {
+      expect(() =>
+        createKnowledgeAsset('cg-1', 'f', { alsoPublishVm: { publishEpoch: 3 } as any }),
+      ).toThrow('Unsupported finalized publish option(s): publishEpoch');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('createKnowledgeAsset rejects array alsoPublishVm before POSTing', () => {
+      expect(() =>
+        createKnowledgeAsset('cg-1', 'f', { alsoPublishVm: [] as any }),
+      ).toThrow('alsoPublishVm must be a boolean or publish-options object');
+      expect(requestLog).toHaveLength(0);
+    });
+
+    it('knowledgeAssetFinalize rejects mutually exclusive authorship fields before POSTing', () => {
+      expect(() =>
+        knowledgeAssetFinalize('cg-1', 'f', {
+          authorAgentAddress: '0xauthor',
+          preSignedAuthorAttestation: { address: '0xauthor', signature: { r: '0xr', vs: '0xvs' } },
+        }),
+      ).toThrow('authorAgentAddress and preSignedAuthorAttestation are mutually exclusive');
+      expect(requestLog).toHaveLength(0);
     });
 
     it('listSwmEntities queries the shared-working-memory view', async () => {

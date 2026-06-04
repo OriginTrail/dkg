@@ -117,6 +117,25 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(agent.assertion.write).not.toHaveBeenCalled();
   });
 
+  it('POST /api/knowledge-assets rejects finalize-only fields without auto-finalize quads', async () => {
+    for (const payload of [
+      { authorAgentAddress: `0x${'11'.repeat(20)}` },
+      { quads: [], schemeVersion: 1 },
+    ]) {
+      const agent = makeAssertionAgent();
+      const ctx = ctxFor('POST', '/api/knowledge-assets', {
+        contextGraphId: 'cg',
+        name: 'f',
+        ...payload,
+      }, agent);
+      await handleKnowledgeAssetsRoutes(ctx);
+      expect(status(ctx)).toBe(400);
+      expect(body(ctx).error).toContain('require non-empty "quads"');
+      expect(agent.assertion.create).not.toHaveBeenCalled();
+      expect(agent.assertion.finalize).not.toHaveBeenCalled();
+    }
+  });
+
   it('POST /api/knowledge-assets with quads auto-writes + auto-finalizes (sealed assertion v1)', async () => {
     const agent = makeAssertionAgent();
     const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];

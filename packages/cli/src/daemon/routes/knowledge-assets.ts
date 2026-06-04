@@ -30,6 +30,11 @@ import { validatePreSignedAuthorAttestation } from "./memory.js";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
 
 const PREFIX = "/api/knowledge-assets";
+const FINALIZE_ONLY_CREATE_FIELDS = [
+  "authorAgentAddress",
+  "preSignedAuthorAttestation",
+  "schemeVersion",
+] as const;
 
 function hex(bytes: Uint8Array): string {
   return "0x" + Buffer.from(bytes).toString("hex");
@@ -134,6 +139,10 @@ function resolveFinalizeOptions(
   };
 }
 
+function hasFinalizeOnlyCreateFields(raw: Record<string, unknown>): boolean {
+  return FINALIZE_ONLY_CREATE_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(raw, field));
+}
+
 export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, agent, path, url } = ctx;
   if (path !== PREFIX && !path.startsWith(`${PREFIX}/`)) return;
@@ -158,6 +167,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       return jsonResponse(res, 400, { error: 'Missing "contextGraphId" or "name"' });
     }
     const shouldAutoFinalize = Array.isArray(quads) && quads.length > 0;
+    if (!shouldAutoFinalize && hasFinalizeOnlyCreateFields(parsed)) {
+      return jsonResponse(res, 400, {
+        error: '"authorAgentAddress", "preSignedAuthorAttestation", and "schemeVersion" require non-empty "quads"',
+      });
+    }
     const finalizeOptions = shouldAutoFinalize
       ? resolveFinalizeOptions({ subGraphName, authorAgentAddress, preSignedAuthorAttestation, schemeVersion }, res)
       : {};

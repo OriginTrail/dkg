@@ -94,6 +94,12 @@ export interface KnowledgeAssetFinalizedPublishOptions {
   publisherNodeIdentityIdOverride?: string;
 }
 
+const FINALIZED_PUBLISH_OPTION_KEYS = new Set([
+  'clearAfter',
+  'publishEpochs',
+  'publisherNodeIdentityIdOverride',
+]);
+
 function publisherNodeIdentityOverridePayload(value: unknown): string {
   if (typeof value === 'string' && /^\d+$/.test(value)) return value;
   throw new Error('publisherNodeIdentityIdOverride must be passed as a decimal string');
@@ -108,11 +114,33 @@ function assertExclusiveAuthorFields(args: {
   }
 }
 
+function assertCreateFinalizeFieldsHaveQuads(args: {
+  quads?: unknown[];
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
+  schemeVersion?: number;
+}): void {
+  const hasFinalizeOnlyField =
+    args.authorAgentAddress != null ||
+    args.preSignedAuthorAttestation != null ||
+    args.schemeVersion !== undefined;
+  if (hasFinalizeOnlyField && !(Array.isArray(args.quads) && args.quads.length > 0)) {
+    throw new Error('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads');
+  }
+}
+
 /** Translate {@link KnowledgeAssetFinalizedPublishOptions} into the daemon body. */
 function finalizedPublishOptionsPayload(
   options?: KnowledgeAssetFinalizedPublishOptions,
+  allowedExtraKeys: readonly string[] = [],
 ): Record<string, unknown> | undefined {
   if (!options) return undefined;
+  const unsupportedKeys = Object.keys(options).filter(
+    (key) => !FINALIZED_PUBLISH_OPTION_KEYS.has(key) && !allowedExtraKeys.includes(key),
+  );
+  if (unsupportedKeys.length > 0) {
+    throw new Error(`Unsupported finalized publish option(s): ${unsupportedKeys.join(', ')}`);
+  }
   const payload: Record<string, unknown> = {};
   if (options.clearAfter !== undefined) payload.clearSharedMemoryAfter = options.clearAfter;
   if (options.publishEpochs !== undefined) payload.publishEpochs = options.publishEpochs;
@@ -123,6 +151,21 @@ function finalizedPublishOptionsPayload(
       publisherNodeIdentityOverridePayload(publisherNodeIdentityIdOverride);
   }
   return Object.keys(payload).length > 0 ? payload : undefined;
+}
+
+function createAlsoPublishVmPayload(
+  value: unknown,
+): boolean | Record<string, unknown> {
+  if (typeof value === 'boolean') return value;
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    if (Object.keys(value).length === 0) return {};
+    const payload = finalizedPublishOptionsPayload(value as KnowledgeAssetFinalizedPublishOptions);
+    if (payload) return payload;
+    throw new Error(
+      'alsoPublishVm options object must include at least one supported option; use true to publish with defaults',
+    );
+  }
+  throw new Error('alsoPublishVm must be a boolean or publish-options object');
 }
 
 /**
@@ -1097,6 +1140,7 @@ export class DkgClient {
     alsoPublishVm?: boolean | KnowledgeAssetFinalizedPublishOptions;
   }): Promise<Record<string, unknown>> {
     assertExclusiveAuthorFields(args);
+    assertCreateFinalizeFieldsHaveQuads(args);
     const body: Record<string, unknown> = {
       contextGraphId: normalizeContextGraphId(args.contextGraphId),
       name: args.name,
@@ -1112,10 +1156,7 @@ export class DkgClient {
     if (args.alsoPublishVm !== undefined) {
       // Object form carries finalized-publish controls; translate to the daemon
       // body shape (mirrors the cli ApiClient). `true`/`false` pass through.
-      body.alsoPublishVm =
-        typeof args.alsoPublishVm === 'object'
-          ? (finalizedPublishOptionsPayload(args.alsoPublishVm) ?? {})
-          : args.alsoPublishVm;
+      body.alsoPublishVm = createAlsoPublishVmPayload(args.alsoPublishVm);
     }
     return this.request<Record<string, unknown>>('POST', '/api/knowledge-assets', body);
   }
@@ -1248,7 +1289,7 @@ export class DkgClient {
       contextGraphId: normalizeContextGraphId(args.contextGraphId),
     };
     if (args.subGraphName) body.subGraphName = args.subGraphName;
-    const publishOptions = finalizedPublishOptionsPayload(args);
+    const publishOptions = finalizedPublishOptionsPayload(args, ['contextGraphId', 'name', 'subGraphName']);
     if (publishOptions) body.options = publishOptions;
     return this.request<Record<string, unknown>>(
       'POST',

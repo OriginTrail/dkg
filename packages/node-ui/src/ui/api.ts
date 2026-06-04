@@ -1,6 +1,38 @@
 const BASE = '';
+const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 declare global {
   interface Window { __DKG_TOKEN__?: string; }
+}
+
+function normalizeContextGraphId(contextGraphIdOrUri: string): string {
+  const trimmed = contextGraphIdOrUri.trim();
+  return trimmed.startsWith(CONTEXT_GRAPH_URI_PREFIX)
+    ? trimmed.slice(CONTEXT_GRAPH_URI_PREFIX.length)
+    : trimmed;
+}
+
+function assertExclusiveAuthorFields(args: {
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
+}): void {
+  if (args.authorAgentAddress != null && args.preSignedAuthorAttestation != null) {
+    throw new Error('authorAgentAddress and preSignedAuthorAttestation are mutually exclusive');
+  }
+}
+
+function assertCreateFinalizeFieldsHaveQuads(args: {
+  quads?: unknown[];
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
+  schemeVersion?: number;
+}): void {
+  const hasFinalizeOnlyField =
+    args.authorAgentAddress != null ||
+    args.preSignedAuthorAttestation != null ||
+    args.schemeVersion !== undefined;
+  if (hasFinalizeOnlyField && !(Array.isArray(args.quads) && args.quads.length > 0)) {
+    throw new Error('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads');
+  }
 }
 
 export function authHeaders(): Record<string, string> {
@@ -678,16 +710,29 @@ export interface KnowledgeAssetFinalizedPublishOptions {
   publisherNodeIdentityIdOverride?: string;
 }
 
+const FINALIZED_PUBLISH_OPTION_KEYS = new Set([
+  'clearAfter',
+  'publishEpochs',
+  'publisherNodeIdentityIdOverride',
+]);
+
 const publisherNodeIdentityOverridePayload = (value: unknown): string => {
-  if (typeof value === 'string') return value;
+  if (typeof value === 'string' && /^\d+$/.test(value)) return value;
   throw new Error('publisherNodeIdentityIdOverride must be passed as a decimal string');
 }
 
 /** Translate {@link KnowledgeAssetFinalizedPublishOptions} into the daemon body. */
 const finalizedPublishOptionsPayload = (
   options?: KnowledgeAssetFinalizedPublishOptions,
+  allowedExtraKeys: readonly string[] = [],
 ): Record<string, unknown> | undefined => {
   if (!options) return undefined;
+  const unsupportedKeys = Object.keys(options).filter(
+    (key) => !FINALIZED_PUBLISH_OPTION_KEYS.has(key) && !allowedExtraKeys.includes(key),
+  );
+  if (unsupportedKeys.length > 0) {
+    throw new Error(`Unsupported finalized publish option(s): ${unsupportedKeys.join(', ')}`);
+  }
   const payload: Record<string, unknown> = {};
   if (options.clearAfter !== undefined) payload.clearSharedMemoryAfter = options.clearAfter;
   if (options.publishEpochs !== undefined) payload.publishEpochs = options.publishEpochs;
@@ -698,6 +743,19 @@ const finalizedPublishOptionsPayload = (
       publisherNodeIdentityOverridePayload(publisherNodeIdentityIdOverride);
   }
   return Object.keys(payload).length > 0 ? payload : undefined;
+};
+
+const createAlsoPublishVmPayload = (value: unknown): boolean | Record<string, unknown> => {
+  if (typeof value === 'boolean') return value;
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    if (Object.keys(value).length === 0) return {};
+    const payload = finalizedPublishOptionsPayload(value as KnowledgeAssetFinalizedPublishOptions);
+    if (payload) return payload;
+    throw new Error(
+      'alsoPublishVm options object must include at least one supported option; use true to publish with defaults',
+    );
+  }
+  throw new Error('alsoPublishVm must be a boolean or publish-options object');
 };
 
 /**
@@ -718,11 +776,18 @@ export const createKnowledgeAsset = (
     alsoPublishVm?: boolean | KnowledgeAssetFinalizedPublishOptions;
   } = {},
 ) => {
-  const body: Record<string, unknown> = { contextGraphId, name, ...opts };
+  assertExclusiveAuthorFields(opts);
+  assertCreateFinalizeFieldsHaveQuads(opts);
+  const normalizedContextGraphId = normalizeContextGraphId(contextGraphId);
+  const body: Record<string, unknown> = {
+    contextGraphId: normalizedContextGraphId,
+    name,
+    ...opts,
+  };
   // Object form carries finalized-publish controls; translate to the daemon
   // body shape (mirrors the cli ApiClient). `true`/`false` pass through.
-  if (opts.alsoPublishVm && typeof opts.alsoPublishVm === 'object') {
-    body.alsoPublishVm = finalizedPublishOptionsPayload(opts.alsoPublishVm) ?? {};
+  if (opts.alsoPublishVm !== undefined) {
+    body.alsoPublishVm = createAlsoPublishVmPayload(opts.alsoPublishVm);
   }
   return post<Record<string, unknown>>('/api/knowledge-assets', body);
 };
@@ -734,7 +799,7 @@ export const getKnowledgeAsset = (
   subGraphName?: string,
 ) => {
   const qs = new URLSearchParams({
-    contextGraphId,
+    contextGraphId: normalizeContextGraphId(contextGraphId),
     ...(subGraphName ? { subGraphName } : {}),
   }).toString();
   return get<Record<string, unknown>>(
@@ -751,7 +816,7 @@ export const knowledgeAssetWrite = (
 ) =>
   post<{ written: number }>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/wm/write`,
-    { contextGraphId, quads, ...opts },
+    { contextGraphId: normalizeContextGraphId(contextGraphId), quads, ...opts },
   );
 
 /** Seal the WM draft — computes the merkle root + signs the seal (git commit). */
@@ -764,11 +829,13 @@ export const knowledgeAssetFinalize = (
     preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
     schemeVersion?: number;
   } = {},
-) =>
-  post<{ merkleRoot: string; eip712Digest: string }>(
+) => {
+  assertExclusiveAuthorFields(opts);
+  return post<{ merkleRoot: string; eip712Digest: string }>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize`,
-    { contextGraphId, ...opts },
+    { contextGraphId: normalizeContextGraphId(contextGraphId), ...opts },
   );
+};
 
 /** Discard the open WM draft (git checkout -- .). */
 export const knowledgeAssetDiscard = (
@@ -778,7 +845,7 @@ export const knowledgeAssetDiscard = (
 ) =>
   post<{ discarded: boolean }>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/wm/discard`,
-    { contextGraphId, ...opts },
+    { contextGraphId: normalizeContextGraphId(contextGraphId), ...opts },
   );
 
 /** Seed a fresh WM draft from the file's current SWM/VM state (git checkout). */
@@ -790,7 +857,7 @@ export const knowledgeAssetPullFrom = (
 ) =>
   post<Record<string, unknown>>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/wm/pull-from`,
-    { contextGraphId, layer, ...opts },
+    { contextGraphId: normalizeContextGraphId(contextGraphId), layer, ...opts },
   );
 
 /** Advance the SWM pointer (WM → SWM; git push origin <branch>). */
@@ -801,7 +868,7 @@ export const knowledgeAssetShare = (
 ) =>
   post<{ swmShared: boolean; promotedCount: number }>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`,
-    { contextGraphId, ...opts },
+    { contextGraphId: normalizeContextGraphId(contextGraphId), ...opts },
   );
 
 /** Publish to VM — mint or update on chain (git push origin main). */
@@ -810,11 +877,11 @@ export const knowledgeAssetPublish = (
   name: string,
   opts: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions = {},
 ) => {
-  const publishOptions = finalizedPublishOptionsPayload(opts);
+  const publishOptions = finalizedPublishOptionsPayload(opts, ['subGraphName']);
   return post<Record<string, unknown>>(
     `/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`,
     {
-      contextGraphId,
+      contextGraphId: normalizeContextGraphId(contextGraphId),
       ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     },
