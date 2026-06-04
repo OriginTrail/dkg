@@ -100,14 +100,22 @@ const MAX_UINT64 = (1n << 64n) - 1n;
  * Mirrors `finalization.ts`'s `bigIntToProtoSafe`, including the MAX_UINT64
  * RangeError guard, for parity across the two encoders.
  */
-function bigIntToProtoSafe(val: number | bigint | Long): number | Long {
+function bigIntToProtoSafe(val: number | bigint | Long, fieldName = 'uint64 value'): number | Long {
   if (typeof val === 'bigint') {
     if (val < 0n || val > MAX_UINT64) {
-      throw new RangeError(`Value ${val} exceeds uint64 range [0, 2^64-1]`);
+      throw new RangeError(`${fieldName} ${val} exceeds uint64 range [0, 2^64-1]`);
     }
     const low = Number(val & 0xFFFFFFFFn);
     const high = Number((val >> 32n) & 0xFFFFFFFFn);
     return { low, high, unsigned: true };
+  }
+  if (typeof val === 'number') {
+    if (!Number.isSafeInteger(val) || val < 0) {
+      throw new RangeError(
+        `${fieldName} must be a non-negative safe integer when passed as number; use bigint or Long for full uint64 values`,
+      );
+    }
+    return val;
   }
   return val as number | Long;
 }
@@ -118,12 +126,12 @@ export function encodePublishRequest(msg: PublishRequestMsg): Uint8Array {
       ...msg,
       kas: msg.kas.map((ka) => ({
         ...ka,
-        tokenId: bigIntToProtoSafe(ka.tokenId),
+        tokenId: bigIntToProtoSafe(ka.tokenId, 'kas.tokenId'),
       })),
-      startKAId: bigIntToProtoSafe(msg.startKAId),
-      endKAId: bigIntToProtoSafe(msg.endKAId),
+      startKAId: bigIntToProtoSafe(msg.startKAId, 'startKAId'),
+      endKAId: bigIntToProtoSafe(msg.endKAId, 'endKAId'),
       ...(msg.blockNumber !== undefined
-        ? { blockNumber: msg.blockNumber }
+        ? { blockNumber: bigIntToProtoSafe(msg.blockNumber, 'blockNumber') }
         : {}),
     }),
   ).finish();
