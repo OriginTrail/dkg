@@ -58,9 +58,10 @@ export function registerAssertionTools(
       title: 'Create Assertion',
       description:
         'Step 1 of the canonical write flow: create an empty Working Memory ' +
-        'assertion graph. Idempotent — duplicate names land as ' +
-        '`alreadyExists: true` rather than throwing. Slug must match ' +
-        '/^[a-z0-9-]+$/ for new names; pre-existing assertions accept any name.',
+        'assertion graph (a Knowledge Asset draft). Idempotent and ' +
+        'non-destructive — re-creating an existing name returns the open ' +
+        'draft without clearing its quads. Slug must match /^[a-z0-9-]+$/ for ' +
+        'new names; pre-existing assertions accept any name.',
       inputSchema: {
         name: z
           .string()
@@ -80,10 +81,10 @@ export function registerAssertionTools(
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
       try {
-        // KA lifecycle: create an empty WM draft (no quads → `draft-open`,
-        // same as the legacy assertion-create). Idempotency is preserved by
-        // catching the daemon's "already exists" below — the KA create route
-        // surfaces it as an error rather than a flag.
+        // KA lifecycle: open an empty WM draft (no quads → `draft-open`). The
+        // KA create route is idempotent and non-destructive — re-creating an
+        // existing name returns the open draft (201) without clearing its
+        // quads, so there is no "already exists" error path to special-case.
         const result = await client.createKnowledgeAsset({
           contextGraphId: pid,
           name,
@@ -93,11 +94,7 @@ export function registerAssertionTools(
           `Created assertion '${name}' in '${pid}'.\nURI: ${result.assertionUri ?? '(unset)'}`,
         );
       } catch (e) {
-        const msg = formatError(e);
-        if (/already exists/i.test(msg)) {
-          return ok(`Assertion '${name}' already exists in '${pid}'.`);
-        }
-        return errResult(`Failed to create assertion: ${msg}`);
+        return errResult(`Failed to create assertion: ${formatError(e)}`);
       }
     },
   );

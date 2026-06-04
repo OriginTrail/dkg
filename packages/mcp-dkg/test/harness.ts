@@ -294,13 +294,14 @@ export class FakeClient {
   }) {
     if (this.overrides.createKnowledgeAsset) return this.overrides.createKnowledgeAsset.call(this, args);
     const key = `${args.contextGraphId}::${args.name}`;
-    // KA create surfaces a duplicate name as an error (the tool catches the
-    // "already exists" message to preserve idempotency).
-    if (this.assertions.has(key)) {
-      throw new Error(`Knowledge asset "${args.name}" already exists`);
+    // KA create is idempotent and non-destructive (verified live: 201
+    // get-or-create). Re-creating an existing name returns the open draft
+    // without clearing its quads.
+    let cell = this.assertions.get(key);
+    if (!cell) {
+      cell = { quads: [] as Array<{ subject: string; predicate: string; object: string }>, promotedRoots: new Set<string>(), discarded: false };
+      this.assertions.set(key, cell);
     }
-    const cell = { quads: [] as Array<{ subject: string; predicate: string; object: string }>, promotedRoots: new Set<string>(), discarded: false };
-    this.assertions.set(key, cell);
     if (args.quads && args.quads.length > 0) {
       cell.quads.push(...args.quads.map((q) => ({ subject: q.subject, predicate: q.predicate, object: q.object })));
     }

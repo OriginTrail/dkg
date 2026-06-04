@@ -3397,17 +3397,10 @@ export class DkgNodePlugin {
       if (!name) return this.error('"name" is required.');
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
       // KA lifecycle: open an empty WM draft (no quads → `draft-open`). The KA
-      // create route surfaces a duplicate name as an error, so preserve the
-      // legacy idempotent contract (`alreadyExists`) here.
-      try {
-        const result = await this.client.createKnowledgeAsset(contextGraphId, name, { subGraphName });
-        return this.json(result);
-      } catch (err: any) {
-        if (/already exists/i.test(String(err?.message ?? err))) {
-          return this.json({ name, alreadyExists: true });
-        }
-        throw err;
-      }
+      // create route is idempotent and non-destructive — re-creating an
+      // existing name returns the open draft without clearing its quads.
+      const result = await this.client.createKnowledgeAsset(contextGraphId, name, { subGraphName });
+      return this.json(result);
     } catch (err: any) {
       return this.daemonError(err);
     }
