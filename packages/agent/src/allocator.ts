@@ -34,8 +34,13 @@ const ADDRESS_HEX_CHARS = 40;
 export interface KaAllocation {
   /** Packed `(uint160(author) << 96) | uint96(number)`. Always non-zero. */
   kaId: bigint;
-  /** The per-author number just consumed (first allocation is 0). */
-  number: number;
+  /**
+   * The per-author number just consumed (first allocation is `0n`).
+   * `bigint` end-to-end (codex PR #976 F6) so the counter stays exact
+   * past `Number.MAX_SAFE_INTEGER`; the on-chain field is `uint96` and
+   * the store backs it with a SQLite signed INTEGER (`2^63 - 1` cap).
+   */
+  number: bigint;
 }
 
 export class KaNumberAllocator {
@@ -55,14 +60,29 @@ export class KaNumberAllocator {
   /**
    * Consume the next number for `authorAddress` and return it together
    * with the packed `kaId`. Throws if startup reconciliation has not
-   * been performed (`assertReconciled`) or if the address is not a valid
-   * 20-byte hex address.
+   * been performed (`assertReconciled`), if the address is not a valid
+   * 20-byte hex address, or if it is the zero address (codex PR #976
+   * F7 — `(0n << 96) | 0n === 0n`, which collides with the poller's
+   * "no kaId" sentinel and violates the `KaAllocation.kaId` non-zero
+   * contract).
+   *
+   * The address is canonicalized to the validated lowercase form
+   * (codex PR #976 F8) BEFORE being passed to the store, so any
+   * `KaNumberStore` implementation receives a single canonical key
+   * regardless of caller casing. Without this, `0xAbc…` vs `0xabc…`
+   * would fork the sequence in a store that forgot to lowercase its
+   * own key, producing duplicate low-96 counters under the same
+   * on-chain author.
    */
   allocate(authorAddress: string): KaAllocation {
     this.assertReconciled();
-    const authorBits = KaNumberAllocator.authorToUint160(authorAddress);
-    const number = this.store.allocate(authorAddress);
-    const kaId = (authorBits << NUMBER_BITS) | BigInt(number);
+    const canonical = KaNumberAllocator.canonicalizeAuthor(authorAddress);
+    const authorBits = BigInt(canonical);
+    // `number` is a `bigint` straight off the store (codex PR #976 F6) —
+    // no `BigInt()` round-trip, no chance of a stray `Number()` cast at
+    // the call site silently truncating a counter past 2^53.
+    const number = this.store.allocate(canonical);
+    const kaId = (authorBits << NUMBER_BITS) | number;
     return { kaId, number };
   }
 
@@ -70,23 +90,31 @@ export class KaNumberAllocator {
    * Raise the stored floor for `authorAddress` from an observed on-chain
    * state. `observedNumber` is the highest number already minted under
    * that author; the next allocation must therefore be at least
-   * `observedNumber + 1`. Idempotent and monotonic (never lowers).
+   * `observedNumber + 1n`. Idempotent and monotonic (never lowers).
+   *
+   * `observedNumber` is a `bigint` (codex PR #976 F6) — the chain reads
+   * that compute it (`kaId & ((1n<<96n)-1n)`) already produce bigint;
+   * accepting `number` here would force a precision-losing cast at the
+   * caller. The address is canonicalized before being passed to the
+   * store (codex PR #976 F8) to keep the per-author key stable across
+   * casing variants.
    */
-  reconcile(authorAddress: string, observedNumber: number): void {
-    // Validate the address shape here too so reconciliation rejects junk
-    // before it can poison the floor.
-    KaNumberAllocator.authorToUint160(authorAddress);
-    this.store.reconcileFloor(authorAddress, observedNumber + 1);
+  reconcile(authorAddress: string, observedNumber: bigint): void {
+    const canonical = KaNumberAllocator.canonicalizeAuthor(authorAddress);
+    this.store.reconcileFloor(canonical, observedNumber + 1n);
   }
 
   /**
    * The `kaId` the next `allocate(authorAddress)` would produce, without
-   * consuming it. Does NOT require reconciliation (read-only peek).
+   * consuming it. Does NOT require reconciliation (read-only peek). The
+   * address is canonicalized (codex PR #976 F8) so peek + allocate
+   * cannot disagree under mixed casing.
    */
   peekKaId(authorAddress: string): bigint {
-    const authorBits = KaNumberAllocator.authorToUint160(authorAddress);
-    const number = this.store.peekNext(authorAddress);
-    return (authorBits << NUMBER_BITS) | BigInt(number);
+    const canonical = KaNumberAllocator.canonicalizeAuthor(authorAddress);
+    const authorBits = BigInt(canonical);
+    const number = this.store.peekNext(canonical);
+    return (authorBits << NUMBER_BITS) | number;
   }
 
   /**
@@ -121,18 +149,44 @@ export class KaNumberAllocator {
    * 160-bit integer value. Uses `ethers.getAddress` to validate (it
    * throws on a malformed/checksum-invalid address); `BigInt(0x…)` then
    * yields the unsigned 160-bit value. NEVER uses `Number()`.
+   *
+   * Rejects the zero address (codex PR #976 F7) — see
+   * `canonicalizeAuthor()` for the rationale.
    */
   static authorToUint160(authorAddress: string): bigint {
-    // getAddress throws on anything that is not a valid 20-byte address
-    // (wrong length, non-hex, bad checksum casing). Re-wrap so the error
-    // is attributable to this module.
+    return BigInt(KaNumberAllocator.canonicalizeAuthor(authorAddress));
+  }
+
+  /**
+   * Validate `authorAddress` and return its canonical lowercase
+   * `0x`-prefixed 42-char form. This is the single normalization point
+   * the allocator uses before talking to the store, so any
+   * `KaNumberStore` implementation receives one canonical key per
+   * on-chain author regardless of caller casing (codex PR #976 F8).
+   *
+   * Rejects:
+   *   - Anything `ethers.getAddress()` rejects (wrong length, non-hex,
+   *     bad checksum casing).
+   *   - The zero address `0x0000…0000` (codex PR #976 F7). Allocating
+   *     under the zero address would yield `kaId = 0n`, which both
+   *     violates the `KaAllocation.kaId` non-zero contract and collides
+   *     with the poller's "no kaId" sentinel (see
+   *     `chain-event-poller.ts::handleKACreated`'s `if (kaId === 0n)
+   *     return`).
+   */
+  static canonicalizeAuthor(authorAddress: string): string {
     let checksummed: string;
     try {
       checksummed = ethers.getAddress(authorAddress);
     } catch {
       throw new Error(`KaNumberAllocator: invalid author address: ${authorAddress}`);
     }
-    return BigInt(checksummed);
+    if (checksummed === ethers.ZeroAddress) {
+      throw new Error(
+        'KaNumberAllocator: refusing to allocate under the zero address (kaId=0n collides with the poller "no kaId" sentinel and violates the KaAllocation non-zero contract)',
+      );
+    }
+    return checksummed.toLowerCase();
   }
 
   /**

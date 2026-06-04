@@ -72,9 +72,11 @@ const WORKSPACE_OWNER_PREDICATE = 'http://dkg.io/ontology/workspaceOwner';
  */
 export interface KaIdAllocator {
   /** Allocate the next packed kaId = (uint160(author)<<96)|number for `author`. */
-  allocate(author: string): { kaId: bigint; number: number };
-  /** Raise the per-author floor to `observedNumber + 1` (never lower) so the next allocate skips minted numbers. */
-  reconcile(author: string, observedNumber: number): void;
+  allocate(author: string): { kaId: bigint; number: bigint };
+  /** Raise the per-author floor to `observedNumber + 1` (never lower) so the next allocate skips minted numbers.
+   *  `observedNumber` is a `bigint` end-to-end (OT-RFC-43 Option-1, PR #976 F6) — the per-author number can
+   *  exceed 2^53, so `Number` would silently lose precision and let the allocator re-issue a minted id. */
+  reconcile(author: string, observedNumber: bigint): void;
   /** Satisfy the allocator's cold-start guard once reconciliation has run. */
   markReconciled(): void;
 }
@@ -4669,7 +4671,8 @@ export class DKGPublisher implements Publisher {
       }
       if (chainMax >= 0n) {
         // chainMax is the highest minted number; reconcile() raises the floor to chainMax + 1.
-        this.kaAllocator.reconcile(author, Number(chainMax));
+        // Pass the bigint straight through (PR #976 F6) — `Number()` would lose precision past 2^53.
+        this.kaAllocator.reconcile(author, chainMax);
       }
       this.kaAllocator.markReconciled();
       this.reconciledKaAuthors.add(key);

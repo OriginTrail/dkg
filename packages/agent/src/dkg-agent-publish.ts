@@ -1821,7 +1821,8 @@ export class PublishMethods extends DKGAgentBase {
           }
         }
         if (chainMax >= 0n) {
-          this.kaNumberAllocator.reconcile(author, Number(chainMax));
+          // Pass the bigint straight through (PR #976 F6) — `Number()` would lose precision past 2^53.
+          this.kaNumberAllocator.reconcile(author, chainMax);
         }
         this.kaNumberAllocator.markReconciled();
         this.reconciledKaAuthors.add(key);

@@ -25,8 +25,8 @@ const NUMBER_BITS = 96n;
 import { ethers } from 'ethers';
 
 export interface KaIdAllocator {
-  allocate(author: string): { kaId: bigint; number: number };
-  reconcile(author: string, observedNumber: number): void;
+  allocate(author: string): { kaId: bigint; number: bigint };
+  reconcile(author: string, observedNumber: bigint): void;
   markReconciled(): void;
 }
 
@@ -37,26 +37,28 @@ export interface KaIdAllocator {
  * `kaId = (uint160(author) << 96) | number` is computed entirely in bigint.
  */
 export class InMemoryKaIdAllocator implements KaIdAllocator {
-  private readonly next = new Map<string, number>();
+  private readonly next = new Map<string, bigint>();
   private reconciled = false;
 
-  allocate(author: string): { kaId: bigint; number: number } {
+  allocate(author: string): { kaId: bigint; number: bigint } {
     if (!this.reconciled) {
       throw new Error('InMemoryKaIdAllocator: allocate() before markReconciled()');
     }
     const key = author.toLowerCase();
-    const number = this.next.get(key) ?? 0;
-    this.next.set(key, number + 1);
+    const number = this.next.get(key) ?? 0n;
+    this.next.set(key, number + 1n);
     const authorBits = BigInt(ethers.getAddress(author));
-    const kaId = (authorBits << NUMBER_BITS) | BigInt(number);
+    const kaId = (authorBits << NUMBER_BITS) | number;
     return { kaId, number };
   }
 
-  reconcile(author: string, observedNumber: number): void {
+  reconcile(author: string, observedNumber: bigint): void {
     const key = author.toLowerCase();
-    const current = this.next.get(key) ?? 0;
+    const current = this.next.get(key) ?? 0n;
     // observedNumber is the highest already-minted number; the floor is +1.
-    this.next.set(key, Math.max(current, observedNumber + 1));
+    // bigint end-to-end (PR #976 F6) — no `Math.max` (mixes bigint/number).
+    const floor = observedNumber + 1n;
+    this.next.set(key, current > floor ? current : floor);
   }
 
   markReconciled(): void {
