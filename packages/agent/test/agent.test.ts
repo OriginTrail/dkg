@@ -4245,6 +4245,17 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         syncScoped: true,
       });
     }
+    // A coreHosted graph: a LEGITIMATE hosted graph, not part of the stale
+    // backlog — the clear must preserve it (host-mode/reconcile depends on it),
+    // exactly like the rehydration cap exempts it.
+    persisted.set('hosted-cg', {
+      id: 'hosted-cg',
+      name: 'Hosted',
+      subscribed: true,
+      synced: false,
+      syncScoped: true,
+      coreHosted: true,
+    });
     const subscriptionStore = {
       loadAll: async () => [...persisted.values()],
       save: async (r: any) => { persisted.set(r.id, { ...r }); },
@@ -4284,6 +4295,12 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(agent.getSubscribedContextGraphs().get(sys)?.subscribed).toBe(true);
         expect(persisted.has(sys)).toBe(true);
       }
+
+      // The coreHosted graph is PRESERVED too — NOT counted in `cleared`, still
+      // subscribed, and its persisted row kept (the clear exempts hosted graphs
+      // just like the rehydration cap, so host-mode/reconcile is never dropped).
+      expect(agent.getSubscribedContextGraphs().get('hosted-cg')?.subscribed).toBe(true);
+      expect(persisted.has('hosted-cg')).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }

@@ -3537,17 +3537,32 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // USER context-graph subscriptions, live and persisted alike. (The store's
     // system-unaware bulk delete is deliberately NOT used here.)
     const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
-    const isUserContextGraph = (id: string) => !systemContextGraphs.has(id);
+    // Clearable = a NON-system, NON-coreHosted user subscription. System CGs are
+    // the control plane (above). coreHosted graphs are legitimate hosted graphs
+    // that `unsubscribeFromContextGraph` deliberately keeps wired for host-mode /
+    // chain reconcile (so a teardown can't fully remove them anyway) and that the
+    // rehydration cap already exempts — clearing/counting them here would report a
+    // removal that didn't happen. The clear targets only the stale non-hosted
+    // backlog, the actual #997 wedge.
+    const isClearable = (id: string, coreHosted: boolean | undefined): boolean =>
+      !systemContextGraphs.has(id) && coreHosted !== true;
 
-    const activeUserIds = [...this.subscribedContextGraphs.keys()].filter(isUserContextGraph);
+    const activeUserIds = [...this.subscribedContextGraphs.entries()]
+      .filter(([id, s]) => isClearable(id, s?.coreHosted))
+      .map(([id]) => id);
 
-    // The full persisted USER backlog (active + dormant rows left behind by the
-    // rehydration cap). Counted up front: `unsubscribeFromContextGraph` deletes
-    // each active row as a side effect, so a post-teardown count would miss them.
-    let persistedUserIds = activeUserIds;
+    // The full persisted clearable backlog (active + dormant rows left behind by
+    // the rehydration cap). Counted up front: `unsubscribeFromContextGraph`
+    // deletes each active row as a side effect, so a post-teardown count would
+    // miss them. Starts empty so a node with NO store reports 0 persisted rows
+    // removed (the active teardown is logged separately) rather than a phantom
+    // count of the in-memory subs.
+    let persistedUserIds: string[] = [];
     if (store) {
       try {
-        persistedUserIds = (await store.loadAll()).map((s) => s.id).filter(isUserContextGraph);
+        persistedUserIds = (await store.loadAll())
+          .filter((r) => isClearable(r.id, r.coreHosted))
+          .map((r) => r.id);
       } catch (err) {
         // Can't enumerate the persisted backlog → the dormant (capped-out) rows
         // would survive and rehydrate after the next restart. Do NOT silently
