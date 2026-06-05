@@ -446,6 +446,76 @@ describe('PanelRight component', () => {
     container.remove();
   });
 
+  it('renders live Hermes failure notices as plain text while preserving partial markdown', async () => {
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
+      id: 'hermes',
+      name: 'Hermes',
+      description: 'Hermes bridge',
+      connectSupported: true,
+      chatSupported: true,
+      chatReady: true,
+      chatAttachments: true,
+      persistentChat: true,
+      bridgeOnline: true,
+      bridgeStatusLabel: 'Connected',
+      configured: true,
+      detected: true,
+      status: 'connected',
+      statusLabel: 'Connected',
+      detail: 'ready',
+      defaultSessionId: 'hermes:dkg-ui:profile-dkg-smoke',
+      profile: 'dkg-smoke',
+      target: 'bridge',
+    }] });
+    streamLocalAgentChatMock.mockImplementation(async (_integrationId: string, _text: string, options: any) => {
+      options?.onEvent?.({ type: 'text_delta', delta: '**Partial Hermes output**' });
+      throw new Error('Backend returned [unsafe](https://attacker.example)');
+    });
+    persistLocalAgentChatFailureMock.mockResolvedValue({ ok: true, turnId: 'corr-unsafe' });
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(React.createElement(PanelRight));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector('textarea');
+    expect(textarea).toBeTruthy();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      valueSetter?.call(textarea, 'Run the unsafe Hermes task');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    const sendButton = container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement | null;
+    expect(sendButton).toBeTruthy();
+    await act(async () => {
+      sendButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await waitForAssertion(() => {
+      expect(persistLocalAgentChatFailureMock).toHaveBeenCalled();
+    });
+    expect(container.querySelector('strong')?.textContent).toBe('Partial Hermes output');
+    expect(container.textContent).toContain('Error: Backend returned [unsafe](https://attacker.example)');
+    const unsafeLinks = Array.from(container.querySelectorAll('a'))
+      .filter((link) => link.textContent === 'unsafe');
+    expect(unsafeLinks).toHaveLength(0);
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
   it('imports skipped chat attachments as context entries and clears the composer after send', async () => {
     importFileMock.mockResolvedValue({
       assertionUri: 'urn:dkg:assertion:epub',

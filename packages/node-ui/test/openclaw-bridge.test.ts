@@ -301,7 +301,7 @@ describe('PanelRight UI - connected agent flow', () => {
 
   it('keeps attachment-only summary text UI-only instead of sending it back through the bridge', () => {
     expect(panelRight).toContain('buildAttachmentSummary(message.attachmentRefs ?? [])');
-    expect(panelRight).toContain('const hasAgentText = Boolean(message.text) && !alreadyFailureNotice;');
+    expect(panelRight).toContain('const hasAgentText = Boolean(message.text);');
     expect(panelRight).toContain("let messageText = '';");
     expect(panelRight).toContain('messageText = text');
     expect(panelRight).toContain(': buildAttachmentTurnSummary(attachments, importContext.results);');

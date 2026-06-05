@@ -316,6 +316,93 @@ describe('PanelRight chat history rehydration on mount (issue #255)', () => {
     container.remove();
   });
 
+  it('renders rehydrated Hermes failure notices as plain text while preserving partial markdown', async () => {
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [readyHermesIntegration()] });
+    fetchLocalAgentHistoryMock.mockImplementation((integrationId: string) => {
+      if (integrationId !== 'hermes') return Promise.resolve([]);
+      return Promise.resolve([
+        {
+          uri: 'urn:m:failed-user',
+          text: 'please run the slow task',
+          author: 'user',
+          ts: '2026-04-23T01:00:00Z',
+          turnId: 'turn-timeout',
+        },
+        {
+          uri: 'urn:m:failed-agent',
+          text: '**Partial Hermes output**',
+          author: 'agent',
+          ts: '2026-04-23T01:00:01Z',
+          turnId: 'turn-timeout',
+          persistStatus: 'failed',
+          failureReason: 'Hermes returned [unsafe](https://attacker.example).',
+        },
+      ]);
+    });
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(React.createElement(PanelRight));
+    });
+    await flushAll();
+
+    expect(container.querySelector('strong')?.textContent).toBe('Partial Hermes output');
+    expect(container.textContent).toContain('Error: Hermes returned [unsafe](https://attacker.example).');
+    const unsafeLinks = Array.from(container.querySelectorAll('a'))
+      .filter((link) => link.textContent === 'unsafe');
+    expect(unsafeLinks).toHaveLength(0);
+
+    root.unmount();
+    container.remove();
+  });
+
+  it('does not append Hermes failure notices to rehydrated OpenClaw failure banners', async () => {
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [readyOpenclawIntegration()] });
+    fetchLocalAgentHistoryMock.mockImplementation((integrationId: string) => {
+      if (integrationId !== 'openclaw') return Promise.resolve([]);
+      return Promise.resolve([
+        {
+          uri: 'urn:m:openclaw-failed-user',
+          text: 'please ask openclaw',
+          author: 'user',
+          ts: '2026-04-23T01:00:00Z',
+          turnId: 'turn-openclaw-failed',
+        },
+        {
+          uri: 'urn:m:openclaw-failed-agent',
+          text: '[OpenClaw reply failed before completion: timed out]',
+          author: 'agent',
+          ts: '2026-04-23T01:00:01Z',
+          turnId: 'turn-openclaw-failed',
+          persistStatus: 'failed',
+          failureReason: 'timed out',
+        },
+      ]);
+    });
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(React.createElement(PanelRight));
+    });
+    await flushAll();
+
+    expect(container.textContent).toContain('[OpenClaw reply failed before completion: timed out]');
+    expect(container.textContent).not.toContain('Error: timed out');
+
+    root.unmount();
+    container.remove();
+  });
+
   it('does not duplicate rehydrated failure notices that already include the failure reason', async () => {
     fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [readyHermesIntegration()] });
     fetchLocalAgentHistoryMock.mockImplementation((integrationId: string) => {

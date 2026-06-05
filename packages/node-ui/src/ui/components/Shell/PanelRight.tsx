@@ -68,6 +68,12 @@ export interface LocalAgentMessage {
   streaming?: boolean;
   attachments?: LocalAgentChatAttachmentRef[];
   /**
+   * UI-generated failed-turn notice rendered as literal text after any real
+   * agent output. Kept separate from `content` so markdown can stay enabled
+   * for partial agent text without parsing local error bodies.
+   */
+  failureNotice?: string;
+  /**
    * True when `content` is locally synthesized by the UI (e.g. an
    * attachment summary fallback from `mapHistoryMessage`, or a local
    * error/cancel string), NOT real agent-authored markdown. The chat
@@ -531,14 +537,24 @@ function isPersistedFailureNotice(text: string, failureContent: string, failureR
   return failureReason === 'Request cancelled.' && trimmed === failureReason;
 }
 
-function buildFailedAgentContent(text: string, failureContent: string, failureReason?: string): string {
-  if (!text) return failureContent;
-  return isPersistedFailureNotice(text, failureContent, failureReason)
-    ? text
-    : `${text}\n\n${failureContent}`;
+function buildFailedTurnDisplay(
+  text: string,
+  failureContent: string,
+  failureReason: string | undefined,
+  integrationId: string,
+): Pick<LocalAgentMessage, 'content' | 'failureNotice' | 'synthesized'> {
+  if (text && isPersistedFailureNotice(text, failureContent, failureReason)) {
+    return { content: text, synthesized: true };
+  }
+  if (text) {
+    return integrationId === 'hermes'
+      ? { content: text, failureNotice: failureContent, synthesized: false }
+      : { content: text, synthesized: false };
+  }
+  return { content: '', failureNotice: failureContent, synthesized: true };
 }
 
-function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage {
+function mapHistoryMessage(message: LocalAgentHistoryMessage, integrationId = ''): LocalAgentMessage {
   const author = message.author.toLowerCase();
   const role: LocalAgentMessage['role'] = author.includes('assistant') || author.includes('agent') ? 'assistant' : 'user';
   const failedReason = typeof message.failureReason === 'string' && message.failureReason.trim()
@@ -546,12 +562,11 @@ function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage
     : undefined;
   const failed = role === 'assistant' && (message.persistStatus === 'failed' || Boolean(failedReason));
   const failureContent = `Error: ${failedReason ?? 'The local agent turn failed.'}`;
-  const alreadyFailureNotice = failed && message.text
-    ? isPersistedFailureNotice(message.text, failureContent, failedReason)
-    : false;
-  const content = failed
-    ? buildFailedAgentContent(message.text, failureContent, failedReason)
-    : message.text || buildAttachmentSummary(message.attachmentRefs ?? []);
+  const failedDisplay = failed
+    ? buildFailedTurnDisplay(message.text, failureContent, failedReason, integrationId)
+    : null;
+  const content = failedDisplay?.content
+    ?? (message.text || buildAttachmentSummary(message.attachmentRefs ?? []));
   // KNOWN ISSUE — persisted messages whose newlines were escape-
   // encoded by the DKG-memory persistence layer (stored as literal
   // backslash-n, two characters, not real newline characters)
@@ -576,7 +591,7 @@ function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage
   // instead of escape-encoding them, or carry an explicit "escaped"
   // marker on encoded payloads so the UI can decode only confirmed-
   // escaped content. Tracked as a follow-up.
-  const hasAgentText = Boolean(message.text) && !alreadyFailureNotice;
+  const hasAgentText = Boolean(message.text);
   return {
     id: message.uri || `local-history:${++localMessageId}`,
     uri: message.uri,
@@ -586,10 +601,11 @@ function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage
     ts: formatLocalTimestamp(message.ts),
     tsRaw: toIsoTimestamp(message.ts),
     attachments: message.attachmentRefs,
+    failureNotice: failedDisplay?.failureNotice,
     // Attachment summaries and exact persisted failure notices are UI-generated
     // strings. Mark them synthesized so the renderer skips markdown; real agent
     // partial text keeps markdown enabled even when the turn failed.
-    synthesized: !hasAgentText,
+    synthesized: failedDisplay?.synthesized ?? !hasAgentText,
   };
 }
 
@@ -647,8 +663,10 @@ function renderMessageContent(
   role: 'user' | 'assistant',
   synthesized: boolean,
   streaming: boolean,
+  failureNotice?: string,
 ): React.ReactNode {
   const normalized = normalizeMessageContent(content);
+  const normalizedFailure = failureNotice ? normalizeMessageContent(failureNotice) : '';
   // Pre-first-token wait: an assistant turn starts as `{ streaming:
   // true, content: '' }`. The inline streaming caret lives inside the
   // last text node, so with no content yet there is nothing to anchor
@@ -656,7 +674,7 @@ function renderMessageContent(
   // "Thinking…" indicator until the first token arrives, at which
   // point this falls through to the markdown path (whose inline caret
   // then takes over). `role=status`/`aria-live` announces it to AT.
-  if (role === 'assistant' && streaming && normalized.trim() === '') {
+  if (role === 'assistant' && streaming && normalized.trim() === '' && !normalizedFailure) {
     return (
       <span className="v10-chat-thinking" role="status" aria-live="polite">
         Thinking…
@@ -675,14 +693,25 @@ function renderMessageContent(
   //     otherwise render as a live external link in an assistant-styled
   //     bubble (CFNsU / CFXYU / CGpe9). The CFThj relative-link guard
   //     doesn't help — those hrefs are absolute and allowed.
-  if (role === 'assistant' && !synthesized) {
-    return <MarkdownMessage content={normalized} streaming={streaming} />;
+  if (role === 'assistant' && !synthesized && normalized.trim() !== '') {
+    return (
+      <>
+        <MarkdownMessage content={normalized} streaming={streaming && !normalizedFailure} />
+        {normalizedFailure && (
+          <span className="v10-chat-plaintext v10-chat-failure-notice">
+            {normalizedFailure}
+            {streaming && <span className="v10-chat-cursor" />}
+          </span>
+        )}
+      </>
+    );
   }
   // Plaintext path (user / synthetic): keep the caret inline with the
   // text rather than as a block sibling that drops to a new line.
+  const plainText = [normalized, normalizedFailure].filter(Boolean).join('\n\n');
   return (
     <span className="v10-chat-plaintext">
-      {normalized}
+      {plainText}
       {streaming && <span className="v10-chat-cursor" />}
     </span>
   );
@@ -1632,6 +1661,7 @@ export function ConnectedAgentsTab(props: {
                       message.role,
                       Boolean(message.synthesized),
                       Boolean(message.streaming),
+                      message.failureNotice,
                     )}
                   </div>
                   {message.attachments && message.attachments.length > 0 && (
@@ -2505,7 +2535,7 @@ export function PanelRight() {
       const history = await fetchLocalAgentHistory(integrationId, 100, {
         sessionId: conversation.sessionId ?? undefined,
       });
-      const loaded = history.map(mapHistoryMessage);
+      const loaded = history.map((message) => mapHistoryMessage(message, integrationId));
       updateLocalMessages(conversation.stateKey, (prev) => mergeLocalAgentMessages(prev, loaded));
     } catch {
       updateLocalMessages(conversation.stateKey, (prev) => prev);
@@ -2728,7 +2758,8 @@ export function PanelRight() {
             message.id === assistantId
               ? {
                   ...message,
-                  content: buildFailedAgentContent(assistantPartialText, failureContent, failureReason),
+                  content: assistantPartialText,
+                  failureNotice: failureContent,
                   streaming: false,
                   synthesized: !assistantPartialText,
                 }
@@ -2896,7 +2927,7 @@ export function PanelRight() {
         setConnectError((refreshOutcome.reason as Error)?.message ?? 'Failed to refresh integration.');
       }
       if (historyOutcome.status === 'fulfilled') {
-        const loaded = historyOutcome.value.map(mapHistoryMessage);
+        const loaded = historyOutcome.value.map((message) => mapHistoryMessage(message, integrationId));
         updateLocalMessages(conversation.stateKey, (prev) => mergeLocalAgentMessages(prev, loaded));
         setLocalHistoryLoadedByConversation((prev) => ({
           ...prev,
