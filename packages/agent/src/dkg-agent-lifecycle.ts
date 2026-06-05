@@ -3440,6 +3440,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // dormant — they re-activate on next explicit access, or an operator
       // prunes them via `DELETE /api/context-graph/subscriptions`. Prioritise
       // core-hosted, then subscribed, so the kept set is the most relevant.
+      // NOTE: a dormant (capped-out) row has no in-memory entry, so individual
+      // `POST /api/context-graph/unsubscribe` can't target it — the bulk DELETE
+      // above is the prune path for the stale backlog by design. (Follow-up:
+      // reconcile contextGraphMembershipStore for rows left dormant / cleared so
+      // a prior `active` local-node membership row doesn't linger.)
       // Validate the cap: it's external config, so a fractional / negative /
       // NaN value would otherwise do something surprising (0.5 → 1 row,
       // -1/NaN → silently disables the cap). Accept only a non-negative integer
@@ -3578,13 +3583,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     const total = persistedUserIds.length;
 
-    // Tear down active in-memory USER subscriptions (gossip topics + sync scope).
+    // Tear down active in-memory USER subscriptions (gossip topics + sync scope),
+    // then REMOVE the registry entry. `unsubscribeFromContextGraph` only flips
+    // `subscribed` to false — it keeps the entry for the host-mode/reconcile path
+    // — but this recovery endpoint must leave NO trace of the cleared CGs, or
+    // read fallbacks would still see the IDs in `subscribedContextGraphs` even
+    // though the persisted rows are gone. (activeUserIds already excludes system
+    // + coreHosted CGs, so this only drops the cleared non-hosted user entries.)
     for (const id of activeUserIds) {
       try {
         this.unsubscribeFromContextGraph(id);
       } catch {
         /* best-effort teardown */
       }
+      this.subscribedContextGraphs.delete(id);
     }
 
     // Delete the persisted USER rows (active + dormant). Selective — never the
