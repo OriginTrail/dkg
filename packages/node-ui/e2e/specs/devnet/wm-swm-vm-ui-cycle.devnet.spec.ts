@@ -64,7 +64,20 @@ const run: {
 test.beforeAll(async () => {
   await requireDevnetNode(test, 1);
   await waitForDevnetStatus(1);
-  const cgs = await listContextGraphs(1);
+
+  // `/api/status` answering does NOT mean the seeded primary context graph has
+  // finished registering — on a cold boot `listContextGraphs()` can briefly
+  // return [] and make this spec falsely skip with "No context graphs". Poll for
+  // a bounded window so a still-propagating CG isn't mistaken for an empty
+  // devnet; a genuinely-empty operator devnet still falls through to the skip.
+  let cgs = await listContextGraphs(1);
+  if (cgs.length === 0) {
+    const deadline = Date.now() + 30_000;
+    while (cgs.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1_000));
+      cgs = await listContextGraphs(1);
+    }
+  }
   requireDevnetPrecondition(test, cgs.length === 0, 'No context graphs on devnet');
   run.cgId = cgs[0]!.id;
   run.cgName = cgs[0]!.name;

@@ -25,7 +25,7 @@
  *      in-process endpoint backed by that same engine.
  */
 import { createServer, type Server } from 'node:http';
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import oxigraph from 'oxigraph';
 import { SparqlHttpStore, type Quad } from '../src/index.js';
 import { buildBlankNodeSafeDelete, isBlankNodeTerm } from '../src/adapters/sparql-http.js';
@@ -360,6 +360,14 @@ describe('SparqlHttpStore.delete() — full HTTP path against a real Oxigraph en
 
   afterAll(async () => {
     await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  beforeEach(() => {
+    // The long-lived endpoint serves whatever `store` currently points at, so
+    // give each case a FRESH embedded graph. Without this, data left behind (or
+    // an early failure before cleanup) in one case would leak into the next and
+    // produce a misleading failure.
+    store = new oxigraph.Store();
   });
 
   it('deletes blank-node entities through the adapter without a 400', async () => {
