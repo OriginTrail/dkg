@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { OxigraphWorkerStore, createTripleStore, type Quad } from '../src/index.js';
 
 // These exercise the embedded worker adapter's resilience guards added to stop
@@ -15,9 +18,9 @@ import { OxigraphWorkerStore, createTripleStore, type Quad } from '../src/index.
 // promise while the write is still in flight, which the rest of the codebase
 // would mis-read as a clean failure. So the timeout tests provoke a timeout by
 // queuing a READ behind a busy worker, not by bounding a write.
-function makeStore(opts?: { operationTimeoutMs?: number }): OxigraphWorkerStore {
+function makeStore(opts?: { operationTimeoutMs?: number }, persistPath?: string): OxigraphWorkerStore {
   try {
-    return new OxigraphWorkerStore(undefined, opts);
+    return new OxigraphWorkerStore(persistPath, opts);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (/oxigraph-worker-impl/.test(msg)) {
@@ -144,15 +147,35 @@ describe('OxigraphWorkerStore resilience', () => {
     // Codex review: close runs the worker's final flush; bounding it by the
     // per-op timeout could terminate() the thread mid-flush and lose writes.
     // With a tiny operationTimeoutMs and the worker still busy on a large
-    // insert, close() must WAIT for the worker to drain rather than reject.
-    const store = makeStore({ operationTimeoutMs: 10 });
-    const busy = store.insert(quads(50_000)); // occupies the worker
-    // A read queued behind it times out at 10ms — proves the worker is busy.
-    await expect(store.query(BUSY_QUERY)).rejects.toThrow(/timed out/);
-    // close() must resolve cleanly (not reject with a 10ms timeout): it waits
-    // for the in-flight op to drain, then flushes + terminates.
-    await expect(store.close()).resolves.toBeUndefined();
-    await busy.catch(() => {});
+    // insert, close() must WAIT for the worker to drain rather than reject —
+    // AND the in-flight write must actually land, not get killed mid-flush.
+    // We prove durability end-to-end on a persistent path: the regression this
+    // guards (close-after-debounced-flush race) was a SILENT data loss, so the
+    // test must assert the quads survive a reopen, not just that close resolves.
+    const dir = mkdtempSync(join(tmpdir(), 'oxigraph-worker-close-'));
+    const path = join(dir, 'store.nq');
+    try {
+      const store = makeStore({ operationTimeoutMs: 10 }, path);
+      const busy = store.insert(quads(50_000)); // occupies the worker
+      // A read queued behind it times out at 10ms — proves the worker is busy.
+      await expect(store.query(BUSY_QUERY)).rejects.toThrow(/timed out/);
+      // close() must resolve cleanly (not reject with a 10ms timeout): it waits
+      // for the in-flight op to drain, then flushes + terminates.
+      await expect(store.close()).resolves.toBeUndefined();
+      // The in-flight insert must have COMPLETED (drained), not been terminated
+      // mid-flight — otherwise close() silently cut it short.
+      await expect(busy).resolves.toBeUndefined();
+      // And the write must be durable: a fresh worker on the same path hydrates
+      // all 50k quads, proving close() flushed before terminating.
+      const reopened = makeStore({ operationTimeoutMs: 60_000 }, path);
+      try {
+        expect(await reopened.countQuads('urn:test:g')).toBe(50_000);
+      } finally {
+        await closeQuietly(reopened);
+      }
+    } finally {
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* */ }
+    }
   });
 
   it('concurrent and repeated close() calls all resolve without hanging', async () => {
