@@ -110,11 +110,14 @@ test.describe('Import Files Modal', () => {
     expect(await importFilesModal.isImportDisabled()).toBe(false);
   });
 
-  test('dropzone shows the supported-format hint', async ({ page }) => {
+  test('dropzone shows the supported-format hint', async ({ importFilesModal }) => {
     // The hint text was reformatted in rc11 to include the leading
     // "Supported:" prefix — assert against a substring that's stable
     // across both the legacy (`.md, .docx, .pdf`) and rc11 surface.
-    await expect(page.getByText(/\.md/)).toBeVisible();
+    // Scope to the modal: a page-wide getByText(/\.md/) also matches any `.md`
+    // document the shared devnet already holds (another spec's import), tripping
+    // strict-mode. The hint lives in the dropzone inside the modal.
+    await expect(importFilesModal.overlay.getByText(/\.md/)).toBeVisible();
   });
 
   test('dropzone shows the drag instruction', async ({ page }) => {
