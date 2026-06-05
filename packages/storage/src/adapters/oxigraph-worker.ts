@@ -20,48 +20,34 @@ import { registerTripleStoreAdapter } from '../triple-store.js';
  * server for heavy workloads). 120s is generous enough not to trip normal
  * operations yet finite. Set `operationTimeoutMs: 0` to restore the old
  * unbounded behaviour.
+ *
+ * IMPORTANT — the timeout is applied to READ-ONLY ops only (see
+ * READ_ONLY_METHODS). A read is side-effect-free, so bounding the caller's wait
+ * and rejecting is always a clean, determinate failure. A mutation is NOT
+ * bounded: the timeout only drops the caller's promise while the single worker
+ * thread keeps running the op, so a "timed-out" insert/delete could STILL
+ * commit afterwards — and the rest of the codebase treats a rejected
+ * insert/delete as a clean failure, which would leave partial state visible and
+ * retries ambiguous. The user-visible hang in the issues above is on the read
+ * paths (`/api/query`, `/api/context-graph/list`); bounding reads surfaces a
+ * wedged worker there without inventing an indeterminate mutation outcome.
  */
 const DEFAULT_OPERATION_TIMEOUT_MS = 120_000;
 
-/**
- * Default chunk size for `insert` — **disabled (0) by default; opt-in**.
- *
- * A large insert posted as ONE worker message holds the single worker thread
- * for its entire duration, head-of-line-blocking every other store op. Setting
- * `insertChunkSize > 0` splits a large insert into sequential worker messages,
- * yielding the worker between chunks so concurrent reads/writes are serviced
- * within ~one chunk instead of waiting for the whole import.
- *
- * The trade-off (why this is OPT-IN rather than on by default): chunking turns
- * one insert into several transactions, so the adapter's "all quads commit, or
- * the call fails" contract weakens to "quads commit a chunk at a time". A
- * concurrent reader can observe a partial graph mid-insert, and a chunk that
- * times out/errors leaves earlier chunks already visible with no rollback.
- * That's only safe for **idempotent bulk-import paths** (re-inserting a quad is
- * a no-op, so a retry converges). To keep the atomic contract for everyone
- * else, default off; operators with heavy idempotent imports opt in via
- * `store.options.insertChunkSize`.
- */
-const DEFAULT_INSERT_CHUNK_SIZE = 0;
-
 export interface OxigraphWorkerStoreOptions {
-  /** Per-operation timeout in milliseconds. Default 120_000. 0 disables it. */
-  operationTimeoutMs?: number;
   /**
-   * Max quads per worker insert message. Default 0 = disabled (inserts stay a
-   * single atomic message). Set > 0 to chunk large inserts for head-of-line
-   * fairness — only on idempotent bulk-import paths (see note above; chunking
-   * trades atomic visibility for fairness).
+   * Per-operation timeout in milliseconds for READ-ONLY ops. Default 120_000.
+   * 0 disables it. Mutations are intentionally never bounded (see
+   * DEFAULT_OPERATION_TIMEOUT_MS) so a timed-out write can't be reported as a
+   * clean failure while it is still in flight.
    */
-  insertChunkSize?: number;
+  operationTimeoutMs?: number;
 }
 
 /**
- * Accept only finite, non-negative overrides; otherwise fall back. The result
- * is floored to an INTEGER: both knobs are integer quantities (ms for the
- * timeout, a quad count for the chunk size). A fractional `insertChunkSize`
- * (e.g. `1.5`) would otherwise desync the `i += size` loop counter from
- * `slice()`'s integer-coerced boundaries and yield malformed chunks.
+ * Accept only a finite, non-negative override; otherwise fall back. The result
+ * is floored to an INTEGER — the timeout is a millisecond count, so a fractional
+ * value is meaningless noise.
  */
 function normalizeNonNegativeInt(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
@@ -70,30 +56,24 @@ function normalizeNonNegativeInt(value: number | undefined, fallback: number): n
 }
 
 /**
- * Methods that change persisted state. A per-op timeout only drops the CALLER's
- * promise — the single worker thread keeps running the op — so a timed-out
- * MUTATION may STILL commit after we've already rejected. We surface that as an
- * explicit "outcome unknown" signal (see OxigraphWorkerTimeoutError) so callers
- * don't treat it as a clean failure (e.g. report "failed" while the write
- * actually landed, or blindly retry a non-idempotent op). Reads are
- * side-effect-free, so a read timeout is an ordinary, determinate failure.
+ * Side-effect-free read methods. ONLY these are bounded by the per-op timeout:
+ * rejecting a read after the bound is a clean, determinate failure (nothing was
+ * written), so it safely surfaces a wedged worker on the exact paths that hang
+ * in production. Every other method mutates persisted state and is left
+ * unbounded — see DEFAULT_OPERATION_TIMEOUT_MS for why timing out a mutation
+ * would be unsafe with the current call sites.
  */
-const MUTATING_METHODS = new Set<string>([
-  'insert', 'delete', 'deleteByPattern', 'dropGraph', 'deleteBySubjectPrefix', 'flush',
+const READ_ONLY_METHODS = new Set<string>([
+  'query', 'hasGraph', 'listGraphs', 'countQuads',
 ]);
 
-/** Rejection raised when a worker op exceeds its per-op timeout. */
+/** Rejection raised when a read op exceeds its per-op timeout. */
 export interface OxigraphWorkerTimeoutError extends Error {
   code: 'OXIGRAPH_WORKER_OP_TIMEOUT';
   /** Which store method timed out. */
   method: string;
   /** The bound that was exceeded. */
   timeoutMs: number;
-  /**
-   * True when the timed-out op was a mutation: the worker may still apply it,
-   * so the persisted outcome is indeterminate. False for side-effect-free reads.
-   */
-  outcomeUnknown: boolean;
 }
 
 export class OxigraphWorkerStore implements TripleStore {
@@ -101,7 +81,6 @@ export class OxigraphWorkerStore implements TripleStore {
   private nextId = 0;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   private readonly operationTimeoutMs: number;
-  private readonly insertChunkSize: number;
   /** Set once the worker thread has exited (graceful close, crash, or kill). */
   private workerExited = false;
   /** Memoized close so repeat/concurrent close() calls share one teardown. */
@@ -109,7 +88,6 @@ export class OxigraphWorkerStore implements TripleStore {
 
   constructor(persistPath?: string, opts?: OxigraphWorkerStoreOptions) {
     this.operationTimeoutMs = normalizeNonNegativeInt(opts?.operationTimeoutMs, DEFAULT_OPERATION_TIMEOUT_MS);
-    this.insertChunkSize = normalizeNonNegativeInt(opts?.insertChunkSize, DEFAULT_INSERT_CHUNK_SIZE);
 
     // Resolve the worker impl with a small search path so this keeps
     // working in all three deployment shapes we actually run in:
@@ -175,7 +153,10 @@ export class OxigraphWorkerStore implements TripleStore {
   }
 
   private call<T>(method: string, ...args: unknown[]): Promise<T> {
-    return this.callWithTimeout<T>(this.operationTimeoutMs, method, ...args);
+    // Only read-only ops are bounded; mutations run unbounded (timeoutMs 0) so a
+    // timed-out write is never reported as a clean failure while still in flight.
+    const timeoutMs = READ_ONLY_METHODS.has(method) ? this.operationTimeoutMs : 0;
+    return this.callWithTimeout<T>(timeoutMs, method, ...args);
   }
 
   /**
@@ -183,7 +164,9 @@ export class OxigraphWorkerStore implements TripleStore {
    * `timeoutMs` (0 = wait indefinitely). The bound is per-CALLER: on timeout we
    * reject and drop the pending entry, but the single-threaded worker is STILL
    * running the op — the late reply is then ignored (the message handler no-ops
-   * on a missing id) rather than double-settling this promise.
+   * on a missing id) rather than double-settling this promise. Only read-only
+   * ops are ever given a non-zero timeout (see `call`), so a fired timeout is
+   * always a determinate, side-effect-free failure.
    */
   private callWithTimeout<T>(timeoutMs: number, method: string, ...args: unknown[]): Promise<T> {
     const id = this.nextId++;
@@ -198,24 +181,16 @@ export class OxigraphWorkerStore implements TripleStore {
       if (timeoutMs > 0) {
         timer = setTimeout(() => {
           if (this.pending.delete(id)) {
-            const outcomeUnknown = MUTATING_METHODS.has(method);
             const err = new Error(
               `oxigraph-worker: "${method}" timed out after ${timeoutMs}ms. ` +
-              (outcomeUnknown
-                ? `This is a MUTATION whose outcome is INDETERMINATE: the single worker ` +
-                  `thread is still running it, so the change may STILL commit after this ` +
-                  `rejection. Treat it as "outcome unknown", not a clean failure — only ` +
-                  `retry if the operation is idempotent (DKG insert/delete are). `
-                : ``) +
               `The embedded store runs on a single worker thread, so a long-running or ` +
-              `stuck operation blocks all others. For heavy workloads point the node at ` +
-              `an external SPARQL server (store.backend "sparql-http" / "blazegraph"), or ` +
-              `raise / disable store.options.operationTimeoutMs.`,
+              `stuck operation blocks all reads queued behind it. For heavy workloads ` +
+              `point the node at an external SPARQL server (store.backend "sparql-http" ` +
+              `/ "blazegraph"), or raise / disable store.options.operationTimeoutMs.`,
             ) as OxigraphWorkerTimeoutError;
             err.code = 'OXIGRAPH_WORKER_OP_TIMEOUT';
             err.method = method;
             err.timeoutMs = timeoutMs;
-            err.outcomeUnknown = outcomeUnknown;
             reject(err);
           }
         }, timeoutMs);
@@ -230,28 +205,13 @@ export class OxigraphWorkerStore implements TripleStore {
     });
   }
 
-  async insert(quads: Quad[]): Promise<void> {
-    const size = this.insertChunkSize;
-    // Default path (chunking disabled, or insert fits in one chunk): a SINGLE
-    // atomic worker message — all quads commit together or the call fails.
-    if (size <= 0 || quads.length <= size) {
-      return this.call('insert', quads);
-    }
-    // Opt-in chunked path (insertChunkSize > 0). Sequential awaits create yield
-    // points between chunks so store ops requested mid-import are serviced
-    // BETWEEN chunks instead of waiting for the whole insert (head-of-line
-    // relief). Each chunk is independently bounded by the per-op timeout.
-    //
-    // CAVEAT — this is NOT atomic: a concurrent reader can see a partial graph
-    // mid-insert, and if a chunk times out/errors the earlier chunks are
-    // already committed with no rollback (the caller only sees a rejected
-    // promise). Only enable on idempotent bulk-import paths where re-inserting
-    // a quad is a no-op, so an interrupted insert converges on retry. See the
-    // DEFAULT_INSERT_CHUNK_SIZE note for the full rationale.
-    for (let i = 0; i < quads.length; i += size) {
-      await this.call('insert', quads.slice(i, i + size));
-    }
-  }
+  // A single atomic worker message: all quads commit together or the call
+  // fails. The contract is "all-or-nothing" and every caller can rely on it
+  // (e.g. FinalizationHandler packs both canonical copies into one insert so one
+  // can't land without the other). Large idempotent bulk imports that want
+  // head-of-line fairness should run on an external SPARQL server, not by
+  // silently fragmenting this insert into non-atomic chunks.
+  async insert(quads: Quad[]): Promise<void> { return this.call('insert', quads); }
   async delete(quads: Quad[]): Promise<void> { return this.call('delete', quads); }
   async deleteByPattern(pattern: Partial<Quad>): Promise<number> { return this.call('deleteByPattern', pattern); }
   async query(sparql: string): Promise<QueryResult> { return this.call('query', sparql); }
@@ -299,7 +259,5 @@ registerTripleStoreAdapter('oxigraph-worker', async (opts) => {
   return new OxigraphWorkerStore(filePath, {
     operationTimeoutMs:
       typeof opts?.operationTimeoutMs === 'number' ? (opts.operationTimeoutMs as number) : undefined,
-    insertChunkSize:
-      typeof opts?.insertChunkSize === 'number' ? (opts.insertChunkSize as number) : undefined,
   });
 });

@@ -6,7 +6,7 @@ Triple store abstraction layer for DKG V10. Provides a unified API over multiple
 
 - **Backend adapters** — pluggable triple store implementations:
   - `OxigraphStore` — embedded WASM/native store, no external dependencies
-  - `OxigraphWorkerStore` — worker-thread variant; keeps the daemon event loop free, with a per-operation timeout and opt-in large-insert chunking (see below)
+  - `OxigraphWorkerStore` — worker-thread variant; keeps the daemon event loop free, with a per-read-operation timeout (see below)
   - `BlazegraphStore` — connects to a running Blazegraph SPARQL endpoint
   - `SparqlHttpStore` — generic adapter for any SPARQL 1.1 compliant endpoint
 - **Graph manager** — named graph lifecycle (create, drop, list) with contextGraph-scoped data and metadata graphs
@@ -39,21 +39,26 @@ The embedded worker runs **all** store operations on a single worker thread, so
 a long-running or stuck op (a huge import, an expensive query) blocks every
 other store-backed request behind it. Under real load this surfaces as the
 daemon's `/api/status` staying green while `/api/query`,
-`/api/context-graph/list`, and `/api/assertion/create` hang. Two `store.options`
-knobs bound that blast radius:
+`/api/context-graph/list`, and `/api/assertion/create` hang. A `store.options`
+knob bounds that blast radius:
 
 | Option | Default | Purpose |
 |---|---|---|
-| `operationTimeoutMs` | `120000` | Reject any single op that exceeds this instead of hanging forever. `0` disables (restores unbounded behaviour). `close` is exempt — its final flush always runs to completion so shutdown can't drop pending writes. |
-| `insertChunkSize` | `0` (off) | **Opt-in.** When `> 0`, split inserts larger than this into sequential chunks so concurrent ops are serviced between chunks. Off by default because chunking is **not atomic** — a concurrent reader can see a partial graph mid-insert and a failed chunk leaves earlier chunks committed. Only enable on idempotent bulk-import paths. |
+| `operationTimeoutMs` | `120000` | Reject a **read-only** op (`query`, `hasGraph`, `listGraphs`, `countQuads`) that exceeds this instead of hanging forever — that's where the user-visible hang shows up. `0` disables (restores unbounded behaviour). `close` is exempt — its final flush always runs to completion so shutdown can't drop pending writes. |
+
+Mutations (`insert`, `delete`, …) are intentionally **not** bounded by this
+timeout. The bound only drops the *caller's* promise — the single worker thread
+keeps running the op — so a "timed-out" write could still commit afterwards,
+and the rest of the codebase treats a rejected `insert`/`delete` as a clean
+failure. Bounding only reads surfaces a wedged worker on the paths that hang
+without inventing an indeterminate write outcome. `insert()` therefore stays
+strictly atomic (all quads commit or the call fails), which callers rely on.
 
 ```jsonc
 // ~/.dkg/config.json
 "store": {
   "backend": "oxigraph-worker",
-  // insertChunkSize defaults to 0 (atomic single-message inserts).
-  // Enable it only for heavy, idempotent bulk-import workloads.
-  "options": { "operationTimeoutMs": 120000, "insertChunkSize": 25000 }
+  "options": { "operationTimeoutMs": 120000 }
 }
 ```
 
