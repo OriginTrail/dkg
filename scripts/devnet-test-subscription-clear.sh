@@ -132,8 +132,15 @@ RE=$(curl -s -X POST -H "$AUTH" -H 'Content-Type: application/json' \
 G3=$(curl -s -H "$AUTH" "$API/api/context-graph/subscriptions" | python3 -c "import sys,json;print('\n'.join(s['contextGraphId'] for s in json.load(sys.stdin).get('subscriptions',[])))" 2>/dev/null || echo "")
 printf '%s\n' "$G3" | grep -qxF "$RECG" && ok "re-subscribe after clear works (node not wedged)" || bad "re-subscribe after clear failed (resp: ${RE:0:140})"
 
-# Cleanup: clear the rejoin sub so reruns start clean.
+# Cleanup: clear our test subs, then RESTORE the node's standard devnet CGs so
+# this destructive test doesn't leave node $NODE_NUM without its devnet-test SWM
+# hosting (the publish ACK quorum depends on it).
 curl -s -X DELETE -H "$AUTH" "$API/api/context-graph/subscriptions" >/dev/null 2>&1 || true
+for cg in devnet-test devnet-isolation; do
+  curl -s -X POST -H "$AUTH" -H 'Content-Type: application/json' \
+    -d "{\"contextGraphId\":\"$cg\",\"includeSharedMemory\":true}" \
+    "$API/api/context-graph/subscribe" >/dev/null 2>&1 || true
+done
 
 # --- Summary -----------------------------------------------------------------
 echo ""

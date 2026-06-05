@@ -29,6 +29,14 @@ SCRIPTS=(
   "cli-invite"
   "reject-flow"
   "random-sampling"
+  # DESTRUCTIVE — keep LAST. These clear a node's context-graph subscriptions
+  # (DELETE /api/context-graph/subscriptions) and restart it, which drops its
+  # devnet-test SWM hosting and breaks the publish ACK quorum for any publish
+  # test that runs after. They re-subscribe the standard CGs on cleanup, but
+  # ordering them last avoids the race entirely. subscription-clear runs on
+  # node 1; subscription-cap on node 2 (so neither restarts the same node).
+  "subscription-clear"
+  "subscription-cap"
 )
 
 # soak-rs is intentionally NOT in the default list — it's 30+ minutes and

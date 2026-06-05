@@ -50,6 +50,13 @@ get_count() { curl -s -H "$AUTH" "$API/api/context-graph/subscriptions" | jq_fie
 cleanup() {
   patch_cap remove
   curl -s -X DELETE -H "$AUTH" "$API/api/context-graph/subscriptions" >/dev/null 2>&1 || true
+  # RESTORE the node's standard devnet CGs (this test cleared them) so the publish
+  # ACK quorum isn't left broken for anything that runs after.
+  for cg in devnet-test devnet-isolation; do
+    curl -s -X POST -H "$AUTH" -H 'Content-Type: application/json' \
+      -d "{\"contextGraphId\":\"$cg\",\"includeSharedMemory\":true}" \
+      "$API/api/context-graph/subscribe" >/dev/null 2>&1 || true
+  done
 }
 trap cleanup EXIT
 
@@ -100,14 +107,21 @@ log "seeded; active user subs before cap = ${PRE:-?}"
 echo "--- 1. cap=$CAP rehydration ---"
 patch_cap "$CAP"
 restart_and_wait || bad "node $NODE_NUM did not come back after restart (cap=$CAP)"
-read -r X1 Y1 <<<"$(rehydrate_xy)"
-if [ "${X1:-}" = "$CAP" ] && [ "${Y1:-0}" -gt "$CAP" ] 2>/dev/null; then
-  ok "rehydrate ACTIVATED exactly $CAP of $Y1 persisted (cap enforced; $((Y1-CAP)) dormant)"
+# The cap applies to NON-HOSTED user rows; coreHosted CGs (e.g. a devnet-test the
+# node hosts) are always restored and counted in X too — so the invariant is
+# (activated − hosted) == CAP, not X == CAP.
+RLINE=$(latest_rehydrate_line)
+X1=$(printf '%s' "$RLINE" | sed -E 's/.*Rehydrated ([0-9]+) of.*/\1/')
+H1=$(printf '%s' "$RLINE" | sed -nE 's/.*; ([0-9]+) hosted always restored.*/\1/p'); H1=${H1:-0}
+N1=$(printf '%s' "$RLINE" | sed -nE 's/.*\(([0-9]+) non-hosted left dormant.*/\1/p'); N1=${N1:-0}
+ACTIVATED_USER=$(( ${X1:-0} - H1 ))
+if [ "$ACTIVATED_USER" = "$CAP" ] && [ "$N1" -gt 0 ] 2>/dev/null; then
+  ok "cap enforced: $CAP non-hosted user subs activated, $N1 left dormant ($H1 hosted exempt)"
 else
-  bad "expected 'Rehydrated $CAP of >$CAP', got X=${X1:-?} Y=${Y1:-?} (line: $(latest_rehydrate_line | sed 's/.*\[DKGAgent\] //'))"
+  bad "expected $CAP non-hosted activated + dormancy, got activated_user=$ACTIVATED_USER dormant=$N1 hosted=$H1 (line: ${RLINE##*[DKGAgent] })"
 fi
-if latest_rehydrate_line | grep -qE "non-hosted left dormant — over the $CAP activation cap"; then
-  ok "boot log records the dormant note"
+if printf '%s' "$RLINE" | grep -qE "non-hosted left dormant — over the $CAP activation cap"; then
+  ok "boot log records the dormant note at cap=$CAP"
 else
   bad "rehydrate log missing the 'left dormant — over the $CAP activation cap' note"
 fi
