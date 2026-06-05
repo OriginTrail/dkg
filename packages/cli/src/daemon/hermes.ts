@@ -585,7 +585,9 @@ export async function ensureHermesBridgeAvailable(
 }
 
 export function shouldTryNextHermesTarget(status: number): boolean {
-  return status === 404 || status === 405 || (status >= 500 && status < 600);
+  // Availability-only fallback. Once a chat request may have been dispatched,
+  // replay requires turn idempotency before bridge-to-gateway retry is safe.
+  return status === 404 || status === 405 || status === 501 || status === 503;
 }
 
 export function normalizeHermesChatPayload(raw: unknown): HermesChatPayload | { error: string } {

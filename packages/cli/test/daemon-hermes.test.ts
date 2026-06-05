@@ -2455,7 +2455,7 @@ describe('Hermes daemon routes', () => {
     );
   });
 
-  it('falls back to the gateway when bridge send returns retryable 5xx', async () => {
+  it('falls back to the gateway when bridge send reports unavailable', async () => {
     const urls: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => {
       const requestUrl = String(url);
@@ -2464,7 +2464,7 @@ describe('Hermes daemon routes', () => {
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       }
       if (requestUrl === 'http://127.0.0.1:9444/send') {
-        return new Response('bridge failed', { status: 500 });
+        return new Response('bridge unavailable', { status: 503 });
       }
       if (requestUrl === 'https://hermes.example.com/api/hermes-channel/send') {
         return new Response(JSON.stringify({ text: 'gateway reply', correlationId: 'corr-1' }), {
@@ -2504,7 +2504,7 @@ describe('Hermes daemon routes', () => {
     ]);
   });
 
-  it('falls back to the gateway when Hermes bridge send fetch times out locally', async () => {
+  it('does not replay Hermes chat send when the bridge fetch times out locally', async () => {
     const urls: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => {
       const requestUrl = String(url);
@@ -2546,12 +2546,18 @@ describe('Hermes daemon routes', () => {
 
     await handleHermesRoutes(ctx);
 
-    expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body)).toMatchObject({ text: 'gateway reply', correlationId: 'corr-1' });
+    expect(res.statusCode).toBe(504);
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: 'Hermes bridge response timeout',
+      code: 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
+      source: 'hermes-channel',
+      target: 'bridge',
+      correlationId: 'corr-1',
+      timeoutMs: HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
+    });
     expect(urls).toEqual([
       'http://127.0.0.1:9444/health',
       'http://127.0.0.1:9444/send',
-      'https://hermes.example.com/api/hermes-channel/send',
     ]);
   });
 
@@ -2616,7 +2622,7 @@ describe('Hermes daemon routes', () => {
     ]);
   });
 
-  it('falls back to the gateway when Hermes bridge send returns an unknown upstream 504', async () => {
+  it('does not replay Hermes chat send when the bridge returns an unknown upstream 504', async () => {
     const urls: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => {
       const requestUrl = String(url);
@@ -2656,12 +2662,15 @@ describe('Hermes daemon routes', () => {
 
     await handleHermesRoutes(ctx);
 
-    expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body)).toMatchObject({ text: 'gateway reply', correlationId: 'corr-1' });
+    expect(res.statusCode).toBe(502);
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: 'Hermes bridge error',
+      code: 'BRIDGE_ERROR',
+      details: 'gateway timeout from proxy',
+    });
     expect(urls).toEqual([
       'http://127.0.0.1:9444/health',
       'http://127.0.0.1:9444/send',
-      'https://hermes.example.com/api/hermes-channel/send',
     ]);
   });
 
@@ -2673,8 +2682,8 @@ describe('Hermes daemon routes', () => {
       if (requestUrl === 'http://127.0.0.1:9444/health') {
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       }
-      if (requestUrl === 'https://hermes.example.com/api/hermes-channel/health') {
-        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      if (requestUrl === 'http://127.0.0.1:9444/send') {
+        return new Response('bridge unavailable', { status: 503 });
       }
       const err = new Error('timed out');
       (err as any).name = 'TimeoutError';
@@ -2717,7 +2726,7 @@ describe('Hermes daemon routes', () => {
     ]);
   });
 
-  it('falls back to the gateway when bridge stream returns an unknown upstream 504', async () => {
+  it('does not replay Hermes stream when the bridge returns an unknown upstream 504', async () => {
     const urls: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => {
       const requestUrl = String(url);
@@ -2762,19 +2771,19 @@ describe('Hermes daemon routes', () => {
 
     await handleHermesRoutes(ctx);
 
-    expect(res.statusCode).toBe(200);
-    expect(res.headers['Content-Type']).toContain('text/event-stream');
-    expect(res.body).toContain('"text":"gateway stream"');
-    expect(res.body).toContain('"sessionId":"bridge-session"');
-    expect(res.body).toContain('"turnId":"bridge-turn"');
+    expect(res.statusCode).toBe(502);
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: 'Hermes bridge error',
+      code: 'BRIDGE_ERROR',
+      details: 'gateway timeout from proxy',
+    });
     expect(urls).toEqual([
       'http://127.0.0.1:9444/health',
       'http://127.0.0.1:9444/stream',
-      'https://hermes.example.com/api/hermes-channel/stream',
     ]);
   });
 
-  it('falls back to the gateway when Hermes bridge stream fetch times out locally', async () => {
+  it('does not replay Hermes stream when the bridge fetch times out locally', async () => {
     const urls: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => {
       const requestUrl = String(url);
@@ -2819,14 +2828,18 @@ describe('Hermes daemon routes', () => {
 
     await handleHermesRoutes(ctx);
 
-    expect(res.statusCode).toBe(200);
-    expect(res.headers['Content-Type']).toContain('text/event-stream');
-    expect(res.body).toContain('"text":"gateway stream"');
-    expect(res.body).toContain('"correlationId":"corr-1"');
+    expect(res.statusCode).toBe(504);
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: 'Hermes bridge response timeout',
+      code: 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
+      source: 'hermes-channel',
+      target: 'bridge',
+      correlationId: 'corr-1',
+      timeoutMs: HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
+    });
     expect(urls).toEqual([
       'http://127.0.0.1:9444/health',
       'http://127.0.0.1:9444/stream',
-      'https://hermes.example.com/api/hermes-channel/stream',
     ]);
   });
 

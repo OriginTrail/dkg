@@ -66,6 +66,12 @@ function buildAgentTimeoutResponseBody(): Record<string, unknown> {
   };
 }
 
+function buildStreamErrorEvent(err: any): Record<string, unknown> {
+  return isAgentResponseTimeoutError(err)
+    ? { type: 'error', ...buildAgentTimeoutResponseBody() }
+    : { type: 'error', error: err?.message ?? String(err) };
+}
+
 /** Strip identity to safe characters and cap length to prevent injection into session keys / URIs. */
 function sanitizeIdentity(raw: string): string {
   return raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'unknown';
@@ -2487,7 +2493,7 @@ export class DkgChannelPlugin {
         }
       } catch (err: any) {
         if (!clientDisconnected) {
-          res.write(`data: ${JSON.stringify({ type: 'error', error: err.message })}\n\n`);
+          res.write(`data: ${JSON.stringify(buildStreamErrorEvent(err))}\n\n`);
         }
       }
       if (!res.writableEnded) res.end();

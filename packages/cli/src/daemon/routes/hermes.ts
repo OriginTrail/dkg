@@ -204,8 +204,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
     const apiServerKey = resolveHermesApiServerKey(config);
     let lastFailure: { status?: number; details?: string; offline?: boolean } | null = null;
 
-    for (const [targetIndex, target] of targets.entries()) {
-      const isLastTarget = targetIndex === targets.length - 1;
+    for (const target of targets) {
       const availability = await ensureHermesBridgeAvailable(target, bridgeAuthToken);
       if (!availability.ok) {
         lastFailure = availability;
@@ -228,8 +227,8 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
           const details = await forwardRes.text().catch(() => '');
           if (forwardRes.status === 504 && isHermesChannelTimeoutDetails(details)) {
             // Only our structured timeout payload proves the selected target
-            // classified its own timeout. Anonymous 504s may be infrastructure
-            // failures and remain eligible for fallback below.
+            // classified its own timeout. Anonymous 504s may have reached the
+            // agent, so they fall through without bridge-to-gateway replay.
             return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
               payload.correlationId,
               target,
@@ -277,10 +276,6 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         return jsonResponse(res, 200, reply);
       } catch (err: any) {
         if (isHermesBridgeTimeoutError(err)) {
-          if (!isLastTarget) {
-            lastFailure = { details: `${target.name} response timeout`, offline: true };
-            continue;
-          }
           return jsonResponse(res, 504, buildHermesChannelTimeoutBody(payload.correlationId, target));
         }
         lastFailure = { details: err.message, offline: true };
@@ -330,8 +325,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
     const apiServerKey = resolveHermesApiServerKey(config);
     let lastFailure: { status?: number; details?: string; offline?: boolean } | null = null;
 
-    for (const [targetIndex, target] of targets.entries()) {
-      const isLastTarget = targetIndex === targets.length - 1;
+    for (const target of targets) {
       const availability = await ensureHermesBridgeAvailable(target, bridgeAuthToken);
       if (!availability.ok) {
         lastFailure = availability;
@@ -357,8 +351,8 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
           const details = await transportRes.text().catch(() => '');
           if (transportRes.status === 504 && isHermesChannelTimeoutDetails(details)) {
             // Only our structured timeout payload proves the selected target
-            // classified its own timeout. Anonymous 504s may be infrastructure
-            // failures and remain eligible for fallback below.
+            // classified its own timeout. Anonymous 504s may have reached the
+            // agent, so they fall through without bridge-to-gateway replay.
             return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
               payload.correlationId,
               target,
@@ -459,10 +453,6 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         return;
       } catch (err: any) {
         if (isHermesBridgeTimeoutError(err)) {
-          if (!isLastTarget) {
-            lastFailure = { details: `${target.name} response timeout`, offline: true };
-            continue;
-          }
           return jsonResponse(res, 504, buildHermesChannelTimeoutBody(payload.correlationId, target));
         }
         lastFailure = { details: err.message, offline: true };
