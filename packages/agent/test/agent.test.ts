@@ -4383,8 +4383,12 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       expect(cleared).toBe(1);
       expect(persisted.has('sub-cg')).toBe(false);
       // The discoverable-only catalog row is KEPT in the store, so the node
-      // re-loads it on restart (doesn't forget graphs it merely discovered).
+      // re-loads it on restart (doesn't forget graphs it merely discovered)...
       expect(persisted.has('disc-cg')).toBe(true);
+      // ...but its persisted syncScoped bit is cleared, so a restart's rehydrate
+      // won't re-track it into the sync scope (#1020 round-4 — the in-memory
+      // untrack alone would be undone on reboot).
+      expect(persisted.get('disc-cg')?.syncScoped).toBe(false);
       // The in-memory map is fully reset — the subscribed backlog AND the
       // subscribed:false entry are dropped — so no `.has(id)` fallback still
       // reports the node as attached to a CG it was told to forget.

@@ -3579,11 +3579,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // with NO store reports 0 persisted rows removed (active teardown is logged
     // separately) rather than a phantom count of the in-memory subs.
     let persistedUserIds: string[] = [];
+    // Discoverable-only rows we KEEP (subscribed:false) but that still carry
+    // syncScoped:true: their in-memory sync scope is torn down below, but the
+    // PERSISTED bit must be cleared too, or rehydrate re-tracks them into the
+    // sync scope after a restart and fallback reads treat the cleared CG as
+    // attached again. Re-saved with syncScoped:false (keeping the catalog row).
+    let retainedSyncScopedRows: ContextGraphSubscriptionRecord[] = [];
     if (store) {
       try {
-        persistedUserIds = (await store.loadAll())
-          .filter((r) => isInScope(r.id, r.coreHosted) && r.subscribed === true)
-          .map((r) => r.id);
+        for (const r of await store.loadAll()) {
+          if (!isInScope(r.id, r.coreHosted)) continue;
+          if (r.subscribed === true) persistedUserIds.push(r.id);
+          else if (r.syncScoped) retainedSyncScopedRows.push(r);
+        }
       } catch (err) {
         // Can't enumerate the persisted backlog → the dormant (capped-out) rows
         // would survive and rehydrate after the next restart. Do NOT silently
@@ -3645,6 +3653,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this.log.warn(
             ctx,
             `clearContextGraphSubscriptions: failed to delete persisted subscription "${id}": ` +
+              (err instanceof Error ? err.message : String(err)),
+          );
+        }
+      }
+    }
+
+    // Durably un-sync-scope the retained discoverable rows: persist
+    // syncScoped:false so a restart's rehydrate doesn't re-track them into the
+    // sync scope (the in-memory untrackSyncContextGraph above is otherwise undone
+    // on reboot). The row itself is KEPT — only its syncScoped bit is flipped.
+    if (store) {
+      for (const r of retainedSyncScopedRows) {
+        try {
+          await store.save({ ...r, syncScoped: false });
+        } catch (err) {
+          this.log.warn(
+            ctx,
+            `clearContextGraphSubscriptions: failed to clear syncScoped on retained row "${r.id}": ` +
               (err instanceof Error ? err.message : String(err)),
           );
         }
