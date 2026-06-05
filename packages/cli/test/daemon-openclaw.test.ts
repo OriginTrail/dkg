@@ -568,12 +568,23 @@ describe('OpenClaw channel routing helpers', () => {
     const timeoutError = new Error('The operation was aborted due to timeout') as Error & { name: string };
     timeoutError.name = 'TimeoutError';
     const urls: string[] = [];
+    let bridgeInboundCalls = 0;
     const origFetch = globalThis.fetch;
     globalThis.fetch = (async (url: string | URL | Request) => {
       const requestUrl = String(url);
       urls.push(requestUrl);
       if (requestUrl.endsWith('/health')) {
         return new Response(JSON.stringify({ ok: true, channel: 'dkg-ui' }), { status: 200 });
+      }
+      if (requestUrl === 'http://127.0.0.1:9301/inbound') {
+        bridgeInboundCalls += 1;
+        if (bridgeInboundCalls === 1) {
+          throw timeoutError;
+        }
+        return new Response(JSON.stringify({
+          text: 'bridge recovered',
+          correlationId: 'corr-timeout-next',
+        }), { status: 200 });
       }
       if (requestUrl === 'https://openclaw.example.com/api/dkg-channel/inbound') {
         return new Response(JSON.stringify({ text: 'gateway reply' }), { status: 200 });
@@ -612,6 +623,36 @@ describe('OpenClaw channel routing helpers', () => {
         target: 'bridge',
         correlationId: 'corr-timeout',
         timeoutMs: OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
+      });
+
+      const { ctx: nextCtx, res: nextRes } = makeOpenClawRouteContext({
+        text: 'next task',
+        correlationId: 'corr-timeout-next',
+      }, '/api/openclaw-channel/send', {
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: { localChat: true },
+            transport: {
+              kind: 'openclaw-channel',
+              bridgeUrl: 'http://127.0.0.1:9301',
+              gatewayUrl: 'https://openclaw.example.com',
+            },
+          },
+        },
+      });
+
+      await handleOpenclawRoutes(nextCtx);
+
+      expect(urls).toEqual([
+        'http://127.0.0.1:9301/health',
+        'http://127.0.0.1:9301/inbound',
+        'http://127.0.0.1:9301/inbound',
+      ]);
+      expect(nextRes.statusCode).toBe(200);
+      expect(JSON.parse(nextRes.body)).toMatchObject({
+        text: 'bridge recovered',
+        correlationId: 'corr-timeout-next',
       });
     } finally {
       globalThis.fetch = origFetch;
@@ -1292,6 +1333,106 @@ describe('OpenClaw channel routing helpers', () => {
         correlationId: 'corr-stream',
         timeoutMs: OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
       });
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('does not mark OpenClaw stream bridge unhealthy when the local bridge fetch times out', async () => {
+    const timeoutError = new Error('The operation was aborted due to timeout') as Error & { name: string };
+    timeoutError.name = 'TimeoutError';
+    const urls: string[] = [];
+    let bridgeStreamCalls = 0;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      const requestUrl = String(url);
+      urls.push(requestUrl);
+      if (requestUrl.endsWith('/health')) {
+        return new Response(JSON.stringify({ ok: true, channel: 'dkg-ui' }), { status: 200 });
+      }
+      if (requestUrl === 'http://127.0.0.1:9301/inbound/stream') {
+        bridgeStreamCalls += 1;
+        if (bridgeStreamCalls === 1) {
+          throw timeoutError;
+        }
+        return new Response(JSON.stringify({
+          text: 'stream bridge recovered',
+          correlationId: 'corr-stream-timeout-next',
+        }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({
+        text: 'gateway stream',
+        correlationId: 'corr-stream-timeout-next',
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+    try {
+      const { ctx, res } = makeOpenClawRouteContext({
+        text: 'slow stream task',
+        correlationId: 'corr-stream-timeout',
+      }, '/api/openclaw-channel/stream', {
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: { localChat: true },
+            transport: {
+              kind: 'openclaw-channel',
+              bridgeUrl: 'http://127.0.0.1:9301',
+              gatewayUrl: 'https://openclaw.example.com',
+            },
+          },
+        },
+      });
+
+      await handleOpenclawRoutes(ctx);
+
+      expect(urls).toEqual([
+        'http://127.0.0.1:9301/health',
+        'http://127.0.0.1:9301/inbound/stream',
+      ]);
+      expect(res.statusCode).toBe(504);
+      expect(JSON.parse(res.body)).toMatchObject({
+        error: 'OpenClaw bridge response timeout',
+        code: 'OPENCLAW_BRIDGE_RESPONSE_TIMEOUT',
+        source: 'openclaw-channel',
+        target: 'bridge',
+        correlationId: 'corr-stream-timeout',
+        timeoutMs: OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
+      });
+
+      const { ctx: nextCtx, res: nextRes } = makeOpenClawRouteContext({
+        text: 'next stream task',
+        correlationId: 'corr-stream-timeout-next',
+      }, '/api/openclaw-channel/stream', {
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: { localChat: true },
+            transport: {
+              kind: 'openclaw-channel',
+              bridgeUrl: 'http://127.0.0.1:9301',
+              gatewayUrl: 'https://openclaw.example.com',
+            },
+          },
+        },
+      });
+
+      await handleOpenclawRoutes(nextCtx);
+
+      expect(urls).toEqual([
+        'http://127.0.0.1:9301/health',
+        'http://127.0.0.1:9301/inbound/stream',
+        'http://127.0.0.1:9301/inbound/stream',
+      ]);
+      expect(nextRes.statusCode).toBe(200);
+      expect(nextRes.headers['Content-Type']).toContain('text/event-stream');
+      expect(nextRes.body).toContain('"text":"stream bridge recovered"');
+      expect(nextRes.body).toContain('"correlationId":"corr-stream-timeout-next"');
     } finally {
       globalThis.fetch = origFetch;
     }

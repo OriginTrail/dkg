@@ -773,9 +773,6 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
         return jsonResponse(res, 200, reply);
       } catch (err: any) {
         if (isOpenClawBridgeTimeoutError(err)) {
-          if (target.name === "bridge") {
-            daemonState.openClawBridgeHealth = { ok: false, ts: Date.now() };
-          }
           return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(corrId, target));
         }
         if (target.name === "bridge") {
@@ -954,9 +951,6 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
         return;
       } catch (err: any) {
         if (isOpenClawBridgeTimeoutError(err)) {
-          if (target.name === "bridge") {
-            daemonState.openClawBridgeHealth = { ok: false, ts: Date.now() };
-          }
           return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(corrId, target));
         }
         if (target.name === "bridge") {
