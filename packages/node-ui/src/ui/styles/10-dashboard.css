@@ -1,0 +1,414 @@
+/* ══════════════════════════════════════════
+   DASHBOARD VIEW
+   ══════════════════════════════════════════ */
+/* Widened from 1200 → 1440: the old cap left a big empty right gutter
+   and the cards read sparse. 1440 fills the viewport on common large
+   screens while keeping readable line lengths and stopping the list row
+   from over-stretching past comfort (ui-lead — capped below 1600). */
+.v10-dashboard { max-width: 1440px; min-width: 0; }
+/* Subtle one-shot mount lift for dashboard cards/sections. Short
+   (160ms), opacity + 4px translate only, `both` so it doesn't flash the
+   pre-animation state. Fully disabled under reduced-motion. */
+@keyframes v10DashMount { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.v10-anim-mount { animation: v10DashMount 160ms ease-out both; }
+@media (prefers-reduced-motion: reduce) { .v10-anim-mount { animation: none; } }
+
+.v10-dash-header { margin-bottom: 24px; }
+/* Keep hero title pinned (PR8); subtitle gets promoted from tertiary
+   muted-mono to a readable secondary line. */
+.v10-dash-title { font-size: 20px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; }
+.v10-dash-subtitle { font-size: 13px; color: var(--text-secondary); font-family: var(--font-mono); }
+.v10-dash-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.v10-dash-stats .stat-card { min-width: 0; }
+.v10-dash-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
+.v10-dash-section {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  padding: 16px 18px;
+  /* Same hover lift/glow as the stat cards so the lower panels feel
+     part of the same surface family (round-2 feedback). */
+  transition: border-color .15s, box-shadow .15s;
+}
+.v10-dash-section:hover {
+  border-color: var(--border-strong);
+  box-shadow: 0 2px 8px rgba(0,0,0,.15);
+}
+.v10-dash-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.v10-dash-section-header h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+/* Icon + title cluster on the left of a section header. Icon inherits
+   --text-secondary so it reads as a quiet affordance, not a control. */
+.v10-dash-section-title { display: flex; align-items: center; gap: 6px; }
+.v10-dash-section-title svg { color: var(--text-secondary); flex-shrink: 0; }
+.v10-dash-section-badge {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.v10-dash-section-link {
+  font-size: 12px;
+  color: var(--text-secondary);
+  transition: color 0.15s;
+}
+.v10-dash-section-link:hover { color: var(--text-primary); }
+
+/* ── PR6 dashboard: 3 stat panels + My Context Graphs list ── */
+.v10-dash-stats-3 { grid-template-columns: repeat(3, 1fr); }
+@media (max-width: 720px) { .v10-dash-stats-3 { grid-template-columns: 1fr; } }
+.v10-dash-grid-2 { grid-template-columns: minmax(0, 2.2fr) minmax(320px, 1fr); }
+@media (max-width: 720px) { .v10-dash-grid-2 { grid-template-columns: 1fr; } }
+.v10-dash-section-wide { min-width: 0; }
+
+/* Curator/Joined split bar in the My Context Graphs card — same
+   spacing rhythm as the Size card's metric → bar → legend stack. */
+.v10-cg-rolesplit { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 2px; transition: opacity 0.12s; }
+/* Identity refetch in flight: signal the split is not authoritative
+   right now without flickering it away (the underlying data may still
+   be correct after the refetch). */
+.v10-cg-rolesplit.is-refreshing { opacity: 0.55; }
+@media (prefers-reduced-motion: reduce) { .v10-cg-rolesplit { transition: none; } }
+
+/* Dim inline label. `--text-secondary` (NOT tertiary): these annotate
+   real numbers, so they must clear AA on the card surface. */
+.v10-cg-dim { color: var(--text-secondary); font-weight: 400; }
+
+/* Context Graph Size: the two metrics ARE the headline now (the
+   redundant combined top number was removed). Big number + small unit
+   label, each over its WM/SWM/VM bar; tightened so the card is compact. */
+/* The two metrics carry the panel — give them air now they're large
+   (ui-lead: 14px between metrics, 6px number→bar). */
+.v10-cg-size-detail { margin-top: 2px; display: flex; flex-direction: column; gap: 14px; }
+.v10-cg-size-metric { display: flex; flex-direction: column; gap: 6px; }
+.v10-cg-size-num { display: flex; align-items: baseline; gap: 6px; }
+.v10-cg-size-big {
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.v10-cg-size-num .v10-cg-dim { font-size: 12px; }
+.v10-cg-size-empty { font-size: 20px; font-weight: 600; padding: 6px 0; }
+/* The Size card is the densest of the three stat cards; trim its
+   padding so the two big numbers + bars + legend + sub don't bloat it
+   past the other two (ui-lead). */
+/* Tighter padding for content-heavy stat cards (Size + My Context
+   Graphs) so the inner bar's right edge aligns across both cards
+   (round-3 feedback). */
+.stat-card.v10-stat-tight { padding: 16px 18px; }
+/* Loading placeholder used in every stat card's value slot AND in the
+   Size card's inline empty/loading area. Reset the inherited
+   `.stat-value` (28px/700) so "loading…" reads as a quiet placeholder
+   instead of a huge headline. Keeps the layout box close to a real
+   value so the surrounding sub-text doesn't jump on settle. */
+.v10-stat-loading {
+  display: inline-block;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  font-style: italic;
+  line-height: 1.4;
+  padding: 6px 0;
+}
+/* Empty placeholder ("—") for the same value slot. Same sizing as the
+   loading state but non-italic so it reads as "no data" rather than
+   "still loading". Resets the inherited `.stat-value` and the older
+   `.v10-cg-size-empty` font sizes so the dash is consistent across
+   all three top cards. */
+.v10-stat-empty {
+  display: inline-block;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  padding: 6px 0;
+}
+/* Track background + 1px gap between segments shows the track colour as
+   a hairline separator, and the outline keeps the light-theme WM
+   segment's boundary readable even though its remapped token fill is
+   low-contrast on its own (ui-lead non-text-contrast fix). */
+.v10-layerbar {
+  display: flex;
+  gap: 1px;
+  height: 7px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+}
+.v10-layerbar-seg { height: 100%; }
+.v10-layerbar-empty { flex: 1; background: var(--bg-elevated); }
+.v10-layer-legend { display: flex; gap: 12px; margin-top: 4px; }
+.v10-layer-legend-item {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--text-secondary); font-family: var(--font-mono);
+}
+.v10-layer-legend-dot { width: 8px; height: 8px; border-radius: 2px; }
+
+/* My Context Graphs list — column grid shared by header + rows. */
+.v10-cg-colhead, .v10-cg-row {
+  display: grid;
+  /* Reverted from the round-2 over-flex: a fully-flexible Size column
+     wrapped the inline "N entities · M triples" onto multiple lines on
+     narrow widths, which read worse than a slightly-truncated name
+     (round-3 feedback). Back to the pre-round-2 fixed-ish Size width
+     and 1fr Name (Name truncates with ellipsis when squeezed). */
+  grid-template-columns: minmax(0, 1fr) 40px minmax(140px, 190px) 52px 76px;
+  align-items: center;
+  gap: 8px;
+}
+.v10-cg-colhead {
+  padding: 5px 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.v10-cg-list {
+  display: flex;
+  flex-direction: column;
+  /* ~10 rows then internal scroll; global scrollbar styling applies. */
+  max-height: 360px;
+  overflow-y: auto;
+}
+.v10-cg-row {
+  width: 100%;
+  text-align: left;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: none;
+  transition: background 0.12s;
+}
+.v10-cg-row:last-child { border-bottom: 0; }
+.v10-cg-row:hover { background: var(--bg-hover); }
+.v10-cg-cell { font-size: 13px; color: var(--text-secondary); min-width: 0; }
+.v10-cg-name {
+  color: var(--text-primary);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v10-cg-type { display: flex; align-items: center; justify-content: center; color: var(--text-secondary); }
+.v10-cg-agents { text-align: right; font-variant-numeric: tabular-nums; }
+/* Role cell: left-anchor the badge. A pill centered in its column reads
+   as unmoored (ui-lead) — left-aligning it under a left header keeps the
+   column edge stable as role labels vary in width. */
+.v10-cg-role { display: flex; align-items: center; justify-content: flex-start; }
+/* Header cells align to their column's content (Name/Size/Role left,
+   Type centered over the glyph, Agents right over the numbers) — a
+   left-aligned header over centered/right content read as misaligned
+   in the screenshot review. */
+.v10-cg-colhead .v10-cg-type { justify-content: center; text-align: center; }
+.v10-cg-colhead .v10-cg-agents { text-align: right; }
+/* Role badge — same small-status-badge family as `.v10-agent-card-badge`. */
+.v10-cg-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+}
+/* Filled chip: `--accent-green` text on `--bg-elevated` fails AA in
+   light theme (~1.9:1 — accent-green is theme-invariant, bg-elevated is
+   not). Invert to a solid green chip with fixed near-black text — AA in
+   BOTH themes (~10:1, accent-green is constant) and rightly emphasises
+   the consequential "curator" role vs the quiet outlined "joined". #86 */
+.v10-cg-badge-curator { background: var(--accent-green); color: #0a0a0a; border-color: var(--accent-green); }
+.v10-cg-badge-joined { color: var(--text-secondary); }
+.v10-cg-empty { color: var(--text-secondary); font-size: 12px; padding: 16px 4px; }
+
+/* Wallets and Spending sidebar card — compact, reuses existing tokens. */
+/* Section titles inside the Wallets card. Stronger than the previous
+   10px caps so "Node wallets" and "Spending" read as distinct sections
+   rather than blending with rows, with extra top-spacing + a hairline
+   divider to separate them (round-3 feedback). */
+.v10-ws-subhead {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 18px 0 8px;
+}
+.v10-ws-subhead:first-of-type { margin-top: 4px; }
+/* Hairline divider above every section except the first to reinforce
+   the section break visually. */
+.v10-ws-subhead + * { margin-top: 0; }
+.v10-ws-subhead:not(:first-of-type) {
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* Chain row above the wallet table: small key:value pair, muted key,
+   primary value. */
+.v10-ws-chain-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+.v10-ws-chain-label {
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.v10-ws-chain-value { color: var(--text-primary); }
+/* (Older `.v10-ws-chain` inline subhead suffix is no longer used — the
+   chain now has its own `.v10-ws-chain-row` above the wallets section.) */
+
+/* Wallet table: Wallet | TRAC | Gas — one shared grid for header +
+   rows so values sit under their column headers (round-2 feedback). */
+.v10-ws-wtable { display: flex; flex-direction: column; gap: 5px; }
+.v10-ws-wrow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 5.5em 5em;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+.v10-ws-wrow .v10-ws-bal,
+.v10-ws-wrow .v10-ws-bal-sec { text-align: right; font-size: 13px; }
+.v10-ws-wrow .v10-ws-bal-sec { color: var(--text-secondary); }
+.v10-ws-whead {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.v10-ws-whead span:not(:first-child) { text-align: right; }
+
+.v10-ws-wallets { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+/* Wallet row: address left, balances right-stacked (TRAC primary, ETH
+   secondary) — a 2-col grid so the address can ellipsis while the
+   balance column stays a stable right edge (ui-lead). */
+.v10-ws-wallet {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.v10-ws-addr {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v10-ws-balcol { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
+.v10-ws-bal {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* Secondary ETH line: smaller, --text-secondary (NOT tertiary — it's a
+   real balance, must clear AA). */
+.v10-ws-bal-sec {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* Spending mini-table: Period | Publishes | TRAC, with a tiny header
+   row so the bare numbers are labelled (ui-lead). */
+.v10-ws-spend { display: flex; flex-direction: column; gap: 4px; }
+.v10-ws-spend-head, .v10-ws-spend-row {
+  display: grid;
+  /* Fixed numeric columns (not `auto auto`): with auto, small numbers
+     collapsed together so Publishes looked empty and both sat under
+     TRAC. Explicit widths keep each value under its own header
+     (round-2 feedback). */
+  grid-template-columns: minmax(0, 1fr) 7em 5em;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+}
+.v10-ws-spend-head {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.v10-ws-spend-head span:not(:first-child),
+.v10-ws-spend-val { text-align: right; }
+.v10-ws-spend-val {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* Chain/RPC partial-error caveat under the wallet list. --text-secondary
+   (AA on the card surface), small but not micro. */
+.v10-ws-note { color: var(--text-secondary); font-size: 12px; margin-top: 6px; }
+
+/* Quick actions */
+.v10-quick-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }
+.v10-quick-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-elevated);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  transition: all 0.15s;
+}
+.v10-quick-action:hover { border-color: var(--border-strong); color: var(--text-primary); }
+.v10-quick-action-icon { font-size: 14px; width: 20px; text-align: center; }
+
+/* Recent ops */
+.v10-recent-ops { display: flex; flex-direction: column; gap: 0; }
+.v10-recent-op {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 12px;
+}
+.v10-recent-op:last-child { border-bottom: none; }
+.v10-recent-op-type { font-weight: 500; color: var(--text-primary); }
+.v10-recent-op-status { font-family: var(--font-mono); font-size: 11px; }
+.v10-recent-op-time { font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary); margin-left: auto; }
+
+/* Project cards in dashboard */
+.v10-dash-projects { display: flex; flex-direction: column; gap: 6px; }
+.v10-dash-project-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  transition: all 0.15s;
+  text-align: left;
+}
+.v10-dash-project-card:hover { border-color: var(--border-default); }
+.v10-dash-project-name { font-size: 12px; font-weight: 500; color: var(--text-primary); }
+.v10-dash-project-count { font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono); }

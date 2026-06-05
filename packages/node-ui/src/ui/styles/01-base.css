@@ -1,0 +1,59 @@
+/* ══════════════════════════════════════════
+   RESET & BASE
+   ══════════════════════════════════════════ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #root {
+  height: 100%;
+  background: var(--bg-root);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  /* Body base 13 → 14 (PR8). PR7's surgical 10→11 bumps on a handful of
+     classes weren't enough — the long tail of inherited 13px chrome
+     still read as footnotes on a real laptop screen. Bumping the base
+     lifts every un-pinned surface (paragraph bodies, modal copy, form
+     labels, tooltips) via the cascade. Explicit "keep" overrides below
+     prevent the very largest surfaces (stat hero numbers, dashboard
+     title) from ballooning. */
+  font-size: 14px;
+  line-height: 1.5;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: var(--font-mono); }
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  outline: none;
+}
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+input, textarea {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 6px 10px;
+  outline: none;
+}
+input:focus, textarea:focus { border-color: var(--border-strong); }
+input::placeholder { color: var(--text-tertiary); }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+* { scrollbar-width: thin; scrollbar-color: var(--border-default) transparent; }
+:focus-visible { outline: 2px solid rgba(34, 197, 94, 0.5); outline-offset: 2px; }
+button:focus:not(:focus-visible) { outline: none; }
+
+@keyframes fadeSlideIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+.pulse-dot { animation: pulse 2s ease-in-out infinite; }
+.fade-in { animation: fadeSlideIn 0.4s ease; }

@@ -1,0 +1,202 @@
+/* ══════════════════════════════════════════
+   GRAPH VISUALIZATION (MemoryLayerView + ProjectView)
+   ══════════════════════════════════════════ */
+
+/* ── View toggle (table / graph) ── */
+.v10-mlv-view-toggle {
+  display: flex;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.v10-mlv-toggle-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  color: var(--text-tertiary);
+  background: var(--bg-surface);
+  transition: all 0.15s;
+  border-right: 1px solid var(--border-default);
+}
+.v10-mlv-toggle-btn:last-child { border-right: none; }
+.v10-mlv-toggle-btn:hover { color: var(--text-secondary); background: var(--bg-hover); }
+.v10-mlv-toggle-btn.active {
+  color: var(--text-primary);
+  background: var(--bg-active);
+}
+
+/* ── Clear / Reset button ── */
+.v10-mlv-clear-btn {
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: none;
+  border: 1px solid var(--border-default);
+  font-size: 11px;
+  color: var(--text-tertiary);
+  transition: all 0.15s;
+}
+.v10-mlv-clear-btn:hover { border-color: var(--border-strong); color: var(--text-secondary); }
+
+/* ── Result count badge ── */
+.v10-mlv-result-count {
+  padding: 6px 12px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+}
+
+/* ── Graph container (MemoryLayerView) ── */
+.v10-mlv-graph-container {
+  position: relative;
+  height: 500px;
+  min-height: 400px;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-surface);
+}
+.v10-mlv-graph-info {
+  position: absolute;
+  top: 8px;
+  left: 10px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+.v10-mlv-graph-info-custom {
+  padding: 1px 6px;
+  background: var(--accent-amber);
+  color: var(--bg-root);
+  font-weight: 600;
+  border-radius: 3px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.v10-mlv-graph-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+/* ── Node detail panel (overlay inside graph) ── */
+.v10-mlv-node-panel {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  width: 280px;
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 14px 16px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  z-index: 20;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.v10-mlv-node-panel h3 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 4px 0;
+  word-break: break-word;
+}
+.v10-mlv-node-panel h4 {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-tertiary);
+  margin: 12px 0 4px;
+}
+
+/* ── Project overview graph (ProjectView) ── */
+.v10-pv-overview-graph {
+  margin-top: 24px;
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-surface);
+}
+.v10-pv-overview-graph-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.v10-pv-overview-graph-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.v10-pv-overview-graph-legend {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+}
+.v10-pv-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.v10-pv-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.v10-pv-overview-graph-canvas {
+  height: 280px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.v10-pv-overview-graph-canvas:hover {
+  background: var(--bg-hover);
+}
+.v10-pv-overview-graph-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+.v10-pv-overview-graph-empty {
+  margin-top: 24px;
+  padding: 24px;
+  text-align: center;
+  border: 1px dashed var(--border-default);
+  border-radius: 10px;
+}
+.v10-pv-overview-graph-empty p {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+/* Layer card triple count */
+.v10-layer-card-count {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+  margin-left: auto;
+  margin-right: 4px;
+}

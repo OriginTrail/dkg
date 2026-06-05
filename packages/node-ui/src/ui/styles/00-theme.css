@@ -1,0 +1,152 @@
+/* ══════════════════════════════════════════
+   DKG V10 — DESIGN TOKENS (from prototype v5.1)
+   ══════════════════════════════════════════ */
+:root {
+  /* Surface hierarchy — true black base */
+  --bg-root: #000000;
+  --bg-panel: #0a0a0a;
+  --bg-surface: #111111;
+  --bg-elevated: #181818;
+  --bg-hover: #1f1f1f;
+  --bg-active: #262626;
+
+  /* Borders */
+  --border-subtle: #1a1a1a;
+  --border-default: #222222;
+  --border-strong: #333333;
+  /* Higher-contrast border for chips that need to clear 3:1 non-text on any
+     surface (used by the inline-code chip, which can land on user bubbles
+     whose bg is identical to a chip fill). */
+  --border-prominent: #888888;
+
+  /* Text — dark mode. Round-3 nudge 2026-05-20 (PR8): user feedback on
+     the live state was "almost there but still could be a bit better."
+     Single targeted bump on secondary (the tier that touches the most
+     body text): #a8a8a8 → #b8b8b8 — opens the secondary↔primary gap to
+     ~5pt luminance and pushes secondary to AAA on both bg-panel and
+     bg-surface. Tertiary, primary, and ghost stay. Future cleanup:
+     tertiary tier could be rebalanced (#9a9a9a is perceptually very
+     close to the new secondary), but that's its own pass. Ratios on
+     --bg-panel #0a0a0a: primary 15.9:1, secondary 9.98:1, tertiary
+     ~7.1:1. */
+  --text-primary: #f0f0f0;
+  --text-secondary: #b8b8b8;
+  --text-tertiary: #9a9a9a;
+  --text-ghost: #333333;
+
+  /* Accent — reserved for signals */
+  --accent-red: #ef4444;
+  --accent-amber: #f59e0b;
+  --accent-green: #22c55e;
+  --accent-blue: #3b82f6;
+
+  /* Semantic foregrounds (theme-aware) */
+  --text-success: #86efac;
+  --text-warning: #fbbf24;
+  --text-info: #7dd3fc;
+  --text-danger: #fca5a5;
+  --text-danger-hover: #fecaca;
+  --text-link: #60a5fa;
+  --text-on-accent: #111111;
+
+  /* Layer identity */
+  --layer-working: #64748b;
+  --layer-shared: #f59e0b;
+  --layer-verified: #22c55e;
+
+  /* Typography */
+  --font-sans: 'Instrument Sans', -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  /* Sizing */
+  --header-h: 44px;
+  --tab-h: 36px;
+  --toolbar-h: 38px;
+
+  /* Legacy aliases (for existing components that use the old tokens) */
+  --bg: var(--bg-root);
+  --surface: var(--bg-surface);
+  --surface-hover: var(--bg-hover);
+  --surface-alt: var(--bg-panel);
+  --border: var(--border-default);
+  --border-light: var(--border-strong);
+  --text: var(--text-primary);
+  --text-muted: var(--text-secondary);
+  --text-dim: var(--text-tertiary);
+  --green: var(--accent-green);
+  --green-dark: #166534;
+  --green-mid: #22c55e;
+  --green-dim: rgba(34, 197, 94, 0.1);
+  --amber: var(--accent-amber);
+  --amber-dim: rgba(251, 191, 36, 0.1);
+  --red: var(--accent-red);
+  --red-dim: rgba(248, 113, 113, 0.1);
+  --blue: var(--accent-blue);
+  --blue-dim: rgba(96, 165, 250, 0.1);
+  --purple: #a78bfa;
+  --purple-dim: rgba(167, 139, 250, 0.1);
+  --cyan: #22d3ee;
+  --cyan-dim: rgba(34, 211, 238, 0.08);
+  --pink: #f472b6;
+  --pink-dim: rgba(244, 114, 182, 0.12);
+}
+
+/* ══════════════════════════════════════════
+   LIGHT THEME
+   ══════════════════════════════════════════ */
+/* BUG-004: the variable overrides have to apply at the html element
+   level too, otherwise the `html { background: var(--bg-root) }` rule
+   keeps reading the dark `:root` definition and macOS rubber-band
+   overscroll flashes the dark colour in light mode. The matching
+   class is set on both html and body in App.tsx so existing
+   `body.light .foo` selectors below still work unchanged. */
+:root.light, body.light {
+  --bg-root: #fafafa;
+  --bg-panel: #f5f5f5;
+  --bg-surface: #ffffff;
+  --bg-elevated: #f0f0f0;
+  --bg-hover: #e8e8e8;
+  --bg-active: #e0e0e0;
+  --border-subtle: #e5e5e5;
+  --border-default: #d4d4d4;
+  --border-strong: #a3a3a3;
+  --border-prominent: #525252;
+  --text-primary: #171717;
+  /* Light secondary round-3 nudge: #525252 → #444444. Same rationale
+     as the dark-mode bump — single targeted step on the tier that
+     touches the most body text. Ratios on bg-panel #f5f5f5: 7.4 →
+     8.93:1 (AAA); on bg-surface #ffffff: 7.81 → 9.74:1 (AAA). */
+  --text-secondary: #444444;
+  /* Light tertiary stays at #6b6b6b (~5.4:1) — was just lifted in the
+     PR8 round-2 cascade; further darkening here would close the
+     tertiary↔secondary gap. Future cleanup if tier balance needs
+     it. Ghost stays at #d4d4d4 (decoration-only). */
+  --text-tertiary: #6b6b6b;
+  --text-ghost: #d4d4d4;
+  /* Light-theme danger foreground (~7.4:1 on --bg-elevated #f0f0f0) */
+  --text-success: #166534;
+  --text-warning: #92400e;
+  --text-info: #1d4ed8;
+  --text-danger: #b91c1c;
+  --text-danger-hover: #991b1b;
+  --text-link: #1d4ed8;
+  --text-on-accent: #111111;
+  /* Layer accents are NOT overridden in light mode — the slate/amber/
+     green from :root carry through, matching the Context Graph and
+     project pages (which already use the unified palette in both
+     themes). The earlier PR6 desaturation to greys (#8a8a8a / #737373
+     / #404040) read as "weird variations of gray" against the white
+     dashboard card vs the colored CG pages; reverting per user
+     directive (PR8 round-4). Non-text contrast at small decoration
+     sizes is acceptable below AA's 3:1 floor — the bars/dots aren't
+     text. */
+  --bg: var(--bg-root);
+  --surface: var(--bg-surface);
+  --surface-hover: var(--bg-hover);
+  --surface-alt: var(--bg-panel);
+  --border: var(--border-default);
+  --border-light: var(--border-strong);
+  --text: var(--text-primary);
+  --text-muted: var(--text-secondary);
+  --text-dim: var(--text-tertiary);
+}

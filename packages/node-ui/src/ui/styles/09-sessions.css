@@ -1,0 +1,28 @@
+/* Sessions list */
+.v10-sessions-list { padding: 8px 0; }
+.v10-session-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  text-align: left;
+  transition: background 0.1s;
+}
+.v10-session-item:hover { background: var(--bg-hover); }
+.v10-session-preview {
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-right: 8px;
+}
+.v10-session-count {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}

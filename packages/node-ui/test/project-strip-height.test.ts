@@ -10,13 +10,27 @@
 // source is the practical regression guard — if the rule
 // regresses to 34px or a different value, this test catches it.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
-const css = readFileSync(resolve(here, '../src/ui/styles.css'), 'utf8');
+
+function readStylesSources(): string {
+  const uiDir = resolve(here, '../src/ui');
+  const stylesDir = resolve(uiDir, 'styles');
+  const chunks = readdirSync(stylesDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.css'))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((entry) => readFileSync(resolve(stylesDir, entry.name), 'utf8'));
+  return [
+    readFileSync(resolve(uiDir, 'styles.css'), 'utf8'),
+    ...chunks,
+  ].join('\n');
+}
+
+const css = readStylesSources();
 
 describe('PR #793 round 2 — breadcrumb container reserves consistent height', () => {
   it('reserves min-height: 44px on .v10-project-strip to eliminate layout shift on breadcrumb appearance', () => {
