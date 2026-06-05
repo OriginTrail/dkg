@@ -141,6 +141,13 @@ describe('Random Sampling E2E (Hardhat)', () => {
     const publisherIdentityId = BigInt(ctx.coreProfileId);
     const byteSize = BigInt(publishQuads.length * 100);
     const epochs = 2n;
+    // OT-RFC-44 / Design B: a publish mints exactly ONE Knowledge Asset whose
+    // member entities are the root subjects (any triple count). The KA count
+    // the contract accepts (`InvalidKnowledgeAssetsAmount` unless == 1), that
+    // the publisher submits as `knowledgeAssetsAmount`, and that every ACK
+    // signer commits to in the digest is therefore ALWAYS 1 — never the triple
+    // count. Mirrors `dkg-publisher.ts` (`knowledgeAssetsAmount: kaCount`).
+    const kaCount = 1n;
     const tokenAmount = await publisherAdapter.getRequiredPublishTokenAmount(byteSize, epochs);
     const ackSignatures = await Promise.all(
       recOpKeys.map(async (key, idx) => {
@@ -150,7 +157,7 @@ describe('Random Sampling E2E (Hardhat)', () => {
           kav10Address,
           cgId,
           merkleRoot,
-          BigInt(publishQuads.length),
+          kaCount,
           byteSize,
           epochs,
           tokenAmount,
@@ -174,11 +181,19 @@ describe('Random Sampling E2E (Hardhat)', () => {
     const authorSig = ethers.Signature.from(
       await coreOpWallet.signTypedData(authorTyped.domain, authorTyped.types, authorTyped.message),
     );
+    // OT-RFC-43 Option 1 (variant 1a): the real adapter requires a packed
+    // reservedKaId = (uint160(author) << 96) | number. Mirror the publisher's
+    // allocator cold-start (DKGPublisher.ensureReservedKaId): read the author's
+    // highest minted number from chain (-1n on a fresh deploy) and reserve the
+    // next one. CORE_OP has minted nothing in this snapshot, so this is number 0.
+    const authorChainMax = await publisherAdapter.getMaxKaNumberForAuthor!(coreOpWallet.address);
+    const reservedKaId =
+      (BigInt(ethers.getAddress(coreOpWallet.address)) << 96n) | (authorChainMax + 1n);
     const publishResult = await publisherAdapter.createKnowledgeAssets!({
       publishOperationId: 'rs-e2e-publish',
       contextGraphId: cgId,
       merkleRoot,
-      knowledgeAssetsAmount: publishQuads.length,
+      knowledgeAssetsAmount: Number(kaCount),
       byteSize,
       epochs: Number(epochs),
       tokenAmount,
@@ -194,6 +209,7 @@ describe('Random Sampling E2E (Hardhat)', () => {
         schemeVersion: 1,
       },
       ackSignatures,
+      reservedKaId,
     });
     kaId = publishResult.batchId;
     if (kaId === 0n) {
