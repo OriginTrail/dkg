@@ -185,6 +185,13 @@ describe('Random Sampling E2E (Hardhat)', () => {
     const authorSig = ethers.Signature.from(
       await coreOpWallet.signTypedData(authorTyped.domain, authorTyped.types, authorTyped.message),
     );
+    // OT-RFC-43 Option 1: direct real-adapter calls must supply the
+    // deterministic packed KA id the DKGPublisher allocator would otherwise
+    // reserve:
+    //   reservedKaId = (uint160(author) << 96) | number
+    // This test runs on a fresh Hardhat snapshot and mints CORE_OP's first KA
+    // in the snapshot, so the per-author number is 0.
+    const reservedKaId = (BigInt(ethers.getAddress(coreOpWallet.address)) << 96n) | 0n;
     const publishResult = await publisherAdapter.createKnowledgeAssets!({
       publishOperationId: 'rs-e2e-publish',
       contextGraphId: cgId,
@@ -195,6 +202,7 @@ describe('Random Sampling E2E (Hardhat)', () => {
       tokenAmount,
       isImmutable: false,
       merkleLeafCount,
+      reservedKaId,
       publisherNodeIdentityId: publisherIdentityId,
       author: {
         address: coreOpWallet.address,
