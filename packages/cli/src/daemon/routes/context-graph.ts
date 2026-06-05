@@ -1688,11 +1688,17 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     return jsonResponse(res, 200, { count: subscriptions.length, subscriptions });
   }
 
-  // DELETE /api/context-graph/subscriptions — operator recovery for #997: tear
-  // down every active subscription and wipe the persisted backlog so a node
-  // wedged by stale subscriptions can be reset without hand-editing the store.
-  // Non-destructive to VM/SWM data — only the local subscription bookkeeping is
-  // cleared; legitimate context graphs re-subscribe on next access.
+  // DELETE /api/context-graph/subscriptions — operator recovery / FULL LOCAL
+  // RESET for #997. Tears down every active subscription AND wipes the node's
+  // entire local non-system, non-coreHosted context-graph bookkeeping: subscribed
+  // rows, `subscribed:false` ghosts left by an earlier unsubscribe, AND
+  // discoverable-only discovery-catalog rows. The discovery catalog is a cache
+  // that re-populates from the preserved ONTOLOGY system CG on the next discovery
+  // pass, so this is a deliberate full reset, not subscription-only — `cleared`
+  // is therefore the TOTAL number of persisted rows removed, not strictly the
+  // subscription count. Non-destructive to VM/SWM DATA and ALL on-chain state:
+  // only local subscription + discovery bookkeeping is reset; system + coreHosted
+  // CGs are untouched. Legitimate CGs re-subscribe / re-discover on next access.
   if (req.method === "DELETE" && path === "/api/context-graph/subscriptions") {
     // Destructive + node-wide: operator-only (node-admin token when auth is on;
     // tokenless when auth is disabled). Prevents an agent-scoped token from

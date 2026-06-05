@@ -3623,12 +3623,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // gone" while stale rows survive in the store.
     let cleared = persistedUserIds.length;
     let failed = 0;
+    // Track which CGs were ACTUALLY removed, so membership reconciliation below
+    // only runs for them. A row whose store.delete() FAILED still has a live
+    // subscription (it will rehydrate), so deleting its memberships would leave
+    // /members + involvement + ACL stale for a CG that was NOT cleared.
+    const clearedIds: string[] = [];
     if (store) {
       cleared = 0;
       for (const id of persistedUserIds) {
         try {
           await store.delete(id);
           cleared++;
+          clearedIds.push(id);
         } catch (err) {
           failed++;
           this.log.warn(
@@ -3639,6 +3645,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
       }
     }
+    // With no store there is nothing persisted to remove or fail — the in-memory
+    // teardown of activeUserIds above IS the clear, so reconcile those.
+    const reconcileIds = store ? clearedIds : activeUserIds;
 
     // Reconcile EVERY local membership for each cleared CG — the 'node' principal
     // AND each local agent. `unsubscribeFromContextGraph` doesn't touch the
@@ -3661,7 +3670,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ...this.listLocalAgents().map((a) => ['agent', a.agentAddress] as [ContextGraphMemberPrincipalType, string]),
       ];
       let memFailed = 0;
-      for (const id of new Set([...activeUserIds, ...persistedUserIds])) {
+      for (const id of new Set(reconcileIds)) {
         for (const [ptype, pid] of principals) {
           try {
             await memStore.delete(id, ptype, this.normalizeMembershipPrincipal(ptype, pid));
