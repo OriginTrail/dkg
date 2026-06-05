@@ -1,0 +1,464 @@
+/* Fills the parent completely — used when the graph tab is active inside a
+   flex-column body (both in the inline strip and the full LayerDetailView). */
+.v10-graph-view-fill {
+  flex: 1 1 auto; min-height: 0; width: 100%;
+}
+.v10-graph-overlay {
+  position: absolute;
+  top: 46px;
+  right: 12px;
+  z-index: 6;
+  width: min(250px, calc(100% - 24px));
+  pointer-events: none;
+}
+.v10-graph-overlay .v10-swm-legend,
+.v10-graph-overlay .v10-vm-legend {
+  box-shadow: 0 18px 36px -24px rgba(0,0,0,0.85);
+  backdrop-filter: blur(6px);
+}
+.v10-graph-rail {
+  flex: 0 0 230px;
+  width: 230px;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  border-left: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-panel) 86%, transparent);
+}
+.v10-graph-rail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: rgba(255,255,255,0.02);
+}
+.v10-graph-rail-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.v10-graph-rail-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.v10-graph-rail-row.active {
+  color: var(--text-primary);
+  font-weight: 650;
+}
+.v10-graph-trust-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  box-shadow: 0 0 0 3px rgba(255,255,255,0.04);
+}
+.v10-graph-rail-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v10-graph-placeholder-centered {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  text-align: center;
+  padding: 24px;
+}
+.v10-graph-singleton-shelf {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  /* Bumped above the RdfGraph's WebGL canvas (which paints inside
+     .v10-graph-view). Without this the shelf rendered but the 3d
+     force-graph layer composited on top of it in the inline view —
+     only zooming the graph (which redraws the canvas) revealed the
+     shelf underneath. */
+  z-index: 20;
+  width: min(280px, calc(100% - 24px));
+  max-height: 28%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-panel) 92%, transparent);
+  box-shadow: 0 14px 34px -20px rgba(0,0,0,0.8);
+}
+.v10-graph-singleton-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+}
+.v10-graph-singleton-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  overflow: auto;
+  padding: 8px;
+}
+.v10-graph-singleton-item {
+  max-width: 120px;
+  min-height: 22px;
+  padding: 3px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.v10-graph-singleton-item:hover {
+  border-color: var(--graph-accent);
+  color: var(--text-primary);
+}
+.v10-graph-singleton-more {
+  align-self: center;
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+.v10-graph-expanded-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  padding: 24px;
+  background: rgba(0,0,0,0.82);
+}
+.v10-graph-expanded-panel {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: 0 24px 70px -28px rgba(0,0,0,0.9);
+}
+.v10-graph-expanded-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.v10-graph-expanded-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.v10-graph-expanded-subtitle {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.v10-graph-expanded-close {
+  width: 30px;
+  height: 28px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.v10-graph-expanded-close:hover {
+  border-color: var(--graph-accent);
+  color: var(--text-primary);
+}
+.v10-graph-expanded-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.v10-graph-expanded-body .v10-graph-shell-bar {
+  display: none;
+}
+.v10-graph-expanded-body .v10-graph-body {
+  flex: 1 1 auto;
+}
+.v10-ka-graph-shell {
+  margin-top: 8px;
+  min-height: clamp(380px, 55vh, 660px);
+  border-radius: 6px;
+}
+body.light .v10-ka-graph-shell,
+body.light .v10-ka-graph-shell .v10-graph-view,
+body.light .v10-ka-graph-shell .v10-graph-canvas {
+  background: #ffffff;
+}
+.v10-graph-placeholder {
+  color: var(--text-tertiary); font-size: 12px; font-family: var(--font-mono);
+}
+.v10-docs-placeholder {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  color: var(--text-tertiary); font-size: 12px;
+}
+.v10-layer-state {
+  flex: 1 1 auto;
+  min-height: 160px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  text-align: center;
+}
+.v10-items-list { padding: 0; }
+
+/* ── KA Detail View ── */
+.v10-ka-detail { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.v10-ka-header {
+  padding: 12px 20px; border-bottom: 1px solid var(--border-subtle);
+  display: flex; flex-direction: column; gap: 8px; flex-shrink: 0;
+}
+.v10-ka-back {
+  align-self: flex-start; border: 1px solid var(--border-default); border-radius: 5px;
+  background: none; color: var(--text-secondary); font-size: 11px; font-weight: 600;
+  padding: 4px 10px; cursor: pointer; font-family: var(--font-sans); transition: all 0.15s;
+}
+.v10-ka-back:hover { color: var(--text-primary); border-color: var(--border-strong); }
+.v10-ka-header-left { display: flex; flex-direction: column; gap: 2px; }
+.v10-ka-label { font-size: 10px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; }
+.v10-ka-name { font-size: 15px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 8px; }
+.v10-ka-ual { font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono); margin-top: 2px; }
+.v10-ka-split { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+.v10-ka-left { flex: 1; min-width: 0; overflow-y: auto; padding: 16px 20px; border-right: 1px solid var(--border-subtle); }
+.v10-ka-right { width: 300px; flex-shrink: 0; overflow-y: auto; padding: 16px; }
+.v10-ka-section { margin-bottom: 16px; }
+.v10-ka-section-title {
+  font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--text-tertiary); margin-bottom: 8px;
+}
+.v10-ka-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.7; }
+.v10-ka-desc p { margin-bottom: 8px; }
+.v10-ka-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); }
+.v10-ka-meta-item { display: flex; align-items: center; gap: 4px; }
+.v10-ka-prop { display: flex; gap: 8px; padding: 4px 0; font-size: 11px; border-bottom: 1px solid var(--border-subtle); }
+.v10-ka-prop:last-child { border-bottom: none; }
+.v10-ka-prop-key { color: var(--text-tertiary); font-weight: 600; min-width: 120px; flex-shrink: 0; font-family: var(--font-mono); font-size: 10px; }
+.v10-ka-prop-val { color: var(--text-secondary); word-break: break-all; }
+.v10-ka-conn {
+  display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; padding: 5px 8px;
+  border-radius: 4px; cursor: pointer; border: none; background: none; color: inherit;
+  font-family: var(--font-sans); font-size: 11px; transition: background 0.1s;
+}
+.v10-ka-conn:hover { background: var(--bg-hover); }
+.v10-ka-conn-pred { color: var(--text-tertiary); font-family: var(--font-mono); font-size: 10px; min-width: 80px; }
+.v10-ka-conn-arrow { color: var(--text-ghost); }
+.v10-ka-conn-target { color: var(--text-secondary); font-weight: 500; }
+.v10-ka-triples-table { width: 100%; border-collapse: collapse; font-size: 10px; font-family: var(--font-mono); }
+.v10-ka-triples-table th {
+  padding: 6px 8px; text-align: left; font-size: 9px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border-default); background: var(--bg-elevated);
+}
+.v10-ka-triples-table td {
+  padding: 5px 8px; border-bottom: 1px solid var(--border-subtle); color: var(--text-secondary);
+  max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v10-ka-timeline { position: relative; padding-left: 24px; }
+.v10-ka-timeline::before { content: ''; position: absolute; left: 7px; top: 0; bottom: 0; width: 1px; background: var(--border-default); }
+.v10-ka-event { position: relative; padding: 0 0 16px 0; }
+.v10-ka-event:last-child { padding-bottom: 0; }
+.v10-ka-event-dot {
+  position: absolute; left: -21px; top: 2px; width: 10px; height: 10px;
+  border-radius: 50%; border: 2px solid var(--border-strong); background: var(--bg-elevated);
+}
+.v10-ka-event-dot.created { border-color: var(--layer-working); background: rgba(100,116,139,0.15); }
+.v10-ka-event-dot.shared { border-color: var(--layer-shared); background: rgba(245,158,11,0.15); }
+.v10-ka-event-dot.verified { border-color: var(--layer-verified); background: rgba(34,197,94,0.15); }
+.v10-ka-event-header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 2px; }
+.v10-ka-event-title { font-size: 11px; font-weight: 600; color: var(--text-primary); }
+.v10-ka-event-time { font-family: var(--font-mono); font-size: 9px; color: var(--text-tertiary); white-space: nowrap; margin-left: auto; }
+.v10-ka-event-desc { font-size: 10px; color: var(--text-tertiary); line-height: 1.5; }
+
+/* ── Sub-graph Overview (Graph Overview tab) ──
+   One "wall of graphs": a responsive grid of mini RdfGraph cards, one per
+   registered sub-graph. Each card is self-contained (title, stats, graph)
+   and styled by its profile color through the --sg-color custom prop. */
+.v10-sgov { display: flex; flex: 1; flex-direction: column; gap: 12px; min-height: 0; padding: 0 12px 12px; }
+.v10-sgov-header {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding: 4px 2px;
+}
+.v10-sgov-title { font-size: 13px; font-weight: 600; color: var(--text-primary); letter-spacing: 0.02em; }
+.v10-sgov-sub { font-size: 11px; color: var(--text-tertiary); font-family: var(--font-mono); }
+.v10-empty-state.v10-sgov-state {
+  min-height: 220px;
+  margin: 0 12px 12px;
+}
+/* The grid auto-fills: 3-up on wide screens, 2-up around 1100px, single column
+   under 720px. Each cell has a stable minimum height so the mini graphs get
+   room to breathe regardless of triple density. */
+.v10-sgov-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 12px;
+  align-content: start;
+  overflow: auto;
+  padding-bottom: 12px;
+}
+.v10-sgov-card {
+  display: flex; flex-direction: column;
+  min-height: 320px;
+  background: var(--surface-1, rgba(255,255,255,0.02));
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  border-radius: 12px;
+  overflow: hidden;
+  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+.v10-sgov-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px -12px var(--sg-color, rgba(100,116,139,0.6));
+}
+/* GH #813 — Root mini-card chrome. Solid `--border-subtle` reads
+   as a quieter daemon-emitted card vs the tinted named-subgraph
+   cards' `card.color + '55'` accent; the synthesized bucket stays
+   visually present without competing with the named cards for
+   attention.
+   Per-card `--sg-color` injection is suppressed in the JSX so the
+   gradient + hover-shadow fall through to the neutral fallback
+   (rgba(100,116,139,…)), and the icon picks up its color from
+   the inherited tertiary token instead of a per-slug accent.
+   Position: rendered last in the grid (mirrors Root chip's
+   rightmost chip-row position).
+   Round 1 visual revision (ui-lead): the original dashed +
+   `--border-strong` treatment was rejected — in this codebase
+   dashed reads as broken/disabled/drop-zone, `--border-strong`
+   is the loud active/hover token (so the Root card became the
+   LOUDEST card in the grid, opposite of intent), and dashed
+   truncates into irregular dot artifacts on the 12px
+   border-radius corners. Solid + subtle is the locked
+   treatment; base `.v10-sgov-card` rule's `border: 1px solid …`
+   cascades, so only the color token swaps here. */
+.v10-sgov-card.root {
+  border-color: var(--border-subtle);
+}
+.v10-sgov-card.root .v10-sgov-card-icon {
+  color: var(--text-tertiary);
+}
+.v10-sgov-card-head {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 12px 8px 12px;
+  border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
+}
+.v10-sgov-card-icon { font-size: 18px; line-height: 1; margin-top: 1px; }
+.v10-sgov-card-title-wrap { flex: 1; min-width: 0; }
+.v10-sgov-card-title {
+  font-size: 13px; font-weight: 600; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.v10-sgov-card-desc {
+  font-size: 10px; color: var(--text-tertiary); line-height: 1.4;
+  margin-top: 2px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.v10-sgov-card-open {
+  appearance: none; background: transparent; color: var(--text-tertiary);
+  border: 1px solid var(--border-subtle); border-radius: 6px;
+  padding: 2px 6px; cursor: pointer; font-size: 12px; line-height: 1;
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+.v10-sgov-card-open:hover {
+  color: var(--sg-color, var(--text-primary));
+  border-color: var(--sg-color, var(--border-strong));
+  background: color-mix(in srgb, var(--sg-color, #64748b) 10%, transparent);
+}
+.v10-sgov-card-stats {
+  display: flex; gap: 12px; padding: 6px 12px;
+  font-size: 11px; color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
+}
+.v10-sgov-card-stat b {
+  color: var(--text-primary); font-weight: 600; margin-right: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.v10-sgov-card-graph {
+  position: relative; flex: 1; min-height: 220px;
+  background:
+    radial-gradient(ellipse at center,
+      color-mix(in srgb, var(--sg-color, #64748b) 6%, transparent) 0%,
+      transparent 70%),
+    var(--surface-0, rgba(0,0,0,0.2));
+}
+.v10-sgov-card-empty {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; color: var(--text-tertiary);
+}
+.v10-sgov-card-pyramid {
+  padding: 0 10px 6px;
+}
+
+/* ── Mini layer pyramid (WM/SWM/VM segmented bar + legend) ── */
+.v10-minibar {
+  display: flex; flex-direction: column; gap: 4px;
+  min-width: 0;
+}
+.v10-minibar.compact { flex-direction: row; align-items: center; gap: 6px; }
+.v10-minibar-empty {
+  font-size: 10px; color: var(--text-tertiary); font-style: italic;
+}
+.v10-minibar-bar {
+  display: flex; height: 6px; width: 100%;
+  border-radius: 3px; overflow: hidden;
+  background: rgba(255,255,255,0.04);
+}
+.v10-minibar-seg {
+  height: 100%;
+  transition: opacity 0.15s ease, filter 0.15s ease;
+}
+.v10-minibar-seg.dim { opacity: 0.3; filter: grayscale(0.6); }
+.v10-minibar-legend {
+  display: flex; gap: 4px; flex-wrap: wrap;
+  align-items: center;
+}
+.v10-minibar-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 7px;
+  background: none;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  font-size: 10px; font-weight: 600;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  cursor: default;
+  transition: border-color 0.15s, color 0.15s, opacity 0.15s;
+}
+.v10-minibar-chip.interactive { cursor: pointer; }
+.v10-minibar-chip.interactive:hover { border-color: var(--border-strong); color: var(--text-primary); }
+.v10-minibar-chip.dim { opacity: 0.4; }
+.v10-minibar-dot {
+  display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+}
+.v10-minibar-short { letter-spacing: 0.04em; }
+.v10-minibar-count { font-variant-numeric: tabular-nums; color: var(--text-tertiary); }

@@ -1,0 +1,339 @@
+/* ── Markdown rendering (PR3) ── */
+.v10-md {
+  font-size: 12px;
+  line-height: 1.5;
+  color: inherit;
+}
+.v10-md > *:first-child { margin-top: 0; }
+.v10-md > *:last-child { margin-bottom: 0; }
+.v10-md-h1, .v10-md-h2, .v10-md-h3 {
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 12px 0 6px;
+  color: var(--text-primary);
+}
+.v10-md-h4, .v10-md-h5, .v10-md-h6 {
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 10px 0 6px;
+  color: var(--text-primary);
+}
+.v10-md-h1 { font-size: 18px; }
+.v10-md-h2 { font-size: 16px; }
+.v10-md-h3 { font-size: 14px; }
+.v10-md-h4 { font-size: 13px; }
+.v10-md-h5 { font-size: 12px; }
+.v10-md-h6 { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
+/* Explicit `--text-primary` on body-text elements. A global
+   `p { color: var(--text-secondary) }` (≈styles.css:2682) would
+   otherwise win over these (bare-element specificity 0,0,1 beats
+   inherited color from an ancestor). Before PR4 the assistant bubble's
+   own `color: var(--text-primary)` masked it; with the bubble removed
+   full-width assistant prose was inheriting the dim global and reading
+   as unreadable muted gray in dark mode. The `.v10-md-*` class
+   selectors (0,1,0) beat the global `p` cleanly. Headings already set
+   this explicitly; links / code / h6 keep their intentional non-primary
+   colors. Blockquote body is re-dimmed below (its inner `<p>` would
+   otherwise pick up this `--text-primary` directly, defeating the
+   intentional dim-quote affordance). */
+.v10-md-p { margin: 4px 0; color: var(--text-primary); }
+.v10-md-ul, .v10-md-ol { margin: 4px 0; padding-left: 20px; }
+.v10-md-ul { list-style: disc; }
+.v10-md-ol { list-style: decimal; }
+.v10-md-li { margin: 2px 0; color: var(--text-primary); }
+.v10-md-li > .v10-md-ul, .v10-md-li > .v10-md-ol { margin: 2px 0; padding-left: 18px; }
+/* Task lists (remark-gfm) */
+.v10-md-ul .v10-md-li input[type="checkbox"] {
+  margin-right: 6px;
+  vertical-align: middle;
+  accent-color: var(--accent-blue);
+}
+.v10-md-link {
+  color: var(--text-link);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  word-break: break-word;
+}
+.v10-md-link:hover { text-decoration: none; }
+.v10-md-link-inert {
+  /* Inert sibling of .v10-md-link: relative / unsupported-scheme hrefs
+     from untrusted chat content render as a span (not <a>), so the user
+     can read the link text but can't be silently navigated by it.
+     Dotted underline keeps the affordance honest. */
+  color: var(--text-secondary);
+  text-decoration: underline dotted;
+  text-decoration-skip-ink: none;
+  text-underline-offset: 2px;
+  cursor: help;
+}
+.v10-md-blockquote {
+  /* Left rail bumped from `--border-strong` to `--border-prominent`
+     after the assistant bubble was removed in PR4 — the rail is the
+     only visual cue defining the blockquote (the 5% wash inside is
+     effectively imperceptible on bg-panel) and `--border-strong`
+     fails WCAG 1.4.11 (3:1 non-text) against `--bg-panel` in both
+     themes. `--border-prominent` clears 5.58:1 dark / 7.17:1 light,
+     same swap recipe as `.v10-md-hr` and the inline-code chip
+     border. Codex / UI-lead Task #67. */
+  margin: 6px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--border-prominent);
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-tertiary) 5%, transparent);
+  border-radius: 0 6px 6px 0;
+}
+/* react-markdown renders blockquote body as `<blockquote><p
+   class="v10-md-p">…</p></blockquote>`. The `.v10-md-p` rule above now
+   sets `--text-primary` directly on that inner `<p>`, which a direct
+   rule always beats over the `--text-secondary` the `<p>` would
+   otherwise inherit from `.v10-md-blockquote`. Re-dim quoted body text
+   with a scoped descendant selector (0,2,0 > the 0,1,0 `.v10-md-p`),
+   preserving the "quoted content reads dimmer than body" affordance.
+   Clears WCAG AA at 5.45:1 dark / 6.92:1 light. UI-lead PR4 r6. */
+.v10-md-blockquote .v10-md-p,
+.v10-md-blockquote .v10-md-li { color: var(--text-secondary); }
+.v10-md-hr {
+  /* `--border-subtle` was invisible against the panel background — the
+     assistant content now sits directly on `--bg-panel` after the
+     bubble removal, and even the dark-theme `--border-default` /
+     `--border-strong` still fail WCAG 1.4.11 (3:1 non-text) here.
+     `--border-prominent` is the same chip-outline token already in
+     use by inline-code chips on user bubbles and clears 3:1 against
+     `--bg-panel` in both themes. */
+  margin: 12px 0;
+  border: 0;
+  border-top: 1px solid var(--border-prominent);
+}
+.v10-md-table-scroll {
+  /* Outer border bumped to `--border-prominent` for the same reason
+     `.v10-md-hr` / `.v10-md-blockquote` / `.v10-md-pre` did — after
+     PR4's bubble removal, the table sits on `--bg-panel` and the old
+     `--border-subtle` clears only ~1.15:1 against panel (fails 3:1).
+     UI-lead Task #66. */
+  margin: 8px 0;
+  overflow-x: auto;
+  border-radius: 8px;
+  border: 1px solid var(--border-prominent);
+}
+.v10-md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.v10-md-thead {
+  background: var(--bg-elevated);
+}
+.v10-md-th {
+  padding: 6px 10px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+}
+.v10-md-td {
+  /* Table data is primary content, not metadata — `--text-secondary`
+     read as dim/unreadable on the no-bubble dark panel (same root
+     cause as `.v10-md-p`). Match the header (`--text-primary`). */
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  vertical-align: top;
+}
+.v10-md-tr:last-child .v10-md-td { border-bottom: 0; }
+/* Inert placeholder rendered in place of markdown images. The chat renders
+   untrusted agent output, so `<img>` is replaced with a label that names
+   the resource without fetching it. */
+.v10-md-image-placeholder {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-active);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-style: italic;
+  border: 1px solid var(--border-prominent);
+  cursor: help;
+}
+
+.v10-md-code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--bg-active);
+  color: var(--text-primary);
+  /* 1px border keeps the chip visible on bubbles whose bg is also --bg-active
+     (e.g., user bubbles). Uses --border-prominent so contrast clears 3:1
+     non-text on every bubble × theme combination. */
+  border: 1px solid var(--border-prominent);
+  /* Default `box-decoration-break: slice` so that a single chip wrapping
+     across lines shows open edges at the wrap point (matches Claude
+     Desktop: the right edge of line 1 and the left edge of line 2 stay
+     open, signalling "this is one continuous token"). Vertical separation
+     between lines is handled by the parent's line-height below. */
+}
+/* Paragraphs and list items that contain inline-code chips bump line-height
+   so the chips have breathing room without needing each line to render a
+   fully-closed padding box. Codex CGaLL: drop the `>` child combinator —
+   `:has(> .v10-md-code)` only matched when the paragraph was a single
+   `<code>` node, so the common `text <code> text` case missed the rule. */
+.v10-md-p:has(.v10-md-code),
+.v10-md-li:has(.v10-md-code) {
+  line-height: 1.85;
+}
+.v10-md-pre {
+  /* Code-block container outline bumped to `--border-prominent` for
+     the same reason as `.v10-md-hr` / `.v10-md-blockquote` /
+     `.v10-md-table-scroll` — the `--bg-elevated` fill is barely a
+     lift over `--bg-panel` (~1.05-1.11:1) once the assistant bubble
+     was removed in PR4, so the border is now the only visual cue
+     defining the code block. `--border-subtle` fails 3:1 against
+     panel; `--border-prominent` clears it in both themes. UI-lead
+     Task #65. */
+  position: relative;
+  margin: 8px 0;
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-prominent);
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.v10-md-pre-lang {
+  position: absolute;
+  top: 6px;
+  left: 10px;
+  padding: 2px 6px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border-radius: 4px;
+  pointer-events: none;
+}
+.v10-md-pre-rendered,
+.v10-md-pre-fallback {
+  margin: 0;
+  padding: 28px 12px 10px;
+  overflow-x: auto;
+}
+.v10-md-pre-rendered pre,
+.v10-md-pre-fallback {
+  margin: 0;
+  background: transparent !important;
+}
+.v10-md-pre-rendered code,
+.v10-md-pre-fallback code {
+  font-family: inherit;
+  font-size: inherit;
+  background: transparent;
+  padding: 0;
+}
+.v10-md-copy {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-active) 75%, transparent);
+  color: var(--text-secondary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease-out, background 0.15s, color 0.15s;
+}
+.v10-md-pre:hover .v10-md-copy,
+.v10-md-copy:focus-visible {
+  opacity: 1;
+}
+.v10-md-copy:hover {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+@media (hover: none) {
+  .v10-md-copy { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .v10-md-copy { opacity: 1; transition: none; }
+}
+.v10-md-copy-announce {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Visually-hidden utility for screen-reader-only text (notifications pane
+   in-flight announcements, glyph equivalents). Same proven pattern as
+   `.v10-md-copy-announce` above. */
+.v10-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.v10-chat-cursor {
+  display: inline-block;
+  width: 5px;
+  height: 14px;
+  background: var(--text-secondary);
+  margin-left: 2px;
+  animation: pulse 1s ease-in-out infinite;
+  vertical-align: text-bottom;
+}
+
+/* Pre-first-token "thinking" indicator (ChatGPT-style sheen sweep).
+   `color: var(--text-secondary)` is declared first as the graceful
+   fallback — if `background-clip: text` is unsupported the word still
+   shows at the AA-clearing secondary tone (5.58:1 dark / 7.17:1
+   light). The animated highlight only sweeps brighter (toward
+   --text-primary), so contrast never drops below the base. */
+.v10-chat-thinking {
+  display: inline-block;
+  font-size: 13px;
+  color: var(--text-secondary);
+  background: linear-gradient(
+    90deg,
+    var(--text-secondary) 0%,
+    var(--text-secondary) 35%,
+    var(--text-primary) 50%,
+    var(--text-secondary) 65%,
+    var(--text-secondary) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: v10-thinking-sheen 1.6s ease-in-out infinite;
+}
+@keyframes v10-thinking-sheen {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Static, fully legible — no sweep. */
+  .v10-chat-thinking {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: var(--text-secondary);
+  }
+}

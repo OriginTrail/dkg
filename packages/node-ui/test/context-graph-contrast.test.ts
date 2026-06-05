@@ -1,10 +1,24 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const css = readFileSync(resolve(here, '../src/ui/styles.css'), 'utf8');
+
+function readStylesSources(): string {
+  const uiDir = resolve(here, '../src/ui');
+  const stylesDir = resolve(uiDir, 'styles');
+  const chunks = readdirSync(stylesDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.css'))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((entry) => readFileSync(resolve(stylesDir, entry.name), 'utf8'));
+  return [
+    readFileSync(resolve(uiDir, 'styles.css'), 'utf8'),
+    ...chunks,
+  ].join('\n');
+}
+
+const css = readStylesSources();
 
 function ruleFor(selector: string): string {
   const match = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{`).exec(css);

@@ -1,12 +1,35 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { readDaemonSources } from './helpers/read-cli-daemon';
 
 const UI_DIR = resolve(__dirname, '..', 'src', 'ui');
 
 function readFile(rel: string): string {
+  if (rel === 'styles.css') return readStylesSources();
+  return readRawFile(rel);
+}
+
+function readRawFile(rel: string): string {
   return readFileSync(resolve(UI_DIR, rel), 'utf-8');
+}
+
+function readTree(rel: string): string {
+  const dir = resolve(UI_DIR, rel);
+  return readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((entry) => {
+      const child = `${rel}/${entry.name}`;
+      return entry.isDirectory() ? readTree(child) : readRawFile(child);
+    })
+    .join('\n');
+}
+
+function readStylesSources(): string {
+  return [
+    readRawFile('styles.css'),
+    readTree('styles'),
+  ].join('\n');
 }
 
 describe('backward-compatible route redirects', () => {

@@ -1,0 +1,480 @@
+/* ══════════════════════════════════════════
+   RESPONSIVE: Graph containers
+   ══════════════════════════════════════════ */
+@media (max-height: 700px) {
+  .v10-mlv-graph-container { height: 350px; min-height: 300px; }
+  .v10-pv-overview-graph-canvas { height: 200px; }
+}
+@media (max-width: 700px) {
+  .v10-mlv-node-panel { width: 200px; max-height: 200px; }
+  .v10-pv-overview-graph-legend { flex-direction: column; gap: 4px; }
+}
+
+/* ══════════════════════════════════════════
+   MEMORY EXPLORER (entity-centric project view)
+   ══════════════════════════════════════════ */
+
+.v10-memory-explorer {
+  display: flex; flex-direction: column; height: 100%; min-height: 0;
+  max-width: none; margin: -24px -28px; overflow: hidden;
+}
+.v10-memory-explorer-page {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.v10-memory-explorer-page[data-view="overview"],
+.v10-memory-explorer-page[data-view="query"],
+.v10-memory-explorer-page[data-view="entity"],
+.v10-memory-explorer-page[data-view="subgraph"] {
+  overflow: auto;
+}
+.v10-memory-explorer-page > .v10-layer-detail,
+.v10-memory-explorer-page > .v10-ka-detail,
+.v10-memory-explorer-page > .v10-sgov,
+.v10-memory-explorer-page > .v10-memory-layer-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+}
+.v10-memory-explorer-page > .v10-sgov-state {
+  flex: 1 1 auto;
+  min-height: 220px;
+  margin: 0 12px 12px;
+}
+.v10-memory-explorer-page[data-view="entity"] > .v10-ka-detail,
+.v10-memory-explorer-page[data-view="subgraph"] > .v10-layer-detail {
+  min-height: 420px;
+}
+
+/* ── Trust Summary ── */
+.v10-trust-summary { padding: 8px 16px; border-bottom: 1px solid var(--border-subtle); flex-shrink: 0; }
+.v10-trust-summary-bar { display: flex; height: 4px; border-radius: 2px; overflow: hidden; background: var(--bg-elevated); margin-bottom: 6px; }
+.v10-trust-bar-seg { min-width: 4px; transition: width 0.3s ease; }
+.v10-trust-bar-seg.trust-working { background: #64748b; }
+.v10-trust-bar-seg.trust-shared { background: #f59e0b; }
+.v10-trust-bar-seg.trust-verified { background: #22c55e; }
+.v10-trust-summary-labels { display: flex; gap: 14px; font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); }
+.v10-trust-summary-item { display: flex; align-items: center; gap: 4px; }
+.v10-trust-summary-item .v10-trust-summary-dot { width: 6px; height: 6px; border-radius: 50%; }
+.v10-trust-summary-item.trust-working .v10-trust-summary-dot { background: #64748b; }
+.v10-trust-summary-item.trust-shared .v10-trust-summary-dot { background: #f59e0b; }
+.v10-trust-summary-item.trust-verified .v10-trust-summary-dot { background: #22c55e; }
+
+/* ── Trust Badges ── */
+.v10-trust-badge { display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; border-radius: 4px; font-size: 9px; font-weight: 600; letter-spacing: 0.3px; white-space: nowrap; }
+.v10-trust-badge-icon { font-size: 10px; }
+.v10-trust-badge.trust-verified { background: rgba(34, 197, 94, 0.12); color: var(--text-success); }
+.v10-trust-badge.trust-shared { background: rgba(245, 158, 11, 0.12); color: var(--text-warning); }
+.v10-trust-badge.trust-working { background: rgba(100, 116, 139, 0.12); color: var(--text-tertiary); }
+.v10-trust-ring { font-size: 14px; line-height: 1; }
+.v10-trust-ring.trust-verified { color: #22c55e; }
+.v10-trust-ring.trust-shared { color: #f59e0b; }
+.v10-trust-ring.trust-working { color: #64748b; }
+
+/* ── Loading / Error / Empty ── */
+.v10-me-loading { display: flex; align-items: center; justify-content: center; flex: 1; }
+.v10-me-loading-text { font-size: 12px; color: var(--text-tertiary); }
+
+/* ── Sub-graph Bar ── */
+/* PR #793 round 2 (ui-locked option a) — capsule chrome dropped.
+   The bar previously had a tinted background + 10px border-radius
+   that made it read as a separate widget hovering above the
+   content; on the Subgraph Explorer page where the strip sits
+   inside the page chrome, that pill-island look broke the
+   continuous strip semantics. Reduced to a single-edge bottom
+   border so the row terminates cleanly without claiming
+   container chrome.
+
+   This also kills the stale `--surface-1` and `--border-subtle`
+   rgba fallbacks that were S2 sweep regressions (undefined token
+   + dead rgba), closing the loop while in here. */
+.v10-subgraph-bar {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  background: transparent;                          /* was: var(--surface-1, rgba(255,255,255,0.02)) */
+  border: 0;                                        /* was: 1px solid var(--border-subtle, ...) */
+  border-bottom: 1px solid var(--border-subtle);    /* single-edge termination */
+  border-radius: 0;                                 /* was: 10px */
+}
+.v10-subgraph-bar-label {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-tertiary, #94a3b8);
+  padding-right: 4px;
+}
+/* PR #793 round 2 — the `.v10-subgraph-bar-hint` rule (sweep 3
+   Bug K's locked literal `+ Root, subgraphs`) was removed
+   alongside the corresponding render in SubGraphBar.tsx. Users
+   asked what the literal meant on manual test; the inline hint
+   was demoted entirely. The long-form tooltip on the All chip's
+   count badge still carries the cross-membership disclosure. */
+.v10-subgraph-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  background: var(--surface-2, rgba(255,255,255,0.04));
+  color: var(--text-secondary, #cbd5e1);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: transform 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+.v10-subgraph-chip:hover {
+  background: var(--surface-3, rgba(255,255,255,0.07));
+  transform: translateY(-1px);
+}
+.v10-subgraph-chip.active {
+  border-color: var(--sg-color, #a855f7);
+  background: color-mix(in srgb, var(--sg-color, #a855f7) 18%, transparent);
+  color: var(--text-primary, #f8fafc);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--sg-color, #a855f7) 40%, transparent) inset;
+}
+.v10-subgraph-chip-icon { font-size: 13px; line-height: 1; }
+.v10-subgraph-chip-label { font-weight: 600; }
+.v10-subgraph-chip-count {
+  font-size: 11px;
+  opacity: 0.75;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+}
+
+/* ── Verified Memory Hero Banner ── */
+.v10-vm-hero {
+  --v10-vm-accent: #86efac;
+  --v10-vm-accent-strong: var(--layer-verified);
+  --v10-vm-border: color-mix(in srgb, var(--v10-vm-accent-strong) 28%, var(--border-default));
+  --v10-vm-surface: color-mix(in srgb, var(--v10-vm-accent-strong) 8%, var(--bg-surface));
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  margin-bottom: 10px;
+  /* Banner sits above the scrollable EntityList inside a fixed-height
+     (70vh) flex-column. Without flex-shrink:0 it competes with the list
+     for vertical space and squeezes the list below the visible region,
+     which makes scrolling the list impossible. */
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--v10-vm-accent-strong) 5%, var(--bg-panel));
+  border: 1px solid var(--v10-vm-border);
+  border-radius: 10px;
+  box-shadow: none;
+}
+.v10-vm-hero-title {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.v10-vm-hero-heading {
+  display: flex;
+  flex: 1 1 220px;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+.v10-vm-hero-badge {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(34,197,94,0.16);
+  color: var(--v10-vm-accent);
+  border: 1px solid var(--v10-vm-border);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.v10-vm-hero-headline {
+  font-size: 14px;
+  line-height: 1.35;
+  color: var(--text-primary, #f8fafc);
+  font-weight: 650;
+}
+.v10-vm-hero-context {
+  max-width: 100%;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-tertiary, #94a3b8);
+  overflow-wrap: anywhere;
+}
+.v10-vm-hero-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+.v10-vm-hero-stat {
+  padding: 12px 14px;
+  background: var(--v10-vm-surface);
+  border: 1px solid var(--v10-vm-border);
+  border-radius: 8px;
+}
+.v10-vm-hero-stat-val {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text-primary, #f8fafc);
+  font-family: var(--font-mono, ui-monospace);
+  line-height: 1.1;
+}
+.v10-vm-hero-stat-lbl {
+  font-size: 11px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-tertiary, #94a3b8);
+  margin-top: 6px;
+}
+.v10-vm-hero-stats .v10-stat-strip-cell {
+  background: var(--v10-vm-surface);
+  border-color: var(--v10-vm-border);
+}
+.v10-vm-hero-stats .v10-stat-strip-value {
+  font-size: 24px;
+}
+.v10-vm-hero-stats .v10-stat-strip-label {
+  font-size: 11px;
+  letter-spacing: 0.07em;
+}
+.v10-vm-hero-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.v10-vm-hero-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary, #cbd5e1);
+  background: var(--v10-vm-surface);
+  border: 1px solid var(--v10-vm-border);
+  border-radius: 999px;
+}
+.v10-vm-hero-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  box-shadow: 0 0 6px currentColor;
+}
+body.light .v10-vm-hero {
+  --v10-vm-accent: #166534;
+  --v10-vm-accent-strong: #16a34a;
+}
+.v10-layer-expand-body.entities-tab > .v10-vm-hero {
+  margin: 16px 16px 10px;
+}
+.v10-vm-hero-empty {
+  gap: 16px;
+}
+.v10-empty-state.v10-vm-empty-state {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 16px;
+  background: var(--v10-vm-surface);
+  border: 1px solid var(--v10-vm-border);
+  border-radius: 8px;
+}
+.v10-vm-empty-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  color: var(--v10-vm-accent);
+  background: rgba(34,197,94,0.14);
+  border: 1px solid var(--v10-vm-border);
+  font-size: 15px;
+  line-height: 1;
+}
+.v10-vm-empty-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+.v10-vm-empty-title {
+  font-size: 14px;
+  line-height: 1.35;
+  font-weight: 650;
+  color: var(--text-primary, #f8fafc);
+}
+.v10-vm-empty-text {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary, #cbd5e1);
+}
+
+/* ── VM graph legend (floating overlay) ──
+   Pinned to the top-right of the Verified Memory graph, this panel is the
+   in-graph key for the two synthetic node glyphs (anchor ◉, agent identity
+   ◈) we inject to make provenance legible. It's also a lightweight ledger:
+   it reports the total anchor count, distinct signers, and latest publish
+   time without needing a detail pane. Kept small and lightly translucent so
+   it never fights the graph behind it. */
+.v10-vm-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  width: 100%;
+  background: rgba(34,197,94,0.05);
+  border: 1px solid rgba(34,197,94,0.3);
+  border-radius: 8px;
+  font-size: 11px;
+  color: var(--text-secondary, #cbd5e1);
+}
+.v10-vm-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 1.3;
+}
+.v10-vm-legend-head {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #4ade80;
+  justify-content: space-between;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(34,197,94,0.18);
+}
+.v10-vm-legend-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary, #f1f5f9);
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(34,197,94,0.12);
+  border: 1px solid rgba(34,197,94,0.3);
+  letter-spacing: 0;
+  text-transform: none;
+  font-size: 10px;
+}
+.v10-vm-legend-swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  color: #0b1020;
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+  box-shadow: 0 0 10px -2px currentColor;
+}
+.v10-vm-legend-label {
+  color: var(--text-primary, #f1f5f9);
+  font-size: 11px;
+}
+.v10-vm-legend-foot {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(255,255,255,0.06);
+  font-size: 10px;
+  color: var(--text-tertiary, #94a3b8);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── SWM attribution legend (floating overlay) ──
+   Visual analogue of .v10-vm-legend but for the Shared Working Memory
+   layer. Lists each promoting agent + colour slot + how many entities
+   they've proposed, plus a conflict pill when multiple agents touch the
+   same entity. Amber accent instead of VM's green to reinforce the
+   layer-palette convention (SWM = amber across the UI). */
+.v10-swm-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  width: 100%;
+  background: rgba(245,158,11,0.05);
+  border: 1px solid rgba(245,158,11,0.3);
+  border-radius: 8px;
+  font-size: 11px;
+  color: var(--text-secondary, #cbd5e1);
+}
+.v10-swm-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 1.3;
+}
+.v10-swm-legend-head {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #fbbf24;
+  justify-content: space-between;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(245,158,11,0.18);
+}
+.v10-swm-legend-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary, #f1f5f9);
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(245,158,11,0.12);
+  border: 1px solid rgba(245,158,11,0.3);
+  letter-spacing: 0;
+  text-transform: none;
+  font-size: 10px;
+}
+.v10-swm-legend-swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  color: #0b1020;
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+  box-shadow: 0 0 8px -2px currentColor;
+}
+.v10-swm-legend-label {
+  color: var(--text-primary, #f1f5f9);
+  font-size: 11px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.v10-swm-legend-metric {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary, #94a3b8);
+  font-size: 10px;
+}
+.v10-swm-legend-conflict {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(245,158,11,0.22);
+  color: #fbbf24;
+}
+.v10-swm-legend-conflict .v10-swm-legend-label { color: #fbbf24; }
