@@ -169,6 +169,98 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
     expect(dataResult.bindings.length).toBe(1);
   }, 20_000);
 
+  it('promote auto-finalizes: publishFromFinalizedAssertion works after a bare promote (no explicit finalize)', async () => {
+    // Regression for the UI/HTTP flow: "Promote All → Shared" then "Publish to
+    // Verifiable Memory" promotes WM→SWM with NO explicit finalize, and the
+    // publish runs publishFromFinalizedAssertion, which requires a seal.
+    // Because promote empties WM, you cannot finalize afterwards — so promote
+    // now seals BEFORE moving WM→SWM. Pre-fix this threw
+    // "publishFromFinalizedAssertion: assertion <...> is not finalized".
+    const agent = await createAgent('AutoFinalizeBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'AutoFinalize E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    await agent.assertion.create(CG_ID, 'auto-final');
+    await agent.assertion.write(CG_ID, 'auto-final', [
+      { subject: `${ENTITY_BASE}:auto`, predicate: 'http://schema.org/name', object: '"Auto Finalized"' },
+    ]);
+
+    // Promote WITHOUT an explicit finalize() — the exact gap that broke the UI.
+    const promoteResult = await agent.assertion.promote(CG_ID, 'auto-final');
+    expect(promoteResult.promotedCount).toBeGreaterThan(0);
+
+    // publishFromFinalizedAssertion hard-requires the seal; it must now find
+    // the one promote stamped, instead of throwing "is not finalized".
+    const pub = await agent.publishFromFinalizedAssertion(CG_ID, 'auto-final');
+    expect(pub.status).toBe('confirmed');
+    expect(pub.ual).toBeDefined();
+    expect(pub.seal).toBeDefined();
+  }, 20_000);
+
+  it('selective promote does NOT auto-finalize (avoids the seal-all vs promote-subset merkleRoot mismatch)', async () => {
+    // Regression for the #1004 review: auto-finalize seals the WHOLE assertion
+    // (all root entities), but a SELECTIVE promote (opts.entities subset) ships
+    // only the chosen roots to SWM. If promote auto-sealed ALL roots here,
+    // publishFromFinalizedAssertion would reload SWM scoped to the sealed (full)
+    // root set, recompute a different merkleRoot, and fail the seal guard. So a
+    // selective promote must NOT auto-finalize — the assertion stays unsealed
+    // until an explicit, matching-scope finalize.
+    const agent = await createAgent('SelectivePromoteBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Selective Promote E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    await agent.assertion.create(CG_ID, 'selective');
+    await agent.assertion.write(CG_ID, 'selective', [
+      { subject: `${ENTITY_BASE}:a`, predicate: 'http://schema.org/name', object: '"Entity A"' },
+      { subject: `${ENTITY_BASE}:b`, predicate: 'http://schema.org/name', object: '"Entity B"' },
+    ]);
+
+    // Promote ONLY entity A — a subset of the assertion's roots.
+    const promoteResult = await agent.assertion.promote(CG_ID, 'selective', {
+      entities: [`${ENTITY_BASE}:a`],
+    });
+    expect(promoteResult.promotedCount).toBeGreaterThan(0);
+
+    // The selective promote must have left the assertion UNSEALED, so publish
+    // surfaces the explicit-finalize requirement — NOT a (pre-fix) seal-all-vs-
+    // promote-subset merkleRoot mismatch.
+    await expect(
+      agent.publishFromFinalizedAssertion(CG_ID, 'selective'),
+    ).rejects.toThrow(/not finalized/i);
+  }, 20_000);
+
+  it('promote fails fast when the draft was edited after finalize (stale seal, not a silent publish mismatch)', async () => {
+    // Regression for the #1004 review: the old auto-finalize only checked whether
+    // a seal EXISTED, not whether it matched the current WM. A finalize → edit →
+    // promote sequence skipped re-finalize, promoted the new content under the
+    // STALE seal, and failed only later at publish with a confusing merkleRoot
+    // mismatch. promote now ALWAYS calls assertionFinalize, which detects the
+    // post-finalize mutation and throws — so promote fails fast, BEFORE emptying
+    // WM, with an actionable "already finalized with a different merkleRoot" error.
+    const agent = await createAgent('StaleSealBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Stale Seal E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    await agent.assertion.create(CG_ID, 'stale');
+    await agent.assertion.write(CG_ID, 'stale', [
+      { subject: `${ENTITY_BASE}:s1`, predicate: 'http://schema.org/name', object: '"First"' },
+    ]);
+    await agent.assertion.finalize(CG_ID, 'stale');
+
+    // Edit the draft AFTER finalize — the seal is now stale.
+    await agent.assertion.write(CG_ID, 'stale', [
+      { subject: `${ENTITY_BASE}:s2`, predicate: 'http://schema.org/name', object: '"Added after finalize"' },
+    ]);
+
+    // promote must fail fast (assertionFinalize detects the mutation), NOT
+    // silently promote the stale-sealed content.
+    await expect(agent.assertion.promote(CG_ID, 'stale')).rejects.toThrow(/different merkleRoot/i);
+
+    // WM is intact — the failed promote did not empty it.
+    const wm = await agent.assertion.query(CG_ID, 'stale');
+    expect(wm.length).toBeGreaterThan(0);
+  }, 20_000);
+
   it('WM is empty after promote; SWM clear after publishFromSWM with flag', async () => {
     const agent = await createAgent('CleanupBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Cleanup E2E' });

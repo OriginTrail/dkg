@@ -98,7 +98,7 @@ export interface StorageACKHandlerConfig {
    * publisher's `isEncryptedPayload=true` claim against the CG's real
    * access policy before signing — without this, a malicious publisher
    * could set the encrypted bit on a PUBLIC CG and have the core sign an
-   * ACK over whatever `merkleRoot`/`kaCount`/`merkleLeafCount` it claimed
+   * ACK over whatever `merkleRoot`/`merkleLeafCount` it claimed
    * (cores skip plaintext verification on the encrypted path because they
    * can't decrypt). Return `true` only when the CG is curated (private /
    * invite-only / allowlisted). Return `false` for public CGs and `null`
@@ -488,16 +488,15 @@ export class StorageACKHandler {
         );
       }
 
-      // Cores can't enumerate KAs from ciphertext — use the publisher's
-      // claimed counts for the V10 digest. Same shape as the LU-5
-      // single-blob path below; deliberately repeated rather than
-      // factored out so the V2 verify slot stays self-contained and
-      // easy to audit against the spec.
-      if (!intent.kaCount || intent.kaCount <= 0) {
+      // OT-RFC-43 / V10: every publish mints exactly ONE Knowledge Asset.
+      // Cores can't enumerate member entities from ciphertext, but they can
+      // still reject the old batch-KA shape before signing an ACK the chain
+      // would reject with InvalidKnowledgeAssetsAmount.
+      if (intent.kaCount !== 1) {
         return this.encodeDecline(
           cgId,
           STORAGE_ACK_DECLINE_CODES.MERKLE_MISMATCH_IN_SWM,
-          `V2 chunked PublishIntent.kaCount must be positive; got ${intent.kaCount}`,
+          `V2 chunked PublishIntent.kaCount must be exactly 1 for V10 publishes; got ${intent.kaCount}`,
         );
       }
       const claimedLeafCount = intent.merkleLeafCount == null ? 0 : Number(intent.merkleLeafCount);
@@ -689,12 +688,12 @@ export class StorageACKHandler {
         }, safetyNetMs);
       }
 
-      // Cores can't enumerate KAs from ciphertext — use the publisher's
-      // claimed counts for the V10 digest. Validate they're positive so
-      // an obviously malformed intent (kaCount=0) doesn't waste a sign.
-      if (!intent.kaCount || intent.kaCount <= 0) {
+      // OT-RFC-43 / V10: every publish mints exactly ONE Knowledge Asset.
+      // Cores can't enumerate member entities from opaque ciphertext, but
+      // they can still reject the old batch-KA shape before signing.
+      if (intent.kaCount !== 1) {
         throw new Error(
-          `encrypted PublishIntent.kaCount must be positive; got ${intent.kaCount}`,
+          `encrypted PublishIntent.kaCount must be exactly 1 for V10 publishes; got ${intent.kaCount}`,
         );
       }
       const claimedLeafCount = intent.merkleLeafCount == null ? 0 : Number(intent.merkleLeafCount);
@@ -946,7 +945,7 @@ export class StorageACKHandler {
     const verifiedLeafCount = computeFlatKCMerkleLeafCountV10(swmQuads, []);
     if (verifiedLeafCount === 0) {
       throw new Error(
-        'StorageACK: empty knowledge collection (zero V10 Merkle leaves after sort+dedupe) — refusing ACK',
+        'StorageACK: empty Knowledge Asset payload (zero V10 Merkle leaves after sort+dedupe) — refusing ACK',
       );
     }
     const claimedLeafCount = intent.merkleLeafCount == null ? 0 : Number(intent.merkleLeafCount);
@@ -1043,8 +1042,8 @@ export class StorageACKHandler {
    *
    * `kaId` + `preUpdateMerkleRootCount` are taken from the request and
    * trusted (the publisher binds them; the on-chain update tx reverts if
-   * they're wrong — same trust model as `kaCount` on the encrypted
-   * publish path).
+   * they're wrong). Publish `kaCount` is not analogous anymore: V10 create
+   * ACKs require exactly one KA before signing.
    *
    * Mirrors the publish `handler` above; only the digest, the request
    * fields, and the protocol id differ.

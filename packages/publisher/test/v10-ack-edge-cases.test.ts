@@ -723,7 +723,8 @@ describe('StorageACKHandler inline verification', () => {
       publisherPeerId: 'pub-0',
       publicByteSize: 300,
       isPrivate: false,
-      kaCount: rootEntities.length,
+      // V10 publishes one KA even when the selection has many member entities.
+      kaCount: 1,
       merkleLeafCount: testMerkleLeafCount,
       rootEntities,
     });

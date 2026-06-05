@@ -30,7 +30,7 @@ import {
   isTrustLevelQuad,
   buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, type AuthorAttestationTypedData,
   buildAssertionSealQuads, buildAssertionPublishReceiptQuads,
-  parseAssertionSealQuads, type AssertionSeal,
+  type AssertionSeal,
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
   WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE,
   computeWorkspaceAgentEncryptionKeyProofPayload,
@@ -1706,7 +1706,60 @@ export class DKGAgent extends DKGAgentBase {
       ): Promise<{ seeded: number; fromLayer: 'swm' | 'vm'; entities: number }> {
         return agent.publisher.assertionPullFrom(contextGraphId, name, agentAddress, sourceLayer, opts);
       },
-      async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string }): Promise<{ promotedCount: number }> {
+      async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string; authorAgentAddress?: string; preSignedAuthorAttestation?: PreSignedAuthorAttestation }): Promise<{ promotedCount: number }> {
+        // Seal-before-share: the on-chain publish path
+        // (`publishFromFinalizedAssertion`) requires a FINALIZED assertion, and
+        // the seal must be computed over the Working-Memory content BEFORE
+        // promote moves it to SWM and empties WM (you cannot finalize afterwards
+        // — no quads left to hash). The canonical create→finalize→promote→publish
+        // flow already finalizes; this makes the UI/HTTP promote→publish flow —
+        // which has no explicit finalize step — work too.
+        //
+        // ALWAYS call `assertionFinalize`, never a "does a seal already exist?"
+        // short-circuit. assertionFinalize is itself idempotent: it returns the
+        // EXISTING seal untouched when its merkleRoot still matches the current
+        // WM (so an explicit finalize's author signature is preserved, never
+        // clobbered with the daemon signer), and it THROWS if the assertion was
+        // edited after finalize (stale seal) or the seal is corrupt. The old
+        // existence-only skip bypassed that check and would promote stale content
+        // that fails later at publish with a confusing merkleRoot mismatch.
+        // Thread the caller's author through (mirroring the explicit finalize
+        // route) so the seal attests the intended author rather than silently
+        // falling back to the daemon signer.
+        //
+        // Only auto-finalize a FULL promote: the seal covers ALL roots, but a
+        // selective promote (`opts.entities` subset) ships only some — sealing
+        // all then promoting a subset makes `publishFromFinalizedAssertion`
+        // recompute a different merkleRoot. A selective promote must be finalized
+        // explicitly with a matching scope.
+        const promotingAllEntities = !opts?.entities || opts.entities === 'all';
+        if (promotingAllEntities) {
+          try {
+            await agent.assertionFinalize(contextGraphId, name, agentAddress, {
+              subGraphName: opts?.subGraphName,
+              authorAgentAddress: opts?.authorAgentAddress,
+              preSignedAuthorAttestation: opts?.preSignedAuthorAttestation,
+            });
+          } catch (err: any) {
+            const msg = err?.message ?? String(err);
+            // Seal-integrity failures — the assertion was edited after finalize
+            // (stale seal) or the seal is corrupt — MUST fail fast: promoting
+            // unsealed would empty WM and leave only a later, confusing publish
+            // error. Re-throw so the caller re-finalizes (or discards) first.
+            if (/already finalized with a different merkleRoot|seal for .* is corrupt/i.test(msg)) {
+              throw err;
+            }
+            // Deliberate no-regression fallback for CAPABILITY gaps only — the
+            // node can't sign for this author (no local key / non-V10 adapter /
+            // unregistered CG): warn and promote UNSEALED exactly as before; the
+            // later publish surfaces the explicit-finalize requirement.
+            agent.log.warn(
+              createOperationContext('share'),
+              `Auto-finalize before promote skipped for "${name}": ${msg}. ` +
+                `Promoting unsealed; publishing to Verifiable Memory will require an explicit finalize first.`,
+            );
+          }
+        }
         // Resolve the gossip signer up-front (mirrors `share()` /
         // `conditionalShare()` patterns) so the publisher can wrap the
         // promoted SWM gossip in the Sender Key encrypted envelope.

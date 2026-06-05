@@ -134,7 +134,7 @@ describe('StorageACKHandler', () => {
       publisherPeerId: 'publisher-0',
       publicByteSize: 300,
       isPrivate: false,
-      kaCount: 2,
+      kaCount: 1,
       rootEntities: ['urn:entity:1', 'urn:entity:2'],
       epochs: 1,
       tokenAmountStr: '1000',
@@ -162,7 +162,7 @@ describe('StorageACKHandler', () => {
       publisherPeerId: 'publisher-0',
       publicByteSize: 300,
       isPrivate: false,
-      kaCount: 2,
+      kaCount: 1,
       rootEntities: ['urn:entity:1', 'urn:entity:2'],
       epochs: 1,
       tokenAmountStr: '1000',
@@ -230,7 +230,9 @@ describe('StorageACKHandler', () => {
     // The publisher's claimed plaintext merkle root. The handler MUST NOT
     // recompute against the ciphertext — it just signs what was claimed.
     const claimedRoot = ethers.getBytes(ethers.keccak256(new TextEncoder().encode('test-plaintext-root')));
-    const claimedKaCount = 3;
+    // OT-RFC-43 / V10: one opaque ciphertext payload still mints exactly ONE
+    // Knowledge Asset. Member/entity counts are not encoded as kaCount.
+    const claimedKaCount = 1;
     const claimedLeafCount = 9;
     const claimedEpochs = 2;
     const claimedTokenAmountStr = '5000';
@@ -318,7 +320,7 @@ describe('StorageACKHandler', () => {
       );
     });
 
-    it('throws when kaCount or merkleLeafCount is missing/zero (publisher must supply both)', async () => {
+    it('throws when kaCount is not exactly one or merkleLeafCount is missing/zero', async () => {
       const handler = await createHandler([]);
       const noKaCountIntent = encodePublishIntent({
         merkleRoot: claimedRoot,
@@ -333,7 +335,23 @@ describe('StorageACKHandler', () => {
         isEncryptedPayload: true,
       });
       await expect(handler.handler(noKaCountIntent, fakePeerId)).rejects.toThrow(
-        /encrypted PublishIntent.kaCount must be positive/,
+        /encrypted PublishIntent\.kaCount must be exactly 1/,
+      );
+
+      const legacyBatchKaCountIntent = encodePublishIntent({
+        merkleRoot: claimedRoot,
+        contextGraphId,
+        publisherPeerId: 'curator-edge',
+        publicByteSize: ciphertextBytes.length,
+        isPrivate: true,
+        kaCount: 3,
+        rootEntities: [],
+        stagingQuads: ciphertextBytes,
+        merkleLeafCount: claimedLeafCount,
+        isEncryptedPayload: true,
+      });
+      await expect(handler.handler(legacyBatchKaCountIntent, fakePeerId)).rejects.toThrow(
+        /encrypted PublishIntent\.kaCount must be exactly 1/,
       );
 
       const noLeafCountIntent = encodePublishIntent({
