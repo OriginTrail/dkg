@@ -4306,7 +4306,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     }
   });
 
-  it('reconciles local-node membership for rows left DORMANT by the rehydration cap (#997)', async () => {
+  it('does NOT touch the membership store for rows left DORMANT by the cap — keeps per-row DB writes off the boot hot path (#997)', async () => {
     const cap = 2;
     const rows = Array.from({ length: 5 }, (_, i) => ({
       id: `mem-cg-${i}`, name: `Mem ${i}`, subscribed: true, synced: false,
@@ -4332,15 +4332,14 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     });
     try {
       await agent.start();
-      // The 3 rows past the cap (mem-cg-2..4) are left DORMANT → their local-node
-      // membership is reconciled away (deleteContextGraphMember called), so the
-      // node no longer looks like a member of graphs it left dormant (ACL). The
-      // activated rows (mem-cg-0, mem-cg-1) are NOT reconciled.
-      const dormantDeleted = memberDeletes
-        .filter((d) => d.type === 'node' && ['mem-cg-2', 'mem-cg-3', 'mem-cg-4'].includes(d.cgId))
-        .map((d) => d.cgId);
-      expect(new Set(dormantDeleted)).toEqual(new Set(['mem-cg-2', 'mem-cg-3', 'mem-cg-4']));
-      expect(memberDeletes.filter((d) => ['mem-cg-0', 'mem-cg-1'].includes(d.cgId))).toHaveLength(0);
+      // The rows past the cap (mem-cg-2..4) are left DORMANT, but a dormant row is
+      // still a LEGITIMATE subscription (it re-activates on access), so we do NOT
+      // reconcile its membership here — and crucially we keep per-row membership
+      // DB writes OFF the boot hot path (the membership store shares SQLite with
+      // the subscription cache, so a large dormant backlog would otherwise
+      // re-create the #997 boot contention the cap exists to prevent). The clear
+      // endpoint reconciles membership instead. So: NO membership deletes at boot.
+      expect(memberDeletes).toHaveLength(0);
     } finally {
       await agent.stop().catch(() => {});
     }

@@ -3472,7 +3472,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         (a, b) => (b.subscribed ? 1 : 0) - (a.subscribed ? 1 : 0),
       );
       const cappedUserRows = cap > 0 ? userRows.slice(0, cap) : userRows;
-      const dormantUserRows = cap > 0 ? userRows.slice(cap) : [];
       const toActivate = [...hostedRows, ...cappedUserRows];
       for (let i = 0; i < toActivate.length; i++) {
         const row = toActivate[i];
@@ -3500,16 +3499,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           await new Promise<void>((resolve) => setTimeout(resolve, 0));
         }
       }
-      // Reconcile local-node membership for rows left DORMANT by the cap: the
-      // node is NOT live-subscribed to them this boot, so a prior 'active'
-      // membership row must not linger — that cache feeds
-      // `/api/context-graph/:id/members`, `localNodeInvolvedInContextGraph`, and
-      // chat ACL checks, so a stale active membership would make the node look
-      // like a member of graphs it left dormant. The membership re-registers via
-      // `persistLocalNodeMembership` if the row re-activates on access.
-      for (const row of dormantUserRows) {
-        this.deleteContextGraphMember(row.id, 'node', this.peerId);
-      }
+      // NOTE: we deliberately do NOT reconcile membership for the rows left
+      // DORMANT by the cap. A dormant row is still a LEGITIMATE subscription
+      // (subscribed:true, just not activated this boot — it re-activates on
+      // access), so its prior 'active' membership is not actually stale. Doing a
+      // per-row contextGraphMembershipStore.delete() here would also put one DB
+      // write per dormant row on the BOOT HOT PATH — and that store is backed by
+      // the same SQLite as the subscription cache, so a large stale backlog would
+      // re-create the very #997 boot contention the cap exists to prevent. The
+      // clear endpoint (an explicit operator action, off the hot path) is where
+      // membership is reconciled.
       const skipped = userRows.length - cappedUserRows.length;
       if (rows.length > 0) {
         this.log.info(
@@ -3641,14 +3640,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
     }
 
-    // Reconcile local-node membership for every cleared CG (active + dormant):
-    // `unsubscribeFromContextGraph` doesn't touch the membership store, so a
-    // prior 'active' row would otherwise linger and make the node still look like
-    // a member of a graph whose subscription was just wiped — it feeds
-    // `/api/context-graph/:id/members`, `localNodeInvolvedInContextGraph`, and
-    // chat ACL.
+    // Reconcile EVERY local membership for each cleared CG — the 'node' principal
+    // AND each local agent. `unsubscribeFromContextGraph` doesn't touch the
+    // membership store, and `localNodeInvolvedInContextGraph` treats ANY active
+    // local membership row (node OR agent) as involvement — so clearing only the
+    // node row would leave private/curated CGs looking active via a lingering
+    // local agent membership. The membership cache is local bookkeeping (feeds
+    // `/api/context-graph/:id/members`, involvement, chat ACL); the on-chain
+    // curated membership is separate and untouched.
+    const localAgentAddresses = this.listLocalAgents().map((a) => a.agentAddress);
     for (const id of new Set([...activeUserIds, ...persistedUserIds])) {
       this.deleteContextGraphMember(id, 'node', this.peerId);
+      for (const agentAddress of localAgentAddresses) {
+        this.deleteContextGraphMember(id, 'agent', agentAddress);
+      }
     }
 
     this.log.info(
