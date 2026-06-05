@@ -1,62 +1,119 @@
 name: Bug Report
-description: Report a bug in DKG V9
+description: Report a reproducible bug in DKG V10 (daemon, Node UI, CLI, chain, or workspace packages)
+title: "<area>: <concise summary of the bug>"
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thank you for reporting a bug. Please fill in as much detail as possible.
+        Thanks for reporting a bug. Please fill in as much detail as possible —
+        paste error text **verbatim** and pin the exact version **and commit hash**.
+        Search existing issues first to avoid duplicates.
   - type: textarea
     id: description
     attributes:
-      label: Description
-      description: A clear description of the bug.
-    validations:
-      required: true
-  - type: textarea
-    id: steps
-    attributes:
-      label: Steps to Reproduce
-      description: Step-by-step instructions to reproduce the issue.
-      placeholder: |
-        1. Run `dkg init`
-        2. Run `dkg start`
-        3. ...
+      label: Bug Description
+      description: A clear, self-contained description of what is broken and the user-facing impact. Say what you were doing when it happened.
+      placeholder: One short paragraph describing the bug and its impact.
     validations:
       required: true
   - type: textarea
     id: expected
     attributes:
       label: Expected Behavior
-      description: What did you expect to happen?
+      description: What should happen. Use bullets for distinct expectations or sub-cases.
     validations:
       required: true
   - type: textarea
     id: actual
     attributes:
       label: Actual Behavior
-      description: What actually happened?
+      description: What actually happens. Reference the exact error/messages (paste raw output in "Relevant Logs" below).
     validations:
       required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs / Error Output
+      description: Paste the exact error text or relevant logs (e.g. from `dkg logs`). Do not paraphrase.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal, numbered, deterministic steps so anyone can reproduce it. Include exact commands and any required state/setup.
+      placeholder: |
+        1. Run `dkg start`
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: root-causes
+    attributes:
+      label: Possible Root Causes
+      description: Optional but strongly encouraged. Concrete hypotheses, ideally pointing at specific files / functions / endpoints, so whoever picks it up starts from evidence.
+    validations:
+      required: false
   - type: input
     id: version
     attributes:
-      label: DKG Version
-      description: Output of `dkg status` or the version from package.json.
-      placeholder: "9.0.0-beta.2"
+      label: DKG daemon / version
+      description: Output of `dkg status` (or the version from package.json). Include the commit hash if you have it.
+      placeholder: "10.0.0-rc.16, commit 3aae056b"
+    validations:
+      required: true
+  - type: input
+    id: surface
+    attributes:
+      label: Surface / Component
+      placeholder: "Node UI / CLI / daemon HTTP / chain adapter / package name"
+    validations:
+      required: false
   - type: input
     id: os
     attributes:
       label: Operating System
       placeholder: "macOS 15.2 / Ubuntu 24.04"
+    validations:
+      required: false
   - type: input
     id: node-version
     attributes:
       label: Node.js Version
       placeholder: "22.x"
+    validations:
+      required: false
   - type: textarea
-    id: logs
+    id: environment
     attributes:
-      label: Relevant Logs
-      description: Paste any relevant logs from `dkg logs`.
-      render: text
+      label: Environment — endpoints, config, health checks
+      description: Relevant endpoints/config and the results of any health probes you ran.
+      placeholder: |
+        - http://127.0.0.1:9200/ui
+        - Hermes gateway :8642 — /api/hermes-channel/health OK
+    validations:
+      required: false
+  - type: textarea
+    id: investigation
+    attributes:
+      label: Suggested Investigation
+      description: Optional. A numbered plan a maintainer (or agent) can follow to confirm the root cause and verify a fix.
+    validations:
+      required: false
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes / Related Issues
+      description: Link related issues/PRs (e.g. #123) and clarify scope vs. similar issues. If found during a QA/test pass, note the version/commit it was found on.
+    validations:
+      required: false
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission checklist
+      options:
+        - label: I searched existing issues and this is not a duplicate
+          required: true
