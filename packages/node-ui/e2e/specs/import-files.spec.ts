@@ -85,6 +85,23 @@ test.describe('Import Files Modal', () => {
     expect(await importFilesModal.isOpen()).toBe(false);
   });
 
+  // Regression for #959: the Import modal hand-rolled its overlay and only
+  // got backdrop-click dismissal — Esc did nothing, unlike Create/Join.
+  // Now it uses the shared `useModalDismiss` hook, so Esc closes it too.
+  test('Escape key closes the modal (#959)', async ({ importFilesModal, page }) => {
+    await page.keyboard.press('Escape');
+    await expect(importFilesModal.overlay).toBeHidden();
+  });
+
+  // The shared hook also adds a header × close button (the modal had only
+  // a footer Cancel before).
+  test('header × button closes the modal (#959)', async ({ importFilesModal }) => {
+    // Scope to the modal overlay — a bare `.v10-modal-close` is global and
+    // would match any other dialog/popover present on the page (Codex review).
+    await importFilesModal.overlay.locator('.v10-modal-close').click();
+    await expect(importFilesModal.overlay).toBeHidden();
+  });
+
   test('ingestion option checkboxes are disabled (coming-soon stub)', async ({ importFilesModal }) => {
     expect(await importFilesModal.areIngestionCheckboxesDisabled()).toBe(true);
   });
@@ -110,11 +127,14 @@ test.describe('Import Files Modal', () => {
     expect(await importFilesModal.isImportDisabled()).toBe(false);
   });
 
-  test('dropzone shows the supported-format hint', async ({ page }) => {
+  test('dropzone shows the supported-format hint', async ({ importFilesModal }) => {
     // The hint text was reformatted in rc11 to include the leading
     // "Supported:" prefix — assert against a substring that's stable
     // across both the legacy (`.md, .docx, .pdf`) and rc11 surface.
-    await expect(page.getByText(/\.md/)).toBeVisible();
+    // Scope to the modal: a page-wide getByText(/\.md/) also matches any `.md`
+    // document the shared devnet already holds (another spec's import), tripping
+    // strict-mode. The hint lives in the dropzone inside the modal.
+    await expect(importFilesModal.overlay.getByText(/\.md/)).toBeVisible();
   });
 
   test('dropzone shows the drag instruction', async ({ page }) => {

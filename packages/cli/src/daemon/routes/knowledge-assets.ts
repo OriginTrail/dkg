@@ -25,7 +25,13 @@
 // `(agent, number)` addressing is layered on by Option 1 later, on these same
 // routes, as an additional accepted identifier form.
 import type { RequestContext } from "./context.js";
-import { jsonResponse, readBody, safeParseJson } from "../http-utils.js";
+import {
+  isPayloadTooLargeError,
+  jsonResponse,
+  payloadTooLargeResponseBody,
+  readBody,
+  safeParseJson,
+} from "../http-utils.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
 
@@ -46,6 +52,10 @@ const FINALIZE_ONLY_CREATE_FIELDS = [
  * publish path, which never down-classified them).
  */
 function respondAssertionError(res: RequestContext["res"], e: any): void {
+  if (isPayloadTooLargeError(e)) {
+    jsonResponse(res, 413, payloadTooLargeResponseBody(e));
+    return;
+  }
   if (e?.name === "AssertionNotPersistedError" || e?.code === "ASSERTION_NOT_PERSISTED") {
     jsonResponse(res, 409, {
       error: e.message,

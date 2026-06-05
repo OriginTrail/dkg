@@ -7,6 +7,7 @@ import type {
   AskResult,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
+import { buildBlankNodeSafeDelete } from './sparql-http.js';
 
 /**
  * BlazegraphStore — TripleStore adapter backed by a remote Blazegraph
@@ -44,12 +45,12 @@ export class BlazegraphStore implements TripleStore {
 
   async delete(quads: DKGQuad[]): Promise<void> {
     if (quads.length === 0) return;
-    const body = quads.map((q) => {
-      const g = q.graph ? `GRAPH <${escapeUri(q.graph)}>` : '';
-      const triple = `${formatTerm(q.subject)} <${q.predicate}> ${formatTerm(q.object)} .`;
-      return g ? `${g} { ${triple} }` : triple;
-    }).join('\n');
-    await this.sparqlUpdate(`DELETE DATA {\n${body}\n}`);
+    // Blazegraph is SPARQL 1.1, so blank nodes are illegal in `DELETE DATA`
+    // (same constraint as Oxigraph). Reuse the shared blank-node-safe builder
+    // so blank-node quads are removed via `DELETE { … } WHERE { … }`.
+    const update = buildBlankNodeSafeDelete(quads);
+    if (!update) return;
+    await this.sparqlUpdate(update);
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>): Promise<number> {
@@ -63,8 +64,10 @@ export class BlazegraphStore implements TripleStore {
         `DELETE { GRAPH <${escapeUri(pattern.graph)}> { ${triple} } } WHERE { GRAPH <${escapeUri(pattern.graph)}> { ${triple} } }`,
       );
     } else {
+      // `DELETE { ?g_ctx { … } }` is a syntax error — the template needs the
+      // `GRAPH` keyword. Rejected with HTTP 400 by a spec-compliant endpoint.
       await this.sparqlUpdate(
-        `DELETE { ?g_ctx { ${triple} } } WHERE { GRAPH ?g_ctx { ${triple} } }`,
+        `DELETE { GRAPH ?g_ctx { ${triple} } } WHERE { GRAPH ?g_ctx { ${triple} } }`,
       );
     }
     const after = await this.countQuads(pattern.graph);

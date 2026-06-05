@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
 import {
   OxigraphStore,
   BlazegraphStore,
+  SparqlHttpStore,
   GraphManager,
   PrivateContentStore,
   createTripleStore,
@@ -9,6 +10,7 @@ import {
   type Quad,
   type TripleStore,
 } from '../src/index.js';
+import { startOxigraphSparqlEndpoint, type OxigraphSparqlEndpoint } from './helpers/oxigraph-sparql-endpoint.js';
 
 // ---------------------------------------------------------------------------
 // Shared TripleStore conformance suite — runs against every backend
@@ -75,6 +77,50 @@ function tripleStoreConformanceSuite(name: string, factory: () => Promise<Triple
       const removed = await store.deleteBySubjectPrefix(g, 'did:dkg:agent:Bot');
       expect(removed).toBe(2);
       expect(await store.countQuads(g)).toBe(1);
+    });
+
+    // ── blank-node coverage ──────────────────────────────────────────────
+    // These run against EVERY backend in the matrix. On the SPARQL-over-HTTP
+    // adapters (oxigraph-server, blazegraph) they exercise the code path that
+    // shipped broken in rc.16: deleting quads with blank nodes via DELETE DATA
+    // (illegal SPARQL → HTTP 400). The embedded backends were always safe;
+    // running both side by side is what catches adapter divergence.
+
+    it('round-trips a quad whose object is a blank node', async () => {
+      const g = 'http://ex.org/g';
+      await store.insert([{ subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '_:b0', graph: g }]);
+      expect(await store.countQuads(g)).toBe(1);
+      const r = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${g}> { ?s ?p ?o } }`);
+      expect(r.type).toBe('quads');
+      if (r.type === 'quads') {
+        expect(r.quads.length).toBe(1);
+        expect(r.quads[0].object.startsWith('_:')).toBe(true);
+      }
+    });
+
+    it('deletes a quad whose object is a blank node (read-back then delete)', async () => {
+      const g = 'http://ex.org/g';
+      await store.insert([{ subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '_:b0', graph: g }]);
+      const r = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${g}> { ?s ?p ?o } }`);
+      const quads = r.type === 'quads' ? r.quads.map((q) => ({ ...q, graph: g })) : [];
+      await store.delete(quads); // pre-fix: HTTP 400 on the SPARQL backends
+      expect(await store.countQuads(g)).toBe(0);
+    });
+
+    it('deletes a nested entity with blank-node children (the WM→SWM promote shape)', async () => {
+      const g = 'http://ex.org/g';
+      await store.insert([
+        { subject: 'http://ex.org/alice', predicate: 'http://ex.org/address', object: '_:addr', graph: g },
+        { subject: '_:addr', predicate: 'http://ex.org/city', object: '"Springfield"', graph: g },
+        { subject: '_:addr', predicate: 'http://ex.org/geo', object: '_:geo', graph: g },
+        { subject: '_:geo', predicate: 'http://ex.org/lat', object: '"1.5"^^<http://www.w3.org/2001/XMLSchema#decimal>', graph: g },
+      ]);
+      // CONSTRUCT the whole graph then delete it — exactly what assertionPromote does.
+      const r = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${g}> { ?s ?p ?o } }`);
+      const quads = r.type === 'quads' ? r.quads.map((q) => ({ ...q, graph: g })) : [];
+      expect(quads.length).toBe(4);
+      await store.delete(quads);
+      expect(await store.countQuads(g)).toBe(0);
     });
 
     it('listGraphs', async () => {
@@ -159,6 +205,24 @@ tripleStoreConformanceSuite('OxigraphStore (direct)', async () => new OxigraphSt
 
 // Run conformance suite against OxigraphStore via factory (validates adapter registration)
 tripleStoreConformanceSuite('OxigraphStore (factory)', async () => createTripleStore({ backend: 'oxigraph' }));
+
+// Run the SAME suite against the `sparql-http` adapter (the oxigraph-server
+// backend a fresh `dkg init` defaults to) by default, on every run. Backed by
+// an in-process SPARQL endpoint running the real Oxigraph engine — so it
+// reproduces server-only behaviour (e.g. blank nodes illegal in DELETE DATA)
+// without the server binary. This is the matrix entry that would have caught
+// the rc.16 blank-node delete bug.
+let sparqlHttpEndpoint: OxigraphSparqlEndpoint | undefined;
+beforeAll(async () => { sparqlHttpEndpoint = await startOxigraphSparqlEndpoint(); });
+afterAll(async () => { await sparqlHttpEndpoint?.close(); });
+tripleStoreConformanceSuite('SparqlHttpStore (oxigraph-server, in-process)', async () => {
+  // Fresh state per test: every backend factory yields an empty store.
+  sparqlHttpEndpoint!.store.update('DROP ALL');
+  return new SparqlHttpStore({
+    queryEndpoint: sparqlHttpEndpoint!.queryEndpoint,
+    updateEndpoint: sparqlHttpEndpoint!.updateEndpoint,
+  });
+});
 
 // BlazegraphStore conformance runs only when Blazegraph is reachable.
 // Set BLAZEGRAPH_URL=http://127.0.0.1:9999/bigdata/namespace/test/sparql to enable.

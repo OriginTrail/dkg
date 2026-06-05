@@ -5,12 +5,90 @@ import { fileURLToPath } from 'node:url';
 import type { TripleStore, Quad, QueryResult } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 
+/**
+ * Default per-operation timeout for the embedded worker store. The worker is
+ * a SINGLE thread that processes store ops FIFO, so one slow / wedged op (a
+ * huge import, an expensive query, or a genuinely hung worker) blocks every
+ * other store-backed request queued behind it. Without a bound, the caller —
+ * an API route, the publisher, gossip ingest — waits FOREVER. That is the
+ * exact signature behind issues #997 / #999 / #1002 / #1005 / #1008:
+ * `/api/status` (no store) stays green while `/api/query`,
+ * `/api/context-graph/list`, `/api/assertion/create` never return.
+ *
+ * A bounded wait turns an indefinite hang into a surfaced error the operator
+ * can act on (the message points at the real fix: use an external SPARQL
+ * server for heavy workloads). 120s is generous enough not to trip normal
+ * operations yet finite. Set `operationTimeoutMs: 0` to restore the old
+ * unbounded behaviour.
+ *
+ * IMPORTANT — the timeout is applied to READ-ONLY ops only (see
+ * READ_ONLY_METHODS). A read is side-effect-free, so bounding the caller's wait
+ * and rejecting is always a clean, determinate failure. A mutation is NOT
+ * bounded: the timeout only drops the caller's promise while the single worker
+ * thread keeps running the op, so a "timed-out" insert/delete could STILL
+ * commit afterwards — and the rest of the codebase treats a rejected
+ * insert/delete as a clean failure, which would leave partial state visible and
+ * retries ambiguous. The user-visible hang in the issues above is on the read
+ * paths (`/api/query`, `/api/context-graph/list`); bounding reads surfaces a
+ * wedged worker there without inventing an indeterminate mutation outcome.
+ */
+const DEFAULT_OPERATION_TIMEOUT_MS = 120_000;
+
+export interface OxigraphWorkerStoreOptions {
+  /**
+   * Per-operation timeout in milliseconds for READ-ONLY ops. Default 120_000.
+   * 0 disables it. Mutations are intentionally never bounded (see
+   * DEFAULT_OPERATION_TIMEOUT_MS) so a timed-out write can't be reported as a
+   * clean failure while it is still in flight.
+   */
+  operationTimeoutMs?: number;
+}
+
+/**
+ * Accept only a finite, non-negative override; otherwise fall back. The result
+ * is floored to an INTEGER — the timeout is a millisecond count, so a fractional
+ * value is meaningless noise.
+ */
+function normalizeNonNegativeInt(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : fallback;
+}
+
+/**
+ * Side-effect-free read methods. ONLY these are bounded by the per-op timeout:
+ * rejecting a read after the bound is a clean, determinate failure (nothing was
+ * written), so it safely surfaces a wedged worker on the exact paths that hang
+ * in production. Every other method mutates persisted state and is left
+ * unbounded — see DEFAULT_OPERATION_TIMEOUT_MS for why timing out a mutation
+ * would be unsafe with the current call sites.
+ */
+const READ_ONLY_METHODS = new Set<string>([
+  'query', 'hasGraph', 'listGraphs', 'countQuads',
+]);
+
+/** Rejection raised when a read op exceeds its per-op timeout. */
+export interface OxigraphWorkerTimeoutError extends Error {
+  code: 'OXIGRAPH_WORKER_OP_TIMEOUT';
+  /** Which store method timed out. */
+  method: string;
+  /** The bound that was exceeded. */
+  timeoutMs: number;
+}
+
 export class OxigraphWorkerStore implements TripleStore {
   private worker: Worker;
   private nextId = 0;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+  private readonly operationTimeoutMs: number;
+  /** Set once the worker thread has exited (graceful close, crash, or kill). */
+  private workerExited = false;
+  /** Memoized close so repeat/concurrent close() calls share one teardown. */
+  private closePromise: Promise<void> | null = null;
 
-  constructor(persistPath?: string) {
+  constructor(persistPath?: string, opts?: OxigraphWorkerStoreOptions) {
+    this.operationTimeoutMs = normalizeNonNegativeInt(opts?.operationTimeoutMs, DEFAULT_OPERATION_TIMEOUT_MS);
+
     // Resolve the worker impl with a small search path so this keeps
     // working in all three deployment shapes we actually run in:
     //
@@ -60,16 +138,79 @@ export class OxigraphWorkerStore implements TripleStore {
       for (const [, p] of this.pending) p.reject(err);
       this.pending.clear();
     });
+    // Once the worker exits, no pending op can ever get a reply. Settle them all
+    // (reject) instead of leaving callers hung forever — this is what makes the
+    // unbounded `close()` safe: if a second close (or any op) is still queued
+    // when terminate() kills the thread, it rejects here rather than hanging.
+    this.worker.on('exit', () => {
+      this.workerExited = true;
+      if (this.pending.size > 0) {
+        const err = new Error('oxigraph-worker: worker exited before the operation completed (store closed)');
+        for (const [, p] of this.pending) p.reject(err);
+        this.pending.clear();
+      }
+    });
   }
 
   private call<T>(method: string, ...args: unknown[]): Promise<T> {
+    // Only read-only ops are bounded; mutations run unbounded (timeoutMs 0) so a
+    // timed-out write is never reported as a clean failure while still in flight.
+    const timeoutMs = READ_ONLY_METHODS.has(method) ? this.operationTimeoutMs : 0;
+    return this.callWithTimeout<T>(timeoutMs, method, ...args);
+  }
+
+  /**
+   * Post one op to the worker and await its reply, bounding the caller's wait by
+   * `timeoutMs` (0 = wait indefinitely). The bound is per-CALLER: on timeout we
+   * reject and drop the pending entry, but the single-threaded worker is STILL
+   * running the op — the late reply is then ignored (the message handler no-ops
+   * on a missing id) rather than double-settling this promise. Only read-only
+   * ops are ever given a non-zero timeout (see `call`), so a fired timeout is
+   * always a determinate, side-effect-free failure.
+   */
+  private callWithTimeout<T>(timeoutMs: number, method: string, ...args: unknown[]): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      // The worker is gone — a posted message would never be answered, so fail
+      // fast instead of registering a pending entry that can only ever hang.
+      if (this.workerExited) {
+        reject(new Error(`oxigraph-worker: cannot run "${method}" — the store is closed.`));
+        return;
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          if (this.pending.delete(id)) {
+            const err = new Error(
+              `oxigraph-worker: "${method}" timed out after ${timeoutMs}ms. ` +
+              `The embedded store runs on a single worker thread, so a long-running or ` +
+              `stuck operation blocks all reads queued behind it. For heavy workloads ` +
+              `point the node at an external SPARQL server (store.backend "sparql-http" ` +
+              `/ "blazegraph"), or raise / disable store.options.operationTimeoutMs.`,
+            ) as OxigraphWorkerTimeoutError;
+            err.code = 'OXIGRAPH_WORKER_OP_TIMEOUT';
+            err.method = method;
+            err.timeoutMs = timeoutMs;
+            reject(err);
+          }
+        }, timeoutMs);
+        // A pending-op timer must not keep the process alive on its own.
+        if (typeof timer.unref === 'function') timer.unref();
+      }
+      this.pending.set(id, {
+        resolve: (v) => { if (timer) clearTimeout(timer); resolve(v as T); },
+        reject: (e) => { if (timer) clearTimeout(timer); reject(e); },
+      });
       this.worker.postMessage({ id, method, args });
     });
   }
 
+  // A single atomic worker message: all quads commit together or the call
+  // fails. The contract is "all-or-nothing" and every caller can rely on it
+  // (e.g. FinalizationHandler packs both canonical copies into one insert so one
+  // can't land without the other). Large idempotent bulk imports that want
+  // head-of-line fairness should run on an external SPARQL server, not by
+  // silently fragmenting this insert into non-atomic chunks.
   async insert(quads: Quad[]): Promise<void> { return this.call('insert', quads); }
   async delete(quads: Quad[]): Promise<void> { return this.call('delete', quads); }
   async deleteByPattern(pattern: Partial<Quad>): Promise<number> { return this.call('deleteByPattern', pattern); }
@@ -83,12 +224,40 @@ export class OxigraphWorkerStore implements TripleStore {
   async flush(): Promise<void> { return this.call('flush'); }
 
   async close(): Promise<void> {
-    await this.call('close');
-    await this.worker.terminate();
+    // Memoized + serialized: every close() call shares ONE teardown promise, so
+    // we issue exactly one close RPC. (A second unbounded close RPC would be
+    // orphaned when terminate() kills the worker after the first resolves, and
+    // — without the exit handler — would hang forever.)
+    if (!this.closePromise) this.closePromise = this.doClose();
+    return this.closePromise;
+  }
+
+  private async doClose(): Promise<void> {
+    // Worker already gone (crash/kill) — there's nothing to flush; just make
+    // sure the thread is reaped. Keeps close() idempotent and non-throwing.
+    if (this.workerExited) {
+      try { await this.worker.terminate(); } catch { /* already terminated */ }
+      return;
+    }
+    // `close` runs the worker's FINAL synchronous flush (insert() only schedules
+    // a 50ms debounced flush, so close is what guarantees durability). It is
+    // therefore EXEMPT from the per-op timeout (timeoutMs 0): bounding it could
+    // fire the timeout while the worker is mid-flush, and the `finally` would
+    // then terminate() the thread before pending writes hit disk — losing data.
+    // terminate() always runs in `finally`; the worker's 'exit' handler then
+    // rejects anything still pending, so nothing leaks or hangs.
+    try {
+      await this.callWithTimeout<void>(0, 'close');
+    } finally {
+      await this.worker.terminate();
+    }
   }
 }
 
 registerTripleStoreAdapter('oxigraph-worker', async (opts) => {
   const filePath = opts?.path as string | undefined;
-  return new OxigraphWorkerStore(filePath);
+  return new OxigraphWorkerStore(filePath, {
+    operationTimeoutMs:
+      typeof opts?.operationTimeoutMs === 'number' ? (opts.operationTimeoutMs as number) : undefined,
+  });
 });

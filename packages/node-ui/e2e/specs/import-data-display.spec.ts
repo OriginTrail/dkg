@@ -43,7 +43,11 @@ test.describe('Import data display', () => {
 
   test('import modal shows supported format hint', async ({ page, importFilesModal }) => {
     await page.locator('button[title*="Import"], button[aria-label*="Import"]').first().click();
-    await expect(page.getByText(/\.md|\.pdf|\.docx/i)).toBeVisible();
+    // Scope to the import modal: a page-wide getByText(/\.md/) also matches any
+    // `.md` document the shared devnet already holds (e.g. another spec's
+    // import), which trips strict-mode with multiple matches. The hint lives in
+    // the modal, so assert there.
+    await expect(importFilesModal.overlay.getByText(/\.md|\.pdf|\.docx/i)).toBeVisible();
     await importFilesModal.cancel();
   });
 });
