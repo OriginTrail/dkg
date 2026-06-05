@@ -3440,8 +3440,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // dormant — they re-activate on next explicit access, or an operator
       // prunes them via `DELETE /api/context-graph/subscriptions`. Prioritise
       // core-hosted, then subscribed, so the kept set is the most relevant.
-      const cap =
-        this.config.maxRehydratedContextGraphSubscriptions ?? DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS;
+      // Validate the cap: it's external config, so a fractional / negative /
+      // NaN value would otherwise do something surprising (0.5 → 1 row,
+      // -1/NaN → silently disables the cap). Accept only a non-negative integer
+      // (0 = "no cap"); fall back to the default otherwise.
+      const configuredCap = this.config.maxRehydratedContextGraphSubscriptions;
+      let cap = DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS;
+      if (configuredCap != null) {
+        if (Number.isInteger(configuredCap) && configuredCap >= 0) {
+          cap = configuredCap;
+        } else {
+          this.log.warn(
+            ctx,
+            `Ignoring invalid maxRehydratedContextGraphSubscriptions=${configuredCap} ` +
+              `(must be a non-negative integer); using default ${DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS}.`,
+          );
+        }
+      }
       const ordered = [...rows].sort(
         (a, b) =>
           (b.coreHosted ? 1 : 0) - (a.coreHosted ? 1 : 0) ||
@@ -3525,8 +3540,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (store) {
       try {
         persistedUserIds = (await store.loadAll()).map((s) => s.id).filter(isUserContextGraph);
-      } catch {
-        persistedUserIds = activeUserIds;
+      } catch (err) {
+        // Can't enumerate the persisted backlog → the dormant (capped-out) rows
+        // would survive and rehydrate after the next restart. Do NOT silently
+        // fall back to active-only and report success; surface the failure so the
+        // operator resolves the store error and retries. Thrown before any
+        // teardown, so nothing is changed.
+        throw new Error(
+          `clearContextGraphSubscriptions: failed to enumerate persisted subscriptions ` +
+            `(${err instanceof Error ? err.message : String(err)}); the backlog was NOT cleared. ` +
+            `Resolve the store error and retry.`,
+        );
       }
     }
     const total = persistedUserIds.length;

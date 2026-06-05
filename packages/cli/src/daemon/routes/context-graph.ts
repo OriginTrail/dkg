@@ -57,7 +57,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -1650,14 +1650,16 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // The total PERSISTED backlog is reported in the boot log ("Rehydrated X of
   // Y"); anything beyond the activation cap is dormant until pruned below.
   if (req.method === "GET" && path === "/api/context-graph/subscriptions") {
+    const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
     const map = agent.getSubscribedContextGraphs?.();
     const subscriptions = map
       ? [...map.entries()]
-          // ACTIVE subscriptions only. The registry snapshot also holds
-          // discoverable-only / unsubscribed entries (`subscribed: false`) that
-          // are NOT live subscriptions — exclude them so `count` and the payload
-          // match this endpoint's "active in-memory subscriptions" contract.
-          .filter(([, s]) => s?.subscribed === true)
+          // ACTIVE USER subscriptions only. Exclude (a) discoverable-only /
+          // unsubscribed registry entries (`subscribed: false`) and (b) the
+          // always-on AGENTS/ONTOLOGY system CGs — which the startup cap/log also
+          // exclude — so `count` and the payload match the rehydrated
+          // user-subscription total rather than running ≥2 higher.
+          .filter(([id, s]) => s?.subscribed === true && !systemContextGraphs.has(id))
           .map(([id, s]) => ({
             contextGraphId: id,
             subscribed: true,
