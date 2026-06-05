@@ -107,7 +107,7 @@ body:
     id: notes
     attributes:
       label: Notes / Related Issues
-      description: Link related issues/PRs (e.g. #123) and clarify scope vs. similar issues. If found during a QA/test pass, note the version/commit it was found on.
+      description: "Link related issues/PRs (e.g. #123) and clarify scope vs. similar issues. If found during a QA/test pass, note the version/commit it was found on."
     validations:
       required: false
   - type: checkboxes
