@@ -414,12 +414,26 @@ create_node_config() {
   # start_node() to point at node 1's local multiaddr.
   local relay_value='"relay": "none",'
 
-  # Backend assignment:
-  #   Node 1-2: oxigraph-worker  (worker thread, file-persisted — production default)
-  #   Node 3-4: oxigraph          (in-process, no worker thread — comparison baseline)
-  #   Node 5-6: blazegraph        (remote SPARQL, if Docker available — else oxigraph-worker)
+  # Backend assignment (production parity + hermetic — no Docker required for the
+  # primary coverage):
+  #   Node 1-2: oxigraph-server  (DAEMON-MANAGED local server — the actual
+  #             fresh-install production default since rc.12. The daemon
+  #             auto-downloads + SHA-256-verifies + caches the Oxigraph binary
+  #             and spawns it on its own port — NO Docker. Node 1 is the node the
+  #             UI/e2e suite drives, so the suite now exercises the REAL default
+  #             backend and deterministically reproduces SPARQL-over-HTTP-only
+  #             bugs such as #996 — which the old `oxigraph-worker` default hid.)
+  #   Node 3-4: blazegraph (if Docker) else oxigraph  (in-process baseline)
+  #   Node 5-6: sparql-http → external Dockerized Oxigraph  (EXTRA coverage of the
+  #             generic external-endpoint path; Docker-only, optional)
   local store_block=""
-  if [ "$node_num" -ge 3 ] && [ "$node_num" -le 4 ]; then
+  if [ "$node_num" -ge 1 ] && [ "$node_num" -le 2 ]; then
+    # The managed oxigraph-server defaults to port 7878; multiple nodes on one
+    # host must pin DISTINCT ports or the second collides ("Address already in
+    # use"). Give each node its own (7900 + node_num), clear of the Dockerized
+    # external Oxigraph on 7878/7879 (nodes 5-6) and a real node's 7878.
+    store_block="\"store\": { \"backend\": \"oxigraph-server\", \"options\": { \"port\": $((7900 + node_num)) } },"
+  elif [ "$node_num" -ge 3 ] && [ "$node_num" -le 4 ]; then
     if [ "$BLAZEGRAPH_AVAILABLE" = true ]; then
       store_block="\"store\": { \"backend\": \"blazegraph\", \"options\": { \"url\": \"http://127.0.0.1:${BLAZEGRAPH_PORT}/bigdata/namespace/node${node_num}/sparql\" } },"
     else
@@ -756,26 +770,49 @@ cmd_start() {
   start_oxigraph_servers
 
   # ── backend coverage summary + optional strict gate ───────────────────────
-  # The devnet runs a store-backend matrix (nodes 1-2 oxigraph-worker, 3-4
-  # blazegraph, 5-6 sparql-http/oxigraph-server). When Docker is unavailable
-  # the SPARQL-over-HTTP backends SILENTLY fall back to the embedded store —
-  # which is exactly how the rc.16 blank-node DELETE-DATA bug slipped past
-  # devnet (no node actually ran sparql-http). Make the degradation loud, and
-  # let CI demand the full matrix via DEVNET_REQUIRE_ALL_BACKENDS=1.
-  local bg_state ox_state
-  if [ "$BLAZEGRAPH_AVAILABLE" = true ]; then bg_state="blazegraph"; else bg_state="DEGRADED → oxigraph in-process (blazegraph unavailable)"; fi
-  if [ "$OXIGRAPH_SERVER_AVAILABLE" = true ]; then ox_state="sparql-http / oxigraph-server"; else ox_state="DEGRADED → oxigraph-worker (oxigraph-server unavailable)"; fi
-  log "Store-backend matrix:  nodes 1-2: oxigraph-worker  |  nodes 3-4: $bg_state  |  nodes 5-6: $ox_state"
+  # Nodes 1-2 run the daemon-managed `oxigraph-server` (the production default)
+  # with NO Docker — the binary is auto-downloaded/cached by the daemon — so the
+  # SPARQL-over-HTTP path, AND the node the UI/e2e suite drives, is ALWAYS
+  # exercised. That closes the rc.16 gap where the matrix silently fell back to
+  # the embedded store and the blank-node DELETE-DATA bug slipped past devnet.
+  # The Docker-gated entries below (blazegraph on 3-4, an EXTERNAL Oxigraph
+  # server on 5-6) are EXTRA matrix coverage; DEVNET_REQUIRE_ALL_BACKENDS=1 makes
+  # their absence a hard failure for full-matrix CI.
+  local bg_state ox_extra
+  if [ "$BLAZEGRAPH_AVAILABLE" = true ]; then bg_state="blazegraph"; else bg_state="oxigraph in-process (blazegraph Docker unavailable)"; fi
+  if [ "$OXIGRAPH_SERVER_AVAILABLE" = true ]; then ox_extra="sparql-http → external Oxigraph"; else ox_extra="(skipped — external Oxigraph Docker unavailable)"; fi
+  log "Store-backend matrix:  nodes 1-2: oxigraph-server (managed, no Docker)  |  nodes 3-4: $bg_state  |  nodes 5-6: $ox_extra"
   if [ "$BLAZEGRAPH_AVAILABLE" != true ] || [ "$OXIGRAPH_SERVER_AVAILABLE" != true ]; then
     if [ "${DEVNET_REQUIRE_ALL_BACKENDS:-0}" = "1" ]; then
-      log "ERROR: DEVNET_REQUIRE_ALL_BACKENDS=1 but a SPARQL-over-HTTP backend could not be provisioned (needs Docker + the oxigraph/oxigraph and blazegraph images). Aborting rather than silently shrinking the backend matrix."
+      log "ERROR: DEVNET_REQUIRE_ALL_BACKENDS=1 but an EXTRA Docker backend (blazegraph and/or external Oxigraph) is missing. The core oxigraph-server path IS covered on nodes 1-2, but full-matrix CI also requires the Docker images. Aborting."
       exit 1
     fi
-    log "WARNING: SPARQL-over-HTTP backend coverage is REDUCED for this devnet run. The hermetic storage conformance matrix still exercises sparql-http on every test run; set DEVNET_REQUIRE_ALL_BACKENDS=1 to make this a hard failure in CI."
+    log "NOTE: EXTRA Docker backends (blazegraph / external Oxigraph) are not provisioned this run. The production-default oxigraph-server path IS covered on nodes 1-2; set DEVNET_REQUIRE_ALL_BACKENDS=1 to require the Docker extras too."
   fi
 
   # Stop any already-running devnet nodes so they pick up the config we are about to write
   stop_devnet_nodes_only
+
+  # The chain was just freshly deployed (start_hardhat wiped the deployment
+  # artifacts + marker above), so ANY persisted per-node store state is STALE —
+  # it references the OLD chain. The critical case: a node's store still holds
+  # the `dkg:contextGraphOnChainId` triple from a previous run, so
+  # `registerContextGraph` below short-circuits on a stale "already registered"
+  # view and never creates the CG on the NEW chain. The CG then reads back
+  # `isContextGraphActive=false` / `publishPolicy=0`, the post-boot policy
+  # assertion fails, and every VM publish hits LU-5 ("publish access-policy is
+  # unknown"). Wipe each node's persisted state now that the nodes are stopped —
+  # but KEEP the cached Oxigraph binary (`oxigraph/`) so we don't re-download it.
+  # Nodes re-register identities + CGs and re-sync from scratch against the fresh
+  # chain, which is exactly the e2e seed-from-clean model.
+  if [ -d "$DEVNET_DIR" ]; then
+    local nd
+    for nd in "$DEVNET_DIR"/node*/; do
+      [ -d "$nd" ] || continue
+      find "$nd" -mindepth 1 -maxdepth 1 ! -name oxigraph -exec rm -rf {} + 2>/dev/null || true
+    done
+    log "Cleared stale per-node store state for the freshly-deployed chain (kept cached Oxigraph binaries)"
+  fi
 
   # Generate a shared auth token for all devnet nodes
   local shared_token

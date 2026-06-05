@@ -241,7 +241,12 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
 
           {(status === 'done' || status === 'error') && (
             <>
-              <div className={`v10-import-result ${errorCount > 0 ? 'error' : 'success'}`}>
+              <div
+                className={`v10-import-result ${errorCount > 0 ? 'error' : 'success'}`}
+                data-testid="import-result"
+                data-import-status={errorCount > 0 ? 'error' : 'success'}
+                data-import-triples={totalTriples}
+              >
                 {errorCount === 0 ? (
                   <>
                     Successfully imported {successCount} file{successCount !== 1 ? 's' : ''}.

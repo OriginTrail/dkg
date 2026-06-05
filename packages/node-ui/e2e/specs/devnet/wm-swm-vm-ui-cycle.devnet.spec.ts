@@ -32,6 +32,7 @@ import {
   waitForDevnetStatus,
   requireDevnetPrecondition,
   requireDevnetNode,
+  devnetApiFetch,
 } from '../../helpers/devnet.js';
 import { listContextGraphs } from '../../helpers/devnet-publish.js';
 import {
@@ -64,6 +65,20 @@ const run: {
 test.beforeAll(async () => {
   await requireDevnetNode(test, 1);
   await waitForDevnetStatus(1);
+
+  // HARD precondition (NOT a skip): this spec only reproduces #996 on a
+  // SPARQL-over-HTTP backend. If node 1 isn't on `oxigraph-server`, the
+  // blank-node DELETE-DATA path is never exercised and the spec would pass
+  // trivially — the exact silent-degradation trap that hid the bug in rc.16.
+  // Fail loudly so the devnet backend wiring (scripts/devnet.sh: node 1-2 →
+  // oxigraph-server) can never regress unnoticed.
+  const statusRes = await devnetApiFetch('/api/status', { nodeNum: 1 });
+  const status = (await statusRes.json()) as { storeBackend?: string };
+  expect(
+    status.storeBackend,
+    'node 1 must run the oxigraph-server backend for this spec to exercise #996 ' +
+      '(set in scripts/devnet.sh); got a non-SPARQL-over-HTTP backend instead',
+  ).toBe('oxigraph-server');
 
   // `/api/status` answering does NOT mean the seeded primary context graph has
   // finished registering — on a cold boot `listContextGraphs()` can briefly
