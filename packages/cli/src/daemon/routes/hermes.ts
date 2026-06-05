@@ -107,11 +107,23 @@ function isHermesChannelTimeoutDetails(details: string): boolean {
     );
 }
 
-function hermesStructuredTimeoutDetails(details: string): string | undefined {
+function buildHermesStructuredChannelTimeoutBody(
+  correlationId: string,
+  details: string,
+): Record<string, unknown> | null {
   const parsed = parseHermesChannelTimeoutDetails(details);
-  return typeof parsed?.details === 'string' && parsed.details.trim()
-    ? parsed.details
-    : undefined;
+  if (parsed?.source !== 'hermes-channel'
+    || (
+      parsed.code !== 'HERMES_BRIDGE_RESPONSE_TIMEOUT'
+      && parsed.code !== 'HERMES_GATEWAY_RESPONSE_TIMEOUT'
+    )
+  ) {
+    return null;
+  }
+  return {
+    ...parsed,
+    correlationId,
+  };
 }
 
 function withVerifiedAttachmentImportContextEntries(
@@ -234,14 +246,13 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         if (!forwardRes.ok) {
           const details = await forwardRes.text().catch(() => '');
           if (forwardRes.status === 504 && isHermesChannelTimeoutDetails(details)) {
-            // Only our structured timeout payload proves the selected target
-            // classified its own timeout. Anonymous 504s keep timeout
-            // semantics below but are not replayed without idempotency.
-            return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
+            // Only our structured timeout payload proves a DKG local-agent
+            // channel classified the timeout. Preserve its target/source fields;
+            // anonymous 504s keep timeout semantics below without replay.
+            return jsonResponse(res, 504, buildHermesStructuredChannelTimeoutBody(
               payload.correlationId,
-              target,
-              hermesStructuredTimeoutDetails(details) || `${target.name} response timeout`,
-            ));
+              details,
+            ) ?? buildHermesChannelTimeoutBody(payload.correlationId, target));
           }
           if (forwardRes.status === 504) {
             return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
@@ -370,14 +381,13 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         if (!transportRes.ok) {
           const details = await transportRes.text().catch(() => '');
           if (transportRes.status === 504 && isHermesChannelTimeoutDetails(details)) {
-            // Only our structured timeout payload proves the selected target
-            // classified its own timeout. Anonymous 504s keep timeout
-            // semantics below but are not replayed without idempotency.
-            return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
+            // Only our structured timeout payload proves a DKG local-agent
+            // channel classified the timeout. Preserve its target/source fields;
+            // anonymous 504s keep timeout semantics below without replay.
+            return jsonResponse(res, 504, buildHermesStructuredChannelTimeoutBody(
               payload.correlationId,
-              target,
-              hermesStructuredTimeoutDetails(details) || `${target.name} response timeout`,
-            ));
+              details,
+            ) ?? buildHermesChannelTimeoutBody(payload.correlationId, target));
           }
           if (transportRes.status === 504) {
             return jsonResponse(res, 504, buildHermesChannelTimeoutBody(

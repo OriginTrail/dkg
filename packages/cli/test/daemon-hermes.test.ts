@@ -2615,7 +2615,9 @@ describe('Hermes daemon routes', () => {
           error: 'Hermes bridge response timeout',
           code: 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
           source: 'hermes-channel',
+          target: 'bridge',
           details: 'Hermes bridge did not produce an agent response',
+          timeoutMs: HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
         }), { status: 504 });
       }
       if (requestUrl === 'https://hermes.example.com/api/hermes-channel/send') {
@@ -2656,6 +2658,67 @@ describe('Hermes daemon routes', () => {
       details: 'Hermes bridge did not produce an agent response',
       correlationId: 'corr-1',
       timeoutMs: HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
+    });
+    expect(urls).toEqual([
+      'http://127.0.0.1:9444/health',
+      'http://127.0.0.1:9444/send',
+    ]);
+  });
+
+  it('preserves structured Hermes timeout metadata returned through a bridge proxy', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => {
+      const requestUrl = String(url);
+      urls.push(requestUrl);
+      if (requestUrl === 'http://127.0.0.1:9444/health') {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (requestUrl === 'http://127.0.0.1:9444/send') {
+        return new Response(JSON.stringify({
+          error: 'Hermes gateway response timeout',
+          code: 'HERMES_GATEWAY_RESPONSE_TIMEOUT',
+          source: 'hermes-channel',
+          target: 'gateway',
+          details: 'Nested Hermes gateway did not produce an agent response',
+          correlationId: 'upstream-corr',
+          timeoutMs: 1234,
+        }), { status: 504 });
+      }
+      return new Response(JSON.stringify({ text: 'gateway reply', correlationId: 'corr-1' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }));
+    const { ctx, res } = makeHermesRouteContext({
+      text: 'hello',
+      correlationId: 'corr-1',
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    }, {
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: {
+            kind: 'hermes-channel',
+            bridgeUrl: 'http://127.0.0.1:9444',
+            gatewayUrl: 'https://hermes.example.com',
+          },
+        },
+      },
+    }, '/api/hermes-channel/send');
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(504);
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: 'Hermes gateway response timeout',
+      code: 'HERMES_GATEWAY_RESPONSE_TIMEOUT',
+      source: 'hermes-channel',
+      target: 'gateway',
+      details: 'Nested Hermes gateway did not produce an agent response',
+      correlationId: 'corr-1',
+      timeoutMs: 1234,
     });
     expect(urls).toEqual([
       'http://127.0.0.1:9444/health',
@@ -2825,6 +2888,67 @@ describe('Hermes daemon routes', () => {
       details: 'gateway timeout from proxy',
       correlationId: 'corr-1',
       timeoutMs: HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
+    });
+    expect(urls).toEqual([
+      'http://127.0.0.1:9444/health',
+      'http://127.0.0.1:9444/stream',
+    ]);
+  });
+
+  it('preserves structured Hermes stream timeout metadata returned through a bridge proxy', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => {
+      const requestUrl = String(url);
+      urls.push(requestUrl);
+      if (requestUrl === 'http://127.0.0.1:9444/health') {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (requestUrl === 'http://127.0.0.1:9444/stream') {
+        return new Response(JSON.stringify({
+          error: 'Hermes gateway response timeout',
+          code: 'HERMES_GATEWAY_RESPONSE_TIMEOUT',
+          source: 'hermes-channel',
+          target: 'gateway',
+          details: 'Nested Hermes gateway stream did not produce an agent response',
+          correlationId: 'upstream-corr',
+          timeoutMs: 5678,
+        }), { status: 504 });
+      }
+      return new Response(JSON.stringify({ text: 'gateway stream', correlationId: 'corr-1' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }));
+    const { ctx, res } = makeHermesRouteContext({
+      text: 'hello',
+      correlationId: 'corr-1',
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange: vi.fn(async () => {}),
+    }, {
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: {
+            kind: 'hermes-channel',
+            bridgeUrl: 'http://127.0.0.1:9444',
+            gatewayUrl: 'https://hermes.example.com',
+          },
+        },
+      },
+    }, '/api/hermes-channel/stream');
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(504);
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: 'Hermes gateway response timeout',
+      code: 'HERMES_GATEWAY_RESPONSE_TIMEOUT',
+      source: 'hermes-channel',
+      target: 'gateway',
+      details: 'Nested Hermes gateway stream did not produce an agent response',
+      correlationId: 'corr-1',
+      timeoutMs: 5678,
     });
     expect(urls).toEqual([
       'http://127.0.0.1:9444/health',

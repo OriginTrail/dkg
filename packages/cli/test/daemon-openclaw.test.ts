@@ -673,7 +673,9 @@ describe('OpenClaw channel routing helpers', () => {
           error: 'OpenClaw bridge response timeout',
           code: 'OPENCLAW_BRIDGE_RESPONSE_TIMEOUT',
           source: 'openclaw-channel',
+          target: 'bridge',
           details: 'OpenClaw bridge did not produce an agent response',
+          timeoutMs: OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
         }), { status: 504 });
       }
       return new Response(JSON.stringify({ text: 'gateway reply' }), { status: 200 });
@@ -711,6 +713,67 @@ describe('OpenClaw channel routing helpers', () => {
         details: 'OpenClaw bridge did not produce an agent response',
         correlationId: 'corr-timeout',
         timeoutMs: OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
+      });
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('preserves structured OpenClaw timeout metadata returned through a bridge proxy', async () => {
+    const urls: string[] = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      const requestUrl = String(url);
+      urls.push(requestUrl);
+      if (requestUrl.endsWith('/health')) {
+        return new Response(JSON.stringify({ ok: true, channel: 'dkg-ui' }), { status: 200 });
+      }
+      if (requestUrl === 'http://127.0.0.1:9301/inbound') {
+        return new Response(JSON.stringify({
+          error: 'OpenClaw gateway response timeout',
+          code: 'OPENCLAW_GATEWAY_RESPONSE_TIMEOUT',
+          source: 'openclaw-channel',
+          target: 'gateway',
+          details: 'Nested OpenClaw gateway did not produce an agent response',
+          correlationId: 'upstream-corr',
+          timeoutMs: 1234,
+        }), { status: 504 });
+      }
+      return new Response(JSON.stringify({ text: 'gateway reply' }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const { ctx, res } = makeOpenClawRouteContext({
+        text: 'slow task',
+        correlationId: 'corr-timeout',
+      }, '/api/openclaw-channel/send', {
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: { localChat: true },
+            transport: {
+              kind: 'openclaw-channel',
+              bridgeUrl: 'http://127.0.0.1:9301',
+              gatewayUrl: 'https://openclaw.example.com',
+            },
+          },
+        },
+      });
+
+      await handleOpenclawRoutes(ctx);
+
+      expect(urls).toEqual([
+        'http://127.0.0.1:9301/health',
+        'http://127.0.0.1:9301/inbound',
+      ]);
+      expect(res.statusCode).toBe(504);
+      expect(JSON.parse(res.body)).toMatchObject({
+        error: 'OpenClaw gateway response timeout',
+        code: 'OPENCLAW_GATEWAY_RESPONSE_TIMEOUT',
+        source: 'openclaw-channel',
+        target: 'gateway',
+        details: 'Nested OpenClaw gateway did not produce an agent response',
+        correlationId: 'corr-timeout',
+        timeoutMs: 1234,
       });
     } finally {
       globalThis.fetch = origFetch;
@@ -1433,6 +1496,70 @@ describe('OpenClaw channel routing helpers', () => {
       expect(nextRes.headers['Content-Type']).toContain('text/event-stream');
       expect(nextRes.body).toContain('"text":"stream bridge recovered"');
       expect(nextRes.body).toContain('"correlationId":"corr-stream-timeout-next"');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('preserves structured OpenClaw stream timeout metadata returned through a bridge proxy', async () => {
+    const urls: string[] = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      const requestUrl = String(url);
+      urls.push(requestUrl);
+      if (requestUrl.endsWith('/health')) {
+        return new Response(JSON.stringify({ ok: true, channel: 'dkg-ui' }), { status: 200 });
+      }
+      if (requestUrl === 'http://127.0.0.1:9301/inbound/stream') {
+        return new Response(JSON.stringify({
+          error: 'OpenClaw gateway response timeout',
+          code: 'OPENCLAW_GATEWAY_RESPONSE_TIMEOUT',
+          source: 'openclaw-channel',
+          target: 'gateway',
+          details: 'Nested OpenClaw gateway stream did not produce an agent response',
+          correlationId: 'upstream-corr',
+          timeoutMs: 5678,
+        }), { status: 504 });
+      }
+      return new Response(JSON.stringify({ text: 'gateway stream', correlationId: 'corr-stream' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+    try {
+      const { ctx, res } = makeOpenClawRouteContext({
+        text: 'slow task',
+        correlationId: 'corr-stream',
+      }, '/api/openclaw-channel/stream', {
+        localAgentIntegrations: {
+          openclaw: {
+            enabled: true,
+            capabilities: { localChat: true },
+            transport: {
+              kind: 'openclaw-channel',
+              bridgeUrl: 'http://127.0.0.1:9301',
+              gatewayUrl: 'https://openclaw.example.com',
+            },
+          },
+        },
+      });
+
+      await handleOpenclawRoutes(ctx);
+
+      expect(urls).toEqual([
+        'http://127.0.0.1:9301/health',
+        'http://127.0.0.1:9301/inbound/stream',
+      ]);
+      expect(res.statusCode).toBe(504);
+      expect(JSON.parse(res.body)).toMatchObject({
+        error: 'OpenClaw gateway response timeout',
+        code: 'OPENCLAW_GATEWAY_RESPONSE_TIMEOUT',
+        source: 'openclaw-channel',
+        target: 'gateway',
+        details: 'Nested OpenClaw gateway stream did not produce an agent response',
+        correlationId: 'corr-stream',
+        timeoutMs: 5678,
+      });
     } finally {
       globalThis.fetch = origFetch;
     }

@@ -391,6 +391,25 @@ function openClawStructuredTimeoutDetails(details: string): string | undefined {
     : undefined;
 }
 
+function buildOpenClawStructuredChannelTimeoutBody(
+  correlationId: string,
+  details: string,
+): Record<string, unknown> | null {
+  const parsed = parseOpenClawUpstreamDetails(details);
+  if (parsed?.source !== 'openclaw-channel'
+    || (
+      parsed.code !== 'OPENCLAW_BRIDGE_RESPONSE_TIMEOUT'
+      && parsed.code !== 'OPENCLAW_GATEWAY_RESPONSE_TIMEOUT'
+    )
+  ) {
+    return null;
+  }
+  return {
+    ...parsed,
+    correlationId,
+  };
+}
+
 function buildOpenClawAgentTimeoutBody(
   correlationId: string,
   details?: string,
@@ -737,14 +756,13 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
               return jsonResponse(res, 504, buildOpenClawAgentTimeoutBody(corrId, openClawStructuredTimeoutDetails(details)));
             }
             if (isOpenClawChannelTimeoutDetails(details)) {
-              // Only our structured timeout payload proves the selected target
-              // classified its own timeout. Anonymous 504s keep timeout
-              // semantics below but are not replayed without idempotency.
-              return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
+              // Only our structured timeout payload proves a DKG local-agent
+              // channel classified the timeout. Preserve its target/source fields;
+              // anonymous 504s keep timeout semantics below without replay.
+              return jsonResponse(res, 504, buildOpenClawStructuredChannelTimeoutBody(
                 corrId,
-                target,
-                openClawStructuredTimeoutDetails(details) || `${target.name} response timeout`,
-              ));
+                details,
+              ) ?? buildOpenClawChannelTimeoutBody(corrId, target));
             }
             return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
               corrId,
@@ -874,14 +892,13 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
               return jsonResponse(res, 504, buildOpenClawAgentTimeoutBody(corrId, openClawStructuredTimeoutDetails(details)));
             }
             if (isOpenClawChannelTimeoutDetails(details)) {
-              // Only our structured timeout payload proves the selected target
-              // classified its own timeout. Anonymous 504s keep timeout
-              // semantics below but are not replayed without idempotency.
-              return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
+              // Only our structured timeout payload proves a DKG local-agent
+              // channel classified the timeout. Preserve its target/source fields;
+              // anonymous 504s keep timeout semantics below without replay.
+              return jsonResponse(res, 504, buildOpenClawStructuredChannelTimeoutBody(
                 corrId,
-                target,
-                openClawStructuredTimeoutDetails(details) || `${target.name} response timeout`,
-              ));
+                details,
+              ) ?? buildOpenClawChannelTimeoutBody(corrId, target));
             }
             return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
               corrId,
