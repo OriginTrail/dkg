@@ -56,9 +56,44 @@ export interface OxigraphWorkerStoreOptions {
   insertChunkSize?: number;
 }
 
-/** Accept only finite, non-negative overrides; otherwise fall back. */
-function normalizeNonNegative(value: number | undefined, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
+/**
+ * Accept only finite, non-negative overrides; otherwise fall back. The result
+ * is floored to an INTEGER: both knobs are integer quantities (ms for the
+ * timeout, a quad count for the chunk size). A fractional `insertChunkSize`
+ * (e.g. `1.5`) would otherwise desync the `i += size` loop counter from
+ * `slice()`'s integer-coerced boundaries and yield malformed chunks.
+ */
+function normalizeNonNegativeInt(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : fallback;
+}
+
+/**
+ * Methods that change persisted state. A per-op timeout only drops the CALLER's
+ * promise — the single worker thread keeps running the op — so a timed-out
+ * MUTATION may STILL commit after we've already rejected. We surface that as an
+ * explicit "outcome unknown" signal (see OxigraphWorkerTimeoutError) so callers
+ * don't treat it as a clean failure (e.g. report "failed" while the write
+ * actually landed, or blindly retry a non-idempotent op). Reads are
+ * side-effect-free, so a read timeout is an ordinary, determinate failure.
+ */
+const MUTATING_METHODS = new Set<string>([
+  'insert', 'delete', 'deleteByPattern', 'dropGraph', 'deleteBySubjectPrefix', 'flush',
+]);
+
+/** Rejection raised when a worker op exceeds its per-op timeout. */
+export interface OxigraphWorkerTimeoutError extends Error {
+  code: 'OXIGRAPH_WORKER_OP_TIMEOUT';
+  /** Which store method timed out. */
+  method: string;
+  /** The bound that was exceeded. */
+  timeoutMs: number;
+  /**
+   * True when the timed-out op was a mutation: the worker may still apply it,
+   * so the persisted outcome is indeterminate. False for side-effect-free reads.
+   */
+  outcomeUnknown: boolean;
 }
 
 export class OxigraphWorkerStore implements TripleStore {
@@ -69,8 +104,8 @@ export class OxigraphWorkerStore implements TripleStore {
   private readonly insertChunkSize: number;
 
   constructor(persistPath?: string, opts?: OxigraphWorkerStoreOptions) {
-    this.operationTimeoutMs = normalizeNonNegative(opts?.operationTimeoutMs, DEFAULT_OPERATION_TIMEOUT_MS);
-    this.insertChunkSize = normalizeNonNegative(opts?.insertChunkSize, DEFAULT_INSERT_CHUNK_SIZE);
+    this.operationTimeoutMs = normalizeNonNegativeInt(opts?.operationTimeoutMs, DEFAULT_OPERATION_TIMEOUT_MS);
+    this.insertChunkSize = normalizeNonNegativeInt(opts?.insertChunkSize, DEFAULT_INSERT_CHUNK_SIZE);
 
     // Resolve the worker impl with a small search path so this keeps
     // working in all three deployment shapes we actually run in:
@@ -141,13 +176,25 @@ export class OxigraphWorkerStore implements TripleStore {
       if (timeoutMs > 0) {
         timer = setTimeout(() => {
           if (this.pending.delete(id)) {
-            reject(new Error(
+            const outcomeUnknown = MUTATING_METHODS.has(method);
+            const err = new Error(
               `oxigraph-worker: "${method}" timed out after ${timeoutMs}ms. ` +
+              (outcomeUnknown
+                ? `This is a MUTATION whose outcome is INDETERMINATE: the single worker ` +
+                  `thread is still running it, so the change may STILL commit after this ` +
+                  `rejection. Treat it as "outcome unknown", not a clean failure — only ` +
+                  `retry if the operation is idempotent (DKG insert/delete are). `
+                : ``) +
               `The embedded store runs on a single worker thread, so a long-running or ` +
               `stuck operation blocks all others. For heavy workloads point the node at ` +
               `an external SPARQL server (store.backend "sparql-http" / "blazegraph"), or ` +
               `raise / disable store.options.operationTimeoutMs.`,
-            ));
+            ) as OxigraphWorkerTimeoutError;
+            err.code = 'OXIGRAPH_WORKER_OP_TIMEOUT';
+            err.method = method;
+            err.timeoutMs = timeoutMs;
+            err.outcomeUnknown = outcomeUnknown;
+            reject(err);
           }
         }, timeoutMs);
         // A pending-op timer must not keep the process alive on its own.

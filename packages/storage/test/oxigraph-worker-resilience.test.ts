@@ -122,4 +122,40 @@ describe('OxigraphWorkerStore resilience', () => {
     // for the in-flight op to drain, then flushes + terminates.
     await expect(store.close()).resolves.toBeUndefined();
   });
+
+  it('a timed-out MUTATION is flagged outcome-unknown; a timed-out READ is not', async () => {
+    // Codex review: a per-op timeout only drops the caller's promise — the
+    // worker keeps running and a mutation may still commit. So a timed-out
+    // mutation must surface an explicit "outcome unknown" signal, while a
+    // side-effect-free read timeout stays an ordinary, determinate failure.
+    const store = makeStore({ operationTimeoutMs: 5, insertChunkSize: 0 });
+    try {
+      const insErr: any = await store.insert(quads(50_000)).then(() => null, (e) => e);
+      expect(insErr).toBeTruthy();
+      expect(insErr.code).toBe('OXIGRAPH_WORKER_OP_TIMEOUT');
+      expect(insErr.outcomeUnknown).toBe(true);
+      expect(insErr.method).toBe('insert');
+
+      // Queues behind the still-running insert and times out — but it's a read.
+      const qErr: any = await store.query('SELECT * WHERE { ?s ?p ?o }').then(() => null, (e) => e);
+      expect(qErr).toBeTruthy();
+      expect(qErr.code).toBe('OXIGRAPH_WORKER_OP_TIMEOUT');
+      expect(qErr.outcomeUnknown).toBe(false);
+    } finally {
+      await closeQuietly(store);
+    }
+  });
+
+  it('a fractional insertChunkSize is floored to an integer (no malformed chunks)', async () => {
+    // Codex review: insertChunkSize is both the loop step and the slice()
+    // boundary; a fractional value desyncs them. Normalization floors it, so a
+    // 2.9 chunk size behaves like 2 and every quad is still written exactly once.
+    const store = makeStore({ operationTimeoutMs: 60_000, insertChunkSize: 2.9 });
+    try {
+      await store.insert(quads(1_000));
+      expect(await store.countQuads('urn:test:g')).toBe(1_000);
+    } finally {
+      await closeQuietly(store);
+    }
+  });
 });
