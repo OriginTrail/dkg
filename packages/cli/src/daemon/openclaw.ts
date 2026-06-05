@@ -66,6 +66,9 @@ const BRIDGE_HEALTH_CACHE_OK_TTL_MS = 10_000;
 const BRIDGE_HEALTH_CACHE_ERROR_TTL_MS = 1_000;
 export const OPENCLAW_UI_CONNECT_TIMEOUT_MS = 150_000;
 export const OPENCLAW_UI_CONNECT_POLL_MS = 1_500;
+// Agent response deadline for an already-dispatched OpenClaw chat turn. This
+// is not a retryable transport timeout; replay requires correlation-id
+// idempotency before bridge-to-gateway fallback can be safe.
 export const OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS = 15 * 60_000;
 // Per-integration UI attach-job machinery moved to
 // `./local-agent-attach-jobs.ts` in S1 of issue #386 so adapter-hermes'
@@ -489,7 +492,7 @@ export function isOpenClawUiAttachCancelled(job: PendingOpenClawUiAttachJob): bo
 
 
 export function shouldTryNextOpenClawTarget(status: number): boolean {
-  return status === 404 || status === 405 || status === 501 || status === 503 || status === 504;
+  return status === 404 || status === 405 || status === 501 || status === 503;
 }
 
 export function buildOpenClawChannelHeaders(

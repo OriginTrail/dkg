@@ -564,7 +564,7 @@ describe('OpenClaw channel routing helpers', () => {
     }
   });
 
-  it('falls back to the OpenClaw gateway when the local bridge fetch times out', async () => {
+  it('does not replay OpenClaw chat send when the local bridge fetch times out', async () => {
     const timeoutError = new Error('The operation was aborted due to timeout') as Error & { name: string };
     timeoutError.name = 'TimeoutError';
     const urls: string[] = [];
@@ -603,10 +603,16 @@ describe('OpenClaw channel routing helpers', () => {
       expect(urls).toEqual([
         'http://127.0.0.1:9301/health',
         'http://127.0.0.1:9301/inbound',
-        'https://openclaw.example.com/api/dkg-channel/inbound',
       ]);
-      expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body)).toMatchObject({ text: 'gateway reply' });
+      expect(res.statusCode).toBe(504);
+      expect(JSON.parse(res.body)).toMatchObject({
+        error: 'OpenClaw bridge response timeout',
+        code: 'OPENCLAW_BRIDGE_RESPONSE_TIMEOUT',
+        source: 'openclaw-channel',
+        target: 'bridge',
+        correlationId: 'corr-timeout',
+        timeoutMs: OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
+      });
     } finally {
       globalThis.fetch = origFetch;
     }
@@ -726,7 +732,7 @@ describe('OpenClaw channel routing helpers', () => {
     }
   });
 
-  it('falls back to the gateway when OpenClaw bridge send returns an unknown upstream 504', async () => {
+  it('does not replay OpenClaw chat send when the bridge returns an unknown upstream 504', async () => {
     const urls: string[] = [];
     const origFetch = globalThis.fetch;
     globalThis.fetch = (async (url: string | URL | Request) => {
@@ -763,10 +769,13 @@ describe('OpenClaw channel routing helpers', () => {
       expect(urls).toEqual([
         'http://127.0.0.1:9301/health',
         'http://127.0.0.1:9301/inbound',
-        'https://openclaw.example.com/api/dkg-channel/inbound',
       ]);
-      expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body)).toMatchObject({ text: 'gateway reply' });
+      expect(res.statusCode).toBe(502);
+      expect(JSON.parse(res.body)).toMatchObject({
+        error: 'Bridge error',
+        code: 'BRIDGE_ERROR',
+        details: 'Agent response timeout from proxy',
+      });
     } finally {
       globalThis.fetch = origFetch;
     }
@@ -782,6 +791,9 @@ describe('OpenClaw channel routing helpers', () => {
       urls.push(requestUrl);
       if (requestUrl.endsWith('/health')) {
         return new Response(JSON.stringify({ ok: true, channel: 'dkg-ui' }), { status: 200 });
+      }
+      if (requestUrl === 'http://127.0.0.1:9301/inbound') {
+        return new Response('bridge unavailable', { status: 503 });
       }
       throw timeoutError;
     }) as typeof fetch;
@@ -1225,7 +1237,7 @@ describe('OpenClaw channel routing helpers', () => {
     }
   });
 
-  it('falls back to the gateway when OpenClaw bridge stream returns an unknown upstream 504', async () => {
+  it('does not replay OpenClaw stream when the bridge returns an unknown upstream 504', async () => {
     const urls: string[] = [];
     const origFetch = globalThis.fetch;
     globalThis.fetch = (async (url: string | URL | Request) => {
@@ -1265,12 +1277,13 @@ describe('OpenClaw channel routing helpers', () => {
       expect(urls).toEqual([
         'http://127.0.0.1:9301/health',
         'http://127.0.0.1:9301/inbound/stream',
-        'https://openclaw.example.com/api/dkg-channel/inbound',
       ]);
-      expect(res.statusCode).toBe(200);
-      expect(res.headers['Content-Type']).toContain('text/event-stream');
-      expect(res.body).toContain('"text":"gateway stream"');
-      expect(res.body).toContain('"correlationId":"corr-stream"');
+      expect(res.statusCode).toBe(502);
+      expect(JSON.parse(res.body)).toMatchObject({
+        error: 'Bridge error',
+        code: 'BRIDGE_ERROR',
+        details: 'gateway timeout from proxy',
+      });
     } finally {
       globalThis.fetch = origFetch;
     }

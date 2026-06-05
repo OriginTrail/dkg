@@ -701,8 +701,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
       offline?: boolean;
     } | null = null;
 
-    for (const [targetIndex, target] of targets.entries()) {
-      const isLastTarget = targetIndex === targets.length - 1;
+    for (const target of targets) {
       const availability = await ensureOpenClawBridgeAvailable(
         target,
         bridgeAuthToken,
@@ -739,8 +738,8 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
             }
             if (isOpenClawChannelTimeoutDetails(details)) {
               // Only our structured timeout payload proves the selected target
-              // classified its own timeout. Anonymous 504s may be
-              // infrastructure failures and remain eligible for fallback below.
+              // classified its own timeout. Anonymous 504s may have reached
+              // the agent, so they fall through without bridge-to-gateway replay.
               return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
                 corrId,
                 target,
@@ -771,10 +770,6 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
         if (isOpenClawBridgeTimeoutError(err)) {
           if (target.name === "bridge") {
             daemonState.openClawBridgeHealth = { ok: false, ts: Date.now() };
-          }
-          if (!isLastTarget) {
-            lastFailure = { details: `${target.name} response timeout`, offline: true };
-            continue;
           }
           return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(corrId, target));
         }
@@ -835,8 +830,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
       offline?: boolean;
     } | null = null;
 
-    for (const [targetIndex, target] of targets.entries()) {
-      const isLastTarget = targetIndex === targets.length - 1;
+    for (const target of targets) {
       const availability = await ensureOpenClawBridgeAvailable(
         target,
         bridgeAuthToken,
@@ -879,8 +873,8 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
             }
             if (isOpenClawChannelTimeoutDetails(details)) {
               // Only our structured timeout payload proves the selected target
-              // classified its own timeout. Anonymous 504s may be
-              // infrastructure failures and remain eligible for fallback below.
+              // classified its own timeout. Anonymous 504s may have reached
+              // the agent, so they fall through without bridge-to-gateway replay.
               return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
                 corrId,
                 target,
@@ -952,10 +946,6 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
         if (isOpenClawBridgeTimeoutError(err)) {
           if (target.name === "bridge") {
             daemonState.openClawBridgeHealth = { ok: false, ts: Date.now() };
-          }
-          if (!isLastTarget) {
-            lastFailure = { details: `${target.name} response timeout`, offline: true };
-            continue;
           }
           return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(corrId, target));
         }
