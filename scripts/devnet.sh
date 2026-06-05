@@ -414,38 +414,18 @@ create_node_config() {
   # start_node() to point at node 1's local multiaddr.
   local relay_value='"relay": "none",'
 
-  # Backend assignment (production parity + hermetic — no Docker required for the
-  # primary coverage):
-  #   Node 1-2: oxigraph-server  (DAEMON-MANAGED local server — the actual
-  #             fresh-install production default since rc.12. The daemon
-  #             auto-downloads + SHA-256-verifies + caches the Oxigraph binary
-  #             and spawns it on its own port — NO Docker. Node 1 is the node the
-  #             UI/e2e suite drives, so the suite now exercises the REAL default
-  #             backend and deterministically reproduces SPARQL-over-HTTP-only
-  #             bugs such as #996 — which the old `oxigraph-worker` default hid.)
-  #   Node 3-4: blazegraph (if Docker) else oxigraph  (in-process baseline)
-  #   Node 5-6: sparql-http → external Dockerized Oxigraph  (EXTRA coverage of the
-  #             generic external-endpoint path; Docker-only, optional)
-  local store_block=""
-  if [ "$node_num" -ge 1 ] && [ "$node_num" -le 2 ]; then
-    # The managed oxigraph-server defaults to port 7878; multiple nodes on one
-    # host must pin DISTINCT ports or the second collides ("Address already in
-    # use"). Give each node its own (7900 + node_num), clear of the Dockerized
-    # external Oxigraph on 7878/7879 (nodes 5-6) and a real node's 7878.
-    store_block="\"store\": { \"backend\": \"oxigraph-server\", \"options\": { \"port\": $((7900 + node_num)) } },"
-  elif [ "$node_num" -ge 3 ] && [ "$node_num" -le 4 ]; then
-    if [ "$BLAZEGRAPH_AVAILABLE" = true ]; then
-      store_block="\"store\": { \"backend\": \"blazegraph\", \"options\": { \"url\": \"http://127.0.0.1:${BLAZEGRAPH_PORT}/bigdata/namespace/node${node_num}/sparql\" } },"
-    else
-      store_block="\"store\": { \"backend\": \"oxigraph\" },"
-    fi
-  elif [ "$node_num" -ge 5 ] && [ "$node_num" -le 6 ]; then
-    if [ "$OXIGRAPH_SERVER_AVAILABLE" = true ]; then
-      local ox_port_var="OXIGRAPH_SERVER_PORT_${node_num}"
-      local ox_port="${!ox_port_var}"
-      store_block="\"store\": { \"backend\": \"sparql-http\", \"options\": { \"queryEndpoint\": \"http://127.0.0.1:${ox_port}/query\", \"updateEndpoint\": \"http://127.0.0.1:${ox_port}/update\" } },"
-    fi
-  fi
+  # Backend assignment: EVERY node runs the DAEMON-MANAGED `oxigraph-server` (the
+  # rc.12+ fresh-install production default) on its own port (7900 + node_num).
+  # The daemon auto-downloads + SHA-256-verifies + caches the Oxigraph binary and
+  # spawns it on that port — NO Docker. A UNIFORM oxigraph-server fleet replaces
+  # the old mixed backends (embedded `oxigraph` on cores 3-4, `oxigraph-worker`
+  # on edges 5-6): those single-threaded embedded stores WEDGE under heavy
+  # SWM-sync / big-promote load and silently drop a core below the StorageACK
+  # quorum (observed: 2 embedded cores timed out, leaving an edge publish unable
+  # to dial 3 core ACKs → `QuorumUnmetError`). One backend for the whole fleet =
+  # uniform, production-parity, and robust under load. Per-node ports (7901..)
+  # are clear of any Dockerized Oxigraph on 7878/7879 and the base 7900.
+  local store_block="\"store\": { \"backend\": \"oxigraph-server\", \"options\": { \"port\": $((7900 + node_num)) } },"
 
   # Opt-in auth disable: set DEVNET_NO_AUTH=1 for frictionless local testing
   local devnet_auth_block=""
@@ -766,29 +746,21 @@ cmd_start() {
   ensure_built
   start_hardhat
   deploy_contracts
-  start_blazegraph
-  start_oxigraph_servers
+  # No Docker backends: every node uses the daemon-managed oxigraph-server (see
+  # configure_node), so the blazegraph / external-Oxigraph Docker probes are no
+  # longer needed.
 
-  # ── backend coverage summary + optional strict gate ───────────────────────
-  # Nodes 1-2 run the daemon-managed `oxigraph-server` (the production default)
-  # with NO Docker — the binary is auto-downloaded/cached by the daemon — so the
-  # SPARQL-over-HTTP path, AND the node the UI/e2e suite drives, is ALWAYS
-  # exercised. That closes the rc.16 gap where the matrix silently fell back to
-  # the embedded store and the blank-node DELETE-DATA bug slipped past devnet.
-  # The Docker-gated entries below (blazegraph on 3-4, an EXTERNAL Oxigraph
-  # server on 5-6) are EXTRA matrix coverage; DEVNET_REQUIRE_ALL_BACKENDS=1 makes
-  # their absence a hard failure for full-matrix CI.
-  local bg_state ox_extra
-  if [ "$BLAZEGRAPH_AVAILABLE" = true ]; then bg_state="blazegraph"; else bg_state="oxigraph in-process (blazegraph Docker unavailable)"; fi
-  if [ "$OXIGRAPH_SERVER_AVAILABLE" = true ]; then ox_extra="sparql-http → external Oxigraph"; else ox_extra="(skipped — external Oxigraph Docker unavailable)"; fi
-  log "Store-backend matrix:  nodes 1-2: oxigraph-server (managed, no Docker)  |  nodes 3-4: $bg_state  |  nodes 5-6: $ox_extra"
-  if [ "$BLAZEGRAPH_AVAILABLE" != true ] || [ "$OXIGRAPH_SERVER_AVAILABLE" != true ]; then
-    if [ "${DEVNET_REQUIRE_ALL_BACKENDS:-0}" = "1" ]; then
-      log "ERROR: DEVNET_REQUIRE_ALL_BACKENDS=1 but an EXTRA Docker backend (blazegraph and/or external Oxigraph) is missing. The core oxigraph-server path IS covered on nodes 1-2, but full-matrix CI also requires the Docker images. Aborting."
-      exit 1
-    fi
-    log "NOTE: EXTRA Docker backends (blazegraph / external Oxigraph) are not provisioned this run. The production-default oxigraph-server path IS covered on nodes 1-2; set DEVNET_REQUIRE_ALL_BACKENDS=1 to require the Docker extras too."
-  fi
+  # ── backend summary ───────────────────────────────────────────────────────
+  # EVERY node runs the daemon-managed `oxigraph-server` (the rc.12+ production
+  # fresh-install default) with NO Docker — the binary is auto-downloaded/cached
+  # by the daemon and spawned on each node's own port (see configure_node). A
+  # UNIFORM oxigraph-server fleet is robust under heavy SWM-sync / big-promote
+  # load: the old mixed embedded backends (`oxigraph` on cores 3-4,
+  # `oxigraph-worker` on edges 5-6) single-thread and WEDGE under that load,
+  # silently dropping a core below the StorageACK quorum (an edge publish then
+  # can't dial 3 core ACKs). The Docker-gated blazegraph / external-Oxigraph
+  # matrix backends are no longer wired into any node.
+  log "Store backend: ALL ${NUM_NODES} nodes → daemon-managed oxigraph-server (per-node port 7900+N, no Docker)"
 
   # Stop any already-running devnet nodes so they pick up the config we are about to write
   stop_devnet_nodes_only
@@ -1255,14 +1227,8 @@ cmd_start() {
     local api_port=$((API_PORT_BASE + i - 1))
     local role="edge"
     [ "$i" -le "$NUM_CORE_NODES" ] && role="core"
-    local store_label="oxigraph-worker"
-    if [ "$i" -ge 3 ] && [ "$i" -le 4 ]; then
-      [ "$BLAZEGRAPH_AVAILABLE" = true ] && store_label="blazegraph" || store_label="oxigraph"
-    fi
-    if [ "$i" -ge 5 ]; then
-      [ "$OXIGRAPH_SERVER_AVAILABLE" = true ] && store_label="oxigraph-server" || store_label="oxigraph-worker"
-    fi
-    log "Node $i ($role, $store_label): http://127.0.0.1:$api_port/ui"
+    # Every node runs the daemon-managed oxigraph-server (see configure_node).
+    log "Node $i ($role, oxigraph-server): http://127.0.0.1:$api_port/ui"
   done
   log ""
   log "Auth token: $shared_token"
