@@ -81,6 +81,13 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
           [],
           this.signer,
           'create random-sampling challenge',
+          // createChallenge's gas depends on per-block randomness (weighted
+          // CG draw + `blockhash` entropy in `_deriveChallengeSeed`). The
+          // estimate is taken against a different block than the one the tx
+          // mines in, so without headroom the tx intermittently OOGs and
+          // reverts with empty `0x` data. +50% covers the estimate-vs-exec
+          // spread with margin for production CG/KC counts.
+          { gasLimitBufferBps: 5_000 },
         );
       } catch (err) {
         this.translateRandomSamplingError(err);

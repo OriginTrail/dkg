@@ -9,7 +9,9 @@ import {
   SMALL_BODY_BYTES,
 } from '../http-utils.js';
 import { daemonState } from '../state.js';
-import { hasConfiguredLocalAgentChat } from '../local-agents.js';
+import {
+  hasConfiguredLocalAgentChat,
+} from '../local-agents.js';
 import type { OpenClawAttachmentRef } from '../openclaw.js';
 import {
   HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
@@ -44,6 +46,85 @@ type HermesPersistRouteResult = {
 type NormalizedHermesPersistTurnPayload = Exclude<ReturnType<typeof normalizeHermesPersistTurnPayload>, { error: string }>;
 
 const hermesPersistTurnInflight = new Map<string, Promise<HermesPersistRouteResult>>();
+
+function isHermesBridgeTimeoutError(err: any): boolean {
+  const message = String(err?.message ?? err ?? '');
+  return err?.name === 'TimeoutError'
+    || err?.cause?.name === 'TimeoutError'
+    || /agent response timeout|response timeout|aborted due to timeout/i.test(message);
+}
+
+function formatTimeoutMs(timeoutMs: number): string {
+  return `${Math.round(timeoutMs / 1000)}s`;
+}
+
+function buildHermesChannelTimeoutBody(
+  correlationId: string,
+  target: { name?: string } | undefined,
+  details?: string,
+): Record<string, unknown> {
+  const targetName = target?.name === 'gateway' ? 'gateway' : 'bridge';
+  const targetLabel = targetName === 'gateway' ? 'Hermes gateway' : 'Hermes bridge';
+  return {
+    error: `${targetLabel} response timeout`,
+    code: targetName === 'gateway'
+      ? 'HERMES_GATEWAY_RESPONSE_TIMEOUT'
+      : 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
+    source: 'hermes-channel',
+    target: targetName,
+    details: details || `${targetLabel} did not produce an agent response within ${formatTimeoutMs(HERMES_CHANNEL_RESPONSE_TIMEOUT_MS)}`,
+    correlationId,
+    timeoutMs: HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
+  };
+}
+
+function buildHermesUiPersistenceErrorBody(err: any): Record<string, unknown> {
+  return {
+    error: 'Hermes UI chat persistence failed',
+    code: 'HERMES_UI_PERSISTENCE_ERROR',
+    details: err?.message ?? String(err),
+  };
+}
+
+function parseHermesChannelTimeoutDetails(details: string): Record<string, unknown> | null {
+  if (!details.trim()) return null;
+  try {
+    const parsed = JSON.parse(details);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isHermesChannelTimeoutDetails(details: string): boolean {
+  const parsed = parseHermesChannelTimeoutDetails(details);
+  return parsed?.source === 'hermes-channel'
+    && (
+      parsed.code === 'HERMES_BRIDGE_RESPONSE_TIMEOUT'
+      || parsed.code === 'HERMES_GATEWAY_RESPONSE_TIMEOUT'
+    );
+}
+
+function buildHermesStructuredChannelTimeoutBody(
+  correlationId: string,
+  details: string,
+): Record<string, unknown> | null {
+  const parsed = parseHermesChannelTimeoutDetails(details);
+  if (parsed?.source !== 'hermes-channel'
+    || (
+      parsed.code !== 'HERMES_BRIDGE_RESPONSE_TIMEOUT'
+      && parsed.code !== 'HERMES_GATEWAY_RESPONSE_TIMEOUT'
+    )
+  ) {
+    return null;
+  }
+  return {
+    ...parsed,
+    correlationId,
+  };
+}
 
 function withVerifiedAttachmentImportContextEntries(
   payload: HermesChatPayload,
@@ -164,6 +245,22 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         });
         if (!forwardRes.ok) {
           const details = await forwardRes.text().catch(() => '');
+          if (forwardRes.status === 504 && isHermesChannelTimeoutDetails(details)) {
+            // Only our structured timeout payload proves a DKG local-agent
+            // channel classified the timeout. Preserve its target/source fields;
+            // anonymous 504s keep timeout semantics below without replay.
+            return jsonResponse(res, 504, buildHermesStructuredChannelTimeoutBody(
+              payload.correlationId,
+              details,
+            ) ?? buildHermesChannelTimeoutBody(payload.correlationId, target));
+          }
+          if (forwardRes.status === 504) {
+            return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
+              payload.correlationId,
+              target,
+              details || `${target.name} response timeout`,
+            ));
+          }
           if (isHermesApiKeyRejection(target, forwardRes.status)) {
             return jsonResponse(res, 502, {
               error: 'Hermes API server rejected the API_SERVER_KEY',
@@ -187,13 +284,18 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         }
         if (target.protocol === 'hermes-openai') {
           const reply = await readHermesOpenAiReply(forwardRes, verifiedPayload);
-          const persisted = await persistHermesOpenAiUiTurn(
-            ctx,
-            verifiedPayload,
-            attachmentRefs,
-            reply.text,
-            reply.sessionId,
-          );
+          let persisted: { sessionId: string; turnId: string };
+          try {
+            persisted = await persistHermesOpenAiUiTurn(
+              ctx,
+              verifiedPayload,
+              attachmentRefs,
+              reply.text,
+              reply.sessionId,
+            );
+          } catch (err: any) {
+            return jsonResponse(res, 500, buildHermesUiPersistenceErrorBody(err));
+          }
           return jsonResponse(res, 200, {
             ...reply,
             sessionId: persisted.sessionId,
@@ -204,12 +306,8 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         const reply = await forwardRes.json();
         return jsonResponse(res, 200, reply);
       } catch (err: any) {
-        if (err.name === 'TimeoutError') {
-          lastFailure = {
-            details: `${target.name} response timeout`,
-            offline: true,
-          };
-          continue;
+        if (isHermesBridgeTimeoutError(err)) {
+          return jsonResponse(res, 504, buildHermesChannelTimeoutBody(payload.correlationId, target));
         }
         lastFailure = { details: err.message, offline: true };
       }
@@ -282,6 +380,22 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
 
         if (!transportRes.ok) {
           const details = await transportRes.text().catch(() => '');
+          if (transportRes.status === 504 && isHermesChannelTimeoutDetails(details)) {
+            // Only our structured timeout payload proves a DKG local-agent
+            // channel classified the timeout. Preserve its target/source fields;
+            // anonymous 504s keep timeout semantics below without replay.
+            return jsonResponse(res, 504, buildHermesStructuredChannelTimeoutBody(
+              payload.correlationId,
+              details,
+            ) ?? buildHermesChannelTimeoutBody(payload.correlationId, target));
+          }
+          if (transportRes.status === 504) {
+            return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
+              payload.correlationId,
+              target,
+              details || `${target.name} response timeout`,
+            ));
+          }
           if (isHermesApiKeyRejection(target, transportRes.status)) {
             return jsonResponse(res, 502, {
               error: 'Hermes API server rejected the API_SERVER_KEY',
@@ -320,13 +434,25 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
                 verifiedPayload,
                 transportRes,
               );
-              const persisted = await persistHermesOpenAiUiTurn(
-                ctx,
-                verifiedPayload,
-                attachmentRefs,
-                streamed.text,
-                streamed.sessionId,
-              );
+              let persisted: { sessionId: string; turnId: string };
+              try {
+                persisted = await persistHermesOpenAiUiTurn(
+                  ctx,
+                  verifiedPayload,
+                  attachmentRefs,
+                  streamed.text,
+                  streamed.sessionId,
+                );
+              } catch (err: any) {
+                if (!res.writableEnded) {
+                  res.write(`data: ${JSON.stringify({
+                    type: 'error',
+                    ...buildHermesUiPersistenceErrorBody(err),
+                  })}\n\n`);
+                  res.end();
+                }
+                return;
+              }
               if (!res.writableEnded) {
                 res.write(`data: ${JSON.stringify({
                   type: 'final',
@@ -341,7 +467,10 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
             }
           } catch (err: any) {
             if (!res.writableEnded) {
-              res.write(`data: ${JSON.stringify({ type: 'error', error: err.message })}\n\n`);
+              const event = isHermesBridgeTimeoutError(err)
+                ? { type: 'error', ...buildHermesChannelTimeoutBody(payload.correlationId, target) }
+                : { type: 'error', error: err.message };
+              res.write(`data: ${JSON.stringify(event)}\n\n`);
             }
           }
           if (!res.writableEnded) res.end();
@@ -351,9 +480,14 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         const reply = target.protocol === 'hermes-openai'
           ? await readHermesOpenAiReply(transportRes, verifiedPayload)
           : await transportRes.json();
-        const persisted = target.protocol === 'hermes-openai'
-          ? await persistHermesOpenAiUiTurn(ctx, verifiedPayload, attachmentRefs, reply.text ?? '', reply.sessionId)
-          : null;
+        let persisted: { sessionId: string; turnId: string } | null = null;
+        if (target.protocol === 'hermes-openai') {
+          try {
+            persisted = await persistHermesOpenAiUiTurn(ctx, verifiedPayload, attachmentRefs, reply.text ?? '', reply.sessionId);
+          } catch (err: any) {
+            return jsonResponse(res, 500, buildHermesUiPersistenceErrorBody(err));
+          }
+        }
         res.writeHead(200, {
           'Content-Type': 'text/event-stream; charset=utf-8',
           'Cache-Control': 'no-cache',
@@ -372,12 +506,8 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         res.end();
         return;
       } catch (err: any) {
-        if (err.name === 'TimeoutError') {
-          lastFailure = {
-            details: `${target.name} response timeout`,
-            offline: true,
-          };
-          continue;
+        if (isHermesBridgeTimeoutError(err)) {
+          return jsonResponse(res, 504, buildHermesChannelTimeoutBody(payload.correlationId, target));
         }
         lastFailure = { details: err.message, offline: true };
       }
@@ -420,7 +550,8 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
   }
 
   if (req.method === 'GET' && path === '/api/hermes-channel/health') {
-    return jsonResponse(res, 200, await probeHermesChannelHealth(config, bridgeAuthToken));
+    const health = await probeHermesChannelHealth(config, bridgeAuthToken);
+    return jsonResponse(res, 200, health);
   }
 }
 

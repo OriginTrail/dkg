@@ -2374,6 +2374,10 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
      handles long unbroken tokens. */
   white-space: pre-wrap;
 }
+.v10-chat-failure-notice {
+  display: block;
+  margin-top: 8px;
+}
 .v10-chat-bubble.user {
   /* User pill — right-aligned, capped width, distinct surface. */
   padding: 10px 14px;

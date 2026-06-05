@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { importFile, type ImportFileResult } from '../../api.js';
+import { useModalDismiss } from './useModalDismiss.js';
 
 interface ImportFilesModalProps {
   open: boolean;
@@ -139,6 +140,11 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
     onClose();
   };
 
+  // Esc-to-close + Tab focus-trap + focus-restore, same as Create/Join.
+  // `handleClose` already no-ops while an import is in flight, so Esc and
+  // backdrop-click both inherit that guard.
+  const { dialogRef, onBackdropClick } = useModalDismiss(open, handleClose);
+
   if (!open) return null;
 
   const totalTriples = results.reduce((sum, r) => sum + (r.triplesWritten ?? 0), 0);
@@ -146,16 +152,43 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
   const errorCount = results.filter(r => r.status === 'error').length;
 
   return (
-    <div className="v10-modal-overlay" onClick={(e) => { if (e.target === e.currentTarget && status !== 'uploading') handleClose(); }}>
-      <div className="v10-modal-box" style={{ maxWidth: 560 }}>
-        <div className="v10-modal-header">
-          <div className="v10-modal-title">Import to Working Memory</div>
-          <div className="v10-modal-subtitle">
-            {contextGraphName
-              ? <>Upload files to <strong>{contextGraphName}</strong> — your agent will extract structured knowledge.</>
-              : <>Upload files — your agent will extract structured knowledge and add it to working memory.</>
-            }
+    <div className="v10-modal-overlay" onClick={onBackdropClick} role="presentation">
+      <div
+        className="v10-modal-box"
+        style={{ maxWidth: 560 }}
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="dkg-import-modal-title"
+      >
+        {/* Header is a flex row so the × sits inline in the header flow
+            (no absolute positioning — `.v10-modal-box` is position:static,
+            so an absolutely-positioned button would anchor to the overlay
+            viewport instead of the modal; see #959 Codex review). */}
+        <div
+          className="v10-modal-header"
+          style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}
+        >
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div id="dkg-import-modal-title" className="v10-modal-title">Import to Working Memory</div>
+            <div className="v10-modal-subtitle">
+              {contextGraphName
+                ? <>Upload files to <strong>{contextGraphName}</strong> — your agent will extract structured knowledge.</>
+                : <>Upload files — your agent will extract structured knowledge and add it to working memory.</>
+              }
+            </div>
           </div>
+          <button
+            type="button"
+            className="v10-modal-close"
+            onClick={handleClose}
+            disabled={status === 'uploading'}
+            aria-label="Close import dialog"
+            title="Close (Esc)"
+            style={{ flexShrink: 0, cursor: status === 'uploading' ? 'not-allowed' : 'pointer' }}
+          >
+            ×
+          </button>
         </div>
 
         <div className="v10-modal-body">
@@ -241,7 +274,12 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
 
           {(status === 'done' || status === 'error') && (
             <>
-              <div className={`v10-import-result ${errorCount > 0 ? 'error' : 'success'}`}>
+              <div
+                className={`v10-import-result ${errorCount > 0 ? 'error' : 'success'}`}
+                data-testid="import-result"
+                data-import-status={errorCount > 0 ? 'error' : 'success'}
+                data-import-triples={totalTriples}
+              >
                 {errorCount === 0 ? (
                   <>
                     Successfully imported {successCount} file{successCount !== 1 ? 's' : ''}.

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
+import { SwmGossipPayloadTooLargeError } from '@origintrail-official/dkg-core';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 
@@ -247,6 +248,34 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(status(ctx)).toBe(200);
     expect(body(ctx)).toMatchObject({ swmShared: true, promotedCount: 3 });
     expect(agent.assertion.promote).toHaveBeenCalledOnce();
+  });
+
+  it('POST .../:name/swm/share returns 413 when the promoted gossip payload is too large', async () => {
+    const agent = makeAssertionAgent({
+      assertion: {
+        promote: vi.fn(async () => {
+          throw new SwmGossipPayloadTooLargeError({
+            actualBytes: 12 * 1024 * 1024,
+            maxBytes: 10 * 1024 * 1024,
+            operation: 'promote',
+            message: 'Promoted assertion too large for gossip (12288 KB, limit 10 MB). Promote fewer entities per call.',
+            hint: 'Promote fewer entities per call.',
+          });
+        }),
+      },
+    });
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/swm/share', { contextGraphId: 'cg' }, agent);
+
+    await handleKnowledgeAssetsRoutes(ctx);
+
+    expect(status(ctx)).toBe(413);
+    expect(body(ctx)).toMatchObject({
+      code: 'SWM_GOSSIP_PAYLOAD_TOO_LARGE',
+      actualBytes: 12 * 1024 * 1024,
+      limitBytes: 10 * 1024 * 1024,
+      hint: 'Promote fewer entities per call.',
+      error: expect.stringContaining('Promoted assertion too large for gossip'),
+    });
   });
 
   it('POST .../:name/vm/publish mints/updates on chain', async () => {

@@ -38,13 +38,40 @@ export class DKGInternalError extends DKGError {
 
 /** HTTP request body exceeded the size limit. */
 export class PayloadTooLargeError extends DKGUserError {
-  constructor(maxBytes?: number) {
+  readonly code: string;
+  readonly maxBytes?: number;
+
+  constructor(maxBytes?: number, message?: string, code = 'PAYLOAD_TOO_LARGE') {
     super(
-      maxBytes != null
+      message ??
+      (maxBytes != null
         ? `Request body too large (>${maxBytes} bytes)`
-        : 'Payload too large',
+        : 'Payload too large'),
     );
     this.name = 'PayloadTooLargeError';
+    this.code = code;
+    this.maxBytes = maxBytes;
+  }
+}
+
+/** SWM gossip payload exceeded the network message size limit. */
+export class SwmGossipPayloadTooLargeError extends PayloadTooLargeError {
+  readonly actualBytes: number;
+  readonly hint: string;
+  readonly operation: 'share' | 'promote';
+
+  constructor(args: {
+    actualBytes: number;
+    maxBytes: number;
+    operation: 'share' | 'promote';
+    message: string;
+    hint: string;
+  }) {
+    super(args.maxBytes, args.message, 'SWM_GOSSIP_PAYLOAD_TOO_LARGE');
+    this.name = 'SwmGossipPayloadTooLargeError';
+    this.actualBytes = args.actualBytes;
+    this.operation = args.operation;
+    this.hint = args.hint;
   }
 }
 

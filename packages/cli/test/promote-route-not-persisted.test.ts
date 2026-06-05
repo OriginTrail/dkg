@@ -23,6 +23,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
+import { SwmGossipPayloadTooLargeError } from '@origintrail-official/dkg-core';
 import { handleAssertionRoutes } from '../src/daemon/routes/assertion.js';
 
 const CG_ID = 'issue-864-cg';
@@ -192,6 +193,29 @@ describe('POST /api/assertion/:name/promote — issue #864 not-persisted envelop
       contextGraphId: CG_ID,
       assertionGraph: ASSERTION_GRAPH,
       expectedTripleCount: 7,
+    });
+  });
+
+  it('translates oversized SWM gossip payloads to a structured 413', async () => {
+    await startWithPromoteImpl(async () => {
+      throw new SwmGossipPayloadTooLargeError({
+        actualBytes: 12 * 1024 * 1024,
+        maxBytes: 10 * 1024 * 1024,
+        operation: 'promote',
+        message: 'Promoted assertion too large for gossip (12288 KB, limit 10 MB). Promote fewer entities per call.',
+        hint: 'Promote fewer entities per call.',
+      });
+    });
+
+    const res = await postPromote({ contextGraphId: CG_ID, entities: 'all' });
+
+    expect(res.status).toBe(413);
+    expect(res.body).toMatchObject({
+      code: 'SWM_GOSSIP_PAYLOAD_TOO_LARGE',
+      actualBytes: 12 * 1024 * 1024,
+      limitBytes: 10 * 1024 * 1024,
+      hint: 'Promote fewer entities per call.',
+      error: expect.stringContaining('Promoted assertion too large for gossip'),
     });
   });
 

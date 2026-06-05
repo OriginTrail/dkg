@@ -795,16 +795,19 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       // This is one SPARQL round-trip regardless of how many sub-graphs exist.
       const counts = new Map<string, { entityCount: number; tripleCount: number }>();
       try {
+        const prefix = `did:dkg:context-graph:${contextGraphId}/`;
         const sparql = `
           SELECT ?g (COUNT(DISTINCT ?s) AS ?entities) (COUNT(*) AS ?triples)
-          WHERE { GRAPH ?g { ?s ?p ?o } }
+          WHERE {
+            GRAPH ?g { ?s ?p ?o }
+            FILTER(STRSTARTS(STR(?g), ${JSON.stringify(prefix)}))
+          }
           GROUP BY ?g
         `;
         const result = await agent.query(sparql, {
           contextGraphId: contextGraphId!,
           includeContextGraphPartitions: true,
         });
-        const prefix = `did:dkg:context-graph:${contextGraphId}/`;
         const parseCount = (v: any) => {
           if (v === undefined || v === null) return 0;
           const s = typeof v === 'string' ? v : (v && typeof v === 'object' && 'value' in v ? (v as any).value : '');

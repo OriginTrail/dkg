@@ -412,6 +412,163 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     );
   });
 
+  it('inflates gasLimit by gasLimitBufferBps when populate leaves it unset (OOG headroom)', async () => {
+    // createChallenge's gas depends on per-block randomness, so the adapter
+    // estimates once and inflates the limit. Verify the buffered branch
+    // actually mutates the populated tx that gets signed (Codex review:
+    // previously only covered indirectly through flaky Hardhat e2e).
+    const a = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+    const provider = { name: 'only' } as any;
+    const signer = new ethers.Wallet(DEPLOYER_PK, provider);
+    const receipt = { hash: '0xabc', blockNumber: 7, status: 1, logs: [] };
+    // No gasLimit from populate → buffered-estimate path runs.
+    const populated: any = { to: '0x0000000000000000000000000000000000000001', data: '0x1234' };
+    const populateTransaction = vi.fn(async () => populated);
+    const estimateGas = vi.fn(async () => 1_000_000n);
+    const contract = {
+      connect: vi.fn(() => ({ createChallenge: { populateTransaction, estimateGas } })),
+    };
+    (a as any).providers = [provider];
+    const signSpy = vi.fn(async () => ({ signedTx: '0xdead', txHash: receipt.hash }));
+    (a as any).signPopulatedTransaction = signSpy;
+    (a as any).sendSignedTransactionAndWait = vi.fn(async () => receipt);
+
+    await expect((a as any).sendContractTransaction(
+      contract,
+      'createChallenge',
+      [],
+      signer,
+      'create random-sampling challenge',
+      { gasLimitBufferBps: 5_000 },
+    )).resolves.toBe(receipt);
+
+    expect(estimateGas).toHaveBeenCalledTimes(1);
+    // 1_000_000 * (10_000 + 5_000) / 10_000 = 1_500_000
+    expect(signSpy.mock.calls[0][1].gasLimit).toBe(1_500_000n);
+  });
+
+  it('falls back to the unbuffered signing flow and warns when buffered estimateGas throws', async () => {
+    const a = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+    const provider = { name: 'only' } as any;
+    const signer = new ethers.Wallet(DEPLOYER_PK, provider);
+    const receipt = { hash: '0xabc', blockNumber: 9, status: 1, logs: [] };
+    const populated: any = { to: '0x0000000000000000000000000000000000000001', data: '0x1234' };
+    const populateTransaction = vi.fn(async () => populated);
+    const estimateGas = vi.fn(async () => { throw new Error('estimate boom'); });
+    const contract = {
+      connect: vi.fn(() => ({ createChallenge: { populateTransaction, estimateGas } })),
+    };
+    (a as any).providers = [provider];
+    const signSpy = vi.fn(async () => ({ signedTx: '0xdead', txHash: receipt.hash }));
+    (a as any).signPopulatedTransaction = signSpy;
+    (a as any).sendSignedTransactionAndWait = vi.fn(async () => receipt);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await expect((a as any).sendContractTransaction(
+      contract,
+      'createChallenge',
+      [],
+      signer,
+      'create random-sampling challenge',
+      { gasLimitBufferBps: 5_000 },
+    )).resolves.toBe(receipt);
+
+    // No headroom applied — gasLimit stays unset so ethers estimates during
+    // signing (unbuffered, but no worse than before the buffer existed).
+    expect(signSpy.mock.calls[0][1].gasLimit).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(String(warnSpy.mock.calls[0][0])).toContain('buffered gas estimation failed');
+    warnSpy.mockRestore();
+  });
+
+  it('skips gas estimation when populate already set gasLimit (buffer is a no-op)', async () => {
+    const a = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+    const provider = { name: 'only' } as any;
+    const signer = new ethers.Wallet(DEPLOYER_PK, provider);
+    const receipt = { hash: '0xabc', blockNumber: 11, status: 1, logs: [] };
+    const populated: any = { to: '0x0000000000000000000000000000000000000001', data: '0x1234', gasLimit: 800_000n };
+    const populateTransaction = vi.fn(async () => populated);
+    const estimateGas = vi.fn(async () => 1_000_000n);
+    const contract = {
+      connect: vi.fn(() => ({ createChallenge: { populateTransaction, estimateGas } })),
+    };
+    (a as any).providers = [provider];
+    const signSpy = vi.fn(async () => ({ signedTx: '0xdead', txHash: receipt.hash }));
+    (a as any).signPopulatedTransaction = signSpy;
+    (a as any).sendSignedTransactionAndWait = vi.fn(async () => receipt);
+
+    await expect((a as any).sendContractTransaction(
+      contract,
+      'createChallenge',
+      [],
+      signer,
+      'create random-sampling challenge',
+      { gasLimitBufferBps: 5_000 },
+    )).resolves.toBe(receipt);
+
+    expect(estimateGas).not.toHaveBeenCalled();
+    expect(signSpy.mock.calls[0][1].gasLimit).toBe(800_000n);
+  });
+
+  it('fails over to the next RPC when buffered estimateGas is rate-limited (keeps the OOG headroom)', async () => {
+    // A retryable estimate failure must NOT silently drop the gas headroom
+    // by signing unbuffered against the failing provider — that reintroduces
+    // the OOG this guards against. Instead the outer loop should fail over to
+    // a healthy RPC that can estimate, and the buffer is still applied
+    // (Codex review).
+    const a = new EVMChainAdapter(minimalConfig({
+      rpcUrl: 'https://primary.example',
+      rpcUrls: ['https://backup.example'],
+    }));
+    const primaryProvider = { name: 'primary' } as any;
+    const backupProvider = { name: 'backup' } as any;
+    const signer = new ethers.Wallet(DEPLOYER_PK, primaryProvider);
+    const receipt = { hash: '0xabc', blockNumber: 13, status: 1, logs: [] };
+    // Fresh populated per provider so provider #1's discarded attempt can't
+    // leak a gasLimit onto provider #2.
+    const populateTransaction = vi.fn(async () => (
+      { to: '0x0000000000000000000000000000000000000001', data: '0x1234' } as any
+    ));
+    const estimateGas = vi.fn()
+      .mockImplementationOnce(async () => {
+        const err = new Error('429 too many requests');
+        (err as any).status = 429;
+        throw err;
+      })
+      .mockResolvedValueOnce(1_000_000n);
+    const runners: any[] = [];
+    const contract = {
+      connect: vi.fn((runner: any) => {
+        runners.push(runner);
+        return { createChallenge: { populateTransaction, estimateGas } };
+      }),
+    };
+    (a as any).providers = [primaryProvider, backupProvider];
+    const signSpy = vi.fn(async () => ({ signedTx: '0xdead', txHash: receipt.hash }));
+    (a as any).signPopulatedTransaction = signSpy;
+    (a as any).sendSignedTransactionAndWait = vi.fn(async () => receipt);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await expect((a as any).sendContractTransaction(
+      contract,
+      'createChallenge',
+      [],
+      signer,
+      'create random-sampling challenge',
+      { gasLimitBufferBps: 5_000 },
+    )).resolves.toBe(receipt);
+
+    expect(estimateGas).toHaveBeenCalledTimes(2);
+    expect(populateTransaction).toHaveBeenCalledTimes(2);
+    // Buffer still applied on the healthy provider.
+    expect(signSpy.mock.calls[0][1].gasLimit).toBe(1_500_000n);
+    // Signed against the BACKUP runner, not the rate-limited primary.
+    expect(signSpy.mock.calls[0][0].provider).toBe(backupProvider);
+    // Failover, not silent fallback — no "headroom not applied" warning.
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
   it('names exhausted RPC endpoints when transaction population fails everywhere', async () => {
     const a = new EVMChainAdapter(minimalConfig({
       rpcUrl: 'https://primary.example',
@@ -1226,6 +1383,16 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
 describe('init() RPC-exhaustion bounding (perpetual 429)', () => {
   let server: Server | null = null;
   let url = '';
+  // Track every adapter the tests build so teardown can `destroy()` them. Under
+  // a perpetual 429 the provider keeps retrying with backoff on a keep-alive
+  // socket AFTER the call rejects; if we don't tear it down, that live
+  // connection keeps `server.close()` from ever invoking its callback, and the
+  // afterEach hook blows past vitest's 10s hook-timeout (the flaky CI failure).
+  const adapters: EVMChainAdapter[] = [];
+  function track(a: EVMChainAdapter): EVMChainAdapter {
+    adapters.push(a);
+    return a;
+  }
 
   async function startRateLimited429(): Promise<string> {
     server = createServer((_req, res) => {
@@ -1239,7 +1406,14 @@ describe('init() RPC-exhaustion bounding (perpetual 429)', () => {
   }
 
   afterEach(async () => {
+    // Stop ethers' background retry loop / idle sockets FIRST, then force-close
+    // any still-open connections, so `server.close()` resolves promptly instead
+    // of hanging on the provider's in-flight 429 retry.
+    for (const a of adapters.splice(0)) {
+      try { a.destroy(); } catch { /* destroy() is idempotent */ }
+    }
     if (server) {
+      server.closeAllConnections?.();
       await new Promise<void>((resolve) => server!.close(() => resolve()));
       server = null;
     }
@@ -1247,7 +1421,7 @@ describe('init() RPC-exhaustion bounding (perpetual 429)', () => {
 
   it('surfaces RPC_ENDPOINTS_EXHAUSTED from createOnChainContextGraph within a bounded time under a perpetually rate-limited RPC', async () => {
     url = await startRateLimited429();
-    const a = new EVMChainAdapter(minimalConfig({ rpcUrl: url, rpcUrls: [] }));
+    const a = track(new EVMChainAdapter(minimalConfig({ rpcUrl: url, rpcUrls: [] })));
 
     const start = Date.now();
     let thrown: any;
@@ -1285,7 +1459,7 @@ describe('init() RPC-exhaustion bounding (perpetual 429)', () => {
     const addr = server.address();
     if (!addr || typeof addr === 'string') throw new Error('mock RPC failed to bind');
     url = `http://127.0.0.1:${addr.port}`;
-    const a = new EVMChainAdapter(minimalConfig({ rpcUrl: url, rpcUrls: [] }));
+    const a = track(new EVMChainAdapter(minimalConfig({ rpcUrl: url, rpcUrls: [] })));
 
     // First read: exhaust + count its retries. >1 hit ⇒ it retried.
     hits = 0;
