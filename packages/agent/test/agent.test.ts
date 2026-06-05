@@ -4306,6 +4306,89 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     }
   });
 
+  it('reconciles local-node membership for rows left DORMANT by the rehydration cap (#997)', async () => {
+    const cap = 2;
+    const rows = Array.from({ length: 5 }, (_, i) => ({
+      id: `mem-cg-${i}`, name: `Mem ${i}`, subscribed: true, synced: false,
+      sharedMemorySynced: false, metaSynced: false, syncScoped: true,
+    }));
+    const subscriptionStore = {
+      loadAll: async () => rows,
+      save: async () => {},
+      delete: async () => {},
+    };
+    const memberDeletes: Array<{ cgId: string; type: string }> = [];
+    const membershipStore = {
+      upsert: async () => {},
+      delete: async (cgId: string, type: string) => { memberDeletes.push({ cgId, type }); },
+    };
+    const agent = await DKGAgent.create({
+      name: 'CapMembershipReconcile',
+      listenHost: '127.0.0.1',
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      contextGraphSubscriptionStore: subscriptionStore,
+      contextGraphMembershipStore: membershipStore,
+      maxRehydratedContextGraphSubscriptions: cap,
+    });
+    try {
+      await agent.start();
+      // The 3 rows past the cap (mem-cg-2..4) are left DORMANT → their local-node
+      // membership is reconciled away (deleteContextGraphMember called), so the
+      // node no longer looks like a member of graphs it left dormant (ACL). The
+      // activated rows (mem-cg-0, mem-cg-1) are NOT reconciled.
+      const dormantDeleted = memberDeletes
+        .filter((d) => d.type === 'node' && ['mem-cg-2', 'mem-cg-3', 'mem-cg-4'].includes(d.cgId))
+        .map((d) => d.cgId);
+      expect(new Set(dormantDeleted)).toEqual(new Set(['mem-cg-2', 'mem-cg-3', 'mem-cg-4']));
+      expect(memberDeletes.filter((d) => ['mem-cg-0', 'mem-cg-1'].includes(d.cgId))).toHaveLength(0);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('clear targets only SUBSCRIBED CGs (leaves discoverable-only catalog) and reconciles their membership (#997)', async () => {
+    const persisted = new Map<string, any>();
+    persisted.set('sub-cg', { id: 'sub-cg', name: 'Subscribed', subscribed: true, synced: false, syncScoped: true });
+    // Discoverable-only catalog entry (seeded by ontology discovery, never subscribed).
+    persisted.set('disc-cg', { id: 'disc-cg', name: 'Discoverable', subscribed: false, synced: false, syncScoped: false });
+    const subscriptionStore = {
+      loadAll: async () => [...persisted.values()],
+      save: async (r: any) => { persisted.set(r.id, { ...r }); },
+      delete: async (id: string) => { persisted.delete(id); },
+    };
+    const persistedMembers = new Map<string, any>();
+    const membershipStore = {
+      upsert: async (r: any) => { persistedMembers.set(`${r.contextGraphId}|${r.principalType}|${r.principalId}`, { ...r }); },
+      delete: async (cgId: string, type: string, pid: string) => { persistedMembers.delete(`${cgId}|${type}|${pid}`); },
+    };
+    const agent = await DKGAgent.create({
+      name: 'ClearSubscribedOnly',
+      listenHost: '127.0.0.1',
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      contextGraphSubscriptionStore: subscriptionStore,
+      contextGraphMembershipStore: membershipStore,
+    });
+    try {
+      await agent.start();
+      const peerId = agent.peerId;
+      // sub-cg activates → active local-node membership; disc-cg is subscribed:false → no membership.
+      expect(persistedMembers.has(`sub-cg|node|${peerId}`)).toBe(true);
+
+      const cleared = await agent.clearContextGraphSubscriptions();
+
+      // Only the SUBSCRIBED CG is cleared + counted; the discoverable-only catalog
+      // entry is left untouched.
+      expect(cleared).toBe(1);
+      expect(persisted.has('sub-cg')).toBe(false);
+      expect(persisted.has('disc-cg')).toBe(true);
+      expect(agent.getSubscribedContextGraphs().has('disc-cg')).toBe(true);
+      // The cleared CG's membership is reconciled away (it feeds members / ACL).
+      expect(persistedMembers.has(`sub-cg|node|${peerId}`)).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('canonicalizes Ethereum agent membership principals before persistence', async () => {
     const persistedMembers = new Map<string, any>();
     const deletedMembers: string[] = [];
