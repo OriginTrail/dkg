@@ -1383,6 +1383,16 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
 describe('init() RPC-exhaustion bounding (perpetual 429)', () => {
   let server: Server | null = null;
   let url = '';
+  // Track every adapter the tests build so teardown can `destroy()` them. Under
+  // a perpetual 429 the provider keeps retrying with backoff on a keep-alive
+  // socket AFTER the call rejects; if we don't tear it down, that live
+  // connection keeps `server.close()` from ever invoking its callback, and the
+  // afterEach hook blows past vitest's 10s hook-timeout (the flaky CI failure).
+  const adapters: EVMChainAdapter[] = [];
+  function track(a: EVMChainAdapter): EVMChainAdapter {
+    adapters.push(a);
+    return a;
+  }
 
   async function startRateLimited429(): Promise<string> {
     server = createServer((_req, res) => {
@@ -1396,7 +1406,14 @@ describe('init() RPC-exhaustion bounding (perpetual 429)', () => {
   }
 
   afterEach(async () => {
+    // Stop ethers' background retry loop / idle sockets FIRST, then force-close
+    // any still-open connections, so `server.close()` resolves promptly instead
+    // of hanging on the provider's in-flight 429 retry.
+    for (const a of adapters.splice(0)) {
+      try { a.destroy(); } catch { /* destroy() is idempotent */ }
+    }
     if (server) {
+      server.closeAllConnections?.();
       await new Promise<void>((resolve) => server!.close(() => resolve()));
       server = null;
     }
@@ -1404,7 +1421,7 @@ describe('init() RPC-exhaustion bounding (perpetual 429)', () => {
 
   it('surfaces RPC_ENDPOINTS_EXHAUSTED from createOnChainContextGraph within a bounded time under a perpetually rate-limited RPC', async () => {
     url = await startRateLimited429();
-    const a = new EVMChainAdapter(minimalConfig({ rpcUrl: url, rpcUrls: [] }));
+    const a = track(new EVMChainAdapter(minimalConfig({ rpcUrl: url, rpcUrls: [] })));
 
     const start = Date.now();
     let thrown: any;
@@ -1442,7 +1459,7 @@ describe('init() RPC-exhaustion bounding (perpetual 429)', () => {
     const addr = server.address();
     if (!addr || typeof addr === 'string') throw new Error('mock RPC failed to bind');
     url = `http://127.0.0.1:${addr.port}`;
-    const a = new EVMChainAdapter(minimalConfig({ rpcUrl: url, rpcUrls: [] }));
+    const a = track(new EVMChainAdapter(minimalConfig({ rpcUrl: url, rpcUrls: [] })));
 
     // First read: exhaust + count its retries. >1 hit ⇒ it retried.
     hits = 0;

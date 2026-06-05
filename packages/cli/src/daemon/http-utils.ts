@@ -38,6 +38,34 @@ export interface PublishRequestBody {
 
 import type { CorsAllowlist } from './state.js';
 
+export function isPayloadTooLargeError(err: unknown): err is PayloadTooLargeError {
+  if (err instanceof PayloadTooLargeError) return true;
+  if (!err || typeof err !== 'object') return false;
+  const shaped = err as { name?: unknown; code?: unknown };
+  return (
+    shaped.name === 'PayloadTooLargeError' ||
+    shaped.name === 'SwmGossipPayloadTooLargeError' ||
+    shaped.code === 'PAYLOAD_TOO_LARGE' ||
+    shaped.code === 'SWM_GOSSIP_PAYLOAD_TOO_LARGE'
+  );
+}
+
+export function payloadTooLargeResponseBody(err: unknown): Record<string, unknown> {
+  const shaped = (err && typeof err === 'object') ? err as Record<string, unknown> : {};
+  const message = err instanceof Error ? err.message : String(err ?? 'Payload too large');
+  const body: Record<string, unknown> = {
+    error: message,
+    code: typeof shaped.code === 'string' ? shaped.code : 'PAYLOAD_TOO_LARGE',
+  };
+  const maxBytes = shaped.maxBytes;
+  if (typeof maxBytes === 'number') body.limitBytes = maxBytes;
+  const actualBytes = shaped.actualBytes;
+  if (typeof actualBytes === 'number') body.actualBytes = actualBytes;
+  const hint = shaped.hint;
+  if (typeof hint === 'string' && hint.length > 0) body.hint = hint;
+  return body;
+}
+
 export async function resolveNameToPeerId(
   agent: DKGAgent,
   nameOrId: string,

@@ -45,12 +45,32 @@ import {
 export const CHANNEL_NAME = 'dkg-ui';
 const DEFAULT_CHANNEL_ACCOUNT_ID = 'default';
 const TURN_PERSIST_RETRY_DELAYS_MS = [250, 1_000] as const;
-const CHANNEL_RESPONSE_TIMEOUT_MS = 180_000;
+const CHANNEL_RESPONSE_TIMEOUT_MS = 15 * 60_000;
 const STOP_DRAIN_TIMEOUT_MS = 1_500;
 const FINAL_MARKER_FLUSH_TIMEOUT_MS = 250;
 const NO_TEXT_RESPONSE_ERROR = 'Agent returned no text response';
+const AGENT_RESPONSE_TIMEOUT_ERROR = 'Agent response timeout';
 const CANCELLED_TURN_MESSAGE = '[OpenClaw reply cancelled before completion]';
 const FAILED_TURN_MESSAGE_PREFIX = '[OpenClaw reply failed before completion';
+
+function isAgentResponseTimeoutError(err: any): boolean {
+  return err?.message === AGENT_RESPONSE_TIMEOUT_ERROR;
+}
+
+function buildAgentTimeoutResponseBody(): Record<string, unknown> {
+  return {
+    error: AGENT_RESPONSE_TIMEOUT_ERROR,
+    code: 'AGENT_TIMEOUT',
+    source: 'openclaw-agent',
+    details: 'OpenClaw agent runtime did not produce a response before its deadline',
+  };
+}
+
+function buildStreamErrorEvent(err: any): Record<string, unknown> {
+  return isAgentResponseTimeoutError(err)
+    ? { type: 'error', ...buildAgentTimeoutResponseBody() }
+    : { type: 'error', error: err?.message ?? String(err) };
+}
 
 /** Strip identity to safe characters and cap length to prevent injection into session keys / URIs. */
 function sanitizeIdentity(raw: string): string {
@@ -1570,7 +1590,7 @@ export class DkgChannelPlugin {
     return new Promise<ChannelOutboundReplyWithMarkerAliases>((resolve, reject) => {
       const TIMEOUT_MS = CHANNEL_RESPONSE_TIMEOUT_MS;
       const timer = setTimeout(() => {
-        reject(new Error('Agent response timeout'));
+        reject(new Error(AGENT_RESPONSE_TIMEOUT_ERROR));
       }, TIMEOUT_MS);
 
       const replyChunks: string[] = [];
@@ -1630,7 +1650,7 @@ export class DkgChannelPlugin {
     return new Promise<ChannelOutboundReplyWithMarkerAliases>((resolve, reject) => {
       const TIMEOUT_MS = CHANNEL_RESPONSE_TIMEOUT_MS;
       const timer = setTimeout(() => {
-        reject(new Error('Agent response timeout'));
+        reject(new Error(AGENT_RESPONSE_TIMEOUT_ERROR));
       }, TIMEOUT_MS);
 
       const replyChunks: string[] = [];
@@ -1786,7 +1806,7 @@ export class DkgChannelPlugin {
     };
 
     const TIMEOUT_MS = CHANNEL_RESPONSE_TIMEOUT_MS;
-    const timer = setTimeout(() => push({ type: 'error', error: new Error('Agent response timeout') }), TIMEOUT_MS);
+    const timer = setTimeout(() => push({ type: 'error', error: new Error(AGENT_RESPONSE_TIMEOUT_ERROR) }), TIMEOUT_MS);
 
     let replyText = '';
     let dispatchTerminal: 'done' | 'error' | null = null;
@@ -2384,9 +2404,10 @@ export class DkgChannelPlugin {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(reply));
       } catch (err: any) {
-        const status = err.message === 'Agent response timeout' ? 504 : 500;
+        const isAgentTimeout = isAgentResponseTimeoutError(err);
+        const status = isAgentTimeout ? 504 : 500;
         res.writeHead(status, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: err.message }));
+        res.end(JSON.stringify(isAgentTimeout ? buildAgentTimeoutResponseBody() : { error: err.message }));
       }
     } finally {
       this.inFlight--;
@@ -2472,7 +2493,7 @@ export class DkgChannelPlugin {
         }
       } catch (err: any) {
         if (!clientDisconnected) {
-          res.write(`data: ${JSON.stringify({ type: 'error', error: err.message })}\n\n`);
+          res.write(`data: ${JSON.stringify(buildStreamErrorEvent(err))}\n\n`);
         }
       }
       if (!res.writableEnded) res.end();
@@ -2522,9 +2543,10 @@ export class DkgChannelPlugin {
       res.writeHead?.(200, { 'Content-Type': 'application/json' });
       res.end?.(JSON.stringify(reply));
     } catch (err: any) {
-      const status = err.message === 'Agent response timeout' ? 504 : 500;
+      const isAgentTimeout = isAgentResponseTimeoutError(err);
+      const status = isAgentTimeout ? 504 : 500;
       res.writeHead?.(status, { 'Content-Type': 'application/json' });
-      res.end?.(JSON.stringify({ error: err.message }));
+      res.end?.(JSON.stringify(isAgentTimeout ? buildAgentTimeoutResponseBody() : { error: err.message }));
     }
   }
 

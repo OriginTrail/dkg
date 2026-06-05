@@ -205,6 +205,8 @@ import {
   MAX_UPLOAD_BYTES,
   type ImportFileExtractionPayload,
   buildImportFileResponse,
+  isPayloadTooLargeError,
+  payloadTooLargeResponseBody,
   unregisteredSubGraphError,
   readBody,
   readBodyBuffer,
@@ -1841,6 +1843,9 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
       // branch so the more specific code wins. Duck-type the check by
       // name + code so we don't have to import the publisher's error
       // class into the cli package's compile graph.
+      if (isPayloadTooLargeError(err)) {
+        return jsonResponse(res, 413, payloadTooLargeResponseBody(err));
+      }
       if (err?.name === "AssertionNotPersistedError" || err?.code === "ASSERTION_NOT_PERSISTED") {
         return jsonResponse(res, 409, {
           error: err.message,

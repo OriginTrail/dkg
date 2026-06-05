@@ -20,6 +20,7 @@ const fetchLocalAgentIntegrationsMock = vi.fn();
 const fetchLocalAgentHistoryMock = vi.fn();
 const fetchCurrentAgentMock = vi.fn();
 const importFileMock = vi.fn();
+const persistLocalAgentChatFailureMock = vi.fn();
 const streamLocalAgentChatMock = vi.fn();
 const connectLocalAgentIntegrationMock = vi.fn();
 const disconnectLocalAgentIntegrationMock = vi.fn();
@@ -35,6 +36,7 @@ vi.mock('../src/ui/api.js', async () => {
     fetchLocalAgentHistory: fetchLocalAgentHistoryMock,
     fetchCurrentAgent: fetchCurrentAgentMock,
     importFile: importFileMock,
+    persistLocalAgentChatFailure: persistLocalAgentChatFailureMock,
     streamLocalAgentChat: streamLocalAgentChatMock,
     connectLocalAgentIntegration: connectLocalAgentIntegrationMock,
     disconnectLocalAgentIntegration: disconnectLocalAgentIntegrationMock,
@@ -119,6 +121,7 @@ describe('PanelRight component', () => {
       nodeIdentityId: 'node-self',
     });
     streamLocalAgentChatMock.mockResolvedValue({ text: 'Roger that', correlationId: 'corr-1' });
+    persistLocalAgentChatFailureMock.mockResolvedValue({ ok: true, turnId: 'corr-1' });
     importFileMock.mockResolvedValue({
       assertionUri: 'urn:dkg:assertion:completed',
       fileHash: 'sha256:completed',
@@ -308,6 +311,272 @@ describe('PanelRight component', () => {
       ],
     }));
     expect(container.textContent).toContain('Roger that');
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('does not client-persist failed OpenClaw turns', async () => {
+    streamLocalAgentChatMock.mockRejectedValue(new Error('OpenClaw bridge unreachable'));
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(React.createElement(PanelRight));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector('textarea');
+    expect(textarea).toBeTruthy();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      valueSetter?.call(textarea, 'Run the OpenClaw task');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    const sendButton = container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement | null;
+    expect(sendButton).toBeTruthy();
+    await act(async () => {
+      sendButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain('Error: OpenClaw is unavailable right now.');
+    });
+    expect(persistLocalAgentChatFailureMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('persists failed Hermes turns so timeout sessions survive refresh', async () => {
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
+      id: 'hermes',
+      name: 'Hermes',
+      description: 'Hermes bridge',
+      connectSupported: true,
+      chatSupported: true,
+      chatReady: true,
+      chatAttachments: true,
+      persistentChat: true,
+      bridgeOnline: true,
+      bridgeStatusLabel: 'Connected',
+      configured: true,
+      detected: true,
+      status: 'connected',
+      statusLabel: 'Connected',
+      detail: 'ready',
+      defaultSessionId: 'hermes:dkg-ui:profile-dkg-smoke',
+      profile: 'dkg-smoke',
+      target: 'bridge',
+    }] });
+    streamLocalAgentChatMock.mockImplementation(async (_integrationId: string, _text: string, options: any) => {
+      options?.onEvent?.({ type: 'text_delta', delta: 'Partial Hermes output' });
+      throw new Error('Agent response timeout');
+    });
+    persistLocalAgentChatFailureMock.mockResolvedValue({ ok: true, turnId: 'corr-timeout' });
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+
+    act(() => {
+      useProjectsStore.setState({
+        contextGraphs: [{ id: 'testing', name: 'Testing' }],
+        loading: false,
+        activeProjectId: 'testing',
+      });
+    });
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(React.createElement(PanelRight));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector('textarea');
+    expect(textarea).toBeTruthy();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      valueSetter?.call(textarea, 'Run the slow Hermes task');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    const sendButton = container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement | null;
+    expect(sendButton).toBeTruthy();
+    await act(async () => {
+      sendButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await waitForAssertion(() => {
+      expect(persistLocalAgentChatFailureMock).toHaveBeenCalled();
+    });
+    expect(persistLocalAgentChatFailureMock).toHaveBeenCalledWith('hermes', expect.objectContaining({
+      sessionId: 'hermes:dkg-ui:profile-dkg-smoke',
+      correlationId: expect.any(String),
+      userMessage: 'Run the slow Hermes task',
+      assistantReply: 'Partial Hermes output',
+      failureReason: 'Hermes took too long to respond.',
+      profile: 'dkg-smoke',
+      contextGraphId: 'testing',
+    }));
+    expect(persistLocalAgentChatFailureMock.mock.calls[0]?.[1]).not.toHaveProperty('turnId');
+    expect(container.textContent).toContain('Partial Hermes output');
+    expect(container.textContent).toContain('Error: Hermes took too long to respond.');
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('renders live Hermes failure notices as plain text while preserving partial markdown', async () => {
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
+      id: 'hermes',
+      name: 'Hermes',
+      description: 'Hermes bridge',
+      connectSupported: true,
+      chatSupported: true,
+      chatReady: true,
+      chatAttachments: true,
+      persistentChat: true,
+      bridgeOnline: true,
+      bridgeStatusLabel: 'Connected',
+      configured: true,
+      detected: true,
+      status: 'connected',
+      statusLabel: 'Connected',
+      detail: 'ready',
+      defaultSessionId: 'hermes:dkg-ui:profile-dkg-smoke',
+      profile: 'dkg-smoke',
+      target: 'bridge',
+    }] });
+    streamLocalAgentChatMock.mockImplementation(async (_integrationId: string, _text: string, options: any) => {
+      options?.onEvent?.({ type: 'text_delta', delta: '**Partial Hermes output**' });
+      throw new Error('Backend returned [unsafe](https://attacker.example)');
+    });
+    persistLocalAgentChatFailureMock.mockResolvedValue({ ok: true, turnId: 'corr-unsafe' });
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(React.createElement(PanelRight));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector('textarea');
+    expect(textarea).toBeTruthy();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      valueSetter?.call(textarea, 'Run the unsafe Hermes task');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    const sendButton = container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement | null;
+    expect(sendButton).toBeTruthy();
+    await act(async () => {
+      sendButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await waitForAssertion(() => {
+      expect(persistLocalAgentChatFailureMock).toHaveBeenCalled();
+    });
+    expect(container.querySelector('strong')?.textContent).toBe('Partial Hermes output');
+    expect(container.textContent).toContain('Error: Backend returned [unsafe](https://attacker.example)');
+    const unsafeLinks = Array.from(container.querySelectorAll('a'))
+      .filter((link) => link.textContent === 'unsafe');
+    expect(unsafeLinks).toHaveLength(0);
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('renders structured local-agent timeout errors without raw abort text', async () => {
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const { LocalAgentApiError } = await import('../src/ui/api.js');
+
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
+      id: 'hermes',
+      name: 'Hermes',
+      description: 'Local bridge',
+      connectSupported: true,
+      chatSupported: true,
+      chatReady: true,
+      chatAttachments: true,
+      persistentChat: true,
+      bridgeOnline: true,
+      bridgeStatusLabel: 'Connected',
+      configured: true,
+      detected: true,
+      status: 'connected',
+      statusLabel: 'Connected',
+      detail: 'ready',
+      target: 'local',
+    }] });
+    streamLocalAgentChatMock.mockRejectedValueOnce(new LocalAgentApiError(
+      'Hermes bridge response timeout: The operation was aborted due to timeout',
+      {
+        code: 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
+        source: 'hermes-channel',
+        correlationId: 'corr-timeout',
+        timeoutMs: 900000,
+      },
+    ));
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(React.createElement(PanelRight));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector('textarea');
+    expect(textarea).toBeTruthy();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      valueSetter?.call(textarea, 'Run a long task');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    const sendButton = container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement | null;
+    expect(sendButton).toBeTruthy();
+    await act(async () => {
+      sendButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain('Error: Hermes bridge response timed out.');
+    });
+    expect(container.textContent).not.toContain('The operation was aborted due to timeout');
 
     await act(async () => {
       root.unmount();

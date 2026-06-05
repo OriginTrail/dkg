@@ -52,6 +52,15 @@ describe('classifyPromoteError', () => {
     expect(verdict).toEqual({ classification: 'cap_exceeded', retryable: false });
   });
 
+  it('classifies typed SWM gossip-cap errors by code', () => {
+    const err = new Error('custom wording') as Error & { code: string };
+    err.code = 'SWM_GOSSIP_PAYLOAD_TOO_LARGE';
+
+    const verdict = classifyPromoteError(err);
+
+    expect(verdict).toEqual({ classification: 'cap_exceeded', retryable: false });
+  });
+
   it('classifies 256 KB body-cap errors as cap_exceeded', () => {
     const verdict = classifyPromoteError(new Error('Request body too large (>262144 bytes)'));
     expect(verdict.classification).toBe('cap_exceeded');
