@@ -451,6 +451,15 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     requestAgentAddress,
     emitMemoryGraphChanged,
   } = ctx;
+  // Operator gate for the node-wide subscription endpoints. When auth is ENABLED,
+  // require a node-level admin token — a recognised token (in validTokens) that
+  // resolves to no agent (agent-scoped tokens resolve to an address; a
+  // missing/unrecognised token isn't in validTokens). When auth is DISABLED the
+  // daemon runs admin maintenance routes tokenless (trusted local), so don't 403.
+  const authEnabled = config.auth?.enabled !== false;
+  const isNodeAdminCaller = (): boolean =>
+    !authEnabled ||
+    (!!requestToken && validTokens.has(requestToken) && !agent.resolveAgentByToken(requestToken));
   const writePreflightCallerAgentAddress = requestToken
     ? agent.resolveAgentByToken(requestToken)
     : undefined;
@@ -1652,11 +1661,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   if (req.method === "GET" && path === "/api/context-graph/subscriptions") {
     // Operator-only: this is a NODE-WIDE view, so an agent-scoped token would
     // otherwise be able to enumerate OTHER agents' subscribed/private CG IDs.
-    // Require the node-level admin token — a recognised token (in validTokens)
-    // that resolves to no agent. (`resolveAgentByToken === undefined` alone is
-    // insufficient: it also matches a missing/unrecognised token when auth is
-    // disabled, which is not in validTokens.)
-    if (!requestToken || !validTokens.has(requestToken) || agent.resolveAgentByToken(requestToken)) {
+    if (!isNodeAdminCaller()) {
       return jsonResponse(res, 403, {
         error:
           "GET /api/context-graph/subscriptions requires a node-level admin token " +
@@ -1689,13 +1694,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // Non-destructive to VM/SWM data — only the local subscription bookkeeping is
   // cleared; legitimate context graphs re-subscribe on next access.
   if (req.method === "DELETE" && path === "/api/context-graph/subscriptions") {
-    // Destructive + node-wide: require the node-level admin token — a recognised
-    // token (in validTokens) that resolves to NO agent. Agent-scoped tokens
-    // resolve to an address; a missing/unrecognised token is not in validTokens.
-    // Checking `resolveAgentByToken === undefined` ALONE is insufficient — it
-    // also matches a missing token when auth is disabled, which would let the
-    // backlog be wiped without proving admin identity.
-    if (!requestToken || !validTokens.has(requestToken) || agent.resolveAgentByToken(requestToken)) {
+    // Destructive + node-wide: operator-only (node-admin token when auth is on;
+    // tokenless when auth is disabled). Prevents an agent-scoped token from
+    // wiping every user's subscription backlog.
+    if (!isNodeAdminCaller()) {
       return jsonResponse(res, 403, {
         error:
           "DELETE /api/context-graph/subscriptions requires a node-level admin token " +

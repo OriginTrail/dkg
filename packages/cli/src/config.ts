@@ -446,6 +446,14 @@ export interface DkgConfig {
   blockExplorerUrl?: string;
   /** Triple store backend override (default: oxigraph-worker with file persistence). */
   store?: { backend: string; options?: Record<string, unknown> };
+  /**
+   * Cap on how many persisted context-graph subscriptions a node ACTIVATES on
+   * boot (gossip + sync). A large stale backlog otherwise fans out store work
+   * and starves authenticated routes (#997). coreHosted graphs are always
+   * restored regardless of this cap. Non-negative integer; 0 = no cap. Raise it
+   * on nodes that legitimately subscribe to more than the default (64).
+   */
+  maxRehydratedContextGraphSubscriptions?: number;
   /** Out-of-line storage for large public SWM RDF literal object terms. */
   largeLiteralStorage?: LargeLiteralStorageConfig;
   /** Out-of-line storage for immutable public SWM operation snapshots. */

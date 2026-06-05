@@ -1208,6 +1208,7 @@ export async function runDaemonInner(
     ...pickNetworkTunables(config.network ?? {}),
     agentProfileHeartbeatMs: config.network?.agentProfileHeartbeatMs,
     syncContextGraphs: syncContextGraphs,
+    maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
     storeConfig: runtimeStore ? {
       backend: runtimeStore.backend,
       options: runtimeStore.options,
