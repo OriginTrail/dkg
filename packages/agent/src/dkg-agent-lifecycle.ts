@@ -3500,36 +3500,44 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async clearContextGraphSubscriptions(this: DKGAgent): Promise<number> {
     const store = this.config.contextGraphSubscriptionStore;
     const ctx = createOperationContext('init');
-    const activeIds = [...this.subscribedContextGraphs.keys()];
-    // Count the full persisted backlog (active + dormant/capped-out) up front:
-    // `unsubscribeFromContextGraph` deletes each active row as a side effect, so
-    // a post-teardown count would miss them.
-    let total = 0;
+    // NEVER clear the system context graphs (AGENTS / ONTOLOGY): they are the
+    // network control plane — agent discovery + the shared ontology/CG registry
+    // — auto-subscribed at start() and always in sync scope. Tearing them down
+    // would silently deafen the node to system gossip until the next restart,
+    // the opposite of what this recovery endpoint is for. So we only ever clear
+    // USER context-graph subscriptions, live and persisted alike. (The store's
+    // system-unaware bulk delete is deliberately NOT used here.)
+    const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
+    const isUserContextGraph = (id: string) => !systemContextGraphs.has(id);
+
+    const activeUserIds = [...this.subscribedContextGraphs.keys()].filter(isUserContextGraph);
+
+    // The full persisted USER backlog (active + dormant rows left behind by the
+    // rehydration cap). Counted up front: `unsubscribeFromContextGraph` deletes
+    // each active row as a side effect, so a post-teardown count would miss them.
+    let persistedUserIds = activeUserIds;
     if (store) {
       try {
-        total = (await store.loadAll()).length;
+        persistedUserIds = (await store.loadAll()).map((s) => s.id).filter(isUserContextGraph);
       } catch {
-        total = activeIds.length;
+        persistedUserIds = activeUserIds;
       }
     }
-    // Tear down active in-memory subscriptions (gossip topics + sync scope).
-    for (const id of activeIds) {
+    const total = persistedUserIds.length;
+
+    // Tear down active in-memory USER subscriptions (gossip topics + sync scope).
+    for (const id of activeUserIds) {
       try {
         this.unsubscribeFromContextGraph(id);
       } catch {
         /* best-effort teardown */
       }
     }
-    // Wipe any rows that were never in memory (dormant, left by the rehydration
-    // cap) plus a clean sweep of the rest.
-    if (store?.deleteAll) {
-      try {
-        await store.deleteAll();
-      } catch {
-        /* best-effort */
-      }
-    } else if (store) {
-      for (const id of activeIds) {
+
+    // Delete the persisted USER rows (active + dormant). Selective — never the
+    // system rows — so a custom store without a system-aware bulk delete is safe.
+    if (store) {
+      for (const id of persistedUserIds) {
         try {
           await store.delete(id);
         } catch {
@@ -3537,9 +3545,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
       }
     }
+
     this.log.info(
       ctx,
-      `Cleared ${total} persisted context-graph subscription(s) and tore down ${activeIds.length} active in-memory subscription(s)`,
+      `Cleared ${total} persisted user context-graph subscription(s) and tore down ` +
+        `${activeUserIds.length} active in-memory subscription(s); system context graphs preserved`,
     );
     return total;
   }

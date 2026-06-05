@@ -4199,7 +4199,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     }
   });
 
-  it('clearContextGraphSubscriptions wipes the persisted backlog and tears down active subscriptions (#997)', async () => {
+  it('clearContextGraphSubscriptions clears USER subscriptions but PRESERVES the system context graphs (#997)', async () => {
     const persisted = new Map<string, any>();
     for (let i = 0; i < 5; i++) {
       persisted.set(`clear-cg-${i}`, {
@@ -4214,7 +4214,6 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       loadAll: async () => [...persisted.values()],
       save: async (r: any) => { persisted.set(r.id, { ...r }); },
       delete: async (id: string) => { persisted.delete(id); },
-      deleteAll: async () => { const n = persisted.size; persisted.clear(); return n; },
     };
     const agent = await DKGAgent.create({
       name: 'ClearSubscriptions',
@@ -4222,20 +4221,34 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       contextGraphSubscriptionStore: subscriptionStore,
     });
+    const systemIds = Object.values(SYSTEM_CONTEXT_GRAPHS) as string[];
     try {
       await agent.start();
-      // The agent also subscribes to system context graphs during start, so the
-      // persisted set is our 5 plus any system rows — assert on our 5 directly.
+      // start() rehydrates our 5 user CGs AND subscribes+persists the system CGs
+      // (agents/ontology — the network control plane).
       expect([...persisted.keys()].filter((k) => k.startsWith('clear-cg-'))).toHaveLength(5);
       expect(agent.getSubscribedContextGraphs().get('clear-cg-0')?.subscribed).toBe(true);
+      for (const sys of systemIds) {
+        expect(agent.getSubscribedContextGraphs().get(sys)?.subscribed).toBe(true);
+      }
 
       const cleared = await agent.clearContextGraphSubscriptions();
-      expect(cleared).toBeGreaterThanOrEqual(5); // wipes our 5 + any system rows
-      expect(persisted.size).toBe(0);
-      const stillActive = ['clear-cg-0', 'clear-cg-1', 'clear-cg-2', 'clear-cg-3', 'clear-cg-4'].filter(
+
+      // Exactly the 5 USER subscriptions are cleared — system CGs are never counted.
+      expect(cleared).toBe(5);
+      // No user row survives, live or persisted.
+      expect([...persisted.keys()].some((k) => k.startsWith('clear-cg-'))).toBe(false);
+      const userStillActive = ['clear-cg-0', 'clear-cg-1', 'clear-cg-2', 'clear-cg-3', 'clear-cg-4'].filter(
         (id) => agent.getSubscribedContextGraphs().get(id)?.subscribed === true,
       );
-      expect(stillActive).toHaveLength(0);
+      expect(userStillActive).toHaveLength(0);
+
+      // System context graphs are PRESERVED — live subscription intact AND the
+      // persisted row kept — so the node never loses control-plane gossip.
+      for (const sys of systemIds) {
+        expect(agent.getSubscribedContextGraphs().get(sys)?.subscribed).toBe(true);
+        expect(persisted.has(sys)).toBe(true);
+      }
     } finally {
       await agent.stop().catch(() => {});
     }

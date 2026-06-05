@@ -636,13 +636,6 @@ export interface ContextGraphSubscriptionStore {
   loadAll(): Promise<ContextGraphSubscriptionRecord[]>;
   save(record: ContextGraphSubscriptionRecord): Promise<void>;
   delete(contextGraphId: string): Promise<void>;
-  /**
-   * Bulk-remove every persisted subscription, returning the count deleted.
-   * Recovery path for a node wedged by a large backlog of stale
-   * subscriptions (see `clearContextGraphSubscriptions`). Optional so older
-   * store implementations keep type-checking; callers feature-detect it.
-   */
-  deleteAll?(): Promise<number>;
 }
 
 export type ContextGraphMemberPrincipalType = 'node' | 'agent' | 'identity';

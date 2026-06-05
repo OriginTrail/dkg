@@ -1690,23 +1690,3 @@ describe('DashboardDB — replication telemetry (Phase F)', () => {
     upgraded.close();
   });
 });
-
-describe('DashboardDB — context-graph subscriptions', () => {
-  it('clearContextGraphSubscriptions bulk-removes every row and returns the count (#997)', () => {
-    for (let i = 0; i < 6; i++) {
-      db.upsertContextGraphSubscription({
-        context_graph_id: `cg-${i}`,
-        name: `CG ${i}`,
-        subscribed: 1,
-        synced: 0,
-        sync_scoped: 1,
-        updated_at: Date.now(),
-      });
-    }
-    expect(db.listContextGraphSubscriptions()).toHaveLength(6);
-    expect(db.clearContextGraphSubscriptions()).toBe(6);
-    expect(db.listContextGraphSubscriptions()).toHaveLength(0);
-    // Idempotent: clearing an empty table removes nothing.
-    expect(db.clearContextGraphSubscriptions()).toBe(0);
-  });
-});
