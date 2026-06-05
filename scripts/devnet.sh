@@ -793,6 +793,27 @@ cmd_start() {
   # Stop any already-running devnet nodes so they pick up the config we are about to write
   stop_devnet_nodes_only
 
+  # The chain was just freshly deployed (start_hardhat wiped the deployment
+  # artifacts + marker above), so ANY persisted per-node store state is STALE —
+  # it references the OLD chain. The critical case: a node's store still holds
+  # the `dkg:contextGraphOnChainId` triple from a previous run, so
+  # `registerContextGraph` below short-circuits on a stale "already registered"
+  # view and never creates the CG on the NEW chain. The CG then reads back
+  # `isContextGraphActive=false` / `publishPolicy=0`, the post-boot policy
+  # assertion fails, and every VM publish hits LU-5 ("publish access-policy is
+  # unknown"). Wipe each node's persisted state now that the nodes are stopped —
+  # but KEEP the cached Oxigraph binary (`oxigraph/`) so we don't re-download it.
+  # Nodes re-register identities + CGs and re-sync from scratch against the fresh
+  # chain, which is exactly the e2e seed-from-clean model.
+  if [ -d "$DEVNET_DIR" ]; then
+    local nd
+    for nd in "$DEVNET_DIR"/node*/; do
+      [ -d "$nd" ] || continue
+      find "$nd" -mindepth 1 -maxdepth 1 ! -name oxigraph -exec rm -rf {} + 2>/dev/null || true
+    done
+    log "Cleared stale per-node store state for the freshly-deployed chain (kept cached Oxigraph binaries)"
+  fi
+
   # Generate a shared auth token for all devnet nodes
   local shared_token
   shared_token=$(openssl rand -base64 32 | tr -d '=/+' | head -c 43)
