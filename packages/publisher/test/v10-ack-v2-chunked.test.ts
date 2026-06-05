@@ -129,7 +129,9 @@ function buildV2IntentBytes(opts: BuildIntentOpts): Uint8Array {
     publisherPeerId: 'publisher-v2',
     publicByteSize: opts.override?.publicByteSize ?? totalBytes,
     isPrivate: false,
-    kaCount: opts.kaCount ?? 2,
+    // OT-RFC-43 / V10: a publish mints exactly one KA; rootEntities may still
+    // list multiple member entities.
+    kaCount: opts.kaCount ?? 1,
     merkleLeafCount: opts.merkleLeafCount ?? 4,
     rootEntities: ['urn:a', 'urn:b'],
     stagingQuads: new Uint8Array(0),
@@ -320,6 +322,43 @@ describe('StorageACKHandler V2 chunked ACK — canonical CG keying (#729 Bug 4 r
 
     expect(isStorageACKDecline(ack)).toBe(false);
     expect(ack.contextGraphId).toBe(NUMERIC_CG_ID);
+  });
+
+  it('declines V2 ACK requests that still declare a batch-style kaCount > 1', async () => {
+    coreWallet = ethers.Wallet.createRandom();
+    const store = new OxigraphStore();
+
+    const chunks = [new Uint8Array([0x44]), new Uint8Array([0x55, 0x66])];
+    const kcMerkleRoot = ethers.getBytes(ethers.id('v2-batch-ka-count-rejected'));
+
+    await seedChunks(store, {
+      canonicalCgId: CANONICAL_WIRE_FOR_CLEARTEXT,
+      batchId: kcMerkleRoot,
+      chunks,
+    });
+
+    const handler = new StorageACKHandler(
+      store,
+      createV2Config(coreWallet, {
+        normalizeContextGraphIdForChunkStore: () => CANONICAL_WIRE_FOR_CLEARTEXT,
+      }),
+      makeEventBus() as any,
+    );
+
+    const ack = decodeStorageACK(await handler.handler(
+      buildV2IntentBytes({
+        cgId: NUMERIC_CG_ID,
+        swmGraphId: CLEARTEXT_CG_ID,
+        merkleRoot: kcMerkleRoot,
+        chunks,
+        kaCount: 2,
+      }),
+      fakePeerId,
+    ));
+
+    expect(isStorageACKDecline(ack)).toBe(true);
+    expect(ack.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.MERKLE_MISMATCH_IN_SWM);
+    expect(ack.declineMessage).toMatch(/kaCount must be exactly 1/);
   });
 
   it('falls back to the raw swmGraphId when no normalizer is wired (legacy callers / pre-#729 shim)', async () => {
@@ -639,7 +678,7 @@ describe('StorageACKHandler V2 chunked ACK — canonical CG keying (#729 Bug 4 r
       publisherPeerId: 'publisher-v2',
       publicByteSize: 256,
       isPrivate: false,
-      kaCount: 2,
+      kaCount: 1,
       merkleLeafCount: 2,
       rootEntities: ['urn:a'],
       ackProtocolVersion: ACK_PROTOCOL_VERSION_V2_LU11,

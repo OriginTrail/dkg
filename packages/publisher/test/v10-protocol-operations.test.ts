@@ -1094,7 +1094,7 @@ describe('V10 Finalization (spec §9.0 Phase 6)', () => {
       publisherPeerId: 'QmPublisher12345',
       publicByteSize: 2048,
       isPrivate: true,
-      kaCount: 3,
+      kaCount: 1,
       rootEntities,
       stagingQuads: stagingBytes,
       merkleLeafCount: multiEntityLeafCount,
@@ -1109,7 +1109,7 @@ describe('V10 Finalization (spec §9.0 Phase 6)', () => {
     expect(decoded.publisherPeerId).toBe('QmPublisher12345');
     expect(Number(decoded.publicByteSize)).toBe(2048);
     expect(decoded.isPrivate).toBe(true);
-    expect(decoded.kaCount).toBe(3);
+    expect(decoded.kaCount).toBe(1);
     expect(decoded.rootEntities).toEqual(rootEntities);
 
     const decodedRoot = decoded.merkleRoot instanceof Uint8Array

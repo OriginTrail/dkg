@@ -49,7 +49,7 @@ function makeMeta(overrides?: Partial<KCMetadata>): KCMetadata {
     ual: UAL,
     contextGraphId: CONTEXT_GRAPH,
     merkleRoot: new Uint8Array([0xab, 0xcd, 0xef]),
-    kaCount: 2,
+    kaCount: 1,
     publisherPeerId: '12D3KooWTestPeer',
     timestamp: new Date('2026-03-01T00:00:00Z'),
     ...overrides,
@@ -123,9 +123,9 @@ describe('generateKCMetadata', () => {
     expect(withPrivate.some(q => q.predicate === `${DKG}privateMerkleRoot`)).toBe(true);
   });
 
-  it('handles multiple KA entries', () => {
+  it('handles multiple member-entity rows under one KA', () => {
     const kas = [makeKA({ tokenId: 1n }), makeKA({ tokenId: 2n, rootEntity: 'did:dkg:entity:bob' })];
-    const quads = generateKCMetadata(makeMeta({ kaCount: 2 }), kas);
+    const quads = generateKCMetadata(makeMeta({ kaCount: 1 }), kas);
     const kaSubjects = new Set(quads.filter(q => q.predicate === RDF_TYPE && q.object === `${DKG}KnowledgeAsset`).map(q => q.subject));
     // PR #968: the bare UAL (aggregate node) is now typed too, alongside the 2 per-root rows.
     expect(kaSubjects).toEqual(new Set([UAL, `${UAL}/1`, `${UAL}/2`]));

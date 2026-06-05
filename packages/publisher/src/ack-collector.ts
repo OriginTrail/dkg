@@ -218,6 +218,11 @@ export class ACKCollector {
         `ACK collection failed: merkleLeafCount must be a positive integer, got ${params.merkleLeafCount}`,
       );
     }
+    if (params.kaCount !== 1) {
+      throw new Error(
+        `ACK collection failed: V10 publish requires exactly one Knowledge Asset (kaCount=1); got ${params.kaCount}`,
+      );
+    }
 
     // P2P intent includes staging quads so core nodes can verify inline.
     // Encrypted inline payloads are gated by this collector's exclusive

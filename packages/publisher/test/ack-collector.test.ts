@@ -174,6 +174,40 @@ describe('ACKCollector', () => {
     })).rejects.toThrow('no connected core peers');
   });
 
+  it('rejects batch-style kaCount before sending ACK requests', async () => {
+    let sendCalls = 0;
+    let peerListCalls = 0;
+    const deps: ACKCollectorDeps = {
+      gossipPublish: async () => {},
+      sendP2P: async () => {
+        sendCalls += 1;
+        return new Uint8Array(0);
+      },
+      getConnectedCorePeers: () => {
+        peerListCalls += 1;
+        return ['peer-0', 'peer-1', 'peer-2'];
+      },
+    };
+
+    const collector = new ACKCollector(deps);
+    await expect(collector.collect({
+      merkleRoot,
+      contextGraphId: testCGId,
+      contextGraphIdStr: testCGIdStr,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 100n,
+      isPrivate: false,
+      kaCount: 2,
+      rootEntities: ['urn:a', 'urn:b'],
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
+      merkleLeafCount,
+    })).rejects.toThrow('V10 publish requires exactly one Knowledge Asset');
+
+    expect(peerListCalls).toBe(0);
+    expect(sendCalls).toBe(0);
+  });
+
   it('fails if only 2 peers respond', async () => {
     let callCount = 0;
     const deps: ACKCollectorDeps = {
