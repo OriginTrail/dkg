@@ -642,6 +642,18 @@ export class EVMChainAdapterBase {
     args: readonly unknown[],
     signer: Wallet,
     label: string,
+    // Optional gas headroom for methods whose on-chain gas cost depends on
+    // per-block randomness. ethers fills `gasLimit` from a single
+    // `eth_estimateGas` with NO margin, but that estimate runs against the
+    // CURRENT block while the tx is mined in a LATER block with different
+    // `prevrandao`/`blockhash`/`timestamp`. If the mined block's entropy
+    // drives a more expensive code path than the estimate's, the tx runs
+    // out of gas and reverts with empty (`0x`) data. `RandomSampling.createChallenge`
+    // is exactly this case (weighted CG draw + historical blockhash access):
+    // observed estimate-vs-execution spread is small here but unbounded in
+    // production with many CGs/KCs. When set, we estimate once and inflate
+    // the limit by `gasLimitBufferBps` basis points so the drift can't OOG.
+    opts?: { gasLimitBufferBps?: number },
   ): Promise<ethers.TransactionReceipt> {
     let lastRetryable: unknown;
     for (let i = 0; i < this.providers.length; i += 1) {
@@ -654,6 +666,37 @@ export class EVMChainAdapterBase {
           RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
           `${label} transaction population via RPC #${i + 1}`,
         );
+        if (opts?.gasLimitBufferBps && populated.gasLimit == null) {
+          try {
+            const est = (await withTimeout<bigint>(
+              connected[method].estimateGas(...args) as Promise<bigint>,
+              RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
+              `${label} gas estimation via RPC #${i + 1}`,
+            ));
+            populated.gasLimit = (est * BigInt(10_000 + opts.gasLimitBufferBps)) / 10_000n;
+          } catch (estErr) {
+            // A RETRYABLE estimate failure must not silently drop the OOG
+            // headroom: if another RPC is left, re-throw so the outer loop
+            // fails over to it (it may estimate fine and apply the buffer).
+            // Swallowing here would sign against the failing provider with no
+            // headroom and could reintroduce the exact OOG this guards
+            // against (Codex review). Only on the LAST provider — or for a
+            // non-retryable estimate error, where failover can't help — do we
+            // fall back to ethers' own unbuffered estimate during signing.
+            const hasMoreProviders = i < this.providers.length - 1;
+            if (isRetryableRpcError(estErr) && hasMoreProviders) {
+              throw estErr;
+            }
+            // Best-effort fallback, but DON'T swallow silently: leave a
+            // breadcrumb that the headroom was never applied so a recurring
+            // intermittent OOG isn't a mystery.
+            console.warn(
+              `[chain] ${label}: buffered gas estimation failed; falling back to ` +
+              `ethers' unbuffered estimate (no OOG headroom applied): ` +
+              `${estErr instanceof Error ? estErr.message : String(estErr)}`,
+            );
+          }
+        }
         prepared = await withTimeout(
           this.signPopulatedTransaction(rpcSigner, populated),
           RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,

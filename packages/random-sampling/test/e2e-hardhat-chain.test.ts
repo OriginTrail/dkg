@@ -80,6 +80,17 @@ describe('Random Sampling E2E (Hardhat)', () => {
   const merkleRoot = tree.root;
   const merkleLeafCount = tree.leafCount;
 
+  // Since rc.12 the contract mints exactly ONE knowledge asset per publish
+  // tx — `KnowledgeAssetsLifecycle.publish` reverts `InvalidKnowledgeAssetsAmount`
+  // unless `knowledgeAssetsAmount == 1` (#956). The three `publishQuads`
+  // above all describe the SAME root entity (`urn:experiment:wsd`), so this
+  // is one KA carrying three triples — `merkleLeafCount` (3) is the triple
+  // count, `knowledgeAssetsAmount` (1) is the KA count. The ACK digest the
+  // receivers sign and the publish params MUST use the same value (the
+  // contract rebuilds the digest from `p.knowledgeAssetsAmount`), so this
+  // single constant feeds both.
+  const knowledgeAssetsAmount = 1;
+
   let snapshotId: string;
   let kaId: bigint;
   let cgId: bigint;
@@ -141,13 +152,6 @@ describe('Random Sampling E2E (Hardhat)', () => {
     const publisherIdentityId = BigInt(ctx.coreProfileId);
     const byteSize = BigInt(publishQuads.length * 100);
     const epochs = 2n;
-    // OT-RFC-44 / Design B: a publish mints exactly ONE Knowledge Asset whose
-    // member entities are the root subjects (any triple count). The KA count
-    // the contract accepts (`InvalidKnowledgeAssetsAmount` unless == 1), that
-    // the publisher submits as `knowledgeAssetsAmount`, and that every ACK
-    // signer commits to in the digest is therefore ALWAYS 1 — never the triple
-    // count. Mirrors `dkg-publisher.ts` (`knowledgeAssetsAmount: kaCount`).
-    const kaCount = 1n;
     const tokenAmount = await publisherAdapter.getRequiredPublishTokenAmount(byteSize, epochs);
     const ackSignatures = await Promise.all(
       recOpKeys.map(async (key, idx) => {
@@ -157,7 +161,7 @@ describe('Random Sampling E2E (Hardhat)', () => {
           kav10Address,
           cgId,
           merkleRoot,
-          kaCount,
+          BigInt(knowledgeAssetsAmount),
           byteSize,
           epochs,
           tokenAmount,
@@ -193,7 +197,7 @@ describe('Random Sampling E2E (Hardhat)', () => {
       publishOperationId: 'rs-e2e-publish',
       contextGraphId: cgId,
       merkleRoot,
-      knowledgeAssetsAmount: Number(kaCount),
+      knowledgeAssetsAmount,
       byteSize,
       epochs: Number(epochs),
       tokenAmount,
