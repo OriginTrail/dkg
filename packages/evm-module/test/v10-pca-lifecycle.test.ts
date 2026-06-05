@@ -875,6 +875,39 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     );
   });
 
+  it('B5(f): a delegated publisher cannot swap the author-signed reservedKaId to another number in the same namespace (OT-RFC-43 §F2 digest binding)', async () => {
+    const setup = await setupRegisteredAgentPublish();
+
+    // The author (setup.creator) signs an attestation that binds slot #7.
+    const signedKaId = packReservedKaId(setup.creator.address, 7);
+    const p = await buildBasePublishParams(setup, 'b5-f-signed-slot-7', {
+      reservedKaId: signedKaId,
+    });
+
+    // A relay/publisher tampers the publish to mint at slot #99 instead —
+    // still inside the author's OWN namespace, so the `(kaId >> 96) == author`
+    // guard would pass. Pre-F2 the author signature covered only the content,
+    // so this substitution succeeded. With `reservedKaId` bound into the
+    // EIP-712 digest, the recomputed digest no longer recovers to the author.
+    const substitutedKaId = packReservedKaId(setup.creator.address, 99);
+    expect(substitutedKaId >> 96n).to.equal(BigInt(setup.creator.address));
+    const tampered = { ...p, reservedKaId: substitutedKaId };
+
+    await expect(
+      KAV10.connect(setup.creator).publish(tampered),
+    ).to.be.revertedWithCustomError(KAV10, 'InvalidAuthorSignature');
+
+    // Neither the signed nor the substituted slot was minted.
+    for (const id of [signedKaId, substitutedKaId]) {
+      await expect(
+        DKGKnowledgeAssets.ownerOf(id),
+      ).to.be.revertedWithCustomError(
+        DKGKnowledgeAssets,
+        'ERC721NonexistentToken',
+      );
+    }
+  });
+
   it('B5(c): reusing the same (author, number) reverts KaIdAlreadyMinted on the second publish (no silent clobber)', async () => {
     const setup = await setupRegisteredAgentPublish();
 

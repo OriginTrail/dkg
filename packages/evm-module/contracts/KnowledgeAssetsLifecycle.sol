@@ -303,10 +303,18 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
     error InvalidAuthorSignature1271();
 
     /// @dev RFC-001 §3.2 — EIP-712 type hash for `AuthorAttestation`.
-    /// `keccak256("AuthorAttestation(uint256 contextGraphId,bytes32 merkleRoot,address authorAddress,uint8 schemeVersion)")`.
+    /// `keccak256("AuthorAttestation(uint256 contextGraphId,bytes32 merkleRoot,address authorAddress,uint8 schemeVersion,uint256 reservedKaId)")`.
+    /// @dev OT-RFC-43 Option-1 (variant 1a): `reservedKaId` is bound into the
+    ///      author attestation so the author signs the *slot* (the packed
+    ///      `(author << 96) | number`) as well as the content. Without it a
+    ///      delegated publisher/relay could mint the author's content at a
+    ///      different number inside the author's own namespace — the on-chain
+    ///      guard only enforces `(reservedKaId >> 96) == author` (the
+    ///      namespace), not the number. Mirrors `UpdateAuthorAttestation`,
+    ///      which already binds `kaId`.
     bytes32 private constant _AUTHOR_ATTESTATION_TYPEHASH =
         keccak256(
-            "AuthorAttestation(uint256 contextGraphId,bytes32 merkleRoot,address authorAddress,uint8 schemeVersion)"
+            "AuthorAttestation(uint256 contextGraphId,bytes32 merkleRoot,address authorAddress,uint8 schemeVersion,uint256 reservedKaId)"
         );
 
     bytes32 private constant _UPDATE_AUTHOR_ATTESTATION_TYPEHASH =
@@ -865,7 +873,8 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
         uint256 _contextGraphId,
         bytes32 _merkleRoot,
         address _authorAddress,
-        uint8 _schemeVersion
+        uint8 _schemeVersion,
+        uint256 _reservedKaId
     ) internal view returns (bytes32) {
         bytes32 domainSeparator = keccak256(
             abi.encode(
@@ -882,7 +891,8 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
                 _contextGraphId,
                 _merkleRoot,
                 _authorAddress,
-                _schemeVersion
+                _schemeVersion,
+                _reservedKaId
             )
         );
         return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
@@ -975,7 +985,8 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
             p.contextGraphId,
             p.merkleRoot,
             p.authorAddress,
-            p.authorSchemeVersion
+            p.authorSchemeVersion,
+            p.reservedKaId
         );
 
         if (p.authorAddress.code.length == 0) {

@@ -382,7 +382,14 @@ export const AUTHOR_SCHEME_VERSION_V1 = 1;
  * `KnowledgeAssetsV10.sol`:
  *
  *   AuthorAttestation(uint256 contextGraphId, bytes32 merkleRoot,
- *                     address authorAddress, uint8 schemeVersion)
+ *                     address authorAddress, uint8 schemeVersion,
+ *                     uint256 reservedKaId)
+ *
+ * OT-RFC-43 Option-1 (variant 1a): `reservedKaId` — the packed
+ * `(uint160(author) << 96) | uint96(number)` slot this publish claims — is
+ * bound into the attestation so the author signs the *slot*, not just the
+ * content. This MUST stay byte-for-byte aligned with the on-chain
+ * `abi.encode(...)` order; the field is appended LAST.
  */
 export const AUTHOR_ATTESTATION_PRIMARY_TYPE = 'AuthorAttestation';
 
@@ -402,6 +409,7 @@ export interface AuthorAttestationTypedData {
     merkleRoot: string;
     authorAddress: string;
     schemeVersion: number;
+    reservedKaId: bigint;
   };
 }
 
@@ -411,8 +419,13 @@ export interface AuthorAttestationTypedData {
  * Domain pins `(chainId, verifyingContract)` to defeat cross-chain and
  * cross-deployment replay. Struct hash binds the publication's
  * `(contextGraphId, merkleRoot)` to a specific
- * `(authorAddress, schemeVersion)` — leaked signatures cannot be
- * redirected to a different CG, root, or author.
+ * `(authorAddress, schemeVersion, reservedKaId)` — leaked signatures cannot
+ * be redirected to a different CG, root, author, or KA id/slot.
+ *
+ * `reservedKaId` is the packed `(uint160(author) << 96) | uint96(number)`
+ * the publish will mint; it is REQUIRED under OT-RFC-43 Option-1 variant 1a
+ * and must equal the `reservedKaId` placed in `PublishParams`, or on-chain
+ * recovery will revert with `InvalidAuthorSignature`.
  *
  * Pass directly to `ethers.Signer.signTypedData(domain, types, message)`
  * or to a wallet-of-record (EIP-1271 contract).
@@ -423,6 +436,7 @@ export function buildAuthorAttestationTypedData(args: {
   contextGraphId: bigint;
   merkleRoot: Uint8Array;
   authorAddress: string;
+  reservedKaId: bigint;
   schemeVersion?: number;
 }): AuthorAttestationTypedData {
   if (args.merkleRoot.length !== 32) {
@@ -449,6 +463,7 @@ export function buildAuthorAttestationTypedData(args: {
         { name: 'merkleRoot', type: 'bytes32' },
         { name: 'authorAddress', type: 'address' },
         { name: 'schemeVersion', type: 'uint8' },
+        { name: 'reservedKaId', type: 'uint256' },
       ],
     },
     primaryType: AUTHOR_ATTESTATION_PRIMARY_TYPE,
@@ -457,6 +472,7 @@ export function buildAuthorAttestationTypedData(args: {
       merkleRoot: merkleRootHex,
       authorAddress: args.authorAddress,
       schemeVersion,
+      reservedKaId: args.reservedKaId,
     },
   };
 }

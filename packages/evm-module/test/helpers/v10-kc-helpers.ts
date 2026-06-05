@@ -102,6 +102,7 @@ export type AuthorAttestationPayload = {
     merkleRoot: string;
     authorAddress: string;
     schemeVersion: number;
+    reservedKaId: bigint;
   };
 };
 
@@ -112,8 +113,8 @@ export type AuthorAttestationPayload = {
  *   name="KnowledgeAssetsLifecycle", version="2.0.0", chainId, verifyingContract.
  *
  * The struct hash binds (contextGraphId, merkleRoot, authorAddress,
- * schemeVersion). Drift between this builder and the contract will surface
- * as `InvalidAuthorSignature` at publish time.
+ * schemeVersion, reservedKaId). Drift between this builder and the contract
+ * will surface as `InvalidAuthorSignature` at publish time.
  */
 export function buildAuthorAttestationPayload(args: {
   chainId: bigint;
@@ -121,6 +122,7 @@ export function buildAuthorAttestationPayload(args: {
   contextGraphId: bigint;
   merkleRoot: string;
   authorAddress: string;
+  reservedKaId: bigint;
   schemeVersion?: number;
 }): AuthorAttestationPayload {
   const schemeVersion = args.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
@@ -137,6 +139,7 @@ export function buildAuthorAttestationPayload(args: {
         { name: 'merkleRoot', type: 'bytes32' },
         { name: 'authorAddress', type: 'address' },
         { name: 'schemeVersion', type: 'uint8' },
+        { name: 'reservedKaId', type: 'uint256' },
       ],
     },
     value: {
@@ -144,6 +147,7 @@ export function buildAuthorAttestationPayload(args: {
       merkleRoot: args.merkleRoot,
       authorAddress: ethers.getAddress(args.authorAddress),
       schemeVersion,
+      reservedKaId: args.reservedKaId,
     },
   };
 }
@@ -392,6 +396,12 @@ export async function buildPublishParams(args: {
   );
 
   const schemeVersion = args.authorSchemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
+  // OT-RFC-43 Option 1 (1a): author-namespaced packed id. Defaults to a
+  // fresh, unused number in the author's namespace; pinned/reused values
+  // come through `args.reservedKaId` for collision / negative tests. Resolved
+  // BEFORE the author attestation so the author signs the exact slot that the
+  // publish mints (OT-RFC-43 §F2 — `reservedKaId` is bound into the digest).
+  const reservedKaId = args.reservedKaId ?? nextReservedKaId(args.author.address);
   const authorSig =
     args.authorSigOverride ??
     (await signAuthorAttestation(
@@ -402,6 +412,7 @@ export async function buildPublishParams(args: {
         contextGraphId: args.contextGraphId,
         merkleRoot: args.merkleRoot,
         authorAddress: args.author.address,
+        reservedKaId,
         schemeVersion,
       }),
     ));
@@ -423,10 +434,7 @@ export async function buildPublishParams(args: {
     authorR: authorSig.authorR,
     authorVS: authorSig.authorVS,
     authorSchemeVersion: schemeVersion,
-    // OT-RFC-43 Option 1 (1a): author-namespaced packed id. Defaults to a
-    // fresh, unused number in the author's namespace; pinned/reused values
-    // come through `args.reservedKaId` for collision / negative tests.
-    reservedKaId: args.reservedKaId ?? nextReservedKaId(args.author.address),
+    reservedKaId,
     identityIds: args.receiverIdentityIds,
     r: sig.receiverRs,
     vs: sig.receiverVSs,
