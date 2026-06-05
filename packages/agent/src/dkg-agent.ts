@@ -1721,15 +1721,28 @@ export class DKGAgent extends DKGAgentBase {
         // we log and promote UNSEALED exactly as before — never regressing an
         // existing caller — and the later publish surfaces the explicit
         // finalize requirement.
+        // Auto-finalize seals the WHOLE Working-Memory assertion (all root
+        // entities). That matches a FULL promote, but NOT a selective one: when
+        // `opts.entities` is a subset, promote ships only those roots to SWM
+        // while the seal still claims every root — so
+        // `publishFromFinalizedAssertion` reloads SWM scoped to the sealed (full)
+        // root set, recomputes a different merkleRoot, and the seal guard fails.
+        // `assertionFinalize` has no per-subset scope, so only auto-finalize a
+        // FULL promote; a selective promote must be finalized explicitly (with a
+        // matching scope) before it can publish. (Mirrors the publisher's own
+        // `opts.entities && opts.entities !== 'all'` selective filter.)
+        const promotingAllEntities = !opts?.entities || opts.entities === 'all';
         try {
-          const assertionUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, opts?.subGraphName);
-          const metaGraph = contextGraphMetaUri(contextGraphId);
-          const sealResult = await agent.store.query(
-            `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
-          );
-          const sealQuads = sealResult.type === 'quads' ? sealResult.quads : [];
-          if (parseAssertionSealQuads(sealQuads, assertionUri) == null) {
-            await agent.assertionFinalize(contextGraphId, name, agentAddress, { subGraphName: opts?.subGraphName });
+          if (promotingAllEntities) {
+            const assertionUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, opts?.subGraphName);
+            const metaGraph = contextGraphMetaUri(contextGraphId);
+            const sealResult = await agent.store.query(
+              `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
+            );
+            const sealQuads = sealResult.type === 'quads' ? sealResult.quads : [];
+            if (parseAssertionSealQuads(sealQuads, assertionUri) == null) {
+              await agent.assertionFinalize(contextGraphId, name, agentAddress, { subGraphName: opts?.subGraphName });
+            }
           }
         } catch (err: any) {
           agent.log.warn(

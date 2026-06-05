@@ -197,6 +197,38 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
     expect(pub.seal).toBeDefined();
   }, 20_000);
 
+  it('selective promote does NOT auto-finalize (avoids the seal-all vs promote-subset merkleRoot mismatch)', async () => {
+    // Regression for the #1004 review: auto-finalize seals the WHOLE assertion
+    // (all root entities), but a SELECTIVE promote (opts.entities subset) ships
+    // only the chosen roots to SWM. If promote auto-sealed ALL roots here,
+    // publishFromFinalizedAssertion would reload SWM scoped to the sealed (full)
+    // root set, recompute a different merkleRoot, and fail the seal guard. So a
+    // selective promote must NOT auto-finalize — the assertion stays unsealed
+    // until an explicit, matching-scope finalize.
+    const agent = await createAgent('SelectivePromoteBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Selective Promote E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    await agent.assertion.create(CG_ID, 'selective');
+    await agent.assertion.write(CG_ID, 'selective', [
+      { subject: `${ENTITY_BASE}:a`, predicate: 'http://schema.org/name', object: '"Entity A"' },
+      { subject: `${ENTITY_BASE}:b`, predicate: 'http://schema.org/name', object: '"Entity B"' },
+    ]);
+
+    // Promote ONLY entity A — a subset of the assertion's roots.
+    const promoteResult = await agent.assertion.promote(CG_ID, 'selective', {
+      entities: [`${ENTITY_BASE}:a`],
+    });
+    expect(promoteResult.promotedCount).toBeGreaterThan(0);
+
+    // The selective promote must have left the assertion UNSEALED, so publish
+    // surfaces the explicit-finalize requirement — NOT a (pre-fix) seal-all-vs-
+    // promote-subset merkleRoot mismatch.
+    await expect(
+      agent.publishFromFinalizedAssertion(CG_ID, 'selective'),
+    ).rejects.toThrow(/not finalized/i);
+  }, 20_000);
+
   it('WM is empty after promote; SWM clear after publishFromSWM with flag', async () => {
     const agent = await createAgent('CleanupBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Cleanup E2E' });
