@@ -18,6 +18,7 @@ import {
   promoteAssertion,
   publishToVm,
 } from '../../helpers/devnet-publish.js';
+import { withSwmLock } from '../../helpers/swm-lock.js';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -97,6 +98,12 @@ test.describe('WM → SWM → VM API pipeline', () => {
     // the exact thing #1004 fixed — was never exercised end-to-end on the V10
     // chain. (The selective-promote-does-NOT-auto-finalize negative is unit-
     // covered in packages/agent/test/e2e-memory-layers.test.ts.)
+    // Hold the SWM lock across create→promote→publish so a concurrent worker's
+    // conviction-baseline clearAfter:true can't wipe shared memory between this
+    // test's promote and publish (nondeterministic #1004-lane failure at
+    // PW_WORKERS>1). runWmSwmVmPipeline() is already lock-wrapped; this manual
+    // finalize:false path must be too.
+    await withSwmLock(async () => {
     const stamp = Date.now();
     const name = `e2e-autofinalize-${stamp}`;
     const label = `AutoFinalize ${stamp}`;
@@ -119,6 +126,7 @@ test.describe('WM → SWM → VM API pipeline', () => {
     expect(vm.httpStatus, 'auto-finalize publish should be a clean 200, not a 207 partial').toBe(200);
     expect(vm.kaId, 'auto-finalize publish returned 2xx but no numeric kaId').toMatch(/^\d+$/);
     expect(BigInt(vm.kaId!), 'kaId is 0 — auto-finalize publish did not mint on-chain').toBeGreaterThan(0n);
+    });
   });
 });
 

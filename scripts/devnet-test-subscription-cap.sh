@@ -46,9 +46,12 @@ log()  { echo "[sub-cap] $*"; }
 jq_field() { python3 -c "import sys,json;d=json.load(sys.stdin);print($1)" 2>/dev/null || echo ""; }
 get_count() { curl -s -H "$AUTH" "$API/api/context-graph/subscriptions" | jq_field "d['count']"; }
 
-# Restore a clean config + cap on any exit so the node isn't left capped.
+# Restore the node's ORIGINAL cap on any exit (the smoke mutates it through
+# several values) instead of always deleting it — otherwise running this on a
+# devnet with a non-default cap would permanently rewrite node config and change
+# behaviour outside the test. ORIG_CAP is snapshotted before the first patch_cap.
 cleanup() {
-  patch_cap remove
+  patch_cap "${ORIG_CAP:-remove}"
   curl -s -X DELETE -H "$AUTH" "$API/api/context-graph/subscriptions" >/dev/null 2>&1 || true
   # RESTORE the node's standard devnet CGs (this test cleared them) so the publish
   # ACK quorum isn't left broken for anything that runs after.
@@ -58,6 +61,9 @@ cleanup() {
       "$API/api/context-graph/subscribe" >/dev/null 2>&1 || true
   done
 }
+# Snapshot the node's ORIGINAL cap (number, or "remove" if unset) before any
+# mutation, so cleanup restores exactly what was there.
+ORIG_CAP=$(CFG_PATH="$CFG" node -e "try{const c=JSON.parse(require('fs').readFileSync(process.env.CFG_PATH,'utf8'));const v=c.maxRehydratedContextGraphSubscriptions;console.log(v===undefined?'remove':v);}catch(e){console.log('remove');}" 2>/dev/null || echo remove)
 trap cleanup EXIT
 
 patch_cap() {  # $1 = integer value | "remove"  (env vars MUST precede `node`)
@@ -106,7 +112,12 @@ log "seeded; active user subs before cap = ${PRE:-?}"
 # --- 1. cap=2 → exactly 2 ACTIVATED at rehydrate; dormant note logged --------
 echo "--- 1. cap=$CAP rehydration ---"
 patch_cap "$CAP"
-restart_and_wait || bad "node $NODE_NUM did not come back after restart (cap=$CAP)"
+# Gate ALL post-restart assertions on the restart actually succeeding: a failed
+# restart leaves the OLD process + a stale daemon.log, so reading
+# latest_rehydrate_line() / the responsiveness probes would false-green.
+if ! restart_and_wait; then
+  bad "node $NODE_NUM did not come back after restart (cap=$CAP) — skipping cap-enforcement + responsiveness checks"
+else
 # The cap applies to NON-HOSTED user rows; coreHosted CGs (e.g. a devnet-test the
 # node hosts) are always restored and counted in X too — so the invariant is
 # (activated − hosted) == CAP, not X == CAP.
@@ -138,13 +149,18 @@ if python3 -c "import sys;sys.exit(0 if ($T1-$T0)<3.0 else 1)"; then
 else
   bad "store-backed routes slow on boot (${ELAPSED}s) — possible store contention"
 fi
+fi  # end: cap=$CAP restart-success guard
 
 # --- 3. invalid cap → warning + default 64 (all rehydrated) ------------------
 echo "--- 3. invalid cap → warning + default ---"
 for badval in -1 0.5; do
   patch_cap "$badval"
+  PRE_LINES=$(wc -l < "$DAEMON_LOG" 2>/dev/null || echo 0)
   restart_and_wait || { bad "node did not return after restart (cap=$badval)"; continue; }
-  if grep -E "Ignoring invalid maxRehydratedContextGraphSubscriptions=$badval" "$DAEMON_LOG" >/dev/null 2>&1; then
+  # Grep ONLY the lines appended by THIS restart — the daemon.log is append-only
+  # across restarts, so scanning the whole file could match a warning from an
+  # earlier run even if the current boot stopped emitting it (false green).
+  if tail -n +$((PRE_LINES + 1)) "$DAEMON_LOG" 2>/dev/null | grep -E "Ignoring invalid maxRehydratedContextGraphSubscriptions=$badval" >/dev/null 2>&1; then
     ok "cap=$badval → 'Ignoring invalid …' warning logged"
   else
     bad "cap=$badval → no invalid-cap warning in daemon.log"
@@ -160,13 +176,16 @@ done
 # --- 4. cap=0 → no cap (all rehydrated) --------------------------------------
 echo "--- 4. cap=0 → no cap ---"
 patch_cap 0
-restart_and_wait || bad "node did not return after restart (cap=0)"
+if ! restart_and_wait; then
+  bad "node did not return after restart (cap=0) — skipping cap=0 rehydration check"
+else
 read -r X4 Y4 <<<"$(rehydrate_xy)"
 if [ -n "${X4:-}" ] && [ "${X4:-}" = "${Y4:-}" ]; then
   ok "cap=0 disables the cap (all $Y4 user subs rehydrated)"
 else
   bad "cap=0 → expected all rehydrated, got X=${X4:-?} Y=${Y4:-?}"
 fi
+fi  # end: cap=0 restart-success guard
 
 # --- Summary -----------------------------------------------------------------
 echo ""
