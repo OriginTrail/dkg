@@ -1227,6 +1227,31 @@ function formatLocalAgentErrorMessage(
   return message;
 }
 
+// Error codes that must NOT trigger client-side failed-turn persistence.
+// They surface through the same send-path catch, but the agent reply itself
+// may have already completed, so re-posting it as `persistenceState: 'failed'`
+// would store/rehydrate a *successful* turn as failed:
+//   - HERMES_UI_PERSISTENCE_ERROR: the daemon finished streaming the reply and
+//     only failed to persist it server-side; the UI must not re-persist it as
+//     a failed turn.
+//   - SWM_SYNC_TIMEOUT / source 'background-sync': a background DKG sync
+//     timeout the bridge explicitly did not treat as a chat failure.
+const NON_CHAT_FAILURE_ERROR_CODES = new Set<string>([
+  'HERMES_UI_PERSISTENCE_ERROR',
+  'SWM_SYNC_TIMEOUT',
+]);
+
+// Whether a send-path error represents a genuine transport/agent chat failure
+// that warrants persisting a durable failed turn (as opposed to a
+// post-completion persistence error or an out-of-band background-sync timeout).
+function isClientPersistableLocalAgentFailure(err: unknown): boolean {
+  if (err instanceof LocalAgentApiError) {
+    if (err.code && NON_CHAT_FAILURE_ERROR_CODES.has(err.code)) return false;
+    if (err.source === 'background-sync') return false;
+  }
+  return true;
+}
+
 export function ConnectedAgentsTab(props: {
   integrations: LocalAgentIntegration[];
   selectedIntegrationId: string;
@@ -2794,7 +2819,13 @@ export function PanelRight() {
           ),
         );
       }
-      if (!isUserAbort && integrationId === 'hermes' && assistantId && messageText) {
+      if (
+        !isUserAbort
+        && integrationId === 'hermes'
+        && assistantId
+        && messageText
+        && isClientPersistableLocalAgentFailure(err)
+      ) {
         void (async () => {
           try {
             const persisted = await persistLocalAgentChatFailure(integrationId, {

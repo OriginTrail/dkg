@@ -446,6 +446,89 @@ describe('PanelRight component', () => {
     container.remove();
   });
 
+  it('does not client-persist Hermes turns that completed before a server-side persistence error', async () => {
+    fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
+      id: 'hermes',
+      name: 'Hermes',
+      description: 'Hermes bridge',
+      connectSupported: true,
+      chatSupported: true,
+      chatReady: true,
+      chatAttachments: true,
+      persistentChat: true,
+      bridgeOnline: true,
+      bridgeStatusLabel: 'Connected',
+      configured: true,
+      detected: true,
+      status: 'connected',
+      statusLabel: 'Connected',
+      detail: 'ready',
+      defaultSessionId: 'hermes:dkg-ui:profile-dkg-smoke',
+      profile: 'dkg-smoke',
+      target: 'bridge',
+    }] });
+
+    const { PanelRight } = await import('../src/ui/components/Shell/PanelRight.js');
+    const { LocalAgentApiError } = await import('../src/ui/api.js');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+
+    // The agent reply streams to completion; only the daemon's server-side
+    // persistence fails afterwards (HERMES_UI_PERSISTENCE_ERROR). The UI must
+    // NOT re-persist this completed turn as a failed turn.
+    streamLocalAgentChatMock.mockImplementation(async (_integrationId: string, _text: string, options: any) => {
+      options?.onEvent?.({ type: 'text_delta', delta: 'Completed Hermes reply' });
+      throw new LocalAgentApiError('Hermes UI chat persistence failed', {
+        code: 'HERMES_UI_PERSISTENCE_ERROR',
+      });
+    });
+
+    act(() => {
+      useProjectsStore.setState({
+        contextGraphs: [{ id: 'testing', name: 'Testing' }],
+        loading: false,
+        activeProjectId: 'testing',
+      });
+    });
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(React.createElement(PanelRight));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const textarea = container.querySelector('textarea');
+    expect(textarea).toBeTruthy();
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      valueSetter?.call(textarea, 'Run the Hermes task');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    const sendButton = container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement | null;
+    expect(sendButton).toBeTruthy();
+    await act(async () => {
+      sendButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    // The completed reply stays visible; the server-side persistence failure is
+    // surfaced in-line, but no durable failed turn is written.
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain('Completed Hermes reply');
+    });
+    expect(persistLocalAgentChatFailureMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
   it('renders live Hermes failure notices as plain text while preserving partial markdown', async () => {
     fetchLocalAgentIntegrationsMock.mockResolvedValue({ integrations: [{
       id: 'hermes',
