@@ -16,6 +16,7 @@ import {
   createWmAssertion,
   buildTestQuads,
   promoteAssertion,
+  publishToVm,
 } from '../../helpers/devnet-publish.js';
 
 test.describe.configure({ mode: 'serial' });
@@ -86,6 +87,38 @@ test.describe('WM → SWM → VM API pipeline', () => {
     // on-chain mint (kaId > 0) is the contract — a 0 here is a real regression,
     // not an expected outcome.
     expect(BigInt(result.kaId!), 'kaId is 0 — publish did not mint on-chain (tentative downgrade)').toBeGreaterThan(0n);
+  });
+
+  test('#1004: a FULL promote auto-finalizes an UNFINALIZED WM assertion (no explicit finalize)', async () => {
+    // The canonical Node UI journey: write WITHOUT an explicit finalize → Promote
+    // All → Publish-to-VM. rc.17 #1004 makes a FULL promote auto-finalize the WM
+    // assertion, so this flow mints on-chain with no finalize step. Every OTHER
+    // pipeline helper finalizes at create time (finalize:true), so this path —
+    // the exact thing #1004 fixed — was never exercised end-to-end on the V10
+    // chain. (The selective-promote-does-NOT-auto-finalize negative is unit-
+    // covered in packages/agent/test/e2e-memory-layers.test.ts.)
+    const stamp = Date.now();
+    const name = `e2e-autofinalize-${stamp}`;
+    const label = `AutoFinalize ${stamp}`;
+    const quads = buildTestQuads(run.cgId!, stamp, label);
+
+    const wm = await createWmAssertion({
+      contextGraphId: run.cgId!,
+      name,
+      quads,
+      finalize: false, // <-- the whole point: NO explicit finalize
+    });
+    expect(wm.ok, `WM create (finalize:false) failed: ${wm.status} ${wm.body}`).toBe(true);
+
+    // FULL promote (no entities subset) must auto-finalize the unfinalized draft.
+    const promote = await promoteAssertion({ contextGraphId: run.cgId!, assertionName: name });
+    expect(promote.ok, `auto-finalize promote failed: ${promote.status} ${await promote.text()}`).toBe(true);
+
+    // Publish must mint a CONFIRMED on-chain kaId — no "assertion is not finalized".
+    const vm = await publishToVm({ contextGraphId: run.cgId!, assertionName: name });
+    expect(vm.httpStatus, 'auto-finalize publish should be a clean 200, not a 207 partial').toBe(200);
+    expect(vm.kaId, 'auto-finalize publish returned 2xx but no numeric kaId').toMatch(/^\d+$/);
+    expect(BigInt(vm.kaId!), 'kaId is 0 — auto-finalize publish did not mint on-chain').toBeGreaterThan(0n);
   });
 });
 
