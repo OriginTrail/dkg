@@ -3648,11 +3648,38 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // local agent membership. The membership cache is local bookkeeping (feeds
     // `/api/context-graph/:id/members`, involvement, chat ACL); the on-chain
     // curated membership is separate and untouched.
-    const localAgentAddresses = this.listLocalAgents().map((a) => a.agentAddress);
-    for (const id of new Set([...activeUserIds, ...persistedUserIds])) {
-      this.deleteContextGraphMember(id, 'node', this.peerId);
-      for (const agentAddress of localAgentAddresses) {
-        this.deleteContextGraphMember(id, 'agent', agentAddress);
+    //
+    // AWAIT the store deletes directly (the public deleteContextGraphMember is
+    // fire-and-forget) so the clear does not return "success" while membership
+    // deletes are still in flight or have failed — that would leave involvement /
+    // ACL stale right after a supposedly-clean reset. Failures are surfaced like
+    // the subscription-delete loop's are.
+    const memStore = this.config.contextGraphMembershipStore;
+    if (memStore) {
+      const principals: Array<[ContextGraphMemberPrincipalType, string]> = [
+        ['node', this.peerId],
+        ...this.listLocalAgents().map((a) => ['agent', a.agentAddress] as [ContextGraphMemberPrincipalType, string]),
+      ];
+      let memFailed = 0;
+      for (const id of new Set([...activeUserIds, ...persistedUserIds])) {
+        for (const [ptype, pid] of principals) {
+          try {
+            await memStore.delete(id, ptype, this.normalizeMembershipPrincipal(ptype, pid));
+          } catch (err) {
+            memFailed++;
+            this.log.warn(
+              ctx,
+              `clearContextGraphSubscriptions: failed to delete ${ptype} membership for "${id}": ` +
+                (err instanceof Error ? err.message : String(err)),
+            );
+          }
+        }
+      }
+      if (memFailed > 0) {
+        this.log.warn(
+          ctx,
+          `clearContextGraphSubscriptions: ${memFailed} membership delete(s) failed — involvement / ACL may be stale for those CGs until resolved.`,
+        );
       }
     }
 
