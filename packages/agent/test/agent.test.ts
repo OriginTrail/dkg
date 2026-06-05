@@ -4349,8 +4349,11 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
   it('clear deletes only subscribed persisted rows (keeps discoverable catalog), resets the in-memory map, and reconciles membership (#997)', async () => {
     const persisted = new Map<string, any>();
     persisted.set('sub-cg', { id: 'sub-cg', name: 'Subscribed', subscribed: true, synced: false, syncScoped: true });
-    // Discoverable-only catalog entry (seeded by ontology discovery, never subscribed).
-    persisted.set('disc-cg', { id: 'disc-cg', name: 'Discoverable', subscribed: false, synced: false, syncScoped: false });
+    // Discoverable-only catalog entry (seeded by ontology discovery, never
+    // subscribed) that is ALSO in sync scope (syncScoped:true) — the #1020
+    // round-3 case: the clear must drop it from the sync scope even though it
+    // skips the full unsubscribe to keep the catalog row.
+    persisted.set('disc-cg', { id: 'disc-cg', name: 'Discoverable', subscribed: false, synced: false, syncScoped: true });
     const subscriptionStore = {
       loadAll: async () => [...persisted.values()],
       save: async (r: any) => { persisted.set(r.id, { ...r }); },
@@ -4389,6 +4392,12 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       expect(agent.getSubscribedContextGraphs().has('disc-cg')).toBe(false);
       // The cleared CG's membership is reconciled away (it feeds members / ACL).
       expect(persistedMembers.has(`sub-cg|node|${peerId}`)).toBe(false);
+      // BOTH the subscribed backlog AND the subscribed:false discoverable row are
+      // dropped from the sync scope, so catch-up / subscription-fallback reads no
+      // longer treat a just-cleared CG as attached (#1020 round-3).
+      const syncScope: string[] = (agent as any).config.syncContextGraphs ?? [];
+      expect(syncScope).not.toContain('sub-cg');
+      expect(syncScope).not.toContain('disc-cg');
     } finally {
       await agent.stop().catch(() => {});
     }

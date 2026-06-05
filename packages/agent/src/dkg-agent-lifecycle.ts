@@ -3615,6 +3615,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         } catch {
           /* best-effort teardown */
         }
+      } else {
+        // subscribed:false (a ghost or discoverable-only catalog row): skip the
+        // full unsubscribe (it would delete the discoverable persisted catalog
+        // row we keep), but STILL drop it from the sync scope — unsubscribe does
+        // that inline, so skipping it would leave a just-cleared CG in
+        // config.syncContextGraphs and keep catch-up / subscription-fallback
+        // reads treating it as attached.
+        this.untrackSyncContextGraph(id);
       }
       this.subscribedContextGraphs.delete(id);
     }

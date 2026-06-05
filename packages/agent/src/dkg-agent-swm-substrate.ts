@@ -797,6 +797,21 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this.config.syncContextGraphs = [...syncSet];
   }
 
+  /**
+   * Remove a context graph from runtime sync scope. The inverse of
+   * {@link trackSyncContextGraph}; `unsubscribeFromContextGraph` does this inline
+   * as part of its teardown, but `clearContextGraphSubscriptions` needs it
+   * standalone for `subscribed:false` rows it drops WITHOUT a full unsubscribe
+   * (so background catch-up / subscription-fallback reads stop treating a just-
+   * cleared CG as attached). System CGs are never in user sync scope; no-op.
+   */
+  public untrackSyncContextGraph(this: DKGAgent, contextGraphId: string): void {
+    const syncSet = new Set<string>(this.config.syncContextGraphs ?? []);
+    if (syncSet.delete(contextGraphId)) {
+      this.config.syncContextGraphs = [...syncSet];
+    }
+  }
+
   getOrCreateGossipPublishHandler(this: DKGAgent): GossipPublishHandler {
     if (!this.gossipPublishHandler) {
       this.gossipPublishHandler = new GossipPublishHandler(
