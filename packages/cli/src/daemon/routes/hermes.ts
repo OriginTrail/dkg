@@ -78,6 +78,14 @@ function buildHermesChannelTimeoutBody(
   };
 }
 
+function buildHermesUiPersistenceErrorBody(err: any): Record<string, unknown> {
+  return {
+    error: 'Hermes UI chat persistence failed',
+    code: 'HERMES_UI_PERSISTENCE_ERROR',
+    details: err?.message ?? String(err),
+  };
+}
+
 function parseHermesChannelTimeoutDetails(details: string): Record<string, unknown> | null {
   if (!details.trim()) return null;
   try {
@@ -227,12 +235,19 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
           const details = await forwardRes.text().catch(() => '');
           if (forwardRes.status === 504 && isHermesChannelTimeoutDetails(details)) {
             // Only our structured timeout payload proves the selected target
-            // classified its own timeout. Anonymous 504s may have reached the
-            // agent, so they fall through without bridge-to-gateway replay.
+            // classified its own timeout. Anonymous 504s keep timeout
+            // semantics below but are not replayed without idempotency.
             return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
               payload.correlationId,
               target,
               hermesStructuredTimeoutDetails(details) || `${target.name} response timeout`,
+            ));
+          }
+          if (forwardRes.status === 504) {
+            return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
+              payload.correlationId,
+              target,
+              details || `${target.name} response timeout`,
             ));
           }
           if (isHermesApiKeyRejection(target, forwardRes.status)) {
@@ -258,13 +273,18 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         }
         if (target.protocol === 'hermes-openai') {
           const reply = await readHermesOpenAiReply(forwardRes, verifiedPayload);
-          const persisted = await persistHermesOpenAiUiTurn(
-            ctx,
-            verifiedPayload,
-            attachmentRefs,
-            reply.text,
-            reply.sessionId,
-          );
+          let persisted: { sessionId: string; turnId: string };
+          try {
+            persisted = await persistHermesOpenAiUiTurn(
+              ctx,
+              verifiedPayload,
+              attachmentRefs,
+              reply.text,
+              reply.sessionId,
+            );
+          } catch (err: any) {
+            return jsonResponse(res, 500, buildHermesUiPersistenceErrorBody(err));
+          }
           return jsonResponse(res, 200, {
             ...reply,
             sessionId: persisted.sessionId,
@@ -351,12 +371,19 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
           const details = await transportRes.text().catch(() => '');
           if (transportRes.status === 504 && isHermesChannelTimeoutDetails(details)) {
             // Only our structured timeout payload proves the selected target
-            // classified its own timeout. Anonymous 504s may have reached the
-            // agent, so they fall through without bridge-to-gateway replay.
+            // classified its own timeout. Anonymous 504s keep timeout
+            // semantics below but are not replayed without idempotency.
             return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
               payload.correlationId,
               target,
               hermesStructuredTimeoutDetails(details) || `${target.name} response timeout`,
+            ));
+          }
+          if (transportRes.status === 504) {
+            return jsonResponse(res, 504, buildHermesChannelTimeoutBody(
+              payload.correlationId,
+              target,
+              details || `${target.name} response timeout`,
             ));
           }
           if (isHermesApiKeyRejection(target, transportRes.status)) {
@@ -397,13 +424,25 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
                 verifiedPayload,
                 transportRes,
               );
-              const persisted = await persistHermesOpenAiUiTurn(
-                ctx,
-                verifiedPayload,
-                attachmentRefs,
-                streamed.text,
-                streamed.sessionId,
-              );
+              let persisted: { sessionId: string; turnId: string };
+              try {
+                persisted = await persistHermesOpenAiUiTurn(
+                  ctx,
+                  verifiedPayload,
+                  attachmentRefs,
+                  streamed.text,
+                  streamed.sessionId,
+                );
+              } catch (err: any) {
+                if (!res.writableEnded) {
+                  res.write(`data: ${JSON.stringify({
+                    type: 'error',
+                    ...buildHermesUiPersistenceErrorBody(err),
+                  })}\n\n`);
+                  res.end();
+                }
+                return;
+              }
               if (!res.writableEnded) {
                 res.write(`data: ${JSON.stringify({
                   type: 'final',
@@ -431,9 +470,14 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
         const reply = target.protocol === 'hermes-openai'
           ? await readHermesOpenAiReply(transportRes, verifiedPayload)
           : await transportRes.json();
-        const persisted = target.protocol === 'hermes-openai'
-          ? await persistHermesOpenAiUiTurn(ctx, verifiedPayload, attachmentRefs, reply.text ?? '', reply.sessionId)
-          : null;
+        let persisted: { sessionId: string; turnId: string } | null = null;
+        if (target.protocol === 'hermes-openai') {
+          try {
+            persisted = await persistHermesOpenAiUiTurn(ctx, verifiedPayload, attachmentRefs, reply.text ?? '', reply.sessionId);
+          } catch (err: any) {
+            return jsonResponse(res, 500, buildHermesUiPersistenceErrorBody(err));
+          }
+        }
         res.writeHead(200, {
           'Content-Type': 'text/event-stream; charset=utf-8',
           'Cache-Control': 'no-cache',

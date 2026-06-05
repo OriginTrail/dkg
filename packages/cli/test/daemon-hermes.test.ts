@@ -2206,6 +2206,47 @@ describe('Hermes daemon routes', () => {
     });
   });
 
+  it('reports Hermes OpenAI persistence timeout separately from response timeout', async () => {
+    const persistTimeout = new Error('persist timed out') as Error & { name: string };
+    persistTimeout.name = 'TimeoutError';
+    const storeChatExchange = vi.fn(async () => {
+      throw persistTimeout;
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: 'Hermes API reply' } }],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json', 'x-hermes-session-id': 'api-session-1' },
+    })));
+    const { ctx, res } = makeHermesRouteContext({
+      text: 'hello',
+      correlationId: 'corr-openai-persist-timeout',
+      sessionId: 'hermes:dkg-ui:profile-default',
+    }, {
+      hasChatTurn: vi.fn(async () => false),
+      storeChatExchange,
+    }, {
+      localAgentIntegrations: {
+        hermes: {
+          enabled: true,
+          transport: {
+            kind: 'hermes-openai',
+            gatewayUrl: 'http://127.0.0.1:8642',
+          },
+        },
+      },
+    }, '/api/hermes-channel/send');
+
+    await handleHermesRoutes(ctx);
+
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: 'Hermes UI chat persistence failed',
+      code: 'HERMES_UI_PERSISTENCE_ERROR',
+      details: 'Hermes UI chat persistence failed: persist timed out',
+    });
+  });
+
   it('surfaces attachment metadata and skipped import results in the Hermes OpenAI system prompt', async () => {
     const calls: Array<{ url: string; body: any }> = [];
     const storeChatExchange = vi.fn(async () => {});
@@ -2662,11 +2703,15 @@ describe('Hermes daemon routes', () => {
 
     await handleHermesRoutes(ctx);
 
-    expect(res.statusCode).toBe(502);
+    expect(res.statusCode).toBe(504);
     expect(JSON.parse(res.body)).toMatchObject({
-      error: 'Hermes bridge error',
-      code: 'BRIDGE_ERROR',
+      error: 'Hermes bridge response timeout',
+      code: 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
+      source: 'hermes-channel',
+      target: 'bridge',
       details: 'gateway timeout from proxy',
+      correlationId: 'corr-1',
+      timeoutMs: HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
     });
     expect(urls).toEqual([
       'http://127.0.0.1:9444/health',
@@ -2771,11 +2816,15 @@ describe('Hermes daemon routes', () => {
 
     await handleHermesRoutes(ctx);
 
-    expect(res.statusCode).toBe(502);
+    expect(res.statusCode).toBe(504);
     expect(JSON.parse(res.body)).toMatchObject({
-      error: 'Hermes bridge error',
-      code: 'BRIDGE_ERROR',
+      error: 'Hermes bridge response timeout',
+      code: 'HERMES_BRIDGE_RESPONSE_TIMEOUT',
+      source: 'hermes-channel',
+      target: 'bridge',
       details: 'gateway timeout from proxy',
+      correlationId: 'corr-1',
+      timeoutMs: HERMES_CHANNEL_RESPONSE_TIMEOUT_MS,
     });
     expect(urls).toEqual([
       'http://127.0.0.1:9444/health',

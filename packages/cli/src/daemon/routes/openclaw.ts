@@ -738,14 +738,19 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
             }
             if (isOpenClawChannelTimeoutDetails(details)) {
               // Only our structured timeout payload proves the selected target
-              // classified its own timeout. Anonymous 504s may have reached
-              // the agent, so they fall through without bridge-to-gateway replay.
+              // classified its own timeout. Anonymous 504s keep timeout
+              // semantics below but are not replayed without idempotency.
               return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
                 corrId,
                 target,
                 openClawStructuredTimeoutDetails(details) || `${target.name} response timeout`,
               ));
             }
+            return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
+              corrId,
+              target,
+              details || `${target.name} response timeout`,
+            ));
           }
           if (shouldTryNextOpenClawTarget(forwardRes.status)) {
             lastFailure = {
@@ -873,14 +878,19 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
             }
             if (isOpenClawChannelTimeoutDetails(details)) {
               // Only our structured timeout payload proves the selected target
-              // classified its own timeout. Anonymous 504s may have reached
-              // the agent, so they fall through without bridge-to-gateway replay.
+              // classified its own timeout. Anonymous 504s keep timeout
+              // semantics below but are not replayed without idempotency.
               return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
                 corrId,
                 target,
                 openClawStructuredTimeoutDetails(details) || `${target.name} response timeout`,
               ));
             }
+            return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
+              corrId,
+              target,
+              details || `${target.name} response timeout`,
+            ));
           }
           if (shouldTryNextOpenClawTarget(transportRes.status)) {
             lastFailure = {

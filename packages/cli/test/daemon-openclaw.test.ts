@@ -770,11 +770,15 @@ describe('OpenClaw channel routing helpers', () => {
         'http://127.0.0.1:9301/health',
         'http://127.0.0.1:9301/inbound',
       ]);
-      expect(res.statusCode).toBe(502);
+      expect(res.statusCode).toBe(504);
       expect(JSON.parse(res.body)).toMatchObject({
-        error: 'Bridge error',
-        code: 'BRIDGE_ERROR',
+        error: 'OpenClaw bridge response timeout',
+        code: 'OPENCLAW_BRIDGE_RESPONSE_TIMEOUT',
+        source: 'openclaw-channel',
+        target: 'bridge',
         details: 'Agent response timeout from proxy',
+        correlationId: 'corr-timeout',
+        timeoutMs: OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
       });
     } finally {
       globalThis.fetch = origFetch;
@@ -1278,11 +1282,15 @@ describe('OpenClaw channel routing helpers', () => {
         'http://127.0.0.1:9301/health',
         'http://127.0.0.1:9301/inbound/stream',
       ]);
-      expect(res.statusCode).toBe(502);
+      expect(res.statusCode).toBe(504);
       expect(JSON.parse(res.body)).toMatchObject({
-        error: 'Bridge error',
-        code: 'BRIDGE_ERROR',
+        error: 'OpenClaw bridge response timeout',
+        code: 'OPENCLAW_BRIDGE_RESPONSE_TIMEOUT',
+        source: 'openclaw-channel',
+        target: 'bridge',
         details: 'gateway timeout from proxy',
+        correlationId: 'corr-stream',
+        timeoutMs: OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
       });
     } finally {
       globalThis.fetch = origFetch;
