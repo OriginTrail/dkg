@@ -3569,29 +3569,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       .filter(([id, s]) => isInScope(id, s?.coreHosted))
       .map(([id]) => id);
 
-    // PERSISTED deletion targets only the SUBSCRIBED backlog (active + dormant
-    // rows left behind by the rehydration cap). The discoverable-only catalog
-    // rows (`subscribed:false`, seeded by ontology discovery) are KEPT so the
-    // node re-loads them on restart instead of forgetting graphs it merely
-    // discovered (their in-memory entry was dropped above and re-seeds). Counted
-    // up front: `unsubscribeFromContextGraph` deletes each active row as a side
-    // effect, so a post-teardown count would miss them. Starts empty so a node
-    // with NO store reports 0 persisted rows removed (active teardown is logged
-    // separately) rather than a phantom count of the in-memory subs.
+    // PERSISTED deletion: the ENTIRE in-scope backlog — active subscribed rows,
+    // dormant rows left behind by the rehydration cap, AND discoverable-only
+    // catalog rows (`subscribed:false`, seeded by ontology discovery). This is a
+    // recovery endpoint that fully RESETS the node's view of these CGs; the
+    // discoverable-only catalog is just a cache that re-populates via ontology
+    // discovery (a preserved system CG), so deleting it keeps the clear uniform
+    // and DURABLE — no per-row `syncScoped` bookkeeping that a restart's rehydrate
+    // could silently undo. Counted up front: `unsubscribeFromContextGraph` deletes
+    // each active row as a side effect, so a post-teardown count would miss them.
+    // Starts empty so a node with NO store reports 0 persisted rows removed (the
+    // active teardown is logged separately).
     let persistedUserIds: string[] = [];
-    // Discoverable-only rows we KEEP (subscribed:false) but that still carry
-    // syncScoped:true: their in-memory sync scope is torn down below, but the
-    // PERSISTED bit must be cleared too, or rehydrate re-tracks them into the
-    // sync scope after a restart and fallback reads treat the cleared CG as
-    // attached again. Re-saved with syncScoped:false (keeping the catalog row).
-    let retainedSyncScopedRows: ContextGraphSubscriptionRecord[] = [];
     if (store) {
       try {
-        for (const r of await store.loadAll()) {
-          if (!isInScope(r.id, r.coreHosted)) continue;
-          if (r.subscribed === true) persistedUserIds.push(r.id);
-          else if (r.syncScoped) retainedSyncScopedRows.push(r);
-        }
+        persistedUserIds = (await store.loadAll())
+          .filter((r) => isInScope(r.id, r.coreHosted))
+          .map((r) => r.id);
       } catch (err) {
         // Can't enumerate the persisted backlog → the dormant (capped-out) rows
         // would survive and rehydrate after the next restart. Do NOT silently
@@ -3607,30 +3601,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     const total = persistedUserIds.length;
 
-    // Tear down the in-memory USER entries, then REMOVE them from the registry so
-    // no `.has(id)` fallback still treats the node as attached. Only the
-    // SUBSCRIBED entries get the gossip/sync teardown (`unsubscribeFromContext
-    // Graph`, which also deletes their non-hosted persisted row); a
-    // `subscribed:false` entry — a ghost from an earlier unsubscribe, or a
-    // discoverable-only catalog row — is just dropped from memory. Running the
-    // full unsubscribe there would also delete the discoverable-only persisted
-    // catalog row we deliberately keep. (activeUserIds already excludes system +
-    // coreHosted CGs.)
+    // Fully tear down EVERY in-scope in-memory entry, uniformly:
+    // `unsubscribeFromContextGraph` drops the gossip topics + the sync scope AND
+    // deletes the non-hosted persisted row, then we remove the registry entry so
+    // no `.has(id)` fallback still treats the node as attached. Applied the same
+    // way to the subscribed backlog, `subscribed:false` ghosts left by an earlier
+    // unsubscribe, and discoverable-only catalog entries — the clear is a full
+    // reset. (activeUserIds already excludes system + coreHosted CGs.)
     for (const id of activeUserIds) {
-      if (this.subscribedContextGraphs.get(id)?.subscribed === true) {
-        try {
-          this.unsubscribeFromContextGraph(id);
-        } catch {
-          /* best-effort teardown */
-        }
-      } else {
-        // subscribed:false (a ghost or discoverable-only catalog row): skip the
-        // full unsubscribe (it would delete the discoverable persisted catalog
-        // row we keep), but STILL drop it from the sync scope — unsubscribe does
-        // that inline, so skipping it would leave a just-cleared CG in
-        // config.syncContextGraphs and keep catch-up / subscription-fallback
-        // reads treating it as attached.
-        this.untrackSyncContextGraph(id);
+      try {
+        this.unsubscribeFromContextGraph(id);
+      } catch {
+        /* best-effort teardown */
       }
       this.subscribedContextGraphs.delete(id);
     }
@@ -3653,24 +3635,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this.log.warn(
             ctx,
             `clearContextGraphSubscriptions: failed to delete persisted subscription "${id}": ` +
-              (err instanceof Error ? err.message : String(err)),
-          );
-        }
-      }
-    }
-
-    // Durably un-sync-scope the retained discoverable rows: persist
-    // syncScoped:false so a restart's rehydrate doesn't re-track them into the
-    // sync scope (the in-memory untrackSyncContextGraph above is otherwise undone
-    // on reboot). The row itself is KEPT — only its syncScoped bit is flipped.
-    if (store) {
-      for (const r of retainedSyncScopedRows) {
-        try {
-          await store.save({ ...r, syncScoped: false });
-        } catch (err) {
-          this.log.warn(
-            ctx,
-            `clearContextGraphSubscriptions: failed to clear syncScoped on retained row "${r.id}": ` +
               (err instanceof Error ? err.message : String(err)),
           );
         }
