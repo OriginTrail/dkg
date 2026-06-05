@@ -229,6 +229,38 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
     ).rejects.toThrow(/not finalized/i);
   }, 20_000);
 
+  it('promote fails fast when the draft was edited after finalize (stale seal, not a silent publish mismatch)', async () => {
+    // Regression for the #1004 review: the old auto-finalize only checked whether
+    // a seal EXISTED, not whether it matched the current WM. A finalize → edit →
+    // promote sequence skipped re-finalize, promoted the new content under the
+    // STALE seal, and failed only later at publish with a confusing merkleRoot
+    // mismatch. promote now ALWAYS calls assertionFinalize, which detects the
+    // post-finalize mutation and throws — so promote fails fast, BEFORE emptying
+    // WM, with an actionable "already finalized with a different merkleRoot" error.
+    const agent = await createAgent('StaleSealBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Stale Seal E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    await agent.assertion.create(CG_ID, 'stale');
+    await agent.assertion.write(CG_ID, 'stale', [
+      { subject: `${ENTITY_BASE}:s1`, predicate: 'http://schema.org/name', object: '"First"' },
+    ]);
+    await agent.assertion.finalize(CG_ID, 'stale');
+
+    // Edit the draft AFTER finalize — the seal is now stale.
+    await agent.assertion.write(CG_ID, 'stale', [
+      { subject: `${ENTITY_BASE}:s2`, predicate: 'http://schema.org/name', object: '"Added after finalize"' },
+    ]);
+
+    // promote must fail fast (assertionFinalize detects the mutation), NOT
+    // silently promote the stale-sealed content.
+    await expect(agent.assertion.promote(CG_ID, 'stale')).rejects.toThrow(/different merkleRoot/i);
+
+    // WM is intact — the failed promote did not empty it.
+    const wm = await agent.assertion.query(CG_ID, 'stale');
+    expect(wm.length).toBeGreaterThan(0);
+  }, 20_000);
+
   it('WM is empty after promote; SWM clear after publishFromSWM with flag', async () => {
     const agent = await createAgent('CleanupBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Cleanup E2E' });
