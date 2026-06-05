@@ -32,6 +32,13 @@ function readStylesSources(): string {
   ].join('\n');
 }
 
+function readPanelRightSources(): string {
+  return [
+    readRawFile('components/Shell/PanelRight.tsx'),
+    readTree('components/Shell/PanelRight'),
+  ].join('\n');
+}
+
 describe('backward-compatible route redirects', () => {
   it('App.tsx routes /network as a lazy page and catch-all to AppShell', () => {
     const app = readFile('App.tsx');
@@ -184,7 +191,7 @@ describe('right-rail agent shell replaces Agent Hub', () => {
   const app = readFile('App.tsx');
   const panelLeft = readFile('components/Shell/PanelLeft.tsx');
   const panelCenter = readFile('components/Shell/PanelCenter.tsx');
-  const panelRight = readFile('components/Shell/PanelRight.tsx');
+  const panelRight = readPanelRightSources();
   const api = readFile('api.ts');
 
   it('App has no floating ChatPanel', () => {

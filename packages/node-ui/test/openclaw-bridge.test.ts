@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { readDaemonSources } from './helpers/read-cli-daemon';
 
@@ -8,6 +8,24 @@ const CLI_DIR = resolve(__dirname, '..', '..', 'cli', 'src');
 
 function readUiFile(rel: string): string {
   return readFileSync(resolve(UI_DIR, rel), 'utf-8');
+}
+
+function readUiTree(rel: string): string {
+  const dir = resolve(UI_DIR, rel);
+  return readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((entry) => {
+      const child = `${rel}/${entry.name}`;
+      return entry.isDirectory() ? readUiTree(child) : readUiFile(child);
+    })
+    .join('\n');
+}
+
+function readPanelRightSources(): string {
+  return [
+    readUiFile('components/Shell/PanelRight.tsx'),
+    readUiTree('components/Shell/PanelRight'),
+  ].join('\n');
 }
 
 // Sub-module sources (daemon.ts was split into daemon/*.ts + daemon/routes/*.ts in PR #258/#259).
@@ -87,8 +105,8 @@ describe('OpenClaw bridge API contract', () => {
     expect(apiSrc).toContain('attachments?: LocalAgentChatAttachmentRef[]');
     expect(apiSrc).toContain('attachmentRefs');
     expect(apiSrc).toContain("extractionStatus?: 'completed';");
-    expect(readUiFile('components/Shell/PanelRight.tsx')).toContain("if (draft.status !== 'completed' || !draft.result) return null;");
-    expect(readUiFile('components/Shell/PanelRight.tsx')).toContain("extractionStatus: 'completed'");
+    expect(readPanelRightSources()).toContain("if (draft.status !== 'completed' || !draft.result) return null;");
+    expect(readPanelRightSources()).toContain("extractionStatus: 'completed'");
   });
 });
 
@@ -160,7 +178,7 @@ describe('OpenClaw daemon endpoints', () => {
 });
 
 describe('PanelRight UI - connected agent flow', () => {
-  const panelRight = readUiFile('components/Shell/PanelRight.tsx');
+  const panelRight = readPanelRightSources();
 
   it('imports local-agent wrapper functions', () => {
     expect(panelRight).toContain('fetchLocalAgentIntegrations');
@@ -540,7 +558,7 @@ describe('OpenClaw bridge behavioral tests', () => {
   });
 
   it('UI sends via local channel bridge (not P2P)', () => {
-    const panelRight = readUiFile('components/Shell/PanelRight.tsx');
+    const panelRight = readPanelRightSources();
     expect(panelRight).toContain('streamLocalAgentChat');
     expect(panelRight).toContain('Connect OpenClaw');
   });
