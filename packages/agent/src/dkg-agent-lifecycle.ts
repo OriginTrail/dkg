@@ -3457,14 +3457,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           );
         }
       }
-      const ordered = [...rows].sort(
-        (a, b) =>
-          (b.coreHosted ? 1 : 0) - (a.coreHosted ? 1 : 0) ||
-          (b.subscribed ? 1 : 0) - (a.subscribed ? 1 : 0),
+      // coreHosted graphs MUST always be restored — their chain-driven
+      // reconcile / host-mode path depends on it — so EXEMPT them from the cap.
+      // The cap (a #997 anti-wedge measure) applies only to the non-hosted
+      // user-subscription backlog, which is what fans out and starves the store
+      // on boot. Prioritise subscribed rows within the capped set.
+      const hostedRows = rows.filter((r) => r.coreHosted);
+      const userRows = [...rows.filter((r) => !r.coreHosted)].sort(
+        (a, b) => (b.subscribed ? 1 : 0) - (a.subscribed ? 1 : 0),
       );
-      const limit = cap > 0 ? Math.min(ordered.length, cap) : ordered.length;
-      for (let i = 0; i < limit; i++) {
-        const row = ordered[i];
+      const cappedUserRows = cap > 0 ? userRows.slice(0, cap) : userRows;
+      const toActivate = [...hostedRows, ...cappedUserRows];
+      for (let i = 0; i < toActivate.length; i++) {
+        const row = toActivate[i];
         this.setContextGraphSubscription(row.id, {
           name: row.name,
           subscribed: row.subscribed,
@@ -3489,12 +3494,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           await new Promise<void>((resolve) => setTimeout(resolve, 0));
         }
       }
-      const skipped = ordered.length - limit;
+      const skipped = userRows.length - cappedUserRows.length;
       if (rows.length > 0) {
         this.log.info(
           ctx,
-          `Rehydrated ${limit} of ${rows.length} persisted context-graph subscription(s)` +
-            (skipped > 0 ? ` (${skipped} left dormant — over the ${cap} activation cap)` : ''),
+          `Rehydrated ${toActivate.length} of ${rows.length} persisted context-graph subscription(s)` +
+            (skipped > 0
+              ? ` (${skipped} non-hosted left dormant — over the ${cap} activation cap; ` +
+                `${hostedRows.length} hosted always restored)`
+              : ''),
         );
       }
       if (skipped > 0) {

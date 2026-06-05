@@ -1650,6 +1650,19 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // The total PERSISTED backlog is reported in the boot log ("Rehydrated X of
   // Y"); anything beyond the activation cap is dormant until pruned below.
   if (req.method === "GET" && path === "/api/context-graph/subscriptions") {
+    // Operator-only: this is a NODE-WIDE view, so an agent-scoped token would
+    // otherwise be able to enumerate OTHER agents' subscribed/private CG IDs.
+    // Require the node-level admin token — a recognised token (in validTokens)
+    // that resolves to no agent. (`resolveAgentByToken === undefined` alone is
+    // insufficient: it also matches a missing/unrecognised token when auth is
+    // disabled, which is not in validTokens.)
+    if (!requestToken || !validTokens.has(requestToken) || agent.resolveAgentByToken(requestToken)) {
+      return jsonResponse(res, 403, {
+        error:
+          "GET /api/context-graph/subscriptions requires a node-level admin token " +
+          "(~/.dkg/auth.token); agent-scoped tokens cannot enumerate node-wide subscriptions.",
+      });
+    }
     const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
     const map = agent.getSubscribedContextGraphs?.();
     const subscriptions = map
@@ -1676,18 +1689,17 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // Non-destructive to VM/SWM data — only the local subscription bookkeeping is
   // cleared; legitimate context graphs re-subscribe on next access.
   if (req.method === "DELETE" && path === "/api/context-graph/subscriptions") {
-    // Destructive + node-wide: gate on a node-level admin token. An agent-scoped
-    // token resolves (via `resolveAgentByToken`) to its agent address; the
-    // node-admin token (~/.dkg/auth.token) is not in the per-agent index and
-    // resolves to undefined. Without this, any authenticated agent token could
-    // wipe every user's subscription backlog. (Same operator-gating pattern as
-    // the agent key-management routes.)
-    const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
-    if (tokenAgentAddress) {
+    // Destructive + node-wide: require the node-level admin token — a recognised
+    // token (in validTokens) that resolves to NO agent. Agent-scoped tokens
+    // resolve to an address; a missing/unrecognised token is not in validTokens.
+    // Checking `resolveAgentByToken === undefined` ALONE is insufficient — it
+    // also matches a missing token when auth is disabled, which would let the
+    // backlog be wiped without proving admin identity.
+    if (!requestToken || !validTokens.has(requestToken) || agent.resolveAgentByToken(requestToken)) {
       return jsonResponse(res, 403, {
         error:
-          `Agent token for ${tokenAgentAddress} cannot clear the node-wide context-graph ` +
-          "subscription backlog. Use a node-level admin token (~/.dkg/auth.token).",
+          "DELETE /api/context-graph/subscriptions requires a node-level admin token " +
+          "(~/.dkg/auth.token); agent-scoped tokens cannot clear the node-wide subscription backlog.",
       });
     }
     const cleared = await agent.clearContextGraphSubscriptions();

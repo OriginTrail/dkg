@@ -4199,6 +4199,41 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     }
   });
 
+  it('exempts coreHosted graphs from the rehydration cap so hosted graphs always restore (#997)', async () => {
+    const cap = 2;
+    const mkRow = (id: string, coreHosted: boolean) => ({
+      id, name: id, subscribed: true, synced: false,
+      sharedMemorySynced: false, metaSynced: false, syncScoped: true, coreHosted,
+    });
+    const hosted = Array.from({ length: 3 }, (_, i) => mkRow(`hosted-cg-${i}`, true));
+    const user = Array.from({ length: 5 }, (_, i) => mkRow(`user-cg-${i}`, false));
+    const rows = [...hosted, ...user];
+    const subscriptionStore = {
+      loadAll: async () => rows,
+      save: async () => {},
+      delete: async () => {},
+    };
+    const agent = await DKGAgent.create({
+      name: 'CapHostedExempt',
+      listenHost: '127.0.0.1',
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      contextGraphSubscriptionStore: subscriptionStore,
+      maxRehydratedContextGraphSubscriptions: cap,
+    });
+    try {
+      await agent.start();
+      const subs = agent.getSubscribedContextGraphs();
+      // ALL coreHosted graphs activate (exempt from the cap — host-mode /
+      // chain-reconcile depends on it); the non-hosted backlog stays capped.
+      const hostedActive = hosted.filter((r) => subs.get(r.id)?.subscribed === true).length;
+      const userActive = user.filter((r) => subs.get(r.id)?.subscribed === true).length;
+      expect(hostedActive).toBe(hosted.length); // all 3 hosted restored despite cap=2
+      expect(userActive).toBe(cap);              // user backlog capped at 2
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('clearContextGraphSubscriptions clears USER subscriptions but PRESERVES the system context graphs (#997)', async () => {
     const persisted = new Map<string, any>();
     for (let i = 0; i < 5; i++) {
