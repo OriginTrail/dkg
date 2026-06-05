@@ -1,5 +1,6 @@
 const BASE = '';
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
+const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60000;
 declare global {
   interface Window { __DKG_TOKEN__?: string; }
 }
@@ -52,6 +53,25 @@ export class HttpError extends Error {
   }
 }
 
+export class LocalAgentApiError extends Error {
+  status?: number;
+  code?: string;
+  source?: string;
+  details?: string;
+  correlationId?: string;
+  timeoutMs?: number;
+  target?: string;
+  route?: string;
+  integrationId?: string;
+  retryable?: boolean;
+
+  constructor(message: string, metadata: Partial<LocalAgentApiError> = {}) {
+    super(message);
+    this.name = 'LocalAgentApiError';
+    Object.assign(this, metadata);
+  }
+}
+
 async function fetchWithTimeout(input: string, init: RequestInit = {}, timeoutMs = 10000): Promise<Response> {
   try {
     return await fetch(input, { ...init, signal: AbortSignal.timeout(timeoutMs) });
@@ -66,6 +86,16 @@ async function fetchWithTimeout(input: string, init: RequestInit = {}, timeoutMs
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
   if (!res.ok) throw new HttpError(res.status);
+  return res.json() as Promise<T>;
+}
+
+async function getWithTimeout<T>(path: string, timeoutMs: number): Promise<T> {
+  const res = await fetchWithTimeout(`${BASE}${path}`, { headers: authHeaders() }, timeoutMs);
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
+    throw new HttpError(res.status, msg, errBody);
+  }
   return res.json() as Promise<T>;
 }
 
@@ -294,7 +324,10 @@ export const fetchNodeLog = (params: { lines?: number; q?: string } = {}) => {
 
 // --- Context graphs (V10) — legacy daemon paths keep working server-side redirects.
 export async function fetchContextGraphs(): Promise<{ contextGraphs: any[] }> {
-  const data = await get<{ contextGraphs?: any[] }>('/api/context-graph/list');
+  const data = await getWithTimeout<{ contextGraphs?: any[] }>(
+    '/api/context-graph/list',
+    CONTEXT_GRAPH_LOAD_TIMEOUT_MS,
+  );
   const list = data.contextGraphs ?? [];
   return { contextGraphs: list.filter((p: any) => !p.isSystem) };
 }
@@ -1296,7 +1329,8 @@ export const promoteAssertion = (
 export type PromoteOutcome =
   | { kind: 'success'; promotedCount: number; message: string }
   | { kind: 'noop'; message: string }
-  | { kind: 'not-persisted'; message: string; expectedTripleCount?: number };
+  | { kind: 'not-persisted'; message: string; expectedTripleCount?: number }
+  | { kind: 'payload-too-large'; message: string; actualBytes?: number; limitBytes?: number };
 
 export function describePromoteResult(
   assertionName: string,
@@ -1319,6 +1353,25 @@ export function describePromoteError(
   assertionName: string,
   err: unknown,
 ): PromoteOutcome | null {
+  if (err instanceof HttpError && err.status === 413) {
+    const body = err.body as {
+      code?: string;
+      actualBytes?: number;
+      limitBytes?: number;
+      hint?: string;
+    } | undefined;
+    if (body?.code === 'SWM_GOSSIP_PAYLOAD_TOO_LARGE') {
+      const hint = typeof body.hint === 'string' && body.hint.length > 0
+        ? body.hint
+        : 'Promote fewer entities per call or split the assertion into smaller root-entity batches.';
+      return {
+        kind: 'payload-too-large',
+        actualBytes: typeof body.actualBytes === 'number' ? body.actualBytes : undefined,
+        limitBytes: typeof body.limitBytes === 'number' ? body.limitBytes : undefined,
+        message: `${assertionName} is too large to promote to Shared Working Memory. ${hint}`,
+      };
+    }
+  }
   if (err instanceof HttpError && err.status === 409) {
     const body = err.body as { code?: string; expectedTripleCount?: number } | undefined;
     if (body?.code === 'ASSERTION_NOT_PERSISTED') {
@@ -1622,6 +1675,22 @@ export interface LocalAgentChatResponse {
   turnId?: string;
 }
 
+export interface LocalAgentChatFailurePersistenceOptions {
+  sessionId?: string;
+  correlationId?: string;
+  userMessage: string;
+  assistantReply?: string;
+  failureReason?: string;
+  profile?: string;
+  attachments?: LocalAgentChatAttachmentRef[];
+  contextGraphId?: string;
+}
+
+export interface LocalAgentChatFailurePersistenceResponse {
+  ok?: boolean;
+  turnId?: string;
+}
+
 export async function sendOpenClawLocalChat(
   text: string,
   opts?: LocalAgentChatRequestOptions,
@@ -1634,7 +1703,7 @@ export async function sendOpenClawLocalChat(
   });
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
-    throw new Error((errBody as { error?: string })?.error ?? `Request failed (${res.status})`);
+    throw buildLocalAgentApiError(errBody, `Request failed (${res.status})`, res.status);
   }
   return res.json();
 }
@@ -1642,7 +1711,19 @@ export async function sendOpenClawLocalChat(
 export type OpenClawStreamEvent =
   | { type: 'text_delta'; delta: string }
   | ({ type: 'final' } & LocalAgentChatResponse)
-  | { type: 'error'; error: string };
+  | ({
+      type: 'error';
+      error: string;
+      code?: string;
+      source?: string;
+      details?: string;
+      correlationId?: string;
+      timeoutMs?: number;
+      target?: string;
+      route?: string;
+      integrationId?: string;
+      retryable?: boolean;
+    });
 
 type HermesRawStreamEvent =
   | OpenClawStreamEvent
@@ -1708,7 +1789,7 @@ export async function streamOpenClawLocalChat(
 
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
-    throw new Error((errBody as { error?: string })?.error ?? `Request failed (${res.status})`);
+    throw buildLocalAgentApiError(errBody, `Request failed (${res.status})`, res.status);
   }
 
   const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
@@ -1730,7 +1811,7 @@ export async function streamOpenClawLocalChat(
   const handleEvent = (event: OpenClawStreamEvent): void => {
     opts.onEvent?.(event);
     if (event.type === 'error') {
-      streamError = new Error(event.error || 'Stream failed');
+      streamError = buildLocalAgentApiError(event, event.error || 'Stream failed');
     } else if (event.type === 'final') {
       finalPayload = {
         text: event.text,
@@ -1800,7 +1881,7 @@ export async function sendHermesLocalChat(
   });
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
-    throw new Error(formatLocalAgentError(errBody, `Request failed (${res.status})`));
+    throw buildLocalAgentApiError(errBody, `Request failed (${res.status})`, res.status);
   }
   return res.json();
 }
@@ -1824,7 +1905,7 @@ export async function streamHermesLocalChat(
 
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
-    throw new Error(formatLocalAgentError(errBody, `Request failed (${res.status})`));
+    throw buildLocalAgentApiError(errBody, `Request failed (${res.status})`, res.status);
   }
 
   const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
@@ -1851,7 +1932,7 @@ export async function streamHermesLocalChat(
   const handleEvent = (event: OpenClawStreamEvent): void => {
     opts.onEvent?.(event);
     if (event.type === 'error') {
-      streamError = new Error(event.error || 'Stream failed');
+      streamError = buildLocalAgentApiError(event, event.error || 'Stream failed');
     } else if (event.type === 'final') {
       finalPayload = {
         text: event.text,
@@ -1916,6 +1997,38 @@ function formatLocalAgentError(body: unknown, fallback: string): string {
     : JSON.stringify(record.details);
   if (!details || details === error) return error;
   return `${error}: ${details}`;
+}
+
+function buildLocalAgentApiError(body: unknown, fallback: string, status?: number): LocalAgentApiError {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return new LocalAgentApiError(fallback, { status });
+  }
+  const record = body as Record<string, unknown>;
+  const message = formatLocalAgentError(record, fallback);
+  const stringField = (key: string): string | undefined => {
+    const value = record[key];
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  };
+  const numberField = (key: string): number | undefined => {
+    const value = record[key];
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  };
+  const booleanField = (key: string): boolean | undefined => {
+    const value = record[key];
+    return typeof value === 'boolean' ? value : undefined;
+  };
+  return new LocalAgentApiError(message, {
+    status,
+    code: stringField('code'),
+    source: stringField('source'),
+    details: stringField('details'),
+    correlationId: stringField('correlationId'),
+    timeoutMs: numberField('timeoutMs'),
+    target: stringField('target'),
+    route: stringField('route'),
+    integrationId: stringField('integrationId'),
+    retryable: booleanField('retryable'),
+  });
 }
 
 interface LocalAgentIntegrationRecord {
@@ -1996,6 +2109,7 @@ export interface LocalAgentHistoryMessage {
   author: string;
   ts: string;
   turnId?: string;
+  persistStatus?: 'pending' | 'in_progress' | 'stored' | 'failed' | 'skipped';
   failureReason?: string | null;
   attachmentRefs?: LocalAgentChatAttachmentRef[];
   toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
@@ -2093,6 +2207,7 @@ async function fetchLocalAgentHistoryBySessionId(
         author: message.author,
         ts: message.ts,
         turnId: message.turnId,
+        persistStatus: message.persistStatus,
         failureReason: message.failureReason,
         attachmentRefs: message.attachmentRefs,
         toolCalls: message.toolCalls,
@@ -2492,6 +2607,34 @@ export async function fetchLocalAgentHistory(
   return fetchLocalAgentHistoryBySessionId(sessionId, limit);
 }
 
+async function persistHermesLocalChatFailure(
+  opts: LocalAgentChatFailurePersistenceOptions,
+): Promise<LocalAgentChatFailurePersistenceResponse> {
+  const sessionId = opts.sessionId?.trim();
+  if (!sessionId) throw new Error('Missing Hermes session id');
+  return post<LocalAgentChatFailurePersistenceResponse>('/api/hermes-channel/persist-turn', {
+    sessionId,
+    userMessage: opts.userMessage,
+    assistantReply: opts.assistantReply ?? '',
+    correlationId: opts.correlationId,
+    attachmentRefs: opts.attachments,
+    persistenceState: 'failed',
+    failureReason: opts.failureReason,
+    contextGraphId: opts.contextGraphId,
+    profile: opts.profile,
+    metadata: { source: 'node-ui-failed-turn' },
+  });
+}
+
+export async function persistLocalAgentChatFailure(
+  id: string,
+  opts: LocalAgentChatFailurePersistenceOptions,
+): Promise<LocalAgentChatFailurePersistenceResponse> {
+  const normalizedId = id.trim().toLowerCase();
+  if (normalizedId === 'hermes') return persistHermesLocalChatFailure(opts);
+  throw new Error(`${id} local chat persistence is not available yet.`);
+}
+
 export async function streamLocalAgentChat(
   id: string,
   text: string,
@@ -2694,6 +2837,7 @@ export interface SubGraphInfo {
   tripleCount: number;
 }
 export const fetchSubGraphs = (contextGraphId: string) =>
-  get<{ contextGraphId: string; subGraphs: SubGraphInfo[] }>(
+  getWithTimeout<{ contextGraphId: string; subGraphs: SubGraphInfo[] }>(
     `/api/sub-graph/list?contextGraphId=${encodeURIComponent(contextGraphId)}`,
+    CONTEXT_GRAPH_LOAD_TIMEOUT_MS,
   );

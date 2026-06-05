@@ -1051,11 +1051,17 @@ assert config["allow_context_graph_admin_tools"] is False, config
   it('uses profile in adapter CLI setup options', async () => {
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
 
+    // `fund: false` keeps this hermetic: runSetup funds wallets via the
+    // live faucet when `fund !== false` (issue #386), and this test only
+    // asserts the profile is threaded into the written config — it has no
+    // fetch stub, so without this it makes a real network call to the
+    // faucet and times out offline (#958).
     await runSetup({
       hermesHome,
       profile: 'explicit',
       start: false,
       verify: false,
+      fund: false,
     });
 
     const config = JSON.parse(readFileSync(join(hermesHome, 'dkg.json'), 'utf-8'));

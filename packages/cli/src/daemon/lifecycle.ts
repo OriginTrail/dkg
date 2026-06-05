@@ -219,6 +219,8 @@ import {
   MAX_UPLOAD_BYTES,
   type ImportFileExtractionPayload,
   buildImportFileResponse,
+  isPayloadTooLargeError,
+  payloadTooLargeResponseBody,
   unregisteredSubGraphError,
   readBody,
   readBodyBuffer,
@@ -2718,8 +2720,8 @@ export async function runDaemonInner(
       );
     } catch (err: any) {
       if (res.headersSent || res.writableEnded) return;
-      if (err instanceof PayloadTooLargeError) {
-        jsonResponse(res, 413, { error: err.message });
+      if (isPayloadTooLargeError(err)) {
+        jsonResponse(res, 413, payloadTooLargeResponseBody(err));
       } else if (err instanceof SyntaxError) {
         jsonResponse(res, 400, { error: err.message });
       } else if (

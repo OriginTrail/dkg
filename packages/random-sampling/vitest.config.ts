@@ -1,9 +1,11 @@
 import { defineConfig } from 'vitest/config';
 
-// Distinct port from chain (9545) and publisher (9546). Each
-// Hardhat-backed test package owns its own port so parallel monorepo
-// test runs (`pnpm -r test`) don't collide.
-process.env.HARDHAT_PORT = '9547';
+// Distinct port per Hardhat-backed test package so parallel monorepo
+// test runs (`pnpm -r test` / turbo) don't collide on the same RPC
+// port. Current map: chain 9545, publisher 9546, agent 9547, cli 9548,
+// kafka-plugin 9549, random-sampling 9550. (Was 9547 — collided with
+// `agent`, see #957.)
+process.env.HARDHAT_PORT = '9550';
 
 // Coverage thresholds intentionally omitted while the package is just
 // a skeleton. Once Phase 3+ lands real prover / extractor / mutual-aid
@@ -21,7 +23,7 @@ export default defineConfig({
     testTimeout: 120_000,
     globalSetup: ['../chain/test/hardhat-global-setup.ts'],
     maxWorkers: 1,
-    env: { HARDHAT_PORT: '9547' },
+    env: { HARDHAT_PORT: '9550' },
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html', 'lcov', 'json-summary'],

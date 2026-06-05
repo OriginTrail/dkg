@@ -34,7 +34,7 @@ import {
   type OpenClawStreamResponse,
 } from './openclaw.js';
 
-export const HERMES_CHANNEL_RESPONSE_TIMEOUT_MS = 180_000;
+export const HERMES_CHANNEL_RESPONSE_TIMEOUT_MS = 15 * 60_000;
 export const DEFAULT_HERMES_BRIDGE_URL = 'http://127.0.0.1:9202';
 export const DEFAULT_HERMES_API_SERVER_URL = 'http://127.0.0.1:8642';
 
@@ -60,6 +60,17 @@ export interface HermesChannelHealthReport {
   bridge?: HermesHealthState;
   gateway?: HermesHealthState;
   error?: string;
+}
+
+function isAbortSignalTimeoutError(err: any): boolean {
+  const message = String(err?.message ?? err ?? '');
+  return err?.name === 'TimeoutError'
+    || err?.cause?.name === 'TimeoutError'
+    || /aborted due to timeout/i.test(message);
+}
+
+function formatHermesHealthTimeout(target: Pick<HermesChannelTarget, 'name'>, timeoutMs: number): string {
+  return `Hermes ${target.name} health probe timed out after ${timeoutMs}ms`;
 }
 
 export interface HermesChatPayload {
@@ -489,10 +500,15 @@ export async function probeHermesChannelHealth(
           ? 'Health endpoint reported not ready'
           : `Health endpoint responded ${healthRes.status}`;
     } catch (err: any) {
-      const result = { ok: false, error: err.message };
+      const result = {
+        ok: false,
+        error: isAbortSignalTimeoutError(err)
+          ? formatHermesHealthTimeout(target, timeoutMs)
+          : err.message,
+      };
       if (target.name === 'bridge') bridge = result;
       else gateway = result;
-      lastError = err.message;
+      lastError = result.error;
     }
   }
 
@@ -558,12 +574,20 @@ export async function ensureHermesBridgeAvailable(
     }
     return { ok: true };
   } catch (err: any) {
-    return { ok: false, details: err.message, offline: true };
+    return {
+      ok: false,
+      details: isAbortSignalTimeoutError(err)
+        ? formatHermesHealthTimeout(target, 3_000)
+        : err.message,
+      offline: true,
+    };
   }
 }
 
 export function shouldTryNextHermesTarget(status: number): boolean {
-  return status === 404 || status === 405 || (status >= 500 && status < 600);
+  // Availability-only fallback. Once a chat request may have been dispatched,
+  // replay requires turn idempotency before bridge-to-gateway retry is safe.
+  return status === 404 || status === 405 || status === 501 || status === 503;
 }
 
 export function normalizeHermesChatPayload(raw: unknown): HermesChatPayload | { error: string } {

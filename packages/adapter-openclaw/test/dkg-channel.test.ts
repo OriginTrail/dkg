@@ -3550,6 +3550,75 @@ describe('DkgChannelPlugin', () => {
     }));
   });
 
+  it('gateway route returns structured agent timeout payloads', async () => {
+    const routeInboundMessage = vi.fn().mockRejectedValue(new Error('Agent response timeout'));
+    const registerHttpRoute = trackFn();
+    const api = makeApi({ registerHttpRoute, routeInboundMessage });
+    plugin.register(api);
+    const route = registerHttpRoute.calls
+      .map(([entry]) => entry as any)
+      .find((entry) => entry.path === '/api/dkg-channel/inbound');
+    let statusCode = 0;
+    let responseBody = '';
+    let resolveEnd!: () => void;
+    const ended = new Promise<void>((resolve) => { resolveEnd = resolve; });
+    const res = {
+      writeHead: vi.fn((status: number) => { statusCode = status; }),
+      end: vi.fn((body: string) => {
+        responseBody = String(body);
+        resolveEnd();
+      }),
+    };
+
+    route.handler({
+      body: {
+        text: 'Slow task',
+        correlationId: 'corr-agent-timeout',
+      },
+    }, res);
+    await ended;
+
+    expect(statusCode).toBe(504);
+    expect(JSON.parse(responseBody)).toMatchObject({
+      error: 'Agent response timeout',
+      code: 'AGENT_TIMEOUT',
+      source: 'openclaw-agent',
+      details: 'OpenClaw agent runtime did not produce a response before its deadline',
+    });
+  });
+
+  it('standalone bridge stream returns structured agent timeout events', async () => {
+    const routeInboundMessage = vi.fn().mockRejectedValue(new Error('Agent response timeout'));
+    const api = makeApi({ routeInboundMessage });
+    plugin.register(api);
+    const port = await waitForBridgePort(plugin);
+
+    const res = await fetch(`http://127.0.0.1:${port}/inbound/stream`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'accept': 'text/event-stream',
+        'x-dkg-bridge-token': 'test-token',
+      },
+      body: JSON.stringify({
+        text: 'Slow task',
+        correlationId: 'corr-agent-timeout-stream',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    const dataLine = body.split(/\r?\n/).find((line) => line.startsWith('data: '));
+    expect(dataLine).toBeTruthy();
+    expect(JSON.parse(dataLine!.slice('data: '.length))).toMatchObject({
+      type: 'error',
+      error: 'Agent response timeout',
+      code: 'AGENT_TIMEOUT',
+      source: 'openclaw-agent',
+      details: 'OpenClaw agent runtime did not produce a response before its deadline',
+    });
+  });
+
   it('standalone bridge streaming accepts attachment-only inbound requests', async () => {
     const routeInboundMessage = vi.fn().mockResolvedValue({
       correlationId: 'corr-attachment-stream',
