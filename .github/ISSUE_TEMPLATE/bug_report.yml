@@ -1,6 +1,6 @@
 name: Bug Report
 description: Report a reproducible bug in DKG V10 (daemon, Node UI, CLI, chain, or workspace packages)
-title: "<area>: <concise summary of the bug>"
+title: "bug: "
 labels: ["bug"]
 body:
   - type: markdown
@@ -45,8 +45,8 @@ body:
       label: Steps to Reproduce
       description: Minimal, numbered, deterministic steps so anyone can reproduce it. Include exact commands and any required state/setup.
       placeholder: |
-        1. Run `dkg start`
-        2. ...
+        1. Run `dkg init` (fresh install)
+        2. Run `dkg start`
         3. ...
     validations:
       required: true
