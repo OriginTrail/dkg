@@ -52,6 +52,25 @@ export class HttpError extends Error {
   }
 }
 
+export class LocalAgentApiError extends Error {
+  status?: number;
+  code?: string;
+  source?: string;
+  details?: string;
+  correlationId?: string;
+  timeoutMs?: number;
+  target?: string;
+  route?: string;
+  integrationId?: string;
+  retryable?: boolean;
+
+  constructor(message: string, metadata: Partial<LocalAgentApiError> = {}) {
+    super(message);
+    this.name = 'LocalAgentApiError';
+    Object.assign(this, metadata);
+  }
+}
+
 async function fetchWithTimeout(input: string, init: RequestInit = {}, timeoutMs = 10000): Promise<Response> {
   try {
     return await fetch(input, { ...init, signal: AbortSignal.timeout(timeoutMs) });
@@ -1650,7 +1669,7 @@ export async function sendOpenClawLocalChat(
   });
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
-    throw new Error((errBody as { error?: string })?.error ?? `Request failed (${res.status})`);
+    throw buildLocalAgentApiError(errBody, `Request failed (${res.status})`, res.status);
   }
   return res.json();
 }
@@ -1658,7 +1677,19 @@ export async function sendOpenClawLocalChat(
 export type OpenClawStreamEvent =
   | { type: 'text_delta'; delta: string }
   | ({ type: 'final' } & LocalAgentChatResponse)
-  | { type: 'error'; error: string };
+  | ({
+      type: 'error';
+      error: string;
+      code?: string;
+      source?: string;
+      details?: string;
+      correlationId?: string;
+      timeoutMs?: number;
+      target?: string;
+      route?: string;
+      integrationId?: string;
+      retryable?: boolean;
+    });
 
 type HermesRawStreamEvent =
   | OpenClawStreamEvent
@@ -1724,7 +1755,7 @@ export async function streamOpenClawLocalChat(
 
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
-    throw new Error((errBody as { error?: string })?.error ?? `Request failed (${res.status})`);
+    throw buildLocalAgentApiError(errBody, `Request failed (${res.status})`, res.status);
   }
 
   const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
@@ -1746,7 +1777,7 @@ export async function streamOpenClawLocalChat(
   const handleEvent = (event: OpenClawStreamEvent): void => {
     opts.onEvent?.(event);
     if (event.type === 'error') {
-      streamError = new Error(event.error || 'Stream failed');
+      streamError = buildLocalAgentApiError(event, event.error || 'Stream failed');
     } else if (event.type === 'final') {
       finalPayload = {
         text: event.text,
@@ -1816,7 +1847,7 @@ export async function sendHermesLocalChat(
   });
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
-    throw new Error(formatLocalAgentError(errBody, `Request failed (${res.status})`));
+    throw buildLocalAgentApiError(errBody, `Request failed (${res.status})`, res.status);
   }
   return res.json();
 }
@@ -1840,7 +1871,7 @@ export async function streamHermesLocalChat(
 
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
-    throw new Error(formatLocalAgentError(errBody, `Request failed (${res.status})`));
+    throw buildLocalAgentApiError(errBody, `Request failed (${res.status})`, res.status);
   }
 
   const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
@@ -1867,7 +1898,7 @@ export async function streamHermesLocalChat(
   const handleEvent = (event: OpenClawStreamEvent): void => {
     opts.onEvent?.(event);
     if (event.type === 'error') {
-      streamError = new Error(event.error || 'Stream failed');
+      streamError = buildLocalAgentApiError(event, event.error || 'Stream failed');
     } else if (event.type === 'final') {
       finalPayload = {
         text: event.text,
@@ -1932,6 +1963,38 @@ function formatLocalAgentError(body: unknown, fallback: string): string {
     : JSON.stringify(record.details);
   if (!details || details === error) return error;
   return `${error}: ${details}`;
+}
+
+function buildLocalAgentApiError(body: unknown, fallback: string, status?: number): LocalAgentApiError {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return new LocalAgentApiError(fallback, { status });
+  }
+  const record = body as Record<string, unknown>;
+  const message = formatLocalAgentError(record, fallback);
+  const stringField = (key: string): string | undefined => {
+    const value = record[key];
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  };
+  const numberField = (key: string): number | undefined => {
+    const value = record[key];
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  };
+  const booleanField = (key: string): boolean | undefined => {
+    const value = record[key];
+    return typeof value === 'boolean' ? value : undefined;
+  };
+  return new LocalAgentApiError(message, {
+    status,
+    code: stringField('code'),
+    source: stringField('source'),
+    details: stringField('details'),
+    correlationId: stringField('correlationId'),
+    timeoutMs: numberField('timeoutMs'),
+    target: stringField('target'),
+    route: stringField('route'),
+    integrationId: stringField('integrationId'),
+    retryable: booleanField('retryable'),
+  });
 }
 
 interface LocalAgentIntegrationRecord {

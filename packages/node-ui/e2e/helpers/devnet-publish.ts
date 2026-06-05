@@ -262,17 +262,37 @@ export async function publishToVm(opts: {
    */
   allowPartial?: boolean;
 }): Promise<{ httpStatus: number; status?: string; kaId?: string; txHash?: string; contextGraphError?: string }> {
-  const res = await devnetApiFetch('/api/shared-memory/publish', {
-    method: 'POST',
-    nodeNum: opts.nodeNum ?? 1,
-    body: JSON.stringify({
-      contextGraphId: opts.contextGraphId,
-      assertionName: opts.assertionName,
-      clearAfter: opts.clearAfter ?? false,
-    }),
-  });
-  if (!res.ok) {
-    throw new Error(`publish failed: ${res.status} ${await res.text()}`);
+  // LU-5 (OT-RFC-38): the publish-access-policy gate refuses to publish until
+  // the CG's curation policy is CHAIN-CONFIRMED. On a freshly-created/registered
+  // CG that confirmation lags the registration tx by a few blocks, so the first
+  // publish can race ahead and 500 with "publish access-policy is unknown …
+  // curated=unknown". That's a transient, not a failure — retry that SPECIFIC
+  // error with backoff (the devnet mines ~1 block/s), so the global-setup VM
+  // seed (and every other publish caller) waits for the policy instead of
+  // flaking. Any other non-ok status still throws immediately.
+  const POLICY_CONFIRM_BUDGET_MS = 45_000;
+  const policyDeadline = Date.now() + POLICY_CONFIRM_BUDGET_MS;
+  let res: Response;
+  for (;;) {
+    res = await devnetApiFetch('/api/shared-memory/publish', {
+      method: 'POST',
+      nodeNum: opts.nodeNum ?? 1,
+      body: JSON.stringify({
+        contextGraphId: opts.contextGraphId,
+        assertionName: opts.assertionName,
+        clearAfter: opts.clearAfter ?? false,
+      }),
+    });
+    if (res.ok) break;
+    const errText = await res.text();
+    const policyNotConfirmed =
+      res.status === 500 &&
+      /publish access-policy is unknown|curated=unknown/i.test(errText);
+    if (policyNotConfirmed && Date.now() < policyDeadline) {
+      await new Promise((r) => setTimeout(r, 3_000));
+      continue;
+    }
+    throw new Error(`publish failed: ${res.status} ${errText}`);
   }
   const body = (await res.json()) as { status?: string; kaId?: string; txHash?: string; contextGraphError?: string };
   // `res.ok` is true for 207 too. The daemon returns 207 when the SWM/VM publish

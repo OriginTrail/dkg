@@ -327,6 +327,102 @@ import {
 
 import type { RequestContext } from './context.js';
 
+function isOpenClawBridgeTimeoutError(err: any): boolean {
+  const message = String(err?.message ?? err ?? '');
+  return err?.name === 'TimeoutError'
+    || err?.cause?.name === 'TimeoutError'
+    || /agent response timeout|response timeout|aborted due to timeout/i.test(message);
+}
+
+function formatTimeoutMs(timeoutMs: number): string {
+  return `${Math.round(timeoutMs / 1000)}s`;
+}
+
+function buildOpenClawChannelTimeoutBody(
+  correlationId: string,
+  target: Pick<OpenClawChannelTarget, 'name'> | undefined,
+  details?: string,
+): Record<string, unknown> {
+  const targetName = target?.name === 'gateway' ? 'gateway' : 'bridge';
+  const targetLabel = targetName === 'gateway' ? 'OpenClaw gateway' : 'OpenClaw bridge';
+  return {
+    error: `${targetLabel} response timeout`,
+    code: targetName === 'gateway'
+      ? 'OPENCLAW_GATEWAY_RESPONSE_TIMEOUT'
+      : 'OPENCLAW_BRIDGE_RESPONSE_TIMEOUT',
+    source: 'openclaw-channel',
+    target: targetName,
+    details: details || `${targetLabel} did not produce an agent response within ${formatTimeoutMs(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS)}`,
+    correlationId,
+    timeoutMs: OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
+  };
+}
+
+function parseOpenClawUpstreamDetails(details: string): Record<string, unknown> | null {
+  if (!details.trim()) return null;
+  try {
+    const parsed = JSON.parse(details);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isOpenClawChannelTimeoutDetails(details: string): boolean {
+  const parsed = parseOpenClawUpstreamDetails(details);
+  return parsed?.source === 'openclaw-channel'
+    && (
+      parsed.code === 'OPENCLAW_BRIDGE_RESPONSE_TIMEOUT'
+      || parsed.code === 'OPENCLAW_GATEWAY_RESPONSE_TIMEOUT'
+    );
+}
+
+function isOpenClawAgentTimeoutDetails(details: string): boolean {
+  const parsed = parseOpenClawUpstreamDetails(details);
+  return parsed?.source === 'openclaw-agent' && parsed.code === 'AGENT_TIMEOUT';
+}
+
+function openClawStructuredTimeoutDetails(details: string): string | undefined {
+  const parsed = parseOpenClawUpstreamDetails(details);
+  return typeof parsed?.details === 'string' && parsed.details.trim()
+    ? parsed.details
+    : undefined;
+}
+
+function buildOpenClawStructuredChannelTimeoutBody(
+  correlationId: string,
+  details: string,
+): Record<string, unknown> | null {
+  const parsed = parseOpenClawUpstreamDetails(details);
+  if (parsed?.source !== 'openclaw-channel'
+    || (
+      parsed.code !== 'OPENCLAW_BRIDGE_RESPONSE_TIMEOUT'
+      && parsed.code !== 'OPENCLAW_GATEWAY_RESPONSE_TIMEOUT'
+    )
+  ) {
+    return null;
+  }
+  return {
+    ...parsed,
+    correlationId,
+  };
+}
+
+function buildOpenClawAgentTimeoutBody(
+  correlationId: string,
+  details?: string,
+): Record<string, unknown> {
+  return {
+    error: 'Agent response timeout',
+    code: 'AGENT_TIMEOUT',
+    source: 'openclaw-agent',
+    details: details || 'OpenClaw agent runtime did not produce a response before its deadline',
+    correlationId,
+  };
+}
+
 
 export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
   const {
@@ -655,6 +751,25 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
         });
         if (!forwardRes.ok) {
           const details = await forwardRes.text().catch(() => "");
+          if (forwardRes.status === 504) {
+            if (isOpenClawAgentTimeoutDetails(details)) {
+              return jsonResponse(res, 504, buildOpenClawAgentTimeoutBody(corrId, openClawStructuredTimeoutDetails(details)));
+            }
+            if (isOpenClawChannelTimeoutDetails(details)) {
+              // Only our structured timeout payload proves a DKG local-agent
+              // channel classified the timeout. Preserve its target/source fields;
+              // anonymous 504s keep timeout semantics below without replay.
+              return jsonResponse(res, 504, buildOpenClawStructuredChannelTimeoutBody(
+                corrId,
+                details,
+              ) ?? buildOpenClawChannelTimeoutBody(corrId, target));
+            }
+            return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
+              corrId,
+              target,
+              details || `${target.name} response timeout`,
+            ));
+          }
           if (shouldTryNextOpenClawTarget(forwardRes.status)) {
             lastFailure = {
               status: forwardRes.status,
@@ -675,12 +790,8 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
         const reply = await forwardRes.json();
         return jsonResponse(res, 200, reply);
       } catch (err: any) {
-        if (err.name === "TimeoutError") {
-          return jsonResponse(res, 504, {
-            error: "Agent response timeout",
-            code: "AGENT_TIMEOUT",
-            correlationId: corrId,
-          });
+        if (isOpenClawBridgeTimeoutError(err)) {
+          return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(corrId, target));
         }
         if (target.name === "bridge") {
           daemonState.openClawBridgeHealth = { ok: false, ts: Date.now() };
@@ -776,6 +887,25 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
 
         if (!transportRes.ok) {
           const details = await transportRes.text().catch(() => "");
+          if (transportRes.status === 504) {
+            if (isOpenClawAgentTimeoutDetails(details)) {
+              return jsonResponse(res, 504, buildOpenClawAgentTimeoutBody(corrId, openClawStructuredTimeoutDetails(details)));
+            }
+            if (isOpenClawChannelTimeoutDetails(details)) {
+              // Only our structured timeout payload proves a DKG local-agent
+              // channel classified the timeout. Preserve its target/source fields;
+              // anonymous 504s keep timeout semantics below without replay.
+              return jsonResponse(res, 504, buildOpenClawStructuredChannelTimeoutBody(
+                corrId,
+                details,
+              ) ?? buildOpenClawChannelTimeoutBody(corrId, target));
+            }
+            return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(
+              corrId,
+              target,
+              details || `${target.name} response timeout`,
+            ));
+          }
           if (shouldTryNextOpenClawTarget(transportRes.status)) {
             lastFailure = {
               status: transportRes.status,
@@ -814,9 +944,10 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
             );
           } catch (err: any) {
             if (!res.writableEnded) {
-              res.write(
-                `data: ${JSON.stringify({ type: "error", error: err.message })}\n\n`,
-              );
+              const event = isOpenClawBridgeTimeoutError(err)
+                ? { type: "error", ...buildOpenClawChannelTimeoutBody(corrId, target) }
+                : { type: "error", error: err.message };
+              res.write(`data: ${JSON.stringify(event)}\n\n`);
             }
           }
           if (!res.writableEnded) res.end();
@@ -836,12 +967,8 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
         res.end();
         return;
       } catch (err: any) {
-        if (err.name === "TimeoutError") {
-          return jsonResponse(res, 504, {
-            error: "Agent response timeout",
-            code: "AGENT_TIMEOUT",
-            correlationId: corrId,
-          });
+        if (isOpenClawBridgeTimeoutError(err)) {
+          return jsonResponse(res, 504, buildOpenClawChannelTimeoutBody(corrId, target));
         }
         if (target.name === "bridge") {
           daemonState.openClawBridgeHealth = { ok: false, ts: Date.now() };

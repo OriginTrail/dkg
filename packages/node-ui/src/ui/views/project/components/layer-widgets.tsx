@@ -202,10 +202,11 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete }:
       <div className="v10-decision-context" style={{ marginBottom: 10 }}>
         {count} {noun} in this layer can be {isWm ? 'promoted to Shared Working Memory for collaborative review' : 'published to Verifiable Memory on-chain'}.
       </div>
-      {result && <div style={{ fontSize: 11, color: 'var(--text-success)', marginBottom: 8 }}>✓ {result}</div>}
-      {error && <div style={{ fontSize: 11, color: 'var(--text-danger)', marginBottom: 8 }}>✕ {error}</div>}
+      {result && <div data-testid="layer-action-result" style={{ fontSize: 11, color: 'var(--text-success)', marginBottom: 8 }}>✓ {result}</div>}
+      {error && <div data-testid="layer-action-result" style={{ fontSize: 11, color: 'var(--text-danger)', marginBottom: 8 }}>✕ {error}</div>}
       <div className="v10-decision-actions">
         <button
+          data-testid={isWm ? 'widget-promote-all-btn' : 'widget-publish-vm-btn'}
           className={isWm ? 'v10-decision-btn approve' : 'v10-decision-btn primary-cta publish-vm'}
           style={isWm
             ? { borderColor: `${color}50`, color: 'var(--text-warning)', background: `${color}15`, opacity: busy ? 0.5 : 1 }

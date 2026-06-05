@@ -200,13 +200,84 @@ describe('useModalDismiss (BUG-017)', () => {
     expect(document.activeElement?.id).toBe('af-target');
   });
 
-  it('handles a dialog with zero focusables without crashing (Tab is a no-op)', async () => {
+  it('traps Tab inside an aria-modal dialog with zero focusables (focus pinned to the dialog)', async () => {
+    // Previously this asserted Tab was a no-op, but that let a keyboard
+    // user Tab straight OUT of an aria-modal dialog into the background
+    // page when nothing inside was tabbable (e.g. ImportFilesModal while
+    // an upload is in flight disables every control). Codex review: an
+    // aria-modal dialog must keep focus contained. The hook now makes the
+    // dialog container focusable (tabindex=-1), pins focus on it, and
+    // swallows Tab so it can't escape.
     const onClose = vi.fn();
     mount(true, onClose, React.createElement('p', null, 'No focusables'));
     await tick();
+    const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+    expect(dialog.getAttribute('tabindex')).toBe('-1');
+    expect(document.activeElement).toBe(dialog);
     const ev = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
     expect(() => window.dispatchEvent(ev)).not.toThrow();
-    expect(ev.defaultPrevented).toBe(false);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(dialog);
+  });
+
+  it('treats an <iframe> as a tab-order boundary (PDF preview cannot let Tab escape)', async () => {
+    // FilePreviewModal renders PDF previews inside an <iframe>. If the
+    // iframe isn't part of the focusable set it isn't recognised as the
+    // last boundary, so tabbing forward from it would escape the
+    // aria-modal dialog. With `iframe` in the selector it becomes `last`
+    // and Tab wraps back to the first control. (Codex review.)
+    const onClose = vi.fn();
+    mount(true, onClose, [
+      React.createElement('button', { key: 'a', id: 'if-first' }, 'A'),
+      React.createElement('iframe', { key: 'b', id: 'if-frame', title: 'PDF preview' }),
+    ]);
+    await tick();
+    const first = document.getElementById('if-first') as HTMLElement;
+    const frame = document.getElementById('if-frame') as HTMLElement;
+    frame.focus();
+    expect(document.activeElement).toBe(frame);
+
+    const ev = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    window.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(first);
+  });
+
+  it('redirects Tab into the trap when controls enable after focus was pinned on the dialog (uploading -> done)', async () => {
+    // ImportFilesModal opens with every control disabled while an upload is
+    // in flight → the hook pins focus on the dialog container (tabindex=-1).
+    // When the upload finishes the controls enable, but focus is still on
+    // the container. Tab must move INTO the trap (first/last), not escape to
+    // the background page. (Codex review.)
+    const onClose = vi.fn();
+    mount(true, onClose, React.createElement('button', { id: 'dz-only', disabled: true }, 'Uploading'));
+    await tick();
+    const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+    expect(document.activeElement).toBe(dialog);
+
+    // Upload completes → controls enable. Focus is still on the container.
+    rerender(true, onClose, [
+      React.createElement('button', { key: 'a', id: 'dz-first' }, 'First'),
+      React.createElement('button', { key: 'b', id: 'dz-last' }, 'Last'),
+    ]);
+    await tick();
+    expect(document.activeElement).toBe(dialog);
+    const first = document.getElementById('dz-first') as HTMLElement;
+    const last = document.getElementById('dz-last') as HTMLElement;
+
+    // Tab from the container moves to the FIRST control, not the background.
+    const fwd = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    window.dispatchEvent(fwd);
+    expect(fwd.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(first);
+
+    // Re-pin to the container and verify Shift+Tab goes to the LAST control.
+    dialog.focus();
+    expect(document.activeElement).toBe(dialog);
+    const back = new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true });
+    window.dispatchEvent(back);
+    expect(back.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(last);
   });
 
   it('uses capture phase so Escape inside a child <input> still closes the dialog (BUG-017 regression guard)', async () => {
