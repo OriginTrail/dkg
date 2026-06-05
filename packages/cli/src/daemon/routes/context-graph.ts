@@ -1642,6 +1642,33 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     });
   }
 
+  // GET /api/context-graph/subscriptions — list the node's ACTIVE in-memory
+  // context-graph subscriptions (diagnostics for #997: see how many are live).
+  // The total PERSISTED backlog is reported in the boot log ("Rehydrated X of
+  // Y"); anything beyond the activation cap is dormant until pruned below.
+  if (req.method === "GET" && path === "/api/context-graph/subscriptions") {
+    const map = agent.getSubscribedContextGraphs?.();
+    const subscriptions = map
+      ? [...map.entries()].map(([id, s]) => ({
+          contextGraphId: id,
+          subscribed: s?.subscribed === true,
+          synced: s?.synced === true,
+          coreHosted: s?.coreHosted === true,
+        }))
+      : [];
+    return jsonResponse(res, 200, { count: subscriptions.length, subscriptions });
+  }
+
+  // DELETE /api/context-graph/subscriptions — operator recovery for #997: tear
+  // down every active subscription and wipe the persisted backlog so a node
+  // wedged by stale subscriptions can be reset without hand-editing the store.
+  // Non-destructive to VM/SWM data — only the local subscription bookkeeping is
+  // cleared; legitimate context graphs re-subscribe on next access.
+  if (req.method === "DELETE" && path === "/api/context-graph/subscriptions") {
+    const cleared = await agent.clearContextGraphSubscriptions();
+    return jsonResponse(res, 200, { cleared });
+  }
+
   // POST /api/context-graph/rename
   //
   // Updates the display name (schema:name) of an existing context graph

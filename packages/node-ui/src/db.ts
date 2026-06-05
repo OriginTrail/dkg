@@ -947,6 +947,12 @@ export class DashboardDB {
     this.stmt('deleteContextGraphSubscription', 'DELETE FROM context_graph_subscriptions WHERE context_graph_id = ?').run(contextGraphId);
   }
 
+  /** Bulk-remove every persisted subscription; returns the row count deleted. Recovery path for #997. */
+  clearContextGraphSubscriptions(): number {
+    const res = this.stmt('clearContextGraphSubscriptions', 'DELETE FROM context_graph_subscriptions').run();
+    return res.changes ?? 0;
+  }
+
   // --- Phase F: chain-driven VM reconciliation telemetry ---
 
   /**

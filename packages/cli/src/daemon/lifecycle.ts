@@ -1267,6 +1267,7 @@ export async function runDaemonInner(
       delete: async (contextGraphId) => {
         dashDb.deleteContextGraphSubscription(contextGraphId);
       },
+      deleteAll: async () => dashDb.clearContextGraphSubscriptions(),
     },
     contextGraphMembershipStore: {
       upsert: async (record) => {

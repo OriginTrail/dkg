@@ -636,6 +636,13 @@ export interface ContextGraphSubscriptionStore {
   loadAll(): Promise<ContextGraphSubscriptionRecord[]>;
   save(record: ContextGraphSubscriptionRecord): Promise<void>;
   delete(contextGraphId: string): Promise<void>;
+  /**
+   * Bulk-remove every persisted subscription, returning the count deleted.
+   * Recovery path for a node wedged by a large backlog of stale
+   * subscriptions (see `clearContextGraphSubscriptions`). Optional so older
+   * store implementations keep type-checking; callers feature-detect it.
+   */
+  deleteAll?(): Promise<number>;
 }
 
 export type ContextGraphMemberPrincipalType = 'node' | 'agent' | 'identity';
@@ -943,6 +950,16 @@ export interface DKGAgentConfig {
   };
   /** Durable local store for subscribed context-graph runtime state. */
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
+  /**
+   * Cap on how many persisted context-graph subscriptions are *activated*
+   * (gossip-subscribed + sync-tracked) when rehydrating at startup. A large
+   * backlog of stale subscriptions otherwise fans out store-touching gossip
+   * /sync work that starves authenticated store-backed routes (issue #997).
+   * Subscriptions beyond the cap stay persisted but inactive and can be
+   * pruned via `DELETE /api/context-graph/subscriptions`. Default
+   * `DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS`. `0` disables the cap.
+   */
+  maxRehydratedContextGraphSubscriptions?: number;
   /** Durable local cache for nodes/agents known to be members of a context graph. */
   contextGraphMembershipStore?: ContextGraphMembershipStore;
   /**

@@ -4159,6 +4159,88 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     }
   });
 
+  it('caps subscription activation at maxRehydratedContextGraphSubscriptions, leaving the rest dormant (#997)', async () => {
+    const N = 10;
+    const cap = 3;
+    const rows = Array.from({ length: N }, (_, i) => ({
+      id: `cap-cg-${i}`,
+      name: `Cap CG ${i}`,
+      subscribed: true,
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      syncScoped: true,
+    }));
+    const subscriptionStore = {
+      loadAll: async () => rows,
+      save: async () => {},
+      delete: async () => {},
+    };
+    const agent = await DKGAgent.create({
+      name: 'CapRehydration',
+      listenHost: '127.0.0.1',
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      contextGraphSubscriptionStore: subscriptionStore,
+      maxRehydratedContextGraphSubscriptions: cap,
+    });
+    try {
+      await agent.start();
+      const subs = agent.getSubscribedContextGraphs();
+      // Only `cap` of the N persisted rows are activated; the rest stay
+      // persisted (loadAll still returns all N) but dormant in-memory.
+      const activated = rows.filter((r) => subs.get(r.id)?.subscribed === true).length;
+      expect(activated).toBe(cap);
+      const inSyncScope = ((agent as any).config.syncContextGraphs ?? []).filter(
+        (id: string) => id.startsWith('cap-cg-'),
+      ).length;
+      expect(inSyncScope).toBe(cap);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('clearContextGraphSubscriptions wipes the persisted backlog and tears down active subscriptions (#997)', async () => {
+    const persisted = new Map<string, any>();
+    for (let i = 0; i < 5; i++) {
+      persisted.set(`clear-cg-${i}`, {
+        id: `clear-cg-${i}`,
+        name: `Clear ${i}`,
+        subscribed: true,
+        synced: false,
+        syncScoped: true,
+      });
+    }
+    const subscriptionStore = {
+      loadAll: async () => [...persisted.values()],
+      save: async (r: any) => { persisted.set(r.id, { ...r }); },
+      delete: async (id: string) => { persisted.delete(id); },
+      deleteAll: async () => { const n = persisted.size; persisted.clear(); return n; },
+    };
+    const agent = await DKGAgent.create({
+      name: 'ClearSubscriptions',
+      listenHost: '127.0.0.1',
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      contextGraphSubscriptionStore: subscriptionStore,
+    });
+    try {
+      await agent.start();
+      // The agent also subscribes to system context graphs during start, so the
+      // persisted set is our 5 plus any system rows — assert on our 5 directly.
+      expect([...persisted.keys()].filter((k) => k.startsWith('clear-cg-'))).toHaveLength(5);
+      expect(agent.getSubscribedContextGraphs().get('clear-cg-0')?.subscribed).toBe(true);
+
+      const cleared = await agent.clearContextGraphSubscriptions();
+      expect(cleared).toBeGreaterThanOrEqual(5); // wipes our 5 + any system rows
+      expect(persisted.size).toBe(0);
+      const stillActive = ['clear-cg-0', 'clear-cg-1', 'clear-cg-2', 'clear-cg-3', 'clear-cg-4'].filter(
+        (id) => agent.getSubscribedContextGraphs().get(id)?.subscribed === true,
+      );
+      expect(stillActive).toHaveLength(0);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('canonicalizes Ethereum agent membership principals before persistence', async () => {
     const persistedMembers = new Map<string, any>();
     const deletedMembers: string[] = [];
