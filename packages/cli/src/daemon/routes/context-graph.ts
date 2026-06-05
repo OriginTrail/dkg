@@ -1652,12 +1652,18 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   if (req.method === "GET" && path === "/api/context-graph/subscriptions") {
     const map = agent.getSubscribedContextGraphs?.();
     const subscriptions = map
-      ? [...map.entries()].map(([id, s]) => ({
-          contextGraphId: id,
-          subscribed: s?.subscribed === true,
-          synced: s?.synced === true,
-          coreHosted: s?.coreHosted === true,
-        }))
+      ? [...map.entries()]
+          // ACTIVE subscriptions only. The registry snapshot also holds
+          // discoverable-only / unsubscribed entries (`subscribed: false`) that
+          // are NOT live subscriptions — exclude them so `count` and the payload
+          // match this endpoint's "active in-memory subscriptions" contract.
+          .filter(([, s]) => s?.subscribed === true)
+          .map(([id, s]) => ({
+            contextGraphId: id,
+            subscribed: true,
+            synced: s?.synced === true,
+            coreHosted: s?.coreHosted === true,
+          }))
       : [];
     return jsonResponse(res, 200, { count: subscriptions.length, subscriptions });
   }
@@ -1668,6 +1674,20 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // Non-destructive to VM/SWM data — only the local subscription bookkeeping is
   // cleared; legitimate context graphs re-subscribe on next access.
   if (req.method === "DELETE" && path === "/api/context-graph/subscriptions") {
+    // Destructive + node-wide: gate on a node-level admin token. An agent-scoped
+    // token resolves (via `resolveAgentByToken`) to its agent address; the
+    // node-admin token (~/.dkg/auth.token) is not in the per-agent index and
+    // resolves to undefined. Without this, any authenticated agent token could
+    // wipe every user's subscription backlog. (Same operator-gating pattern as
+    // the agent key-management routes.)
+    const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
+    if (tokenAgentAddress) {
+      return jsonResponse(res, 403, {
+        error:
+          `Agent token for ${tokenAgentAddress} cannot clear the node-wide context-graph ` +
+          "subscription backlog. Use a node-level admin token (~/.dkg/auth.token).",
+      });
+    }
     const cleared = await agent.clearContextGraphSubscriptions();
     return jsonResponse(res, 200, { cleared });
   }

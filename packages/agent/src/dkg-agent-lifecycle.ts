@@ -3424,7 +3424,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!store) return;
     const ctx = createOperationContext('init');
     try {
-      const rows = await store.loadAll();
+      // System context graphs (AGENTS/ONTOLOGY) are auto-subscribed separately
+      // by start(); their persisted rows must NOT be rehydrated here too. Re-
+      // activating them is redundant, and counting them against the cap below
+      // would let them consume activation slots and leave USER subscriptions
+      // dormant. Exclude them from the rehydration set entirely.
+      const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
+      const rows = (await store.loadAll()).filter((r) => !systemContextGraphs.has(r.id));
       // Cap how many subscriptions we ACTIVATE on boot. Activation
       // (in-memory restore + sync-track + gossip subscribe + member persist)
       // does store-touching work per row; a large stale backlog fans this out
@@ -3536,22 +3542,35 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     // Delete the persisted USER rows (active + dormant). Selective — never the
     // system rows — so a custom store without a system-aware bulk delete is safe.
+    // Count ACTUAL deletions: a swallowed store.delete() failure must not be
+    // reported as cleared, or this recovery endpoint would answer 200 "all
+    // gone" while stale rows survive in the store.
+    let cleared = persistedUserIds.length;
+    let failed = 0;
     if (store) {
+      cleared = 0;
       for (const id of persistedUserIds) {
         try {
           await store.delete(id);
-        } catch {
-          /* best-effort */
+          cleared++;
+        } catch (err) {
+          failed++;
+          this.log.warn(
+            ctx,
+            `clearContextGraphSubscriptions: failed to delete persisted subscription "${id}": ` +
+              (err instanceof Error ? err.message : String(err)),
+          );
         }
       }
     }
 
     this.log.info(
       ctx,
-      `Cleared ${total} persisted user context-graph subscription(s) and tore down ` +
-        `${activeUserIds.length} active in-memory subscription(s); system context graphs preserved`,
+      `Cleared ${cleared} of ${total} persisted user context-graph subscription(s)` +
+        (failed > 0 ? ` (${failed} failed to delete — see warnings)` : '') +
+        `; tore down ${activeUserIds.length} active in-memory subscription(s); system context graphs preserved`,
     );
-    return total;
+    return cleared;
   }
 
   async hasConfirmedMetaState(this: DKGAgent, contextGraphId: string): Promise<boolean> {
