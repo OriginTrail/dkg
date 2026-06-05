@@ -214,9 +214,13 @@ export async function readMemoryLayerMarker(
   markerUri: string,
   nodeNum = 1,
 ): Promise<string | null> {
+  // The `_meta` partition must be addressed with a HARDCODED `GRAPH <iri>` under
+  // the scoped-query guard (see file header) — a `GRAPH ?mg` variable + filter is
+  // only legal for the data / `_shared_memory` partitions and 400s on a strict
+  // daemon. Build the exact meta-graph IRI and query it directly.
+  const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
   const sparql = `SELECT ?layer WHERE {
-    GRAPH ?mg { <${markerUri}> <${META_LAYER_PREDICATE}> ?layer }
-    FILTER(CONTAINS(STR(?mg), "/_meta"))
+    GRAPH <${metaGraph}> { <${markerUri}> <${META_LAYER_PREDICATE}> ?layer }
   }`;
   const values = bindingValues(await runQuery(contextGraphId, sparql, nodeNum), 'layer');
   if (values.length === 0) return null;
