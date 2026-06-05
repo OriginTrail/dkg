@@ -6,7 +6,7 @@ Triple store abstraction layer for DKG V10. Provides a unified API over multiple
 
 - **Backend adapters** — pluggable triple store implementations:
   - `OxigraphStore` — embedded WASM/native store, no external dependencies
-  - `OxigraphWorkerStore` — worker-thread variant; keeps the daemon event loop free, with a per-operation timeout and large-insert chunking (see below)
+  - `OxigraphWorkerStore` — worker-thread variant; keeps the daemon event loop free, with a per-operation timeout and opt-in large-insert chunking (see below)
   - `BlazegraphStore` — connects to a running Blazegraph SPARQL endpoint
   - `SparqlHttpStore` — generic adapter for any SPARQL 1.1 compliant endpoint
 - **Graph manager** — named graph lifecycle (create, drop, list) with contextGraph-scoped data and metadata graphs
@@ -44,13 +44,15 @@ knobs bound that blast radius:
 
 | Option | Default | Purpose |
 |---|---|---|
-| `operationTimeoutMs` | `120000` | Reject any single op that exceeds this instead of hanging forever. `0` disables (restores unbounded behaviour). |
-| `insertChunkSize` | `25000` | Split inserts larger than this into sequential chunks so concurrent ops are serviced between chunks. `0` disables chunking. |
+| `operationTimeoutMs` | `120000` | Reject any single op that exceeds this instead of hanging forever. `0` disables (restores unbounded behaviour). `close` is exempt — its final flush always runs to completion so shutdown can't drop pending writes. |
+| `insertChunkSize` | `0` (off) | **Opt-in.** When `> 0`, split inserts larger than this into sequential chunks so concurrent ops are serviced between chunks. Off by default because chunking is **not atomic** — a concurrent reader can see a partial graph mid-insert and a failed chunk leaves earlier chunks committed. Only enable on idempotent bulk-import paths. |
 
 ```jsonc
 // ~/.dkg/config.json
 "store": {
   "backend": "oxigraph-worker",
+  // insertChunkSize defaults to 0 (atomic single-message inserts).
+  // Enable it only for heavy, idempotent bulk-import workloads.
   "options": { "operationTimeoutMs": 120000, "insertChunkSize": 25000 }
 }
 ```

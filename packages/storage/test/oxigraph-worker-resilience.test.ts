@@ -96,4 +96,30 @@ describe('OxigraphWorkerStore resilience', () => {
       await closeQuietly(store);
     }
   });
+
+  it('chunking is OFF by default — a large insert is one atomic op (opt-in only)', async () => {
+    // Codex review: chunking weakens the all-or-nothing insert contract, so it
+    // must be opt-in. With defaults (insertChunkSize 0) a >25k insert still goes
+    // as a single message and commits atomically.
+    const store = makeStore({ operationTimeoutMs: 60_000 });
+    try {
+      await store.insert(quads(30_000));
+      expect(await store.countQuads('urn:test:g')).toBe(30_000);
+    } finally {
+      await closeQuietly(store);
+    }
+  });
+
+  it('close() is exempt from the per-op timeout so the final flush is never cut short', async () => {
+    // Codex review: close runs the worker's final flush; bounding it by the
+    // per-op timeout could terminate() the thread mid-flush and lose writes.
+    // With a tiny operationTimeoutMs and the worker still busy on a large
+    // insert, close() must WAIT for the worker to drain rather than reject.
+    const store = makeStore({ operationTimeoutMs: 10, insertChunkSize: 0 });
+    // Caller times out at 10ms, but the worker keeps running the insert.
+    await expect(store.insert(quads(50_000))).rejects.toThrow(/timed out/);
+    // close() must resolve cleanly (not reject with a 10ms timeout): it waits
+    // for the in-flight op to drain, then flushes + terminates.
+    await expect(store.close()).resolves.toBeUndefined();
+  });
 });
