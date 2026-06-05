@@ -3553,37 +3553,36 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // USER context-graph subscriptions, live and persisted alike. (The store's
     // system-unaware bulk delete is deliberately NOT used here.)
     const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
-    // Clearable = a NON-system, NON-coreHosted, SUBSCRIBED user subscription.
-    // System CGs are the control plane (above). coreHosted graphs are legitimate
-    // hosted graphs that `unsubscribeFromContextGraph` deliberately keeps wired
-    // for host-mode / chain reconcile and that the rehydration cap already
-    // exempts. Discoverable-only entries (`subscribed: false`, seeded by ontology
-    // discovery) are the local catalog, NOT the subscription backlog — purging
-    // them would drop catalog rows for graphs the node never subscribed to. So
-    // the clear targets only the stale SUBSCRIBED non-hosted backlog, the #997
-    // wedge.
-    const isClearable = (
-      id: string,
-      coreHosted: boolean | undefined,
-      subscribed: boolean | undefined,
-    ): boolean =>
-      !systemContextGraphs.has(id) && coreHosted !== true && subscribed === true;
+    // In scope for clearing = a NON-system, NON-coreHosted user CG. System CGs
+    // are the control plane (above); coreHosted graphs are legitimate hosted
+    // graphs `unsubscribeFromContextGraph` keeps wired for host-mode / reconcile
+    // and the rehydration cap already exempts.
+    const isInScope = (id: string, coreHosted: boolean | undefined): boolean =>
+      !systemContextGraphs.has(id) && coreHosted !== true;
 
+    // IN-MEMORY teardown clears EVERY in-scope entry, regardless of `subscribed`:
+    // besides the subscribed backlog this also drops `subscribed:false` ghosts
+    // left behind by an earlier `unsubscribeFromContextGraph` (which keeps the
+    // map entry), so no `.has(id)` fallback still treats the node as attached to
+    // a CG it was told to forget.
     const activeUserIds = [...this.subscribedContextGraphs.entries()]
-      .filter(([id, s]) => isClearable(id, s?.coreHosted, s?.subscribed))
+      .filter(([id, s]) => isInScope(id, s?.coreHosted))
       .map(([id]) => id);
 
-    // The full persisted clearable backlog (active + dormant rows left behind by
-    // the rehydration cap). Counted up front: `unsubscribeFromContextGraph`
-    // deletes each active row as a side effect, so a post-teardown count would
-    // miss them. Starts empty so a node with NO store reports 0 persisted rows
-    // removed (the active teardown is logged separately) rather than a phantom
-    // count of the in-memory subs.
+    // PERSISTED deletion targets only the SUBSCRIBED backlog (active + dormant
+    // rows left behind by the rehydration cap). The discoverable-only catalog
+    // rows (`subscribed:false`, seeded by ontology discovery) are KEPT so the
+    // node re-loads them on restart instead of forgetting graphs it merely
+    // discovered (their in-memory entry was dropped above and re-seeds). Counted
+    // up front: `unsubscribeFromContextGraph` deletes each active row as a side
+    // effect, so a post-teardown count would miss them. Starts empty so a node
+    // with NO store reports 0 persisted rows removed (active teardown is logged
+    // separately) rather than a phantom count of the in-memory subs.
     let persistedUserIds: string[] = [];
     if (store) {
       try {
         persistedUserIds = (await store.loadAll())
-          .filter((r) => isClearable(r.id, r.coreHosted, r.subscribed))
+          .filter((r) => isInScope(r.id, r.coreHosted) && r.subscribed === true)
           .map((r) => r.id);
       } catch (err) {
         // Can't enumerate the persisted backlog → the dormant (capped-out) rows
@@ -3600,18 +3599,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     const total = persistedUserIds.length;
 
-    // Tear down active in-memory USER subscriptions (gossip topics + sync scope),
-    // then REMOVE the registry entry. `unsubscribeFromContextGraph` only flips
-    // `subscribed` to false — it keeps the entry for the host-mode/reconcile path
-    // — but this recovery endpoint must leave NO trace of the cleared CGs, or
-    // read fallbacks would still see the IDs in `subscribedContextGraphs` even
-    // though the persisted rows are gone. (activeUserIds already excludes system
-    // + coreHosted CGs, so this only drops the cleared non-hosted user entries.)
+    // Tear down the in-memory USER entries, then REMOVE them from the registry so
+    // no `.has(id)` fallback still treats the node as attached. Only the
+    // SUBSCRIBED entries get the gossip/sync teardown (`unsubscribeFromContext
+    // Graph`, which also deletes their non-hosted persisted row); a
+    // `subscribed:false` entry — a ghost from an earlier unsubscribe, or a
+    // discoverable-only catalog row — is just dropped from memory. Running the
+    // full unsubscribe there would also delete the discoverable-only persisted
+    // catalog row we deliberately keep. (activeUserIds already excludes system +
+    // coreHosted CGs.)
     for (const id of activeUserIds) {
-      try {
-        this.unsubscribeFromContextGraph(id);
-      } catch {
-        /* best-effort teardown */
+      if (this.subscribedContextGraphs.get(id)?.subscribed === true) {
+        try {
+          this.unsubscribeFromContextGraph(id);
+        } catch {
+          /* best-effort teardown */
+        }
       }
       this.subscribedContextGraphs.delete(id);
     }

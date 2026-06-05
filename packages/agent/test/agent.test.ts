@@ -4346,7 +4346,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     }
   });
 
-  it('clear targets only SUBSCRIBED CGs (leaves discoverable-only catalog) and reconciles their membership (#997)', async () => {
+  it('clear deletes only subscribed persisted rows (keeps discoverable catalog), resets the in-memory map, and reconciles membership (#997)', async () => {
     const persisted = new Map<string, any>();
     persisted.set('sub-cg', { id: 'sub-cg', name: 'Subscribed', subscribed: true, synced: false, syncScoped: true });
     // Discoverable-only catalog entry (seeded by ontology discovery, never subscribed).
@@ -4376,12 +4376,17 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       const cleared = await agent.clearContextGraphSubscriptions();
 
-      // Only the SUBSCRIBED CG is cleared + counted; the discoverable-only catalog
-      // entry is left untouched.
+      // Only the SUBSCRIBED persisted row is deleted + counted.
       expect(cleared).toBe(1);
       expect(persisted.has('sub-cg')).toBe(false);
+      // The discoverable-only catalog row is KEPT in the store, so the node
+      // re-loads it on restart (doesn't forget graphs it merely discovered).
       expect(persisted.has('disc-cg')).toBe(true);
-      expect(agent.getSubscribedContextGraphs().has('disc-cg')).toBe(true);
+      // The in-memory map is fully reset — the subscribed backlog AND the
+      // subscribed:false entry are dropped — so no `.has(id)` fallback still
+      // reports the node as attached to a CG it was told to forget.
+      expect(agent.getSubscribedContextGraphs().has('sub-cg')).toBe(false);
+      expect(agent.getSubscribedContextGraphs().has('disc-cg')).toBe(false);
       // The cleared CG's membership is reconciled away (it feeds members / ACL).
       expect(persistedMembers.has(`sub-cg|node|${peerId}`)).toBe(false);
     } finally {
