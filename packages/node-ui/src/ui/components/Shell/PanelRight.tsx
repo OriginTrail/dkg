@@ -531,7 +531,7 @@ function isPersistedFailureNotice(text: string, failureContent: string, failureR
   return failureReason === 'Request cancelled.' && trimmed === failureReason;
 }
 
-function buildFailedAssistantContent(text: string, failureContent: string, failureReason?: string): string {
+function buildFailedAgentContent(text: string, failureContent: string, failureReason?: string): string {
   if (!text) return failureContent;
   return isPersistedFailureNotice(text, failureContent, failureReason)
     ? text
@@ -550,7 +550,7 @@ function mapHistoryMessage(message: LocalAgentHistoryMessage): LocalAgentMessage
     ? isPersistedFailureNotice(message.text, failureContent, failedReason)
     : false;
   const content = failed
-    ? buildFailedAssistantContent(message.text, failureContent, failedReason)
+    ? buildFailedAgentContent(message.text, failureContent, failedReason)
     : message.text || buildAttachmentSummary(message.attachmentRefs ?? []);
   // KNOWN ISSUE — persisted messages whose newlines were escape-
   // encoded by the DKG-memory persistence layer (stored as literal
@@ -2728,7 +2728,7 @@ export function PanelRight() {
             message.id === assistantId
               ? {
                   ...message,
-                  content: buildFailedAssistantContent(assistantPartialText, failureContent, failureReason),
+                  content: buildFailedAgentContent(assistantPartialText, failureContent, failureReason),
                   streaming: false,
                   synthesized: !assistantPartialText,
                 }
