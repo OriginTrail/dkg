@@ -202,11 +202,20 @@ else
   bad "private-curated CG create returned no id"
 fi
 
-# ── Scenario 4: private-open, core lifecycle ────────────────────────────────
-sec "SCENARIO 4 — private-open CG (curated members, any member publishes)"
+# ── Scenario 4: private-open, CURATOR lifecycle ─────────────────────────────
+# private-open = accessPolicy:private + publishPolicy:open (in principle ANY
+# member may publish). On the devnet a member only gains SWM publish rights after
+# the curator provisions its sender key via the INVITE flow — a bare allowlist
+# entry (or subscribe) hits "SWM Sender Key setup rejected", which also breaks the
+# curator's OWN publish when a non-provisioned member is listed. So this scenario
+# uses a curator-only allowlist and proves the private-open create→promote→publish
+# path FROM THE CURATOR; the non-creator member-publish path (invite → sender-key
+# → member publishes) is covered by devnet-test-invite-flow.sh, not duplicated
+# here (and not falsely claimed by this scenario).
+sec "SCENARIO 4 — private-open CG (curator lifecycle; member-publish → see invite-flow test)"
 CG_PRIVOPEN=$(create_cg 2 "ev-privopen-$TS" 1 1 true "[\"$(agent_addr 2)\"]")
 if [ -n "$CG_PRIVOPEN" ]; then
-  ok "created private-open CG: $CG_PRIVOPEN"
+  ok "created private-open CG (curator-only allowlist): $CG_PRIVOPEN"
   run_lifecycle 2 "$CG_PRIVOPEN" "privopen-core" 5 full
 else
   bad "private-open CG create returned no id"
@@ -222,8 +231,12 @@ else
   bad "public-curated CG create returned no id"
 fi
 
-# ── Scenario 6/7: local-only (unregistered host-mode) — no on-chain VM ──────
-sec "SCENARIO 6 — local-only-open CG from EDGE (WM→SWM, no on-chain)"
+# ── Scenario 6/7: local-only (UNREGISTERED) — WM write ONLY ─────────────────
+# Unregistered CGs have no on-chain identity, so they cannot finalize/promote an
+# assertion (no SWM) or publish (no VM). These scenarios deliberately cover the
+# WM-write path only — `wm` mode finalizes:false and stops before /promote. They
+# do NOT exercise SWM; the named "WM" reflects exactly what is asserted.
+sec "SCENARIO 6 — local-only-open CG from EDGE (WM write only — unregistered, no promote/SWM/VM)"
 CG_LOPEN=$(create_cg 6 "ev-localopen-$TS" 0 1 false)
 if [ -n "$CG_LOPEN" ]; then
   ok "edge node 6 created local-only-open CG: $CG_LOPEN"
@@ -232,7 +245,7 @@ else
   bad "local-only-open CG create returned no id"
 fi
 
-sec "SCENARIO 7 — local-only-curated CG from EDGE (WM→SWM, no on-chain)"
+sec "SCENARIO 7 — local-only-curated CG from EDGE (WM write only — unregistered, no promote/SWM/VM)"
 CG_LCUR=$(create_cg 5 "ev-localcur-$TS" 1 0 false "[\"$(agent_addr 5)\"]")
 if [ -n "$CG_LCUR" ]; then
   ok "edge node 5 created local-only-curated CG: $CG_LCUR"

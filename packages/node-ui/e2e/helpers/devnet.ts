@@ -140,11 +140,12 @@ const IS_CI = !!process.env.CI;
 // is outside the booted topology" (genuinely not applicable — e.g. node2 on a
 // `PLAYWRIGHT_DEVNET_NUM_NODES=1` run). Read from env rather than importing
 // real-node.ts to keep this low-level helper dependency-light. The fallback MUST
-// match the NUM_NODES default in playwright.config.ts (4): the runner process
-// does not always have PLAYWRIGHT_DEVNET_NUM_NODES exported (the webServer
-// command sets it only for the bootstrap/Vite subprocess), so a stale `3` here
-// would mark node4 as "outside topology" even though the webServer booted 4.
-const CONFIGURED_NUM_NODES = Number(process.env.PLAYWRIGHT_DEVNET_NUM_NODES) || 4;
+// match the NUM_NODES default in playwright.config.ts (6 = 4 core + 2 edge).
+// playwright.config.ts now also threads PLAYWRIGHT_DEVNET_NUM_NODES into the
+// runner process (it previously reached only the bootstrap/Vite subprocess), so
+// this fallback is normally moot — but a stale `4` here would wrongly mark
+// node5/6 (the edges) as "outside topology" and skip every edge spec.
+const CONFIGURED_NUM_NODES = Number(process.env.PLAYWRIGHT_DEVNET_NUM_NODES) || 6;
 
 type SkippableTest = { skip: (condition: boolean, description: string) => void };
 

@@ -32,6 +32,12 @@ const DEVNET_NODE = process.env.DEVNET_NODE || process.env.UI_NODE_ID || '1';
 // all-core devnet. node1 sees 5 peers (satisfies peer-connectivity.spec.ts
 // ">1 peer"). Override the count with PLAYWRIGHT_DEVNET_NUM_NODES.
 const NUM_NODES = process.env.PLAYWRIGHT_DEVNET_NUM_NODES || '6';
+// Thread the chosen count into the RUNNER process. The helpers (real-node.ts,
+// devnet.ts) read PLAYWRIGHT_DEVNET_NUM_NODES at import time, but webServer.command
+// exports it only to the bootstrap/Vite SUBPROCESS — so without this the runner
+// falls back to its default and would treat node5/6 (edges) as outside the
+// topology (skipped) and under-count EXPECTED_MIN_PEERS.
+process.env.PLAYWRIGHT_DEVNET_NUM_NODES = NUM_NODES;
 
 // Mesh-settle budget for the chained `bootstrap-devnet.ts` (it reads this via
 // PLAYWRIGHT_DEVNET_TIMEOUT_MS). Declared here so `webServer.timeout` below can

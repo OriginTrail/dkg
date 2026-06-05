@@ -427,6 +427,24 @@ create_node_config() {
   # are clear of any Dockerized Oxigraph on 7878/7879 and the base 7900.
   local store_block="\"store\": { \"backend\": \"oxigraph-server\", \"options\": { \"port\": $((7900 + node_num)) } },"
 
+  # Opt-in MIXED-backend fleet: DEVNET_MIXED_BACKEND=1 restores a heterogeneous
+  # assignment so the other supported store backends keep end-to-end devnet
+  # coverage (the uniform default above otherwise exercises only oxigraph-server).
+  # Rotates per node: node1→oxigraph-server, node2→oxigraph (embedded),
+  # node3→oxigraph-worker, node4→blazegraph, node5→sparql-http, then repeats.
+  # NOTE: this is a backend-MATRIX lane, not the robustness default — the embedded
+  # stores can wedge under heavy load (see above), and blazegraph/sparql-http
+  # expect a reachable external endpoint (BLAZEGRAPH_URL / SPARQL_HTTP_URL).
+  if [ "${DEVNET_MIXED_BACKEND:-0}" = "1" ]; then
+    case $(( (node_num - 1) % 5 )) in
+      0) store_block="\"store\": { \"backend\": \"oxigraph-server\", \"options\": { \"port\": $((7900 + node_num)) } },";;
+      1) store_block="\"store\": { \"backend\": \"oxigraph\" },";;
+      2) store_block="\"store\": { \"backend\": \"oxigraph-worker\" },";;
+      3) store_block="\"store\": { \"backend\": \"blazegraph\", \"options\": { \"url\": \"${BLAZEGRAPH_URL:-http://127.0.0.1:9999/blazegraph/namespace/kb/sparql}\" } },";;
+      4) store_block="\"store\": { \"backend\": \"sparql-http\", \"options\": { \"url\": \"${SPARQL_HTTP_URL:-http://127.0.0.1:7878/query}\" } },";;
+    esac
+  fi
+
   # Opt-in auth disable: set DEVNET_NO_AUTH=1 for frictionless local testing
   local devnet_auth_block=""
   if [ "${DEVNET_NO_AUTH:-}" = "1" ]; then
@@ -758,9 +776,15 @@ cmd_start() {
   # load: the old mixed embedded backends (`oxigraph` on cores 3-4,
   # `oxigraph-worker` on edges 5-6) single-thread and WEDGE under that load,
   # silently dropping a core below the StorageACK quorum (an edge publish then
-  # can't dial 3 core ACKs). The Docker-gated blazegraph / external-Oxigraph
-  # matrix backends are no longer wired into any node.
-  log "Store backend: ALL ${NUM_NODES} nodes → daemon-managed oxigraph-server (per-node port 7900+N, no Docker)"
+  # can't dial 3 core ACKs). For backend-matrix coverage of the OTHER supported
+  # stores (embedded oxigraph / oxigraph-worker / blazegraph / sparql-http), boot
+  # with DEVNET_MIXED_BACKEND=1 (see configure_node) — an opt-in lane, not the
+  # robustness default.
+  if [ "${DEVNET_MIXED_BACKEND:-0}" = "1" ]; then
+    log "Store backend: MIXED (DEVNET_MIXED_BACKEND=1) — per-node rotation across oxigraph-server / oxigraph / oxigraph-worker / blazegraph / sparql-http (matrix lane; embedded stores may wedge under load)"
+  else
+    log "Store backend: ALL ${NUM_NODES} nodes → daemon-managed oxigraph-server (per-node port 7900+N, no Docker). Opt into the backend matrix with DEVNET_MIXED_BACKEND=1."
+  fi
 
   # Stop any already-running devnet nodes so they pick up the config we are about to write
   stop_devnet_nodes_only
