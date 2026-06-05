@@ -102,6 +102,10 @@ export class OxigraphWorkerStore implements TripleStore {
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   private readonly operationTimeoutMs: number;
   private readonly insertChunkSize: number;
+  /** Set once the worker thread has exited (graceful close, crash, or kill). */
+  private workerExited = false;
+  /** Memoized close so repeat/concurrent close() calls share one teardown. */
+  private closePromise: Promise<void> | null = null;
 
   constructor(persistPath?: string, opts?: OxigraphWorkerStoreOptions) {
     this.operationTimeoutMs = normalizeNonNegativeInt(opts?.operationTimeoutMs, DEFAULT_OPERATION_TIMEOUT_MS);
@@ -156,6 +160,18 @@ export class OxigraphWorkerStore implements TripleStore {
       for (const [, p] of this.pending) p.reject(err);
       this.pending.clear();
     });
+    // Once the worker exits, no pending op can ever get a reply. Settle them all
+    // (reject) instead of leaving callers hung forever — this is what makes the
+    // unbounded `close()` safe: if a second close (or any op) is still queued
+    // when terminate() kills the thread, it rejects here rather than hanging.
+    this.worker.on('exit', () => {
+      this.workerExited = true;
+      if (this.pending.size > 0) {
+        const err = new Error('oxigraph-worker: worker exited before the operation completed (store closed)');
+        for (const [, p] of this.pending) p.reject(err);
+        this.pending.clear();
+      }
+    });
   }
 
   private call<T>(method: string, ...args: unknown[]): Promise<T> {
@@ -172,6 +188,12 @@ export class OxigraphWorkerStore implements TripleStore {
   private callWithTimeout<T>(timeoutMs: number, method: string, ...args: unknown[]): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
+      // The worker is gone — a posted message would never be answered, so fail
+      // fast instead of registering a pending entry that can only ever hang.
+      if (this.workerExited) {
+        reject(new Error(`oxigraph-worker: cannot run "${method}" — the store is closed.`));
+        return;
+      }
       let timer: ReturnType<typeof setTimeout> | undefined;
       if (timeoutMs > 0) {
         timer = setTimeout(() => {
@@ -242,13 +264,28 @@ export class OxigraphWorkerStore implements TripleStore {
   async flush(): Promise<void> { return this.call('flush'); }
 
   async close(): Promise<void> {
+    // Memoized + serialized: every close() call shares ONE teardown promise, so
+    // we issue exactly one close RPC. (A second unbounded close RPC would be
+    // orphaned when terminate() kills the worker after the first resolves, and
+    // — without the exit handler — would hang forever.)
+    if (!this.closePromise) this.closePromise = this.doClose();
+    return this.closePromise;
+  }
+
+  private async doClose(): Promise<void> {
+    // Worker already gone (crash/kill) — there's nothing to flush; just make
+    // sure the thread is reaped. Keeps close() idempotent and non-throwing.
+    if (this.workerExited) {
+      try { await this.worker.terminate(); } catch { /* already terminated */ }
+      return;
+    }
     // `close` runs the worker's FINAL synchronous flush (insert() only schedules
     // a 50ms debounced flush, so close is what guarantees durability). It is
     // therefore EXEMPT from the per-op timeout (timeoutMs 0): bounding it could
     // fire the timeout while the worker is mid-flush, and the `finally` would
     // then terminate() the thread before pending writes hit disk — losing data.
-    // We still terminate() in `finally`, so a worker that errors/closes cleanly
-    // never leaks its thread; a graceful close simply runs to completion first.
+    // terminate() always runs in `finally`; the worker's 'exit' handler then
+    // rejects anything still pending, so nothing leaks or hangs.
     try {
       await this.callWithTimeout<void>(0, 'close');
     } finally {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { OxigraphWorkerStore, type Quad } from '../src/index.js';
+import { OxigraphWorkerStore, createTripleStore, type Quad } from '../src/index.js';
 
 // These exercise the embedded worker adapter's resilience guards added to stop
 // a single slow/wedged store op from hanging every other store-backed request
@@ -156,6 +156,47 @@ describe('OxigraphWorkerStore resilience', () => {
       expect(await store.countQuads('urn:test:g')).toBe(1_000);
     } finally {
       await closeQuietly(store);
+    }
+  });
+
+  it('concurrent and repeated close() calls all resolve without hanging', async () => {
+    // Codex review: close() went through an UNBOUNDED worker RPC, so a second
+    // close racing the first was orphaned when terminate() killed the worker and
+    // never settled. close() is now memoized + the worker 'exit' handler rejects
+    // anything still pending, so concurrent/repeat closes all settle.
+    const store = makeStore({ operationTimeoutMs: 60_000 });
+    await store.insert(quads(5));
+    const results = await Promise.all([store.close(), store.close(), store.close()]);
+    expect(results).toEqual([undefined, undefined, undefined]);
+    // Ops issued after close fail fast (store closed) instead of hanging.
+    await new Promise((r) => setImmediate(r));
+    await expect(store.insert(quads(1))).rejects.toThrow(/closed/i);
+  });
+
+  it('store.options reach the adapter through createTripleStore (factory path)', async () => {
+    // Codex review: the user-facing path is createTripleStore({ backend, options }),
+    // not the constructor — assert the option forwarding in the adapter factory
+    // actually takes effect so a typo there can't silently drop the knobs.
+    // operationTimeoutMs forwarded: a 5ms bound rejects a 50k insert.
+    const a = await createTripleStore({
+      backend: 'oxigraph-worker',
+      options: { operationTimeoutMs: 5, insertChunkSize: 0 },
+    });
+    try {
+      await expect(a.insert(quads(50_000))).rejects.toThrow(/timed out after 5ms/);
+    } finally {
+      await a.close().catch(() => {});
+    }
+    // insertChunkSize forwarded: a chunked insert through the factory writes all quads.
+    const b = await createTripleStore({
+      backend: 'oxigraph-worker',
+      options: { operationTimeoutMs: 60_000, insertChunkSize: 1_000 },
+    });
+    try {
+      await b.insert(quads(5_000));
+      expect(await b.countQuads('urn:test:g')).toBe(5_000);
+    } finally {
+      await b.close().catch(() => {});
     }
   });
 });
