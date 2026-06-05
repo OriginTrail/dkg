@@ -5,12 +5,59 @@ import { fileURLToPath } from 'node:url';
 import type { TripleStore, Quad, QueryResult } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 
+/**
+ * Default per-operation timeout for the embedded worker store. The worker is
+ * a SINGLE thread that processes store ops FIFO, so one slow / wedged op (a
+ * huge import, an expensive query, or a genuinely hung worker) blocks every
+ * other store-backed request queued behind it. Without a bound, the caller —
+ * an API route, the publisher, gossip ingest — waits FOREVER. That is the
+ * exact signature behind issues #997 / #999 / #1002 / #1005 / #1008:
+ * `/api/status` (no store) stays green while `/api/query`,
+ * `/api/context-graph/list`, `/api/assertion/create` never return.
+ *
+ * A bounded wait turns an indefinite hang into a surfaced error the operator
+ * can act on (the message points at the real fix: use an external SPARQL
+ * server for heavy workloads). 120s is generous enough not to trip normal
+ * operations yet finite. Set `operationTimeoutMs: 0` to restore the old
+ * unbounded behaviour.
+ */
+const DEFAULT_OPERATION_TIMEOUT_MS = 120_000;
+
+/**
+ * Default chunk size for `insert`. A large insert posted as ONE worker
+ * message holds the single worker thread for its entire duration, during
+ * which no other store op can run (head-of-line blocking). Splitting a large
+ * insert into sequential chunks yields the worker between chunks, so
+ * concurrently-issued reads / writes are serviced within ~one chunk instead
+ * of waiting for the whole import to finish. Inserts at or below this size go
+ * as a single (atomic) message, preserving existing semantics for the common
+ * case. Set `insertChunkSize: 0` to disable chunking entirely.
+ */
+const DEFAULT_INSERT_CHUNK_SIZE = 25_000;
+
+export interface OxigraphWorkerStoreOptions {
+  /** Per-operation timeout in milliseconds. Default 120_000. 0 disables it. */
+  operationTimeoutMs?: number;
+  /** Max quads per worker insert message. Default 25_000. 0 disables chunking. */
+  insertChunkSize?: number;
+}
+
+/** Accept only finite, non-negative overrides; otherwise fall back. */
+function normalizeNonNegative(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
 export class OxigraphWorkerStore implements TripleStore {
   private worker: Worker;
   private nextId = 0;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+  private readonly operationTimeoutMs: number;
+  private readonly insertChunkSize: number;
 
-  constructor(persistPath?: string) {
+  constructor(persistPath?: string, opts?: OxigraphWorkerStoreOptions) {
+    this.operationTimeoutMs = normalizeNonNegative(opts?.operationTimeoutMs, DEFAULT_OPERATION_TIMEOUT_MS);
+    this.insertChunkSize = normalizeNonNegative(opts?.insertChunkSize, DEFAULT_INSERT_CHUNK_SIZE);
+
     // Resolve the worker impl with a small search path so this keeps
     // working in all three deployment shapes we actually run in:
     //
@@ -65,12 +112,51 @@ export class OxigraphWorkerStore implements TripleStore {
   private call<T>(method: string, ...args: unknown[]): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      if (this.operationTimeoutMs > 0) {
+        timer = setTimeout(() => {
+          // The worker is single-threaded: it is STILL running this op, but we
+          // refuse to make the caller wait forever. Drop the pending entry so
+          // the eventual (late) worker reply is ignored rather than
+          // double-settling this promise (the message handler no-ops on a
+          // missing id).
+          if (this.pending.delete(id)) {
+            reject(new Error(
+              `oxigraph-worker: "${method}" timed out after ${this.operationTimeoutMs}ms. ` +
+              `The embedded store runs on a single worker thread, so a long-running or ` +
+              `stuck operation blocks all others. For heavy workloads point the node at ` +
+              `an external SPARQL server (store.backend "sparql-http" / "blazegraph"), or ` +
+              `raise / disable store.options.operationTimeoutMs.`,
+            ));
+          }
+        }, this.operationTimeoutMs);
+        // A pending-op timer must not keep the process alive on its own.
+        if (typeof timer.unref === 'function') timer.unref();
+      }
+      this.pending.set(id, {
+        resolve: (v) => { if (timer) clearTimeout(timer); resolve(v as T); },
+        reject: (e) => { if (timer) clearTimeout(timer); reject(e); },
+      });
       this.worker.postMessage({ id, method, args });
     });
   }
 
-  async insert(quads: Quad[]): Promise<void> { return this.call('insert', quads); }
+  async insert(quads: Quad[]): Promise<void> {
+    const size = this.insertChunkSize;
+    if (size <= 0 || quads.length <= size) {
+      return this.call('insert', quads);
+    }
+    // Sequential awaits create yield points between chunks: store ops requested
+    // while this import runs are serviced by the worker BETWEEN chunks instead
+    // of waiting for the entire insert (head-of-line blocking relief). Each
+    // chunk is also bounded by the per-op timeout independently. Trade-off: a
+    // large insert becomes multiple transactions rather than one — DKG insert
+    // paths are additive / idempotent (re-inserting a quad is a no-op), so a
+    // partial insert interrupted by a crash is safely re-applied on retry.
+    for (let i = 0; i < quads.length; i += size) {
+      await this.call('insert', quads.slice(i, i + size));
+    }
+  }
   async delete(quads: Quad[]): Promise<void> { return this.call('delete', quads); }
   async deleteByPattern(pattern: Partial<Quad>): Promise<number> { return this.call('deleteByPattern', pattern); }
   async query(sparql: string): Promise<QueryResult> { return this.call('query', sparql); }
@@ -83,12 +169,22 @@ export class OxigraphWorkerStore implements TripleStore {
   async flush(): Promise<void> { return this.call('flush'); }
 
   async close(): Promise<void> {
-    await this.call('close');
-    await this.worker.terminate();
+    // Always terminate the worker, even if the graceful close reply is slow or
+    // times out — otherwise a wedged worker would leak its thread on shutdown.
+    try {
+      await this.call('close');
+    } finally {
+      await this.worker.terminate();
+    }
   }
 }
 
 registerTripleStoreAdapter('oxigraph-worker', async (opts) => {
   const filePath = opts?.path as string | undefined;
-  return new OxigraphWorkerStore(filePath);
+  return new OxigraphWorkerStore(filePath, {
+    operationTimeoutMs:
+      typeof opts?.operationTimeoutMs === 'number' ? (opts.operationTimeoutMs as number) : undefined,
+    insertChunkSize:
+      typeof opts?.insertChunkSize === 'number' ? (opts.insertChunkSize as number) : undefined,
+  });
 });
