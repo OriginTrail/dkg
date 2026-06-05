@@ -117,7 +117,20 @@ export async function findWmAssertion(
       && CONTAINS(STR(?g), "${nameSubstring}")
       && !CONTAINS(STR(?g), "/meta/assertion/"))
   }`;
-  const graphs = bindingValues(await runQuery(contextGraphId, sparql, nodeNum), 'g').sort();
+  // Sort by the assertion-NAME segment (the last path component), NOT the full
+  // graph URI. URIs are `.../assertion/<agent>/<name>`, so a raw string sort
+  // orders by the <agent> segment first and could pick an older assertion from
+  // a DIFFERENT agent on a shared devnet — the rest of the spec would then read
+  // counts/markers from the wrong graph. The trailing name is the stable
+  // per-import key (and the only field that varies for this test's own imports).
+  const assertionNameOf = (uri: string) => uri.split('/').pop() ?? uri;
+  const graphs = bindingValues(await runQuery(contextGraphId, sparql, nodeNum), 'g').sort(
+    (a, b) => {
+      const an = assertionNameOf(a);
+      const bn = assertionNameOf(b);
+      return an < bn ? -1 : an > bn ? 1 : 0;
+    },
+  );
   const dataGraphUri = graphs[graphs.length - 1];
   if (!dataGraphUri) {
     throw new Error(`findWmAssertion: no assertion data graph contains "${nameSubstring}" in CG ${contextGraphId}`);
