@@ -849,30 +849,13 @@ async function canReadImportedArtifactSharedSource(
   return false;
 }
 
-async function resolveImportedArtifactSourcePeerId(
-  ctx: RequestContext,
-  artifact: Pick<ImportedArtifactResolution, 'contextGraphId' | 'subGraphName' | 'assertionUri'>,
-): Promise<string | undefined> {
-  const swmMetaGraph = contextGraphSharedMemoryMetaUri(artifact.contextGraphId, artifact.subGraphName);
-  if (!isSafeIri(artifact.assertionUri)) return undefined;
-  const result = await ctx.agent.store.query(`
-    SELECT ?publisherPeerId ?publishedAt WHERE {
-      GRAPH <${swmMetaGraph}> {
-        ?op <${RDF_TYPE}> <${DKG_ONTOLOGY}WorkspaceOperation> .
-        ?op <${DKG_ONTOLOGY}rootEntity> <${artifact.assertionUri}> .
-        ?op <${DKG_ONTOLOGY}publisherPeerId> ?publisherPeerId .
-        OPTIONAL { ?op <${DKG_ONTOLOGY}publishedAt> ?publishedAt }
-      }
-    }
-    ORDER BY DESC(?publishedAt) DESC(STR(?op))
-    LIMIT 1
-  `) as { type?: string; bindings?: Array<Record<string, unknown>> };
-  return normalizeSourcePeerId(result.bindings?.[0]?.publisherPeerId);
-}
-
 function normalizeSourcePeerId(raw: unknown): string | undefined {
   const peerId = normalizeLiteralBinding(raw);
   return peerId && peerId !== 'unknown' ? peerId : undefined;
+}
+
+function importedArtifactMarkdownCacheMarkerSubject(assertionUri: string, peerId: string): string {
+  return `${assertionUri}#cached-markdown-${encodeURIComponent(peerId)}`;
 }
 
 async function hasVerifiedImportedArtifactMarkdownCache(
@@ -881,10 +864,11 @@ async function hasVerifiedImportedArtifactMarkdownCache(
 ): Promise<boolean> {
   if (!artifact.markdownHash) return false;
   const metaGraph = contextGraphMetaUri(artifact.contextGraphId);
+  const markerSubject = importedArtifactMarkdownCacheMarkerSubject(artifact.assertionUri, ctx.agent.peerId);
   const result = await ctx.agent.store.query(`
     SELECT ?cachedMarkdownHash WHERE {
       GRAPH <${metaGraph}> {
-        <${artifact.assertionUri}> <${DKG_ONTOLOGY}cachedMarkdownHash> ?cachedMarkdownHash .
+        <${markerSubject}> <${DKG_ONTOLOGY}cachedMarkdownHash> ?cachedMarkdownHash .
       }
     }
     LIMIT 1
@@ -903,8 +887,9 @@ async function markVerifiedImportedArtifactMarkdownCache(
   const insert = ctx.agent.store.insert;
   if (typeof insert !== 'function') return;
   const metaGraph = contextGraphMetaUri(artifact.contextGraphId);
+  const markerSubject = importedArtifactMarkdownCacheMarkerSubject(artifact.assertionUri, ctx.agent.peerId);
   await insert.call(ctx.agent.store, [{
-    subject: artifact.assertionUri,
+    subject: markerSubject,
     predicate: `${DKG_ONTOLOGY}cachedMarkdownHash`,
     object: rdfLiteral(artifact.markdownHash),
     graph: metaGraph,
@@ -929,8 +914,7 @@ async function finalizeImportedArtifactAvailability(
       canFetchMarkdown: false,
     };
   }
-  const sourcePeerId = normalizeSourcePeerId(artifact.sourcePeerId)
-    ?? await resolveImportedArtifactSourcePeerId(ctx, artifact).catch(() => undefined);
+  const sourcePeerId = normalizeSourcePeerId(artifact.sourcePeerId);
   if (!sourcePeerId) {
     return {
       ...artifact,
