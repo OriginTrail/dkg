@@ -5,6 +5,7 @@ import {
   PROTOCOL_GET_IMPORTED_SOURCE_BLOB,
   createOperationContext,
   contextGraphMetaUri,
+  contextGraphSharedMemoryUri,
   isSafeIri,
   validateContextGraphId,
   validateSubGraphName,
@@ -45,6 +46,12 @@ function normalizeStoredContentHash(hash: string | undefined): string | undefine
   } catch {
     return undefined;
   }
+}
+
+function hashFromFileUrn(raw: unknown): string | undefined {
+  const value = bindingCellValue(raw).trim();
+  const prefix = 'urn:dkg:file:';
+  return value.startsWith(prefix) ? normalizeStoredContentHash(value.slice(prefix.length)) : undefined;
 }
 
 function contentHashMatchesBytes(hash: string, bytes: Uint8Array): boolean {
@@ -544,6 +551,26 @@ export class SourceBlobMethods extends DKGAgentBase {
       const sourceContentType = normalizeDetectedContentType(normalizeLiteralBinding(row.sourceContentType) || undefined);
       const mdIntermediateHash = normalizeStoredContentHash(normalizeLiteralBinding(row.mdIntermediateHash));
       if (mdIntermediateHash) return hash === mdIntermediateHash;
+      if (sourceContentType === 'text/markdown' && hash === sourceFileHash) return true;
+    }
+
+    const swmGraph = contextGraphSharedMemoryUri(req.contextGraphId, req.subGraphName);
+    const swmResult = await this.store.query(`
+      SELECT ?sourceFile ?sourceContentType ?markdownForm WHERE {
+        GRAPH <${swmGraph}> {
+          <${req.assertionUri}> <${DKG}sourceFile> ?sourceFile .
+          OPTIONAL { <${req.assertionUri}> <${DKG}sourceContentType> ?sourceContentType }
+          OPTIONAL { <${req.assertionUri}> <${DKG}markdownForm> ?markdownForm }
+        }
+      }
+      LIMIT 1
+    `);
+    if (swmResult.type === 'bindings' && swmResult.bindings.length > 0) {
+      const row = swmResult.bindings[0];
+      const sourceFileHash = hashFromFileUrn(row.sourceFile);
+      const sourceContentType = normalizeDetectedContentType(normalizeLiteralBinding(row.sourceContentType) || undefined);
+      const markdownFormHash = hashFromFileUrn(row.markdownForm);
+      if (markdownFormHash) return hash === markdownFormHash;
       if (sourceContentType === 'text/markdown' && hash === sourceFileHash) return true;
     }
 

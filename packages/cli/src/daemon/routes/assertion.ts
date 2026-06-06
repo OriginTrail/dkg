@@ -361,6 +361,7 @@ type ImportedArtifactResolution = {
   canFetchMarkdown?: boolean;
   markdownUnavailableReason?: string;
   sourcePeerId?: string;
+  sourcePeerIds?: string[];
   /**
    * Issue #872 — set to `true` when the request would have been
    * blocked by the legacy owner guard but the CG's on-chain policy
@@ -868,12 +869,12 @@ function parseAgentLastSeenMs(raw: unknown): number {
   return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
 }
 
-async function resolveLegacyImportedArtifactSourcePeerId(
+async function resolveLegacyImportedArtifactSourcePeerIds(
   ctx: RequestContext,
   assertionAgentAddress: string,
-): Promise<string | undefined> {
+): Promise<string[]> {
   const findAgents = ctx.agent.findAgents;
-  if (typeof findAgents !== 'function') return undefined;
+  if (typeof findAgents !== 'function') return [];
   const strippedAssertionAgentAddress = assertionAgentAddress.startsWith('did:dkg:agent:')
     ? assertionAgentAddress.slice('did:dkg:agent:'.length)
     : assertionAgentAddress;
@@ -896,7 +897,8 @@ async function resolveLegacyImportedArtifactSourcePeerId(
   }
   return [...candidates.entries()]
     .sort(([leftPeerId, leftLastSeen], [rightPeerId, rightLastSeen]) =>
-      rightLastSeen - leftLastSeen || leftPeerId.localeCompare(rightPeerId))[0]?.[0];
+      rightLastSeen - leftLastSeen || leftPeerId.localeCompare(rightPeerId))
+    .map(([peerId]) => peerId);
 }
 
 async function hasVerifiedImportedArtifactMarkdownCache(
@@ -955,7 +957,15 @@ async function finalizeImportedArtifactAvailability(
       canFetchMarkdown: false,
     };
   }
-  const sourcePeerId = normalizeSourcePeerId(artifact.sourcePeerId);
+  const sourcePeerIds = [
+    artifact.sourcePeerId,
+    ...(artifact.sourcePeerIds ?? []),
+  ].reduce<string[]>((peers, peerId) => {
+    const normalized = normalizeSourcePeerId(peerId);
+    if (normalized && !peers.includes(normalized)) peers.push(normalized);
+    return peers;
+  }, []);
+  const sourcePeerId = sourcePeerIds.find((peerId) => peerId !== ctx.agent.peerId) ?? sourcePeerIds[0];
   if (!sourcePeerId) {
     return {
       ...artifact,
@@ -968,6 +978,7 @@ async function finalizeImportedArtifactAvailability(
     return {
       ...artifact,
       sourcePeerId,
+      sourcePeerIds,
       markdownAvailability: 'unavailable',
       canFetchMarkdown: false,
       markdownUnavailableReason: 'source-peer-unavailable',
@@ -976,6 +987,7 @@ async function finalizeImportedArtifactAvailability(
   return {
     ...artifact,
     sourcePeerId,
+    sourcePeerIds: sourcePeerIds.filter((peerId) => peerId !== ctx.agent.peerId),
     markdownAvailability: 'fetchable',
     canFetchMarkdown: true,
   };
@@ -995,51 +1007,72 @@ async function hydrateImportedArtifactMarkdown(
   artifact: ImportedArtifactResolution,
   maxBytes: number,
 ): Promise<{ bytes?: Buffer; tooLargeBytes?: number; error?: string }> {
-  if (!artifact.markdownHash || !artifact.sourcePeerId || !artifact.canFetchMarkdown) {
+  const sourcePeerIds = [
+    artifact.sourcePeerId,
+    ...(artifact.sourcePeerIds ?? []),
+  ].reduce<string[]>((peers, peerId) => {
+    const normalized = normalizeSourcePeerId(peerId);
+    if (normalized && normalized !== ctx.agent.peerId && !peers.includes(normalized)) peers.push(normalized);
+    return peers;
+  }, []);
+  if (!artifact.markdownHash || sourcePeerIds.length === 0 || !artifact.canFetchMarkdown) {
     return { error: 'source peer unavailable' };
   }
   const fetcher = ctx.agent.fetchImportedSourceBlobFromPeer;
   if (typeof fetcher !== 'function') {
     return { error: 'source blob fetch is unavailable on this agent' };
   }
-  let fetched;
-  try {
-    fetched = await fetcher.call(ctx.agent, artifact.sourcePeerId, {
-      contextGraphId: artifact.contextGraphId,
-      assertionUri: artifact.assertionUri,
-      blobHash: artifact.markdownHash,
-      maxBytes,
-      ...(artifact.subGraphName ? { subGraphName: artifact.subGraphName } : {}),
-      requestAgentAddress: ctx.requestAgentAddress,
-    });
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : String(err) };
+  let lastError = 'source peer unavailable';
+  for (const sourcePeerId of sourcePeerIds) {
+    let fetched;
+    try {
+      fetched = await fetcher.call(ctx.agent, sourcePeerId, {
+        contextGraphId: artifact.contextGraphId,
+        assertionUri: artifact.assertionUri,
+        blobHash: artifact.markdownHash,
+        maxBytes,
+        ...(artifact.subGraphName ? { subGraphName: artifact.subGraphName } : {}),
+        requestAgentAddress: ctx.requestAgentAddress,
+      });
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      continue;
+    }
+    if (fetched.denied) {
+      lastError = fetched.denied;
+      continue;
+    }
+    if (typeof fetched.totalBytes === 'number' && fetched.totalBytes > maxBytes) return { tooLargeBytes: fetched.totalBytes };
+    if (fetched.truncated) return { tooLargeBytes: fetched.totalBytes ?? maxBytes + 1 };
+    if (!fetched.bytes) {
+      lastError = 'source blob fetch returned no bytes';
+      continue;
+    }
+    const bytes = Buffer.from(fetched.bytes);
+    if (bytes.length > maxBytes) return { tooLargeBytes: bytes.length };
+    if (!contentHashMatchesBytes(artifact.markdownHash, bytes)) {
+      lastError = 'source blob hash mismatch';
+      continue;
+    }
+    const stored = await ctx.fileStore.put(bytes, 'text/markdown');
+    if (!contentHashMatchesBytes(artifact.markdownHash, bytes)) {
+      return { error: 'source blob hash mismatch after cache write' };
+    }
+    if (
+      artifact.markdownHash.startsWith('keccak256:') && stored.keccak256 !== artifact.markdownHash ||
+      artifact.markdownHash.startsWith('sha256:') && stored.hash !== artifact.markdownHash
+    ) {
+      return { error: 'cached source blob hash mismatch' };
+    }
+    await markVerifiedImportedArtifactMarkdownCache(ctx, artifact);
+    artifact.sourcePeerId = sourcePeerId;
+    artifact.canReadMarkdown = true;
+    artifact.markdownAvailability = 'local';
+    artifact.canFetchMarkdown = false;
+    delete artifact.markdownUnavailableReason;
+    return { bytes };
   }
-  if (fetched.denied) return { error: fetched.denied };
-  if (typeof fetched.totalBytes === 'number' && fetched.totalBytes > maxBytes) return { tooLargeBytes: fetched.totalBytes };
-  if (fetched.truncated) return { tooLargeBytes: fetched.totalBytes ?? maxBytes + 1 };
-  if (!fetched.bytes) return { error: 'source blob fetch returned no bytes' };
-  const bytes = Buffer.from(fetched.bytes);
-  if (bytes.length > maxBytes) return { tooLargeBytes: bytes.length };
-  if (!contentHashMatchesBytes(artifact.markdownHash, bytes)) {
-    return { error: 'source blob hash mismatch' };
-  }
-  const stored = await ctx.fileStore.put(bytes, 'text/markdown');
-  if (!contentHashMatchesBytes(artifact.markdownHash, bytes)) {
-    return { error: 'source blob hash mismatch after cache write' };
-  }
-  if (
-    artifact.markdownHash.startsWith('keccak256:') && stored.keccak256 !== artifact.markdownHash ||
-    artifact.markdownHash.startsWith('sha256:') && stored.hash !== artifact.markdownHash
-  ) {
-    return { error: 'cached source blob hash mismatch' };
-  }
-  await markVerifiedImportedArtifactMarkdownCache(ctx, artifact);
-  artifact.canReadMarkdown = true;
-  artifact.markdownAvailability = 'local';
-  artifact.canFetchMarkdown = false;
-  delete artifact.markdownUnavailableReason;
-  return { bytes };
+  return { error: lastError };
 }
 
 function handleImportArtifactRouteError(res: ServerResponse, err: unknown): boolean {
@@ -1125,8 +1158,8 @@ async function resolveImportedArtifactFromSharedMemory(
         }).catch(() => false)
       : await ctx.fileStore.has(markdownHash).catch(() => false)
     : false;
-  const sourcePeerId = await resolveLegacyImportedArtifactSourcePeerId(ctx, args.assertionAgentAddress)
-    .catch(() => undefined);
+  const sourcePeerIds = await resolveLegacyImportedArtifactSourcePeerIds(ctx, args.assertionAgentAddress)
+    .catch(() => []);
 
   return finalizeImportedArtifactAvailability(ctx, {
     contextGraphId: args.contextGraphId,
@@ -1144,7 +1177,7 @@ async function resolveImportedArtifactFromSharedMemory(
     ...(markdownHash && markdownHash !== sourceFileHash ? { mdIntermediateHash: markdownHash } : {}),
     ...(markdownForm ? { markdownForm } : {}),
     ...(markdownHash ? { markdownHash } : {}),
-    ...(sourcePeerId ? { sourcePeerId } : {}),
+    ...(sourcePeerIds[0] ? { sourcePeerId: sourcePeerIds[0], sourcePeerIds } : {}),
     canReadMarkdown: markdownAvailableLocally,
     ...(args.ownerGuardRelaxed ? { ownerGuardRelaxed: true } : {}),
   });
@@ -1397,8 +1430,10 @@ async function resolveImportedArtifact(
     ? await ctx.fileStore.has(markdownHash).catch(() => false)
     : false;
   const durableSourcePeerId = normalizeSourcePeerId(metaBinding.sourcePublisherPeerId);
-  const sourcePeerId = durableSourcePeerId
-    ?? await resolveLegacyImportedArtifactSourcePeerId(ctx, parsedAssertion.assertionAgentAddress).catch(() => undefined);
+  const legacySourcePeerIds = durableSourcePeerId
+    ? []
+    : await resolveLegacyImportedArtifactSourcePeerIds(ctx, parsedAssertion.assertionAgentAddress).catch(() => []);
+  const sourcePeerId = durableSourcePeerId ?? legacySourcePeerIds[0];
 
   return finalizeImportedArtifactAvailability(ctx, {
     contextGraphId,
@@ -1422,6 +1457,7 @@ async function resolveImportedArtifact(
     ...(markdownHash ? { markdownHash } : {}),
     canReadMarkdown: markdownAvailableLocally,
     ...(sourcePeerId ? { sourcePeerId } : {}),
+    ...(legacySourcePeerIds.length > 0 ? { sourcePeerIds: legacySourcePeerIds } : {}),
     ...(ownerGuardRelaxed ? { ownerGuardRelaxed: true } : {}),
   });
 }

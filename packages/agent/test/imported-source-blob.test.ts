@@ -155,12 +155,18 @@ function fakeResponder(args: {
   policy?: { accessPolicy?: number; publishPolicy?: number };
   contentType?: string;
   mdIntermediateHash?: string;
+  omitDurableMeta?: boolean;
+  swmContentType?: string;
+  swmMarkdownFormHash?: string;
   verifySyncIdentity?: (address: string, identityId: bigint) => Promise<boolean>;
 }) {
   const bytes = args.bytes ?? Buffer.from('# Imported\n');
   const verifySyncIdentity = vi.fn(args.verifySyncIdentity ?? (async () => false));
   const storeQuery = vi.fn(async (sparql: string) => {
     if (sparql.includes('SELECT ?sourceFileHash')) {
+      if (args.omitDurableMeta) {
+        return { type: 'bindings', bindings: [] };
+      }
       return {
         type: 'bindings',
         bindings: [{
@@ -171,7 +177,16 @@ function fakeResponder(args: {
       };
     }
     if (sparql.includes('SELECT ?sourceFile')) {
-      return { type: 'bindings', bindings: [] };
+      return args.omitDurableMeta
+        ? {
+            type: 'bindings',
+            bindings: [{
+              sourceFile: `urn:dkg:file:${args.blobHash}`,
+              sourceContentType: args.swmContentType ?? args.contentType ?? 'text/markdown',
+              ...(args.swmMarkdownFormHash ? { markdownForm: `urn:dkg:file:${args.swmMarkdownFormHash}` } : {}),
+            }],
+          }
+        : { type: 'bindings', bindings: [] };
     }
     throw new Error(`unexpected query: ${sparql}`);
   });
@@ -264,6 +279,41 @@ describe('imported source blob protocol', () => {
     expect(response.denied).toBeUndefined();
     expect(response.blobHash).toBe(blobHash);
     expect(responder._spies.stat).toHaveBeenCalledWith(blobHash);
+    expect(responder._spies.readRange).toHaveBeenCalledWith(blobHash, 0, bytes.length);
+  });
+
+  it('serves source blobs referenced only by shared-memory import metadata', async () => {
+    const bytes = Buffer.from('# SWM Only Source Blob\n');
+    const blobHash = hash(bytes);
+    const contextGraphId = 'cg-source-blob-swm-only';
+    const assertionUri = 'did:dkg:context-graph:cg-source-blob-swm-only/assertion/did:dkg:agent:source/imported-md';
+    const responder = fakeResponder({
+      blobHash,
+      bytes,
+      omitDurableMeta: true,
+      swmContentType: 'text/markdown',
+    });
+
+    const responseBytes = await SourceBlobMethods.prototype.handleGetImportedSourceBlob.call(
+      responder as any,
+      sourceBlobRequest({
+        contextGraphId,
+        assertionUri,
+        blobHash,
+        auth: await signedAuthEnvelope({
+          contextGraphId,
+          assertionUri,
+          blobHash,
+        }),
+      }),
+      REQUESTER_PEER_ID,
+    );
+    const response = decodeImportedSourceBlobResponse(responseBytes);
+
+    expect(response.denied).toBeUndefined();
+    expect(response.totalBytes).toBe(bytes.length);
+    expect(responder._spies.storeQuery.mock.calls.some(([sparql]) => sparql.includes('sourceFileHash'))).toBe(true);
+    expect(responder._spies.storeQuery.mock.calls.some(([sparql]) => sparql.includes('sourceFile'))).toBe(true);
     expect(responder._spies.readRange).toHaveBeenCalledWith(blobHash, 0, bytes.length);
   });
 

@@ -805,6 +805,57 @@ describe('import artifact daemon routes', () => {
     expect(queries.some((sparql) => sparql.includes('WorkspaceOperation'))).toBe(false);
   });
 
+  it('retries legacy registry source peers until one serves the imported Markdown blob (#872 review)', async () => {
+    const remoteBytes = Buffer.from('# Legacy Registry Retry Source Peer\n');
+    const markdownHash = keccakContentHash(remoteBytes);
+    const contextGraphId = 'cg-public-open-legacy-registry-source-peer-retry';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
+    const requestedPeers: string[] = [];
+    const { agent, queries } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: markdownHash,
+      markdownHash,
+      markdownForm: `urn:dkg:file:${markdownHash}`,
+      onChainPolicy: { accessPolicy: 0, publishPolicy: 1 },
+      agents: [{
+        agentUri: 'did:dkg:agent:source',
+        agentAddress: 'did:dkg:agent:source',
+        name: 'Source Agent Fresh But Missing Blob',
+        peerId: 'peer-source-fresh',
+        lastSeen: '2026-06-06T00:00:00.000Z',
+      }, {
+        agentUri: 'did:dkg:agent:source',
+        agentAddress: 'did:dkg:agent:source',
+        name: 'Source Agent Older Blob Holder',
+        peerId: 'peer-source-stale',
+        lastSeen: '2026-06-05T00:00:00.000Z',
+      }],
+      async fetchImportedSourceBlobFromPeer(remotePeerId) {
+        requestedPeers.push(remotePeerId);
+        if (remotePeerId === 'peer-source-fresh') {
+          return { denied: 'source blob not found' };
+        }
+        return { totalBytes: remoteBytes.length, bytes: remoteBytes };
+      },
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 1024,
+    });
+
+    expect(read.status).toBe(200);
+    expect(read.body.markdown).toBe('# Legacy Registry Retry Source Peer\n');
+    expect(read.body.artifact.sourcePeerId).toBe('peer-source-stale');
+    expect(requestedPeers).toEqual(['peer-source-fresh', 'peer-source-stale']);
+    expect(queries.some((sparql) => sparql.includes('WorkspaceOperation'))).toBe(false);
+  });
+
   it('does not use WorkspaceOperation rows as source peers (#872 review)', async () => {
     const remoteBytes = Buffer.from('# Latest Source Peer\n');
     const markdownHash = keccakContentHash(remoteBytes);
