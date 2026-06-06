@@ -14,6 +14,7 @@
  * can see through MCP with the same canonical queries.
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { toEip55Checksum } from '@origintrail-official/dkg-core';
 import { z } from 'zod';
 import type { DkgClient, ProjectRow } from './client.js';
 import type { DkgConfig } from './config.js';
@@ -43,6 +44,7 @@ const formatError = (e: unknown): string =>
   e instanceof Error ? e.message : String(e);
 
 const AGENT_DID_PREFIX = 'did:dkg:agent:';
+const ETH_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
 function normalizeAgentAddressForQuery(agentAddress: string | undefined): string | undefined {
   if (agentAddress === undefined) return undefined;
@@ -50,9 +52,12 @@ function normalizeAgentAddressForQuery(agentAddress: string | undefined): string
   if (!trimmed) {
     throw new Error('"agentAddress" must be a non-empty string.');
   }
-  return trimmed.startsWith(AGENT_DID_PREFIX)
+  const stripped = trimmed.startsWith(AGENT_DID_PREFIX)
     ? trimmed.slice(AGENT_DID_PREFIX.length)
     : trimmed;
+  return ETH_ADDRESS_RE.test(stripped)
+    ? toEip55Checksum(stripped)
+    : stripped;
 }
 
 /**

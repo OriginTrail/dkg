@@ -199,7 +199,7 @@ export class DkgMemorySearchManager implements MemorySearchManager {
         `[dkg-memory] DkgMemorySearchManager.search skipped project sub-graph scope ` +
         `"${projectSubGraphName}" because no project context graph is selected.`,
       );
-      return [];
+      throw new Error('projectSubGraphName requires a selected project context graph.');
     }
 
     // B28: Preflight the agent address BEFORE firing WM queries. The query

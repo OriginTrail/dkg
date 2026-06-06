@@ -1046,7 +1046,7 @@ describe('DkgMemorySearchManager', () => {
       expect(projectOpts.every(o => o.subGraphName === 'skills')).toBe(true);
     });
 
-    it('does not apply projectSubGraphName to agent-context when no project CG is resolved', async () => {
+    it('rejects projectSubGraphName when no project CG is resolved', async () => {
       const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
       const warn = vi.fn();
       const manager = new DkgMemorySearchManager({
@@ -1055,9 +1055,8 @@ describe('DkgMemorySearchManager', () => {
         logger: { warn },
       });
 
-      const result = await manager.search('hello world', { projectSubGraphName: 'skills' });
-
-      expect(result).toEqual([]);
+      await expect(manager.search('hello world', { projectSubGraphName: 'skills' }))
+        .rejects.toThrow(/projectSubGraphName.*project context graph/i);
       expect(querySpy).not.toHaveBeenCalled();
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('no project context graph'));
     });
