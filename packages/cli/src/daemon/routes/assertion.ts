@@ -871,8 +871,8 @@ async function resolveImportedArtifactSourcePeerId(
 ): Promise<string | undefined> {
   const swmMetaGraph = contextGraphSharedMemoryMetaUri(artifact.contextGraphId, artifact.subGraphName);
   const candidates = [
-    artifact.rootEntity,
     artifact.assertionUri,
+    artifact.rootEntity,
   ].filter((value): value is string => Boolean(value && isSafeIri(value)));
   for (const rootEntity of [...new Set(candidates)]) {
     const result = await ctx.agent.store.query(`
@@ -891,6 +891,47 @@ async function resolveImportedArtifactSourcePeerId(
     if (peerId && peerId !== 'unknown') return peerId;
   }
   return undefined;
+}
+
+function normalizeSourcePeerId(raw: unknown): string | undefined {
+  const peerId = normalizeLiteralBinding(raw);
+  return peerId && peerId !== 'unknown' ? peerId : undefined;
+}
+
+async function hasVerifiedImportedArtifactMarkdownCache(
+  ctx: RequestContext,
+  artifact: Pick<ImportedArtifactResolution, 'contextGraphId' | 'assertionUri' | 'markdownHash'>,
+): Promise<boolean> {
+  if (!artifact.markdownHash) return false;
+  const metaGraph = contextGraphMetaUri(artifact.contextGraphId);
+  const result = await ctx.agent.store.query(`
+    SELECT ?cachedMarkdownHash WHERE {
+      GRAPH <${metaGraph}> {
+        <${artifact.assertionUri}> <${DKG_ONTOLOGY}cachedMarkdownHash> ?cachedMarkdownHash .
+      }
+    }
+    LIMIT 1
+  `) as { type?: string; bindings?: Array<Record<string, unknown>> };
+  const cachedHash = normalizeLiteralBinding(result.bindings?.[0]?.cachedMarkdownHash);
+  return cachedHash === artifact.markdownHash
+    ? ctx.fileStore.has(artifact.markdownHash).catch(() => false)
+    : false;
+}
+
+async function markVerifiedImportedArtifactMarkdownCache(
+  ctx: RequestContext,
+  artifact: Pick<ImportedArtifactResolution, 'contextGraphId' | 'assertionUri' | 'markdownHash'>,
+): Promise<void> {
+  if (!artifact.markdownHash) return;
+  const insert = ctx.agent.store.insert;
+  if (typeof insert !== 'function') return;
+  const metaGraph = contextGraphMetaUri(artifact.contextGraphId);
+  await insert.call(ctx.agent.store, [{
+    subject: artifact.assertionUri,
+    predicate: `${DKG_ONTOLOGY}cachedMarkdownHash`,
+    object: rdfLiteral(artifact.markdownHash),
+    graph: metaGraph,
+  }]).catch(() => undefined);
 }
 
 async function finalizeImportedArtifactAvailability(
@@ -918,7 +959,8 @@ async function finalizeImportedArtifactAvailability(
       markdownUnavailableReason: 'not-local',
     };
   }
-  const sourcePeerId = await resolveImportedArtifactSourcePeerId(ctx, artifact).catch(() => undefined);
+  const sourcePeerId = normalizeSourcePeerId(artifact.sourcePeerId)
+    ?? await resolveImportedArtifactSourcePeerId(ctx, artifact).catch(() => undefined);
   if (!sourcePeerId) {
     return {
       ...artifact,
@@ -988,6 +1030,7 @@ async function hydrateImportedArtifactMarkdown(
   ) {
     return { error: 'cached source blob hash mismatch' };
   }
+  await markVerifiedImportedArtifactMarkdownCache(ctx, artifact);
   artifact.canReadMarkdown = true;
   artifact.markdownAvailability = 'local';
   artifact.canFetchMarkdown = false;
@@ -1069,7 +1112,13 @@ async function resolveImportedArtifactFromSharedMemory(
   // Use them to discover the origin peer and requested hash, but never as
   // authority to read a local file-store blob directly; the origin peer must
   // prove the blob against its durable import `_meta` before bytes are served.
-  const markdownAvailableLocally = false;
+  const markdownAvailableLocally = markdownHash
+    ? await hasVerifiedImportedArtifactMarkdownCache(ctx, {
+        contextGraphId: args.contextGraphId,
+        assertionUri: args.assertionUri,
+        markdownHash,
+      }).catch(() => false)
+    : false;
 
   return finalizeImportedArtifactAvailability(ctx, {
     contextGraphId: args.contextGraphId,
@@ -1246,7 +1295,7 @@ async function resolveImportedArtifact(
 
   const metaGraph = contextGraphMetaUri(contextGraphId);
   const metaResult = await ctx.agent.store.query(`
-    SELECT ?fileHash ?contentType ?rootEntity ?structuralTripleCount ?semanticTripleCount ?extractionMethod ?extractionStatus ?mdIntermediateHash ?sourceFileName WHERE {
+    SELECT ?fileHash ?contentType ?rootEntity ?structuralTripleCount ?semanticTripleCount ?extractionMethod ?extractionStatus ?mdIntermediateHash ?sourceFileName ?sourcePublisherPeerId WHERE {
       GRAPH <${metaGraph}> {
         <${assertionUri}> <${DKG_ONTOLOGY}sourceFileHash> ?fileHash .
         OPTIONAL { <${assertionUri}> <${DKG_ONTOLOGY}sourceContentType> ?contentType }
@@ -1257,6 +1306,7 @@ async function resolveImportedArtifact(
         OPTIONAL { <${assertionUri}> <${DKG_ONTOLOGY}extractionStatus> ?extractionStatus }
         OPTIONAL { <${assertionUri}> <${DKG_ONTOLOGY}mdIntermediateHash> ?mdIntermediateHash }
         OPTIONAL { <${assertionUri}> <${DKG_ONTOLOGY}sourceFileName> ?sourceFileName }
+        OPTIONAL { <${assertionUri}> <${DKG_ONTOLOGY}publisherPeerId> ?sourcePublisherPeerId }
       }
     }
     LIMIT 1
@@ -1347,6 +1397,7 @@ async function resolveImportedArtifact(
       ? await ctx.fileStore.has(markdownHash).catch(() => false)
       : true
     : false;
+  const sourcePeerId = normalizeSourcePeerId(metaBinding.sourcePublisherPeerId);
 
   return finalizeImportedArtifactAvailability(ctx, {
     contextGraphId,
@@ -1369,6 +1420,7 @@ async function resolveImportedArtifact(
     ...(markdownForm ? { markdownForm } : {}),
     ...(markdownHash ? { markdownHash } : {}),
     canReadMarkdown: markdownAvailableLocally,
+    ...(sourcePeerId ? { sourcePeerId } : {}),
     ...(ownerGuardRelaxed ? { ownerGuardRelaxed: true } : {}),
   });
 }
@@ -3553,7 +3605,16 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
           graph: metaGraph,
         },
       ];
-      // Row 20 — only emitted when Phase 1 actually ran (PDF/DOCX path).
+      // Durable source-peer locator for cross-peer source blob hydration.
+      if (typeof agent.peerId === 'string' && agent.peerId.trim()) {
+        metaQuads.push({
+          subject: assertionUri,
+          predicate: "http://dkg.io/ontology/publisherPeerId",
+          object: JSON.stringify(agent.peerId.trim()),
+          graph: metaGraph,
+        });
+      }
+      // Optional Markdown intermediate hash — only emitted when Phase 1 actually ran (PDF/DOCX path).
       if (mdIntermediateHash) {
         metaQuads.push({
           subject: assertionUri,
