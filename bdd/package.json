@@ -1,0 +1,16 @@
+{
+  "name": "@origintrail-official/dkg-bdd",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Gherkin/BDD test pilot — human-readable .feature specs running on the existing Vitest runner.",
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts steps/entity-predicate.steps.ts",
+    "test:devnet": "vitest run --config vitest.config.ts steps/ka-lifecycle.steps.ts",
+    "test:all": "vitest run --config vitest.config.ts"
+  },
+  "devDependencies": {
+    "@amiceli/vitest-cucumber": "^6.5.0",
+    "vitest": "^4.0.18"
+  }
+}
