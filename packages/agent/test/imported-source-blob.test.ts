@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { contextGraphSubGraphMetaUri } from '@origintrail-official/dkg-core';
+import { contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { SourceBlobMethods } from '../src/dkg-agent-source-blob.js';
 import {
@@ -259,7 +259,7 @@ describe('imported source blob protocol', () => {
     expect(responder._spies.readRange).toHaveBeenCalledWith(blobHash, 0, bytes.length);
   });
 
-  it('uses subgraph metadata when a source blob request includes subGraphName', async () => {
+  it('uses root import metadata when a source blob request includes subGraphName', async () => {
     const bytes = Buffer.from('# Subgraph Markdown\n');
     const blobHash = hash(bytes);
     const contextGraphId = 'cg-source-blob-subgraph';
@@ -288,7 +288,7 @@ describe('imported source blob protocol', () => {
     const metadataQuery = responder._spies.storeQuery.mock.calls
       .map(([sparql]) => sparql)
       .find((sparql) => sparql.includes('SELECT ?sourceFileHash'));
-    expect(metadataQuery).toContain(`<${contextGraphSubGraphMetaUri(contextGraphId, subGraphName)}>`);
+    expect(metadataQuery).toContain(`<${contextGraphMetaUri(contextGraphId)}>`);
   });
 
   it('denies before metadata lookup when signed auth is not policy-authorized', async () => {
