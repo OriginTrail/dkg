@@ -26,6 +26,8 @@ const DECISIONS_SWM_GRAPH = contextGraphSharedMemoryUri(CG_ID, 'decisions');
 const VIEW_NAME = 'http://ex.org/viewName';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const CONTEXT_GRAPH_TYPE = 'https://dkg.network/ontology#ContextGraph';
+const DKG_SUB_GRAPH_TYPE = 'http://dkg.io/ontology/SubGraph';
+const SCHEMA_NAME = 'http://schema.org/name';
 
 function q(s: string, p: string, o: string, g: string): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -40,6 +42,11 @@ describe('sub-graph query scoping', () => {
     engine = new DKGQueryEngine(store);
 
     await store.insert([
+      q(CODE_GRAPH, RDF_TYPE, DKG_SUB_GRAPH_TYPE, contextGraphMetaUri(CG_ID)),
+      q(CODE_GRAPH, SCHEMA_NAME, '"code"', contextGraphMetaUri(CG_ID)),
+      q(DECISIONS_GRAPH, RDF_TYPE, DKG_SUB_GRAPH_TYPE, contextGraphMetaUri(CG_ID)),
+      q(DECISIONS_GRAPH, SCHEMA_NAME, '"decisions"', contextGraphMetaUri(CG_ID)),
+
       q('urn:fn:main', 'http://ex.org/type', '"Function"', ROOT_GRAPH),
       q('urn:fn:main', 'http://ex.org/name', '"main"', ROOT_GRAPH),
 
@@ -187,6 +194,26 @@ describe('sub-graph query scoping', () => {
         assertionName: 'probe/sibling',
       },
     )).rejects.toThrow(/Invalid assertionName.*cannot contain "\/"/);
+  });
+
+  it('rejects view-routed subGraphName when the sub-graph is not registered', async () => {
+    const staleGraph = contextGraphSubGraphUri(CG_ID, 'stale');
+    await store.insert([
+      q('urn:view:stale', VIEW_NAME, '"Stale"', staleGraph),
+    ]);
+
+    await expect(engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      { contextGraphId: CG_ID, view: 'working-memory', agentAddress: AGENT, subGraphName: 'stale' },
+    )).rejects.toThrow(/Unknown sub-graph "stale"/);
+    await expect(engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      { contextGraphId: CG_ID, view: 'shared-working-memory', subGraphName: 'stale' },
+    )).rejects.toThrow(/Unknown sub-graph "stale"/);
+    await expect(engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      { contextGraphId: CG_ID, view: 'verified-memory', subGraphName: 'stale' },
+    )).rejects.toThrow(/Unknown sub-graph "stale"/);
   });
 
   it('constrains GRAPH patterns to the selected sub-graph WM assertion', async () => {
