@@ -146,12 +146,24 @@ spec.loader.exec_module(module)
 class FakeClient:
     def __init__(self):
         self.calls = []
+        self.fail_all = False
+        self.fail_scoped_project = False
+        self.generic_fail_scoped_project_wm = False
+        self.generic_fail_scoped_project = False
 
     def _resolve_agent_address(self):
         return "0xAgent"
 
     def query(self, sparql, context_graph_id, **kwargs):
         self.calls.append((context_graph_id, kwargs))
+        if self.fail_all:
+            return {"error": "fetch failed"}
+        if self.fail_scoped_project and kwargs.get("sub_graph_name"):
+            return {"error": "Invalid subGraphName: Sub-graph names cannot contain \"/\""}
+        if self.generic_fail_scoped_project_wm and kwargs.get("sub_graph_name") and kwargs.get("view") == "working-memory":
+            return {"error": "fetch failed"}
+        if self.generic_fail_scoped_project and kwargs.get("sub_graph_name"):
+            return {"error": "fetch failed"}
         return {
             "result": {
                 "bindings": [{
@@ -194,6 +206,126 @@ assert provider._client.calls == [
     ("project-cg", {"view": "shared-working-memory", "agent_address": None}),
     ("project-cg", {"view": "verified-memory", "agent_address": None}),
 ], provider._client.calls
+
+provider._client.calls = []
+scoped = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "limit": 10,
+    "sub_graph_name": "skills",
+}))
+assert scoped["scope"] == "project-cg", scoped
+assert provider._client.calls == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+    ("project-cg", {"view": "working-memory", "agent_address": "0xAgent", "sub_graph_name": "skills"}),
+    ("project-cg", {"view": "shared-working-memory", "agent_address": None, "sub_graph_name": "skills"}),
+    ("project-cg", {"view": "verified-memory", "agent_address": None, "sub_graph_name": "skills"}),
+], provider._client.calls
+
+provider._offline = True
+offline_scoped = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "limit": 10,
+    "sub_graph_name": "skills",
+}))
+assert "sub_graph_name" in offline_scoped["error"], offline_scoped
+assert "offline" in offline_scoped["error"], offline_scoped
+provider._offline = False
+
+provider._client.calls = []
+provider._client.fail_scoped_project = True
+failed_scoped = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "limit": 10,
+    "sub_graph_name": "skills",
+}))
+assert "sub_graph_name" in failed_scoped["error"], failed_scoped
+assert "Invalid subGraphName" in failed_scoped["error"], failed_scoped
+assert provider._client.calls == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+    ("project-cg", {"view": "working-memory", "agent_address": "0xAgent", "sub_graph_name": "skills"}),
+], provider._client.calls
+provider._client.fail_scoped_project = False
+
+provider._client.calls = []
+provider._client.generic_fail_scoped_project_wm = True
+generic_failed_scoped = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "limit": 10,
+    "sub_graph_name": "skills",
+}))
+assert "error" not in generic_failed_scoped, generic_failed_scoped
+assert generic_failed_scoped["count"] == 5, generic_failed_scoped
+assert provider._client.calls == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+    ("project-cg", {"view": "working-memory", "agent_address": "0xAgent", "sub_graph_name": "skills"}),
+    ("project-cg", {"view": "shared-working-memory", "agent_address": None, "sub_graph_name": "skills"}),
+    ("project-cg", {"view": "verified-memory", "agent_address": None, "sub_graph_name": "skills"}),
+], provider._client.calls
+provider._client.generic_fail_scoped_project_wm = False
+
+provider._client.calls = []
+provider._client.generic_fail_scoped_project = True
+scoped_project_all_failed = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "limit": 10,
+    "sub_graph_name": "skills",
+}))
+assert "sub_graph_name" not in scoped_project_all_failed["error"], scoped_project_all_failed
+assert "memory_search failed" in scoped_project_all_failed["error"], scoped_project_all_failed
+assert "fetch failed" in scoped_project_all_failed["error"], scoped_project_all_failed
+assert provider._client.calls == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+    ("project-cg", {"view": "working-memory", "agent_address": "0xAgent", "sub_graph_name": "skills"}),
+    ("project-cg", {"view": "shared-working-memory", "agent_address": None, "sub_graph_name": "skills"}),
+    ("project-cg", {"view": "verified-memory", "agent_address": None, "sub_graph_name": "skills"}),
+], provider._client.calls
+provider._client.generic_fail_scoped_project = False
+
+provider._client.calls = []
+provider._client.fail_all = True
+provider._cache = {"memory": [{"target": "memory", "content": "alpha beta stale cache hit"}]}
+scoped_all_failed = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "limit": 10,
+    "sub_graph_name": "skills",
+}))
+assert "sub_graph_name" not in scoped_all_failed["error"], scoped_all_failed
+assert "memory_search failed" in scoped_all_failed["error"], scoped_all_failed
+assert "fetch failed" in scoped_all_failed["error"], scoped_all_failed
+assert provider._client.calls == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+    ("project-cg", {"view": "working-memory", "agent_address": "0xAgent", "sub_graph_name": "skills"}),
+    ("project-cg", {"view": "shared-working-memory", "agent_address": None, "sub_graph_name": "skills"}),
+    ("project-cg", {"view": "verified-memory", "agent_address": None, "sub_graph_name": "skills"}),
+], provider._client.calls
+provider._client.fail_all = False
+provider._cache = {}
+
+provider._context_graph = "agent-context"
+missing_project = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "sub_graph_name": "skills",
+}))
+assert "sub_graph_name" in missing_project["error"], missing_project
+assert "project context graph" in missing_project["error"], missing_project
+
+provider._context_graph = "did:dkg:context-graph:agent-context"
+missing_project_uri = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "sub_graph_name": "skills",
+}))
+assert "sub_graph_name" in missing_project_uri["error"], missing_project_uri
+assert "project context graph" in missing_project_uri["error"], missing_project_uri
 `;
     const result = spawnSync('python', ['-B', '-c', script], {
       cwd: process.cwd(),

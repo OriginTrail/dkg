@@ -90,6 +90,18 @@ export function buildQueryTools(ctx: DkgToolHost): OpenClawTool[] {
               'writer-side identity falls back to peerId. Ignored for non-WM views. Supply an ' +
               'explicit value to read another local agent\'s WM namespace in multi-agent deployments.',
           },
+          sub_graph_name: {
+            type: 'string',
+            description:
+              'Optional sub-graph scope within `context_graph_id`. May be combined with `view` ' +
+              'to route WM, SWM, or VM reads to a project subgraph.',
+          },
+          assertion_name: {
+            type: 'string',
+            description:
+              'Optional Working Memory assertion name. Combine with `view: "working-memory"` ' +
+              'and `context_graph_id` to read exactly one assertion graph.',
+          },
         },
         required: ['sparql'],
       },

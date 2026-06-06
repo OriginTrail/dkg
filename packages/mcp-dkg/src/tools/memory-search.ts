@@ -1,7 +1,7 @@
 /**
  * `dkg_memory_search` — trust-weighted, multi-tier, multi-CG-fan-out
  * recall over agent-context WM/SWM/VM (and the project CG's matching
- * layers when supplied).
+ * layers when supplied or pinned as the default project).
  *
  * Per parity-matrix v0.7 §4.19: re-implementation of the adapter's
  * `DkgMemorySearchManager` (`packages/adapter-openclaw/src/DkgMemoryPlugin.ts`).
@@ -44,6 +44,26 @@ const errResult = (text: string): ToolResult => ({
 const formatError = (e: unknown): string =>
   e instanceof Error ? e.message : String(e);
 
+function isScopedQueryRoutingError(message: string): boolean {
+  const text = message.toLowerCase();
+  const mentionsSubGraph = text.includes('sub-graph') ||
+    text.includes('subgraphname') ||
+    text.includes('sub_graph_name');
+  return text.includes('scoped query violation') ||
+    text.includes('known child context graph') ||
+    text.includes('unknown sub-graph') ||
+    text.includes('unknown subgraph') ||
+    (
+      mentionsSubGraph &&
+      (
+        text.includes('registered') ||
+        text.includes('invalid') ||
+        text.includes('requires') ||
+        text.includes('not found')
+      )
+    );
+}
+
 // ── Layer model ─────────────────────────────────────────────────────
 // Source of truth: `packages/adapter-openclaw/src/types.ts:217-223`.
 type MemoryLayer =
@@ -82,6 +102,19 @@ const TRUST_ORDER: Record<MemoryLayer, number> = {
 const AGENT_CONTEXT_GRAPH = 'agent-context';
 
 const AGENT_DID_PREFIX = 'did:dkg:agent:';
+const CONTEXT_GRAPH_DID_PREFIX = 'did:dkg:context-graph:';
+
+function normalizeContextGraphIdForMemorySearch(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  return trimmed.startsWith(CONTEXT_GRAPH_DID_PREFIX)
+    ? trimmed.slice(CONTEXT_GRAPH_DID_PREFIX.length)
+    : trimmed;
+}
+
+function isAgentContextGraphId(value: string | undefined): boolean {
+  return normalizeContextGraphIdForMemorySearch(value) === AGENT_CONTEXT_GRAPH;
+}
 
 /**
  * The DKG V10 query engine routes WM reads by raw peer ID, NOT the DID
@@ -99,6 +132,7 @@ interface LayerPlan {
   layer: MemoryLayer;
   contextGraphId: string;
   view: 'working-memory' | 'shared-working-memory' | 'verified-memory';
+  subGraphName?: string;
 }
 
 /**
@@ -198,17 +232,30 @@ export function registerMemorySearchTool(
           .string()
           .optional()
           .describe(
-            'Optional project context-graph id. When supplied, fan-out adds ' +
-              "the project's WM/SWM/VM layers to the agent-context layers.",
+            'Optional project context-graph id. When supplied, or when a default project is pinned, ' +
+              "fan-out adds the project's WM/SWM/VM layers to the agent-context layers.",
           ),
+        subGraphName: z
+          .string()
+          .optional()
+          .describe('Optional project sub-graph scope. Requires projectId or a pinned default project and applies only to project fan-out.'),
       },
     },
-    async ({ query, limit, projectId }): Promise<ToolResult> => {
+    async ({ query, limit, projectId, subGraphName }): Promise<ToolResult> => {
       const trimmed = query.trim();
       if (trimmed.length < 2) {
         return errResult('"query" is required (non-empty string, ≥2 chars).');
       }
       const cap = Math.floor(Math.max(1, Math.min(100, limit ?? 20)));
+      const explicitProjectId = projectId?.trim();
+      const effectiveProjectId = normalizeContextGraphIdForMemorySearch(explicitProjectId || _config.defaultProject || undefined);
+      const projectSubGraphName = subGraphName?.trim();
+      if (subGraphName !== undefined && !projectSubGraphName) {
+        return errResult('"subGraphName" must be a non-empty string.');
+      }
+      if (projectSubGraphName && (!effectiveProjectId || isAgentContextGraphId(effectiveProjectId))) {
+        return errResult('"subGraphName" requires "projectId" or a pinned default project because memory search subgraph scope applies only to project context graph fan-out.');
+      }
 
       // The query engine requires the agent's raw peer ID for WM view
       // routing. Probe the daemon's identity once per call; without this,
@@ -261,37 +308,59 @@ LIMIT ${cap}`;
         { layer: 'agent-context-swm', contextGraphId: AGENT_CONTEXT_GRAPH, view: 'shared-working-memory' },
         { layer: 'agent-context-vm', contextGraphId: AGENT_CONTEXT_GRAPH, view: 'verified-memory' },
       ];
-      if (projectId) {
+      if (effectiveProjectId) {
         plans.push(
-          { layer: 'project-wm', contextGraphId: projectId, view: 'working-memory' },
-          { layer: 'project-swm', contextGraphId: projectId, view: 'shared-working-memory' },
-          { layer: 'project-vm', contextGraphId: projectId, view: 'verified-memory' },
+          { layer: 'project-wm', contextGraphId: effectiveProjectId, view: 'working-memory', subGraphName: projectSubGraphName },
+          { layer: 'project-swm', contextGraphId: effectiveProjectId, view: 'shared-working-memory', subGraphName: projectSubGraphName },
+          { layer: 'project-vm', contextGraphId: effectiveProjectId, view: 'verified-memory', subGraphName: projectSubGraphName },
         );
       }
       const searchedLayers: MemoryLayer[] = plans.map((p) => p.layer);
 
-      // Per-layer fan-out. A single layer's failure must NOT propagate —
-      // surface the error to stderr (callers tail daemon logs anyway) and
-      // continue with the surviving layers. Mirrors the partial-success
-      // semantics in `DkgMemoryPlugin.ts:336-352`.
-      const settled = await Promise.all(
-        plans.map((plan) =>
-          client
-            .query({
-              sparql,
-              contextGraphId: plan.contextGraphId,
-              view: plan.view,
-              agentAddress,
-            })
-            .then((r) => ({ plan, bindings: r.bindings ?? [] }))
-            .catch((err) => {
-              process.stderr.write(
-                `[dkg-mcp] memory-search ${plan.layer} failed (cg=${plan.contextGraphId}, view=${plan.view}): ${formatError(err)}\n`,
-              );
-              return { plan, bindings: [] as Array<Record<string, unknown>> };
-            }),
-        ),
-      );
+      // Per-layer fan-out. A single unscoped layer's failure must NOT
+      // propagate: surface the error to stderr and continue with surviving
+      // layers. Explicit project sub-graph scope is different; validation
+      // or routing failures there are caller-visible scope errors, not
+      // cache misses.
+      let settled: Array<{ plan: LayerPlan; bindings: Array<Record<string, unknown>>; succeeded: boolean }>;
+      let firstScopedProjectError: string | undefined;
+      try {
+        settled = await Promise.all(
+          plans.map((plan) =>
+            client
+              .query({
+                sparql,
+                contextGraphId: plan.contextGraphId,
+                view: plan.view,
+                agentAddress,
+                subGraphName: plan.subGraphName,
+              })
+              .then((r) => ({ plan, bindings: r.bindings ?? [], succeeded: true }))
+              .catch((err) => {
+                const message = formatError(err);
+                process.stderr.write(
+                  `[dkg-mcp] memory-search ${plan.layer} failed (cg=${plan.contextGraphId}, view=${plan.view}): ${message}\n`,
+                );
+                if (plan.subGraphName && isScopedQueryRoutingError(message)) {
+                  throw new Error(
+                    `memory_search subGraphName "${plan.subGraphName}" failed for ` +
+                    `project "${plan.contextGraphId}" (${plan.view}): ${message}`,
+                  );
+                }
+                if (plan.subGraphName && firstScopedProjectError === undefined) {
+                  firstScopedProjectError = `project "${plan.contextGraphId}" (${plan.view}): ${message}`;
+                }
+                return { plan, bindings: [] as Array<Record<string, unknown>>, succeeded: false };
+              }),
+          ),
+        );
+      } catch (err) {
+        return errResult(formatError(err));
+      }
+      const scopedProjectSucceeded = settled.some((s) => Boolean(s.plan.subGraphName) && s.succeeded);
+      if (projectSubGraphName && !scopedProjectSucceeded && firstScopedProjectError) {
+        return errResult(`memory_search failed: ${firstScopedProjectError}`);
+      }
 
       // Dedup by (contextGraphId, uri-or-text-hash). Keep the highest-
       // trust hit; tie-break on raw score. Source: `DkgMemoryPlugin.ts:381-433`.
@@ -358,7 +427,7 @@ LIMIT ${cap}`;
       // level only; mcp-dkg has no log-level surface, so we drop it).
       process.stderr.write(
         `[dkg-mcp] memory-search fired ` +
-          `(limit=${cap}): project=${projectId ?? '∅'}, ` +
+          `(limit=${cap}): project=${effectiveProjectId ?? '∅'}, ` +
           `layers=${plans.length}, raw_hits=${totalRaw} (${breakdown})\n`,
       );
       const header =

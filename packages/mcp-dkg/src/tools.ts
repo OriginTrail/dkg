@@ -14,6 +14,7 @@
  * can see through MCP with the same canonical queries.
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { toEip55Checksum, validateSubGraphName } from '@origintrail-official/dkg-core';
 import { z } from 'zod';
 import type { DkgClient, ProjectRow } from './client.js';
 import type { DkgConfig } from './config.js';
@@ -41,6 +42,40 @@ const err = (text: string): ToolResult => ({
 
 const formatError = (e: unknown): string =>
   e instanceof Error ? e.message : String(e);
+
+const AGENT_DID_PREFIX = 'did:dkg:agent:';
+const ETH_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+
+function normalizeAgentAddressForQuery(
+  agentAddress: string | undefined,
+  view: 'working-memory' | 'shared-working-memory' | 'verified-memory' | undefined,
+): string | undefined {
+  if (agentAddress === undefined) return undefined;
+  if (view !== 'working-memory') return agentAddress;
+  const trimmed = agentAddress.trim();
+  if (!trimmed) {
+    throw new Error('"agentAddress" must be a non-empty string.');
+  }
+  const stripped = trimmed.startsWith(AGENT_DID_PREFIX)
+    ? trimmed.slice(AGENT_DID_PREFIX.length)
+    : trimmed;
+  return ETH_ADDRESS_RE.test(stripped)
+    ? toEip55Checksum(stripped)
+    : stripped;
+}
+
+function normalizeSubGraphNameForQuery(subGraphName: string | undefined): string | undefined {
+  if (subGraphName === undefined) return undefined;
+  const trimmed = subGraphName.trim();
+  if (!trimmed) {
+    throw new Error('"subGraphName" must be a non-empty string.');
+  }
+  const validation = validateSubGraphName(trimmed);
+  if (!validation.valid) {
+    throw new Error(`Invalid subGraphName: ${validation.reason}`);
+  }
+  return trimmed;
+}
 
 /**
  * Resolve the contextGraphId for a tool invocation. Argument beats
@@ -199,6 +234,14 @@ export function registerReadTools(
           .optional()
           .describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
         subGraphName: z.string().optional().describe('Limit the query to a single sub-graph'),
+        assertionName: z
+          .string()
+          .optional()
+          .describe('Optional Working Memory assertion name for view: "working-memory" reads.'),
+        agentAddress: z
+          .string()
+          .optional()
+          .describe('Optional Working Memory owner address for view: "working-memory" reads.'),
         view: z
           .enum(['working-memory', 'shared-working-memory', 'verified-memory'])
           .optional()
@@ -210,15 +253,26 @@ export function registerReadTools(
         limit: z.number().optional().describe('Row cap when rendering to markdown; does NOT modify the query'),
       },
     },
-    async ({ sparql, projectId, subGraphName, view, includeSharedMemory, limit }): Promise<ToolResult> => {
+    async ({ sparql, projectId, subGraphName, assertionName, agentAddress, view, includeSharedMemory, limit }): Promise<ToolResult> => {
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
       const fullSparql = sparql.startsWith('PREFIX') ? sparql : `${PREFIXES}\n${sparql}`;
       try {
+        const scopedAssertionName = assertionName?.trim();
+        if (assertionName !== undefined && !scopedAssertionName) {
+          return err('"assertionName" must be a non-empty string.');
+        }
+        if (scopedAssertionName && view !== 'working-memory') {
+          return err('"assertionName" is only supported with view: "working-memory".');
+        }
+        const normalizedAgentAddress = normalizeAgentAddressForQuery(agentAddress, view);
+        const normalizedSubGraphName = normalizeSubGraphNameForQuery(subGraphName);
         const result = await client.query({
           sparql: fullSparql,
           contextGraphId: pid,
-          subGraphName,
+          subGraphName: normalizedSubGraphName,
+          assertionName: scopedAssertionName,
+          agentAddress: normalizedAgentAddress,
           view,
           includeSharedMemory,
         });

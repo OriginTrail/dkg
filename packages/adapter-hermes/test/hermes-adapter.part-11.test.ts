@@ -234,12 +234,39 @@ for args, needle in [
     ({"sparql": "ASK {}", "include_shared_memory": True}, "include_shared_memory"),
     ({"sparql": "ASK {}", "context_graph": "old"}, "context_graph"),
     ({"sparql": "ASK {}", "context_graph_id": "cg:test", "view": "bad"}, "view"),
-    ({"sparql": "ASK {}", "view": "working-memory"}, "context_graph_id"),
-    ({"sparql": "ASK {}", "context_graph_id": "cg:test", "view": "shared-working-memory", "sub_graph_name": "scratch"}, "sub_graph_name"),
+    ({"sparql": "ASK {}", "context_graph_id": "cg:test", "sub_graph_name": 42}, "sub_graph_name"),
+    ({"sparql": "ASK {}", "context_graph_id": "cg:test", "view": "verified-memory", "assertion_name": "turn"}, "assertion_name"),
+    ({"sparql": "ASK {}", "context_graph_id": "cg:test", "view": "working-memory", "assertion_name": 42}, "assertion_name"),
     ({"sparql": "ASK {}", "context_graph_id": "cg:test", "view": "working-memory", "agent_address": "   "}, "agent_address"),
 ]:
     result = json.loads(provider.handle_tool_call("dkg_query", args))
     assert needle in result["error"], (args, result)
+
+provider_without_default = module.DKGMemoryProvider()
+provider_without_default._offline = False
+provider_without_default._context_graph = None
+provider_without_default._client = QueryClient()
+missing_view_cg = json.loads(provider_without_default.handle_tool_call("dkg_query", {
+    "sparql": "ASK {}",
+    "view": "working-memory",
+}))
+missing_sub_cg = json.loads(provider_without_default.handle_tool_call("dkg_query", {
+    "sparql": "ASK {}",
+    "sub_graph_name": "scratch",
+}))
+assert "context_graph_id" in missing_view_cg["error"], missing_view_cg
+assert "sub_graph_name" in missing_sub_cg["error"] and "context_graph_id" in missing_sub_cg["error"], missing_sub_cg
+
+default_view_cg = json.loads(provider.handle_tool_call("dkg_query", {
+    "sparql": "ASK {}",
+    "view": "shared-working-memory",
+}))
+default_sub_cg = json.loads(provider.handle_tool_call("dkg_query", {
+    "sparql": "ASK {}",
+    "sub_graph_name": "scratch",
+}))
+assert "context_graph_id" in default_view_cg["error"], default_view_cg
+assert "sub_graph_name" in default_sub_cg["error"] and "context_graph_id" in default_sub_cg["error"], default_sub_cg
 
 result = json.loads(provider.handle_tool_call("dkg_query", {
     "sparql": "ASK {}",
@@ -257,6 +284,15 @@ result = json.loads(provider.handle_tool_call("dkg_query", {
 }))
 assert result["ok"] is True, result
 assert provider._client.queries[-1][2]["agent_address"] == "peer-default", provider._client.queries
+
+result = json.loads(provider.handle_tool_call("dkg_query", {
+    "sparql": "ASK {}",
+    "context_graph_id": "cg:test",
+    "view": "shared-working-memory",
+    "sub_graph_name": "scratch",
+}))
+assert result["ok"] is True, result
+assert provider._client.queries[-1][2]["sub_graph_name"] == "scratch", provider._client.queries
 
 class ReadMarkdownClient:
     def __init__(self):

@@ -415,9 +415,10 @@ subscribe_schema = next(schema for schema in provider.get_tool_schemas() if sche
 assert "include_shared_memory" in subscribe_schema["parameters"]["properties"], subscribe_schema
 search_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "memory_search")
 assert "context_graph_id" in search_schema["parameters"]["properties"], search_schema
+assert "sub_graph_name" in search_schema["parameters"]["properties"], search_schema
 assert "context_graph" not in search_schema["parameters"]["properties"], search_schema
 query_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_query")
-assert "sub_graph_name" not in query_schema["parameters"]["properties"], query_schema
+assert "sub_graph_name" in query_schema["parameters"]["properties"], query_schema
 share_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_share")
 assert "context_graph_id" in share_schema["parameters"]["properties"], share_schema
 assert "context_graph" not in share_schema["parameters"]["properties"], share_schema

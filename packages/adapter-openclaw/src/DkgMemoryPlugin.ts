@@ -29,7 +29,7 @@
  * `21_TRI_MODAL_MEMORY.md §5`.
  */
 
-import type { DkgDaemonClient } from './dkg-client.js';
+import { normalizeContextGraphId, type DkgDaemonClient } from './dkg-client.js';
 import type {
   DkgOpenClawConfig,
   MemoryEmbeddingProbeResult,
@@ -61,6 +61,11 @@ import {
 export const AGENT_CONTEXT_GRAPH = 'agent-context';
 export const CHAT_TURNS_ASSERTION = 'chat-turns';
 export const PROJECT_MEMORY_ASSERTION = 'memory';
+
+function normalizeMemoryContextGraphId(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  return normalizeContextGraphId(value) || undefined;
+}
 
 function buildDkgMemoryPromptSections(): string[] {
   return [
@@ -192,7 +197,15 @@ export class DkgMemorySearchManager implements MemorySearchManager {
     // consumption boundary. `toAgentPeerId` is a no-op on already-raw
     // inputs, so passing a raw peer ID through the resolver still works.
     const agentAddress = rawAgentAddress ? toAgentPeerId(rawAgentAddress) : undefined;
-    const projectContextGraphId = session?.projectContextGraphId;
+    const projectContextGraphId = normalizeMemoryContextGraphId(session?.projectContextGraphId);
+    const projectSubGraphName = options?.projectSubGraphName;
+    if (projectSubGraphName && (!projectContextGraphId || projectContextGraphId === AGENT_CONTEXT_GRAPH)) {
+      this.deps.logger?.warn?.(
+        `[dkg-memory] DkgMemorySearchManager.search skipped project sub-graph scope ` +
+        `"${projectSubGraphName}" because no project context graph is selected.`,
+      );
+      throw new Error('projectSubGraphName requires a selected project context graph.');
+    }
 
     // B28: Preflight the agent address BEFORE firing WM queries. The query
     // engine at `packages/query/src/dkg-query-engine.ts:47-48` throws
@@ -273,9 +286,12 @@ export class DkgMemorySearchManager implements MemorySearchManager {
     // there is no inherent trust advantage of agent-context over
     // project-scoped memories at the same view tier.
     //
-    // Per-query `.catch → []` preserves partial-success semantics:
+    // Per-query `.catch -> []` preserves partial-success semantics:
     // one failing (cg, view) pair emits exactly one warn and the
-    // surviving layers continue to contribute results.
+    // surviving layers continue to contribute results. The exception is
+    // explicit project sub-graph scope: if the caller supplied
+    // `projectSubGraphName`, daemon validation/routing failures must
+    // surface as caller errors rather than looking like "no memories".
     interface LayerPlan {
       layer: MemoryLayer;
       source: MemorySource;
@@ -283,6 +299,7 @@ export class DkgMemorySearchManager implements MemorySearchManager {
       contextGraphId: string;
       view: 'working-memory' | 'shared-working-memory' | 'verified-memory';
       sparql: string;
+      subGraphName?: string;
     }
     const plans: LayerPlan[] = [
       {
@@ -319,6 +336,7 @@ export class DkgMemorySearchManager implements MemorySearchManager {
           contextGraphId: projectContextGraphId,
           view: 'working-memory',
           sparql: permissiveSparql,
+          subGraphName: projectSubGraphName,
         },
         {
           layer: 'project-swm',
@@ -327,6 +345,7 @@ export class DkgMemorySearchManager implements MemorySearchManager {
           contextGraphId: projectContextGraphId,
           view: 'shared-working-memory',
           sparql: permissiveSparql,
+          subGraphName: projectSubGraphName,
         },
         {
           layer: 'project-vm',
@@ -335,10 +354,12 @@ export class DkgMemorySearchManager implements MemorySearchManager {
           contextGraphId: projectContextGraphId,
           view: 'verified-memory',
           sparql: permissiveSparql,
+          subGraphName: projectSubGraphName,
         },
       );
     }
 
+    let firstScopedProjectError: string | undefined;
     const settled = await Promise.all(
       plans.map(plan =>
         this.deps.client
@@ -346,16 +367,32 @@ export class DkgMemorySearchManager implements MemorySearchManager {
             contextGraphId: plan.contextGraphId,
             view: plan.view,
             agentAddress,
+            subGraphName: plan.subGraphName,
           })
-          .then(r => ({ plan, bindings: extractBindings(r) }))
+          .then(r => ({ plan, bindings: extractBindings(r), succeeded: true }))
           .catch(err => {
+            const message = errorMessage(err);
             this.deps.logger?.warn?.(
-              `[dkg-memory] ${plan.layer} search failed (cg=${plan.contextGraphId}, view=${plan.view}): ${errorMessage(err)}`,
+              `[dkg-memory] ${plan.layer} search failed (cg=${plan.contextGraphId}, view=${plan.view}): ${message}`,
             );
-            return { plan, bindings: [] as any[] };
+            if (plan.subGraphName && isScopedQueryRoutingError(message)) {
+              throw new Error(
+                `memory_search sub_graph_name "${plan.subGraphName}" failed for ` +
+                `context graph "${plan.contextGraphId}" (${plan.view}): ${message}`,
+              );
+            }
+            if (plan.subGraphName && firstScopedProjectError === undefined) {
+              firstScopedProjectError = `context graph "${plan.contextGraphId}" (${plan.view}): ${message}`;
+            }
+            return { plan, bindings: [] as any[], succeeded: false };
           }),
       ),
     );
+
+    const scopedProjectSucceeded = settled.some(s => Boolean(s.plan.subGraphName) && s.succeeded);
+    if (projectSubGraphName && !scopedProjectSucceeded && firstScopedProjectError) {
+      throw new Error(`memory_search failed: ${firstScopedProjectError}`);
+    }
 
     // Observability: one info-level log per search call showing the
     // query, resolved project CG, layer count, and per-layer raw hit
@@ -1037,6 +1074,26 @@ function extractBindings(result: any): any[] {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function isScopedQueryRoutingError(message: string): boolean {
+  const text = message.toLowerCase();
+  const mentionsSubGraph = text.includes('sub-graph') ||
+    text.includes('subgraphname') ||
+    text.includes('sub_graph_name');
+  return text.includes('scoped query violation') ||
+    text.includes('known child context graph') ||
+    text.includes('unknown sub-graph') ||
+    text.includes('unknown subgraph') ||
+    (
+      mentionsSubGraph &&
+      (
+        text.includes('registered') ||
+        text.includes('invalid') ||
+        text.includes('requires') ||
+        text.includes('not found')
+      )
+    );
 }
 
 /**

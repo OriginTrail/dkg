@@ -43,6 +43,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1",
+    "@origintrail-official/dkg-core": "workspace:*",
     "zod": "^3.25",
     "yaml": "^2.6.0"
   },

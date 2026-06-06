@@ -147,10 +147,12 @@ describe('V10 named graph URIs', () => {
 
   it('verified memory URI', () => {
     expect(contextGraphVerifiedMemoryUri(id, '7')).toBe('did:dkg:context-graph:42/_verified_memory/7');
+    expect(contextGraphVerifiedMemoryUri(id, '7', 'code')).toBe('did:dkg:context-graph:42/code/_verified_memory/7');
   });
 
   it('verified memory meta URI', () => {
     expect(contextGraphVerifiedMemoryMetaUri(id, '7')).toBe('did:dkg:context-graph:42/_verified_memory/7/_meta');
+    expect(contextGraphVerifiedMemoryMetaUri(id, '7', 'code')).toBe('did:dkg:context-graph:42/code/_verified_memory/7/_meta');
   });
 
   it('assertion URI', () => {

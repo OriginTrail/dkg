@@ -5,7 +5,7 @@ import {
   contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiedMemoryUri, contextGraphAssertionUri,
   contextGraphSubGraphUri, contextGraphMetaUri, contextGraphSharedMemoryMetaUri,
   contextGraphSubGraphMetaUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri,
-  assertSafeIri, escapeSparqlLiteral, validateSubGraphName,
+  assertSafeIri, escapeSparqlLiteral, validateSubGraphName, validateAssertionName,
   type GetView,
   REMOVED_VIEWS,
   TrustLevel,
@@ -56,6 +56,7 @@ export function resolveViewGraphs(
     agentAddress?: string;
     verifiedGraph?: string;
     assertionName?: string;
+    subGraphName?: string;
     /** Spec §12/§14 trust-gradient filter. Enforced after graph resolution. */
     minTrust?: TrustLevel;
   },
@@ -71,20 +72,23 @@ export function resolveViewGraphs(
       if (!opts?.agentAddress) {
         throw new Error('agentAddress is required for the working-memory view');
       }
+      const assertionBaseGraph = opts.subGraphName
+        ? contextGraphSubGraphUri(contextGraphId, opts.subGraphName)
+        : contextGraphDataUri(contextGraphId);
       if (opts.assertionName) {
         return {
-          graphs: [contextGraphAssertionUri(contextGraphId, opts.agentAddress, opts.assertionName)],
+          graphs: [contextGraphAssertionUri(contextGraphId, opts.agentAddress, opts.assertionName, opts.subGraphName)],
           graphPrefixes: [],
         };
       }
       return {
         graphs: [],
-        graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/assertion/${opts.agentAddress}/`],
+        graphPrefixes: [`${assertionBaseGraph}/assertion/${opts.agentAddress}/`],
       };
     }
     case 'shared-working-memory':
       return {
-        graphs: [contextGraphSharedMemoryUri(contextGraphId)],
+        graphs: [contextGraphSharedMemoryUri(contextGraphId, opts?.subGraphName)],
         graphPrefixes: [],
       };
     case 'verified-memory': {
@@ -117,7 +121,7 @@ export function resolveViewGraphs(
 
       if (opts?.verifiedGraph) {
         return {
-          graphs: [contextGraphVerifiedMemoryUri(contextGraphId, opts.verifiedGraph)],
+          graphs: [contextGraphVerifiedMemoryUri(contextGraphId, opts.verifiedGraph, opts.subGraphName)],
           graphPrefixes: [],
         };
       }
@@ -153,9 +157,12 @@ export function resolveViewGraphs(
       // cross-node consensus-verified data (still stamped with
       // `dkg:trustLevel` ConsensusVerified by
       // `DKGAgent.promoteToVerifiedMemory`).
+      const dataGraph = opts?.subGraphName
+        ? contextGraphSubGraphUri(contextGraphId, opts.subGraphName)
+        : contextGraphDataUri(contextGraphId);
       return {
-        graphs: [`did:dkg:context-graph:${contextGraphId}`],
-        graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verified_memory/`],
+        graphs: [dataGraph],
+        graphPrefixes: [`${dataGraph}/_verified_memory/`],
       };
     }
   }
@@ -194,6 +201,19 @@ export class DKGQueryEngine implements QueryEngine {
     if (options?.subGraphName) {
       const v = validateSubGraphName(options.subGraphName);
       if (!v.valid) throw new Error(`Invalid sub-graph name for query: ${v.reason}`);
+    }
+
+    if (options?.assertionName !== undefined) {
+      if (typeof options.assertionName !== 'string') {
+        throw new Error(`Invalid assertionName for query: expected a string, got ${typeof options.assertionName}`);
+      }
+      const assertionValidation = validateAssertionName(options.assertionName);
+      if (!assertionValidation.valid) {
+        throw new Error(`Invalid assertionName for query: ${assertionValidation.reason}`);
+      }
+      if (options.view !== 'working-memory') {
+        throw new Error('assertionName is only supported for view "working-memory" queries');
+      }
     }
 
     if (effectiveContextGraphId && !options?.view) {
@@ -298,9 +318,9 @@ export class DKGQueryEngine implements QueryEngine {
         );
       }
       if (options.subGraphName) {
-        throw new Error(
-          `subGraphName cannot be combined with view-based routing (view='${options.view}'). ` +
-          'Sub-graph scoping within views is deferred to V10.x.',
+        await this.assertViewSubGraphDoesNotCollideWithKnownChildContextGraph(
+          effectiveContextGraphId,
+          options.subGraphName,
         );
       }
       return this.queryWithView(sparql, options.view, effectiveContextGraphId, options);
@@ -370,6 +390,7 @@ export class DKGQueryEngine implements QueryEngine {
       agentAddress: options.agentAddress,
       verifiedGraph: options.verifiedGraph,
       assertionName: options.assertionName,
+      subGraphName: options.subGraphName,
       // Back-compat: accept the legacy `_minTrust` underscore form for a
       // deprecation window. See QueryOptions._minTrust.
       minTrust: options.minTrust ?? options._minTrust,
@@ -613,6 +634,20 @@ export class DKGQueryEngine implements QueryEngine {
       }
     }
     return names;
+  }
+
+  private async assertViewSubGraphDoesNotCollideWithKnownChildContextGraph(
+    contextGraphId: string,
+    subGraphName: string,
+  ): Promise<void> {
+    const subGraphUri = contextGraphSubGraphUri(contextGraphId, subGraphName);
+    const knownChildContextGraphs = await this.discoverKnownChildContextGraphUris(contextGraphId);
+    if (!knownChildContextGraphs.has(subGraphUri)) return;
+
+    throw new ScopedQueryViolationError(
+      `subGraphName "${subGraphName}" for contextGraphId "${contextGraphId}" resolves to a known child context graph ` +
+      `"${contextGraphId}/${subGraphName}". Query the child context graph directly or choose a different sub-graph name.`,
+    );
   }
 
   private async discoverRegisteredAssertionGraphs(contextGraphId: string): Promise<Set<string>> {

@@ -41,6 +41,112 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     expect(lastCall.includeSharedMemory).toBe(true);
   });
 
+  it('normalizes agentAddress DID form and forwards subGraphName through dkg_query', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      view: 'working-memory',
+      agentAddress: 'did:dkg:agent:peer-explicit',
+      subGraphName: ' imports ',
+      assertionName: 'chat-turns',
+    });
+    expect(result.isError).toBeFalsy();
+    const lastCall = client.queryCalls.at(-1)!;
+    expect(lastCall.agentAddress).toBe('peer-explicit');
+    expect(lastCall.subGraphName).toBe('imports');
+    expect(lastCall.assertionName).toBe('chat-turns');
+  });
+
+  it('normalizes wallet-shaped working-memory agentAddress', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      view: 'working-memory',
+      agentAddress: 'did:dkg:agent:0x52908400098527886e0f7030069857d2e4169ee7',
+    });
+    expect(result.isError).toBeFalsy();
+    const lastCall = client.queryCalls.at(-1)!;
+    expect(lastCall.view).toBe('working-memory');
+    expect(lastCall.agentAddress).toBe('0x52908400098527886E0F7030069857D2E4169EE7');
+  });
+
+  it('forwards wallet-shaped agentAddress unchanged when view is omitted', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      agentAddress: 'did:dkg:agent:0x52908400098527886e0f7030069857d2e4169ee7',
+    });
+    expect(result.isError).toBeFalsy();
+    const lastCall = client.queryCalls.at(-1)!;
+    expect(lastCall.view).toBeUndefined();
+    expect(lastCall.agentAddress).toBe('did:dkg:agent:0x52908400098527886e0f7030069857d2e4169ee7');
+  });
+
+  it('forwards wallet-shaped agentAddress unchanged outside working-memory', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      view: 'shared-working-memory',
+      agentAddress: 'did:dkg:agent:0x52908400098527886e0f7030069857d2e4169ee7',
+    });
+    expect(result.isError).toBeFalsy();
+    const lastCall = client.queryCalls.at(-1)!;
+    expect(lastCall.view).toBe('shared-working-memory');
+    expect(lastCall.agentAddress).toBe('did:dkg:agent:0x52908400098527886e0f7030069857d2e4169ee7');
+  });
+
+  it('rejects blank agentAddress in dkg_query', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      view: 'working-memory',
+      agentAddress: '   ',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('agentAddress');
+    expect(client.queryCalls).toHaveLength(0);
+  });
+
+  it('rejects blank subGraphName in dkg_query', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      view: 'working-memory',
+      subGraphName: '   ',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('subGraphName');
+    expect(client.queryCalls).toHaveLength(0);
+  });
+
+  it('rejects invalid subGraphName in dkg_query before forwarding', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      view: 'working-memory',
+      subGraphName: 'bad/name',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Invalid subGraphName');
+    expect(client.queryCalls).toHaveLength(0);
+  });
+
+  it('rejects blank assertionName in dkg_query', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      view: 'working-memory',
+      assertionName: '   ',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('assertionName');
+    expect(client.queryCalls).toHaveLength(0);
+  });
+
+  it('rejects assertionName outside working-memory so the scope is not ignored', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      view: 'verified-memory',
+      assertionName: 'chat-turns',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('assertionName');
+    expect(result.content[0].text).toContain('working-memory');
+    expect(client.queryCalls).toHaveLength(0);
+  });
+
   it.each(['working-memory', 'shared-working-memory', 'verified-memory'])(
     'accepts the canonical view enum value %s',
     async (view) => {
@@ -101,11 +207,14 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     const tool = server.get('dkg_query');
     const shape = tool.config.inputSchema!;
     const keys = Object.keys(shape);
-    // Post-migration surface: sparql, projectId, subGraphName, view,
-    // includeSharedMemory, limit. The legacy `layer` key MUST be gone.
+    // Post-migration surface: sparql, projectId, subGraphName,
+    // assertionName, agentAddress, view, includeSharedMemory, limit.
+    // The legacy `layer` key MUST be gone.
     expect(keys).toEqual(
       expect.arrayContaining([
         'sparql',
+        'assertionName',
+        'agentAddress',
         'view',
         'includeSharedMemory',
       ]),

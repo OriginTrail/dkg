@@ -50,8 +50,22 @@ TARGET_CONTEXT_GRAPH_DESCRIPTION = (
     "Target context graph. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION
 )
 AGENT_CONTEXT_GRAPH_ID = "agent-context"
+CONTEXT_GRAPH_URI_PREFIX = "did:dkg:context-graph:"
 AGENT_CONTEXT_GRAPH_NAME = "Agent Context"
 AGENT_CONTEXT_GRAPH_DESCRIPTION = "Chat-turn working memory for local agent integrations."
+
+
+def _normalize_context_graph_id(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    trimmed = value.strip()
+    if trimmed.startswith(CONTEXT_GRAPH_URI_PREFIX):
+        return trimmed[len(CONTEXT_GRAPH_URI_PREFIX):]
+    return trimmed
+
+
+def _is_agent_context_graph(value: Any) -> bool:
+    return _normalize_context_graph_id(value) == AGENT_CONTEXT_GRAPH_ID
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +292,10 @@ DKG_QUERY_SCHEMA = {
             "agent_address": {
                 "type": "string",
                 "description": "Optional Working Memory owner address. Defaults to this node when view is working-memory.",
+            },
+            "sub_graph_name": {
+                "type": "string",
+                "description": "Optional sub-graph scope within context_graph_id. May be combined with view.",
             },
             "assertion_name": {
                 "type": "string",
@@ -804,6 +822,10 @@ MEMORY_SEARCH_SCHEMA = {
             "query": {"type": "string", "description": "Free-text search query."},
             "limit": {"type": "integer", "description": "Max results, default 20, capped at 100."},
             "context_graph_id": {"type": "string", "description": "Optional context graph override. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION},
+            "sub_graph_name": {
+                "type": "string",
+                "description": "Optional project sub-graph scope. Requires a project context graph.",
+            },
         },
         "required": ["query"],
     },
@@ -1386,14 +1408,26 @@ class DKGMemoryProvider(MemoryProvider):
             )
         if args.get("context_graph") is not None:
             return tool_error('"context_graph" is not a supported parameter on dkg_query. Use "context_graph_id".')
-        cg = _first_text(args, "context_graph_id") or self._context_graph
+        explicit_cg = _first_text(args, "context_graph_id")
+        cg = explicit_cg or self._context_graph
         view = _first_text(args, "view")
         if view and view not in ("working-memory", "shared-working-memory", "verified-memory"):
             return tool_error('"view" must be one of: working-memory, shared-working-memory, verified-memory.')
-        if view and not _first_text(args, "context_graph_id"):
+        if view and not explicit_cg:
             return tool_error(f'"view: {view}" requires "context_graph_id".')
-        if view and _first_text(args, "sub_graph_name"):
-            return tool_error('"sub_graph_name" cannot be combined with view-based dkg_query routing.')
+        if args.get("sub_graph_name") is not None and not isinstance(args.get("sub_graph_name"), str):
+            return tool_error('"sub_graph_name" must be a string.')
+        if isinstance(args.get("sub_graph_name"), str) and not args.get("sub_graph_name", "").strip():
+            return tool_error('"sub_graph_name" must be a non-empty string.')
+        if _first_text(args, "sub_graph_name") and not explicit_cg:
+            return tool_error('"sub_graph_name" requires "context_graph_id".')
+        if args.get("assertion_name") is not None and not isinstance(args.get("assertion_name"), str):
+            return tool_error('"assertion_name" must be a string.')
+        if isinstance(args.get("assertion_name"), str) and not args.get("assertion_name", "").strip():
+            return tool_error('"assertion_name" must be a non-empty string.')
+        assertion_name = _first_text(args, "assertion_name")
+        if assertion_name and view != "working-memory":
+            return tool_error('"assertion_name" is only supported with "view: working-memory".')
         if args.get("agent_address") is not None and not isinstance(args.get("agent_address"), str):
             return tool_error('"agent_address" must be a string.')
         if isinstance(args.get("agent_address"), str) and not args.get("agent_address", "").strip():
@@ -1409,7 +1443,7 @@ class DKGMemoryProvider(MemoryProvider):
             sparql,
             cg,
             view=view,
-            assertion_name=_first_text(args, "assertion_name"),
+            assertion_name=assertion_name,
             agent_address=agent_address,
             sub_graph_name=_first_text(args, "sub_graph_name"),
             verified_graph=_first_text(args, "verified_graph"),
@@ -1423,7 +1457,24 @@ class DKGMemoryProvider(MemoryProvider):
         if len(query) < 2:
             return tool_error("query must be at least 2 characters.")
         limit = _coerce_limit(args.get("limit"), default=20, maximum=100)
+        if "context_graph" in args:
+            return tool_error('"context_graph" is not a supported parameter on memory_search. Use "context_graph_id".')
+        project_context_graph = _normalize_context_graph_id(
+            _first_text(args, "context_graph_id") or self._context_graph
+        )
+        if args.get("sub_graph_name") is not None and not isinstance(args.get("sub_graph_name"), str):
+            return tool_error('"sub_graph_name" must be a string.')
+        if isinstance(args.get("sub_graph_name"), str) and not args.get("sub_graph_name", "").strip():
+            return tool_error('"sub_graph_name" must be a non-empty string.')
+        project_sub_graph_name = _first_text(args, "sub_graph_name")
+        if project_sub_graph_name and (not project_context_graph or _is_agent_context_graph(project_context_graph)):
+            return tool_error('"sub_graph_name" requires a project context graph for memory_search.')
         if self._offline or not self._client:
+            if project_sub_graph_name:
+                return tool_error(
+                    '"sub_graph_name" cannot be used for offline memory_search because the local cache '
+                    "does not record sub-graph scope."
+                )
             return json.dumps(_cache_memory_search(query, self._cache, limit))
 
         keywords = [k for k in query.lower().split() if len(k) >= 2]
@@ -1432,16 +1483,15 @@ class DKGMemoryProvider(MemoryProvider):
 
         sparql = _build_memory_search_sparql(keywords, limit)
         agent_address = self._client._resolve_agent_address()
-        if "context_graph" in args:
-            return tool_error('"context_graph" is not a supported parameter on memory_search. Use "context_graph_id".')
-        project_context_graph = _first_text(args, "context_graph_id") or self._context_graph
         context_graphs: List[str] = []
-        for cg in ("agent-context", project_context_graph):
+        for cg in (AGENT_CONTEXT_GRAPH_ID, project_context_graph):
             if cg and cg not in context_graphs:
                 context_graphs.append(cg)
 
         hits: List[Dict[str, Any]] = []
         successful_queries = 0
+        successful_scoped_project_queries = 0
+        first_scoped_project_error: Optional[str] = None
         for cg in context_graphs:
             for view, weight in (
                 ("working-memory", 1.0),
@@ -1450,15 +1500,49 @@ class DKGMemoryProvider(MemoryProvider):
             ):
                 if view == "working-memory" and not agent_address:
                     continue
-                result = self._client.query(
-                    sparql,
-                    cg,
-                    view=view,
-                    agent_address=agent_address if view == "working-memory" else None,
+                scoped_project_layer = bool(
+                    project_sub_graph_name
+                    and cg == project_context_graph
+                    and not _is_agent_context_graph(cg)
                 )
+                query_kwargs = {
+                    "view": view,
+                    "agent_address": agent_address if view == "working-memory" else None,
+                }
+                if scoped_project_layer:
+                    query_kwargs["sub_graph_name"] = project_sub_graph_name
+                try:
+                    result = self._client.query(
+                        sparql,
+                        cg,
+                        **query_kwargs,
+                    )
+                except Exception as e:
+                    if scoped_project_layer and _is_scoped_query_routing_error(e):
+                        return tool_error(
+                            f'memory_search sub_graph_name "{project_sub_graph_name}" failed for '
+                            f'context_graph_id "{cg}" ({view}): {e}'
+                        )
+                    if scoped_project_layer:
+                        if first_scoped_project_error is None:
+                            first_scoped_project_error = f'{cg} ({view}): {e}'
+                        continue
+                    raise
                 if _client_result_failed(result):
+                    detail = result.get("error") if isinstance(result, dict) else "query failed"
+                    if scoped_project_layer:
+                        if _is_scoped_query_routing_error(detail):
+                            return tool_error(
+                                f'memory_search sub_graph_name "{project_sub_graph_name}" failed for '
+                                f'context_graph_id "{cg}" ({view}): {detail}'
+                            )
+                        if first_scoped_project_error is None:
+                            first_scoped_project_error = f'{cg} ({view}): {detail}'
+                        continue
                     continue
                 successful_queries += 1
+                if scoped_project_layer:
+                    successful_scoped_project_queries += 1
                 for binding in _extract_query_bindings(result):
                     text = _binding_value(binding.get("text") or binding.get("o"))
                     uri = _binding_value(binding.get("uri") or binding.get("s"))
@@ -1467,7 +1551,7 @@ class DKGMemoryProvider(MemoryProvider):
                         continue
                     score = _keyword_overlap(text, keywords)
                     layer = _memory_search_layer(cg, view)
-                    source = "sessions" if cg == "agent-context" else "memory"
+                    source = "sessions" if _is_agent_context_graph(cg) else "memory"
                     hits.append({
                         "snippet": text[:500],
                         "layer": layer,
@@ -1478,15 +1562,20 @@ class DKGMemoryProvider(MemoryProvider):
                         "predicate": pred,
                     })
 
+        if project_sub_graph_name and successful_scoped_project_queries == 0 and first_scoped_project_error:
+            detail = first_scoped_project_error or "all live queries failed"
+            return tool_error(
+                f"memory_search failed: {detail}"
+            )
         if not hits and successful_queries == 0:
             fallback = _cache_memory_search(query, self._cache, limit)
-            fallback["scope"] = project_context_graph if project_context_graph != "agent-context" else None
+            fallback["scope"] = project_context_graph if not _is_agent_context_graph(project_context_graph) else None
             return json.dumps(fallback)
         if not hits:
             return json.dumps({
                 "query": query,
                 "count": 0,
-                "scope": project_context_graph if project_context_graph != "agent-context" else None,
+                "scope": project_context_graph if not _is_agent_context_graph(project_context_graph) else None,
                 "hits": [],
             })
 
@@ -1520,7 +1609,7 @@ class DKGMemoryProvider(MemoryProvider):
         return json.dumps({
             "query": query,
             "count": len(public_hits),
-            "scope": project_context_graph if project_context_graph != "agent-context" else None,
+            "scope": project_context_graph if not _is_agent_context_graph(project_context_graph) else None,
             "hits": public_hits,
         })
 
@@ -2368,6 +2457,30 @@ def _client_result_failed(result: Any) -> bool:
     return result.get("success") is False or result.get("ok") is False or bool(result.get("error"))
 
 
+def _is_scoped_query_routing_error(message: Any) -> bool:
+    text = str(message).lower()
+    mentions_sub_graph = (
+        "sub-graph" in text
+        or "subgraphname" in text
+        or "sub_graph_name" in text
+    )
+    return (
+        "scoped query violation" in text
+        or "known child context graph" in text
+        or "unknown sub-graph" in text
+        or "unknown subgraph" in text
+        or (
+            mentions_sub_graph
+            and (
+                "registered" in text
+                or "invalid" in text
+                or "requires" in text
+                or "not found" in text
+            )
+        )
+    )
+
+
 def _first_text(args: Dict[str, Any], *keys: str) -> str:
     for key in keys:
         value = args.get(key)
@@ -2569,7 +2682,7 @@ def _memory_search_layer(context_graph_id: str, view: str) -> str:
         "shared-working-memory": "swm",
         "verified-memory": "vm",
     }.get(view, "wm")
-    prefix = "agent-context" if context_graph_id == "agent-context" else "project"
+    prefix = "agent-context" if _is_agent_context_graph(context_graph_id) else "project"
     return f"{prefix}-{suffix}"
 
 

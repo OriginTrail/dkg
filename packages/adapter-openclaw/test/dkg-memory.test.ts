@@ -1026,6 +1026,159 @@ describe('DkgMemorySearchManager', () => {
       );
     });
 
+    it('applies projectSubGraphName only to project CG fan-out', async () => {
+      const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'research-x' }),
+      });
+
+      await manager.search('hello world', { projectSubGraphName: 'skills' });
+
+      expect(querySpy).toHaveBeenCalledTimes(6);
+      const allOpts = querySpy.mock.calls.map(c => c[1]!);
+      const agentContextOpts = allOpts.filter(o => o.contextGraphId === AGENT_CONTEXT_GRAPH);
+      expect(agentContextOpts).toHaveLength(3);
+      expect(agentContextOpts.every(o => o.subGraphName === undefined)).toBe(true);
+
+      const projectOpts = allOpts.filter(o => o.contextGraphId === 'research-x');
+      expect(projectOpts).toHaveLength(3);
+      expect(projectOpts.every(o => o.subGraphName === 'skills')).toBe(true);
+    });
+
+    it('surfaces projectSubGraphName query failures instead of returning no hits', async () => {
+      const warn = vi.fn();
+      const querySpy = vi.spyOn(client, 'query').mockImplementation(async (_sparql, opts) => {
+        if (opts?.subGraphName) {
+          throw new Error('Unknown sub-graph: skills');
+        }
+        return { result: { bindings: [] } };
+      });
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'research-x' }),
+        logger: { warn },
+      });
+
+      await expect(manager.search('hello world', { projectSubGraphName: 'skills' }))
+        .rejects.toThrow(/sub_graph_name "skills".*Unknown sub-graph: skills/i);
+      expect(querySpy).toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('project-wm search failed'));
+    });
+
+    it('surfaces camel-case subGraphName daemon validation errors', async () => {
+      vi.spyOn(client, 'query').mockImplementation(async (_sparql, opts) => {
+        if (opts?.subGraphName) {
+          throw new Error('Invalid subGraphName: Sub-graph names cannot contain "/"');
+        }
+        return { result: { bindings: [] } };
+      });
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'research-x' }),
+      });
+
+      await expect(manager.search('hello world', { projectSubGraphName: 'bad/name' }))
+        .rejects.toThrow(/sub_graph_name "bad\/name".*Invalid subGraphName/i);
+    });
+
+    it('keeps partial-success behavior when a projectSubGraphName layer succeeds', async () => {
+      const warn = vi.fn();
+      vi.spyOn(client, 'query').mockImplementation(async (_sparql, opts) => {
+        if (opts?.subGraphName && opts.view === 'working-memory') {
+          throw new Error('fetch failed');
+        }
+        if (opts?.subGraphName && opts.view === 'verified-memory') {
+          return {
+            result: {
+              bindings: [{
+                uri: { value: 'urn:project:note' },
+                text: { value: 'hello world from project memory' },
+              }],
+            },
+          };
+        }
+        return {
+          result: {
+            bindings: [],
+          },
+        };
+      });
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'research-x' }),
+        logger: { warn },
+      });
+
+      const hits = await manager.search('hello world', { projectSubGraphName: 'skills' });
+
+      expect(hits).toHaveLength(1);
+      expect(hits[0].source).toBe('memory');
+      expect(hits[0].layer).toBe('project-vm');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('fetch failed'));
+    });
+
+    it('surfaces generic projectSubGraphName failures when every project-scoped layer fails', async () => {
+      const warn = vi.fn();
+      vi.spyOn(client, 'query').mockImplementation(async (_sparql, opts) => {
+        if (opts?.subGraphName) {
+          throw new Error('fetch failed');
+        }
+        return { result: { bindings: [] } };
+      });
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'research-x' }),
+        logger: { warn },
+      });
+
+      await expect(manager.search('hello world', { projectSubGraphName: 'skills' }))
+        .rejects.toThrow(/memory_search failed:.*fetch failed/i);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('project-wm search failed'));
+    });
+
+    it('surfaces generic projectSubGraphName failures when every live layer fails', async () => {
+      const warn = vi.fn();
+      vi.spyOn(client, 'query').mockRejectedValue(new Error('fetch failed'));
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'research-x' }),
+        logger: { warn },
+      });
+
+      await expect(manager.search('hello world', { projectSubGraphName: 'skills' }))
+        .rejects.toThrow(/memory_search failed:.*fetch failed/i);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('agent-context-wm search failed'));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('project-wm search failed'));
+    });
+
+    it('rejects projectSubGraphName when no project CG is resolved', async () => {
+      const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
+      const warn = vi.fn();
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver(),
+        logger: { warn },
+      });
+
+      await expect(manager.search('hello world', { projectSubGraphName: 'skills' }))
+        .rejects.toThrow(/projectSubGraphName.*project context graph/i);
+      expect(querySpy).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('no project context graph'));
+    });
+
+    it('rejects projectSubGraphName when the project CG resolves to the agent-context URI', async () => {
+      const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'did:dkg:context-graph:agent-context' }),
+      });
+
+      await expect(manager.search('hello world', { projectSubGraphName: 'skills' }))
+        .rejects.toThrow(/projectSubGraphName.*project context graph/i);
+      expect(querySpy).not.toHaveBeenCalled();
+    });
+
     it('uses a permissive SPARQL shape — no rdf:type constraint, no specific predicate, literal-length floor', async () => {
       const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
       const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });

@@ -406,7 +406,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       parsed.includeSharedMemory ?? parsed.includeWorkspace;
     const includeContextGraphPartitions = parsed.includeContextGraphPartitions === true;
     const view = parsed.view;
-    const agentAddress = parsed.agentAddress;
+    const requestedAgentAddress = parsed.agentAddress;
     // the
     // RFC-29 multi-agent WM isolation gate is fail-closed by default.
     // For cross-agent `view: 'working-memory'` reads on nodes with
@@ -427,6 +427,9 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     const verifiedGraph = parsed.verifiedGraph;
     const assertionName = parsed.assertionName;
     const subGraphName = parsed.subGraphName;
+    if (requestedAgentAddress !== undefined && typeof requestedAgentAddress !== 'string') {
+      return jsonResponse(res, 400, { error: 'agentAddress must be a string when provided' });
+    }
     // P-13: accept `minTrust` as a string ("SelfAttested"|"Endorsed"|
     // "PartiallyVerified"|"ConsensusVerified") or the matching integer
     // (0..3). Unrecognised values fail closed with a 400 rather than
@@ -452,6 +455,38 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 400, {
         error: `Invalid view "${view}". Supported: ${GET_VIEWS.join(", ")}`,
       });
+    }
+    if (assertionName !== undefined) {
+      if (typeof assertionName !== 'string') {
+        return jsonResponse(res, 400, { error: 'assertionName must be a string when provided' });
+      }
+      if (!assertionName.trim()) {
+        return jsonResponse(res, 400, { error: 'assertionName must be a non-empty string when provided' });
+      }
+      const assertionValidation = validateAssertionName(assertionName);
+      if (!assertionValidation.valid) {
+        return jsonResponse(res, 400, { error: `Invalid assertionName: ${assertionValidation.reason}` });
+      }
+      if (view !== 'working-memory') {
+        return jsonResponse(res, 400, {
+          error: 'assertionName is only supported with view "working-memory"',
+        });
+      }
+    }
+    if (subGraphName !== undefined) {
+      if (typeof subGraphName !== 'string') {
+        return jsonResponse(res, 400, { error: 'subGraphName must be a string when provided' });
+      }
+      if (!subGraphName.trim()) {
+        return jsonResponse(res, 400, { error: 'subGraphName must be a non-empty string when provided' });
+      }
+      const subGraphValidation = validateSubGraphName(subGraphName);
+      if (!subGraphValidation.valid) {
+        return jsonResponse(res, 400, { error: `Invalid subGraphName: ${subGraphValidation.reason}` });
+      }
+      if (!contextGraphId) {
+        return jsonResponse(res, 400, { error: 'subGraphName requires contextGraphId' });
+      }
     }
     // PR #239 Codex iter-7: gate minTrust normalization/validation behind
     // view === 'verified-memory'. Upstream `resolveViewGraphs()` already
@@ -554,10 +589,11 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         && validTokens.has(requestToken)
         && callerAgentAddress === undefined;
       const hasRecognisedIdentity = isAdminToken || callerAgentAddress !== undefined;
+      const effectiveAgentAddress = requestedAgentAddress;
       if (
         !hasRecognisedIdentity &&
         view === 'working-memory' &&
-        typeof agentAddress === 'string'
+        typeof effectiveAgentAddress === 'string'
       ) {
         // Codex (iteration 4): the daemon's canonical "own WM" identity is
         // whatever `agent.resolveAgentAddress(undefined)` returns — i.e.
@@ -567,7 +603,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         // so we must accept both the default agent address *and* the bare
         // peerId as self, otherwise an auth-disabled self-read via the
         // legacy alias now 403s where it used to return the node's own WM.
-        const targetLower = agentAddress.toLowerCase();
+        const targetLower = effectiveAgentAddress.toLowerCase();
         const selfAliasesLower = new Set<string>();
         const defaultAgent = agent.getDefaultAgentAddress();
         if (defaultAgent) selfAliasesLower.add(defaultAgent.toLowerCase());
@@ -575,7 +611,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         if (selfAliasesLower.size === 0 || !selfAliasesLower.has(targetLower)) {
           return jsonResponse(res, 403, {
             error:
-              `working-memory reads for agentAddress=${agentAddress} require authentication. ` +
+              `working-memory reads for agentAddress=${effectiveAgentAddress} require authentication. ` +
               `An unauthenticated / auth-disabled caller may only read the node-default agent's WM ` +
               `(accepted self-aliases: defaultAgentAddress and the node's peerId).`,
           });
@@ -587,7 +623,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         includeSharedMemory,
         includeContextGraphPartitions,
         view,
-        agentAddress,
+        agentAddress: effectiveAgentAddress,
         verifiedGraph,
         assertionName,
         subGraphName,
@@ -987,6 +1023,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         emitMemoryGraphChanged?.({
           contextGraphId,
           layers: ["vm"],
+          ...(result.subGraphName ? { subGraphName: result.subGraphName } : {}),
           operation: "verified_memory_updated",
           source: "api",
         });
@@ -994,6 +1031,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         emitMemoryGraphChanged?.({
           contextGraphId,
           layers: ["wm"],
+          ...(result.subGraphName ? { subGraphName: result.subGraphName } : {}),
           operation: "trust_metadata_updated",
           source: "api",
         });

@@ -1,11 +1,33 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  contextGraphAssertionUri,
+  contextGraphDataUri,
+  contextGraphMetaUri,
+  contextGraphSharedMemoryUri,
+  contextGraphSubGraphUri,
+} from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 
 const CG_ID = 'dkg-v10-dev';
-const ROOT_GRAPH = `did:dkg:context-graph:${CG_ID}`;
-const CODE_GRAPH = `did:dkg:context-graph:${CG_ID}/code`;
-const DECISIONS_GRAPH = `did:dkg:context-graph:${CG_ID}/decisions`;
+const AGENT = '0xAbC0000000000000000000000000000000000001';
+const OTHER_AGENT = '0xDeAd000000000000000000000000000000000002';
+const ROOT_GRAPH = contextGraphDataUri(CG_ID);
+const CODE_GRAPH = contextGraphSubGraphUri(CG_ID, 'code');
+const DECISIONS_GRAPH = contextGraphSubGraphUri(CG_ID, 'decisions');
+const ROOT_WM_GRAPH = contextGraphAssertionUri(CG_ID, AGENT, 'probe-root');
+const CODE_WM_GRAPH = contextGraphAssertionUri(CG_ID, AGENT, 'probe', 'code');
+const CODE_WM_SIBLING_GRAPH = contextGraphAssertionUri(CG_ID, AGENT, 'probe-sibling', 'code');
+const DECISIONS_WM_GRAPH = contextGraphAssertionUri(CG_ID, AGENT, 'probe', 'decisions');
+const OTHER_AGENT_CODE_WM_GRAPH = contextGraphAssertionUri(CG_ID, OTHER_AGENT, 'probe', 'code');
+const ROOT_SWM_GRAPH = contextGraphSharedMemoryUri(CG_ID);
+const CODE_SWM_GRAPH = contextGraphSharedMemoryUri(CG_ID, 'code');
+const DECISIONS_SWM_GRAPH = contextGraphSharedMemoryUri(CG_ID, 'decisions');
+const VIEW_NAME = 'http://ex.org/viewName';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const CONTEXT_GRAPH_TYPE = 'https://dkg.network/ontology#ContextGraph';
+const DKG_SUB_GRAPH_TYPE = 'http://dkg.io/ontology/SubGraph';
+const SCHEMA_NAME = 'http://schema.org/name';
 
 function q(s: string, p: string, o: string, g: string): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -20,6 +42,11 @@ describe('sub-graph query scoping', () => {
     engine = new DKGQueryEngine(store);
 
     await store.insert([
+      q(CODE_GRAPH, RDF_TYPE, DKG_SUB_GRAPH_TYPE, contextGraphMetaUri(CG_ID)),
+      q(CODE_GRAPH, SCHEMA_NAME, '"code"', contextGraphMetaUri(CG_ID)),
+      q(DECISIONS_GRAPH, RDF_TYPE, DKG_SUB_GRAPH_TYPE, contextGraphMetaUri(CG_ID)),
+      q(DECISIONS_GRAPH, SCHEMA_NAME, '"decisions"', contextGraphMetaUri(CG_ID)),
+
       q('urn:fn:main', 'http://ex.org/type', '"Function"', ROOT_GRAPH),
       q('urn:fn:main', 'http://ex.org/name', '"main"', ROOT_GRAPH),
 
@@ -28,6 +55,20 @@ describe('sub-graph query scoping', () => {
 
       q('urn:decision:1', 'http://ex.org/type', '"Decision"', DECISIONS_GRAPH),
       q('urn:decision:1', 'http://ex.org/title', '"Use TypeScript"', DECISIONS_GRAPH),
+
+      q('urn:view:vm-root', VIEW_NAME, '"VMRoot"', ROOT_GRAPH),
+      q('urn:view:vm-code', VIEW_NAME, '"VMCode"', CODE_GRAPH),
+      q('urn:view:vm-decisions', VIEW_NAME, '"VMDecisions"', DECISIONS_GRAPH),
+
+      q('urn:view:wm-root', VIEW_NAME, '"WMRoot"', ROOT_WM_GRAPH),
+      q('urn:view:wm-code', VIEW_NAME, '"WMCode"', CODE_WM_GRAPH),
+      q('urn:view:wm-code-sibling', VIEW_NAME, '"WMSiblingAssertion"', CODE_WM_SIBLING_GRAPH),
+      q('urn:view:wm-decisions', VIEW_NAME, '"WMDecisions"', DECISIONS_WM_GRAPH),
+      q('urn:view:wm-other-agent', VIEW_NAME, '"WMOtherAgent"', OTHER_AGENT_CODE_WM_GRAPH),
+
+      q('urn:view:swm-root', VIEW_NAME, '"SWMRoot"', ROOT_SWM_GRAPH),
+      q('urn:view:swm-code', VIEW_NAME, '"SWMCode"', CODE_SWM_GRAPH),
+      q('urn:view:swm-decisions', VIEW_NAME, '"SWMDecisions"', DECISIONS_SWM_GRAPH),
     ]);
   });
 
@@ -86,10 +127,153 @@ describe('sub-graph query scoping', () => {
     expect(result.bindings).toHaveLength(0);
   });
 
-  it('rejects subGraphName combined with view-based routing', async () => {
-    await expect(engine.query(
-      'SELECT ?s ?sig WHERE { ?s <http://ex.org/signature> ?sig }',
+  it('queries a sub-graph working-memory view without leaking root, sibling, or other-agent WM', async () => {
+    const result = await engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      { contextGraphId: CG_ID, view: 'working-memory', agentAddress: AGENT, subGraphName: 'code' },
+    );
+    expect(result.bindings.map((b) => b['name']).sort()).toEqual([
+      '"WMCode"',
+      '"WMSiblingAssertion"',
+    ]);
+  });
+
+  it('queries a sub-graph shared-working-memory view without root or sibling sub-graph leakage', async () => {
+    const result = await engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      { contextGraphId: CG_ID, view: 'shared-working-memory', subGraphName: 'code' },
+    );
+    expect(result.bindings.map((b) => b['name'])).toEqual(['"SWMCode"']);
+  });
+
+  it('queries a sub-graph verified-memory view without root or sibling sub-graph leakage', async () => {
+    const result = await engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
       { contextGraphId: CG_ID, view: 'verified-memory', subGraphName: 'code' },
-    )).rejects.toThrow('subGraphName cannot be combined with view-based routing');
+    );
+    expect(result.bindings.map((b) => b['name'])).toEqual(['"VMCode"']);
+  });
+
+  it('queries one sub-graph WM assertion when subGraphName and assertionName are both supplied', async () => {
+    const result = await engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      {
+        contextGraphId: CG_ID,
+        view: 'working-memory',
+        agentAddress: AGENT,
+        subGraphName: 'code',
+        assertionName: 'probe',
+      },
+    );
+    expect(result.bindings.map((b) => b['name'])).toEqual(['"WMCode"']);
+  });
+
+  it('rejects assertionName outside working-memory so it cannot be ignored', async () => {
+    await expect(engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      { contextGraphId: CG_ID, view: 'shared-working-memory', subGraphName: 'code', assertionName: 'probe' },
+    )).rejects.toThrow(/assertionName.*working-memory/);
+    await expect(engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      { contextGraphId: CG_ID, view: 'verified-memory', subGraphName: 'code', assertionName: 'probe' },
+    )).rejects.toThrow(/assertionName.*working-memory/);
+    await expect(engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      { contextGraphId: CG_ID, subGraphName: 'code', assertionName: 'probe' },
+    )).rejects.toThrow(/assertionName.*working-memory/);
+  });
+
+  it('rejects invalid assertionName before building assertion graph URIs', async () => {
+    await expect(engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      {
+        contextGraphId: CG_ID,
+        view: 'working-memory',
+        agentAddress: AGENT,
+        subGraphName: 'code',
+        assertionName: 'probe/sibling',
+      },
+    )).rejects.toThrow(/Invalid assertionName.*cannot contain "\/"/);
+  });
+
+  it('allows view-routed subGraphName data even when the sub-graph is not registered', async () => {
+    const staleGraph = contextGraphSubGraphUri(CG_ID, 'stale');
+    const staleWmGraph = contextGraphAssertionUri(CG_ID, AGENT, 'probe', 'stale');
+    const staleSwmGraph = contextGraphSharedMemoryUri(CG_ID, 'stale');
+    await store.insert([
+      q('urn:view:stale-vm', VIEW_NAME, '"StaleVM"', staleGraph),
+      q('urn:view:stale-wm', VIEW_NAME, '"StaleWM"', staleWmGraph),
+      q('urn:view:stale-swm', VIEW_NAME, '"StaleSWM"', staleSwmGraph),
+    ]);
+
+    await expect(engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      { contextGraphId: CG_ID, view: 'working-memory', agentAddress: AGENT, subGraphName: 'stale' },
+    )).resolves.toMatchObject({ bindings: [{ name: '"StaleWM"' }] });
+    await expect(engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      { contextGraphId: CG_ID, view: 'shared-working-memory', subGraphName: 'stale' },
+    )).resolves.toMatchObject({ bindings: [{ name: '"StaleSWM"' }] });
+    await expect(engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      { contextGraphId: CG_ID, view: 'verified-memory', subGraphName: 'stale' },
+    )).resolves.toMatchObject({ bindings: [{ name: '"StaleVM"' }] });
+  });
+
+  it('constrains GRAPH patterns to the selected sub-graph WM assertion', async () => {
+    const result = await engine.query(
+      `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${VIEW_NAME}> ?name } }`,
+      {
+        contextGraphId: CG_ID,
+        view: 'working-memory',
+        agentAddress: AGENT,
+        subGraphName: 'code',
+        assertionName: 'probe',
+      },
+    );
+    expect(result.bindings).toEqual([
+      { g: CODE_WM_GRAPH, name: '"WMCode"' },
+    ]);
+  });
+
+  it('constrains GRAPH patterns to the selected sub-graph SWM graph', async () => {
+    const result = await engine.query(
+      `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${VIEW_NAME}> ?name } }`,
+      { contextGraphId: CG_ID, view: 'shared-working-memory', subGraphName: 'code' },
+    );
+    expect(result.bindings).toEqual([
+      { g: CODE_SWM_GRAPH, name: '"SWMCode"' },
+    ]);
+  });
+
+  it('constrains GRAPH patterns to the selected sub-graph VM graph', async () => {
+    const result = await engine.query(
+      `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${VIEW_NAME}> ?name } }`,
+      { contextGraphId: CG_ID, view: 'verified-memory', subGraphName: 'code' },
+    );
+    expect(result.bindings).toEqual([
+      { g: CODE_GRAPH, name: '"VMCode"' },
+    ]);
+  });
+
+  it('rejects view-routed sub-graph scope that aliases a known child context graph', async () => {
+    const childContextGraphId = `${CG_ID}/code`;
+    const childContextGraphUri = contextGraphDataUri(childContextGraphId);
+    await store.insert([
+      q(childContextGraphUri, RDF_TYPE, CONTEXT_GRAPH_TYPE, contextGraphMetaUri(childContextGraphId)),
+    ]);
+
+    await expect(engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      { contextGraphId: CG_ID, view: 'working-memory', agentAddress: AGENT, subGraphName: 'code' },
+    )).rejects.toThrow(/known child context graph/);
+    await expect(engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      { contextGraphId: CG_ID, view: 'shared-working-memory', subGraphName: 'code' },
+    )).rejects.toThrow(/known child context graph/);
+    await expect(engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      { contextGraphId: CG_ID, view: 'verified-memory', subGraphName: 'code' },
+    )).rejects.toThrow(/known child context graph/);
   });
 });

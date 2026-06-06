@@ -259,6 +259,11 @@ export interface MemorySearchOptions {
   minScore?: number;
   sessionKey?: string;
   /**
+   * Optional sub-graph scope for project-context fan-out only. Agent-context
+   * reads stay unscoped so local session memory remains visible.
+   */
+  projectSubGraphName?: string;
+  /**
    * T74 — Observability tag. Identifies the caller in the
    * `[dkg-memory] search fired (caller=…)` log line so operators can
    * distinguish W3 auto-recall hook firings from explicit `memory_search`
