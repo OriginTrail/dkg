@@ -855,6 +855,16 @@ function normalizeSourcePeerId(raw: unknown): string | undefined {
   return peerId && peerId !== 'unknown' ? peerId : undefined;
 }
 
+function combineSourcePeerIds(...groups: Array<readonly unknown[]>): string[] {
+  return groups.reduce<string[]>((peers, group) => {
+    for (const peerId of group) {
+      const normalized = normalizeSourcePeerId(peerId);
+      if (normalized && !peers.includes(normalized)) peers.push(normalized);
+    }
+    return peers;
+  }, []);
+}
+
 function importedArtifactMarkdownCacheMarkerSubject(assertionUri: string, peerId: string): string {
   return `${assertionUri}#cached-markdown-${encodeURIComponent(peerId)}`;
 }
@@ -899,6 +909,37 @@ async function resolveLegacyImportedArtifactSourcePeerIds(
     .sort(([leftPeerId, leftLastSeen], [rightPeerId, rightLastSeen]) =>
       rightLastSeen - leftLastSeen || leftPeerId.localeCompare(rightPeerId))
     .map(([peerId]) => peerId);
+}
+
+async function resolveSharedMemoryImportedArtifactSourcePeerIds(
+  ctx: RequestContext,
+  args: {
+    contextGraphId: string;
+    assertionUri: string;
+    subGraphName?: string;
+  },
+): Promise<string[]> {
+  const swmMetaGraph = contextGraphSharedMemoryMetaUri(args.contextGraphId, args.subGraphName);
+  const assertionUri = assertSafeIri(args.assertionUri);
+  const result = await ctx.agent.store.query(`
+    SELECT ?publisherPeerId ?publishedAt ?op WHERE {
+      GRAPH <${swmMetaGraph}> {
+        ?op <${RDF_TYPE}> <${DKG_ONTOLOGY}WorkspaceOperation> ;
+            <${DKG_ONTOLOGY}publisherPeerId> ?publisherPeerId .
+        {
+          ?op <${DKG_ONTOLOGY}entity> <${assertionUri}> .
+        } UNION {
+          ?op <${DKG_ONTOLOGY}rootEntity> <${assertionUri}> .
+        }
+        OPTIONAL { ?op <${DKG_ONTOLOGY}publishedAt> ?publishedAt }
+      }
+    }
+    ORDER BY DESC(?publishedAt) DESC(STR(?op))
+  `) as { type?: string; bindings?: Array<Record<string, unknown>> };
+
+  return combineSourcePeerIds(
+    (result.bindings ?? []).map((binding) => binding.publisherPeerId),
+  );
 }
 
 async function hasVerifiedImportedArtifactMarkdownCache(
@@ -957,14 +998,7 @@ async function finalizeImportedArtifactAvailability(
       canFetchMarkdown: false,
     };
   }
-  const sourcePeerIds = [
-    artifact.sourcePeerId,
-    ...(artifact.sourcePeerIds ?? []),
-  ].reduce<string[]>((peers, peerId) => {
-    const normalized = normalizeSourcePeerId(peerId);
-    if (normalized && !peers.includes(normalized)) peers.push(normalized);
-    return peers;
-  }, []);
+  const sourcePeerIds = combineSourcePeerIds([artifact.sourcePeerId], artifact.sourcePeerIds ?? []);
   const sourcePeerId = sourcePeerIds.find((peerId) => peerId !== ctx.agent.peerId) ?? sourcePeerIds[0];
   if (!sourcePeerId) {
     return {
@@ -1007,14 +1041,8 @@ async function hydrateImportedArtifactMarkdown(
   artifact: ImportedArtifactResolution,
   maxBytes: number,
 ): Promise<{ bytes?: Buffer; tooLargeBytes?: number; error?: string }> {
-  const sourcePeerIds = [
-    artifact.sourcePeerId,
-    ...(artifact.sourcePeerIds ?? []),
-  ].reduce<string[]>((peers, peerId) => {
-    const normalized = normalizeSourcePeerId(peerId);
-    if (normalized && normalized !== ctx.agent.peerId && !peers.includes(normalized)) peers.push(normalized);
-    return peers;
-  }, []);
+  const sourcePeerIds = combineSourcePeerIds([artifact.sourcePeerId], artifact.sourcePeerIds ?? [])
+    .filter((peerId) => peerId !== ctx.agent.peerId);
   if (!artifact.markdownHash || sourcePeerIds.length === 0 || !artifact.canFetchMarkdown) {
     return { error: 'source peer unavailable' };
   }
@@ -1158,8 +1186,14 @@ async function resolveImportedArtifactFromSharedMemory(
         }).catch(() => false)
       : await ctx.fileStore.has(markdownHash).catch(() => false)
     : false;
-  const sourcePeerIds = await resolveLegacyImportedArtifactSourcePeerIds(ctx, args.assertionAgentAddress)
+  const swmSourcePeerIds = await resolveSharedMemoryImportedArtifactSourcePeerIds(ctx, {
+    contextGraphId: args.contextGraphId,
+    assertionUri: args.assertionUri,
+    ...(args.subGraphName ? { subGraphName: args.subGraphName } : {}),
+  }).catch(() => []);
+  const registrySourcePeerIds = await resolveLegacyImportedArtifactSourcePeerIds(ctx, args.assertionAgentAddress)
     .catch(() => []);
+  const sourcePeerIds = combineSourcePeerIds(swmSourcePeerIds, registrySourcePeerIds);
 
   return finalizeImportedArtifactAvailability(ctx, {
     contextGraphId: args.contextGraphId,
@@ -1430,10 +1464,10 @@ async function resolveImportedArtifact(
     ? await ctx.fileStore.has(markdownHash).catch(() => false)
     : false;
   const durableSourcePeerId = normalizeSourcePeerId(metaBinding.sourcePublisherPeerId);
-  const legacySourcePeerIds = durableSourcePeerId
-    ? []
-    : await resolveLegacyImportedArtifactSourcePeerIds(ctx, parsedAssertion.assertionAgentAddress).catch(() => []);
-  const sourcePeerId = durableSourcePeerId ?? legacySourcePeerIds[0];
+  const legacySourcePeerIds = await resolveLegacyImportedArtifactSourcePeerIds(ctx, parsedAssertion.assertionAgentAddress)
+    .catch(() => []);
+  const sourcePeerIds = combineSourcePeerIds([durableSourcePeerId], legacySourcePeerIds);
+  const sourcePeerId = sourcePeerIds[0];
 
   return finalizeImportedArtifactAvailability(ctx, {
     contextGraphId,
@@ -1456,8 +1490,7 @@ async function resolveImportedArtifact(
     ...(markdownForm ? { markdownForm } : {}),
     ...(markdownHash ? { markdownHash } : {}),
     canReadMarkdown: markdownAvailableLocally,
-    ...(sourcePeerId ? { sourcePeerId } : {}),
-    ...(legacySourcePeerIds.length > 0 ? { sourcePeerIds: legacySourcePeerIds } : {}),
+    ...(sourcePeerId ? { sourcePeerId, sourcePeerIds } : {}),
     ...(ownerGuardRelaxed ? { ownerGuardRelaxed: true } : {}),
   });
 }

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import {
   contextGraphAssertionUri,
   contextGraphMetaUri,
+  contextGraphSharedMemoryMetaUri,
   contextGraphSharedMemoryUri,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
@@ -319,12 +320,15 @@ describe('import artifact daemon routes', () => {
             };
           }
           if (sparql.includes('WorkspaceOperation') && sparql.includes('publisherPeerId')) {
+            expect(sparql).toContain(`<${contextGraphSharedMemoryMetaUri(args.contextGraphId)}>`);
             expect(sparql).toContain('ORDER BY DESC(?publishedAt) DESC(STR(?op))');
             const sourcePeerBindings = args.sourcePeerBindings
               ? [...args.sourcePeerBindings]
                   .filter((binding) => !binding.rootEntity || sparql.includes(`<${binding.rootEntity}>`))
+                  .filter((binding) => !binding.assertionUri || sparql.includes(`<${binding.assertionUri}>`))
                   .sort((left, right) =>
-                  String(right.publishedAt ?? '').localeCompare(String(left.publishedAt ?? '')))
+                    String(right.publishedAt ?? '').localeCompare(String(left.publishedAt ?? '')) ||
+                    String(right.op ?? '').localeCompare(String(left.op ?? '')))
               : undefined;
             return {
               type: 'bindings',
@@ -758,6 +762,52 @@ describe('import artifact daemon routes', () => {
     expect(queries.some((sparql) => sparql.includes('WorkspaceOperation'))).toBe(false);
   });
 
+  it('tries registry source peers after a stale durable source peer fails (#872 review)', async () => {
+    const remoteBytes = Buffer.from('# Durable Then Registry Source Peer\n');
+    const markdownHash = keccakContentHash(remoteBytes);
+    const contextGraphId = 'cg-public-open-durable-source-peer-registry-fallback';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
+    const requestedPeers: string[] = [];
+    const { agent, queries } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: markdownHash,
+      markdownHash,
+      markdownForm: `urn:dkg:file:${markdownHash}`,
+      onChainPolicy: { accessPolicy: 0, publishPolicy: 1 },
+      durableSourcePeerId: 'peer-durable-stale',
+      agents: [{
+        agentUri: 'did:dkg:agent:source',
+        agentAddress: 'did:dkg:agent:source',
+        name: 'Current Source Agent',
+        peerId: 'peer-registry-current',
+        lastSeen: '2026-06-06T00:00:00.000Z',
+      }],
+      async fetchImportedSourceBlobFromPeer(remotePeerId) {
+        requestedPeers.push(remotePeerId);
+        if (remotePeerId === 'peer-durable-stale') {
+          return { denied: 'source blob not found' };
+        }
+        return { totalBytes: remoteBytes.length, bytes: remoteBytes };
+      },
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 1024,
+    });
+
+    expect(read.status).toBe(200);
+    expect(read.body.markdown).toBe('# Durable Then Registry Source Peer\n');
+    expect(read.body.artifact.sourcePeerId).toBe('peer-registry-current');
+    expect(requestedPeers).toEqual(['peer-durable-stale', 'peer-registry-current']);
+    expect(queries.some((sparql) => sparql.includes('WorkspaceOperation'))).toBe(false);
+  });
+
   it('hydrates legacy imports without durable source peer using the source agent registry entry (#872 review)', async () => {
     const remoteBytes = Buffer.from('# Legacy Registry Source Peer\n');
     const markdownHash = keccakContentHash(remoteBytes);
@@ -902,7 +952,7 @@ describe('import artifact daemon routes', () => {
     expect(requestedPeers).toEqual([]);
   });
 
-  it('does not use exact assertion WorkspaceOperation rows as source peers (#872 review)', async () => {
+  it('does not use exact assertion WorkspaceOperation rows when durable import metadata exists (#872 review)', async () => {
     const remoteBytes = Buffer.from('# Exact Assertion Peer\n');
     const markdownHash = keccakContentHash(remoteBytes);
     const contextGraphId = 'cg-public-open-exact-source-peer';
@@ -1131,6 +1181,109 @@ describe('import artifact daemon routes', () => {
     });
   });
 
+  it('prefers exact SWM operation publisherPeerId before registry discovery for SWM-only imports (#872 review)', async () => {
+    const remoteBytes = Buffer.from('# Exact SWM Source Peer\n');
+    const markdownHash = keccakContentHash(remoteBytes);
+    const contextGraphId = 'cg-public-open-swm-exact-source-peer';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
+    const rootEntity = 'urn:doc:real-root';
+    const requestedPeers: string[] = [];
+    const { agent, queries } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: markdownHash,
+      markdownHash,
+      markdownForm: `urn:dkg:file:${markdownHash}`,
+      rootEntity,
+      omitImportMeta: true,
+      onChainPolicy: { accessPolicy: 0, publishPolicy: 1 },
+      sourcePeerBindings: [
+        { rootEntity, publisherPeerId: 'peer-root-wrong', publishedAt: '2026-06-06T00:00:00.000Z' },
+        { rootEntity: assertionUri, publisherPeerId: 'peer-swm-authoritative', publishedAt: '2026-06-05T00:00:00.000Z' },
+      ],
+      agents: [{
+        agentUri: 'did:dkg:agent:source',
+        agentAddress: 'did:dkg:agent:source',
+        name: 'Registry Source Agent',
+        peerId: 'peer-registry-current',
+        lastSeen: '2026-06-07T00:00:00.000Z',
+      }],
+      async fetchImportedSourceBlobFromPeer(remotePeerId) {
+        requestedPeers.push(remotePeerId);
+        if (remotePeerId !== 'peer-swm-authoritative') {
+          return { denied: 'wrong source peer' };
+        }
+        return { totalBytes: remoteBytes.length, bytes: remoteBytes };
+      },
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 1024,
+    });
+
+    expect(read.status).toBe(200);
+    expect(read.body.markdown).toBe('# Exact SWM Source Peer\n');
+    expect(read.body.artifact.sourcePeerId).toBe('peer-swm-authoritative');
+    expect(requestedPeers).toEqual(['peer-swm-authoritative']);
+    const peerQueries = queries.filter((query) => query.includes('WorkspaceOperation') && query.includes('publisherPeerId'));
+    expect(peerQueries).toHaveLength(1);
+    expect(peerQueries[0]).toContain(`<${assertionUri}>`);
+    expect(peerQueries[0]).not.toContain(`<${rootEntity}>`);
+  });
+
+  it('does not use root-entity SWM operation rows as source peers for SWM-only imports (#872 review)', async () => {
+    const remoteBytes = Buffer.from('# Root Peer Should Still Be Ignored\n');
+    const markdownHash = keccakContentHash(remoteBytes);
+    const contextGraphId = 'cg-public-open-swm-root-peer-ignored';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
+    const rootEntity = 'urn:doc:shared-root';
+    const requestedPeers: string[] = [];
+    const { agent, queries } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: markdownHash,
+      markdownHash,
+      markdownForm: `urn:dkg:file:${markdownHash}`,
+      rootEntity,
+      omitImportMeta: true,
+      onChainPolicy: { accessPolicy: 0, publishPolicy: 1 },
+      sourcePeerBindings: [
+        { rootEntity, publisherPeerId: 'peer-root-latest', publishedAt: '2026-06-06T00:00:00.000Z' },
+      ],
+      async fetchImportedSourceBlobFromPeer(remotePeerId) {
+        requestedPeers.push(remotePeerId);
+        return { totalBytes: remoteBytes.length, bytes: remoteBytes };
+      },
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 1024,
+    });
+
+    expect(read.status).toBe(404);
+    expect(read.body.artifact).toMatchObject({
+      canReadMarkdown: false,
+      canFetchMarkdown: false,
+      markdownAvailability: 'unavailable',
+      markdownUnavailableReason: 'source-peer-unavailable',
+    });
+    const peerQueries = queries.filter((query) => query.includes('WorkspaceOperation') && query.includes('publisherPeerId'));
+    expect(peerQueries).toHaveLength(1);
+    expect(peerQueries[0]).toContain(`<${assertionUri}>`);
+    expect(peerQueries[0]).not.toContain(`<${rootEntity}>`);
+    expect(requestedPeers).toEqual([]);
+  });
+
   it('hydrates SWM-only imports without durable source metadata using the source agent registry entry (#872 review)', async () => {
     const remoteBytes = Buffer.from('# SWM Registry Source Peer\n');
     const markdownHash = keccakContentHash(remoteBytes);
@@ -1182,7 +1335,7 @@ describe('import artifact daemon routes', () => {
       canFetchMarkdown: false,
     });
     expect(requestedPeers).toEqual(['peer-source-fresh']);
-    expect(queries.some((sparql) => sparql.includes('WorkspaceOperation'))).toBe(false);
+    expect(queries.some((sparql) => sparql.includes('WorkspaceOperation'))).toBe(true);
   });
 
   it('keeps owner guard for curated non-owner reads even when the local node can read the CG (#872 review)', async () => {
