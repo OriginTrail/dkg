@@ -55,7 +55,7 @@ describe('dkg_memory_search — multi-layer fan-out + trust-tier dedup', () => {
     expect(result.content[0].text).toMatch(/proj-x · VM/);
   });
 
-  it('does not add project layers when only a default project is pinned', async () => {
+  it('fan-out covers project layers when a default project is pinned', async () => {
     const localServer = new FakeServer();
     const localClient = new FakeClient();
     registerMemorySearchTool(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig({ defaultProject: 'pinned-cg' }));
@@ -63,9 +63,8 @@ describe('dkg_memory_search — multi-layer fan-out + trust-tier dedup', () => {
     const result = await localServer.call('dkg_memory_search', { query: 'tree-sitter parsers' });
 
     expect(result.isError).toBeFalsy();
-    expect(localClient.queryCalls).toHaveLength(3);
-    expect(localClient.queryCalls.filter((call) => call.contextGraphId === 'agent-context')).toHaveLength(3);
-    expect(localClient.queryCalls.filter((call) => call.contextGraphId === 'pinned-cg')).toHaveLength(0);
+    expect(localClient.queryCalls).toHaveLength(6);
+    expect(localClient.queryCalls.filter((call) => call.contextGraphId === 'pinned-cg')).toHaveLength(3);
   });
 
   it('applies subGraphName only to project context graph fan-out', async () => {
@@ -142,20 +141,27 @@ describe('dkg_memory_search — multi-layer fan-out + trust-tier dedup', () => {
     expect(result.content[0].text).toMatch(/agent-context/);
   });
 
-  it('does not fan out to a pinned default project when projectId is omitted', async () => {
+  it('applies subGraphName to the pinned default project when projectId is omitted', async () => {
     const localServer = new FakeServer();
     const localClient = new FakeClient();
     registerMemorySearchTool(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig({ defaultProject: 'pinned-cg' }));
 
     const result = await localServer.call('dkg_memory_search', {
       query: 'tree-sitter parsers',
+      subGraphName: 'imports',
     });
 
     expect(result.isError).toBeFalsy();
     const agentCalls = localClient.queryCalls.filter((call) => call.contextGraphId === 'agent-context');
     const projectCalls = localClient.queryCalls.filter((call) => call.contextGraphId === 'pinned-cg');
     expect(agentCalls).toHaveLength(3);
-    expect(projectCalls).toHaveLength(0);
+    expect(projectCalls).toHaveLength(3);
+    for (const call of agentCalls) {
+      expect(call.subGraphName).toBeUndefined();
+    }
+    for (const call of projectCalls) {
+      expect(call.subGraphName).toBe('imports');
+    }
   });
 
   it('returns a tool error when subGraphName is supplied without any project scope', async () => {
@@ -164,7 +170,7 @@ describe('dkg_memory_search — multi-layer fan-out + trust-tier dedup', () => {
       subGraphName: 'imports',
     });
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toMatch(/subGraphName.*projectId/i);
+    expect(result.content[0].text).toMatch(/subGraphName.*projectId.*default project/i);
     expect(client.queryCalls).toHaveLength(0);
   });
 
@@ -190,25 +196,6 @@ describe('dkg_memory_search — multi-layer fan-out + trust-tier dedup', () => {
       subGraphName: 'imports',
     });
     expect(pinned.isError).toBe(true);
-    expect(localClient.queryCalls).toHaveLength(0);
-  });
-
-  it('returns a tool error when subGraphName is supplied with only a pinned default project', async () => {
-    const localServer = new FakeServer();
-    const localClient = new FakeClient();
-    registerMemorySearchTool(
-      localServer.asMcpServer(),
-      localClient.asDkgClient(),
-      makeConfig({ defaultProject: 'pinned-cg' }),
-    );
-
-    const result = await localServer.call('dkg_memory_search', {
-      query: 'tree-sitter parsers',
-      subGraphName: 'imports',
-    });
-
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toMatch(/subGraphName.*projectId/i);
     expect(localClient.queryCalls).toHaveLength(0);
   });
 

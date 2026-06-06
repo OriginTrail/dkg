@@ -228,12 +228,13 @@ export function registerMemorySearchTool(
           .string()
           .optional()
           .describe(
-            'Optional project context-graph id. When supplied, fan-out adds the project WM/SWM/VM layers to the agent-context layers.',
+            'Optional project context-graph id. When supplied, or when a default project is pinned, ' +
+              "fan-out adds the project's WM/SWM/VM layers to the agent-context layers.",
           ),
         subGraphName: z
           .string()
           .optional()
-          .describe('Optional project sub-graph scope. Requires projectId and applies only to project fan-out.'),
+          .describe('Optional project sub-graph scope. Requires projectId or a pinned default project and applies only to project fan-out.'),
       },
     },
     async ({ query, limit, projectId, subGraphName }): Promise<ToolResult> => {
@@ -243,13 +244,13 @@ export function registerMemorySearchTool(
       }
       const cap = Math.floor(Math.max(1, Math.min(100, limit ?? 20)));
       const explicitProjectId = projectId?.trim();
-      const effectiveProjectId = normalizeContextGraphIdForMemorySearch(explicitProjectId || undefined);
+      const effectiveProjectId = normalizeContextGraphIdForMemorySearch(explicitProjectId || _config.defaultProject || undefined);
       const projectSubGraphName = subGraphName?.trim();
       if (subGraphName !== undefined && !projectSubGraphName) {
         return errResult('"subGraphName" must be a non-empty string.');
       }
       if (projectSubGraphName && (!effectiveProjectId || isAgentContextGraphId(effectiveProjectId))) {
-        return errResult('"subGraphName" requires "projectId" because memory search subgraph scope applies only to project context graph fan-out.');
+        return errResult('"subGraphName" requires "projectId" or a pinned default project because memory search subgraph scope applies only to project context graph fan-out.');
       }
 
       // The query engine requires the agent's raw peer ID for WM view

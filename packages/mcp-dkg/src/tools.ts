@@ -46,7 +46,10 @@ const formatError = (e: unknown): string =>
 const AGENT_DID_PREFIX = 'did:dkg:agent:';
 const ETH_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
-function normalizeAgentAddressForQuery(agentAddress: string | undefined): string | undefined {
+function normalizeAgentAddressForQuery(
+  agentAddress: string | undefined,
+  view: 'working-memory' | 'shared-working-memory' | 'verified-memory' | undefined,
+): string | undefined {
   if (agentAddress === undefined) return undefined;
   const trimmed = agentAddress.trim();
   if (!trimmed) {
@@ -55,6 +58,12 @@ function normalizeAgentAddressForQuery(agentAddress: string | undefined): string
   const stripped = trimmed.startsWith(AGENT_DID_PREFIX)
     ? trimmed.slice(AGENT_DID_PREFIX.length)
     : trimmed;
+  if (ETH_ADDRESS_RE.test(stripped) && (view === undefined || view === 'working-memory')) {
+    throw new Error(
+      '"agentAddress" for working-memory must be a raw peer ID. ' +
+      'Wallet addresses cannot be mapped to the working-memory peer namespace by this tool.',
+    );
+  }
   return ETH_ADDRESS_RE.test(stripped)
     ? toEip55Checksum(stripped)
     : stripped;
@@ -248,7 +257,7 @@ export function registerReadTools(
         if (scopedAssertionName && view !== 'working-memory') {
           return err('"assertionName" is only supported with view: "working-memory".');
         }
-        const normalizedAgentAddress = normalizeAgentAddressForQuery(agentAddress);
+        const normalizedAgentAddress = normalizeAgentAddressForQuery(agentAddress, view);
         const result = await client.query({
           sparql: fullSparql,
           contextGraphId: pid,
