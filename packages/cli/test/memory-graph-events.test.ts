@@ -723,6 +723,7 @@ describe('daemon memory_graph_changed route emissions', () => {
     expect(emitMemoryGraphChanged).toHaveBeenCalledWith({
       contextGraphId: 'project-a',
       layers: ['vm'],
+      subGraphName: 'notes',
       operation: 'verified_memory_updated',
       source: 'api',
     });

@@ -1023,6 +1023,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         emitMemoryGraphChanged?.({
           contextGraphId,
           layers: ["vm"],
+          ...(result.subGraphName ? { subGraphName: result.subGraphName } : {}),
           operation: "verified_memory_updated",
           source: "api",
         });
@@ -1030,6 +1031,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         emitMemoryGraphChanged?.({
           contextGraphId,
           layers: ["wm"],
+          ...(result.subGraphName ? { subGraphName: result.subGraphName } : {}),
           operation: "trust_metadata_updated",
           source: "api",
         });

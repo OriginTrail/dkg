@@ -56,16 +56,16 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     expect(lastCall.assertionName).toBe('chat-turns');
   });
 
-  it('rejects wallet-shaped working-memory agentAddress because MCP cannot map it to a peer ID', async () => {
+  it('normalizes wallet-shaped working-memory agentAddress', async () => {
     const result = await server.call('dkg_query', {
       sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
       view: 'working-memory',
       agentAddress: 'did:dkg:agent:0x52908400098527886e0f7030069857d2e4169ee7',
     });
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain('agentAddress');
-    expect(result.content[0].text).toContain('raw peer ID');
-    expect(client.queryCalls).toHaveLength(0);
+    expect(result.isError).toBeFalsy();
+    const lastCall = client.queryCalls.at(-1)!;
+    expect(lastCall.view).toBe('working-memory');
+    expect(lastCall.agentAddress).toBe('0x52908400098527886E0F7030069857D2E4169EE7');
   });
 
   it('does not reject wallet-shaped agentAddress when view is omitted', async () => {
