@@ -113,6 +113,34 @@ describe('dkg_memory_search — multi-layer fan-out + trust-tier dedup', () => {
     expect(localClient.queryCalls.filter((call) => call.subGraphName === 'imports').length).toBeGreaterThan(0);
   });
 
+  it('keeps partial-success behavior for generic project-scoped subGraphName failures', async () => {
+    const localServer = new FakeServer();
+    const localClient = new FakeClient({
+      query: async function (this: FakeClient, args: Record<string, unknown>) {
+        if (args.subGraphName) {
+          throw new Error('fetch failed');
+        }
+        const cgId = String(args.contextGraphId ?? '');
+        const view = String(args.view ?? 'working-memory');
+        return { bindings: this.memoryFixtures.get(`${cgId}::${view}`) ?? [] };
+      } as never,
+    });
+    localClient.memoryFixtures.set('agent-context::shared-working-memory', [
+      { uri: { value: 'urn:agent:note' }, text: { value: 'tree-sitter parsers from agent memory' } },
+    ]);
+    registerMemorySearchTool(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig({ defaultProject: null }));
+
+    const result = await localServer.call('dkg_memory_search', {
+      query: 'tree-sitter parsers',
+      projectId: 'proj-x',
+      subGraphName: 'imports',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toMatch(/1 hit\(s\)/);
+    expect(result.content[0].text).toMatch(/agent-context/);
+  });
+
   it('applies subGraphName to the pinned default project when projectId is omitted', async () => {
     const localServer = new FakeServer();
     const localClient = new FakeClient();

@@ -1408,18 +1408,19 @@ class DKGMemoryProvider(MemoryProvider):
             )
         if args.get("context_graph") is not None:
             return tool_error('"context_graph" is not a supported parameter on dkg_query. Use "context_graph_id".')
-        cg = _first_text(args, "context_graph_id") or self._context_graph
+        explicit_cg = _first_text(args, "context_graph_id")
+        cg = explicit_cg or self._context_graph
         view = _first_text(args, "view")
         if view and view not in ("working-memory", "shared-working-memory", "verified-memory"):
             return tool_error('"view" must be one of: working-memory, shared-working-memory, verified-memory.')
-        if view and not cg:
+        if view and not explicit_cg:
             return tool_error(f'"view: {view}" requires "context_graph_id".')
         if args.get("sub_graph_name") is not None and not isinstance(args.get("sub_graph_name"), str):
             return tool_error('"sub_graph_name" must be a string.')
         if isinstance(args.get("sub_graph_name"), str) and not args.get("sub_graph_name", "").strip():
             return tool_error('"sub_graph_name" must be a non-empty string.')
-        if _first_text(args, "sub_graph_name") and not cg:
-            return tool_error('"sub_graph_name" requires "context_graph_id" or a configured default context graph.')
+        if _first_text(args, "sub_graph_name") and not explicit_cg:
+            return tool_error('"sub_graph_name" requires "context_graph_id".')
         if args.get("assertion_name") is not None and not isinstance(args.get("assertion_name"), str):
             return tool_error('"assertion_name" must be a string.')
         if isinstance(args.get("assertion_name"), str) and not args.get("assertion_name", "").strip():
@@ -1515,19 +1516,23 @@ class DKGMemoryProvider(MemoryProvider):
                         **query_kwargs,
                     )
                 except Exception as e:
-                    if scoped_project_layer:
+                    if scoped_project_layer and _is_scoped_query_routing_error(e):
                         return tool_error(
                             f'memory_search sub_graph_name "{project_sub_graph_name}" failed for '
                             f'context_graph_id "{cg}" ({view}): {e}'
                         )
+                    if scoped_project_layer:
+                        continue
                     raise
                 if _client_result_failed(result):
+                    detail = result.get("error") if isinstance(result, dict) else "query failed"
                     if scoped_project_layer:
-                        detail = result.get("error") if isinstance(result, dict) else "query failed"
-                        return tool_error(
-                            f'memory_search sub_graph_name "{project_sub_graph_name}" failed for '
-                            f'context_graph_id "{cg}" ({view}): {detail}'
-                        )
+                        if _is_scoped_query_routing_error(detail):
+                            return tool_error(
+                                f'memory_search sub_graph_name "{project_sub_graph_name}" failed for '
+                                f'context_graph_id "{cg}" ({view}): {detail}'
+                            )
+                        continue
                     continue
                 successful_queries += 1
                 for binding in _extract_query_bindings(result):
@@ -2437,6 +2442,24 @@ def _client_result_failed(result: Any) -> bool:
     if not isinstance(result, dict):
         return False
     return result.get("success") is False or result.get("ok") is False or bool(result.get("error"))
+
+
+def _is_scoped_query_routing_error(message: Any) -> bool:
+    text = str(message).lower()
+    return (
+        "scoped query violation" in text
+        or "known child context graph" in text
+        or "unknown sub-graph" in text
+        or (
+            "sub-graph" in text
+            and (
+                "registered" in text
+                or "invalid" in text
+                or "requires" in text
+                or "not found" in text
+            )
+        )
+    )
 
 
 def _first_text(args: Dict[str, Any], *keys: str) -> str:

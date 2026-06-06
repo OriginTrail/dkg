@@ -2782,6 +2782,17 @@ missing_sub_cg = json.loads(provider_without_default.handle_tool_call("dkg_query
 assert "context_graph_id" in missing_view_cg["error"], missing_view_cg
 assert "sub_graph_name" in missing_sub_cg["error"] and "context_graph_id" in missing_sub_cg["error"], missing_sub_cg
 
+default_view_cg = json.loads(provider.handle_tool_call("dkg_query", {
+    "sparql": "ASK {}",
+    "view": "shared-working-memory",
+}))
+default_sub_cg = json.loads(provider.handle_tool_call("dkg_query", {
+    "sparql": "ASK {}",
+    "sub_graph_name": "scratch",
+}))
+assert "context_graph_id" in default_view_cg["error"], default_view_cg
+assert "sub_graph_name" in default_sub_cg["error"] and "context_graph_id" in default_sub_cg["error"], default_sub_cg
+
 result = json.loads(provider.handle_tool_call("dkg_query", {
     "sparql": "ASK {}",
     "context_graph_id": "cg:test",
@@ -2806,15 +2817,6 @@ result = json.loads(provider.handle_tool_call("dkg_query", {
     "sub_graph_name": "scratch",
 }))
 assert result["ok"] is True, result
-assert provider._client.queries[-1][2]["sub_graph_name"] == "scratch", provider._client.queries
-
-result = json.loads(provider.handle_tool_call("dkg_query", {
-    "sparql": "ASK {}",
-    "view": "shared-working-memory",
-    "sub_graph_name": "scratch",
-}))
-assert result["ok"] is True, result
-assert provider._client.queries[-1][1] == "default-cg", provider._client.queries
 assert provider._client.queries[-1][2]["sub_graph_name"] == "scratch", provider._client.queries
 
 class ReadMarkdownClient:
@@ -3144,6 +3146,7 @@ class FakeClient:
     def __init__(self):
         self.calls = []
         self.fail_scoped_project = False
+        self.generic_fail_scoped_project = False
 
     def _resolve_agent_address(self):
         return "0xAgent"
@@ -3152,6 +3155,8 @@ class FakeClient:
         self.calls.append((context_graph_id, kwargs))
         if self.fail_scoped_project and kwargs.get("sub_graph_name"):
             return {"error": "Unknown sub-graph: skills"}
+        if self.generic_fail_scoped_project and kwargs.get("sub_graph_name"):
+            return {"error": "fetch failed"}
         return {
             "result": {
                 "bindings": [{
@@ -3237,6 +3242,25 @@ assert provider._client.calls == [
     ("project-cg", {"view": "working-memory", "agent_address": "0xAgent", "sub_graph_name": "skills"}),
 ], provider._client.calls
 provider._client.fail_scoped_project = False
+
+provider._client.calls = []
+provider._client.generic_fail_scoped_project = True
+generic_failed_scoped = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "limit": 10,
+    "sub_graph_name": "skills",
+}))
+assert "error" not in generic_failed_scoped, generic_failed_scoped
+assert generic_failed_scoped["count"] == 3, generic_failed_scoped
+assert provider._client.calls == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+    ("project-cg", {"view": "working-memory", "agent_address": "0xAgent", "sub_graph_name": "skills"}),
+    ("project-cg", {"view": "shared-working-memory", "agent_address": None, "sub_graph_name": "skills"}),
+    ("project-cg", {"view": "verified-memory", "agent_address": None, "sub_graph_name": "skills"}),
+], provider._client.calls
+provider._client.generic_fail_scoped_project = False
 
 provider._context_graph = "agent-context"
 missing_project = json.loads(provider.handle_tool_call("memory_search", {

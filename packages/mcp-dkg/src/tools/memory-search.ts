@@ -44,6 +44,22 @@ const errResult = (text: string): ToolResult => ({
 const formatError = (e: unknown): string =>
   e instanceof Error ? e.message : String(e);
 
+function isScopedQueryRoutingError(message: string): boolean {
+  const text = message.toLowerCase();
+  return text.includes('scoped query violation') ||
+    text.includes('known child context graph') ||
+    text.includes('unknown sub-graph') ||
+    (
+      text.includes('sub-graph') &&
+      (
+        text.includes('registered') ||
+        text.includes('invalid') ||
+        text.includes('requires') ||
+        text.includes('not found')
+      )
+    );
+}
+
 // ── Layer model ─────────────────────────────────────────────────────
 // Source of truth: `packages/adapter-openclaw/src/types.ts:217-223`.
 type MemoryLayer =
@@ -320,7 +336,7 @@ LIMIT ${cap}`;
                 process.stderr.write(
                   `[dkg-mcp] memory-search ${plan.layer} failed (cg=${plan.contextGraphId}, view=${plan.view}): ${message}\n`,
                 );
-                if (plan.subGraphName) {
+                if (plan.subGraphName && isScopedQueryRoutingError(message)) {
                   throw new Error(
                     `memory_search subGraphName "${plan.subGraphName}" failed for ` +
                     `project "${plan.contextGraphId}" (${plan.view}): ${message}`,
