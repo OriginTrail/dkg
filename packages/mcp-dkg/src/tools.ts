@@ -14,7 +14,7 @@
  * can see through MCP with the same canonical queries.
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { toEip55Checksum } from '@origintrail-official/dkg-core';
+import { toEip55Checksum, validateSubGraphName } from '@origintrail-official/dkg-core';
 import { z } from 'zod';
 import type { DkgClient, ProjectRow } from './client.js';
 import type { DkgConfig } from './config.js';
@@ -46,8 +46,12 @@ const formatError = (e: unknown): string =>
 const AGENT_DID_PREFIX = 'did:dkg:agent:';
 const ETH_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 
-function normalizeAgentAddressForQuery(agentAddress: string | undefined): string | undefined {
+function normalizeAgentAddressForQuery(
+  agentAddress: string | undefined,
+  view: 'working-memory' | 'shared-working-memory' | 'verified-memory' | undefined,
+): string | undefined {
   if (agentAddress === undefined) return undefined;
+  if (view !== 'working-memory') return agentAddress;
   const trimmed = agentAddress.trim();
   if (!trimmed) {
     throw new Error('"agentAddress" must be a non-empty string.');
@@ -58,6 +62,19 @@ function normalizeAgentAddressForQuery(agentAddress: string | undefined): string
   return ETH_ADDRESS_RE.test(stripped)
     ? toEip55Checksum(stripped)
     : stripped;
+}
+
+function normalizeSubGraphNameForQuery(subGraphName: string | undefined): string | undefined {
+  if (subGraphName === undefined) return undefined;
+  const trimmed = subGraphName.trim();
+  if (!trimmed) {
+    throw new Error('"subGraphName" must be a non-empty string.');
+  }
+  const validation = validateSubGraphName(trimmed);
+  if (!validation.valid) {
+    throw new Error(`Invalid subGraphName: ${validation.reason}`);
+  }
+  return trimmed;
 }
 
 /**
@@ -248,11 +265,12 @@ export function registerReadTools(
         if (scopedAssertionName && view !== 'working-memory') {
           return err('"assertionName" is only supported with view: "working-memory".');
         }
-        const normalizedAgentAddress = normalizeAgentAddressForQuery(agentAddress);
+        const normalizedAgentAddress = normalizeAgentAddressForQuery(agentAddress, view);
+        const normalizedSubGraphName = normalizeSubGraphNameForQuery(subGraphName);
         const result = await client.query({
           sparql: fullSparql,
           contextGraphId: pid,
-          subGraphName,
+          subGraphName: normalizedSubGraphName,
           assertionName: scopedAssertionName,
           agentAddress: normalizedAgentAddress,
           view,

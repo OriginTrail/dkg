@@ -46,7 +46,7 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
       sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
       view: 'working-memory',
       agentAddress: 'did:dkg:agent:peer-explicit',
-      subGraphName: 'imports',
+      subGraphName: ' imports ',
       assertionName: 'chat-turns',
     });
     expect(result.isError).toBeFalsy();
@@ -68,7 +68,7 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     expect(lastCall.agentAddress).toBe('0x52908400098527886E0F7030069857D2E4169EE7');
   });
 
-  it('does not reject wallet-shaped agentAddress when view is omitted', async () => {
+  it('forwards wallet-shaped agentAddress unchanged when view is omitted', async () => {
     const result = await server.call('dkg_query', {
       sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
       agentAddress: 'did:dkg:agent:0x52908400098527886e0f7030069857d2e4169ee7',
@@ -76,7 +76,19 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     expect(result.isError).toBeFalsy();
     const lastCall = client.queryCalls.at(-1)!;
     expect(lastCall.view).toBeUndefined();
-    expect(lastCall.agentAddress).toBe('0x52908400098527886E0F7030069857D2E4169EE7');
+    expect(lastCall.agentAddress).toBe('did:dkg:agent:0x52908400098527886e0f7030069857d2e4169ee7');
+  });
+
+  it('forwards wallet-shaped agentAddress unchanged outside working-memory', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      view: 'shared-working-memory',
+      agentAddress: 'did:dkg:agent:0x52908400098527886e0f7030069857d2e4169ee7',
+    });
+    expect(result.isError).toBeFalsy();
+    const lastCall = client.queryCalls.at(-1)!;
+    expect(lastCall.view).toBe('shared-working-memory');
+    expect(lastCall.agentAddress).toBe('did:dkg:agent:0x52908400098527886e0f7030069857d2e4169ee7');
   });
 
   it('rejects blank agentAddress in dkg_query', async () => {
@@ -87,6 +99,28 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('agentAddress');
+    expect(client.queryCalls).toHaveLength(0);
+  });
+
+  it('rejects blank subGraphName in dkg_query', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      view: 'working-memory',
+      subGraphName: '   ',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('subGraphName');
+    expect(client.queryCalls).toHaveLength(0);
+  });
+
+  it('rejects invalid subGraphName in dkg_query before forwarding', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      view: 'working-memory',
+      subGraphName: 'bad/name',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Invalid subGraphName');
     expect(client.queryCalls).toHaveLength(0);
   });
 
