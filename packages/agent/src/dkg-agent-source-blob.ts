@@ -5,6 +5,7 @@ import {
   PROTOCOL_GET_IMPORTED_SOURCE_BLOB,
   createOperationContext,
   contextGraphMetaUri,
+  contextGraphSubGraphMetaUri,
   isSafeIri,
   validateContextGraphId,
   validateSubGraphName,
@@ -176,9 +177,7 @@ export class SourceBlobMethods extends DKGAgentBase {
       const isCompleteBlob = offset === 0 &&
         response.truncated !== true &&
         (typeof response.totalBytes !== 'number' || response.totalBytes === bytes.length);
-      if (!isCompleteBlob) {
-        bytes = undefined;
-      } else if (!contentHashMatchesBytes(blobHash, bytes)) {
+      if (isCompleteBlob && !contentHashMatchesBytes(blobHash, bytes)) {
         throw new Error('Imported source blob response hash mismatch');
       }
     }
@@ -470,7 +469,9 @@ export class SourceBlobMethods extends DKGAgentBase {
 
   async importedSourceBlobHashIsReferenced(this: DKGAgent, req: ImportedSourceBlobRequest): Promise<boolean> {
     const hash = normalizeImportedSourceBlobHash(req.blobHash);
-    const metaGraph = contextGraphMetaUri(req.contextGraphId);
+    const metaGraph = req.subGraphName
+      ? contextGraphSubGraphMetaUri(req.contextGraphId, req.subGraphName)
+      : contextGraphMetaUri(req.contextGraphId);
     const metaResult = await this.store.query(`
       SELECT ?sourceFileHash ?sourceContentType ?mdIntermediateHash WHERE {
         GRAPH <${metaGraph}> {

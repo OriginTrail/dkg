@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
+import { contextGraphSubGraphMetaUri } from '@origintrail-official/dkg-core';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { SourceBlobMethods } from '../src/dkg-agent-source-blob.js';
 import {
@@ -119,6 +120,7 @@ function sourceBlobRequest(input: {
   contextGraphId: string;
   assertionUri: string;
   blobHash: string;
+  subGraphName?: string;
   offset?: number;
   maxBytes?: number;
   auth?: Uint8Array;
@@ -128,6 +130,7 @@ function sourceBlobRequest(input: {
     contextGraphId: input.contextGraphId,
     assertionUri: input.assertionUri,
     blobHash: input.blobHash,
+    ...(input.subGraphName ? { subGraphName: input.subGraphName } : {}),
     offset: input.offset ?? 0,
     maxBytes: input.maxBytes ?? 1024,
     authB64: Buffer.from(input.auth ?? unsignedAuthEnvelope({
@@ -254,6 +257,38 @@ describe('imported source blob protocol', () => {
     expect(response.blobHash).toBe(blobHash);
     expect(responder._spies.stat).toHaveBeenCalledWith(blobHash);
     expect(responder._spies.readRange).toHaveBeenCalledWith(blobHash, 0, bytes.length);
+  });
+
+  it('uses subgraph metadata when a source blob request includes subGraphName', async () => {
+    const bytes = Buffer.from('# Subgraph Markdown\n');
+    const blobHash = hash(bytes);
+    const contextGraphId = 'cg-source-blob-subgraph';
+    const subGraphName = 'research';
+    const assertionUri = 'did:dkg:context-graph:cg-source-blob-subgraph/research/assertion/did:dkg:agent:source/imported-md';
+    const responder = fakeResponder({ blobHash, bytes });
+
+    const responseBytes = await SourceBlobMethods.prototype.handleGetImportedSourceBlob.call(
+      responder as any,
+      sourceBlobRequest({
+        contextGraphId,
+        assertionUri,
+        blobHash,
+        subGraphName,
+        auth: await signedAuthEnvelope({
+          contextGraphId,
+          assertionUri,
+          blobHash,
+        }),
+      }),
+      REQUESTER_PEER_ID,
+    );
+    const response = decodeImportedSourceBlobResponse(responseBytes);
+
+    expect(response.denied).toBeUndefined();
+    const metadataQuery = responder._spies.storeQuery.mock.calls
+      .map(([sparql]) => sparql)
+      .find((sparql) => sparql.includes('SELECT ?sourceFileHash'));
+    expect(metadataQuery).toContain(`<${contextGraphSubGraphMetaUri(contextGraphId, subGraphName)}>`);
   });
 
   it('denies before metadata lookup when signed auth is not policy-authorized', async () => {
@@ -473,6 +508,41 @@ describe('imported source blob protocol', () => {
       'peer-source',
       { contextGraphId, assertionUri, blobHash, maxBytes: 1024 },
     )).resolves.toEqual({ denied: 'malformed request: invalid JSON' });
+  });
+
+  it('returns partial fetch response bytes without whole-blob hash verification', async () => {
+    const contextGraphId = 'cg-fetch-paged';
+    const assertionUri = 'did:dkg:context-graph:cg-fetch-paged/assertion/did:dkg:agent:source/imported-md';
+    const fullBytes = Buffer.from('# Paged\n\nFirst page then second page\n');
+    const pageBytes = fullBytes.subarray(0, 12);
+    const blobHash = hash(fullBytes);
+    const requestAgent = {
+      buildImportedSourceBlobAuthEnvelope: vi.fn(async () => new Uint8Array([1])),
+      messenger: {
+        sendToPeer: vi.fn(async () => encodeImportedSourceBlobResponse({
+          version: IMPORTED_SOURCE_BLOB_WIRE_VERSION,
+          contextGraphId,
+          assertionUri,
+          blobHash,
+          offset: 0,
+          totalBytes: fullBytes.length,
+          nextOffset: pageBytes.length,
+          truncated: true,
+          bytesB64: pageBytes.toString('base64'),
+        })),
+      },
+    };
+
+    const fetched = await SourceBlobMethods.prototype.fetchImportedSourceBlobFromPeer.call(
+      requestAgent as any,
+      'peer-source',
+      { contextGraphId, assertionUri, blobHash, maxBytes: pageBytes.length },
+    );
+
+    expect(Buffer.from(fetched.bytes ?? new Uint8Array())).toEqual(pageBytes);
+    expect(fetched.totalBytes).toBe(fullBytes.length);
+    expect(fetched.nextOffset).toBe(pageBytes.length);
+    expect(fetched.truncated).toBe(true);
   });
 
   it('rejects oversized fetch responses even when response metadata omits truncation', async () => {
