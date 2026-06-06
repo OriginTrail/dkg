@@ -68,6 +68,17 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     expect(client.queryCalls).toHaveLength(0);
   });
 
+  it('does not reject wallet-shaped agentAddress when view is omitted', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      agentAddress: 'did:dkg:agent:0x52908400098527886e0f7030069857d2e4169ee7',
+    });
+    expect(result.isError).toBeFalsy();
+    const lastCall = client.queryCalls.at(-1)!;
+    expect(lastCall.view).toBeUndefined();
+    expect(lastCall.agentAddress).toBe('0x52908400098527886E0F7030069857D2E4169EE7');
+  });
+
   it('rejects blank agentAddress in dkg_query', async () => {
     const result = await server.call('dkg_query', {
       sparql: 'SELECT ?s WHERE { ?s ?p ?o }',

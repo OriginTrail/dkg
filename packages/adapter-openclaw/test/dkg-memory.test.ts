@@ -1066,7 +1066,7 @@ describe('DkgMemorySearchManager', () => {
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('project-wm search failed'));
     });
 
-    it('surfaces generic projectSubGraphName layer failures instead of returning agent-context-only hits', async () => {
+    it('keeps partial-success behavior for generic projectSubGraphName layer failures', async () => {
       const warn = vi.fn();
       vi.spyOn(client, 'query').mockImplementation(async (_sparql, opts) => {
         if (opts?.subGraphName) {
@@ -1087,8 +1087,10 @@ describe('DkgMemorySearchManager', () => {
         logger: { warn },
       });
 
-      await expect(manager.search('hello world', { projectSubGraphName: 'skills' }))
-        .rejects.toThrow(/sub_graph_name "skills".*fetch failed/i);
+      const hits = await manager.search('hello world', { projectSubGraphName: 'skills' });
+
+      expect(hits).toHaveLength(1);
+      expect(hits[0].source).toBe('sessions');
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('fetch failed'));
     });
 

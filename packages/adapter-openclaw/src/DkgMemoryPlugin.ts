@@ -374,7 +374,7 @@ export class DkgMemorySearchManager implements MemorySearchManager {
             this.deps.logger?.warn?.(
               `[dkg-memory] ${plan.layer} search failed (cg=${plan.contextGraphId}, view=${plan.view}): ${message}`,
             );
-            if (plan.subGraphName) {
+            if (plan.subGraphName && isScopedQueryRoutingError(message)) {
               throw new Error(
                 `memory_search sub_graph_name "${plan.subGraphName}" failed for ` +
                 `context graph "${plan.contextGraphId}" (${plan.view}): ${message}`,
@@ -1065,6 +1065,22 @@ function extractBindings(result: any): any[] {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function isScopedQueryRoutingError(message: string): boolean {
+  const text = message.toLowerCase();
+  return text.includes('scoped query violation') ||
+    text.includes('known child context graph') ||
+    text.includes('unknown sub-graph') ||
+    (
+      text.includes('sub-graph') &&
+      (
+        text.includes('registered') ||
+        text.includes('invalid') ||
+        text.includes('requires') ||
+        text.includes('not found')
+      )
+    );
 }
 
 /**

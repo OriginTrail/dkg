@@ -58,7 +58,7 @@ function normalizeAgentAddressForQuery(
   const stripped = trimmed.startsWith(AGENT_DID_PREFIX)
     ? trimmed.slice(AGENT_DID_PREFIX.length)
     : trimmed;
-  if (ETH_ADDRESS_RE.test(stripped) && (view === undefined || view === 'working-memory')) {
+  if (ETH_ADDRESS_RE.test(stripped) && view === 'working-memory') {
     throw new Error(
       '"agentAddress" for working-memory must be a raw peer ID. ' +
       'Wallet addresses cannot be mapped to the working-memory peer namespace by this tool.',
