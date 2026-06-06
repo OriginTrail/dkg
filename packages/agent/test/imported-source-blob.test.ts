@@ -9,6 +9,7 @@ import {
   encodeImportedSourceBlobRequest,
   encodeImportedSourceBlobResponse,
 } from '../src/imported-source-blob-wire.js';
+import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 
 const AUTH_PURPOSE = 'imported-source-blob:v1';
 const MAX_PAGE_BYTES = 5 * 1024 * 1024;
@@ -72,10 +73,13 @@ async function signedAuthEnvelope(input: {
   maxBytes?: number;
   authPurpose?: string;
   authSelector?: string;
+  requesterIdentityId?: string;
+  includeRequesterAgentAddress?: boolean;
 }): Promise<Uint8Array> {
   const offset = input.offset ?? 0;
   const maxBytes = input.maxBytes ?? 1024;
-  const request = {
+  const requesterIdentityId = input.requesterIdentityId ?? '0';
+  const request: SyncRequestEnvelope = {
     contextGraphId: input.contextGraphId,
     offset,
     limit: maxBytes,
@@ -84,8 +88,7 @@ async function signedAuthEnvelope(input: {
     requesterPeerId: REQUESTER_PEER_ID,
     requestId: ethers.hexlify(ethers.randomBytes(12)),
     issuedAtMs: Date.now(),
-    requesterIdentityId: '0',
-    requesterAgentAddress: REQUESTER_WALLET.address,
+    requesterIdentityId,
     authPurpose: input.authPurpose ?? AUTH_PURPOSE,
     authSelector: input.authSelector ?? selector({
       assertionUri: input.assertionUri,
@@ -94,6 +97,9 @@ async function signedAuthEnvelope(input: {
       maxBytes,
     }),
   };
+  if (input.includeRequesterAgentAddress ?? (requesterIdentityId === '0')) {
+    request.requesterAgentAddress = REQUESTER_WALLET.address;
+  }
   const digest = ContextGraphResolveMethods.prototype.computeSyncDigest.call(
     {},
     request.contextGraphId,
@@ -149,8 +155,10 @@ function fakeResponder(args: {
   policy?: { accessPolicy?: number; publishPolicy?: number };
   contentType?: string;
   mdIntermediateHash?: string;
+  verifySyncIdentity?: (address: string, identityId: bigint) => Promise<boolean>;
 }) {
   const bytes = args.bytes ?? Buffer.from('# Imported\n');
+  const verifySyncIdentity = vi.fn(args.verifySyncIdentity ?? (async () => false));
   const storeQuery = vi.fn(async (sparql: string) => {
     if (sparql.includes('SELECT ?sourceFileHash')) {
       return {
@@ -172,7 +180,7 @@ function fakeResponder(args: {
     bytes.subarray(offset, offset + length));
   return {
     peerId: RESPONDER_PEER_ID,
-    chain: {},
+    chain: { verifySyncIdentity },
     seenPrivateSyncRequestIds: new Map<string, number>(),
     getContextGraphOnChainPolicy: vi.fn(async () => args.policy ?? { accessPolicy: 0, publishPolicy: 1 }),
     computeSyncDigest: ContextGraphResolveMethods.prototype.computeSyncDigest,
@@ -191,7 +199,7 @@ function fakeResponder(args: {
     importedSourceBlobHashIsReferenced: SourceBlobMethods.prototype.importedSourceBlobHashIsReferenced,
     store: { query: storeQuery },
     importedSourceBlobStore: { stat, readRange },
-    _spies: { storeQuery, stat, readRange },
+    _spies: { storeQuery, stat, readRange, verifySyncIdentity },
   };
 }
 
@@ -256,6 +264,44 @@ describe('imported source blob protocol', () => {
     expect(response.denied).toBeUndefined();
     expect(response.blobHash).toBe(blobHash);
     expect(responder._spies.stat).toHaveBeenCalledWith(blobHash);
+    expect(responder._spies.readRange).toHaveBeenCalledWith(blobHash, 0, bytes.length);
+  });
+
+  it('serves an identity-signed auth envelope without an agent address claim', async () => {
+    const bytes = Buffer.from('# Identity Signed\n');
+    const blobHash = hash(bytes);
+    const contextGraphId = 'cg-source-blob-identity-auth';
+    const assertionUri = 'did:dkg:context-graph:cg-source-blob-identity-auth/assertion/did:dkg:agent:source/imported-md';
+    const identityId = 77n;
+    const responder = fakeResponder({
+      blobHash,
+      bytes,
+      verifySyncIdentity: async (address, claimedIdentityId) =>
+        address.toLowerCase() === REQUESTER_WALLET.address.toLowerCase() &&
+        claimedIdentityId === identityId,
+    });
+
+    const responseBytes = await SourceBlobMethods.prototype.handleGetImportedSourceBlob.call(
+      responder as any,
+      sourceBlobRequest({
+        contextGraphId,
+        assertionUri,
+        blobHash,
+        auth: await signedAuthEnvelope({
+          contextGraphId,
+          assertionUri,
+          blobHash,
+          requesterIdentityId: identityId.toString(),
+          includeRequesterAgentAddress: false,
+        }),
+      }),
+      REQUESTER_PEER_ID,
+    );
+    const response = decodeImportedSourceBlobResponse(responseBytes);
+
+    expect(response.denied).toBeUndefined();
+    expect(response.totalBytes).toBe(bytes.length);
+    expect(responder._spies.verifySyncIdentity).toHaveBeenCalledWith(REQUESTER_WALLET.address, identityId);
     expect(responder._spies.readRange).toHaveBeenCalledWith(blobHash, 0, bytes.length);
   });
 

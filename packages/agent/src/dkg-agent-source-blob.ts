@@ -255,11 +255,13 @@ export class SourceBlobMethods extends DKGAgentBase {
       request.issuedAtMs == null ||
       now - request.issuedAtMs > SYNC_AUTH_MAX_AGE_MS ||
       now < request.issuedAtMs - 5000 ||
-      !request.requesterAgentAddress ||
       !request.requesterSignatureR ||
       !request.requesterSignatureVS ||
       this.seenPrivateSyncRequestIds.has(request.requestId)
     ) {
+      return false;
+    }
+    if (requesterIdentityId === 0n && !request.requesterAgentAddress) {
       return false;
     }
 
@@ -288,7 +290,7 @@ export class SourceBlobMethods extends DKGAgentBase {
     }
 
     if (requesterIdentityId === 0n) {
-      return recoveredAddress.toLowerCase() === request.requesterAgentAddress.toLowerCase();
+      return recoveredAddress.toLowerCase() === request.requesterAgentAddress!.toLowerCase();
     }
 
     const verifyIdentity = this.chain.verifySyncIdentity ?? this.chain.verifyACKIdentity;
