@@ -364,13 +364,18 @@ export class SourceBlobMethods extends DKGAgentBase {
 
     const policy: { accessPolicy?: number; publishPolicy?: number } =
       await this.getContextGraphOnChainPolicy(request.contextGraphId).catch(() => ({}));
+    // Source blob reads follow the CG read policy; publishPolicy only gates writes.
     if (policy.accessPolicy === 0) {
-      if (policy.publishPolicy !== 1) return false;
       this.seenPrivateSyncRequestIds.set(request.requestId!, Date.now());
       return true;
     }
+    let isPrivate = policy.accessPolicy === 1;
     if (policy.accessPolicy !== 1) {
-      return false;
+      isPrivate = await this.isPrivateContextGraph(request.contextGraphId).catch(() => true);
+    }
+    if (!isPrivate) {
+      this.seenPrivateSyncRequestIds.set(request.requestId!, Date.now());
+      return true;
     }
     const verifyIdentity = this.chain.verifySyncIdentity ?? this.chain.verifyACKIdentity;
     return authorizePrivateSyncRequest({

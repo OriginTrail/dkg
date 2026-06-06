@@ -153,6 +153,7 @@ function fakeResponder(args: {
   blobHash: string;
   bytes?: Buffer;
   policy?: { accessPolicy?: number; publishPolicy?: number };
+  isPrivateContextGraph?: boolean;
   contentType?: string;
   mdIntermediateHash?: string;
   verifySyncIdentity?: (address: string, identityId: bigint) => Promise<boolean>;
@@ -183,6 +184,7 @@ function fakeResponder(args: {
     chain: { verifySyncIdentity },
     seenPrivateSyncRequestIds: new Map<string, number>(),
     getContextGraphOnChainPolicy: vi.fn(async () => args.policy ?? { accessPolicy: 0, publishPolicy: 1 }),
+    isPrivateContextGraph: vi.fn(async () => args.isPrivateContextGraph ?? false),
     computeSyncDigest: ContextGraphResolveMethods.prototype.computeSyncDigest,
     parseSyncRequest: vi.fn((data: Uint8Array) => JSON.parse(new TextDecoder().decode(data))),
     authorizeSyncRequest: vi.fn(async () => true),
@@ -337,8 +339,8 @@ describe('imported source blob protocol', () => {
     expect(metadataQuery).toContain(`<${contextGraphMetaUri(contextGraphId)}>`);
   });
 
-  it('denies before metadata lookup when signed auth is not policy-authorized', async () => {
-    const bytes = Buffer.from('# Secret\n');
+  it('serves public source blobs when publish is curated', async () => {
+    const bytes = Buffer.from('# Public Curated Publish\n');
     const blobHash = hash(bytes);
     const contextGraphId = 'cg-public-curators-only';
     const assertionUri = 'did:dkg:context-graph:cg-public-curators-only/assertion/did:dkg:agent:source/imported-md';
@@ -364,7 +366,77 @@ describe('imported source blob protocol', () => {
     );
     const response = decodeImportedSourceBlobResponse(responseBytes);
 
+    expect(response.denied).toBeUndefined();
+    expect(response.totalBytes).toBe(bytes.length);
+    expect(responder._spies.storeQuery).toHaveBeenCalled();
+    expect(responder._spies.stat).toHaveBeenCalledWith(blobHash);
+    expect(responder._spies.readRange).toHaveBeenCalledWith(blobHash, 0, bytes.length);
+  });
+
+  it('falls back to local public read policy when chain policy is unknown', async () => {
+    const bytes = Buffer.from('# Unknown Policy Public\n');
+    const blobHash = hash(bytes);
+    const contextGraphId = 'cg-source-blob-unknown-policy-public';
+    const assertionUri = 'did:dkg:context-graph:cg-source-blob-unknown-policy-public/assertion/did:dkg:agent:source/imported-md';
+    const responder = fakeResponder({
+      blobHash,
+      bytes,
+      policy: {},
+      isPrivateContextGraph: false,
+    });
+
+    const responseBytes = await SourceBlobMethods.prototype.handleGetImportedSourceBlob.call(
+      responder as any,
+      sourceBlobRequest({
+        contextGraphId,
+        assertionUri,
+        blobHash,
+        auth: await signedAuthEnvelope({
+          contextGraphId,
+          assertionUri,
+          blobHash,
+        }),
+      }),
+      REQUESTER_PEER_ID,
+    );
+    const response = decodeImportedSourceBlobResponse(responseBytes);
+
+    expect(response.denied).toBeUndefined();
+    expect(responder.isPrivateContextGraph).toHaveBeenCalledWith(contextGraphId);
+    expect(responder._spies.readRange).toHaveBeenCalledWith(blobHash, 0, bytes.length);
+  });
+
+  it('falls back to private authorization when chain policy is unknown but local graph is private', async () => {
+    const bytes = Buffer.from('# Unknown Policy Private\n');
+    const blobHash = hash(bytes);
+    const contextGraphId = 'cg-source-blob-unknown-policy-private';
+    const assertionUri = 'did:dkg:context-graph:cg-source-blob-unknown-policy-private/assertion/did:dkg:agent:source/imported-md';
+    const responder = fakeResponder({
+      blobHash,
+      bytes,
+      policy: {},
+      isPrivateContextGraph: true,
+    });
+
+    const responseBytes = await SourceBlobMethods.prototype.handleGetImportedSourceBlob.call(
+      responder as any,
+      sourceBlobRequest({
+        contextGraphId,
+        assertionUri,
+        blobHash,
+        auth: await signedAuthEnvelope({
+          contextGraphId,
+          assertionUri,
+          blobHash,
+        }),
+      }),
+      REQUESTER_PEER_ID,
+    );
+    const response = decodeImportedSourceBlobResponse(responseBytes);
+
     expect(response.denied).toMatch(/unauthorized/);
+    expect(responder.isPrivateContextGraph).toHaveBeenCalledWith(contextGraphId);
+    expect(responder.getPrivateContextGraphParticipants).toHaveBeenCalledWith(contextGraphId);
     expect(responder._spies.storeQuery).not.toHaveBeenCalled();
     expect(responder._spies.stat).not.toHaveBeenCalled();
   });
