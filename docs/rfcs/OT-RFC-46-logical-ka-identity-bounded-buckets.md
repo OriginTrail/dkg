@@ -32,6 +32,8 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 - The hard part is **ACL** (§9): WM per-agent isolation is enforced today by *both* the physical graph URI **and** a query-time deny. Removing the graph boundary makes the query-time filter load-bearing alone, so the bucket query layer MUST inject a non-strippable agent-id constraint server-side.
 - Migration is **dual-read/backfill**, reusing the in-repo `ASSERTION_ROOT_ENTITY → ASSERTION_ENTITY` rename template (`assertion-seal.ts:59-67`). WM is **node-local** (sync excludes the WM layer), so WM bucketing has zero wire impact and ships first. The tactical `#184` WM+SWM resolver fix ships **independently and first** (§14). **This RFC now BUILDS ON the `feat/unify-knowledge-assets-routes` branch (v10-devnet + KA-route-unification): the legacy `/api/assertion` surface is already deleted and replaced by `/api/knowledge-assets` (`routes/assertion.ts` removed, commit `3b5c47fb`), so the prior "coordinate with the rc.17 route migration" caveat is RESOLVED — that migration is done here.**
 - **⚠️ This is a model choice, not just a layout change (added after review — see §16).** Adopting buckets silently commits the protocol to **Model 1 (exclusive entity):** a member-entity subject may belong to **at most one KA per bucket**, and enriching an entity is **owner-only** (OT-RFC-45). The alternative is **Model 2: one named graph per KA keyed by the UAL, plus a bounded `_meta` discovery index** — which supports *overlapping, multi-author* claims about a shared entity and keeps atomic delete + a physical ACL fence, at the cost of fragmented full-subgraph analytic scans. Critically, the two headline §2 wins — O(1) discovery (§2.1) and #184 (§2.3) — are **model-independent** (Model 2 gets both from the `_meta` index, without per-KA graph collapse). §16 compares the two in full.
+- **This RFC now also contains the accessible explainer of the M1/M2 fork.** The §16 story intro (Model 1 = a Wikipedia page, one canonical truth, trivial to survey; Model 2 = a pile of signed memos, many attributed claims, trivial to keep apart) makes the tradeoff legible to non-implementers before any SPARQL; §16.9 (the 21-query coding-agents catalog with a derived weighting — **~77% model-agnostic `_meta`, ~21% Model-1 analytics/traversal, ~2% Model-2 overlap**); and §16.10 (the per-subgraph "support both" engineering surface).
+- **OT-RFC-47 is absorbed and retired into this RFC.** Its three strengths now live in the §16 story intro, §16.9, and §16.10; its `code → Model 1` recommendation is the same target as §17's "ship M2, defer `bucket` for traversal-heavy code subgraphs," with §17 owning the launch phasing (reconciliation note under §17.1).
 
 ---
 
@@ -849,6 +851,16 @@ The dangerous failures are isolation and consensus shaped; single-node happy-pat
 ## 16. The entity-exclusivity fork: Model 1 (buckets) vs Model 2 (per-KA graph + `_meta` index)
 
 > **Added after design review.** §1–§15 argue "buckets vs. today." That framing hides the actual decision. Bucketing is **not storage-model-neutral** — it forces one of two coherent data models. This section names both, compares them dimension-by-dimension, expands the central trade-off, surveys prior art, and gives a recommendation for the shared-agent-memory use case. The load-bearing realization: **the two §2 wins this RFC leads with (O(1) discovery, #184) are model-independent**, so they cannot, on their own, justify the model commitment that buckets quietly make.
+>
+> **OT-RFC-47 (storage-models) is superseded by and folded into this section** (the §16 story intro below, §16.9 query catalog, §16.10 support-both); §17 owns the launch phasing it omitted.
+
+> **Read this first — the two models as a story.** Before the dimension-by-dimension dissection, hold the fork in your head as two ways of running a shared notebook. (Absorbed from OT-RFC-47, which framed this for non-implementers.)
+>
+> **Model 1 is a Wikipedia.** Every topic — every function, every decision — has **one canonical page**, and everyone edits *toward one agreed truth*. There is exactly one `convertToMd()` page; if A measures its complexity and B re-measures, B edits the same page and the project converges. All pages live in essentially one shared book (the bucket). This is lovely for **whole-picture** questions — "across the *entire* codebase, which function has the most callers? what's dead? what breaks if I touch `Z`?" — because you are reading *one book*, one plain query, no stitching. What it costs: you **cannot hold two contradictory facts about one topic at once**. The page says complexity 5, or it says 8 — if B disagrees, B overwrites and the dissent is gone. And because the page is canonical, editing it is **owner-gated** (OT-RFC-45): you don't scribble on someone's page, you propose an update and the whole page is re-sealed.
+>
+> **Model 2 is a pile of signed memos.** Nobody edits a shared page. Each claim is a **signed memo** dropped on a pile: *"`convertToMd()` complexity = 5 — signed A"* and *"= 8 — signed B"* both sit there, side by side, each stamped with who said it; the memo *is* its own little named graph and the graph it lives in tells you the provenance of every line. This is lovely when **multi-source truth must survive** — every attributed claim is kept, anyone can contribute without owning anything (permissionless), and you can **shred exactly one memo** (atomic delete) without touching the rest. What it costs: the **whole-picture** question is now painful — to ask "most callers across the whole codebase?" you must gather *every* memo, union them, and count, and that gets slower and more fragile as memos pile up (our own engine literally crashes or refuses certain whole-picture queries over many memos — §16.8, §2.2).
+>
+> The fork is not "fast vs. slow." It is **one agreed truth that's trivial to survey** (Wikipedia) **vs. many independent attributed claims that are trivial to keep apart** (signed memos) — and you cannot have both *for the same triple at the same time*, because the 4th term of a quad is a single budget you spend either on *locality* (one shared book) or on *provenance* (which memo). Which side your workload lands on is an empirical question about *which questions you actually ask* — which is exactly what §16.1 onward measures, dimension by dimension, ending in §16.9's query catalog and the §17 launch decision.
 
 ### 16.1 The two models
 
@@ -986,6 +998,66 @@ In **Model 1**, the subgraph is one graph, so `GRAPH <…/_code> { ?x code:calls
 
 **Consequence for the hybrid:** traversal is the cleanest signal for `storageModel`. Graph-structured, traversal-heavy subgraphs — the code/AST/dependency graph above all — want `bucket` (M1), and they are *also* typically single-writer (the indexer), so the entity-exclusivity cost is free there. Judgment/append subgraphs (decisions, tasks, findings) are not traversal-heavy and want `per-ka` (M2). This is why the deferred M1 path (§17.6) targets exactly the code-graph-shaped subgraphs.
 
+### 16.9 What the workload actually asks — the query catalog
+
+§16.1–§16.8 argue the models in the abstract. This subsection grounds them: a storage model is only as good as the questions it serves, so here is the catalog of what five agents coordinating on a live codebase (subgraphs `code`/`decisions`/`tasks`/`spec`) **actually ask**, weighted by frequency. (Absorbed from OT-RFC-47 §3. Predicates `dkg:kind`/`dkg:about`/`code:calls` are illustrative for this scenario; `prov:wasAttributedTo`, `dkg:status`, `dkg:assertionGraph` are real — `metadata.ts:1316,1324`.) *Reads* column: `_meta` index = answered from the shared logbook alone (model-agnostic); single-KA = logbook lookup + one KA body; cross-KA analytics = aggregate/traverse many KAs at once; overlap = needs two KAs' differing facts about one subject to coexist; content search = a separate text/vector index.
+
+| # | The question (verbatim) | How common | Reads | Best |
+|---|---|---|---|---|
+| Q1 | Which decisions have been made since my last activity (since T)? | Very common | `_meta` index | Tie |
+| Q2 | What decisions have been made about function `convertToMd()`? | Common | single-KA | Tie |
+| Q3 | What tasks are currently pending that I can take over? | Very common | `_meta` index | Tie |
+| Q4 | What is agent X working on right now? | Very common | `_meta` index | Tie |
+| Q5 | Which function has the highest degree (most callers)? | Occasional | cross-KA analytics | **M1** |
+| Q6 | Who edited function Y last, and why this way? | Common | `_meta` index | Tie |
+| Q7 | What changed in the spec since version/timestamp T? | Common | `_meta` index | Tie |
+| Q8 | Full provenance chain for a decision: tasks spawned, edits implementing it. | Occasional | `_meta` index | Tie |
+| Q9 | Which agents were active in the last hour? | Very common | `_meta` index | Tie |
+| Q10 | What is currently blocked, and on whom? | Common | `_meta` index | Tie |
+| Q11 | What did agent X do today? | Common | `_meta` index | Tie |
+| Q12 | Two agents assert DIFFERING facts about one function-subject (complexity 5 vs 8) — keep both, attributed. | Rare | overlap | **M2** |
+| Q13 | What is the call graph / dependencies of function Y? | Common | cross-KA analytics | **M1** |
+| Q14 | Find dead code: functions with no callers (in-degree 0). | Occasional | cross-KA analytics | **M1** |
+| Q15 | Impact analysis: what breaks if I change function Z? | Common | cross-KA analytics | **M1** |
+| Q16 | Which functions are most churned (most edits)? | Occasional | `_meta` index | Tie |
+| Q17 | Which functions are largest / most complex? | Occasional | cross-KA analytics | **M1** |
+| Q18 | Which tasks relate to decision D but haven't started? | Occasional | `_meta` index | Tie |
+| Q19 | Which decisions have no implementing edit yet? | Occasional | `_meta` index | Tie |
+| Q20 | Semantic / full-text search across decisions and spec. | Common | content search | Tie |
+| Q21 | Who are the experts on module M (most edits there)? | Occasional | `_meta` index | Tie |
+
+**The derived weighting.** Weight by frequency — *very common = 4, common = 3, occasional = 2, rare = 1* — and sum across Q1–Q21: the **model-agnostic (Tie)** queries total ≈44, the **Model-1** analytics/traversal tail (Q5, Q13, Q14, Q15, Q17) ≈12, the **Model-2** overlap case (Q12) ≈1, out of ≈57. That is **≈77% model-agnostic, ≈21% Model-1-leaning, ≈2% Model-2-leaning.** This is **our model of agent behavior, not measured telemetry** — but you would have to be wildly wrong about the frequencies to move the conclusion.
+
+**What it means.** The hot path is **model-agnostic**: ~77% of weighted traffic reads only the shared `_meta` coordination logbook (*what changed, what can I take, who's doing what, why*), which is **one graph in both models** (§16.5, `SPEC_PART1_MARKETPLACE.md:168`) — for three-quarters of real work the storage model is invisible, so "M1 vs M2" is, for most purposes, a false dilemma. Model 1's edge (analytics/traversal) is **common and real, not exotic** — Q13 and Q15 are *common* because an agent runs an impact-before-edit check every time it touches a function, putting that tail on the critical path. Model 2's edge (genuine multi-source overlap, Q12) is **rare in a canonical AST**, where a single parser owns structural truth. That asymmetry is exactly why **§16.8's traversal signal — not a global vote — should drive `storageModel`**: the weighting does not crown one global winner, it says *the code subgraph specifically* wants M1 (analytics-heavy, traversal-heavy, single-writer, overlap-free) while the coordination subgraphs ride the model-agnostic `_meta` index. That is the per-subgraph hybrid §17 ships toward, with §17.6 deferring the M1 `bucket` path to precisely the traversal-heavy code/AST subgraph this catalog fingerprints.
+
+### 16.10 Supporting both — the engineering surface
+
+§16.9 says different subgraphs want different models. This subsection shows that is **buildable**, because the model is a **local storage concern, not a protocol one**: you can run different `storageModel`s in different subgraphs of the same contextGraph, on the same network, under the same consensus. (Absorbed from OT-RFC-47 §5; verified against branch `f25a1193`.)
+
+**Why it's clean — four grounded reasons.**
+
+1. **Consensus/merkle/seal/UAL/gossip are model-independent.** Leaves hash `(s,p,o)` only (`merkle.ts:56-57`); the root is over `skolemizeByEntity` (`canonical-publish-payload.ts:28,47,51`); the seal is read back from `_meta` verbatim and is explicitly unaffected by graph layout (`assertion-seal.ts:10-15,59-69`) — the same layout-independence §10 relies on. Two nodes can store one KA under different models and still agree on its commitment byte-for-byte.
+2. **Data is located by indirection, not assumption.** The writer stamps `<lifecycleUri> dkg:assertionGraph <graphUri>` into `_meta` (`metadata.ts:1316`). **That one line is the seam.** A `storageModel` flag changes only this *computed value* — the per-KA assertion URI (M2) vs. the shared bucket URI (M1). Every reader follows the pointer and is therefore agnostic: the sync responder gates on `?lifecycle dkg:assertionGraph ?g` (`sync-handler.ts:392`, meta-phase `:286`); the engine's `discoverRegisteredAssertionGraphs()` runs `SELECT ?graph WHERE { GRAPH <metaGraph> { ?assertion dkg:assertionGraph ?graph } }` (`dkg-query-engine.ts:618-637`).
+3. **Sync anchors on KA identity, never on graph URIs.** The verification worker indexes by `dkg:merkleRoot`/`dkg:partOf`/`dkg:rootEntity` (`sync-verify-worker-impl.ts:59,65,66`), re-partitions with `skolemizeByEntity` (`:94`), re-derives and compares the flat root (`:132-134`), and accepts/rejects by the subject's membership in the verified root-entity set — **the quad's graph term is never consulted** (`:175-181`). Sync behaves identically whether verified quads came from one bucket or N graphs.
+4. **Per-CG policy precedent exists, and storage is already keyed by `(cg, subGraph, layer)`.** `accessPolicy`/`publishPolicy` are first-class registration knobs (`context-graph.ts:489`); `storageModel` slots into the same bag. Every graph URI is a deterministic function of `(cg, subGraph, layer)` (`constants.ts:199-238`), and the subgraph is a path segment — so resolving the policy per `(cg, subGraph)` is sufficient to pick, at write time, which `graphUri` to stamp. The per-subgraph split is not bolted on; the keying already isolates subgraphs.
+
+**The branch surface — 4 spots.**
+
+| # | Spot | File:line | What changes |
+|---|---|---|---|
+| 1 | **Write / store** | `metadata.ts:1316,1328`; quad-pin `knowledge-assets-import.ts:1164-1273` | The `dkg:assertionGraph` value: shared bucket (M1) vs per-KA graph (M2). **One value, computed from a flag — genuinely two-path.** |
+| 2 | **Data-read resolver** | `dkg-agent.ts:1805,1819`; CONSTRUCT `knowledge-assets-import.ts:1434` | **No branch in the pointer-following** — the resolver dereferences `dkg:assertionGraph` regardless. But the shape it lands on differs: M2 → a bound single-`GRAPH` read (O(KA)); M1 → reading one KA from a shared bucket, which is O(bucket) `STRSTARTS` (`dkg-query-engine.ts:729-744`) *until* it becomes O(KA) via **this RFC's §3.5 `dkg:knowledgeAsset` backlink — net-new, consensus-sensitive work (a hard prerequisite, not an optimization), excluded at the 7 merkle sites of §10.1.** Indirection is model-agnostic; M1's *cheap* read is inherited work, not free. |
+| 3 | **Delete** | `knowledge-assets-import.ts:1531` | M2: `store.dropGraph(<ual>)` (atomic O(1)). M1: scoped `deleteByPattern`/`DELETE WHERE` over the KA's skolemized subjects (§6.3). **Both primitives already exist** (`triple-store.ts:40,45`); `_meta` cleanup is already model-independent (`:1527-1529`). **Genuinely two-path.** |
+| 4 | **Cross-KA analytics planner** | `queryMultipleGraphs()` `dkg-query-engine.ts:445` | **No branch.** Adapts to the *number* of graphs the resolver hands it: M1 → ~2 graphs → single-graph fast path; M2 → fan out to the union. The model is expressed entirely upstream, in which graphs reason (2) discovers. |
+
+Only **spot 1 (write-stamp) and spot 3 (delete)** are truly two-path; spots 2 and 4 follow the pointer and adapt to graph-count without model-conditional code — with the honest asterisk that M1's *cheap* per-KA read rides on the §3.5 backlink machinery (real, consensus-sensitive work even though the calling code doesn't branch).
+
+**What stays untouched.** Consensus/merkle/seal/UAL (`merkle.ts`, `canonical-publish-payload.ts`, `assertion-seal.ts`) — graph-agnostic by construction. Sync — responder paging, requester delta, verification worker — anchor on KA/KC identity. And the **`_meta` index** — the one graph serving the ~77% model-agnostic majority of §16.9 — **one graph in both models**, never split by storage model.
+
+**The honest cost.** Two storage/read code paths to maintain and test — the write-path graph-target choice and the delete-path primitive choice — a real recurring tax (bigger test matrix, two behaviors a debugging engineer must hold in mind). Worth paying: the alternative is forcing the wrong tradeoff on half the subgraphs, a cost borne forever by every query rather than once by maintainers.
+
+**This is the substrate §17 ships.** V10.0 launches Model 2 over exactly this seam (`dkg:assertionGraph` indirection + `_meta` index + layout-independent seal), and the deferred M1 path (§17.6) is *one such per-subgraph branch* — turning on the `bucket` write-stamp, the §3.5 backlink + §10.1 exclusion, and the §6.3 scoped delete for the traversal-heavy code/AST subgraph, with nothing in V10.0 unwound to add it.
+
 ---
 
 ## 17. Decision for V10.0 mainnet: ship Model 2, with the hybrid as the target architecture
@@ -997,6 +1069,8 @@ In **Model 1**, the subgraph is one graph, so `GRAPH <…/_code> { ?x code:calls
 1. **Target architecture (multi-release):** §16's hybrid — a per-subgraph `dkg:storageModel ∈ { per-ka (M2), bucket (M1) }`, over a **universal substrate** (`_meta` index + UAL/`kaId` + the layout-independent seal of §10).
 2. **V10.0 mainnet ships exactly one implemented model: Model 2.** `per-ka` is the default and, at launch, the only `storageModel`. There is no `bucket` code path in the V10.0 critical scope.
 3. **Model 1 / `bucket` is specified (this RFC, §3–§10) but deferred** to a post-launch release, as an opt-in `storageModel` for traversal-/analytics-heavy, typically single-writer subgraphs (the code/AST graph is the canonical case — §16.8 traversal argument).
+
+> **Reconciliation with the accessible explainer (OT-RFC-47, now absorbed).** OT-RFC-47's headline recommendation — *per-subgraph `storageModel`, route `code → Model 1`, coordination subgraphs → Model 2/either* — and §17's decision — *ship Model 2 for V10.0, defer `bucket` post-launch for traversal-heavy code/AST subgraphs* — are **the same target with §17 adding the launch phasing OT-RFC-47 omitted.** They agree on the architecture (per-subgraph hybrid; the code graph is the Model-1 candidate, fingerprinted by the §16.9 catalog and the §16.8 traversal signal); they differ only in that §17 sequences it — universal M2 substrate first, opt-in M1 `bucket` for the code subgraph later (§17.6) — rather than presenting the end-state as if it ships at once. This unified RFC therefore absorbs OT-RFC-47 wholesale as the **accessible explainer of the §16/§17 decision** (its story → the §16 story intro, its query catalog → §16.9, its support-both surface → §16.10), and keeps §17's launch decision authoritative wherever phasing is concerned.
 
 ### 17.2 Why Model 2 is the lower-delta, lower-risk launch choice
 
