@@ -137,11 +137,11 @@ describe('dkg_memory_search — multi-layer fan-out + trust-tier dedup', () => {
     expect(result.content[0].text).toMatch(/subGraphName "imports".*subGraphName requires contextGraphId/i);
   });
 
-  it('keeps partial-success behavior for generic project-scoped subGraphName failures', async () => {
+  it('keeps partial-success behavior when a project-scoped subGraphName layer succeeds', async () => {
     const localServer = new FakeServer();
     const localClient = new FakeClient({
       query: async function (this: FakeClient, args: Record<string, unknown>) {
-        if (args.subGraphName) {
+        if (args.subGraphName && args.view === 'working-memory') {
           throw new Error('fetch failed');
         }
         const cgId = String(args.contextGraphId ?? '');
@@ -149,8 +149,8 @@ describe('dkg_memory_search — multi-layer fan-out + trust-tier dedup', () => {
         return { bindings: this.memoryFixtures.get(`${cgId}::${view}`) ?? [] };
       } as never,
     });
-    localClient.memoryFixtures.set('agent-context::shared-working-memory', [
-      { uri: { value: 'urn:agent:note' }, text: { value: 'tree-sitter parsers from agent memory' } },
+    localClient.memoryFixtures.set('proj-x::verified-memory', [
+      { uri: { value: 'urn:project:note' }, text: { value: 'tree-sitter parsers from project memory' } },
     ]);
     registerMemorySearchTool(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig({ defaultProject: null }));
 
@@ -162,7 +162,30 @@ describe('dkg_memory_search — multi-layer fan-out + trust-tier dedup', () => {
 
     expect(result.isError).toBeFalsy();
     expect(result.content[0].text).toMatch(/1 hit\(s\)/);
-    expect(result.content[0].text).toMatch(/agent-context/);
+    expect(result.content[0].text).toMatch(/proj-x/);
+  });
+
+  it('returns a tool error for generic project-scoped subGraphName failures when all scoped layers fail', async () => {
+    const localServer = new FakeServer();
+    const localClient = new FakeClient({
+      query: async (args: Record<string, unknown>) => {
+        if (args.subGraphName) {
+          throw new Error('fetch failed');
+        }
+        return { bindings: [] };
+      },
+    });
+    registerMemorySearchTool(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig({ defaultProject: null }));
+
+    const result = await localServer.call('dkg_memory_search', {
+      query: 'tree-sitter parsers',
+      projectId: 'proj-x',
+      subGraphName: 'imports',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/memory_search failed:.*fetch failed/i);
+    expect(localClient.queryCalls.filter((call) => call.subGraphName === 'imports')).toHaveLength(3);
   });
 
   it('returns a tool error for generic project-scoped subGraphName failures when every layer fails', async () => {

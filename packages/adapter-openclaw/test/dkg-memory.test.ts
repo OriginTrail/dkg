@@ -1082,18 +1082,25 @@ describe('DkgMemorySearchManager', () => {
         .rejects.toThrow(/sub_graph_name "bad\/name".*Invalid subGraphName/i);
     });
 
-    it('keeps partial-success behavior for generic projectSubGraphName layer failures', async () => {
+    it('keeps partial-success behavior when a projectSubGraphName layer succeeds', async () => {
       const warn = vi.fn();
       vi.spyOn(client, 'query').mockImplementation(async (_sparql, opts) => {
-        if (opts?.subGraphName) {
+        if (opts?.subGraphName && opts.view === 'working-memory') {
           throw new Error('fetch failed');
+        }
+        if (opts?.subGraphName && opts.view === 'verified-memory') {
+          return {
+            result: {
+              bindings: [{
+                uri: { value: 'urn:project:note' },
+                text: { value: 'hello world from project memory' },
+              }],
+            },
+          };
         }
         return {
           result: {
-            bindings: [{
-              uri: { value: 'urn:agent:note' },
-              text: { value: 'hello world from agent memory' },
-            }],
+            bindings: [],
           },
         };
       });
@@ -1106,8 +1113,28 @@ describe('DkgMemorySearchManager', () => {
       const hits = await manager.search('hello world', { projectSubGraphName: 'skills' });
 
       expect(hits).toHaveLength(1);
-      expect(hits[0].source).toBe('sessions');
+      expect(hits[0].source).toBe('memory');
+      expect(hits[0].layer).toBe('project-vm');
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('fetch failed'));
+    });
+
+    it('surfaces generic projectSubGraphName failures when every project-scoped layer fails', async () => {
+      const warn = vi.fn();
+      vi.spyOn(client, 'query').mockImplementation(async (_sparql, opts) => {
+        if (opts?.subGraphName) {
+          throw new Error('fetch failed');
+        }
+        return { result: { bindings: [] } };
+      });
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'research-x' }),
+        logger: { warn },
+      });
+
+      await expect(manager.search('hello world', { projectSubGraphName: 'skills' }))
+        .rejects.toThrow(/memory_search failed:.*fetch failed/i);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('project-wm search failed'));
     });
 
     it('surfaces generic projectSubGraphName failures when every live layer fails', async () => {

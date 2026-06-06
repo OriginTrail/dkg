@@ -357,7 +357,8 @@ LIMIT ${cap}`;
       } catch (err) {
         return errResult(formatError(err));
       }
-      if (projectSubGraphName && !settled.some((s) => s.succeeded) && firstScopedProjectError) {
+      const scopedProjectSucceeded = settled.some((s) => Boolean(s.plan.subGraphName) && s.succeeded);
+      if (projectSubGraphName && !scopedProjectSucceeded && firstScopedProjectError) {
         return errResult(`memory_search failed: ${firstScopedProjectError}`);
       }
 

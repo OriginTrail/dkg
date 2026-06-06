@@ -1490,6 +1490,7 @@ class DKGMemoryProvider(MemoryProvider):
 
         hits: List[Dict[str, Any]] = []
         successful_queries = 0
+        successful_scoped_project_queries = 0
         first_scoped_project_error: Optional[str] = None
         for cg in context_graphs:
             for view, weight in (
@@ -1540,6 +1541,8 @@ class DKGMemoryProvider(MemoryProvider):
                         continue
                     continue
                 successful_queries += 1
+                if scoped_project_layer:
+                    successful_scoped_project_queries += 1
                 for binding in _extract_query_bindings(result):
                     text = _binding_value(binding.get("text") or binding.get("o"))
                     uri = _binding_value(binding.get("uri") or binding.get("s"))
@@ -1559,7 +1562,7 @@ class DKGMemoryProvider(MemoryProvider):
                         "predicate": pred,
                     })
 
-        if not hits and successful_queries == 0 and project_sub_graph_name:
+        if project_sub_graph_name and successful_scoped_project_queries == 0 and first_scoped_project_error:
             detail = first_scoped_project_error or "all live queries failed"
             return tool_error(
                 f"memory_search failed: {detail}"

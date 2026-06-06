@@ -389,7 +389,8 @@ export class DkgMemorySearchManager implements MemorySearchManager {
       ),
     );
 
-    if (projectSubGraphName && !settled.some(s => s.succeeded) && firstScopedProjectError) {
+    const scopedProjectSucceeded = settled.some(s => Boolean(s.plan.subGraphName) && s.succeeded);
+    if (projectSubGraphName && !scopedProjectSucceeded && firstScopedProjectError) {
       throw new Error(`memory_search failed: ${firstScopedProjectError}`);
     }
 

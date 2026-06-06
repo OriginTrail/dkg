@@ -148,6 +148,7 @@ class FakeClient:
         self.calls = []
         self.fail_all = False
         self.fail_scoped_project = False
+        self.generic_fail_scoped_project_wm = False
         self.generic_fail_scoped_project = False
 
     def _resolve_agent_address(self):
@@ -159,6 +160,8 @@ class FakeClient:
             return {"error": "fetch failed"}
         if self.fail_scoped_project and kwargs.get("sub_graph_name"):
             return {"error": "Invalid subGraphName: Sub-graph names cannot contain \"/\""}
+        if self.generic_fail_scoped_project_wm and kwargs.get("sub_graph_name") and kwargs.get("view") == "working-memory":
+            return {"error": "fetch failed"}
         if self.generic_fail_scoped_project and kwargs.get("sub_graph_name"):
             return {"error": "fetch failed"}
         return {
@@ -248,14 +251,34 @@ assert provider._client.calls == [
 provider._client.fail_scoped_project = False
 
 provider._client.calls = []
-provider._client.generic_fail_scoped_project = True
+provider._client.generic_fail_scoped_project_wm = True
 generic_failed_scoped = json.loads(provider.handle_tool_call("memory_search", {
     "query": "alpha beta",
     "limit": 10,
     "sub_graph_name": "skills",
 }))
 assert "error" not in generic_failed_scoped, generic_failed_scoped
-assert generic_failed_scoped["count"] == 3, generic_failed_scoped
+assert generic_failed_scoped["count"] == 5, generic_failed_scoped
+assert provider._client.calls == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+    ("project-cg", {"view": "working-memory", "agent_address": "0xAgent", "sub_graph_name": "skills"}),
+    ("project-cg", {"view": "shared-working-memory", "agent_address": None, "sub_graph_name": "skills"}),
+    ("project-cg", {"view": "verified-memory", "agent_address": None, "sub_graph_name": "skills"}),
+], provider._client.calls
+provider._client.generic_fail_scoped_project_wm = False
+
+provider._client.calls = []
+provider._client.generic_fail_scoped_project = True
+scoped_project_all_failed = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "limit": 10,
+    "sub_graph_name": "skills",
+}))
+assert "sub_graph_name" not in scoped_project_all_failed["error"], scoped_project_all_failed
+assert "memory_search failed" in scoped_project_all_failed["error"], scoped_project_all_failed
+assert "fetch failed" in scoped_project_all_failed["error"], scoped_project_all_failed
 assert provider._client.calls == [
     ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
     ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
