@@ -557,12 +557,18 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         && validTokens.has(requestToken)
         && callerAgentAddress === undefined;
       const hasRecognisedIdentity = isAdminToken || callerAgentAddress !== undefined;
-      const inferredWorkingMemoryAgentAddress = view === 'working-memory'
-        ? callerAgentAddress ?? (isAdminToken ? requestAgentAddress : undefined)
-        : undefined;
-      const effectiveAgentAddress =
-        requestedAgentAddress
-        ?? inferredWorkingMemoryAgentAddress;
+      const effectiveAgentAddress = requestedAgentAddress;
+      if (
+        !hasRecognisedIdentity &&
+        view === 'working-memory' &&
+        requestedAgentAddress === undefined
+      ) {
+        return jsonResponse(res, 403, {
+          error:
+            'working-memory reads without agentAddress require authentication. ' +
+            'Provide an agent-scoped bearer token, a node-admin token, or an explicit self agentAddress.',
+        });
+      }
       if (
         !hasRecognisedIdentity &&
         view === 'working-memory' &&

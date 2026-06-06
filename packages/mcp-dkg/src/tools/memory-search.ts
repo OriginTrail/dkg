@@ -1,7 +1,7 @@
 /**
  * `dkg_memory_search` — trust-weighted, multi-tier, multi-CG-fan-out
  * recall over agent-context WM/SWM/VM (and the project CG's matching
- * layers when supplied).
+ * layers when supplied or pinned as the default project).
  *
  * Per parity-matrix v0.7 §4.19: re-implementation of the adapter's
  * `DkgMemorySearchManager` (`packages/adapter-openclaw/src/DkgMemoryPlugin.ts`).
@@ -199,13 +199,13 @@ export function registerMemorySearchTool(
           .string()
           .optional()
           .describe(
-            'Optional project context-graph id. When supplied, fan-out adds ' +
-              "the project's WM/SWM/VM layers to the agent-context layers.",
+            'Optional project context-graph id. When supplied, or when a default project is pinned, ' +
+              "fan-out adds the project's WM/SWM/VM layers to the agent-context layers.",
           ),
         subGraphName: z
           .string()
           .optional()
-          .describe('Optional project sub-graph scope. Requires projectId and applies only to project fan-out.'),
+          .describe('Optional project sub-graph scope. Requires projectId or a pinned default project and applies only to project fan-out.'),
       },
     },
     async ({ query, limit, projectId, subGraphName }): Promise<ToolResult> => {
@@ -214,12 +214,14 @@ export function registerMemorySearchTool(
         return errResult('"query" is required (non-empty string, ≥2 chars).');
       }
       const cap = Math.floor(Math.max(1, Math.min(100, limit ?? 20)));
+      const explicitProjectId = projectId?.trim();
+      const effectiveProjectId = explicitProjectId || _config.defaultProject || undefined;
       const projectSubGraphName = subGraphName?.trim();
       if (subGraphName !== undefined && !projectSubGraphName) {
         return errResult('"subGraphName" must be a non-empty string.');
       }
-      if (projectSubGraphName && !projectId?.trim()) {
-        return errResult('"subGraphName" requires "projectId" because memory search subgraph scope applies only to project context graph fan-out.');
+      if (projectSubGraphName && !effectiveProjectId) {
+        return errResult('"subGraphName" requires "projectId" or a pinned default project because memory search subgraph scope applies only to project context graph fan-out.');
       }
 
       // The query engine requires the agent's raw peer ID for WM view
@@ -273,11 +275,11 @@ LIMIT ${cap}`;
         { layer: 'agent-context-swm', contextGraphId: AGENT_CONTEXT_GRAPH, view: 'shared-working-memory' },
         { layer: 'agent-context-vm', contextGraphId: AGENT_CONTEXT_GRAPH, view: 'verified-memory' },
       ];
-      if (projectId) {
+      if (effectiveProjectId) {
         plans.push(
-          { layer: 'project-wm', contextGraphId: projectId, view: 'working-memory', subGraphName: projectSubGraphName },
-          { layer: 'project-swm', contextGraphId: projectId, view: 'shared-working-memory', subGraphName: projectSubGraphName },
-          { layer: 'project-vm', contextGraphId: projectId, view: 'verified-memory', subGraphName: projectSubGraphName },
+          { layer: 'project-wm', contextGraphId: effectiveProjectId, view: 'working-memory', subGraphName: projectSubGraphName },
+          { layer: 'project-swm', contextGraphId: effectiveProjectId, view: 'shared-working-memory', subGraphName: projectSubGraphName },
+          { layer: 'project-vm', contextGraphId: effectiveProjectId, view: 'verified-memory', subGraphName: projectSubGraphName },
         );
       }
       const searchedLayers: MemoryLayer[] = plans.map((p) => p.layer);
@@ -371,7 +373,7 @@ LIMIT ${cap}`;
       // level only; mcp-dkg has no log-level surface, so we drop it).
       process.stderr.write(
         `[dkg-mcp] memory-search fired ` +
-          `(limit=${cap}): project=${projectId ?? '∅'}, ` +
+          `(limit=${cap}): project=${effectiveProjectId ?? '∅'}, ` +
           `layers=${plans.length}, raw_hits=${totalRaw} (${breakdown})\n`,
       );
       const header =

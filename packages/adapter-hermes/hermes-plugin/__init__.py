@@ -1398,12 +1398,14 @@ class DKGMemoryProvider(MemoryProvider):
         view = _first_text(args, "view")
         if view and view not in ("working-memory", "shared-working-memory", "verified-memory"):
             return tool_error('"view" must be one of: working-memory, shared-working-memory, verified-memory.')
-        if view and not _first_text(args, "context_graph_id"):
+        if view and not cg:
             return tool_error(f'"view: {view}" requires "context_graph_id".')
         if args.get("sub_graph_name") is not None and not isinstance(args.get("sub_graph_name"), str):
             return tool_error('"sub_graph_name" must be a string.')
         if isinstance(args.get("sub_graph_name"), str) and not args.get("sub_graph_name", "").strip():
             return tool_error('"sub_graph_name" must be a non-empty string.')
+        if _first_text(args, "sub_graph_name") and not cg:
+            return tool_error('"sub_graph_name" requires "context_graph_id" or a configured default context graph.')
         if args.get("agent_address") is not None and not isinstance(args.get("agent_address"), str):
             return tool_error('"agent_address" must be a string.')
         if isinstance(args.get("agent_address"), str) and not args.get("agent_address", "").strip():

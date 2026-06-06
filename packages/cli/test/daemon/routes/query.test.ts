@@ -140,7 +140,7 @@ describe('handleQueryRoutes /api/query', () => {
     expect(res.statusCode).not.toBe(400);
   });
 
-  it('infers omitted working-memory agentAddress from the authenticated caller', async () => {
+  it('leaves omitted working-memory agentAddress to the agent while forwarding the authenticated caller', async () => {
     const caller = '0x1111111111111111111111111111111111111111';
     const agent = {
       resolveAgentByToken: vi.fn().mockReturnValue(caller),
@@ -167,19 +167,20 @@ describe('handleQueryRoutes /api/query', () => {
 
     expect(res.statusCode).toBe(200);
     expect(agent.query).toHaveBeenCalledTimes(1);
-    expect(agent.query.mock.calls[0][1]).toMatchObject({
+    const queryOptions = agent.query.mock.calls[0][1];
+    expect(queryOptions).toMatchObject({
       contextGraphId: 'research',
       view: 'working-memory',
-      agentAddress: caller,
       callerAgentAddress: caller,
     });
+    expect(queryOptions).toHaveProperty('agentAddress', undefined);
   });
 
   it('does not infer omitted working-memory agentAddress for unauthenticated callers', async () => {
     const defaultAgent = '0x1111111111111111111111111111111111111111';
     const agent = {
       resolveAgentByToken: vi.fn(),
-      query: vi.fn().mockRejectedValue(new Error('agentAddress is required for working-memory view')),
+      query: vi.fn().mockResolvedValue({ bindings: [] }),
       getDefaultAgentAddress: vi.fn().mockReturnValue(defaultAgent),
       peerId: '12D3KooWself',
     };
@@ -198,14 +199,12 @@ describe('handleQueryRoutes /api/query', () => {
 
     await handleQueryRoutes(ctx);
 
-    expect(res.statusCode).toBe(400);
-    expect(JSON.parse(res.body).error).toMatch(/agentAddress is required/);
-    expect(agent.query).toHaveBeenCalledTimes(1);
-    expect(agent.query.mock.calls[0][1]).toHaveProperty('agentAddress', undefined);
-    expect(agent.query.mock.calls[0][1]).toHaveProperty('callerAgentAddress', undefined);
+    expect(res.statusCode).toBe(403);
+    expect(JSON.parse(res.body).error).toMatch(/without agentAddress require authentication/);
+    expect(agent.query).not.toHaveBeenCalled();
   });
 
-  it('infers omitted working-memory agentAddress for node-admin callers', async () => {
+  it('leaves omitted working-memory agentAddress to the agent for node-admin callers', async () => {
     const defaultAgent = '0x1111111111111111111111111111111111111111';
     const agent = {
       resolveAgentByToken: vi.fn().mockReturnValue(undefined),
@@ -232,12 +231,13 @@ describe('handleQueryRoutes /api/query', () => {
 
     expect(res.statusCode).toBe(200);
     expect(agent.query).toHaveBeenCalledTimes(1);
-    expect(agent.query.mock.calls[0][1]).toMatchObject({
+    const queryOptions = agent.query.mock.calls[0][1];
+    expect(queryOptions).toMatchObject({
       contextGraphId: 'research',
       view: 'working-memory',
-      agentAddress: defaultAgent,
     });
-    expect(agent.query.mock.calls[0][1]).toHaveProperty('callerAgentAddress', undefined);
+    expect(queryOptions).toHaveProperty('agentAddress', undefined);
+    expect(queryOptions).toHaveProperty('callerAgentAddress', undefined);
   });
 
   it('rejects present non-string agentAddress instead of inferring it', async () => {
