@@ -1066,6 +1066,22 @@ describe('DkgMemorySearchManager', () => {
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('project-wm search failed'));
     });
 
+    it('surfaces camel-case subGraphName daemon validation errors', async () => {
+      vi.spyOn(client, 'query').mockImplementation(async (_sparql, opts) => {
+        if (opts?.subGraphName) {
+          throw new Error('Invalid subGraphName: Sub-graph names cannot contain "/"');
+        }
+        return { result: { bindings: [] } };
+      });
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'research-x' }),
+      });
+
+      await expect(manager.search('hello world', { projectSubGraphName: 'bad/name' }))
+        .rejects.toThrow(/sub_graph_name "bad\/name".*Invalid subGraphName/i);
+    });
+
     it('keeps partial-success behavior for generic projectSubGraphName layer failures', async () => {
       const warn = vi.fn();
       vi.spyOn(client, 'query').mockImplementation(async (_sparql, opts) => {

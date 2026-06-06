@@ -158,7 +158,7 @@ class FakeClient:
         if self.fail_all:
             return {"error": "fetch failed"}
         if self.fail_scoped_project and kwargs.get("sub_graph_name"):
-            return {"error": "Unknown sub-graph: skills"}
+            return {"error": "Invalid subGraphName: Sub-graph names cannot contain \"/\""}
         if self.generic_fail_scoped_project and kwargs.get("sub_graph_name"):
             return {"error": "fetch failed"}
         return {
@@ -238,7 +238,7 @@ failed_scoped = json.loads(provider.handle_tool_call("memory_search", {
     "sub_graph_name": "skills",
 }))
 assert "sub_graph_name" in failed_scoped["error"], failed_scoped
-assert "Unknown sub-graph: skills" in failed_scoped["error"], failed_scoped
+assert "Invalid subGraphName" in failed_scoped["error"], failed_scoped
 assert provider._client.calls == [
     ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
     ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
@@ -274,7 +274,8 @@ scoped_all_failed = json.loads(provider.handle_tool_call("memory_search", {
     "limit": 10,
     "sub_graph_name": "skills",
 }))
-assert "sub_graph_name" in scoped_all_failed["error"], scoped_all_failed
+assert "sub_graph_name" not in scoped_all_failed["error"], scoped_all_failed
+assert "memory_search failed" in scoped_all_failed["error"], scoped_all_failed
 assert "fetch failed" in scoped_all_failed["error"], scoped_all_failed
 assert provider._client.calls == [
     ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),

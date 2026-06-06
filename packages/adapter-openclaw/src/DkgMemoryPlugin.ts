@@ -1069,11 +1069,15 @@ function errorMessage(err: unknown): string {
 
 function isScopedQueryRoutingError(message: string): boolean {
   const text = message.toLowerCase();
+  const mentionsSubGraph = text.includes('sub-graph') ||
+    text.includes('subgraphname') ||
+    text.includes('sub_graph_name');
   return text.includes('scoped query violation') ||
     text.includes('known child context graph') ||
     text.includes('unknown sub-graph') ||
+    text.includes('unknown subgraph') ||
     (
-      text.includes('sub-graph') &&
+      mentionsSubGraph &&
       (
         text.includes('registered') ||
         text.includes('invalid') ||

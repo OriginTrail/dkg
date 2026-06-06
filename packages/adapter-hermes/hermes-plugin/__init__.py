@@ -1560,9 +1560,9 @@ class DKGMemoryProvider(MemoryProvider):
                     })
 
         if not hits and successful_queries == 0 and project_sub_graph_name:
-            detail = first_scoped_project_error or "all scoped project queries failed"
+            detail = first_scoped_project_error or "all live queries failed"
             return tool_error(
-                f'memory_search sub_graph_name "{project_sub_graph_name}" failed: {detail}'
+                f"memory_search failed: {detail}"
             )
         if not hits and successful_queries == 0:
             fallback = _cache_memory_search(query, self._cache, limit)
@@ -2456,12 +2456,18 @@ def _client_result_failed(result: Any) -> bool:
 
 def _is_scoped_query_routing_error(message: Any) -> bool:
     text = str(message).lower()
+    mentions_sub_graph = (
+        "sub-graph" in text
+        or "subgraphname" in text
+        or "sub_graph_name" in text
+    )
     return (
         "scoped query violation" in text
         or "known child context graph" in text
         or "unknown sub-graph" in text
+        or "unknown subgraph" in text
         or (
-            "sub-graph" in text
+            mentions_sub_graph
             and (
                 "registered" in text
                 or "invalid" in text
