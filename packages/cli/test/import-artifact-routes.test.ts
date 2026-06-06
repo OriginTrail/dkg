@@ -936,6 +936,42 @@ describe('import artifact daemon routes', () => {
     }]);
   });
 
+  it('does not self-hydrate when the durable source peer is local but bytes are missing (#872 review)', async () => {
+    const markdownHash = keccakContentHash(Buffer.from('# Missing Local Source\n'));
+    const contextGraphId = 'cg-public-open-owner-self-source-missing';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:test', assertionName);
+    const { agent } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: markdownHash,
+      markdownHash,
+      markdownForm: `urn:dkg:file:${markdownHash}`,
+      durableSourcePeerId: 'peer-local',
+      async fetchImportedSourceBlobFromPeer() {
+        throw new Error('must not fetch source blobs from self');
+      },
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 1024,
+    });
+
+    expect(read.status).toBe(404);
+    expect(read.body.artifact).toMatchObject({
+      canReadMarkdown: false,
+      canFetchMarkdown: false,
+      markdownAvailability: 'unavailable',
+      markdownUnavailableReason: 'source-peer-unavailable',
+      sourcePeerId: 'peer-local',
+    });
+    expect(read.body.markdown).toBeUndefined();
+  });
+
   it('reuses local bytes for SWM-only metadata only with a local verified marker (#872 review)', async () => {
     const remoteBytes = Buffer.from('# Verified SWM Cache\n');
     const markdownHash = keccakContentHash(remoteBytes);

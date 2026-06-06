@@ -923,6 +923,15 @@ async function finalizeImportedArtifactAvailability(
       markdownUnavailableReason: 'source-peer-unavailable',
     };
   }
+  if (sourcePeerId === ctx.agent.peerId) {
+    return {
+      ...artifact,
+      sourcePeerId,
+      markdownAvailability: 'unavailable',
+      canFetchMarkdown: false,
+      markdownUnavailableReason: 'source-peer-unavailable',
+    };
+  }
   return {
     ...artifact,
     sourcePeerId,
