@@ -82,6 +82,19 @@ const TRUST_ORDER: Record<MemoryLayer, number> = {
 const AGENT_CONTEXT_GRAPH = 'agent-context';
 
 const AGENT_DID_PREFIX = 'did:dkg:agent:';
+const CONTEXT_GRAPH_DID_PREFIX = 'did:dkg:context-graph:';
+
+function normalizeContextGraphIdForMemorySearch(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  return trimmed.startsWith(CONTEXT_GRAPH_DID_PREFIX)
+    ? trimmed.slice(CONTEXT_GRAPH_DID_PREFIX.length)
+    : trimmed;
+}
+
+function isAgentContextGraphId(value: string | undefined): boolean {
+  return normalizeContextGraphIdForMemorySearch(value) === AGENT_CONTEXT_GRAPH;
+}
 
 /**
  * The DKG V10 query engine routes WM reads by raw peer ID, NOT the DID
@@ -215,12 +228,12 @@ export function registerMemorySearchTool(
       }
       const cap = Math.floor(Math.max(1, Math.min(100, limit ?? 20)));
       const explicitProjectId = projectId?.trim();
-      const effectiveProjectId = explicitProjectId || _config.defaultProject || undefined;
+      const effectiveProjectId = normalizeContextGraphIdForMemorySearch(explicitProjectId || _config.defaultProject || undefined);
       const projectSubGraphName = subGraphName?.trim();
       if (subGraphName !== undefined && !projectSubGraphName) {
         return errResult('"subGraphName" must be a non-empty string.');
       }
-      if (projectSubGraphName && !effectiveProjectId) {
+      if (projectSubGraphName && (!effectiveProjectId || isAgentContextGraphId(effectiveProjectId))) {
         return errResult('"subGraphName" requires "projectId" or a pinned default project because memory search subgraph scope applies only to project context graph fan-out.');
       }
 

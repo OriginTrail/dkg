@@ -1081,6 +1081,18 @@ describe('DkgMemorySearchManager', () => {
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('no project context graph'));
     });
 
+    it('rejects projectSubGraphName when the project CG resolves to the agent-context URI', async () => {
+      const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'did:dkg:context-graph:agent-context' }),
+      });
+
+      await expect(manager.search('hello world', { projectSubGraphName: 'skills' }))
+        .rejects.toThrow(/projectSubGraphName.*project context graph/i);
+      expect(querySpy).not.toHaveBeenCalled();
+    });
+
     it('uses a permissive SPARQL shape — no rdf:type constraint, no specific predicate, literal-length floor', async () => {
       const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
       const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });

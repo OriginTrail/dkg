@@ -217,6 +217,10 @@ export function registerReadTools(
           .optional()
           .describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
         subGraphName: z.string().optional().describe('Limit the query to a single sub-graph'),
+        assertionName: z
+          .string()
+          .optional()
+          .describe('Optional Working Memory assertion name for view: "working-memory" reads.'),
         agentAddress: z
           .string()
           .optional()
@@ -232,16 +236,21 @@ export function registerReadTools(
         limit: z.number().optional().describe('Row cap when rendering to markdown; does NOT modify the query'),
       },
     },
-    async ({ sparql, projectId, subGraphName, agentAddress, view, includeSharedMemory, limit }): Promise<ToolResult> => {
+    async ({ sparql, projectId, subGraphName, assertionName, agentAddress, view, includeSharedMemory, limit }): Promise<ToolResult> => {
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
       const fullSparql = sparql.startsWith('PREFIX') ? sparql : `${PREFIXES}\n${sparql}`;
       try {
+        const scopedAssertionName = assertionName?.trim();
+        if (assertionName !== undefined && !scopedAssertionName) {
+          return err('"assertionName" must be a non-empty string.');
+        }
         const normalizedAgentAddress = normalizeAgentAddressForQuery(agentAddress);
         const result = await client.query({
           sparql: fullSparql,
           contextGraphId: pid,
           subGraphName,
+          assertionName: scopedAssertionName,
           agentAddress: normalizedAgentAddress,
           view,
           includeSharedMemory,

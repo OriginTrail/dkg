@@ -50,8 +50,22 @@ TARGET_CONTEXT_GRAPH_DESCRIPTION = (
     "Target context graph. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION
 )
 AGENT_CONTEXT_GRAPH_ID = "agent-context"
+CONTEXT_GRAPH_URI_PREFIX = "did:dkg:context-graph:"
 AGENT_CONTEXT_GRAPH_NAME = "Agent Context"
 AGENT_CONTEXT_GRAPH_DESCRIPTION = "Chat-turn working memory for local agent integrations."
+
+
+def _normalize_context_graph_id(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    trimmed = value.strip()
+    if trimmed.startswith(CONTEXT_GRAPH_URI_PREFIX):
+        return trimmed[len(CONTEXT_GRAPH_URI_PREFIX):]
+    return trimmed
+
+
+def _is_agent_context_graph(value: Any) -> bool:
+    return _normalize_context_graph_id(value) == AGENT_CONTEXT_GRAPH_ID
 
 
 # ---------------------------------------------------------------------------
@@ -1437,13 +1451,15 @@ class DKGMemoryProvider(MemoryProvider):
         limit = _coerce_limit(args.get("limit"), default=20, maximum=100)
         if "context_graph" in args:
             return tool_error('"context_graph" is not a supported parameter on memory_search. Use "context_graph_id".')
-        project_context_graph = _first_text(args, "context_graph_id") or self._context_graph
+        project_context_graph = _normalize_context_graph_id(
+            _first_text(args, "context_graph_id") or self._context_graph
+        )
         if args.get("sub_graph_name") is not None and not isinstance(args.get("sub_graph_name"), str):
             return tool_error('"sub_graph_name" must be a string.')
         if isinstance(args.get("sub_graph_name"), str) and not args.get("sub_graph_name", "").strip():
             return tool_error('"sub_graph_name" must be a non-empty string.')
         project_sub_graph_name = _first_text(args, "sub_graph_name")
-        if project_sub_graph_name and (not project_context_graph or project_context_graph == "agent-context"):
+        if project_sub_graph_name and (not project_context_graph or _is_agent_context_graph(project_context_graph)):
             return tool_error('"sub_graph_name" requires a project context graph for memory_search.')
         if self._offline or not self._client:
             return json.dumps(_cache_memory_search(query, self._cache, limit))
@@ -1455,7 +1471,7 @@ class DKGMemoryProvider(MemoryProvider):
         sparql = _build_memory_search_sparql(keywords, limit)
         agent_address = self._client._resolve_agent_address()
         context_graphs: List[str] = []
-        for cg in ("agent-context", project_context_graph):
+        for cg in (AGENT_CONTEXT_GRAPH_ID, project_context_graph):
             if cg and cg not in context_graphs:
                 context_graphs.append(cg)
 
@@ -1472,7 +1488,7 @@ class DKGMemoryProvider(MemoryProvider):
                 scoped_project_layer = bool(
                     project_sub_graph_name
                     and cg == project_context_graph
-                    and cg != "agent-context"
+                    and not _is_agent_context_graph(cg)
                 )
                 query_kwargs = {
                     "view": view,
@@ -1510,7 +1526,7 @@ class DKGMemoryProvider(MemoryProvider):
                         continue
                     score = _keyword_overlap(text, keywords)
                     layer = _memory_search_layer(cg, view)
-                    source = "sessions" if cg == "agent-context" else "memory"
+                    source = "sessions" if _is_agent_context_graph(cg) else "memory"
                     hits.append({
                         "snippet": text[:500],
                         "layer": layer,
@@ -1523,13 +1539,13 @@ class DKGMemoryProvider(MemoryProvider):
 
         if not hits and successful_queries == 0:
             fallback = _cache_memory_search(query, self._cache, limit)
-            fallback["scope"] = project_context_graph if project_context_graph != "agent-context" else None
+            fallback["scope"] = project_context_graph if not _is_agent_context_graph(project_context_graph) else None
             return json.dumps(fallback)
         if not hits:
             return json.dumps({
                 "query": query,
                 "count": 0,
-                "scope": project_context_graph if project_context_graph != "agent-context" else None,
+                "scope": project_context_graph if not _is_agent_context_graph(project_context_graph) else None,
                 "hits": [],
             })
 
@@ -1563,7 +1579,7 @@ class DKGMemoryProvider(MemoryProvider):
         return json.dumps({
             "query": query,
             "count": len(public_hits),
-            "scope": project_context_graph if project_context_graph != "agent-context" else None,
+            "scope": project_context_graph if not _is_agent_context_graph(project_context_graph) else None,
             "hits": public_hits,
         })
 
@@ -2612,7 +2628,7 @@ def _memory_search_layer(context_graph_id: str, view: str) -> str:
         "shared-working-memory": "swm",
         "verified-memory": "vm",
     }.get(view, "wm")
-    prefix = "agent-context" if context_graph_id == "agent-context" else "project"
+    prefix = "agent-context" if _is_agent_context_graph(context_graph_id) else "project"
     return f"{prefix}-{suffix}"
 
 

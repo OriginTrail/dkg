@@ -3233,6 +3233,14 @@ missing_project = json.loads(provider.handle_tool_call("memory_search", {
 }))
 assert "sub_graph_name" in missing_project["error"], missing_project
 assert "project context graph" in missing_project["error"], missing_project
+
+provider._context_graph = "did:dkg:context-graph:agent-context"
+missing_project_uri = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "sub_graph_name": "skills",
+}))
+assert "sub_graph_name" in missing_project_uri["error"], missing_project_uri
+assert "project context graph" in missing_project_uri["error"], missing_project_uri
 `;
     const result = spawnSync('python', ['-B', '-c', script], {
       cwd: process.cwd(),

@@ -47,11 +47,13 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
       view: 'working-memory',
       agentAddress: 'did:dkg:agent:peer-explicit',
       subGraphName: 'imports',
+      assertionName: 'chat-turns',
     });
     expect(result.isError).toBeFalsy();
     const lastCall = client.queryCalls.at(-1)!;
     expect(lastCall.agentAddress).toBe('peer-explicit');
     expect(lastCall.subGraphName).toBe('imports');
+    expect(lastCall.assertionName).toBe('chat-turns');
   });
 
   it('normalizes DID-prefixed wallet agentAddress to checksum form for dkg_query', async () => {
@@ -73,6 +75,17 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('agentAddress');
+    expect(client.queryCalls).toHaveLength(0);
+  });
+
+  it('rejects blank assertionName in dkg_query', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      view: 'working-memory',
+      assertionName: '   ',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('assertionName');
     expect(client.queryCalls).toHaveLength(0);
   });
 
@@ -137,11 +150,12 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     const shape = tool.config.inputSchema!;
     const keys = Object.keys(shape);
     // Post-migration surface: sparql, projectId, subGraphName,
-    // agentAddress, view, includeSharedMemory, limit. The legacy `layer`
-    // key MUST be gone.
+    // assertionName, agentAddress, view, includeSharedMemory, limit.
+    // The legacy `layer` key MUST be gone.
     expect(keys).toEqual(
       expect.arrayContaining([
         'sparql',
+        'assertionName',
         'agentAddress',
         'view',
         'includeSharedMemory',

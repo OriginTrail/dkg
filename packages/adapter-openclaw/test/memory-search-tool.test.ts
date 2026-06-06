@@ -121,6 +121,24 @@ describe('memory_search tool', () => {
     expect(client.query).not.toHaveBeenCalled();
   });
 
+  it('returns a clear error when sub_graph_name is supplied with an agent-context URI', async () => {
+    const tool = tools.find((t) => t.name === 'memory_search')!;
+    const client = (plugin as any).client;
+    client.query = vi.fn().mockResolvedValue({ result: { bindings: [] } });
+    (plugin as any).memorySessionResolver.getSession = () => ({
+      agentAddress: '12D3KooWReady',
+      projectContextGraphId: 'did:dkg:context-graph:agent-context',
+    });
+
+    const result = await tool.execute('t-subgraph-agent-context-uri', {
+      query: 'project memories',
+      sub_graph_name: 'imports',
+    });
+
+    expect((result as any).content?.[0]?.text ?? '').toMatch(/sub_graph_name.*project context graph/i);
+    expect(client.query).not.toHaveBeenCalled();
+  });
+
   it('returns a clear error when a project-scoped sub_graph_name query fails', async () => {
     const tool = tools.find((t) => t.name === 'memory_search')!;
     const client = (plugin as any).client;

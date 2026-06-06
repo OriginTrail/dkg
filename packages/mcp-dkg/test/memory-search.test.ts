@@ -146,6 +146,31 @@ describe('dkg_memory_search — multi-layer fan-out + trust-tier dedup', () => {
     expect(client.queryCalls).toHaveLength(0);
   });
 
+  it('returns a tool error when subGraphName is supplied with an agent-context project URI', async () => {
+    const result = await server.call('dkg_memory_search', {
+      query: 'tree-sitter parsers',
+      projectId: 'did:dkg:context-graph:agent-context',
+      subGraphName: 'imports',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/subGraphName.*projectId.*default project/i);
+    expect(client.queryCalls).toHaveLength(0);
+
+    const localServer = new FakeServer();
+    const localClient = new FakeClient();
+    registerMemorySearchTool(
+      localServer.asMcpServer(),
+      localClient.asDkgClient(),
+      makeConfig({ defaultProject: 'did:dkg:context-graph:agent-context' }),
+    );
+    const pinned = await localServer.call('dkg_memory_search', {
+      query: 'tree-sitter parsers',
+      subGraphName: 'imports',
+    });
+    expect(pinned.isError).toBe(true);
+    expect(localClient.queryCalls).toHaveLength(0);
+  });
+
   it('VM hit collapses an SWM hit on the same entity URI (trust tier ordering: VM > SWM > WM)', async () => {
     const text = 'agreed-on architectural decision about staking adapter v2';
     client.memoryFixtures.set('agent-context::working-memory', [

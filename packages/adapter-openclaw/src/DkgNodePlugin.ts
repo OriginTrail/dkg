@@ -2667,9 +2667,12 @@ export class DkgNodePlugin {
       await this.ensureNodePeerId().catch(() => {});
     }
     const session = this.memorySessionResolver.getSession(undefined);
+    const sessionProjectContextGraphId = session?.projectContextGraphId
+      ? normalizeContextGraphId(session.projectContextGraphId)
+      : undefined;
     if (
       projectSubGraphName &&
-      (!session?.projectContextGraphId || session.projectContextGraphId === AGENT_CONTEXT_GRAPH)
+      (!sessionProjectContextGraphId || sessionProjectContextGraphId === AGENT_CONTEXT_GRAPH)
     ) {
       return this.error('"sub_graph_name" requires a selected project context graph for memory_search.');
     }
@@ -2792,6 +2795,17 @@ export class DkgNodePlugin {
       if (subGraphName && contextGraphId === undefined) {
         return this.error('"sub_graph_name" requires "context_graph_id".');
       }
+      if (args.assertion_name !== undefined) {
+        if (typeof args.assertion_name !== 'string') {
+          return this.error('"assertion_name" must be a string.');
+        }
+        if (args.assertion_name.trim() === '') {
+          return this.error('"assertion_name" must be a non-empty string.');
+        }
+      }
+      const assertionName = typeof args.assertion_name === 'string'
+        ? args.assertion_name.trim()
+        : undefined;
       // Handler-side view validation (no JSON-schema enum, so strict-schema
       // hosts still surface these tailored errors). Use the shared
       // `GET_VIEWS` constant from `@origintrail-official/dkg-core` as the
@@ -2897,6 +2911,7 @@ export class DkgNodePlugin {
         view,
         agentAddress,
         subGraphName,
+        assertionName,
       });
       return this.json(result);
     } catch (err: any) {

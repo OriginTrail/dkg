@@ -29,7 +29,7 @@
  * `21_TRI_MODAL_MEMORY.md §5`.
  */
 
-import type { DkgDaemonClient } from './dkg-client.js';
+import { normalizeContextGraphId, type DkgDaemonClient } from './dkg-client.js';
 import type {
   DkgOpenClawConfig,
   MemoryEmbeddingProbeResult,
@@ -61,6 +61,11 @@ import {
 export const AGENT_CONTEXT_GRAPH = 'agent-context';
 export const CHAT_TURNS_ASSERTION = 'chat-turns';
 export const PROJECT_MEMORY_ASSERTION = 'memory';
+
+function normalizeMemoryContextGraphId(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  return normalizeContextGraphId(value) || undefined;
+}
 
 function buildDkgMemoryPromptSections(): string[] {
   return [
@@ -192,7 +197,7 @@ export class DkgMemorySearchManager implements MemorySearchManager {
     // consumption boundary. `toAgentPeerId` is a no-op on already-raw
     // inputs, so passing a raw peer ID through the resolver still works.
     const agentAddress = rawAgentAddress ? toAgentPeerId(rawAgentAddress) : undefined;
-    const projectContextGraphId = session?.projectContextGraphId;
+    const projectContextGraphId = normalizeMemoryContextGraphId(session?.projectContextGraphId);
     const projectSubGraphName = options?.projectSubGraphName;
     if (projectSubGraphName && (!projectContextGraphId || projectContextGraphId === AGENT_CONTEXT_GRAPH)) {
       this.deps.logger?.warn?.(
