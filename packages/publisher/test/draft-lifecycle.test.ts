@@ -249,7 +249,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(result.promotedCount).toBe(0);
   });
 
-  it('durable SWM ownership blocks cross-author promote after publisher restart with empty map', async () => {
+  it('durable SWM ownership skips (advisory) cross-author promote after publisher restart with empty map', async () => {
     const root = 'urn:test:entity:restart-owned';
     const firstAssertion = 'restart-owner-a';
     const secondAssertion = 'restart-owner-b';
@@ -285,11 +285,18 @@ describe('Working Memory Assertion Lifecycle', () => {
       { subject: root, predicate: 'http://schema.org/name', object: '"Overwritten"' },
     ]);
 
-    await expect(
-      restartedPublisher.assertionPromote(CG_ID, secondAssertion, AGENT_B, { publisherPeerId: PEER_B }),
-    ).rejects.toThrow(
-      `Cannot promote entity <${root}>: owned by peer ${PEER}, not by caller ${PEER_B}.`,
+    // OT-RFC-46 §17.4 / rc.17 D6: a cross-author promote is no longer REJECTED — the
+    // foreign-owned root is skipped (workspaceOwner is now advisory, not a hard gate).
+    // Under the still-bucket SWM the skip preserves the owner's data (no clobber); the
+    // assertions below confirm SWM content and ownership are unchanged. Once SWM is
+    // per-KA (rc.17b) the co-claim coexists in its own graph instead of being skipped.
+    const promoteResult = await restartedPublisher.assertionPromote(
+      CG_ID,
+      secondAssertion,
+      AGENT_B,
+      { publisherPeerId: PEER_B },
     );
+    expect(promoteResult.promotedCount).toBe(0);
 
     const remaining = await restartedPublisher.assertionQuery(CG_ID, secondAssertion, AGENT_B);
     expect(remaining).toHaveLength(1);

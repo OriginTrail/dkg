@@ -34,7 +34,7 @@ import {
   type AssertionPublishedMeta,
   type AssertionDiscardedMeta,
 } from '../src/metadata.js';
-import { assertionLifecycleUri, contextGraphAssertionUri, MemoryLayer } from '@origintrail-official/dkg-core';
+import { assertionLifecycleUri, contextGraphAssertionUri, contextGraphSharedMemoryUri, MemoryLayer } from '@origintrail-official/dkg-core';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const DKG = 'http://dkg.io/ontology/';
@@ -750,6 +750,28 @@ describe('generateAssertionPromotedMetadata', () => {
     expect(del.find(q => q.predicate === `${DKG}state`)!.object).toBe('"created"');
     expect(insert.find(q => q.subject === LIFECYCLE_URI && q.predicate === `${DKG}memoryLayer`)!.object).toBe(`"${MemoryLayer.SharedWorkingMemory}"`);
     expect(del.find(q => q.predicate === `${DKG}memoryLayer`)!.object).toBe(`"${MemoryLayer.WorkingMemory}"`);
+  });
+
+  it('SUBSTRATE-2: re-stamps dkg:assertionGraph from the WM graph to the SWM graph on promote', () => {
+    const { insert, delete: del } = generateAssertionPromotedMetadata(meta);
+    const wmGraph = contextGraphAssertionUri(CONTEXT_GRAPH, AGENT_ADDR, ASSERTION);
+    const swmGraph = contextGraphSharedMemoryUri(CONTEXT_GRAPH);
+    // the stale WM-layer pointer is deleted
+    expect(del).toContainEqual(expect.objectContaining({
+      subject: LIFECYCLE_URI, predicate: `${DKG}assertionGraph`, object: wmGraph, graph: META_GRAPH,
+    }));
+    // the layer-correct SWM pointer is inserted
+    expect(insert).toContainEqual(expect.objectContaining({
+      subject: LIFECYCLE_URI, predicate: `${DKG}assertionGraph`, object: swmGraph, graph: META_GRAPH,
+    }));
+    // exactly one assertionGraph value is written (no duplicate/stale pointer)
+    expect(insert.filter(q => q.predicate === `${DKG}assertionGraph`)).toHaveLength(1);
+  });
+
+  it('SUBSTRATE-2: re-stamps to the sub-graph-scoped SWM graph when scoped', () => {
+    const swmScoped = contextGraphSharedMemoryUri(CONTEXT_GRAPH, 'players');
+    const { insert } = generateAssertionPromotedMetadata({ ...meta, subGraphName: 'players' });
+    expect(insert.find(q => q.predicate === `${DKG}assertionGraph`)!.object).toBe(swmScoped);
   });
 
   it('event is prov:Activity + dkg:AssertionPromoted with prov:used', () => {

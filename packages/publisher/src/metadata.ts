@@ -5,6 +5,7 @@ import {
   isSafeIri,
   assertionLifecycleUri,
   contextGraphAssertionUri,
+  contextGraphSharedMemoryUri,
   contextGraphDataUri,
   contextGraphMetaUri,
   MemoryLayer,
@@ -1367,15 +1368,24 @@ export function generateAssertionPromotedMetadata(meta: AssertionPromotedMeta): 
   const subject = assertionLifecycleUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
   const agentUri = agentDid(meta.agentAddress);
   const eventUri = `${subject}/event/${nextEventId()}`;
+  // SUBSTRATE-2: the layer-aware assertionGraph re-stamp. At create the pointer names
+  // the WM graph (metadata.ts generateAssertionCreatedMetadata); on promote it must
+  // re-point to the SWM-layer graph so the _meta index locates SWM data correctly.
+  // rc.17a: the shared bucket (contextGraphSharedMemoryUri); rc.17b flips this target
+  // to the per-KA SWM graph. Without this re-stamp the index follows a stale WM pointer.
+  const wmGraphUri = contextGraphAssertionUri(meta.contextGraphId, meta.agentAddress, meta.assertionName, meta.subGraphName);
+  const swmGraphUri = contextGraphSharedMemoryUri(meta.contextGraphId, meta.subGraphName);
 
   const del = [
     assertionStateQuad(subject, 'created', metaGraph),
     assertionLayerQuad(subject, MemoryLayer.WorkingMemory, metaGraph),
+    mq(subject, `${DKG}assertionGraph`, wmGraphUri, metaGraph),
   ];
   const ins: Quad[] = [
     // Update assertion entity (mutable fields)
     mq(subject, `${DKG}state`, lit('promoted'), metaGraph),
     mq(subject, `${DKG}memoryLayer`, lit(MemoryLayer.SharedWorkingMemory), metaGraph),
+    mq(subject, `${DKG}assertionGraph`, swmGraphUri, metaGraph),
     // Event entity (prov:Activity + DKG layer transition)
     mq(eventUri, `${RDF}type`, `${PROV}Activity`, metaGraph),
     mq(eventUri, `${RDF}type`, `${DKG}AssertionPromoted`, metaGraph),
