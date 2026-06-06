@@ -527,6 +527,23 @@ describe('imported source blob protocol', () => {
 
     requestAgent.messenger.sendToPeer = vi.fn(async () => encodeImportedSourceBlobResponse({
       version: IMPORTED_SOURCE_BLOB_WIRE_VERSION,
+      contextGraphId,
+      assertionUri,
+      blobHash,
+      offset: 0,
+      totalBytes: 100,
+      truncated: false,
+      bytesB64: Buffer.from('# Partial But Claims Complete\n').toString('base64'),
+    }));
+
+    await expect(SourceBlobMethods.prototype.fetchImportedSourceBlobFromPeer.call(
+      requestAgent as any,
+      'peer-source',
+      { contextGraphId, assertionUri, blobHash, maxBytes: 1024 },
+    )).rejects.toThrow(/inconsistent pagination metadata/);
+
+    requestAgent.messenger.sendToPeer = vi.fn(async () => encodeImportedSourceBlobResponse({
+      version: IMPORTED_SOURCE_BLOB_WIRE_VERSION,
       contextGraphId: 'other-cg',
       assertionUri,
       blobHash,

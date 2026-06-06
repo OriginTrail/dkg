@@ -68,7 +68,7 @@ export class DiscoveryClient {
     const limitClause = options.limit ? `LIMIT ${options.limit}` : '';
 
     const sparql = `
-      SELECT ?agent ?name ?peerId ?framework ?nodeRole ?relayAddress ?agentAddress WHERE {
+      SELECT ?agent ?name ?peerId ?framework ?nodeRole ?relayAddress ?agentAddress ?lastSeen WHERE {
         ?agent a <${DKG}Agent> ;
                <${SCHEMA}name> ?name ;
                <${DKG}peerId> ?peerId .${filter}
@@ -76,6 +76,7 @@ export class DiscoveryClient {
         OPTIONAL { ?agent <${DKG}nodeRole> ?nodeRole }
         OPTIONAL { ?agent <${DKG}relayAddress> ?relayAddress }
         OPTIONAL { ?agent <${DKG}agentAddress> ?agentAddress }
+        OPTIONAL { ?agent <${DKG}lastSeen> ?lastSeen }
       }
       ${limitClause}
     `;
@@ -90,6 +91,7 @@ export class DiscoveryClient {
       nodeRole: row['nodeRole'] ? stripQuotes(row['nodeRole']) : undefined,
       relayAddress: row['relayAddress'] ? stripQuotes(row['relayAddress']) : undefined,
       agentAddress: row['agentAddress'] ? stripQuotes(row['agentAddress']) : undefined,
+      lastSeen: row['lastSeen'] ? stripQuotes(row['lastSeen']) : undefined,
     }));
   }
 

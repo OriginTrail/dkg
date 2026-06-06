@@ -862,6 +862,12 @@ function importedArtifactMarkdownCacheMarkerGraph(peerId: string): string {
   return `urn:dkg:local:imported-artifact-markdown-cache:${encodeURIComponent(peerId)}`;
 }
 
+function parseAgentLastSeenMs(raw: unknown): number {
+  if (typeof raw !== 'string' || !raw.trim()) return Number.NEGATIVE_INFINITY;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+}
+
 async function resolveLegacyImportedArtifactSourcePeerId(
   ctx: RequestContext,
   assertionAgentAddress: string,
@@ -872,19 +878,25 @@ async function resolveLegacyImportedArtifactSourcePeerId(
     ? assertionAgentAddress.slice('did:dkg:agent:'.length)
     : assertionAgentAddress;
   const agents = await findAgents.call(ctx.agent).catch(() => []) as Array<Record<string, unknown>>;
+  const candidates = new Map<string, number>();
   for (const agent of agents) {
     const peerId = normalizeSourcePeerId(agent.peerId);
     if (!peerId) continue;
-    if (peerId === assertionAgentAddress || peerId === strippedAssertionAgentAddress) {
-      return peerId;
-    }
+    let matches = peerId === assertionAgentAddress || peerId === strippedAssertionAgentAddress;
     const candidateAddresses = [agent.agentAddress, agent.agentUri]
       .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
-    if (candidateAddresses.some((candidate) => isSameAgentAddress(candidate, assertionAgentAddress))) {
-      return peerId;
+    matches ||= candidateAddresses.some((candidate) => isSameAgentAddress(candidate, assertionAgentAddress));
+    if (matches) {
+      const lastSeenMs = parseAgentLastSeenMs(agent.lastSeen);
+      const existing = candidates.get(peerId);
+      if (existing === undefined || lastSeenMs > existing) {
+        candidates.set(peerId, lastSeenMs);
+      }
     }
   }
-  return undefined;
+  return [...candidates.entries()]
+    .sort(([leftPeerId, leftLastSeen], [rightPeerId, rightLastSeen]) =>
+      rightLastSeen - leftLastSeen || leftPeerId.localeCompare(rightPeerId))[0]?.[0];
 }
 
 async function hasVerifiedImportedArtifactMarkdownCache(

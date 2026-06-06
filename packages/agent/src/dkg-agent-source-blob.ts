@@ -173,10 +173,23 @@ export class SourceBlobMethods extends DKGAgentBase {
       throw new Error(`Imported source blob response exceeds requested maxBytes (${maxBytes})`);
     }
     if (bytes !== undefined) {
-      const isCompleteBlob = offset === 0 &&
-        response.truncated !== true &&
-        (typeof response.totalBytes !== 'number' || response.totalBytes === bytes.length);
-      if (isCompleteBlob && !contentHashMatchesBytes(blobHash, bytes)) {
+      const responseEnd = offset + bytes.length;
+      if (typeof response.totalBytes === 'number') {
+        if (response.totalBytes < responseEnd) {
+          throw new Error('Imported source blob response has inconsistent pagination metadata');
+        }
+        if (response.truncated === true && response.totalBytes <= responseEnd) {
+          throw new Error('Imported source blob response has inconsistent pagination metadata');
+        }
+        if (response.truncated !== true && response.totalBytes !== responseEnd) {
+          throw new Error('Imported source blob response has inconsistent pagination metadata');
+        }
+      }
+      if (typeof response.nextOffset === 'number' && response.nextOffset !== responseEnd) {
+        throw new Error('Imported source blob response has inconsistent pagination metadata');
+      }
+      const isCompleteOffsetZeroResponse = offset === 0 && response.truncated !== true;
+      if (isCompleteOffsetZeroResponse && !contentHashMatchesBytes(blobHash, bytes)) {
         throw new Error('Imported source blob response hash mismatch');
       }
     }

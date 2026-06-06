@@ -776,8 +776,15 @@ describe('import artifact daemon routes', () => {
       agents: [{
         agentUri: 'did:dkg:agent:source',
         agentAddress: 'did:dkg:agent:source',
-        name: 'Source Agent',
-        peerId: 'peer-source',
+        name: 'Source Agent Stale',
+        peerId: 'peer-source-stale',
+        lastSeen: '2026-06-05T00:00:00.000Z',
+      }, {
+        agentUri: 'did:dkg:agent:source',
+        agentAddress: 'did:dkg:agent:source',
+        name: 'Source Agent Fresh',
+        peerId: 'peer-source-fresh',
+        lastSeen: '2026-06-06T00:00:00.000Z',
       }],
       async fetchImportedSourceBlobFromPeer(remotePeerId) {
         requestedPeers.push(remotePeerId);
@@ -794,7 +801,7 @@ describe('import artifact daemon routes', () => {
 
     expect(read.status).toBe(200);
     expect(read.body.markdown).toBe('# Legacy Registry Source Peer\n');
-    expect(requestedPeers).toEqual(['peer-source']);
+    expect(requestedPeers).toEqual(['peer-source-fresh']);
     expect(queries.some((sparql) => sparql.includes('WorkspaceOperation'))).toBe(false);
   });
 
