@@ -4478,21 +4478,22 @@ export class DKGPublisher implements Publisher {
       gossipMessage = wrapped;
     }
 
-    // Rule 4: reject roots owned by a different peer before any mutations.
+    // OT-RFC-46 §17.4 / rc.17 D6 — workspaceOwner is now an ADVISORY hint, not a
+    // hard exclusivity gate: a foreign co-claim is no longer REJECTED (the Rule-4
+    // throw is removed). While SWM is still a shared bucket (pre rc.17b per-KA
+    // conversion) we SKIP foreign-owned roots so a co-claim cannot clobber the
+    // owner's quads in the shared graph; once SWM is per-KA (each peer owns its own
+    // graph) this skip is dropped entirely and overlap is fully allowed.
     const skippedRoots = new Set<string>();
     for (const root of rootEntities) {
       const owner = swmOwners.get(root);
       if (!owner) continue;
-      if (opts?.publisherPeerId) {
-        if (owner !== opts.publisherPeerId) {
-          throw new Error(
-            `Cannot promote entity <${root}>: owned by peer ${owner}, not by caller ${opts.publisherPeerId}.`,
-          );
-        }
-      } else {
-        this.log.warn(createOperationContext('share'), `Skipping entity <${root}>: owned by peer ${owner} in SWM but no publisherPeerId provided to verify ownership.`);
-        skippedRoots.add(root);
-      }
+      if (opts?.publisherPeerId && owner === opts.publisherPeerId) continue; // self-owned — proceed
+      this.log.warn(
+        createOperationContext('share'),
+        `Skipping entity <${root}>: owned by peer ${owner} in SWM (advisory ownership; co-claim not rejected). caller=${opts?.publisherPeerId ?? '(none)'}`,
+      );
+      skippedRoots.add(root);
     }
 
     // Filter out skipped roots so subsequent mutations don't touch foreign-owned data.
