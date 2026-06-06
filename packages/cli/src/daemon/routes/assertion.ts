@@ -867,30 +867,23 @@ async function canReadImportedArtifactSharedSource(
 
 async function resolveImportedArtifactSourcePeerId(
   ctx: RequestContext,
-  artifact: Pick<ImportedArtifactResolution, 'contextGraphId' | 'subGraphName' | 'assertionUri' | 'rootEntity'>,
+  artifact: Pick<ImportedArtifactResolution, 'contextGraphId' | 'subGraphName' | 'assertionUri'>,
 ): Promise<string | undefined> {
   const swmMetaGraph = contextGraphSharedMemoryMetaUri(artifact.contextGraphId, artifact.subGraphName);
-  const candidates = [
-    artifact.assertionUri,
-    artifact.rootEntity,
-  ].filter((value): value is string => Boolean(value && isSafeIri(value)));
-  for (const rootEntity of [...new Set(candidates)]) {
-    const result = await ctx.agent.store.query(`
-      SELECT ?publisherPeerId ?publishedAt WHERE {
-        GRAPH <${swmMetaGraph}> {
-          ?op <${RDF_TYPE}> <${DKG_ONTOLOGY}WorkspaceOperation> .
-          ?op <${DKG_ONTOLOGY}rootEntity> <${rootEntity}> .
-          ?op <${DKG_ONTOLOGY}publisherPeerId> ?publisherPeerId .
-          OPTIONAL { ?op <${DKG_ONTOLOGY}publishedAt> ?publishedAt }
-        }
+  if (!isSafeIri(artifact.assertionUri)) return undefined;
+  const result = await ctx.agent.store.query(`
+    SELECT ?publisherPeerId ?publishedAt WHERE {
+      GRAPH <${swmMetaGraph}> {
+        ?op <${RDF_TYPE}> <${DKG_ONTOLOGY}WorkspaceOperation> .
+        ?op <${DKG_ONTOLOGY}rootEntity> <${artifact.assertionUri}> .
+        ?op <${DKG_ONTOLOGY}publisherPeerId> ?publisherPeerId .
+        OPTIONAL { ?op <${DKG_ONTOLOGY}publishedAt> ?publishedAt }
       }
-      ORDER BY DESC(?publishedAt) DESC(STR(?op))
-      LIMIT 1
-    `) as { type?: string; bindings?: Array<Record<string, unknown>> };
-    const peerId = normalizeLiteralBinding(result.bindings?.[0]?.publisherPeerId);
-    if (peerId && peerId !== 'unknown') return peerId;
-  }
-  return undefined;
+    }
+    ORDER BY DESC(?publishedAt) DESC(STR(?op))
+    LIMIT 1
+  `) as { type?: string; bindings?: Array<Record<string, unknown>> };
+  return normalizeSourcePeerId(result.bindings?.[0]?.publisherPeerId);
 }
 
 function normalizeSourcePeerId(raw: unknown): string | undefined {
@@ -950,13 +943,6 @@ async function finalizeImportedArtifactAvailability(
       ...artifact,
       markdownAvailability: 'local',
       canFetchMarkdown: false,
-    };
-  }
-  if (!artifact.ownerGuardRelaxed) {
-    return {
-      ...artifact,
-      markdownAvailability: 'unavailable',
-      markdownUnavailableReason: 'not-local',
     };
   }
   const sourcePeerId = normalizeSourcePeerId(artifact.sourcePeerId)
@@ -1380,22 +1366,12 @@ async function resolveImportedArtifact(
   const markdownHash = authoritativeMarkdownHash;
   const markdownForm = markdownHash ? `urn:dkg:file:${markdownHash}` : undefined;
 
-  // Codex review on #872 — when the owner guard is relaxed for a
-  // public + open CG, replicated `_meta` may have a `markdownHash`
-  // even though the bytes were never replicated to this node's
-  // file-store (only the SWM/_meta triples gossip across peers; the
-  // raw file bytes don't auto-replicate). The previous
-  // `Boolean(markdownHash)` would have returned `canReadMarkdown:
-  // true` and then `/import-artifact/read-markdown` would
-  // deterministically 404. Derive presence from the local file-store
-  // when the relaxation is in effect so the flag is honest. Owner
-  // self-reads (no relaxation) keep the existing fast-path —
-  // `_meta` and bytes land together at import time on the importing
-  // node, so a `markdownHash` there really does mean readable.
+  // Replicated import metadata may have a `markdownHash` even when the
+  // raw source bytes are absent from this peer's file store. Derive local
+  // readability from the file store for both owner and non-owner reads;
+  // a known source peer can still satisfy the read through hydration.
   const markdownAvailableLocally = markdownHash
-    ? ownerGuardRelaxed
-      ? await ctx.fileStore.has(markdownHash).catch(() => false)
-      : true
+    ? await ctx.fileStore.has(markdownHash).catch(() => false)
     : false;
   const sourcePeerId = normalizeSourcePeerId(metaBinding.sourcePublisherPeerId);
 

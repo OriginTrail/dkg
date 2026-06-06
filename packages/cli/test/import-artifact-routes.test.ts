@@ -823,6 +823,109 @@ describe('import artifact daemon routes', () => {
     expect(requestedPeers).toEqual(['peer-exact']);
   });
 
+  it('does not use root-entity WorkspaceOperation rows as source peers (#872 review)', async () => {
+    const remoteBytes = Buffer.from('# Root Peer Should Not Be Used\n');
+    const markdownHash = keccakContentHash(remoteBytes);
+    const contextGraphId = 'cg-public-open-root-peer-ignored';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
+    const rootEntity = 'urn:doc:shared-root';
+    const requestedPeers: string[] = [];
+    const { agent, queries } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: markdownHash,
+      markdownHash,
+      markdownForm: `urn:dkg:file:${markdownHash}`,
+      rootEntity,
+      onChainPolicy: { accessPolicy: 0, publishPolicy: 1 },
+      sourcePeerBindings: [
+        { rootEntity, publisherPeerId: 'peer-root-latest', publishedAt: '2026-06-06T00:00:00.000Z' },
+      ],
+      async fetchImportedSourceBlobFromPeer(remotePeerId) {
+        requestedPeers.push(remotePeerId);
+        return { totalBytes: remoteBytes.length, bytes: remoteBytes };
+      },
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 1024,
+    });
+
+    expect(read.status).toBe(404);
+    expect(read.body.artifact).toMatchObject({
+      canReadMarkdown: false,
+      canFetchMarkdown: false,
+      markdownAvailability: 'unavailable',
+      markdownUnavailableReason: 'source-peer-unavailable',
+    });
+    const peerQueries = queries.filter((query) => query.includes('WorkspaceOperation') && query.includes('publisherPeerId'));
+    expect(peerQueries).toHaveLength(1);
+    expect(peerQueries[0]).toContain(`<${assertionUri}>`);
+    expect(peerQueries[0]).not.toContain(`<${rootEntity}>`);
+    expect(requestedPeers).toEqual([]);
+  });
+
+  it('hydrates missing owner Markdown bytes from durable source metadata (#872 review)', async () => {
+    const remoteBytes = Buffer.from('# Owner Remote Imported\n');
+    const markdownHash = keccakContentHash(remoteBytes);
+    const contextGraphId = 'cg-public-open-owner-remote-hydrate';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:test', assertionName);
+    const fetches: unknown[] = [];
+    const { agent } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: markdownHash,
+      markdownHash,
+      markdownForm: `urn:dkg:file:${markdownHash}`,
+      durableSourcePeerId: 'peer-source',
+      async fetchImportedSourceBlobFromPeer(remotePeerId, input) {
+        fetches.push({ remotePeerId, input });
+        return { totalBytes: remoteBytes.length, bytes: remoteBytes };
+      },
+    });
+    await startRoutes({ agent });
+
+    const resolved = await post('/api/assertion/import-artifact/resolve', {
+      contextGraphId,
+      assertionUri,
+    });
+    expect(resolved.status).toBe(200);
+    expect(resolved.body.artifact).toMatchObject({
+      canReadMarkdown: false,
+      markdownAvailability: 'fetchable',
+      canFetchMarkdown: true,
+      sourcePeerId: 'peer-source',
+    });
+    expect(resolved.body.artifact.ownerGuardRelaxed).toBeUndefined();
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 1024,
+    });
+
+    expect(read.status).toBe(200);
+    expect(read.body.markdown).toBe('# Owner Remote Imported\n');
+    expect(read.body.artifact.ownerGuardRelaxed).toBeUndefined();
+    expect(fetches).toEqual([{
+      remotePeerId: 'peer-source',
+      input: {
+        contextGraphId,
+        assertionUri,
+        blobHash: markdownHash,
+        maxBytes: 1024,
+        requestAgentAddress: 'did:dkg:agent:test',
+      },
+    }]);
+  });
+
   it('reuses verified hydrated bytes for SWM-only import metadata (#872 review)', async () => {
     const remoteBytes = Buffer.from('# Verified SWM Cache\n');
     const markdownHash = keccakContentHash(remoteBytes);
