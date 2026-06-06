@@ -359,6 +359,7 @@ export class DkgMemorySearchManager implements MemorySearchManager {
       );
     }
 
+    let firstScopedProjectError: string | undefined;
     const settled = await Promise.all(
       plans.map(plan =>
         this.deps.client
@@ -368,7 +369,7 @@ export class DkgMemorySearchManager implements MemorySearchManager {
             agentAddress,
             subGraphName: plan.subGraphName,
           })
-          .then(r => ({ plan, bindings: extractBindings(r) }))
+          .then(r => ({ plan, bindings: extractBindings(r), succeeded: true }))
           .catch(err => {
             const message = errorMessage(err);
             this.deps.logger?.warn?.(
@@ -380,10 +381,17 @@ export class DkgMemorySearchManager implements MemorySearchManager {
                 `context graph "${plan.contextGraphId}" (${plan.view}): ${message}`,
               );
             }
-            return { plan, bindings: [] as any[] };
+            if (plan.subGraphName && firstScopedProjectError === undefined) {
+              firstScopedProjectError = `context graph "${plan.contextGraphId}" (${plan.view}): ${message}`;
+            }
+            return { plan, bindings: [] as any[], succeeded: false };
           }),
       ),
     );
+
+    if (projectSubGraphName && !settled.some(s => s.succeeded) && firstScopedProjectError) {
+      throw new Error(`memory_search failed: ${firstScopedProjectError}`);
+    }
 
     // Observability: one info-level log per search call showing the
     // query, resolved project CG, layer count, and per-layer raw hit

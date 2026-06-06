@@ -1110,6 +1110,21 @@ describe('DkgMemorySearchManager', () => {
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('fetch failed'));
     });
 
+    it('surfaces generic projectSubGraphName failures when every live layer fails', async () => {
+      const warn = vi.fn();
+      vi.spyOn(client, 'query').mockRejectedValue(new Error('fetch failed'));
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'research-x' }),
+        logger: { warn },
+      });
+
+      await expect(manager.search('hello world', { projectSubGraphName: 'skills' }))
+        .rejects.toThrow(/memory_search failed:.*fetch failed/i);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('agent-context-wm search failed'));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('project-wm search failed'));
+    });
+
     it('rejects projectSubGraphName when no project CG is resolved', async () => {
       const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
       const warn = vi.fn();

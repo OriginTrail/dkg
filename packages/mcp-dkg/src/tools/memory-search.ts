@@ -322,7 +322,8 @@ LIMIT ${cap}`;
       // layers. Explicit project sub-graph scope is different; validation
       // or routing failures there are caller-visible scope errors, not
       // cache misses.
-      let settled: Array<{ plan: LayerPlan; bindings: Array<Record<string, unknown>> }>;
+      let settled: Array<{ plan: LayerPlan; bindings: Array<Record<string, unknown>>; succeeded: boolean }>;
+      let firstScopedProjectError: string | undefined;
       try {
         settled = await Promise.all(
           plans.map((plan) =>
@@ -334,7 +335,7 @@ LIMIT ${cap}`;
                 agentAddress,
                 subGraphName: plan.subGraphName,
               })
-              .then((r) => ({ plan, bindings: r.bindings ?? [] }))
+              .then((r) => ({ plan, bindings: r.bindings ?? [], succeeded: true }))
               .catch((err) => {
                 const message = formatError(err);
                 process.stderr.write(
@@ -346,12 +347,18 @@ LIMIT ${cap}`;
                     `project "${plan.contextGraphId}" (${plan.view}): ${message}`,
                   );
                 }
-                return { plan, bindings: [] as Array<Record<string, unknown>> };
+                if (plan.subGraphName && firstScopedProjectError === undefined) {
+                  firstScopedProjectError = `project "${plan.contextGraphId}" (${plan.view}): ${message}`;
+                }
+                return { plan, bindings: [] as Array<Record<string, unknown>>, succeeded: false };
               }),
           ),
         );
       } catch (err) {
         return errResult(formatError(err));
+      }
+      if (projectSubGraphName && !settled.some((s) => s.succeeded) && firstScopedProjectError) {
+        return errResult(`memory_search failed: ${firstScopedProjectError}`);
       }
 
       // Dedup by (contextGraphId, uri-or-text-hash). Keep the highest-

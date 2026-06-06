@@ -165,6 +165,25 @@ describe('dkg_memory_search — multi-layer fan-out + trust-tier dedup', () => {
     expect(result.content[0].text).toMatch(/agent-context/);
   });
 
+  it('returns a tool error for generic project-scoped subGraphName failures when every layer fails', async () => {
+    const localServer = new FakeServer();
+    const localClient = new FakeClient({
+      query: async () => {
+        throw new Error('fetch failed');
+      },
+    });
+    registerMemorySearchTool(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig({ defaultProject: null }));
+
+    const result = await localServer.call('dkg_memory_search', {
+      query: 'tree-sitter parsers',
+      projectId: 'proj-x',
+      subGraphName: 'imports',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/memory_search failed:.*fetch failed/i);
+  });
+
   it('applies subGraphName to the pinned default project when projectId is omitted', async () => {
     const localServer = new FakeServer();
     const localClient = new FakeClient();
