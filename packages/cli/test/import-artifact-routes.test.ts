@@ -1080,6 +1080,60 @@ describe('import artifact daemon routes', () => {
     });
   });
 
+  it('hydrates SWM-only imports without durable source metadata using the source agent registry entry (#872 review)', async () => {
+    const remoteBytes = Buffer.from('# SWM Registry Source Peer\n');
+    const markdownHash = keccakContentHash(remoteBytes);
+    const contextGraphId = 'cg-public-open-swm-registry-source-peer';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
+    const requestedPeers: string[] = [];
+    const { agent, queries } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: markdownHash,
+      markdownHash,
+      markdownForm: `urn:dkg:file:${markdownHash}`,
+      omitImportMeta: true,
+      onChainPolicy: { accessPolicy: 0, publishPolicy: 1 },
+      agents: [{
+        agentUri: 'did:dkg:agent:source',
+        agentAddress: 'did:dkg:agent:source',
+        name: 'Source Agent Stale',
+        peerId: 'peer-source-stale',
+        lastSeen: '2026-06-05T00:00:00.000Z',
+      }, {
+        agentUri: 'did:dkg:agent:source',
+        agentAddress: 'did:dkg:agent:source',
+        name: 'Source Agent Fresh',
+        peerId: 'peer-source-fresh',
+        lastSeen: '2026-06-06T00:00:00.000Z',
+      }],
+      async fetchImportedSourceBlobFromPeer(remotePeerId) {
+        requestedPeers.push(remotePeerId);
+        return { totalBytes: remoteBytes.length, bytes: remoteBytes };
+      },
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 1024,
+    });
+
+    expect(read.status).toBe(200);
+    expect(read.body.markdown).toBe('# SWM Registry Source Peer\n');
+    expect(read.body.artifact).toMatchObject({
+      sourcePeerId: 'peer-source-fresh',
+      canReadMarkdown: true,
+      markdownAvailability: 'local',
+      canFetchMarkdown: false,
+    });
+    expect(requestedPeers).toEqual(['peer-source-fresh']);
+    expect(queries.some((sparql) => sparql.includes('WorkspaceOperation'))).toBe(false);
+  });
+
   it('keeps owner guard for curated non-owner reads even when the local node can read the CG (#872 review)', async () => {
     const remoteBytes = Buffer.from('# Curated Shared Imported\n');
     const markdownHash = keccakContentHash(remoteBytes);

@@ -1125,6 +1125,8 @@ async function resolveImportedArtifactFromSharedMemory(
         }).catch(() => false)
       : await ctx.fileStore.has(markdownHash).catch(() => false)
     : false;
+  const sourcePeerId = await resolveLegacyImportedArtifactSourcePeerId(ctx, args.assertionAgentAddress)
+    .catch(() => undefined);
 
   return finalizeImportedArtifactAvailability(ctx, {
     contextGraphId: args.contextGraphId,
@@ -1142,6 +1144,7 @@ async function resolveImportedArtifactFromSharedMemory(
     ...(markdownHash && markdownHash !== sourceFileHash ? { mdIntermediateHash: markdownHash } : {}),
     ...(markdownForm ? { markdownForm } : {}),
     ...(markdownHash ? { markdownHash } : {}),
+    ...(sourcePeerId ? { sourcePeerId } : {}),
     canReadMarkdown: markdownAvailableLocally,
     ...(args.ownerGuardRelaxed ? { ownerGuardRelaxed: true } : {}),
   });

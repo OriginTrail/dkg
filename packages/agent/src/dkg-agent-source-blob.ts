@@ -256,6 +256,7 @@ export class SourceBlobMethods extends DKGAgentBase {
       : undefined;
     const claimedAgent = localClaim ? this.localAgents.get(localClaim) : undefined;
     const canonicalBlobHash = normalizeImportedSourceBlobHash(blobHash);
+    const useAgentKeySigner = !!claimedAgent?.privateKey;
     return buildSyncRequestEnvelope({
       contextGraphId,
       offset,
@@ -267,7 +268,9 @@ export class SourceBlobMethods extends DKGAgentBase {
       needsAuth,
       computeSyncDigest: this.computeSyncDigest.bind(this),
       getIdentityId: () => this.chain.getIdentityId(),
-      signMessage: typeof this.chain.signMessage === 'function' ? this.chain.signMessage.bind(this.chain) : undefined,
+      signMessage: !useAgentKeySigner && typeof this.chain.signMessage === 'function'
+        ? this.chain.signMessage.bind(this.chain)
+        : undefined,
       claimedAgentAddress: localClaim ?? claimedAgentAddress,
       claimedAgentPrivateKey: claimedAgent?.privateKey,
       authPurpose: IMPORTED_SOURCE_BLOB_AUTH_PURPOSE,

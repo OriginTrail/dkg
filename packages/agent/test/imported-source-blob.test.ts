@@ -344,6 +344,91 @@ describe('imported source blob protocol', () => {
     expect(responder._spies.stat).not.toHaveBeenCalled();
   });
 
+  it('builds source blob auth with the local agent key when one matches the request agent', async () => {
+    const bytes = Buffer.from('# Agent Key Owner Claim\n');
+    const blobHash = hash(bytes);
+    const contextGraphId = 'cg-source-blob-agent-key-owner';
+    const agentWallet = new ethers.Wallet(`0x${'22'.repeat(32)}`);
+    const identityWallet = new ethers.Wallet(`0x${'33'.repeat(32)}`);
+    const requestAgentAddress = `did:dkg:agent:${agentWallet.address}`;
+    const assertionUri = `did:dkg:context-graph:${contextGraphId}/assertion/${requestAgentAddress}/imported-md`;
+    const signMessage = vi.fn(async (digest: Uint8Array) => {
+      const sig = ethers.Signature.from(await identityWallet.signMessage(digest));
+      return {
+        r: ethers.getBytes(sig.r),
+        vs: ethers.getBytes(sig.yParityAndS),
+      };
+    });
+    const requester = {
+      peerId: REQUESTER_PEER_ID,
+      chain: {
+        getIdentityId: vi.fn(async () => 101n),
+        signMessage,
+      },
+      localAgents: new Map([[agentWallet.address, {
+        agentAddress: agentWallet.address,
+        mode: 'custodial',
+        privateKey: agentWallet.privateKey,
+      }]]),
+      findLocalAgentForContextGraph: vi.fn(async () => undefined),
+      resolveLocalAgentAddress: vi.fn(() => agentWallet.address),
+      computeSyncDigest: ContextGraphResolveMethods.prototype.computeSyncDigest,
+    };
+
+    const auth = await SourceBlobMethods.prototype.buildImportedSourceBlobAuthEnvelope.call(
+      requester as any,
+      contextGraphId,
+      RESPONDER_PEER_ID,
+      0,
+      1024,
+      assertionUri,
+      blobHash,
+      requestAgentAddress,
+    );
+    const request = JSON.parse(new TextDecoder().decode(auth)) as SyncRequestEnvelope;
+    const digest = ContextGraphResolveMethods.prototype.computeSyncDigest.call(
+      {},
+      request.contextGraphId,
+      request.offset,
+      request.limit,
+      request.includeSharedMemory,
+      request.targetPeerId!,
+      request.requesterPeerId!,
+      request.requestId!,
+      request.issuedAtMs!,
+      request.requesterAgentAddress,
+      request.authPurpose,
+      request.authSelector,
+    );
+    const recovered = ethers.recoverAddress(ethers.hashMessage(digest), {
+      r: request.requesterSignatureR!,
+      yParityAndS: request.requesterSignatureVS!,
+    });
+
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(request.requesterIdentityId).toBe('0');
+    expect(request.requesterAgentAddress).toBe(agentWallet.address);
+    expect(recovered.toLowerCase()).toBe(agentWallet.address.toLowerCase());
+    expect(recovered.toLowerCase()).not.toBe(identityWallet.address.toLowerCase());
+
+    const responder = fakeResponder({
+      blobHash,
+      bytes,
+      policy: { accessPolicy: 1, publishPolicy: 1 },
+    });
+    const responseBytes = await SourceBlobMethods.prototype.handleGetImportedSourceBlob.call(
+      responder as any,
+      sourceBlobRequest({ contextGraphId, assertionUri, blobHash, auth }),
+      REQUESTER_PEER_ID,
+    );
+    const response = decodeImportedSourceBlobResponse(responseBytes);
+
+    expect(response.denied).toBeUndefined();
+    expect(response.totalBytes).toBe(bytes.length);
+    expect(responder.getPrivateContextGraphParticipants).not.toHaveBeenCalled();
+    expect(responder._spies.readRange).toHaveBeenCalledWith(blobHash, 0, bytes.length);
+  });
+
   it('uses root import metadata when a source blob request includes subGraphName', async () => {
     const bytes = Buffer.from('# Subgraph Markdown\n');
     const blobHash = hash(bytes);
