@@ -586,7 +586,7 @@ export async function importFile(
   if (opts?.ontologyRef) form.append('ontologyRef', opts.ontologyRef);
   if (opts?.subGraphName) form.append('subGraphName', opts.subGraphName);
 
-  const res = await fetch(`${BASE}/api/assertion/${encodeURIComponent(assertionName)}/import-file`, {
+  const res = await fetch(`${BASE}/api/knowledge-assets/${encodeURIComponent(assertionName)}/wm/import-file`, {
     method: 'POST',
     headers: authHeaders(),
     body: form,
@@ -689,7 +689,7 @@ export async function fetchAssertionUals(contextGraphId: string): Promise<Record
 export const publishTriples = async (contextGraphId: string, quads: any[]) => {
   const assertionName = `ui-publish-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const created = await post<{ assertionUri: string; seal?: Record<string, unknown> }>(
-    '/api/assertion/create',
+    '/api/knowledge-assets',
     {
       contextGraphId,
       name: assertionName,
@@ -1273,7 +1273,7 @@ export const promoteAssertion = (
   subGraphName?: string,
 ) =>
   post<{ promotedCount: number }>(
-    `/api/assertion/${encodeURIComponent(assertionName)}/promote`,
+    `/api/knowledge-assets/${encodeURIComponent(assertionName)}/swm/share`,
     { contextGraphId, entities, ...(subGraphName ? { subGraphName } : {}) },
   );
 
@@ -1366,7 +1366,7 @@ export const fetchExtractionStatus = (
   const params = new URLSearchParams({ contextGraphId });
   if (subGraphName) params.set('subGraphName', subGraphName);
   return get<ExtractionStatus>(
-    `/api/assertion/${encodeURIComponent(assertionName)}/extraction-status?${params}`,
+    `/api/knowledge-assets/${encodeURIComponent(assertionName)}/wm/extraction-status?${params}`,
   );
 };
 
