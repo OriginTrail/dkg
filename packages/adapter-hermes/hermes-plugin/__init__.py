@@ -1469,18 +1469,37 @@ class DKGMemoryProvider(MemoryProvider):
             ):
                 if view == "working-memory" and not agent_address:
                     continue
+                scoped_project_layer = bool(
+                    project_sub_graph_name
+                    and cg == project_context_graph
+                    and cg != "agent-context"
+                )
                 query_kwargs = {
                     "view": view,
                     "agent_address": agent_address if view == "working-memory" else None,
                 }
-                if project_sub_graph_name and cg == project_context_graph and cg != "agent-context":
+                if scoped_project_layer:
                     query_kwargs["sub_graph_name"] = project_sub_graph_name
-                result = self._client.query(
-                    sparql,
-                    cg,
-                    **query_kwargs,
-                )
+                try:
+                    result = self._client.query(
+                        sparql,
+                        cg,
+                        **query_kwargs,
+                    )
+                except Exception as e:
+                    if scoped_project_layer:
+                        return tool_error(
+                            f'memory_search sub_graph_name "{project_sub_graph_name}" failed for '
+                            f'context_graph_id "{cg}" ({view}): {e}'
+                        )
+                    raise
                 if _client_result_failed(result):
+                    if scoped_project_layer:
+                        detail = result.get("error") if isinstance(result, dict) else "query failed"
+                        return tool_error(
+                            f'memory_search sub_graph_name "{project_sub_graph_name}" failed for '
+                            f'context_graph_id "{cg}" ({view}): {detail}'
+                        )
                     continue
                 successful_queries += 1
                 for binding in _extract_query_bindings(result):

@@ -3141,12 +3141,15 @@ spec.loader.exec_module(module)
 class FakeClient:
     def __init__(self):
         self.calls = []
+        self.fail_scoped_project = False
 
     def _resolve_agent_address(self):
         return "0xAgent"
 
     def query(self, sparql, context_graph_id, **kwargs):
         self.calls.append((context_graph_id, kwargs))
+        if self.fail_scoped_project and kwargs.get("sub_graph_name"):
+            return {"error": "Unknown sub-graph: skills"}
         return {
             "result": {
                 "bindings": [{
@@ -3205,6 +3208,23 @@ assert provider._client.calls == [
     ("project-cg", {"view": "shared-working-memory", "agent_address": None, "sub_graph_name": "skills"}),
     ("project-cg", {"view": "verified-memory", "agent_address": None, "sub_graph_name": "skills"}),
 ], provider._client.calls
+
+provider._client.calls = []
+provider._client.fail_scoped_project = True
+failed_scoped = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "limit": 10,
+    "sub_graph_name": "skills",
+}))
+assert "sub_graph_name" in failed_scoped["error"], failed_scoped
+assert "Unknown sub-graph: skills" in failed_scoped["error"], failed_scoped
+assert provider._client.calls == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+    ("project-cg", {"view": "working-memory", "agent_address": "0xAgent", "sub_graph_name": "skills"}),
+], provider._client.calls
+provider._client.fail_scoped_project = False
 
 provider._context_graph = "agent-context"
 missing_project = json.loads(provider.handle_tool_call("memory_search", {

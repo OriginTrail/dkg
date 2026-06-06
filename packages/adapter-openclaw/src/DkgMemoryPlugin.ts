@@ -281,9 +281,12 @@ export class DkgMemorySearchManager implements MemorySearchManager {
     // there is no inherent trust advantage of agent-context over
     // project-scoped memories at the same view tier.
     //
-    // Per-query `.catch → []` preserves partial-success semantics:
+    // Per-query `.catch -> []` preserves partial-success semantics:
     // one failing (cg, view) pair emits exactly one warn and the
-    // surviving layers continue to contribute results.
+    // surviving layers continue to contribute results. The exception is
+    // explicit project sub-graph scope: if the caller supplied
+    // `projectSubGraphName`, daemon validation/routing failures must
+    // surface as caller errors rather than looking like "no memories".
     interface LayerPlan {
       layer: MemoryLayer;
       source: MemorySource;
@@ -362,9 +365,16 @@ export class DkgMemorySearchManager implements MemorySearchManager {
           })
           .then(r => ({ plan, bindings: extractBindings(r) }))
           .catch(err => {
+            const message = errorMessage(err);
             this.deps.logger?.warn?.(
-              `[dkg-memory] ${plan.layer} search failed (cg=${plan.contextGraphId}, view=${plan.view}): ${errorMessage(err)}`,
+              `[dkg-memory] ${plan.layer} search failed (cg=${plan.contextGraphId}, view=${plan.view}): ${message}`,
             );
+            if (plan.subGraphName) {
+              throw new Error(
+                `memory_search sub_graph_name "${plan.subGraphName}" failed for ` +
+                `context graph "${plan.contextGraphId}" (${plan.view}): ${message}`,
+              );
+            }
             return { plan, bindings: [] as any[] };
           }),
       ),

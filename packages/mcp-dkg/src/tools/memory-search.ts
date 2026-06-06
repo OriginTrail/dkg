@@ -284,29 +284,42 @@ LIMIT ${cap}`;
       }
       const searchedLayers: MemoryLayer[] = plans.map((p) => p.layer);
 
-      // Per-layer fan-out. A single layer's failure must NOT propagate —
-      // surface the error to stderr (callers tail daemon logs anyway) and
-      // continue with the surviving layers. Mirrors the partial-success
-      // semantics in `DkgMemoryPlugin.ts:336-352`.
-      const settled = await Promise.all(
-        plans.map((plan) =>
-          client
-            .query({
-              sparql,
-              contextGraphId: plan.contextGraphId,
-              view: plan.view,
-              agentAddress,
-              subGraphName: plan.subGraphName,
-            })
-            .then((r) => ({ plan, bindings: r.bindings ?? [] }))
-            .catch((err) => {
-              process.stderr.write(
-                `[dkg-mcp] memory-search ${plan.layer} failed (cg=${plan.contextGraphId}, view=${plan.view}): ${formatError(err)}\n`,
-              );
-              return { plan, bindings: [] as Array<Record<string, unknown>> };
-            }),
-        ),
-      );
+      // Per-layer fan-out. A single unscoped layer's failure must NOT
+      // propagate: surface the error to stderr and continue with surviving
+      // layers. Explicit project sub-graph scope is different; validation
+      // or routing failures there are caller-visible scope errors, not
+      // cache misses.
+      let settled: Array<{ plan: LayerPlan; bindings: Array<Record<string, unknown>> }>;
+      try {
+        settled = await Promise.all(
+          plans.map((plan) =>
+            client
+              .query({
+                sparql,
+                contextGraphId: plan.contextGraphId,
+                view: plan.view,
+                agentAddress,
+                subGraphName: plan.subGraphName,
+              })
+              .then((r) => ({ plan, bindings: r.bindings ?? [] }))
+              .catch((err) => {
+                const message = formatError(err);
+                process.stderr.write(
+                  `[dkg-mcp] memory-search ${plan.layer} failed (cg=${plan.contextGraphId}, view=${plan.view}): ${message}\n`,
+                );
+                if (plan.subGraphName) {
+                  throw new Error(
+                    `memory_search subGraphName "${plan.subGraphName}" failed for ` +
+                    `project "${plan.contextGraphId}" (${plan.view}): ${message}`,
+                  );
+                }
+                return { plan, bindings: [] as Array<Record<string, unknown>> };
+              }),
+          ),
+        );
+      } catch (err) {
+        return errResult(formatError(err));
+      }
 
       // Dedup by (contextGraphId, uri-or-text-hash). Keep the highest-
       // trust hit; tie-break on raw score. Source: `DkgMemoryPlugin.ts:381-433`.

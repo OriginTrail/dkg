@@ -121,6 +121,29 @@ describe('memory_search tool', () => {
     expect(client.query).not.toHaveBeenCalled();
   });
 
+  it('returns a clear error when a project-scoped sub_graph_name query fails', async () => {
+    const tool = tools.find((t) => t.name === 'memory_search')!;
+    const client = (plugin as any).client;
+    client.query = vi.fn().mockImplementation(async (_sparql: string, opts: any) => {
+      if (opts?.subGraphName) {
+        throw new Error('Unknown sub-graph: imports');
+      }
+      return { result: { bindings: [] } };
+    });
+    (plugin as any).memorySessionResolver.getSession = () => ({
+      agentAddress: '12D3KooWReady',
+      projectContextGraphId: 'project-cg',
+    });
+
+    const result = await tool.execute('t-subgraph-query-fail', {
+      query: 'project memories',
+      sub_graph_name: 'imports',
+    });
+
+    const error = (result as any).details?.error ?? '';
+    expect(error).toMatch(/sub_graph_name "imports".*Unknown sub-graph: imports/i);
+  });
+
   it('returns "not ready" error when the resolver has no agent identity yet (R7.6 / T51)', async () => {
     const tool = tools.find((t) => t.name === 'memory_search')!;
     // Force resolver to surface no agent address (neither session-bound nor default).

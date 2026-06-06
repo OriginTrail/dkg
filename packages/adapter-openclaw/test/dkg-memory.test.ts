@@ -1046,6 +1046,26 @@ describe('DkgMemorySearchManager', () => {
       expect(projectOpts.every(o => o.subGraphName === 'skills')).toBe(true);
     });
 
+    it('surfaces projectSubGraphName query failures instead of returning no hits', async () => {
+      const warn = vi.fn();
+      const querySpy = vi.spyOn(client, 'query').mockImplementation(async (_sparql, opts) => {
+        if (opts?.subGraphName) {
+          throw new Error('Unknown sub-graph: skills');
+        }
+        return { result: { bindings: [] } };
+      });
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'research-x' }),
+        logger: { warn },
+      });
+
+      await expect(manager.search('hello world', { projectSubGraphName: 'skills' }))
+        .rejects.toThrow(/sub_graph_name "skills".*Unknown sub-graph: skills/i);
+      expect(querySpy).toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('project-wm search failed'));
+    });
+
     it('rejects projectSubGraphName when no project CG is resolved', async () => {
       const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
       const warn = vi.fn();
