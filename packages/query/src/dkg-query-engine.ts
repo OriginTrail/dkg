@@ -5,7 +5,7 @@ import {
   contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiedMemoryUri, contextGraphAssertionUri,
   contextGraphSubGraphUri, contextGraphMetaUri, contextGraphSharedMemoryMetaUri,
   contextGraphSubGraphMetaUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri,
-  assertSafeIri, escapeSparqlLiteral, validateSubGraphName,
+  assertSafeIri, escapeSparqlLiteral, validateSubGraphName, validateAssertionName,
   type GetView,
   REMOVED_VIEWS,
   TrustLevel,
@@ -203,8 +203,17 @@ export class DKGQueryEngine implements QueryEngine {
       if (!v.valid) throw new Error(`Invalid sub-graph name for query: ${v.reason}`);
     }
 
-    if (options?.assertionName && options.view !== 'working-memory') {
-      throw new Error('assertionName is only supported for view "working-memory" queries');
+    if (options?.assertionName !== undefined) {
+      if (typeof options.assertionName !== 'string') {
+        throw new Error(`Invalid assertionName for query: expected a string, got ${typeof options.assertionName}`);
+      }
+      const assertionValidation = validateAssertionName(options.assertionName);
+      if (!assertionValidation.valid) {
+        throw new Error(`Invalid assertionName for query: ${assertionValidation.reason}`);
+      }
+      if (options.view !== 'working-memory') {
+        throw new Error('assertionName is only supported for view "working-memory" queries');
+      }
     }
 
     if (effectiveContextGraphId && !options?.view) {

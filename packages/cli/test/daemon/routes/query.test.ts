@@ -271,6 +271,37 @@ describe('handleQueryRoutes /api/query', () => {
     expect(agent.query).not.toHaveBeenCalled();
   });
 
+  it('rejects present non-string subGraphName before calling the agent', async () => {
+    const caller = '0x1111111111111111111111111111111111111111';
+    const agent = {
+      resolveAgentByToken: vi.fn().mockReturnValue(caller),
+      query: vi.fn().mockResolvedValue({ bindings: [] }),
+      getDefaultAgentAddress: vi.fn().mockReturnValue(caller),
+      peerId: '12D3KooWself',
+    };
+    const { ctx, res } = makeCtx(
+      agent,
+      {
+        sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 1',
+        contextGraphId: 'research',
+        view: 'verified-memory',
+        subGraphName: 42,
+      },
+      makeRes(),
+      {
+        requestToken: 'agent-token',
+        requestAgentAddress: caller,
+        validTokens: ['agent-token'],
+      },
+    );
+
+    await handleQueryRoutes(ctx);
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/subGraphName/);
+    expect(agent.query).not.toHaveBeenCalled();
+  });
+
   it('forwards view, subGraphName, and assertionName to the agent query route', async () => {
     const caller = '0x2222222222222222222222222222222222222222';
     const agent = {

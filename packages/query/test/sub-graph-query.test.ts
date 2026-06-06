@@ -176,6 +176,19 @@ describe('sub-graph query scoping', () => {
     )).rejects.toThrow(/assertionName.*working-memory/);
   });
 
+  it('rejects invalid assertionName before building assertion graph URIs', async () => {
+    await expect(engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      {
+        contextGraphId: CG_ID,
+        view: 'working-memory',
+        agentAddress: AGENT,
+        subGraphName: 'code',
+        assertionName: 'probe/sibling',
+      },
+    )).rejects.toThrow(/Invalid assertionName.*cannot contain "\/"/);
+  });
+
   it('constrains GRAPH patterns to the selected sub-graph WM assertion', async () => {
     const result = await engine.query(
       `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${VIEW_NAME}> ?name } }`,

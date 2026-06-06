@@ -469,6 +469,18 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         });
       }
     }
+    if (subGraphName !== undefined) {
+      if (typeof subGraphName !== 'string') {
+        return jsonResponse(res, 400, { error: 'subGraphName must be a string when provided' });
+      }
+      if (!subGraphName.trim()) {
+        return jsonResponse(res, 400, { error: 'subGraphName must be a non-empty string when provided' });
+      }
+      const subGraphValidation = validateSubGraphName(subGraphName);
+      if (!subGraphValidation.valid) {
+        return jsonResponse(res, 400, { error: `Invalid subGraphName: ${subGraphValidation.reason}` });
+      }
+    }
     // PR #239 Codex iter-7: gate minTrust normalization/validation behind
     // view === 'verified-memory'. Upstream `resolveViewGraphs()` already
     // ignores `minTrust` outside VM, so the HTTP layer must match that —
