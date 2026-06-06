@@ -972,7 +972,7 @@ describe('import artifact daemon routes', () => {
     expect(requestedPeers).toEqual(['peer-source']);
   });
 
-  it('allows curated allowlisted non-owner reads and hydrates Markdown bytes (#872)', async () => {
+  it('keeps owner guard for curated non-owner reads even when the local node can read the CG (#872 review)', async () => {
     const remoteBytes = Buffer.from('# Curated Shared Imported\n');
     const markdownHash = keccakContentHash(remoteBytes);
     const contextGraphId = 'cg-curated-allowlisted-hydrate';
@@ -988,10 +988,8 @@ describe('import artifact daemon routes', () => {
       onChainPolicy: { accessPolicy: 1, publishPolicy: 0 },
       canReadContextGraph: true,
       sourcePeerId: 'peer-curator',
-      async fetchImportedSourceBlobFromPeer(remotePeerId, input) {
-        expect(remotePeerId).toBe('peer-curator');
-        expect(input.blobHash).toBe(markdownHash);
-        return { totalBytes: remoteBytes.length, bytes: remoteBytes };
+      async fetchImportedSourceBlobFromPeer() {
+        throw new Error('must not fetch for curated non-owner caller');
       },
     });
     await startRoutes({ agent });
@@ -1002,13 +1000,8 @@ describe('import artifact daemon routes', () => {
       maxBytes: 2048,
     });
 
-    expect(read.status).toBe(200);
-    expect(read.body.markdown).toBe('# Curated Shared Imported\n');
-    expect(read.body.artifact).toMatchObject({
-      assertionAgentAddress: 'did:dkg:agent:source',
-      ownerGuardRelaxed: true,
-      markdownAvailability: 'local',
-    });
+    expect(read.status).toBe(403);
+    expect(read.body.error).toMatch(/owned by the requesting agent/);
   });
 
   it('keeps metadata and Markdown bytes hidden for curated non-allowed callers (#872)', async () => {
@@ -1255,6 +1248,43 @@ describe('import artifact daemon routes', () => {
     expect(read.body.error).toMatch(/not replicated locally/);
     expect(read.body.error).not.toMatch(/owned by the requesting agent/);
     expect(read.body.artifact.ownerGuardRelaxed).toBe(true);
+  });
+
+  it('reads owner local bytes from SWM-only import metadata without a hydration marker (#872 review)', async () => {
+    const entry = await fileStore.put(Buffer.from('# Owner SWM Local\n'), 'text/markdown');
+    const contextGraphId = 'cg-public-open-owner-swm-local';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:test', assertionName);
+    const { agent, insertedQuads } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: entry.keccak256,
+      markdownHash: entry.keccak256,
+      markdownForm: `urn:dkg:file:${entry.keccak256}`,
+      omitImportMeta: true,
+      onChainPolicy: { accessPolicy: 0, publishPolicy: 1 },
+      async fetchImportedSourceBlobFromPeer() {
+        throw new Error('must not self-fetch local owner bytes');
+      },
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 1024,
+    });
+
+    expect(read.status).toBe(200);
+    expect(read.body.markdown).toBe('# Owner SWM Local\n');
+    expect(read.body.artifact).toMatchObject({
+      canReadMarkdown: true,
+      markdownAvailability: 'local',
+      canFetchMarkdown: false,
+    });
+    expect(read.body.artifact.ownerGuardRelaxed).toBeUndefined();
+    expect(insertedQuads.some((quad) => quad.predicate === `${DKG}cachedMarkdownHash`)).toBe(false);
   });
 
   it('does not read locally cached bytes from SWM-only import metadata (#872 security review)', async () => {

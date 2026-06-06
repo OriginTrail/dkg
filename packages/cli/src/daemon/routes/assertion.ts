@@ -831,14 +831,9 @@ function assertImportedArtifactOwnerAddress(
  */
 async function canReadImportedArtifactSharedSource(
   agent: {
-    canReadContextGraph?: (
-      id: string,
-      opts?: { callerAgentAddress?: string; allowSubscriptionFallback?: boolean; forcePrivatePolicy?: boolean },
-    ) => Promise<boolean>;
     getContextGraphOnChainPolicy?: (id: string) => Promise<{ accessPolicy?: number; publishPolicy?: number }>;
   },
   contextGraphId: string,
-  requestAgentAddress: string,
 ): Promise<boolean> {
   let policy: { accessPolicy?: number; publishPolicy?: number };
   try {
@@ -851,18 +846,7 @@ async function canReadImportedArtifactSharedSource(
   if (policy.accessPolicy === 0) {
     return policy.publishPolicy === 1;
   }
-  if (policy.accessPolicy !== 1 || typeof agent.canReadContextGraph !== 'function') {
-    return false;
-  }
-  try {
-    return await agent.canReadContextGraph(contextGraphId, {
-      callerAgentAddress: requestAgentAddress,
-      allowSubscriptionFallback: false,
-      forcePrivatePolicy: true,
-    });
-  } catch {
-    return false;
-  }
+  return false;
 }
 
 async function resolveImportedArtifactSourcePeerId(
@@ -1095,15 +1079,17 @@ async function resolveImportedArtifactFromSharedMemory(
     ?? (sourceContentType === 'text/markdown' ? sourceFileHash : undefined);
   const markdownForm = markdownHash ? `urn:dkg:file:${markdownHash}` : undefined;
   // SWM triples are replicated graph content, not durable import provenance.
-  // Use them to discover the origin peer and requested hash, but never as
-  // authority to read a local file-store blob directly; the origin peer must
-  // prove the blob against its durable import `_meta` before bytes are served.
+  // Non-owner reads require a marker from prior verified hydration before
+  // reusing local bytes. Owner reads may use the local file store directly:
+  // those bytes are the source node's own imported artifact cache.
   const markdownAvailableLocally = markdownHash
-    ? await hasVerifiedImportedArtifactMarkdownCache(ctx, {
-        contextGraphId: args.contextGraphId,
-        assertionUri: args.assertionUri,
-        markdownHash,
-      }).catch(() => false)
+    ? args.ownerGuardRelaxed
+      ? await hasVerifiedImportedArtifactMarkdownCache(ctx, {
+          contextGraphId: args.contextGraphId,
+          assertionUri: args.assertionUri,
+          markdownHash,
+        }).catch(() => false)
+      : await ctx.fileStore.has(markdownHash).catch(() => false)
     : false;
 
   return finalizeImportedArtifactAvailability(ctx, {
@@ -1198,7 +1184,7 @@ async function resolveImportedArtifact(
   // never relaxes). Skip it there to keep the diff scoped and avoid
   // adding chain-cache reads to a code path that doesn't need them.
   const canReadSharedSource = canRelaxGuard
-    ? await canReadImportedArtifactSharedSource(ctx.agent, contextGraphId, ownerGuard?.requestAgentAddress ?? '')
+    ? await canReadImportedArtifactSharedSource(ctx.agent, contextGraphId)
     : false;
   const parsedAssertion = parseImportedAssertionUri(
     inputAssertionUri,
@@ -1299,7 +1285,7 @@ async function resolveImportedArtifact(
   `) as { type?: string; bindings?: Array<Record<string, unknown>> };
   const metaBinding = metaResult.bindings?.[0];
   if (!metaBinding) {
-    if (ownerGuardRelaxed) {
+    if (canRelaxGuard && !parsedAssertion.legacy) {
       const swmArtifact = await resolveImportedArtifactFromSharedMemory(ctx, {
         contextGraphId,
         assertionUri,
