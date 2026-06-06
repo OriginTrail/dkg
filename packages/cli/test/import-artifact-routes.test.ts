@@ -20,6 +20,10 @@ function keccakContentHash(bytes: Buffer): string {
   return `keccak256:${ethers.keccak256(bytes).replace(/^0x/, '')}`;
 }
 
+function localMarkdownCacheGraph(peerId: string): string {
+  return `urn:dkg:local:imported-artifact-markdown-cache:${encodeURIComponent(peerId)}`;
+}
+
 type Quad = { subject: string; predicate: string; object: string };
 
 describe('import artifact daemon routes', () => {
@@ -132,6 +136,7 @@ describe('import artifact daemon routes', () => {
     durableSourcePeerId?: string;
     sourcePeerId?: string;
     sourcePeerBindings?: Array<Record<string, string>>;
+    agents?: Array<Record<string, string>>;
     fetchImportedSourceBlobFromPeer?: (
       remotePeerId: string,
       input: {
@@ -181,6 +186,9 @@ describe('import artifact daemon routes', () => {
     ];
     const agent: Record<string, unknown> = {
       peerId: 'peer-local',
+      async findAgents() {
+        return args.agents ?? [];
+      },
       async listContextGraphs() {
         return [{
           id: args.contextGraphId,
@@ -265,9 +273,10 @@ describe('import artifact daemon routes', () => {
             return { type: 'bindings', bindings: [] };
           }
           if (sparql.includes('SELECT ?cachedMarkdownHash')) {
-            expect(sparql).toContain(`<${contextGraphMetaUri(args.contextGraphId)}>`);
+            expect(sparql).toContain(`<${localMarkdownCacheGraph('peer-local')}>`);
             const cached = insertedQuads.find((quad) =>
               quad.predicate === `${DKG}cachedMarkdownHash` &&
+              (quad.graph ? sparql.includes(`<${quad.graph}>`) : true) &&
               sparql.includes(`<${quad.subject}>`));
             return {
               type: 'bindings',
@@ -651,7 +660,7 @@ describe('import artifact daemon routes', () => {
     const assertionName = 'imported-md';
     const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
     const fetches: unknown[] = [];
-    const { agent } = makeAgent({
+    const { agent, insertedQuads } = makeAgent({
       contextGraphId,
       assertionName,
       assertionUri,
@@ -704,6 +713,14 @@ describe('import artifact daemon routes', () => {
       },
     });
     await expect(fileStore.has(markdownHash)).resolves.toBe(true);
+    expect(insertedQuads).toContainEqual(expect.objectContaining({
+      subject: `${assertionUri}#cached-markdown-peer-local`,
+      predicate: `${DKG}cachedMarkdownHash`,
+      graph: localMarkdownCacheGraph('peer-local'),
+    }));
+    expect(insertedQuads.some((quad) =>
+      quad.predicate === `${DKG}cachedMarkdownHash` &&
+      quad.graph === contextGraphMetaUri(contextGraphId))).toBe(false);
   });
 
   it('hydrates from durable import metadata when SWM source-peer rows have expired (#872 review)', async () => {
@@ -738,6 +755,46 @@ describe('import artifact daemon routes', () => {
     expect(read.status).toBe(200);
     expect(read.body.markdown).toBe('# Durable Source Peer\n');
     expect(requestedPeers).toEqual(['peer-durable']);
+    expect(queries.some((sparql) => sparql.includes('WorkspaceOperation'))).toBe(false);
+  });
+
+  it('hydrates legacy imports without durable source peer using the source agent registry entry (#872 review)', async () => {
+    const remoteBytes = Buffer.from('# Legacy Registry Source Peer\n');
+    const markdownHash = keccakContentHash(remoteBytes);
+    const contextGraphId = 'cg-public-open-legacy-registry-source-peer';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
+    const requestedPeers: string[] = [];
+    const { agent, queries } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: markdownHash,
+      markdownHash,
+      markdownForm: `urn:dkg:file:${markdownHash}`,
+      onChainPolicy: { accessPolicy: 0, publishPolicy: 1 },
+      agents: [{
+        agentUri: 'did:dkg:agent:source',
+        agentAddress: 'did:dkg:agent:source',
+        name: 'Source Agent',
+        peerId: 'peer-source',
+      }],
+      async fetchImportedSourceBlobFromPeer(remotePeerId) {
+        requestedPeers.push(remotePeerId);
+        return { totalBytes: remoteBytes.length, bytes: remoteBytes };
+      },
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 1024,
+    });
+
+    expect(read.status).toBe(200);
+    expect(read.body.markdown).toBe('# Legacy Registry Source Peer\n');
+    expect(requestedPeers).toEqual(['peer-source']);
     expect(queries.some((sparql) => sparql.includes('WorkspaceOperation'))).toBe(false);
   });
 
@@ -997,7 +1054,7 @@ describe('import artifact daemon routes', () => {
       subject: `${assertionUri}#cached-markdown-peer-local`,
       predicate: `${DKG}cachedMarkdownHash`,
       object: markdownHash,
-      graph: contextGraphMetaUri(contextGraphId),
+      graph: localMarkdownCacheGraph('peer-local'),
     });
     await startRoutes({ agent });
 

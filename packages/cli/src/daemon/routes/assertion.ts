@@ -858,16 +858,45 @@ function importedArtifactMarkdownCacheMarkerSubject(assertionUri: string, peerId
   return `${assertionUri}#cached-markdown-${encodeURIComponent(peerId)}`;
 }
 
+function importedArtifactMarkdownCacheMarkerGraph(peerId: string): string {
+  return `urn:dkg:local:imported-artifact-markdown-cache:${encodeURIComponent(peerId)}`;
+}
+
+async function resolveLegacyImportedArtifactSourcePeerId(
+  ctx: RequestContext,
+  assertionAgentAddress: string,
+): Promise<string | undefined> {
+  const findAgents = ctx.agent.findAgents;
+  if (typeof findAgents !== 'function') return undefined;
+  const strippedAssertionAgentAddress = assertionAgentAddress.startsWith('did:dkg:agent:')
+    ? assertionAgentAddress.slice('did:dkg:agent:'.length)
+    : assertionAgentAddress;
+  const agents = await findAgents.call(ctx.agent).catch(() => []) as Array<Record<string, unknown>>;
+  for (const agent of agents) {
+    const peerId = normalizeSourcePeerId(agent.peerId);
+    if (!peerId) continue;
+    if (peerId === assertionAgentAddress || peerId === strippedAssertionAgentAddress) {
+      return peerId;
+    }
+    const candidateAddresses = [agent.agentAddress, agent.agentUri]
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+    if (candidateAddresses.some((candidate) => isSameAgentAddress(candidate, assertionAgentAddress))) {
+      return peerId;
+    }
+  }
+  return undefined;
+}
+
 async function hasVerifiedImportedArtifactMarkdownCache(
   ctx: RequestContext,
   artifact: Pick<ImportedArtifactResolution, 'contextGraphId' | 'assertionUri' | 'markdownHash'>,
 ): Promise<boolean> {
   if (!artifact.markdownHash) return false;
-  const metaGraph = contextGraphMetaUri(artifact.contextGraphId);
+  const markerGraph = importedArtifactMarkdownCacheMarkerGraph(ctx.agent.peerId);
   const markerSubject = importedArtifactMarkdownCacheMarkerSubject(artifact.assertionUri, ctx.agent.peerId);
   const result = await ctx.agent.store.query(`
     SELECT ?cachedMarkdownHash WHERE {
-      GRAPH <${metaGraph}> {
+      GRAPH <${markerGraph}> {
         <${markerSubject}> <${DKG_ONTOLOGY}cachedMarkdownHash> ?cachedMarkdownHash .
       }
     }
@@ -886,13 +915,13 @@ async function markVerifiedImportedArtifactMarkdownCache(
   if (!artifact.markdownHash) return;
   const insert = ctx.agent.store.insert;
   if (typeof insert !== 'function') return;
-  const metaGraph = contextGraphMetaUri(artifact.contextGraphId);
+  const markerGraph = importedArtifactMarkdownCacheMarkerGraph(ctx.agent.peerId);
   const markerSubject = importedArtifactMarkdownCacheMarkerSubject(artifact.assertionUri, ctx.agent.peerId);
   await insert.call(ctx.agent.store, [{
     subject: markerSubject,
     predicate: `${DKG_ONTOLOGY}cachedMarkdownHash`,
     object: rdfLiteral(artifact.markdownHash),
-    graph: metaGraph,
+    graph: markerGraph,
   }]).catch(() => undefined);
 }
 
@@ -1352,7 +1381,9 @@ async function resolveImportedArtifact(
   const markdownAvailableLocally = markdownHash
     ? await ctx.fileStore.has(markdownHash).catch(() => false)
     : false;
-  const sourcePeerId = normalizeSourcePeerId(metaBinding.sourcePublisherPeerId);
+  const durableSourcePeerId = normalizeSourcePeerId(metaBinding.sourcePublisherPeerId);
+  const sourcePeerId = durableSourcePeerId
+    ?? await resolveLegacyImportedArtifactSourcePeerId(ctx, parsedAssertion.assertionAgentAddress).catch(() => undefined);
 
   return finalizeImportedArtifactAvailability(ctx, {
     contextGraphId,
