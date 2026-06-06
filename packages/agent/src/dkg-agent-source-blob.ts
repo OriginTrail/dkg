@@ -25,6 +25,7 @@ import {
   decodeImportedSourceBlobResponse,
   encodeImportedSourceBlobRequest,
   encodeImportedSourceBlobResponse,
+  normalizeImportedSourceBlobHash,
   type ImportedSourceBlobRequest,
 } from './imported-source-blob-wire.js';
 
@@ -34,6 +35,15 @@ const IMPORTED_SOURCE_BLOB_AUTH_PURPOSE = 'imported-source-blob:v1';
 
 function validateContentHash(hash: string): boolean {
   return /^(?:sha256:|keccak256:)?[0-9a-f]{64}$/i.test(hash);
+}
+
+function normalizeStoredContentHash(hash: string | undefined): string | undefined {
+  if (!hash) return undefined;
+  try {
+    return normalizeImportedSourceBlobHash(hash);
+  } catch {
+    return undefined;
+  }
 }
 
 function bindingCellValue(cell: unknown): string {
@@ -103,6 +113,7 @@ export class SourceBlobMethods extends DKGAgentBase {
     const maxBytes = Math.min(input.maxBytes, MAX_IMPORTED_SOURCE_BLOB_PAGE_BYTES);
     if (!remotePeerId) throw new Error('fetchImportedSourceBlobFromPeer requires remotePeerId');
     if (!validateContentHash(input.blobHash)) throw new Error('fetchImportedSourceBlobFromPeer requires a valid blobHash');
+    const blobHash = normalizeImportedSourceBlobHash(input.blobHash);
     if (!Number.isSafeInteger(offset) || offset < 0) {
       throw new Error('fetchImportedSourceBlobFromPeer requires a non-negative offset');
     }
@@ -115,14 +126,14 @@ export class SourceBlobMethods extends DKGAgentBase {
       offset,
       maxBytes,
       input.assertionUri,
-      input.blobHash,
+      blobHash,
       input.requestAgentAddress,
     );
     const req = encodeImportedSourceBlobRequest({
       version: IMPORTED_SOURCE_BLOB_WIRE_VERSION,
       contextGraphId: input.contextGraphId,
       assertionUri: input.assertionUri,
-      blobHash: input.blobHash,
+      blobHash,
       offset,
       maxBytes,
       ...(input.subGraphName ? { subGraphName: input.subGraphName } : {}),
@@ -135,10 +146,13 @@ export class SourceBlobMethods extends DKGAgentBase {
       { timeoutMs: input.timeoutMs ?? 15_000 },
     );
     const response = decodeImportedSourceBlobResponse(responseBytes);
+    if (response.denied) {
+      return { denied: response.denied };
+    }
     if (
       response.contextGraphId !== input.contextGraphId ||
       response.assertionUri !== input.assertionUri ||
-      response.blobHash.toLowerCase() !== input.blobHash.toLowerCase() ||
+      response.blobHash !== blobHash ||
       response.offset !== offset
     ) {
       throw new Error('Imported source blob response does not match request');
@@ -148,7 +162,6 @@ export class SourceBlobMethods extends DKGAgentBase {
       throw new Error(`Imported source blob response exceeds requested maxBytes (${maxBytes})`);
     }
     return {
-      ...(response.denied ? { denied: response.denied } : {}),
       ...(typeof response.totalBytes === 'number' ? { totalBytes: response.totalBytes } : {}),
       ...(typeof response.nextOffset === 'number' ? { nextOffset: response.nextOffset } : {}),
       ...(response.truncated !== undefined ? { truncated: response.truncated } : {}),
@@ -173,6 +186,7 @@ export class SourceBlobMethods extends DKGAgentBase {
       ? this.resolveLocalAgentAddress(claimedAgentAddress)
       : undefined;
     const claimedAgent = localClaim ? this.localAgents.get(localClaim) : undefined;
+    const canonicalBlobHash = normalizeImportedSourceBlobHash(blobHash);
     return buildSyncRequestEnvelope({
       contextGraphId,
       offset,
@@ -190,7 +204,7 @@ export class SourceBlobMethods extends DKGAgentBase {
       authPurpose: IMPORTED_SOURCE_BLOB_AUTH_PURPOSE,
       authSelector: computeImportedSourceBlobSelector({
         assertionUri,
-        blobHash,
+        blobHash: canonicalBlobHash,
         offset,
         maxBytes: limit,
       }),
@@ -434,7 +448,7 @@ export class SourceBlobMethods extends DKGAgentBase {
   }
 
   async importedSourceBlobHashIsReferenced(this: DKGAgent, req: ImportedSourceBlobRequest): Promise<boolean> {
-    const hash = req.blobHash;
+    const hash = normalizeImportedSourceBlobHash(req.blobHash);
     const metaGraph = contextGraphMetaUri(req.contextGraphId);
     const metaResult = await this.store.query(`
       SELECT ?sourceFileHash ?sourceContentType ?mdIntermediateHash WHERE {
@@ -448,9 +462,9 @@ export class SourceBlobMethods extends DKGAgentBase {
     `);
     if (metaResult.type === 'bindings' && metaResult.bindings.length > 0) {
       const row = metaResult.bindings[0];
-      const sourceFileHash = normalizeLiteralBinding(row.sourceFileHash);
+      const sourceFileHash = normalizeStoredContentHash(normalizeLiteralBinding(row.sourceFileHash));
       const sourceContentType = normalizeDetectedContentType(normalizeLiteralBinding(row.sourceContentType) || undefined);
-      const mdIntermediateHash = normalizeLiteralBinding(row.mdIntermediateHash);
+      const mdIntermediateHash = normalizeStoredContentHash(normalizeLiteralBinding(row.mdIntermediateHash));
       if (mdIntermediateHash) return hash === mdIntermediateHash;
       if (sourceContentType === 'text/markdown' && hash === sourceFileHash) return true;
     }

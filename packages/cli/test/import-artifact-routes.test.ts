@@ -850,8 +850,40 @@ describe('import artifact daemon routes', () => {
       maxBytes: 1024,
     });
 
-    expect(read.status).toBe(404);
-    expect(read.body.error).toMatch(/not replicated locally|not present in the file store/);
+    expect(read.status).toBe(502);
+    expect(read.body.error).toMatch(/Markdown source fetch failed: source blob hash mismatch/);
+    await expect(fileStore.has(markdownHash)).resolves.toBe(false);
+  });
+
+  it('surfaces remote source blob denials instead of a generic local cache miss (#872 review)', async () => {
+    const expectedBytes = Buffer.from('# Expected Markdown\n');
+    const markdownHash = keccakContentHash(expectedBytes);
+    const contextGraphId = 'cg-public-open-remote-denied';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
+    const { agent } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: markdownHash,
+      markdownHash,
+      markdownForm: `urn:dkg:file:${markdownHash}`,
+      onChainPolicy: { accessPolicy: 0, publishPolicy: 1 },
+      sourcePeerId: 'peer-source',
+      async fetchImportedSourceBlobFromPeer() {
+        return { denied: 'source blob request unauthorized' };
+      },
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 1024,
+    });
+
+    expect(read.status).toBe(502);
+    expect(read.body.error).toMatch(/Markdown source fetch failed: source blob request unauthorized/);
     await expect(fileStore.has(markdownHash)).resolves.toBe(false);
   });
 

@@ -226,6 +226,36 @@ describe('imported source blob protocol', () => {
     expect(responder._spies.readRange).toHaveBeenCalledWith(blobHash, 0, MAX_PAGE_BYTES);
   });
 
+  it('normalizes source blob hash casing before metadata and store lookups', async () => {
+    const bytes = Buffer.from('# Mixed Case Hash\n');
+    const blobHash = hash(bytes);
+    const mixedCaseBlobHash = blobHash.replace('keccak256:', 'KECCAK256:').toUpperCase();
+    const contextGraphId = 'cg-source-blob-mixed-case';
+    const assertionUri = 'did:dkg:context-graph:cg-source-blob-mixed-case/assertion/did:dkg:agent:source/imported-md';
+    const responder = fakeResponder({ blobHash, bytes });
+
+    const responseBytes = await SourceBlobMethods.prototype.handleGetImportedSourceBlob.call(
+      responder as any,
+      sourceBlobRequest({
+        contextGraphId,
+        assertionUri,
+        blobHash: mixedCaseBlobHash,
+        auth: await signedAuthEnvelope({
+          contextGraphId,
+          assertionUri,
+          blobHash: mixedCaseBlobHash,
+        }),
+      }),
+      REQUESTER_PEER_ID,
+    );
+    const response = decodeImportedSourceBlobResponse(responseBytes);
+
+    expect(response.denied).toBeUndefined();
+    expect(response.blobHash).toBe(blobHash);
+    expect(responder._spies.stat).toHaveBeenCalledWith(blobHash);
+    expect(responder._spies.readRange).toHaveBeenCalledWith(blobHash, 0, bytes.length);
+  });
+
   it('denies before metadata lookup when signed auth is not policy-authorized', async () => {
     const bytes = Buffer.from('# Secret\n');
     const blobHash = hash(bytes);
@@ -325,6 +355,19 @@ describe('imported source blob protocol', () => {
     expect(responder._spies.storeQuery).not.toHaveBeenCalled();
   });
 
+  it('returns malformed request denial details in a decodable response', async () => {
+    const responseBytes = await SourceBlobMethods.prototype.handleGetImportedSourceBlob.call(
+      {} as any,
+      new TextEncoder().encode('{not-json'),
+      REQUESTER_PEER_ID,
+    );
+    const response = decodeImportedSourceBlobResponse(responseBytes);
+
+    expect(response.contextGraphId).toBe('');
+    expect(response.assertionUri).toBe('');
+    expect(response.denied).toMatch(/malformed request/);
+  });
+
   it('serves a converter Markdown intermediate instead of the original source blob', async () => {
     const sourceBytes = Buffer.from('%PDF original');
     const markdownBytes = Buffer.from('# Converted\n');
@@ -399,6 +442,21 @@ describe('imported source blob protocol', () => {
       'peer-source',
       { contextGraphId, assertionUri, blobHash, maxBytes: 1024 },
     )).rejects.toThrow(/does not match request/);
+
+    requestAgent.messenger.sendToPeer = vi.fn(async () => encodeImportedSourceBlobResponse({
+      version: IMPORTED_SOURCE_BLOB_WIRE_VERSION,
+      contextGraphId: '',
+      assertionUri: '',
+      blobHash: `keccak256:${'0'.repeat(64)}`,
+      offset: 0,
+      denied: 'malformed request: invalid JSON',
+    }));
+
+    await expect(SourceBlobMethods.prototype.fetchImportedSourceBlobFromPeer.call(
+      requestAgent as any,
+      'peer-source',
+      { contextGraphId, assertionUri, blobHash, maxBytes: 1024 },
+    )).resolves.toEqual({ denied: 'malformed request: invalid JSON' });
   });
 
   it('rejects oversized fetch responses even when response metadata omits truncation', async () => {

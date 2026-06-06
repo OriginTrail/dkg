@@ -1465,6 +1465,12 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
             bytes: hydrated.tooLargeBytes,
           });
         }
+        if (hydrated.error) {
+          return jsonResponse(res, 502, {
+            error: `Markdown source fetch failed: ${hydrated.error}`,
+            artifact,
+          });
+        }
         if (hydrated.bytes) bytes = hydrated.bytes;
       }
       if (!bytes) {

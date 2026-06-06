@@ -30,6 +30,13 @@ type ResponseJson = Partial<ImportedSourceBlobResponse>;
 
 const HASH_RE = /^(?:sha256:|keccak256:)?[0-9a-f]{64}$/i;
 
+export function normalizeImportedSourceBlobHash(value: string): string {
+  if (!HASH_RE.test(value)) {
+    throw new Error('blobHash must be a supported content hash');
+  }
+  return value.toLowerCase();
+}
+
 function requireString(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.length === 0) {
     throw new Error(`${field} must be a non-empty string`);
@@ -62,10 +69,7 @@ export function decodeImportedSourceBlobRequest(bytes: Uint8Array): ImportedSour
   }
   const contextGraphId = requireString(parsed.contextGraphId, 'contextGraphId');
   const assertionUri = requireString(parsed.assertionUri, 'assertionUri');
-  const blobHash = requireString(parsed.blobHash, 'blobHash');
-  if (!HASH_RE.test(blobHash)) {
-    throw new Error('blobHash must be a supported content hash');
-  }
+  const blobHash = normalizeImportedSourceBlobHash(requireString(parsed.blobHash, 'blobHash'));
   const offset = requireNonNegativeInteger(parsed.offset, 'offset');
   const maxBytes = requirePositiveInteger(parsed.maxBytes, 'maxBytes');
   const authB64 = requireString(parsed.authB64, 'authB64');
@@ -90,12 +94,14 @@ export function decodeImportedSourceBlobResponse(bytes: Uint8Array): ImportedSou
   if (parsed.version !== IMPORTED_SOURCE_BLOB_WIRE_VERSION) {
     throw new Error(`Unsupported imported-source-blob response version: ${parsed.version}`);
   }
-  const contextGraphId = requireString(parsed.contextGraphId, 'contextGraphId');
-  const assertionUri = requireString(parsed.assertionUri, 'assertionUri');
-  const blobHash = requireString(parsed.blobHash, 'blobHash');
-  if (!HASH_RE.test(blobHash)) {
-    throw new Error('blobHash must be a supported content hash');
-  }
+  const denied = typeof parsed.denied === 'string' ? parsed.denied : undefined;
+  const contextGraphId = denied !== undefined && parsed.contextGraphId === ''
+    ? ''
+    : requireString(parsed.contextGraphId, 'contextGraphId');
+  const assertionUri = denied !== undefined && parsed.assertionUri === ''
+    ? ''
+    : requireString(parsed.assertionUri, 'assertionUri');
+  const blobHash = normalizeImportedSourceBlobHash(requireString(parsed.blobHash, 'blobHash'));
   const offset = requireNonNegativeInteger(parsed.offset, 'offset');
   if (parsed.denied !== undefined && parsed.bytesB64 !== undefined) {
     throw new Error('imported-source-blob response sets both denied and bytesB64');
@@ -109,7 +115,7 @@ export function decodeImportedSourceBlobResponse(bytes: Uint8Array): ImportedSou
     ...(parsed.totalBytes !== undefined ? { totalBytes: requireNonNegativeInteger(parsed.totalBytes, 'totalBytes') } : {}),
     ...(parsed.nextOffset !== undefined ? { nextOffset: requireNonNegativeInteger(parsed.nextOffset, 'nextOffset') } : {}),
     ...(typeof parsed.truncated === 'boolean' ? { truncated: parsed.truncated } : {}),
-    ...(typeof parsed.denied === 'string' ? { denied: parsed.denied } : {}),
+    ...(denied !== undefined ? { denied } : {}),
     ...(typeof parsed.bytesB64 === 'string' ? { bytesB64: parsed.bytesB64 } : {}),
   };
 }
