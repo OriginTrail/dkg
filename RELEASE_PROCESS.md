@@ -40,6 +40,12 @@ Current process keeps these aligned:
 
 ## 4) Pre-release tagging workflow
 
+> **Gate:** do not run the tag commands below until the **RC cut checklist
+> (§11)** is green. Tagging is the mechanical step at the *end* of a release;
+> the checklist is what makes the tag trustworthy. Cutting RCs faster than they
+> can be validated is how rc.13 → rc.14 → rc.15 ended up tagged inside two days,
+> with rc.14 a same-day emergency for an `eth_getLogs` request storm.
+
 From repo root:
 
 ```bash
@@ -188,3 +194,73 @@ Promote only after successful:
 - isolated local update run
 - canary network runtime validation
 - release-asset verification (`markitdown-*` binaries present on the GitHub Release)
+
+## 11) RC cut checklist (stabilization gate)
+
+Run this before tagging **every** `beta.N` / `rc.N`. Copy it into the release
+tracking issue (or the release PR description) and tick each box on the exact
+`main` commit you intend to tag. If a box can't be ticked, the RC is not ready —
+fix the cause, don't tag around it.
+
+**Cadence rule (read first):** do **not** cut a new RC while the *previous* RC
+still has an open sev-1, an unresolved revert, or has not completed its soak
+window. The point of an RC is to be exercised; back-to-back same-day RCs (rc.13
+→ rc.15 in two days) mean nothing soaked long enough to surface the next
+regression. One RC in flight at a time.
+
+### A. Stabilization (the previous RC earned this one)
+
+- [ ] Previous RC soaked on the canary/devnet cohort for the agreed window
+      (default **≥ 48h**) with **no new sev-1**.
+- [ ] Every revert and explicit "regression" fix from this window has a
+      regression test landed **in the same PR that fixed it** (so it cannot
+      silently come back — see the rc.15 "restore SPARQL filterability" and the
+      `#904/#905/#913/#915` QA-found UI bugs for what escapes without this).
+- [ ] No open sev-1 / data-loss / chain-state issues against the target commit.
+- [ ] Rollback verified: `dkg rollback` returns the node to the prior slot
+      cleanly (don't discover this during an incident).
+
+### B. Correctness gates (all green on the tagged commit, not "mostly")
+
+- [ ] `ci.yml` green on the exact commit: build, Tornado unit
+      (core + storage + chain), Blazegraph live integration, **Kosava node-ui
+      Playwright devnet e2e**, and the EVM integration matrix.
+- [ ] `pnpm check:file-size` green — no god-file regressions
+      (`scripts/audit-file-size.mjs`; budgets in `scripts/file-size-baseline.json`).
+- [ ] Deliberately-red PROD-BUG sentinels reviewed against
+      `.test-audit/BUGS_FOUND.md` — **no newly-red sentinel** beyond the known
+      inventory, and any sentinel that went green is converted to a normal
+      passing test.
+- [ ] Devnet release-validation run passed for this RC (the
+      `scripts/devnet-rc<N>-release-validation.sh` analog), and the validation
+      script itself is current — not patched mid-run.
+
+### C. Review hygiene (stop the round-N treadmill)
+
+- [ ] No PR merged into this RC with **unresolved Codex / reviewer threads**.
+- [ ] Any PR that needed **≥ 5 review rounds** carries a one-paragraph design
+      note (or was re-scoped/split) — 5+ rounds means the design was wrong, not
+      that the diff needed more polish. ~17% of this window's commits were
+      "address review round N"; that is the cost being controlled here.
+- [ ] No PR over ~400 lines of diff merged without an explicit reviewer waiver.
+
+### D. Versioning & release artifacts
+
+- [ ] Package versions aligned for the channel (§3): `package.json`,
+      `packages/cli/package.json`, `packages/evm-module/package.json`,
+      `packages/mcp-server/package.json`.
+- [ ] ABIs regenerated and committed if any Solidity source changed (§7);
+      `abi-freshness` CI green.
+- [ ] `CHANGELOG.md` curated for the full `<prev>..<this>` range (not a raw
+      commit dump).
+- [ ] Builder-impacting changes ship an upgrade guide
+      `docs/UPGRADE_<PRIOR>_TO_<NEW>.md` (§9), cross-linked from
+      `docs/RELEASE.md`.
+- [ ] Named **release owner** recorded on the tracking issue, and a one-line
+      rollback/abort plan stated.
+
+> **Track the trend, not just the boxes.** The signal that this gate is working
+> is the `fix:` vs `feat:` commit ratio falling over successive RCs (it ran
+> ~4:1 across rc.8 → rc.15). If it isn't moving, the defects are being created
+> upstream of this checklist — reinforce design review and PR sizing, not the
+> gate.
