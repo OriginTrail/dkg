@@ -129,6 +129,7 @@ describe('import artifact daemon routes', () => {
     queryQuads?: Quad[];
     canReadContextGraph?: boolean | ((contextGraphId: string, opts?: unknown) => Promise<boolean> | boolean);
     sourcePeerId?: string;
+    sourcePeerBindings?: Array<Record<string, string>>;
     fetchImportedSourceBlobFromPeer?: (
       remotePeerId: string,
       input: {
@@ -294,9 +295,14 @@ describe('import artifact daemon routes', () => {
             };
           }
           if (sparql.includes('WorkspaceOperation') && sparql.includes('publisherPeerId')) {
+            expect(sparql).toContain('ORDER BY DESC(?publishedAt) DESC(STR(?op))');
+            const sourcePeerBindings = args.sourcePeerBindings
+              ? [...args.sourcePeerBindings].sort((left, right) =>
+                  String(right.publishedAt ?? '').localeCompare(String(left.publishedAt ?? '')))
+              : undefined;
             return {
               type: 'bindings',
-              bindings: args.sourcePeerId ? [{ publisherPeerId: args.sourcePeerId }] : [],
+              bindings: sourcePeerBindings ?? (args.sourcePeerId ? [{ publisherPeerId: args.sourcePeerId }] : []),
             };
           }
           if (sparql.includes('?markdownForm')) {
@@ -678,6 +684,46 @@ describe('import artifact daemon routes', () => {
       },
     });
     await expect(fileStore.has(markdownHash)).resolves.toBe(true);
+  });
+
+  it('hydrates from the latest source peer when multiple workspace operations reference the same root (#872 review)', async () => {
+    const remoteBytes = Buffer.from('# Latest Source Peer\n');
+    const markdownHash = keccakContentHash(remoteBytes);
+    const contextGraphId = 'cg-public-open-latest-source-peer';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
+    const requestedPeers: string[] = [];
+    const { agent } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: markdownHash,
+      markdownHash,
+      markdownForm: `urn:dkg:file:${markdownHash}`,
+      onChainPolicy: { accessPolicy: 0, publishPolicy: 1 },
+      sourcePeerBindings: [
+        { publisherPeerId: 'peer-stale', publishedAt: '2026-06-05T00:00:00.000Z' },
+        { publisherPeerId: 'peer-latest', publishedAt: '2026-06-06T00:00:00.000Z' },
+      ],
+      async fetchImportedSourceBlobFromPeer(remotePeerId) {
+        requestedPeers.push(remotePeerId);
+        if (remotePeerId !== 'peer-latest') {
+          return { denied: 'stale source peer' };
+        }
+        return { totalBytes: remoteBytes.length, bytes: remoteBytes };
+      },
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 1024,
+    });
+
+    expect(read.status).toBe(200);
+    expect(read.body.markdown).toBe('# Latest Source Peer\n');
+    expect(requestedPeers).toEqual(['peer-latest']);
   });
 
   it('allows curated allowlisted non-owner reads and hydrates Markdown bytes (#872)', async () => {

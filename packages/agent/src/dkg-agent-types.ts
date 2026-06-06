@@ -157,7 +157,7 @@ export interface SyncRequestEnvelope {
 }
 
 export interface ImportedSourceBlobStore {
-  get(hash: string): Promise<Uint8Array | Buffer | null | undefined>;
+  get?(hash: string): Promise<Uint8Array | Buffer | null | undefined>;
   has?(hash: string): Promise<boolean>;
   stat?(hash: string): Promise<{ size: number } | null | undefined>;
   readRange?(hash: string, offset: number, length: number): Promise<Uint8Array | Buffer | null | undefined>;

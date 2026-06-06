@@ -876,13 +876,15 @@ async function resolveImportedArtifactSourcePeerId(
   ].filter((value): value is string => Boolean(value && isSafeIri(value)));
   for (const rootEntity of [...new Set(candidates)]) {
     const result = await ctx.agent.store.query(`
-      SELECT ?publisherPeerId WHERE {
+      SELECT ?publisherPeerId ?publishedAt WHERE {
         GRAPH <${swmMetaGraph}> {
           ?op <${RDF_TYPE}> <${DKG_ONTOLOGY}WorkspaceOperation> .
           ?op <${DKG_ONTOLOGY}rootEntity> <${rootEntity}> .
           ?op <${DKG_ONTOLOGY}publisherPeerId> ?publisherPeerId .
+          OPTIONAL { ?op <${DKG_ONTOLOGY}publishedAt> ?publishedAt }
         }
       }
+      ORDER BY DESC(?publishedAt) DESC(STR(?op))
       LIMIT 1
     `) as { type?: string; bindings?: Array<Record<string, unknown>> };
     const peerId = normalizeLiteralBinding(result.bindings?.[0]?.publisherPeerId);

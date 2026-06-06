@@ -405,7 +405,7 @@ describe('imported source blob protocol', () => {
   it('rejects mismatched fetch responses and preserves empty byte pages', async () => {
     const contextGraphId = 'cg-fetch';
     const assertionUri = 'did:dkg:context-graph:cg-fetch/assertion/did:dkg:agent:source/imported-md';
-    const blobHash = `keccak256:${'a'.repeat(64)}`;
+    const blobHash = hash(new Uint8Array());
     const requestAgent = {
       buildImportedSourceBlobAuthEnvelope: vi.fn(async () => new Uint8Array([1])),
       messenger: {
@@ -427,6 +427,22 @@ describe('imported source blob protocol', () => {
       { contextGraphId, assertionUri, blobHash, maxBytes: 1024 },
     );
     expect(fetched.bytes).toEqual(new Uint8Array());
+
+    requestAgent.messenger.sendToPeer = vi.fn(async () => encodeImportedSourceBlobResponse({
+      version: IMPORTED_SOURCE_BLOB_WIRE_VERSION,
+      contextGraphId,
+      assertionUri,
+      blobHash,
+      offset: 0,
+      totalBytes: 14,
+      bytesB64: Buffer.from('# Wrong Bytes\n').toString('base64'),
+    }));
+
+    await expect(SourceBlobMethods.prototype.fetchImportedSourceBlobFromPeer.call(
+      requestAgent as any,
+      'peer-source',
+      { contextGraphId, assertionUri, blobHash, maxBytes: 1024 },
+    )).rejects.toThrow(/hash mismatch/);
 
     requestAgent.messenger.sendToPeer = vi.fn(async () => encodeImportedSourceBlobResponse({
       version: IMPORTED_SOURCE_BLOB_WIRE_VERSION,

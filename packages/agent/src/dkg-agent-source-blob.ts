@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { createHash } from 'node:crypto';
 import {
   PROTOCOL_GET_IMPORTED_SOURCE_BLOB,
   createOperationContext,
@@ -44,6 +45,16 @@ function normalizeStoredContentHash(hash: string | undefined): string | undefine
   } catch {
     return undefined;
   }
+}
+
+function contentHashMatchesBytes(hash: string, bytes: Uint8Array): boolean {
+  const lower = hash.toLowerCase();
+  const buffer = Buffer.from(bytes);
+  if (lower.startsWith('keccak256:')) {
+    return ethers.keccak256(buffer).replace(/^0x/, '').toLowerCase() === lower.slice('keccak256:'.length);
+  }
+  const sha = createHash('sha256').update(buffer).digest('hex').toLowerCase();
+  return sha === lower.replace(/^sha256:/, '');
 }
 
 function bindingCellValue(cell: unknown): string {
@@ -157,9 +168,19 @@ export class SourceBlobMethods extends DKGAgentBase {
     ) {
       throw new Error('Imported source blob response does not match request');
     }
-    const bytes = response.bytesB64 !== undefined ? bytesFromBase64(response.bytesB64) : undefined;
+    let bytes = response.bytesB64 !== undefined ? bytesFromBase64(response.bytesB64) : undefined;
     if (bytes && bytes.length > maxBytes) {
       throw new Error(`Imported source blob response exceeds requested maxBytes (${maxBytes})`);
+    }
+    if (bytes !== undefined) {
+      const isCompleteBlob = offset === 0 &&
+        response.truncated !== true &&
+        (typeof response.totalBytes !== 'number' || response.totalBytes === bytes.length);
+      if (!isCompleteBlob) {
+        bytes = undefined;
+      } else if (!contentHashMatchesBytes(blobHash, bytes)) {
+        throw new Error('Imported source blob response hash mismatch');
+      }
     }
     return {
       ...(typeof response.totalBytes === 'number' ? { totalBytes: response.totalBytes } : {}),
