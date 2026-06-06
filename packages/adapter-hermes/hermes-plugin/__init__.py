@@ -1554,6 +1554,13 @@ class DKGMemoryProvider(MemoryProvider):
                         "predicate": pred,
                     })
 
+        if not hits and successful_queries == 0 and project_sub_graph_name:
+            return json.dumps({
+                "query": query,
+                "count": 0,
+                "scope": project_context_graph if not _is_agent_context_graph(project_context_graph) else None,
+                "hits": [],
+            })
         if not hits and successful_queries == 0:
             fallback = _cache_memory_search(query, self._cache, limit)
             fallback["scope"] = project_context_graph if not _is_agent_context_graph(project_context_graph) else None

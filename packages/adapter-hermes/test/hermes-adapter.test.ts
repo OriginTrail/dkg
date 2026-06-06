@@ -3145,6 +3145,7 @@ spec.loader.exec_module(module)
 class FakeClient:
     def __init__(self):
         self.calls = []
+        self.fail_all = False
         self.fail_scoped_project = False
         self.generic_fail_scoped_project = False
 
@@ -3153,6 +3154,8 @@ class FakeClient:
 
     def query(self, sparql, context_graph_id, **kwargs):
         self.calls.append((context_graph_id, kwargs))
+        if self.fail_all:
+            return {"error": "fetch failed"}
         if self.fail_scoped_project and kwargs.get("sub_graph_name"):
             return {"error": "Unknown sub-graph: skills"}
         if self.generic_fail_scoped_project and kwargs.get("sub_graph_name"):
@@ -3261,6 +3264,29 @@ assert provider._client.calls == [
     ("project-cg", {"view": "verified-memory", "agent_address": None, "sub_graph_name": "skills"}),
 ], provider._client.calls
 provider._client.generic_fail_scoped_project = False
+
+provider._client.calls = []
+provider._client.fail_all = True
+provider._cache = {"memory": [{"target": "memory", "content": "alpha beta stale cache hit"}]}
+scoped_all_failed = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "limit": 10,
+    "sub_graph_name": "skills",
+}))
+assert "error" not in scoped_all_failed, scoped_all_failed
+assert scoped_all_failed["scope"] == "project-cg", scoped_all_failed
+assert scoped_all_failed["count"] == 0, scoped_all_failed
+assert scoped_all_failed["hits"] == [], scoped_all_failed
+assert provider._client.calls == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+    ("project-cg", {"view": "working-memory", "agent_address": "0xAgent", "sub_graph_name": "skills"}),
+    ("project-cg", {"view": "shared-working-memory", "agent_address": None, "sub_graph_name": "skills"}),
+    ("project-cg", {"view": "verified-memory", "agent_address": None, "sub_graph_name": "skills"}),
+], provider._client.calls
+provider._client.fail_all = False
+provider._cache = {}
 
 provider._context_graph = "agent-context"
 missing_project = json.loads(provider.handle_tool_call("memory_search", {
