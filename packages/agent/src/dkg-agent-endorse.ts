@@ -484,6 +484,9 @@ export class EndorseVerifyMethods extends DKGAgentBase {
       merkleRootValue.startsWith('0x') ? merkleRootValue : `0x${merkleRootValue}`,
     );
     const subGraphName = batchBindings[0]['sgName'] ? stripLiteral(batchBindings[0]['sgName']) : undefined;
+    if (subGraphName) {
+      await this.assertSubGraphDoesNotCollideWithKnownChildContextGraph(opts.contextGraphId, subGraphName);
+    }
     const batchDataGraph = subGraphName
       ? contextGraphSubGraphUri(opts.contextGraphId, subGraphName)
       : contextGraphDataGraphUri(opts.contextGraphId);
@@ -795,6 +798,9 @@ export class EndorseVerifyMethods extends DKGAgentBase {
     signers: string[],
     subGraphName?: string,
   ): Promise<void> {
+    if (subGraphName) {
+      await this.assertSubGraphDoesNotCollideWithKnownChildContextGraph(contextGraphId, subGraphName);
+    }
     // Query only the triples belonging to this batch via root entities in _meta
     const rootEntities = await this.getRootEntities(contextGraphId, batchId);
     if (rootEntities.length === 0) {
@@ -847,6 +853,35 @@ export class EndorseVerifyMethods extends DKGAgentBase {
       graph: vmMetaGraph,
     });
     await this.store.insert(metaQuads);
+  }
+
+  async assertSubGraphDoesNotCollideWithKnownChildContextGraph(
+    this: DKGAgent,
+    contextGraphId: string,
+    subGraphName: string,
+  ): Promise<void> {
+    const subGraphUri = assertSafeIri(contextGraphSubGraphUri(contextGraphId, subGraphName));
+    const childMetaGraph = assertSafeIri(contextGraphMetaUri(`${contextGraphId}/${subGraphName}`));
+    const result = await this.store.query(
+      `SELECT ?marker WHERE {
+        GRAPH <${childMetaGraph}> {
+          {
+            <${subGraphUri}> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <https://dkg.network/ontology#ContextGraph> .
+            BIND("type" AS ?marker)
+          }
+          UNION
+          {
+            <${subGraphUri}> <https://dkg.network/ontology#registrationStatus> ?marker .
+          }
+        }
+      } LIMIT 1`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return;
+
+    throw new Error(
+      `subGraphName "${subGraphName}" for contextGraphId "${contextGraphId}" resolves to a known child context graph ` +
+      `"${contextGraphId}/${subGraphName}". Verify the child context graph directly or choose a different sub-graph name.`,
+    );
   }
 
   async stampBatchTrustLevel(this: DKGAgent,

@@ -557,9 +557,12 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         && validTokens.has(requestToken)
         && callerAgentAddress === undefined;
       const hasRecognisedIdentity = isAdminToken || callerAgentAddress !== undefined;
+      const inferredWorkingMemoryAgentAddress = view === 'working-memory'
+        ? callerAgentAddress ?? (isAdminToken ? requestAgentAddress : undefined)
+        : undefined;
       const effectiveAgentAddress =
         requestedAgentAddress
-        ?? (view === 'working-memory' ? requestAgentAddress : undefined);
+        ?? inferredWorkingMemoryAgentAddress;
       if (
         !hasRecognisedIdentity &&
         view === 'working-memory' &&
