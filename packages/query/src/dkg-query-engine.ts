@@ -322,10 +322,6 @@ export class DKGQueryEngine implements QueryEngine {
           effectiveContextGraphId,
           options.subGraphName,
         );
-        await this.assertViewSubGraphIsRegistered(
-          effectiveContextGraphId,
-          options.subGraphName,
-        );
       }
       return this.queryWithView(sparql, options.view, effectiveContextGraphId, options);
     }
@@ -651,19 +647,6 @@ export class DKGQueryEngine implements QueryEngine {
     throw new ScopedQueryViolationError(
       `subGraphName "${subGraphName}" for contextGraphId "${contextGraphId}" resolves to a known child context graph ` +
       `"${contextGraphId}/${subGraphName}". Query the child context graph directly or choose a different sub-graph name.`,
-    );
-  }
-
-  private async assertViewSubGraphIsRegistered(
-    contextGraphId: string,
-    subGraphName: string,
-  ): Promise<void> {
-    const registeredSubGraphs = await this.discoverRegisteredSubGraphNames(contextGraphId);
-    if (registeredSubGraphs.has(subGraphName)) return;
-
-    throw new ScopedQueryViolationError(
-      `Unknown sub-graph "${subGraphName}" for contextGraphId "${contextGraphId}". ` +
-      'Register the sub-graph before querying it.',
     );
   }
 

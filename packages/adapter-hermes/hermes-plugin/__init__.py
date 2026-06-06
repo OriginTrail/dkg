@@ -1490,6 +1490,7 @@ class DKGMemoryProvider(MemoryProvider):
 
         hits: List[Dict[str, Any]] = []
         successful_queries = 0
+        first_scoped_project_error: Optional[str] = None
         for cg in context_graphs:
             for view, weight in (
                 ("working-memory", 1.0),
@@ -1522,6 +1523,8 @@ class DKGMemoryProvider(MemoryProvider):
                             f'context_graph_id "{cg}" ({view}): {e}'
                         )
                     if scoped_project_layer:
+                        if first_scoped_project_error is None:
+                            first_scoped_project_error = f'{cg} ({view}): {e}'
                         continue
                     raise
                 if _client_result_failed(result):
@@ -1532,6 +1535,8 @@ class DKGMemoryProvider(MemoryProvider):
                                 f'memory_search sub_graph_name "{project_sub_graph_name}" failed for '
                                 f'context_graph_id "{cg}" ({view}): {detail}'
                             )
+                        if first_scoped_project_error is None:
+                            first_scoped_project_error = f'{cg} ({view}): {detail}'
                         continue
                     continue
                 successful_queries += 1
@@ -1555,12 +1560,10 @@ class DKGMemoryProvider(MemoryProvider):
                     })
 
         if not hits and successful_queries == 0 and project_sub_graph_name:
-            return json.dumps({
-                "query": query,
-                "count": 0,
-                "scope": project_context_graph if not _is_agent_context_graph(project_context_graph) else None,
-                "hits": [],
-            })
+            detail = first_scoped_project_error or "all scoped project queries failed"
+            return tool_error(
+                f'memory_search sub_graph_name "{project_sub_graph_name}" failed: {detail}'
+            )
         if not hits and successful_queries == 0:
             fallback = _cache_memory_search(query, self._cache, limit)
             fallback["scope"] = project_context_graph if not _is_agent_context_graph(project_context_graph) else None

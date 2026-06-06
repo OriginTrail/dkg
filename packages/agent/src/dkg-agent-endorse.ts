@@ -449,6 +449,7 @@ export class EndorseVerifyMethods extends DKGAgentBase {
     signers: string[];
     status: 'verified' | 'partial' | 'no_quorum';
     trustLevel: TrustLevel;
+    subGraphName?: string;
   }> {
     const ctx = createOperationContext('verify');
 
@@ -715,6 +716,7 @@ export class EndorseVerifyMethods extends DKGAgentBase {
         signers: resolvedSignerAddresses,
         status,
         trustLevel,
+        ...(subGraphName ? { subGraphName } : {}),
       };
     }
 
@@ -767,6 +769,7 @@ export class EndorseVerifyMethods extends DKGAgentBase {
       signers: resolvedSignerAddresses,
       status: 'verified',
       trustLevel: TrustLevel.ConsensusVerified,
+      ...(subGraphName ? { subGraphName } : {}),
     };
   }
 

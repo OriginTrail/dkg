@@ -196,24 +196,28 @@ describe('sub-graph query scoping', () => {
     )).rejects.toThrow(/Invalid assertionName.*cannot contain "\/"/);
   });
 
-  it('rejects view-routed subGraphName when the sub-graph is not registered', async () => {
+  it('allows view-routed subGraphName data even when the sub-graph is not registered', async () => {
     const staleGraph = contextGraphSubGraphUri(CG_ID, 'stale');
+    const staleWmGraph = contextGraphAssertionUri(CG_ID, AGENT, 'probe', 'stale');
+    const staleSwmGraph = contextGraphSharedMemoryUri(CG_ID, 'stale');
     await store.insert([
-      q('urn:view:stale', VIEW_NAME, '"Stale"', staleGraph),
+      q('urn:view:stale-vm', VIEW_NAME, '"StaleVM"', staleGraph),
+      q('urn:view:stale-wm', VIEW_NAME, '"StaleWM"', staleWmGraph),
+      q('urn:view:stale-swm', VIEW_NAME, '"StaleSWM"', staleSwmGraph),
     ]);
 
     await expect(engine.query(
       `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
       { contextGraphId: CG_ID, view: 'working-memory', agentAddress: AGENT, subGraphName: 'stale' },
-    )).rejects.toThrow(/Unknown sub-graph "stale"/);
+    )).resolves.toMatchObject({ bindings: [{ name: '"StaleWM"' }] });
     await expect(engine.query(
       `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
       { contextGraphId: CG_ID, view: 'shared-working-memory', subGraphName: 'stale' },
-    )).rejects.toThrow(/Unknown sub-graph "stale"/);
+    )).resolves.toMatchObject({ bindings: [{ name: '"StaleSWM"' }] });
     await expect(engine.query(
       `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
       { contextGraphId: CG_ID, view: 'verified-memory', subGraphName: 'stale' },
-    )).rejects.toThrow(/Unknown sub-graph "stale"/);
+    )).resolves.toMatchObject({ bindings: [{ name: '"StaleVM"' }] });
   });
 
   it('constrains GRAPH patterns to the selected sub-graph WM assertion', async () => {

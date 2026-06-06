@@ -274,10 +274,8 @@ scoped_all_failed = json.loads(provider.handle_tool_call("memory_search", {
     "limit": 10,
     "sub_graph_name": "skills",
 }))
-assert "error" not in scoped_all_failed, scoped_all_failed
-assert scoped_all_failed["scope"] == "project-cg", scoped_all_failed
-assert scoped_all_failed["count"] == 0, scoped_all_failed
-assert scoped_all_failed["hits"] == [], scoped_all_failed
+assert "sub_graph_name" in scoped_all_failed["error"], scoped_all_failed
+assert "fetch failed" in scoped_all_failed["error"], scoped_all_failed
 assert provider._client.calls == [
     ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
     ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
