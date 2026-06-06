@@ -427,6 +427,9 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     const verifiedGraph = parsed.verifiedGraph;
     const assertionName = parsed.assertionName;
     const subGraphName = parsed.subGraphName;
+    if (requestedAgentAddress !== undefined && typeof requestedAgentAddress !== 'string') {
+      return jsonResponse(res, 400, { error: 'agentAddress must be a string when provided' });
+    }
     // P-13: accept `minTrust` as a string ("SelfAttested"|"Endorsed"|
     // "PartiallyVerified"|"ConsensusVerified") or the matching integer
     // (0..3). Unrecognised values fail closed with a 400 rather than

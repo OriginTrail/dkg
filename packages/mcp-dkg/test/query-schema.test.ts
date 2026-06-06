@@ -41,17 +41,28 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     expect(lastCall.includeSharedMemory).toBe(true);
   });
 
-  it('forwards agentAddress and subGraphName through dkg_query', async () => {
+  it('normalizes agentAddress DID form and forwards subGraphName through dkg_query', async () => {
     const result = await server.call('dkg_query', {
       sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
       view: 'working-memory',
-      agentAddress: 'peer-explicit',
+      agentAddress: 'did:dkg:agent:peer-explicit',
       subGraphName: 'imports',
     });
     expect(result.isError).toBeFalsy();
     const lastCall = client.queryCalls.at(-1)!;
     expect(lastCall.agentAddress).toBe('peer-explicit');
     expect(lastCall.subGraphName).toBe('imports');
+  });
+
+  it('rejects blank agentAddress in dkg_query', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      view: 'working-memory',
+      agentAddress: '   ',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('agentAddress');
+    expect(client.queryCalls).toHaveLength(0);
   });
 
   it.each(['working-memory', 'shared-working-memory', 'verified-memory'])(

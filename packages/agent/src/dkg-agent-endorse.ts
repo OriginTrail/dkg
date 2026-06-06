@@ -18,6 +18,7 @@ import {
   contextGraphSharedMemoryUri,
   contextGraphVerifiedMemoryUri, contextGraphVerifiedMemoryMetaUri,
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
+  contextGraphSubGraphUri,
   deriveCuratorDidFromCgId,
   MemoryLayer,
   computeACKDigest,
@@ -459,7 +460,13 @@ export class EndorseVerifyMethods extends DKGAgentBase {
     for (const ns of dkgNamespaces) {
       for (const literal of [`"${opts.batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${opts.batchId}"`]) {
         const r = await this.store.query(
-          `SELECT ?root WHERE { GRAPH <${metaGraph}> { ?kc <${ns}merkleRoot> ?root . ?kc <${ns}batchId> ${literal} } } LIMIT 1`,
+          `SELECT ?root ?sgName WHERE {
+            GRAPH <${metaGraph}> {
+              ?kc <${ns}merkleRoot> ?root .
+              ?kc <${ns}batchId> ${literal} .
+              OPTIONAL { ?kc <${ns}subGraphName> ?sgName }
+            }
+          } LIMIT 1`,
         );
         if (r.type === 'bindings' && r.bindings.length > 0) {
           batchBindings = r.bindings as Record<string, string>[];
@@ -476,6 +483,10 @@ export class EndorseVerifyMethods extends DKGAgentBase {
     const merkleRoot = ethers.getBytes(
       merkleRootValue.startsWith('0x') ? merkleRootValue : `0x${merkleRootValue}`,
     );
+    const subGraphName = batchBindings[0]['sgName'] ? stripLiteral(batchBindings[0]['sgName']) : undefined;
+    const batchDataGraph = subGraphName
+      ? contextGraphSubGraphUri(opts.contextGraphId, subGraphName)
+      : contextGraphDataGraphUri(opts.contextGraphId);
 
     // 2. Look up context graph on-chain config
     const onChainId = await this.getContextGraphOnChainId(opts.contextGraphId);
@@ -685,8 +696,9 @@ export class EndorseVerifyMethods extends DKGAgentBase {
       await this.stampBatchTrustLevel(
         opts.contextGraphId,
         opts.batchId,
-        contextGraphDataGraphUri(opts.contextGraphId),
+        batchDataGraph,
         trustLevel,
+        subGraphName,
       );
       this.log.info(
         ctx,
@@ -740,6 +752,7 @@ export class EndorseVerifyMethods extends DKGAgentBase {
       txResult.hash,
       txResult.blockNumber,
       resolvedSignerAddresses,
+      subGraphName,
     );
 
     this.log.info(ctx, `Verified batch ${opts.batchId} → _verified_memory/${opts.verifiedMemoryId} (tx=${txResult.hash.slice(0, 16)}...)`);
@@ -780,6 +793,7 @@ export class EndorseVerifyMethods extends DKGAgentBase {
     txHash: string,
     blockNumber: number,
     signers: string[],
+    subGraphName?: string,
   ): Promise<void> {
     // Query only the triples belonging to this batch via root entities in _meta
     const rootEntities = await this.getRootEntities(contextGraphId, batchId);
@@ -787,7 +801,9 @@ export class EndorseVerifyMethods extends DKGAgentBase {
       this.log.warn(createOperationContext('verify'), `No root entities found for batch ${batchId} — skipping VM promotion`);
       return;
     }
-    const dataGraph = assertSafeIri(contextGraphDataGraphUri(contextGraphId));
+    const dataGraph = assertSafeIri(subGraphName
+      ? contextGraphSubGraphUri(contextGraphId, subGraphName)
+      : contextGraphDataGraphUri(contextGraphId));
     // Query root entities AND their skolemized children (subjects starting
     // with the root entity URI, e.g. <root>/.well-known/genid/...).
     // We use FILTER with STRSTARTS to capture the full closure instead of
@@ -800,7 +816,7 @@ export class EndorseVerifyMethods extends DKGAgentBase {
     );
     if (result.type !== 'bindings') return;
 
-    const vmGraph = assertSafeIri(contextGraphVerifiedMemoryUri(contextGraphId, verifiedMemoryId));
+    const vmGraph = assertSafeIri(contextGraphVerifiedMemoryUri(contextGraphId, verifiedMemoryId, subGraphName));
     const vmQuads: Quad[] = (result.bindings as Record<string, string>[])
       .filter(row => !isTrustLevelQuad({ predicate: row.p }))
       .map(row => ({
@@ -819,7 +835,7 @@ export class EndorseVerifyMethods extends DKGAgentBase {
     );
 
     // Write verification metadata
-    const vmMetaGraph = contextGraphVerifiedMemoryMetaUri(contextGraphId, verifiedMemoryId);
+    const vmMetaGraph = contextGraphVerifiedMemoryMetaUri(contextGraphId, verifiedMemoryId, subGraphName);
     const metaQuads = buildVerificationMetadata({
       contextGraphId,
       verifiedMemoryId,
@@ -838,14 +854,18 @@ export class EndorseVerifyMethods extends DKGAgentBase {
     batchId: bigint,
     graph: string,
     level: TrustLevel,
+    subGraphName?: string,
   ): Promise<void> {
-    const subjects = await this.getBatchSubjects(contextGraphId, batchId);
+    const subjects = await this.getBatchSubjects(contextGraphId, batchId, subGraphName);
     await this.stampTrustLevel(graph, subjects, level);
   }
 
-  async getBatchSubjects(this: DKGAgent, contextGraphId: string, batchId: bigint): Promise<string[]> {
+  async getBatchSubjects(this: DKGAgent, contextGraphId: string, batchId: bigint, subGraphName?: string): Promise<string[]> {
     const rootEntities = await this.getRootEntities(contextGraphId, batchId);
-    return this.getSubjectsForRoots(contextGraphDataGraphUri(contextGraphId), rootEntities);
+    const dataGraph = subGraphName
+      ? contextGraphSubGraphUri(contextGraphId, subGraphName)
+      : contextGraphDataGraphUri(contextGraphId);
+    return this.getSubjectsForRoots(dataGraph, rootEntities);
   }
 
   async getRootEntities(this: DKGAgent, contextGraphId: string, batchId: bigint): Promise<string[]> {

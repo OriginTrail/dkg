@@ -43,12 +43,12 @@ export class ContextGraphManager {
     return contextGraphSharedMemoryMetaUri(contextGraphId, subGraphName);
   }
 
-  verifiedMemoryUri(contextGraphId: string, verifiedMemoryId: string): string {
-    return contextGraphVerifiedMemoryUri(contextGraphId, verifiedMemoryId);
+  verifiedMemoryUri(contextGraphId: string, verifiedMemoryId: string, subGraphName?: string): string {
+    return contextGraphVerifiedMemoryUri(contextGraphId, verifiedMemoryId, subGraphName);
   }
 
-  verifiedMemoryMetaUri(contextGraphId: string, verifiedMemoryId: string): string {
-    return contextGraphVerifiedMemoryMetaUri(contextGraphId, verifiedMemoryId);
+  verifiedMemoryMetaUri(contextGraphId: string, verifiedMemoryId: string, subGraphName?: string): string {
+    return contextGraphVerifiedMemoryMetaUri(contextGraphId, verifiedMemoryId, subGraphName);
   }
 
   assertionUri(contextGraphId: string, agentAddress: string, name: string): string {

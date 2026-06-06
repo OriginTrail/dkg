@@ -42,6 +42,19 @@ const err = (text: string): ToolResult => ({
 const formatError = (e: unknown): string =>
   e instanceof Error ? e.message : String(e);
 
+const AGENT_DID_PREFIX = 'did:dkg:agent:';
+
+function normalizeAgentAddressForQuery(agentAddress: string | undefined): string | undefined {
+  if (agentAddress === undefined) return undefined;
+  const trimmed = agentAddress.trim();
+  if (!trimmed) {
+    throw new Error('"agentAddress" must be a non-empty string.');
+  }
+  return trimmed.startsWith(AGENT_DID_PREFIX)
+    ? trimmed.slice(AGENT_DID_PREFIX.length)
+    : trimmed;
+}
+
 /**
  * Resolve the contextGraphId for a tool invocation. Argument beats
  * config default; if neither is present we return null and the tool
@@ -219,11 +232,12 @@ export function registerReadTools(
       if (!pid) return projectErr();
       const fullSparql = sparql.startsWith('PREFIX') ? sparql : `${PREFIXES}\n${sparql}`;
       try {
+        const normalizedAgentAddress = normalizeAgentAddressForQuery(agentAddress);
         const result = await client.query({
           sparql: fullSparql,
           contextGraphId: pid,
           subGraphName,
-          agentAddress,
+          agentAddress: normalizedAgentAddress,
           view,
           includeSharedMemory,
         });
