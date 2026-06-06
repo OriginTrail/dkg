@@ -85,6 +85,38 @@ function normalizeAgentAddressClaim(address: string | undefined): string | undef
   return value.startsWith('did:dkg:agent:') ? value.slice('did:dkg:agent:'.length) : value;
 }
 
+function comparableAgentAddressClaim(address: string | undefined): string | undefined {
+  const value = normalizeAgentAddressClaim(address);
+  if (!value) return undefined;
+  return /^0x[0-9a-fA-F]{40}$/.test(value) ? value.toLowerCase() : value;
+}
+
+function extractAssertionAgentAddress(contextGraphId: string, assertionUri: string): string | undefined {
+  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
+  if (!assertionUri.startsWith(prefix)) return undefined;
+  const rest = assertionUri.slice(prefix.length);
+  const assertionPrefix = 'assertion/';
+  const marker = '/assertion/';
+  let assertionTail: string | undefined;
+  if (rest.startsWith(assertionPrefix)) {
+    assertionTail = rest.slice(assertionPrefix.length);
+  } else {
+    const markerIndex = rest.indexOf(marker);
+    if (markerIndex >= 0) assertionTail = rest.slice(markerIndex + marker.length);
+  }
+  if (!assertionTail) return undefined;
+  const slash = assertionTail.indexOf('/');
+  if (slash <= 0) return undefined;
+  return assertionTail.slice(0, slash);
+}
+
+function requesterOwnsAssertion(request: SyncRequestEnvelope, assertionUri: string): boolean {
+  const assertionAgentAddress = extractAssertionAgentAddress(request.contextGraphId, assertionUri);
+  const requesterAgentAddress = comparableAgentAddressClaim(request.requesterAgentAddress);
+  const ownerAgentAddress = comparableAgentAddressClaim(assertionAgentAddress);
+  return !!requesterAgentAddress && !!ownerAgentAddress && requesterAgentAddress === ownerAgentAddress;
+}
+
 function bytesToBase64(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString('base64');
 }
@@ -354,6 +386,7 @@ export class SourceBlobMethods extends DKGAgentBase {
   async authorizeImportedSourceBlobRequest(this: DKGAgent,
     request: SyncRequestEnvelope,
     remotePeerId: string,
+    assertionUri: string,
   ): Promise<boolean> {
     if (!this.validateImportedSourceBlobSignature(request, remotePeerId)) {
       return false;
@@ -364,19 +397,16 @@ export class SourceBlobMethods extends DKGAgentBase {
 
     const policy: { accessPolicy?: number; publishPolicy?: number } =
       await this.getContextGraphOnChainPolicy(request.contextGraphId).catch(() => ({}));
-    // Source blob reads follow the CG read policy; publishPolicy only gates writes.
-    if (policy.accessPolicy === 0) {
+    if (requesterOwnsAssertion(request, assertionUri)) {
       this.seenPrivateSyncRequestIds.set(request.requestId!, Date.now());
       return true;
     }
-    let isPrivate = policy.accessPolicy === 1;
-    if (policy.accessPolicy !== 1) {
-      isPrivate = await this.isPrivateContextGraph(request.contextGraphId).catch(() => true);
-    }
-    if (!isPrivate) {
+    // Cross-agent source blob reads mirror the HTTP route relaxation: public + open only.
+    if (policy.accessPolicy === 0 && policy.publishPolicy === 1) {
       this.seenPrivateSyncRequestIds.set(request.requestId!, Date.now());
       return true;
     }
+    if (policy.accessPolicy === 0) return false;
     const verifyIdentity = this.chain.verifySyncIdentity ?? this.chain.verifyACKIdentity;
     return authorizePrivateSyncRequest({
       ctx: createOperationContext('sync'),
@@ -453,7 +483,8 @@ export class SourceBlobMethods extends DKGAgentBase {
     ) {
       return deny('auth envelope does not bind source blob selector');
     }
-    const authorized = await this.authorizeImportedSourceBlobRequest(authEnvelope, fromPeerId).catch(() => false);
+    const authorized = await this.authorizeImportedSourceBlobRequest(authEnvelope, fromPeerId, req.assertionUri)
+      .catch(() => false);
     if (!authorized) return deny('source blob request unauthorized');
 
     const referenced = await this.importedSourceBlobHashIsReferenced(req).catch(() => false);
