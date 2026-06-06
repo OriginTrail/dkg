@@ -224,7 +224,8 @@ export function contextGraphSharedMemoryMetaUri(contextGraphId: string, subGraph
   return `did:dkg:context-graph:${contextGraphId}/_shared_memory_meta`;
 }
 
-export function contextGraphVerifiedMemoryUri(contextGraphId: string, verifiedMemoryId: string): string {
+export function contextGraphVerifiedMemoryUri(contextGraphId: string, verifiedMemoryId: string, subGraphName?: string): string {
+  if (subGraphName) return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/_verified_memory/${verifiedMemoryId}`;
   return `did:dkg:context-graph:${contextGraphId}/_verified_memory/${verifiedMemoryId}`;
 }
 

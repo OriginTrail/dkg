@@ -437,6 +437,8 @@ describe("DkgNodePlugin", () => {
     // agent_address is exposed as an optional tool param for WM targeting.
     expect(queryProps.agent_address.type).toBe('string');
     expect(queryProps.agent_address.description).toMatch(/working-memory/i);
+    expect(queryProps.sub_graph_name.type).toBe('string');
+    expect(queryProps.sub_graph_name.description).toMatch(/sub-graph/i);
 
     const inviteTool = byName.get('dkg_context_graph_invite')!;
     expect(inviteTool.description).toMatch(/primary user-facing deliverable/i);

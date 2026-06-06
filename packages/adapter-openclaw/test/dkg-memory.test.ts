@@ -1026,6 +1026,42 @@ describe('DkgMemorySearchManager', () => {
       );
     });
 
+    it('applies projectSubGraphName only to project CG fan-out', async () => {
+      const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver({ projectContextGraphId: 'research-x' }),
+      });
+
+      await manager.search('hello world', { projectSubGraphName: 'skills' });
+
+      expect(querySpy).toHaveBeenCalledTimes(6);
+      const allOpts = querySpy.mock.calls.map(c => c[1]!);
+      const agentContextOpts = allOpts.filter(o => o.contextGraphId === AGENT_CONTEXT_GRAPH);
+      expect(agentContextOpts).toHaveLength(3);
+      expect(agentContextOpts.every(o => o.subGraphName === undefined)).toBe(true);
+
+      const projectOpts = allOpts.filter(o => o.contextGraphId === 'research-x');
+      expect(projectOpts).toHaveLength(3);
+      expect(projectOpts.every(o => o.subGraphName === 'skills')).toBe(true);
+    });
+
+    it('does not apply projectSubGraphName to agent-context when no project CG is resolved', async () => {
+      const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
+      const warn = vi.fn();
+      const manager = new DkgMemorySearchManager({
+        client,
+        resolver: makeResolver(),
+        logger: { warn },
+      });
+
+      const result = await manager.search('hello world', { projectSubGraphName: 'skills' });
+
+      expect(result).toEqual([]);
+      expect(querySpy).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('no project context graph'));
+    });
+
     it('uses a permissive SPARQL shape — no rdf:type constraint, no specific predicate, literal-length floor', async () => {
       const querySpy = vi.spyOn(client, 'query').mockResolvedValue({ result: { bindings: [] } });
       const manager = new DkgMemorySearchManager({ client, resolver: makeResolver() });

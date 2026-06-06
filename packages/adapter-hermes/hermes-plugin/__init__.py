@@ -279,6 +279,10 @@ DKG_QUERY_SCHEMA = {
                 "type": "string",
                 "description": "Optional Working Memory owner address. Defaults to this node when view is working-memory.",
             },
+            "sub_graph_name": {
+                "type": "string",
+                "description": "Optional sub-graph scope within context_graph_id. May be combined with view.",
+            },
             "assertion_name": {
                 "type": "string",
                 "description": "Optional assertion name scope.",
@@ -804,6 +808,10 @@ MEMORY_SEARCH_SCHEMA = {
             "query": {"type": "string", "description": "Free-text search query."},
             "limit": {"type": "integer", "description": "Max results, default 20, capped at 100."},
             "context_graph_id": {"type": "string", "description": "Optional context graph override. " + EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION},
+            "sub_graph_name": {
+                "type": "string",
+                "description": "Optional project sub-graph scope. Requires a project context graph.",
+            },
         },
         "required": ["query"],
     },
@@ -1392,8 +1400,10 @@ class DKGMemoryProvider(MemoryProvider):
             return tool_error('"view" must be one of: working-memory, shared-working-memory, verified-memory.')
         if view and not _first_text(args, "context_graph_id"):
             return tool_error(f'"view: {view}" requires "context_graph_id".')
-        if view and _first_text(args, "sub_graph_name"):
-            return tool_error('"sub_graph_name" cannot be combined with view-based dkg_query routing.')
+        if args.get("sub_graph_name") is not None and not isinstance(args.get("sub_graph_name"), str):
+            return tool_error('"sub_graph_name" must be a string.')
+        if isinstance(args.get("sub_graph_name"), str) and not args.get("sub_graph_name", "").strip():
+            return tool_error('"sub_graph_name" must be a non-empty string.')
         if args.get("agent_address") is not None and not isinstance(args.get("agent_address"), str):
             return tool_error('"agent_address" must be a string.')
         if isinstance(args.get("agent_address"), str) and not args.get("agent_address", "").strip():
@@ -1423,6 +1433,16 @@ class DKGMemoryProvider(MemoryProvider):
         if len(query) < 2:
             return tool_error("query must be at least 2 characters.")
         limit = _coerce_limit(args.get("limit"), default=20, maximum=100)
+        if "context_graph" in args:
+            return tool_error('"context_graph" is not a supported parameter on memory_search. Use "context_graph_id".')
+        project_context_graph = _first_text(args, "context_graph_id") or self._context_graph
+        if args.get("sub_graph_name") is not None and not isinstance(args.get("sub_graph_name"), str):
+            return tool_error('"sub_graph_name" must be a string.')
+        if isinstance(args.get("sub_graph_name"), str) and not args.get("sub_graph_name", "").strip():
+            return tool_error('"sub_graph_name" must be a non-empty string.')
+        project_sub_graph_name = _first_text(args, "sub_graph_name")
+        if project_sub_graph_name and (not project_context_graph or project_context_graph == "agent-context"):
+            return tool_error('"sub_graph_name" requires a project context graph for memory_search.')
         if self._offline or not self._client:
             return json.dumps(_cache_memory_search(query, self._cache, limit))
 
@@ -1432,9 +1452,6 @@ class DKGMemoryProvider(MemoryProvider):
 
         sparql = _build_memory_search_sparql(keywords, limit)
         agent_address = self._client._resolve_agent_address()
-        if "context_graph" in args:
-            return tool_error('"context_graph" is not a supported parameter on memory_search. Use "context_graph_id".')
-        project_context_graph = _first_text(args, "context_graph_id") or self._context_graph
         context_graphs: List[str] = []
         for cg in ("agent-context", project_context_graph):
             if cg and cg not in context_graphs:
@@ -1450,11 +1467,16 @@ class DKGMemoryProvider(MemoryProvider):
             ):
                 if view == "working-memory" and not agent_address:
                     continue
+                query_kwargs = {
+                    "view": view,
+                    "agent_address": agent_address if view == "working-memory" else None,
+                }
+                if project_sub_graph_name and cg == project_context_graph and cg != "agent-context":
+                    query_kwargs["sub_graph_name"] = project_sub_graph_name
                 result = self._client.query(
                     sparql,
                     cg,
-                    view=view,
-                    agent_address=agent_address if view == "working-memory" else None,
+                    **query_kwargs,
                 )
                 if _client_result_failed(result):
                     continue

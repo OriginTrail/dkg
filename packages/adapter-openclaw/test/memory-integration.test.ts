@@ -182,5 +182,27 @@ describe('Memory integration round-trip (issue #199 Phase 1 + Phase 2)', () => {
         expect(call[1].agentAddress).toBeDefined();
       }
     });
+
+    it('memory_search applies sub_graph_name only to project context graph fan-out', async () => {
+      const tool = tools.find((t) => t.name === 'memory_search')!;
+      (plugin as any).memorySessionResolver.getSession = () => ({
+        agentAddress: '12D3KooWProjectPeer',
+        projectContextGraphId: 'project-cg',
+      });
+      (plugin as any).memorySessionResolver.getDefaultAgentAddress = () => '12D3KooWProjectPeer';
+
+      await tool.execute('t1', { query: 'anything at all', sub_graph_name: 'imports' });
+
+      const agentCalls = mockQuery.mock.calls.filter((c) => c[1].contextGraphId === 'agent-context');
+      const projectCalls = mockQuery.mock.calls.filter((c) => c[1].contextGraphId === 'project-cg');
+      expect(agentCalls).toHaveLength(3);
+      expect(projectCalls).toHaveLength(3);
+      for (const call of agentCalls) {
+        expect(call[1].subGraphName).toBeUndefined();
+      }
+      for (const call of projectCalls) {
+        expect(call[1].subGraphName).toBe('imports');
+      }
+    });
   });
 });

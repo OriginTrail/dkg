@@ -406,7 +406,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       parsed.includeSharedMemory ?? parsed.includeWorkspace;
     const includeContextGraphPartitions = parsed.includeContextGraphPartitions === true;
     const view = parsed.view;
-    const agentAddress = parsed.agentAddress;
+    const requestedAgentAddress = parsed.agentAddress;
     // the
     // RFC-29 multi-agent WM isolation gate is fail-closed by default.
     // For cross-agent `view: 'working-memory'` reads on nodes with
@@ -554,10 +554,13 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         && validTokens.has(requestToken)
         && callerAgentAddress === undefined;
       const hasRecognisedIdentity = isAdminToken || callerAgentAddress !== undefined;
+      const effectiveAgentAddress =
+        requestedAgentAddress
+        ?? (view === 'working-memory' ? requestAgentAddress : undefined);
       if (
         !hasRecognisedIdentity &&
         view === 'working-memory' &&
-        typeof agentAddress === 'string'
+        typeof effectiveAgentAddress === 'string'
       ) {
         // Codex (iteration 4): the daemon's canonical "own WM" identity is
         // whatever `agent.resolveAgentAddress(undefined)` returns — i.e.
@@ -567,7 +570,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         // so we must accept both the default agent address *and* the bare
         // peerId as self, otherwise an auth-disabled self-read via the
         // legacy alias now 403s where it used to return the node's own WM.
-        const targetLower = agentAddress.toLowerCase();
+        const targetLower = effectiveAgentAddress.toLowerCase();
         const selfAliasesLower = new Set<string>();
         const defaultAgent = agent.getDefaultAgentAddress();
         if (defaultAgent) selfAliasesLower.add(defaultAgent.toLowerCase());
@@ -575,7 +578,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         if (selfAliasesLower.size === 0 || !selfAliasesLower.has(targetLower)) {
           return jsonResponse(res, 403, {
             error:
-              `working-memory reads for agentAddress=${agentAddress} require authentication. ` +
+              `working-memory reads for agentAddress=${effectiveAgentAddress} require authentication. ` +
               `An unauthenticated / auth-disabled caller may only read the node-default agent's WM ` +
               `(accepted self-aliases: defaultAgentAddress and the node's peerId).`,
           });
@@ -587,7 +590,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         includeSharedMemory,
         includeContextGraphPartitions,
         view,
-        agentAddress,
+        agentAddress: effectiveAgentAddress,
         verifiedGraph,
         assertionName,
         subGraphName,

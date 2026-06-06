@@ -97,6 +97,12 @@ export function buildMemoryTools(ctx: DkgToolHost): OpenClawTool[] {
             type: ['number', 'string'],
             description: 'Max hits to return. Integer in [1, 100]. Default 20.',
           },
+          sub_graph_name: {
+            type: 'string',
+            description:
+              'Optional project sub-graph scope. Applies only to project context graph fan-out; ' +
+              'requires a currently selected project context graph.',
+          },
         },
         required: ['query'],
       },

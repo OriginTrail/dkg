@@ -55,6 +55,37 @@ describe('dkg_memory_search — multi-layer fan-out + trust-tier dedup', () => {
     expect(result.content[0].text).toMatch(/proj-x · VM/);
   });
 
+  it('applies subGraphName only to project context graph fan-out', async () => {
+    const result = await server.call('dkg_memory_search', {
+      query: 'tree-sitter parsers',
+      projectId: 'proj-x',
+      subGraphName: 'imports',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(client.queryCalls).toHaveLength(6);
+
+    const agentCalls = client.queryCalls.filter((call) => call.contextGraphId === 'agent-context');
+    const projectCalls = client.queryCalls.filter((call) => call.contextGraphId === 'proj-x');
+    expect(agentCalls).toHaveLength(3);
+    expect(projectCalls).toHaveLength(3);
+    for (const call of agentCalls) {
+      expect(call.subGraphName).toBeUndefined();
+    }
+    for (const call of projectCalls) {
+      expect(call.subGraphName).toBe('imports');
+    }
+  });
+
+  it('returns a tool error when subGraphName is supplied without projectId', async () => {
+    const result = await server.call('dkg_memory_search', {
+      query: 'tree-sitter parsers',
+      subGraphName: 'imports',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/subGraphName.*projectId/i);
+    expect(client.queryCalls).toHaveLength(0);
+  });
+
   it('VM hit collapses an SWM hit on the same entity URI (trust tier ordering: VM > SWM > WM)', async () => {
     const text = 'agreed-on architectural decision about staking adapter v2';
     client.memoryFixtures.set('agent-context::working-memory', [

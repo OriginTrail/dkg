@@ -51,6 +51,7 @@ describe('memory_search tool', () => {
     const tool = tools.find((t) => t.name === 'memory_search')!;
     const params = tool.parameters as any;
     expect(params.properties.query).toBeDefined();
+    expect(params.properties.sub_graph_name).toBeDefined();
     expect(params.required).toContain('query');
   });
 
@@ -100,6 +101,24 @@ describe('memory_search tool', () => {
     const result = await tool.execute('t2', { query: 'project milestones' });
     expect(result).toBeDefined();
     expect(typeof result).toBe('object');
+  });
+
+  it('returns a clear error when sub_graph_name is supplied without a project context graph', async () => {
+    const tool = tools.find((t) => t.name === 'memory_search')!;
+    const client = (plugin as any).client;
+    client.query = vi.fn().mockResolvedValue({ result: { bindings: [] } });
+    (plugin as any).memorySessionResolver.getSession = () => ({
+      agentAddress: '12D3KooWReady',
+      projectContextGraphId: undefined,
+    });
+
+    const result = await tool.execute('t-subgraph-no-project', {
+      query: 'project memories',
+      sub_graph_name: 'imports',
+    });
+
+    expect((result as any).content?.[0]?.text ?? '').toMatch(/sub_graph_name.*project context graph/i);
+    expect(client.query).not.toHaveBeenCalled();
   });
 
   it('returns "not ready" error when the resolver has no agent identity yet (R7.6 / T51)', async () => {

@@ -41,6 +41,19 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     expect(lastCall.includeSharedMemory).toBe(true);
   });
 
+  it('forwards agentAddress and subGraphName through dkg_query', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      view: 'working-memory',
+      agentAddress: 'peer-explicit',
+      subGraphName: 'imports',
+    });
+    expect(result.isError).toBeFalsy();
+    const lastCall = client.queryCalls.at(-1)!;
+    expect(lastCall.agentAddress).toBe('peer-explicit');
+    expect(lastCall.subGraphName).toBe('imports');
+  });
+
   it.each(['working-memory', 'shared-working-memory', 'verified-memory'])(
     'accepts the canonical view enum value %s',
     async (view) => {
@@ -101,11 +114,13 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     const tool = server.get('dkg_query');
     const shape = tool.config.inputSchema!;
     const keys = Object.keys(shape);
-    // Post-migration surface: sparql, projectId, subGraphName, view,
-    // includeSharedMemory, limit. The legacy `layer` key MUST be gone.
+    // Post-migration surface: sparql, projectId, subGraphName,
+    // agentAddress, view, includeSharedMemory, limit. The legacy `layer`
+    // key MUST be gone.
     expect(keys).toEqual(
       expect.arrayContaining([
         'sparql',
+        'agentAddress',
         'view',
         'includeSharedMemory',
       ]),

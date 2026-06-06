@@ -179,7 +179,7 @@ Drop to HTTP when the operation isn't in the table — participant self-service 
 | `dkg_share` | `POST /api/shared-memory/write` | Directly write concise team-visible knowledge to SWM without staging a WM assertion. Prefer the WM assertion → promote flow for durable/canonical work. Both Hermes and OpenClaw expose the same tool schema (required `content` and `context_graph_id`, optional `sub_graph_name`), so MCP-discovered call signatures are portable. The OpenClaw implementation additionally validates content as non-whitespace, mints a unique subject per share (returned in the response), and N-Triples-quotes content; Hermes is currently looser on those points — the parallel hardening is tracked in OriginTrail/dkg#414. |
 | `dkg_sub_graph_create` | `POST /api/sub-graph/create` | Register a sub-graph inside a CG |
 | `dkg_sub_graph_list` | `GET /api/sub-graph/list` | List sub-graphs in a CG |
-| `dkg_query` | `POST /api/query` | Read-only SPARQL across assertions in a CG. Pass `view` (`working-memory` / `shared-working-memory` / `verified-memory`) to pick the layer — when `view` is set, `context_graph_id` is required; for WM reads, optional `agent_address` targets another agent's WM (defaults to this node). Omit `view` for a legacy cross-graph data-path query. |
+| `dkg_query` | `POST /api/query` | Read-only SPARQL across assertions in a CG. Pass `view` (`working-memory` / `shared-working-memory` / `verified-memory`) to pick the layer, and optional `sub_graph_name` / `subGraphName` to narrow that layer to a registered sub-graph. When `view` is set, `context_graph_id` is required. For WM reads, optional `agent_address` targets another agent's WM; if omitted, the daemon uses the authenticated caller or node-default agent. Optional `assertion_name` narrows WM to one assertion. Omit `view` for a legacy cross-graph data-path query. |
 | `dkg_query_catalog_list` | `POST /api/profile/query-catalog/read` | List saved SPARQL queries declared in the project profile query catalog |
 | `dkg_query_catalog_run` | `POST /api/profile/query-catalog/read` + `POST /api/query` | Run a saved catalog query by slug or exact display name |
 | `dkg_query_catalog_save` | `POST /api/profile/query-catalog/write` | Save a read-only SPARQL query into the project profile query catalog |
@@ -280,9 +280,9 @@ The `memory_search` tool is the recommended entry point for free-text memory rec
   - `sparql` (required) — the query string
   - `contextGraphId` — scope query to one CG (recommended)
   - `view` — `working-memory` | `shared-working-memory` | `verified-memory`
-  - `agentAddress` — required when `view: "working-memory"` (WM is per-agent)
-  - `assertionName` — scope to a specific WM assertion graph
-  - `subGraphName` — scope to a specific sub-graph
+  - `agentAddress` — optional for `view: "working-memory"` self reads (defaults to the authenticated caller or node-default agent); provide it when intentionally reading another local agent's WM
+  - `assertionName` — scope to a specific WM assertion graph; may be combined with `subGraphName`
+  - `subGraphName` — scope the selected route to a registered sub-graph. With `view`, this targets sub-graph WM assertions, sub-graph SWM, or sub-graph VM/public data instead of the CG root.
   - `graphSuffix` — advanced: target a specific internal graph (e.g. `_shared_memory`, `_meta`)
   - `includeSharedMemory` / `includeWorkspace` — merge SWM into the result set
   - `verifiedGraph` — target a specific VM (on-chain) named graph
@@ -527,7 +527,7 @@ A **sub-graph** is a named partition inside a context graph. Use them to organiz
 - `POST /api/sub-graph/create` — register a new sub-graph. Body: `{ contextGraphId, subGraphName }`.
 - `GET /api/sub-graph/list?contextGraphId=...` — list all sub-graphs registered in a CG.
 
-To put an assertion in a sub-graph, pass `subGraphName` on `/api/assertion/create`, `/write`, `/query`, `/promote`, `/discard`, `/import-file`, `/history`, and on `/api/query` when scoping queries.
+To put an assertion in a sub-graph, pass `subGraphName` on `/api/assertion/create`, `/write`, `/query`, `/promote`, `/discard`, `/import-file`, `/history`, and on `/api/query` when scoping queries. `/api/query` accepts `subGraphName` both on the legacy no-`view` path and with `view` routing; with `view: "working-memory"`, combine it with `assertionName` when you need exactly one assertion graph.
 
 ### Participants and join flow
 
@@ -758,9 +758,9 @@ This entire surface was empirically driven by [PR #720](https://github.com/Origi
 
 **Query across layers:**
 
-- Working memory: `{"sparql": "...", "view": "working-memory", "agentAddress": "...", "contextGraphId": "..."}`
-- Shared memory: `{"sparql": "...", "contextGraphId": "...", "view": "shared-working-memory"}`
-- Verified memory: `{"sparql": "...", "contextGraphId": "...", "view": "verified-memory"}`
+- Working memory: `{"sparql": "...", "view": "working-memory", "contextGraphId": "...", "subGraphName": "...", "assertionName": "..."}`
+- Shared memory: `{"sparql": "...", "contextGraphId": "...", "view": "shared-working-memory", "subGraphName": "..."}`
+- Verified memory: `{"sparql": "...", "contextGraphId": "...", "view": "verified-memory", "subGraphName": "..."}`
 
 **List and inspect your assertions:**
 

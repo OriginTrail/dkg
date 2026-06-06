@@ -2307,9 +2307,10 @@ subscribe_schema = next(schema for schema in provider.get_tool_schemas() if sche
 assert "include_shared_memory" in subscribe_schema["parameters"]["properties"], subscribe_schema
 search_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "memory_search")
 assert "context_graph_id" in search_schema["parameters"]["properties"], search_schema
+assert "sub_graph_name" in search_schema["parameters"]["properties"], search_schema
 assert "context_graph" not in search_schema["parameters"]["properties"], search_schema
 query_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_query")
-assert "sub_graph_name" not in query_schema["parameters"]["properties"], query_schema
+assert "sub_graph_name" in query_schema["parameters"]["properties"], query_schema
 share_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_share")
 assert "context_graph_id" in share_schema["parameters"]["properties"], share_schema
 assert "context_graph" not in share_schema["parameters"]["properties"], share_schema
@@ -2759,7 +2760,7 @@ for args, needle in [
     ({"sparql": "ASK {}", "context_graph": "old"}, "context_graph"),
     ({"sparql": "ASK {}", "context_graph_id": "cg:test", "view": "bad"}, "view"),
     ({"sparql": "ASK {}", "view": "working-memory"}, "context_graph_id"),
-    ({"sparql": "ASK {}", "context_graph_id": "cg:test", "view": "shared-working-memory", "sub_graph_name": "scratch"}, "sub_graph_name"),
+    ({"sparql": "ASK {}", "context_graph_id": "cg:test", "sub_graph_name": 42}, "sub_graph_name"),
     ({"sparql": "ASK {}", "context_graph_id": "cg:test", "view": "working-memory", "agent_address": "   "}, "agent_address"),
 ]:
     result = json.loads(provider.handle_tool_call("dkg_query", args))
@@ -2781,6 +2782,15 @@ result = json.loads(provider.handle_tool_call("dkg_query", {
 }))
 assert result["ok"] is True, result
 assert provider._client.queries[-1][2]["agent_address"] == "peer-default", provider._client.queries
+
+result = json.loads(provider.handle_tool_call("dkg_query", {
+    "sparql": "ASK {}",
+    "context_graph_id": "cg:test",
+    "view": "shared-working-memory",
+    "sub_graph_name": "scratch",
+}))
+assert result["ok"] is True, result
+assert provider._client.queries[-1][2]["sub_graph_name"] == "scratch", provider._client.queries
 
 class ReadMarkdownClient:
     def __init__(self):
@@ -3156,6 +3166,30 @@ assert provider._client.calls == [
     ("project-cg", {"view": "shared-working-memory", "agent_address": None}),
     ("project-cg", {"view": "verified-memory", "agent_address": None}),
 ], provider._client.calls
+
+provider._client.calls = []
+scoped = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "limit": 10,
+    "sub_graph_name": "skills",
+}))
+assert scoped["scope"] == "project-cg", scoped
+assert provider._client.calls == [
+    ("agent-context", {"view": "working-memory", "agent_address": "0xAgent"}),
+    ("agent-context", {"view": "shared-working-memory", "agent_address": None}),
+    ("agent-context", {"view": "verified-memory", "agent_address": None}),
+    ("project-cg", {"view": "working-memory", "agent_address": "0xAgent", "sub_graph_name": "skills"}),
+    ("project-cg", {"view": "shared-working-memory", "agent_address": None, "sub_graph_name": "skills"}),
+    ("project-cg", {"view": "verified-memory", "agent_address": None, "sub_graph_name": "skills"}),
+], provider._client.calls
+
+provider._context_graph = "agent-context"
+missing_project = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "sub_graph_name": "skills",
+}))
+assert "sub_graph_name" in missing_project["error"], missing_project
+assert "project context graph" in missing_project["error"], missing_project
 `;
     const result = spawnSync('python', ['-B', '-c', script], {
       cwd: process.cwd(),

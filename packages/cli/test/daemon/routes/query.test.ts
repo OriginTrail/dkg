@@ -53,7 +53,16 @@ function makeTracker() {
   };
 }
 
-function makeCtx(agent: Record<string, unknown>, body: Record<string, unknown>, res = makeRes()): {
+function makeCtx(
+  agent: Record<string, unknown>,
+  body: Record<string, unknown>,
+  res = makeRes(),
+  opts: {
+    requestToken?: string;
+    requestAgentAddress?: string;
+    validTokens?: string[];
+  } = {},
+): {
   ctx: RequestContext;
   res: FakeRes;
 } {
@@ -62,10 +71,11 @@ function makeCtx(agent: Record<string, unknown>, body: Record<string, unknown>, 
     res: res as unknown as ServerResponse,
     agent,
     tracker: makeTracker(),
-    validTokens: new Set<string>(),
+    validTokens: new Set<string>(opts.validTokens ?? []),
     path: '/api/query',
     url: new URL('http://127.0.0.1/api/query'),
-    requestToken: undefined,
+    requestToken: opts.requestToken,
+    requestAgentAddress: opts.requestAgentAddress,
   } as unknown as RequestContext;
   return { ctx, res };
 }
@@ -128,5 +138,80 @@ describe('handleQueryRoutes /api/query', () => {
 
     await expect(handleQueryRoutes(ctx)).rejects.toThrow('Database connection lost');
     expect(res.statusCode).not.toBe(400);
+  });
+
+  it('infers omitted working-memory agentAddress from the authenticated caller', async () => {
+    const caller = '0x1111111111111111111111111111111111111111';
+    const agent = {
+      resolveAgentByToken: vi.fn().mockReturnValue(caller),
+      query: vi.fn().mockResolvedValue({ bindings: [] }),
+      getDefaultAgentAddress: vi.fn().mockReturnValue(caller),
+      peerId: '12D3KooWself',
+    };
+    const { ctx, res } = makeCtx(
+      agent,
+      {
+        sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 1',
+        contextGraphId: 'research',
+        view: 'working-memory',
+      },
+      makeRes(),
+      {
+        requestToken: 'agent-token',
+        requestAgentAddress: caller,
+        validTokens: ['agent-token'],
+      },
+    );
+
+    await handleQueryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(agent.query).toHaveBeenCalledTimes(1);
+    expect(agent.query.mock.calls[0][1]).toMatchObject({
+      contextGraphId: 'research',
+      view: 'working-memory',
+      agentAddress: caller,
+      callerAgentAddress: caller,
+    });
+  });
+
+  it('forwards view, subGraphName, and assertionName to the agent query route', async () => {
+    const caller = '0x2222222222222222222222222222222222222222';
+    const agent = {
+      resolveAgentByToken: vi.fn().mockReturnValue(caller),
+      query: vi.fn().mockResolvedValue({ bindings: [] }),
+      getDefaultAgentAddress: vi.fn().mockReturnValue(caller),
+      peerId: '12D3KooWself',
+    };
+    const { ctx, res } = makeCtx(
+      agent,
+      {
+        sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 1',
+        contextGraphId: 'research',
+        view: 'working-memory',
+        agentAddress: caller,
+        subGraphName: 'code',
+        assertionName: 'probe',
+      },
+      makeRes(),
+      {
+        requestToken: 'agent-token',
+        requestAgentAddress: caller,
+        validTokens: ['agent-token'],
+      },
+    );
+
+    await handleQueryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(agent.query).toHaveBeenCalledTimes(1);
+    expect(agent.query.mock.calls[0][1]).toMatchObject({
+      contextGraphId: 'research',
+      view: 'working-memory',
+      agentAddress: caller,
+      subGraphName: 'code',
+      assertionName: 'probe',
+      callerAgentAddress: caller,
+    });
   });
 });

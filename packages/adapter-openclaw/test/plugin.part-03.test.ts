@@ -194,6 +194,45 @@ describe("DkgNodePlugin", () => {
       expect(body.agentAddress).toBe(ethChecksum);
     });
 
+    it('dkg_query forwards sub_graph_name with view-based routing', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'shared-working-memory',
+        sub_graph_name: 'protocols',
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+      expect(body.contextGraphId).toBe('my-cg');
+      expect(body.view).toBe('shared-working-memory');
+      expect(body.subGraphName).toBe('protocols');
+    });
+
+    it('dkg_query rejects non-string sub_graph_name instead of silently dropping the scope', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'verified-memory',
+        sub_graph_name: 42,
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('sub_graph_name');
+      expect(result.content[0].text).toContain('string');
+    });
+
+    it('dkg_query rejects sub_graph_name without context_graph_id instead of running unscoped', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        sub_graph_name: 'protocols',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('sub_graph_name');
+      expect(result.content[0].text).toContain('context_graph_id');
+    });
+
 
     it('dkg_query rejects a whitespace-only agent_address (same silent-namespace-swap risk as non-string)', async () => {
       // An explicitly-supplied whitespace string is still "caller meant

@@ -193,6 +193,14 @@ export class DkgMemorySearchManager implements MemorySearchManager {
     // inputs, so passing a raw peer ID through the resolver still works.
     const agentAddress = rawAgentAddress ? toAgentPeerId(rawAgentAddress) : undefined;
     const projectContextGraphId = session?.projectContextGraphId;
+    const projectSubGraphName = options?.projectSubGraphName;
+    if (projectSubGraphName && (!projectContextGraphId || projectContextGraphId === AGENT_CONTEXT_GRAPH)) {
+      this.deps.logger?.warn?.(
+        `[dkg-memory] DkgMemorySearchManager.search skipped project sub-graph scope ` +
+        `"${projectSubGraphName}" because no project context graph is selected.`,
+      );
+      return [];
+    }
 
     // B28: Preflight the agent address BEFORE firing WM queries. The query
     // engine at `packages/query/src/dkg-query-engine.ts:47-48` throws
@@ -283,6 +291,7 @@ export class DkgMemorySearchManager implements MemorySearchManager {
       contextGraphId: string;
       view: 'working-memory' | 'shared-working-memory' | 'verified-memory';
       sparql: string;
+      subGraphName?: string;
     }
     const plans: LayerPlan[] = [
       {
@@ -319,6 +328,7 @@ export class DkgMemorySearchManager implements MemorySearchManager {
           contextGraphId: projectContextGraphId,
           view: 'working-memory',
           sparql: permissiveSparql,
+          subGraphName: projectSubGraphName,
         },
         {
           layer: 'project-swm',
@@ -327,6 +337,7 @@ export class DkgMemorySearchManager implements MemorySearchManager {
           contextGraphId: projectContextGraphId,
           view: 'shared-working-memory',
           sparql: permissiveSparql,
+          subGraphName: projectSubGraphName,
         },
         {
           layer: 'project-vm',
@@ -335,6 +346,7 @@ export class DkgMemorySearchManager implements MemorySearchManager {
           contextGraphId: projectContextGraphId,
           view: 'verified-memory',
           sparql: permissiveSparql,
+          subGraphName: projectSubGraphName,
         },
       );
     }
@@ -346,6 +358,7 @@ export class DkgMemorySearchManager implements MemorySearchManager {
             contextGraphId: plan.contextGraphId,
             view: plan.view,
             agentAddress,
+            subGraphName: plan.subGraphName,
           })
           .then(r => ({ plan, bindings: extractBindings(r) }))
           .catch(err => {

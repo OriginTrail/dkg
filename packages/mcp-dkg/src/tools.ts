@@ -199,6 +199,10 @@ export function registerReadTools(
           .optional()
           .describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
         subGraphName: z.string().optional().describe('Limit the query to a single sub-graph'),
+        agentAddress: z
+          .string()
+          .optional()
+          .describe('Optional Working Memory owner address for view: "working-memory" reads.'),
         view: z
           .enum(['working-memory', 'shared-working-memory', 'verified-memory'])
           .optional()
@@ -210,7 +214,7 @@ export function registerReadTools(
         limit: z.number().optional().describe('Row cap when rendering to markdown; does NOT modify the query'),
       },
     },
-    async ({ sparql, projectId, subGraphName, view, includeSharedMemory, limit }): Promise<ToolResult> => {
+    async ({ sparql, projectId, subGraphName, agentAddress, view, includeSharedMemory, limit }): Promise<ToolResult> => {
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
       const fullSparql = sparql.startsWith('PREFIX') ? sparql : `${PREFIXES}\n${sparql}`;
@@ -219,6 +223,7 @@ export function registerReadTools(
           sparql: fullSparql,
           contextGraphId: pid,
           subGraphName,
+          agentAddress,
           view,
           includeSharedMemory,
         });

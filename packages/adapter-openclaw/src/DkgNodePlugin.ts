@@ -35,6 +35,7 @@ import { DkgChannelPlugin } from './DkgChannelPlugin.js';
 import { HookSurface } from './HookSurface.js';
 import { ChatTurnWriter } from './ChatTurnWriter.js';
 import {
+  AGENT_CONTEXT_GRAPH,
   DkgMemoryPlugin,
   DkgMemorySearchManager,
   toAgentPeerId,
@@ -2630,6 +2631,17 @@ export class DkgNodePlugin {
     const limit = Number.isFinite(rawLimit)
       ? Math.floor(Math.max(1, Math.min(100, rawLimit as number)))
       : 20;
+    if (args.sub_graph_name !== undefined) {
+      if (typeof args.sub_graph_name !== 'string') {
+        return this.error('"sub_graph_name" must be a string.');
+      }
+      if (args.sub_graph_name.trim() === '') {
+        return this.error('"sub_graph_name" must be a non-empty string.');
+      }
+    }
+    const projectSubGraphName = typeof args.sub_graph_name === 'string'
+      ? args.sub_graph_name.trim()
+      : undefined;
 
     // Mode-independent slot re-assertion anchor. `before_prompt_build`
     // (the W3 anchor) only fires in `full` registration mode, which means
@@ -2655,6 +2667,12 @@ export class DkgNodePlugin {
       await this.ensureNodePeerId().catch(() => {});
     }
     const session = this.memorySessionResolver.getSession(undefined);
+    if (
+      projectSubGraphName &&
+      (!session?.projectContextGraphId || session.projectContextGraphId === AGENT_CONTEXT_GRAPH)
+    ) {
+      return this.error('"sub_graph_name" requires a selected project context graph for memory_search.');
+    }
     const agentAddress = session?.agentAddress ?? this.memorySessionResolver.getDefaultAgentAddress();
     if (!agentAddress) {
       return this.error(
@@ -2671,7 +2689,11 @@ export class DkgNodePlugin {
         resolver: this.memorySessionResolver,
         logger: this.memoryResolverApi?.logger,
       });
-      const hits = await manager.search(query, { maxResults: limit, caller: 'tool' });
+      const hits = await manager.search(query, {
+        maxResults: limit,
+        caller: 'tool',
+        projectSubGraphName,
+      });
       return this.json({
         query,
         count: hits.length,
@@ -2756,6 +2778,20 @@ export class DkgNodePlugin {
       // matching a CG whose id is the literal whitespace string.
       const trimmed = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
       const contextGraphId = trimmed || undefined;
+      if (args.sub_graph_name !== undefined) {
+        if (typeof args.sub_graph_name !== 'string') {
+          return this.error('"sub_graph_name" must be a string.');
+        }
+        if (args.sub_graph_name.trim() === '') {
+          return this.error('"sub_graph_name" must be a non-empty string.');
+        }
+      }
+      const subGraphName = typeof args.sub_graph_name === 'string'
+        ? args.sub_graph_name.trim()
+        : undefined;
+      if (subGraphName && contextGraphId === undefined) {
+        return this.error('"sub_graph_name" requires "context_graph_id".');
+      }
       // Handler-side view validation (no JSON-schema enum, so strict-schema
       // hosts still surface these tailored errors). Use the shared
       // `GET_VIEWS` constant from `@origintrail-official/dkg-core` as the
@@ -2860,6 +2896,7 @@ export class DkgNodePlugin {
         contextGraphId,
         view,
         agentAddress,
+        subGraphName,
       });
       return this.json(result);
     } catch (err: any) {

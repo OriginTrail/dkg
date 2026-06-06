@@ -45,9 +45,9 @@ export interface QueryOptions {
   assertionName?: string;
   /**
    * Scope the query to a specific sub-graph within the context graph.
-   * When set, the query targets `did:dkg:context-graph:{id}/{subGraphName}`
-   * instead of the root data graph. Only works with legacy routing (no `view`).
-   * Combining `subGraphName` with `view` throws — deferred to V10.x.
+   * With legacy routing, targets `did:dkg:context-graph:{id}/{subGraphName}`
+   * instead of the root data graph. With view-based routing, targets the
+   * selected memory layer inside the named sub-graph.
    */
   subGraphName?: string;
   /**

@@ -99,6 +99,7 @@ interface LayerPlan {
   layer: MemoryLayer;
   contextGraphId: string;
   view: 'working-memory' | 'shared-working-memory' | 'verified-memory';
+  subGraphName?: string;
 }
 
 /**
@@ -201,14 +202,25 @@ export function registerMemorySearchTool(
             'Optional project context-graph id. When supplied, fan-out adds ' +
               "the project's WM/SWM/VM layers to the agent-context layers.",
           ),
+        subGraphName: z
+          .string()
+          .optional()
+          .describe('Optional project sub-graph scope. Requires projectId and applies only to project fan-out.'),
       },
     },
-    async ({ query, limit, projectId }): Promise<ToolResult> => {
+    async ({ query, limit, projectId, subGraphName }): Promise<ToolResult> => {
       const trimmed = query.trim();
       if (trimmed.length < 2) {
         return errResult('"query" is required (non-empty string, ≥2 chars).');
       }
       const cap = Math.floor(Math.max(1, Math.min(100, limit ?? 20)));
+      const projectSubGraphName = subGraphName?.trim();
+      if (subGraphName !== undefined && !projectSubGraphName) {
+        return errResult('"subGraphName" must be a non-empty string.');
+      }
+      if (projectSubGraphName && !projectId?.trim()) {
+        return errResult('"subGraphName" requires "projectId" because memory search subgraph scope applies only to project context graph fan-out.');
+      }
 
       // The query engine requires the agent's raw peer ID for WM view
       // routing. Probe the daemon's identity once per call; without this,
@@ -263,9 +275,9 @@ LIMIT ${cap}`;
       ];
       if (projectId) {
         plans.push(
-          { layer: 'project-wm', contextGraphId: projectId, view: 'working-memory' },
-          { layer: 'project-swm', contextGraphId: projectId, view: 'shared-working-memory' },
-          { layer: 'project-vm', contextGraphId: projectId, view: 'verified-memory' },
+          { layer: 'project-wm', contextGraphId: projectId, view: 'working-memory', subGraphName: projectSubGraphName },
+          { layer: 'project-swm', contextGraphId: projectId, view: 'shared-working-memory', subGraphName: projectSubGraphName },
+          { layer: 'project-vm', contextGraphId: projectId, view: 'verified-memory', subGraphName: projectSubGraphName },
         );
       }
       const searchedLayers: MemoryLayer[] = plans.map((p) => p.layer);
@@ -282,6 +294,7 @@ LIMIT ${cap}`;
               contextGraphId: plan.contextGraphId,
               view: plan.view,
               agentAddress,
+              subGraphName: plan.subGraphName,
             })
             .then((r) => ({ plan, bindings: r.bindings ?? [] }))
             .catch((err) => {
