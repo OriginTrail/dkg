@@ -593,17 +593,6 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       if (
         !hasRecognisedIdentity &&
         view === 'working-memory' &&
-        requestedAgentAddress === undefined
-      ) {
-        return jsonResponse(res, 403, {
-          error:
-            'working-memory reads without agentAddress require authentication. ' +
-            'Provide an agent-scoped bearer token, a node-admin token, or an explicit self agentAddress.',
-        });
-      }
-      if (
-        !hasRecognisedIdentity &&
-        view === 'working-memory' &&
         typeof effectiveAgentAddress === 'string'
       ) {
         // Codex (iteration 4): the daemon's canonical "own WM" identity is

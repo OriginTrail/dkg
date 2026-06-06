@@ -176,7 +176,7 @@ describe('handleQueryRoutes /api/query', () => {
     expect(queryOptions).toHaveProperty('agentAddress', undefined);
   });
 
-  it('does not infer omitted working-memory agentAddress for unauthenticated callers', async () => {
+  it('leaves omitted working-memory agentAddress to the agent for unauthenticated callers', async () => {
     const defaultAgent = '0x1111111111111111111111111111111111111111';
     const agent = {
       resolveAgentByToken: vi.fn(),
@@ -199,9 +199,15 @@ describe('handleQueryRoutes /api/query', () => {
 
     await handleQueryRoutes(ctx);
 
-    expect(res.statusCode).toBe(403);
-    expect(JSON.parse(res.body).error).toMatch(/without agentAddress require authentication/);
-    expect(agent.query).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+    expect(agent.query).toHaveBeenCalledTimes(1);
+    const queryOptions = agent.query.mock.calls[0][1];
+    expect(queryOptions).toMatchObject({
+      contextGraphId: 'research',
+      view: 'working-memory',
+    });
+    expect(queryOptions).toHaveProperty('agentAddress', undefined);
+    expect(queryOptions).toHaveProperty('callerAgentAddress', undefined);
   });
 
   it('leaves omitted working-memory agentAddress to the agent for node-admin callers', async () => {
