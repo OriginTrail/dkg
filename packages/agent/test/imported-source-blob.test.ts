@@ -305,6 +305,45 @@ describe('imported source blob protocol', () => {
     expect(responder._spies.readRange).toHaveBeenCalledWith(blobHash, 0, bytes.length);
   });
 
+  it('does not allow identity-signed envelopes to use the owner agent-address fast path', async () => {
+    const bytes = Buffer.from('# Identity Owner Claim\n');
+    const blobHash = hash(bytes);
+    const contextGraphId = 'cg-source-blob-identity-owner-claim';
+    const assertionUri = `did:dkg:context-graph:cg-source-blob-identity-owner-claim/assertion/did:dkg:agent:${REQUESTER_WALLET.address}/imported-md`;
+    const identityId = 88n;
+    const responder = fakeResponder({
+      blobHash,
+      bytes,
+      policy: { accessPolicy: 1, publishPolicy: 1 },
+      verifySyncIdentity: async (address, claimedIdentityId) =>
+        address.toLowerCase() === REQUESTER_WALLET.address.toLowerCase() &&
+        claimedIdentityId === identityId,
+    });
+
+    const responseBytes = await SourceBlobMethods.prototype.handleGetImportedSourceBlob.call(
+      responder as any,
+      sourceBlobRequest({
+        contextGraphId,
+        assertionUri,
+        blobHash,
+        auth: await signedAuthEnvelope({
+          contextGraphId,
+          assertionUri,
+          blobHash,
+          requesterIdentityId: identityId.toString(),
+          includeRequesterAgentAddress: true,
+        }),
+      }),
+      REQUESTER_PEER_ID,
+    );
+    const response = decodeImportedSourceBlobResponse(responseBytes);
+
+    expect(response.denied).toMatch(/unauthorized/);
+    expect(responder.getPrivateContextGraphParticipants).toHaveBeenCalledWith(contextGraphId);
+    expect(responder._spies.storeQuery).not.toHaveBeenCalled();
+    expect(responder._spies.stat).not.toHaveBeenCalled();
+  });
+
   it('uses root import metadata when a source blob request includes subGraphName', async () => {
     const bytes = Buffer.from('# Subgraph Markdown\n');
     const blobHash = hash(bytes);

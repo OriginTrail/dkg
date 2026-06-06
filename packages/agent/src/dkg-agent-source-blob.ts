@@ -111,6 +111,11 @@ function extractAssertionAgentAddress(contextGraphId: string, assertionUri: stri
 }
 
 function requesterOwnsAssertion(request: SyncRequestEnvelope, assertionUri: string): boolean {
+  try {
+    if (BigInt(request.requesterIdentityId ?? '0') !== 0n) return false;
+  } catch {
+    return false;
+  }
   const assertionAgentAddress = extractAssertionAgentAddress(request.contextGraphId, assertionUri);
   const requesterAgentAddress = comparableAgentAddressClaim(request.requesterAgentAddress);
   const ownerAgentAddress = comparableAgentAddressClaim(assertionAgentAddress);
