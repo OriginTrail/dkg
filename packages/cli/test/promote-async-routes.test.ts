@@ -86,6 +86,13 @@ describe('async SWM-share queue daemon routes', () => {
       },
       resolveAgentByToken: () => undefined,
       assertion: {
+        async history() {
+          return {
+            state: 'created',
+            memoryLayer: 'WorkingMemory',
+            wmCurrentAssertion: 'abcd',
+          };
+        },
         async promoteAsync(
           contextGraphId: string,
           name: string,

@@ -81,6 +81,13 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
       },
       resolveAgentByToken: () => undefined,
       assertion: {
+        async history() {
+          return {
+            state: 'created',
+            memoryLayer: 'WorkingMemory',
+            wmCurrentAssertion: 'abcd',
+          };
+        },
         promote,
       },
     };

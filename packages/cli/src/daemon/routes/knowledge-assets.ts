@@ -16,9 +16,10 @@
 //   POST /api/knowledge-assets/:name/vm/publish      mint/update on chain
 //
 // These delegate to the SAME agent lifecycle methods the legacy
-// `/api/assertion/*` + `/api/shared-memory/*` routes use, so behavior is
-// identical; only the URL shape changes. This module is purely ADDITIVE — the
-// legacy routes are untouched (308 redirects from them land in a follow-up).
+// `/api/assertion/*` + `/api/shared-memory/*` routes use, with V10 route-level
+// preconditions (for example: SWM share requires a finalized WM pointer).
+// This module is purely ADDITIVE — the legacy routes are untouched (308
+// redirects from them land in a follow-up).
 //
 // Identifier note (OT-RFC-43 §10.5.7): for the v10.0 floor the KA is addressed
 // by its lifecycle NAME (the file handle) + `contextGraphId`. Minter-namespaced
@@ -104,6 +105,21 @@ const FINALIZE_ONLY_CREATE_FIELDS = [
   "preSignedAuthorAttestation",
   "schemeVersion",
 ] as const;
+const ASSERTION_NOT_FINALIZED = "ASSERTION_NOT_FINALIZED";
+
+function assertionNotFinalizedBody(
+  contextGraphId: string,
+  name: string,
+  subGraphName?: string,
+): Record<string, unknown> {
+  return {
+    code: ASSERTION_NOT_FINALIZED,
+    error: `Knowledge asset "${name}" must be finalized before it can be shared to SWM. Call POST /api/knowledge-assets/${encodeURIComponent(name)}/wm/finalize first.`,
+    contextGraphId,
+    name,
+    ...(subGraphName ? { subGraphName } : {}),
+  };
+}
 
 /**
  * Translate engine/publisher errors on the WM/SWM mutation verbs into the same
@@ -115,6 +131,10 @@ const FINALIZE_ONLY_CREATE_FIELDS = [
  * publish path, which never down-classified them).
  */
 function respondAssertionError(res: RequestContext["res"], e: any): void {
+  if (e?.code === ASSERTION_NOT_FINALIZED) {
+    jsonResponse(res, 409, assertionNotFinalizedBody(e.contextGraphId, e.assertionName, e.subGraphName));
+    return;
+  }
   if (e?.name === "AssertionNotPersistedError" || e?.code === "ASSERTION_NOT_PERSISTED") {
     jsonResponse(res, 409, {
       error: e.message,
@@ -137,6 +157,22 @@ function respondAssertionError(res: RequestContext["res"], e: any): void {
     return;
   }
   jsonResponse(res, 500, { error: msg });
+}
+
+async function requireFinalizedBeforeSwmShare(
+  ctx: RequestContext,
+  contextGraphId: string,
+  name: string,
+  subGraphName?: string,
+): Promise<boolean> {
+  const { agent, res } = ctx;
+  const hist = await agent.assertion.history(contextGraphId, name, { subGraphName });
+  const wmCurrentAssertion = (hist as Record<string, unknown> | null | undefined)?.wmCurrentAssertion;
+  if (typeof wmCurrentAssertion === "string" && wmCurrentAssertion.length > 0) {
+    return true;
+  }
+  jsonResponse(res, 409, assertionNotFinalizedBody(contextGraphId, name, subGraphName));
+  return false;
 }
 
 function hex(bytes: Uint8Array): string {
@@ -755,6 +791,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
 
     // ── SWM verb: share (WM → SWM; OT-RFC-43 §10.6 renames promote → share) ──
     if (layer === "swm" && verb === "share") {
+      if (!(await requireFinalizedBeforeSwmShare(ctx, contextGraphId, name, subGraphName))) return;
       const share = await agent.assertion.promote(contextGraphId, name, { entities: parsed.entities, subGraphName });
       if (share.promotedCount !== 0) {
         emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm", "swm"], subGraphName, operation: "assertion_promoted", source: "api", counts: { triples: share.promotedCount } });
@@ -768,15 +805,16 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // preflight above already decoded/validated `name`, parsed the JSON body,
     // validated `subGraphName`, and resolved `contextGraphId` — so we reuse
     // those here (parity with how `swm/share` reuses them). The worker-
-    // availability 503 guard, `validateEntities` 400, and the conflict/error
-    // mapping match the legacy handler exactly. Self-contained try/catch (like
-    // `vm/publish`) so the legacy enqueue error mapping is preserved verbatim
-    // and unmatched errors rethrow rather than falling through to the outer
-    // `respondAssertionError` catch.
+    // availability 503 guard, `validateEntities` 400, finalized-WM preflight,
+    // and the conflict/error mapping match the V10 share semantics.
+    // Self-contained try/catch (like `vm/publish`) so the legacy enqueue error
+    // mapping is preserved verbatim and unmatched errors rethrow rather than
+    // falling through to the outer `respondAssertionError` catch.
     if (layer === "swm" && verb === "share-async") {
       if (asyncPromoteUnavailable(res)) return;
       const entities = parsed.entities;
       if (!validateEntities(entities, res)) return;
+      if (!(await requireFinalizedBeforeSwmShare(ctx, contextGraphId, name, subGraphName))) return;
       try {
         const result = await agent.assertion.promoteAsync(contextGraphId, name, {
           entities: entities ?? "all",

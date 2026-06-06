@@ -255,7 +255,13 @@ describe('daemon memory_graph_changed route emissions', () => {
       subGraphName: 'notes',
       entities: ['urn:root'],
     }, {
-      agent: { assertion: { promote }, resolveAgentByToken: () => undefined } as unknown as RequestContext['agent'],
+      agent: {
+        assertion: {
+          history: vi.fn(async () => ({ state: 'created', memoryLayer: 'WorkingMemory', wmCurrentAssertion: 'abcd' })),
+          promote,
+        },
+        resolveAgentByToken: () => undefined,
+      } as unknown as RequestContext['agent'],
       emitMemoryGraphChanged,
     });
 

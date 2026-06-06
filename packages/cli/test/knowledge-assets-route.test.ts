@@ -131,6 +131,11 @@ function status(ctx: RequestContext): number {
 // argument, so we surface a writable row for every id the suite uses; the
 // `resolveRequiredWriteContextGraphId` `exact` match then keys off the request.
 const WRITABLE_CG_IDS = ['cg', 'cg-2', 'other'];
+const FINALIZED_DESCRIPTOR = {
+  state: 'created',
+  memoryLayer: 'WorkingMemory',
+  wmCurrentAssertion: 'abcd',
+};
 
 function contextGraphMocks() {
   return {
@@ -381,7 +386,9 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
   });
 
   it('POST .../:name/swm/share advances the SWM pointer (promote→share) + emits activity', async () => {
-    const agent = makeAssertionAgent();
+    const agent = makeAssertionAgent({
+      assertion: { history: vi.fn(async () => FINALIZED_DESCRIPTOR) },
+    });
     const ctx = ctxFor('POST', '/api/knowledge-assets/f/swm/share', { contextGraphId: 'cg' }, agent);
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(200);
@@ -393,6 +400,22 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(ctx.emitNotification).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'assertion_activity' }),
     );
+  });
+
+  it('POST .../:name/swm/share rejects drafts that have not been finalized', async () => {
+    const agent = makeAssertionAgent({
+      assertion: { history: vi.fn(async () => ({ state: 'created', memoryLayer: 'WorkingMemory' })) },
+    });
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/swm/share', { contextGraphId: 'cg' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(409);
+    expect(body(ctx)).toMatchObject({
+      code: 'ASSERTION_NOT_FINALIZED',
+      contextGraphId: 'cg',
+      name: 'f',
+    });
+    expect(agent.assertion.promote).not.toHaveBeenCalled();
+    expect(ctx.emitMemoryGraphChanged).not.toHaveBeenCalled();
   });
 
   it('POST .../:name/vm/publish mints/updates on chain', async () => {
@@ -894,13 +917,31 @@ describe('async SWM-share queue routes', () => {
 
   it('POST /:name/swm/share-async enqueues a job → { jobId, state: queued }', async () => {
     const agent = makeAssertionAgent({
-      assertion: { promoteAsync: vi.fn(async () => ({ jobId: 'job-xyz' })) },
+      assertion: {
+        history: vi.fn(async () => FINALIZED_DESCRIPTOR),
+        promoteAsync: vi.fn(async () => ({ jobId: 'job-xyz' })),
+      },
     });
     const ctx = ctxFor('POST', '/api/knowledge-assets/notes/swm/share-async', { contextGraphId: 'cg' }, agent);
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(200);
     expect(body(ctx)).toMatchObject({ jobId: 'job-xyz', state: 'queued' });
     expect(agent.assertion.promoteAsync).toHaveBeenCalledWith('cg', 'notes', { entities: 'all', subGraphName: undefined });
+  });
+
+  it('POST /:name/swm/share-async rejects drafts that have not been finalized before enqueue', async () => {
+    const agent = makeAssertionAgent({
+      assertion: { history: vi.fn(async () => ({ state: 'created', memoryLayer: 'WorkingMemory' })) },
+    });
+    const ctx = ctxFor('POST', '/api/knowledge-assets/notes/swm/share-async', { contextGraphId: 'cg' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(409);
+    expect(body(ctx)).toMatchObject({
+      code: 'ASSERTION_NOT_FINALIZED',
+      contextGraphId: 'cg',
+      name: 'notes',
+    });
+    expect(agent.assertion.promoteAsync).not.toHaveBeenCalled();
   });
 
   it('POST /:name/swm/share-async returns 503 when the worker is unavailable (daemonState)', async () => {
@@ -1137,7 +1178,12 @@ describe('OT-RFC-43 A2/B3 — per-layer status + kaId addressing', () => {
         assertionGraph: 'urn:g',
         expectedTripleCount: 4,
       });
-      const agent = makeAssertionAgent({ assertion: { promote: vi.fn(async () => { throw err; }) } });
+      const agent = makeAssertionAgent({
+        assertion: {
+          history: vi.fn(async () => FINALIZED_DESCRIPTOR),
+          promote: vi.fn(async () => { throw err; }),
+        },
+      });
       const ctx = ctxFor('POST', '/api/knowledge-assets/f/swm/share', { contextGraphId: 'cg' }, agent);
       await handleKnowledgeAssetsRoutes(ctx);
       expect(status(ctx)).toBe(409);

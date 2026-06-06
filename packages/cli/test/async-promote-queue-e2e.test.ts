@@ -115,6 +115,13 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
       },
       resolveAgentByToken: () => undefined,
       assertion: {
+        async history() {
+          return {
+            state: 'created',
+            memoryLayer: 'WorkingMemory',
+            wmCurrentAssertion: 'abcd',
+          };
+        },
         async promote(
           contextGraphId: string,
           name: string,
