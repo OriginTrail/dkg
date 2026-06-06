@@ -245,6 +245,9 @@ export function registerReadTools(
         if (assertionName !== undefined && !scopedAssertionName) {
           return err('"assertionName" must be a non-empty string.');
         }
+        if (scopedAssertionName && view !== 'working-memory') {
+          return err('"assertionName" is only supported with view: "working-memory".');
+        }
         const normalizedAgentAddress = normalizeAgentAddressForQuery(agentAddress);
         const result = await client.query({
           sparql: fullSparql,

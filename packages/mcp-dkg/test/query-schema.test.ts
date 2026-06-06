@@ -89,6 +89,18 @@ describe('dkg_query — two-axis schema migration (post-#17 rename + split)', ()
     expect(client.queryCalls).toHaveLength(0);
   });
 
+  it('rejects assertionName outside working-memory so the scope is not ignored', async () => {
+    const result = await server.call('dkg_query', {
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      view: 'verified-memory',
+      assertionName: 'chat-turns',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('assertionName');
+    expect(result.content[0].text).toContain('working-memory');
+    expect(client.queryCalls).toHaveLength(0);
+  });
+
   it.each(['working-memory', 'shared-working-memory', 'verified-memory'])(
     'accepts the canonical view enum value %s',
     async (view) => {

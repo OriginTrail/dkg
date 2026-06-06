@@ -2831,6 +2831,9 @@ export class DkgNodePlugin {
             'single CG; omit `view` for an unscoped cross-graph query.',
         );
       }
+      if (assertionName && view !== 'working-memory') {
+        return this.error('"assertion_name" is only supported with "view: working-memory".');
+      }
       // For WM reads the daemon requires an agentAddress (see
       // `resolveViewGraphs:60`). Accept an explicit `agent_address` on the
       // tool and fall back to this node's agent address — the same default

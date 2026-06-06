@@ -456,6 +456,19 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         error: `Invalid view "${view}". Supported: ${GET_VIEWS.join(", ")}`,
       });
     }
+    if (assertionName !== undefined) {
+      if (typeof assertionName !== 'string') {
+        return jsonResponse(res, 400, { error: 'assertionName must be a string when provided' });
+      }
+      if (!assertionName.trim()) {
+        return jsonResponse(res, 400, { error: 'assertionName must be a non-empty string when provided' });
+      }
+      if (view !== 'working-memory') {
+        return jsonResponse(res, 400, {
+          error: 'assertionName is only supported with view "working-memory"',
+        });
+      }
+    }
     // PR #239 Codex iter-7: gate minTrust normalization/validation behind
     // view === 'verified-memory'. Upstream `resolveViewGraphs()` already
     // ignores `minTrust` outside VM, so the HTTP layer must match that —

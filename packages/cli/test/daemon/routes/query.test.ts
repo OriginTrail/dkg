@@ -310,4 +310,35 @@ describe('handleQueryRoutes /api/query', () => {
       callerAgentAddress: caller,
     });
   });
+
+  it('rejects assertionName outside working-memory so the scope is not ignored', async () => {
+    const caller = '0x2222222222222222222222222222222222222222';
+    const agent = {
+      resolveAgentByToken: vi.fn().mockReturnValue(caller),
+      query: vi.fn().mockResolvedValue({ bindings: [] }),
+      getDefaultAgentAddress: vi.fn().mockReturnValue(caller),
+      peerId: '12D3KooWself',
+    };
+    const { ctx, res } = makeCtx(
+      agent,
+      {
+        sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 1',
+        contextGraphId: 'research',
+        view: 'verified-memory',
+        assertionName: 'probe',
+      },
+      makeRes(),
+      {
+        requestToken: 'agent-token',
+        requestAgentAddress: caller,
+        validTokens: ['agent-token'],
+      },
+    );
+
+    await handleQueryRoutes(ctx);
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/assertionName.*working-memory/);
+    expect(agent.query).not.toHaveBeenCalled();
+  });
 });

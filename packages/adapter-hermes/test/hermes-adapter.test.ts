@@ -2760,6 +2760,8 @@ for args, needle in [
     ({"sparql": "ASK {}", "context_graph": "old"}, "context_graph"),
     ({"sparql": "ASK {}", "context_graph_id": "cg:test", "view": "bad"}, "view"),
     ({"sparql": "ASK {}", "context_graph_id": "cg:test", "sub_graph_name": 42}, "sub_graph_name"),
+    ({"sparql": "ASK {}", "context_graph_id": "cg:test", "view": "verified-memory", "assertion_name": "turn"}, "assertion_name"),
+    ({"sparql": "ASK {}", "context_graph_id": "cg:test", "view": "working-memory", "assertion_name": 42}, "assertion_name"),
     ({"sparql": "ASK {}", "context_graph_id": "cg:test", "view": "working-memory", "agent_address": "   "}, "agent_address"),
 ]:
     result = json.loads(provider.handle_tool_call("dkg_query", args))
@@ -3208,6 +3210,16 @@ assert provider._client.calls == [
     ("project-cg", {"view": "shared-working-memory", "agent_address": None, "sub_graph_name": "skills"}),
     ("project-cg", {"view": "verified-memory", "agent_address": None, "sub_graph_name": "skills"}),
 ], provider._client.calls
+
+provider._offline = True
+offline_scoped = json.loads(provider.handle_tool_call("memory_search", {
+    "query": "alpha beta",
+    "limit": 10,
+    "sub_graph_name": "skills",
+}))
+assert "sub_graph_name" in offline_scoped["error"], offline_scoped
+assert "offline" in offline_scoped["error"], offline_scoped
+provider._offline = False
 
 provider._client.calls = []
 provider._client.fail_scoped_project = True

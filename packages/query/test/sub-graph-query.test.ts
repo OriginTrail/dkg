@@ -161,6 +161,21 @@ describe('sub-graph query scoping', () => {
     expect(result.bindings.map((b) => b['name'])).toEqual(['"WMCode"']);
   });
 
+  it('rejects assertionName outside working-memory so it cannot be ignored', async () => {
+    await expect(engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      { contextGraphId: CG_ID, view: 'shared-working-memory', subGraphName: 'code', assertionName: 'probe' },
+    )).rejects.toThrow(/assertionName.*working-memory/);
+    await expect(engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      { contextGraphId: CG_ID, view: 'verified-memory', subGraphName: 'code', assertionName: 'probe' },
+    )).rejects.toThrow(/assertionName.*working-memory/);
+    await expect(engine.query(
+      `SELECT ?name WHERE { ?s <${VIEW_NAME}> ?name }`,
+      { contextGraphId: CG_ID, subGraphName: 'code', assertionName: 'probe' },
+    )).rejects.toThrow(/assertionName.*working-memory/);
+  });
+
   it('constrains GRAPH patterns to the selected sub-graph WM assertion', async () => {
     const result = await engine.query(
       `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${VIEW_NAME}> ?name } }`,

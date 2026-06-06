@@ -248,6 +248,19 @@ describe("DkgNodePlugin", () => {
       expect(result.content[0].text).toContain('string');
     });
 
+    it('dkg_query rejects assertion_name outside working-memory so the scope is not ignored', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ ok: true });
+      const result = await byName.get('dkg_query')!.execute('tc', {
+        sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1',
+        context_graph_id: 'my-cg',
+        view: 'verified-memory',
+        assertion_name: 'chat-turns',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.content[0].text).toContain('assertion_name');
+      expect(result.content[0].text).toContain('working-memory');
+    });
+
     it('dkg_query rejects a whitespace-only agent_address (same silent-namespace-swap risk as non-string)', async () => {
       // An explicitly-supplied whitespace string is still "caller meant
       // something here" — treating `"   "` as "missing" and defaulting

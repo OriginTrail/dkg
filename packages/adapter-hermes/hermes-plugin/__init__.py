@@ -1420,6 +1420,13 @@ class DKGMemoryProvider(MemoryProvider):
             return tool_error('"sub_graph_name" must be a non-empty string.')
         if _first_text(args, "sub_graph_name") and not cg:
             return tool_error('"sub_graph_name" requires "context_graph_id" or a configured default context graph.')
+        if args.get("assertion_name") is not None and not isinstance(args.get("assertion_name"), str):
+            return tool_error('"assertion_name" must be a string.')
+        if isinstance(args.get("assertion_name"), str) and not args.get("assertion_name", "").strip():
+            return tool_error('"assertion_name" must be a non-empty string.')
+        assertion_name = _first_text(args, "assertion_name")
+        if assertion_name and view != "working-memory":
+            return tool_error('"assertion_name" is only supported with "view: working-memory".')
         if args.get("agent_address") is not None and not isinstance(args.get("agent_address"), str):
             return tool_error('"agent_address" must be a string.')
         if isinstance(args.get("agent_address"), str) and not args.get("agent_address", "").strip():
@@ -1435,7 +1442,7 @@ class DKGMemoryProvider(MemoryProvider):
             sparql,
             cg,
             view=view,
-            assertion_name=_first_text(args, "assertion_name"),
+            assertion_name=assertion_name,
             agent_address=agent_address,
             sub_graph_name=_first_text(args, "sub_graph_name"),
             verified_graph=_first_text(args, "verified_graph"),
@@ -1462,6 +1469,11 @@ class DKGMemoryProvider(MemoryProvider):
         if project_sub_graph_name and (not project_context_graph or _is_agent_context_graph(project_context_graph)):
             return tool_error('"sub_graph_name" requires a project context graph for memory_search.')
         if self._offline or not self._client:
+            if project_sub_graph_name:
+                return tool_error(
+                    '"sub_graph_name" cannot be used for offline memory_search because the local cache '
+                    "does not record sub-graph scope."
+                )
             return json.dumps(_cache_memory_search(query, self._cache, limit))
 
         keywords = [k for k in query.lower().split() if len(k) >= 2]

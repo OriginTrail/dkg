@@ -203,6 +203,10 @@ export class DKGQueryEngine implements QueryEngine {
       if (!v.valid) throw new Error(`Invalid sub-graph name for query: ${v.reason}`);
     }
 
+    if (options?.assertionName && options.view !== 'working-memory') {
+      throw new Error('assertionName is only supported for view "working-memory" queries');
+    }
+
     if (effectiveContextGraphId && !options?.view) {
       const dataGraph = options?.subGraphName
         ? contextGraphSubGraphUri(effectiveContextGraphId, options.subGraphName)
