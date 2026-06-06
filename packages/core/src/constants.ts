@@ -153,6 +153,14 @@ export const PROTOCOL_STORAGE_UPDATE_ACK = '/dkg/10.0.1/storage-update-ack';
  */
 export const PROTOCOL_GET_CIPHERTEXT_CHUNK = '/dkg/10.0.2/get-ciphertext-chunk';
 
+/**
+ * Issue #872: point-to-point raw sync verb for imported source blobs.
+ * Requesters use this only after SWM metadata proves the caller can read
+ * the imported assertion; responders re-run CG authorization and verify the
+ * requested hash is referenced by assertion metadata before returning bytes.
+ */
+export const PROTOCOL_GET_IMPORTED_SOURCE_BLOB = '/dkg/10.0.2/get-imported-source-blob';
+
 export const DHT_PROTOCOL = '/dkg/kad/1.0.0';
 
 /** Maximum application payload size allowed for one DKG GossipSub message (10 MB). */

@@ -145,6 +145,8 @@ export interface SyncRequestEnvelope {
   requesterAgentAddress?: string;
   requesterSignatureR?: string;
   requesterSignatureVS?: string;
+  authPurpose?: string;
+  authSelector?: string;
   /**
    * Phase C — optional, UNSIGNED delta-sync hint (decimal `uint256` string).
    * When set, the responder returns only KAs whose KC `dkg:batchId` is
@@ -152,6 +154,32 @@ export interface SyncRequestEnvelope {
    * like `phase`/`snapshotRef`), so it's additive and backward-compatible.
    */
   sinceBatchId?: string;
+}
+
+export interface ImportedSourceBlobStore {
+  get(hash: string): Promise<Uint8Array | Buffer | null | undefined>;
+  has?(hash: string): Promise<boolean>;
+  stat?(hash: string): Promise<{ size: number } | null | undefined>;
+  readRange?(hash: string, offset: number, length: number): Promise<Uint8Array | Buffer | null | undefined>;
+}
+
+export interface ImportedSourceBlobFetchInput {
+  contextGraphId: string;
+  assertionUri: string;
+  blobHash: string;
+  offset?: number;
+  maxBytes: number;
+  subGraphName?: string;
+  requestAgentAddress?: string;
+  timeoutMs?: number;
+}
+
+export interface ImportedSourceBlobFetchResult {
+  denied?: string;
+  totalBytes?: number;
+  nextOffset?: number;
+  truncated?: boolean;
+  bytes?: Uint8Array;
 }
 
 // ── Public error classes ────────────────────────────────────────────

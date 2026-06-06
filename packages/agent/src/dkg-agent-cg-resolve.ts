@@ -477,7 +477,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       return {
         contextGraphId: parsed.contextGraphId,
         offset: parsed.offset ?? 0,
-        limit: Math.min(parsed.limit ?? SYNC_PAGE_SIZE, SYNC_PAGE_SIZE),
+        limit: parsed.limit ?? SYNC_PAGE_SIZE,
         includeSharedMemory: parsed.includeSharedMemory ?? false,
         phase: normalizeSyncPhase(parsed.phase),
         snapshotRef: typeof parsed.snapshotRef === 'string' ? parsed.snapshotRef : undefined,
@@ -489,6 +489,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         requesterAgentAddress: parsed.requesterAgentAddress,
         requesterSignatureR: parsed.requesterSignatureR,
         requesterSignatureVS: parsed.requesterSignatureVS,
+        authPurpose: typeof parsed.authPurpose === 'string' ? parsed.authPurpose : undefined,
+        authSelector: typeof parsed.authSelector === 'string' ? parsed.authSelector : undefined,
         // Phase C: unsigned delta hint. Validated/normalised in the responder.
         sinceBatchId: typeof parsed.sinceBatchId === 'string' ? parsed.sinceBatchId : undefined,
       };
@@ -644,6 +646,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     requestId: string | undefined,
     issuedAtMs: number | undefined,
     requesterAgentAddress: string | undefined,
+    authPurpose?: string,
+    authSelector?: string,
   ): Uint8Array {
     // `requesterAgentAddress` participates in the digest so the
     // "on behalf of" claim is signed, not free-form envelope data.
@@ -651,20 +655,25 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     // tampering with `requesterAgentAddress` after the signature was
     // produced — which would be a way to bypass the per-agent
     // delegation binding in `request-authorize`.
+    const baseTypes = ['string', 'uint256', 'uint256', 'bool', 'string', 'string', 'string', 'uint256', 'string'];
+    const baseValues = [
+      contextGraphId,
+      BigInt(offset),
+      BigInt(limit),
+      includeSharedMemory,
+      targetPeerId,
+      requesterPeerId ?? '',
+      requestId ?? '',
+      BigInt(issuedAtMs ?? 0),
+      (requesterAgentAddress ?? '').toLowerCase(),
+    ];
+    if (!authPurpose && !authSelector) {
+      return ethers.getBytes(ethers.solidityPackedKeccak256(baseTypes, baseValues));
+    }
     return ethers.getBytes(
       ethers.solidityPackedKeccak256(
-        ['string', 'uint256', 'uint256', 'bool', 'string', 'string', 'string', 'uint256', 'string'],
-        [
-          contextGraphId,
-          BigInt(offset),
-          BigInt(limit),
-          includeSharedMemory,
-          targetPeerId,
-          requesterPeerId ?? '',
-          requestId ?? '',
-          BigInt(issuedAtMs ?? 0),
-          (requesterAgentAddress ?? '').toLowerCase(),
-        ],
+        [...baseTypes, 'string', 'string'],
+        [...baseValues, authPurpose ?? '', authSelector ?? ''],
       ),
     );
   }

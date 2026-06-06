@@ -110,6 +110,9 @@ export {
   type CclPublishedEvaluationRecord,
   type CclPublishedResultEntry,
   type PendingSenderKeyEntry,
+  type ImportedSourceBlobStore,
+  type ImportedSourceBlobFetchInput,
+  type ImportedSourceBlobFetchResult,
 } from './dkg-agent-types.js';
 export {
   bindRandomSampling,

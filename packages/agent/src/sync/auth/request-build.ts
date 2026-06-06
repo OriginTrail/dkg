@@ -17,6 +17,8 @@ export interface SyncRequestEnvelope {
   requesterSignatureVS?: string;
   phase?: SyncPhase;
   snapshotRef?: string;
+  authPurpose?: string;
+  authSelector?: string;
   /**
    * Phase C — optional, UNSIGNED delta-sync hint. When set, the responder
    * returns only Knowledge Assets whose KC `dkg:batchId` is strictly greater
@@ -53,6 +55,8 @@ interface BuildSyncRequestParams {
     requestId: string,
     issuedAtMs: number,
     requesterAgentAddress: string | undefined,
+    authPurpose?: string,
+    authSelector?: string,
   ) => Uint8Array;
   getIdentityId: () => Promise<bigint>;
   signMessage?: (digest: Uint8Array) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
@@ -66,6 +70,10 @@ interface BuildSyncRequestParams {
   claimedAgentAddress?: string;
   /** Private key matching `claimedAgentAddress`, used as a fallback signer when no chain identity is available. */
   claimedAgentPrivateKey?: string;
+  /** Optional purpose marker for protocol-specific auth envelopes. */
+  authPurpose?: string;
+  /** Optional selector digest bound into the signed auth envelope. */
+  authSelector?: string;
 }
 
 export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): Promise<Uint8Array> {
@@ -85,6 +93,8 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     signMessage,
     claimedAgentAddress,
     claimedAgentPrivateKey,
+    authPurpose,
+    authSelector,
   } = params;
 
   if (!needsAuth) {
@@ -122,6 +132,8 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   if (claimedAgentAddress) {
     request.requesterAgentAddress = claimedAgentAddress;
   }
+  if (authPurpose) request.authPurpose = authPurpose;
+  if (authSelector) request.authSelector = authSelector;
   const digest = computeSyncDigest(
     request.contextGraphId,
     request.offset,
@@ -132,6 +144,8 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     request.requestId!,
     request.issuedAtMs!,
     request.requesterAgentAddress,
+    request.authPurpose,
+    request.authSelector,
   );
 
   // Phase C: ride the envelope unsigned, after the digest (cannot influence

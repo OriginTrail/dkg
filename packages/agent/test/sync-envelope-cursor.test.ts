@@ -47,14 +47,16 @@ describe('Phase C sync envelope — sinceBatchId is unsigned', () => {
     expect(withHint.digestCalls).toHaveLength(1);
 
     // The digest signature is (cg, offset, limit, includeSWM, target, requester,
-    // requestId, issuedAtMs, agentAddress) — 9 args, NO sinceBatchId. requestId
-    // (idx 6) and issuedAtMs (idx 7) are random/time-based per build, so compare
-    // only the stable, semantically-meaningful positions.
+    // requestId, issuedAtMs, agentAddress, authPurpose, authSelector) — 11 args,
+    // NO sinceBatchId. requestId (idx 6) and issuedAtMs (idx 7) are random/time-
+    // based per build, so compare only the stable, semantically-meaningful positions.
     const a = without.digestCalls[0];
     const b = withHint.digestCalls[0];
-    expect(a).toHaveLength(9);
-    expect(b).toHaveLength(9);
-    for (const idx of [0, 1, 2, 3, 4, 5, 8]) expect(b[idx]).toEqual(a[idx]);
+    expect(a).toHaveLength(11);
+    expect(b).toHaveLength(11);
+    for (const idx of [0, 1, 2, 3, 4, 5, 8, 9, 10]) expect(b[idx]).toEqual(a[idx]);
+    expect(a[9]).toBeUndefined();
+    expect(a[10]).toBeUndefined();
     // The hint value never appears anywhere in the digest inputs.
     expect(b.some((arg) => String(arg) === '42')).toBe(false);
   });

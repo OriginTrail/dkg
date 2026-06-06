@@ -8,12 +8,17 @@ import {
   contextGraphMetaUri,
   contextGraphSharedMemoryUri,
 } from '@origintrail-official/dkg-core';
+import { ethers } from 'ethers';
 import { FileStore } from '../src/file-store.js';
 import type { ExtractionStatusRecord } from '../src/extraction-status.js';
 import { handleAssertionRoutes } from '../src/daemon/routes/assertion.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
+
+function keccakContentHash(bytes: Buffer): string {
+  return `keccak256:${ethers.keccak256(bytes).replace(/^0x/, '')}`;
+}
 
 type Quad = { subject: string; predicate: string; object: string };
 
@@ -122,6 +127,19 @@ describe('import artifact daemon routes', () => {
     publisherDiscardError?: Error;
     targetGraphExists?: boolean;
     queryQuads?: Quad[];
+    canReadContextGraph?: boolean | ((contextGraphId: string, opts?: unknown) => Promise<boolean> | boolean);
+    sourcePeerId?: string;
+    fetchImportedSourceBlobFromPeer?: (
+      remotePeerId: string,
+      input: {
+        contextGraphId: string;
+        assertionUri: string;
+        blobHash: string;
+        maxBytes: number;
+        subGraphName?: string;
+        requestAgentAddress?: string;
+      },
+    ) => Promise<{ denied?: string; totalBytes?: number; truncated?: boolean; bytes?: Uint8Array }>;
     /**
      * Issue #872 — optional on-chain policy enum pair (`accessPolicy`,
      * `publishPolicy`) returned by the mock agent's
@@ -220,6 +238,18 @@ describe('import artifact daemon routes', () => {
             },
           }
         : {}),
+      ...(args.canReadContextGraph !== undefined
+        ? {
+            async canReadContextGraph(contextGraphId: string, opts?: unknown) {
+              return typeof args.canReadContextGraph === 'function'
+                ? args.canReadContextGraph(contextGraphId, opts)
+                : args.canReadContextGraph;
+            },
+          }
+        : {}),
+      ...(args.fetchImportedSourceBlobFromPeer
+        ? { fetchImportedSourceBlobFromPeer: args.fetchImportedSourceBlobFromPeer }
+        : {}),
       store: {
         async hasGraph() {
           return Boolean(args.targetGraphExists);
@@ -261,6 +291,12 @@ describe('import artifact daemon routes', () => {
                 rootEntity: args.assertionUri,
                 markdownForm: Array.isArray(args.markdownForm) ? args.markdownForm[0] : args.markdownForm,
               }],
+            };
+          }
+          if (sparql.includes('WorkspaceOperation') && sparql.includes('publisherPeerId')) {
+            return {
+              type: 'bindings',
+              bindings: args.sourcePeerId ? [{ publisherPeerId: args.sourcePeerId }] : [],
             };
           }
           if (sparql.includes('?markdownForm')) {
@@ -582,6 +618,275 @@ describe('import artifact daemon routes', () => {
     expect(read.body.artifact.ownerGuardRelaxed).toBe(true);
   });
 
+  it('hydrates missing non-owner Markdown bytes from the source peer on public + open CGs (#872)', async () => {
+    const remoteBytes = Buffer.from('# Remote Public Imported\n');
+    const markdownHash = keccakContentHash(remoteBytes);
+    const contextGraphId = 'cg-public-open-remote-hydrate';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
+    const fetches: unknown[] = [];
+    const { agent } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: markdownHash,
+      markdownHash,
+      markdownForm: `urn:dkg:file:${markdownHash}`,
+      onChainPolicy: { accessPolicy: 0, publishPolicy: 1 },
+      sourcePeerId: 'peer-source',
+      async fetchImportedSourceBlobFromPeer(remotePeerId, input) {
+        fetches.push({ remotePeerId, input });
+        return { totalBytes: remoteBytes.length, bytes: remoteBytes };
+      },
+    });
+    await startRoutes({ agent });
+
+    const resolved = await post('/api/assertion/import-artifact/resolve', {
+      contextGraphId,
+      assertionUri,
+    });
+    expect(resolved.status).toBe(200);
+    expect(resolved.body.artifact).toMatchObject({
+      markdownHash,
+      canReadMarkdown: false,
+      markdownAvailability: 'fetchable',
+      canFetchMarkdown: true,
+      sourcePeerId: 'peer-source',
+    });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 1024,
+    });
+    expect(read.status).toBe(200);
+    expect(read.body.markdown).toBe('# Remote Public Imported\n');
+    expect(read.body.artifact).toMatchObject({
+      canReadMarkdown: true,
+      markdownAvailability: 'local',
+      canFetchMarkdown: false,
+    });
+    expect(fetches).toHaveLength(1);
+    expect(fetches[0]).toMatchObject({
+      remotePeerId: 'peer-source',
+      input: {
+        contextGraphId,
+        assertionUri,
+        blobHash: markdownHash,
+        maxBytes: 1024,
+        requestAgentAddress: 'did:dkg:agent:test',
+      },
+    });
+    await expect(fileStore.has(markdownHash)).resolves.toBe(true);
+  });
+
+  it('allows curated allowlisted non-owner reads and hydrates Markdown bytes (#872)', async () => {
+    const remoteBytes = Buffer.from('# Curated Shared Imported\n');
+    const markdownHash = keccakContentHash(remoteBytes);
+    const contextGraphId = 'cg-curated-allowlisted-hydrate';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
+    const { agent } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: markdownHash,
+      markdownHash,
+      markdownForm: `urn:dkg:file:${markdownHash}`,
+      onChainPolicy: { accessPolicy: 1, publishPolicy: 0 },
+      canReadContextGraph: true,
+      sourcePeerId: 'peer-curator',
+      async fetchImportedSourceBlobFromPeer(remotePeerId, input) {
+        expect(remotePeerId).toBe('peer-curator');
+        expect(input.blobHash).toBe(markdownHash);
+        return { totalBytes: remoteBytes.length, bytes: remoteBytes };
+      },
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 2048,
+    });
+
+    expect(read.status).toBe(200);
+    expect(read.body.markdown).toBe('# Curated Shared Imported\n');
+    expect(read.body.artifact).toMatchObject({
+      assertionAgentAddress: 'did:dkg:agent:source',
+      ownerGuardRelaxed: true,
+      markdownAvailability: 'local',
+    });
+  });
+
+  it('keeps metadata and Markdown bytes hidden for curated non-allowed callers (#872)', async () => {
+    const remoteBytes = Buffer.from('# Curated Denied\n');
+    const markdownHash = keccakContentHash(remoteBytes);
+    const contextGraphId = 'cg-curated-denied';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
+    const { agent, queries } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: markdownHash,
+      markdownHash,
+      markdownForm: `urn:dkg:file:${markdownHash}`,
+      onChainPolicy: { accessPolicy: 1, publishPolicy: 0 },
+      canReadContextGraph: false,
+      sourcePeerId: 'peer-curator',
+      async fetchImportedSourceBlobFromPeer() {
+        throw new Error('must not fetch for denied caller');
+      },
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+    });
+
+    expect(read.status).toBe(403);
+    expect(read.body.error).toMatch(/owned by the requesting agent/);
+    expect(queries).toHaveLength(0);
+  });
+
+  it('forces curated authorization when on-chain access policy is private despite stale local public metadata (#872 security review)', async () => {
+    const remoteBytes = Buffer.from('# Curated Stale Public\n');
+    const markdownHash = keccakContentHash(remoteBytes);
+    const contextGraphId = 'cg-curated-stale-public';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
+    const { agent, queries } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: markdownHash,
+      markdownHash,
+      markdownForm: `urn:dkg:file:${markdownHash}`,
+      onChainPolicy: { accessPolicy: 1, publishPolicy: 1 },
+      canReadContextGraph: (_contextGraphId, opts) => !(opts as { forcePrivatePolicy?: boolean } | undefined)?.forcePrivatePolicy,
+      sourcePeerId: 'peer-curator',
+      async fetchImportedSourceBlobFromPeer() {
+        throw new Error('must not fetch for denied caller');
+      },
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+    });
+
+    expect(read.status).toBe(403);
+    expect(read.body.error).toMatch(/owned by the requesting agent/);
+    expect(queries).toHaveLength(0);
+  });
+
+  it('hydrates converter-backed Markdown intermediate instead of original source bytes (#872)', async () => {
+    const sourceBytes = Buffer.from('%PDF original');
+    const markdownBytes = Buffer.from('# Converted Markdown\n');
+    const sourceHash = keccakContentHash(sourceBytes);
+    const markdownHash = keccakContentHash(markdownBytes);
+    const contextGraphId = 'cg-converted-md-intermediate-hydrate';
+    const assertionName = 'converted-doc';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
+    const requestedHashes: string[] = [];
+    const { agent } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: sourceHash,
+      markdownHash,
+      markdownForm: `urn:dkg:file:${markdownHash}`,
+      contentType: 'application/pdf',
+      mdIntermediateHash: markdownHash,
+      onChainPolicy: { accessPolicy: 0, publishPolicy: 1 },
+      sourcePeerId: 'peer-source',
+      async fetchImportedSourceBlobFromPeer(_remotePeerId, input) {
+        requestedHashes.push(input.blobHash);
+        return { totalBytes: markdownBytes.length, bytes: markdownBytes };
+      },
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 1024,
+    });
+
+    expect(read.status).toBe(200);
+    expect(read.body.markdown).toBe('# Converted Markdown\n');
+    expect(requestedHashes).toEqual([markdownHash]);
+    expect(requestedHashes).not.toContain(sourceHash);
+  });
+
+  it('rejects remote source blob hash mismatches without caching bytes (#872)', async () => {
+    const expectedBytes = Buffer.from('# Expected Markdown\n');
+    const wrongBytes = Buffer.from('# Wrong Markdown\n');
+    const markdownHash = keccakContentHash(expectedBytes);
+    const contextGraphId = 'cg-public-open-remote-hash-mismatch';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
+    const { agent } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: markdownHash,
+      markdownHash,
+      markdownForm: `urn:dkg:file:${markdownHash}`,
+      onChainPolicy: { accessPolicy: 0, publishPolicy: 1 },
+      sourcePeerId: 'peer-source',
+      async fetchImportedSourceBlobFromPeer() {
+        return { totalBytes: wrongBytes.length, bytes: wrongBytes };
+      },
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 1024,
+    });
+
+    expect(read.status).toBe(404);
+    expect(read.body.error).toMatch(/not replicated locally|not present in the file store/);
+    await expect(fileStore.has(markdownHash)).resolves.toBe(false);
+  });
+
+  it('rejects oversized remote source blob responses without caching bytes (#872 security review)', async () => {
+    const remoteBytes = Buffer.alloc(2048, 0x61);
+    const markdownHash = keccakContentHash(remoteBytes);
+    const contextGraphId = 'cg-public-open-remote-oversized';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
+    const { agent } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: markdownHash,
+      markdownHash,
+      markdownForm: `urn:dkg:file:${markdownHash}`,
+      onChainPolicy: { accessPolicy: 0, publishPolicy: 1 },
+      sourcePeerId: 'peer-source',
+      async fetchImportedSourceBlobFromPeer() {
+        return { bytes: remoteBytes };
+      },
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 1024,
+    });
+
+    expect(read.status).toBe(413);
+    expect(read.body.error).toMatch(/exceeds maxBytes/);
+    await expect(fileStore.has(markdownHash)).resolves.toBe(false);
+  });
+
   it('derives non-owner public + open read metadata from replicated SWM linkage when _meta is absent (#872 devnet)', async () => {
     // Devnet peers receive the promoted SWM assertion triples but do not
     // receive the origin node's CG-root `_meta` rows. The read route should
@@ -626,6 +931,39 @@ describe('import artifact daemon routes', () => {
     expect(read.body.error).toMatch(/not replicated locally/);
     expect(read.body.error).not.toMatch(/owned by the requesting agent/);
     expect(read.body.artifact.ownerGuardRelaxed).toBe(true);
+  });
+
+  it('does not read locally cached bytes from SWM-only import metadata (#872 security review)', async () => {
+    const entry = await fileStore.put(Buffer.from('# Local But Unproven\n'), 'text/markdown');
+    const contextGraphId = 'cg-public-open-swm-local-cache-oracle';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:source', assertionName);
+    const { agent } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: entry.keccak256,
+      markdownHash: entry.keccak256,
+      markdownForm: `urn:dkg:file:${entry.keccak256}`,
+      omitImportMeta: true,
+      onChainPolicy: { accessPolicy: 0, publishPolicy: 1 },
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/assertion/import-artifact/read-markdown', {
+      contextGraphId,
+      assertionUri,
+      maxBytes: 1024,
+    });
+
+    expect(read.status).toBe(404);
+    expect(read.body.error).toMatch(/not replicated locally/);
+    expect(read.body.markdown).toBeUndefined();
+    expect(read.body.artifact).toMatchObject({
+      markdownHash: entry.keccak256,
+      canReadMarkdown: false,
+      ownerGuardRelaxed: true,
+    });
   });
 
   it('keeps the owner guard in force when a non-owner reads from a CG that is public but curators-only (#872)', async () => {

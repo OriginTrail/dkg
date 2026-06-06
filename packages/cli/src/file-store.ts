@@ -14,7 +14,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers } from 'ethers';
@@ -126,6 +126,37 @@ export class FileStore {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /** Return blob size for a stored hash without reading the full file. */
+  async stat(hash: string): Promise<{ size: number } | null> {
+    const path = await this.hashToPath(hash);
+    if (!path) return null;
+    try {
+      const info = await stat(path);
+      return { size: info.size };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Read a bounded byte range for a stored hash without loading the full blob. */
+  async readRange(hash: string, offset: number, length: number): Promise<Buffer | null> {
+    if (!Number.isSafeInteger(offset) || offset < 0) return null;
+    if (!Number.isSafeInteger(length) || length < 0) return null;
+    const path = await this.hashToPath(hash);
+    if (!path) return null;
+    let handle;
+    try {
+      handle = await open(path, 'r');
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, offset);
+      return buffer.subarray(0, bytesRead);
+    } catch {
+      return null;
+    } finally {
+      await handle?.close().catch(() => {});
     }
   }
 

@@ -57,7 +57,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, escapeDkgRdfLiteral, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, escapeDkgRdfLiteral, sparqlIri, contextGraphSharedMemoryUri, contextGraphSharedMemoryMetaUri, contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri, PROMOTE_JOB_STATES, PromoteJobConflictError, type PromoteJob, type PromoteJobState, type PublishOptions } from '@origintrail-official/dkg-publisher';
 import { validatePreSignedAuthorAttestation } from './memory.js';
 import { recordAssertionActivity } from '../activity-notification.js';
@@ -357,6 +357,10 @@ type ImportedArtifactResolution = {
   markdownForm?: string;
   markdownHash?: string;
   canReadMarkdown: boolean;
+  markdownAvailability?: 'local' | 'fetchable' | 'unavailable';
+  canFetchMarkdown?: boolean;
+  markdownUnavailableReason?: string;
+  sourcePeerId?: string;
   /**
    * Issue #872 — set to `true` when the request would have been
    * blocked by the legacy owner guard but the CG's on-chain policy
@@ -825,17 +829,168 @@ function assertImportedArtifactOwnerAddress(
  * will return 404 on every cross-agent read until byte-replication is
  * added. Tracked in the PR body for #872.
  */
-async function isPublicOpenContextGraph(
-  agent: { getContextGraphOnChainPolicy?: (id: string) => Promise<{ accessPolicy?: number; publishPolicy?: number }> },
+async function canReadImportedArtifactSharedSource(
+  agent: {
+    canReadContextGraph?: (
+      id: string,
+      opts?: { callerAgentAddress?: string; allowSubscriptionFallback?: boolean; forcePrivatePolicy?: boolean },
+    ) => Promise<boolean>;
+    getContextGraphOnChainPolicy?: (id: string) => Promise<{ accessPolicy?: number; publishPolicy?: number }>;
+  },
   contextGraphId: string,
+  requestAgentAddress: string,
 ): Promise<boolean> {
-  if (typeof agent.getContextGraphOnChainPolicy !== 'function') return false;
+  let policy: { accessPolicy?: number; publishPolicy?: number };
   try {
-    const policy = await agent.getContextGraphOnChainPolicy(contextGraphId);
-    return policy.accessPolicy === 0 && policy.publishPolicy === 1;
+    policy = typeof agent.getContextGraphOnChainPolicy === 'function'
+      ? await agent.getContextGraphOnChainPolicy(contextGraphId)
+      : {};
   } catch {
     return false;
   }
+  if (policy.accessPolicy === 0) {
+    return policy.publishPolicy === 1;
+  }
+  if (policy.accessPolicy !== 1 || typeof agent.canReadContextGraph !== 'function') {
+    return false;
+  }
+  try {
+    return await agent.canReadContextGraph(contextGraphId, {
+      callerAgentAddress: requestAgentAddress,
+      allowSubscriptionFallback: false,
+      forcePrivatePolicy: true,
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function resolveImportedArtifactSourcePeerId(
+  ctx: RequestContext,
+  artifact: Pick<ImportedArtifactResolution, 'contextGraphId' | 'subGraphName' | 'assertionUri' | 'rootEntity'>,
+): Promise<string | undefined> {
+  const swmMetaGraph = contextGraphSharedMemoryMetaUri(artifact.contextGraphId, artifact.subGraphName);
+  const candidates = [
+    artifact.rootEntity,
+    artifact.assertionUri,
+  ].filter((value): value is string => Boolean(value && isSafeIri(value)));
+  for (const rootEntity of [...new Set(candidates)]) {
+    const result = await ctx.agent.store.query(`
+      SELECT ?publisherPeerId WHERE {
+        GRAPH <${swmMetaGraph}> {
+          ?op <${RDF_TYPE}> <${DKG_ONTOLOGY}WorkspaceOperation> .
+          ?op <${DKG_ONTOLOGY}rootEntity> <${rootEntity}> .
+          ?op <${DKG_ONTOLOGY}publisherPeerId> ?publisherPeerId .
+        }
+      }
+      LIMIT 1
+    `) as { type?: string; bindings?: Array<Record<string, unknown>> };
+    const peerId = normalizeLiteralBinding(result.bindings?.[0]?.publisherPeerId);
+    if (peerId && peerId !== 'unknown') return peerId;
+  }
+  return undefined;
+}
+
+async function finalizeImportedArtifactAvailability(
+  ctx: RequestContext,
+  artifact: ImportedArtifactResolution,
+): Promise<ImportedArtifactResolution> {
+  if (!artifact.markdownHash) {
+    return {
+      ...artifact,
+      markdownAvailability: 'unavailable',
+      markdownUnavailableReason: 'no-markdown-source',
+    };
+  }
+  if (artifact.canReadMarkdown) {
+    return {
+      ...artifact,
+      markdownAvailability: 'local',
+      canFetchMarkdown: false,
+    };
+  }
+  if (!artifact.ownerGuardRelaxed) {
+    return {
+      ...artifact,
+      markdownAvailability: 'unavailable',
+      markdownUnavailableReason: 'not-local',
+    };
+  }
+  const sourcePeerId = await resolveImportedArtifactSourcePeerId(ctx, artifact).catch(() => undefined);
+  if (!sourcePeerId) {
+    return {
+      ...artifact,
+      markdownAvailability: 'unavailable',
+      canFetchMarkdown: false,
+      markdownUnavailableReason: 'source-peer-unavailable',
+    };
+  }
+  return {
+    ...artifact,
+    sourcePeerId,
+    markdownAvailability: 'fetchable',
+    canFetchMarkdown: true,
+  };
+}
+
+function contentHashMatchesBytes(hash: string, bytes: Buffer): boolean {
+  const lower = hash.toLowerCase();
+  if (lower.startsWith('keccak256:')) {
+    return ethers.keccak256(bytes).replace(/^0x/, '').toLowerCase() === lower.slice('keccak256:'.length);
+  }
+  const sha = createHash('sha256').update(bytes).digest('hex').toLowerCase();
+  return sha === lower.replace(/^sha256:/, '');
+}
+
+async function hydrateImportedArtifactMarkdown(
+  ctx: RequestContext,
+  artifact: ImportedArtifactResolution,
+  maxBytes: number,
+): Promise<{ bytes?: Buffer; tooLargeBytes?: number; error?: string }> {
+  if (!artifact.markdownHash || !artifact.sourcePeerId || !artifact.canFetchMarkdown) {
+    return { error: 'source peer unavailable' };
+  }
+  const fetcher = ctx.agent.fetchImportedSourceBlobFromPeer;
+  if (typeof fetcher !== 'function') {
+    return { error: 'source blob fetch is unavailable on this agent' };
+  }
+  let fetched;
+  try {
+    fetched = await fetcher.call(ctx.agent, artifact.sourcePeerId, {
+      contextGraphId: artifact.contextGraphId,
+      assertionUri: artifact.assertionUri,
+      blobHash: artifact.markdownHash,
+      maxBytes,
+      ...(artifact.subGraphName ? { subGraphName: artifact.subGraphName } : {}),
+      requestAgentAddress: ctx.requestAgentAddress,
+    });
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+  if (fetched.denied) return { error: fetched.denied };
+  if (typeof fetched.totalBytes === 'number' && fetched.totalBytes > maxBytes) return { tooLargeBytes: fetched.totalBytes };
+  if (fetched.truncated) return { tooLargeBytes: fetched.totalBytes ?? maxBytes + 1 };
+  if (!fetched.bytes) return { error: 'source blob fetch returned no bytes' };
+  const bytes = Buffer.from(fetched.bytes);
+  if (bytes.length > maxBytes) return { tooLargeBytes: bytes.length };
+  if (!contentHashMatchesBytes(artifact.markdownHash, bytes)) {
+    return { error: 'source blob hash mismatch' };
+  }
+  const stored = await ctx.fileStore.put(bytes, 'text/markdown');
+  if (!contentHashMatchesBytes(artifact.markdownHash, bytes)) {
+    return { error: 'source blob hash mismatch after cache write' };
+  }
+  if (
+    artifact.markdownHash.startsWith('keccak256:') && stored.keccak256 !== artifact.markdownHash ||
+    artifact.markdownHash.startsWith('sha256:') && stored.hash !== artifact.markdownHash
+  ) {
+    return { error: 'cached source blob hash mismatch' };
+  }
+  artifact.canReadMarkdown = true;
+  artifact.markdownAvailability = 'local';
+  artifact.canFetchMarkdown = false;
+  delete artifact.markdownUnavailableReason;
+  return { bytes };
 }
 
 function handleImportArtifactRouteError(res: ServerResponse, err: unknown): boolean {
@@ -908,11 +1063,13 @@ async function resolveImportedArtifactFromSharedMemory(
   const markdownHash = markdownFormHash
     ?? (sourceContentType === 'text/markdown' ? sourceFileHash : undefined);
   const markdownForm = markdownHash ? `urn:dkg:file:${markdownHash}` : undefined;
-  const markdownAvailableLocally = markdownHash
-    ? await ctx.fileStore.has(markdownHash).catch(() => false)
-    : false;
+  // SWM triples are replicated graph content, not durable import provenance.
+  // Use them to discover the origin peer and requested hash, but never as
+  // authority to read a local file-store blob directly; the origin peer must
+  // prove the blob against its durable import `_meta` before bytes are served.
+  const markdownAvailableLocally = false;
 
-  return {
+  return finalizeImportedArtifactAvailability(ctx, {
     contextGraphId: args.contextGraphId,
     assertionUri: args.assertionUri,
     assertionName: args.assertionName,
@@ -930,7 +1087,7 @@ async function resolveImportedArtifactFromSharedMemory(
     ...(markdownHash ? { markdownHash } : {}),
     canReadMarkdown: markdownAvailableLocally,
     ...(args.ownerGuardRelaxed ? { ownerGuardRelaxed: true } : {}),
-  };
+  });
 }
 
 async function resolveImportedArtifact(
@@ -1003,8 +1160,8 @@ async function resolveImportedArtifact(
   // Probing the on-chain policy is a no-op for the write path (which
   // never relaxes). Skip it there to keep the diff scoped and avoid
   // adding chain-cache reads to a code path that doesn't need them.
-  const isPublicOpen = canRelaxGuard
-    ? await isPublicOpenContextGraph(ctx.agent, contextGraphId)
+  const canReadSharedSource = canRelaxGuard
+    ? await canReadImportedArtifactSharedSource(ctx.agent, contextGraphId, ownerGuard?.requestAgentAddress ?? '')
     : false;
   const parsedAssertion = parseImportedAssertionUri(
     inputAssertionUri,
@@ -1050,7 +1207,7 @@ async function resolveImportedArtifact(
     // `assertionAgentAddress === requestAgentAddress` so the guard
     // passes) while non-owner cross-agent reads get the same 404
     // they got pre-PR rather than a misleading 200.
-    if (canRelaxGuard && isPublicOpen && !parsedAssertion.legacy) {
+    if (canRelaxGuard && canReadSharedSource && !parsedAssertion.legacy) {
       ownerGuardRelaxed = !isSameAgentAddress(
         parsedAssertion.assertionAgentAddress,
         ownerGuard.requestAgentAddress,
@@ -1189,7 +1346,7 @@ async function resolveImportedArtifact(
       : true
     : false;
 
-  return {
+  return finalizeImportedArtifactAvailability(ctx, {
     contextGraphId,
     assertionUri,
     assertionName: parsedAssertion.assertionName,
@@ -1211,7 +1368,7 @@ async function resolveImportedArtifact(
     ...(markdownHash ? { markdownHash } : {}),
     canReadMarkdown: markdownAvailableLocally,
     ...(ownerGuardRelaxed ? { ownerGuardRelaxed: true } : {}),
-  };
+  });
 }
 
 export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> {
@@ -1296,7 +1453,20 @@ export async function handleAssertionRoutes(ctx: RequestContext): Promise<void> 
           artifact,
         });
       }
-      const bytes = await fileStore.get(artifact.markdownHash);
+      let bytes = artifact.canReadMarkdown
+        ? await fileStore.get(artifact.markdownHash)
+        : null;
+      if (!bytes && artifact.canFetchMarkdown) {
+        const hydrated = await hydrateImportedArtifactMarkdown(ctx, artifact, maxBytes);
+        if (hydrated.tooLargeBytes) {
+          return jsonResponse(res, 413, {
+            error: `Markdown content exceeds maxBytes (${maxBytes})`,
+            artifact,
+            bytes: hydrated.tooLargeBytes,
+          });
+        }
+        if (hydrated.bytes) bytes = hydrated.bytes;
+      }
       if (!bytes) {
         // Issue #872 — when the owner guard was relaxed (public + open
         // CG, cross-agent request), the missing bytes are the

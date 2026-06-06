@@ -646,9 +646,10 @@ export class QueryMethods extends DKGAgentBase {
     opts: {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
+      forcePrivatePolicy?: boolean;
     } = {},
   ): Promise<boolean> {
-    if (!(await this.isPrivateContextGraph(contextGraphId))) {
+    if (!opts.forcePrivatePolicy && !(await this.isPrivateContextGraph(contextGraphId))) {
       return true;
     }
 

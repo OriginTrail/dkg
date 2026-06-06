@@ -343,6 +343,7 @@ import {
   type DKGAgentConfig,
   type ReplicationEvent,
   type SyncReconcilerBackoff,
+  type ImportedSourceBlobStore,
 } from './dkg-agent-types.js';
 import {
   normalizePublishContextGraphId,
@@ -434,6 +435,7 @@ export class DKGAgentBase {
   /** Shared write locks so gossip writes serialize against local CAS writes. */
   protected readonly writeLocks: Map<string, Promise<void>>;
   protected readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  protected importedSourceBlobStore?: ImportedSourceBlobStore;
   protected sharedMemoryHandler?: InstanceType<typeof SharedMemoryHandler>;
   protected gossipPublishHandler?: GossipPublishHandler;
   protected finalizationHandler?: FinalizationHandler;

@@ -137,6 +137,36 @@ describe('FileStore.has', () => {
   });
 });
 
+describe('FileStore.stat/readRange', () => {
+  it('stats and reads bounded ranges without requiring sha256 callers', async () => {
+    const store = new FileStore(rootDir);
+    const bytes = Buffer.from('0123456789abcdef', 'utf-8');
+    const entry = await store.put(bytes, 'text/plain');
+
+    await expect(store.stat(entry.hash)).resolves.toEqual({ size: bytes.length });
+    await expect(store.stat(entry.keccak256)).resolves.toEqual({ size: bytes.length });
+
+    const slice = await store.readRange(entry.keccak256, 4, 6);
+    expect(slice).not.toBeNull();
+    expect(slice!.toString('utf8')).toBe('456789');
+  });
+
+  it('returns short final ranges and null for invalid ranges or missing hashes', async () => {
+    const store = new FileStore(rootDir);
+    const bytes = Buffer.from('range-tail', 'utf-8');
+    const entry = await store.put(bytes, 'text/plain');
+
+    const tail = await store.readRange(entry.hash, 6, 20);
+    expect(tail).not.toBeNull();
+    expect(tail!.toString('utf8')).toBe('tail');
+
+    await expect(store.stat('keccak256:' + 'f'.repeat(64))).resolves.toBeNull();
+    await expect(store.readRange(entry.hash, -1, 1)).resolves.toBeNull();
+    await expect(store.readRange(entry.hash, 0, -1)).resolves.toBeNull();
+    await expect(store.readRange('bad-hash', 0, 1)).resolves.toBeNull();
+  });
+});
+
 describe('FileStore.hashToPath', () => {
   it('resolves a sha256 hash to the absolute sharded blob path', async () => {
     const store = new FileStore(rootDir);
