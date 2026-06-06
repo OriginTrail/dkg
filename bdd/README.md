@@ -47,10 +47,14 @@ Pins the OT-RFC-43/44 entity-predicate rename invariant
 during the dual-write migration window, a mixed-fleet node **must recognise both
 the new and the legacy predicate** or it silently drops entity members.
 
-It exercises the real pure helpers in
+It exercises the real helpers in
 [`packages/core/src/entity-predicate.ts`](../packages/core/src/entity-predicate.ts)
-via a data-driven `Scenario Outline`. No devnet, no network — it runs in
-milliseconds and proves the Gherkin→Vitest binding works end to end.
+via a data-driven `Scenario Outline`. They are imported through the public
+`@origintrail-official/dkg-core` export (declared as a workspace dependency), so
+Turbo treats `bdd` as depending on `dkg-core` and **invalidates the smoke-spec
+cache when that code changes** — the regression check stays honest. No devnet,
+no network — it runs in milliseconds and proves the Gherkin→Vitest binding works
+end to end.
 
 This is the package's default `test` script, so `turbo test` (the standard CI
 command) runs it automatically — no extra CI lane:
@@ -67,10 +71,12 @@ on-chain Knowledge Asset. The step definitions call the same daemon routes as
 `devnet/v10-core-flows`' `fullPublish()`, sharing the produced
 assertion/`kaId` through the test World.
 
-It is **tag-gated**: if no local devnet is provisioned it is skipped cleanly
-(rather than failing), mirroring how the existing devnet suites guard. Like the
-other `devnet/*` suites it is intentionally kept out of the default `turbo test`
-lane and run explicitly:
+It is **tag-gated**: if no devnet is reachable it is skipped cleanly (rather than
+failing), mirroring how the existing devnet suites guard. Availability is decided
+by a **live `/api/status` probe**, not just on-disk provisioning — so a
+stopped-but-provisioned cluster also skips instead of erroring. Like the other
+`devnet/*` suites it is intentionally kept out of the default `turbo test` lane
+and run explicitly:
 
 ```bash
 ./scripts/devnet.sh clean && ./scripts/devnet.sh start 6

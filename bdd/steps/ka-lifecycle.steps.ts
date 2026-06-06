@@ -25,7 +25,17 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const feature = await loadFeature(resolve(here, '../features/ka-lifecycle.feature'));
 
-const probe = detectDevnet();
+// Gate on a LIVE probe, not just on-disk provisioning: a stopped-but-provisioned
+// cluster must skip cleanly (not fail in BeforeAllScenarios). detectDevnet() is
+// the cheap disk check; probeStatus() confirms the node actually answers.
+const disk = detectDevnet();
+const probe: typeof disk =
+  disk.available && disk.node && !(await probeStatus(disk.node))
+    ? {
+        available: false,
+        reason: `node${disk.node.num} provisioned but not responding on ${disk.node.api}`,
+      }
+    : disk;
 const excludeTags = probe.available ? [] : ['devnet'];
 if (!probe.available) {
   console.warn(`[bdd] @devnet scenarios skipped — ${probe.reason}`);

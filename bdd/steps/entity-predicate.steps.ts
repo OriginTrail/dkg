@@ -9,10 +9,7 @@ import { describeFeature, loadFeature } from '@amiceli/vitest-cucumber';
 import { expect } from 'vitest';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  isAssertionEntityPredicate,
-  isEntityPredicate,
-} from '../../packages/core/src/entity-predicate.js';
+import { isAssertionEntityPredicate, isEntityPredicate } from '@origintrail-official/dkg-core';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const feature = await loadFeature(resolve(here, '../features/entity-predicate.feature'));

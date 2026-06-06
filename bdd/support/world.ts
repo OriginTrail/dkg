@@ -107,13 +107,24 @@ async function parse(res: Response): Promise<any> {
   }
 }
 
-/** Async health check — true if /api/status answers 2xx. */
-export async function probeStatus(node: DevnetNode): Promise<boolean> {
+/**
+ * Async health check — true only if /api/status answers 2xx within `timeoutMs`.
+ * A provisioned-but-stopped node fails fast (connection refused) and returns
+ * false, so callers can downgrade it to a skip rather than a hard error.
+ */
+export async function probeStatus(node: DevnetNode, timeoutMs = 3000): Promise<boolean> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const { status } = await getJson(node, '/api/status');
-    return status >= 200 && status < 300;
+    const res = await fetch(`${node.api}/api/status`, {
+      headers: headers(node),
+      signal: ctrl.signal,
+    });
+    return res.status >= 200 && res.status < 300;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
