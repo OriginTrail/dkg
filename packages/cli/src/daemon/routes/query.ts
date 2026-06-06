@@ -463,6 +463,10 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       if (!assertionName.trim()) {
         return jsonResponse(res, 400, { error: 'assertionName must be a non-empty string when provided' });
       }
+      const assertionValidation = validateAssertionName(assertionName);
+      if (!assertionValidation.valid) {
+        return jsonResponse(res, 400, { error: `Invalid assertionName: ${assertionValidation.reason}` });
+      }
       if (view !== 'working-memory') {
         return jsonResponse(res, 400, {
           error: 'assertionName is only supported with view "working-memory"',
@@ -479,6 +483,9 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       const subGraphValidation = validateSubGraphName(subGraphName);
       if (!subGraphValidation.valid) {
         return jsonResponse(res, 400, { error: `Invalid subGraphName: ${subGraphValidation.reason}` });
+      }
+      if (!contextGraphId) {
+        return jsonResponse(res, 400, { error: 'subGraphName requires contextGraphId' });
       }
     }
     // PR #239 Codex iter-7: gate minTrust normalization/validation behind
