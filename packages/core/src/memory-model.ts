@@ -17,6 +17,22 @@ export enum MemoryLayer {
 }
 
 /**
+ * The named-graph slug for each memory layer (OT-RFC-46 uniform Chorus layout).
+ * Every layer's per-KA graph is `…/{slug}/{addr}/{number}` — the layer is just a
+ * parameter, so one builder / one read path serves WM, SWM, and VM alike.
+ */
+export function memoryLayerSlug(layer: MemoryLayer): string {
+  switch (layer) {
+    case MemoryLayer.WorkingMemory:
+      return '_working_memory';
+    case MemoryLayer.SharedWorkingMemory:
+      return '_shared_memory';
+    case MemoryLayer.VerifiedMemory:
+      return '_verified_memory';
+  }
+}
+
+/**
  * Trust levels for Verified Memory triples, ordered by ascending trust.
  * Used with `minTrust` on verified-memory queries to filter results.
  */

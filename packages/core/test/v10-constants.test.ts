@@ -31,6 +31,7 @@ import {
   contextGraphVerifiedMemoryUri,
   contextGraphVerifiedMemoryMetaUri,
   contextGraphAssertionUri,
+  contextGraphLayerUri,
   contextGraphRulesUri,
   contextGraphSubGraphUri,
   // Deprecated aliases
@@ -47,6 +48,7 @@ import {
   contextGraphSessionsTopic,
   contextGraphSessionTopic,
 } from '../src/constants.js';
+import { MemoryLayer } from '../src/memory-model.js';
 
 describe('V10 protocol stream IDs', () => {
   // rc.9 plan: protocols on /dkg/10.0.1/* are migrated onto the
@@ -155,6 +157,30 @@ describe('V10 named graph URIs', () => {
 
   it('assertion URI', () => {
     expect(contextGraphAssertionUri(id, '0xAbc', 'my-assertion')).toBe('did:dkg:context-graph:42/assertion/0xAbc/my-assertion');
+  });
+
+  it('uniform per-KA layer URI: every layer differs ONLY by the {_layer} token', () => {
+    expect(contextGraphLayerUri(id, MemoryLayer.WorkingMemory, '0xAbc', 7))
+      .toBe('did:dkg:context-graph:42/_working_memory/0xAbc/7');
+    expect(contextGraphLayerUri(id, MemoryLayer.SharedWorkingMemory, '0xAbc', 7))
+      .toBe('did:dkg:context-graph:42/_shared_memory/0xAbc/7');
+    expect(contextGraphLayerUri(id, MemoryLayer.VerifiedMemory, '0xAbc', 7))
+      .toBe('did:dkg:context-graph:42/_verified_memory/0xAbc/7');
+  });
+
+  it('uniform per-KA layer URI: same {addr}/{number} suffix across the lifecycle', () => {
+    const wm = contextGraphLayerUri(id, MemoryLayer.WorkingMemory, '0xAbc', 7);
+    const swm = contextGraphLayerUri(id, MemoryLayer.SharedWorkingMemory, '0xAbc', 7);
+    const vm = contextGraphLayerUri(id, MemoryLayer.VerifiedMemory, '0xAbc', 7);
+    const suffix = (u: string) => u.split('/').slice(-2).join('/');
+    expect(suffix(wm)).toBe('0xAbc/7');
+    expect(suffix(swm)).toBe('0xAbc/7');
+    expect(suffix(vm)).toBe('0xAbc/7');
+  });
+
+  it('uniform per-KA layer URI: sub-graph scoping is uniform across layers', () => {
+    expect(contextGraphLayerUri(id, MemoryLayer.VerifiedMemory, '0xAbc', 7, 'game-state'))
+      .toBe('did:dkg:context-graph:42/game-state/_verified_memory/0xAbc/7');
   });
 
   it('rules URI', () => {

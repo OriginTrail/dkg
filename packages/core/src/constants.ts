@@ -1,3 +1,5 @@
+import { MemoryLayer, memoryLayerSlug } from './memory-model.js';
+
 // ── V10 Protocol Stream IDs ─────────────────────────────────────────────
 
 export const PROTOCOL_PUBLISH = '/dkg/10.0.0/publish';
@@ -235,6 +237,30 @@ export function contextGraphVerifiedMemoryMetaUri(contextGraphId: string, verifi
 export function contextGraphAssertionUri(contextGraphId: string, agentAddress: string, name: string, subGraphName?: string): string {
   if (subGraphName) return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/assertion/${agentAddress}/${name}`;
   return `did:dkg:context-graph:${contextGraphId}/assertion/${agentAddress}/${name}`;
+}
+
+/**
+ * Uniform per-KA graph URI for ANY memory layer (OT-RFC-46 Chorus).
+ *
+ *   did:dkg:context-graph:{cg}[/{sub}]/{_layer}/{addr}/{number}
+ *
+ * The layer is just a parameter — WM, SWM, and VM share ONE structure, ONE
+ * builder, and (downstream) ONE read path. `kaNumber` is the per-author KA
+ * number (the identifying half of the UAL `did:dkg:{chain}/{addr}/{number}`),
+ * minted at create. A KA moves between layers by swapping only the `{_layer}`
+ * segment; the `{addr}/{number}` suffix is stable for its whole lifecycle.
+ */
+export function contextGraphLayerUri(
+  contextGraphId: string,
+  layer: MemoryLayer,
+  agentAddress: string,
+  kaNumber: string | number | bigint,
+  subGraphName?: string,
+): string {
+  const base = subGraphName
+    ? `did:dkg:context-graph:${contextGraphId}/${subGraphName}`
+    : `did:dkg:context-graph:${contextGraphId}`;
+  return `${base}/${memoryLayerSlug(layer)}/${agentAddress}/${kaNumber}`;
 }
 
 export function contextGraphRulesUri(contextGraphId: string): string {
