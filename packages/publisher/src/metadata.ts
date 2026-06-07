@@ -1309,6 +1309,10 @@ export interface AssertionCreatedMeta {
   assertionName: string;
   subGraphName?: string;
   timestamp: Date;
+  /** D1 (identity-at-create) — per-author KA number minted at create. */
+  kaNumber?: string | number | bigint;
+  /** D1 (identity-at-create) — reserved UAL `did:dkg:{chain}/{addr}/{number}`. */
+  reservedUal?: string;
 }
 
 export function generateAssertionCreatedMetadata(meta: AssertionCreatedMeta): Quad[] {
@@ -1338,6 +1342,18 @@ export function generateAssertionCreatedMetadata(meta: AssertionCreatedMeta): Qu
     mq(eventUri, `${DKG}fromLayer`, lit('none'), metaGraph),
     mq(eventUri, `${DKG}toLayer`, lit(MemoryLayer.WorkingMemory), metaGraph),
   ];
+
+  // D1 (identity-at-create): stamp the KA number + reserved UAL on the lifecycle URN
+  // so the UAL is the KA's identity from the first write — the per-KA graph name
+  // {addr}/{number} and the _meta row key both derive from it. Finalize's
+  // hasExistingKaId guard then finds this stamp and skips re-allocation. Consensus-
+  // neutral: the seal commits content+author, never the kaId.
+  if (meta.kaNumber !== undefined) {
+    quads.push(mq(subject, KA_ID_PRED, intLit(BigInt(meta.kaNumber)), metaGraph));
+  }
+  if (meta.reservedUal) {
+    quads.push(mq(subject, RESERVED_UAL_PRED, lit(meta.reservedUal), metaGraph));
+  }
 
   if (meta.subGraphName) {
     quads.push(mq(subject, `${DKG}subGraphName`, lit(meta.subGraphName), metaGraph));

@@ -683,6 +683,21 @@ describe('generateAssertionCreatedMetadata', () => {
     expect(graphQuad!.object).toBe(ASSERTION_GRAPH);
   });
 
+  it('D1: stamps kaId + reservedUal on the URN when the number is minted at create', () => {
+    const ual = `did:dkg:31337/${AGENT_ADDR}/7`;
+    const quads = generateAssertionCreatedMetadata({ ...meta, kaNumber: 7, reservedUal: ual });
+    const kaId = quads.find(q => q.subject === LIFECYCLE_URI && q.predicate === `${DKG}kaId`);
+    expect(kaId!.object).toBe('"7"^^<http://www.w3.org/2001/XMLSchema#integer>');
+    const ru = quads.find(q => q.subject === LIFECYCLE_URI && q.predicate === `${DKG}reservedUal`);
+    expect(ru!.object).toBe(`"${ual}"`);
+  });
+
+  it('D1: omits kaId/reservedUal when not minted (no-op for callers that have not adopted create-time allocation)', () => {
+    const quads = generateAssertionCreatedMetadata(meta);
+    expect(quads.find(q => q.predicate === `${DKG}kaId`)).toBeUndefined();
+    expect(quads.find(q => q.predicate === `${DKG}reservedUal`)).toBeUndefined();
+  });
+
   it('event entity is dual-typed prov:Activity + dkg:AssertionCreated', () => {
     const quads = generateAssertionCreatedMetadata(meta);
     const eventUri = findEventUri(quads);
