@@ -371,6 +371,7 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
+import { reconcileAndAllocateKaNumber } from './allocator.js';
 import { applyMixins } from './dkg-agent-apply-mixins.js';
 import { OwnershipMethods } from './dkg-agent-ownership.js';
 import { ContextGraphResolveMethods } from './dkg-agent-cg-resolve.js';
@@ -1666,7 +1667,14 @@ export class DKGAgent extends DKGAgentBase {
     const agentAddress = this.defaultAgentAddress ?? this.peerId;
     return {
       async create(contextGraphId: string, name: string, opts?: { subGraphName?: string }): Promise<string> {
-        return agent.publisher.assertionCreate(contextGraphId, name, agentAddress, opts?.subGraphName);
+        // D1 (identity-at-create): mint the KA number/UAL at create so the UAL is the
+        // KA's identity from the first write. assertionCreate only allocates when the
+        // draft has no preserved kaId (the re-open guard lives there), so passing the
+        // callback unconditionally is safe — re-opens reuse the preserved identity.
+        const allocateKaNumber = agent.kaNumberAllocator
+          ? () => reconcileAndAllocateKaNumber(agent.kaNumberAllocator!, agent.chain, agent.reconciledKaAuthors, agentAddress)
+          : undefined;
+        return agent.publisher.assertionCreate(contextGraphId, name, agentAddress, opts?.subGraphName, { allocateKaNumber });
       },
 
       /**

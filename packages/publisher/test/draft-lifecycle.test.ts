@@ -71,6 +71,49 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(uri).toBe(contextGraphAssertionUri(CG_ID, AGENT, ASSERTION_NAME));
   });
 
+  it('D1: create stamps kaId + reservedUal on the URN when given an allocate callback', async () => {
+    const name = 'd1-mint';
+    const ual = `did:dkg:31337/${AGENT.toLowerCase()}/42`;
+    await publisher.assertionCreate(CG_ID, name, AGENT, undefined, {
+      allocateKaNumber: async () => ({ number: 42n, reservedUal: ual }),
+    });
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    const urn = assertionLifecycleUri(CG_ID, AGENT, name);
+    const kaId = await store.query(`SELECT ?n WHERE { GRAPH <${metaGraph}> { <${urn}> <http://dkg.io/ontology/kaId> ?n } }`);
+    expect(kaId.type).toBe('bindings');
+    if (kaId.type === 'bindings') {
+      expect(kaId.bindings.map((r) => r['n'])).toEqual(['"42"^^<http://www.w3.org/2001/XMLSchema#integer>']);
+    }
+    const ru = await store.query(`SELECT ?u WHERE { GRAPH <${metaGraph}> { <${urn}> <http://dkg.io/ontology/reservedUal> ?u } }`);
+    if (ru.type === 'bindings') {
+      expect(ru.bindings.map((r) => r['u'])).toEqual([`"${ual}"`]);
+    }
+  });
+
+  it('D1: re-create does NOT re-allocate — the preserved kaId is reused (re-open guard)', async () => {
+    const name = 'd1-reopen';
+    const ual42 = `did:dkg:31337/${AGENT.toLowerCase()}/42`;
+    await publisher.assertionCreate(CG_ID, name, AGENT, undefined, {
+      allocateKaNumber: async () => ({ number: 42n, reservedUal: ual42 }),
+    });
+    // Re-create with a callback that WOULD allocate a different number — it must NOT be invoked,
+    // because the draft already carries a preserved kaId (the re-open guard lives in assertionCreate).
+    let called = false;
+    await publisher.assertionCreate(CG_ID, name, AGENT, undefined, {
+      allocateKaNumber: async () => {
+        called = true;
+        return { number: 99n, reservedUal: `did:dkg:31337/${AGENT.toLowerCase()}/99` };
+      },
+    });
+    expect(called).toBe(false);
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    const urn = assertionLifecycleUri(CG_ID, AGENT, name);
+    const kaId = await store.query(`SELECT ?n WHERE { GRAPH <${metaGraph}> { <${urn}> <http://dkg.io/ontology/kaId> ?n } }`);
+    if (kaId.type === 'bindings') {
+      expect(kaId.bindings.map((r) => r['n'])).toEqual(['"42"^^<http://www.w3.org/2001/XMLSchema#integer>']);
+    }
+  });
+
   it('write inserts triples into the assertion graph', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);

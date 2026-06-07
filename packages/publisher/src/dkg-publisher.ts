@@ -4065,7 +4065,13 @@ export class DKGPublisher implements Publisher {
     this.privateStore.clearCache(ownershipKey);
   }
 
-  async assertionCreate(contextGraphId: string, name: string, agentAddress: string, subGraphName?: string): Promise<string> {
+  async assertionCreate(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    subGraphName?: string,
+    opts?: { allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }> },
+  ): Promise<string> {
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
     const graphUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     await this.store.createGraph(graphUri);
@@ -4120,12 +4126,25 @@ export class DKGPublisher implements Publisher {
       await this.store.insert(preserved);
     }
 
+    // D1 (identity-at-create): mint the KA number now, UNLESS the draft already
+    // carries a persistent identity. The A2 preserve step above re-inserts a prior
+    // kaId on discard+recreate / pull-from, so reuse it and never double-allocate
+    // (this is the re-open guard the create-time allocation needs).
+    const hasPreservedKaId = preserved.some((q) => q.predicate === `${A2_DKG}kaId`);
+    let kaNumber: bigint | undefined;
+    let reservedUal: string | undefined;
+    if (!hasPreservedKaId && opts?.allocateKaNumber) {
+      ({ number: kaNumber, reservedUal } = await opts.allocateKaNumber());
+    }
+
     const lifecycleQuads = generateAssertionCreatedMetadata({
       contextGraphId,
       agentAddress,
       assertionName: name,
       subGraphName,
       timestamp: new Date(),
+      kaNumber,
+      reservedUal,
     });
     await this.store.insert(lifecycleQuads);
 

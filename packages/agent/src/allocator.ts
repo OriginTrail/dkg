@@ -43,6 +43,48 @@ export interface KaAllocation {
   number: bigint;
 }
 
+/** Minimal chain surface the allocate helper needs (avoids a ChainAdapter import). */
+export interface KaAllocatorChain {
+  readonly chainId: string;
+  getMaxKaNumberForAuthor?: (author: string) => Promise<bigint>;
+}
+
+/**
+ * Reconcile the per-author KA-number floor against the chain (ONCE per author,
+ * cached in `reconciled`) then allocate the next number and derive its reserved
+ * UAL `did:dkg:{chainId}/{author}/{number}`.
+ *
+ * Shared by create (OT-RFC-46 D1 — identity-at-create) and finalize. Moving the
+ * call to create means the first KA per author pays the chain reconcile at create
+ * instead of finalize; every later create is a local counter bump.
+ */
+export async function reconcileAndAllocateKaNumber(
+  allocator: KaNumberAllocator,
+  chain: KaAllocatorChain,
+  reconciled: Set<string>,
+  author: string,
+): Promise<{ number: bigint; reservedUal: string }> {
+  const key = author.toLowerCase();
+  if (!reconciled.has(key)) {
+    let chainMax = -1n;
+    if (typeof chain.getMaxKaNumberForAuthor === 'function') {
+      try {
+        chainMax = await chain.getMaxKaNumberForAuthor(author);
+      } catch (err) {
+        throw new Error(
+          `OT-RFC-43 A2: failed to reconcile KA-number floor for author ${author}: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
+    if (chainMax >= 0n) allocator.reconcile(author, chainMax);
+    allocator.markReconciled();
+    reconciled.add(key);
+  }
+  const { number } = allocator.allocate(author);
+  return { number, reservedUal: `did:dkg:${chain.chainId}/${key}/${number}` };
+}
+
 export class KaNumberAllocator {
   private readonly store: KaNumberStore;
   /**
