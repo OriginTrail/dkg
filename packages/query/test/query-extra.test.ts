@@ -52,6 +52,8 @@ import {
   contextGraphLayerUri,
   MemoryLayer,
   contextGraphSharedMemoryUri,
+  contextGraphMetaUri,
+  assertionLifecycleUri,
   TrustLevel,
 } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine, resolveViewGraphs } from '../src/dkg-query-engine.js';
@@ -657,6 +659,35 @@ describe('[Q-3] resolveViewGraphs + DKGQueryEngine route working-memory', () => 
     );
     expect(result.bindings).toHaveLength(1);
     expect(result.bindings[0]['name']).toBe('"One"');
+  });
+
+  it('by-name WM read resolves name→number from _meta and reads the per-KA graph (rc.17 read-flip)', async () => {
+    // Regression: under the uniform layout, a created+written assertion's data lives in the
+    // number-keyed graph `…/_working_memory/{addr}/{number}`, and its number is stamped as
+    // `dkg:kaId` on the lifecycle URN in `_meta`. A by-name `view: 'working-memory'` query must
+    // resolve that number and read the per-KA graph. Before the fix, the engine passed no
+    // kaNumber to resolveViewGraphs, so it fell back to the (empty) legacy name-keyed graph and
+    // returned 0 bindings.
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const name = 'numbered-draft';
+    const kaNumber = 7n;
+    const perKaGraph = contextGraphLayerUri(CG, MemoryLayer.WorkingMemory, AGENT, kaNumber);
+    const urn = assertionLifecycleUri(CG, AGENT, name);
+    const metaGraph = contextGraphMetaUri(CG);
+
+    await store.insert([
+      // data written by the new create/write path → number-keyed per-KA graph
+      quad('urn:numbered:1', 'http://schema.org/name', '"NumberedValue"', perKaGraph),
+      // identity-at-create (D1): the KA number stamped on the lifecycle URN in _meta
+      quad(urn, 'http://dkg.io/ontology/kaId', '"7"^^<http://www.w3.org/2001/XMLSchema#integer>', metaGraph),
+    ]);
+
+    const result = await engine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { contextGraphId: CG, view: 'working-memory', agentAddress: AGENT, assertionName: name },
+    );
+    expect(result.bindings.map((b) => b['name'])).toEqual(['"NumberedValue"']);
   });
 });
 

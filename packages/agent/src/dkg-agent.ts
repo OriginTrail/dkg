@@ -1670,8 +1670,15 @@ export class DKGAgent extends DKGAgentBase {
         // D1 (identity-at-create): mint the KA number/UAL at create so the UAL is the
         // KA's identity from the first write. assertionCreate only allocates when the
         // draft has no preserved kaId (the re-open guard lives there), so passing the
-        // callback unconditionally is safe — re-opens reuse the preserved identity.
-        const allocateKaNumber = agent.kaNumberAllocator
+        // callback is safe — re-opens reuse the preserved identity.
+        //
+        // Gate on a valid 0x EVM author: when no default agent is registered,
+        // `agentAddress` falls back to the libp2p peerId, which the allocator rejects
+        // (`ethers.getAddress` throws). A peerId-author draft falls back to the legacy
+        // name-keyed WM graph instead of hard-failing create. Mirrors the publisher's
+        // own self-allocation guard.
+        const isEvmAuthor = /^0x[a-fA-F0-9]{40}$/.test(agentAddress);
+        const allocateKaNumber = agent.kaNumberAllocator && isEvmAuthor
           ? () => reconcileAndAllocateKaNumber(agent.kaNumberAllocator!, agent.chain, agent.reconciledKaAuthors, agentAddress)
           : undefined;
         return agent.publisher.assertionCreate(contextGraphId, name, agentAddress, opts?.subGraphName, { allocateKaNumber });

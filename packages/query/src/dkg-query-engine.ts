@@ -3,7 +3,7 @@ import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { QueryResult, QueryOptions, QueryEngine } from './query-engine.js';
 import {
   contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiedMemoryUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer,
-  contextGraphSubGraphUri, contextGraphMetaUri, contextGraphSharedMemoryMetaUri,
+  contextGraphSubGraphUri, contextGraphMetaUri, contextGraphSharedMemoryMetaUri, assertionLifecycleUri,
   contextGraphSubGraphMetaUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri,
   assertSafeIri, escapeSparqlLiteral, validateSubGraphName,
   type GetView,
@@ -374,10 +374,25 @@ export class DKGQueryEngine implements QueryEngine {
     contextGraphId: string,
     options: QueryOptions,
   ): Promise<QueryResult> {
+    // Uniform layout (rc.17): a by-name working-memory read must target the per-KA
+    // graph `…/_working_memory/{addr}/{number}` the data was written to. Resolve the
+    // KA number from the `dkg:kaId` stamped on the lifecycle URN in `_meta` and pass
+    // it to resolveViewGraphs; without it the read falls back to the (empty) legacy
+    // name-keyed graph and returns nothing for newly created assertions.
+    let kaNumber: bigint | undefined;
+    if (view === 'working-memory' && options.assertionName && options.agentAddress) {
+      kaNumber = await this.resolveWorkingMemoryKaNumber(
+        contextGraphId,
+        options.agentAddress,
+        options.assertionName,
+      );
+    }
+
     const resolution = resolveViewGraphs(view, contextGraphId, {
       agentAddress: options.agentAddress,
       verifiedGraph: options.verifiedGraph,
       assertionName: options.assertionName,
+      kaNumber,
       // Back-compat: accept the legacy `_minTrust` underscore form for a
       // deprecation window. See QueryOptions._minTrust.
       minTrust: options.minTrust ?? options._minTrust,
@@ -526,6 +541,29 @@ export class DKGQueryEngine implements QueryEngine {
     return allGraphs.filter(
       (g) => g.startsWith(prefix) && !g.includes('/_meta') && !g.includes('/staging/'),
     );
+  }
+
+  /**
+   * Resolve a WM assertion's allocated KA number (`dkg:kaId`) off its lifecycle URN
+   * in `_meta`, for single-graph by-name reads under the uniform layout. Returns
+   * `undefined` for an unallocated draft (legacy name-keyed graph fallback). Mirrors
+   * the publisher's `resolveKaNumber`.
+   */
+  private async resolveWorkingMemoryKaNumber(
+    contextGraphId: string,
+    agentAddress: string,
+    assertionName: string,
+  ): Promise<bigint | undefined> {
+    const urn = assertionLifecycleUri(contextGraphId, agentAddress, assertionName);
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+    const res = await this.store.query(
+      `SELECT ?n WHERE { GRAPH <${metaGraph}> { <${urn}> <http://dkg.io/ontology/kaId> ?n } } LIMIT 1`,
+    );
+    if (res.type === 'bindings' && res.bindings.length > 0) {
+      const m = res.bindings[0]['n']?.match(/(\d+)/);
+      if (m) return BigInt(m[1]);
+    }
+    return undefined;
   }
 
   private async resolveScopedGraphVariableAllowList(
