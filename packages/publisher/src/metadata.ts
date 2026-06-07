@@ -1404,7 +1404,14 @@ export function generateAssertionPromotedMetadata(meta: AssertionPromotedMeta): 
     ins.push(assertionLayerPointerQuad(subject, SWM_CURRENT_ASSERTION_PRED, meta.merkleHex, metaGraph));
   }
   for (const entity of meta.rootEntities) {
+    // membership on the event node (provenance of this promote)
     ins.push(...entityMemberQuads(eventUri, entity, metaGraph));
+    // SUBSTRATE-1: membership on the STABLE lifecycle URN, so the _meta index can
+    // resolve "which KAs contain member-entity X" by binding dkg:entity on the URN
+    // instead of walking per-event nodes. (Member entities are first known once the
+    // KA is sealed; promote is the first lifecycle event that carries them. The
+    // create-and-seal path (D2) should stamp the same rows on the URN.)
+    ins.push(...entityMemberQuads(subject, entity, metaGraph));
   }
   if (meta.subGraphName) {
     ins.push(mq(subject, `${DKG}subGraphName`, lit(meta.subGraphName), metaGraph));

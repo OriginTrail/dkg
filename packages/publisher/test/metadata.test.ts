@@ -774,6 +774,20 @@ describe('generateAssertionPromotedMetadata', () => {
     expect(insert.find(q => q.predicate === `${DKG}assertionGraph`)!.object).toBe(swmScoped);
   });
 
+  it('SUBSTRATE-1: stamps member-entity membership (dkg:entity + legacy dkg:rootEntity) on the lifecycle URN', () => {
+    const { insert } = generateAssertionPromotedMetadata(meta);
+    for (const entity of meta.rootEntities) {
+      // the new membership predicate on the stable URN (what the _meta index binds)
+      expect(insert).toContainEqual(expect.objectContaining({
+        subject: LIFECYCLE_URI, predicate: `${DKG}entity`, object: entity, graph: META_GRAPH,
+      }));
+      // dual-write: the legacy predicate is also on the URN (OT-RFC-43 §10.1)
+      expect(insert).toContainEqual(expect.objectContaining({
+        subject: LIFECYCLE_URI, predicate: `${DKG}rootEntity`, object: entity, graph: META_GRAPH,
+      }));
+    }
+  });
+
   it('event is prov:Activity + dkg:AssertionPromoted with prov:used', () => {
     const { insert } = generateAssertionPromotedMetadata(meta);
     const eventUri = findEventUriFromInsert(insert);
