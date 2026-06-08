@@ -31,6 +31,17 @@ import type {
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 
+/**
+ * R6-A: how long a managed-endpoint `listGraphs()` result may be served from
+ * cache before it is re-validated against the store. The cache is also cleared
+ * eagerly on every local write, so this TTL only bounds *non-write* staleness:
+ * it collapses the peer-churn-driven burst of reconcile enumerations to at most
+ * one scan per window (the actual CPU win) while guaranteeing the graph set is
+ * re-read at least this often — so a managed-store outage/restart surfaces
+ * within the window instead of being masked indefinitely (review round 1).
+ */
+export const LIST_GRAPHS_CACHE_TTL_MS = 30_000;
+
 export interface SparqlHttpStoreOptions {
   /** SPARQL query endpoint URL (required). */
   queryEndpoint: string;
@@ -45,15 +56,21 @@ export interface SparqlHttpStoreOptions {
    * `oxigraph-server`, signalled by `oxigraph-managed.ts`). When set, no
    * external writer can mutate the store behind our back, so `listGraphs()`
    * is served from an in-memory cache that is invalidated on every local
-   * write. This kills the data-proportional `SELECT DISTINCT ?g` full scan
-   * that the 30 s host-mode reconcile (and on-demand CG enumeration) would
-   * otherwise re-run every cycle on an idle, data-rich node (R6-A).
+   * write AND expires after {@link LIST_GRAPHS_CACHE_TTL_MS}. This kills the
+   * data-proportional `SELECT DISTINCT ?g` full scan that the 30 s host-mode
+   * reconcile (and on-demand CG enumeration) would otherwise re-run every
+   * cycle on an idle, data-rich node (R6-A).
    *
    * Leave false/undefined for operator-provided endpoints: a shared/external
    * SPARQL server can gain graphs we did not write, which the cache would
    * miss — so caching is unsafe there and `listGraphs()` always queries.
    */
   managedByDkg?: boolean;
+  /**
+   * Injectable monotonic clock for the `listGraphs()` cache TTL. Testing seam
+   * only; defaults to `Date.now`.
+   */
+  now?: () => number;
 }
 
 export class SparqlHttpStore implements TripleStore {
@@ -64,8 +81,12 @@ export class SparqlHttpStore implements TripleStore {
 
   /** R6-A: cache `listGraphs()` only for daemon-owned (managed) endpoints. */
   private readonly cacheGraphList: boolean;
+  /** Injectable clock for the cache TTL (defaults to Date.now). */
+  private readonly now: () => number;
   /** Cached graph-name list; null = not built / invalidated by a write. */
   private graphListCache: string[] | null = null;
+  /** Wall-clock (via {@link now}) when {@link graphListCache} was last built. */
+  private graphListCacheAt = 0;
   /**
    * Bumped on every local write. `listGraphs()` captures it before its
    * async query and only stores the result if it is unchanged on return —
@@ -82,6 +103,7 @@ export class SparqlHttpStore implements TripleStore {
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? 30_000;
     this.cacheGraphList = options.managedByDkg === true;
+    this.now = options.now ?? Date.now;
     // Content-Type is set per-request in postQuery/postUpdate (direct POST:
     // application/sparql-query | application/sparql-update). Only shared
     // headers (e.g. Authorization) belong here.
@@ -287,8 +309,16 @@ export class SparqlHttpStore implements TripleStore {
     // when *we* write, so serve a warm cache and skip the full
     // `SELECT DISTINCT ?g` quad-store scan — the dominant idle-node CPU cost
     // on a data-rich node (re-run by the 30 s host-mode reconcile and every
-    // on-demand CG enumeration). Returns a copy so callers can't mutate it.
-    if (this.cacheGraphList && this.graphListCache !== null) {
+    // on-demand CG enumeration). The cache is cleared on every write and also
+    // expires after LIST_GRAPHS_CACHE_TTL_MS, so the burst of churn-driven
+    // re-enumerations collapses to one scan per window while a store
+    // outage/restart still surfaces within the TTL. Returns a copy so callers
+    // can't mutate it.
+    if (
+      this.cacheGraphList &&
+      this.graphListCache !== null &&
+      this.now() - this.graphListCacheAt < LIST_GRAPHS_CACHE_TTL_MS
+    ) {
       return [...this.graphListCache];
     }
     const gen = this.graphListCacheGen;
@@ -298,6 +328,7 @@ export class SparqlHttpStore implements TripleStore {
     // this snapshot may predate that write — discard it, the next call rebuilds.
     if (this.cacheGraphList && gen === this.graphListCacheGen) {
       this.graphListCache = graphs;
+      this.graphListCacheAt = this.now();
     }
     return [...graphs];
   }

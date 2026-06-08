@@ -61,8 +61,12 @@ describe('ttlMemo (R6-B)', () => {
     expect(calls).toBe(2);
   });
 
-  it('exposes a sane default count TTL (>= 60s)', () => {
-    expect(METRIC_COUNT_TTL_MS).toBeGreaterThanOrEqual(60_000);
+  it('keeps the count TTL below the 30s collector cadence so snapshots are not masked', () => {
+    // R6-B (review round 1): a TTL >= the 30s tick would let stale "healthy"
+    // counts hide a store outage across multiple snapshots. Staying under it
+    // means every periodic snapshot re-reads the store.
+    expect(METRIC_COUNT_TTL_MS).toBeGreaterThan(0);
+    expect(METRIC_COUNT_TTL_MS).toBeLessThan(30_000);
   });
 });
 

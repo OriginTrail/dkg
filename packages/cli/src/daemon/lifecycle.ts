@@ -1850,10 +1850,11 @@ export async function runDaemonInner(
     },
     getContextGraphCount: async () => (await agent.listContextGraphs()).length,
     // R6-B: the count getters below each issue a data-proportional full-scan
-    // COUNT. The collector ticks every 30 s (and /api/status may also call
-    // them), so wrap each in a TTL memo to bound the scan to once per window
-    // even with a UI client connected. Counts change slowly, so a flat value
-    // across a few snapshots is accurate for the dashboard time-series.
+    // COUNT. Wrap each in a short-TTL memo (METRIC_COUNT_TTL_MS, below the 30 s
+    // collector cadence) so a UI /api/status request firing alongside the
+    // metrics tick coalesces onto one scan, without masking a store outage —
+    // every periodic snapshot still re-reads the store. The heavier CG-count
+    // scan behind getContextGraphCount is relieved by R6-A's listGraphs cache.
     getTotalTriples: ttlMemo(async () => {
       const r = await agent.query(GET_TOTAL_TRIPLES_SPARQL);
       return parseRdfInt(r?.bindings?.[0]?.c);

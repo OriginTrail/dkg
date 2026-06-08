@@ -29,14 +29,16 @@ export function parseRdfInt(raw: string | undefined): number {
 }
 
 /**
- * Default TTL for the metric COUNT getters (R6-B). The collector ticks every
- * 30 s, but the full-scan COUNTs (total triples / KCs / KAs / status) are
- * data-proportional and change slowly, so serving a cached value for a couple
- * of minutes bounds their CPU cost on a data-rich node without meaningfully
- * staling the dashboard time-series. (The CG count is relieved separately by
- * the `listGraphs()` cache, R6-A.)
+ * Short TTL for the metric COUNT getters (R6-B). Deliberately BELOW the 30 s
+ * collector cadence so every periodic snapshot re-reads the store — a managed
+ * or external SPARQL backend going down surfaces in the dashboard within this
+ * window instead of being masked by stale "healthy" counts (review round 1).
+ * Its job is in-flight coalescing + a brief dedup window: a UI `/api/status`
+ * request firing alongside the metrics tick shares one full-scan COUNT rather
+ * than triggering two. (The far heavier CG-count scan is relieved separately
+ * by the `listGraphs()` cache, R6-A.)
  */
-export const METRIC_COUNT_TTL_MS = 120_000;
+export const METRIC_COUNT_TTL_MS = 10_000;
 
 /**
  * Wrap an async getter so a successful result is reused for `ttlMs`. Concurrent

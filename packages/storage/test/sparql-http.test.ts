@@ -1,6 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { SparqlHttpStore, createTripleStore, type Quad } from '../src/index.js';
+import { LIST_GRAPHS_CACHE_TTL_MS } from '../src/adapters/sparql-http.js';
 
 let server: Server;
 let queryUrl: string;
@@ -252,6 +253,24 @@ describe('SparqlHttpStore (test server)', () => {
       await store.listGraphs();
       await store.listGraphs();
       expect(listGraphsHits).toBe(2); // every call queries the server
+    });
+
+    it('re-scans after the cache TTL expires, so a store outage cannot be masked forever', async () => {
+      listGraphsHits = 0;
+      let clock = 1_000_000;
+      const store = new SparqlHttpStore({
+        queryEndpoint: queryUrl,
+        updateEndpoint: updateUrl,
+        managedByDkg: true,
+        now: () => clock,
+      });
+      await store.listGraphs();
+      await store.listGraphs();
+      expect(listGraphsHits).toBe(1); // within TTL: served from cache
+
+      clock += LIST_GRAPHS_CACHE_TTL_MS + 1; // advance past the TTL
+      await store.listGraphs();
+      expect(listGraphsHits).toBe(2); // expired: re-validated against the store
     });
 
     it('returns a defensive copy that cannot mutate the cached set', async () => {
