@@ -63,9 +63,12 @@ describe('useSwmAttributions — stale-on-switch protection', () => {
       const body = init?.body ? JSON.parse(String(init.body)) : {};
       // B2: the POST body no longer carries contextGraphId (it scoped the
       // engine to CG-direct graphs and dropped per-sub-graph attribution).
-      // Recover the cgId from the SPARQL's STRSTARTS filter to route the
-      // deferred promise, matching how the daemon now scopes the query.
-      const cgId: string = String(body.sparql).match(/context-graph:([^"/]+)/)?.[1] ?? '';
+      // Recover the cgId from the SPARQL's exact STRSTARTS prefix
+      // ("did:dkg:context-graph:<cgId>/") to route the deferred promise.
+      // Capture up to the trailing `/"` (non-greedy) rather than `[^"/]+`, so
+      // canonical slash-containing ids like `<wallet>/project` route under the
+      // full key instead of being truncated at the first `/`.
+      const cgId: string = String(body.sparql).match(/context-graph:(.+?)\/"/)?.[1] ?? '';
       const p = new Promise<any[]>((resolve) => {
         pending.set(cgId, { resolve });
       });
@@ -105,40 +108,40 @@ describe('useSwmAttributions — stale-on-switch protection', () => {
       return null;
     }
 
-    // Initial render for cg-A.
+    // Initial render for acme/alpha.
     await act(async () => {
-      root.render(React.createElement(Probe, { id: 'cg-A' }));
+      root.render(React.createElement(Probe, { id: 'acme/alpha' }));
     });
     await flushMicrotasks();
     expect(latest!.resultContextGraphId).toBeUndefined();
     expect(latest!.events).toHaveLength(0);
 
-    // Resolve cg-A's fetch.
-    pending.get('cg-A')!.resolve(rowsFor('cg-A'));
+    // Resolve acme/alpha's fetch.
+    pending.get('acme/alpha')!.resolve(rowsFor('acme/alpha'));
     await flushMicrotasks();
-    expect(latest!.resultContextGraphId).toBe('cg-A');
+    expect(latest!.resultContextGraphId).toBe('acme/alpha');
     expect(latest!.events).toHaveLength(1);
-    expect(latest!.events[0].rootUri).toBe('urn:e:cg-A');
+    expect(latest!.events[0].rootUri).toBe('urn:e:acme/alpha');
 
-    // Switch to cg-B. The hook still holds cg-A's events until the
+    // Switch to acme/beta. The hook still holds acme/alpha's events until the
     // new SPARQL lands — that's the pre-existing behaviour. The fix
     // is the discriminator: callers can detect the mismatch and
     // suppress downstream rendering until it clears.
     await act(async () => {
-      root.render(React.createElement(Probe, { id: 'cg-B' }));
+      root.render(React.createElement(Probe, { id: 'acme/beta' }));
     });
     await flushMicrotasks();
-    // Before cg-B's fetch resolves, the result still describes cg-A.
+    // Before acme/beta's fetch resolves, the result still describes acme/alpha.
     // A consumer that gates on `resultContextGraphId === currentId`
     // would now suppress these events (they're for the wrong graph).
-    expect(latest!.resultContextGraphId).toBe('cg-A');
+    expect(latest!.resultContextGraphId).toBe('acme/alpha');
 
-    // Resolve cg-B; the discriminator catches up.
-    pending.get('cg-B')!.resolve(rowsFor('cg-B'));
+    // Resolve acme/beta; the discriminator catches up.
+    pending.get('acme/beta')!.resolve(rowsFor('acme/beta'));
     await flushMicrotasks();
-    expect(latest!.resultContextGraphId).toBe('cg-B');
+    expect(latest!.resultContextGraphId).toBe('acme/beta');
     expect(latest!.events).toHaveLength(1);
-    expect(latest!.events[0].rootUri).toBe('urn:e:cg-B');
+    expect(latest!.events[0].rootUri).toBe('urn:e:acme/beta');
   });
 });
 
