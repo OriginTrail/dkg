@@ -64,8 +64,8 @@ const PREFIX = "/api/knowledge-assets";
 
 // Decode + validate a `:name` path segment (parity with the legacy routes,
 // which `safeDecodeURIComponent` then `validateAssertionName` every name). A
-// B3 kaId form (did:dkg UAL / `0x<addr>:<n>`) is exempt — it's validated by
-// `classifyKaIdentifier`. Returns the name, or null after writing a 400/error.
+// B3 did:dkg UAL is exempt — it's validated by `classifyKaIdentifier`.
+// Returns the name, or null after writing a 400/error.
 function decodeAndValidateName(seg: string, res: RequestContext["res"]): string | null {
   if (classifyKaIdentifier(seg).kind === "kaId") return seg;
   const nameVal = validateAssertionName(seg);
@@ -149,15 +149,14 @@ function hex(bytes: Uint8Array): string {
   return "0x" + Buffer.from(bytes).toString("hex");
 }
 
-// OT-RFC-43 B3 — (agent, number) compact identifier: `0x<40hex>:<number>`.
-const AGENT_NUMBER_RE = /^0x[0-9a-fA-F]{40}:[0-9]+$/;
-
 /**
  * OT-RFC-43 B3 — classify the leading path segment as a KA identifier:
  *   (a) `did:dkg:.../<id>`        → the trailing `/<id>` is the packed kaId
- *   (b) `0x<40hex>:<number>`      → (agent, number) → kaId = (agent<<96)|number
- *   (c) anything else             → a plain assertion NAME (current behavior)
- * Returns `{ kind: "kaId", kaId }` for (a)/(b) or `{ kind: "name" }` for (c).
+ *   (b) anything else             → a plain assertion NAME (current behavior)
+ * The compact `0x<agent>:<number>` form is intentionally NOT classified here:
+ * `validateAssertionName()` has historically allowed that literal shape, so
+ * treating it as a KA id would reinterpret/make unmutable existing drafts.
+ * Returns `{ kind: "kaId", kaId }` for (a) or `{ kind: "name" }` for (b).
  */
 function classifyKaIdentifier(seg: string): { kind: "kaId"; kaId: bigint } | { kind: "name" } {
   if (seg.startsWith("did:dkg:")) {
@@ -172,15 +171,6 @@ function classifyKaIdentifier(seg: string): { kind: "kaId"; kaId: bigint } | { k
     }
     return { kind: "name" };
   }
-  if (AGENT_NUMBER_RE.test(seg)) {
-    const [agentHex, numberStr] = seg.split(":");
-    try {
-      const kaId = (BigInt(agentHex) << 96n) | BigInt(numberStr);
-      return { kind: "kaId", kaId };
-    } catch {
-      return { kind: "name" };
-    }
-  }
   return { kind: "name" };
 }
 
@@ -189,7 +179,7 @@ function rejectKaIdMutationIdentifier(seg: string, res: RequestContext["res"]): 
   jsonResponse(res, 400, {
     code: "KA_ID_MUTATION_UNSUPPORTED",
     error:
-      "B3 KA identifiers (did:dkg UAL / 0x<agent>:<number>) are only supported on GET /api/knowledge-assets routes. " +
+      "B3 did:dkg KA identifiers are only supported on GET /api/knowledge-assets routes. " +
       "Mutation routes must use the lifecycle assertion name.",
   });
   return true;
@@ -200,7 +190,7 @@ function rejectReservedKaIdentifierName(name: string, res: RequestContext["res"]
   jsonResponse(res, 400, {
     code: "KA_IDENTIFIER_RESERVED",
     error:
-      "B3 KA identifiers (did:dkg UAL / 0x<agent>:<number>) are reserved for KA addressing and cannot be used as lifecycle assertion names.",
+      "B3 did:dkg KA identifiers are reserved for KA addressing and cannot be used as lifecycle assertion names.",
   });
   return true;
 }
@@ -745,10 +735,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // the prov event history and any seal/finalize metadata, preserving only
         // the KA identity + layer pointers). Calling it on every write would
         // corrupt an in-progress draft and — if the following write() throws —
-        // leave that wipe behind. So gate it on a missing-only existence check:
-        // brand-new names get created; existing drafts stay append-only.
+        // leave that wipe behind. So gate it on an active-draft existence check:
+        // brand-new or discarded names get created; existing drafts stay append-only.
         const existing = await agent.assertion.history(contextGraphId, name, { subGraphName });
-        if (!existing) {
+        if (!existing || existing.state === "discarded") {
           await agent.assertion.create(contextGraphId, name, { subGraphName });
         }
         await agent.assertion.write(contextGraphId, name, parsed.quads, { subGraphName });

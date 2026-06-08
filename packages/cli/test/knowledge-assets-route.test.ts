@@ -243,15 +243,14 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(body(ctx)).toMatchObject({ name: 'dup', alreadyExists: true });
   });
 
-  it('POST /api/knowledge-assets reserves compact B3 identifiers as names', async () => {
+  it('POST /api/knowledge-assets keeps compact 0x<agent>:<number> as a literal name', async () => {
     const agent = makeAssertionAgent();
     const name = `0x${'ab'.repeat(20)}:5`;
     const ctx = ctxFor('POST', '/api/knowledge-assets', { contextGraphId: 'cg', name }, agent);
     await handleKnowledgeAssetsRoutes(ctx);
-    expect(status(ctx)).toBe(400);
-    expect(body(ctx)).toMatchObject({ code: 'KA_IDENTIFIER_RESERVED' });
-    expect(agent.assertion.history).not.toHaveBeenCalled();
-    expect(agent.assertion.create).not.toHaveBeenCalled();
+    expect(status(ctx)).toBe(201);
+    expect(body(ctx)).toMatchObject({ name });
+    expect(agent.assertion.create).toHaveBeenCalledWith('cg', name, { subGraphName: undefined });
   });
 
   it('POST /api/knowledge-assets reserves did:dkg UAL identifiers as names', async () => {
@@ -399,6 +398,21 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(agent.assertion.history).toHaveBeenCalledWith('cg', 'f', { subGraphName: undefined });
     expect(agent.assertion.create).not.toHaveBeenCalled();
     expect(agent.assertion.write).toHaveBeenCalledWith('cg', 'f', quads, { subGraphName: undefined });
+  });
+
+  it('POST .../:name/wm/write re-creates a DISCARDED KA before appending', async () => {
+    // A discarded lifecycle record is not an active draft. Treat it like
+    // missing so the first write after discard rebuilds state/memoryLayer and
+    // the event history before appending to the per-KA graph.
+    const agent = makeAssertionAgent({ assertion: { history: vi.fn(async () => ({ state: 'discarded' })) } });
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/wm/write', { contextGraphId: 'cg', quads }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(200);
+    expect(agent.assertion.create).toHaveBeenCalledWith('cg', 'f', { subGraphName: undefined });
+    const createOrder = (agent.assertion.create as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    const writeOrder = (agent.assertion.write as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    expect(createOrder).toBeLessThan(writeOrder);
   });
 
   it('POST .../:name/wm/finalize seals the draft (full seal payload)', async () => {
@@ -1175,18 +1189,15 @@ describe('OT-RFC-43 A2/B3 — per-layer status + kaId addressing', () => {
     expect(b.status).toBe('vm-confirmed');
   });
 
-  it('B3: resolves a KA by (agent, number) — same descriptor as by name', async () => {
+  it('B3: compact 0x<agent>:<number> remains a plain literal name', async () => {
     const agent = makePointerAgent();
     const ident = `${AGENT_ADDR}:5`;
     const ctx = ctxFor('GET', `/api/knowledge-assets/${encodeURIComponent(ident)}?contextGraphId=cg`, undefined, agent);
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(200);
     expect(body(ctx)).toMatchObject({ name: 'notes', status: 'vm-confirmed' });
-    // Routed through resolveByKaId with the packed kaId = (agent<<96)|5.
-    expect(agent.assertion.resolveByKaId).toHaveBeenCalledOnce();
-    const packed = (BigInt(AGENT_ADDR) << 96n) | 5n;
-    expect(agent.assertion.resolveByKaId.mock.calls[0][1]).toBe(packed);
-    expect(agent.assertion.history).not.toHaveBeenCalled();
+    expect(agent.assertion.history).toHaveBeenCalledWith('cg', ident, { agentAddress: undefined, subGraphName: undefined });
+    expect(agent.assertion.resolveByKaId).not.toHaveBeenCalled();
   });
 
   it('B3: resolves a KA by did:dkg UAL — same descriptor', async () => {
@@ -1210,7 +1221,7 @@ describe('OT-RFC-43 A2/B3 — per-layer status + kaId addressing', () => {
     expect(agent.assertion.resolveByKaId).not.toHaveBeenCalled();
   });
 
-  it('B3: mutation routes reject kaId identifiers instead of creating a literal draft name', async () => {
+  it('B3: mutation routes keep compact 0x<agent>:<number> as a literal draft name', async () => {
     const agent = makeAssertionAgent();
     const ident = `${AGENT_ADDR}:5`;
     const ctx = ctxFor('POST', `/api/knowledge-assets/${encodeURIComponent(ident)}/wm/write`, {
@@ -1220,11 +1231,11 @@ describe('OT-RFC-43 A2/B3 — per-layer status + kaId addressing', () => {
 
     await handleKnowledgeAssetsRoutes(ctx);
 
-    expect(status(ctx)).toBe(400);
-    expect(body(ctx)).toMatchObject({ code: 'KA_ID_MUTATION_UNSUPPORTED' });
-    expect(agent.assertion.history).not.toHaveBeenCalled();
+    expect(status(ctx)).toBe(200);
+    expect(body(ctx)).toMatchObject({ written: 1 });
+    expect(agent.assertion.history).toHaveBeenCalledWith('cg', ident, { subGraphName: undefined });
     expect(agent.assertion.create).not.toHaveBeenCalled();
-    expect(agent.assertion.write).not.toHaveBeenCalled();
+    expect(agent.assertion.write).toHaveBeenCalledWith('cg', ident, [{ subject: 's', predicate: 'p', object: '"o"' }], { subGraphName: undefined });
   });
 
   it('B3: mutation routes reject did:dkg UAL identifiers too', async () => {
