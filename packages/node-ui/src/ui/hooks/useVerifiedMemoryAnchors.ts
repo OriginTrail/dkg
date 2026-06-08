@@ -114,7 +114,11 @@ function buildAnchorsQuery(cgId: string): string {
   // Trailing slash makes this an EXACT CG prefix: every partition graph is
   // `did:dkg:context-graph:<cg>/[<sg>/]_shared_memory_meta`, so "<cgUri>/"
   // matches all of this CG's partitions while excluding sibling CGs whose id
-  // merely shares the prefix (cg-1 must not capture cg-10 / cg-1-foo).
+  // merely shares the prefix (cg-1 must not capture cg-10 / cg-1-foo). Same
+  // known limitation as useSwmAttributions.buildAttributionsQuery: a
+  // path-extending child CG `<cg>/<x>` (CG ids may contain "/") would still
+  // prefix-match; the authoritative fix is the deferred server-side sub-graph
+  // SWM routing (A2/A4).
   const cgPrefix = `did:dkg:context-graph:${cgId}/`;
   return `PREFIX dkg: <http://dkg.io/ontology/>
 PREFIX prov: <http://www.w3.org/ns/prov#>

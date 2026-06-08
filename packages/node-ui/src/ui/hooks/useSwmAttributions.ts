@@ -184,6 +184,15 @@ export function buildAttributionsQuery(cgId: string): string {
   // `did:dkg:context-graph:<cg>/[<sg>/]_shared_memory_meta`, so "<cgUri>/"
   // matches all of this CG's partitions while excluding sibling CGs whose id
   // merely shares the prefix (cg-1 must not capture cg-10 / cg-1-foo).
+  //
+  // Known limitation: CG ids may themselves contain "/" (validateContextGraphId
+  // allows it; convention is <addr>/<name>), so a hypothetical path-extending
+  // child CG `<cg>/<x>` would still prefix-match. That URI is structurally
+  // identical to a real sub-graph `<sg>=<x>`, so only the sub-graph registry
+  // can disambiguate — i.e. the deferred server-side sub-graph SWM routing
+  // (rc.17 A2/A4). The raw-prefix read is the deliberate client bridge and is
+  // preferred over a client-built registry allow-list, which would re-drop
+  // partitions whose `_meta` registration is missing — a condition seen live.
   const cgPrefix = `did:dkg:context-graph:${cgId}/`;
   return `PREFIX dkg: <http://dkg.io/ontology/>
 PREFIX prov: <http://www.w3.org/ns/prov#>
