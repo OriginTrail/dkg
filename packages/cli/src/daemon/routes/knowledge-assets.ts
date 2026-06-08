@@ -195,6 +195,16 @@ function rejectKaIdMutationIdentifier(seg: string, res: RequestContext["res"]): 
   return true;
 }
 
+function rejectReservedKaIdentifierName(name: string, res: RequestContext["res"]): boolean {
+  if (classifyKaIdentifier(name).kind !== "kaId") return false;
+  jsonResponse(res, 400, {
+    code: "KA_IDENTIFIER_RESERVED",
+    error:
+      "B3 KA identifiers (did:dkg UAL / 0x<agent>:<number>) are reserved for KA addressing and cannot be used as lifecycle assertion names.",
+  });
+  return true;
+}
+
 /**
  * OT-RFC-43 §10.5.4 — derive a per-layer status from a history descriptor's
  * pointers. Reuses the canonical `deriveStatus` helper.
@@ -487,6 +497,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     if (typeof name !== "string") {
       return jsonResponse(res, 400, { error: '"name" must be a string' });
     }
+    if (rejectReservedKaIdentifierName(name, res)) return;
     const nameVal = validateAssertionName(name);
     if (!nameVal.valid) {
       return jsonResponse(res, 400, { error: `Invalid "name": ${nameVal.reason}` });

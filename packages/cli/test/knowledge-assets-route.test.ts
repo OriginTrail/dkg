@@ -243,6 +243,27 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(body(ctx)).toMatchObject({ name: 'dup', alreadyExists: true });
   });
 
+  it('POST /api/knowledge-assets reserves compact B3 identifiers as names', async () => {
+    const agent = makeAssertionAgent();
+    const name = `0x${'ab'.repeat(20)}:5`;
+    const ctx = ctxFor('POST', '/api/knowledge-assets', { contextGraphId: 'cg', name }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx)).toMatchObject({ code: 'KA_IDENTIFIER_RESERVED' });
+    expect(agent.assertion.history).not.toHaveBeenCalled();
+    expect(agent.assertion.create).not.toHaveBeenCalled();
+  });
+
+  it('POST /api/knowledge-assets reserves did:dkg UAL identifiers as names', async () => {
+    const agent = makeAssertionAgent();
+    const name = 'did:dkg:evm:31337/0xkaaddr/123';
+    const ctx = ctxFor('POST', '/api/knowledge-assets', { contextGraphId: 'cg', name }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx)).toMatchObject({ code: 'KA_IDENTIFIER_RESERVED' });
+    expect(agent.assertion.create).not.toHaveBeenCalled();
+  });
+
   it('POST /api/knowledge-assets rejects finalize-only fields without auto-finalize quads', async () => {
     for (const payload of [
       { authorAgentAddress: `0x${'11'.repeat(20)}` },
