@@ -111,7 +111,17 @@ export {
   type CclPublishedEvaluationRecord,
   type CclPublishedResultEntry,
   type PendingSenderKeyEntry,
+  type AssertionArtifactKind,
+  type ImportedArtifactByteStore,
 } from './dkg-agent-types.js';
+export {
+  computeImportedArtifactSelector,
+  IMPORTED_ARTIFACT_AUTH_PURPOSE,
+  IMPORTED_ARTIFACT_MAX_PAGE_BYTES,
+  type ImportedArtifactRequest,
+  type ImportedArtifactResponse,
+  type ReadAssertionArtifactParams,
+} from './imported-artifact.js';
 export {
   bindRandomSampling,
   type RandomSamplingBindOptions,

@@ -85,6 +85,23 @@ describe('Phase C sync envelope — sinceBatchId is unsigned', () => {
     expect(parsed.sinceBatchId).toBeUndefined();
   });
 
+  it('feeds generic authPurpose/authSelector into the signed digest when set', async () => {
+    const { params, digestCalls } = baseParams(undefined);
+    const bytes = await buildSyncRequestEnvelope({
+      ...params,
+      authPurpose: 'imported-artifact:v1',
+      authSelector: 'imported-artifact:v1:0xabc',
+    });
+    const parsed = JSON.parse(new TextDecoder().decode(bytes)) as SyncRequestEnvelope;
+
+    expect(parsed.authPurpose).toBe('imported-artifact:v1');
+    expect(parsed.authSelector).toBe('imported-artifact:v1:0xabc');
+    expect(digestCalls).toHaveLength(1);
+    expect(digestCalls[0]).toHaveLength(11);
+    expect(digestCalls[0][9]).toBe('imported-artifact:v1');
+    expect(digestCalls[0][10]).toBe('imported-artifact:v1:0xabc');
+  });
+
   it('appends an unauthenticated |since|<n> token for the pipe encoding', async () => {
     const { params } = baseParams('42');
     const bytes = await buildSyncRequestEnvelope({ ...params, needsAuth: false });

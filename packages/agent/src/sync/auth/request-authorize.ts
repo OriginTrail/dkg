@@ -23,6 +23,8 @@ interface AuthorizeSyncRequestParams {
     requestId: string,
     issuedAtMs: number,
     requesterAgentAddress: string | undefined,
+    authPurpose?: string,
+    authSelector?: string,
   ) => Uint8Array;
   verifyIdentity?: (recoveredAddress: string, claimedIdentityId: bigint, options?: AuthLookupOptions) => Promise<boolean>;
   getParticipants: (contextGraphId: string, options?: AuthLookupOptions) => Promise<string[] | null>;
@@ -121,17 +123,31 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
     return false;
   }
 
-  const digest = computeSyncDigest(
-    request.contextGraphId,
-    request.offset,
-    request.limit,
-    request.includeSharedMemory,
-    request.targetPeerId,
-    request.requesterPeerId,
-    request.requestId,
-    request.issuedAtMs,
-    request.requesterAgentAddress,
-  );
+  const digest = request.authPurpose || request.authSelector
+    ? computeSyncDigest(
+        request.contextGraphId,
+        request.offset,
+        request.limit,
+        request.includeSharedMemory,
+        request.targetPeerId,
+        request.requesterPeerId,
+        request.requestId,
+        request.issuedAtMs,
+        request.requesterAgentAddress,
+        request.authPurpose,
+        request.authSelector,
+      )
+    : computeSyncDigest(
+        request.contextGraphId,
+        request.offset,
+        request.limit,
+        request.includeSharedMemory,
+        request.targetPeerId,
+        request.requesterPeerId,
+        request.requestId,
+        request.issuedAtMs,
+        request.requesterAgentAddress,
+      );
 
   let recoveredAddress: string;
   try {

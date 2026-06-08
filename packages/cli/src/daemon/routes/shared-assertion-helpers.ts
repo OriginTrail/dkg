@@ -657,6 +657,9 @@ export async function resolveImportedArtifact(
      */
     relaxOnPublicOpenCg?: boolean;
   },
+  opts?: {
+    allowSharedMemoryFallback?: boolean;
+  },
 ): Promise<ImportedArtifactResolution> {
   const rawContextGraphId = typeof raw.contextGraphId === 'string' ? raw.contextGraphId.trim() : '';
   const contextGraphId = rawContextGraphId ? normalizeContextGraphIdOrUri(rawContextGraphId) : '';
@@ -810,7 +813,7 @@ export async function resolveImportedArtifact(
   `) as { type?: string; bindings?: Array<Record<string, unknown>> };
   const metaBinding = metaResult.bindings?.[0];
   if (!metaBinding) {
-    if (ownerGuardRelaxed) {
+    if (ownerGuardRelaxed || opts?.allowSharedMemoryFallback) {
       const swmArtifact = await resolveImportedArtifactFromSharedMemory(ctx, {
         contextGraphId,
         assertionUri,

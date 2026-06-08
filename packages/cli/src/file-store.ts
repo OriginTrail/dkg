@@ -14,7 +14,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, stat as fsStat, unlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers } from 'ethers';
@@ -117,12 +117,42 @@ export class FileStore {
     return readFile(path);
   }
 
+  async stat(hash: string): Promise<{ size: number } | null> {
+    const path = await this.hashToPath(hash);
+    if (!path) return null;
+    try {
+      const info = await fsStat(path);
+      return { size: info.size };
+    } catch {
+      return null;
+    }
+  }
+
+  async readRange(hash: string, offset: number, length: number): Promise<Buffer | null> {
+    if (!Number.isSafeInteger(offset) || offset < 0) return null;
+    if (!Number.isSafeInteger(length) || length <= 0) return Buffer.alloc(0);
+    const path = await this.hashToPath(hash);
+    if (!path) return null;
+    const handle = await open(path, 'r').catch(() => null);
+    if (!handle) return null;
+    try {
+      const info = await handle.stat();
+      if (offset >= info.size) return Buffer.alloc(0);
+      const cappedLength = Math.min(length, info.size - offset);
+      const buffer = Buffer.alloc(cappedLength);
+      const { bytesRead } = await handle.read(buffer, 0, cappedLength, offset);
+      return buffer.subarray(0, bytesRead);
+    } finally {
+      await handle.close().catch(() => {});
+    }
+  }
+
   /** Check whether a hash is present in the store. */
   async has(hash: string): Promise<boolean> {
     const path = await this.hashToPath(hash);
     if (!path) return false;
     try {
-      await stat(path);
+      await fsStat(path);
       return true;
     } catch {
       return false;

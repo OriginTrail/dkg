@@ -640,6 +640,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         includeSharedMemory: parsed.includeSharedMemory ?? false,
         phase: normalizeSyncPhase(parsed.phase),
         snapshotRef: typeof parsed.snapshotRef === 'string' ? parsed.snapshotRef : undefined,
+        authPurpose: typeof parsed.authPurpose === 'string' ? parsed.authPurpose : undefined,
+        authSelector: typeof parsed.authSelector === 'string' ? parsed.authSelector : undefined,
         targetPeerId: parsed.targetPeerId,
         requesterPeerId: parsed.requesterPeerId,
         requestId: parsed.requestId,
@@ -815,6 +817,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     requestId: string | undefined,
     issuedAtMs: number | undefined,
     requesterAgentAddress: string | undefined,
+    authPurpose?: string,
+    authSelector?: string,
   ): Uint8Array {
     // `requesterAgentAddress` participates in the digest so the
     // "on behalf of" claim is signed, not free-form envelope data.
@@ -822,22 +826,23 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     // tampering with `requesterAgentAddress` after the signature was
     // produced — which would be a way to bypass the per-agent
     // delegation binding in `request-authorize`.
-    return ethers.getBytes(
-      ethers.solidityPackedKeccak256(
-        ['string', 'uint256', 'uint256', 'bool', 'string', 'string', 'string', 'uint256', 'string'],
-        [
-          contextGraphId,
-          BigInt(offset),
-          BigInt(limit),
-          includeSharedMemory,
-          targetPeerId,
-          requesterPeerId ?? '',
-          requestId ?? '',
-          BigInt(issuedAtMs ?? 0),
-          (requesterAgentAddress ?? '').toLowerCase(),
-        ],
-      ),
-    );
+    const baseTypes = ['string', 'uint256', 'uint256', 'bool', 'string', 'string', 'string', 'uint256', 'string'];
+    const baseValues = [
+      contextGraphId,
+      BigInt(offset),
+      BigInt(limit),
+      includeSharedMemory,
+      targetPeerId,
+      requesterPeerId ?? '',
+      requestId ?? '',
+      BigInt(issuedAtMs ?? 0),
+      (requesterAgentAddress ?? '').toLowerCase(),
+    ];
+    if (authPurpose || authSelector) {
+      baseTypes.push('string', 'string');
+      baseValues.push(authPurpose ?? '', authSelector ?? '');
+    }
+    return ethers.getBytes(ethers.solidityPackedKeccak256(baseTypes, baseValues));
   }
 
   public async authorizeSyncRequest(

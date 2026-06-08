@@ -17,7 +17,8 @@
 // error mapping, response shape, and side-effects. Each reads + parses
 // its own body. The shared logic lives in `./shared-assertion-helpers.js`.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { ethers } from "ethers";
 import {
   contextGraphAssertionUri,
   contextGraphMetaUri,
@@ -52,6 +53,8 @@ import {
   normalizeGeneratedAt,
   normalizeGeneratedBy,
   normalizeMarkdownReadLimit,
+  validateContentHash,
+  type ImportedArtifactResolution,
 } from "./shared-assertion-helpers.js";
 import { parseBoundary, parseMultipart, MultipartParseError } from "../../http/multipart.js";
 import { normalizeDetectedContentType } from "../manifest.js";
@@ -62,6 +65,85 @@ import {
   setExtractionStatusRecord,
 } from "../../extraction-status.js";
 import { SignedRequestRejectedError } from "../../auth.js";
+
+const MAX_ASSERTION_ARTIFACT_READ_BYTES = 1024 * 1024;
+
+type AssertionArtifactKind = 'source' | 'markdown' | 'original';
+
+type AssertionArtifactResolution = ImportedArtifactResolution & {
+  kind: AssertionArtifactKind;
+  hash: string;
+  contentType: string;
+};
+
+function normalizeAssertionArtifactKind(raw: unknown): AssertionArtifactKind {
+  if (raw === 'source' || raw === 'markdown' || raw === 'original') return raw;
+  throw new ImportArtifactRouteError(400, '"kind" must be one of "source", "markdown", or "original"');
+}
+
+function normalizeArtifactOffset(raw: unknown): number {
+  if (raw == null) return 0;
+  if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw < 0) {
+    throw new ImportArtifactRouteError(400, '"offset" must be a non-negative integer');
+  }
+  return raw;
+}
+
+function normalizeArtifactReadLimit(raw: unknown): number {
+  if (raw == null) return MAX_ASSERTION_ARTIFACT_READ_BYTES;
+  if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw <= 0) {
+    throw new ImportArtifactRouteError(400, '"maxBytes" must be a positive integer');
+  }
+  return Math.min(raw, MAX_ASSERTION_ARTIFACT_READ_BYTES);
+}
+
+function verifyArtifactBytesHash(hash: string, bytes: Buffer): boolean {
+  if (hash.startsWith('keccak256:')) {
+    return `keccak256:${ethers.keccak256(bytes).replace(/^0x/, '')}` === hash;
+  }
+  const sha = createHash('sha256').update(bytes).digest('hex');
+  return hash === sha || hash === `sha256:${sha}`;
+}
+
+async function resolveAssertionArtifact(
+  ctx: RequestContext,
+  raw: Record<string, unknown>,
+): Promise<AssertionArtifactResolution | 'hash_mismatch'> {
+  const kind = normalizeAssertionArtifactKind(raw.kind);
+  const requestedHash = typeof raw.hash === 'string' && raw.hash.trim()
+    ? raw.hash.trim()
+    : undefined;
+  if (requestedHash && !validateContentHash(requestedHash)) {
+    throw new ImportArtifactRouteError(400, 'Invalid hash');
+  }
+
+  const artifact = await resolveImportedArtifact(
+    ctx,
+    {
+      ...raw,
+      ...(kind === 'source' || kind === 'original'
+        ? (requestedHash ? { fileHash: requestedHash } : {})
+        : {}),
+    },
+    undefined,
+    { allowSharedMemoryFallback: true },
+  );
+
+  const resolvedHash = kind === 'markdown'
+    ? artifact.markdownHash
+    : artifact.sourceFileHash;
+  if (!resolvedHash) {
+    throw new ImportArtifactRouteError(404, `No ${kind} artifact is linked to assertionUri`);
+  }
+  if (requestedHash && requestedHash !== resolvedHash) return 'hash_mismatch';
+
+  return {
+    ...artifact,
+    kind,
+    hash: resolvedHash,
+    contentType: kind === 'markdown' ? 'text/markdown' : artifact.sourceContentType,
+  };
+}
 
 // POST /api/knowledge-assets/import-artifact/resolve
 // Resolve a completed deterministic import artifact from graph metadata.
@@ -79,6 +161,151 @@ export async function handleKaImportArtifactResolve(ctx: RequestContext): Promis
       relaxOnPublicOpenCg: true,
     });
     return jsonResponse(res, 200, { artifact });
+  } catch (err) {
+    if (handleImportArtifactRouteError(res, err)) return;
+    throw err;
+  }
+}
+
+// POST /api/knowledge-assets/import-artifact/read
+// Generic imported assertion artifact byte reader.
+export async function handleKaImportArtifactRead(ctx: RequestContext): Promise<void> {
+  const { req, res, agent, fileStore } = ctx;
+  const body = await readBody(req, SMALL_BODY_BYTES);
+  const parsed = safeParseJson(body, res);
+  if (!parsed) return;
+  const raw = parsed as Record<string, unknown>;
+  try {
+    const offset = normalizeArtifactOffset(raw.offset);
+    const maxBytes = normalizeArtifactReadLimit(raw.maxBytes);
+    const resolved = await resolveAssertionArtifact(ctx, raw);
+    if (resolved === 'hash_mismatch') {
+      return jsonResponse(res, 200, {
+        status: 'hash_mismatch',
+        contextGraphId: typeof raw.contextGraphId === 'string' ? normalizeContextGraphIdOrUri(raw.contextGraphId) : undefined,
+        assertionUri: raw.assertionUri,
+        kind: raw.kind,
+        hash: raw.hash,
+      });
+    }
+
+    const statResult = await fileStore.stat(resolved.hash);
+    if (statResult) {
+      const bytes = await fileStore.readRange(resolved.hash, offset, maxBytes);
+      if (bytes) {
+        const nextOffset = offset + bytes.length;
+        const truncated = nextOffset < statResult.size;
+        return jsonResponse(res, 200, {
+          status: 'local',
+          contextGraphId: resolved.contextGraphId,
+          assertionUri: resolved.assertionUri,
+          kind: resolved.kind,
+          hash: resolved.hash,
+          contentType: resolved.contentType,
+          size: statResult.size,
+          offset,
+          nextOffset: truncated ? nextOffset : undefined,
+          truncated,
+          bytesB64: bytes.toString('base64'),
+          source: { agentAddress: resolved.assertionAgentAddress },
+        });
+      }
+    }
+
+    const sourcePeerId = typeof raw.sourcePeerId === 'string' && raw.sourcePeerId.trim()
+      ? raw.sourcePeerId.trim()
+      : undefined;
+    if (!sourcePeerId || typeof agent.fetchAndVerifyAssertionArtifact !== 'function') {
+      return jsonResponse(res, 200, {
+        status: sourcePeerId ? 'unavailable' : 'fetchable',
+        contextGraphId: resolved.contextGraphId,
+        assertionUri: resolved.assertionUri,
+        kind: resolved.kind,
+        hash: resolved.hash,
+        contentType: resolved.contentType,
+        offset,
+        source: {
+          ...(sourcePeerId ? { peerId: sourcePeerId } : {}),
+          agentAddress: resolved.assertionAgentAddress,
+        },
+        reason: sourcePeerId ? 'Artifact bytes are not available locally or from the requested peer' : 'Artifact bytes are not local; provide sourcePeerId to fetch from a peer',
+      });
+    }
+
+    const cache = raw.cache !== false && offset === 0;
+    const remote = await agent.fetchAndVerifyAssertionArtifact({
+      contextGraphId: resolved.contextGraphId,
+      assertionUri: resolved.assertionUri,
+      kind: resolved.kind,
+      hash: resolved.hash,
+      offset,
+      maxBytes,
+      ...(resolved.subGraphName ? { subGraphName: resolved.subGraphName } : {}),
+      sourcePeerId,
+      cache,
+    });
+    const page = remote.response;
+    if (page.denied) {
+      return jsonResponse(res, 200, {
+        status: 'denied',
+        contextGraphId: resolved.contextGraphId,
+        assertionUri: resolved.assertionUri,
+        kind: resolved.kind,
+        hash: resolved.hash,
+        source: { peerId: sourcePeerId, agentAddress: resolved.assertionAgentAddress },
+        reason: 'denied',
+      });
+    }
+    if (page.hashMismatch) {
+      return jsonResponse(res, 200, {
+        status: 'hash_mismatch',
+        contextGraphId: resolved.contextGraphId,
+        assertionUri: resolved.assertionUri,
+        kind: resolved.kind,
+        hash: resolved.hash,
+        source: { peerId: sourcePeerId, agentAddress: resolved.assertionAgentAddress },
+      });
+    }
+    if (page.unavailable || !page.bytesB64) {
+      return jsonResponse(res, 200, {
+        status: 'unavailable',
+        contextGraphId: resolved.contextGraphId,
+        assertionUri: resolved.assertionUri,
+        kind: resolved.kind,
+        hash: resolved.hash,
+        source: { peerId: sourcePeerId, agentAddress: resolved.assertionAgentAddress },
+      });
+    }
+
+    if (remote.verifiedBytes && cache) {
+      if (!verifyArtifactBytesHash(resolved.hash, remote.verifiedBytes)) {
+        return jsonResponse(res, 200, {
+          status: 'hash_mismatch',
+          contextGraphId: resolved.contextGraphId,
+          assertionUri: resolved.assertionUri,
+          kind: resolved.kind,
+          hash: resolved.hash,
+          source: { peerId: sourcePeerId, agentAddress: resolved.assertionAgentAddress },
+        });
+      }
+      await fileStore.put(remote.verifiedBytes, resolved.contentType);
+    }
+
+    return jsonResponse(res, 200, {
+      status: remote.verifiedBytes ? 'fetched' : 'fetchable',
+      contextGraphId: resolved.contextGraphId,
+      assertionUri: resolved.assertionUri,
+      kind: resolved.kind,
+      hash: resolved.hash,
+      contentType: page.contentType ?? resolved.contentType,
+      size: page.totalBytes,
+      offset: page.offset,
+      nextOffset: page.nextOffset,
+      truncated: page.truncated,
+      bytesB64: page.bytesB64,
+      source: { peerId: sourcePeerId, agentAddress: resolved.assertionAgentAddress },
+      ...(remote.verifiedBytes ? {} : { reason: 'Remote page fetched but full artifact was not cache-promoted' }),
+    });
   } catch (err) {
     if (handleImportArtifactRouteError(res, err)) return;
     throw err;

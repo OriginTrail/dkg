@@ -18,6 +18,8 @@ export interface SyncRequestEnvelope {
   requesterSignatureVS?: string;
   phase?: SyncPhase;
   snapshotRef?: string;
+  authPurpose?: string;
+  authSelector?: string;
   /**
    * Phase C — optional, UNSIGNED delta-sync hint. When set, the responder
    * returns only Knowledge Assets whose KC `dkg:batchId` is strictly greater
@@ -42,6 +44,8 @@ interface BuildSyncRequestParams {
   requesterPeerId: string;
   phase?: SyncPhase;
   snapshotRef?: string;
+  authPurpose?: string;
+  authSelector?: string;
   sinceBatchId?: string;
   syncSessionId?: string;
   needsAuth: boolean;
@@ -55,6 +59,8 @@ interface BuildSyncRequestParams {
     requestId: string,
     issuedAtMs: number,
     requesterAgentAddress: string | undefined,
+    authPurpose?: string,
+    authSelector?: string,
   ) => Uint8Array;
   getIdentityId: () => Promise<bigint>;
   signMessage?: (digest: Uint8Array) => Promise<{ r: Uint8Array; vs: Uint8Array }>;
@@ -80,6 +86,8 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     requesterPeerId,
     phase,
     snapshotRef,
+    authPurpose,
+    authSelector,
     sinceBatchId,
     syncSessionId,
     needsAuth,
@@ -115,6 +123,8 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   };
   if (phase) request.phase = phase;
   if (snapshotRef) request.snapshotRef = snapshotRef;
+  if (authPurpose) request.authPurpose = authPurpose;
+  if (authSelector) request.authSelector = authSelector;
   // Phase C: set AFTER digest computation below — it is intentionally outside
   // the signature (narrowing-only, see field docs).
 
@@ -126,17 +136,31 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   if (claimedAgentAddress) {
     request.requesterAgentAddress = claimedAgentAddress;
   }
-  const digest = computeSyncDigest(
-    request.contextGraphId,
-    request.offset,
-    request.limit,
-    request.includeSharedMemory,
-    request.targetPeerId!,
-    request.requesterPeerId!,
-    request.requestId!,
-    request.issuedAtMs!,
-    request.requesterAgentAddress,
-  );
+  const digest = request.authPurpose || request.authSelector
+    ? computeSyncDigest(
+        request.contextGraphId,
+        request.offset,
+        request.limit,
+        request.includeSharedMemory,
+        request.targetPeerId!,
+        request.requesterPeerId!,
+        request.requestId!,
+        request.issuedAtMs!,
+        request.requesterAgentAddress,
+        request.authPurpose,
+        request.authSelector,
+      )
+    : computeSyncDigest(
+        request.contextGraphId,
+        request.offset,
+        request.limit,
+        request.includeSharedMemory,
+        request.targetPeerId!,
+        request.requesterPeerId!,
+        request.requestId!,
+        request.issuedAtMs!,
+        request.requesterAgentAddress,
+      );
 
   // Phase C: ride the envelope unsigned, after the digest (cannot influence
   // authorization; only narrows the responder's result set).

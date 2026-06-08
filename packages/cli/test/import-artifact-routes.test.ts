@@ -334,6 +334,111 @@ describe('import artifact daemon routes', () => {
     });
   });
 
+  it('reads a generic source artifact as bounded base64 bytes', async () => {
+    const entry = await fileStore.put(Buffer.from('source bytes'), 'text/markdown');
+    const contextGraphId = 'cg-generic-source-artifact';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:test', assertionName);
+    const { agent } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: entry.keccak256,
+      markdownHash: entry.keccak256,
+      markdownForm: `urn:dkg:file:${entry.keccak256}`,
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/knowledge-assets/import-artifact/read', {
+      contextGraphId,
+      assertionUri,
+      kind: 'source',
+      hash: entry.keccak256,
+      offset: 0,
+      maxBytes: 6,
+    });
+
+    expect(read.status).toBe(200);
+    expect(read.body).toMatchObject({
+      status: 'local',
+      contextGraphId,
+      assertionUri,
+      kind: 'source',
+      hash: entry.keccak256,
+      contentType: 'text/markdown',
+      size: Buffer.byteLength('source bytes'),
+      offset: 0,
+      nextOffset: 6,
+      truncated: true,
+      bytesB64: Buffer.from('source').toString('base64'),
+    });
+  });
+
+  it('reads a generic markdown artifact via mdIntermediateHash', async () => {
+    const originalEntry = await fileStore.put(Buffer.from('%PDF-1.4'), 'application/pdf');
+    const markdownEntry = await fileStore.put(Buffer.from('# Converted\n'), 'text/markdown');
+    const contextGraphId = 'cg-generic-markdown-artifact';
+    const assertionName = 'imported-pdf';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:test', assertionName);
+    const { agent } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: originalEntry.keccak256,
+      markdownHash: markdownEntry.keccak256,
+      markdownForm: `urn:dkg:file:${markdownEntry.keccak256}`,
+      contentType: 'application/pdf',
+      mdIntermediateHash: markdownEntry.keccak256,
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/knowledge-assets/import-artifact/read', {
+      contextGraphId,
+      assertionUri,
+      kind: 'markdown',
+      hash: markdownEntry.keccak256,
+      maxBytes: 1024,
+    });
+
+    expect(read.status).toBe(200);
+    expect(read.body).toMatchObject({
+      status: 'local',
+      contextGraphId,
+      assertionUri,
+      kind: 'markdown',
+      hash: markdownEntry.keccak256,
+      contentType: 'text/markdown',
+      truncated: false,
+      bytesB64: Buffer.from('# Converted\n').toString('base64'),
+    });
+  });
+
+  it('reports hash_mismatch for generic artifact hashes not linked to metadata', async () => {
+    const entry = await fileStore.put(Buffer.from('source bytes'), 'text/markdown');
+    const contextGraphId = 'cg-generic-artifact-mismatch';
+    const assertionName = 'imported-md';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:test', assertionName);
+    const { agent } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: entry.keccak256,
+      markdownHash: entry.keccak256,
+      markdownForm: `urn:dkg:file:${entry.keccak256}`,
+    });
+    await startRoutes({ agent });
+
+    const read = await post('/api/knowledge-assets/import-artifact/read', {
+      contextGraphId,
+      assertionUri,
+      kind: 'markdown',
+      hash: `keccak256:${'d'.repeat(64)}`,
+    });
+
+    expect(read.status).toBe(200);
+    expect(read.body.status).toBe('hash_mismatch');
+  });
+
   it('accepts legacy ownerless attachment assertion URIs by resolving them to the requesting agent assertion', async () => {
     const entry = await fileStore.put(Buffer.from('# Legacy Imported\n'), 'text/markdown');
     const contextGraphId = 'cg-import-artifact-legacy-uri';

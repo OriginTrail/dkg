@@ -42,6 +42,7 @@ import { validatePreSignedAuthorAttestation } from "./memory.js";
 import { recordAssertionActivity } from "../activity-notification.js";
 import {
   handleKaImportArtifactResolve,
+  handleKaImportArtifactRead,
   handleKaImportArtifactReadMarkdown,
   handleKaSemanticEnrichmentWrite,
   handleKaImportFile,
@@ -456,6 +457,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   // create handler (`path === PREFIX`) is unaffected — these paths all carry
   // a trailing segment.
   if (method === "POST" && path === `${PREFIX}/import-artifact/resolve`) return handleKaImportArtifactResolve(ctx);
+  if (method === "POST" && path === `${PREFIX}/import-artifact/read`) return handleKaImportArtifactRead(ctx);
   if (method === "POST" && path === `${PREFIX}/import-artifact/read-markdown`) return handleKaImportArtifactReadMarkdown(ctx);
   if (method === "POST" && path === `${PREFIX}/semantic-enrichment/write`) return handleKaSemanticEnrichmentWrite(ctx);
 

@@ -336,6 +336,7 @@ import {
   type DurableSyncResult,
   type SharedMemorySyncResult,
   type DKGAgentConfig,
+  type ImportedArtifactByteStore,
   type ReplicationEvent,
 } from './dkg-agent-types.js';
 import {
@@ -389,6 +390,7 @@ import { LifecycleSyncMethods } from './dkg-agent-lifecycle.js';
 import { PublishMethods } from './dkg-agent-publish.js';
 import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
 import { ContextGraphMethods } from './dkg-agent-context-graph.js';
+import { ImportedArtifactMethods } from './imported-artifact.js';
 // Public surface re-exported so external consumers that import directly
 // from `./dkg-agent.js` keep working. The new file `dkg-agent-types.ts`
 // is the canonical home; `packages/agent/src/index.ts` re-exports from
@@ -420,6 +422,7 @@ export type {
   SharedMemorySyncDiagnostics,
   CatchupSyncDiagnostics,
   DKGAgentConfig,
+  ImportedArtifactByteStore,
 };
 
 /**
@@ -2233,5 +2236,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods {}
-applyMixins(DKGAgent, [ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods]);
+export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods {}
+applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods]);
