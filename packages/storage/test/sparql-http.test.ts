@@ -6,6 +6,8 @@ let server: Server;
 let queryUrl: string;
 let updateUrl: string;
 const insertedQuads: string[] = [];
+/** How many times the server received the `SELECT DISTINCT ?g` listGraphs scan. */
+let listGraphsHits = 0;
 
 function startTestServer(): Promise<void> {
   return new Promise((resolve) => {
@@ -35,6 +37,7 @@ function startTestServer(): Promise<void> {
             return;
           }
           if (decoded.includes('DISTINCT') && decoded.includes('?g')) {
+            listGraphsHits++;
             res.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
             res.end(JSON.stringify({
               head: { vars: ['g'] },
@@ -197,6 +200,69 @@ describe('SparqlHttpStore (test server)', () => {
 
     const result = await store.query('SELECT ?x WHERE { ?x ?y ?z } LIMIT 1');
     expect(result.type).toBe('bindings');
+  });
+
+  // R6-A: on a daemon-owned (managed) endpoint, listGraphs() is served from an
+  // in-memory cache invalidated on writes — eliminating the data-proportional
+  // `SELECT DISTINCT ?g` full scan that the 30s host-mode reconcile (and
+  // on-demand CG enumeration) would otherwise re-run every cycle on an idle,
+  // data-rich node. External (non-managed) endpoints must NOT cache, since an
+  // outside writer could add a graph we never see.
+  describe('listGraphs() cache (R6-A)', () => {
+    const managedStore = () =>
+      new SparqlHttpStore({ queryEndpoint: queryUrl, updateEndpoint: updateUrl, managedByDkg: true });
+    const g = (graph: string) =>
+      [{ subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"v"', graph }];
+
+    it('managed endpoint serves repeated listGraphs() from cache (one scan)', async () => {
+      listGraphsHits = 0;
+      const store = managedStore();
+      const a = await store.listGraphs();
+      const b = await store.listGraphs();
+      expect(a).toContain('http://ex.org/g1');
+      expect(b).toContain('http://ex.org/g1');
+      expect(listGraphsHits).toBe(1); // second call hit the cache, not the server
+    });
+
+    it.each(['insert', 'delete', 'deleteByPattern', 'dropGraph', 'deleteBySubjectPrefix'] as const)(
+      'invalidates the cache on %s so the next listGraphs() re-scans',
+      async (method) => {
+        listGraphsHits = 0;
+        const store = managedStore();
+        await store.listGraphs();
+        await store.listGraphs();
+        expect(listGraphsHits).toBe(1); // warm
+
+        switch (method) {
+          case 'insert': await store.insert(g('http://ex.org/g2')); break;
+          case 'delete': await store.delete(g('http://ex.org/g')); break;
+          case 'deleteByPattern': await store.deleteByPattern({ graph: 'http://ex.org/g' }); break;
+          case 'dropGraph': await store.dropGraph('http://ex.org/g'); break;
+          case 'deleteBySubjectPrefix': await store.deleteBySubjectPrefix('http://ex.org/g', 'http://ex.org/'); break;
+        }
+
+        await store.listGraphs();
+        expect(listGraphsHits).toBe(2); // write invalidated the cache
+      },
+    );
+
+    it('does NOT cache for a non-managed (external) endpoint', async () => {
+      listGraphsHits = 0;
+      const store = new SparqlHttpStore({ queryEndpoint: queryUrl, updateEndpoint: updateUrl });
+      await store.listGraphs();
+      await store.listGraphs();
+      expect(listGraphsHits).toBe(2); // every call queries the server
+    });
+
+    it('returns a defensive copy that cannot mutate the cached set', async () => {
+      listGraphsHits = 0;
+      const store = managedStore();
+      const first = await store.listGraphs();
+      first.push('http://ex.org/injected');
+      const second = await store.listGraphs();
+      expect(second).not.toContain('http://ex.org/injected');
+      expect(listGraphsHits).toBe(1); // second served from cache, copy was independent
+    });
   });
 });
 

@@ -14,7 +14,12 @@ import {
   type ServerResponse,
 } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
-import { GET_TOTAL_TRIPLES_SPARQL, parseRdfInt } from "./metrics-queries.js";
+import {
+  GET_TOTAL_TRIPLES_SPARQL,
+  parseRdfInt,
+  ttlMemo,
+  METRIC_COUNT_TTL_MS,
+} from "./metrics-queries.js";
 import {
   appendFile,
   chmod,
@@ -1844,34 +1849,39 @@ export async function runDaemonInner(
       }
     },
     getContextGraphCount: async () => (await agent.listContextGraphs()).length,
-    getTotalTriples: async () => {
+    // R6-B: the count getters below each issue a data-proportional full-scan
+    // COUNT. The collector ticks every 30 s (and /api/status may also call
+    // them), so wrap each in a TTL memo to bound the scan to once per window
+    // even with a UI client connected. Counts change slowly, so a flat value
+    // across a few snapshots is accurate for the dashboard time-series.
+    getTotalTriples: ttlMemo(async () => {
       const r = await agent.query(GET_TOTAL_TRIPLES_SPARQL);
       return parseRdfInt(r?.bindings?.[0]?.c);
-    },
-    getTotalKCs: async () => {
+    }, METRIC_COUNT_TTL_MS),
+    getTotalKCs: ttlMemo(async () => {
       const r = await agent.query(
         "SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc a <http://dkg.io/ontology/KnowledgeCollection> } }",
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
-    },
-    getTotalKAs: async () => {
+    }, METRIC_COUNT_TTL_MS),
+    getTotalKAs: ttlMemo(async () => {
       const r = await agent.query(
         "SELECT (COUNT(DISTINCT ?ka) AS ?c) WHERE { GRAPH ?g { ?ka a <http://dkg.io/ontology/KnowledgeAsset> } }",
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
-    },
-    getConfirmedKCs: async () => {
+    }, METRIC_COUNT_TTL_MS),
+    getConfirmedKCs: ttlMemo(async () => {
       const r = await agent.query(
         'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "confirmed" } }',
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
-    },
-    getTentativeKCs: async () => {
+    }, METRIC_COUNT_TTL_MS),
+    getTentativeKCs: ttlMemo(async () => {
       const r = await agent.query(
         'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "tentative" } }',
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
-    },
+    }, METRIC_COUNT_TTL_MS),
     getStoreBytes: async () => {
       // External SPARQL backends own no local file; `null` is the
       // correct signal here (returning 0 misleads operators into
@@ -1918,7 +1928,7 @@ export async function runDaemonInner(
     dkgDir(),
   );
   metricsCollector.start();
-  log("Metrics collector started (2min interval)");
+  log("Metrics collector started (30s interval)");
 
   // --- Telemetry: syslog log streaming (opt-in) ---
   const networkKey = network?.networkName?.toLowerCase().includes("testnet")

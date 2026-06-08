@@ -40,6 +40,20 @@ export interface SparqlHttpStoreOptions {
   timeout?: number;
   /** Optional Authorization header value (e.g. "Bearer <token>" or "Basic <base64>"). */
   auth?: string;
+  /**
+   * True when the daemon owns this endpoint end-to-end (a CLI-managed local
+   * `oxigraph-server`, signalled by `oxigraph-managed.ts`). When set, no
+   * external writer can mutate the store behind our back, so `listGraphs()`
+   * is served from an in-memory cache that is invalidated on every local
+   * write. This kills the data-proportional `SELECT DISTINCT ?g` full scan
+   * that the 30 s host-mode reconcile (and on-demand CG enumeration) would
+   * otherwise re-run every cycle on an idle, data-rich node (R6-A).
+   *
+   * Leave false/undefined for operator-provided endpoints: a shared/external
+   * SPARQL server can gain graphs we did not write, which the cache would
+   * miss — so caching is unsafe there and `listGraphs()` always queries.
+   */
+  managedByDkg?: boolean;
 }
 
 export class SparqlHttpStore implements TripleStore {
@@ -48,6 +62,18 @@ export class SparqlHttpStore implements TripleStore {
   private readonly timeout: number;
   private readonly headers: Record<string, string>;
 
+  /** R6-A: cache `listGraphs()` only for daemon-owned (managed) endpoints. */
+  private readonly cacheGraphList: boolean;
+  /** Cached graph-name list; null = not built / invalidated by a write. */
+  private graphListCache: string[] | null = null;
+  /**
+   * Bumped on every local write. `listGraphs()` captures it before its
+   * async query and only stores the result if it is unchanged on return —
+   * so a write that lands while a rebuild is in flight discards the
+   * possibly-stale result instead of caching it.
+   */
+  private graphListCacheGen = 0;
+
   constructor(options: SparqlHttpStoreOptions) {
     if (!options.queryEndpoint?.trim()) {
       throw new Error('sparql-http adapter requires options.queryEndpoint');
@@ -55,6 +81,7 @@ export class SparqlHttpStore implements TripleStore {
     this.queryEndpoint = options.queryEndpoint.replace(/\/$/, '');
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? 30_000;
+    this.cacheGraphList = options.managedByDkg === true;
     // Content-Type is set per-request in postQuery/postUpdate (direct POST:
     // application/sparql-query | application/sparql-update). Only shared
     // headers (e.g. Authorization) belong here.
@@ -62,6 +89,18 @@ export class SparqlHttpStore implements TripleStore {
     if (options.auth) {
       this.headers['Authorization'] = options.auth;
     }
+  }
+
+  /**
+   * Invalidate the cached graph list after a local write. A no-op when
+   * caching is disabled (external endpoints). Bumping the generation also
+   * causes any concurrently in-flight `listGraphs()` rebuild to drop its
+   * result rather than cache a pre-write snapshot.
+   */
+  private invalidateGraphListCache(): void {
+    if (!this.cacheGraphList) return;
+    this.graphListCache = null;
+    this.graphListCacheGen++;
   }
 
   private async postQuery(sparql: string, accept: string): Promise<Response> {
@@ -117,6 +156,7 @@ export class SparqlHttpStore implements TripleStore {
       const text = await res.text().catch(() => '');
       throw new Error(`SPARQL HTTP insert failed (${res.status}): ${text.slice(0, 300)}`);
     }
+    this.invalidateGraphListCache(); // a new graph may have appeared
   }
 
   async delete(quads: DKGQuad[]): Promise<void> {
@@ -135,6 +175,7 @@ export class SparqlHttpStore implements TripleStore {
       const text = await res.text().catch(() => '');
       throw new Error(`SPARQL HTTP delete failed (${res.status}): ${text.slice(0, 300)}`);
     }
+    this.invalidateGraphListCache(); // a graph may now be empty (gone from listGraphs)
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>): Promise<number> {
@@ -157,6 +198,7 @@ export class SparqlHttpStore implements TripleStore {
       const text = await res.text().catch(() => '');
       throw new Error(`SPARQL HTTP deleteByPattern failed (${res.status}): ${text.slice(0, 300)}`);
     }
+    this.invalidateGraphListCache(); // a graph may now be empty (gone from listGraphs)
     const after = await this.countQuads(graphUri);
     return Math.max(0, before - after);
   }
@@ -170,6 +212,7 @@ export class SparqlHttpStore implements TripleStore {
       const text = await res.text().catch(() => '');
       throw new Error(`SPARQL HTTP deleteBySubjectPrefix failed (${res.status}): ${text.slice(0, 300)}`);
     }
+    this.invalidateGraphListCache(); // the graph may now be empty (gone from listGraphs)
     const after = await this.countQuads(graphUri);
     return Math.max(0, before - after);
   }
@@ -236,12 +279,27 @@ export class SparqlHttpStore implements TripleStore {
       const text = await res.text().catch(() => '');
       throw new Error(`SPARQL HTTP dropGraph failed (${res.status}): ${text.slice(0, 300)}`);
     }
+    this.invalidateGraphListCache(); // the graph is gone from listGraphs
   }
 
   async listGraphs(): Promise<string[]> {
+    // R6-A: on a managed (daemon-owned) endpoint the graph set only changes
+    // when *we* write, so serve a warm cache and skip the full
+    // `SELECT DISTINCT ?g` quad-store scan — the dominant idle-node CPU cost
+    // on a data-rich node (re-run by the 30 s host-mode reconcile and every
+    // on-demand CG enumeration). Returns a copy so callers can't mutate it.
+    if (this.cacheGraphList && this.graphListCache !== null) {
+      return [...this.graphListCache];
+    }
+    const gen = this.graphListCacheGen;
     const r = await this.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
-    if (r.type !== 'bindings') return [];
-    return r.bindings.map((b) => b.g).filter(Boolean);
+    const graphs = r.type === 'bindings' ? r.bindings.map((b) => b.g).filter(Boolean) : [];
+    // Only cache if no write landed during the query (gen unchanged); else
+    // this snapshot may predate that write — discard it, the next call rebuilds.
+    if (this.cacheGraphList && gen === this.graphListCacheGen) {
+      this.graphListCache = graphs;
+    }
+    return [...graphs];
   }
 
   async countQuads(graphUri?: string): Promise<number> {

@@ -27,3 +27,43 @@ export function parseRdfInt(raw: string | undefined): number {
   const n = parseInt(raw, 10);
   return isNaN(n) ? 0 : n;
 }
+
+/**
+ * Default TTL for the metric COUNT getters (R6-B). The collector ticks every
+ * 30 s, but the full-scan COUNTs (total triples / KCs / KAs / status) are
+ * data-proportional and change slowly, so serving a cached value for a couple
+ * of minutes bounds their CPU cost on a data-rich node without meaningfully
+ * staling the dashboard time-series. (The CG count is relieved separately by
+ * the `listGraphs()` cache, R6-A.)
+ */
+export const METRIC_COUNT_TTL_MS = 120_000;
+
+/**
+ * Wrap an async getter so a successful result is reused for `ttlMs`. Concurrent
+ * calls on a cold/expired entry are coalesced onto one in-flight promise, so a
+ * UI status request and the metrics tick can't both trigger the underlying full
+ * scan at the same time. A rejection is not cached and clears the in-flight
+ * slot, so the next call retries. `now` is injectable for deterministic tests.
+ */
+export function ttlMemo<T>(
+  fn: () => Promise<T>,
+  ttlMs: number,
+  now: () => number = Date.now,
+): () => Promise<T> {
+  let cached: { value: T; at: number } | null = null;
+  let inflight: Promise<T> | null = null;
+  return () => {
+    if (cached && now() - cached.at < ttlMs) return Promise.resolve(cached.value);
+    if (inflight) return inflight;
+    inflight = (async () => {
+      try {
+        const value = await fn();
+        cached = { value, at: now() };
+        return value;
+      } finally {
+        inflight = null;
+      }
+    })();
+    return inflight;
+  };
+}
