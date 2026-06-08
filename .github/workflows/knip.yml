@@ -13,9 +13,9 @@ name: Knip (dead-code baseline)
 
 on:
   push:
-    branches: [main, v10-rc]
+    branches: [main, v10-rc, rc17-vm-wip]
   pull_request:
-    branches: [main, v10-rc]
+    branches: [main, v10-rc, rc17-vm-wip]
   workflow_dispatch:
 
 concurrency:

@@ -26,7 +26,7 @@ name: Supply chain scan
 
 on:
   pull_request:
-    branches: [main, v10-rc, release/rc.12]
+    branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
     paths:
       - '.github/workflows/**'
       - '.github/actions/**'
@@ -53,7 +53,7 @@ on:
       - '.cursorrules'
       - '**/.cursorrules'
   push:
-    branches: [main, v10-rc, release/rc.12]
+    branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
     paths:
       - '.github/workflows/**'
       - '.github/actions/**'

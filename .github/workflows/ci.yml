@@ -14,9 +14,9 @@ name: CI
 #     or trigger the workflow manually via `workflow_dispatch`.
 on:
   push:
-    branches: [main, v10-rc, release/rc.12]
+    branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
   pull_request:
-    branches: [main, v10-rc, release/rc.12]
+    branches: [main, v10-rc, release/rc.12, rc17-vm-wip]
   workflow_dispatch:
 
 concurrency:
