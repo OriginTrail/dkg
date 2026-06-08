@@ -94,6 +94,14 @@ export class SparqlHttpStore implements TripleStore {
    * possibly-stale result instead of caching it.
    */
   private graphListCacheGen = 0;
+  /**
+   * In-flight rebuild promise (managed endpoints). Concurrent callers on a
+   * cold/expired cache share this single scan instead of each issuing their
+   * own `SELECT DISTINCT ?g` — without it, a burst of overlapping enumerations
+   * (reconcile + metrics CG-count + status) at startup or each TTL boundary
+   * would still run duplicate full scans, the exact load this fix targets.
+   */
+  private graphListInflight: Promise<string[]> | null = null;
 
   constructor(options: SparqlHttpStoreOptions) {
     if (!options.queryEndpoint?.trim()) {
@@ -321,16 +329,36 @@ export class SparqlHttpStore implements TripleStore {
     ) {
       return [...this.graphListCache];
     }
+    // External (non-managed) endpoint: never cache (an outside writer could
+    // add a graph we'd miss), so just scan.
+    if (!this.cacheGraphList) {
+      return [...(await this.scanGraphs())];
+    }
+    // Managed, cold/expired cache: coalesce concurrent callers onto one
+    // in-flight scan so a startup or TTL-boundary burst doesn't fan out into
+    // duplicate full scans (the very load this fix removes).
+    if (!this.graphListInflight) {
+      this.graphListInflight = this.scanGraphs().finally(() => {
+        this.graphListInflight = null;
+      });
+    }
+    return [...(await this.graphListInflight)];
+  }
+
+  /**
+   * Run the `SELECT DISTINCT ?g` enumeration and (for managed endpoints) cache
+   * the result, unless a write landed during the scan — the generation guard
+   * discards a snapshot that may predate that write so the next call rebuilds.
+   */
+  private async scanGraphs(): Promise<string[]> {
     const gen = this.graphListCacheGen;
     const r = await this.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
     const graphs = r.type === 'bindings' ? r.bindings.map((b) => b.g).filter(Boolean) : [];
-    // Only cache if no write landed during the query (gen unchanged); else
-    // this snapshot may predate that write — discard it, the next call rebuilds.
     if (this.cacheGraphList && gen === this.graphListCacheGen) {
       this.graphListCache = graphs;
       this.graphListCacheAt = this.now();
     }
-    return [...graphs];
+    return graphs;
   }
 
   async countQuads(graphUri?: string): Promise<number> {

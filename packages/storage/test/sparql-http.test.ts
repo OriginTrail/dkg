@@ -273,6 +273,23 @@ describe('SparqlHttpStore (test server)', () => {
       expect(listGraphsHits).toBe(2); // expired: re-validated against the store
     });
 
+    it('coalesces concurrent cold-cache callers onto a single scan', async () => {
+      // Without in-flight coalescing, simultaneous callers (reconcile + metrics
+      // CG-count + status) on a cold/expired cache each issue their own
+      // `SELECT DISTINCT ?g` — duplicate full scans, the load this fix removes.
+      listGraphsHits = 0;
+      const store = managedStore();
+      const [a, b, c] = await Promise.all([
+        store.listGraphs(),
+        store.listGraphs(),
+        store.listGraphs(),
+      ]);
+      expect(a).toContain('http://ex.org/g1');
+      expect(b).toContain('http://ex.org/g1');
+      expect(c).toContain('http://ex.org/g1');
+      expect(listGraphsHits).toBe(1); // all three shared one in-flight scan
+    });
+
     it('returns a defensive copy that cannot mutate the cached set', async () => {
       listGraphsHits = 0;
       const store = managedStore();
