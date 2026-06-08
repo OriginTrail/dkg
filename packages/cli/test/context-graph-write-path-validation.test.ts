@@ -41,6 +41,9 @@ describe('context graph write-path validation', () => {
     const create = vi.fn(async (contextGraphId: string, name: string) =>
       `did:dkg:context-graph:${contextGraphId}/assertion/${CALLER}/${name}`);
     const write = vi.fn(async () => undefined);
+    // wm/write gates create() on a missing-only existence check; null = the
+    // 'draft' KA these tests write to doesn't exist yet, so create() fires.
+    const history = vi.fn(async () => null);
     const promote = vi.fn(async () => ({ promotedCount: 1 }));
     const promoteAsync = vi.fn(async () => ({ jobId: 'job-1' }));
     const discard = vi.fn(async () => undefined);
@@ -86,6 +89,7 @@ describe('context graph write-path validation', () => {
       assertion: {
         create,
         write,
+        history,
         promote,
         promoteAsync,
         discard,
@@ -120,6 +124,7 @@ describe('context graph write-path validation', () => {
       calls: {
         create,
         write,
+        history,
         promote,
         promoteAsync,
         discard,

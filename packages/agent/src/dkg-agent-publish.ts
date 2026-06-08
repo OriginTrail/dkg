@@ -2782,7 +2782,17 @@ export class PublishMethods extends DKGAgentBase {
         // that doesn't exist yet.
         if (result.status === 'confirmed' && result.onChainResult) {
           const ASSERTION_GRAPH_PRED = 'http://dkg.io/ontology/assertionGraph';
-          const vmKaId = result.onChainResult.kaId ?? result.onChainResult.batchId ?? packedKaId;
+          // Derive the VM graph URI from the SAME kaId the data write used.
+          // `result.kaId` is the canonical packed id (author<<96 | number)
+          // returned by the publishFromSharedMemory/update call above — i.e. the
+          // exact id that named the …/_verified_memory/{author}/{number} graph,
+          // so the pointer and the data always agree. `packedKaId` (the reserved,
+          // finalize-stamped id threaded down as `reservedKaId`) is an equal
+          // fallback. We deliberately do NOT use `onChainResult.batchId`: it only
+          // equals the packed kaId on some adapters (when tokenId !== kaId it is
+          // a separate batch identifier), which would point the pointer at the
+          // wrong graph.
+          const vmKaId = result.kaId ?? packedKaId;
           if (vmKaId !== undefined && vmKaId !== null) {
             const vmKaIdBig = BigInt(vmKaId);
             const vmAuthor = '0x' + (vmKaIdBig >> 96n).toString(16).padStart(40, '0');

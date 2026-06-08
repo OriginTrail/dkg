@@ -223,17 +223,19 @@ describe('daemon memory_graph_changed route emissions', () => {
 
   it('emits WM refresh events after assertion writes', async () => {
     const emitMemoryGraphChanged = vi.fn();
-    // RC.17: wm/write now idempotently get-or-creates the KA before the first
-    // append (so a bare write lands in the proper per-KA layout, not the
-    // legacy name-keyed graph), so the mock must supply create() too.
+    // RC.17: wm/write creates a MISSING KA before the first append (so a bare
+    // write lands in the proper per-KA layout, not the legacy name-keyed graph),
+    // gated on a missing-only existence check — history() returns null here
+    // because this is a brand-new draft, so create() must fire before write().
     const create = vi.fn().mockResolvedValue('urn:dkg:assertion:project-a:agent:draft');
     const write = vi.fn().mockResolvedValue(undefined);
+    const history = vi.fn().mockResolvedValue(null);
     const ctx = createContext('/api/knowledge-assets/draft/wm/write', {
       contextGraphId: 'project-a',
       subGraphName: 'notes',
       quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
     }, {
-      agent: { assertion: { create, write }, resolveAgentByToken: () => undefined } as unknown as RequestContext['agent'],
+      agent: { assertion: { create, write, history }, resolveAgentByToken: () => undefined } as unknown as RequestContext['agent'],
       emitMemoryGraphChanged,
     });
 

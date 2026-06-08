@@ -343,13 +343,13 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(agent.assertion.write).toHaveBeenCalledWith('cg', 'f', quads, { subGraphName: undefined });
   });
 
-  it('POST .../:name/wm/write get-or-creates the KA before the first append', async () => {
+  it('POST .../:name/wm/write creates a MISSING KA before the first append', async () => {
     // RC.17 lifecycle bug: a bare wm/write to a name that was never created
     // used to skip create() and fall through to the legacy name-keyed graph,
     // yielding a KA that is permanently 404 in the descriptor API (no _meta
-    // lifecycle record, no per-KA layout). The route now calls the idempotent
-    // create() first, BEFORE the write, so the KA always has the proper layout.
-    const agent = makeAssertionAgent();
+    // lifecycle record, no per-KA layout). The route now calls create() first,
+    // BEFORE the write, so a brand-new KA always has the proper layout.
+    const agent = makeAssertionAgent({ assertion: { history: vi.fn(async () => null) } });
     const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
     const ctx = ctxFor('POST', '/api/knowledge-assets/f/wm/write', { contextGraphId: 'cg', quads }, agent);
     await handleKnowledgeAssetsRoutes(ctx);
@@ -360,6 +360,24 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     const createOrder = (agent.assertion.create as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
     const writeOrder = (agent.assertion.write as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
     expect(createOrder).toBeLessThan(writeOrder);
+  });
+
+  it('POST .../:name/wm/write does NOT re-create an EXISTING KA (append-only)', async () => {
+    // Codex RC.17 follow-up: assertion.create() is NOT a no-op get-or-create —
+    // assertionCreate() clears + rebuilds the lifecycle record (resetting
+    // state/memoryLayer, dropping the prov event history and seal/finalize
+    // metadata, preserving only the KA identity). So a write to a KA that
+    // already exists must skip create() entirely and stay append-only, or every
+    // append would corrupt an in-progress (or finalized) draft. The default
+    // history() mock returns a descriptor (the KA exists).
+    const agent = makeAssertionAgent();
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/wm/write', { contextGraphId: 'cg', quads }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(200);
+    expect(agent.assertion.history).toHaveBeenCalledWith('cg', 'f', { subGraphName: undefined });
+    expect(agent.assertion.create).not.toHaveBeenCalled();
+    expect(agent.assertion.write).toHaveBeenCalledWith('cg', 'f', quads, { subGraphName: undefined });
   });
 
   it('POST .../:name/wm/finalize seals the draft (full seal payload)', async () => {

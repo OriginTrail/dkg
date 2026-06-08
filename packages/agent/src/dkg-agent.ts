@@ -1983,32 +1983,66 @@ export class DKGAgent extends DKGAgentBase {
         const DKG_NS = 'http://dkg.io/ontology/';
         // number = kaId & ((1<<96)-1) — the per-author low-96-bit half.
         const number = kaId & ((1n << 96n) - 1n);
+        const expectedAuthor = '0x' + (kaId >> 96n).toString(16).padStart(40, '0');
         const strip = (v?: string) => v?.replace(/^"|"$/g, '').replace(/"\^\^<.*>$/, '') ?? undefined;
         // FILTER on the integer value so a typed literal ("N"^^xsd:integer)
         // matches regardless of the store's lexical canonicalisation.
+        const PROV_NS = 'http://www.w3.org/ns/prov#';
         const res = await agent.store.query(
-          `SELECT ?lifecycle ?name ?assertionGraph WHERE {
+          `SELECT ?lifecycle ?name ?author WHERE {
             GRAPH <${metaGraph}> {
               ?lifecycle <${DKG_NS}kaId> ?n .
               FILTER(?n = ${number})
               OPTIONAL { ?lifecycle <${DKG_NS}assertionName> ?name }
-              OPTIONAL { ?lifecycle <${DKG_NS}assertionGraph> ?assertionGraph }
+              OPTIONAL { ?lifecycle <${PROV_NS}wasAttributedTo> ?author }
             }
-          } LIMIT 1`,
+          }`,
         );
         if (res.type !== 'bindings' || res.bindings.length === 0) return null;
-        const b = res.bindings[0];
-        const resolvedName = strip(b['name']);
-        if (!resolvedName) return null;
-        // Derive the agent address from the assertion-graph URI, which has the
-        // clean shape did:dkg:context-graph:<cg>[/<sub>]/assertion/<agent>/<name>
-        // (robust to cg/name containing ':' unlike parsing the lifecycle URN).
-        const assertionGraph = b['assertionGraph'];
+
+        let resolvedName: string | undefined;
         let resolvedAgent: string | undefined;
-        if (typeof assertionGraph === 'string') {
-          const m = assertionGraph.match(/\/assertion\/([^/]+)\/[^/]+$/);
-          if (m) resolvedAgent = m[1];
+        for (const b of res.bindings) {
+          const candidateName = strip(b['name']);
+          if (!candidateName) continue;
+          // Recover the author in the EXACT case stored on the lifecycle URN so the
+          // history() rebuild (which re-derives urn:dkg:assertion:{cg}[:{sub}]:{author}:{name})
+          // matches. We do NOT parse dkg:assertionGraph for this: for any KA that
+          // has a kaId (the only kind resolveByKaId matches) the pointer is the
+          // layer-keyed form (…/_working_memory|_shared_…|_verified_memory/{author}/{number}),
+          // never the legacy /assertion/{agent}/{name} shape, and the VM re-stamp
+          // lowercases the address (derived from the packed kaId bits) — so a
+          // pointer parse would hand history() a case-mismatched author that fails
+          // to resolve published assets authored by anyone but the default agent.
+          // Slice the author out of the matched lifecycle URN instead, bounding the
+          // cut with the already-known cg / sub / name (robust to ':' in cg/name).
+          let candidateAgent: string | undefined;
+          const lifecycleUrn = b['lifecycle'];
+          if (typeof lifecycleUrn === 'string') {
+            const sub = opts?.subGraphName;
+            const prefix = `urn:dkg:assertion:${contextGraphId}:${sub ? `${sub}:` : ''}`;
+            const suffix = `:${candidateName}`;
+            if (lifecycleUrn.startsWith(prefix) && lifecycleUrn.endsWith(suffix)) {
+              const mid = lifecycleUrn.slice(prefix.length, lifecycleUrn.length - suffix.length);
+              if (mid && !mid.includes(':')) candidateAgent = mid;
+            }
+          }
+          // Fallback: the prov:wasAttributedTo author DID (did:dkg:agent:<author>)
+          // for any record whose URN bounds we couldn't pin down.
+          if (!candidateAgent) {
+            const author = b['author'];
+            if (typeof author === 'string') {
+              const am = author.match(/^did:dkg:agent:(.+)$/);
+              if (am) candidateAgent = am[1];
+            }
+          }
+          if (candidateAgent?.toLowerCase() === expectedAuthor.toLowerCase()) {
+            resolvedName = candidateName;
+            resolvedAgent = candidateAgent;
+            break;
+          }
         }
+        if (!resolvedName || !resolvedAgent) return null;
         return this.history(contextGraphId, resolvedName, {
           subGraphName: opts?.subGraphName,
           ...(resolvedAgent ? { agentAddress: resolvedAgent } : {}),

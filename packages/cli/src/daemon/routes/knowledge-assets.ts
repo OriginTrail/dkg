@@ -714,11 +714,20 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // A bare write to a name that was never created used to fall through to
         // the legacy `/assertion/{addr}/{name}` graph and produce a KA that is
         // permanently 404 in the descriptor API (no `_meta` lifecycle record,
-        // no per-KA `_working_memory` layout). create() is an idempotent
-        // get-or-create — the SAME call the atomic POST path makes — so
-        // ensuring the KA exists before the first append yields the proper
-        // per-KA layout and is a no-op on every subsequent append.
-        await agent.assertion.create(contextGraphId, name, { subGraphName });
+        // no per-KA `_working_memory` layout). Ensure the KA exists first so the
+        // proper per-KA layout is in place before the first append.
+        //
+        // create() is NOT a no-op get-or-create: assertionCreate() clears and
+        // rebuilds the lifecycle record (resetting state/memoryLayer, dropping
+        // the prov event history and any seal/finalize metadata, preserving only
+        // the KA identity + layer pointers). Calling it on every write would
+        // corrupt an in-progress draft and — if the following write() throws —
+        // leave that wipe behind. So gate it on a missing-only existence check:
+        // brand-new names get created; existing drafts stay append-only.
+        const existing = await agent.assertion.history(contextGraphId, name, { subGraphName });
+        if (!existing) {
+          await agent.assertion.create(contextGraphId, name, { subGraphName });
+        }
         await agent.assertion.write(contextGraphId, name, parsed.quads, { subGraphName });
         emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm"], subGraphName, operation: "assertion_written", source: "api", counts: { triples: parsed.quads.length } });
         return jsonResponse(res, 200, { written: parsed.quads.length });
