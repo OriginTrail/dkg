@@ -50,5 +50,8 @@ describe('useVerifiedMemoryAnchors — POST body scoping', () => {
     const body = JSON.parse(String((calls[0][1] as any)?.body ?? '{}'));
     expect(body.sparql).toContain('_shared_memory_meta');
     expect(body).not.toHaveProperty('contextGraphId');
+    // Codex review (PR #1055) — exact "<cgUri>/" prefix so a sibling CG
+    // (cg-10 / cg-1-foo) can't leak its anchors in once contextGraphId is gone.
+    expect(body.sparql).toContain('STRSTARTS(STR(?g), "did:dkg:context-graph:cg-1/")');
   });
 });

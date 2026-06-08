@@ -25,6 +25,18 @@ describe('useSwmAttributions — SPARQL query shape', () => {
     // the new DESC and the old `ORDER BY ?publishedAt` both present.
     expect(q).not.toMatch(/ORDER BY \?publishedAt\s+LIMIT/);
   });
+
+  // Codex review (PR #1055) — with contextGraphId removed from the request
+  // (B2), scoping rests entirely on this STRSTARTS prefix, so it MUST end in
+  // "/" to be exact. A bare "did:dkg:context-graph:cg-1" prefix would also
+  // match a sibling CG like cg-10 / cg-1-foo and merge its _shared_memory_meta
+  // attribution rows into the legend.
+  it('scopes via an exact "<cgUri>/" STRSTARTS prefix so sibling CGs do not leak in', () => {
+    const q = buildAttributionsQuery('cg-1');
+    expect(q).toContain('STRSTARTS(STR(?g), "did:dkg:context-graph:cg-1/")');
+    // The slash-less prefix would over-match cg-10 / cg-1-foo.
+    expect(q).not.toMatch(/STRSTARTS\(STR\(\?g\), "did:dkg:context-graph:cg-1"\)/);
+  });
 });
 
 // Codex Code7 (PR #656) — the hook returns its previous-graph result

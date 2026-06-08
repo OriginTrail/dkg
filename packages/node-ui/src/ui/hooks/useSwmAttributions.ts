@@ -180,7 +180,11 @@ function subGraphFromMetaGraphUri(gUri: string, cgId: string): string | undefine
 }
 
 export function buildAttributionsQuery(cgId: string): string {
-  const cgUri = `did:dkg:context-graph:${cgId}`;
+  // Trailing slash makes this an EXACT CG prefix: every partition graph is
+  // `did:dkg:context-graph:<cg>/[<sg>/]_shared_memory_meta`, so "<cgUri>/"
+  // matches all of this CG's partitions while excluding sibling CGs whose id
+  // merely shares the prefix (cg-1 must not capture cg-10 / cg-1-foo).
+  const cgPrefix = `did:dkg:context-graph:${cgId}/`;
   return `PREFIX dkg: <http://dkg.io/ontology/>
 PREFIX prov: <http://www.w3.org/ns/prov#>
 SELECT ?op ?root ?agent ?publishedAt ?g WHERE {
@@ -191,7 +195,7 @@ SELECT ?op ?root ?agent ?publishedAt ?g WHERE {
         prov:wasAttributedTo ?agent .
   }
   FILTER(
-    STRSTARTS(STR(?g), "${cgUri}") &&
+    STRSTARTS(STR(?g), "${cgPrefix}") &&
     CONTAINS(STR(?g), "_shared_memory_meta")
   )
 } ORDER BY DESC(?publishedAt) LIMIT 5000`;
@@ -252,7 +256,7 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
             signal: controller.signal,
             body: JSON.stringify({
               // Do NOT send contextGraphId here. The query already scopes to the
-              // CG via its STRSTARTS(?g, "<cgUri>") filter and must read EVERY
+              // CG via its exact STRSTARTS(?g, "<cgUri>/") filter and must read EVERY
               // sub-graph's <cg>/<sg>/_shared_memory_meta partition. Passing
               // contextGraphId makes the engine constrain GRAPH ?g to CG-direct
               // graphs only, dropping per-sub-graph attribution so the legend
