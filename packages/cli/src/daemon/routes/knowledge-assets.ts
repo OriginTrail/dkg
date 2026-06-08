@@ -626,6 +626,13 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   async function resolveDescriptor(cg: string, subGraphName?: string, agentAddress?: string): Promise<Record<string, unknown> | null> {
     const ident = classifyKaIdentifier(name);
     if (ident.kind === "kaId") {
+      // Compact `0x<agent>:<number>` is both a B3 read alias and a historically
+      // valid literal assertion name. Preserve literal-name semantics first:
+      // if such a lifecycle exists, return it; otherwise fall back to B3.
+      if (AGENT_NUMBER_RE.test(name)) {
+        const literalHist = await agent.assertion.history(cg, name, { agentAddress, subGraphName });
+        if (literalHist) return literalHist as unknown as Record<string, unknown>;
+      }
       const hist = await (agent as any).assertion.resolveByKaId?.(cg, ident.kaId, { subGraphName });
       return (hist as unknown as Record<string, unknown>) ?? null;
     }

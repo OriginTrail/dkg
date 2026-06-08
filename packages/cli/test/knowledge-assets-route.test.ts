@@ -1132,8 +1132,8 @@ describe('OT-RFC-43 A2/B3 — per-layer status + kaId addressing', () => {
     reservedUal: `did:dkg:evm:31337/${AGENT_ADDR}/5`,
   };
 
-  function makePointerAgent() {
-    const history = vi.fn(async () => divergedDescriptor);
+  function makePointerAgent(opts: { historyResult?: any } = {}) {
+    const history = vi.fn(async () => ('historyResult' in opts ? opts.historyResult : divergedDescriptor));
     const resolveByKaId = vi.fn(async () => divergedDescriptor);
     return {
       ...contextGraphMocks(),
@@ -1189,8 +1189,19 @@ describe('OT-RFC-43 A2/B3 — per-layer status + kaId addressing', () => {
     expect(b.status).toBe('vm-confirmed');
   });
 
-  it('B3: resolves a KA by compact (agent, number) on GET — same descriptor as by name', async () => {
+  it('B3: compact (agent, number) on GET prefers an existing literal name', async () => {
     const agent = makePointerAgent();
+    const ident = `${AGENT_ADDR}:5`;
+    const ctx = ctxFor('GET', `/api/knowledge-assets/${encodeURIComponent(ident)}?contextGraphId=cg`, undefined, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(200);
+    expect(body(ctx)).toMatchObject({ name: 'notes', status: 'vm-confirmed' });
+    expect(agent.assertion.history).toHaveBeenCalledWith('cg', ident, { agentAddress: undefined, subGraphName: undefined });
+    expect(agent.assertion.resolveByKaId).not.toHaveBeenCalled();
+  });
+
+  it('B3: compact (agent, number) falls back to kaId resolution when no literal name exists', async () => {
+    const agent = makePointerAgent({ historyResult: null });
     const ident = `${AGENT_ADDR}:5`;
     const ctx = ctxFor('GET', `/api/knowledge-assets/${encodeURIComponent(ident)}?contextGraphId=cg`, undefined, agent);
     await handleKnowledgeAssetsRoutes(ctx);
@@ -1199,7 +1210,7 @@ describe('OT-RFC-43 A2/B3 — per-layer status + kaId addressing', () => {
     expect(agent.assertion.resolveByKaId).toHaveBeenCalledOnce();
     const packed = (BigInt(AGENT_ADDR) << 96n) | 5n;
     expect(agent.assertion.resolveByKaId.mock.calls[0][1]).toBe(packed);
-    expect(agent.assertion.history).not.toHaveBeenCalled();
+    expect(agent.assertion.history).toHaveBeenCalledOnce();
   });
 
   it('B3: resolves a KA by did:dkg UAL — same descriptor', async () => {
