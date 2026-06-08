@@ -223,13 +223,17 @@ describe('daemon memory_graph_changed route emissions', () => {
 
   it('emits WM refresh events after assertion writes', async () => {
     const emitMemoryGraphChanged = vi.fn();
+    // RC.17: wm/write now idempotently get-or-creates the KA before the first
+    // append (so a bare write lands in the proper per-KA layout, not the
+    // legacy name-keyed graph), so the mock must supply create() too.
+    const create = vi.fn().mockResolvedValue('urn:dkg:assertion:project-a:agent:draft');
     const write = vi.fn().mockResolvedValue(undefined);
     const ctx = createContext('/api/knowledge-assets/draft/wm/write', {
       contextGraphId: 'project-a',
       subGraphName: 'notes',
       quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
     }, {
-      agent: { assertion: { write }, resolveAgentByToken: () => undefined } as unknown as RequestContext['agent'],
+      agent: { assertion: { create, write }, resolveAgentByToken: () => undefined } as unknown as RequestContext['agent'],
       emitMemoryGraphChanged,
     });
 
@@ -237,6 +241,8 @@ describe('daemon memory_graph_changed route emissions', () => {
 
     expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(200);
     expect(responseBody(ctx)).toMatchObject({ written: 1 });
+    // create() must run before write() so the first append uses the per-KA layout.
+    expect(create.mock.invocationCallOrder[0]).toBeLessThan(write.mock.invocationCallOrder[0]);
     expect(emitMemoryGraphChanged).toHaveBeenCalledWith({
       contextGraphId: 'project-a',
       layers: ['wm'],

@@ -21,7 +21,7 @@ import { ActivityFeed } from '../components/ActivityFeed.js';
 import { SubGraphBar } from '../components/SubGraphBar.js';
 import { CONTEXT_GRAPH_PRIMER_TAB } from '../lib/contextGraphPrimer.js';
 import { useTabsStore } from '../stores/tabs.js';
-import { shouldFetchSwmAttribution, type LayerView, type LayerContentTab, type SubGraphTab } from './project/helpers.js';
+import { shouldFetchSwmAttribution, useCanonicalTriples, type LayerView, type LayerContentTab, type SubGraphTab } from './project/helpers.js';
 import {
   ProjectHeaderStrip,
   LayerSwitcher,
@@ -364,6 +364,11 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
   // DashboardView caller, which already opts in for the same
   // failed-vs-empty-distinct reason.
   const rawMemory = useMemoryEntities(contextGraphId, { signalErrors: true });
+  // Canonical (de-duped, Root-inclusive) triple total — the SAME number the
+  // Subgraph Explorer panel subtitle shows. Fed to the SubGraphBar "All" chip
+  // tooltip so it stops reporting "0 triples" on Root-only graphs (the daemon
+  // per-named-subgraph sum excludes Root). See SubGraphBar.allTriplesTotal.
+  const canonicalTripleTotal = useCanonicalTriples(rawMemory).total;
   // SWM attribution drives the SWM graph's agent-tint legend (its
   // sole remaining consumer). PR #694 review — the Overview no
   // longer reads this stream (lifecycle source replaced it), so the
@@ -850,6 +855,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
                synchronously by `handleSelectSubGraph` on entry
                + on user toggles via the mirror callback. */
             enabledScope={currentDetailScope ?? undefined}
+            allTriplesTotal={canonicalTripleTotal}
           />
           <SubGraphDetailView
             slug={activeSubGraph}
@@ -929,6 +935,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             selected={null}
             entities={chipBarEntities}
             onSelect={handleSelectSubGraph}
+            allTriplesTotal={canonicalTripleTotal}
           />
           <SubGraphOverviewGrid
             contextGraphId={contextGraphId}

@@ -822,6 +822,66 @@ describe('SubGraphBar — layer-scoped chip counts (P4)', () => {
     expect(chipCount('beta')).toBe(1);
   });
 
+  // RC.17 bug: the "All" chip tooltip's triple count summed only the
+  // daemon's per-NAMED-subgraph tripleCount, which excludes the Root bucket —
+  // so on a Root-only graph it read "0 triples" while the Subgraph Explorer
+  // panel (canonical client-side count) showed the real number. The bar now
+  // accepts an `allTriplesTotal` prop (the panel's canonical total) and uses
+  // it for the All-chip tooltip in layer-agnostic mode.
+  it('All chip tooltip uses `allTriplesTotal` over the daemon named-subgraph sum (layer-agnostic)', async () => {
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: null,
+        onSelect: vi.fn(),
+        // Daemon mock sums to 18 triples (alpha 9 + beta 9); the canonical
+        // total the panel shows is 42. The tooltip must report 42, not 18.
+        allTriplesTotal: 42,
+      }));
+    });
+    await flushNet();
+    const allChip = Array.from(container.querySelectorAll('button.v10-subgraph-chip'))
+      .find(b => b.textContent?.includes('All')) as HTMLButtonElement;
+    const title = allChip.getAttribute('title') ?? '';
+    expect(title).toContain('· 42 triples');
+    expect(title).not.toContain('18 triples');
+  });
+
+  it('All chip tooltip falls back to the daemon sum when `allTriplesTotal` is absent', async () => {
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: null,
+        onSelect: vi.fn(),
+      }));
+    });
+    await flushNet();
+    const allChip = Array.from(container.querySelectorAll('button.v10-subgraph-chip'))
+      .find(b => b.textContent?.includes('All')) as HTMLButtonElement;
+    expect(allChip.getAttribute('title') ?? '').toContain('· 18 triples');
+  });
+
+  it('layer mode never prints a triple count even when `allTriplesTotal` is passed', async () => {
+    // In a WM/SWM/VM-scoped mount the tooltip narrows to entities-in-layer and
+    // deliberately omits triples; the override must not leak a count in.
+    await act(async () => {
+      root.render(React.createElement(SubGraphBar, {
+        contextGraphId: 'cg',
+        profile,
+        selected: null,
+        onSelect: vi.fn(),
+        layer: 'wm',
+        allTriplesTotal: 42,
+      }));
+    });
+    await flushNet();
+    const allChip = Array.from(container.querySelectorAll('button.v10-subgraph-chip'))
+      .find(b => b.textContent?.includes('All')) as HTMLButtonElement;
+    expect(allChip.getAttribute('title') ?? '').not.toContain('triples');
+  });
+
   it('`enabledScope` wins over `layer` when both are set (Bug O precedence)', async () => {
     // Defensive — if a caller passes both (shouldn't, but),
     // `enabledScope` is the multi-layer carrier and takes

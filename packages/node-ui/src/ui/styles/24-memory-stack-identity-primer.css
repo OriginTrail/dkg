@@ -369,6 +369,30 @@
   padding-bottom: 22px;
   border-bottom: 1px solid var(--border-subtle);
 }
+.v10-primer-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 16px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-2, transparent);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.v10-primer-back:hover {
+  background: var(--surface-3, rgba(127, 127, 127, 0.12));
+  color: var(--text-primary);
+  border-color: var(--border-strong, var(--border-subtle));
+}
+.v10-primer-back:focus-visible {
+  outline: 2px solid var(--accent, #4c8bf5);
+  outline-offset: 2px;
+}
 .v10-primer-kicker {
   margin: 0 0 8px;
   color: var(--text-tertiary);

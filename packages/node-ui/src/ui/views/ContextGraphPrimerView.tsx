@@ -1,4 +1,6 @@
 import React from 'react';
+import { useTabsStore } from '../stores/tabs.js';
+import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../lib/contextGraphPrimer.js';
 
 const primerSections = [
   {
@@ -24,9 +26,37 @@ const primerSections = [
 ];
 
 export function ContextGraphPrimerView() {
+  // The primer takes over the center pane as a closable tab, but the "×" in the
+  // tab strip is easy to miss and the pane offered no in-content way out — users
+  // had to re-click the originating CG tab to escape. Give it an explicit Back
+  // affordance plus the conventional Escape shortcut; both just close the tab,
+  // which the store auto-resolves to the previously active tab (the CG the user
+  // opened the primer from).
+  const closeTab = useTabsStore(s => s.closeTab);
+  const dismiss = React.useCallback(() => closeTab(CONTEXT_GRAPH_PRIMER_TAB_ID), [closeTab]);
+
+  React.useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        dismiss();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [dismiss]);
+
   return (
     <div className="v10-primer-view">
       <header className="v10-primer-header">
+        <button
+          type="button"
+          className="v10-primer-back"
+          onClick={dismiss}
+          aria-label="Close primer and return to the previous tab"
+        >
+          ← Back
+        </button>
         <p className="v10-primer-kicker">Context Graph Primer</p>
         <h1>What is a Context Graph?</h1>
         <p>

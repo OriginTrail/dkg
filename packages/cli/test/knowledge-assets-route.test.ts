@@ -343,6 +343,25 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(agent.assertion.write).toHaveBeenCalledWith('cg', 'f', quads, { subGraphName: undefined });
   });
 
+  it('POST .../:name/wm/write get-or-creates the KA before the first append', async () => {
+    // RC.17 lifecycle bug: a bare wm/write to a name that was never created
+    // used to skip create() and fall through to the legacy name-keyed graph,
+    // yielding a KA that is permanently 404 in the descriptor API (no _meta
+    // lifecycle record, no per-KA layout). The route now calls the idempotent
+    // create() first, BEFORE the write, so the KA always has the proper layout.
+    const agent = makeAssertionAgent();
+    const quads = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: '' }];
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/wm/write', { contextGraphId: 'cg', quads }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(200);
+    expect(agent.assertion.create).toHaveBeenCalledWith('cg', 'f', { subGraphName: undefined });
+    // Ordering matters: create() must run before write() or the first append
+    // still lands in the wrong graph.
+    const createOrder = (agent.assertion.create as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    const writeOrder = (agent.assertion.write as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    expect(createOrder).toBeLessThan(writeOrder);
+  });
+
   it('POST .../:name/wm/finalize seals the draft (full seal payload)', async () => {
     // PR #971: finalize returns the whole seal payload (assertionUri /
     // authorAddress / chainId / kav10Address) so clients can inspect the attestation.
@@ -410,6 +429,42 @@ describe('GitHub-shaped /api/knowledge-assets routes (OT-RFC-43 §10.5)', () => 
     expect(status(ctx)).toBe(200);
     expect(body(ctx)).toMatchObject({ status: 'confirmed', ual: 'did:dkg:hardhat:31337/0xabc/7', txHash: '0xtx' });
     expect(agent.publishFromFinalizedAssertion).toHaveBeenCalledOnce();
+  });
+
+  it('POST .../:name/vm/publish hex-encodes a Uint8Array merkleRoot (parity with wm/finalize)', async () => {
+    // RC.17 bug: vm/publish echoed the raw publisher merkleRoot, which is a
+    // Uint8Array byte-map, so the JSON came back as {"0":171,"1":205,...}
+    // instead of the "0xabcd" hex string wm/finalize returns. The route now
+    // hex-encodes it when it isn't already a string, so the two surfaces agree.
+    const agent = makeAssertionAgent({
+      publishFromFinalizedAssertion: vi.fn(async () => ({
+        kaId: 7n,
+        status: 'confirmed',
+        ual: 'did:dkg:hardhat:31337/0xabc/7',
+        onChainResult: { txHash: '0xtx' },
+        merkleRoot: new Uint8Array([0xab, 0xcd]),
+      })),
+    });
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(200);
+    expect(body(ctx).merkleRoot).toBe('0xabcd');
+  });
+
+  it('POST .../:name/vm/publish leaves an already-hex merkleRoot untouched', async () => {
+    const agent = makeAssertionAgent({
+      publishFromFinalizedAssertion: vi.fn(async () => ({
+        kaId: 7n,
+        status: 'confirmed',
+        ual: 'did:dkg:hardhat:31337/0xabc/7',
+        onChainResult: { txHash: '0xtx' },
+        merkleRoot: '0xdeadbeef',
+      })),
+    });
+    const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg' }, agent);
+    await handleKnowledgeAssetsRoutes(ctx);
+    expect(status(ctx)).toBe(200);
+    expect(body(ctx).merkleRoot).toBe('0xdeadbeef');
   });
 
   // PR #972: vm/publish HTTP status reflects the actual publish outcome.
@@ -1168,6 +1223,31 @@ describe('OT-RFC-43 A2/B3 — per-layer status + kaId addressing', () => {
       const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg' }, agent);
       await handleKnowledgeAssetsRoutes(ctx);
       expect(status(ctx)).toBe(500);
+    });
+
+    // RC.17 bug: a vm/publish on a KA that hasn't been finalized — or hasn't
+    // been shared to SWM — is a caller precondition error, but the route used
+    // to return a blanket 500. Both messages are thrown by the engine BEFORE
+    // any chain interaction, so they down-classify to 409 without violating
+    // the #988 "don't down-classify on-chain errors" contract above.
+    it('maps a not-finalized vm/publish to 409 (caller precondition)', async () => {
+      const agent = makeAssertionAgent({
+        publishFromFinalizedAssertion: vi.fn(async () => { throw new Error('Assertion <urn:x> is not finalized'); }),
+      });
+      const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg' }, agent);
+      await handleKnowledgeAssetsRoutes(ctx);
+      expect(status(ctx)).toBe(409);
+      expect(body(ctx)).toMatchObject({ code: 'VM_PUBLISH_PRECONDITION' });
+    });
+
+    it('maps a publish-without-share vm/publish to 409 (caller precondition)', async () => {
+      const agent = makeAssertionAgent({
+        publishFromFinalizedAssertion: vi.fn(async () => { throw new Error('No quads in shared memory for context graph cg matching selection'); }),
+      });
+      const ctx = ctxFor('POST', '/api/knowledge-assets/f/vm/publish', { contextGraphId: 'cg' }, agent);
+      await handleKnowledgeAssetsRoutes(ctx);
+      expect(status(ctx)).toBe(409);
+      expect(body(ctx)).toMatchObject({ code: 'VM_PUBLISH_PRECONDITION' });
     });
   });
 });

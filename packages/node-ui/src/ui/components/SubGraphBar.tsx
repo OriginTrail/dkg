@@ -68,6 +68,17 @@ export interface SubGraphBarProps {
    * a fresh Set on chip click via `originatingScope` — see below.
    */
   enabledScope?: ReadonlySet<TrustLevel>;
+  /**
+   * Accurate cross-layer triple total for the "All" chip tooltip. The local
+   * `totalTriples` sums only the daemon's per-NAMED-subgraph `tripleCount`,
+   * which (a) excludes the Root bucket and (b) is the raw, un-deduped COUNT —
+   * so on a CG whose data lives entirely in Root it reads "0 triples" while the
+   * Subgraph Explorer panel (canonical client-side count) shows the real
+   * number. When the consumer can supply the canonical total it is used for the
+   * All-chip tooltip so the two surfaces agree. Only consulted in layer-
+   * agnostic mode (where the tooltip shows a triple count at all).
+   */
+  allTriplesTotal?: number;
 }
 
 const LAYER_TRUST_LEVEL = {
@@ -122,7 +133,7 @@ function computeBadges(entities: MemoryEntity[] | undefined): Map<string, SubGra
   return out;
 }
 
-export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profile, selected, onSelect, entities, layer, enabledScope }) => {
+export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profile, selected, onSelect, entities, layer, enabledScope, allTriplesTotal }) => {
   const [subGraphs, setSubGraphs] = React.useState<SubGraphInfo[]>([]);
   const [loading, setLoading] = React.useState(true);
   const badges = React.useMemo(() => computeBadges(entities), [entities]);
@@ -295,7 +306,12 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
   // semantic split is gone. The dynamic suffix still narrows the
   // count display (`scopeSuffix` for narrowed mode, conditional
   // triples for layer-agnostic), but the prose stays one shape.
-  const allTooltipCopy = `Total distinct entities — includes those in named subgraphs (some may belong to more than one), plus Root entities not in any subgraph · ${totalEntities} entities${scopeSuffix}${layerLabel ? '' : ` · ${totalTriples} triples`}`;
+  // Prefer the consumer-supplied canonical total (counts Root + de-dupes)
+  // over the daemon named-subgraph sum, which is 0 on a Root-only CG and
+  // disagrees with the Subgraph Explorer panel. Only matters in layer-
+  // agnostic mode — that's the only branch that prints a triple count.
+  const allChipTriples = allTriplesTotal ?? totalTriples;
+  const allTooltipCopy = `Total distinct entities — includes those in named subgraphs (some may belong to more than one), plus Root entities not in any subgraph · ${totalEntities} entities${scopeSuffix}${layerLabel ? '' : ` · ${allChipTriples} triples`}`;
   const allAriaCopy = `All — total distinct entities. Includes those in named subgraphs (some may belong to more than one), plus Root entities not in any subgraph. ${totalEntities} entities${scopeSuffix}.`;
 
   return (

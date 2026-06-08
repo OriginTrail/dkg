@@ -711,6 +711,14 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     if (layer === "wm") {
       if (verb === "write") {
         if (!Array.isArray(parsed.quads)) return jsonResponse(res, 400, { error: 'Missing "quads"' });
+        // A bare write to a name that was never created used to fall through to
+        // the legacy `/assertion/{addr}/{name}` graph and produce a KA that is
+        // permanently 404 in the descriptor API (no `_meta` lifecycle record,
+        // no per-KA `_working_memory` layout). create() is an idempotent
+        // get-or-create — the SAME call the atomic POST path makes — so
+        // ensuring the KA exists before the first append yields the proper
+        // per-KA layout and is a no-op on every subsequent append.
+        await agent.assertion.create(contextGraphId, name, { subGraphName });
         await agent.assertion.write(contextGraphId, name, parsed.quads, { subGraphName });
         emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm"], subGraphName, operation: "assertion_written", source: "api", counts: { triples: parsed.quads.length } });
         return jsonResponse(res, 200, { written: parsed.quads.length });
@@ -836,14 +844,27 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           txHash: pub?.onChainResult?.txHash,
           ...(pub?.assertionUri !== undefined ? { assertionUri: pub.assertionUri } : {}),
           ...(pub?.seal?.authorAddress ?? pub?.authorAddress ? { authorAddress: pub?.seal?.authorAddress ?? pub?.authorAddress } : {}),
-          ...(pub?.merkleRoot !== undefined ? { merkleRoot: pub.merkleRoot } : {}),
+          ...(pub?.merkleRoot !== undefined
+            ? { merkleRoot: typeof pub.merkleRoot === "string" ? pub.merkleRoot : hex(pub.merkleRoot) }
+            : {}),
           ...(Array.isArray(pub?.kas) ? { kas: pub.kas } : {}),
           ...(pub?.onChainResult?.blockNumber !== undefined ? { blockNumber: pub.onChainResult.blockNumber } : {}),
           ...(typeof pub?.contextGraphError === "string" ? { contextGraphError: pub.contextGraphError } : {}),
           ...(reason ? { error: reason } : {}),
         });
       } catch (e: any) {
-        return jsonResponse(res, 500, { error: e?.message ?? String(e) });
+        const msg = e?.message ?? String(e);
+        // A vm/publish on a KA that hasn't been finalized, or hasn't been
+        // shared to SWM, is a caller precondition error (4xx), not a
+        // server/on-chain failure (5xx). Both messages below are thrown by the
+        // engine BEFORE any chain interaction, so down-classifying them to 409
+        // is safe. Everything else (on-chain reverts, storage, "Invalid"/
+        // "Unsafe" publisher text) keeps the generic 500 — the #988 parity
+        // contract that publish must NOT down-classify on-chain errors.
+        if (/is not finalized/.test(msg) || /No quads in shared memory/.test(msg)) {
+          return jsonResponse(res, 409, { code: "VM_PUBLISH_PRECONDITION", error: msg });
+        }
+        return jsonResponse(res, 500, { error: msg });
       }
     }
   } catch (e: any) {

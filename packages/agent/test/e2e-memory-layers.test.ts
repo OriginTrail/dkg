@@ -16,6 +16,12 @@ import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, rever
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
+import {
+  assertionLifecycleUri,
+  contextGraphMetaUri,
+  contextGraphLayerUri,
+  MemoryLayer,
+} from '@origintrail-official/dkg-core';
 
 const agents: DKGAgent[] = [];
 
@@ -195,7 +201,43 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
     expect(pub.status).toBe('confirmed');
     expect(pub.ual).toBeDefined();
     expect(pub.seal).toBeDefined();
-  }, 20_000);
+
+    // RC.17 Bug #1 regression (SUBSTRATE-2): a confirmed publish must re-point
+    // dkg:assertionGraph in _meta at the per-KA verified-memory graph it just
+    // wrote (…/_verified_memory/{author}/{number}). promote() leaves the pointer
+    // on the SWM bucket, which the post-confirm SWM cleanup then EMPTIES — so
+    // without the re-stamp the _meta index follows a stale pointer to an empty
+    // graph and descriptor reads return no triples. The publish derives the VM
+    // graph from the minted kaId, so we re-derive it the same way and assert the
+    // pointer AND the data agree.
+    const ASSERTION_GRAPH_PRED = 'http://dkg.io/ontology/assertionGraph';
+    const author = agent.defaultAgentAddress ?? agent.peerId;
+    const lifecycleUri = assertionLifecycleUri(CG_ID, author, 'auto-final');
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    const kaId = BigInt(pub.kaId!);
+    const expectedVmGraph = contextGraphLayerUri(
+      CG_ID,
+      MemoryLayer.VerifiedMemory,
+      '0x' + (kaId >> 96n).toString(16).padStart(40, '0'),
+      kaId & ((1n << 96n) - 1n),
+    );
+    const ptrRes = await (agent as any).store.query(
+      `SELECT ?o WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${ASSERTION_GRAPH_PRED}> ?o } } LIMIT 1`,
+    );
+    expect(ptrRes.type).toBe('bindings');
+    expect(ptrRes.bindings.length).toBe(1);
+    const assertionGraphPtr = String(ptrRes.bindings[0]['o'])
+      .replace(/^"/, '')
+      .replace(/"(\^\^<[^>]+>)?$/, '');
+    expect(assertionGraphPtr).toBe(expectedVmGraph);
+    // …and the pointed-at graph actually holds the published triple (no stale
+    // pointer at an emptied SWM bucket).
+    const vmData = await (agent as any).store.query(
+      `SELECT ?o WHERE { GRAPH <${expectedVmGraph}> { <${ENTITY_BASE}:auto> <http://schema.org/name> ?o } }`,
+    );
+    expect(vmData.type).toBe('bindings');
+    expect(vmData.bindings.length).toBeGreaterThan(0);
+  }, 30_000);
 
   it('selective promote does NOT auto-finalize (avoids the seal-all vs promote-subset merkleRoot mismatch)', async () => {
     // Regression for the #1004 review: auto-finalize seals the WHOLE assertion
