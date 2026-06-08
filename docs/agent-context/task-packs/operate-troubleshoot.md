@@ -30,7 +30,7 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9200/api/agent/identity
 dkg wallet
 ```
 
-Funds are needed for Verified Memory, not for WM/SWM/query-only flows.
+Funds are needed for Verifiable Memory, not for WM/SWM/query-only flows.
 
 ## Connectivity
 

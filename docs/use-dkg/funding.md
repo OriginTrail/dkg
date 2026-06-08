@@ -13,12 +13,12 @@ Verifiable Memory publishing, updates, endorsement, verification, and other chai
 
 Setup flows try to fund generated testnet wallets when a faucet is configured:
 
-* `dkg init`
+* `dkg init` — auto-funds when a faucet is reachable; has no `--no-fund` flag
 * `dkg mcp setup`
 * `dkg hermes setup`
 * `dkg openclaw setup`
 
-Skip funding with:
+Skip funding on the `setup` commands with:
 
 ```bash
 --no-fund

@@ -6,7 +6,7 @@ icon: memo-circle-info
 
 ### Preamble
 
-The OriginTrail Decentralized Knowledge Graph Version 10 (hereinafter referred to as "**OriginTrail V10**" or "**V10**") is a neutral, peer-to-peer, multi-chain network designed to facilitate decentralized knowledge publishing, verification, and retrieval by human and autonomous software agents. OriginTrail V10 consists of open-source Core Nodes and Edge Nodes implementation, a three-layer Memory Model (Working Memory, Shared Working Memory, Verified Memory), and on-chain primitives (Knowledge Assets, Knowledge Collections, Context Graphs, Verified Graphs, Publisher Conviction Accounts, and Staker Conviction Positions) deployed across multiple EVM-compatible blockchains.
+The OriginTrail Decentralized Knowledge Graph Version 10 (hereinafter referred to as "**OriginTrail V10**" or "**V10**") is a neutral, peer-to-peer, multi-chain network designed to facilitate decentralized knowledge publishing, verification, and retrieval by human and autonomous software agents. OriginTrail V10 consists of open-source Core Nodes and Edge Nodes implementation, a three-layer Memory Model (Working Memory, Shared Working Memory, Verifiable Memory), and on-chain primitives (Knowledge Assets, Knowledge Collections, Context Graphs, Verified Graphs, Publisher Conviction Accounts, and Staker Conviction Positions) deployed across multiple EVM-compatible blockchains.
 
 OriginTrail V10 is developed by **OriginTrail d.o.o.**, a company organized and established under the laws of Slovenia (hereinafter referred to as "**OriginTrail**").
 
@@ -40,7 +40,7 @@ For the purpose of these Terms and Conditions, the following capitalised terms s
 
 **MAINNET** means the production OriginTrail V10 network deployed across the Supported Blockchains.
 
-**MEMORY** **MODEL** means the three-layer data organisation of the OriginTrail V10 network: (i) Working Memory - local, private, free; (ii) Shared Working Memory - gossip-replicated among selected peers; (iii) Verified Memory - blockchain-anchored, requires on-chain publishing, with a trust gradient from self-attested to consensus-verified.
+**MEMORY** **MODEL** means the three-layer data organisation of the OriginTrail V10 network: (i) Working Memory - local, private, free; (ii) Shared Working Memory - gossip-replicated among selected peers; (iii) Verifiable Memory - blockchain-anchored, requires on-chain publishing, with a trust gradient from self-attested to consensus-verified.
 
 **NODE** or "**OriginTrail V10 NODE**" means a client program that participates in the OriginTrail V10 network by hosting Agents, replicating data, serving queries, and - where applicable - submitting blockchain transactions. "Node" includes both Core Nodes (infrastructure that stakes TRAC and supports the network infrastructure) and Edge Nodes (client-side nodes for end-user and application integration).
 
@@ -210,9 +210,9 @@ For the purpose of these Terms and Conditions, the following capitalised terms s
 
 (c) Is, to the extent it contains personal data, processed by You in compliance with all applicable data protection laws (including, where applicable, the EU General Data Protection Regulation); and
 
-(d) May be replicated, stored, and served by other Nodes on the network in accordance with protocol rules, and - in the case of Verified Memory - may be anchored permanently on one or more Supported Chains in a manner that You accept is technically impossible to reverse.
+(d) May be replicated, stored, and served by other Nodes on the network in accordance with protocol rules, and - in the case of Verifiable Memory - may be anchored permanently on one or more Supported Chains in a manner that You accept is technically impossible to reverse.
 
-9.2 **Once knowledge is published to Verified Memory, its merkle root is anchored on blockchain and the underlying triples are replicated across Nodes within the relevant Context Graph. UPDATE operations replace the root, but You acknowledge that historical roots, and copies of the underlying data that may have been retained by third-party Nodes, cannot be guaranteed to be erased. You must take this into account when deciding whether to publish any given data.**
+9.2 **Once knowledge is published to Verifiable Memory, its merkle root is anchored on blockchain and the underlying triples are replicated across Nodes within the relevant Context Graph. UPDATE operations replace the root, but You acknowledge that historical roots, and copies of the underlying data that may have been retained by third-party Nodes, cannot be guaranteed to be erased. You must take this into account when deciding whether to publish any given data.**
 
 ***
 

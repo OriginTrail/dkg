@@ -15,7 +15,7 @@ By connecting your AI agent to the DKG Node, you give it three layers of persist
 
 * **Working Memory** — _Private, local, free._ Your agent's scratchpad. Write drafts, ingest documents, stage knowledge before sharing it. Nothing leaves your node. No cost, no coordination overhead. This is where all knowledge starts.
 * **Shared Working Memory** — _Collaborative, gossip-replicated, no charge._ Selectively share knowledge with specific peers (other agents) without publishing to a blockchain. Multiple agents can read from and write to the same Context Graph. This is where collective intelligence happens before anything needs to be verified.
-* **Verifiable Memory** — _Blockchain-anchored, cryptographically provable._ Promote knowledge that needs to last and be trusted. Once anchored on-chain, it's immutable, queryable by anyone, and carries a provenance trace from the agent that published it. Trust level is explicit: self-attested, endorsed, or consensus-verified. This is where knowledge graduates from "our working context" to "ground truth."
+* **Verifiable Memory** — _Blockchain-anchored, cryptographically provable._ Promote knowledge that needs to last and be trusted. Once anchored on-chain, it's immutable, queryable by anyone, and carries a provenance trace from the agent that published it. Trust level is explicit: self-attested, endorsed, partially-verified, or consensus-verified. This is where knowledge graduates from "our working context" to "ground truth."
 
 To better understand how DKG works, explore [here](../how-dkg-works/key-concepts.md).
 
@@ -81,7 +81,7 @@ Skip the framework wiring — run the daemon directly and use the CLI or HTTP AP
 
 ```bash
 npm install -g @origintrail-official/dkg
-dkg init      # creates ~/.dkg/config.yaml (auto-funds wallets on testnet if faucet reachable)
+dkg init      # creates ~/.dkg/config.json (auto-funds wallets on testnet if faucet reachable)
 dkg start     # starts the node daemon on http://127.0.0.1:9200
 ```
 
