@@ -1,0 +1,21 @@
+# A hand-picked FIBO slice — NOT the full ontology.
+#
+# FIBO (the EDM Council's Financial Industry Business Ontology) is thousands of
+# classes across dozens of modules; loading it whole would bury the demo. This
+# file declares only what the reasoning needs: that each party is a FIBO
+# LegalEntity. The control vocabulary the rules PRODUCE
+# (demo:controls / demo:indirectlyControls) corresponds to FIBO's
+# BE/OwnershipAndControl/Control module and is kept in the demo namespace so the
+# inferred triples are easy to read on stage.
+#
+# Real FIBO module referenced:
+#   BE/LegalEntities/LegalPersons  →  LegalEntity
+
+@prefix rdfs:          <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix fibo-be-le-lp: <https://spec.edmcouncil.org/fibo/ontology/BE/LegalEntities/LegalPersons/> .
+@prefix ex:            <https://example.org/entity/> .
+
+ex:AcmeCapital a fibo-be-le-lp:LegalEntity ; rdfs:label "Acme Capital Partners" .
+ex:BridgeHldgs a fibo-be-le-lp:LegalEntity ; rdfs:label "Bridge Holdings plc" .
+ex:SmallCo     a fibo-be-le-lp:LegalEntity ; rdfs:label "SmallCo Manufacturing Ltd" .
+ex:Meridian    a fibo-be-le-lp:LegalEntity ; rdfs:label "Meridian Trading SA" .

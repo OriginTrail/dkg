@@ -4,10 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test kafka-streams/test/*.mjs"
+    "test": "node --test kafka-streams/test/*.mjs",
+    "test:fibo": "node --test fibo-reasoner/test/*.mjs",
+    "demo:fibo": "node fibo-reasoner/run.mjs"
   },
   "dependencies": {
     "@multiformats/multiaddr": "^13.0.3",
+    "eyereasoner": "^21.1.10",
+    "n3": "^1.22.3",
     "@origintrail-official/dkg-agent": "workspace:*",
     "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",

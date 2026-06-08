@@ -1,0 +1,22 @@
+# FIBO-style corporate-control rules, in Notation3, run by eye-js (the EYE
+# reasoner compiled to WebAssembly). These are the entire "reasoner" — two
+# rules, no code. Change a threshold here and the whole derivation shifts.
+#
+# Mirrors FIBO BE/OwnershipAndControl/Control: a majority voting interest
+# constitutes control, and control passes down a chain of holdings.
+
+@prefix demo: <https://example.org/fibo-demo#> .
+@prefix math: <http://www.w3.org/2000/10/swap/math#> .
+
+# R1 — majority voting interest ⇒ control
+#      "If A holds more than 50% of B's voting shares, A controls B."
+{ ?a demo:ownsVotingShares ( ?b ?pct ) . ?pct math:greaterThan 50 . }
+  =>
+{ ?a demo:controls ?b } .
+
+# R2 — control is transitive ⇒ indirect (beneficial) control
+#      "If A controls B and B controls C, then A indirectly controls C —
+#       even when A's *direct* stake in C is small or zero."
+{ ?a demo:controls ?b . ?b demo:controls ?c . }
+  =>
+{ ?a demo:indirectlyControls ?c } .
