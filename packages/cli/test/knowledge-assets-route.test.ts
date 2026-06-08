@@ -1189,15 +1189,17 @@ describe('OT-RFC-43 A2/B3 — per-layer status + kaId addressing', () => {
     expect(b.status).toBe('vm-confirmed');
   });
 
-  it('B3: compact 0x<agent>:<number> remains a plain literal name', async () => {
+  it('B3: resolves a KA by compact (agent, number) on GET — same descriptor as by name', async () => {
     const agent = makePointerAgent();
     const ident = `${AGENT_ADDR}:5`;
     const ctx = ctxFor('GET', `/api/knowledge-assets/${encodeURIComponent(ident)}?contextGraphId=cg`, undefined, agent);
     await handleKnowledgeAssetsRoutes(ctx);
     expect(status(ctx)).toBe(200);
     expect(body(ctx)).toMatchObject({ name: 'notes', status: 'vm-confirmed' });
-    expect(agent.assertion.history).toHaveBeenCalledWith('cg', ident, { agentAddress: undefined, subGraphName: undefined });
-    expect(agent.assertion.resolveByKaId).not.toHaveBeenCalled();
+    expect(agent.assertion.resolveByKaId).toHaveBeenCalledOnce();
+    const packed = (BigInt(AGENT_ADDR) << 96n) | 5n;
+    expect(agent.assertion.resolveByKaId.mock.calls[0][1]).toBe(packed);
+    expect(agent.assertion.history).not.toHaveBeenCalled();
   });
 
   it('B3: resolves a KA by did:dkg UAL — same descriptor', async () => {

@@ -64,7 +64,7 @@ const PREFIX = "/api/knowledge-assets";
 
 // Decode + validate a `:name` path segment (parity with the legacy routes,
 // which `safeDecodeURIComponent` then `validateAssertionName` every name). A
-// B3 did:dkg UAL is exempt — it's validated by `classifyKaIdentifier`.
+// B3 read identifier is exempt — it's validated by `classifyKaIdentifier`.
 // Returns the name, or null after writing a 400/error.
 function decodeAndValidateName(seg: string, res: RequestContext["res"]): string | null {
   if (classifyKaIdentifier(seg).kind === "kaId") return seg;
@@ -152,13 +152,19 @@ function hex(bytes: Uint8Array): string {
 /**
  * OT-RFC-43 B3 — classify the leading path segment as a KA identifier:
  *   (a) `did:dkg:.../<id>`        → the trailing `/<id>` is the packed kaId
- *   (b) anything else             → a plain assertion NAME (current behavior)
- * The compact `0x<agent>:<number>` form is intentionally NOT classified here:
- * `validateAssertionName()` has historically allowed that literal shape, so
- * treating it as a KA id would reinterpret/make unmutable existing drafts.
- * Returns `{ kind: "kaId", kaId }` for (a) or `{ kind: "name" }` for (b).
+ *   (b) `0x<agent>:<number>`      → (agent, number), but only on read paths
+ *   (c) anything else             → a plain assertion NAME (current behavior)
+ * The compact form stays enabled for GET/read compatibility. Create/mutation
+ * call sites pass `includeCompact: false` so historically-valid literal names
+ * like `0xabc...:7` remain creatable and mutable.
  */
-function classifyKaIdentifier(seg: string): { kind: "kaId"; kaId: bigint } | { kind: "name" } {
+const AGENT_NUMBER_RE = /^0x[0-9a-fA-F]{40}:[0-9]+$/;
+
+function classifyKaIdentifier(
+  seg: string,
+  opts: { includeCompact?: boolean } = {},
+): { kind: "kaId"; kaId: bigint } | { kind: "name" } {
+  const includeCompact = opts.includeCompact ?? true;
   if (seg.startsWith("did:dkg:")) {
     // The kaId is the last `/`-delimited segment of the UAL.
     const idPart = seg.slice(seg.lastIndexOf("/") + 1);
@@ -171,11 +177,20 @@ function classifyKaIdentifier(seg: string): { kind: "kaId"; kaId: bigint } | { k
     }
     return { kind: "name" };
   }
+  if (includeCompact && AGENT_NUMBER_RE.test(seg)) {
+    const [agentHex, numberStr] = seg.split(":");
+    try {
+      const kaId = (BigInt(agentHex) << 96n) | BigInt(numberStr);
+      return { kind: "kaId", kaId };
+    } catch {
+      return { kind: "name" };
+    }
+  }
   return { kind: "name" };
 }
 
 function rejectKaIdMutationIdentifier(seg: string, res: RequestContext["res"]): boolean {
-  if (classifyKaIdentifier(seg).kind !== "kaId") return false;
+  if (classifyKaIdentifier(seg, { includeCompact: false }).kind !== "kaId") return false;
   jsonResponse(res, 400, {
     code: "KA_ID_MUTATION_UNSUPPORTED",
     error:
@@ -186,7 +201,7 @@ function rejectKaIdMutationIdentifier(seg: string, res: RequestContext["res"]): 
 }
 
 function rejectReservedKaIdentifierName(name: string, res: RequestContext["res"]): boolean {
-  if (classifyKaIdentifier(name).kind !== "kaId") return false;
+  if (classifyKaIdentifier(name, { includeCompact: false }).kind !== "kaId") return false;
   jsonResponse(res, 400, {
     code: "KA_IDENTIFIER_RESERVED",
     error:
