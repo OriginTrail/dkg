@@ -234,8 +234,13 @@ export function useVerifiedMemoryAnchors(
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders() },
           body: JSON.stringify({
+            // Do NOT send contextGraphId here. buildAnchorsQuery already scopes to
+            // the CG via STRSTARTS(?g, "<cgUri>") and enumerates EVERY sub-graph's
+            // <cg>/<sg>/_shared_memory_meta partition. Passing contextGraphId makes
+            // the engine constrain GRAPH ?g to CG-direct graphs only, dropping
+            // per-sub-graph anchors/attribution (same bug class as B2). See
+            // dkg-query-engine.ts graph-variable allow-list.
             sparql: buildAnchorsQuery(contextGraphId),
-            contextGraphId,
           }),
         });
         if (!res.ok) throw new Error(`SPARQL query failed: ${res.status}`);

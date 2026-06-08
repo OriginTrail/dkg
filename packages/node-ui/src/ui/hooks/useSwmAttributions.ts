@@ -251,8 +251,14 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
             headers: { 'Content-Type': 'application/json', ...authHeaders() },
             signal: controller.signal,
             body: JSON.stringify({
+              // Do NOT send contextGraphId here. The query already scopes to the
+              // CG via its STRSTARTS(?g, "<cgUri>") filter and must read EVERY
+              // sub-graph's <cg>/<sg>/_shared_memory_meta partition. Passing
+              // contextGraphId makes the engine constrain GRAPH ?g to CG-direct
+              // graphs only, dropping per-sub-graph attribution so the legend
+              // under-counts agents (B2). See dkg-query-engine.ts graph-variable
+              // allow-list.
               sparql: buildAttributionsQuery(contextGraphId),
-              contextGraphId,
             }),
           });
           if (!res.ok) throw new Error(`SPARQL query failed: ${res.status}`);

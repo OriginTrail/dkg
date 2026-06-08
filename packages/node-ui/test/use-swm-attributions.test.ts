@@ -49,7 +49,11 @@ describe('useSwmAttributions — stale-on-switch protection', () => {
     originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn(async (_url: any, init?: any) => {
       const body = init?.body ? JSON.parse(String(init.body)) : {};
-      const cgId: string = body.contextGraphId;
+      // B2: the POST body no longer carries contextGraphId (it scoped the
+      // engine to CG-direct graphs and dropped per-sub-graph attribution).
+      // Recover the cgId from the SPARQL's STRSTARTS filter to route the
+      // deferred promise, matching how the daemon now scopes the query.
+      const cgId: string = String(body.sparql).match(/context-graph:([^"/]+)/)?.[1] ?? '';
       const p = new Promise<any[]>((resolve) => {
         pending.set(cgId, { resolve });
       });
@@ -123,5 +127,51 @@ describe('useSwmAttributions — stale-on-switch protection', () => {
     expect(latest!.resultContextGraphId).toBe('cg-B');
     expect(latest!.events).toHaveLength(1);
     expect(latest!.events[0].rootUri).toBe('urn:e:cg-B');
+  });
+});
+
+// B2 (DKG-NODE-ISSUES-FOR-RC17) — the attribution fetch MUST NOT send
+// contextGraphId. The SPARQL scopes itself to the CG via STRSTARTS(?g, …)
+// and must read every sub-graph's <cg>/<sg>/_shared_memory_meta partition;
+// sending contextGraphId makes the daemon constrain GRAPH ?g to CG-direct
+// graphs only, so the legend under-counted agents (showed 1 of 5 agents live).
+describe('useSwmAttributions — B2 POST body scoping', () => {
+  let root: Root;
+  let container: HTMLDivElement;
+  let originalFetch: typeof globalThis.fetch | undefined;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: { bindings: [] } }),
+    } as any)) as any;
+  });
+
+  afterEach(async () => {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    if (originalFetch) globalThis.fetch = originalFetch;
+  });
+
+  it('omits contextGraphId from the /api/query POST body so all sub-graph partitions are reached', async () => {
+    function Probe({ id }: { id: string }) {
+      useSwmAttributions(id);
+      return null;
+    }
+    await act(async () => {
+      root.render(React.createElement(Probe, { id: 'cg-1' }));
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    const calls = vi.mocked(fetch).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    const body = JSON.parse(String((calls[0][1] as any)?.body ?? '{}'));
+    expect(body.sparql).toContain('_shared_memory_meta');
+    expect(body).not.toHaveProperty('contextGraphId');
   });
 });
