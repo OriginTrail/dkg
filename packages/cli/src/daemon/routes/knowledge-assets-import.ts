@@ -117,15 +117,13 @@ async function resolveAssertionArtifact(
     throw new ImportArtifactRouteError(400, 'Invalid hash');
   }
 
-  const artifact = await resolveImportedArtifact(
+  const artifact = await resolveImportedArtifactForRead(
     ctx,
     {
       ...raw,
-      ...(kind === 'source' || kind === 'original'
-        ? (requestedHash ? { fileHash: requestedHash } : {})
-        : {}),
+      fileHash: undefined,
     },
-    undefined,
+    'Import artifact bytes can only be read from imported assertions owned by the requesting agent',
     { allowSharedMemoryFallback: true },
   );
 
@@ -145,21 +143,39 @@ async function resolveAssertionArtifact(
   };
 }
 
+function importedArtifactReadOwnerGuard(
+  ctx: RequestContext,
+  message: string,
+) {
+  return {
+    requestAgentAddress: ctx.requestAgentAddress,
+    message,
+    relaxOnPublicOpenCg: true,
+  };
+}
+
+function resolveImportedArtifactForRead(
+  ctx: RequestContext,
+  raw: Record<string, unknown>,
+  message: string,
+  opts?: { allowSharedMemoryFallback?: boolean },
+): Promise<ImportedArtifactResolution> {
+  return resolveImportedArtifact(ctx, raw, importedArtifactReadOwnerGuard(ctx, message), opts);
+}
+
 // POST /api/knowledge-assets/import-artifact/resolve
 // Resolve a completed deterministic import artifact from graph metadata.
 export async function handleKaImportArtifactResolve(ctx: RequestContext): Promise<void> {
-  const { req, res, requestAgentAddress } = ctx;
+  const { req, res } = ctx;
   const body = await readBody(req, SMALL_BODY_BYTES);
   const parsed = safeParseJson(body, res);
   if (!parsed) return;
   try {
-    const artifact = await resolveImportedArtifact(ctx, parsed as Record<string, unknown>, {
-      requestAgentAddress,
-      message: 'Import artifact metadata can only be read from imported assertions owned by the requesting agent',
-      // Issue #872 — this is a read; opt into the public + open
-      // policy relaxation. The write route below does NOT set this.
-      relaxOnPublicOpenCg: true,
-    });
+    const artifact = await resolveImportedArtifactForRead(
+      ctx,
+      parsed as Record<string, unknown>,
+      'Import artifact metadata can only be read from imported assertions owned by the requesting agent',
+    );
     return jsonResponse(res, 200, { artifact });
   } catch (err) {
     if (handleImportArtifactRouteError(res, err)) return;
@@ -266,7 +282,7 @@ export async function handleKaImportArtifactRead(ctx: RequestContext): Promise<v
         source: { peerId: sourcePeerId, agentAddress: resolved.assertionAgentAddress },
       });
     }
-    if (page.unavailable || !page.bytesB64) {
+    if (page.unavailable || page.bytesB64 == null) {
       return jsonResponse(res, 200, {
         status: 'unavailable',
         contextGraphId: resolved.contextGraphId,
@@ -315,17 +331,16 @@ export async function handleKaImportArtifactRead(ctx: RequestContext): Promise<v
 // POST /api/knowledge-assets/import-artifact/read-markdown
 // Read only the Markdown blob tied to a completed imported assertion.
 export async function handleKaImportArtifactReadMarkdown(ctx: RequestContext): Promise<void> {
-  const { req, res, requestAgentAddress, fileStore } = ctx;
+  const { req, res, fileStore } = ctx;
   const body = await readBody(req, SMALL_BODY_BYTES);
   const parsed = safeParseJson(body, res);
   if (!parsed) return;
   try {
-    const artifact = await resolveImportedArtifact(ctx, parsed as Record<string, unknown>, {
-      requestAgentAddress,
-      message: 'Import artifact Markdown can only be read from imported assertions owned by the requesting agent',
-      // Issue #872 — read path; opt into the public + open relaxation.
-      relaxOnPublicOpenCg: true,
-    });
+    const artifact = await resolveImportedArtifactForRead(
+      ctx,
+      parsed as Record<string, unknown>,
+      'Import artifact Markdown can only be read from imported assertions owned by the requesting agent',
+    );
     const maxBytes = normalizeMarkdownReadLimit((parsed as Record<string, unknown>).maxBytes);
     if (!artifact.markdownHash) {
       return jsonResponse(res, 409, {

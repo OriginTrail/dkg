@@ -633,6 +633,9 @@ export class DKGAgent extends DKGAgentBase {
       workspaceOwnedEntities, writeLocks, publicSnapshotStore,
     );
     agentRef = agent;
+    if (config.importedArtifactByteStore) {
+      agent.registerImportedArtifactByteStore(config.importedArtifactByteStore);
+    }
     return agent;
   }
 

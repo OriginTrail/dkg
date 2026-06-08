@@ -372,6 +372,26 @@ describe('import artifact daemon routes', () => {
       truncated: true,
       bytesB64: Buffer.from('source').toString('base64'),
     });
+
+    const original = await post('/api/knowledge-assets/import-artifact/read', {
+      contextGraphId,
+      assertionUri,
+      kind: 'original',
+      hash: entry.keccak256,
+      offset: 7,
+      maxBytes: 5,
+    });
+    expect(original.status).toBe(200);
+    expect(original.body).toMatchObject({
+      status: 'local',
+      contextGraphId,
+      assertionUri,
+      kind: 'original',
+      hash: entry.keccak256,
+      offset: 7,
+      truncated: false,
+      bytesB64: Buffer.from('bytes').toString('base64'),
+    });
   });
 
   it('reads a generic markdown artifact via mdIntermediateHash', async () => {
@@ -437,6 +457,16 @@ describe('import artifact daemon routes', () => {
 
     expect(read.status).toBe(200);
     expect(read.body.status).toBe('hash_mismatch');
+
+    const sourceRead = await post('/api/knowledge-assets/import-artifact/read', {
+      contextGraphId,
+      assertionUri,
+      kind: 'source',
+      hash: `keccak256:${'e'.repeat(64)}`,
+    });
+
+    expect(sourceRead.status).toBe(200);
+    expect(sourceRead.body.status).toBe('hash_mismatch');
   });
 
   it('accepts legacy ownerless attachment assertion URIs by resolving them to the requesting agent assertion', async () => {
@@ -602,6 +632,16 @@ describe('import artifact daemon routes', () => {
     });
     expect(read.status).toBe(403);
     expect(read.body.error).toMatch(/owned by the requesting agent/);
+
+    const genericRead = await post('/api/knowledge-assets/import-artifact/read', {
+      contextGraphId,
+      assertionUri,
+      kind: 'source',
+      hash: entry.keccak256,
+      maxBytes: 4,
+    });
+    expect(genericRead.status).toBe(403);
+    expect(genericRead.body.error).toMatch(/owned by the requesting agent/);
     expect(queries).toHaveLength(0);
   });
 
@@ -650,6 +690,22 @@ describe('import artifact daemon routes', () => {
     expect(read.status).toBe(200);
     expect(read.body.markdown).toBe('# Public Imported\n');
     expect(read.body.artifact.ownerGuardRelaxed).toBe(true);
+
+    const genericRead = await post('/api/knowledge-assets/import-artifact/read', {
+      contextGraphId,
+      assertionUri,
+      kind: 'markdown',
+      hash: entry.keccak256,
+      maxBytes: 1024,
+    });
+    expect(genericRead.status).toBe(200);
+    expect(genericRead.body).toMatchObject({
+      status: 'local',
+      assertionUri,
+      kind: 'markdown',
+      hash: entry.keccak256,
+      bytesB64: Buffer.from('# Public Imported\n').toString('base64'),
+    });
   });
 
   it('returns 404 (not 403) for non-owner reads on public + open CGs when bytes are missing (#872)', async () => {

@@ -67,6 +67,14 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw asAbortError(signal.reason);
 }
 
+export function isSyncRequestEnvelopeBoundToPeer(
+  request: SyncRequestEnvelope,
+  remotePeerId: string,
+  localPeerId: string,
+): request is SyncRequestEnvelope & { targetPeerId: string; requesterPeerId: string } {
+  return request.targetPeerId === localPeerId && request.requesterPeerId === remotePeerId;
+}
+
 export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestParams): Promise<boolean> {
   const {
     ctx,
@@ -102,8 +110,7 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
   try { requesterIdentityId = request.requesterIdentityId ? BigInt(request.requesterIdentityId) : 0n; } catch {}
 
   if (
-    request.targetPeerId !== localPeerId ||
-    request.requesterPeerId !== remotePeerId ||
+    !isSyncRequestEnvelopeBoundToPeer(request, remotePeerId, localPeerId) ||
     !request.requestId ||
     request.issuedAtMs == null ||
     now - request.issuedAtMs > syncAuthMaxAgeMs ||
