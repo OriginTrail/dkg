@@ -9,6 +9,8 @@ let updateUrl: string;
 const insertedQuads: string[] = [];
 /** How many times the server received the `SELECT DISTINCT ?g` listGraphs scan. */
 let listGraphsHits = 0;
+/** When set, the server holds every listGraphs response until this resolves. */
+let listGraphsGate: Promise<void> | null = null;
 
 function startTestServer(): Promise<void> {
   return new Promise((resolve) => {
@@ -39,11 +41,16 @@ function startTestServer(): Promise<void> {
           }
           if (decoded.includes('DISTINCT') && decoded.includes('?g')) {
             listGraphsHits++;
-            res.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
-            res.end(JSON.stringify({
-              head: { vars: ['g'] },
-              results: { bindings: [{ g: { type: 'uri', value: 'http://ex.org/g1' } }] },
-            }));
+            const respond = () => {
+              res.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
+              res.end(JSON.stringify({
+                head: { vars: ['g'] },
+                results: { bindings: [{ g: { type: 'uri', value: 'http://ex.org/g1' } }] },
+              }));
+            };
+            // Optionally hold the response so a test can keep a scan in flight.
+            if (listGraphsGate) void listGraphsGate.then(respond);
+            else respond();
             return;
           }
           res.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
@@ -288,6 +295,29 @@ describe('SparqlHttpStore (test server)', () => {
       expect(b).toContain('http://ex.org/g1');
       expect(c).toContain('http://ex.org/g1');
       expect(listGraphsHits).toBe(1); // all three shared one in-flight scan
+    });
+
+    it('a write during an in-flight scan forces the next caller to re-scan, not join stale work', async () => {
+      // Read-your-writes: if a scan is in flight and a write invalidates the
+      // cache before it resolves, a caller arriving after the write must start
+      // a fresh scan rather than join the pre-write in-flight one.
+      listGraphsHits = 0;
+      let release!: () => void;
+      listGraphsGate = new Promise<void>((r) => { release = r; });
+      const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+      const store = managedStore();
+      try {
+        const p1 = store.listGraphs();             // caller 1: scan in flight (held by gate)
+        await delay(30);                           // request reaches the server (hits=1)
+        await store.insert(g('http://ex.org/g2')); // write invalidates the cache (gen bump)
+        const p2 = store.listGraphs();             // caller 2: must NOT join the pre-write scan
+        await delay(30);                           // caller 2 issues its own request (hits=2)
+        release();
+        await Promise.all([p1, p2]);
+        expect(listGraphsHits).toBe(2);            // post-write caller ran a fresh scan
+      } finally {
+        listGraphsGate = null;
+      }
     });
 
     it('returns a defensive copy that cannot mutate the cached set', async () => {

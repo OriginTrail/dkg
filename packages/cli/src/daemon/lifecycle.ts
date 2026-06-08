@@ -14,12 +14,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
-import {
-  GET_TOTAL_TRIPLES_SPARQL,
-  parseRdfInt,
-  ttlMemo,
-  METRIC_COUNT_TTL_MS,
-} from "./metrics-queries.js";
+import { GET_TOTAL_TRIPLES_SPARQL, parseRdfInt } from "./metrics-queries.js";
 import {
   appendFile,
   chmod,
@@ -1849,40 +1844,42 @@ export async function runDaemonInner(
       }
     },
     getContextGraphCount: async () => (await agent.listContextGraphs()).length,
-    // R6-B: the count getters below each issue a data-proportional full-scan
-    // COUNT. Wrap each in a short-TTL memo (METRIC_COUNT_TTL_MS, below the 30 s
-    // collector cadence) so a UI /api/status request firing alongside the
-    // metrics tick coalesces onto one scan, without masking a store outage —
-    // every periodic snapshot still re-reads the store. The heavier CG-count
-    // scan behind getContextGraphCount is relieved by R6-A's listGraphs cache.
-    getTotalTriples: ttlMemo(async () => {
+    // The count getters below each issue a data-proportional full-scan COUNT,
+    // but the only caller is the 30 s metrics tick (metricsSource is consumed
+    // solely by MetricsCollector — no on-demand /api/status path), so each tick
+    // already re-reads the store fresh and there is nothing concurrent to
+    // coalesce. They are intentionally left uncached so a snapshot never serves
+    // a stale count and can't mask a store outage. The one heavy metrics read,
+    // getContextGraphCount, is relieved at the chokepoint by R6-A's listGraphs
+    // cache; these COUNTs are cheap (~0.015 CPU-s/tick on a 75k-triple store).
+    getTotalTriples: async () => {
       const r = await agent.query(GET_TOTAL_TRIPLES_SPARQL);
       return parseRdfInt(r?.bindings?.[0]?.c);
-    }, METRIC_COUNT_TTL_MS),
-    getTotalKCs: ttlMemo(async () => {
+    },
+    getTotalKCs: async () => {
       const r = await agent.query(
         "SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc a <http://dkg.io/ontology/KnowledgeCollection> } }",
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
-    }, METRIC_COUNT_TTL_MS),
-    getTotalKAs: ttlMemo(async () => {
+    },
+    getTotalKAs: async () => {
       const r = await agent.query(
         "SELECT (COUNT(DISTINCT ?ka) AS ?c) WHERE { GRAPH ?g { ?ka a <http://dkg.io/ontology/KnowledgeAsset> } }",
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
-    }, METRIC_COUNT_TTL_MS),
-    getConfirmedKCs: ttlMemo(async () => {
+    },
+    getConfirmedKCs: async () => {
       const r = await agent.query(
         'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "confirmed" } }',
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
-    }, METRIC_COUNT_TTL_MS),
-    getTentativeKCs: ttlMemo(async () => {
+    },
+    getTentativeKCs: async () => {
       const r = await agent.query(
         'SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> "tentative" } }',
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
-    }, METRIC_COUNT_TTL_MS),
+    },
     getStoreBytes: async () => {
       // External SPARQL backends own no local file; `null` is the
       // correct signal here (returning 0 misleads operators into

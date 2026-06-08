@@ -102,6 +102,14 @@ export class SparqlHttpStore implements TripleStore {
    * would still run duplicate full scans, the exact load this fix targets.
    */
   private graphListInflight: Promise<string[]> | null = null;
+  /**
+   * The generation {@link graphListInflight} was started at. A caller may only
+   * join the in-flight scan when this still equals {@link graphListCacheGen};
+   * a write that bumps the generation mid-scan means the in-flight result is
+   * pre-write, so a later caller must start a fresh scan rather than observe a
+   * stale graph set (read-your-writes).
+   */
+  private graphListInflightGen = -1;
 
   constructor(options: SparqlHttpStoreOptions) {
     if (!options.queryEndpoint?.trim()) {
@@ -332,29 +340,43 @@ export class SparqlHttpStore implements TripleStore {
     // External (non-managed) endpoint: never cache (an outside writer could
     // add a graph we'd miss), so just scan.
     if (!this.cacheGraphList) {
-      return [...(await this.scanGraphs())];
+      return [...(await this.scanGraphs(this.graphListCacheGen))];
     }
     // Managed, cold/expired cache: coalesce concurrent callers onto one
     // in-flight scan so a startup or TTL-boundary burst doesn't fan out into
-    // duplicate full scans (the very load this fix removes).
-    if (!this.graphListInflight) {
-      this.graphListInflight = this.scanGraphs().finally(() => {
-        this.graphListInflight = null;
-      });
+    // duplicate full scans (the very load this fix removes) — but only while no
+    // write has invalidated the cache since that scan started. A caller
+    // arriving after a write must not join the pre-write scan (it would observe
+    // a stale graph set); it starts a fresh one instead.
+    if (this.graphListInflight && this.graphListInflightGen === this.graphListCacheGen) {
+      return [...(await this.graphListInflight)];
     }
-    return [...(await this.graphListInflight)];
+    const startGen = this.graphListCacheGen;
+    const scan = this.scanGraphs(startGen);
+    this.graphListInflight = scan;
+    this.graphListInflightGen = startGen;
+    try {
+      return [...(await scan)];
+    } finally {
+      // Clear only if a newer scan hasn't already replaced this one, so a
+      // post-write rebuild started while this scan was resolving isn't lost.
+      if (this.graphListInflight === scan) {
+        this.graphListInflight = null;
+        this.graphListInflightGen = -1;
+      }
+    }
   }
 
   /**
    * Run the `SELECT DISTINCT ?g` enumeration and (for managed endpoints) cache
    * the result, unless a write landed during the scan — the generation guard
-   * discards a snapshot that may predate that write so the next call rebuilds.
+   * (`startGen` vs the current generation) discards a snapshot that may predate
+   * that write so the next call rebuilds.
    */
-  private async scanGraphs(): Promise<string[]> {
-    const gen = this.graphListCacheGen;
+  private async scanGraphs(startGen: number): Promise<string[]> {
     const r = await this.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
     const graphs = r.type === 'bindings' ? r.bindings.map((b) => b.g).filter(Boolean) : [];
-    if (this.cacheGraphList && gen === this.graphListCacheGen) {
+    if (this.cacheGraphList && startGen === this.graphListCacheGen) {
       this.graphListCache = graphs;
       this.graphListCacheAt = this.now();
     }
