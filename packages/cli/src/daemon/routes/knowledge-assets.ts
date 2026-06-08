@@ -184,6 +184,17 @@ function classifyKaIdentifier(seg: string): { kind: "kaId"; kaId: bigint } | { k
   return { kind: "name" };
 }
 
+function rejectKaIdMutationIdentifier(seg: string, res: RequestContext["res"]): boolean {
+  if (classifyKaIdentifier(seg).kind !== "kaId") return false;
+  jsonResponse(res, 400, {
+    code: "KA_ID_MUTATION_UNSUPPORTED",
+    error:
+      "B3 KA identifiers (did:dkg UAL / 0x<agent>:<number>) are only supported on GET /api/knowledge-assets routes. " +
+      "Mutation routes must use the lifecycle assertion name.",
+  });
+  return true;
+}
+
 /**
  * OT-RFC-43 §10.5.4 — derive a per-layer status from a history descriptor's
  * pointers. Reuses the canonical `deriveStatus` helper.
@@ -677,6 +688,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   }
 
   if (method !== "POST") return;
+  if (rejectKaIdMutationIdentifier(name, res)) return;
 
   // POST /api/knowledge-assets/:name/wm/import-file — MULTIPART, not JSON.
   // Faithful port of the legacy POST /api/assertion/:name/import-file. This MUST

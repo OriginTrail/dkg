@@ -1189,6 +1189,38 @@ describe('OT-RFC-43 A2/B3 — per-layer status + kaId addressing', () => {
     expect(agent.assertion.resolveByKaId).not.toHaveBeenCalled();
   });
 
+  it('B3: mutation routes reject kaId identifiers instead of creating a literal draft name', async () => {
+    const agent = makeAssertionAgent();
+    const ident = `${AGENT_ADDR}:5`;
+    const ctx = ctxFor('POST', `/api/knowledge-assets/${encodeURIComponent(ident)}/wm/write`, {
+      contextGraphId: 'cg',
+      quads: [{ subject: 's', predicate: 'p', object: '"o"' }],
+    }, agent);
+
+    await handleKnowledgeAssetsRoutes(ctx);
+
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx)).toMatchObject({ code: 'KA_ID_MUTATION_UNSUPPORTED' });
+    expect(agent.assertion.history).not.toHaveBeenCalled();
+    expect(agent.assertion.create).not.toHaveBeenCalled();
+    expect(agent.assertion.write).not.toHaveBeenCalled();
+  });
+
+  it('B3: mutation routes reject did:dkg UAL identifiers too', async () => {
+    const agent = makeAssertionAgent();
+    const packed = (BigInt(AGENT_ADDR) << 96n) | 5n;
+    const ual = `did:dkg:evm:31337/0xkaaddr/${packed.toString()}`;
+    const ctx = ctxFor('POST', `/api/knowledge-assets/${encodeURIComponent(ual)}/vm/publish`, {
+      contextGraphId: 'cg',
+    }, agent);
+
+    await handleKnowledgeAssetsRoutes(ctx);
+
+    expect(status(ctx)).toBe(400);
+    expect(body(ctx)).toMatchObject({ code: 'KA_ID_MUTATION_UNSUPPORTED' });
+    expect(agent.publishFromFinalizedAssertion).not.toHaveBeenCalled();
+  });
+
   // Parity with the legacy /api/assertion/* routes: on the WM/SWM mutation
   // verbs a caller's own mistakes are 400s (and the "_meta completed but empty"
   // case a 409), not blanket 500s — but vm/publish failures stay 500.
