@@ -30,6 +30,15 @@ import type {
   AskResult,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
+import { performance } from 'node:perf_hooks';
+
+/**
+ * Monotonic clock for the listGraphs cache TTL. Unlike `Date.now()`,
+ * `performance.now()` never moves backwards on an NTP step / VM resume / manual
+ * clock change, so the TTL can't be silently extended past its window (which
+ * would defeat the outage re-validation guarantee).
+ */
+const monotonicNow = (): number => performance.now();
 
 /**
  * R6-A: how long a managed-endpoint `listGraphs()` result may be served from
@@ -67,8 +76,9 @@ export interface SparqlHttpStoreOptions {
    */
   managedByDkg?: boolean;
   /**
-   * Injectable monotonic clock for the `listGraphs()` cache TTL. Testing seam
-   * only; defaults to `Date.now`.
+   * Clock for the `listGraphs()` cache TTL. Test seam only; defaults to the
+   * monotonic {@link monotonicNow} (`performance.now`), never `Date.now`, so a
+   * backwards wall-clock jump can't extend the cache past its TTL.
    */
   now?: () => number;
 }
@@ -81,7 +91,7 @@ export class SparqlHttpStore implements TripleStore {
 
   /** R6-A: cache `listGraphs()` only for daemon-owned (managed) endpoints. */
   private readonly cacheGraphList: boolean;
-  /** Injectable clock for the cache TTL (defaults to Date.now). */
+  /** Monotonic clock for the cache TTL (defaults to performance.now). */
   private readonly now: () => number;
   /** Cached graph-name list; null = not built / invalidated by a write. */
   private graphListCache: string[] | null = null;
@@ -119,7 +129,7 @@ export class SparqlHttpStore implements TripleStore {
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? 30_000;
     this.cacheGraphList = options.managedByDkg === true;
-    this.now = options.now ?? Date.now;
+    this.now = options.now ?? monotonicNow;
     // Content-Type is set per-request in postQuery/postUpdate (direct POST:
     // application/sparql-query | application/sparql-update). Only shared
     // headers (e.g. Authorization) belong here.
