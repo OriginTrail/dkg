@@ -324,6 +324,12 @@ DKG_PUBLISH_SCHEMA = {
         "then publish SWM to Verifiable Memory. Chain-anchored, permanent, costs TRAC. "
         "Object values starting with http://, https://, urn:, or did: are treated as "
         "URIs. Everything else becomes a string literal automatically.\n"
+        "NON-ATOMIC for multiple root subjects: this legacy path mints ONE root per call "
+        "(the daemon rejects atomic multi-root). On a partial failure, already-published "
+        "roots stay on-chain (TRAC spent, irreversible) and the result reports which "
+        "published vs failed vs were not attempted — re-publish only the failed/remaining "
+        "roots. For a single named asset prefer dkg_knowledge_asset_publish, which seals the "
+        "whole asset and is the atomic-safe path.\n"
         "Always call dkg_wallet_balances first to verify sufficient TRAC."
     ),
     "parameters": {
@@ -863,7 +869,12 @@ DKG_SHARED_MEMORY_PUBLISH_SCHEMA = {
     "name": "dkg_shared_memory_publish",
     "description": (
         "Publish existing Shared Working Memory to Verifiable Memory. "
-        "Use after dkg_knowledge_asset_share in the canonical write -> share -> publish flow."
+        "Use after dkg_knowledge_asset_share in the canonical write -> share -> publish flow. "
+        "NON-ATOMIC across multiple root_entities: mints ONE root per call (the daemon rejects "
+        "atomic multi-root). On a partial failure, already-published roots stay on-chain (TRAC "
+        "spent, irreversible) and the result reports which published vs failed vs were not "
+        "attempted — re-publish only the failed/remaining roots. For a single named asset prefer "
+        "dkg_knowledge_asset_publish (seals the whole asset; atomic-safe)."
     ),
     "parameters": {
         "type": "object",
@@ -1145,6 +1156,14 @@ class DKGMemoryProvider(MemoryProvider):
             if self._direct_publish_allowed()
             else "  Verifiable Memory publish tools are disabled by operator policy; ask before chain publish\n"
         )
+        # dkg_knowledge_asset_publish is only registered when direct publish is
+        # allowed (get_tool_schemas gates it). Gate its mention here behind the
+        # SAME condition so the agent is never told to call an unregistered tool.
+        ka_lifecycle_line = (
+            "  dkg_knowledge_asset_create/write/finalize/share/publish — Canonical knowledge asset lifecycle (create -> write -> finalize -> share -> publish)\n"
+            if self._direct_publish_allowed()
+            else "  dkg_knowledge_asset_create/write/finalize/share — Knowledge asset lifecycle up to Shared Working Memory (chain publish is disabled by operator policy)\n"
+        )
         admin_guidance = (
             "  dkg_context_graph_invite / dkg_participant_* / dkg_join_request_* — Manage project access\n"
             if self._context_graph_admin_tools_allowed()
@@ -1158,7 +1177,7 @@ class DKGMemoryProvider(MemoryProvider):
             "  dkg_memory — Store/update/remove persistent facts (your primary memory)\n"
             "  memory_search — Free-text recall across DKG memory layers\n"
             "  dkg_query — Search knowledge via SPARQL (fast, local)\n"
-            "  dkg_knowledge_asset_create/write/finalize/share/publish — Canonical knowledge asset lifecycle (create -> write -> finalize -> share -> publish)\n"
+            f"{ka_lifecycle_line}"
             "  dkg_knowledge_asset_pull_from/query/history/discard/import_file — Reseed a draft, inspect quads, read lifecycle state, discard, or import a document\n"
             "\n"
             "  dkg_knowledge_asset_import_artifact_read_markdown + dkg_knowledge_asset_semantic_enrichment_write - Read imported attachment Markdown and append semantic triples to the imported assertion\n"
@@ -2764,28 +2783,35 @@ def _validate_int_arg(
     absent (so the caller omits the wire key and lets the daemon default), and
     ``(None, message)`` when the arg is PRESENT but invalid — the caller must
     surface that as a tool error rather than silently dropping it (CONTRACT §C).
-    Accepts both ``int`` and numeric-string forms; rejects ``bool`` (an ``int``
-    subclass), non-numeric, and out-of-range. Mirrors the daemon's predicates.
+    Accepts ``int``, integral-``float`` (e.g. ``2.0``), and numeric-string forms;
+    rejects ``bool`` (an ``int`` subclass), non-INTEGRAL numerics (``1.9`` /
+    ``"1.9"`` — never silently truncate via ``int()``), non-numeric, and
+    out-of-range. Mirrors the daemon's integer predicates.
     """
     if value is None:
         return None, None
     if isinstance(value, bool):
         return None, f"{label} must be an integer."
-    if isinstance(value, str):
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, float):
+        # Reject a float with a fractional part rather than truncating it; an
+        # integral float (2.0) is accepted as its integer value.
+        if not value.is_integer():
+            return None, f"{label} must be an integer."
+        parsed = int(value)
+    elif isinstance(value, str):
         text = value.strip()
         if not text:
             return None, None
         try:
+            # int() on a string rejects "1.9" with ValueError (no truncation),
+            # which is exactly the integral-only contract we want.
             parsed = int(text)
         except ValueError:
             return None, f"{label} must be an integer."
-    elif isinstance(value, int):
-        parsed = value
     else:
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            return None, f"{label} must be an integer."
+        return None, f"{label} must be an integer."
     if parsed < minimum:
         bound = "non-negative" if minimum == 0 else f">= {minimum}"
         return None, f"{label} must be {bound}."
