@@ -475,7 +475,8 @@ assert provider._client.published == (
     {"selection": ["urn:root:1", "urn:root:2"], "clear_after": True, "sub_graph_name": ""},
 ), provider._client.published
 
-# Single-subject dkg_publish still uses "all" (server resolves the one root).
+# Single-subject dkg_publish publishes the EXPLICIT root it just wrote, never
+# "all" (which would over-scope to every unpublished root in the CG — Codex #1750).
 provider._client = PublishClient()
 result = json.loads(provider.handle_tool_call("dkg_publish", {
     "context_graph_id": "cg:test",
@@ -488,7 +489,7 @@ assert result["success"] is True, result
 assert result["rootEntities"] == ["urn:root:solo"], result
 assert provider._client.published == (
     "cg:test",
-    {"selection": "all", "clear_after": True, "sub_graph_name": ""},
+    {"selection": ["urn:root:solo"], "clear_after": True, "sub_graph_name": ""},
 ), provider._client.published
 `;
     const result = spawnSync('python', ['-B', '-c', script], {

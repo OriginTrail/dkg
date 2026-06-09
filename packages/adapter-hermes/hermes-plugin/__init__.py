@@ -1741,13 +1741,18 @@ class DKGMemoryProvider(MemoryProvider):
         if share_result.get("success") is False:
             return json.dumps(share_result)
         roots = _quad_root_entities(quads)
-        # The legacy SWM-bridge (Fork-2) is single-root-only: publishing >1 root
-        # in one call 409s MULTI_ROOT_PUBLISH_NOT_ATOMIC (CONTRACT §3). Pass an
-        # explicit root list when the quads carry multiple subjects so the client
-        # loops one root per call; a single subject still goes through "all".
+        # ALWAYS publish the EXPLICIT roots this call just wrote — never "all".
+        # selection="all" publishes the WHOLE shared-memory graph (every
+        # unpublished root in the CG/sub-graph), so a one-shot dkg_publish would
+        # over-scope and mint other agents'/calls' unpublished SWM content
+        # (Codex #1750). Passing the explicit list also makes the client loop
+        # one-root-per-call (dedup + clearAfter-on-last + partial-failure
+        # transparency all apply uniformly, single or multi root). The CG-wide
+        # "all" remains available only on dkg_shared_memory_publish, where the
+        # agent explicitly opts in.
         result = self._client.publish(
             cg,
-            selection=roots if len(roots) > 1 else "all",
+            selection=roots,
             clear_after=True,
             sub_graph_name=_first_text(args, "sub_graph_name"),
         )
@@ -2779,14 +2784,16 @@ def _validate_int_arg(
 ) -> Tuple[Optional[int], Optional[str]]:
     """Validate an optional integer arg: absent -> omit, present-but-invalid -> error.
 
-    Returns ``(int, None)`` for a valid value, ``(None, None)`` when the arg is
-    absent (so the caller omits the wire key and lets the daemon default), and
-    ``(None, message)`` when the arg is PRESENT but invalid — the caller must
-    surface that as a tool error rather than silently dropping it (CONTRACT §C).
-    Accepts ``int``, integral-``float`` (e.g. ``2.0``), and numeric-string forms;
-    rejects ``bool`` (an ``int`` subclass), non-INTEGRAL numerics (``1.9`` /
-    ``"1.9"`` — never silently truncate via ``int()``), non-numeric, and
-    out-of-range. Mirrors the daemon's integer predicates.
+    Returns ``(int, None)`` for a valid value, ``(None, None)`` only when the arg
+    is truly ABSENT (``None``) — the caller omits the wire key and lets the
+    daemon default — and ``(None, message)`` when the arg is PRESENT but invalid,
+    which the caller must surface as a tool error rather than silently dropping
+    it (CONTRACT §C). A present blank/whitespace-only string (``""`` / ``"   "``)
+    is present-but-INVALID, NOT absent (Codex #2805). Accepts ``int``,
+    integral-``float`` (e.g. ``2.0``), and numeric-string forms; rejects ``bool``
+    (an ``int`` subclass), non-INTEGRAL numerics (``1.9`` / ``"1.9"`` — never
+    silently truncate via ``int()``), non-numeric, and out-of-range. Mirrors the
+    daemon's integer predicates.
     """
     if value is None:
         return None, None
@@ -2803,7 +2810,8 @@ def _validate_int_arg(
     elif isinstance(value, str):
         text = value.strip()
         if not text:
-            return None, None
+            # Present but blank/whitespace: invalid, not omitted (Codex #2805).
+            return None, f"{label} must be an integer."
         try:
             # int() on a string rejects "1.9" with ValueError (no truncation),
             # which is exactly the integral-only contract we want.
