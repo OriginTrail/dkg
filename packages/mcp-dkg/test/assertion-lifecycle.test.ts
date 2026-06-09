@@ -230,6 +230,20 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     registerAssertionTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
   });
 
+  // CONTRACT §0 invariant 2 (parity with PR1's OpenClaw plugin.part-06 guard):
+  // the dkg_knowledge_asset_write quad element schema must NOT advertise a
+  // per-quad `graph` field. The daemon pins every triple to the per-KA WM graph,
+  // so a client `graph` is daemon-overridden; the agent-facing schema must not
+  // teach it. (`.element.shape` is zod's stable object-shape introspection.)
+  it('write schema exposes no per-quad graph field (subject/predicate/object only)', () => {
+    const schema = server.get('dkg_knowledge_asset_write').config.inputSchema!;
+    const quadShape = (schema.quads as unknown as { element: { shape: Record<string, unknown> } }).element.shape;
+    expect(quadShape).toHaveProperty('subject');
+    expect(quadShape).toHaveProperty('predicate');
+    expect(quadShape).toHaveProperty('object');
+    expect(quadShape).not.toHaveProperty('graph');
+  });
+
   // finalize surfaces author_agent_address (token-resolved author) but NOT the
   // raw preSignedAuthorAttestation — colocated-agent attribution by design
   // (CONTRACT §1 Stage3), matching the OpenClaw adapter.

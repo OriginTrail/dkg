@@ -155,6 +155,19 @@ describe('publish tools — write+publish helper + canonical SWM finalizer', () 
     expect(server.tools.has('dkg_shared_memory_publish')).toBe(true);
   });
 
+  // CONTRACT §0 invariant 2 (parity with PR1's OpenClaw query-tools guard): the
+  // dkg_publish one-shot quad element schema must NOT advertise a per-quad
+  // `graph` — the daemon pins quads to the per-KA WM graph and overrides any
+  // client value. (`.element.shape` is zod's stable object-shape introspection.)
+  it('dkg_publish schema exposes no per-quad graph field (subject/predicate/object only)', () => {
+    const schema = server.get('dkg_publish').config.inputSchema!;
+    const quadShape = (schema.quads as unknown as { element: { shape: Record<string, unknown> } }).element.shape;
+    expect(quadShape).toHaveProperty('subject');
+    expect(quadShape).toHaveProperty('predicate');
+    expect(quadShape).toHaveProperty('object');
+    expect(quadShape).not.toHaveProperty('graph');
+  });
+
   it('documents canonical context graph ids for publish tools', () => {
     for (const name of ['dkg_publish', 'dkg_shared_memory_publish']) {
       const contextGraphId = server.get(name).config.inputSchema?.contextGraphId;
