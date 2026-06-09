@@ -112,7 +112,7 @@ export function registerAssertionTools(
         'existing Working Memory draft. Writes are additive (set-merge); ' +
         'callers that want replace semantics should call `dkg_knowledge_asset_discard` ' +
         'first or mint a unique asset name per snapshot.\n\n' +
-        'IMPORTANT — quad shape: each quad has subject/predicate/object/graph. ' +
+        'IMPORTANT — triple shape: each triple has subject/predicate/object. ' +
         'Subjects and predicates are ALWAYS URIs (no spaces). The `object` field ' +
         'accepts EITHER a URI (no surrounding quotes) OR a literal string ' +
         'WRAPPED IN DOUBLE QUOTES. Most common mistake: passing free-text ' +
