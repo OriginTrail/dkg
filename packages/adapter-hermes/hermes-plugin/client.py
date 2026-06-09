@@ -737,16 +737,38 @@ class DKGClient:
                     clear_after=(clear_after and index == last),
                     sub_graph_name=sub_graph_name, publish_epochs=publish_epochs)
                 if _client_result_failed(result):
+                    # Legacy multi-root publish is NON-ATOMIC: it mints one root
+                    # per call and on-chain mints are irreversible, so we stop on
+                    # the first failure but report the partial state EXPLICITLY —
+                    # which roots already published (TRAC spent, on chain) vs the
+                    # one that failed vs the ones never attempted (CONTRACT §G1).
+                    published_roots = [entry["rootEntity"] for entry in published]
+                    not_attempted = roots[index + 1:]
                     failure = dict(result) if isinstance(result, dict) else {"error": str(result)}
                     failure["success"] = False
+                    failure["partial"] = bool(published)
                     failure["published"] = published
+                    failure["publishedRoots"] = published_roots
                     failure["failedRoot"] = root
+                    failure["notAttemptedRoots"] = not_attempted
+                    failure["message"] = (
+                        f"Non-atomic multi-root publish stopped at '{root}'. "
+                        f"{len(published_roots)} root(s) already published on-chain (TRAC spent, "
+                        f"irreversible): {published_roots}. {len(not_attempted)} root(s) not attempted: "
+                        f"{not_attempted}. Re-publish only the failed/remaining roots — do NOT retry "
+                        f"the whole set (the published roots would mint again)."
+                    )
                     return failure
                 published.append({
                     "rootEntity": root,
                     **(result if isinstance(result, dict) else {"result": result}),
                 })
-            return {"success": True, "published": published, "rootEntities": roots}
+            return {
+                "success": True,
+                "partial": False,
+                "published": published,
+                "rootEntities": roots,
+            }
         payload: Dict[str, Any] = {
             "contextGraphId": _normalize_context_graph_id(context_graph_id),
             "selection": selection,
