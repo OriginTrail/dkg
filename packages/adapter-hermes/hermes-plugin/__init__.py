@@ -1807,6 +1807,10 @@ class DKGMemoryProvider(MemoryProvider):
                 # Any other registration failure is fatal: surface it and do NOT publish.
                 if "already registered" not in error and "already exists" not in error:
                     return json.dumps(registration)
+                # Normalize the already-registered short-circuit to a success
+                # shape (Codex #1084:1810) — leaving the raw {success:false,...} on
+                # result["registration"] makes a clean publish look partly failed.
+                registration = {"alreadyRegistered": True}
         # Publish via the ATOMIC assertionName fork (parity with OpenClaw + MCP):
         # create a fresh uniquely-named assertion with these quads (auto-finalize
         # + promote), then publish that ONE sealed assertion by name. The daemon
@@ -1819,13 +1823,24 @@ class DKGMemoryProvider(MemoryProvider):
             quads,
             sub_graph_name=_first_text(args, "sub_graph_name"),
         )
-        # Only stamp the per-call counts on a non-hard-failure result (FIX N /
-        # Codex #1079:1784): the client returns a partial-failure dict
-        # ({success:false, failedRoot, ...}) when a root mint fails — attaching
-        # quadsPublished/rootEntities there would falsely imply everything
-        # published. Confirmed / 207-partial results are fine to annotate.
-        if isinstance(result, dict) and not _client_result_failed(result):
-            result["quadsPublished"] = len(quads)
+        # The publish leg goes through /api/shared-memory/publish, which returns
+        # HTTP 207 with a non-empty contextGraphError when the asset is minted
+        # on-chain (UAL valid) but the CG-binding failed (memory.ts:1772). Surface
+        # that as a PARTIAL/warning (Codex #1077:1115 parity), keeping ual/kaId/
+        # assertionName visible. A clean 200 is untouched; no-op on the FIX A/B
+        # partial-failure dicts (they carry no contextGraphError).
+        result = _annotate_vm_publish_partial(result)
+        if isinstance(result, dict):
+            # Only stamp the per-call count on a non-hard-failure result (FIX N /
+            # Codex #1084:1821): publish_quads returns a partial-failure dict
+            # ({success:false, ...}) on create-207 / publish-fail — stamping
+            # quadsPublished there would falsely imply it published. A confirmed
+            # result or a 207-partial (minted) is fine to annotate.
+            if not _client_result_failed(result):
+                result["quadsPublished"] = len(quads)
+            # Registration context stays on any result (incl. a publish failure):
+            # the register step itself succeeded / was already-registered, so it
+            # is not misleading and aids recovery.
             if registration is not None:
                 result["registration"] = registration
         return json.dumps(result)

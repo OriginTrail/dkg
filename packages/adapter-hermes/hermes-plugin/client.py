@@ -738,9 +738,8 @@ class DKGClient:
             failure["error"] = (
                 f"Knowledge asset '{assertion_name}' was created and sealed but a later stage "
                 f"failed ({phases or 'share'}), so it was NOT shared to SWM and was NOT published. "
-                f"Share it (dkg_knowledge_asset_share with this name) and then publish "
-                f"(dkg_knowledge_asset_publish / dkg_shared_memory_publish with this name) — do "
-                f"NOT recreate the asset."
+                f"Share it with dkg_knowledge_asset_share (this name), then publish with "
+                f"dkg_knowledge_asset_publish (this name) -- do NOT recreate the asset."
             )
             return failure
         publish_payload: Dict[str, Any] = {
@@ -767,9 +766,8 @@ class DKGClient:
             base_error = str(failure.get("error") or failure.get("message") or "publish failed")
             failure["error"] = (
                 f"Knowledge asset '{assertion_name}' was created, sealed, and shared to SWM, but the "
-                f"on-chain publish failed ({base_error}). Retry the publish by name "
-                f"(dkg_knowledge_asset_publish / dkg_shared_memory_publish with this assertionName) — "
-                f"do NOT recreate the asset."
+                f"on-chain publish failed ({base_error}). Retry the publish by name with "
+                f"dkg_knowledge_asset_publish (this assertionName) -- do NOT recreate the asset."
             )
             return failure
         result: Dict[str, Any] = dict(published) if isinstance(published, dict) else {"result": published}
