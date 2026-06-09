@@ -676,6 +676,61 @@ class DKGClient:
             payload["subGraphName"] = sub_graph_name
         return self._post("/api/shared-memory/write", payload)
 
+    def publish_quads(self, context_graph_id: str, quads: List[Dict[str, str]],
+                      sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
+        """One-shot publish via the ATOMIC assertionName fork (mirrors OpenClaw +
+        MCP).
+
+        Creates a fresh, uniquely-named assertion with the supplied quads
+        (auto-finalize is driven by non-empty quads — CONTRACT §1 Stage1 — and
+        ``promote:true`` shares it into SWM in the same call), then publishes
+        that single sealed assertion by name. The daemon's assertionName fork
+        (memory.ts:1703-1808) reads the seal keyed to the assertion's exact
+        merkleRoot and publishes ONLY that assertion ATOMICALLY — multi-root-safe,
+        correctly scoped, no per-root loop, no partial-failure.
+
+        The write wire shape is ``{subject, predicate, object}`` only; any
+        per-quad ``graph`` is stripped (CONTRACT §0 invariant 2). ``finalize:true``
+        is unread and dropped; ``promote:true`` is the create route's
+        ``alsoShareSwm`` alias.
+
+        NOTE: unlike the selection fork, the assertionName fork does NOT
+        auto-register the CG (LU-6 transparent register-then-publish is
+        selection-fork only, memory.ts:1874+); on a fresh, never-registered CG on
+        a REAL chain it surfaces the daemon's "not registered on-chain" error
+        (skipped for mock/none chains — publisher dkg-publisher.ts:1198-1222).
+        """
+        cg_id = _normalize_context_graph_id(context_graph_id)
+        assertion_name = f"hermes-publish-{uuid.uuid4().hex}"
+        create_payload: Dict[str, Any] = {
+            "contextGraphId": cg_id,
+            "name": assertion_name,
+            "quads": _to_write_quads(quads),
+            "promote": True,
+        }
+        if sub_graph_name:
+            create_payload["subGraphName"] = sub_graph_name
+        created = self._post("/api/knowledge-assets", create_payload)
+        if _client_result_failed(created):
+            return created
+        publish_payload: Dict[str, Any] = {
+            "contextGraphId": cg_id,
+            "assertionName": assertion_name,
+        }
+        if sub_graph_name:
+            publish_payload["subGraphName"] = sub_graph_name
+        published = self._post("/api/shared-memory/publish", publish_payload)
+        if _client_result_failed(published):
+            return published
+        result: Dict[str, Any] = dict(published) if isinstance(published, dict) else {"result": published}
+        if isinstance(created, dict):
+            if created.get("assertionUri") is not None:
+                result["assertionUri"] = created["assertionUri"]
+            if created.get("seal") is not None:
+                result["seal"] = created["seal"]
+        result["assertionName"] = assertion_name
+        return result
+
     def publish_one_root(self, context_graph_id: str, root_entity: str,
                          clear_after: bool,
                          sub_graph_name: Optional[str] = None) -> Dict[str, Any]:

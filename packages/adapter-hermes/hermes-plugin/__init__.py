@@ -320,16 +320,12 @@ DKG_SHARE_SCHEMA = {
 DKG_PUBLISH_SCHEMA = {
     "name": "dkg_publish",
     "description": (
-        "One-shot write + publish helper: write supplied quads to Shared Working Memory, "
-        "then publish SWM to Verifiable Memory. Chain-anchored, permanent, costs TRAC. "
-        "Object values starting with http://, https://, urn:, or did: are treated as "
-        "URIs. Everything else becomes a string literal automatically.\n"
-        "NON-ATOMIC for multiple root subjects: this legacy path mints ONE root per call "
-        "(the daemon rejects atomic multi-root). On a partial failure, already-published "
-        "roots stay on-chain (TRAC spent, irreversible) and the result reports which "
-        "published vs failed vs were not attempted — re-publish only the failed/remaining "
-        "roots. For a single named asset prefer dkg_knowledge_asset_publish, which seals the "
-        "whole asset and is the atomic-safe path.\n"
+        "One-shot write + publish helper: writes the supplied quads as a single fresh, "
+        "uniquely-named sealed assertion and publishes it to Verifiable Memory in one ATOMIC "
+        "operation. Chain-anchored, permanent, costs TRAC. Multi-root-safe: all subjects in the "
+        "quads publish together as one sealed assertion in a single atomic mint. Object "
+        "values starting with http://, https://, urn:, or did: are treated as URIs; everything "
+        "else becomes a string literal automatically.\n"
         "Always call dkg_wallet_balances first to verify sufficient TRAC."
     ),
     "parameters": {
@@ -1777,31 +1773,16 @@ class DKGMemoryProvider(MemoryProvider):
         quads = _normalize_quads(args.get("quads"))
         if not quads:
             return tool_error("quads must contain at least one item with subject, predicate, and object.")
-        share_result = self._client.share(cg, quads, sub_graph_name=_first_text(args, "sub_graph_name"))
-        if share_result.get("success") is False:
-            return json.dumps(share_result)
-        roots = _quad_root_entities(quads)
-        # ALWAYS publish the EXPLICIT roots this call just wrote — never "all".
-        # selection="all" publishes the WHOLE shared-memory graph (every
-        # unpublished root in the CG/sub-graph), so a one-shot dkg_publish would
-        # over-scope and mint other agents'/calls' unpublished SWM content
-        # (Codex #1750). Passing the explicit list also makes the client loop
-        # one-root-per-call (dedup + clearAfter-on-last + partial-failure
-        # transparency all apply uniformly, single or multi root). The CG-wide
-        # "all" remains available only on dkg_shared_memory_publish, where the
-        # agent explicitly opts in.
-        result = self._client.publish(
+        # Publish via the ATOMIC assertionName fork (parity with OpenClaw + MCP):
+        # create a fresh uniquely-named assertion with these quads (auto-finalize
+        # + promote), then publish that ONE sealed assertion by name. The daemon
+        # publishes only that assertion's exact merkleRoot — multi-root-safe,
+        # correctly scoped, in a single atomic operation. No per-root loop, no
+        # dedup, no partial-failure shape (those apply only to the explicit
+        # CG-wide dkg_shared_memory_publish, which stays on the selection path).
+        result = self._client.publish_quads(
             cg,
-            selection=roots,
-            # clear_after=False (FIX M / Codex #1079:1781): on the selection path,
-            # clearSharedMemoryAfter=true makes the daemon wipe the WHOLE SWM
-            # remainder (deleteByPattern over every SWM graph under the bucket, no
-            # subject filter — dkg-publisher.ts:1528-1535), destroying every other
-            # call's/agent's unpublished roots. dkg_publish only owns the roots it
-            # just wrote, so it must NOT clear the remainder. (The published roots
-            # are cleared unconditionally regardless.) Matches the sibling
-            # dkg_shared_memory_publish default for an explicit-root selection.
-            clear_after=False,
+            quads,
             sub_graph_name=_first_text(args, "sub_graph_name"),
         )
         # Only stamp the per-call counts on a non-hard-failure result (FIX N /
@@ -1811,7 +1792,6 @@ class DKGMemoryProvider(MemoryProvider):
         # published. Confirmed / 207-partial results are fine to annotate.
         if isinstance(result, dict) and not _client_result_failed(result):
             result["quadsPublished"] = len(quads)
-            result["rootEntities"] = roots
         return json.dumps(result)
 
     def _handle_shared_memory_publish(self, args: Dict[str, Any]) -> str:
@@ -2856,15 +2836,6 @@ def _normalize_semantic_quads(raw_quads: Any) -> Tuple[List[Dict[str, str]], Opt
             "object": object_value if _is_safe_iri(object_value) or object_value.startswith('"') else _quote_literal(object_value),
         })
     return quads, None
-
-
-def _quad_root_entities(quads: List[Dict[str, str]]) -> List[str]:
-    roots: List[str] = []
-    for quad in quads:
-        subject = str(quad.get("subject", "")).strip()
-        if subject and subject not in roots:
-            roots.append(subject)
-    return roots
 
 
 def _coerce_limit(value: Any, default: int, maximum: int) -> int:
