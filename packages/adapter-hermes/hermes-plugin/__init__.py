@@ -786,7 +786,7 @@ DKG_ASSERTION_QUERY_SCHEMA = {
 }
 
 DKG_IMPORT_ARTIFACT_RESOLVE_SCHEMA = {
-    "name": "dkg_import_artifact_resolve",
+    "name": "dkg_knowledge_asset_import_artifact_resolve",
     "description": "Optional validation/debug helper. Resolve a completed imported attachment/assertion into deterministic artifact metadata. Skipped imports are rejected.",
     "parameters": {
         "type": "object",
@@ -802,7 +802,7 @@ DKG_IMPORT_ARTIFACT_RESOLVE_SCHEMA = {
 }
 
 DKG_IMPORT_ARTIFACT_READ_MARKDOWN_SCHEMA = {
-    "name": "dkg_import_artifact_read_markdown",
+    "name": "dkg_knowledge_asset_import_artifact_read_markdown",
     "description": "Read Markdown for a completed imported attachment through daemon content-addressed storage, never arbitrary filesystem paths.",
     "parameters": {
         "type": "object",
@@ -819,7 +819,7 @@ DKG_IMPORT_ARTIFACT_READ_MARKDOWN_SCHEMA = {
 }
 
 DKG_SEMANTIC_ENRICHMENT_WRITE_SCHEMA = {
-    "name": "dkg_semantic_enrichment_write",
+    "name": "dkg_knowledge_asset_semantic_enrichment_write",
     "description": "Append model-derived triples to a completed imported assertion with daemon-stamped provenance. Does not promote, finalize, or publish.",
     "parameters": {
         "type": "object",
@@ -1155,8 +1155,8 @@ class DKGMemoryProvider(MemoryProvider):
             "  dkg_knowledge_asset_create/write/finalize/share/publish — Canonical knowledge asset lifecycle (create -> write -> finalize -> share -> publish)\n"
             "  dkg_knowledge_asset_pull_from/query/history/discard/import_file — Reseed a draft, inspect quads, read lifecycle state, discard, or import a document\n"
             "\n"
-            "  dkg_import_artifact_read_markdown + dkg_semantic_enrichment_write - Read imported attachment Markdown and append semantic triples to the imported assertion\n"
-            "  dkg_import_artifact_resolve - Optional metadata re-check for imported attachments\n"
+            "  dkg_knowledge_asset_import_artifact_read_markdown + dkg_knowledge_asset_semantic_enrichment_write - Read imported attachment Markdown and append semantic triples to the imported assertion\n"
+            "  dkg_knowledge_asset_import_artifact_resolve - Optional metadata re-check for imported attachments\n"
             "\n"
             "COLLABORATION WORKFLOW:\n"
             "  dkg_share — Share findings to Shared Working Memory (team-visible, free)\n"
@@ -1277,9 +1277,9 @@ class DKGMemoryProvider(MemoryProvider):
             "dkg_knowledge_asset_discard": self._handle_assertion_discard,
             "dkg_knowledge_asset_import_file": self._handle_assertion_import_file,
             "dkg_knowledge_asset_query": self._handle_assertion_query,
-            "dkg_import_artifact_resolve": self._handle_import_artifact_resolve,
-            "dkg_import_artifact_read_markdown": self._handle_import_artifact_read_markdown,
-            "dkg_semantic_enrichment_write": self._handle_semantic_enrichment_write,
+            "dkg_knowledge_asset_import_artifact_resolve": self._handle_import_artifact_resolve,
+            "dkg_knowledge_asset_import_artifact_read_markdown": self._handle_import_artifact_read_markdown,
+            "dkg_knowledge_asset_semantic_enrichment_write": self._handle_semantic_enrichment_write,
             "dkg_knowledge_asset_history": self._handle_assertion_history,
             "dkg_sub_graph_create": self._handle_sub_graph_create,
             "dkg_sub_graph_list": self._handle_sub_graph_list,
