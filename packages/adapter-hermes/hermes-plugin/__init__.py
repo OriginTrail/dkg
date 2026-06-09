@@ -326,6 +326,8 @@ DKG_PUBLISH_SCHEMA = {
         "quads publish together as one sealed assertion in a single atomic mint. Object "
         "values starting with http://, https://, urn:, or did: are treated as URIs; everything "
         "else becomes a string literal automatically.\n"
+        "This atomic path requires the context graph to be registered on-chain; pass "
+        "register_if_needed=true to register it first on a fresh CG.\n"
         "Always call dkg_wallet_balances first to verify sufficient TRAC."
     ),
     "parameters": {
@@ -350,6 +352,16 @@ DKG_PUBLISH_SCHEMA = {
                 },
                 "description": "Array of RDF triples to write and publish.",
             },
+            "register_if_needed": {
+                "type": "boolean",
+                "description": (
+                    "If the context graph is not yet registered on-chain, register it first "
+                    "(idempotent), then publish. Registration may spend gas/TRAC. Default false -- "
+                    "when false and the CG is unregistered, publish fails with the daemon's "
+                    "not-registered error."
+                ),
+            },
+            "access_policy": {"type": "integer", "description": "Optional registration access policy used only with register_if_needed: 0 open, 1 private."},
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph scope."},
         },
         "required": ["context_graph_id", "quads"],
@@ -1773,6 +1785,28 @@ class DKGMemoryProvider(MemoryProvider):
         quads = _normalize_quads(args.get("quads"))
         if not quads:
             return tool_error("quads must contain at least one item with subject, predicate, and object.")
+        # register_if_needed: the atomic assertionName fork (publish_quads) does
+        # NOT auto-register the CG (LU-6 transparent register-then-publish is the
+        # selection fork only, memory.ts:1874+), so on a fresh, never-registered
+        # CG the publish would fail "not registered on-chain" on a real chain.
+        # When true, register the CG first (idempotent — short-circuits if already
+        # registered) BEFORE publishing, so this one-shot is self-contained on a
+        # fresh CG. Mirrors the §G register block on dkg_knowledge_asset_publish.
+        registration = None
+        if args.get("register_if_needed") is not None and not isinstance(args.get("register_if_needed"), bool):
+            return tool_error("register_if_needed must be a boolean.")
+        if args.get("register_if_needed") is True:
+            access_policy = args.get("access_policy")
+            access_policy_error = _validate_access_policy(access_policy)
+            if access_policy_error:
+                return tool_error(access_policy_error)
+            registration = self._client.register_context_graph(cg, access_policy)
+            if _client_result_failed(registration):
+                error = str(registration.get("error") or registration.get("message") or "").lower()
+                # "already registered"/"already exists" is success — continue.
+                # Any other registration failure is fatal: surface it and do NOT publish.
+                if "already registered" not in error and "already exists" not in error:
+                    return json.dumps(registration)
         # Publish via the ATOMIC assertionName fork (parity with OpenClaw + MCP):
         # create a fresh uniquely-named assertion with these quads (auto-finalize
         # + promote), then publish that ONE sealed assertion by name. The daemon
@@ -1792,6 +1826,8 @@ class DKGMemoryProvider(MemoryProvider):
         # published. Confirmed / 207-partial results are fine to annotate.
         if isinstance(result, dict) and not _client_result_failed(result):
             result["quadsPublished"] = len(quads)
+            if registration is not None:
+                result["registration"] = registration
         return json.dumps(result)
 
     def _handle_shared_memory_publish(self, args: Dict[str, Any]) -> str:
