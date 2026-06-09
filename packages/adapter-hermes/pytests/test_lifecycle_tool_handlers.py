@@ -31,6 +31,12 @@ LEGACY_NAMES = [
 class _FakeClient:
     def __init__(self):
         self.calls = []
+        # Override to test §G register_if_needed branches; default success.
+        self.register_response = {"registered": "cg", "onChainId": "1"}
+
+    def register_context_graph(self, context_graph_id, access_policy=None):
+        self.calls.append(("register", context_graph_id, access_policy))
+        return self.register_response
 
     def finalize_assertion(self, name, cg, sub_graph_name=None,
                            author_agent_address=None, scheme_version=None):
@@ -365,6 +371,87 @@ def test_publish_handler_enforces_publish_guard(provider):
         "context_graph_id": "cg1", "name": "ka",
     }))
     assert "disabled by the adapter publish guard" in out["error"]
+
+
+# -- §G: register_if_needed on the per-KA publish ---------------------------
+
+def _kinds(provider):
+    return [c[0] for c in provider._client.calls]
+
+
+def test_publish_schema_has_register_if_needed(provider):
+    pub = next(s for s in provider.get_tool_schemas()
+               if s["name"] == "dkg_knowledge_asset_publish")
+    props = pub["parameters"]["properties"]
+    assert props["register_if_needed"]["type"] == "boolean"
+    assert "access_policy" in props
+
+
+def test_publish_register_if_needed_fresh_cg_registers_then_publishes(provider):
+    out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka", "register_if_needed": True,
+    }))
+    # register call happens BEFORE publish
+    assert _kinds(provider) == ["register", "publish"]
+    assert out["status"] == "confirmed"
+    assert out["registration"] == {"registered": "cg", "onChainId": "1"}
+
+
+def test_publish_default_does_not_register(provider):
+    json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka",
+    }))
+    assert _kinds(provider) == ["publish"]
+    assert "register" not in _kinds(provider)
+
+
+def test_publish_register_already_registered_short_circuits(provider):
+    provider._client.register_response = {
+        "success": False, "error": "Context graph already registered on-chain",
+    }
+    out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka", "register_if_needed": True,
+    }))
+    # "already registered" is treated as success → publish still runs
+    assert _kinds(provider) == ["register", "publish"]
+    assert out["status"] == "confirmed"
+
+
+def test_publish_register_hard_failure_does_not_publish(provider):
+    provider._client.register_response = {
+        "success": False, "error": "wallet has insufficient gas",
+    }
+    out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka", "register_if_needed": True,
+    }))
+    # register failed (not the idempotent short-circuit) → publish NOT attempted
+    assert _kinds(provider) == ["register"]
+    assert "publish" not in _kinds(provider)
+    assert out["success"] is False
+    assert "insufficient gas" in out["error"]
+
+
+def test_publish_register_if_needed_must_be_boolean(provider):
+    out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka", "register_if_needed": "yes",
+    }))
+    assert "register_if_needed must be a boolean" in out["error"]
+    assert _kinds(provider) == []  # nothing called
+
+
+def test_publish_register_access_policy_validated_and_forwarded(provider):
+    bad = json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka",
+        "register_if_needed": True, "access_policy": 5,
+    }))
+    assert "access_policy must be 0 or 1" in bad["error"]
+
+    provider._client.calls.clear()
+    provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka",
+        "register_if_needed": True, "access_policy": 1,
+    })
+    assert provider._client.calls[0] == ("register", "cg1", 1)
 
 
 # -- pull_from handler ------------------------------------------------------
