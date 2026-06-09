@@ -500,6 +500,71 @@ class DKGClient:
             payload["subGraphName"] = sub_graph_name
         return self._post(f"/api/knowledge-assets/{quote(assertion_name, safe='')}/swm/share", payload)
 
+    def finalize_assertion(self, assertion_name: str, context_graph_id: str,
+                           sub_graph_name: Optional[str] = None,
+                           author_agent_address: Optional[str] = None,
+                           scheme_version: Optional[int] = None) -> Dict[str, Any]:
+        """POST /api/knowledge-assets/{name}/wm/finalize — seal the WM draft.
+
+        Computes the merkle root and signs the EIP-712 AuthorAttestation
+        node-side. Finalize always seals the WHOLE draft (no subset parameter).
+        ``author_agent_address`` attributes the seal to a specific agent EOA;
+        omit it to let the daemon default the author to the request token's
+        agent. The pre-signed attestation path is intentionally NOT exposed —
+        Hermes relies on node-side signing, exactly like OpenClaw/MCP (no
+        client-side EIP-712, no raw preSignedAuthorAttestation).
+        """
+        payload: Dict[str, Any] = {"contextGraphId": _normalize_context_graph_id(context_graph_id)}
+        if sub_graph_name:
+            payload["subGraphName"] = sub_graph_name
+        if author_agent_address:
+            payload["authorAgentAddress"] = author_agent_address
+        if scheme_version is not None:
+            payload["schemeVersion"] = scheme_version
+        return self._post(f"/api/knowledge-assets/{quote(assertion_name, safe='')}/wm/finalize", payload)
+
+    def publish_finalized_assertion(self, assertion_name: str, context_graph_id: str,
+                                    sub_graph_name: Optional[str] = None,
+                                    options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """POST /api/knowledge-assets/{name}/vm/publish — publish a sealed KA.
+
+        This is the Fork-1 (finalized-assertion) publish: multi-root safe, the
+        seal selects the author and the whole asset. The daemon REJECTS
+        ``assertionName``, author overrides, and any ``selection`` — never send
+        them (knowledge-assets.ts:307-343). ``options`` carries the nested
+        finalized-publish controls ({ publishEpochs?, clearSharedMemoryAfter?,
+        publisherNodeIdentityIdOverride? }). Surfaces { kaId, ual, txHash,
+        status } on success; 409 VM_PUBLISH_PRECONDITION when not finalized +
+        shared.
+        """
+        payload: Dict[str, Any] = {"contextGraphId": _normalize_context_graph_id(context_graph_id)}
+        if sub_graph_name:
+            payload["subGraphName"] = sub_graph_name
+        if options:
+            payload["options"] = options
+        return self._post(f"/api/knowledge-assets/{quote(assertion_name, safe='')}/vm/publish", payload)
+
+    def pull_from(self, assertion_name: str, context_graph_id: str, layer: str,
+                  on_conflict: Optional[str] = None,
+                  sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
+        """POST /api/knowledge-assets/{name}/wm/pull-from — reseed a WM draft.
+
+        Seeds a fresh Working Memory draft from the asset's current Shared
+        Working Memory (``layer="swm"``) or Verifiable Memory (``layer="vm"``)
+        state — the edit-loop primitive (git checkout). ``on_conflict`` defaults
+        to "reject" server-side; pass "replace" to overwrite a dirty draft
+        (otherwise an open draft 409s WM_DRAFT_CONFLICT).
+        """
+        payload: Dict[str, Any] = {
+            "contextGraphId": _normalize_context_graph_id(context_graph_id),
+            "layer": layer,
+        }
+        if on_conflict:
+            payload["onConflict"] = on_conflict
+        if sub_graph_name:
+            payload["subGraphName"] = sub_graph_name
+        return self._post(f"/api/knowledge-assets/{quote(assertion_name, safe='')}/wm/pull-from", payload)
+
     def discard_assertion(self, assertion_name: str, context_graph_id: str,
                           sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
         """POST /api/knowledge-assets/{name}/wm/discard — discard a WM assertion."""
