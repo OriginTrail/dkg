@@ -458,7 +458,9 @@ for name in ["dkg_publish", "dkg_shared_memory_publish", "dkg_knowledge_asset_pu
     assert name in direct_names, direct_names
 publish_schema = next(schema for schema in direct_schemas if schema["name"] == "dkg_publish")
 quad_props = publish_schema["parameters"]["properties"]["quads"]["items"]["properties"]
-assert "graph" in quad_props, publish_schema
+# No per-quad graph on the write/publish quad schema — the daemon pins triples
+# to the per-KA graph itself (CONTRACT inv.2). Parity with OpenClaw + MCP.
+assert "graph" not in quad_props, publish_schema
 
 provider._config = {
     "publish_tool": "direct",

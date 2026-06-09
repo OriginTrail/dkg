@@ -338,8 +338,9 @@ DKG_PUBLISH_SCHEMA = {
                         "subject": {"type": "string", "description": "Subject URI (e.g. 'https://example.org/finding/001')"},
                         "predicate": {"type": "string", "description": "Predicate URI (e.g. 'https://schema.org/name')"},
                         "object": {"type": "string", "description": "Object — URI or literal (e.g. 'Warfarin interaction' or 'https://schema.org/MedicalEntity')"},
-                        "graph": {"type": "string", "description": "Optional named graph URI."},
                     },
+                    # No per-quad `graph`: the daemon pins triples to the per-KA
+                    # graph itself (CONTRACT §0 invariant 2). Matches OpenClaw + MCP.
                     "required": ["subject", "predicate", "object"],
                 },
                 "description": "Array of RDF triples to write and publish.",
@@ -575,8 +576,10 @@ QUAD_SCHEMA = {
         "subject": {"type": "string", "description": "Subject URI."},
         "predicate": {"type": "string", "description": "Predicate URI."},
         "object": {"type": "string", "description": "Object URI or literal text."},
-        "graph": {"type": "string", "description": "Optional graph name."},
     },
+    # No per-quad `graph` field: the write wire shape is {subject,predicate,object}
+    # and the daemon pins every triple to the per-KA WM graph itself, overriding
+    # any client-supplied graph (CONTRACT §0 invariant 2). Matches OpenClaw + MCP.
     "required": ["subject", "predicate", "object"],
 }
 
@@ -2670,13 +2673,15 @@ def _normalize_quads(raw_quads: Any) -> List[Dict[str, str]]:
         object_value = str(raw.get("object", "")).strip()
         if not subject or not predicate or not object_value:
             return []
+        # Emit {subject,predicate,object} only — no per-quad `graph`. The daemon
+        # pins every triple to the per-KA WM graph itself and overrides any
+        # client-supplied graph (CONTRACT §0 invariant 2). A `graph` key on the
+        # input is silently dropped here, matching OpenClaw + MCP.
         quad = {
             "subject": subject,
             "predicate": predicate,
             "object": object_value if _is_uri(object_value) or object_value.startswith('"') else _quote_literal(object_value),
         }
-        if raw.get("graph") is not None:
-            quad["graph"] = str(raw.get("graph", ""))
         quads.append(quad)
     return quads
 
