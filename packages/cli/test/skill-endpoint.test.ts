@@ -134,14 +134,21 @@ describe('SKILL.md file', () => {
   });
 
   it('documents imported attachment semantic enrichment as same-assertion append', () => {
-    expect(skillContent).toContain('dkg_import_artifact_read_markdown');
-    expect(skillContent).toContain('dkg_import_artifact_resolve');
-    expect(skillContent).toContain('dkg_semantic_enrichment_write');
+    // rc.17 rename (CONTRACT §2): the import-artifact / semantic-enrichment tools
+    // are part of the dkg_knowledge_asset_* family now — no dkg_assertion_* /
+    // dkg_import_artifact_* / dkg_semantic_enrichment_* back-compat names remain.
+    expect(skillContent).toContain('dkg_knowledge_asset_import_artifact_read_markdown');
+    expect(skillContent).toContain('dkg_knowledge_asset_import_artifact_resolve');
+    expect(skillContent).toContain('dkg_knowledge_asset_semantic_enrichment_write');
     expect(skillContent).toContain('appends model-derived semantic triples');
     expect(skillContent).toContain('same imported assertion graph');
     expect(skillContent).toContain('Optional metadata re-check');
     expect(skillContent).toContain('rejects target assertion names');
     expect(skillContent).not.toContain('separate Working Memory assertion');
+    // The legacy short names must be fully gone from the canonical skill doc.
+    expect(skillContent).not.toContain('dkg_import_artifact_read_markdown');
+    expect(skillContent).not.toContain('dkg_import_artifact_resolve');
+    expect(skillContent).not.toContain('dkg_semantic_enrichment_write');
   });
 
   it('documents error status codes', () => {
