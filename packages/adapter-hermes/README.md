@@ -150,7 +150,7 @@ with ownership metadata and leaves a non-managed file untouched.
 | `memory_mode` | `provider` | Stored setup mode for status/reconnect/uninstall. |
 | `publish_tool` / `allow_direct_publish` | direct / `true` | Controls exposure of direct publish tools. Env `DKG_ALLOW_DIRECT_PUBLISH=false` hides them. |
 | `allow_context_graph_admin_tools` | `true` | Controls mutating project-admin tools. Env `DKG_ALLOW_CONTEXT_GRAPH_ADMIN_TOOLS=false` hides them. |
-| `import_roots` | `[]` | Optional safe roots for `dkg_assertion_import_file`; env import-root settings also apply. |
+| `import_roots` | `[]` | Optional safe roots for `dkg_knowledge_asset_import_file`; env import-root settings also apply. |
 
 Environment token override order is `DKG_API_TOKEN`, `DKG_AUTH_TOKEN`, the
 setup-resolved `dkg_home`, `DKG_HOME`, then `~/.dkg`.
@@ -191,8 +191,10 @@ the integration stays disconnected and the restore error surfaces as a
 warning on the Node UI row.
 
 Once DKG is the active provider, Hermes receives DKG-backed memory recall,
-`dkg_memory`, `memory_search`, `dkg_query`, `dkg_share`,
-assertion/sub-graph helpers, and status/wallet/network helpers.
+`dkg_memory`, `memory_search`, `dkg_query`, `dkg_share`, the
+`dkg_knowledge_asset_*` lifecycle tools (create -> write -> finalize -> share ->
+publish, plus pull_from / query / history / discard / import_file),
+sub-graph helpers, and status/wallet/network helpers.
 
 ## Node UI Connect, Refresh, And Disconnect
 
@@ -263,7 +265,7 @@ provenance before forwarding them to Hermes.
   can hide direct publish exposure with `DKG_ALLOW_DIRECT_PUBLISH=false`.
 - Context-graph admin mutation tools are enabled by default for collaboration;
   operators can hide them with `DKG_ALLOW_CONTEXT_GRAPH_ADMIN_TOOLS=false`.
-- `dkg_assertion_import_file` requires an operator-approved import root. Use
+- `dkg_knowledge_asset_import_file` requires an operator-approved import root. Use
   `DKG_HERMES_IMPORT_ROOTS`, `HERMES_DKG_IMPORT_ROOTS`, `DKG_IMPORT_ROOTS`, or
   adapter `import_roots` to approve document locations explicitly.
 
