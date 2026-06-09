@@ -1812,8 +1812,9 @@ class DKGMemoryProvider(MemoryProvider):
             return tool_error("register_if_needed must be a boolean.")
         if args.get("register_if_needed") is True:
             access_policy = args.get("access_policy")
-            if access_policy is not None and access_policy not in (0, 1):
-                return tool_error("access_policy must be 0 or 1.")
+            access_policy_error = _validate_access_policy(access_policy)
+            if access_policy_error:
+                return tool_error(access_policy_error)
             registration = self._client.register_context_graph(cg, access_policy)
             if _client_result_failed(registration):
                 error = str(registration.get("error") or registration.get("message") or "").lower()
@@ -2218,8 +2219,9 @@ class DKGMemoryProvider(MemoryProvider):
             return tool_error("register_if_needed must be a boolean.")
         if args.get("register_if_needed") is True:
             access_policy = args.get("access_policy")
-            if access_policy is not None and access_policy not in (0, 1):
-                return tool_error("access_policy must be 0 or 1.")
+            access_policy_error = _validate_access_policy(access_policy)
+            if access_policy_error:
+                return tool_error(access_policy_error)
             registration = self._client.register_context_graph(cg, access_policy)
             if _client_result_failed(registration):
                 error = str(registration.get("error") or registration.get("message") or "").lower()
@@ -2236,7 +2238,7 @@ class DKGMemoryProvider(MemoryProvider):
         )
         if registration is not None and isinstance(result, dict):
             result["registration"] = registration
-        return json.dumps(result)
+        return json.dumps(_annotate_vm_publish_partial(result))
 
     def _handle_assertion_pull_from(self, args: Dict[str, Any]) -> str:
         if self._offline:
@@ -2910,6 +2912,52 @@ def _validate_decimal_string_arg(value: Any, label: str) -> Tuple[Optional[str],
             return None, f"{label} must be a non-negative integer (decimal string)."
         return text, None  # preserved verbatim — no precision loss
     return None, f"{label} must be a non-negative integer (decimal string)."
+
+
+def _annotate_vm_publish_partial(result: Any) -> Any:
+    """Flag a vm/publish 207 partial result (KA minted, CG-binding failed).
+
+    The daemon's per-KA ``/vm/publish`` route returns HTTP 207 when the asset was
+    minted on-chain (UAL/kaId valid) but the context-graph binding step FAILED —
+    the signal is a non-empty ``contextGraphError`` in the body (``classifyVmPublish``,
+    knowledge-assets.ts:291-300). Python ``requests`` does not raise on 207, so the
+    body flows through as plain success. This is NOT a hard failure (the asset IS
+    published), but it must NOT be reported as full success: add ``partial: true``
+    + a ``warning`` so the agent retries the CG binding while the UAL stays visible.
+    A 200 with no ``contextGraphError`` is left untouched (clean success). Parity
+    with OpenClaw 54998c9c7 / MCP f8c364e5a.
+    """
+    if not isinstance(result, dict):
+        return result
+    context_graph_error = result.get("contextGraphError")
+    if isinstance(context_graph_error, str) and context_graph_error:
+        return {
+            **result,
+            "partial": True,
+            "warning": (
+                "Partial publish: the knowledge asset was minted on-chain (UAL/kaId are valid), "
+                f"but the context-graph binding failed ({context_graph_error}). The on-chain asset "
+                "is published; retry the publish to re-attempt the context-graph binding."
+            ),
+        }
+    return result
+
+
+def _validate_access_policy(value: Any) -> Optional[str]:
+    """Validate an optional registration access_policy (0 open | 1 private).
+
+    Returns an error message for a present-but-invalid value, or ``None`` when
+    absent or valid. ``bool`` is REJECTED explicitly: it is an ``int`` subclass
+    in Python, so ``True``/``False`` would pass a bare ``not in (0, 1)`` check
+    (``True == 1``, ``False == 0``) and serialize as JSON ``true``/``false`` —
+    which the daemon's ``typeof === 'number'`` guard drops, silently resolving to
+    its default. Use ``type(...) is int`` so only true ints 0/1 are accepted.
+    """
+    if value is None:
+        return None
+    if type(value) is not int or value not in (0, 1):
+        return "access_policy must be 0 (open) or 1 (private)."
+    return None
 
 
 def _build_memory_search_sparql(keywords: List[str], limit: int) -> str:
