@@ -319,10 +319,20 @@ export class FakeClient {
     if (!cell) throw new Error(`assertion not created: ${key}`);
     const isSubset = Array.isArray(args.entities) && args.entities.length > 0;
     if (isSubset) {
+      const entitySet = new Set(args.entities as string[]);
       for (const e of args.entities as string[]) cell.promotedRoots.add(e);
+      // Production promote MOVES the promoted triples WM → SWM and DELETES them
+      // from the WM draft (`dkg-publisher.ts:4665-4669`, `store.delete(... graph:
+      // wmGraphUri)`). A SELECTIVE share deletes ONLY the shared subset's quads
+      // (production filters `quadsToPromote` to the subset at :4518-4526); the
+      // rest stay in WM. Model that so a post-share WM `query` reflects reality.
+      cell.quads = cell.quads.filter((q) => !entitySet.has(q.subject));
       // CONTRACT §5 / §1 Stage4: a SUBSET share is NOT auto-sealed.
     } else {
       for (const q of cell.quads) cell.promotedRoots.add(q.subject);
+      // A FULL share promotes every root, so production empties the WM draft
+      // entirely (every quad is deleted from the WM graph). Clear WM here too.
+      cell.quads = [];
       // CONTRACT §1 Stage4: a FULL share ("all"/omitted) auto-seals best-effort
       // and is publish-ready.
       cell.finalized = true;

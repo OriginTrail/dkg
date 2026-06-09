@@ -136,13 +136,10 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     expect(written.isError).toBeFalsy();
     expect(written.content[0].text).toMatch(/Wrote 2 quad\(s\)/);
 
-    const shared = await server.call('dkg_knowledge_asset_share', {
-      name: 'session-2026',
-      entities: ['urn:x:1'],
-    });
-    expect(shared.isError).toBeFalsy();
-    expect(shared.content[0].text).toMatch(/Shared 1 entity/);
-
+    // Dump the WM draft BEFORE sharing — `dkg_knowledge_asset_query` reads the
+    // WM draft, and production promote MOVES the shared quads to SWM and DELETES
+    // them from WM (`dkg-publisher.ts:4665-4669`), so the @en round-trip must be
+    // verified on the WM draft pre-share.
     const queried = await server.call('dkg_knowledge_asset_query', { name: 'session-2026' });
     expect(queried.isError).toBeFalsy();
     expect(queried.content[0].text).toMatch(/2 quad\(s\)/);
@@ -152,13 +149,29 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     // unescaped form on the raw stored quad below.
     expect(queried.content[0].text).toContain('\\"hello world\\"@en');
 
+    const cellBeforeShare = client.assertions.get('test-cg::session-2026');
+    expect(cellBeforeShare).toBeDefined();
+    expect(cellBeforeShare!.quads).toHaveLength(2);
+    // Object stored verbatim — language-tagged literal is preserved in WM.
+    expect(cellBeforeShare!.quads[0].object).toBe(langTagged);
+
+    const shared = await server.call('dkg_knowledge_asset_share', {
+      name: 'session-2026',
+      entities: ['urn:x:1'],
+    });
+    expect(shared.isError).toBeFalsy();
+    expect(shared.content[0].text).toMatch(/Shared 1 entity/);
+
+    // After sharing `urn:x:1`, BOTH quads (both have subject `urn:x:1`) move
+    // WM → SWM and are deleted from the WM draft — so a post-share WM query
+    // returns 0 quads. (This is the lifecycle reality the harness now models;
+    // SWM is the layer that holds the shared content.)
     const cell = client.assertions.get('test-cg::session-2026');
     expect(cell).toBeDefined();
-    expect(cell!.quads).toHaveLength(2);
     expect(cell!.promotedRoots.has('urn:x:1')).toBe(true);
-    // Object stored verbatim — language-tagged literal is preserved on
-    // both the wire and in the memory fixture.
-    expect(cell!.quads[0].object).toBe(langTagged);
+    expect(cell!.quads).toHaveLength(0);
+    const queriedAfter = await server.call('dkg_knowledge_asset_query', { name: 'session-2026' });
+    expect(queriedAfter.content[0].text).toMatch(/0 quad\(s\)/);
   });
 
   it('create is idempotent: a duplicate name reports alreadyExists rather than erroring', async () => {
