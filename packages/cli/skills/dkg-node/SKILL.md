@@ -100,8 +100,15 @@ A full `swm/share` (`entities: "all"`) auto-seals best-effort, so you can also s
 without an explicit finalize — but the explicit `wm/finalize` step below is the
 canonical, predictable path (see §5 "Verifiable Memory" for the auto-seal caveats).
 
+> **VM publishing needs an on-chain CG.** A project created with
+> `/api/context-graph/create` is local-only — `vm/publish` fails until the CG is
+> registered on-chain. The quick start registers it explicitly below; alternatively pass
+> `"register_if_needed": true` on the `vm/publish` body to register-then-publish in one
+> call (see §5 "Registering the CG for VM").
+
 ```bash
 curl -X POST $BASE_URL/api/context-graph/create -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"id":"my-project","name":"My Project"}'
+curl -X POST $BASE_URL/api/context-graph/register -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"id":"my-project"}'   # register on-chain so VM publishing works (costs gas/TRAC)
 curl -X POST $BASE_URL/api/knowledge-assets -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"contextGraphId":"my-project","name":"notes"}'
 curl -X POST $BASE_URL/api/knowledge-assets/notes/wm/write -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"contextGraphId":"my-project","quads":[{"subject":"https://example.org/alice","predicate":"https://schema.org/name","object":"\"Alice\""}]}'
 curl -X POST $BASE_URL/api/knowledge-assets/notes/wm/finalize -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"contextGraphId":"my-project"}'
@@ -839,7 +846,9 @@ This entire surface was empirically driven by [PR #720](https://github.com/Origi
 > single `swm/share` for the common case (see §5 VM for the auto-seal caveats). The
 > explicit finalize in step 4 is the predictable path. You can also pass `quads` directly
 > to `POST /api/knowledge-assets` (step 2) to auto write+seal in one call, then add
-> `alsoShareSwm`/`alsoPublishVm` to run the whole lifecycle atomically.
+> `alsoShareSwm`/`alsoPublishVm` to run the whole lifecycle atomically — but `alsoPublishVm`
+> still needs the CG registered on-chain first (register it, or use the explicit
+> `vm/publish` + `register_if_needed` path), since the create route has no register flag.
 
 **Private project for me alone (the default):**
 
@@ -860,7 +869,7 @@ This entire surface was empirically driven by [PR #720](https://github.com/Origi
 
 1. `POST /api/knowledge-assets/{name}/wm/import-file` with the document + `contextGraphId`
 2. Poll `GET /api/knowledge-assets/{name}/wm/extraction-status?contextGraphId=...` if needed
-3. Finalize + share the assertion to SWM when extraction is complete (and `vm/publish` to anchor it on chain)
+3. Finalize + share the assertion to SWM when extraction is complete (and `vm/publish` to anchor it on chain — pass `register_if_needed: true` if the project isn't registered on-chain yet; see §5 "Registering the CG for VM")
 
 **Query across layers:**
 
