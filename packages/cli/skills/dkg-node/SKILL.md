@@ -660,14 +660,14 @@ hash/form as the starting point. Do not read local filesystem paths.
 
 Canonical flow:
 
-1. Call `dkg_import_artifact_read_markdown` when you need the Markdown text. The
+1. Call `dkg_knowledge_asset_import_artifact_read_markdown` when you need the Markdown text. The
    daemon validates the import and reads only the content-addressed Markdown blob.
 2. Optionally call `dkg_knowledge_asset_query` to inspect existing triples, or
-   `dkg_import_artifact_resolve` when you need to re-check artifact metadata.
-3. Call `dkg_semantic_enrichment_write` with `contextGraphId`, `assertionUri`,
+   `dkg_knowledge_asset_import_artifact_resolve` when you need to re-check artifact metadata.
+3. Call `dkg_knowledge_asset_semantic_enrichment_write` with `contextGraphId`, `assertionUri`,
    `semanticQuads`, and optional generation metadata.
 
-`dkg_semantic_enrichment_write` appends model-derived semantic triples and
+`dkg_knowledge_asset_semantic_enrichment_write` appends model-derived semantic triples and
 daemon-stamped provenance to the same imported assertion graph. It rejects skipped
 or incomplete imports, rejects per-quad `graph`, rejects target assertion names,
 and does not promote, finalize, or publish.
