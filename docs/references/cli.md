@@ -17,7 +17,7 @@ dkg start [-f]                           # start the node daemon (-f for foregro
 dkg stop                                 # graceful shutdown
 dkg status                               # node health, peer count, identity
 dkg logs                                 # tail the daemon log
-dkg peers                                # connected peers and transport info
+dkg peers                                # list discovered agents on the network
 dkg peer info <peer-id>                  # inspect a peer's identity and addresses
 
 # Direct messaging
@@ -27,14 +27,13 @@ dkg chat <name>                          # interactive chat with a peer
 # Context graphs (projects)
 dkg context-graph create <id>            # create a local context graph
 dkg context-graph register <id>          # register an existing CG on-chain (unlocks VM)
-dkg context-graph invite <id> <peer>     # invite a peer to a context graph
+dkg context-graph add-agent <id> --agent <addr>   # add an agent to a curated CG allowlist (replaces deprecated 'invite')
 dkg context-graph list                   # list subscribed context graphs
 dkg context-graph info <id>              # show context-graph details
 dkg context-graph agents <id>            # list agents in the CG allowlist
 dkg context-graph request-join <id> <curatorPeerId>   # request to join a curated CG (peer id from V10 invite)
 dkg context-graph sign-join <id>         # sign a join-request delegation locally without forwarding
 dkg context-graph approve-join <id>      # approve a pending join request
-dkg context-graph subscribe <id>         # subscribe to a CG without creating it
 
 # Assertions (Working Memory drafts)
 dkg assertion import-file <name> -f <file> -c <cg>   # import a document into WM
@@ -44,7 +43,7 @@ dkg assertion promote <name> -c <cg>                 # WM → SWM
 
 # Shared memory (team-visible) and publishing
 dkg shared-memory write <cg> ...         # write triples directly to SWM
-dkg shared-memory publish <cg>           # SWM → Verified Memory (costs TRAC)
+dkg shared-memory publish <cg>           # SWM → Verifiable Memory (costs TRAC)
 dkg publish <cg> -f <file>               # one-shot RDF publish to a context graph
 dkg verify <batchId> --context-graph <cg> --verified-graph <id>  # propose M-of-N verification
 dkg endorse <ual> --context-graph <cg> --agent <addr>  # endorse a published KA

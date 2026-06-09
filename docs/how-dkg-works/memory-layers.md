@@ -13,7 +13,7 @@ DKG V10 separates memory by scope and trust into three memory layers. Every piec
 
 * **Working Memory (WM)** — _Private, local, free._ Your agent's scratchpad. Write drafts, ingest documents, stage knowledge before sharing it. Nothing leaves your node. No gas, no cost, no coordination overhead. This is where all knowledge starts.
 * **Shared Working Memory (SWM)** — _Collaborative, gossip-replicated, no chain required._ Selectively share knowledge with specific peers — other agents, teammates, or nodes — without publishing to a blockchain. Multiple agents can read from and write to the same Context Graph. This is where collective intelligence happens before anything needs to be verified.
-* **Verifiable Memory (VM)** — _**Blockchain-anchored, cryptographically provable.**_ Promote knowledge that needs to last and be trusted. Once anchored on-chain, it's immutable, queryable by anyone, and carries a provenance trace from the agent that published it. Trust level is explicit: self-attested, endorsed, or consensus-verified. This is where knowledge graduates from working context to ground truth.
+* **Verifiable Memory (VM)** — _**Blockchain-anchored, cryptographically provable.**_ Promote knowledge that needs to last and be trusted. Once anchored on-chain, it's immutable, queryable by anyone, and carries a provenance trace from the agent that published it. Trust level is explicit: self-attested, endorsed, partially-verified, or consensus-verified. This is where knowledge graduates from working context to ground truth.
 
 <table><thead><tr><th width="168">Layer</th><th width="228">Scope</th><th width="106">Cost</th><th>Use</th></tr></thead><tbody><tr><td>Working Memory (WM)</td><td>Private to an agent/node</td><td>Free</td><td>Drafts, session notes, local imports.</td></tr><tr><td>Shared Working Memory (SWM)</td><td>Visible to allowed peers</td><td>Free</td><td>Team-visible findings and shared context.</td></tr><tr><td>Verifiable Memory (VM)</td><td>On-chain anchored</td><td>Gas/TRAC</td><td>Durable final records and verifiable Knowledge Assets.</td></tr></tbody></table>
 
@@ -33,7 +33,7 @@ The assertion lifecycle is the write path agents should prefer.
 2. Write RDF quads into that assertion.
 3. Query the assertion to verify what was written.
 4. Promote the assertion to Shared Working Memory when peers should see it.
-5. Publish SWM to Verified Memory when on-chain finality is required.
+5. Publish SWM to Verifiable Memory when on-chain finality is required.
 6. Read lifecycle history for audit and recovery.
 
 Operational implications:
@@ -46,7 +46,7 @@ Operational implications:
 
 ## Example
 
-An autoresearch agent may write every experiment note to Working Memory. When the result is useful to the team, it promotes the assertion to Shared Working Memory so peer agents can query it. When trusted verifiers reproduce the result, and the team wants durable provenance, the selected graph data can be published to Verified Memory.
+An autoresearch agent may write every experiment note to Working Memory. When the result is useful to the team, it promotes the assertion to Shared Working Memory so peer agents can query it. When trusted verifiers reproduce the result, and the team wants durable provenance, the selected graph data can be published to Verifiable Memory.
 
 That same flow is useful outside research:
 

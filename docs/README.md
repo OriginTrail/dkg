@@ -37,9 +37,9 @@ DKG organizes knowledge into three memory layers rather than collapsing everythi
 
 * **Working Memory** — _Private, local, free._ Your agent's scratchpad. Write drafts, ingest documents, stage knowledge before sharing it. Nothing leaves your node. No cost, no coordination overhead. This is where all knowledge starts.
 * **Shared Working Memory** — _Collaborative, gossip-replicated, no charge._ Selectively share knowledge with specific peers (other agents) without publishing to a blockchain. Multiple agents can read from and write to the same Context Graph. This is where collective intelligence happens before anything needs to be verified.
-* **Verifiable Memory** — _**Blockchain-anchored, cryptographically provable.**_ Promote knowledge that needs to last and be trusted. Once anchored on-chain, it's immutable, queryable by anyone, and carries a provenance trace from the agent that published it. Trust level is explicit: self-attested, endorsed, or consensus-verified. This is where knowledge graduates from working context to ground truth.
+* **Verifiable Memory** — _**Blockchain-anchored, cryptographically provable.**_ Promote knowledge that needs to last and be trusted. Once anchored on-chain, it's immutable, queryable by anyone, and carries a provenance trace from the agent that published it. Trust level is explicit: self-attested, endorsed, partially-verified, or consensus-verified. This is where knowledge graduates from working context to ground truth.
 
-<table><thead><tr><th width="167">Layer</th><th width="183">Scope</th><th width="79">Cost</th><th width="164">Trust</th><th>Persistence</th></tr></thead><tbody><tr><td><strong>Working Memory (WM)</strong></td><td>Private to your agent</td><td>Free</td><td>Self-attested</td><td>Local, survives restarts</td></tr><tr><td><strong>Shared Working Memory (SWM)</strong></td><td>Visible to context-graph peers</td><td>Free</td><td>Self-attested, gossip-replicated</td><td>TTL-bounded</td></tr><tr><td><strong>Verified Memory (VM)</strong></td><td>Permanent, on-chain</td><td>TRAC</td><td>Self-attested → endorsed → consensus-verified</td><td>Permanent</td></tr></tbody></table>
+<table><thead><tr><th width="167">Layer</th><th width="183">Scope</th><th width="79">Cost</th><th width="164">Trust</th><th>Persistence</th></tr></thead><tbody><tr><td><strong>Working Memory (WM)</strong></td><td>Private to your agent</td><td>Free</td><td>Self-attested</td><td>Local, survives restarts</td></tr><tr><td><strong>Shared Working Memory (SWM)</strong></td><td>Visible to context-graph peers</td><td>Free</td><td>Self-attested, gossip-replicated</td><td>TTL-bounded</td></tr><tr><td><strong>Verifiable Memory (VM)</strong></td><td>Permanent, on-chain</td><td>TRAC</td><td>Self-attested → endorsed → consensus-verified</td><td>Permanent</td></tr></tbody></table>
 
 Agents can therefore collaborate before finality, and humans can decide when knowledge deserves the cost and permanence of publication.
 
@@ -66,11 +66,11 @@ You run a node to participate in the network. For most builders, this means runn
 
 ### Ideas to get you started
 
-* **Research agents that build on each other's work:** An agent ingests sources into Working Memory, distills findings into Shared Working Memory for teammates or other agents to query, and promotes validated conclusions to Verified Memory as a citable knowledge artifact. → _All three memory layers_
+* **Research agents that build on each other's work:** An agent ingests sources into Working Memory, distills findings into Shared Working Memory for teammates or other agents to query, and promotes validated conclusions to Verifiable Memory as a citable knowledge artifact. → _All three memory layers_
 * **Multi-agent task coordination:** Multiple agents working on a long-horizon task share a Context Graph in Shared Working Memory. Each agent reads the latest state written by others, avoiding duplicate work and conflicting outputs. → _Shared Working Memory_
 * **Auditable AI decision traces:** An agent publishes its reasoning steps and decisions as Knowledge Assets anchored on-chain. Any downstream system — or human auditor — can query what the agent concluded, when, and from what sources. → _Verifiable Memory_
 * **Personal knowledge bases that agents can query:** Ingest documents, notes, and structured data into Working Memory on your node. Your agents query it via SPARQL — structured, precise retrieval rather than fuzzy vector search. → _Working Memory_
-* **Cross-team knowledge sharing without a central platform:** Teams share a Context Graph in Shared Working Memory. When knowledge is ready to be trusted beyond the team, it gets promoted to Verifiable Memory — no central database, no single point of failure. → _Shared Working Memory → Verified Memory_
+* **Cross-team knowledge sharing without a central platform:** Teams share a Context Graph in Shared Working Memory. When knowledge is ready to be trusted beyond the team, it gets promoted to Verifiable Memory — no central database, no single point of failure. → _Shared Working Memory → Verifiable Memory_
 
 ## Next steps
 

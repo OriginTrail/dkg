@@ -14,7 +14,7 @@ doc_type: playbook
 3. Write RDF quads.
 4. Query the assertion to verify.
 5. Promote to Shared Working Memory when peers should see it.
-6. Publish to Verified Memory only with explicit finality intent.
+6. Publish to Verifiable Memory only with explicit finality intent.
 
 Node Skill tools:
 

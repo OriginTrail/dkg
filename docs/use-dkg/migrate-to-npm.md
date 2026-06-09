@@ -1,9 +1,11 @@
 ---
-status: current
+status: deprecated
 version: v10
 audience: human+agent
 doc_type: how-to
 ---
+
+> **Applies to `10.0.0-rc.11` and earlier.** The `dkg migrate-to-npm` command was removed in `10.0.0-rc.17`. On current releases the git-checkout → npm migration runs automatically on the first `dkg start`, so this manual procedure is no longer needed. Keep this page only for operators running a node pinned to rc.11 or older.
 
 # Migrate a git-checkout install to the npm-pinned auto-update path
 

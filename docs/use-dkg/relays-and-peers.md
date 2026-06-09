@@ -54,7 +54,7 @@ CLI entries and config entries are deduplicated before they are prepended to the
 Short peer-to-peer protocols that use Universal Messenger expose delivery latency and queued counts through the daemon API:
 
 ```bash
-curl -H "Authorization: Bearer $(cat ~/.dkg/auth.token)" \
+curl -H "Authorization: Bearer $(dkg auth show)" \
   http://127.0.0.1:9200/api/slo
 ```
 

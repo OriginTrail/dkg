@@ -49,7 +49,7 @@ Optional:
    - Download from [oxigraph/oxigraph releases](https://github.com/oxigraph/oxigraph/releases) or build from source.
    - Run the server, e.g.:
      ```bash
-     oxigraph serve --bind 127.0.0.1:7878 --storage-path /path/to/oxigraph-data
+     oxigraph serve --bind 127.0.0.1:7878 --location /path/to/oxigraph-data
      ```
    - Default paths are often `/query` and `/update` (check the server’s docs).
 

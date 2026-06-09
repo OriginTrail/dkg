@@ -48,10 +48,10 @@ Some roadmap concepts are important to explain now because they shape the system
 
 ```mermaid
 flowchart TB
-  R1["Round 1<br/>Working + Shared Memory integrations"] --> R2["Round 2<br/>Verified Memory + context oracles"]
+  R1["Round 1<br/>Working + Shared Memory integrations"] --> R2["Round 2<br/>Verifiable Memory + context oracles"]
   R2 --> R3["Round 3<br/>Agent-ready analytics + user support"]
 ```
 
-Round 1 seeds the pre-verification layer with useful integrations. Round 2 is expected to move more of that output into Verified Memory and oracle-ready workflows. Round 3 is expected to make the resulting network easier for agents and humans to inspect, support, and operate.
+Round 1 seeds the pre-verification layer with useful integrations. Round 2 is expected to move more of that output into Verifiable Memory and oracle-ready workflows. Round 3 is expected to make the resulting network easier for agents and humans to inspect, support, and operate.
 
 The binding program details live in the official [DKG V10 Bounty Program](../active-now/dkg-v10-bounty.md) page.

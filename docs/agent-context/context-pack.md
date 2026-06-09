@@ -16,7 +16,7 @@ Use this decision order:
 3. Need exact graph patterns: use SPARQL query with named graph patterns.
 4. Need to write draft knowledge: create and write a Working Memory assertion.
 5. Need team-visible knowledge: promote the assertion to Shared Working Memory.
-6. Need durable finality: publish from Shared Working Memory to Verified Memory after confirming wallet funds and user intent.
+6. Need durable finality: publish from Shared Working Memory to Verifiable Memory after confirming wallet funds and user intent.
 7. Need publisher conviction: use the current PCA CLI/API surface, then verify ownership and registered agent status before assuming discount eligibility.
 
 Always report the memory layer when presenting evidence. Do not imply on-chain verification for WM or SWM data.
