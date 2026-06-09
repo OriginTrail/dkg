@@ -311,6 +311,65 @@ describe('dkg_publish tool', () => {
     expect(writeBody.quads[0]).not.toHaveProperty('graph');
     expect(writeBody.quads[0]).toMatchObject({ subject: 'urn:a', predicate: 'urn:b' });
   });
+
+  // ── CONTRACT §G — register_if_needed on the one-shot dkg_publish ──────────
+  it('register_if_needed:true registers the CG on-chain THEN publishes', async () => {
+    ft.addResponses(
+      new Response(JSON.stringify({ registered: 'testing', onChainId: 'chain:testing' }), { status: 200 }), // register
+      new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),                                  // create
+      new Response(JSON.stringify({ kaId: 'kc-reg', kas: [] }), { status: 200 }),                            // publish
+    );
+    const tool = findTool('dkg_publish');
+    const result = await tool.execute('call-reg', {
+      context_graph_id: 'testing',
+      quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'hello' }],
+      register_if_needed: true,
+      access_policy: 1,
+    });
+    // register first, then the publish two-call path.
+    expect(String(ft.calls[0][0])).toContain('/api/context-graph/register');
+    const regBody = JSON.parse(ft.calls[0][1]?.body as string);
+    expect(regBody).toMatchObject({ id: 'testing', accessPolicy: 1 });
+    expect(String(ft.calls[1][0])).toContain('/api/knowledge-assets');
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.kaId).toBe('kc-reg');
+    expect(parsed.registration).toBeDefined();
+  });
+
+  it('register_if_needed:true tolerates an already-registered CG and still publishes', async () => {
+    ft.addResponses(
+      new Response(JSON.stringify({ error: 'context graph already registered' }), { status: 400 }), // register → already
+      new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),                          // create
+      new Response(JSON.stringify({ kaId: 'kc-already', kas: [] }), { status: 200 }),                // publish
+    );
+    const tool = findTool('dkg_publish');
+    const result = await tool.execute('call-already', {
+      context_graph_id: 'testing',
+      quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'hello' }],
+      register_if_needed: true,
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.kaId).toBe('kc-already');
+    // already-registered → no fresh registration record echoed.
+    expect(parsed.registration).toBeUndefined();
+  });
+
+  it('register_if_needed:true surfaces a register HARD failure and does NOT publish', async () => {
+    ft.addResponses(
+      new Response(JSON.stringify({ error: 'rpc unreachable' }), { status: 500 }), // register hard fail
+    );
+    const tool = findTool('dkg_publish');
+    const result = await tool.execute('call-regfail', {
+      context_graph_id: 'testing',
+      quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'hello' }],
+      register_if_needed: true,
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toBeTruthy();
+    // only the register call was made — publish NOT attempted.
+    expect(ft.calls).toHaveLength(1);
+    expect(String(ft.calls[0][0])).toContain('/api/context-graph/register');
+  });
 });
 
 describe('dkg_query tool', () => {
@@ -906,17 +965,29 @@ describe('dkg_publish SWM-first flow', () => {
     expect(pubUrl).toContain('/api/shared-memory/publish');
   });
 
-  it('ignores unknown access_policy parameter gracefully', async () => {
+  it('rejects an invalid access_policy (now a recognized 0|1 param, CONTRACT §G)', async () => {
+    // access_policy became a real register-time param (0 open / 1 private), so a
+    // non-0/1 value is a tool error instead of being silently ignored.
+    const tool = findTool('dkg_publish');
+    const result = await tool.execute('call-2', { context_graph_id: 'testing', quads: VALID_QUADS, access_policy: 'public' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toMatch(/access_policy.*0.*1/);
+    // Nothing published — validation fails before any daemon call.
+    expect(ft.calls).toHaveLength(0);
+  });
+
+  it('accepts a valid access_policy without register_if_needed (no register call; publishes)', async () => {
     ft.addResponses(
       new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),
       new Response(JSON.stringify({ kaId: 'kc-2', kas: [] }), { status: 200 }),
     );
 
     const tool = findTool('dkg_publish');
-    const result = await tool.execute('call-2', { context_graph_id: 'testing', quads: VALID_QUADS, access_policy: 'public' });
+    const result = await tool.execute('call-2b', { context_graph_id: 'testing', quads: VALID_QUADS, access_policy: 1 });
     const parsed = JSON.parse(result.content[0].text);
-
     expect(parsed.kaId).toBe('kc-2');
+    // access_policy only matters when register_if_needed:true → no register call here.
+    expect(String(ft.calls[0][0])).toContain('/api/knowledge-assets');
   });
 });
 

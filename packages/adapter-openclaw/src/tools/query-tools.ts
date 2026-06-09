@@ -18,7 +18,8 @@ export function buildQueryTools(ctx: DkgToolHost): OpenClawTool[] {
         'One-shot write + publish helper: writes the supplied quads to Shared Working Memory, then publishes ' +
         'all SWM in the CG to Verifiable Memory (on-chain) and clears SWM. For the canonical stepwise flow ' +
         '(create → write → finalize → share → publish) use `dkg_knowledge_asset_create/write/finalize/share` ' +
-        'followed by `dkg_knowledge_asset_publish`.',
+        'followed by `dkg_knowledge_asset_publish`. Publishing requires the context graph to be registered ' +
+        'on-chain — set `register_if_needed: true` to register it first (idempotent) before publishing.',
       parameters: {
         type: 'object',
         properties: {
@@ -37,6 +38,17 @@ export function buildQueryTools(ctx: DkgToolHost): OpenClawTool[] {
             description:
               'Quads to publish. Example: `[{ subject: "https://example.org/a", predicate: "https://schema.org/name", object: "Alpha" }]`. ' +
               'Object values starting with http://, https://, urn:, did: are passed as URIs; anything else becomes a literal.',
+          },
+          register_if_needed: {
+            type: 'boolean',
+            description:
+              'If the context graph is not yet registered on-chain, register it first (idempotent), then publish. ' +
+              'Registration may spend gas/TRAC; it is opt-in. Default false — when false and the CG is ' +
+              'unregistered, publish fails with the daemon\'s not-registered error.',
+          },
+          access_policy: {
+            type: 'number',
+            description: 'Used only when `register_if_needed` is true: `0` for open, `1` for private.',
           },
         },
         required: ['context_graph_id', 'quads'],

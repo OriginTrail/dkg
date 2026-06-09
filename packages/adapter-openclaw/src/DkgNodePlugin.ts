@@ -2741,8 +2741,27 @@ export class DkgNodePlugin {
         return this.error('"quads" must be a non-empty array of {subject, predicate, object} objects.');
       }
 
+      if (args.register_if_needed !== undefined && typeof args.register_if_needed !== 'boolean') {
+        return this.error('"register_if_needed" must be a boolean.');
+      }
+      const registerIfNeeded = args.register_if_needed === true;
+      if (args.access_policy !== undefined && args.access_policy !== 0 && args.access_policy !== 1) {
+        return this.error('"access_policy" must be 0 (open) or 1 (private).');
+      }
+
+      // CONTRACT §G: publishing requires the CG to be registered on-chain and the
+      // daemon does NOT auto-register. When `register_if_needed` is true, register
+      // first (idempotent — "already registered" is success) via the shared helper;
+      // a hard registration failure is a tool error and we do NOT publish. When
+      // false/omitted, publish directly and surface the daemon's not-registered
+      // error verbatim.
+      const registration = registerIfNeeded
+        ? await this.registerContextGraphIfNeeded(contextGraphId, args.access_policy as number | undefined)
+        : undefined;
+
       const result = await this.publisher.publishVerifiableMemory({ contextGraphId, quads: rawQuads });
-      return this.json({ kaId: result.kaId, kaCount: result.kas?.length ?? 0, quadsPublished: rawQuads.length });
+      const summary = { kaId: result.kaId, kaCount: result.kas?.length ?? 0, quadsPublished: rawQuads.length };
+      return this.json(registration ? { ...summary, registration } : summary);
     } catch (err: any) {
       return this.daemonError(err);
     }

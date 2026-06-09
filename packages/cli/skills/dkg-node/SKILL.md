@@ -191,7 +191,7 @@ Drop to HTTP when the operation isn't in the table — participant self-service 
 | `dkg_knowledge_asset_import_artifact_read_markdown` | `POST /api/knowledge-assets/import-artifact/read-markdown` | Safely read Markdown for a completed imported attachment by content-addressed hash |
 | `dkg_knowledge_asset_import_artifact_resolve` | `POST /api/knowledge-assets/import-artifact/resolve` | Optional metadata re-check for completed imported attachments |
 | `dkg_knowledge_asset_semantic_enrichment_write` | `POST /api/knowledge-assets/semantic-enrichment/write` | Append model-derived semantic triples and provenance to the imported assertion |
-| `dkg_publish` | `POST /api/shared-memory/write` + `POST /api/shared-memory/publish` | **Two-call helper** (SWM-bridge / CG-wide): first writes supplied quads to SWM via `/write`, then publishes SWM → VM (TRAC). For a single per-KA sealed publish prefer `dkg_knowledge_asset_publish`. The legacy `/api/shared-memory/publish` is single-root-per-call — see §5 VM |
+| `dkg_publish` | `POST /api/shared-memory/write` + `POST /api/shared-memory/publish` | **Two-call helper** (SWM-bridge / CG-wide): first writes supplied quads to SWM via `/write`, then publishes SWM → VM (TRAC). Accepts `register_if_needed` + `access_policy` to register a fresh CG on-chain first (§6). For a single per-KA sealed publish prefer `dkg_knowledge_asset_publish`. The legacy `/api/shared-memory/publish` is single-root-per-call — see §5 VM |
 | `dkg_shared_memory_publish` | `POST /api/shared-memory/publish` | **SWM-bridge / CG-wide publish (legacy, retained)**: publish existing SWM → VM, no fresh quads. Single-root-per-call (loop for multiple roots). For the per-KA sealed path use `dkg_knowledge_asset_publish` |
 | `dkg_share` | `POST /api/shared-memory/write` | Directly write concise team-visible knowledge to SWM without staging a WM assertion. Prefer the WM assertion → promote flow for durable/canonical work. Both Hermes and OpenClaw expose the same tool schema (required `content` and `context_graph_id`, optional `sub_graph_name`), so MCP-discovered call signatures are portable. The OpenClaw implementation additionally validates content as non-whitespace, mints a unique subject per share (returned in the response), and N-Triples-quotes content; Hermes is currently looser on those points — the parallel hardening is tracked in OriginTrail/dkg#414. |
 | `dkg_sub_graph_create` | `POST /api/sub-graph/create` | Register a sub-graph inside a CG |
@@ -329,12 +329,15 @@ identifiers you get back are `kaId`, `ual`, and `kas[].tokenId`.
 be **registered on-chain** (the first registration is when you accept the chain cost). A
 project created with `dkg_context_graph_create` is local-only until then. Three ways to
 register:
-- **`register_if_needed` on the publish tool (simplest):** `dkg_knowledge_asset_publish`
-  accepts `register_if_needed: true` — it registers the CG on-chain (idempotent; a no-op
-  if already registered, may spend gas/TRAC) and then publishes, in one call. Use this to
-  complete `create → write → finalize → share → publish` on a brand-new CG. Default is
-  `false` (publish a never-registered CG and you'll get the daemon's not-registered
-  error). The same option exists on `dkg_shared_memory_publish`.
+- **`register_if_needed` on the publish tools (simplest):** all three publish tools —
+  `dkg_publish`, `dkg_knowledge_asset_publish`, and `dkg_shared_memory_publish` — accept
+  `register_if_needed: true` (`registerIfNeeded` on the MCP runtime) plus an optional
+  `access_policy` (`0` open / `1` private, used only when registering). It registers the CG
+  on-chain (idempotent; a no-op if already registered, may spend gas/TRAC) and then
+  publishes, in one call. Use this to complete `create → write → finalize → share →
+  publish` on a brand-new CG, or to one-shot `dkg_publish` fresh quads to an unregistered
+  CG. Default is `false` (publish a never-registered CG and you'll get the daemon's
+  not-registered error).
 - **Explicit register:** `POST /api/context-graph/register` `{ id, accessPolicy?, publishPolicy? }` (CLI: `dkg context-graph register <id>`), then publish.
 - **Implicit on the CG-wide path:** the legacy `POST /api/shared-memory/publish` /
   `dkg_shared_memory_publish` auto-registers on first publish (transparent
