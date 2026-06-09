@@ -88,6 +88,24 @@ describe('DkgClient knowledge-assets — publish/finalize option serialization',
     expect(calls).toHaveLength(0);
   });
 
+  it('knowledgeAssetWrite strips any per-quad `graph` at the client (CONTRACT §A)', async () => {
+    const { client, calls } = makeClient();
+    // Even a NON-EMPTY graph must be dropped before the POST — the daemon pins
+    // every quad to the per-KA WM graph, so the write wire shape is
+    // {subject,predicate,object} only. Stripping at the client (not just the
+    // tool schema) defends a hand-built or normalizer-emitted `graph`.
+    await client.knowledgeAssetWrite({
+      contextGraphId: 'cg-1',
+      name: 'f',
+      quads: [{ subject: 's', predicate: 'p', object: 'o', graph: 'urn:my-graph:forged' }],
+    });
+    expect(calls[0].url).toContain('/api/knowledge-assets/f/wm/write');
+    const quads = calls[0].body.quads as Array<Record<string, unknown>>;
+    expect(quads).toHaveLength(1);
+    expect(quads[0]).not.toHaveProperty('graph');
+    expect(quads[0]).toEqual({ subject: 's', predicate: 'p', object: 'o' });
+  });
+
   it('knowledgeAssetFinalize forwards authorAgentAddress', async () => {
     const { client, calls } = makeClient();
     await client.knowledgeAssetFinalize({

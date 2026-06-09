@@ -192,7 +192,9 @@ export function registerAssertionTools(
         'subset parameter). A FULL share (dkg_knowledge_asset_share with ' +
         '`entities` omitted or "all") auto-seals for you, so you only need to ' +
         'call this explicitly before sharing a SELECTIVE subset of entities, or ' +
-        'to re-seal after editing a previously-sealed draft.',
+        'to re-seal after editing a previously-sealed draft. (External-signer / ' +
+        'pre-signed attestation is a tracked follow-up and is not exposed by this ' +
+        'tool — author with authorAgentAddress.)',
       inputSchema: {
         name: z.string().describe('Existing knowledge asset name to finalize'),
         authorAgentAddress: z
@@ -202,7 +204,9 @@ export function registerAssertionTools(
             'Optional 0x author address to attest as. Omit to let the daemon ' +
             'default the author to the request token\'s agent.',
           ),
-        schemeVersion: z.number().int().optional().describe('Optional attestation scheme version'),
+        // CONTRACT §C: scheme_version is a POSITIVE integer (daemon >= 1) — zod
+        // rejects 0 / negative / non-integer at the boundary as a tool error.
+        schemeVersion: z.number().int().positive().optional().describe('Optional attestation scheme version (positive integer)'),
         projectId: z.string().optional().describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
         subGraphName: z.string().optional(),
       },
@@ -255,13 +259,15 @@ export function registerAssertionTools(
         'share the full asset (or model the subset as its own knowledge asset).',
       inputSchema: {
         name: z.string().describe('Existing knowledge asset name'),
+        // CONTRACT §B: accept "all" | string[] | omitted. The daemon reads
+        // parsed.entities and treats "all"/omitted as a full share.
         entities: z
-          .array(z.string())
+          .union([z.literal('all'), z.array(z.string())])
           .optional()
           .describe(
-            'Root entity URIs to share. Omit to share all roots (auto-seals + ' +
-            'publish-ready). A subset shares to SWM only and is NOT publishable ' +
-            'to Verifiable Memory.',
+            'Root entities to share. Omit (or pass the string "all") to share all ' +
+            'roots (auto-seals + publish-ready). A subset (non-empty array) shares ' +
+            'to SWM only and is NOT publishable to Verifiable Memory.',
           ),
         projectId: z.string().optional().describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
         subGraphName: z.string().optional(),
@@ -270,24 +276,26 @@ export function registerAssertionTools(
     async ({ name, entities, projectId, subGraphName }): Promise<ToolResult> => {
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
-      // Provided entities must be a non-empty array of URIs; omitted means
-      // "share all roots" (daemon-side default).
-      if (entities !== undefined && entities.length === 0) {
+      // CONTRACT §B: "all" | string[] | omitted. Pass "all" / omitted through as a
+      // full share (omitted ⇒ undefined ⇒ daemon default); a non-empty array is the
+      // subset. An empty array is rejected client-side (the daemon would 400 it) —
+      // fail fast, never coerce to "all" or omit.
+      if (Array.isArray(entities) && entities.length === 0) {
         return errResult(
-          '"entities" must be omitted or a non-empty array of root entity URIs.',
+          '"entities" must be omitted, the string "all", or a non-empty array of root entity URIs.',
         );
       }
       try {
         // WM → SWM. The KA `swm/share` route is the same engine call
         // (`agent.assertion.promote`) the legacy promote used; omit `entities`
-        // to share every root (the route's default), or pass a subset.
+        // to share every root (the route's default), pass "all", or pass a subset.
         await client.knowledgeAssetShare({
           contextGraphId: pid,
           name,
           subGraphName,
-          entities: entities && entities.length > 0 ? entities : undefined,
+          entities,
         });
-        const scope = entities && entities.length > 0
+        const scope = Array.isArray(entities)
           ? `${entities.length} entit${entities.length === 1 ? 'y' : 'ies'}`
           : 'all root entities';
         return ok(`Shared ${scope} from knowledge asset '${name}' (project '${pid}') to SWM.`);
@@ -314,6 +322,8 @@ export function registerAssertionTools(
         'SWM constraint. Fails 409 if the asset is not yet finalized + shared ' +
         '(run dkg_knowledge_asset_finalize / dkg_knowledge_asset_share first).',
       inputSchema: {
+        // CONTRACT §C: publishEpochs is a POSITIVE integer (zod rejects 0 /
+        // negative / non-integer at the boundary → a fail-fast tool error).
         name: z.string().describe('Knowledge asset name to publish (must be finalized + shared)'),
         publishEpochs: z
           .number()
@@ -321,14 +331,19 @@ export function registerAssertionTools(
           .positive()
           .optional()
           .describe('Optional number of epochs to publish for (positive integer)'),
+        // CONTRACT §C: NON-NEGATIVE integer as a decimal string (daemon /^\d+$/).
+        // Validated at the boundary so a bad value is a clear tool error, not a
+        // generic client throw.
         publisherNodeIdentityIdOverride: z
           .string()
+          .regex(/^\d+$/, 'publisher_node_identity_id_override must be a non-negative integer (decimal string)')
           .optional()
-          .describe('Optional publisher node identity id override (decimal string)'),
-        clearSharedMemoryAfter: z
-          .boolean()
-          .optional()
-          .describe('When true, clear the asset\'s Shared Working Memory after a confirmed publish'),
+          .describe('Optional publisher node identity id override (non-negative integer, decimal string)'),
+        // CONTRACT §D: clear_shared_memory_after is NOT exposed on the per-asset
+        // publish tool — on vm/publish it is graph-wide destructive (wipes every
+        // other agent's unpublished SWM under the CG/sub-graph). The this-asset
+        // cleanup runs unconditionally regardless. The CG-wide clear stays on
+        // dkg_publish / dkg_shared_memory_publish.
         projectId: z.string().optional().describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
         subGraphName: z.string().optional(),
       },
@@ -337,7 +352,6 @@ export function registerAssertionTools(
       name,
       publishEpochs,
       publisherNodeIdentityIdOverride,
-      clearSharedMemoryAfter,
       projectId,
       subGraphName,
     }): Promise<ToolResult> => {
@@ -356,7 +370,6 @@ export function registerAssertionTools(
           subGraphName,
           publishEpochs,
           publisherNodeIdentityIdOverride,
-          clearAfter: clearSharedMemoryAfter,
         });
         return ok(
           `Published knowledge asset '${name}' (project '${pid}') to Verifiable Memory:\n\n\`\`\`json\n${JSON.stringify(

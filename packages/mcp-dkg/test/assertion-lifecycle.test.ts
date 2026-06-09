@@ -195,6 +195,23 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     expect(result.content[0].text).toMatch(/non-empty array/);
   });
 
+  it('share accepts the "all" sentinel and passes it through unchanged (CONTRACT §B)', async () => {
+    const captured: Record<string, unknown> = {};
+    const localClient = new FakeClient({
+      knowledgeAssetShare: async (args) => {
+        Object.assign(captured, args);
+        return { swmShared: true, promotedCount: 2 };
+      },
+    });
+    const localServer = new FakeServer();
+    registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+
+    const res = await localServer.call('dkg_knowledge_asset_share', { name: 'doc', entities: 'all' });
+    expect(res.isError).toBeFalsy();
+    // CONTRACT §B: "all" is forwarded verbatim (NOT coerced to [] or omitted).
+    expect(captured.entities).toBe('all');
+  });
+
   it('discard marks the assertion discarded; subsequent writes fail', async () => {
     await server.call('dkg_knowledge_asset_create', { name: 'rollback' });
     await server.call('dkg_knowledge_asset_discard', { name: 'rollback' });
@@ -270,11 +287,15 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
   // publish must NOT expose author/selection overrides — the seal selects them
   // (CONTRACT §1 Stage5 / §3). It exposes only the finalized-publish options,
   // byte-for-byte with OpenClaw.
-  it('publish schema exposes only finalized-publish options, no author/selection', () => {
+  it('publish schema exposes only finalized-publish options, no author/selection/clear-after', () => {
     const schema = server.get('dkg_knowledge_asset_publish').config.inputSchema!;
     expect(schema).toHaveProperty('publishEpochs');
     expect(schema).toHaveProperty('publisherNodeIdentityIdOverride');
-    expect(schema).toHaveProperty('clearSharedMemoryAfter');
+    // CONTRACT §D: clear-after is DROPPED from the per-asset publish tool — on
+    // vm/publish it is graph-wide destructive (wipes other agents' SWM). The
+    // CG-wide clear stays on dkg_publish / dkg_shared_memory_publish.
+    expect(schema).not.toHaveProperty('clearSharedMemoryAfter');
+    expect(schema).not.toHaveProperty('clearAfter');
     expect(schema).not.toHaveProperty('authorAgentAddress');
     expect(schema).not.toHaveProperty('preSignedAuthorAttestation');
     expect(schema).not.toHaveProperty('entities');
@@ -295,17 +316,16 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     const res = await localServer.call('dkg_knowledge_asset_publish', {
       name: 'doc',
       publishEpochs: 2,
-      clearSharedMemoryAfter: true,
       publisherNodeIdentityIdOverride: '12',
     });
     expect(res.isError).toBeFalsy();
     expect(res.content[0].text).toContain('"ual": "did:dkg:31337/0xauthor/7"');
-    // The tool maps clearSharedMemoryAfter → clearAfter on the client call
-    // (the client then translates to the daemon's clearSharedMemoryAfter key).
-    expect(captured.clearAfter).toBe(true);
     expect(captured.publishEpochs).toBe(2);
     expect(captured.publisherNodeIdentityIdOverride).toBe('12');
     expect(captured).not.toHaveProperty('authorAgentAddress');
+    // CONTRACT §D: the per-asset publish never forwards a clear-after flag.
+    expect(captured).not.toHaveProperty('clearAfter');
+    expect(captured).not.toHaveProperty('clearSharedMemoryAfter');
   });
 
   it('pull_from seeds a fresh WM draft from swm/vm with layer + onConflict', async () => {

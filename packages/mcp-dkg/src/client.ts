@@ -1203,15 +1203,24 @@ export class DkgClient {
   async knowledgeAssetWrite(args: {
     contextGraphId: string;
     name: string;
-    // `graph` is optional: the WM-write engine (agent.assertion.write) derives
-    // the draft's named graph when omitted — the legacy triples path relied on
-    // exactly this, so callers may pass bare subject/predicate/object.
+    // `graph` is accepted on the input for caller convenience but is STRIPPED
+    // before the POST (CONTRACT §A) — the write wire shape is
+    // {subject,predicate,object} only and the daemon pins every quad to the
+    // per-KA WM graph (§0 invariant 2), overriding any client-supplied graph.
     quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>;
     subGraphName?: string;
   }): Promise<{ written: number }> {
+    // Strip any per-quad `graph` at the client (CONTRACT §A) — not just the
+    // tool schema — so a hand-built or normalizer-emitted `graph` can't reach
+    // the wire.
+    const wireQuads = args.quads.map((q) => ({
+      subject: q.subject,
+      predicate: q.predicate,
+      object: q.object,
+    }));
     const body: Record<string, unknown> = {
       contextGraphId: normalizeContextGraphId(args.contextGraphId),
-      quads: args.quads,
+      quads: wireQuads,
     };
     if (args.subGraphName) body.subGraphName = args.subGraphName;
     return this.request<{ written: number }>(
