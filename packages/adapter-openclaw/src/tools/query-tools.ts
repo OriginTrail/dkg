@@ -17,8 +17,8 @@ export function buildQueryTools(ctx: DkgToolHost): OpenClawTool[] {
       description:
         'One-shot write + publish helper: writes the supplied quads to Shared Working Memory, then publishes ' +
         'all SWM in the CG to Verifiable Memory (on-chain) and clears SWM. For the canonical stepwise flow ' +
-        '(write → promote → publish) use `dkg_assertion_create/write/promote` followed by ' +
-        '`dkg_shared_memory_publish`.',
+        '(create → write → finalize → share → publish) use `dkg_knowledge_asset_create/write/finalize/share` ' +
+        'followed by `dkg_knowledge_asset_publish`.',
       parameters: {
         type: 'object',
         properties: {
@@ -31,7 +31,6 @@ export function buildQueryTools(ctx: DkgToolHost): OpenClawTool[] {
                 subject: { type: 'string', description: 'Subject URI.' },
                 predicate: { type: 'string', description: 'Predicate URI.' },
                 object: { type: 'string', description: 'Object — URI or literal (URI auto-detected by prefix).' },
-                graph: { type: 'string', description: 'Optional named graph URI.' },
               },
               required: ['subject', 'predicate', 'object'],
             },

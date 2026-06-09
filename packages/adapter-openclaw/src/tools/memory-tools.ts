@@ -16,10 +16,12 @@ export function buildMemoryTools(ctx: DkgToolHost): OpenClawTool[] {
     {
       name: 'dkg_shared_memory_publish',
       description:
-        'Final step of the canonical flow. Publish all Shared Working Memory in a context graph to Verified ' +
-        'Memory (on-chain) and clear SWM. Use after `dkg_assertion_promote` to finalize promoted data. ' +
-        'If the context graph is still local-only/unregistered, set `register_if_needed: true` to explicitly ' +
-        'upgrade it to on-chain registration before publishing.',
+        'SWM-bridge / CG-wide publish (legacy, retained). Publish all Shared Working Memory in a context ' +
+        'graph to Verifiable Memory (on-chain) and clear SWM. To publish a SINGLE named knowledge asset, ' +
+        'prefer `dkg_knowledge_asset_publish` (multi-root-safe). This bulk route is single-root-per-call: ' +
+        'with more than one root entity in SWM it returns 409 MULTI_ROOT_PUBLISH_NOT_ATOMIC. Use after ' +
+        '`dkg_knowledge_asset_share`. If the context graph is still local-only/unregistered, set ' +
+        '`register_if_needed: true` to explicitly upgrade it to on-chain registration before publishing.',
       parameters: {
         type: 'object',
         properties: {
@@ -54,9 +56,9 @@ export function buildMemoryTools(ctx: DkgToolHost): OpenClawTool[] {
       name: 'dkg_share',
       description:
         'Direct Shared Working Memory write — gossip-replicate a concise free-text fact ' +
-        'to the team. Lightweight alternative to the canonical dkg_assertion_create → ' +
-        'dkg_assertion_write → dkg_assertion_promote flow; use the canonical flow when the ' +
-        'data needs to be staged, retracted, or promoted to Verifiable Memory.',
+        'to the team. Lightweight alternative to the canonical dkg_knowledge_asset_create → ' +
+        'dkg_knowledge_asset_write → dkg_knowledge_asset_share flow; use the canonical flow when the ' +
+        'data needs to be staged, retracted, or published to Verifiable Memory.',
       parameters: {
         type: 'object',
         properties: {

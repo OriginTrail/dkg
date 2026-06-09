@@ -172,10 +172,6 @@ function optionalContextGraphId(value: string | undefined): string | undefined {
   return normalizeContextGraphId(value) || undefined;
 }
 
-function toContextGraphUri(value: string): string {
-  return `${CONTEXT_GRAPH_URI_PREFIX}${normalizeContextGraphId(value)}`;
-}
-
 function normalizeContextGraphRequest<T extends { contextGraphId: string }>(request: T): T {
   return {
     ...request,
@@ -1021,17 +1017,21 @@ export class DkgDaemonClient {
       );
     }
     const assertionName = `openclaw-publish-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const quadsWithGraph = quads.map((q) => ({
+    // The write wire shape is `{subject, predicate, object}` only — the daemon
+    // pins every quad to the per-KA WM graph itself, so a client-supplied
+    // `graph` is ignored/overridden (CONTRACT §0 invariant 2). Auto-finalize is
+    // driven purely by non-empty `quads` (CONTRACT §1 Stage1), so `finalize:true`
+    // is unread and dropped. `promote:true` is kept: the create route reads it as
+    // the `alsoShareSwm` alias (CONTRACT §1 Stage1).
+    const wireQuads = quads.map((q) => ({
       subject: q.subject,
       predicate: q.predicate,
       object: q.object,
-      graph: q.graph || toContextGraphUri(cgId),
     }));
     const created: any = await this.post('/api/knowledge-assets', {
       contextGraphId: cgId,
       name: assertionName,
-      quads: quadsWithGraph,
-      finalize: true,
+      quads: wireQuads,
       promote: true,
     });
     const published = await this.post('/api/shared-memory/publish', {

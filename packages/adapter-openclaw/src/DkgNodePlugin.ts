@@ -2414,7 +2414,10 @@ export class DkgNodePlugin {
       handleInvokeSkill: this.handleInvokeSkill.bind(this),
       handleAssertionCreate: this.handleAssertionCreate.bind(this),
       handleAssertionWrite: this.handleAssertionWrite.bind(this),
+      handleAssertionFinalize: this.handleAssertionFinalize.bind(this),
       handleAssertionPromote: this.handleAssertionPromote.bind(this),
+      handleAssertionPublish: this.handleAssertionPublish.bind(this),
+      handleAssertionPullFrom: this.handleAssertionPullFrom.bind(this),
       handleAssertionDiscard: this.handleAssertionDiscard.bind(this),
       handleAssertionImportFile: this.handleAssertionImportFile.bind(this),
       handleAssertionQuery: this.handleAssertionQuery.bind(this),
@@ -3438,6 +3441,37 @@ export class DkgNodePlugin {
     }
   }
 
+  private async handleAssertionFinalize(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      const name = String(args.name ?? '').trim();
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!name) return this.error('"name" is required.');
+      const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
+      const authorAgentAddress = args.author_agent_address ? String(args.author_agent_address) : undefined;
+      let schemeVersion: number | undefined;
+      if (args.scheme_version !== undefined) {
+        const raw = typeof args.scheme_version === 'string' ? Number(args.scheme_version) : args.scheme_version;
+        if (typeof raw !== 'number' || !Number.isInteger(raw)) {
+          return this.error('"scheme_version" must be an integer.');
+        }
+        schemeVersion = raw;
+      }
+      // Seal the WHOLE WM draft (CONTRACT §1 Stage3 — there is no subset scope on
+      // finalize). The author defaults to the request token's agent when
+      // `author_agent_address` is omitted; pre-signed attestations are not surfaced
+      // on this tool (they require the packed reservedKaId — out of scope here).
+      const result = await this.client.knowledgeAssetFinalize(contextGraphId, name, {
+        subGraphName,
+        authorAgentAddress,
+        schemeVersion,
+      });
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
   private async handleAssertionPromote(args: Record<string, unknown>): Promise<OpenClawToolResult> {
     try {
       const contextGraphId = String(args.context_graph_id ?? '').trim();
@@ -3463,6 +3497,84 @@ export class DkgNodePlugin {
       const result = await this.client.knowledgeAssetShare(contextGraphId, name, {
         entities,
         subGraphName,
+      });
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleAssertionPublish(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      const name = String(args.name ?? '').trim();
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!name) return this.error('"name" is required.');
+      const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
+
+      let publishEpochs: number | undefined;
+      if (args.publish_epochs !== undefined) {
+        const raw = typeof args.publish_epochs === 'string' ? Number(args.publish_epochs) : args.publish_epochs;
+        if (typeof raw !== 'number' || !Number.isInteger(raw) || raw <= 0) {
+          return this.error('"publish_epochs" must be a positive integer.');
+        }
+        publishEpochs = raw;
+      }
+      let publisherNodeIdentityIdOverride: bigint | undefined;
+      if (args.publisher_node_identity_id_override !== undefined) {
+        try {
+          publisherNodeIdentityIdOverride = BigInt(String(args.publisher_node_identity_id_override));
+        } catch {
+          return this.error('"publisher_node_identity_id_override" must be a non-negative integer (decimal string).');
+        }
+      }
+      if (args.clear_shared_memory_after !== undefined && typeof args.clear_shared_memory_after !== 'boolean') {
+        return this.error('"clear_shared_memory_after" must be a boolean.');
+      }
+      const clearAfter = args.clear_shared_memory_after as boolean | undefined;
+
+      // Per-KA sealed publish (CONTRACT §1 Stage5). The seal selects the author and
+      // the whole asset, so author/selection overrides are never sent. The daemon
+      // returns the UAL plus kaId/txHash/status/kas; 409 VM_PUBLISH_PRECONDITION
+      // (not finalized / empty SWM) and 502 (on-chain not-confirmed) surface
+      // verbatim through daemonError.
+      const result = await this.client.knowledgeAssetPublish(contextGraphId, name, {
+        subGraphName,
+        publishEpochs,
+        publisherNodeIdentityIdOverride,
+        clearAfter,
+      });
+      return this.json(result);
+    } catch (err: any) {
+      return this.daemonError(err);
+    }
+  }
+
+  private async handleAssertionPullFrom(args: Record<string, unknown>): Promise<OpenClawToolResult> {
+    try {
+      const contextGraphId = String(args.context_graph_id ?? '').trim();
+      const name = String(args.name ?? '').trim();
+      if (!contextGraphId) return this.error('"context_graph_id" is required.');
+      if (!name) return this.error('"name" is required.');
+      const layer = String(args.layer ?? '').trim();
+      if (layer !== 'swm' && layer !== 'vm') {
+        return this.error('"layer" is required and must be "swm" or "vm".');
+      }
+      let onConflict: 'reject' | 'replace' | undefined;
+      if (args.on_conflict !== undefined) {
+        const raw = String(args.on_conflict).trim();
+        if (raw !== 'reject' && raw !== 'replace') {
+          return this.error('"on_conflict" must be "reject" or "replace".');
+        }
+        onConflict = raw;
+      }
+      const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
+      // Seed a fresh WM draft from SWM/VM (CONTRACT §1 side-verbs). A dirty draft
+      // → 409 WM_DRAFT_CONFLICT, surfaced verbatim through daemonError; the agent
+      // can retry with on_conflict:"replace".
+      const result = await this.client.knowledgeAssetPullFrom(contextGraphId, name, layer, {
+        subGraphName,
+        onConflict,
       });
       return this.json(result);
     } catch (err: any) {
