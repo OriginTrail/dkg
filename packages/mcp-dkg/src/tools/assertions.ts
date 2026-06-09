@@ -505,10 +505,13 @@ export function registerAssertionTools(
     {
       title: 'Dump Knowledge Asset Quads',
       description:
-        'Return every quad in a knowledge asset\'s Working Memory draft. Not a ' +
-        'SPARQL endpoint — for ad-hoc filtering use `dkg_query` with ' +
-        '`view: "working-memory"`. The canonical introspection step for the ' +
-        '`knowledge_asset_create + write + share` round-trip.',
+        'Return every quad in a knowledge asset\'s Working Memory DRAFT (the ' +
+        'un-shared working copy). Query it BEFORE sharing: a FULL share empties ' +
+        'the WM draft, so a query after sharing returns 0 quads. To inspect ' +
+        'already-shared content use `dkg_query` with `view: ' +
+        '"shared-working-memory"` (or `"verifiable-memory"` once published). Not ' +
+        'a SPARQL endpoint — for ad-hoc filtering of the draft use `dkg_query` ' +
+        'with `view: "working-memory"`.',
       inputSchema: {
         name: z.string().describe('Existing assertion name'),
         projectId: z.string().optional().describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
