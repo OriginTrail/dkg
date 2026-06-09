@@ -2148,7 +2148,7 @@ export async function mcpSetupAction(
   console.log('Next steps:');
   console.log('  1. Restart your MCP-aware client (Cursor / Claude Code) so it picks up the new server.');
   console.log('  2. From inside the client, ask "what tools does dkg expose?" — you should see');
-  console.log('     dkg_assertion_create, dkg_assertion_write, dkg_assertion_query, and friends.');
+  console.log('     dkg_knowledge_asset_create, dkg_knowledge_asset_write, dkg_knowledge_asset_query, and friends.');
   console.log('');
   } finally {
     // Codex Round-3 Fix 3: restore the prior `DKG_HOME` (or unset
