@@ -320,7 +320,9 @@ export function registerAssertionTools(
         'Prefer this over dkg_shared_memory_publish when publishing a single ' +
         'named asset; it is multi-root-safe and avoids the legacy single-root ' +
         'SWM constraint. Fails 409 if the asset is not yet finalized + shared ' +
-        '(run dkg_knowledge_asset_finalize / dkg_knowledge_asset_share first).',
+        '(run dkg_knowledge_asset_finalize / dkg_knowledge_asset_share first). ' +
+        'vm/publish requires the context graph to be registered on-chain — set ' +
+        '`registerIfNeeded: true` to register it first (idempotent) before publishing.',
       inputSchema: {
         // CONTRACT §C: publishEpochs is a POSITIVE integer (zod rejects 0 /
         // negative / non-integer at the boundary → a fail-fast tool error).
@@ -339,6 +341,21 @@ export function registerAssertionTools(
           .regex(/^\d+$/, 'publisher_node_identity_id_override must be a non-negative integer (decimal string)')
           .optional()
           .describe('Optional publisher node identity id override (non-negative integer, decimal string)'),
+        // CONTRACT §G: vm/publish requires the CG to be registered on-chain and
+        // does NOT auto-register. registerIfNeeded registers first (idempotent),
+        // mirroring dkg_shared_memory_publish.
+        registerIfNeeded: z
+          .boolean()
+          .optional()
+          .describe(
+            'If the context graph is not yet registered on-chain, register it first (idempotent), then ' +
+            'publish. Registration may spend gas/TRAC; opt-in. Default false — when false and the CG is ' +
+            'unregistered, publish fails with the daemon\'s not-registered error.',
+          ),
+        accessPolicy: z
+          .union([z.literal(0), z.literal(1)])
+          .optional()
+          .describe('Used only when `registerIfNeeded: true`. 0 = open, 1 = private.'),
         // CONTRACT §D: clear_shared_memory_after is NOT exposed on the per-asset
         // publish tool — on vm/publish it is graph-wide destructive (wipes every
         // other agent's unpublished SWM under the CG/sub-graph). The this-asset
@@ -352,11 +369,25 @@ export function registerAssertionTools(
       name,
       publishEpochs,
       publisherNodeIdentityIdOverride,
+      registerIfNeeded,
+      accessPolicy,
       projectId,
       subGraphName,
     }): Promise<ToolResult> => {
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
+      // CONTRACT §G: vm/publish requires the CG to be registered on-chain and does
+      // NOT auto-register. When registerIfNeeded is true, register first (the
+      // client short-circuits an already-registered CG via alreadyRegistered), then
+      // publish — mirroring dkg_shared_memory_publish. A hard registration failure
+      // is a tool error: do NOT publish.
+      if (registerIfNeeded === true) {
+        try {
+          await client.registerContextGraph({ id: pid, accessPolicy });
+        } catch (err) {
+          return errResult(`Failed to register context graph: ${formatError(err)}`);
+        }
+      }
       try {
         // Per-KA sealed publish (CONTRACT §1 Stage5). The seal selects the author
         // and the whole asset, so author/selection overrides are never sent. The

@@ -304,6 +304,9 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     const schema = server.get('dkg_knowledge_asset_publish').config.inputSchema!;
     expect(schema).toHaveProperty('publishEpochs');
     expect(schema).toHaveProperty('publisherNodeIdentityIdOverride');
+    // CONTRACT §G: per-KA publish can register the CG on-chain first (mirrors
+    // dkg_shared_memory_publish) — vm/publish requires a registered CG.
+    expect(schema).toHaveProperty('registerIfNeeded');
     // CONTRACT §D: clear-after is DROPPED from the per-asset publish tool — on
     // vm/publish it is graph-wide destructive (wipes other agents' SWM). The
     // CG-wide clear stays on dkg_publish / dkg_shared_memory_publish.
@@ -368,6 +371,78 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     // CONTRACT §D: the per-asset publish never forwards a clear-after flag.
     expect(captured).not.toHaveProperty('clearAfter');
     expect(captured).not.toHaveProperty('clearSharedMemoryAfter');
+  });
+
+  // ── CONTRACT §G — registerIfNeeded on per-KA publish ──────────────────────
+  const setupPublishWithRegisterTracking = (opts: {
+    registerImpl?: (args: { id: string; accessPolicy?: number }) => Promise<Record<string, unknown>>;
+  } = {}) => {
+    const events: string[] = [];
+    const registerCalls: Array<{ id: string; accessPolicy?: number }> = [];
+    const localClient = new FakeClient({
+      registerContextGraph: async (args: { id: string; accessPolicy?: number }) => {
+        events.push('register');
+        registerCalls.push(args);
+        if (opts.registerImpl) return opts.registerImpl(args);
+        return { registered: args.id, onChainId: `chain:${args.id}`, txHash: '0xreg', alreadyRegistered: false };
+      },
+      knowledgeAssetPublish: async () => {
+        events.push('publish');
+        return { kaId: 'ka-1', status: 'confirmed', ual: 'did:dkg:31337/0xauthor/7', txHash: '0xpub' };
+      },
+    });
+    const localServer = new FakeServer();
+    registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+    return { localServer, events, registerCalls };
+  };
+
+  it('publish with registerIfNeeded=true registers THEN publishes (CONTRACT §G)', async () => {
+    const { localServer, events, registerCalls } = setupPublishWithRegisterTracking();
+    const res = await localServer.call('dkg_knowledge_asset_publish', {
+      name: 'doc',
+      registerIfNeeded: true,
+      accessPolicy: 1,
+    });
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toContain('"ual": "did:dkg:31337/0xauthor/7"');
+    expect(events).toEqual(['register', 'publish']); // register first, then publish
+    expect(registerCalls).toEqual([{ id: 'test-cg', accessPolicy: 1 }]);
+  });
+
+  it('publish does NOT register when registerIfNeeded is omitted (CONTRACT §G)', async () => {
+    const { localServer, events } = setupPublishWithRegisterTracking();
+    const res = await localServer.call('dkg_knowledge_asset_publish', { name: 'doc' });
+    expect(res.isError).toBeFalsy();
+    expect(events).toEqual(['publish']); // no register call
+  });
+
+  it('publish with registerIfNeeded=true short-circuits an already-registered CG, still publishes (CONTRACT §G)', async () => {
+    const { localServer, events, registerCalls } = setupPublishWithRegisterTracking({
+      // The client surfaces alreadyRegistered:true (it swallows the daemon 409) —
+      // no throw, no double-mint.
+      registerImpl: async (args) => ({ registered: args.id, alreadyRegistered: true }),
+    });
+    const res = await localServer.call('dkg_knowledge_asset_publish', { name: 'doc', registerIfNeeded: true });
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toContain('"ual"');
+    expect(events).toEqual(['register', 'publish']);
+    expect(registerCalls).toHaveLength(1); // exactly one register attempt
+  });
+
+  it('publish surfaces a register HARD failure and does NOT publish (CONTRACT §G)', async () => {
+    const { localServer, events } = setupPublishWithRegisterTracking({
+      registerImpl: async () => { throw new Error('rpc unreachable'); },
+    });
+    const res = await localServer.call('dkg_knowledge_asset_publish', { name: 'doc', registerIfNeeded: true });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/Failed to register context graph: rpc unreachable/);
+    expect(events).toEqual(['register']); // publish NOT attempted
+  });
+
+  it('publish rejects a non-boolean registerIfNeeded at the schema boundary (CONTRACT §G)', async () => {
+    await expect(
+      server.call('dkg_knowledge_asset_publish', { name: 'doc', registerIfNeeded: 'yes' }),
+    ).rejects.toThrow();
   });
 
   it('publish rejects a non-integral publishEpochs at the schema boundary (CONTRACT §C)', async () => {
