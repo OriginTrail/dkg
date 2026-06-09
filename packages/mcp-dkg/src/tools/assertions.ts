@@ -251,7 +251,11 @@ export function registerAssertionTools(
         'Shared Working Memory so teammates see it. A FULL share (omit ' +
         '`entities` or pass "all") auto-seals the draft best-effort and is ' +
         'publish-ready — follow it with dkg_knowledge_asset_publish to mint the ' +
-        'asset on-chain (Verifiable Memory). A SELECTIVE subset (`entities` set ' +
+        'asset on-chain (Verifiable Memory). The auto-seal uses DEFAULT finalize ' +
+        'options; if you need custom finalize/attestation options ' +
+        '(authorAgentAddress / schemeVersion), call dkg_knowledge_asset_finalize ' +
+        'EXPLICITLY first (even for a full share) — share\'s auto-seal cannot ' +
+        'carry those. A SELECTIVE subset (`entities` set ' +
         'to a proper subset) shares to SWM only for peer visibility, is NOT ' +
         'auto-sealed, and is NOT publishable to Verifiable Memory: ' +
         'dkg_knowledge_asset_publish reconstructs the seal\'s full root set and ' +
