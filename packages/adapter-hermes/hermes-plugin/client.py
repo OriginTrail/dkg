@@ -678,8 +678,7 @@ class DKGClient:
 
     def publish_one_root(self, context_graph_id: str, root_entity: str,
                          clear_after: bool,
-                         sub_graph_name: Optional[str] = None,
-                         publish_epochs: Optional[int] = None) -> Dict[str, Any]:
+                         sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
         """POST /api/shared-memory/publish for a SINGLE root entity.
 
         Fork-2 of the legacy SWM-bridge is single-root-only: a request whose
@@ -695,14 +694,11 @@ class DKGClient:
         }
         if sub_graph_name:
             payload["subGraphName"] = sub_graph_name
-        if publish_epochs is not None:
-            payload["publishEpochs"] = publish_epochs
         return self._post("/api/shared-memory/publish", payload)
 
     def publish(self, context_graph_id: str, selection: Any = "all",
                 clear_after: bool = True,
-                sub_graph_name: Optional[str] = None,
-                publish_epochs: Optional[int] = None) -> Dict[str, Any]:
+                sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
         """POST /api/shared-memory/publish — publish SWM to Verifiable Memory (costs TRAC).
 
         The legacy SWM-bridge (Fork-2) is single-root-only. When ``selection`` is
@@ -728,14 +724,14 @@ class DKGClient:
             if len(roots) == 1:
                 return self.publish_one_root(
                     context_graph_id, roots[0], clear_after=clear_after,
-                    sub_graph_name=sub_graph_name, publish_epochs=publish_epochs)
+                    sub_graph_name=sub_graph_name)
             published: List[Dict[str, Any]] = []
             last = len(roots) - 1
             for index, root in enumerate(roots):
                 result = self.publish_one_root(
                     context_graph_id, root,
                     clear_after=(clear_after and index == last),
-                    sub_graph_name=sub_graph_name, publish_epochs=publish_epochs)
+                    sub_graph_name=sub_graph_name)
                 if _client_result_failed(result):
                     # Legacy multi-root publish is NON-ATOMIC: it mints one root
                     # per call and on-chain mints are irreversible, so we stop on
@@ -776,8 +772,6 @@ class DKGClient:
         }
         if sub_graph_name:
             payload["subGraphName"] = sub_graph_name
-        if publish_epochs is not None:
-            payload["publishEpochs"] = publish_epochs
         return self._post("/api/shared-memory/publish", payload)
 
     # -- Context Graphs --------------------------------------------------------
