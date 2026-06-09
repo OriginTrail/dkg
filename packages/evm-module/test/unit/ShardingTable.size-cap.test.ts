@@ -72,4 +72,14 @@ describe('@unit ShardingTable enforces shardingTableSizeLimit', () => {
     // Count is unchanged — the failed insert did not grow the table.
     expect(await ShardingTableStorage.nodesCount()).to.equal(3);
   });
+
+  it('rejects setting the size limit to 0 (would freeze all node admission)', async () => {
+    await deploy();
+    await expect(ParametersStorage.setShardingTableSizeLimit(0)).to.be.revertedWith(
+      'shardingTableSizeLimit must be > 0',
+    );
+    // A positive limit is still accepted.
+    await ParametersStorage.setShardingTableSizeLimit(1);
+    expect(await ParametersStorage.shardingTableSizeLimit()).to.equal(1);
+  });
 });
