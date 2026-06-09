@@ -1215,9 +1215,16 @@ export class EVMChainAdapterBase {
       try {
         const max = await storage.getMaxKaNumberForAuthor.staticCall(normalized);
         return BigInt(max);
-      } catch {
-        // View absent on an older-deployed contract (selector mismatch) or a
-        // transient read error — fall through to the bounded log scan.
+      } catch (err) {
+        // Fall back to the bounded scan for contract-level call failures
+        // (e.g. a pre-10.0.4 deployment without the selector -> empty/
+        // undecodable return data). Rethrow clearly-transient RPC/network
+        // errors so a provider blip doesn't silently degrade into a full
+        // historical `KnowledgeAssetCreated` crawl on the same provider.
+        const code = (err as { code?: string } | null)?.code;
+        if (code === 'NETWORK_ERROR' || code === 'SERVER_ERROR' || code === 'TIMEOUT') {
+          throw err;
+        }
       }
     }
 

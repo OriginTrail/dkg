@@ -120,4 +120,21 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
     };
     expect(await makeAdapter(storage, 100).getMaxKaNumberForAuthor(AUTHOR)).toBe(-1n);
   });
+
+  it('rethrows a transient RPC error from the view instead of crawling logs', async () => {
+    const transient: any = new Error('rate limited');
+    transient.code = 'SERVER_ERROR';
+    const queryFilter = vi.fn(async () => [{ args: { id: pack(9n) } }]);
+    const storage = {
+      getMaxKaNumberForAuthor: viewMock(async () => {
+        throw transient;
+      }),
+      filters: { KnowledgeAssetCreated: vi.fn(() => 'F') },
+      queryFilter,
+    };
+    const a = makeAdapter(storage, 100);
+    await expect(a.getMaxKaNumberForAuthor(AUTHOR)).rejects.toThrow('rate limited');
+    // A transient error must NOT degrade into a historical log crawl.
+    expect(queryFilter).not.toHaveBeenCalled();
+  });
 });
