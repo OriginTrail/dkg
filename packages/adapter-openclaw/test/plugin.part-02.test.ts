@@ -48,7 +48,7 @@ describe("DkgNodePlugin", () => {
     const originalFetch = globalThis.fetch;
 
 
-    it('dkg_assertion_import_file infers content-type for common formats (kept in sync with CLI UPLOAD_CONTENT_TYPES)', async () => {
+    it('dkg_knowledge_asset_import_file infers content-type for common formats (kept in sync with CLI UPLOAD_CONTENT_TYPES)', async () => {
       const { writeFileSync, mkdtempSync } = await import('node:fs');
       const { join } = await import('node:path');
       const { tmpdir } = await import('node:os');
@@ -72,7 +72,7 @@ describe("DkgNodePlugin", () => {
         const tmpDir = mkdtempSync(join(tmpdir(), 'dkg-mime-'));
         const filePath = join(tmpDir, fileName);
         writeFileSync(filePath, 'dummy');
-        await byName.get('dkg_assertion_import_file')!.execute('tc', {
+        await byName.get('dkg_knowledge_asset_import_file')!.execute('tc', {
           context_graph_id: 'ctx',
           name: 'notes',
           file_path: filePath,
@@ -83,7 +83,7 @@ describe("DkgNodePlugin", () => {
     });
 
 
-    it('dkg_assertion_import_file falls through to octet-stream for unknown extensions (no contentType form field)', async () => {
+    it('dkg_knowledge_asset_import_file falls through to octet-stream for unknown extensions (no contentType form field)', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ assertionUri: 'urn:x' });
       const { writeFileSync, mkdtempSync } = await import('node:fs');
       const { join } = await import('node:path');
@@ -91,7 +91,7 @@ describe("DkgNodePlugin", () => {
       const tmpDir = mkdtempSync(join(tmpdir(), 'dkg-unknown-'));
       const filePath = join(tmpDir, 'blob.xyz');
       writeFileSync(filePath, 'dummy');
-      await byName.get('dkg_assertion_import_file')!.execute('tc', {
+      await byName.get('dkg_knowledge_asset_import_file')!.execute('tc', {
         context_graph_id: 'ctx',
         name: 'notes',
         file_path: filePath,

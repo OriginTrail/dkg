@@ -227,7 +227,10 @@ describe('dkg_publish tool', () => {
 
     const createBody = JSON.parse(ft.calls[0][1]?.body as string);
     expect(createBody.contextGraphId).toBe('0xabc/tuesday-cg');
-    expect(createBody.quads[0].graph).toBe('did:dkg:context-graph:0xabc/tuesday-cg');
+    // CONTRACT §0 invariant 2: the write wire shape is {subject,predicate,object}
+    // — the daemon pins quads to the per-KA WM graph, so no per-quad `graph` is
+    // sent (the legacy double-prefixed graph field was dropped in PR1).
+    expect(createBody.quads[0]).not.toHaveProperty('graph');
     const publishBody = JSON.parse(ft.calls[1][1]?.body as string);
     expect(publishBody.contextGraphId).toBe('0xabc/tuesday-cg');
   });
@@ -288,20 +291,25 @@ describe('dkg_publish tool', () => {
     expect(writeBody.quads[0].object).toBe('"She said \\"hello\\""');
   });
 
-  it('passes optional graph field', async () => {
+  it('drops a client-supplied per-quad graph field (CONTRACT §0 invariant 2)', async () => {
     ft.addResponses(
       new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),
       new Response(JSON.stringify({ kaId: 'kc-graph', kas: [] }), { status: 200 }),
     );
 
     const tool = findTool('dkg_publish');
+    // The dkg_publish schema no longer advertises a per-quad `graph` (query-tools),
+    // and even if an agent injects one the publish path must NOT forward it: the
+    // daemon overrides the graph to the per-KA WM graph. The write wire shape is
+    // {subject,predicate,object} only.
     const quads = [
       { subject: 'urn:a', predicate: 'urn:b', object: 'hello', graph: 'urn:my-graph' },
     ];
-    const result = await tool.execute('call-graph', { context_graph_id: 'testing', quads });
+    await tool.execute('call-graph', { context_graph_id: 'testing', quads });
 
     const writeBody = JSON.parse(ft.calls[0][1]?.body as string);
-    expect(writeBody.quads[0].graph).toBe('urn:my-graph');
+    expect(writeBody.quads[0]).not.toHaveProperty('graph');
+    expect(writeBody.quads[0]).toMatchObject({ subject: 'urn:a', predicate: 'urn:b' });
   });
 });
 

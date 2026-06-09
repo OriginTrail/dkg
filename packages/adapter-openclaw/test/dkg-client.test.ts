@@ -866,7 +866,15 @@ describe('DkgDaemonClient', () => {
     const createBody = JSON.parse(createOpts?.body as string);
     expect(createBody.contextGraphId).toBe('testing');
     expect(createBody.quads).toHaveLength(1);
-    expect(createBody.finalize).toBe(true);
+    // CONTRACT §1 Stage1 / §0 invariant 2: `finalize:true` is unread by the
+    // create route (auto-finalize is driven by non-empty quads) and must be
+    // dropped; per-quad `graph` is daemon-pinned and must not be sent. The
+    // write wire shape is `{subject,predicate,object}` only. `promote:true`
+    // stays (the create route reads it as the `alsoShareSwm` alias).
+    expect(createBody.finalize).toBeUndefined();
+    expect(createBody.promote).toBe(true);
+    expect(createBody.quads[0]).toEqual({ subject: 'urn:a', predicate: 'urn:b', object: '"value"' });
+    expect(createBody.quads[0]).not.toHaveProperty('graph');
 
     const [pubUrl, pubOpts] = fetchCalls[1];
     expect(pubUrl).toBe('http://localhost:9200/api/shared-memory/publish');
