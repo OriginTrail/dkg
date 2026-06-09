@@ -328,6 +328,20 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     expect(captured).not.toHaveProperty('clearSharedMemoryAfter');
   });
 
+  it('publish rejects a non-integral publishEpochs at the schema boundary (CONTRACT §C)', async () => {
+    // 1.9 must be REJECTED (zod .int()), not coerced to 1 — a present-but-invalid
+    // numeric is a tool error, same as 0 / -1.
+    await expect(
+      server.call('dkg_knowledge_asset_publish', { name: 'doc', publishEpochs: 1.9 }),
+    ).rejects.toThrow();
+  });
+
+  it('finalize rejects a non-integral schemeVersion at the schema boundary (CONTRACT §C)', async () => {
+    await expect(
+      server.call('dkg_knowledge_asset_finalize', { name: 'doc', schemeVersion: 1.9 }),
+    ).rejects.toThrow();
+  });
+
   it('pull_from seeds a fresh WM draft from swm/vm with layer + onConflict', async () => {
     const captured: Record<string, unknown> = {};
     const localClient = new FakeClient({
