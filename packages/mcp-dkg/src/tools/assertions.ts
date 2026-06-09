@@ -142,11 +142,10 @@ export function registerAssertionTools(
                 '  Lang-tagged:     "\\"hello\\"@en"\n' +
                 'A literal without surrounding quotes will be parsed as a URI and FAIL on spaces.',
               ),
-              graph: z.string().optional().describe('Optional named graph URI (same rules as subject)'),
             }),
           )
           .min(1)
-          .describe('Non-empty array of RDF quads to append'),
+          .describe('Non-empty array of RDF triples to append'),
         projectId: z.string().optional().describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
         subGraphName: z.string().optional(),
       },
@@ -156,15 +155,15 @@ export function registerAssertionTools(
       if (!pid) return projectErr();
       try {
         // Append to the KA's WM draft. Strip angle brackets from URIs (the
-        // engine wants bare URIs) and carry `graph` through when supplied;
-        // omitted graph lets the WM-write engine derive the draft graph.
+        // engine wants bare URIs). Wire shape is {subject, predicate, object}
+        // only — no per-quad `graph` (CONTRACT §0 invariant 2; the daemon pins
+        // every triple to the per-KA WM graph and overrides any client value).
         const strip = (t: string): string =>
           t.startsWith('<') && t.endsWith('>') ? t.slice(1, -1) : t;
         const kaQuads = quads.map((q) => ({
           subject: strip(q.subject),
           predicate: strip(q.predicate),
           object: q.object,
-          ...(q.graph ? { graph: strip(q.graph) } : {}),
         }));
         const { written } = await client.knowledgeAssetWrite({
           contextGraphId: pid,

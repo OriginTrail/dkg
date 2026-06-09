@@ -63,10 +63,6 @@ function optionalContextGraphId(contextGraphIdOrUri: string | undefined): string
   return normalizeContextGraphId(contextGraphIdOrUri) || undefined;
 }
 
-function toContextGraphUri(contextGraphIdOrUri: string): string {
-  return `${CONTEXT_GRAPH_URI_PREFIX}${normalizeContextGraphId(contextGraphIdOrUri)}`;
-}
-
 /**
  * Author attestation produced by an external signer. Mirrors the
  * `packages/cli/src/api-client.ts` reference so finalize / create KA flows can
@@ -1061,11 +1057,16 @@ export class DkgClient {
   }): Promise<Record<string, unknown>> {
     const cgId = normalizeContextGraphId(args.contextGraphId);
     const assertionName = `mcp-publish-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const quadsWithGraph = args.quads.map((q) => ({
+    // The write wire shape is `{subject, predicate, object}` only — the daemon
+    // pins every quad to the per-KA WM graph itself, so a client-supplied
+    // `graph` is ignored/overridden (CONTRACT §0 invariant 2). Auto-finalize is
+    // driven purely by non-empty `quads` (CONTRACT §1 Stage1), so `finalize:true`
+    // is unread and dropped. `promote:true` is kept: the create route reads it as
+    // the `alsoShareSwm` alias (CONTRACT §1 Stage1). Mirrors the OpenClaw adapter.
+    const wireQuads = args.quads.map((q) => ({
       subject: q.subject,
       predicate: q.predicate,
       object: q.object,
-      graph: q.graph || toContextGraphUri(cgId),
     }));
     const created = await this.request<{ assertionUri?: string; seal?: Record<string, unknown> }>(
       'POST',
@@ -1073,8 +1074,7 @@ export class DkgClient {
       {
         contextGraphId: cgId,
         name: assertionName,
-        quads: quadsWithGraph,
-        finalize: true,
+        quads: wireQuads,
         promote: true,
       },
     );

@@ -96,7 +96,6 @@ const QuadSchema = z.object({
     .describe(
       'Object — URI or literal. Auto-detected: values starting with http://, https://, urn:, or did: pass as URIs; anything else becomes a literal.',
     ),
-  graph: z.string().optional().describe('Optional named graph URI'),
 });
 
 export function registerPublishTools(
@@ -142,13 +141,14 @@ export function registerPublishTools(
       // Auto-type the object: URI vs literal. Mirrors the adapter's
       // handlePublish at `DkgNodePlugin.ts:2721-2729` byte-for-byte so
       // a memory written via either surface lands as identical triples.
+      // Wire shape is {subject, predicate, object} only — no per-quad `graph`
+      // (CONTRACT §0 invariant 2; the daemon pins quads to the per-KA WM graph).
       const wireQuads = quads.map((q) => {
         const objVal = String(q.object ?? '');
         return {
           subject: String(q.subject ?? ''),
           predicate: String(q.predicate ?? ''),
           object: isUri(objVal) ? objVal : `"${escapeRdfLiteral(objVal)}"`,
-          graph: q.graph ? String(q.graph) : '',
         };
       });
       try {
