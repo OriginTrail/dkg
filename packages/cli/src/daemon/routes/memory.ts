@@ -362,13 +362,24 @@ function subjectMatchesPublishRoot(subject: string, root: string): boolean {
   return subject === root || (isSkolemizedUri(subject) && subject.startsWith(`${root}${SKOLEM_GENID_SEGMENT}`));
 }
 
-async function resolvePublishRootEntities(
+// Exported for the OT-RFC-46 read-both regression test (the route mocks the
+// store, so the SPARQL scope can only be exercised against a real store).
+export async function resolvePublishRootEntities(
   agent: DKGAgent,
   contextGraphId: string,
   selection: SharedMemoryPublishSelection,
   subGraphName?: string,
 ): Promise<string[]> {
   const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
+  // OT-RFC-46: SWM data may live in the bare bucket (`<bucket>`) OR in per-KA
+  // layer graphs (`<bucket>/<addr>/<num>`) written by `promote` (swm/share).
+  // Read BOTH — excluding the `/staging/` sub-tree — mirroring the publisher's
+  // own SWM read in `publishFromSharedMemory` (dkg-publisher.ts). Without this
+  // scope, a selection-mode publish of a promote-written root matches nothing
+  // and the route 400s before `publishFromSharedMemory` (which already reads
+  // both layouts) is ever reached.
+  const swmGraphScope =
+    `FILTER(((STRSTARTS(STR(?g), "${swmGraph}/") && !STRSTARTS(STR(?g), "${swmGraph}/staging/")) || STR(?g) = "${swmGraph}"))`;
 
   if (selection !== "all") {
     const requestedRoots = [...new Set(
@@ -381,12 +392,13 @@ async function resolvePublishRootEntities(
     const values = requestedRoots.map((root) => sparqlIri(root)).join(" ");
     const result = await agent.store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE {
-        GRAPH <${swmGraph}> {
+        GRAPH ?g {
           VALUES ?root { ${values} }
           ?s ?p ?o .
           FILTER(?p != <${WORKSPACE_OWNER_PREDICATE}>)
           FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "${SKOLEM_GENID_SEGMENT}")))
         }
+        ${swmGraphScope}
       }`,
     );
     const quads: Quad[] = result.type === "quads"
@@ -405,10 +417,11 @@ async function resolvePublishRootEntities(
 
   const result = await agent.store.query(
     `CONSTRUCT { ?s ?p ?o } WHERE {
-      GRAPH <${swmGraph}> {
+      GRAPH ?g {
         ?s ?p ?o .
         FILTER(?p != <${WORKSPACE_OWNER_PREDICATE}>)
       }
+      ${swmGraphScope}
     }`,
   );
   const quads: Quad[] = result.type === "quads"
