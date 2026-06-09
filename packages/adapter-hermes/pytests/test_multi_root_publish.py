@@ -176,54 +176,135 @@ def test_all_duplicate_roots_collapse_to_single_call(recording_client):
     assert body["clearAfter"] is True
 
 
-# -- #1750: dkg_publish publishes the EXPLICIT roots it wrote, never "all" ----
+# -- dkg_publish (one-shot) uses the ATOMIC assertionName fork --------------
+# (Fast-follow: parity with OpenClaw + MCP. The selection/loop/dedup above is
+#  still used by the explicit CG-wide dkg_shared_memory_publish tool.)
 
-class _PublishProbe:
-    """Minimal fake client for _handle_publish: records the share + publish args."""
+import json
+
+
+class _AssertionNameProbe:
+    """Fake client recording the assertionName-fork one-shot publish."""
 
     def __init__(self):
-        self.published = None
+        self.publish_quads_call = None
 
-    def share(self, context_graph_id, quads, sub_graph_name=None):
-        return {"success": True}
-
-    def publish(self, context_graph_id, selection="all", clear_after=True,
-                sub_graph_name=None):
-        self.published = {"contextGraphId": context_graph_id, "selection": selection,
-                          "clearAfter": clear_after}
-        return {"success": True}
+    def publish_quads(self, context_graph_id, quads, sub_graph_name=None):
+        self.publish_quads_call = {
+            "contextGraphId": context_graph_id,
+            "quads": quads,
+            "subGraphName": sub_graph_name,
+        }
+        return {"kaId": "ka", "ual": "did:dkg:1/0xabc/5", "status": "confirmed"}
 
 
 def _publish_provider(plugin_module):
     p = plugin_module.DKGMemoryProvider()
     p._offline = False
     p._config = {"publish_tool": "direct", "allow_direct_publish": True}
-    p._client = _PublishProbe()
+    p._client = _AssertionNameProbe()
     return p
 
 
-def test_handle_publish_single_root_uses_explicit_list_not_all(plugin_module):
-    import json
+def test_handle_publish_routes_to_assertionname_fork(plugin_module):
     p = _publish_provider(plugin_module)
-    json.loads(p.handle_tool_call("dkg_publish", {
+    out = json.loads(p.handle_tool_call("dkg_publish", {
         "context_graph_id": "cg:test",
-        "quads": [
-            {"subject": "urn:root:solo", "predicate": "urn:p", "object": "one"},
-            {"subject": "urn:root:solo", "predicate": "urn:p2", "object": "two"},
-        ],
+        "quads": [{"subject": "urn:root:solo", "predicate": "urn:p", "object": "one"}],
     }))
-    # NOT "all" — only the root this call wrote (Codex #1750).
-    assert p._client.published["selection"] == ["urn:root:solo"]
+    # one atomic publish_quads call — no per-root selection/loop
+    assert p._client.publish_quads_call["contextGraphId"] == "cg:test"
+    assert out["ual"] == "did:dkg:1/0xabc/5"
+    assert out["quadsPublished"] == 1
 
 
-def test_handle_publish_multi_root_uses_explicit_list(plugin_module):
-    import json
+def test_handle_publish_multi_subject_one_atomic_call(plugin_module):
     p = _publish_provider(plugin_module)
-    json.loads(p.handle_tool_call("dkg_publish", {
+    out = json.loads(p.handle_tool_call("dkg_publish", {
         "context_graph_id": "cg:test",
         "quads": [
             {"subject": "urn:root:1", "predicate": "urn:p", "object": "x"},
             {"subject": "urn:root:2", "predicate": "urn:p", "object": "y"},
         ],
     }))
-    assert p._client.published["selection"] == ["urn:root:1", "urn:root:2"]
+    # multi-subject publishes atomically in ONE call — no 409, no over-scope
+    assert len(p._client.publish_quads_call["quads"]) == 2
+    assert out["ual"] == "did:dkg:1/0xabc/5"
+
+
+def test_handle_publish_result_has_no_per_root_shape(plugin_module):
+    p = _publish_provider(plugin_module)
+    out = json.loads(p.handle_tool_call("dkg_publish", {
+        "context_graph_id": "cg:test",
+        "quads": [{"subject": "urn:r", "predicate": "urn:p", "object": "o"}],
+    }))
+    # the obsolete selection-fork result fields are gone
+    for key in ("rootEntities", "partial", "publishedRoots",
+                "failedRoot", "notAttemptedRoots"):
+        assert key not in out, key
+
+
+def test_dkg_publish_description_is_atomic(plugin_module):
+    p = _publish_provider(plugin_module)
+    desc = next(s for s in p.get_tool_schemas() if s["name"] == "dkg_publish")["description"]
+    assert "ATOMIC" in desc or "atomic" in desc
+    assert "NON-ATOMIC" not in desc
+    assert "per-root" not in desc.lower()
+
+
+# -- client.publish_quads payload shaping (assertionName fork) ---------------
+
+def test_publish_quads_two_calls_create_then_publish_by_name(recording_client):
+    client = recording_client
+
+    def responder(path, body):
+        if path == "/api/knowledge-assets":
+            return {"assertionUri": "urn:a", "seal": {"merkleRoot": "0xr"}}
+        return {"kaId": "ka", "ual": "did:dkg:1/0xabc/5", "status": "confirmed"}
+
+    client.responder = responder
+    result = client.publish_quads("did:dkg:context-graph:cg", [
+        {"subject": "urn:s1", "predicate": "urn:p", "object": "x", "graph": "urn:g"},
+        {"subject": "urn:s2", "predicate": "urn:p", "object": "y"},
+    ])
+    paths = [p for p, _ in client.posts]
+    assert paths == ["/api/knowledge-assets", "/api/shared-memory/publish"]
+    create_body = client.posts[0][1]
+    assert create_body["contextGraphId"] == "cg"
+    assert create_body["promote"] is True
+    assert create_body["name"].startswith("hermes-publish-")
+    # graph stripped on the create quads (CONTRACT §0 invariant 2)
+    assert all(set(q.keys()) == {"subject", "predicate", "object"} for q in create_body["quads"])
+    publish_body = client.posts[1][1]
+    # assertionName fork — name only, NO selection
+    assert publish_body == {"contextGraphId": "cg", "assertionName": create_body["name"]}
+    assert "selection" not in publish_body
+    # merged result surfaces ual/assertionUri/seal/assertionName
+    assert result["ual"] == "did:dkg:1/0xabc/5"
+    assert result["assertionUri"] == "urn:a"
+    assert result["seal"] == {"merkleRoot": "0xr"}
+    assert result["assertionName"] == create_body["name"]
+
+
+def test_publish_quads_unique_name_per_call(recording_client):
+    client = recording_client
+    client.responder = lambda path, body: (
+        {"assertionUri": "u"} if path == "/api/knowledge-assets" else {"status": "confirmed"}
+    )
+    client.publish_quads("cg", [{"subject": "urn:s", "predicate": "urn:p", "object": "o"}])
+    n1 = client.posts[0][1]["name"]
+    client.posts.clear()
+    client.publish_quads("cg", [{"subject": "urn:s", "predicate": "urn:p", "object": "o"}])
+    n2 = client.posts[0][1]["name"]
+    assert n1 != n2
+
+
+def test_publish_quads_create_failure_short_circuits(recording_client):
+    client = recording_client
+    client.responder = lambda path, body: (
+        {"success": False, "error": "boom"} if path == "/api/knowledge-assets" else {"status": "confirmed"}
+    )
+    result = client.publish_quads("cg", [{"subject": "urn:s", "predicate": "urn:p", "object": "o"}])
+    assert result == {"success": False, "error": "boom"}
+    # publish was never attempted
+    assert [p for p, _ in client.posts] == ["/api/knowledge-assets"]

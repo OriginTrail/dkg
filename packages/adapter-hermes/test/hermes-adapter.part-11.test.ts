@@ -445,18 +445,16 @@ assert result["success"] is True and provider._client.published is True, result
 # registration to a success shape — it must NOT carry the raw {success:false}.
 assert result["registration"] == {"alreadyRegistered": True}, result
 
+# dkg_publish (one-shot) routes through the ATOMIC assertionName fork
+# (client.publish_quads): create a uniquely-named sealed assertion + publish it
+# by name in one atomic mint — no per-root selection/loop (parity w/ OpenClaw+MCP).
 class PublishClient:
     def __init__(self):
-        self.shared = None
-        self.published = None
+        self.publish_quads_call = None
 
-    def share(self, context_graph_id, quads, sub_graph_name=None):
-        self.shared = (context_graph_id, quads, sub_graph_name)
-        return {"success": True}
-
-    def publish(self, context_graph_id, **kwargs):
-        self.published = (context_graph_id, kwargs)
-        return {"success": True}
+    def publish_quads(self, context_graph_id, quads, sub_graph_name=None):
+        self.publish_quads_call = (context_graph_id, quads, sub_graph_name)
+        return {"kaId": "ka", "ual": "did:dkg:1/0xabc/5", "status": "confirmed"}
 
 provider._client = PublishClient()
 result = json.loads(provider.handle_tool_call("dkg_publish", {
@@ -467,35 +465,14 @@ result = json.loads(provider.handle_tool_call("dkg_publish", {
         {"subject": "urn:root:1", "predicate": "urn:p2", "object": "three"},
     ],
 }))
-assert result["success"] is True, result
-assert result["rootEntities"] == ["urn:root:1", "urn:root:2"], result
-# Multi-root publish passes the explicit root list (not "all") so the client
-# loops one root per call and avoids the 409 MULTI_ROOT_PUBLISH_NOT_ATOMIC
-# single-root guard on /api/shared-memory/publish. clear_after MUST be False
-# (FIX M): clear_after=True wipes the whole SWM remainder, destroying other
-# calls'/agents' unpublished roots; dkg_publish only owns what it just wrote.
-assert provider._client.published == (
-    "cg:test",
-    {"selection": ["urn:root:1", "urn:root:2"], "clear_after": False, "sub_graph_name": ""},
-), provider._client.published
-
-# Single-subject dkg_publish publishes the EXPLICIT root it just wrote, never
-# "all" (which would over-scope to every unpublished root in the CG — Codex #1750).
-provider._client = PublishClient()
-result = json.loads(provider.handle_tool_call("dkg_publish", {
-    "context_graph_id": "cg:test",
-    "quads": [
-        {"subject": "urn:root:solo", "predicate": "urn:p", "object": "one"},
-        {"subject": "urn:root:solo", "predicate": "urn:p2", "object": "two"},
-    ],
-}))
-assert result["success"] is True, result
-assert result["rootEntities"] == ["urn:root:solo"], result
-# clear_after MUST be False (FIX M) — never wipe the SWM remainder.
-assert provider._client.published == (
-    "cg:test",
-    {"selection": ["urn:root:solo"], "clear_after": False, "sub_graph_name": ""},
-), provider._client.published
+# Multi-subject quads publish atomically in ONE call — no 409, no over-scope.
+assert result["ual"] == "did:dkg:1/0xabc/5", result
+assert result["quadsPublished"] == 3, result
+assert provider._client.publish_quads_call[0] == "cg:test", provider._client.publish_quads_call
+assert len(provider._client.publish_quads_call[1]) == 3, provider._client.publish_quads_call
+# The obsolete selection-fork result fields are gone.
+for _k in ("rootEntities", "partial", "publishedRoots", "failedRoot", "notAttemptedRoots"):
+    assert _k not in result, _k
 `;
     const result = spawnSync('python', ['-B', '-c', script], {
       cwd: process.cwd(),
