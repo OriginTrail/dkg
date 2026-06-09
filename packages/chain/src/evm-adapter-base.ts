@@ -1194,14 +1194,13 @@ export class EVMChainAdapterBase {
    * reconciliation so a stale-local-DB / fresh device never re-hands a burned
    * `(author, number)`.
    *
-   * Resolution order:
-   *   1. The O(1) on-chain view `getMaxKaNumberForAuthor(author)` returns int256
-   *      (`DKGKnowledgeAssets` >= 10.0.4) — a single `eth_call`, natively bounded.
-   *   2. Fallback for pre-10.0.4 deployments (view absent / reverts): enumerate
-   *      `KnowledgeAssetCreated(id, author)` logs, but PAGINATED in RPC-safe
-   *      windows. The previous single `queryFilter(filter, 0)` scanned
-   *      `[0, latest]` in one shot and overflowed the `eth_getLogs` block-range
-   *      cap on networks with deep history, aborting KA create (issue #1080).
+   * Strict O(1): reads the `getMaxKaNumberForAuthor(address) -> int256` view on
+   * `DKGKnowledgeAssets` (>= 10.0.4) — a single `eth_call`, natively bounded, no
+   * `eth_getLogs` scan (#1080). The off-chain allocator's next number is
+   * `result + 1` (so a never-minted author, `-1`, starts at 0). There is no
+   * log-scan fallback by design: V10 deploys the 10.0.4 contract fresh, so the
+   * view is authoritative from genesis; an absent selector is a misconfigured
+   * deployment and should fail loudly rather than silently crawl chain history.
    */
   async getMaxKaNumberForAuthor(author: string): Promise<bigint> {
     const storage = this.contracts.knowledgeAssetStorage;
@@ -1209,43 +1208,8 @@ export class EVMChainAdapterBase {
       throw new Error('DKGKnowledgeAssets not deployed on this chain.');
     }
     const normalized = ethers.getAddress(author);
-
-    // 1) Preferred: the O(1) on-chain view (no log scan, no range limits).
-    if (typeof storage.getMaxKaNumberForAuthor === 'function') {
-      try {
-        const max = await storage.getMaxKaNumberForAuthor.staticCall(normalized);
-        return BigInt(max);
-      } catch (err) {
-        // Fall back to the bounded scan for contract-level call failures
-        // (e.g. a pre-10.0.4 deployment without the selector -> empty/
-        // undecodable return data). Rethrow clearly-transient RPC/network
-        // errors so a provider blip doesn't silently degrade into a full
-        // historical `KnowledgeAssetCreated` crawl on the same provider.
-        const code = (err as { code?: string } | null)?.code;
-        if (code === 'NETWORK_ERROR' || code === 'SERVER_ERROR' || code === 'TIMEOUT') {
-          throw err;
-        }
-      }
-    }
-
-    // 2) Fallback: paginated `KnowledgeAssetCreated` scan in RPC-safe windows.
-    const filter = storage.filters.KnowledgeAssetCreated(null, normalized);
-    const head = await this.provider.getBlockNumber();
-    const PAGE = 2_000; // <= the smallest common eth_getLogs block-range cap
-    const MASK = (1n << 96n) - 1n;
-    let max = -1n;
-    for (let lo = 0; lo <= head; lo += PAGE) {
-      const hi = Math.min(lo + PAGE - 1, head);
-      const logs = await storage.queryFilter(filter, lo, hi);
-      for (const log of logs) {
-        const args = (log as ethers.EventLog).args;
-        const rawId = args?.id ?? args?.[0];
-        if (rawId === undefined || rawId === null) continue;
-        const num = BigInt(rawId) & MASK;
-        if (num > max) max = num;
-      }
-    }
-    return max;
+    const max = await storage.getMaxKaNumberForAuthor.staticCall(normalized);
+    return BigInt(max);
   }
 
   async getKnowledgeAssetsLifecycleAddress(): Promise<string> {
