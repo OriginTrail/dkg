@@ -191,8 +191,8 @@ Drop to HTTP when the operation isn't in the table — participant self-service 
 | `dkg_knowledge_asset_import_artifact_read_markdown` | `POST /api/knowledge-assets/import-artifact/read-markdown` | Safely read Markdown for a completed imported attachment by content-addressed hash |
 | `dkg_knowledge_asset_import_artifact_resolve` | `POST /api/knowledge-assets/import-artifact/resolve` | Optional metadata re-check for completed imported attachments |
 | `dkg_knowledge_asset_semantic_enrichment_write` | `POST /api/knowledge-assets/semantic-enrichment/write` | Append model-derived semantic triples and provenance to the imported assertion |
-| `dkg_publish` | `POST /api/shared-memory/write` + `POST /api/shared-memory/publish` | **Two-call helper** (SWM-bridge / CG-wide): first writes supplied quads to SWM via `/write`, then publishes SWM → VM (TRAC). Accepts `register_if_needed` + `access_policy` to register a fresh CG on-chain first (§6). For a single per-KA sealed publish prefer `dkg_knowledge_asset_publish`. The legacy `/api/shared-memory/publish` is single-root-per-call — see §5 VM |
-| `dkg_shared_memory_publish` | `POST /api/shared-memory/publish` | **SWM-bridge / CG-wide publish (legacy, retained)**: publish existing SWM → VM, no fresh quads. Single-root-per-call (loop for multiple roots). For the per-KA sealed path use `dkg_knowledge_asset_publish` |
+| `dkg_publish` | `POST /api/knowledge-assets` + `POST /api/shared-memory/publish` (`{assertionName}`) | **Two-call one-shot helper** (atomic, per-call): creates a fresh auto-named assertion with the supplied quads, then publishes it by `assertionName` via the **atomic finalized-assertion fork** of `/api/shared-memory/publish` — scoped to that one assertion's seal, **multi-root-safe** (no single-root loop, no `409 MULTI_ROOT`). Does **not** auto-register the CG → accepts `register_if_needed` + `access_policy` to register a fresh CG on-chain first (§6). For a single named per-KA sealed publish prefer `dkg_knowledge_asset_publish` |
+| `dkg_shared_memory_publish` | `POST /api/shared-memory/publish` (`{selection}`) | **SWM-bridge / CG-wide publish (legacy, retained)**: publish existing SWM → VM, no fresh quads. Uses the **`selection` fork** — **single-root-per-call** (loop one root per call with `clearAfter:false` on all but the last, else `409 MULTI_ROOT_PUBLISH_NOT_ATOMIC`). Auto-registers the CG on first publish (OT-RFC-38 LU-6). For the per-KA sealed path use `dkg_knowledge_asset_publish` |
 | `dkg_share` | `POST /api/shared-memory/write` | Directly write concise team-visible knowledge to SWM without staging a WM assertion. Prefer the WM assertion → promote flow for durable/canonical work. Both Hermes and OpenClaw expose the same tool schema (required `content` and `context_graph_id`, optional `sub_graph_name`), so MCP-discovered call signatures are portable. The OpenClaw implementation additionally validates content as non-whitespace, mints a unique subject per share (returned in the response), and N-Triples-quotes content; Hermes is currently looser on those points — the parallel hardening is tracked in OriginTrail/dkg#414. |
 | `dkg_sub_graph_create` | `POST /api/sub-graph/create` | Register a sub-graph inside a CG |
 | `dkg_sub_graph_list` | `GET /api/sub-graph/list` | List sub-graphs in a CG |
@@ -205,10 +205,11 @@ Drop to HTTP when the operation isn't in the table — participant self-service 
 | `dkg_read_messages` | `GET /api/messages` | Read inbound messages |
 | `dkg_invoke_skill` | `POST /api/invoke-skill` | Call another agent's skill (best-effort P2P) |
 
-P2P tools fail gracefully when the peer is offline. There are **two publish surfaces**:
+P2P tools fail gracefully when the peer is offline. There are **three publish tools**, but only **two underlying forks** of `/api/shared-memory/publish` — the difference is *atomic per-assertion* vs *CG-wide selection*:
 
 - **Per-KA sealed publish** — `dkg_knowledge_asset_publish` (`/vm/publish`). Publishes one sealed assertion by name; takes **no selector** (the seal commits the whole assertion) and is multi-root-safe. This is the canonical step 5 of the `create → write → finalize → share → publish` lifecycle and the one that returns the **UAL**.
-- **SWM-bridge / CG-wide publish (legacy, retained)** — `dkg_publish` (fresh quads + write + publish, two HTTP calls) and `dkg_shared_memory_publish` (publish existing SWM, one HTTP call) hit `/api/shared-memory/publish`, which uses a `selection` selector and is **single-root-per-call**: for multiple root entities, loop one root per call with `clearAfter: false` on all but the last (else the daemon returns `409 MULTI_ROOT_PUBLISH_NOT_ATOMIC`). Use the two-call helper for "I have loose quads, publish now"; use `dkg_shared_memory_publish` to flush existing SWM.
+- **One-shot atomic publish** — `dkg_publish` ("I have loose quads, publish now"). Two HTTP calls: `POST /api/knowledge-assets` (creates a fresh auto-named assertion with the quads) then `POST /api/shared-memory/publish` with `{assertionName}` — the **atomic finalized-assertion fork**, scoped to that one assertion's seal. **Multi-root-safe**: no single-root loop, no `409 MULTI_ROOT`. It does **not** auto-register the CG, so on a fresh never-registered CG pass `register_if_needed: true`.
+- **CG-wide SWM-bridge publish (legacy, retained)** — `dkg_shared_memory_publish` (publish existing SWM, no fresh quads). Uses the **`selection` fork** of `/api/shared-memory/publish` and is **single-root-per-call**: for multiple root entities, loop one root per call with `clearAfter: false` on all but the last (else the daemon returns `409 MULTI_ROOT_PUBLISH_NOT_ATOMIC`). Auto-registers the CG on first publish (OT-RFC-38 LU-6). Use it to flush existing SWM.
 
 `dkg_share` is a direct SWM convenience helper for quick team-visible notes, not a replacement for the knowledge-asset lifecycle.
 
@@ -294,10 +295,17 @@ SWM is for knowledge you've promoted from WM and want peers to see. Data arrives
   context-graph register …' first"*). A fresh project created via
   `dkg_context_graph_create` is **local-only** (no chain) until its first registration —
   see "Registering the CG for VM" below. Returns the **publish response body** below.
-- **SWM-bridge / CG-wide publish (legacy, retained)** — `POST /api/shared-memory/publish`
-  (and the `dkg_publish` / `dkg_shared_memory_publish` tools). Uses a `selection`
-  selector and is single-root-per-call (§5 SWM). Use it to flush loose SWM that isn't a
-  named lifecycle assertion.
+- **One-shot atomic publish** — `dkg_publish`. Creates a fresh auto-named assertion from
+  loose quads (`POST /api/knowledge-assets`) then publishes it via the **atomic
+  finalized-assertion fork** of `/api/shared-memory/publish` (`{assertionName}`) — scoped
+  to that one assertion's seal, **multi-root-safe** (no `selection`, no single-root loop,
+  no `409 MULTI_ROOT`). Like `vm/publish` it does **not** auto-register the CG → pass
+  `register_if_needed: true` on a fresh CG. Use it for "I have loose quads, publish now".
+- **CG-wide SWM-bridge publish (legacy, retained)** — `dkg_shared_memory_publish` →
+  `POST /api/shared-memory/publish` with a **`selection`** selector. **Single-root-per-call**
+  (§5 SWM): loop one root per call (else `409 MULTI_ROOT_PUBLISH_NOT_ATOMIC`); auto-registers
+  the CG on first publish (LU-6). Use it to flush existing SWM that isn't a named lifecycle
+  assertion.
 
 **Publish response body (`vm/publish`).** A successful publish returns:
 
