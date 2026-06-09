@@ -68,7 +68,8 @@ export function buildAssertionTools(ctx: DkgToolHost): OpenClawTool[] {
         'root and signs the EIP-712 AuthorAttestation. Finalize always seals the WHOLE draft (there is no ' +
         'subset parameter). A FULL share (dkg_knowledge_asset_share with entities omitted or "all") ' +
         'auto-seals for you, so you only need to call this explicitly before sharing a SELECTIVE subset of ' +
-        'entities, or to re-seal after editing a previously-sealed draft.',
+        'entities, or to re-seal after editing a previously-sealed draft. (External-signer / pre-signed ' +
+        'attestation is a tracked follow-up and is not exposed by this tool — author with author_agent_address.)',
       parameters: {
         type: 'object',
         properties: {
@@ -77,8 +78,8 @@ export function buildAssertionTools(ctx: DkgToolHost): OpenClawTool[] {
           author_agent_address: {
             type: 'string',
             description:
-              'Optional 0x author address to attest as. Mutually exclusive with pre_signed_author_attestation. ' +
-              'Omit to let the daemon default the author to the request token\'s agent.',
+              'Optional 0x author address to attest as. Omit to let the daemon default the author to the ' +
+              'request token\'s agent.',
           },
           scheme_version: { type: 'integer', description: 'Optional attestation scheme version.' },
           sub_graph_name: { type: 'string', description: 'Must match the one used at write time.' },
@@ -104,12 +105,13 @@ export function buildAssertionTools(ctx: DkgToolHost): OpenClawTool[] {
           context_graph_id: { type: 'string', description: `Target context graph. ${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION}` },
           name: { type: 'string', description: 'Knowledge asset name to share.' },
           entities: {
-            type: 'array',
+            type: ['string', 'array'],
             items: { type: 'string', description: 'Root entity URI.' },
             description:
-              'Root entity URIs to share. Omit to share every root entity (default, auto-seals + publish-ready). ' +
-              'When provided, must be a non-empty array of URIs that already exist in the asset; a subset shares ' +
-              'to SWM only and is NOT publishable to Verifiable Memory.',
+              'Root entities to share. Omit (or pass the string "all") to share every root entity (full share, ' +
+              'auto-seals + publish-ready). Provide a non-empty array of URIs that already exist in the asset to ' +
+              'share a subset — a subset shares to SWM only and is NOT publishable to Verifiable Memory. The only ' +
+              'accepted string value is "all".',
           },
           sub_graph_name: { type: 'string', description: 'Must match the one used at write time.' },
         },
@@ -135,11 +137,7 @@ export function buildAssertionTools(ctx: DkgToolHost): OpenClawTool[] {
           publish_epochs: { type: 'integer', description: 'Optional number of epochs to publish for (positive integer).' },
           publisher_node_identity_id_override: {
             type: 'string',
-            description: 'Optional publisher node identity id override (decimal string).',
-          },
-          clear_shared_memory_after: {
-            type: 'boolean',
-            description: 'When true, clear the asset\'s Shared Working Memory after a confirmed publish.',
+            description: 'Optional publisher node identity id override (non-negative integer, decimal string).',
           },
           sub_graph_name: { type: 'string', description: 'Must match the one used at write/share time.' },
         },

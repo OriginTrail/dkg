@@ -1248,12 +1248,21 @@ export class DkgDaemonClient {
   async knowledgeAssetWrite(
     contextGraphId: string,
     name: string,
-    quads: Array<{ subject: string; predicate: string; object: string; graph: string }>,
+    quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
     opts?: { subGraphName?: string },
   ): Promise<{ written: number }> {
+    // Strip any per-quad `graph` at the client (CONTRACT §A): the write wire
+    // shape is `{subject, predicate, object}` only and the daemon pins every
+    // quad to the per-KA WM graph (§0 invariant 2), so a caller-supplied or
+    // normalizer-emitted `graph` is dropped here — not just in the tool schema.
+    const wireQuads = quads.map((q) => ({
+      subject: q.subject,
+      predicate: q.predicate,
+      object: q.object,
+    }));
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/write`, {
       contextGraphId: normalizeContextGraphId(contextGraphId),
-      quads,
+      quads: wireQuads,
       ...(opts ?? {}),
     });
   }

@@ -3449,11 +3449,13 @@ export class DkgNodePlugin {
       if (!name) return this.error('"name" is required.');
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
       const authorAgentAddress = args.author_agent_address ? String(args.author_agent_address) : undefined;
+      // CONTRACT §C: present-but-invalid is a tool error, never silent-default.
+      // `scheme_version` must be a POSITIVE integer (daemon Number.isInteger && >= 1).
       let schemeVersion: number | undefined;
       if (args.scheme_version !== undefined) {
-        const raw = typeof args.scheme_version === 'string' ? Number(args.scheme_version) : args.scheme_version;
-        if (typeof raw !== 'number' || !Number.isInteger(raw)) {
-          return this.error('"scheme_version" must be an integer.');
+        const raw = typeof args.scheme_version === 'string' ? Number(args.scheme_version.trim()) : args.scheme_version;
+        if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1) {
+          return this.error('"scheme_version" must be a positive integer.');
         }
         schemeVersion = raw;
       }
@@ -3479,18 +3481,22 @@ export class DkgNodePlugin {
       if (!contextGraphId) return this.error('"context_graph_id" is required.');
       if (!name) return this.error('"name" is required.');
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
-      // Public contract: omit `entities` → promote everything (daemon defaults `entities ?? "all"`).
-      // Provided → must be a non-empty array of URIs. The previous string-"all" shortcut was dropped
-      // because strict JSON-schema validators rejected it (schema says `type: 'array'`) while
-      // `entities: ["all"]` would silently 400 at the daemon — a confusing no-signal failure mode.
-      let entities: string[] | undefined;
+      // CONTRACT §B: `entities` accepts "all" | string[] | omitted. Omitted ⇒
+      // undefined (daemon defaults to a full share); the "all" string sentinel is
+      // passed through unchanged (the daemon reads parsed.entities and treats
+      // "all" as a full share). A non-empty string[] passes through as the subset.
+      // An empty array is rejected client-side (the daemon REST 400s "all"→[] /
+      // empty selections) — fail fast with a clear message, never coerce.
+      let entities: string[] | 'all' | undefined;
       const raw = args.entities;
       if (raw === undefined || raw === null) {
         entities = undefined;
+      } else if (raw === 'all') {
+        entities = 'all';
       } else if (Array.isArray(raw) && raw.length > 0 && raw.every((e) => typeof e === 'string')) {
         entities = raw.map((e) => String(e));
       } else {
-        return this.error('"entities" must be omitted or a non-empty array of root entity URIs.');
+        return this.error('"entities" must be omitted, the string "all", or a non-empty array of root entity URIs.');
       }
       // WM → SWM. The KA `swm/share` route is the same engine call
       // (`agent.assertion.promote`) the legacy promote used.
@@ -3512,26 +3518,34 @@ export class DkgNodePlugin {
       if (!name) return this.error('"name" is required.');
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
 
+      // CONTRACT §C: a present-but-invalid numeric is a tool error, never a
+      // silent default. `publish_epochs` must be a POSITIVE integer (daemon
+      // /^[1-9]\d*$/ + MAX_PUBLISH_EPOCHS cap).
       let publishEpochs: number | undefined;
       if (args.publish_epochs !== undefined) {
-        const raw = typeof args.publish_epochs === 'string' ? Number(args.publish_epochs) : args.publish_epochs;
+        const raw = typeof args.publish_epochs === 'string' ? Number(args.publish_epochs.trim()) : args.publish_epochs;
         if (typeof raw !== 'number' || !Number.isInteger(raw) || raw <= 0) {
           return this.error('"publish_epochs" must be a positive integer.');
         }
         publishEpochs = raw;
       }
+      // CONTRACT §C: `publisher_node_identity_id_override` must be a NON-NEGATIVE
+      // integer (daemon /^\d+$/). BigInt() alone accepts "-1" / "0x.." — validate
+      // explicitly first, then carry as a bigint.
       let publisherNodeIdentityIdOverride: bigint | undefined;
       if (args.publisher_node_identity_id_override !== undefined) {
-        try {
-          publisherNodeIdentityIdOverride = BigInt(String(args.publisher_node_identity_id_override));
-        } catch {
+        const raw = String(args.publisher_node_identity_id_override).trim();
+        if (!/^\d+$/.test(raw)) {
           return this.error('"publisher_node_identity_id_override" must be a non-negative integer (decimal string).');
         }
+        publisherNodeIdentityIdOverride = BigInt(raw);
       }
-      if (args.clear_shared_memory_after !== undefined && typeof args.clear_shared_memory_after !== 'boolean') {
-        return this.error('"clear_shared_memory_after" must be a boolean.');
-      }
-      const clearAfter = args.clear_shared_memory_after as boolean | undefined;
+
+      // CONTRACT §D: `clear_shared_memory_after` is NOT exposed on the per-asset
+      // publish tool — on vm/publish it is graph-wide destructive (wipes every
+      // other agent's unpublished SWM in the CG/sub-graph). The this-asset SWM
+      // cleanup runs unconditionally regardless. The CG-wide clear stays on
+      // dkg_publish / dkg_shared_memory_publish.
 
       // Per-KA sealed publish (CONTRACT §1 Stage5). The seal selects the author and
       // the whole asset, so author/selection overrides are never sent. The daemon
@@ -3542,7 +3556,6 @@ export class DkgNodePlugin {
         subGraphName,
         publishEpochs,
         publisherNodeIdentityIdOverride,
-        clearAfter,
       });
       return this.json(result);
     } catch (err: any) {
