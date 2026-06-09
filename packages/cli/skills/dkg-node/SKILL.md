@@ -280,9 +280,13 @@ SWM is for knowledge you've promoted from WM and want peers to see. Data arrives
   select the assertion and encode the author, so this endpoint takes **no selector** —
   `assertionName`, author overrides, and any `selection` other than `"all"` are
   rejected `400`. It is multi-root-safe (the seal commits the whole assertion).
-  Body: `{ "contextGraphId": "...", "subGraphName"?: "...", "options"?: { "publishEpochs"?: N, "clearSharedMemoryAfter"?: bool, "publisherNodeIdentityIdOverride"?: "N" } }`.
-  **Precondition:** the assertion must be finalized **and** present in SWM, else
-  `409 VM_PUBLISH_PRECONDITION`. Returns the **publish response body** below.
+  Body: `{ "contextGraphId": "...", "subGraphName"?: "...", "options"?: { "publishEpochs"?: N, "publisherNodeIdentityIdOverride"?: "N" } }`.
+  **Preconditions:** the assertion must be finalized **and** present in SWM (else
+  `409 VM_PUBLISH_PRECONDITION`), **and the context graph must be registered on-chain**
+  (else the daemon throws *"Context graph … is not registered on-chain. Run 'dkg
+  context-graph register …' first"*). A fresh project created via
+  `dkg_context_graph_create` is **local-only** (no chain) until its first registration —
+  see "Registering the CG for VM" below. Returns the **publish response body** below.
 - **SWM-bridge / CG-wide publish (legacy, retained)** — `POST /api/shared-memory/publish`
   (and the `dkg_publish` / `dkg_shared_memory_publish` tools). Uses a `selection`
   selector and is single-root-per-call (§5 SWM). Use it to flush loose SWM that isn't a
@@ -313,6 +317,21 @@ identifiers you get back are `kaId`, `ual`, and `kas[].tokenId`.
 **Status codes:** `200` confirmed · `207` minted but the CG-binding step failed
 (`contextGraphError` present; the UAL is still valid) · `502` did not confirm ·
 `409 VM_PUBLISH_PRECONDITION` (not finalized / empty SWM).
+
+**Registering the CG for VM.** Verifiable-Memory publishing requires the context graph to
+be **registered on-chain** (the first registration is when you accept the chain cost). A
+project created with `dkg_context_graph_create` is local-only until then. Three ways to
+register:
+- **`register_if_needed` on the publish tool (simplest):** `dkg_knowledge_asset_publish`
+  accepts `register_if_needed: true` — it registers the CG on-chain (idempotent; a no-op
+  if already registered, may spend gas/TRAC) and then publishes, in one call. Use this to
+  complete `create → write → finalize → share → publish` on a brand-new CG. Default is
+  `false` (publish a never-registered CG and you'll get the daemon's not-registered
+  error). The same option exists on `dkg_shared_memory_publish`.
+- **Explicit register:** `POST /api/context-graph/register` `{ id, accessPolicy?, publishPolicy? }` (CLI: `dkg context-graph register <id>`), then publish.
+- **Implicit on the CG-wide path:** the legacy `POST /api/shared-memory/publish` /
+  `dkg_shared_memory_publish` auto-registers on first publish (transparent
+  register-then-publish), so publishing a fresh CG's SWM there also registers it.
 
 **Auto-seal on full share (best-effort).** A full `swm/share` (`entities: "all"` /
 omitted) tries to seal the draft for you before promoting, with three outcomes:
@@ -814,7 +833,7 @@ This entire surface was empirically driven by [PR #720](https://github.com/Origi
 3. **Write** triples to Working Memory (`POST /api/knowledge-assets/{name}/wm/write`)
 4. **Finalize** (seal) the draft (`POST /api/knowledge-assets/{name}/wm/finalize`) — the EIP-712 "git commit" over the whole assertion
 5. **Share** to SWM when ready for peers (`POST /api/knowledge-assets/{name}/swm/share`, `entities: "all"`)
-6. **Publish** the sealed assertion to VM (`POST /api/knowledge-assets/{name}/vm/publish`) — mints on chain and returns the **UAL** in the response body (`{ kaId, ual, txHash, ... }`); store the UAL to reference the asset later
+6. **Publish** the sealed assertion to VM (`POST /api/knowledge-assets/{name}/vm/publish`) — mints on chain and returns the **UAL** in the response body (`{ kaId, ual, txHash, ... }`); store the UAL to reference the asset later. **On a brand-new project**, the CG isn't registered on-chain yet — pass `register_if_needed: true` on `dkg_knowledge_asset_publish` so it registers then publishes in one call (or register first; see §5 "Registering the CG for VM").
 
 > Shortcut: a full `swm/share` auto-seals best-effort, so steps 4–5 can collapse into a
 > single `swm/share` for the common case (see §5 VM for the auto-seal caveats). The
