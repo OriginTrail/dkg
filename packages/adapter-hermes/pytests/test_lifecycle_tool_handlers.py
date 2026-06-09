@@ -46,6 +46,10 @@ class _FakeClient:
         self.calls.append(("pull", name, cg, layer, on_conflict, sub_graph_name))
         return {"wmDraft": "open", "seededFrom": {"layer": layer}}
 
+    def promote_assertion(self, name, cg, entities, sub_graph_name=None):
+        self.calls.append(("share", name, cg, entities, sub_graph_name))
+        return {"swmShared": True, "promotedCount": 1}
+
 
 @pytest.fixture
 def provider(plugin_module):
@@ -101,6 +105,68 @@ def test_share_description_carries_subset_language(provider):
     assert "NOT publishable to Verifiable Memory" in share["description"]
 
 
+# -- B: entities accepts "all" | string[] | omitted -------------------------
+
+def test_share_entities_all_passes_through(provider):
+    provider.handle_tool_call("dkg_knowledge_asset_share", {
+        "context_graph_id": "cg1", "name": "ka", "entities": "all",
+    })
+    assert provider._client.calls[-1][3] == "all"
+
+
+def test_share_entities_array_passes_through(provider):
+    provider.handle_tool_call("dkg_knowledge_asset_share", {
+        "context_graph_id": "cg1", "name": "ka", "entities": ["urn:a", "urn:b"],
+    })
+    assert provider._client.calls[-1][3] == ["urn:a", "urn:b"]
+
+
+def test_share_entities_omitted_is_none_not_coerced(provider):
+    provider.handle_tool_call("dkg_knowledge_asset_share", {
+        "context_graph_id": "cg1", "name": "ka",
+    })
+    # omitted stays None — NOT coerced to "all" (both are full-share daemon-side)
+    assert provider._client.calls[-1][3] is None
+
+
+def test_share_entities_empty_array_rejected(provider):
+    before = len(provider._client.calls)
+    out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_share", {
+        "context_graph_id": "cg1", "name": "ka", "entities": [],
+    }))
+    assert "error" in out and '"all"' in out["error"]
+    assert len(provider._client.calls) == before  # never reached the wire
+
+
+def test_share_entities_bad_string_rejected(provider):
+    out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_share", {
+        "context_graph_id": "cg1", "name": "ka", "entities": "everything",
+    }))
+    assert "error" in out
+
+
+def test_share_schema_entities_is_union(provider):
+    share = next(s for s in provider.get_tool_schemas()
+                 if s["name"] == "dkg_knowledge_asset_share")
+    assert "anyOf" in share["parameters"]["properties"]["entities"]
+
+
+# -- E: no pre-signed reference; finalize follow-up note ---------------------
+
+def test_finalize_description_has_no_presigned_ref(provider):
+    fin = next(s for s in provider.get_tool_schemas()
+               if s["name"] == "dkg_knowledge_asset_finalize")
+    assert "pre_signed" not in fin["description"]
+    assert "preSigned" not in fin["description"]
+    assert "pre_signed_author_attestation" not in fin["parameters"]["properties"]
+
+
+def test_finalize_description_notes_external_signer_followup(provider):
+    fin = next(s for s in provider.get_tool_schemas()
+               if s["name"] == "dkg_knowledge_asset_finalize")
+    assert "tracked follow-up" in fin["description"]
+
+
 # -- finalize handler -------------------------------------------------------
 
 def test_finalize_handler_normalizes_author_to_checksum(provider):
@@ -131,17 +197,26 @@ def test_publish_handler_builds_nested_options(provider):
         "context_graph_id": "cg1",
         "name": "ka",
         "publish_epochs": 3,
-        "clear_shared_memory_after": True,
-        "publisher_node_identity_id_override": "12",
+        "publisher_node_identity_id_override": 12,
     }))
     call = provider._client.calls[-1]
     assert call[0] == "publish"
+    # override normalized to a decimal string on the wire (daemon regex /^\d+$/)
     assert call[4] == {
         "publishEpochs": 3,
-        "clearSharedMemoryAfter": True,
         "publisherNodeIdentityIdOverride": "12",
     }
     assert out["ual"] == "did:dkg:1/0xabc/5"
+
+
+def test_publish_handler_accepts_numeric_string_forms(provider):
+    provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka",
+        "publish_epochs": "5", "publisher_node_identity_id_override": "0",
+    })
+    assert provider._client.calls[-1][4] == {
+        "publishEpochs": 5, "publisherNodeIdentityIdOverride": "0",
+    }
 
 
 def test_publish_handler_omits_empty_options(provider):
@@ -151,11 +226,49 @@ def test_publish_handler_omits_empty_options(provider):
     assert provider._client.calls[-1][4] is None
 
 
-def test_publish_handler_rejects_non_boolean_clear_flag(provider):
+# -- C: numeric validation — present-but-invalid -> tool error, nothing on wire
+
+def test_publish_handler_rejects_invalid_publish_epochs(provider):
+    for bad in [0, -1, "x", 0x100000000]:
+        before = len(provider._client.calls)
+        out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
+            "context_graph_id": "cg1", "name": "ka", "publish_epochs": bad,
+        }))
+        assert "publish_epochs" in out["error"], (bad, out)
+        # invalid value never reached the wire
+        assert len(provider._client.calls) == before, bad
+
+
+def test_publish_handler_rejects_negative_override(provider):
     out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
-        "context_graph_id": "cg1", "name": "ka", "clear_shared_memory_after": "yes",
+        "context_graph_id": "cg1", "name": "ka", "publisher_node_identity_id_override": -1,
     }))
-    assert "must be a boolean" in out["error"]
+    assert "publisher_node_identity_id_override" in out["error"]
+
+
+def test_finalize_handler_rejects_invalid_scheme_version(provider):
+    out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_finalize", {
+        "context_graph_id": "cg1", "name": "ka", "scheme_version": 0,
+    }))
+    assert "scheme_version" in out["error"]
+
+
+# -- D: clear-after dropped from the per-asset publish tool
+
+def test_publish_schema_has_no_clear_after(provider):
+    pub = next(s for s in provider.get_tool_schemas()
+               if s["name"] == "dkg_knowledge_asset_publish")
+    assert "clear_shared_memory_after" not in pub["parameters"]["properties"]
+    assert "clear_after" not in pub["parameters"]["properties"]
+
+
+def test_publish_handler_ignores_clear_after_arg(provider):
+    # an agent that still sends it must not put it on the wire
+    provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka", "clear_shared_memory_after": True,
+    })
+    opts = provider._client.calls[-1][4]
+    assert opts is None or "clearSharedMemoryAfter" not in opts
 
 
 def test_publish_handler_enforces_publish_guard(provider):

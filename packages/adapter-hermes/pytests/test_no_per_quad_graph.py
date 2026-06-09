@@ -64,3 +64,18 @@ def test_dkg_query_handler_keeps_graph_scoping_read_params(plugin_module):
     })
     assert captured.get("verified_graph") == "urn:vg"
     assert captured.get("graph_suffix") == "tuesday"
+
+
+# -- A: client-level wire-level strip (CONTRACT §A) -------------------------
+
+def test_write_assertion_strips_graph_at_the_wire(recording_client):
+    # A hand-built quad carrying `graph` must not reach the POST body — the
+    # client strips it even when the schema is bypassed (CONTRACT §A).
+    client = recording_client
+    client.write_assertion("ka", "cg1", [
+        {"subject": "urn:s", "predicate": "urn:p", "object": "urn:o", "graph": "urn:g"},
+    ])
+    path, body = client.posts[-1]
+    assert path == "/api/knowledge-assets/ka/wm/write"
+    assert body["quads"] == [{"subject": "urn:s", "predicate": "urn:p", "object": "urn:o"}]
+    assert all("graph" not in q for q in body["quads"])

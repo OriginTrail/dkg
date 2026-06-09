@@ -93,3 +93,26 @@ def test_context_graph_id_is_normalized(recording_client):
     client.publish("did:dkg:context-graph:cg1", selection=["a", "b"], clear_after=True)
 
     assert all(body["contextGraphId"] == "cg1" for _, body in client.posts)
+
+
+# -- F: dedupe the per-root publish list preserving first-seen order --------
+
+def test_duplicate_roots_dedup_preserving_order(recording_client):
+    client = recording_client
+    result = client.publish("cg:test", selection=["a", "b", "a", "c", "b"], clear_after=True)
+
+    # N DISTINCT calls, one per unique root, in first-seen order — not N-with-repeats
+    assert result["rootEntities"] == ["a", "b", "c"]
+    assert [body["selection"] for _, body in client.posts] == [["a"], ["b"], ["c"]]
+    # clearAfter still only true on the final (last unique) call
+    assert [body["clearAfter"] for _, body in client.posts] == [False, False, True]
+
+
+def test_all_duplicate_roots_collapse_to_single_call(recording_client):
+    client = recording_client
+    client.publish("cg:test", selection=["z", "z", "z"], clear_after=True)
+
+    assert len(client.posts) == 1
+    _, body = client.posts[0]
+    assert body["selection"] == ["z"]
+    assert body["clearAfter"] is True
