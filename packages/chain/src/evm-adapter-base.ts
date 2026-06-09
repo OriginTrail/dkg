@@ -1190,10 +1190,18 @@ export class EVMChainAdapterBase {
 
   /**
    * OT-RFC-43 Option 1 — highest per-author KA `number` already minted on chain,
-   * or `-1n` if `author` never minted. Enumerates `KnowledgeAssetCreated(id,
-   * author, ...)` logs filtered by the indexed `author` topic and returns
-   * `max(id & ((1<<96)-1))`. Backs the allocator's cold-start reconciliation so
-   * a stale-local-DB / fresh device never re-hands a burned `(author, number)`.
+   * or `-1n` if `author` never minted. Backs the allocator's cold-start
+   * reconciliation so a stale-local-DB / fresh device never re-hands a burned
+   * `(author, number)`.
+   *
+   * Resolution order:
+   *   1. The O(1) on-chain view `getMaxKaNumberForAuthor(author)` returns int256
+   *      (`DKGKnowledgeAssets` >= 10.0.4) — a single `eth_call`, natively bounded.
+   *   2. Fallback for pre-10.0.4 deployments (view absent / reverts): enumerate
+   *      `KnowledgeAssetCreated(id, author)` logs, but PAGINATED in RPC-safe
+   *      windows. The previous single `queryFilter(filter, 0)` scanned
+   *      `[0, latest]` in one shot and overflowed the `eth_getLogs` block-range
+   *      cap on networks with deep history, aborting KA create (issue #1080).
    */
   async getMaxKaNumberForAuthor(author: string): Promise<bigint> {
     const storage = this.contracts.knowledgeAssetStorage;
@@ -1201,20 +1209,34 @@ export class EVMChainAdapterBase {
       throw new Error('DKGKnowledgeAssets not deployed on this chain.');
     }
     const normalized = ethers.getAddress(author);
-    // KnowledgeAssetCreated(uint256 indexed id, address indexed author, ...):
-    // filter by the second indexed topic (author). fromBlock 0 — devnets are
-    // cheap; a production fromBlock = deployment block is a future optimization
-    // (there is no per-author counter view on-chain under variant 1a).
+
+    // 1) Preferred: the O(1) on-chain view (no log scan, no range limits).
+    if (typeof storage.getMaxKaNumberForAuthor === 'function') {
+      try {
+        const max = await storage.getMaxKaNumberForAuthor.staticCall(normalized);
+        return BigInt(max);
+      } catch {
+        // View absent on an older-deployed contract (selector mismatch) or a
+        // transient read error — fall through to the bounded log scan.
+      }
+    }
+
+    // 2) Fallback: paginated `KnowledgeAssetCreated` scan in RPC-safe windows.
     const filter = storage.filters.KnowledgeAssetCreated(null, normalized);
-    const logs = await storage.queryFilter(filter, 0);
+    const head = await this.provider.getBlockNumber();
+    const PAGE = 2_000; // <= the smallest common eth_getLogs block-range cap
     const MASK = (1n << 96n) - 1n;
     let max = -1n;
-    for (const log of logs) {
-      const args = (log as ethers.EventLog).args;
-      const rawId = args?.id ?? args?.[0];
-      if (rawId === undefined || rawId === null) continue;
-      const num = BigInt(rawId) & MASK;
-      if (num > max) max = num;
+    for (let lo = 0; lo <= head; lo += PAGE) {
+      const hi = Math.min(lo + PAGE - 1, head);
+      const logs = await storage.queryFilter(filter, lo, hi);
+      for (const log of logs) {
+        const args = (log as ethers.EventLog).args;
+        const rawId = args?.id ?? args?.[0];
+        if (rawId === undefined || rawId === null) continue;
+        const num = BigInt(rawId) & MASK;
+        if (num > max) max = num;
+      }
     }
     return max;
   }
