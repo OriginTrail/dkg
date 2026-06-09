@@ -591,8 +591,8 @@ SEMANTIC_TRIPLE_SCHEMA = {
 }
 
 DKG_ASSERTION_CREATE_SCHEMA = {
-    "name": "dkg_assertion_create",
-    "description": "Create a Working Memory assertion in a context graph.",
+    "name": "dkg_knowledge_asset_create",
+    "description": "Create a Working Memory knowledge asset draft in a context graph.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -605,8 +605,8 @@ DKG_ASSERTION_CREATE_SCHEMA = {
 }
 
 DKG_ASSERTION_WRITE_SCHEMA = {
-    "name": "dkg_assertion_write",
-    "description": "Append quads to an existing Working Memory assertion.",
+    "name": "dkg_knowledge_asset_write",
+    "description": "Append quads to an existing Working Memory knowledge asset draft.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -619,15 +619,33 @@ DKG_ASSERTION_WRITE_SCHEMA = {
     },
 }
 
-DKG_ASSERTION_PROMOTE_SCHEMA = {
-    "name": "dkg_assertion_promote",
-    "description": "Promote a Working Memory assertion into Shared Working Memory.",
+DKG_ASSERTION_SHARE_SCHEMA = {
+    "name": "dkg_knowledge_asset_share",
+    "description": (
+        "Step 4 of the canonical flow (create -> write -> finalize -> share -> publish). "
+        "Share a knowledge asset (or selected root entities) from Working Memory into Shared "
+        "Working Memory. A FULL share (omit `entities` or pass \"all\") auto-seals the draft "
+        "best-effort and is publish-ready -- follow it with dkg_knowledge_asset_publish to mint "
+        "the asset on-chain (Verifiable Memory). A SELECTIVE subset (`entities` set to a proper "
+        "subset) shares to SWM only for peer visibility, is NOT auto-sealed, and is NOT "
+        "publishable to Verifiable Memory: dkg_knowledge_asset_publish reconstructs the seal's "
+        "full root set and rejects a truncated SWM with a merkleRoot mismatch. To publish "
+        "on-chain, share the full asset (or model the subset as its own knowledge asset)."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
             "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
-            "name": {"type": "string", "description": "Assertion name."},
-            "entities": {"type": "array", "items": {"type": "string"}, "description": "Optional root entity URI list."},
+            "name": {"type": "string", "description": "Knowledge asset name to share."},
+            "entities": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional root entity URI list. Omit to share every root entity (default, "
+                    "auto-seals + publish-ready). A subset shares to SWM only and is NOT "
+                    "publishable to Verifiable Memory."
+                ),
+            },
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
         },
         "required": ["context_graph_id", "name"],
@@ -635,8 +653,8 @@ DKG_ASSERTION_PROMOTE_SCHEMA = {
 }
 
 DKG_ASSERTION_DISCARD_SCHEMA = {
-    "name": "dkg_assertion_discard",
-    "description": "Discard a Working Memory assertion without promoting it.",
+    "name": "dkg_knowledge_asset_discard",
+    "description": "Discard a Working Memory knowledge asset draft without sharing it.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -649,8 +667,8 @@ DKG_ASSERTION_DISCARD_SCHEMA = {
 }
 
 DKG_ASSERTION_IMPORT_FILE_SCHEMA = {
-    "name": "dkg_assertion_import_file",
-    "description": "Upload a local document from an operator-approved import root into a Working Memory assertion and run daemon extraction.",
+    "name": "dkg_knowledge_asset_import_file",
+    "description": "Upload a local document from an operator-approved import root into a Working Memory knowledge asset draft and run daemon extraction.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -666,8 +684,8 @@ DKG_ASSERTION_IMPORT_FILE_SCHEMA = {
 }
 
 DKG_ASSERTION_QUERY_SCHEMA = {
-    "name": "dkg_assertion_query",
-    "description": "Dump every quad from one Working Memory assertion. Use dkg_query for SPARQL. Use this to inspect deterministic import quads before semantic enrichment.",
+    "name": "dkg_knowledge_asset_query",
+    "description": "Dump every quad from one Working Memory knowledge asset draft. Use dkg_query for SPARQL. Use this to inspect deterministic import quads before semantic enrichment.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -733,8 +751,8 @@ DKG_SEMANTIC_ENRICHMENT_WRITE_SCHEMA = {
 }
 
 DKG_ASSERTION_HISTORY_SCHEMA = {
-    "name": "dkg_assertion_history",
-    "description": "Read an assertion lifecycle descriptor.",
+    "name": "dkg_knowledge_asset_history",
+    "description": "Read a knowledge asset lifecycle descriptor.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -751,7 +769,7 @@ DKG_SHARED_MEMORY_PUBLISH_SCHEMA = {
     "name": "dkg_shared_memory_publish",
     "description": (
         "Publish existing Shared Working Memory to Verifiable Memory. "
-        "Use after dkg_assertion_promote in the canonical write → promote → publish flow."
+        "Use after dkg_knowledge_asset_share in the canonical write -> share -> publish flow."
     ),
     "parameters": {
         "type": "object",
@@ -1046,7 +1064,8 @@ class DKGMemoryProvider(MemoryProvider):
             "  dkg_memory — Store/update/remove persistent facts (your primary memory)\n"
             "  memory_search — Free-text recall across DKG memory layers\n"
             "  dkg_query — Search knowledge via SPARQL (fast, local)\n"
-            "  dkg_assertion_create/write/promote/query/history/discard/import_file — Work with V10 WM assertions\n"
+            "  dkg_knowledge_asset_create/write/finalize/share/publish — Canonical knowledge asset lifecycle (create -> write -> finalize -> share -> publish)\n"
+            "  dkg_knowledge_asset_pull_from/query/history/discard/import_file — Reseed a draft, inspect quads, read lifecycle state, discard, or import a document\n"
             "\n"
             "  dkg_import_artifact_read_markdown + dkg_semantic_enrichment_write - Read imported attachment Markdown and append semantic triples to the imported assertion\n"
             "  dkg_import_artifact_resolve - Optional metadata re-check for imported attachments\n"
@@ -1106,7 +1125,7 @@ class DKGMemoryProvider(MemoryProvider):
             DKG_JOIN_REQUEST_LIST_SCHEMA,
             DKG_ASSERTION_CREATE_SCHEMA,
             DKG_ASSERTION_WRITE_SCHEMA,
-            DKG_ASSERTION_PROMOTE_SCHEMA,
+            DKG_ASSERTION_SHARE_SCHEMA,
             DKG_ASSERTION_DISCARD_SCHEMA,
             DKG_ASSERTION_IMPORT_FILE_SCHEMA,
             DKG_ASSERTION_QUERY_SCHEMA,
@@ -1158,16 +1177,16 @@ class DKGMemoryProvider(MemoryProvider):
             "dkg_join_request_list": self._handle_join_request_list,
             "dkg_join_request_approve": self._handle_join_request_approve,
             "dkg_join_request_reject": self._handle_join_request_reject,
-            "dkg_assertion_create": self._handle_assertion_create,
-            "dkg_assertion_write": self._handle_assertion_write,
-            "dkg_assertion_promote": self._handle_assertion_promote,
-            "dkg_assertion_discard": self._handle_assertion_discard,
-            "dkg_assertion_import_file": self._handle_assertion_import_file,
-            "dkg_assertion_query": self._handle_assertion_query,
+            "dkg_knowledge_asset_create": self._handle_assertion_create,
+            "dkg_knowledge_asset_write": self._handle_assertion_write,
+            "dkg_knowledge_asset_share": self._handle_assertion_share,
+            "dkg_knowledge_asset_discard": self._handle_assertion_discard,
+            "dkg_knowledge_asset_import_file": self._handle_assertion_import_file,
+            "dkg_knowledge_asset_query": self._handle_assertion_query,
             "dkg_import_artifact_resolve": self._handle_import_artifact_resolve,
             "dkg_import_artifact_read_markdown": self._handle_import_artifact_read_markdown,
             "dkg_semantic_enrichment_write": self._handle_semantic_enrichment_write,
-            "dkg_assertion_history": self._handle_assertion_history,
+            "dkg_knowledge_asset_history": self._handle_assertion_history,
             "dkg_sub_graph_create": self._handle_sub_graph_create,
             "dkg_sub_graph_list": self._handle_sub_graph_list,
         }
@@ -1962,7 +1981,7 @@ class DKGMemoryProvider(MemoryProvider):
             return tool_error("quads must contain at least one item with subject, predicate, and object.")
         return json.dumps(self._client.write_assertion(name, cg, quads, _first_text(args, "sub_graph_name")))
 
-    def _handle_assertion_promote(self, args: Dict[str, Any]) -> str:
+    def _handle_assertion_share(self, args: Dict[str, Any]) -> str:
         if self._offline:
             return tool_error("DKG daemon is offline.")
         cg, name = _required_cg_and_name(args)
