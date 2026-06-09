@@ -619,6 +619,65 @@ DKG_ASSERTION_WRITE_SCHEMA = {
     },
 }
 
+DKG_ASSERTION_FINALIZE_SCHEMA = {
+    "name": "dkg_knowledge_asset_finalize",
+    "description": (
+        "Step 3 of the canonical flow. Seal a knowledge asset's Working Memory draft -- computes "
+        "the merkle root and signs the EIP-712 AuthorAttestation node-side. Finalize always seals "
+        "the WHOLE draft (there is no subset parameter). A FULL share "
+        "(dkg_knowledge_asset_share with entities omitted or \"all\") auto-seals for you, so you "
+        "only need to call this explicitly before sharing a SELECTIVE subset of entities, or to "
+        "re-seal after editing a previously-sealed draft."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "name": {"type": "string", "description": "Knowledge asset name to finalize."},
+            "author_agent_address": {
+                "type": "string",
+                "description": (
+                    "Optional 0x author address to attest as. Omit to let the daemon default the "
+                    "author to the request token's agent (node-side signing)."
+                ),
+            },
+            "scheme_version": {"type": "integer", "minimum": 1, "description": "Optional attestation scheme version."},
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name (must match write time)."},
+        },
+        "required": ["context_graph_id", "name"],
+    },
+}
+
+DKG_ASSERTION_PULL_FROM_SCHEMA = {
+    "name": "dkg_knowledge_asset_pull_from",
+    "description": (
+        "Seed a fresh Working Memory draft for a knowledge asset from its current Shared Working "
+        "Memory (swm) or Verifiable Memory (vm) state -- the edit-loop primitive (like git "
+        "checkout). Use this to re-open an already-shared or published asset for editing. Fails "
+        "409 (WM_DRAFT_CONFLICT) if an open draft already exists; pass on_conflict=\"replace\" to "
+        "overwrite it or discard the draft first."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "name": {"type": "string", "description": "Knowledge asset name to seed a draft for."},
+            "layer": {
+                "type": "string",
+                "enum": ["swm", "vm"],
+                "description": "Which layer to seed the draft from: \"swm\" (Shared Working Memory) or \"vm\" (Verifiable Memory).",
+            },
+            "on_conflict": {
+                "type": "string",
+                "enum": ["reject", "replace"],
+                "description": "What to do if an open WM draft already exists. Defaults to \"reject\".",
+            },
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name (must match write/share time)."},
+        },
+        "required": ["context_graph_id", "name", "layer"],
+    },
+}
+
 DKG_ASSERTION_SHARE_SCHEMA = {
     "name": "dkg_knowledge_asset_share",
     "description": (
@@ -647,6 +706,32 @@ DKG_ASSERTION_SHARE_SCHEMA = {
                 ),
             },
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
+        },
+        "required": ["context_graph_id", "name"],
+    },
+}
+
+DKG_ASSERTION_PUBLISH_SCHEMA = {
+    "name": "dkg_knowledge_asset_publish",
+    "description": (
+        "Step 5 of the canonical flow. Publish ONE finalized + shared knowledge asset (by name) "
+        "from Shared Working Memory to Verifiable Memory on-chain, minting or updating it. "
+        "Chain-anchored, permanent, costs TRAC. Returns the asset's UAL (Universal Asset Locator, "
+        "did:dkg:<chainId>/<author>/<number>) plus kaId, txHash, and status. The seal already "
+        "selects the author and the whole asset -- do not pass author or selection overrides. "
+        "Multi-root safe; prefer this over dkg_shared_memory_publish for a single named asset. "
+        "Fails 409 if the asset is not yet finalized + shared (run dkg_knowledge_asset_finalize / "
+        "dkg_knowledge_asset_share first). Call dkg_wallet_balances first to verify TRAC."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
+            "name": {"type": "string", "description": "Knowledge asset name to publish (must be finalized + shared)."},
+            "publish_epochs": {"type": "integer", "minimum": 1, "description": "Optional number of epochs to publish for (positive integer)."},
+            "publisher_node_identity_id_override": {"type": "string", "description": "Optional publisher node identity id override (decimal string)."},
+            "clear_shared_memory_after": {"type": "boolean", "description": "When true, clear the asset's Shared Working Memory after a confirmed publish."},
+            "sub_graph_name": {"type": "string", "description": "Optional sub-graph name (must match write/share time)."},
         },
         "required": ["context_graph_id", "name"],
     },
@@ -1125,7 +1210,9 @@ class DKGMemoryProvider(MemoryProvider):
             DKG_JOIN_REQUEST_LIST_SCHEMA,
             DKG_ASSERTION_CREATE_SCHEMA,
             DKG_ASSERTION_WRITE_SCHEMA,
+            DKG_ASSERTION_FINALIZE_SCHEMA,
             DKG_ASSERTION_SHARE_SCHEMA,
+            DKG_ASSERTION_PULL_FROM_SCHEMA,
             DKG_ASSERTION_DISCARD_SCHEMA,
             DKG_ASSERTION_IMPORT_FILE_SCHEMA,
             DKG_ASSERTION_QUERY_SCHEMA,
@@ -1141,6 +1228,7 @@ class DKGMemoryProvider(MemoryProvider):
             schemas[publish_index:publish_index] = [
                 DKG_PUBLISH_SCHEMA,
                 DKG_SHARED_MEMORY_PUBLISH_SCHEMA,
+                DKG_ASSERTION_PUBLISH_SCHEMA,
             ]
         if self._context_graph_admin_tools_allowed():
             admin_index = schemas.index(DKG_PARTICIPANT_LIST_SCHEMA)
@@ -1179,7 +1267,10 @@ class DKGMemoryProvider(MemoryProvider):
             "dkg_join_request_reject": self._handle_join_request_reject,
             "dkg_knowledge_asset_create": self._handle_assertion_create,
             "dkg_knowledge_asset_write": self._handle_assertion_write,
+            "dkg_knowledge_asset_finalize": self._handle_assertion_finalize,
             "dkg_knowledge_asset_share": self._handle_assertion_share,
+            "dkg_knowledge_asset_publish": self._handle_assertion_publish,
+            "dkg_knowledge_asset_pull_from": self._handle_assertion_pull_from,
             "dkg_knowledge_asset_discard": self._handle_assertion_discard,
             "dkg_knowledge_asset_import_file": self._handle_assertion_import_file,
             "dkg_knowledge_asset_query": self._handle_assertion_query,
@@ -1996,6 +2087,79 @@ class DKGMemoryProvider(MemoryProvider):
             return tool_error("entities must be omitted or a non-empty array of strings.")
         return json.dumps(self._client.promote_assertion(name, cg, entities, _first_text(args, "sub_graph_name")))
 
+    def _handle_assertion_finalize(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg, name = _required_cg_and_name(args)
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not name:
+            return tool_error("name is required.")
+        scheme_version = _coerce_int_or_none(args.get("scheme_version"))
+        author = _first_text(args, "author_agent_address")
+        author = _normalize_wm_agent_address(author) if author else None
+        return json.dumps(self._client.finalize_assertion(
+            name,
+            cg,
+            sub_graph_name=_first_text(args, "sub_graph_name"),
+            author_agent_address=author,
+            scheme_version=scheme_version,
+        ))
+
+    def _handle_assertion_publish(self, args: Dict[str, Any]) -> str:
+        if not self._direct_publish_allowed():
+            return tool_error(
+                "Direct DKG publish is disabled by the adapter publish guard. "
+                "Use an operator-reviewed publish request or enable DKG_ALLOW_DIRECT_PUBLISH explicitly."
+            )
+        if self._offline:
+            return tool_error("DKG daemon is offline. Cannot publish to chain.")
+        cg, name = _required_cg_and_name(args)
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not name:
+            return tool_error("name is required.")
+        options: Dict[str, Any] = {}
+        publish_epochs = _coerce_int_or_none(args.get("publish_epochs"))
+        if publish_epochs is not None:
+            options["publishEpochs"] = publish_epochs
+        override = _first_text(args, "publisher_node_identity_id_override")
+        if override:
+            options["publisherNodeIdentityIdOverride"] = override
+        clear_after = args.get("clear_shared_memory_after")
+        if clear_after is not None:
+            if not isinstance(clear_after, bool):
+                return tool_error("clear_shared_memory_after must be a boolean.")
+            options["clearSharedMemoryAfter"] = clear_after
+        return json.dumps(self._client.publish_finalized_assertion(
+            name,
+            cg,
+            sub_graph_name=_first_text(args, "sub_graph_name"),
+            options=options or None,
+        ))
+
+    def _handle_assertion_pull_from(self, args: Dict[str, Any]) -> str:
+        if self._offline:
+            return tool_error("DKG daemon is offline.")
+        cg, name = _required_cg_and_name(args)
+        if not cg:
+            return tool_error("context_graph_id is required.")
+        if not name:
+            return tool_error("name is required.")
+        layer = _first_text(args, "layer")
+        if layer not in ("swm", "vm"):
+            return tool_error('layer must be "swm" or "vm".')
+        on_conflict = _first_text(args, "on_conflict")
+        if on_conflict and on_conflict not in ("reject", "replace"):
+            return tool_error('on_conflict must be "reject" or "replace".')
+        return json.dumps(self._client.pull_from(
+            name,
+            cg,
+            layer,
+            on_conflict=on_conflict or None,
+            sub_graph_name=_first_text(args, "sub_graph_name"),
+        ))
+
     def _handle_assertion_discard(self, args: Dict[str, Any]) -> str:
         if self._offline:
             return tool_error("DKG daemon is offline.")
@@ -2554,6 +2718,22 @@ def _coerce_limit(value: Any, default: int, maximum: int) -> int:
     except Exception:
         parsed = default
     return max(1, min(maximum, parsed))
+
+
+def _coerce_int_or_none(value: Any) -> Optional[int]:
+    """Coerce an optional integer arg, rejecting bools and non-numeric input.
+
+    Returns ``None`` when the value is absent or cannot be interpreted as an
+    integer, so callers can omit the field entirely (e.g. publishEpochs /
+    schemeVersion are optional on the wire). ``bool`` is excluded because it is
+    an ``int`` subclass in Python and `True`/`False` should not become 1/0.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _build_memory_search_sparql(keywords: List[str], limit: int) -> str:
