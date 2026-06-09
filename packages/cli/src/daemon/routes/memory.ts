@@ -58,7 +58,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, escapeDkgRdfLiteral, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, sparqlIri, contextGraphSharedMemoryUri, sharedMemoryReadBothFilter, contextGraphAssertionUri, contextGraphMetaUri, escapeDkgRdfLiteral, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import { skolemizeByEntity, findReservedSubjectPrefix, isSkolemizedUri, type PublishOptions, type PublishResult } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
@@ -371,15 +371,10 @@ export async function resolvePublishRootEntities(
   subGraphName?: string,
 ): Promise<string[]> {
   const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
-  // OT-RFC-46: SWM data may live in the bare bucket (`<bucket>`) OR in per-KA
-  // layer graphs (`<bucket>/<addr>/<num>`) written by `promote` (swm/share).
-  // Read BOTH — excluding the `/staging/` sub-tree — mirroring the publisher's
-  // own SWM read in `publishFromSharedMemory` (dkg-publisher.ts). Without this
-  // scope, a selection-mode publish of a promote-written root matches nothing
-  // and the route 400s before `publishFromSharedMemory` (which already reads
-  // both layouts) is ever reached.
-  const swmGraphScope =
-    `FILTER(((STRSTARTS(STR(?g), "${swmGraph}/") && !STRSTARTS(STR(?g), "${swmGraph}/staging/")) || STR(?g) = "${swmGraph}"))`;
+  // OT-RFC-46 read-both: include the per-KA layer graphs `promote` writes into,
+  // not just the bare bucket — otherwise a selection-mode publish of a promoted
+  // root 400s here before `publishFromSharedMemory` (which reads both) runs.
+  const swmGraphScope = sharedMemoryReadBothFilter(swmGraph);
 
   if (selection !== "all") {
     const requestedRoots = [...new Set(

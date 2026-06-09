@@ -94,6 +94,7 @@ import {
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
+  sharedMemoryReadBothFilter,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
@@ -2759,7 +2760,7 @@ export class PublishMethods extends DKGAgentBase {
     const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
     let sparql: string;
     if (selection === 'all') {
-      sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } FILTER((STRSTARTS(STR(?g), "${swmGraph}/") && !STRSTARTS(STR(?g), "${swmGraph}/staging/")) || STR(?g) = "${swmGraph}") }`;
+      sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } ${sharedMemoryReadBothFilter(swmGraph)} }`;
     } else {
       // Round 4 review §10 — mirror the `isSafeIri` filter that
       // `DKGPublisher.publishFromSharedMemory` applies before its own
@@ -2796,7 +2797,7 @@ export class PublishMethods extends DKGAgentBase {
             || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
           )
         }
-        FILTER((STRSTARTS(STR(?g), "${swmGraph}/") && !STRSTARTS(STR(?g), "${swmGraph}/staging/")) || STR(?g) = "${swmGraph}")
+        ${sharedMemoryReadBothFilter(swmGraph)}
       }`;
     }
     const result = await this.store.query(sparql);

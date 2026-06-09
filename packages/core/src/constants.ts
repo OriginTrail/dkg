@@ -221,6 +221,25 @@ export function contextGraphSharedMemoryUri(contextGraphId: string, subGraphName
   return `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
 }
 
+/**
+ * SPARQL `FILTER` scoping a `GRAPH ?g` pattern to a shared-working-memory
+ * bucket's OT-RFC-46 read-both layout: the bare bucket `<swmGraph>` AND its
+ * per-KA layer graphs (`<swmGraph>/<addr>/<number>`), excluding the
+ * `<swmGraph>/staging/` sub-tree.
+ *
+ * Single source of truth for this predicate. It was previously copy-pasted
+ * across the publisher, agent, storage-ACK and daemon SWM read paths, and the
+ * publish-from-SWM selection bug came from those copies drifting apart. Reuse
+ * this anywhere a SWM read must see promoted (per-KA) data so the paths stay in
+ * lockstep.
+ *
+ * @param swmGraph bucket URI from `contextGraphSharedMemoryUri(...)`
+ * @param graphVar SPARQL variable bound to the named graph (default `?g`)
+ */
+export function sharedMemoryReadBothFilter(swmGraph: string, graphVar: string = "?g"): string {
+  return `FILTER(((STRSTARTS(STR(${graphVar}), "${swmGraph}/") && !STRSTARTS(STR(${graphVar}), "${swmGraph}/staging/")) || STR(${graphVar}) = "${swmGraph}"))`;
+}
+
 export function contextGraphSharedMemoryMetaUri(contextGraphId: string, subGraphName?: string): string {
   if (subGraphName) return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/_shared_memory_meta`;
   return `did:dkg:context-graph:${contextGraphId}/_shared_memory_meta`;

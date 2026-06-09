@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, sharedMemoryReadBothFilter } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
@@ -1105,8 +1105,8 @@ export class DKGPublisher implements Publisher {
 
     for (const cond of options.conditions) {
       const ask = cond.expectedValue === null
-        ? `ASK { GRAPH ?g { <${cond.subject}> <${cond.predicate}> ?o } FILTER(((STRSTARTS(STR(?g), "${swmGraph}/") && !STRSTARTS(STR(?g), "${swmGraph}/staging/")) || STR(?g) = "${swmGraph}")) }`
-        : `ASK { GRAPH ?g { <${cond.subject}> <${cond.predicate}> ${cond.expectedValue} } FILTER(((STRSTARTS(STR(?g), "${swmGraph}/") && !STRSTARTS(STR(?g), "${swmGraph}/staging/")) || STR(?g) = "${swmGraph}")) }`;
+        ? `ASK { GRAPH ?g { <${cond.subject}> <${cond.predicate}> ?o } ${sharedMemoryReadBothFilter(swmGraph)} }`
+        : `ASK { GRAPH ?g { <${cond.subject}> <${cond.predicate}> ${cond.expectedValue} } ${sharedMemoryReadBothFilter(swmGraph)} }`;
       const result = await this.store.query(ask);
 
       if (result.type !== 'boolean') {
@@ -1115,7 +1115,7 @@ export class DKGPublisher implements Publisher {
 
       const shouldExist = cond.expectedValue !== null;
       if (result.value !== shouldExist) {
-        const sel = `SELECT ?o WHERE { GRAPH ?g { <${cond.subject}> <${cond.predicate}> ?o } FILTER(((STRSTARTS(STR(?g), "${swmGraph}/") && !STRSTARTS(STR(?g), "${swmGraph}/staging/")) || STR(?g) = "${swmGraph}")) } LIMIT 1`;
+        const sel = `SELECT ?o WHERE { GRAPH ?g { <${cond.subject}> <${cond.predicate}> ?o } ${sharedMemoryReadBothFilter(swmGraph)} } LIMIT 1`;
         const cur = await this.store.query(sel);
         const actual = cur.type === 'bindings' && cur.bindings.length > 0 ? cur.bindings[0].o ?? null : null;
         throw new StaleWriteError(cond, actual);
@@ -1230,7 +1230,7 @@ export class DKGPublisher implements Publisher {
 
     let sparql: string;
     if (selection === 'all') {
-      sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } FILTER(((STRSTARTS(STR(?g), "${swmGraph}/") && !STRSTARTS(STR(?g), "${swmGraph}/staging/")) || STR(?g) = "${swmGraph}")) }`;
+      sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } ${sharedMemoryReadBothFilter(swmGraph)} }`;
     } else {
       const roots = [...new Set(
         selection.rootEntities
@@ -1255,7 +1255,7 @@ export class DKGPublisher implements Publisher {
             || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
           )
         }
-        FILTER(((STRSTARTS(STR(?g), "${swmGraph}/") && !STRSTARTS(STR(?g), "${swmGraph}/staging/")) || STR(?g) = "${swmGraph}"))
+        ${sharedMemoryReadBothFilter(swmGraph)}
       }`;
     }
 
@@ -4379,7 +4379,7 @@ export class DKGPublisher implements Publisher {
     const values = entities.map((e) => `<${e}>`).join(' ');
     // Per-KA SWM: when pulling from SWM the source spans the per-KA prefix, not one bucket.
     const sourcePattern = sourceLayer === 'swm'
-      ? `GRAPH ?g { VALUES ?root { ${values} } ?s ?p ?o . FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))) } FILTER((STRSTARTS(STR(?g), "${sourceGraph}/") && !STRSTARTS(STR(?g), "${sourceGraph}/staging/")) || STR(?g) = "${sourceGraph}")`
+      ? `GRAPH ?g { VALUES ?root { ${values} } ?s ?p ?o . FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))) } ${sharedMemoryReadBothFilter(sourceGraph)}`
       : `GRAPH <${sourceGraph}> { VALUES ?root { ${values} } ?s ?p ?o . FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))) }`;
     const gather = await this.store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE { ${sourcePattern} }`,
