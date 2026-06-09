@@ -230,6 +230,99 @@ describe("DkgNodePlugin", () => {
     });
 
 
+    // ── CONTRACT §G — register_if_needed on per-KA publish ──────────────────
+    // A URL-routed fetch mock so register (POST /api/context-graph/register) and
+    // publish (POST /api/knowledge-assets/<name>/vm/publish) can be asserted +
+    // failed independently.
+    const setupPublishWithRoutedFetch = (
+      handlers: { register?: () => Response; publish?: () => Response } = {},
+    ) => {
+      const calls: string[] = [];
+      const fetchMock = vi.fn(async (url: string) => {
+        calls.push(String(url));
+        if (String(url).includes('/api/context-graph/register')) {
+          return handlers.register?.() ?? new Response(JSON.stringify({ registered: 'ctx' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        if (String(url).includes('/vm/publish')) {
+          return handlers.publish?.() ?? new Response(JSON.stringify({ ual: 'did:dkg:1/0xauthor/7', status: 'confirmed' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        return new Response(JSON.stringify({}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
+      const tools: OpenClawTool[] = [];
+      plugin.register({ config: {}, registerTool: (t) => tools.push(t), registerHook: () => {}, on: () => {}, logger: {} });
+      const byName = new Map(tools.map((t) => [t.name, t] as const));
+      return { fetchMock, byName, calls };
+    };
+
+    it('dkg_knowledge_asset_publish with register_if_needed=true registers THEN publishes', async () => {
+      const { byName, calls } = setupPublishWithRoutedFetch();
+      const res = await byName.get('dkg_knowledge_asset_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        register_if_needed: true,
+        access_policy: 1,
+      });
+      expect(res.details).toMatchObject({ ual: 'did:dkg:1/0xauthor/7' });
+      // register first, then vm/publish.
+      expect(calls.some((u) => u.includes('/api/context-graph/register'))).toBe(true);
+      expect(calls.filter((u) => u.includes('/api/context-graph/register'))).toHaveLength(1);
+      const regIdx = calls.findIndex((u) => u.includes('/api/context-graph/register'));
+      const pubIdx = calls.findIndex((u) => u.includes('/vm/publish'));
+      expect(regIdx).toBeGreaterThanOrEqual(0);
+      expect(pubIdx).toBeGreaterThan(regIdx);
+    });
+
+    it('dkg_knowledge_asset_publish does NOT register when register_if_needed is omitted', async () => {
+      const { byName, calls } = setupPublishWithRoutedFetch();
+      await byName.get('dkg_knowledge_asset_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+      });
+      expect(calls.some((u) => u.includes('/api/context-graph/register'))).toBe(false);
+      expect(calls.some((u) => u.includes('/vm/publish'))).toBe(true);
+    });
+
+    it('dkg_knowledge_asset_publish treats "already registered" as success and still publishes', async () => {
+      const { byName, calls } = setupPublishWithRoutedFetch({
+        register: () => new Response(JSON.stringify({ error: 'context graph already registered' }), { status: 400, headers: { 'Content-Type': 'application/json' } }),
+      });
+      const res = await byName.get('dkg_knowledge_asset_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        register_if_needed: true,
+      });
+      expect(res.details).toMatchObject({ ual: 'did:dkg:1/0xauthor/7' });
+      expect(calls.some((u) => u.includes('/vm/publish'))).toBe(true);
+    });
+
+    it('dkg_knowledge_asset_publish surfaces a register HARD failure and does NOT publish', async () => {
+      const { byName, calls } = setupPublishWithRoutedFetch({
+        register: () => new Response(JSON.stringify({ error: 'rpc unreachable' }), { status: 500, headers: { 'Content-Type': 'application/json' } }),
+      });
+      const res = await byName.get('dkg_knowledge_asset_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        register_if_needed: true,
+      });
+      expect(res.details?.error).toBeTruthy();
+      // CONTRACT §G: a hard registration failure is a tool error — publish NOT attempted.
+      expect(calls.some((u) => u.includes('/vm/publish'))).toBe(false);
+    });
+
+    it('dkg_knowledge_asset_publish rejects a non-boolean register_if_needed', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({});
+      const res = await byName.get('dkg_knowledge_asset_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        register_if_needed: 'yes',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(res.details?.error).toMatch(/register_if_needed.*boolean/);
+    });
+
+
     it('dkg_knowledge_asset_pull_from POSTs to /wm/pull-from with layer + onConflict (camelCase body)', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ wmDraft: 'open', seededFrom: { layer: 'swm' } });
       const res = await byName.get('dkg_knowledge_asset_pull_from')!.execute('tc', {

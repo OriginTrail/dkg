@@ -3547,6 +3547,34 @@ export class DkgNodePlugin {
       // cleanup runs unconditionally regardless. The CG-wide clear stays on
       // dkg_publish / dkg_shared_memory_publish.
 
+      if (args.register_if_needed !== undefined && typeof args.register_if_needed !== 'boolean') {
+        return this.error('"register_if_needed" must be a boolean.');
+      }
+      const registerIfNeeded = args.register_if_needed === true;
+      if (args.access_policy !== undefined && args.access_policy !== 0 && args.access_policy !== 1) {
+        return this.error('"access_policy" must be 0 (open) or 1 (private).');
+      }
+
+      // CONTRACT §G: vm/publish requires the CG to be registered on-chain and does
+      // NOT auto-register. When `register_if_needed` is true, register first
+      // (idempotent — "already registered" is success), mirroring
+      // dkg_shared_memory_publish. A hard registration failure is a tool error: do
+      // NOT publish. When false/omitted, publish directly and surface the daemon's
+      // not-registered error verbatim.
+      let registration: Record<string, unknown> | undefined;
+      if (registerIfNeeded) {
+        try {
+          registration = await this.client.registerContextGraph(contextGraphId, {
+            accessPolicy: args.access_policy as number | undefined,
+          });
+        } catch (err: any) {
+          const message = err?.message ?? String(err);
+          if (!message.includes('already registered')) {
+            throw err;
+          }
+        }
+      }
+
       // Per-KA sealed publish (CONTRACT §1 Stage5). The seal selects the author and
       // the whole asset, so author/selection overrides are never sent. The daemon
       // returns the UAL plus kaId/txHash/status/kas; 409 VM_PUBLISH_PRECONDITION
@@ -3557,7 +3585,7 @@ export class DkgNodePlugin {
         publishEpochs,
         publisherNodeIdentityIdOverride,
       });
-      return this.json(result);
+      return this.json(registration ? { ...result, registration } : result);
     } catch (err: any) {
       return this.daemonError(err);
     }

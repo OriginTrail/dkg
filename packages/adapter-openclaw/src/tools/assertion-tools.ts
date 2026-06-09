@@ -128,7 +128,9 @@ export function buildAssertionTools(ctx: DkgToolHost): OpenClawTool[] {
         'and `kas`. The seal already selects the author and the whole asset — do not pass author or selection ' +
         'overrides. Prefer this over dkg_shared_memory_publish when publishing a single named asset; it is ' +
         'multi-root-safe and avoids the legacy single-root SWM constraint. Fails 409 if the asset is not yet ' +
-        'finalized + shared (run dkg_knowledge_asset_finalize / dkg_knowledge_asset_share first).',
+        'finalized + shared (run dkg_knowledge_asset_finalize / dkg_knowledge_asset_share first). vm/publish ' +
+        'requires the context graph to be registered on-chain — set `register_if_needed: true` to register it ' +
+        'first (idempotent) before publishing.',
       parameters: {
         type: 'object',
         properties: {
@@ -138,6 +140,17 @@ export function buildAssertionTools(ctx: DkgToolHost): OpenClawTool[] {
           publisher_node_identity_id_override: {
             type: 'string',
             description: 'Optional publisher node identity id override (non-negative integer, decimal string).',
+          },
+          register_if_needed: {
+            type: 'boolean',
+            description:
+              'If the context graph is not yet registered on-chain, register it first (idempotent), then publish. ' +
+              'Registration may spend gas/TRAC; it is opt-in. Default false — when false and the CG is ' +
+              'unregistered, publish fails with the daemon\'s not-registered error.',
+          },
+          access_policy: {
+            type: 'number',
+            description: 'Optional registration access policy used only when `register_if_needed` is true: `0` for open, `1` for private.',
           },
           sub_graph_name: { type: 'string', description: 'Must match the one used at write/share time.' },
         },

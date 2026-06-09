@@ -400,6 +400,9 @@ describe("DkgNodePlugin", () => {
     // CG-wide clear stays on dkg_publish / dkg_shared_memory_publish.
     expect(publishKaProps).not.toHaveProperty('clear_shared_memory_after');
     expect(publishKaProps).not.toHaveProperty('clear_after');
+    // CONTRACT §G: per-KA publish can register the CG on-chain first (mirrors
+    // dkg_shared_memory_publish) — vm/publish requires a registered CG.
+    expect(publishKaProps).toHaveProperty('register_if_needed');
     // finalize surfaces the token-resolved author but NOT the raw pre-signed
     // attestation (colocated-agent attribution — CONTRACT §1 Stage3, by design).
     const finalizeProps = byName.get('dkg_knowledge_asset_finalize')!.parameters.properties;
