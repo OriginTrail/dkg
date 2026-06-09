@@ -406,6 +406,21 @@ export function registerAssertionTools(
           publishEpochs,
           publisherNodeIdentityIdOverride,
         });
+        // CONTRACT §1 Stage5 / §7: vm/publish returns HTTP 207 (treated as success
+        // by DkgClient.request, which only throws on !res.ok) when the KA minted
+        // on-chain but the context-graph binding FAILED — `contextGraphError` is
+        // present in the body. The UAL/kaId are valid (the asset IS on-chain), so
+        // this is NOT a hard failure, but it must NOT be reported as full success:
+        // surface a clear PARTIAL warning so the agent can retry the CG binding.
+        const contextGraphError = (result as Record<string, unknown>).contextGraphError;
+        if (typeof contextGraphError === 'string' && contextGraphError.length > 0) {
+          return ok(
+            `PARTIAL publish of knowledge asset '${name}' (project '${pid}'): the asset was minted ` +
+            `on-chain (UAL/kaId below are valid), but the context-graph binding FAILED ` +
+            `(${contextGraphError}). The on-chain asset is published; retry the publish to re-attempt ` +
+            `the context-graph binding.\n\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\``,
+          );
+        }
         return ok(
           `Published knowledge asset '${name}' (project '${pid}') to Verifiable Memory:\n\n\`\`\`json\n${JSON.stringify(
             result,

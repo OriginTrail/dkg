@@ -373,6 +373,46 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     expect(captured).not.toHaveProperty('clearSharedMemoryAfter');
   });
 
+  it('publish surfaces a 207 partial (KA minted, CG bind failed) as a WARNING, not plain success (#1077:409)', async () => {
+    // The client treats HTTP 207 as success and returns the body; a present
+    // contextGraphError means the asset minted on-chain but the CG binding failed.
+    const localClient = new FakeClient({
+      knowledgeAssetPublish: async () => ({
+        kaId: 'ka-1',
+        status: 'confirmed',
+        ual: 'did:dkg:31337/0xauthor/7',
+        txHash: '0xpub',
+        contextGraphError: 'context-graph binding timed out',
+      }),
+    });
+    const localServer = new FakeServer();
+    registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+
+    const res = await localServer.call('dkg_knowledge_asset_publish', { name: 'doc' });
+    // Not a hard failure (the asset minted) but clearly flagged as partial.
+    expect(res.content[0].text).toMatch(/PARTIAL/);
+    expect(res.content[0].text).toContain('context-graph binding timed out');
+    expect(res.content[0].text).toContain('"ual": "did:dkg:31337/0xauthor/7"'); // UAL still valid
+  });
+
+  it('publish reports plain success on a 200 (no contextGraphError)', async () => {
+    const localClient = new FakeClient({
+      knowledgeAssetPublish: async () => ({
+        kaId: 'ka-1',
+        status: 'confirmed',
+        ual: 'did:dkg:31337/0xauthor/7',
+        txHash: '0xpub',
+      }),
+    });
+    const localServer = new FakeServer();
+    registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+
+    const res = await localServer.call('dkg_knowledge_asset_publish', { name: 'doc' });
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toMatch(/Published knowledge asset 'doc'/);
+    expect(res.content[0].text).not.toMatch(/PARTIAL/);
+  });
+
   // ── CONTRACT §G — registerIfNeeded on per-KA publish ──────────────────────
   const setupPublishWithRegisterTracking = (opts: {
     registerImpl?: (args: { id: string; accessPolicy?: number }) => Promise<Record<string, unknown>>;
