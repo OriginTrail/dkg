@@ -326,6 +326,22 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     ///         `-1`) correctly starts at number 0. Returns `int256` so "never minted"
     ///         is a true sentinel rather than colliding with a legitimately-minted
     ///         number 0.
+    ///
+    ///         PRECONDITION — not backfilled across an in-place storage upgrade.
+    ///         `_authorKaNumberHighWater` is only populated by `createKnowledgeAsset`
+    ///         from this version (10.0.4) onward. On a fresh deploy or redeploy — the
+    ///         expected path, where every KA is minted under this contract — it is
+    ///         authoritative for ALL of an author's KAs. But if this storage is
+    ///         upgraded IN PLACE over a pre-10.0.4 deployment that already minted KAs,
+    ///         those historical authors read `-1` until their next mint. Callers MUST
+    ///         therefore treat this as a fast-path floor, NOT the sole allocation
+    ///         source, across such an upgrade: the off-chain allocator retains its own
+    ///         persisted counter plus a bounded `KnowledgeAssetCreated` scan as the
+    ///         reconciliation floor, and `createKnowledgeAsset`'s `KaIdAlreadyMinted`
+    ///         guard is the on-chain backstop against reusing a burned `(author,
+    ///         number)`.
+    /// @param  author The attested author address (the high 160 bits of a packed kaId).
+    /// @return The highest KA `number` already minted under `author`, or `-1` if none.
     function getMaxKaNumberForAuthor(address author) external view returns (int256) {
         uint256 highWater = _authorKaNumberHighWater[author];
         return highWater == 0 ? int256(-1) : int256(highWater) - 1;
