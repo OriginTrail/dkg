@@ -92,12 +92,15 @@ export function buildAssertionTools(ctx: DkgToolHost): OpenClawTool[] {
       name: 'dkg_knowledge_asset_share',
       description:
         'Step 4 of the canonical flow. Share a knowledge asset (or selected root entities) from Working ' +
-        'Memory into Shared Working Memory. A FULL share (omit `entities` or pass "all") auto-seals the ' +
-        'draft best-effort and is publish-ready — follow it with dkg_knowledge_asset_publish to mint the ' +
-        'asset on-chain (Verifiable Memory). The auto-seal uses DEFAULT finalize options; if you need ' +
-        'custom finalize/attestation options (author_agent_address / scheme_version), call ' +
-        'dkg_knowledge_asset_finalize EXPLICITLY first (even for a full share) — share\'s auto-seal cannot ' +
-        'carry those. A SELECTIVE subset (`entities` set to a proper subset) shares ' +
+        'Memory into Shared Working Memory. A FULL share (omit `entities` or pass "all") attempts a ' +
+        'best-effort auto-seal: when the seal SUCCEEDS the asset is publish-ready — follow it with ' +
+        'dkg_knowledge_asset_publish to mint the asset on-chain (Verifiable Memory). But on a ' +
+        'capability/signing gap (no local signing key / non-V10 adapter / unregistered CG) the auto-seal ' +
+        'is skipped and the asset is shared UNSEALED — a later dkg_knowledge_asset_publish then 409s ' +
+        'requiring an explicit finalize. For predictable publishing, call dkg_knowledge_asset_finalize ' +
+        'EXPLICITLY first (this is also required to carry custom finalize/attestation options — ' +
+        'author_agent_address / scheme_version — which the auto-seal cannot). A SELECTIVE subset ' +
+        '(`entities` set to a proper subset) shares ' +
         'to SWM only for peer visibility, is NOT auto-sealed, and is NOT publishable to Verifiable Memory: ' +
         'dkg_knowledge_asset_publish reconstructs the seal\'s full root set and rejects a truncated SWM with ' +
         'a merkleRoot mismatch. To publish on-chain, share the full asset (or model the subset as its own ' +

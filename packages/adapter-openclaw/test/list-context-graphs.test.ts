@@ -370,6 +370,57 @@ describe('dkg_publish tool', () => {
     expect(ft.calls).toHaveLength(1);
     expect(String(ft.calls[0][0])).toContain('/api/context-graph/register');
   });
+
+  // ── FIX A — create 207 share-phase partial-failure → do NOT publish ──────
+  it('aborts (no publish) when create returns a 207 share-phase partial-failure, surfacing the assertionName', async () => {
+    ft.addResponses(
+      // create → 207: sealed in WM but the promote/share phase failed.
+      new Response(
+        JSON.stringify({
+          created: true,
+          name: 'openclaw-publish-x',
+          assertionUri: 'urn:assertion:x',
+          status: 'wm-sealed',
+          errors: [{ phase: 'swm-share', error: 'gossip peer unreachable' }],
+        }),
+        { status: 207, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+    const tool = findTool('dkg_publish');
+    const result = await tool.execute('call-207', {
+      context_graph_id: 'testing',
+      quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'hello' }],
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toBeTruthy();
+    expect(parsed.error).toContain('gossip peer unreachable'); // the share error
+    expect(parsed.error).toMatch(/openclaw-publish-/); // the created asset name for recovery
+    expect(parsed.error).toMatch(/do not recreate/i);
+    // The /api/shared-memory/publish call was NEVER made — only the create call.
+    expect(ft.calls).toHaveLength(1);
+    expect(String(ft.calls[0][0])).toContain('/api/knowledge-assets');
+  });
+
+  // ── FIX B — publish fails after create → surface the assertionName ───────
+  it('surfaces the created assertionName when the publish call fails after a successful create', async () => {
+    ft.addResponses(
+      new Response(JSON.stringify({ assertionUri: 'urn:assertion:y', status: 'swm-shared' }), { status: 201 }), // create OK
+      new Response(JSON.stringify({ error: 'on-chain revert' }), { status: 502 }),                               // publish fails
+    );
+    const tool = findTool('dkg_publish');
+    const result = await tool.execute('call-pubfail', {
+      context_graph_id: 'testing',
+      quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'hello' }],
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toBeTruthy();
+    expect(parsed.error).toMatch(/openclaw-publish-/);  // assertionName for retry
+    expect(parsed.error).toMatch(/do not recreate/i);
+    expect(parsed.error).toMatch(/retry the publish/i);
+    // both create + publish calls were made (the failure was the 2nd call).
+    expect(ft.calls).toHaveLength(2);
+    expect(String(ft.calls[1][0])).toContain('/api/shared-memory/publish');
+  });
 });
 
 describe('dkg_query tool', () => {
