@@ -17,12 +17,13 @@
  * 2. **Read-side regex-scope guard** — per matrix v0.5 §4.16 alignment
  *    paragraph, the `/^[a-z0-9-]+$/` regex on the assertion `name` argument
  *    is creator-side input validation only. Read-side / lookup-side tools
- *    (`dkg_assertion_write / promote / discard / query` + `_history` +
- *    `_import_file`) MUST NOT inherit it — they look up assertions that
- *    may have been minted by other agents whose names don't conform.
+ *    (`dkg_knowledge_asset_write / share / finalize / publish / pull_from /
+ *    discard / query` + `_history` + `_import_file`) MUST NOT inherit it —
+ *    they look up assets that may have been minted by other agents whose
+ *    names don't conform.
  *
  *    The bug-class-most-likely is an implementer copying the regex from
- *    `dkg_assertion_create` to all five tools because they look symmetric
+ *    `dkg_knowledge_asset_create` to all the lookup tools because they look symmetric
  *    ("name should always be slug-shaped, right?"). This test asserts the
  *    asymmetry by passing a non-conforming name to each read-side tool
  *    and confirming the schema does NOT reject it.
@@ -104,14 +105,19 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
   // in `DROPPED_TOOLS` for the trust-boundary rationale. Bump again
   // when a new tool is intentionally added, drop when a tool is
   // removed, and keep a comment trail so future drops are auditable.
-  it('registered surface contains exactly 25 tools (post-PR locked count)', () => {
-    expect(server.tools.size).toBe(25);
+  // rc.17 agent-tooling PR2: +3 net-new knowledge-asset lifecycle verbs
+  // (finalize / publish / pull_from) under registerAssertionTools take the
+  // 6-module surface counted here from 25 → 28. (The full production surface in
+  // src/index.ts also registers registerChatTools (+2), so the README's
+  // "30 tools" = these 28 + 2 chat tools.)
+  it('registered surface contains exactly 28 tools (post-PR locked count)', () => {
+    expect(server.tools.size).toBe(28);
   });
 });
 
 /**
  * Regex-scope guard. Production source (matrix v0.5 §4.16 alignment paragraph)
- * documents that the slug regex applies ONLY to `dkg_assertion_create`'s
+ * documents that the slug regex applies ONLY to `dkg_knowledge_asset_create`'s
  * `name` arg. Every other tool that takes a `name` argument must accept
  * richer strings.
  *
@@ -132,14 +138,17 @@ describe('regex-scope guard — read-side `name` arg accepts non-conforming slug
     registerAssertionTools(server.asMcpServer(), client.asDkgClient(), config);
   });
 
-  // The four read-side / lookup-side assertion tools. `dkg_assertion_create` is
-  // INTENTIONALLY excluded — it IS the regex-bearing tool.
+  // The read-side / lookup-side knowledge-asset tools. `dkg_knowledge_asset_create`
+  // is INTENTIONALLY excluded — it IS the regex-bearing tool.
   it.each([
-    ['dkg_assertion_write', { name: 'Bad Name With Spaces', quads: [{ subject: 'urn:x', predicate: 'urn:p', object: '"v"' }] }],
-    ['dkg_assertion_promote', { name: 'Bad Name With Spaces' }],
-    ['dkg_assertion_discard', { name: 'Bad Name With Spaces' }],
-    ['dkg_assertion_query', { name: 'Bad Name With Spaces' }],
-    ['dkg_assertion_history', { name: 'Bad Name With Spaces' }],
+    ['dkg_knowledge_asset_write', { name: 'Bad Name With Spaces', quads: [{ subject: 'urn:x', predicate: 'urn:p', object: '"v"' }] }],
+    ['dkg_knowledge_asset_share', { name: 'Bad Name With Spaces' }],
+    ['dkg_knowledge_asset_finalize', { name: 'Bad Name With Spaces' }],
+    ['dkg_knowledge_asset_publish', { name: 'Bad Name With Spaces' }],
+    ['dkg_knowledge_asset_pull_from', { name: 'Bad Name With Spaces', layer: 'swm' }],
+    ['dkg_knowledge_asset_discard', { name: 'Bad Name With Spaces' }],
+    ['dkg_knowledge_asset_query', { name: 'Bad Name With Spaces' }],
+    ['dkg_knowledge_asset_history', { name: 'Bad Name With Spaces' }],
   ])('%s schema accepts non-slug `name` (no zod throw at input boundary)', async (toolName, args) => {
     // Don't care what the handler returns — it'll behaviourally produce a
     // not-found result against the empty FakeClient state. The assertion
@@ -149,13 +158,13 @@ describe('regex-scope guard — read-side `name` arg accepts non-conforming slug
     await expect(server.call(toolName, args)).resolves.toBeDefined();
   });
 
-  // Positive control: dkg_assertion_create DOES enforce the regex (per
+  // Positive control: dkg_knowledge_asset_create DOES enforce the regex (per
   // assertion-lifecycle.test.ts:81). Re-asserting here so the asymmetry is
   // visible in this file alone — a reviewer reading just `drop-sweep.test.ts`
   // can see why the read-side test exists.
-  it('positive control: dkg_assertion_create rejects non-slug `name` (regex IS enforced creator-side)', async () => {
+  it('positive control: dkg_knowledge_asset_create rejects non-slug `name` (regex IS enforced creator-side)', async () => {
     await expect(
-      server.call('dkg_assertion_create', { name: 'Bad Name With Spaces' }),
+      server.call('dkg_knowledge_asset_create', { name: 'Bad Name With Spaces' }),
     ).rejects.toThrow();
   });
 });

@@ -112,10 +112,16 @@ type ClientMethods = Partial<{
 
 export class FakeClient {
   // Round-trip storage for the assertion quintet.
+  //
+  // `finalized` models the rc.17 seal (CONTRACT §1 Stage3): finalize seals the
+  // WHOLE draft; a FULL share auto-seals best-effort; a SUBSET share does NOT
+  // auto-seal; and vm/publish reconstructs the seal's full root set, so it
+  // hard-fails (409 VM_PUBLISH_PRECONDITION) unless the draft is finalized.
   readonly assertions = new Map<string, {
     quads: Array<{ subject: string; predicate: string; object: string }>;
     promotedRoots: Set<string>;
     discarded: boolean;
+    finalized: boolean;
   }>();
   readonly contextGraphs = new Set<string>();
   readonly subGraphs = new Set<string>();
@@ -167,7 +173,7 @@ export class FakeClient {
     if (this.assertions.has(key)) {
       return { assertionUri: null, alreadyExists: true };
     }
-    this.assertions.set(key, { quads: [], promotedRoots: new Set(), discarded: false });
+    this.assertions.set(key, { quads: [], promotedRoots: new Set(), discarded: false, finalized: false });
     return {
       assertionUri: `urn:dkg:assertion:${args.contextGraphId}:${args.assertionName}`,
       alreadyExists: false,
@@ -305,18 +311,88 @@ export class FakeClient {
   async knowledgeAssetShare(args: {
     contextGraphId: string;
     name: string;
-    entities?: string[];
+    entities?: string[] | 'all';
   }) {
     if (this.overrides.knowledgeAssetShare) return this.overrides.knowledgeAssetShare.call(this, args);
     const key = `${args.contextGraphId}::${args.name}`;
     const cell = this.assertions.get(key);
     if (!cell) throw new Error(`assertion not created: ${key}`);
-    if (args.entities && args.entities.length > 0) {
-      for (const e of args.entities) cell.promotedRoots.add(e);
+    const isSubset = Array.isArray(args.entities) && args.entities.length > 0;
+    if (isSubset) {
+      for (const e of args.entities as string[]) cell.promotedRoots.add(e);
+      // CONTRACT §5 / §1 Stage4: a SUBSET share is NOT auto-sealed.
     } else {
       for (const q of cell.quads) cell.promotedRoots.add(q.subject);
+      // CONTRACT §1 Stage4: a FULL share ("all"/omitted) auto-seals best-effort
+      // and is publish-ready.
+      cell.finalized = true;
     }
     return { swmShared: true, promotedCount: cell.promotedRoots.size };
+  }
+
+  // ── Seal / publish / pull-from (rc.17 lifecycle) ────────────────
+  async knowledgeAssetFinalize(args: {
+    contextGraphId: string;
+    name: string;
+    subGraphName?: string;
+    authorAgentAddress?: string;
+    schemeVersion?: number;
+  }) {
+    if (this.overrides.knowledgeAssetFinalize) return this.overrides.knowledgeAssetFinalize.call(this, args);
+    const key = `${args.contextGraphId}::${args.name}`;
+    const cell = this.assertions.get(key);
+    if (!cell) throw new Error(`assertion not created: ${key}`);
+    // Finalize always seals the WHOLE draft (CONTRACT §1 Stage3 — no subset).
+    cell.finalized = true;
+    return { merkleRoot: '0xroot', eip712Digest: '0xdigest', authorAddress: args.authorAgentAddress ?? '0xtoken' };
+  }
+
+  async knowledgeAssetPublish(args: {
+    contextGraphId: string;
+    name: string;
+    subGraphName?: string;
+    clearAfter?: boolean;
+    publishEpochs?: number;
+    publisherNodeIdentityIdOverride?: string;
+  }) {
+    if (this.overrides.knowledgeAssetPublish) return this.overrides.knowledgeAssetPublish.call(this, args);
+    const key = `${args.contextGraphId}::${args.name}`;
+    const cell = this.assertions.get(key);
+    if (!cell) throw new Error(`assertion not created: ${key}`);
+    // vm/publish reconstructs the seal's full root set; an unsealed draft hard-
+    // fails with the daemon's 409 VM_PUBLISH_PRECONDITION (CONTRACT §1 Stage5 /
+    // §5). This is the seal-before-share/publish invariant the mock enforces.
+    if (!cell.finalized) {
+      throw new Error('DKG daemon /vm/publish responded 409: VM_PUBLISH_PRECONDITION assertion is not finalized');
+    }
+    if (args.clearAfter) cell.promotedRoots.clear();
+    return {
+      kaId: 'ka-published',
+      status: 'confirmed',
+      ual: `did:dkg:31337/0xauthor/7`,
+      txHash: '0xpub',
+      kas: [{ tokenId: '7', rootEntity: cell.quads[0]?.subject ?? 'urn:x' }],
+    };
+  }
+
+  async knowledgeAssetPullFrom(args: {
+    contextGraphId: string;
+    name: string;
+    layer: 'swm' | 'vm';
+    subGraphName?: string;
+    onConflict?: 'reject' | 'replace';
+  }) {
+    if (this.overrides.knowledgeAssetPullFrom) return this.overrides.knowledgeAssetPullFrom.call(this, args);
+    const key = `${args.contextGraphId}::${args.name}`;
+    const existing = this.assertions.get(key);
+    // A dirty (non-discarded) open draft + onConflict:"reject" → 409
+    // WM_DRAFT_CONFLICT (CONTRACT §1 side-verbs / §7).
+    if (existing && !existing.discarded && args.onConflict !== 'replace') {
+      throw new Error('DKG daemon /wm/pull-from responded 409: WM_DRAFT_CONFLICT an open draft already exists');
+    }
+    // Seed a fresh WM draft from the named layer (unsealed).
+    this.assertions.set(key, { quads: [], promotedRoots: new Set(), discarded: false, finalized: false });
+    return { wmDraft: 'open', seededFrom: { layer: args.layer } };
   }
 
   async knowledgeAssetDiscard(args: { contextGraphId: string; name: string }) {

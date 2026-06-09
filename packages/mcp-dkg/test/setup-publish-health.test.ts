@@ -61,7 +61,7 @@ describe('setup tools — context graph + sub-graph + subscribe', () => {
   // F2: surface the daemon's already-exists signal so callers can
   // distinguish "newly created" from "already existed" without doing
   // an extra dkg_list_context_graphs round-trip. Mirrors
-  // dkg_assertion_create's idempotency surfacing.
+  // dkg_knowledge_asset_create's idempotency surfacing.
   it('first create reports "Created"; second create with same id reports "already exists"', async () => {
     const r1 = await server.call('dkg_context_graph_create', { name: 'My Project' });
     expect(r1.isError).toBeFalsy();
@@ -188,7 +188,13 @@ describe('publish tools — write+publish helper + canonical SWM finalizer', () 
     });
 
     expect(bodies[0].contextGraphId).toBe('0xabc/my-cg');
-    expect(bodies[0].quads[0].graph).toBe(fullDid);
+    // CONTRACT §0 invariant 2 / §1 Stage1 (OpenClaw parity): the create/write
+    // body drops the per-quad `graph` (daemon-pinned) and the unread
+    // `finalize:true`; `promote:true` stays (read as the alsoShareSwm alias).
+    expect(bodies[0].quads[0]).not.toHaveProperty('graph');
+    expect(bodies[0].finalize).toBeUndefined();
+    expect(bodies[0].promote).toBe(true);
+    expect(bodies[0].quads[0]).toEqual({ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' });
     expect(bodies[1].contextGraphId).toBe('0xabc/my-cg');
   });
 

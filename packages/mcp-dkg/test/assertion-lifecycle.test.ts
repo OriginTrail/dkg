@@ -15,31 +15,47 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     registerAssertionTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
   });
 
-  it('registers all ten assertion-family tools', () => {
+  it('registers all thirteen knowledge-asset-family tools (rc.17 rename + 3 new verbs)', () => {
     const expected = [
-      'dkg_assertion_create',
-      'dkg_assertion_write',
-      'dkg_assertion_promote',
-      'dkg_assertion_discard',
-      'dkg_assertion_query',
-      'dkg_import_artifact_resolve',
-      'dkg_import_artifact_read_markdown',
-      'dkg_semantic_enrichment_write',
-      'dkg_assertion_import_file',
-      'dkg_assertion_history',
+      'dkg_knowledge_asset_create',
+      'dkg_knowledge_asset_write',
+      'dkg_knowledge_asset_finalize',
+      'dkg_knowledge_asset_share',
+      'dkg_knowledge_asset_publish',
+      'dkg_knowledge_asset_pull_from',
+      'dkg_knowledge_asset_discard',
+      'dkg_knowledge_asset_query',
+      'dkg_knowledge_asset_import_artifact_resolve',
+      'dkg_knowledge_asset_import_artifact_read_markdown',
+      'dkg_knowledge_asset_semantic_enrichment_write',
+      'dkg_knowledge_asset_import_file',
+      'dkg_knowledge_asset_history',
     ];
     for (const name of expected) {
       expect(server.tools.has(name)).toBe(true);
     }
+    // No dkg_assertion_* / dkg_import_artifact_* / dkg_semantic_enrichment_*
+    // back-compat names survive the clean cut (CONTRACT §2).
+    for (const legacy of [
+      'dkg_assertion_create',
+      'dkg_assertion_promote',
+      'dkg_import_artifact_resolve',
+      'dkg_semantic_enrichment_write',
+    ]) {
+      expect(server.tools.has(legacy)).toBe(false);
+    }
   });
 
-  it('documents canonical context graph ids for assertion write tools', () => {
+  it('documents canonical context graph ids for knowledge-asset write tools', () => {
     for (const name of [
-      'dkg_assertion_create',
-      'dkg_assertion_write',
-      'dkg_assertion_promote',
-      'dkg_assertion_discard',
-      'dkg_assertion_query',
+      'dkg_knowledge_asset_create',
+      'dkg_knowledge_asset_write',
+      'dkg_knowledge_asset_finalize',
+      'dkg_knowledge_asset_share',
+      'dkg_knowledge_asset_publish',
+      'dkg_knowledge_asset_pull_from',
+      'dkg_knowledge_asset_discard',
+      'dkg_knowledge_asset_query',
     ]) {
       const projectId = server.get(name).config.inputSchema?.projectId;
       expect(projectId?.description).toContain('dkg_list_context_graphs');
@@ -52,20 +68,20 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
   it('exposes imported attachment resolve/read/enrichment helpers without promoting', async () => {
     const assertionUri = 'did:dkg:context-graph:test-cg/assertion/peer-test/imported-doc';
 
-    const resolved = await server.call('dkg_import_artifact_resolve', {
+    const resolved = await server.call('dkg_knowledge_asset_import_artifact_resolve', {
       assertionUri,
     });
     expect(resolved.isError).toBeFalsy();
     expect(resolved.content[0].text).toContain('"canReadMarkdown": true');
 
-    const markdown = await server.call('dkg_import_artifact_read_markdown', {
+    const markdown = await server.call('dkg_knowledge_asset_import_artifact_read_markdown', {
       assertionUri,
       maxBytes: 1024,
     });
     expect(markdown.isError).toBeFalsy();
     expect(markdown.content[0].text).toContain('# Imported');
 
-    const enrichment = await server.call('dkg_semantic_enrichment_write', {
+    const enrichment = await server.call('dkg_knowledge_asset_semantic_enrichment_write', {
       assertionUri,
       semanticQuads: [
         { subject: 'urn:dkg:doc:imported', predicate: 'http://schema.org/about', object: '"Semantic topic"' },
@@ -79,7 +95,7 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
   });
 
   it('does not expose a target assertion name on the semantic enrichment schema', () => {
-    const tool = server.tools.get('dkg_semantic_enrichment_write');
+    const tool = server.tools.get('dkg_knowledge_asset_semantic_enrichment_write');
     expect(tool).toBeTruthy();
     expect(tool!.config.description).toMatch(/Append model-derived semantic triples/);
     expect(tool!.config.description).not.toMatch(/separate Working Memory assertion/);
@@ -90,7 +106,7 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     const assertionUri = 'did:dkg:context-graph:test-cg/assertion/peer-test/imported-doc';
 
     await expect(
-      server.call('dkg_semantic_enrichment_write', {
+      server.call('dkg_knowledge_asset_semantic_enrichment_write', {
         assertionUri,
         semanticQuads: [
           {
@@ -104,13 +120,13 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     ).rejects.toThrow();
   });
 
-  it('round-trips create → write → promote → query, preserving @en language tags on literals', async () => {
-    const created = await server.call('dkg_assertion_create', { name: 'session-2026' });
+  it('round-trips create → write → share → query, preserving @en language tags on literals', async () => {
+    const created = await server.call('dkg_knowledge_asset_create', { name: 'session-2026' });
     expect(created.isError).toBeFalsy();
     expect(created.content[0].text).toMatch(/Created assertion 'session-2026'/);
 
     const langTagged = '"hello world"@en';
-    const written = await server.call('dkg_assertion_write', {
+    const written = await server.call('dkg_knowledge_asset_write', {
       name: 'session-2026',
       quads: [
         { subject: 'urn:x:1', predicate: 'urn:p:label', object: langTagged },
@@ -120,14 +136,14 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     expect(written.isError).toBeFalsy();
     expect(written.content[0].text).toMatch(/Wrote 2 quad\(s\)/);
 
-    const promoted = await server.call('dkg_assertion_promote', {
+    const shared = await server.call('dkg_knowledge_asset_share', {
       name: 'session-2026',
       entities: ['urn:x:1'],
     });
-    expect(promoted.isError).toBeFalsy();
-    expect(promoted.content[0].text).toMatch(/Promoted 1 entity/);
+    expect(shared.isError).toBeFalsy();
+    expect(shared.content[0].text).toMatch(/Shared 1 entity/);
 
-    const queried = await server.call('dkg_assertion_query', { name: 'session-2026' });
+    const queried = await server.call('dkg_knowledge_asset_query', { name: 'session-2026' });
     expect(queried.isError).toBeFalsy();
     expect(queried.content[0].text).toMatch(/2 quad\(s\)/);
     // @en lang-tag must round-trip byte-for-byte through the JSON dump.
@@ -146,32 +162,32 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
   });
 
   it('create is idempotent: a duplicate name reports alreadyExists rather than erroring', async () => {
-    await server.call('dkg_assertion_create', { name: 'dupe' });
-    const second = await server.call('dkg_assertion_create', { name: 'dupe' });
+    await server.call('dkg_knowledge_asset_create', { name: 'dupe' });
+    const second = await server.call('dkg_knowledge_asset_create', { name: 'dupe' });
     expect(second.isError).toBeFalsy();
     expect(second.content[0].text).toMatch(/already exists/);
   });
 
   it('rejects bad assertion-name slugs at the schema layer (zod regex)', async () => {
     await expect(
-      server.call('dkg_assertion_create', { name: 'Invalid Name With Spaces' }),
+      server.call('dkg_knowledge_asset_create', { name: 'Invalid Name With Spaces' }),
     ).rejects.toThrow();
   });
 
   it('write requires a non-empty quads array', async () => {
-    await server.call('dkg_assertion_create', { name: 'empty' });
+    await server.call('dkg_knowledge_asset_create', { name: 'empty' });
     await expect(
-      server.call('dkg_assertion_write', { name: 'empty', quads: [] }),
+      server.call('dkg_knowledge_asset_write', { name: 'empty', quads: [] }),
     ).rejects.toThrow();
   });
 
-  it('promote rejects an empty entities array (must be omitted or non-empty)', async () => {
-    await server.call('dkg_assertion_create', { name: 'rollback' });
-    await server.call('dkg_assertion_write', {
+  it('share rejects an empty entities array (must be omitted or non-empty)', async () => {
+    await server.call('dkg_knowledge_asset_create', { name: 'rollback' });
+    await server.call('dkg_knowledge_asset_write', {
       name: 'rollback',
       quads: [{ subject: 'urn:r', predicate: 'urn:p', object: '"v"' }],
     });
-    const result = await server.call('dkg_assertion_promote', {
+    const result = await server.call('dkg_knowledge_asset_share', {
       name: 'rollback',
       entities: [],
     });
@@ -180,10 +196,10 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
   });
 
   it('discard marks the assertion discarded; subsequent writes fail', async () => {
-    await server.call('dkg_assertion_create', { name: 'rollback' });
-    await server.call('dkg_assertion_discard', { name: 'rollback' });
+    await server.call('dkg_knowledge_asset_create', { name: 'rollback' });
+    await server.call('dkg_knowledge_asset_discard', { name: 'rollback' });
     expect(client.assertions.get('test-cg::rollback')!.discarded).toBe(true);
-    const writeAfterDiscard = await server.call('dkg_assertion_write', {
+    const writeAfterDiscard = await server.call('dkg_knowledge_asset_write', {
       name: 'rollback',
       quads: [{ subject: 'urn:r', predicate: 'urn:p', object: '"v"' }],
     });
@@ -198,13 +214,171 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
       noProjectClient.asDkgClient(),
       makeConfig({ defaultProject: null }),
     );
-    const result = await noProjectServer.call('dkg_assertion_query', { name: 'x' });
+    const result = await noProjectServer.call('dkg_knowledge_asset_query', { name: 'x' });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/No project specified/);
   });
 });
 
-describe('dkg_assertion_import_file — wave-2 P1 add', () => {
+describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with OpenClaw PR1)', () => {
+  let server: FakeServer;
+  let client: FakeClient;
+
+  beforeEach(() => {
+    server = new FakeServer();
+    client = new FakeClient();
+    registerAssertionTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
+  });
+
+  // finalize surfaces author_agent_address (token-resolved author) but NOT the
+  // raw preSignedAuthorAttestation — colocated-agent attribution by design
+  // (CONTRACT §1 Stage3), matching the OpenClaw adapter.
+  it('finalize schema surfaces authorAgentAddress + schemeVersion but not preSignedAuthorAttestation', () => {
+    const schema = server.get('dkg_knowledge_asset_finalize').config.inputSchema!;
+    expect(schema).toHaveProperty('authorAgentAddress');
+    expect(schema).toHaveProperty('schemeVersion');
+    expect(schema).not.toHaveProperty('preSignedAuthorAttestation');
+    expect(schema).not.toHaveProperty('entities'); // whole-draft seal, no subset
+  });
+
+  it('finalize seals the whole WM draft (sets the seal flag)', async () => {
+    await server.call('dkg_knowledge_asset_create', { name: 'doc' });
+    await server.call('dkg_knowledge_asset_write', {
+      name: 'doc',
+      quads: [{ subject: 'urn:a', predicate: 'urn:p', object: '"v"' }],
+    });
+    const sealed = await server.call('dkg_knowledge_asset_finalize', { name: 'doc' });
+    expect(sealed.isError).toBeFalsy();
+    expect(sealed.content[0].text).toMatch(/Finalized \(sealed\) knowledge asset 'doc'/);
+    expect(client.assertions.get('test-cg::doc')!.finalized).toBe(true);
+  });
+
+  // publish must NOT expose author/selection overrides — the seal selects them
+  // (CONTRACT §1 Stage5 / §3). It exposes only the finalized-publish options,
+  // byte-for-byte with OpenClaw.
+  it('publish schema exposes only finalized-publish options, no author/selection', () => {
+    const schema = server.get('dkg_knowledge_asset_publish').config.inputSchema!;
+    expect(schema).toHaveProperty('publishEpochs');
+    expect(schema).toHaveProperty('publisherNodeIdentityIdOverride');
+    expect(schema).toHaveProperty('clearSharedMemoryAfter');
+    expect(schema).not.toHaveProperty('authorAgentAddress');
+    expect(schema).not.toHaveProperty('preSignedAuthorAttestation');
+    expect(schema).not.toHaveProperty('entities');
+    expect(schema).not.toHaveProperty('selection');
+  });
+
+  it('publish forwards the finalized-publish options and returns the UAL', async () => {
+    const captured: Record<string, unknown> = {};
+    const localClient = new FakeClient({
+      knowledgeAssetPublish: async (args) => {
+        Object.assign(captured, args);
+        return { kaId: 'ka-1', status: 'confirmed', ual: 'did:dkg:31337/0xauthor/7', txHash: '0xpub' };
+      },
+    });
+    const localServer = new FakeServer();
+    registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+
+    const res = await localServer.call('dkg_knowledge_asset_publish', {
+      name: 'doc',
+      publishEpochs: 2,
+      clearSharedMemoryAfter: true,
+      publisherNodeIdentityIdOverride: '12',
+    });
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toContain('"ual": "did:dkg:31337/0xauthor/7"');
+    // The tool maps clearSharedMemoryAfter → clearAfter on the client call
+    // (the client then translates to the daemon's clearSharedMemoryAfter key).
+    expect(captured.clearAfter).toBe(true);
+    expect(captured.publishEpochs).toBe(2);
+    expect(captured.publisherNodeIdentityIdOverride).toBe('12');
+    expect(captured).not.toHaveProperty('authorAgentAddress');
+  });
+
+  it('pull_from seeds a fresh WM draft from swm/vm with layer + onConflict', async () => {
+    const captured: Record<string, unknown> = {};
+    const localClient = new FakeClient({
+      knowledgeAssetPullFrom: async (args) => {
+        Object.assign(captured, args);
+        return { wmDraft: 'open', seededFrom: { layer: args.layer } };
+      },
+    });
+    const localServer = new FakeServer();
+    registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+
+    const res = await localServer.call('dkg_knowledge_asset_pull_from', {
+      name: 'doc',
+      layer: 'swm',
+      onConflict: 'replace',
+    });
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toMatch(/Seeded a WM draft for knowledge asset 'doc'.*from SWM/s);
+    expect(captured.layer).toBe('swm');
+    expect(captured.onConflict).toBe('replace');
+  });
+
+  it('pull_from rejects an invalid layer at the schema boundary (swm|vm enum)', async () => {
+    await expect(
+      server.call('dkg_knowledge_asset_pull_from', { name: 'doc', layer: 'wm' }),
+    ).rejects.toThrow();
+  });
+
+  it('pull_from surfaces 409 WM_DRAFT_CONFLICT verbatim onto a dirty draft', async () => {
+    await server.call('dkg_knowledge_asset_create', { name: 'doc' });
+    await server.call('dkg_knowledge_asset_write', {
+      name: 'doc',
+      quads: [{ subject: 'urn:a', predicate: 'urn:p', object: '"v"' }],
+    });
+    const res = await server.call('dkg_knowledge_asset_pull_from', { name: 'doc', layer: 'vm' });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain('WM_DRAFT_CONFLICT');
+  });
+
+  // The crux of CONTRACT §5 (H2): a SUBSET share is NOT auto-sealed, so
+  // publish 409s; a FULL share (or an explicit finalize) seals and publish
+  // succeeds. This models the seal-before-publish invariant.
+  it('subset share → publish FAILS (not finalized); full share → publish SUCCEEDS', async () => {
+    await server.call('dkg_knowledge_asset_create', { name: 'multi' });
+    await server.call('dkg_knowledge_asset_write', {
+      name: 'multi',
+      quads: [
+        { subject: 'urn:a', predicate: 'urn:p', object: '"a"' },
+        { subject: 'urn:b', predicate: 'urn:p', object: '"b"' },
+      ],
+    });
+    // SUBSET share — SWM-only, NOT auto-sealed.
+    const subset = await server.call('dkg_knowledge_asset_share', { name: 'multi', entities: ['urn:a'] });
+    expect(subset.isError).toBeFalsy();
+    expect(client.assertions.get('test-cg::multi')!.finalized).toBe(false);
+
+    const failed = await server.call('dkg_knowledge_asset_publish', { name: 'multi' });
+    expect(failed.isError).toBe(true);
+    expect(failed.content[0].text).toContain('VM_PUBLISH_PRECONDITION');
+
+    // FULL share auto-seals → publish now succeeds and returns the UAL.
+    const full = await server.call('dkg_knowledge_asset_share', { name: 'multi' });
+    expect(full.isError).toBeFalsy();
+    expect(client.assertions.get('test-cg::multi')!.finalized).toBe(true);
+
+    const ok = await server.call('dkg_knowledge_asset_publish', { name: 'multi' });
+    expect(ok.isError).toBeFalsy();
+    expect(ok.content[0].text).toContain('"ual"');
+  });
+
+  it('explicit finalize before a subset share also makes publish succeed', async () => {
+    await server.call('dkg_knowledge_asset_create', { name: 'sealed' });
+    await server.call('dkg_knowledge_asset_write', {
+      name: 'sealed',
+      quads: [{ subject: 'urn:a', predicate: 'urn:p', object: '"a"' }],
+    });
+    await server.call('dkg_knowledge_asset_finalize', { name: 'sealed' });
+    await server.call('dkg_knowledge_asset_share', { name: 'sealed', entities: ['urn:a'] });
+    const res = await server.call('dkg_knowledge_asset_publish', { name: 'sealed' });
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toContain('"ual"');
+  });
+});
+
+describe('dkg_knowledge_asset_import_file — wave-2 P1 add', () => {
   let server: FakeServer;
   let client: FakeClient;
   let tempDir: string;
@@ -233,7 +407,7 @@ describe('dkg_assertion_import_file — wave-2 P1 add', () => {
     const localServer = new FakeServer();
     registerAssertionTools(localServer.asMcpServer(), client.asDkgClient(), makeConfig());
 
-    const result = await localServer.call('dkg_assertion_import_file', {
+    const result = await localServer.call('dkg_knowledge_asset_import_file', {
       name: 'imported',
       filePath,
     });
@@ -247,7 +421,7 @@ describe('dkg_assertion_import_file — wave-2 P1 add', () => {
   });
 
   it('surfaces a tool error when the file path does not exist', async () => {
-    const result = await server.call('dkg_assertion_import_file', {
+    const result = await server.call('dkg_knowledge_asset_import_file', {
       name: 'missing',
       filePath: path.join(tempDir, 'no-such-file.md'),
     });
@@ -258,7 +432,7 @@ describe('dkg_assertion_import_file — wave-2 P1 add', () => {
   });
 });
 
-describe('dkg_assertion_history — wave-2 P3 add', () => {
+describe('dkg_knowledge_asset_history — wave-2 P3 add', () => {
   let server: FakeServer;
   let client: FakeClient;
 
@@ -269,7 +443,7 @@ describe('dkg_assertion_history — wave-2 P3 add', () => {
   });
 
   it('returns the lifecycle JSON block for a known assertion', async () => {
-    const result = await server.call('dkg_assertion_history', { name: 'session-2026' });
+    const result = await server.call('dkg_knowledge_asset_history', { name: 'session-2026' });
     expect(result.isError).toBeFalsy();
     expect(result.content[0].text).toMatch(/History for assertion 'session-2026'/);
     expect(result.content[0].text).toContain('"author": "urn:dkg:agent:test"');
