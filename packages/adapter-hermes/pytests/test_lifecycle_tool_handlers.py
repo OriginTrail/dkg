@@ -33,6 +33,8 @@ class _FakeClient:
         self.calls = []
         # Override to test §G register_if_needed branches; default success.
         self.register_response = {"registered": "cg", "onChainId": "1"}
+        # Override to test the vm/publish 207 partial path; None = default 200.
+        self.publish_response = None
 
     def register_context_graph(self, context_graph_id, access_policy=None):
         self.calls.append(("register", context_graph_id, access_policy))
@@ -46,6 +48,8 @@ class _FakeClient:
 
     def publish_finalized_assertion(self, name, cg, sub_graph_name=None, options=None):
         self.calls.append(("publish", name, cg, sub_graph_name, options))
+        if self.publish_response is not None:
+            return self.publish_response
         return {"kaId": "ka1", "ual": "did:dkg:1/0xabc/5", "txHash": "0xtx", "status": "confirmed"}
 
     def pull_from(self, name, cg, layer, on_conflict=None, sub_graph_name=None):
@@ -511,7 +515,9 @@ def test_publish_register_access_policy_validated_and_forwarded(provider):
         "context_graph_id": "cg1", "name": "ka",
         "register_if_needed": True, "access_policy": 5,
     }))
-    assert "access_policy must be 0 or 1" in bad["error"]
+    assert "access_policy" in bad["error"]
+    # bad access_policy must NOT reach the register call
+    assert provider._client.calls == []
 
     provider._client.calls.clear()
     provider.handle_tool_call("dkg_knowledge_asset_publish", {
@@ -519,6 +525,75 @@ def test_publish_register_access_policy_validated_and_forwarded(provider):
         "register_if_needed": True, "access_policy": 1,
     })
     assert provider._client.calls[0] == ("register", "cg1", 1)
+
+
+# -- Phase A (#1079): access_policy bool-rejection (bool is an int subclass) --
+
+@pytest.mark.parametrize("bad", [True, False])
+def test_publish_register_rejects_bool_access_policy(provider, bad):
+    # True/False would slip past a bare `not in (0, 1)` check (True==1, False==0).
+    out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka",
+        "register_if_needed": True, "access_policy": bad,
+    }))
+    assert "access_policy" in out["error"]
+    assert provider._client.calls == []  # register never attempted
+
+
+def test_validate_access_policy_helper_is_bool_safe(plugin_module):
+    v = plugin_module._validate_access_policy
+    assert v(None) is None
+    assert v(0) is None and v(1) is None
+    assert v(True) is not None and v(False) is not None
+    assert v(2) is not None and v(-1) is not None and v("1") is not None
+
+
+# -- Phase A (#1079): vm/publish 207 partial surfacing ----------------------
+
+def test_publish_207_partial_surfaces_warning_keeping_ual(provider):
+    # HTTP 207: minted on-chain (UAL valid) but the CG-binding failed
+    # (contextGraphError present). Must be a PARTIAL/warning, not plain success.
+    provider._client.publish_response = {
+        "kaId": "ka1", "ual": "did:dkg:1/0xabc/5", "status": "confirmed",
+        "contextGraphError": "context-graph binding timed out",
+    }
+    out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka",
+    }))
+    assert out["partial"] is True
+    assert "Partial publish" in out["warning"]
+    assert "context-graph binding timed out" in out["warning"]
+    # the UAL / kaId stay visible — the asset IS on-chain
+    assert out["ual"] == "did:dkg:1/0xabc/5"
+    assert out["kaId"] == "ka1"
+
+
+def test_publish_200_clean_success_not_marked_partial(provider):
+    out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka",
+    }))
+    assert "partial" not in out
+    assert "warning" not in out
+    assert out["status"] == "confirmed"
+
+
+def test_publish_empty_context_graph_error_is_not_partial(provider):
+    provider._client.publish_response = {
+        "ual": "did:dkg:1/0xabc/5", "status": "confirmed", "contextGraphError": "",
+    }
+    out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka",
+    }))
+    assert "partial" not in out
+
+
+def test_annotate_vm_publish_partial_helper(plugin_module):
+    f = plugin_module._annotate_vm_publish_partial
+    r = f({"ual": "u", "contextGraphError": "boom"})
+    assert r["partial"] is True and "boom" in r["warning"] and r["ual"] == "u"
+    assert "partial" not in f({"ual": "u"})
+    assert "partial" not in f({"ual": "u", "contextGraphError": ""})
+    assert f("x") == "x"  # non-dict passthrough
 
 
 # -- pull_from handler ------------------------------------------------------
