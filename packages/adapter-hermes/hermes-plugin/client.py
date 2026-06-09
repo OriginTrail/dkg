@@ -713,6 +713,36 @@ class DKGClient:
         created = self._post("/api/knowledge-assets", create_payload)
         if _client_result_failed(created):
             return created
+        # The create route returns HTTP 207 { created:true, ..., errors:[{phase,
+        # error}] } when create+finalize succeeded but an opt-in tail FAILED — for
+        # us that is the promote/swm-share (knowledge-assets.ts:575-614). _post
+        # does not raise on 207 and _client_result_failed does not inspect
+        # errors[], so without this check we would publish an assertion that was
+        # sealed but NEVER SHARED (Codex #1084:714). Do NOT touch the global
+        # _client_result_failed (the multi-root loop shares it) — check errors[]
+        # here, targeted. On a share-phase failure, do not publish; surface the
+        # error AND the assertionName so the caller can recover (share then
+        # publish by name) without recreating the asset.
+        create_errors = created.get("errors") if isinstance(created, dict) else None
+        if isinstance(create_errors, list) and create_errors:
+            failure = dict(created)
+            failure["success"] = False
+            failure["assertionName"] = assertion_name
+            if created.get("assertionUri") is not None:
+                failure["assertionUri"] = created["assertionUri"]
+            if created.get("seal") is not None:
+                failure["seal"] = created["seal"]
+            phases = ", ".join(
+                str(e.get("phase")) for e in create_errors if isinstance(e, dict) and e.get("phase")
+            )
+            failure["error"] = (
+                f"Knowledge asset '{assertion_name}' was created and sealed but a later stage "
+                f"failed ({phases or 'share'}), so it was NOT shared to SWM and was NOT published. "
+                f"Share it (dkg_knowledge_asset_share with this name) and then publish "
+                f"(dkg_knowledge_asset_publish / dkg_shared_memory_publish with this name) — do "
+                f"NOT recreate the asset."
+            )
+            return failure
         publish_payload: Dict[str, Any] = {
             "contextGraphId": cg_id,
             "assertionName": assertion_name,
@@ -721,7 +751,27 @@ class DKGClient:
             publish_payload["subGraphName"] = sub_graph_name
         published = self._post("/api/shared-memory/publish", publish_payload)
         if _client_result_failed(published):
-            return published
+            # The on-chain publish failed AFTER the asset was created+sealed+shared
+            # under the random assertion_name. Returning `published` verbatim would
+            # drop that name and the agent would recreate the asset (orphaning the
+            # first) — Codex #1084:723. Merge the assertionName (+ assertionUri/seal)
+            # into the failure with a retry-not-recreate message.
+            failure = dict(published) if isinstance(published, dict) else {"error": str(published)}
+            failure["success"] = False
+            failure["assertionName"] = assertion_name
+            if isinstance(created, dict):
+                if created.get("assertionUri") is not None:
+                    failure["assertionUri"] = created["assertionUri"]
+                if created.get("seal") is not None:
+                    failure["seal"] = created["seal"]
+            base_error = str(failure.get("error") or failure.get("message") or "publish failed")
+            failure["error"] = (
+                f"Knowledge asset '{assertion_name}' was created, sealed, and shared to SWM, but the "
+                f"on-chain publish failed ({base_error}). Retry the publish by name "
+                f"(dkg_knowledge_asset_publish / dkg_shared_memory_publish with this assertionName) — "
+                f"do NOT recreate the asset."
+            )
+            return failure
         result: Dict[str, Any] = dict(published) if isinstance(published, dict) else {"result": published}
         if isinstance(created, dict):
             if created.get("assertionUri") is not None:
