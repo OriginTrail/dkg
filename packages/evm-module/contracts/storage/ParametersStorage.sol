@@ -172,6 +172,10 @@ contract ParametersStorage is INamed, IVersioned, HubDependent {
     }
 
     function setShardingTableSizeLimit(uint16 shardingTableSizeLimit_) external onlyOwnerOrMultiSigOwner {
+        // Reject 0: ShardingTable._insertNode enforces this cap (`nodesCount >= limit`
+        // reverts), so a 0 limit would freeze ALL node admission (even the first
+        // insert), bricking staking. 0 is never a meaningful table size.
+        require(shardingTableSizeLimit_ > 0, "shardingTableSizeLimit must be > 0");
         shardingTableSizeLimit = shardingTableSizeLimit_;
 
         emit ParameterChanged("shardingTableSizeLimit", shardingTableSizeLimit);
