@@ -441,7 +441,9 @@ result = json.loads(provider.handle_tool_call("dkg_shared_memory_publish", {
     "register_if_needed": True,
 }))
 assert result["success"] is True and provider._client.published is True, result
-assert "registration" in result, result
+# FIX H (#1084:1810): the already-registered short-circuit normalizes the
+# registration to a success shape — it must NOT carry the raw {success:false}.
+assert result["registration"] == {"alreadyRegistered": True}, result
 
 class PublishClient:
     def __init__(self):

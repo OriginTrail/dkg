@@ -491,6 +491,32 @@ def test_publish_register_already_registered_short_circuits(provider):
     # "already registered" is treated as success → publish still runs
     assert _kinds(provider) == ["register", "publish"]
     assert out["status"] == "confirmed"
+    # FIX H (#1084:1810): the already-registered short-circuit must NOT leave the
+    # raw {success:false} on result["registration"] — normalize to a success shape.
+    assert out["registration"] == {"alreadyRegistered": True}
+    assert out["registration"].get("success") is not False
+
+
+def test_shared_memory_publish_already_registered_normalizes(plugin_module):
+    # FIX H (#1084:1810) on the CG-wide dkg_shared_memory_publish register path:
+    # the already-registered short-circuit must normalize, not attach raw failure.
+    class _Client:
+        def register_context_graph(self, cg, access_policy=None):
+            return {"success": False, "error": "context graph already registered"}
+
+        def publish(self, cg, selection="all", clear_after=True, sub_graph_name=None):
+            return {"kaId": "ka", "ual": "u", "status": "confirmed"}
+
+    p = plugin_module.DKGMemoryProvider()
+    p._offline = False
+    p._config = {"publish_tool": "direct", "allow_direct_publish": True}
+    p._client = _Client()
+    out = json.loads(p.handle_tool_call("dkg_shared_memory_publish", {
+        "context_graph_id": "cg1", "register_if_needed": True,
+    }))
+    assert out["status"] == "confirmed"
+    assert out["registration"] == {"alreadyRegistered": True}
+    assert out["registration"].get("success") is not False
 
 
 def test_publish_register_hard_failure_does_not_publish(provider):
