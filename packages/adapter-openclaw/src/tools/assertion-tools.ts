@@ -224,8 +224,11 @@ export function buildAssertionTools(ctx: DkgToolHost): OpenClawTool[] {
     {
       name: 'dkg_knowledge_asset_query',
       description:
-        'Dump every triple in a knowledge asset\'s Working Memory draft as `{ quads, count }`. NOT a SPARQL ' +
-        'endpoint — use dkg_query for ad-hoc SPARQL.',
+        'Dump every triple in a knowledge asset\'s Working Memory DRAFT (the un-shared working copy) as ' +
+        '`{ quads, count }`. Query it BEFORE sharing: a FULL share empties the WM draft, so a query after ' +
+        'sharing returns 0 quads. To inspect already-shared content use dkg_query with view ' +
+        '"shared-working-memory" (or "verifiable-memory" once published). NOT a SPARQL endpoint — use ' +
+        'dkg_query for ad-hoc SPARQL.',
       parameters: {
         type: 'object',
         properties: {
