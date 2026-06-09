@@ -116,6 +116,8 @@ describe("DkgNodePlugin", () => {
         context_graph_id: 'ctx',
         name: 'notes',
         publish_epochs: 2,
+        // CONTRACT §D: clear-after is NOT a param on the per-asset publish tool;
+        // a stray arg must never reach the wire (it is graph-wide destructive).
         clear_shared_memory_after: true,
         publisher_node_identity_id_override: '12',
         sub_graph_name: 'protocols',
@@ -127,19 +129,22 @@ describe("DkgNodePlugin", () => {
       // The seal selects author + the whole asset (CONTRACT §1 Stage5 / §3) —
       // never send author/selection. publish controls are normalized into the
       // nested `options` object with the canonical daemon keys (CONTRACT §6).
+      // clearSharedMemoryAfter is DROPPED from the per-asset publish (CONTRACT §D).
       expect(body).toEqual({
         contextGraphId: 'ctx',
         subGraphName: 'protocols',
         options: {
           publishEpochs: 2,
-          clearSharedMemoryAfter: true,
           publisherNodeIdentityIdOverride: '12',
         },
       });
       expect(body).not.toHaveProperty('authorAgentAddress');
       expect(body).not.toHaveProperty('preSignedAuthorAttestation');
       expect(body).not.toHaveProperty('selection');
-      expect(body.options).not.toHaveProperty('clearAfter'); // SDK alias must be translated
+      // CONTRACT §D: neither the canonical key nor its SDK alias is ever sent on
+      // the per-asset publish path, even when a clear-after arg is passed.
+      expect(body.options).not.toHaveProperty('clearSharedMemoryAfter');
+      expect(body.options).not.toHaveProperty('clearAfter');
       // The returned UAL flows through to the agent.
       expect(res.details).toMatchObject({ ual: 'did:dkg:1/0xauthor/7' });
     });
@@ -154,6 +159,21 @@ describe("DkgNodePlugin", () => {
       });
       expect(fetchMock).not.toHaveBeenCalled();
       expect(res.details?.error).toMatch(/publish_epochs.*positive integer/);
+    });
+
+
+    it('dkg_knowledge_asset_publish rejects a negative publisher_node_identity_id_override (CONTRACT §C)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({});
+      // Regression: BigInt("-1") parses fine, so the daemon /^\d+$/ rule must be
+      // enforced at the adapter boundary — a negative override is a tool error,
+      // never sent on the wire.
+      const res = await byName.get('dkg_knowledge_asset_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        publisher_node_identity_id_override: '-1',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(res.details?.error).toMatch(/publisher_node_identity_id_override.*non-negative integer/);
     });
 
 
@@ -511,7 +531,7 @@ describe("DkgNodePlugin", () => {
     });
 
 
-    it('dkg_knowledge_asset_share forwards snake_case → camelCase body and rejects stray string "all"', async () => {
+    it('dkg_knowledge_asset_share forwards snake_case → camelCase body and accepts the "all" sentinel (CONTRACT §B)', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ promoted: 1 });
       await byName.get('dkg_knowledge_asset_share')!.execute('tc', {
         context_graph_id: 'ctx',
@@ -527,17 +547,32 @@ describe("DkgNodePlugin", () => {
         subGraphName: 'protocols',
       });
 
-      // Blocker guard: the previous string-"all" shortcut is gone from the public
-      // tool surface. The handler now returns an error result instead of sending.
+      // CONTRACT §B: the "all" string sentinel is accepted and passed through to
+      // the wire unchanged (the daemon reads parsed.entities and treats "all" as a
+      // full share). It is NOT coerced to [] or omitted.
       fetchMock.mockClear();
-      const bad = await byName.get('dkg_knowledge_asset_share')!.execute('tc', {
+      await byName.get('dkg_knowledge_asset_share')!.execute('tc', {
         context_graph_id: 'ctx',
         name: 'notes',
         entities: 'all',
       });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [, allInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(JSON.parse(allInit.body as string)).toEqual({
+        contextGraphId: 'ctx',
+        entities: 'all',
+      });
+
+      // An empty array is still rejected client-side (fail fast — the daemon would
+      // 400 it anyway).
+      fetchMock.mockClear();
+      const bad = await byName.get('dkg_knowledge_asset_share')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        entities: [],
+      });
       expect(fetchMock).not.toHaveBeenCalled();
       expect(bad.content[0].text).toContain('entities');
-      expect(bad.content[0].text).toContain('non-empty array');
     });
 
 

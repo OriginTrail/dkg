@@ -394,7 +394,12 @@ describe("DkgNodePlugin", () => {
     expect(publishKaProps).not.toHaveProperty('entities');
     expect(publishKaProps).not.toHaveProperty('selection');
     expect(publishKaProps).toHaveProperty('publish_epochs');
-    expect(publishKaProps).toHaveProperty('clear_shared_memory_after');
+    expect(publishKaProps).toHaveProperty('publisher_node_identity_id_override');
+    // CONTRACT §D: clear-after is DROPPED from the per-asset publish tool — on
+    // vm/publish it is graph-wide destructive (wipes other agents' SWM). The
+    // CG-wide clear stays on dkg_publish / dkg_shared_memory_publish.
+    expect(publishKaProps).not.toHaveProperty('clear_shared_memory_after');
+    expect(publishKaProps).not.toHaveProperty('clear_after');
     // finalize surfaces the token-resolved author but NOT the raw pre-signed
     // attestation (colocated-agent attribution — CONTRACT §1 Stage3, by design).
     const finalizeProps = byName.get('dkg_knowledge_asset_finalize')!.parameters.properties;
