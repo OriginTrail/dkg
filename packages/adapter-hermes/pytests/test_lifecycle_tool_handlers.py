@@ -274,6 +274,63 @@ def test_publish_handler_rejects_negative_override(provider):
     assert "publisher_node_identity_id_override" in out["error"]
 
 
+# -- Codex #1079:750: override preserved as a decimal string (bigint precision)
+
+def test_publish_override_digit_string_preserved_verbatim(provider):
+    big = "123456789012345678901234567890"  # >> 2**53, would lose precision as a number
+    provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka",
+        "publisher_node_identity_id_override": big,
+    })
+    assert provider._client.calls[-1][4] == {"publisherNodeIdentityIdOverride": big}
+
+
+def test_publish_override_int_normalized_to_string(provider):
+    provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka", "publisher_node_identity_id_override": 12,
+    })
+    assert provider._client.calls[-1][4] == {"publisherNodeIdentityIdOverride": "12"}
+
+
+def test_publish_override_rejects_non_digit_and_blank(provider):
+    for bad in ["12x", "1.5", "-5", "  ", ""]:
+        before = len(provider._client.calls)
+        out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
+            "context_graph_id": "cg1", "name": "ka",
+            "publisher_node_identity_id_override": bad,
+        }))
+        assert "publisher_node_identity_id_override" in out["error"], (bad, out)
+        assert len(provider._client.calls) == before, bad  # nothing on the wire
+
+
+def test_publish_override_schema_is_digit_string(provider):
+    pub = next(s for s in provider.get_tool_schemas()
+               if s["name"] == "dkg_knowledge_asset_publish")
+    ov = pub["parameters"]["properties"]["publisher_node_identity_id_override"]
+    assert ov["type"] == "string"
+    assert ov["pattern"] == "^[0-9]+$"
+
+
+def test_validate_decimal_string_arg_preserves_bigint(plugin_module):
+    v = plugin_module._validate_decimal_string_arg
+    big = "999999999999999999999999"
+    assert v(big, "x") == (big, None)
+    assert v(None, "x") == (None, None)
+    assert v(0, "x") == ("0", None)
+    assert v(-1, "x")[1]
+    assert v("1.0", "x")[1]
+    assert v("", "x")[1]
+
+
+def test_query_description_warns_about_post_share_emptying(provider):
+    q = next(s for s in provider.get_tool_schemas()
+             if s["name"] == "dkg_knowledge_asset_query")
+    desc = q["description"]
+    assert "WORKING MEMORY DRAFT" in desc
+    assert "returns 0" in desc
+    assert "shared-working-memory" in desc
+
+
 def test_finalize_handler_rejects_invalid_scheme_version(provider):
     out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_finalize", {
         "context_graph_id": "cg1", "name": "ka", "scheme_version": 0,
