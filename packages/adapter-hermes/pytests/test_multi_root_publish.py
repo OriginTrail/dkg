@@ -81,6 +81,38 @@ def test_loop_stops_on_first_failure_and_surfaces_409(recording_client):
     assert [body["selection"] for _, body in client.posts] == [["a"], ["b"]]
 
 
+def test_partial_failure_reports_explicit_transparency(recording_client):
+    # G1: a partial multi-root failure must EXPLICITLY report which roots were
+    # published on-chain (TRAC spent), which failed, and which were not attempted.
+    client = recording_client
+
+    def responder(path, body):
+        if body["selection"][0] == "c":
+            return {"success": False, "error": "boom"}
+        return {"kaId": "ka-" + body["selection"][0], "status": "confirmed"}
+
+    client.responder = responder
+    result = client.publish("cg:test", selection=["a", "b", "c", "d"], clear_after=True)
+
+    assert result["success"] is False
+    assert result["partial"] is True
+    assert result["publishedRoots"] == ["a", "b"]   # minted on-chain, TRAC spent
+    assert result["failedRoot"] == "c"
+    assert result["notAttemptedRoots"] == ["d"]
+    # plain-language guidance about irreversibility + don't-retry-the-whole-set
+    assert "TRAC spent" in result["message"]
+    assert "irreversible" in result["message"]
+    # only a, b, c were attempted — never d
+    assert [body["selection"] for _, body in client.posts] == [["a"], ["b"], ["c"]]
+
+
+def test_full_success_marks_partial_false(recording_client):
+    client = recording_client
+    result = client.publish("cg:test", selection=["a", "b"], clear_after=True)
+    assert result["success"] is True
+    assert result["partial"] is False
+
+
 def test_publish_epochs_threaded_per_call(recording_client):
     client = recording_client
     client.publish("cg:test", selection=["a", "b"], clear_after=False, publish_epochs=4)

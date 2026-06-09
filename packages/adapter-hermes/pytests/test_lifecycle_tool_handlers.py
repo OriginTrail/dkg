@@ -99,6 +99,28 @@ def test_publish_appears_only_when_direct_publish_allowed(provider):
     assert "dkg_knowledge_asset_publish" in names
 
 
+# -- G2: the agent prompt must not advertise the gated publish tool ----------
+
+def test_prompt_advertises_publish_only_when_allowed(provider):
+    provider._recall_facts = lambda: [{"target": "memory", "content": "a fact"}]
+
+    provider._config = {"publish_tool": "direct", "allow_direct_publish": True,
+                        "allow_context_graph_admin_tools": False}
+    allowed = provider.system_prompt_block()
+    assert "dkg_knowledge_asset_create/write/finalize/share/publish" in allowed
+
+    provider._config = {"publish_tool": "disabled", "allow_direct_publish": False,
+                        "allow_context_graph_admin_tools": False}
+    gated = provider.system_prompt_block()
+    # the gated prompt must NOT name the unregistered publish verb in the
+    # lifecycle line, and the tool really is absent from the registered set
+    assert "dkg_knowledge_asset_create/write/finalize/share/publish" not in gated
+    assert "chain publish is disabled" in gated
+    assert "dkg_knowledge_asset_publish" not in {
+        s["name"] for s in provider.get_tool_schemas()
+    }
+
+
 def test_share_description_carries_subset_language(provider):
     share = next(s for s in provider.get_tool_schemas()
                  if s["name"] == "dkg_knowledge_asset_share")
@@ -251,6 +273,39 @@ def test_finalize_handler_rejects_invalid_scheme_version(provider):
         "context_graph_id": "cg1", "name": "ka", "scheme_version": 0,
     }))
     assert "scheme_version" in out["error"]
+
+
+# -- G3: non-integral numerics must be rejected, never silently truncated
+
+def test_publish_handler_rejects_non_integral_float_epochs(provider):
+    before = len(provider._client.calls)
+    out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka", "publish_epochs": 1.9,
+    }))
+    assert "publish_epochs" in out["error"]          # NOT silently truncated to 1
+    assert len(provider._client.calls) == before     # nothing on the wire
+
+
+def test_publish_handler_accepts_integral_float_epochs(provider):
+    provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka", "publish_epochs": 2.0,
+    })
+    assert provider._client.calls[-1][4] == {"publishEpochs": 2}
+
+
+def test_validate_int_arg_rejects_fractional_and_truncation(plugin_module):
+    v = plugin_module._validate_int_arg
+    # fractional float and fractional string are rejected, not truncated
+    assert v(1.9, "x", minimum=1)[0] is None and v(1.9, "x", minimum=1)[1]
+    assert v("1.9", "x", minimum=1)[0] is None and v("1.9", "x", minimum=1)[1]
+    # integral forms accepted
+    assert v(2.0, "x", minimum=1) == (2, None)
+    assert v(3, "x", minimum=1) == (3, None)
+    assert v("4", "x", minimum=1) == (4, None)
+    # bool / non-numeric rejected; absent omitted
+    assert v(True, "x", minimum=1)[1]
+    assert v([], "x", minimum=1)[1]
+    assert v(None, "x", minimum=1) == (None, None)
 
 
 # -- D: clear-after dropped from the per-asset publish tool
