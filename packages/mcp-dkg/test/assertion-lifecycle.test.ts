@@ -302,6 +302,35 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     expect(schema).not.toHaveProperty('selection');
   });
 
+  // CONTRACT §C (float-truncation parity — Codex round-2 flagged this on Hermes):
+  // a present-but-non-integral numeric must be REJECTED at the zod boundary, never
+  // silently truncated (1.9 → 1). publishEpochs + schemeVersion use .int(); the
+  // override regex /^\d+$/ rejects "1.9" and "-1".
+  it('rejects non-integral / negative numeric options at the schema boundary (CONTRACT §C)', async () => {
+    // publishEpochs 1.9 → .int() rejects (no truncation to 1).
+    await expect(
+      server.call('dkg_knowledge_asset_publish', { name: 'doc', publishEpochs: 1.9 }),
+    ).rejects.toThrow();
+    // publishEpochs 0 / negative → .positive() rejects.
+    await expect(
+      server.call('dkg_knowledge_asset_publish', { name: 'doc', publishEpochs: 0 }),
+    ).rejects.toThrow();
+    // publisher_node_identity_id_override "1.9" and "-1" → /^\d+$/ rejects.
+    await expect(
+      server.call('dkg_knowledge_asset_publish', { name: 'doc', publisherNodeIdentityIdOverride: '1.9' }),
+    ).rejects.toThrow();
+    await expect(
+      server.call('dkg_knowledge_asset_publish', { name: 'doc', publisherNodeIdentityIdOverride: '-1' }),
+    ).rejects.toThrow();
+    // scheme_version 1.9 / 0 → .int().positive() rejects.
+    await expect(
+      server.call('dkg_knowledge_asset_finalize', { name: 'doc', schemeVersion: 1.9 }),
+    ).rejects.toThrow();
+    await expect(
+      server.call('dkg_knowledge_asset_finalize', { name: 'doc', schemeVersion: 0 }),
+    ).rejects.toThrow();
+  });
+
   it('publish forwards the finalized-publish options and returns the UAL', async () => {
     const captured: Record<string, unknown> = {};
     const localClient = new FakeClient({
