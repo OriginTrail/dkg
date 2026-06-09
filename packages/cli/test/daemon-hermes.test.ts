@@ -2341,10 +2341,10 @@ describe('Hermes daemon routes', () => {
     expect(systemPrompt).toContain('tripleCount=12');
     expect(systemPrompt).toContain('rootEntity="did:dkg:context-graph:project-1/assertion/notes"');
     expect(systemPrompt).toContain(`markdownHash="${attachmentRef.fileHash}"`);
-    expect(systemPrompt).toContain('dkg_import_artifact_read_markdown');
-    expect(systemPrompt).toContain('dkg_semantic_enrichment_write');
-    expect(systemPrompt).toContain('Use dkg_import_artifact_resolve only when you need to re-check artifact metadata');
-    expect(systemPrompt).not.toContain('resolve the artifact with dkg_import_artifact_resolve');
+    expect(systemPrompt).toContain('dkg_knowledge_asset_import_artifact_read_markdown');
+    expect(systemPrompt).toContain('dkg_knowledge_asset_semantic_enrichment_write');
+    expect(systemPrompt).toContain('Use dkg_knowledge_asset_import_artifact_resolve only when you need to re-check artifact metadata');
+    expect(systemPrompt).not.toContain('resolve the artifact with dkg_knowledge_asset_import_artifact_resolve');
     expect(systemPrompt).not.toContain('Keep deterministic import assertions separate');
     expect(storeChatExchange).toHaveBeenCalledWith(
       'hermes:dkg-ui:attachments',

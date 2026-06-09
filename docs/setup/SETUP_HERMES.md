@@ -292,7 +292,7 @@ but the UI shows a degraded/offline bridge state.
   `dkg_join_request_approve`, and `dkg_join_request_reject` are exposed by
   default. Operators can hide them with `allow_context_graph_admin_tools: false`
   in `dkg.json` or `DKG_ALLOW_CONTEXT_GRAPH_ADMIN_TOOLS=false`.
-- `dkg_assertion_import_file` requires a configured safe root through
+- `dkg_knowledge_asset_import_file` requires a configured safe root through
   `DKG_HERMES_IMPORT_ROOTS`, `HERMES_DKG_IMPORT_ROOTS`, `DKG_IMPORT_ROOTS`, or
   adapter `import_roots`; imports outside those roots, symlink escapes, and
   obvious credential/wallet/DKG private-state paths are rejected.
