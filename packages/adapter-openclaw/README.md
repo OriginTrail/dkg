@@ -12,7 +12,7 @@ The adapter is a thin bridge into the DKG node. It does not run its own DKG node
 - exposes DKG agent-network tools to the OpenClaw runtime
 - funds the generated admin wallet plus operational wallets via the testnet faucet on first setup (skippable with `--no-fund`; failures are non-fatal and log manual `curl` instructions)
 
-Memory writes are not exposed as an adapter tool. The agent persists memory through direct daemon routes listed in `packages/cli/skills/dkg-node/SKILL.md` §5 (`POST /api/knowledge-assets` on first use of a fresh project CG, then `POST /api/knowledge-assets/:name/wm/write` for each write). The daemon serves the skill document at `GET /.well-known/skill.md`, so the agent sees it on startup and calls the routes directly.
+Memory writes are not exposed as an adapter tool. The agent persists memory through direct daemon routes listed in `packages/cli/skills/dkg-node/SKILL.md` §5: `POST /api/knowledge-assets` (create) on first use of a fresh project CG, then `POST /api/knowledge-assets/:name/wm/write` for each write. To anchor knowledge beyond Working Memory, the agent continues the canonical 5-stage lifecycle — `wm/finalize` (seal) → `swm/share` → `vm/publish` (mint on chain, returns the asset's UAL) — see SKILL.md §5 / §10 for the full flow and response body. The daemon serves the skill document at `GET /.well-known/skill.md`, so the agent sees it on startup and calls the routes directly.
 
 ## What It Does Not Do Anymore
 
