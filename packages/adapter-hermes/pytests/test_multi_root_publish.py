@@ -310,6 +310,64 @@ def test_publish_quads_create_failure_short_circuits(recording_client):
     assert [p for p, _ in client.posts] == ["/api/knowledge-assets"]
 
 
+# -- FIX A (#1084:714): create 207 with errors[] (share failed) -> no publish -
+
+def test_publish_quads_create_207_errors_does_not_publish(recording_client):
+    client = recording_client
+    client.responder = lambda path, body: (
+        {
+            "created": True, "assertionUri": "urn:a", "seal": {"merkleRoot": "0xr"},
+            "status": "wm-sealed",
+            "errors": [{"phase": "swm-share", "error": "gossip timeout"}],
+        }
+        if path == "/api/knowledge-assets" else {"kaId": "k", "ual": "u", "status": "confirmed"}
+    )
+    result = client.publish_quads("cg", _Q)
+    # the assertion was sealed but NOT shared -> must NOT publish
+    assert [p for p, _ in client.posts] == ["/api/knowledge-assets"]
+    assert result["success"] is False
+    # assertionName + recovery context surfaced
+    assert result["assertionName"].startswith("hermes-publish-")
+    assert result["assertionUri"] == "urn:a"
+    assert result["seal"] == {"merkleRoot": "0xr"}
+    assert "swm-share" in result["error"]
+    assert "NOT shared" in result["error"]
+    assert "recreate" in result["error"].lower()
+
+
+def test_publish_quads_create_empty_errors_publishes(recording_client):
+    client = recording_client
+    client.responder = lambda path, body: (
+        {"created": True, "assertionUri": "urn:a", "errors": []}
+        if path == "/api/knowledge-assets" else {"kaId": "k", "ual": "u", "status": "confirmed"}
+    )
+    result = client.publish_quads("cg", _Q)
+    assert [p for p, _ in client.posts] == ["/api/knowledge-assets", "/api/shared-memory/publish"]
+    assert result["ual"] == "u"
+
+
+# -- FIX B (#1084:723): publish fails after create+share -> keep assertionName -
+
+def test_publish_quads_publish_failure_merges_assertion_name(recording_client):
+    client = recording_client
+    client.responder = lambda path, body: (
+        {"assertionUri": "urn:a", "seal": {"m": "r"}, "swmShared": True}
+        if path == "/api/knowledge-assets"
+        else {"success": False, "error": "chain revert: insufficient TRAC"}
+    )
+    result = client.publish_quads("cg", _Q)
+    assert [p for p, _ in client.posts] == ["/api/knowledge-assets", "/api/shared-memory/publish"]
+    assert result["success"] is False
+    # the random name is kept (don't recreate — retry by name)
+    assert result["assertionName"].startswith("hermes-publish-")
+    assert result["assertionUri"] == "urn:a"
+    assert result["seal"] == {"m": "r"}
+    assert "insufficient TRAC" in result["error"]
+    assert "shared to SWM" in result["error"]
+    assert "Retry the publish" in result["error"]
+    assert "recreate" in result["error"].lower()
+
+
 # -- Phase B (fast-follow): register_if_needed on the one-shot dkg_publish ----
 # The atomic assertionName fork does NOT auto-register the CG (LU-6 is selection-
 # fork only), so dkg_publish gets its own register lever (mirrors §G).
