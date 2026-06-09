@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { registerSetupTools } from '../src/tools/setup.js';
 import { registerPublishTools } from '../src/tools/publish.js';
 import { registerHealthTools } from '../src/tools/health.js';
-import { DkgClient } from '../src/client.js';
 import { FakeServer, FakeClient, makeConfig } from './harness.js';
 
 describe('setup tools — context graph + sub-graph + subscribe', () => {
@@ -165,65 +164,15 @@ describe('publish tools — write+publish helper + canonical SWM finalizer', () 
     }
   });
 
-  it('DkgClient.publishQuads accepts full context graph DIDs without double-prefixing graph', async () => {
-    const bodies: Array<Record<string, any>> = [];
-    const httpClient = new DkgClient({
-      config: makeConfig(),
-      fetcher: (async (_url, init) => {
-        bodies.push(JSON.parse(String(init?.body ?? '{}')));
-        const responseBody = bodies.length === 1
-          ? { assertionUri: 'did:dkg:context-graph:0xabc/my-cg/assertion/peer/a' }
-          : { kaId: 'kc-1', kas: [], txHash: '0x1' };
-        return new Response(JSON.stringify(responseBody), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }) as typeof fetch,
-    });
-    const fullDid = 'did:dkg:context-graph:0xabc/my-cg';
-
-    await httpClient.publishQuads({
-      contextGraphId: fullDid,
-      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
-    });
-
-    expect(bodies[0].contextGraphId).toBe('0xabc/my-cg');
-    expect(bodies[0].quads[0].graph).toBe(fullDid);
-    expect(bodies[1].contextGraphId).toBe('0xabc/my-cg');
-  });
-
-  it('DkgClient normalizes full context graph DIDs on read/setup routes', async () => {
-    const calls: Array<{ url: string; body?: any }> = [];
-    const httpClient = new DkgClient({
-      config: makeConfig(),
-      fetcher: (async (url, init) => {
-        calls.push({
-          url: String(url),
-          body: init?.body ? JSON.parse(String(init.body)) : undefined,
-        });
-        let responseBody: unknown = {};
-        if (String(url).includes('/api/query')) responseBody = { result: { bindings: [] } };
-        if (String(url).includes('/api/sub-graph/list')) responseBody = { subGraphs: [] };
-        if (String(url).includes('/api/subscribe')) responseBody = { subscribed: 'ui-refresh' };
-        return new Response(JSON.stringify(responseBody), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }) as typeof fetch,
-    });
-
-    await httpClient.query({
-      sparql: 'ASK {}',
-      contextGraphId: 'did:dkg:context-graph:ui-refresh',
-      view: 'shared-working-memory',
-    });
-    await httpClient.listSubGraphs('did:dkg:context-graph:0xabc/tuesday-cg');
-    await httpClient.subscribe({ contextGraphId: 'did:dkg:context-graph:ui-refresh' });
-
-    expect(calls[0].body.contextGraphId).toBe('ui-refresh');
-    expect(calls[1].url).toContain('/api/sub-graph/list?contextGraphId=0xabc%2Ftuesday-cg');
-    expect(calls[2].body.contextGraphId).toBe('ui-refresh');
-  });
+  // NOTE: the two DID-form contextGraphId normalization tests that used to
+  // live here drove a fake `fetcher` (returning canned `new Response(...)`
+  // bodies) purely to capture the outgoing URL/body. That fake-daemon
+  // pattern pins the wire shape but is blind to the daemon renaming a field
+  // or rejecting the request — the exact false-confidence we are removing.
+  // The normalization is now validated END-TO-END against a real daemon in
+  // `mcp-tool-surface.integration.test.ts` ("accepts a full
+  // did:dkg:context-graph CG id on query/listSubGraphs/subscribe"), where a
+  // broken normalization surfaces as a real 400/throw.
 
   it('dkg_publish auto-types objects: URI passes through, literal gets quoted', async () => {
     const result = await server.call('dkg_publish', {

@@ -2,198 +2,117 @@ import { describe, it, expect } from 'vitest';
 import { DkgClient } from '../src/client.js';
 import { makeConfig } from './harness.js';
 
-// ── OT-RFC-43 §10.5 — knowledge-assets client contract ──────────────────────
-// Pins the request body shapes for the VM-publish / finalize options the daemon
-// supports, mirroring the cli ApiClient reference. Regression for the review on
-// PR #978: these options were dropped, so external-signer / publish-control
-// flows were unreachable through the MCP KA surface.
-describe('DkgClient knowledge-assets — publish/finalize option serialization', () => {
-  const makeClient = () => {
-    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
-    const client = new DkgClient({
-      config: makeConfig(),
-      fetcher: (async (url, init) => {
-        calls.push({ url: String(url), body: JSON.parse(String(init?.body ?? '{}')) });
-        return new Response(JSON.stringify({ ok: true }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }) as typeof fetch,
-    });
-    return { client, calls };
-  };
+// ── OT-RFC-43 §10.5 — knowledge-assets client precondition guards ───────────
+//
+// NO MOCKS. This file used to drive a fake `fetcher` that returned
+// `{ ok: true }` for ANY request and inspected the captured body to pin the
+// happy-path serialization (e.g. "`clearAfter` nests under `options`"). That
+// fake-daemon pattern is exactly the false-confidence we are removing: it
+// pinned the OUTGOING shape but could never notice the daemon renaming a
+// field or rejecting the body. The happy-path body serialization is now
+// validated end-to-end against a REAL daemon in
+// `mcp-tool-surface.integration.test.ts` (the "finalized-publish option
+// plumbing survives a real round-trip" case) and
+// `mcp-daemon-contract.integration.test.ts`.
+//
+// What remains here is the CLIENT-SIDE precondition contract: the client
+// REJECTS a malformed call before any network I/O. We assert that against a
+// REAL `DkgClient` (no fetcher override). The validation throws
+// synchronously before `fetch` is reached, so no daemon is needed — and if a
+// guard regressed, the call would fall through to a real fetch against the
+// (unconfigured, nothing-listening) default API and throw a CONNECTION error
+// instead of the documented validation message, failing the matcher. That
+// "fall-through → connection error, not the validation message" is the
+// mock-free tripwire that proves the guard still short-circuits.
+//
+// Regression for the review on PR #978: these options were dropped, so
+// external-signer / publish-control flows were unreachable through the MCP
+// KA surface.
+describe('DkgClient knowledge-assets — client-side precondition guards (no mocks)', () => {
+  const client = () => new DkgClient({ config: makeConfig() });
 
-  it('knowledgeAssetPublish nests finalized-publish controls under `options`', async () => {
-    const { client, calls } = makeClient();
-    await client.knowledgeAssetPublish({
-      contextGraphId: 'cg-1',
-      name: 'f',
-      subGraphName: 'sg',
-      clearAfter: true,
-      publishEpochs: 3,
-      publisherNodeIdentityIdOverride: '42',
-    });
-    expect(calls[0].url).toContain('/api/knowledge-assets/f/vm/publish');
-    // `clearAfter` is the SDK spelling; the daemon expects `clearSharedMemoryAfter`.
-    // JSON-facing callers send the uint64 override as a decimal string.
-    expect(calls[0].body).toMatchObject({
-      contextGraphId: 'cg-1',
-      subGraphName: 'sg',
-      options: {
-        clearSharedMemoryAfter: true,
-        publishEpochs: 3,
-        publisherNodeIdentityIdOverride: '42',
-      },
-    });
-  });
-
-  it('knowledgeAssetPublish omits `options` when no controls are passed', async () => {
-    const { client, calls } = makeClient();
-    await client.knowledgeAssetPublish({ contextGraphId: 'cg-1', name: 'f', subGraphName: 'sg' });
-    expect(calls[0].body).toEqual({ contextGraphId: 'cg-1', subGraphName: 'sg' });
-  });
-
-  it('knowledgeAssetPublish rejects numeric publisher identity overrides before HTTP serialization', async () => {
-    const { client, calls } = makeClient();
-    await expect(client.knowledgeAssetPublish({
-      contextGraphId: 'cg-1',
-      name: 'f',
-      publisherNodeIdentityIdOverride: Number.MAX_SAFE_INTEGER + 1,
-    } as any)).rejects.toThrow(/decimal string/);
-    expect(calls).toHaveLength(0);
+  it('knowledgeAssetPublish rejects numeric publisher identity overrides before HTTP', async () => {
+    await expect(
+      client().knowledgeAssetPublish({
+        contextGraphId: 'cg-1',
+        name: 'f',
+        publisherNodeIdentityIdOverride: Number.MAX_SAFE_INTEGER + 1,
+      } as never),
+    ).rejects.toThrow(/decimal string/);
   });
 
   it('knowledgeAssetPublish rejects malformed decimal-string publisher identity overrides', async () => {
-    const { client, calls } = makeClient();
-    await expect(client.knowledgeAssetPublish({
-      contextGraphId: 'cg-1',
-      name: 'f',
-      publisherNodeIdentityIdOverride: 'abc',
-    })).rejects.toThrow(/decimal string/);
-    await expect(client.knowledgeAssetPublish({
-      contextGraphId: 'cg-1',
-      name: 'f',
-      publisherNodeIdentityIdOverride: '-1',
-    })).rejects.toThrow(/decimal string/);
-    expect(calls).toHaveLength(0);
+    await expect(
+      client().knowledgeAssetPublish({
+        contextGraphId: 'cg-1',
+        name: 'f',
+        publisherNodeIdentityIdOverride: 'abc',
+      }),
+    ).rejects.toThrow(/decimal string/);
+    await expect(
+      client().knowledgeAssetPublish({
+        contextGraphId: 'cg-1',
+        name: 'f',
+        publisherNodeIdentityIdOverride: '-1',
+      }),
+    ).rejects.toThrow(/decimal string/);
   });
 
   it('knowledgeAssetPublish rejects unknown finalized-publish option keys', async () => {
-    const { client, calls } = makeClient();
-    await expect(client.knowledgeAssetPublish({
-      contextGraphId: 'cg-1',
-      name: 'f',
-      publishEpoch: 3,
-    } as any)).rejects.toThrow(/Unsupported finalized publish option\(s\): publishEpoch/);
-    expect(calls).toHaveLength(0);
+    await expect(
+      client().knowledgeAssetPublish({
+        contextGraphId: 'cg-1',
+        name: 'f',
+        publishEpoch: 3,
+      } as never),
+    ).rejects.toThrow(/Unsupported finalized publish option\(s\): publishEpoch/);
   });
 
-  it('knowledgeAssetFinalize forwards authorAgentAddress', async () => {
-    const { client, calls } = makeClient();
-    await client.knowledgeAssetFinalize({
-      contextGraphId: 'cg-1',
-      name: 'f',
-      authorAgentAddress: '0xauthor',
-      schemeVersion: 1,
-    });
-    expect(calls[0].url).toContain('/api/knowledge-assets/f/wm/finalize');
-    expect(calls[0].body).toMatchObject({
-      contextGraphId: 'cg-1',
-      authorAgentAddress: '0xauthor',
-      schemeVersion: 1,
-    });
+  it('knowledgeAssetFinalize rejects mutually exclusive authorship fields before HTTP', async () => {
+    await expect(
+      client().knowledgeAssetFinalize({
+        contextGraphId: 'cg-1',
+        name: 'f',
+        authorAgentAddress: '0xauthor',
+        preSignedAuthorAttestation: { address: '0xauthor', reservedKaId: '1', signature: { r: '0xr', vs: '0xvs' } },
+      }),
+    ).rejects.toThrow(/mutually exclusive/);
   });
 
-  it('knowledgeAssetFinalize forwards preSignedAuthorAttestation', async () => {
-    const { client, calls } = makeClient();
-    const preSignedAuthorAttestation = { address: '0xauthor', reservedKaId: '1', signature: { r: '0xr', vs: '0xvs' } };
-    await client.knowledgeAssetFinalize({
-      contextGraphId: 'cg-1',
-      name: 'f',
-      preSignedAuthorAttestation,
-      schemeVersion: 1,
-    });
-    expect(calls[0].url).toContain('/api/knowledge-assets/f/wm/finalize');
-    expect(calls[0].body).toMatchObject({
-      contextGraphId: 'cg-1',
-      preSignedAuthorAttestation,
-      schemeVersion: 1,
-    });
-  });
-
-  it('knowledgeAssetFinalize rejects mutually exclusive authorship fields before HTTP serialization', async () => {
-    const { client, calls } = makeClient();
-    await expect(client.knowledgeAssetFinalize({
-      contextGraphId: 'cg-1',
-      name: 'f',
-      authorAgentAddress: '0xauthor',
-      preSignedAuthorAttestation: { address: '0xauthor', reservedKaId: '1', signature: { r: '0xr', vs: '0xvs' } },
-    })).rejects.toThrow(/mutually exclusive/);
-    expect(calls).toHaveLength(0);
-  });
-
-  it('createKnowledgeAsset translates an alsoPublishVm options object', async () => {
-    const { client, calls } = makeClient();
-    await client.createKnowledgeAsset({
-      contextGraphId: 'cg-1',
-      name: 'f',
-      alsoPublishVm: { clearAfter: true, publishEpochs: 2, publisherNodeIdentityIdOverride: '7' },
-    });
-    expect(calls[0].body.alsoPublishVm).toEqual({
-      clearSharedMemoryAfter: true,
-      publishEpochs: 2,
-      publisherNodeIdentityIdOverride: '7',
-    });
-  });
-
-  it('createKnowledgeAsset passes a boolean alsoPublishVm through unchanged', async () => {
-    const { client, calls } = makeClient();
-    await client.createKnowledgeAsset({ contextGraphId: 'cg-1', name: 'f', alsoPublishVm: true });
-    expect(calls[0].body.alsoPublishVm).toBe(true);
-  });
-
-  it('createKnowledgeAsset rejects null alsoPublishVm before HTTP serialization', async () => {
-    const { client, calls } = makeClient();
-    await expect(client.createKnowledgeAsset({
-      contextGraphId: 'cg-1',
-      name: 'f',
-      alsoPublishVm: null,
-    } as any)).rejects.toThrow(/alsoPublishVm must be a boolean or publish-options object/);
-    expect(calls).toHaveLength(0);
-  });
-
-  it('createKnowledgeAsset treats an empty alsoPublishVm options object as default publish', async () => {
-    const { client, calls } = makeClient();
-    await client.createKnowledgeAsset({
-      contextGraphId: 'cg-1',
-      name: 'f',
-      alsoPublishVm: {},
-    });
-    expect(calls[0].body.alsoPublishVm).toEqual({});
+  it('createKnowledgeAsset rejects null alsoPublishVm before HTTP', async () => {
+    await expect(
+      client().createKnowledgeAsset({
+        contextGraphId: 'cg-1',
+        name: 'f',
+        alsoPublishVm: null,
+      } as never),
+    ).rejects.toThrow(/alsoPublishVm must be a boolean or publish-options object/);
   });
 
   it('createKnowledgeAsset rejects unknown alsoPublishVm option objects', async () => {
-    const { client, calls } = makeClient();
-    await expect(client.createKnowledgeAsset({
-      contextGraphId: 'cg-1',
-      name: 'f',
-      alsoPublishVm: { unknown: true },
-    } as any)).rejects.toThrow(/Unsupported finalized publish option\(s\): unknown/);
-    await expect(client.createKnowledgeAsset({
-      contextGraphId: 'cg-1',
-      name: 'f',
-      alsoPublishVm: { publishEpoch: 3 },
-    } as any)).rejects.toThrow(/Unsupported finalized publish option\(s\): publishEpoch/);
-    expect(calls).toHaveLength(0);
+    await expect(
+      client().createKnowledgeAsset({
+        contextGraphId: 'cg-1',
+        name: 'f',
+        alsoPublishVm: { unknown: true },
+      } as never),
+    ).rejects.toThrow(/Unsupported finalized publish option\(s\): unknown/);
+    await expect(
+      client().createKnowledgeAsset({
+        contextGraphId: 'cg-1',
+        name: 'f',
+        alsoPublishVm: { publishEpoch: 3 },
+      } as never),
+    ).rejects.toThrow(/Unsupported finalized publish option\(s\): publishEpoch/);
   });
 
-  it('createKnowledgeAsset rejects finalize-only fields without quads before HTTP serialization', async () => {
-    const { client, calls } = makeClient();
-    await expect(client.createKnowledgeAsset({
-      contextGraphId: 'cg-1',
-      name: 'f',
-      authorAgentAddress: '0xauthor',
-    })).rejects.toThrow(/require non-empty quads/);
-    expect(calls).toHaveLength(0);
+  it('createKnowledgeAsset rejects finalize-only fields without quads before HTTP', async () => {
+    await expect(
+      client().createKnowledgeAsset({
+        contextGraphId: 'cg-1',
+        name: 'f',
+        authorAgentAddress: '0xauthor',
+      }),
+    ).rejects.toThrow(/require non-empty quads/);
   });
 });
