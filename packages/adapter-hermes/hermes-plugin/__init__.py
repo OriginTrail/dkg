@@ -35,6 +35,9 @@ logger = logging.getLogger(__name__)
 # Entry delimiter matching built-in memory format
 _ENTRY_SEP = "\n\xA7\n"  # §
 
+# Daemon cap on publishEpochs (knowledge-assets.ts MAX_PUBLISH_EPOCHS = 0xffffffff).
+_MAX_PUBLISH_EPOCHS = 0xFFFFFFFF
+
 
 # Existing-target context graph wording is intentionally shared across Hermes
 # tool schemas so agents see the same rule as MCP/OpenClaw.
@@ -630,7 +633,9 @@ DKG_ASSERTION_FINALIZE_SCHEMA = {
         "the WHOLE draft (there is no subset parameter). A FULL share "
         "(dkg_knowledge_asset_share with entities omitted or \"all\") auto-seals for you, so you "
         "only need to call this explicitly before sharing a SELECTIVE subset of entities, or to "
-        "re-seal after editing a previously-sealed draft."
+        "re-seal after editing a previously-sealed draft. Author signing is node-side via "
+        "author_agent_address; external-signer (pre-signed) attestation is a tracked follow-up, "
+        "not exposed by the agent tools."
     ),
     "parameters": {
         "type": "object",
@@ -700,12 +705,14 @@ DKG_ASSERTION_SHARE_SCHEMA = {
             "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
             "name": {"type": "string", "description": "Knowledge asset name to share."},
             "entities": {
-                "type": "array",
-                "items": {"type": "string"},
+                "anyOf": [
+                    {"type": "string", "enum": ["all"]},
+                    {"type": "array", "items": {"type": "string"}},
+                ],
                 "description": (
-                    "Optional root entity URI list. Omit to share every root entity (default, "
-                    "auto-seals + publish-ready). A subset shares to SWM only and is NOT "
-                    "publishable to Verifiable Memory."
+                    "Optional: \"all\" (or omitted) shares every root entity (default, auto-seals "
+                    "+ publish-ready); a non-empty array of root entity URIs shares only that "
+                    "subset to SWM (NOT auto-sealed, NOT publishable to Verifiable Memory)."
                 ),
             },
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
@@ -732,8 +739,7 @@ DKG_ASSERTION_PUBLISH_SCHEMA = {
             "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
             "name": {"type": "string", "description": "Knowledge asset name to publish (must be finalized + shared)."},
             "publish_epochs": {"type": "integer", "minimum": 1, "description": "Optional number of epochs to publish for (positive integer)."},
-            "publisher_node_identity_id_override": {"type": "string", "description": "Optional publisher node identity id override (decimal string)."},
-            "clear_shared_memory_after": {"type": "boolean", "description": "When true, clear the asset's Shared Working Memory after a confirmed publish."},
+            "publisher_node_identity_id_override": {"type": "integer", "minimum": 0, "description": "Optional publisher node identity id override (non-negative integer)."},
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name (must match write/share time)."},
         },
         "required": ["context_graph_id", "name"],
@@ -2083,11 +2089,21 @@ class DKGMemoryProvider(MemoryProvider):
             return tool_error("context_graph_id is required.")
         if not name:
             return tool_error("name is required.")
+        # entities accepts "all" | string[] | omitted (CONTRACT §B). "all" and
+        # omitted are both a full share; pass either straight through. Reject an
+        # empty array fast (the daemon would 400 it as empty SWM selection) and
+        # do NOT coerce "all" -> [] or omitted -> "all".
         entities = args.get("entities")
-        if entities is not None and not (
-            isinstance(entities, list) and entities and all(isinstance(e, str) and e.strip() for e in entities)
-        ):
-            return tool_error("entities must be omitted or a non-empty array of strings.")
+        if entities is not None:
+            if isinstance(entities, str):
+                if entities.strip() != "all":
+                    return tool_error('entities must be "all", a non-empty array of strings, or omitted.')
+                entities = "all"
+            elif isinstance(entities, list):
+                if not entities or not all(isinstance(e, str) and e.strip() for e in entities):
+                    return tool_error('entities must be "all", a non-empty array of strings, or omitted.')
+            else:
+                return tool_error('entities must be "all", a non-empty array of strings, or omitted.')
         return json.dumps(self._client.promote_assertion(name, cg, entities, _first_text(args, "sub_graph_name")))
 
     def _handle_assertion_finalize(self, args: Dict[str, Any]) -> str:
@@ -2098,7 +2114,9 @@ class DKGMemoryProvider(MemoryProvider):
             return tool_error("context_graph_id is required.")
         if not name:
             return tool_error("name is required.")
-        scheme_version = _coerce_int_or_none(args.get("scheme_version"))
+        scheme_version, error = _validate_int_arg(args.get("scheme_version"), "scheme_version", minimum=1)
+        if error:
+            return tool_error(error)
         author = _first_text(args, "author_agent_address")
         author = _normalize_wm_agent_address(author) if author else None
         return json.dumps(self._client.finalize_assertion(
@@ -2123,17 +2141,25 @@ class DKGMemoryProvider(MemoryProvider):
         if not name:
             return tool_error("name is required.")
         options: Dict[str, Any] = {}
-        publish_epochs = _coerce_int_or_none(args.get("publish_epochs"))
+        publish_epochs, error = _validate_int_arg(
+            args.get("publish_epochs"), "publish_epochs", minimum=1, maximum=_MAX_PUBLISH_EPOCHS)
+        if error:
+            return tool_error(error)
         if publish_epochs is not None:
             options["publishEpochs"] = publish_epochs
-        override = _first_text(args, "publisher_node_identity_id_override")
-        if override:
-            options["publisherNodeIdentityIdOverride"] = override
-        clear_after = args.get("clear_shared_memory_after")
-        if clear_after is not None:
-            if not isinstance(clear_after, bool):
-                return tool_error("clear_shared_memory_after must be a boolean.")
-            options["clearSharedMemoryAfter"] = clear_after
+        override, error = _validate_int_arg(
+            args.get("publisher_node_identity_id_override"),
+            "publisher_node_identity_id_override", minimum=0)
+        if error:
+            return tool_error(error)
+        if override is not None:
+            # Canonical wire form is a decimal string (daemon regex /^\d+$/).
+            options["publisherNodeIdentityIdOverride"] = str(override)
+        # No clear_after / clear_shared_memory_after on the per-asset publish:
+        # on vm/publish that flag is GRAPH-WIDE destructive (wipes every other
+        # agent's/asset's unpublished SWM in the CG), and this asset's own SWM is
+        # cleared unconditionally regardless (CONTRACT §D). CG-wide clearing
+        # stays on dkg_publish / dkg_shared_memory_publish.
         return json.dumps(self._client.publish_finalized_assertion(
             name,
             cg,
@@ -2725,20 +2751,47 @@ def _coerce_limit(value: Any, default: int, maximum: int) -> int:
     return max(1, min(maximum, parsed))
 
 
-def _coerce_int_or_none(value: Any) -> Optional[int]:
-    """Coerce an optional integer arg, rejecting bools and non-numeric input.
+def _validate_int_arg(
+    value: Any,
+    label: str,
+    *,
+    minimum: int,
+    maximum: Optional[int] = None,
+) -> Tuple[Optional[int], Optional[str]]:
+    """Validate an optional integer arg: absent -> omit, present-but-invalid -> error.
 
-    Returns ``None`` when the value is absent or cannot be interpreted as an
-    integer, so callers can omit the field entirely (e.g. publishEpochs /
-    schemeVersion are optional on the wire). ``bool`` is excluded because it is
-    an ``int`` subclass in Python and `True`/`False` should not become 1/0.
+    Returns ``(int, None)`` for a valid value, ``(None, None)`` when the arg is
+    absent (so the caller omits the wire key and lets the daemon default), and
+    ``(None, message)`` when the arg is PRESENT but invalid — the caller must
+    surface that as a tool error rather than silently dropping it (CONTRACT §C).
+    Accepts both ``int`` and numeric-string forms; rejects ``bool`` (an ``int``
+    subclass), non-numeric, and out-of-range. Mirrors the daemon's predicates.
     """
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    if value is None:
+        return None, None
+    if isinstance(value, bool):
+        return None, f"{label} must be an integer."
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None, None
+        try:
+            parsed = int(text)
+        except ValueError:
+            return None, f"{label} must be an integer."
+    elif isinstance(value, int):
+        parsed = value
+    else:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None, f"{label} must be an integer."
+    if parsed < minimum:
+        bound = "non-negative" if minimum == 0 else f">= {minimum}"
+        return None, f"{label} must be {bound}."
+    if maximum is not None and parsed > maximum:
+        return None, f"{label} must be <= {maximum}."
+    return parsed, None
 
 
 def _build_memory_search_sparql(keywords: List[str], limit: int) -> str:
