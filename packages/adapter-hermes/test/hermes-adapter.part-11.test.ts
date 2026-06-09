@@ -293,7 +293,7 @@ class AssertionWriteClient:
         return {"ok": True}
 
 provider._client = AssertionWriteClient()
-result = json.loads(provider.handle_tool_call("dkg_assertion_write", {
+result = json.loads(provider.handle_tool_call("dkg_knowledge_asset_write", {
     "context_graph_id": "cg:test",
     "name": "notes",
     "quads": [
@@ -353,7 +353,7 @@ for tool_name, args in [
     ("memory_search", {"query": "alpha beta", "context_graph": "legacy"}),
     ("dkg_share", {"content": "alpha", "context_graph": "legacy"}),
     ("dkg_shared_memory_publish", {"context_graph": "legacy"}),
-    ("dkg_assertion_write", {
+    ("dkg_knowledge_asset_write", {
         "context_graph": "legacy",
         "name": "notes",
         "quads": [{"subject": "urn:s", "predicate": "urn:p", "object": "o"}],
@@ -467,6 +467,25 @@ result = json.loads(provider.handle_tool_call("dkg_publish", {
 }))
 assert result["success"] is True, result
 assert result["rootEntities"] == ["urn:root:1", "urn:root:2"], result
+# Multi-root publish passes the explicit root list (not "all") so the client
+# loops one root per call and avoids the 409 MULTI_ROOT_PUBLISH_NOT_ATOMIC
+# single-root guard on /api/shared-memory/publish.
+assert provider._client.published == (
+    "cg:test",
+    {"selection": ["urn:root:1", "urn:root:2"], "clear_after": True, "sub_graph_name": ""},
+), provider._client.published
+
+# Single-subject dkg_publish still uses "all" (server resolves the one root).
+provider._client = PublishClient()
+result = json.loads(provider.handle_tool_call("dkg_publish", {
+    "context_graph_id": "cg:test",
+    "quads": [
+        {"subject": "urn:root:solo", "predicate": "urn:p", "object": "one"},
+        {"subject": "urn:root:solo", "predicate": "urn:p2", "object": "two"},
+    ],
+}))
+assert result["success"] is True, result
+assert result["rootEntities"] == ["urn:root:solo"], result
 assert provider._client.published == (
     "cg:test",
     {"selection": "all", "clear_after": True, "sub_graph_name": ""},

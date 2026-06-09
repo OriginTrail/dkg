@@ -374,13 +374,15 @@ spec.loader.exec_module(module)
 provider = module.DKGMemoryProvider()
 names = sorted(schema["name"] for schema in provider.get_tool_schemas())
 expected_default = [
-    "dkg_assertion_create",
-    "dkg_assertion_discard",
-    "dkg_assertion_history",
-    "dkg_assertion_import_file",
-    "dkg_assertion_promote",
-    "dkg_assertion_query",
-    "dkg_assertion_write",
+    "dkg_knowledge_asset_create",
+    "dkg_knowledge_asset_discard",
+    "dkg_knowledge_asset_finalize",
+    "dkg_knowledge_asset_history",
+    "dkg_knowledge_asset_import_file",
+    "dkg_knowledge_asset_pull_from",
+    "dkg_knowledge_asset_query",
+    "dkg_knowledge_asset_share",
+    "dkg_knowledge_asset_write",
     "dkg_import_artifact_read_markdown",
     "dkg_import_artifact_resolve",
     "dkg_semantic_enrichment_write",
@@ -442,6 +444,7 @@ provider._config = {
 disabled_names = sorted(schema["name"] for schema in provider.get_tool_schemas())
 assert "dkg_publish" not in disabled_names, disabled_names
 assert "dkg_shared_memory_publish" not in disabled_names, disabled_names
+assert "dkg_knowledge_asset_publish" not in disabled_names, disabled_names
 assert "dkg_context_graph_invite" not in disabled_names, disabled_names
 guarded = provider.handle_tool_call("dkg_shared_memory_publish", {"context_graph_id": "cg:test"})
 assert "disabled by the adapter publish guard" in guarded, guarded
@@ -451,7 +454,7 @@ assert "Context graph admin tools are disabled" in admin_guarded, admin_guarded
 provider._config = {"publish_tool": "direct", "allow_direct_publish": True}
 direct_schemas = provider.get_tool_schemas()
 direct_names = sorted(schema["name"] for schema in direct_schemas)
-for name in ["dkg_publish", "dkg_shared_memory_publish"]:
+for name in ["dkg_publish", "dkg_shared_memory_publish", "dkg_knowledge_asset_publish"]:
     assert name in direct_names, direct_names
 publish_schema = next(schema for schema in direct_schemas if schema["name"] == "dkg_publish")
 quad_props = publish_schema["parameters"]["properties"]["quads"]["items"]["properties"]
