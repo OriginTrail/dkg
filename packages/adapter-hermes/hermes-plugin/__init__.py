@@ -1824,6 +1824,10 @@ class DKGMemoryProvider(MemoryProvider):
                 error = str(registration.get("error") or registration.get("message") or "").lower()
                 if "already registered" not in error and "already exists" not in error:
                     return json.dumps(registration)
+                # Normalize the already-registered short-circuit to a success
+                # shape (Codex #1084:1810) — leaving the raw {success:false,...} on
+                # result["registration"] makes a clean publish look partly failed.
+                registration = {"alreadyRegistered": True}
         result = self._client.publish(
             cg,
             selection=selection,
@@ -2234,6 +2238,10 @@ class DKGMemoryProvider(MemoryProvider):
                 # do NOT publish.
                 if "already registered" not in error and "already exists" not in error:
                     return json.dumps(registration)
+                # Normalize the already-registered short-circuit to a success
+                # shape (Codex #1084:1810) — leaving the raw {success:false,...} on
+                # result["registration"] makes a clean publish look partly failed.
+                registration = {"alreadyRegistered": True}
         result = self._client.publish_finalized_assertion(
             name,
             cg,
