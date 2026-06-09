@@ -137,14 +137,19 @@ def test_share_description_carries_subset_language(provider):
     assert "NOT publishable to Verifiable Memory" in share["description"]
 
 
-def test_share_description_notes_custom_finalize_first(provider):
-    # #1076:69 — full-share auto-seal uses DEFAULT attestation; custom finalize
-    # options require an explicit dkg_knowledge_asset_finalize first.
+def test_share_description_softens_publish_ready_and_notes_finalize(provider):
+    # #1076:96 — "publish-ready" must be CONDITIONAL: full share auto-seals
+    # best-effort; on a signing/capability gap it shares UNSEALED and a later
+    # publish 409s, so finalize explicitly for predictable publishing.
     share = next(s for s in provider.get_tool_schemas()
                  if s["name"] == "dkg_knowledge_asset_share")
     desc = share["description"]
-    assert "DEFAULT attestation" in desc
+    assert "BEST-EFFORT" in desc
+    assert "UNSEALED" in desc
+    assert "409" in desc
     assert "dkg_knowledge_asset_finalize EXPLICITLY first" in desc
+    # custom finalize options note is preserved
+    assert "author_agent_address" in desc and "scheme_version" in desc
 
 
 # -- B: entities accepts "all" | string[] | omitted -------------------------

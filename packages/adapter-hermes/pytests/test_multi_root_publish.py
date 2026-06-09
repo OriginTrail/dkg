@@ -113,13 +113,6 @@ def test_full_success_marks_partial_false(recording_client):
     assert result["partial"] is False
 
 
-def test_publish_epochs_threaded_per_call(recording_client):
-    client = recording_client
-    client.publish("cg:test", selection=["a", "b"], clear_after=False, publish_epochs=4)
-
-    assert all(body.get("publishEpochs") == 4 for _, body in client.posts)
-
-
 def test_context_graph_id_is_normalized(recording_client):
     client = recording_client
     client.publish("did:dkg:context-graph:cg1", selection=["a", "b"], clear_after=True)
@@ -162,7 +155,7 @@ class _PublishProbe:
         return {"success": True}
 
     def publish(self, context_graph_id, selection="all", clear_after=True,
-                sub_graph_name=None, publish_epochs=None):
+                sub_graph_name=None):
         self.published = {"contextGraphId": context_graph_id, "selection": selection,
                           "clearAfter": clear_after}
         return {"success": True}
