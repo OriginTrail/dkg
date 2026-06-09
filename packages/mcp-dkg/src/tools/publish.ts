@@ -121,7 +121,9 @@ export function registerPublishTools(
         '`dkg_knowledge_asset_create / write / finalize / share` followed ' +
         'by `dkg_knowledge_asset_publish` — that path keeps WM as a draft ' +
         'staging area before SWM. Use `dkg_publish` only when you have ' +
-        'fresh quads to anchor immediately.',
+        'fresh quads to anchor immediately. Publishing requires the context ' +
+        'graph to be registered on-chain — set `registerIfNeeded: true` to ' +
+        'register it first (idempotent) before publishing.',
       inputSchema: {
         contextGraphId: z.string().min(1).describe(`Target context graph id. ${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION}`),
         quads: z
@@ -130,9 +132,21 @@ export function registerPublishTools(
           .describe(
             'Non-empty array of quads to publish. Object values are auto-typed (URI vs literal).',
           ),
+        registerIfNeeded: z
+          .boolean()
+          .optional()
+          .describe(
+            'When true, register the CG on-chain before publishing if needed. May spend gas/TRAC; opt-in only.',
+          ),
+        accessPolicy: z
+          .union([z.literal(0), z.literal(1)])
+          .optional()
+          .describe(
+            'Used only when `registerIfNeeded: true`. 0 = open, 1 = private.',
+          ),
       },
     },
-    async ({ contextGraphId, quads }): Promise<ToolResult> => {
+    async ({ contextGraphId, quads, registerIfNeeded, accessPolicy }): Promise<ToolResult> => {
       const cgId = contextGraphId.trim();
       if (!cgId) return errResult('"contextGraphId" is required.');
       if (!quads.length) {
@@ -151,6 +165,23 @@ export function registerPublishTools(
           object: isUri(objVal) ? objVal : `"${escapeRdfLiteral(objVal)}"`,
         };
       });
+
+      // CONTRACT §G: publishing requires the CG to be registered on-chain and the
+      // daemon does NOT auto-register. When registerIfNeeded is true, register
+      // first (the client short-circuits an already-registered CG via its typed
+      // alreadyRegistered flag — no double-mint), mirroring dkg_shared_memory_publish.
+      // A hard registration failure is a tool error: do NOT publish.
+      let registered = false;
+      if (registerIfNeeded === true) {
+        try {
+          const reg = await client.registerContextGraph({ id: cgId, accessPolicy });
+          registered = !reg.alreadyRegistered;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          return errResult(`Failed to register context graph: ${message}`);
+        }
+      }
+
       try {
         const result = await client.publishQuads({
           contextGraphId: cgId,
@@ -169,6 +200,7 @@ export function registerPublishTools(
         const chainId = await resolveChainId(client);
         const summary = [
           `Published ${wireQuads.length} quad(s) to '${cgId}'.`,
+          registered ? `Registered context graph '${cgId}' on-chain.` : null,
           kaId ? `KC: ${kaId}` : null,
           kas?.length ? `KAs: ${kas.length}` : null,
           txHash ? `Tx: ${txHash}` : null,

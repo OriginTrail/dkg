@@ -362,6 +362,63 @@ describe('publish tools — write+publish helper + canonical SWM finalizer', () 
     expect(result.content[0].text).toMatch(/Failed to register context graph: rpc unreachable/);
   });
 
+  // ── CONTRACT §G — registerIfNeeded on the one-shot dkg_publish ────────────
+  it('dkg_publish runs registerContextGraph first when registerIfNeeded: true', async () => {
+    const localClient = new FakeClient();
+    let registered = false;
+    localClient.registerContextGraph = (async () => {
+      registered = true;
+      return { registered: 'cg', onChainId: 'chain:cg', txHash: '0xreg', alreadyRegistered: false };
+    }) as never;
+    const localServer = new FakeServer();
+    registerPublishTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+
+    const result = await localServer.call('dkg_publish', {
+      contextGraphId: 'cg',
+      quads: [{ subject: 'urn:s:1', predicate: 'urn:p:type', object: 'urn:Note' }],
+      registerIfNeeded: true,
+      accessPolicy: 1,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(registered).toBe(true);
+    expect(result.content[0].text).toMatch(/Registered context graph 'cg' on-chain/);
+  });
+
+  it('dkg_publish tolerates an already-registered CG and still publishes (no double-mint claim)', async () => {
+    const localClient = new FakeClient({
+      registerContextGraph: async () => ({ registered: 'cg', alreadyRegistered: true }) as any,
+    });
+    const localServer = new FakeServer();
+    registerPublishTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+
+    const result = await localServer.call('dkg_publish', {
+      contextGraphId: 'cg',
+      quads: [{ subject: 'urn:s:1', predicate: 'urn:p:type', object: 'urn:Note' }],
+      registerIfNeeded: true,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).not.toMatch(/Registered context graph/);
+  });
+
+  it('dkg_publish surfaces a register HARD failure and does NOT publish', async () => {
+    let published = false;
+    const localClient = new FakeClient({
+      registerContextGraph: async () => { throw new Error('rpc unreachable'); },
+      publishQuads: async () => { published = true; return { kaId: 'kc-x', kas: [] }; },
+    });
+    const localServer = new FakeServer();
+    registerPublishTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+
+    const result = await localServer.call('dkg_publish', {
+      contextGraphId: 'cg',
+      quads: [{ subject: 'urn:s:1', predicate: 'urn:p:type', object: 'urn:Note' }],
+      registerIfNeeded: true,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/Failed to register context graph: rpc unreachable/);
+    expect(published).toBe(false); // publish NOT attempted
+  });
+
   // F3+F13 (qa-review-round-1 F3 + qa-review-round-2 F13): chain
   // provenance echoed on publish responses so callers can verify
   // post-hoc which chain the publish landed on. User explicit:
