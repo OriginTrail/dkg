@@ -333,6 +333,11 @@ def test_publish_quads_create_207_errors_does_not_publish(recording_client):
     assert "swm-share" in result["error"]
     assert "NOT shared" in result["error"]
     assert "recreate" in result["error"].lower()
+    # FIX F (#1084:742): point to dkg_knowledge_asset_share + _publish, NOT
+    # dkg_shared_memory_publish (which can't retry by name).
+    assert "dkg_knowledge_asset_share" in result["error"]
+    assert "dkg_knowledge_asset_publish" in result["error"]
+    assert "dkg_shared_memory_publish" not in result["error"]
 
 
 def test_publish_quads_create_empty_errors_publishes(recording_client):
@@ -366,6 +371,9 @@ def test_publish_quads_publish_failure_merges_assertion_name(recording_client):
     assert "shared to SWM" in result["error"]
     assert "Retry the publish" in result["error"]
     assert "recreate" in result["error"].lower()
+    # FIX F (#1084:742): retry-by-name points to dkg_knowledge_asset_publish only.
+    assert "dkg_knowledge_asset_publish" in result["error"]
+    assert "dkg_shared_memory_publish" not in result["error"]
 
 
 # -- Phase B (fast-follow): register_if_needed on the one-shot dkg_publish ----
@@ -378,9 +386,12 @@ _Q = [{"subject": "urn:s", "predicate": "urn:p", "object": "o"}]
 class _RegisterProbe:
     """Fake client recording register + publish_quads for dkg_publish."""
 
-    def __init__(self, register_response):
+    def __init__(self, register_response, publish_response=None):
         self.calls = []
         self.register_response = register_response
+        self.publish_response = publish_response or {
+            "kaId": "ka", "ual": "did:dkg:1/0xabc/5", "status": "confirmed",
+        }
 
     def register_context_graph(self, context_graph_id, access_policy=None):
         self.calls.append(("register", context_graph_id, access_policy))
@@ -388,14 +399,14 @@ class _RegisterProbe:
 
     def publish_quads(self, context_graph_id, quads, sub_graph_name=None):
         self.calls.append(("publish", context_graph_id, len(quads)))
-        return {"kaId": "ka", "ual": "did:dkg:1/0xabc/5", "status": "confirmed"}
+        return self.publish_response
 
 
-def _register_provider(plugin_module, register_response):
+def _register_provider(plugin_module, register_response, publish_response=None):
     p = plugin_module.DKGMemoryProvider()
     p._offline = False
     p._config = {"publish_tool": "direct", "allow_direct_publish": True}
-    p._client = _RegisterProbe(register_response)
+    p._client = _RegisterProbe(register_response, publish_response)
     return p
 
 
@@ -431,6 +442,38 @@ def test_publish_register_already_registered_short_circuits(plugin_module):
     }))
     assert _kinds(p) == ["register", "publish"]
     assert out["ual"] == "did:dkg:1/0xabc/5"
+    # FIX H (#1084:1810): the already-registered short-circuit normalizes the
+    # registration to a success shape — NOT the raw {success:false}.
+    assert out["registration"] == {"alreadyRegistered": True}
+    assert out["registration"].get("success") is not False
+
+
+# -- FIX E (#1077:1115): dkg_publish 207 contextGraphError -> partial/warning --
+
+def test_publish_207_context_graph_error_surfaces_partial(plugin_module):
+    p = _register_provider(plugin_module, {"registered": "cg"}, publish_response={
+        "kaId": "ka", "ual": "did:dkg:1/0xabc/5", "status": "confirmed",
+        "assertionName": "hermes-publish-x", "contextGraphError": "cg bind timed out",
+    })
+    out = json.loads(p.handle_tool_call("dkg_publish", {
+        "context_graph_id": "cg", "quads": _Q,
+    }))
+    assert out["partial"] is True
+    assert "Partial publish" in out["warning"]
+    assert "cg bind timed out" in out["warning"]
+    # minted-on-chain identifiers stay visible
+    assert out["ual"] == "did:dkg:1/0xabc/5"
+    assert out["kaId"] == "ka"
+    assert out["assertionName"] == "hermes-publish-x"
+
+
+def test_publish_clean_200_not_marked_partial(plugin_module):
+    p = _register_provider(plugin_module, {"registered": "cg"})
+    out = json.loads(p.handle_tool_call("dkg_publish", {
+        "context_graph_id": "cg", "quads": _Q,
+    }))
+    assert "partial" not in out
+    assert "warning" not in out
 
 
 def test_publish_register_hard_failure_no_publish(plugin_module):
