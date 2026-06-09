@@ -198,10 +198,24 @@ export function registerPublishTools(
         // succeeds; if the wallet-balances probe itself fails the
         // publish stands and we just omit the chain line.
         const chainId = await resolveChainId(client);
+        // FIX E — the dkg_publish path publishes via POST /api/shared-memory/publish
+        // {assertionName}, which (like vm/publish) returns HTTP 207 with
+        // `contextGraphError` set when the KA minted on-chain but the context-graph
+        // binding FAILED (memory.ts:1772). `this.request` treats 207 as success, so
+        // without this the partial reads as clean success. The UAL/kaId are valid
+        // (the asset IS on-chain) — surface a PARTIAL warning so the agent can retry
+        // the CG bind, mirroring dkg_knowledge_asset_publish.
+        const contextGraphError = (result as Record<string, unknown>).contextGraphError;
+        const ual = (result as Record<string, unknown>).ual as string | undefined;
         const summary = [
-          `Published ${wireQuads.length} quad(s) to '${cgId}'.`,
+          typeof contextGraphError === 'string' && contextGraphError.length > 0
+            ? `PARTIAL publish to '${cgId}': the asset was minted on-chain (KC/UAL below are valid), but the ` +
+              `context-graph binding FAILED (${contextGraphError}). The on-chain asset is published; retry ` +
+              `dkg_publish to re-attempt the context-graph binding.`
+            : `Published ${wireQuads.length} quad(s) to '${cgId}'.`,
           registered ? `Registered context graph '${cgId}' on-chain.` : null,
           kaId ? `KC: ${kaId}` : null,
+          ual ? `UAL: ${ual}` : null,
           kas?.length ? `KAs: ${kas.length}` : null,
           txHash ? `Tx: ${txHash}` : null,
           chainId ? `Chain: ${chainId}` : null,

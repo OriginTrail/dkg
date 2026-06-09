@@ -1095,8 +1095,8 @@ export class DkgClient {
       const err = new Error(
         `Publish aborted: the asset was created + sealed in Working Memory as "${assertionName}", but ` +
         `sharing it to Shared Working Memory FAILED (${shareErr?.error ?? 'unknown error'}). The on-chain ` +
-        `publish was NOT attempted. Do NOT recreate — re-share + publish the existing sealed asset by name ` +
-        `via dkg_knowledge_asset_share + dkg_knowledge_asset_publish (or dkg_shared_memory_publish).`,
+        `publish was NOT attempted. Do NOT recreate — re-share the existing sealed asset by name with ` +
+        `dkg_knowledge_asset_share, then publish it with dkg_knowledge_asset_publish.`,
       ) as Error & Record<string, unknown>;
       err.assertionName = assertionName;
       err.assertionUri = created.assertionUri;
@@ -1124,8 +1124,7 @@ export class DkgClient {
       const err = new Error(
         `Publish failed for asset "${assertionName}": ${e instanceof Error ? e.message : String(e)}. The asset ` +
         `is created + sealed + shared to Shared Working Memory; only the on-chain publish failed. Do NOT ` +
-        `recreate — retry the publish of this asset by name via dkg_shared_memory_publish or ` +
-        `dkg_knowledge_asset_publish.`,
+        `recreate — retry the publish of this asset by name with dkg_knowledge_asset_publish.`,
       ) as Error & Record<string, unknown>;
       err.assertionName = assertionName;
       err.assertionUri = created.assertionUri;

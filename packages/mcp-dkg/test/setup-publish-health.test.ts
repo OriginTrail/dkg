@@ -435,6 +435,45 @@ describe('publish tools — write+publish helper + canonical SWM finalizer', () 
     expect(result.content[0].text).toMatch(/Chain: base-sepolia/);
   });
 
+  // ── FIX E — dkg_publish 207 contextGraphError → PARTIAL warning ───────────
+  it('dkg_publish surfaces a 207 partial (minted on-chain, CG bind failed) as a WARNING', async () => {
+    const localClient = new FakeClient({
+      publishQuads: async () => ({
+        kaId: 'kc-z',
+        ual: 'did:dkg:1/0xauthor/9',
+        status: 'confirmed',
+        contextGraphError: 'context-graph binding timed out',
+      }),
+    });
+    const localServer = new FakeServer();
+    registerPublishTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+
+    const result = await localServer.call('dkg_publish', {
+      contextGraphId: 'cg',
+      quads: [{ subject: 'urn:s:1', predicate: 'urn:p:type', object: 'urn:Note' }],
+    });
+    expect(result.content[0].text).toMatch(/PARTIAL/);
+    expect(result.content[0].text).toContain('context-graph binding timed out');
+    expect(result.content[0].text).toContain('kc-z');                 // kaId kept
+    expect(result.content[0].text).toContain('did:dkg:1/0xauthor/9'); // UAL kept
+  });
+
+  it('dkg_publish reports plain success on a 200 publish (no contextGraphError)', async () => {
+    const localClient = new FakeClient({
+      publishQuads: async () => ({ kaId: 'kc-ok', ual: 'did:dkg:1/0xauthor/10', kas: [], txHash: '0xok' }),
+    });
+    const localServer = new FakeServer();
+    registerPublishTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+
+    const result = await localServer.call('dkg_publish', {
+      contextGraphId: 'cg',
+      quads: [{ subject: 'urn:s:1', predicate: 'urn:p:type', object: 'urn:Note' }],
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toMatch(/Published 1 quad/);
+    expect(result.content[0].text).not.toMatch(/PARTIAL/);
+  });
+
   it('F3+F13: dkg_shared_memory_publish success summary echoes the configured chainId', async () => {
     const result = await server.call('dkg_shared_memory_publish', { contextGraphId: 'cg' });
     expect(result.isError).toBeFalsy();
