@@ -39,7 +39,10 @@ export interface DkgToolHost {
   handleInvokeSkill(args: ToolArgs): Promise<OpenClawToolResult>;
   handleAssertionCreate(args: ToolArgs): Promise<OpenClawToolResult>;
   handleAssertionWrite(args: ToolArgs): Promise<OpenClawToolResult>;
+  handleAssertionFinalize(args: ToolArgs): Promise<OpenClawToolResult>;
   handleAssertionPromote(args: ToolArgs): Promise<OpenClawToolResult>;
+  handleAssertionPublish(args: ToolArgs): Promise<OpenClawToolResult>;
+  handleAssertionPullFrom(args: ToolArgs): Promise<OpenClawToolResult>;
   handleAssertionDiscard(args: ToolArgs): Promise<OpenClawToolResult>;
   handleAssertionImportFile(args: ToolArgs): Promise<OpenClawToolResult>;
   handleAssertionQuery(args: ToolArgs): Promise<OpenClawToolResult>;

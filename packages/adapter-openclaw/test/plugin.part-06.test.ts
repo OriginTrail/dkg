@@ -287,17 +287,29 @@ describe("DkgNodePlugin", () => {
     expect(toolNames).toContain('dkg_send_message');
     expect(toolNames).toContain('dkg_read_messages');
     expect(toolNames).toContain('dkg_invoke_skill');
-    // 10 new tools from PR #254 (assertion lifecycle + sub-graph management + SWM→VM publish)
-    expect(toolNames).toContain('dkg_assertion_create');
-    expect(toolNames).toContain('dkg_assertion_write');
-    expect(toolNames).toContain('dkg_assertion_promote');
-    expect(toolNames).toContain('dkg_assertion_discard');
-    expect(toolNames).toContain('dkg_assertion_import_file');
-    expect(toolNames).toContain('dkg_assertion_query');
-    expect(toolNames).toContain('dkg_assertion_history');
-    expect(toolNames).toContain('dkg_import_artifact_resolve');
-    expect(toolNames).toContain('dkg_import_artifact_read_markdown');
-    expect(toolNames).toContain('dkg_semantic_enrichment_write');
+    // rc.17 knowledge-asset lifecycle family (CONTRACT §2): the 10 renamed
+    // dkg_assertion_*/import_artifact_*/semantic_enrichment_* tools plus the 3
+    // new lifecycle verbs (finalize / publish / pull_from). No dkg_assertion_*
+    // back-compat aliases (clean cut, CONTRACT §2).
+    expect(toolNames).toContain('dkg_knowledge_asset_create');
+    expect(toolNames).toContain('dkg_knowledge_asset_write');
+    expect(toolNames).toContain('dkg_knowledge_asset_finalize');
+    expect(toolNames).toContain('dkg_knowledge_asset_share');
+    expect(toolNames).toContain('dkg_knowledge_asset_publish');
+    expect(toolNames).toContain('dkg_knowledge_asset_pull_from');
+    expect(toolNames).toContain('dkg_knowledge_asset_discard');
+    expect(toolNames).toContain('dkg_knowledge_asset_import_file');
+    expect(toolNames).toContain('dkg_knowledge_asset_query');
+    expect(toolNames).toContain('dkg_knowledge_asset_history');
+    expect(toolNames).toContain('dkg_knowledge_asset_import_artifact_resolve');
+    expect(toolNames).toContain('dkg_knowledge_asset_import_artifact_read_markdown');
+    expect(toolNames).toContain('dkg_knowledge_asset_semantic_enrichment_write');
+    // The legacy dkg_assertion_* / dkg_import_artifact_* / dkg_semantic_enrichment_*
+    // names are gone (no back-compat aliases — CONTRACT §2).
+    expect(toolNames).not.toContain('dkg_assertion_create');
+    expect(toolNames).not.toContain('dkg_assertion_promote');
+    expect(toolNames).not.toContain('dkg_import_artifact_resolve');
+    expect(toolNames).not.toContain('dkg_semantic_enrichment_write');
     expect(toolNames).toContain('dkg_sub_graph_create');
     expect(toolNames).toContain('dkg_sub_graph_list');
     expect(toolNames).toContain('dkg_shared_memory_publish');
@@ -310,11 +322,13 @@ describe("DkgNodePlugin", () => {
     expect(toolNames).toContain('memory_search');
     // Keep this resilient as main adds new exported tools; this test already
     // asserts presence of the critical tool set above.
-    expect(registeredTools.length).toBeGreaterThanOrEqual(32);
+    // +3 net-new lifecycle verbs (finalize / publish / pull_from) over the
+    // previous floor of 32.
+    expect(registeredTools.length).toBeGreaterThanOrEqual(35);
   });
 
 
-  it('new dkg_assertion_* and dkg_sub_graph_* tools have the expected schema shape', () => {
+  it('new dkg_knowledge_asset_* and dkg_sub_graph_* tools have the expected schema shape', () => {
     const plugin = new DkgNodePlugin();
     const registeredTools: OpenClawTool[] = [];
 
@@ -340,7 +354,7 @@ describe("DkgNodePlugin", () => {
       expect(tool!.parameters.required).toEqual(expect.arrayContaining(required));
     };
 
-    expectRequired('dkg_assertion_create', ['context_graph_id', 'name']);
+    expectRequired('dkg_knowledge_asset_create', ['context_graph_id', 'name']);
     expectRequired('dkg_context_graph_invite', ['context_graph_id', 'peer_id']);
     expectRequired('dkg_participant_add', ['context_graph_id', 'agent_address']);
     expectRequired('dkg_participant_remove', ['context_graph_id', 'agent_address']);
@@ -348,34 +362,66 @@ describe("DkgNodePlugin", () => {
     expectRequired('dkg_join_request_list', ['context_graph_id']);
     expectRequired('dkg_join_request_approve', ['context_graph_id', 'agent_address']);
     expectRequired('dkg_join_request_reject', ['context_graph_id', 'agent_address']);
-    expectRequired('dkg_assertion_write', ['context_graph_id', 'name', 'quads']);
-    expectRequired('dkg_assertion_promote', ['context_graph_id', 'name']);
-    expectRequired('dkg_assertion_discard', ['context_graph_id', 'name']);
-    expectRequired('dkg_assertion_import_file', ['context_graph_id', 'name', 'file_path']);
-    expectRequired('dkg_assertion_query', ['context_graph_id', 'name']);
-    expectRequired('dkg_import_artifact_resolve', ['context_graph_id', 'assertion_uri']);
-    expectRequired('dkg_import_artifact_read_markdown', ['context_graph_id', 'assertion_uri']);
-    expectRequired('dkg_semantic_enrichment_write', ['context_graph_id', 'assertion_uri', 'semantic_quads']);
-    expect(byName.get('dkg_semantic_enrichment_write')!.parameters.properties).not.toHaveProperty('name');
-    expect(byName.get('dkg_import_artifact_resolve')!.description).toMatch(/Optional validation\/debug helper/);
-    expect(byName.get('dkg_semantic_enrichment_write')!.description).toMatch(/Append model-derived semantic triples/);
-    expect(byName.get('dkg_semantic_enrichment_write')!.description).not.toMatch(/separate Working Memory assertion/);
-    expect(byName.get('dkg_import_artifact_read_markdown')!.parameters.properties.max_bytes).toMatchObject({
+    expectRequired('dkg_knowledge_asset_write', ['context_graph_id', 'name', 'quads']);
+    expectRequired('dkg_knowledge_asset_finalize', ['context_graph_id', 'name']);
+    expectRequired('dkg_knowledge_asset_share', ['context_graph_id', 'name']);
+    expectRequired('dkg_knowledge_asset_publish', ['context_graph_id', 'name']);
+    expectRequired('dkg_knowledge_asset_pull_from', ['context_graph_id', 'name', 'layer']);
+    expectRequired('dkg_knowledge_asset_discard', ['context_graph_id', 'name']);
+    expectRequired('dkg_knowledge_asset_import_file', ['context_graph_id', 'name', 'file_path']);
+    expectRequired('dkg_knowledge_asset_query', ['context_graph_id', 'name']);
+    expectRequired('dkg_knowledge_asset_import_artifact_resolve', ['context_graph_id', 'assertion_uri']);
+    expectRequired('dkg_knowledge_asset_import_artifact_read_markdown', ['context_graph_id', 'assertion_uri']);
+    expectRequired('dkg_knowledge_asset_semantic_enrichment_write', ['context_graph_id', 'assertion_uri', 'semantic_quads']);
+    expect(byName.get('dkg_knowledge_asset_semantic_enrichment_write')!.parameters.properties).not.toHaveProperty('name');
+    expect(byName.get('dkg_knowledge_asset_import_artifact_resolve')!.description).toMatch(/Optional validation\/debug helper/);
+    expect(byName.get('dkg_knowledge_asset_semantic_enrichment_write')!.description).toMatch(/Append model-derived semantic triples/);
+    expect(byName.get('dkg_knowledge_asset_semantic_enrichment_write')!.description).not.toMatch(/separate Working Memory assertion/);
+    expect(byName.get('dkg_knowledge_asset_import_artifact_read_markdown')!.parameters.properties.max_bytes).toMatchObject({
       type: 'integer',
     });
-    expect(byName.get('dkg_import_artifact_read_markdown')!.parameters.properties.max_bytes.description).toMatch(/positive integer/);
-    expectRequired('dkg_assertion_history', ['context_graph_id', 'name']);
+    expect(byName.get('dkg_knowledge_asset_import_artifact_read_markdown')!.parameters.properties.max_bytes.description).toMatch(/positive integer/);
+    expectRequired('dkg_knowledge_asset_history', ['context_graph_id', 'name']);
+
+    // pull-from `layer` is constrained to swm|vm (CONTRACT §1 side-verbs).
+    const pullFromLayer = byName.get('dkg_knowledge_asset_pull_from')!.parameters.properties.layer;
+    expect(pullFromLayer.enum).toEqual(['swm', 'vm']);
+    // publish must NOT expose author/selection overrides — the seal selects them
+    // (CONTRACT §1 Stage5 / §3). It exposes only the finalized-publish options.
+    const publishKaProps = byName.get('dkg_knowledge_asset_publish')!.parameters.properties;
+    expect(publishKaProps).not.toHaveProperty('author_agent_address');
+    expect(publishKaProps).not.toHaveProperty('pre_signed_author_attestation');
+    expect(publishKaProps).not.toHaveProperty('entities');
+    expect(publishKaProps).not.toHaveProperty('selection');
+    expect(publishKaProps).toHaveProperty('publish_epochs');
+    expect(publishKaProps).toHaveProperty('publisher_node_identity_id_override');
+    // CONTRACT §D: clear-after is DROPPED from the per-asset publish tool — on
+    // vm/publish it is graph-wide destructive (wipes other agents' SWM). The
+    // CG-wide clear stays on dkg_publish / dkg_shared_memory_publish.
+    expect(publishKaProps).not.toHaveProperty('clear_shared_memory_after');
+    expect(publishKaProps).not.toHaveProperty('clear_after');
+    // CONTRACT §G: per-KA publish can register the CG on-chain first (mirrors
+    // dkg_shared_memory_publish) — vm/publish requires a registered CG.
+    expect(publishKaProps).toHaveProperty('register_if_needed');
+    // finalize surfaces the token-resolved author but NOT the raw pre-signed
+    // attestation (colocated-agent attribution — CONTRACT §1 Stage3, by design).
+    const finalizeProps = byName.get('dkg_knowledge_asset_finalize')!.parameters.properties;
+    expect(finalizeProps).toHaveProperty('author_agent_address');
+    expect(finalizeProps).not.toHaveProperty('pre_signed_author_attestation');
     expectRequired('dkg_sub_graph_create', ['context_graph_id', 'sub_graph_name']);
     expectRequired('dkg_sub_graph_list', ['context_graph_id']);
     expectRequired('dkg_shared_memory_publish', ['context_graph_id']);
 
     for (const name of [
-      'dkg_assertion_create',
-      'dkg_assertion_write',
-      'dkg_assertion_promote',
-      'dkg_assertion_discard',
-      'dkg_assertion_import_file',
-      'dkg_assertion_query',
+      'dkg_knowledge_asset_create',
+      'dkg_knowledge_asset_write',
+      'dkg_knowledge_asset_finalize',
+      'dkg_knowledge_asset_share',
+      'dkg_knowledge_asset_publish',
+      'dkg_knowledge_asset_pull_from',
+      'dkg_knowledge_asset_discard',
+      'dkg_knowledge_asset_import_file',
+      'dkg_knowledge_asset_query',
       'dkg_shared_memory_publish',
       'dkg_share',
       'dkg_sub_graph_create',
@@ -400,10 +446,12 @@ describe("DkgNodePlugin", () => {
     expect(publishProps).toHaveProperty('access_policy');
     expect(publishProps.access_policy.type).toBe('number');
 
-    // dkg_assertion_write.quads is an array of {subject,predicate,object}
-    const writeTool = byName.get('dkg_assertion_write')!;
+    // dkg_knowledge_asset_write.quads is an array of {subject,predicate,object}
+    // with NO per-quad `graph` (CONTRACT §0 invariant 2).
+    const writeTool = byName.get('dkg_knowledge_asset_write')!;
     expect(writeTool.parameters.properties.quads.type).toBe('array');
     expect(writeTool.parameters.properties.quads.items).toBeDefined();
+    expect(writeTool.parameters.properties.quads.items.properties).not.toHaveProperty('graph');
 
     // dkg_subscribe: `include_shared_memory` is boolean-only (subscribe is a
     // catch-up/sync flag, not a memory-layer selector).

@@ -71,8 +71,8 @@ describe('Memory integration round-trip (issue #199 Phase 1 + Phase 2)', () => {
   });
 
   describe('Phase 1 — canonical write contract', () => {
-    it('dkg_assertion_write tool is registered with the expected shape', () => {
-      const tool = tools.find((t) => t.name === 'dkg_assertion_write');
+    it('dkg_knowledge_asset_write tool is registered with the expected shape', () => {
+      const tool = tools.find((t) => t.name === 'dkg_knowledge_asset_write');
       expect(tool).toBeDefined();
       const params = tool!.parameters as any;
       expect(params.required).toContain('context_graph_id');
@@ -80,8 +80,8 @@ describe('Memory integration round-trip (issue #199 Phase 1 + Phase 2)', () => {
       expect(params.required).toContain('quads');
     });
 
-    it('calling dkg_assertion_write flows to client.knowledgeAssetWrite', async () => {
-      const tool = tools.find((t) => t.name === 'dkg_assertion_write')!;
+    it('calling dkg_knowledge_asset_write flows to client.knowledgeAssetWrite', async () => {
+      const tool = tools.find((t) => t.name === 'dkg_knowledge_asset_write')!;
       const client = (plugin as any).client;
       client.knowledgeAssetWrite = vi.fn().mockResolvedValue({ written: 1 });
       await tool.execute('t1', {
