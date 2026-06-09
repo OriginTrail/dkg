@@ -118,11 +118,11 @@ export function registerPublishTools(
         'writes the supplied quads to Shared Working Memory, then ' +
         'publishes the entire SWM in the CG to Verifiable Memory ' +
         '(on-chain) and clears SWM. For the canonical step-wise flow ' +
-        '(write → promote → publish) use `dkg_assertion_create / write ' +
-        '/ promote` followed by `dkg_shared_memory_publish` — that ' +
-        'path keeps WM as a draft staging area before SWM. Use ' +
-        '`dkg_publish` only when you have fresh quads to anchor ' +
-        'immediately.',
+        '(create → write → finalize → share → publish) use ' +
+        '`dkg_knowledge_asset_create / write / finalize / share` followed ' +
+        'by `dkg_knowledge_asset_publish` — that path keeps WM as a draft ' +
+        'staging area before SWM. Use `dkg_publish` only when you have ' +
+        'fresh quads to anchor immediately.',
       inputSchema: {
         contextGraphId: z.string().min(1).describe(`Target context graph id. ${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION}`),
         quads: z
@@ -192,15 +192,18 @@ export function registerPublishTools(
     {
       title: 'Publish Shared Working Memory',
       description:
-        'Canonical step-4 finalizer for "publish existing SWM" (one HTTP ' +
-        'call). Publishes all Shared Working Memory in a context graph to ' +
-        'Verifiable Memory (on-chain) and clears SWM. Use after ' +
-        '`dkg_assertion_promote` to finalize promoted data. Pass ' +
-        '`rootEntities` to publish only specific roots (subset publishes ' +
-        'default to NOT clearing SWM, so other unpublished roots are not ' +
-        'dropped). Set `registerIfNeeded: true` to upgrade a local-only CG ' +
-        'to on-chain registration before publishing — note this MAY spend ' +
-        'gas/TRAC; opt-in only.',
+        'SWM-bridge / CG-wide publish (legacy, retained). Publishes all ' +
+        'Shared Working Memory in a context graph to Verifiable Memory ' +
+        '(on-chain) and clears SWM. To publish a SINGLE named knowledge ' +
+        'asset, prefer `dkg_knowledge_asset_publish` (multi-root-safe); this ' +
+        'bulk route is single-root-per-call and returns 409 ' +
+        'MULTI_ROOT_PUBLISH_NOT_ATOMIC when more than one root entity is in ' +
+        'SWM. Use after `dkg_knowledge_asset_share`. Pass `rootEntities` to ' +
+        'publish only specific roots (subset publishes default to NOT ' +
+        'clearing SWM, so other unpublished roots are not dropped). Set ' +
+        '`registerIfNeeded: true` to upgrade a local-only CG to on-chain ' +
+        'registration before publishing — note this MAY spend gas/TRAC; ' +
+        'opt-in only.',
       inputSchema: {
         contextGraphId: z.string().min(1).describe(`Target context graph id. ${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION}`),
         rootEntities: z
