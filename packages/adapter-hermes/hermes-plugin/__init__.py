@@ -737,7 +737,9 @@ DKG_ASSERTION_PUBLISH_SCHEMA = {
         "selects the author and the whole asset -- do not pass author or selection overrides. "
         "Multi-root safe; prefer this over dkg_shared_memory_publish for a single named asset. "
         "Fails 409 if the asset is not yet finalized + shared (run dkg_knowledge_asset_finalize / "
-        "dkg_knowledge_asset_share first). Call dkg_wallet_balances first to verify TRAC."
+        "dkg_knowledge_asset_share first). vm/publish requires the context graph to already be "
+        "registered on-chain; pass register_if_needed=true to register it first on a fresh CG. "
+        "Call dkg_wallet_balances first to verify TRAC."
     ),
     "parameters": {
         "type": "object",
@@ -746,6 +748,16 @@ DKG_ASSERTION_PUBLISH_SCHEMA = {
             "name": {"type": "string", "description": "Knowledge asset name to publish (must be finalized + shared)."},
             "publish_epochs": {"type": "integer", "minimum": 1, "description": "Optional number of epochs to publish for (positive integer)."},
             "publisher_node_identity_id_override": {"type": "integer", "minimum": 0, "description": "Optional publisher node identity id override (non-negative integer)."},
+            "register_if_needed": {
+                "type": "boolean",
+                "description": (
+                    "If the context graph is not yet registered on-chain, register it first "
+                    "(idempotent), then publish. Registration may spend gas/TRAC. Default false -- "
+                    "when false and the CG is unregistered, publish fails with the daemon's "
+                    "not-registered error."
+                ),
+            },
+            "access_policy": {"type": "integer", "description": "Optional registration access policy used only with register_if_needed: 0 open, 1 private."},
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name (must match write/share time)."},
         },
         "required": ["context_graph_id", "name"],
@@ -2184,12 +2196,36 @@ class DKGMemoryProvider(MemoryProvider):
         # agent's/asset's unpublished SWM in the CG), and this asset's own SWM is
         # cleared unconditionally regardless (CONTRACT §D). CG-wide clearing
         # stays on dkg_publish / dkg_shared_memory_publish.
-        return json.dumps(self._client.publish_finalized_assertion(
+        #
+        # register_if_needed (CONTRACT §G): vm/publish requires the CG to already
+        # be registered on-chain and does NOT auto-register. When true, register
+        # the CG first (idempotent — short-circuits if already registered) BEFORE
+        # publishing, so the create->...->publish lifecycle is self-contained on a
+        # fresh CG. Mirrors dkg_shared_memory_publish's existing register block.
+        registration = None
+        if args.get("register_if_needed") is not None and not isinstance(args.get("register_if_needed"), bool):
+            return tool_error("register_if_needed must be a boolean.")
+        if args.get("register_if_needed") is True:
+            access_policy = args.get("access_policy")
+            if access_policy is not None and access_policy not in (0, 1):
+                return tool_error("access_policy must be 0 or 1.")
+            registration = self._client.register_context_graph(cg, access_policy)
+            if _client_result_failed(registration):
+                error = str(registration.get("error") or registration.get("message") or "").lower()
+                # "already registered"/"already exists" is success — continue to
+                # publish. Any other registration failure is fatal: surface it and
+                # do NOT publish.
+                if "already registered" not in error and "already exists" not in error:
+                    return json.dumps(registration)
+        result = self._client.publish_finalized_assertion(
             name,
             cg,
             sub_graph_name=_first_text(args, "sub_graph_name"),
             options=options or None,
-        ))
+        )
+        if registration is not None and isinstance(result, dict):
+            result["registration"] = registration
+        return json.dumps(result)
 
     def _handle_assertion_pull_from(self, args: Dict[str, Any]) -> str:
         if self._offline:
