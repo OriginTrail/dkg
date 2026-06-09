@@ -171,6 +171,25 @@ def _client_result_failed(result: Any) -> bool:
     return result.get("success") is False or result.get("ok") is False or bool(result.get("error"))
 
 
+def _to_write_quads(quads: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Map each quad to exactly {subject, predicate, object} for a WM write.
+
+    The write wire shape is {subject,predicate,object} only — the daemon pins
+    every triple to the per-KA WM graph itself and silently overrides any
+    client-supplied ``graph`` (CONTRACT §0 invariant 2 / §A). Strip ``graph``
+    (and any other extra key) HERE in the client, not just in the tool schema:
+    a hand-built quad object or a passthrough map can still carry ``graph``.
+    """
+    return [
+        {
+            "subject": q.get("subject"),
+            "predicate": q.get("predicate"),
+            "object": q.get("object"),
+        }
+        for q in quads
+    ]
+
+
 def _is_blocked_import_path(path: Path) -> bool:
     name = path.name.lower()
     if name in _BLOCKED_IMPORT_NAMES:
@@ -386,7 +405,9 @@ class DKGClient:
         """POST /api/knowledge-assets/{name}/wm/write — write quads to the assertion graph."""
         payload: Dict[str, Any] = {
             "contextGraphId": _normalize_context_graph_id(context_graph_id),
-            "quads": quads,
+            # Strip any per-quad `graph` at the client (CONTRACT §A) — the wire
+            # shape is {subject,predicate,object} only, daemon-pinned.
+            "quads": _to_write_quads(quads),
         }
         if sub_graph_name:
             payload["subGraphName"] = sub_graph_name
@@ -695,7 +716,13 @@ class DKGClient:
         hold multiple roots should pass an explicit list (see ``_handle_publish``).
         """
         if isinstance(selection, list):
-            roots = [str(r).strip() for r in selection if str(r).strip()]
+            # Dedupe preserving first-seen order: quads can name the same root
+            # subject more than once, and an undeduped list would publish the
+            # same root twice -> double on-chain work / double TRAC spend, and
+            # the second call may hit an already-cleared state (CONTRACT §F).
+            roots = list(dict.fromkeys(
+                stripped for r in selection if (stripped := str(r).strip())
+            ))
             if not roots:
                 return {"success": False, "error": "No root entities to publish."}
             if len(roots) == 1:
