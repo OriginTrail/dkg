@@ -638,7 +638,7 @@ jobs:
         with:
           python-version: '3.x'
       - name: Install Hermes plugin Python test deps
-        run: python -m pip install --upgrade pip pytest eth-utils requests
+        run: python -m pip install -r packages/adapter-hermes/pytests/requirements.txt
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -648,6 +648,12 @@ jobs:
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
       - name: "Supporting Kosava packages"
+        # DKG_REQUIRE_PYTEST=1 makes the adapter-hermes Python suite REQUIRED in
+        # CI: run-pytest.mjs fails (not skips) if no interpreter/pytest is found,
+        # so CI never silently loses Python coverage. Local `pnpm test` (flag
+        # unset) skips gracefully when Python is absent.
+        env:
+          DKG_REQUIRE_PYTEST: '1'
         run: |
           pnpm \
             --filter @origintrail-official/dkg-epcis \

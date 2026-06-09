@@ -1,0 +1,9 @@
+# Pinned Python deps for the Hermes plugin pytest suite (pytests/).
+# Exact pins so CI is reproducible — an upstream release cannot break the
+# adapter-hermes lane without a deliberate bump here. Validated against the
+# versions the suite was developed/green on (2026-06-09).
+#
+# Install: pip install -r packages/adapter-hermes/pytests/requirements.txt
+pytest==9.0.2
+eth-utils==6.0.0
+requests==2.32.5
