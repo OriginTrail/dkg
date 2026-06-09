@@ -747,7 +747,7 @@ DKG_ASSERTION_PUBLISH_SCHEMA = {
             "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
             "name": {"type": "string", "description": "Knowledge asset name to publish (must be finalized + shared)."},
             "publish_epochs": {"type": "integer", "minimum": 1, "description": "Optional number of epochs to publish for (positive integer)."},
-            "publisher_node_identity_id_override": {"type": "integer", "minimum": 0, "description": "Optional publisher node identity id override (non-negative integer)."},
+            "publisher_node_identity_id_override": {"type": "string", "pattern": "^[0-9]+$", "description": "Optional publisher node identity id override (non-negative integer as a decimal string; preserved verbatim to avoid bigint precision loss)."},
             "register_if_needed": {
                 "type": "boolean",
                 "description": (
@@ -797,7 +797,14 @@ DKG_ASSERTION_IMPORT_FILE_SCHEMA = {
 
 DKG_ASSERTION_QUERY_SCHEMA = {
     "name": "dkg_knowledge_asset_query",
-    "description": "Dump every quad from one Working Memory knowledge asset draft. Use dkg_query for SPARQL. Use this to inspect deterministic import quads before semantic enrichment.",
+    "description": (
+        "Dump every quad from one knowledge asset's WORKING MEMORY DRAFT. Reads the WM draft "
+        "ONLY: a FULL share (dkg_knowledge_asset_share with entities omitted or \"all\") empties "
+        "the WM draft, so a query AFTER sharing returns 0 quads. Query the draft BEFORE sharing "
+        "(e.g. to inspect deterministic import quads before semantic enrichment); to inspect "
+        "shared content after a share, use dkg_query with view \"shared-working-memory\". "
+        "Not a SPARQL endpoint — use dkg_query for SPARQL."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
@@ -2183,14 +2190,16 @@ class DKGMemoryProvider(MemoryProvider):
             return tool_error(error)
         if publish_epochs is not None:
             options["publishEpochs"] = publish_epochs
-        override, error = _validate_int_arg(
+        override, error = _validate_decimal_string_arg(
             args.get("publisher_node_identity_id_override"),
-            "publisher_node_identity_id_override", minimum=0)
+            "publisher_node_identity_id_override")
         if error:
             return tool_error(error)
         if override is not None:
-            # Canonical wire form is a decimal string (daemon regex /^\d+$/).
-            options["publisherNodeIdentityIdOverride"] = str(override)
+            # Preserved as a decimal string end-to-end (daemon regex /^\d+$/) —
+            # no int() round-trip, so a bigint node id above 2**53 keeps its
+            # precision (Codex #1079:750).
+            options["publisherNodeIdentityIdOverride"] = override
         # No clear_after / clear_shared_memory_after on the per-asset publish:
         # on vm/publish that flag is GRAPH-WIDE destructive (wipes every other
         # agent's/asset's unpublished SWM in the CG), and this asset's own SWM is
@@ -2862,6 +2871,43 @@ def _validate_int_arg(
     if maximum is not None and parsed > maximum:
         return None, f"{label} must be <= {maximum}."
     return parsed, None
+
+
+_DIGIT_STRING_RE = re.compile(r"^\d+$")
+
+
+def _validate_decimal_string_arg(value: Any, label: str) -> Tuple[Optional[str], Optional[str]]:
+    """Validate an optional non-negative-integer arg PRESERVED as a decimal STRING.
+
+    Some ids (e.g. publisherNodeIdentityIdOverride) are uint/bigint on the daemon
+    and arrive as a decimal string matching ``/^\\d+$/``. Modeling them as a
+    JSON ``integer`` loses precision above JS's safe-integer range (2**53) BEFORE
+    serialization — the wrong node identity could be attributed (Codex #1079:750).
+    So accept a digit string and pass it through VERBATIM (no int() round-trip).
+
+    Returns ``(str, None)`` for a valid digit string, ``(None, None)`` when truly
+    absent (``None``), and ``(None, message)`` when present-but-invalid. A
+    non-negative ``int`` is also accepted (normalized to its decimal string) for
+    convenience; ``bool``, floats, blank/whitespace strings, negative/non-digit
+    values are rejected.
+    """
+    if value is None:
+        return None, None
+    if isinstance(value, bool):
+        return None, f"{label} must be a non-negative integer (decimal string)."
+    if isinstance(value, int):
+        if value < 0:
+            return None, f"{label} must be a non-negative integer (decimal string)."
+        return str(value), None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            # Present but blank/whitespace: invalid, not omitted (Codex #2805).
+            return None, f"{label} must be a non-negative integer (decimal string)."
+        if not _DIGIT_STRING_RE.match(text):
+            return None, f"{label} must be a non-negative integer (decimal string)."
+        return text, None  # preserved verbatim — no precision loss
+    return None, f"{label} must be a non-negative integer (decimal string)."
 
 
 def _build_memory_search_sparql(keywords: List[str], limit: int) -> str:
