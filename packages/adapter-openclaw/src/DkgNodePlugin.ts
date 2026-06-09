@@ -2379,6 +2379,29 @@ export class DkgNodePlugin {
     return this.error(msg);
   }
 
+  /**
+   * Register a context graph on-chain, tolerating the idempotent
+   * "already registered" case (returns `undefined` so callers don't claim a
+   * fresh registration). Any OTHER failure rethrows — the caller surfaces it as
+   * a tool error and must NOT proceed. Shared by handleSharedMemoryPublish and
+   * handleAssertionPublish (CONTRACT §G) so the register-then-publish logic
+   * can't drift between the two publish tools.
+   */
+  private async registerContextGraphIfNeeded(
+    contextGraphId: string,
+    accessPolicy?: number,
+  ): Promise<Record<string, unknown> | undefined> {
+    try {
+      return await this.client.registerContextGraph(contextGraphId, { accessPolicy });
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      if (message.includes('already registered')) {
+        return undefined;
+      }
+      throw err;
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Tools
   // ---------------------------------------------------------------------------
@@ -3561,19 +3584,9 @@ export class DkgNodePlugin {
       // dkg_shared_memory_publish. A hard registration failure is a tool error: do
       // NOT publish. When false/omitted, publish directly and surface the daemon's
       // not-registered error verbatim.
-      let registration: Record<string, unknown> | undefined;
-      if (registerIfNeeded) {
-        try {
-          registration = await this.client.registerContextGraph(contextGraphId, {
-            accessPolicy: args.access_policy as number | undefined,
-          });
-        } catch (err: any) {
-          const message = err?.message ?? String(err);
-          if (!message.includes('already registered')) {
-            throw err;
-          }
-        }
-      }
+      const registration = registerIfNeeded
+        ? await this.registerContextGraphIfNeeded(contextGraphId, args.access_policy as number | undefined)
+        : undefined;
 
       // Per-KA sealed publish (CONTRACT §1 Stage5). The seal selects the author and
       // the whole asset, so author/selection overrides are never sent. The daemon
@@ -3585,7 +3598,29 @@ export class DkgNodePlugin {
         publishEpochs,
         publisherNodeIdentityIdOverride,
       });
-      return this.json(registration ? { ...result, registration } : result);
+      const merged = registration ? { ...result, registration } : result;
+
+      // CONTRACT §1 Stage5 / §7: vm/publish returns HTTP 207 (treated as success by
+      // the HTTP client) when the KA minted on-chain but the context-graph binding
+      // FAILED — `contextGraphError` is present in the body. The UAL/kaId are valid
+      // (the asset IS on-chain), so this is NOT a hard failure, but it must NOT be
+      // reported as full success: surface a clear PARTIAL so the agent can retry the
+      // CG binding.
+      const contextGraphError =
+        merged && typeof merged === 'object'
+          ? (merged as Record<string, unknown>).contextGraphError
+          : undefined;
+      if (typeof contextGraphError === 'string' && contextGraphError.length > 0) {
+        return this.json({
+          ...(merged as Record<string, unknown>),
+          partial: true,
+          warning:
+            'Partial publish: the knowledge asset was minted on-chain (UAL/kaId are valid), but the ' +
+            `context-graph binding failed (${contextGraphError}). The on-chain asset is published; retry ` +
+            'the publish to re-attempt the context-graph binding.',
+        });
+      }
+      return this.json(merged);
     } catch (err: any) {
       return this.daemonError(err);
     }
@@ -3850,19 +3885,9 @@ export class DkgNodePlugin {
       if (args.access_policy !== undefined && args.access_policy !== 0 && args.access_policy !== 1) {
         return this.error('"access_policy" must be 0 (open) or 1 (private).');
       }
-      let registration: Record<string, unknown> | undefined;
-      if (registerIfNeeded) {
-        try {
-          registration = await this.client.registerContextGraph(contextGraphId, {
-            accessPolicy: args.access_policy as number | undefined,
-          });
-        } catch (err: any) {
-          const message = err?.message ?? String(err);
-          if (!message.includes('already registered')) {
-            throw err;
-          }
-        }
-      }
+      const registration = registerIfNeeded
+        ? await this.registerContextGraphIfNeeded(contextGraphId, args.access_policy as number | undefined)
+        : undefined;
       const result = await this.publisher.publishSharedMemory({ contextGraphId, rootEntities, subGraphName });
       return this.json(registration ? { ...result, registration } : result);
     } catch (err: any) {

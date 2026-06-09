@@ -230,6 +230,44 @@ describe("DkgNodePlugin", () => {
     });
 
 
+    it('dkg_knowledge_asset_publish surfaces a 207 partial (KA minted, CG bind failed) as a WARNING, not plain success', async () => {
+      // HTTP 207: status confirmed but contextGraphError present (the HTTP client
+      // treats 207 as success and returns the body). The UAL/kaId are valid, but
+      // the result must flag the partial so the agent can retry the CG binding.
+      const { byName } = setupPluginWithFetch({
+        ual: 'did:dkg:1/0xauthor/7',
+        kaId: 'kc-1',
+        status: 'confirmed',
+        contextGraphError: 'context-graph binding timed out',
+      });
+      const res = await byName.get('dkg_knowledge_asset_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+      });
+      const details = res.details as Record<string, unknown>;
+      expect(details.partial).toBe(true);
+      expect(details.ual).toBe('did:dkg:1/0xauthor/7'); // mint succeeded — UAL still valid
+      expect(String(details.warning)).toContain('context-graph binding timed out');
+      expect(res.content[0].text).toMatch(/partial/i);
+    });
+
+    it('dkg_knowledge_asset_publish reports plain success on a 200 (no contextGraphError)', async () => {
+      const { byName } = setupPluginWithFetch({
+        ual: 'did:dkg:1/0xauthor/7',
+        kaId: 'kc-1',
+        status: 'confirmed',
+      });
+      const res = await byName.get('dkg_knowledge_asset_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+      });
+      const details = res.details as Record<string, unknown>;
+      expect(details).not.toHaveProperty('partial');
+      expect(details).not.toHaveProperty('warning');
+      expect(details.ual).toBe('did:dkg:1/0xauthor/7');
+    });
+
+
     // ── CONTRACT §G — register_if_needed on per-KA publish ──────────────────
     // A URL-routed fetch mock so register (POST /api/context-graph/register) and
     // publish (POST /api/knowledge-assets/<name>/vm/publish) can be asserted +
