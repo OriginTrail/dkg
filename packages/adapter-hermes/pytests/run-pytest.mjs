@@ -3,15 +3,16 @@
 // the package `test` script (after vitest) so `pnpm --filter ...adapter-hermes
 // test` and the root `turbo test` / CI exercise the Python suite.
 //
-// Availability policy (Codex round-4):
-//   - Local dev (DKG_REQUIRE_PYTEST unset): if no Python interpreter OR pytest is
-//     not importable, SKIP GRACEFULLY — print a clear warning and exit 0 so a
-//     clean contributor machine (no Python; `pnpm install` never provisions it)
-//     can still `pnpm test` (vitest runs, this skips, the script passes).
+// Availability policy (Codex round-4 + final round):
+//   - Local dev (DKG_REQUIRE_PYTEST unset): if no Python interpreter OR the full
+//     dep set (pytest + eth_utils + requests) is not importable, SKIP GRACEFULLY
+//     — print a clear warning and exit 0 so a clean contributor machine (no
+//     Python, or partial deps; `pnpm install` never provisions them) can still
+//     `pnpm test` (vitest runs, this skips, the script passes).
 //   - CI (DKG_REQUIRE_PYTEST=1): the Python suite is REQUIRED — a missing
-//     interpreter / pytest is a hard FAILURE (exit non-zero), so CI never
-//     silently skips coverage. The ci.yml adapter-hermes lane sets the flag and
-//     provisions Python via actions/setup-python + the pinned requirements file.
+//     interpreter / dep is a hard FAILURE (exit non-zero), so CI never silently
+//     skips coverage. The ci.yml adapter-hermes lane sets the flag and provisions
+//     Python via actions/setup-python + the pinned requirements file.
 //
 // A REAL pytest failure (red tests / collection error) ALWAYS exits non-zero,
 // independent of the flag — "missing" and "failing" are distinct.
@@ -29,10 +30,17 @@ const candidates =
     ? [['py', ['-3']], ['python', []], ['python3', []]]
     : [['python3', []], ['python', []]];
 
-// A usable interpreter is one where `<py> -m pytest --version` succeeds — this
-// also proves pytest itself is importable, not just that Python exists.
+// A usable interpreter is one where the FULL import set the suite needs is
+// importable — pytest AND the pinned runtime deps (eth_utils, requests). Probing
+// only `pytest --version` would mark a machine with global pytest but without
+// eth_utils/requests as "runnable", so pytest would run and fail on the missing
+// import instead of skipping. Keep this in sync with pytests/requirements.txt.
 function pytestProbe(cmd, prefix) {
-  const probe = spawnSync(cmd, [...prefix, '-m', 'pytest', '--version'], { stdio: 'ignore' });
+  const probe = spawnSync(
+    cmd,
+    [...prefix, '-c', 'import pytest, eth_utils, requests'],
+    { stdio: 'ignore' },
+  );
   return probe.status === 0;
 }
 
@@ -50,8 +58,9 @@ for (const [cmd, prefix] of candidates) {
 
 if (!runner) {
   const msg =
-    'Python pytest suite skipped — no Python interpreter with pytest was found. ' +
-    'Install Python 3 and `pip install -r packages/adapter-hermes/pytests/requirements.txt` to run it.';
+    'Python pytest suite skipped — no Python interpreter with the required deps ' +
+    '(pytest, eth_utils, requests) was found. Install Python 3 and ' +
+    '`pip install -r packages/adapter-hermes/pytests/requirements.txt` to run it.';
   if (REQUIRED) {
     console.error(
       `[adapter-hermes] ${msg}\n` +
