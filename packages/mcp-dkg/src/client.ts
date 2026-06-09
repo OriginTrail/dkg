@@ -1068,7 +1068,11 @@ export class DkgClient {
       predicate: q.predicate,
       object: q.object,
     }));
-    const created = await this.request<{ assertionUri?: string; seal?: Record<string, unknown> }>(
+    const created = await this.request<{
+      assertionUri?: string;
+      seal?: Record<string, unknown>;
+      errors?: Array<{ phase?: string; error?: string }>;
+    }>(
       'POST',
       '/api/knowledge-assets',
       {
@@ -1078,14 +1082,58 @@ export class DkgClient {
         promote: true,
       },
     );
-    const published = await this.request<Record<string, unknown>>(
-      'POST',
-      '/api/shared-memory/publish',
-      {
-        contextGraphId: cgId,
-        assertionName,
-      },
-    );
+
+    // FIX A — the create route returns HTTP 207 `{ created:true, …, errors:[…] }`
+    // when create+finalize succeeded but the `promote:true` share phase FAILED
+    // (knowledge-assets.ts:614). `this.request` treats 207 as success (2xx, no
+    // throw), so without this check we would publish an UNSHARED assertion and
+    // mask the real error. If the share failed, do NOT publish — surface the
+    // sealed-but-unshared asset by name so the caller can recover with the
+    // lifecycle tools instead of recreating it.
+    if (Array.isArray(created.errors) && created.errors.length > 0) {
+      const shareErr = created.errors.find((e) => e?.phase === 'swm-share') ?? created.errors[0];
+      const err = new Error(
+        `Publish aborted: the asset was created + sealed in Working Memory as "${assertionName}", but ` +
+        `sharing it to Shared Working Memory FAILED (${shareErr?.error ?? 'unknown error'}). The on-chain ` +
+        `publish was NOT attempted. Do NOT recreate — re-share + publish the existing sealed asset by name ` +
+        `via dkg_knowledge_asset_share + dkg_knowledge_asset_publish (or dkg_shared_memory_publish).`,
+      ) as Error & Record<string, unknown>;
+      err.assertionName = assertionName;
+      err.assertionUri = created.assertionUri;
+      if (created.seal) err.seal = created.seal;
+      err.phase = shareErr?.phase ?? 'swm-share';
+      err.partial = true;
+      throw err;
+    }
+
+    // FIX B — the asset is created + sealed + shared; only the on-chain publish
+    // remains. If it fails, the random `assertionName` would be lost and the next
+    // dkg_publish would mint a DUPLICATE. Catch + rethrow carrying the name so the
+    // caller can retry the publish of the existing asset, not recreate it.
+    let published: Record<string, unknown>;
+    try {
+      published = await this.request<Record<string, unknown>>(
+        'POST',
+        '/api/shared-memory/publish',
+        {
+          contextGraphId: cgId,
+          assertionName,
+        },
+      );
+    } catch (e) {
+      const err = new Error(
+        `Publish failed for asset "${assertionName}": ${e instanceof Error ? e.message : String(e)}. The asset ` +
+        `is created + sealed + shared to Shared Working Memory; only the on-chain publish failed. Do NOT ` +
+        `recreate — retry the publish of this asset by name via dkg_shared_memory_publish or ` +
+        `dkg_knowledge_asset_publish.`,
+      ) as Error & Record<string, unknown>;
+      err.assertionName = assertionName;
+      err.assertionUri = created.assertionUri;
+      if (created.seal) err.seal = created.seal;
+      err.phase = 'vm-publish';
+      err.cause = e;
+      throw err;
+    }
     return {
       ...published,
       ...(created.assertionUri ? { assertionUri: created.assertionUri } : {}),

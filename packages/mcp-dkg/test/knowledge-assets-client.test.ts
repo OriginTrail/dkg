@@ -214,4 +214,58 @@ describe('DkgClient knowledge-assets — publish/finalize option serialization',
     })).rejects.toThrow(/require non-empty quads/);
     expect(calls).toHaveLength(0);
   });
+
+  // A sequenced fetcher: returns responses[i] for the i-th call (create, then publish).
+  const makeSequencedClient = (responses: Array<{ status: number; body: unknown }>) => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let i = 0;
+    const client = new DkgClient({
+      config: makeConfig(),
+      fetcher: (async (url, init) => {
+        calls.push({ url: String(url), body: JSON.parse(String(init?.body ?? '{}')) });
+        const r = responses[i++] ?? { status: 200, body: {} };
+        return new Response(JSON.stringify(r.body), {
+          status: r.status,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }) as typeof fetch,
+    });
+    return { client, calls };
+  };
+
+  // FIX A — publishQuads aborts (no publish) on a create 207 share-phase failure.
+  it('publishQuads aborts without publishing when create returns a 207 share-phase partial-failure', async () => {
+    const { client, calls } = makeSequencedClient([
+      { status: 207, body: { created: true, name: 'mcp-publish-x', assertionUri: 'urn:assertion:x', status: 'wm-sealed', errors: [{ phase: 'swm-share', error: 'gossip peer unreachable' }] } },
+    ]);
+    await expect(
+      client.publishQuads({ contextGraphId: 'cg-1', quads: [{ subject: 's', predicate: 'p', object: 'o' }] }),
+    ).rejects.toThrow(/gossip peer unreachable/);
+    // re-run to inspect the structured error fields + that publish was never called.
+    const { client: c2, calls: calls2 } = makeSequencedClient([
+      { status: 207, body: { created: true, name: 'mcp-publish-x', assertionUri: 'urn:assertion:x', status: 'wm-sealed', errors: [{ phase: 'swm-share', error: 'gossip peer unreachable' }] } },
+    ]);
+    const err = await c2.publishQuads({ contextGraphId: 'cg-1', quads: [{ subject: 's', predicate: 'p', object: 'o' }] }).catch((e) => e);
+    expect(err.assertionName).toMatch(/mcp-publish-/);
+    expect(err.message).toMatch(/do not recreate/i);
+    // only the create call was made — /api/shared-memory/publish was NEVER called.
+    expect(calls2).toHaveLength(1);
+    expect(calls2[0].url).toContain('/api/knowledge-assets');
+    void calls;
+  });
+
+  // FIX B — publishQuads carries the assertionName when the publish call fails.
+  it('publishQuads surfaces the created assertionName when the publish call fails after a successful create', async () => {
+    const { client, calls } = makeSequencedClient([
+      { status: 201, body: { assertionUri: 'urn:assertion:y', status: 'swm-shared' } }, // create OK
+      { status: 502, body: { error: 'on-chain revert' } },                              // publish fails
+    ]);
+    const err = await client.publishQuads({ contextGraphId: 'cg-1', quads: [{ subject: 's', predicate: 'p', object: 'o' }] }).catch((e) => e);
+    expect(err.assertionName).toMatch(/mcp-publish-/);
+    expect(err.message).toMatch(/do not recreate/i);
+    expect(err.message).toMatch(/retry the publish/i);
+    // both calls were made — the failure was the publish (2nd) call.
+    expect(calls).toHaveLength(2);
+    expect(calls[1].url).toContain('/api/shared-memory/publish');
+  });
 });
