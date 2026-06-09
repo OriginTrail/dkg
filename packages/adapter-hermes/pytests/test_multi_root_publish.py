@@ -308,3 +308,112 @@ def test_publish_quads_create_failure_short_circuits(recording_client):
     assert result == {"success": False, "error": "boom"}
     # publish was never attempted
     assert [p for p, _ in client.posts] == ["/api/knowledge-assets"]
+
+
+# -- Phase B (fast-follow): register_if_needed on the one-shot dkg_publish ----
+# The atomic assertionName fork does NOT auto-register the CG (LU-6 is selection-
+# fork only), so dkg_publish gets its own register lever (mirrors §G).
+
+_Q = [{"subject": "urn:s", "predicate": "urn:p", "object": "o"}]
+
+
+class _RegisterProbe:
+    """Fake client recording register + publish_quads for dkg_publish."""
+
+    def __init__(self, register_response):
+        self.calls = []
+        self.register_response = register_response
+
+    def register_context_graph(self, context_graph_id, access_policy=None):
+        self.calls.append(("register", context_graph_id, access_policy))
+        return self.register_response
+
+    def publish_quads(self, context_graph_id, quads, sub_graph_name=None):
+        self.calls.append(("publish", context_graph_id, len(quads)))
+        return {"kaId": "ka", "ual": "did:dkg:1/0xabc/5", "status": "confirmed"}
+
+
+def _register_provider(plugin_module, register_response):
+    p = plugin_module.DKGMemoryProvider()
+    p._offline = False
+    p._config = {"publish_tool": "direct", "allow_direct_publish": True}
+    p._client = _RegisterProbe(register_response)
+    return p
+
+
+def _kinds(p):
+    return [c[0] for c in p._client.calls]
+
+
+def test_publish_register_if_needed_fresh_cg(plugin_module):
+    p = _register_provider(plugin_module, {"registered": "cg", "onChainId": "42"})
+    out = json.loads(p.handle_tool_call("dkg_publish", {
+        "context_graph_id": "cg", "quads": _Q, "register_if_needed": True,
+    }))
+    assert _kinds(p) == ["register", "publish"]  # register BEFORE publish
+    assert out["registration"] == {"registered": "cg", "onChainId": "42"}
+    assert out["ual"] == "did:dkg:1/0xabc/5"
+
+
+def test_publish_default_no_register(plugin_module):
+    p = _register_provider(plugin_module, {"registered": "cg"})
+    out = json.loads(p.handle_tool_call("dkg_publish", {
+        "context_graph_id": "cg", "quads": _Q,
+    }))
+    assert _kinds(p) == ["publish"]
+    assert "registration" not in out
+
+
+def test_publish_register_already_registered_short_circuits(plugin_module):
+    p = _register_provider(plugin_module, {
+        "success": False, "error": "Context graph already registered on-chain",
+    })
+    out = json.loads(p.handle_tool_call("dkg_publish", {
+        "context_graph_id": "cg", "quads": _Q, "register_if_needed": True,
+    }))
+    assert _kinds(p) == ["register", "publish"]
+    assert out["ual"] == "did:dkg:1/0xabc/5"
+
+
+def test_publish_register_hard_failure_no_publish(plugin_module):
+    p = _register_provider(plugin_module, {"success": False, "error": "insufficient gas"})
+    out = json.loads(p.handle_tool_call("dkg_publish", {
+        "context_graph_id": "cg", "quads": _Q, "register_if_needed": True,
+    }))
+    assert _kinds(p) == ["register"]  # publish NOT attempted
+    assert out["success"] is False
+    assert "insufficient gas" in out["error"]
+
+
+def test_publish_register_if_needed_bool_and_access_policy_guards(plugin_module):
+    p = _register_provider(plugin_module, {"registered": "cg"})
+    out = json.loads(p.handle_tool_call("dkg_publish", {
+        "context_graph_id": "cg", "quads": _Q, "register_if_needed": "yes",
+    }))
+    assert "register_if_needed must be a boolean" in out["error"]
+    assert p._client.calls == []
+    # bool access_policy rejected (Phase-A guard), register not attempted
+    for bad in (True, False, 5):
+        out = json.loads(p.handle_tool_call("dkg_publish", {
+            "context_graph_id": "cg", "quads": _Q,
+            "register_if_needed": True, "access_policy": bad,
+        }))
+        assert "access_policy" in out["error"], bad
+        assert p._client.calls == [], bad
+
+
+def test_publish_register_access_policy_forwarded(plugin_module):
+    p = _register_provider(plugin_module, {"registered": "cg"})
+    p.handle_tool_call("dkg_publish", {
+        "context_graph_id": "cg", "quads": _Q,
+        "register_if_needed": True, "access_policy": 1,
+    })
+    assert p._client.calls[0] == ("register", "cg", 1)
+
+
+def test_publish_schema_has_register_if_needed(plugin_module):
+    p = _register_provider(plugin_module, {"registered": "cg"})
+    pub = next(s for s in p.get_tool_schemas() if s["name"] == "dkg_publish")
+    props = pub["parameters"]["properties"]
+    assert props["register_if_needed"]["type"] == "boolean"
+    assert "access_policy" in props
