@@ -1603,14 +1603,19 @@ class DKGMemoryProvider(MemoryProvider):
         if share_result.get("success") is False:
             return json.dumps(share_result)
         roots = _quad_root_entities(quads)
+        # The legacy SWM-bridge (Fork-2) is single-root-only: publishing >1 root
+        # in one call 409s MULTI_ROOT_PUBLISH_NOT_ATOMIC (CONTRACT §3). Pass an
+        # explicit root list when the quads carry multiple subjects so the client
+        # loops one root per call; a single subject still goes through "all".
         result = self._client.publish(
             cg,
-            selection="all",
+            selection=roots if len(roots) > 1 else "all",
             clear_after=True,
             sub_graph_name=_first_text(args, "sub_graph_name"),
         )
-        result["quadsPublished"] = len(quads)
-        result["rootEntities"] = roots
+        if isinstance(result, dict):
+            result["quadsPublished"] = len(quads)
+            result["rootEntities"] = roots
         return json.dumps(result)
 
     def _handle_shared_memory_publish(self, args: Dict[str, Any]) -> str:

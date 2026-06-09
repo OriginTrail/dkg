@@ -157,6 +157,20 @@ def _looks_already_exists(message: Any) -> bool:
     return "already exists" in lower or "already exist" in lower or "already registered" in lower
 
 
+def _client_result_failed(result: Any) -> bool:
+    """Canonical failure detector for daemon responses.
+
+    Mirrors ``_client_result_failed`` in ``__init__.py`` so the multi-root
+    publish loop can stop on the first failing root without importing the
+    plugin module (which would be circular). All ``_post``/``_get`` failure
+    shapes set ``success: False`` (and/or carry an ``error``), so the same
+    three-way check applies here.
+    """
+    if not isinstance(result, dict):
+        return False
+    return result.get("success") is False or result.get("ok") is False or bool(result.get("error"))
+
+
 def _is_blocked_import_path(path: Path) -> bool:
     name = path.name.lower()
     if name in _BLOCKED_IMPORT_NAMES:
@@ -576,10 +590,71 @@ class DKGClient:
             payload["subGraphName"] = sub_graph_name
         return self._post("/api/shared-memory/write", payload)
 
+    def publish_one_root(self, context_graph_id: str, root_entity: str,
+                         clear_after: bool,
+                         sub_graph_name: Optional[str] = None,
+                         publish_epochs: Optional[int] = None) -> Dict[str, Any]:
+        """POST /api/shared-memory/publish for a SINGLE root entity.
+
+        Fork-2 of the legacy SWM-bridge is single-root-only: a request whose
+        ``selection`` resolves to more than one root is rejected with
+        ``409 MULTI_ROOT_PUBLISH_NOT_ATOMIC`` (``memory.ts:1864-1872``). Callers
+        with multiple roots must loop over this helper one root per call (see
+        ``publish`` below and CONTRACT §3).
+        """
+        payload: Dict[str, Any] = {
+            "contextGraphId": _normalize_context_graph_id(context_graph_id),
+            "selection": [root_entity],
+            "clearAfter": clear_after,
+        }
+        if sub_graph_name:
+            payload["subGraphName"] = sub_graph_name
+        if publish_epochs is not None:
+            payload["publishEpochs"] = publish_epochs
+        return self._post("/api/shared-memory/publish", payload)
+
     def publish(self, context_graph_id: str, selection: Any = "all",
                 clear_after: bool = True,
-                sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
-        """POST /api/shared-memory/publish — publish SWM to Verifiable Memory (costs TRAC)."""
+                sub_graph_name: Optional[str] = None,
+                publish_epochs: Optional[int] = None) -> Dict[str, Any]:
+        """POST /api/shared-memory/publish — publish SWM to Verifiable Memory (costs TRAC).
+
+        The legacy SWM-bridge (Fork-2) is single-root-only. When ``selection`` is
+        an explicit list of root entities, partition it into ONE publish call per
+        root, passing ``clearAfter=False`` on all but the last call so unpublished
+        roots are not dropped from SWM mid-loop (CONTRACT §3). A multi-root
+        ``selection="all"`` would otherwise 409 with MULTI_ROOT_PUBLISH_NOT_ATOMIC.
+
+        ``selection="all"`` is forwarded as-is: the daemon resolves the roots
+        server-side and 409s if more than one is publishable, so callers that may
+        hold multiple roots should pass an explicit list (see ``_handle_publish``).
+        """
+        if isinstance(selection, list):
+            roots = [str(r).strip() for r in selection if str(r).strip()]
+            if not roots:
+                return {"success": False, "error": "No root entities to publish."}
+            if len(roots) == 1:
+                return self.publish_one_root(
+                    context_graph_id, roots[0], clear_after=clear_after,
+                    sub_graph_name=sub_graph_name, publish_epochs=publish_epochs)
+            published: List[Dict[str, Any]] = []
+            last = len(roots) - 1
+            for index, root in enumerate(roots):
+                result = self.publish_one_root(
+                    context_graph_id, root,
+                    clear_after=(clear_after and index == last),
+                    sub_graph_name=sub_graph_name, publish_epochs=publish_epochs)
+                if _client_result_failed(result):
+                    failure = dict(result) if isinstance(result, dict) else {"error": str(result)}
+                    failure["success"] = False
+                    failure["published"] = published
+                    failure["failedRoot"] = root
+                    return failure
+                published.append({
+                    "rootEntity": root,
+                    **(result if isinstance(result, dict) else {"result": result}),
+                })
+            return {"success": True, "published": published, "rootEntities": roots}
         payload: Dict[str, Any] = {
             "contextGraphId": _normalize_context_graph_id(context_graph_id),
             "selection": selection,
@@ -587,6 +662,8 @@ class DKGClient:
         }
         if sub_graph_name:
             payload["subGraphName"] = sub_graph_name
+        if publish_epochs is not None:
+            payload["publishEpochs"] = publish_epochs
         return self._post("/api/shared-memory/publish", payload)
 
     # -- Context Graphs --------------------------------------------------------
