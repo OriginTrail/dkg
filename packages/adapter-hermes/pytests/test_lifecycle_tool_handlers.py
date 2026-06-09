@@ -308,6 +308,39 @@ def test_validate_int_arg_rejects_fractional_and_truncation(plugin_module):
     assert v(None, "x", minimum=1) == (None, None)
 
 
+# -- #2805: a present blank/whitespace string is invalid, not omitted ---------
+
+def test_validate_int_arg_rejects_blank_string(plugin_module):
+    v = plugin_module._validate_int_arg
+    # present but blank/whitespace -> error (NOT silently omitted as a default)
+    assert v("", "x", minimum=1)[0] is None and v("", "x", minimum=1)[1]
+    assert v("   ", "x", minimum=1)[0] is None and v("   ", "x", minimum=1)[1]
+    assert v("\t", "x", minimum=1)[1]
+    # truly absent still omits without error
+    assert v(None, "x", minimum=1) == (None, None)
+
+
+def test_publish_handler_rejects_blank_epochs_and_override(provider):
+    for blank in ["", "   "]:
+        before = len(provider._client.calls)
+        out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
+            "context_graph_id": "cg1", "name": "ka", "publish_epochs": blank,
+        }))
+        assert "publish_epochs" in out["error"], (blank, out)
+        assert len(provider._client.calls) == before, blank
+    out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka", "publisher_node_identity_id_override": "  ",
+    }))
+    assert "publisher_node_identity_id_override" in out["error"]
+
+
+def test_finalize_handler_rejects_blank_scheme_version(provider):
+    out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_finalize", {
+        "context_graph_id": "cg1", "name": "ka", "scheme_version": "",
+    }))
+    assert "scheme_version" in out["error"]
+
+
 # -- D: clear-after dropped from the per-asset publish tool
 
 def test_publish_schema_has_no_clear_after(provider):

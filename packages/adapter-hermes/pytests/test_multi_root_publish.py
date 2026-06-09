@@ -148,3 +148,56 @@ def test_all_duplicate_roots_collapse_to_single_call(recording_client):
     _, body = client.posts[0]
     assert body["selection"] == ["z"]
     assert body["clearAfter"] is True
+
+
+# -- #1750: dkg_publish publishes the EXPLICIT roots it wrote, never "all" ----
+
+class _PublishProbe:
+    """Minimal fake client for _handle_publish: records the share + publish args."""
+
+    def __init__(self):
+        self.published = None
+
+    def share(self, context_graph_id, quads, sub_graph_name=None):
+        return {"success": True}
+
+    def publish(self, context_graph_id, selection="all", clear_after=True,
+                sub_graph_name=None, publish_epochs=None):
+        self.published = {"contextGraphId": context_graph_id, "selection": selection,
+                          "clearAfter": clear_after}
+        return {"success": True}
+
+
+def _publish_provider(plugin_module):
+    p = plugin_module.DKGMemoryProvider()
+    p._offline = False
+    p._config = {"publish_tool": "direct", "allow_direct_publish": True}
+    p._client = _PublishProbe()
+    return p
+
+
+def test_handle_publish_single_root_uses_explicit_list_not_all(plugin_module):
+    import json
+    p = _publish_provider(plugin_module)
+    json.loads(p.handle_tool_call("dkg_publish", {
+        "context_graph_id": "cg:test",
+        "quads": [
+            {"subject": "urn:root:solo", "predicate": "urn:p", "object": "one"},
+            {"subject": "urn:root:solo", "predicate": "urn:p2", "object": "two"},
+        ],
+    }))
+    # NOT "all" — only the root this call wrote (Codex #1750).
+    assert p._client.published["selection"] == ["urn:root:solo"]
+
+
+def test_handle_publish_multi_root_uses_explicit_list(plugin_module):
+    import json
+    p = _publish_provider(plugin_module)
+    json.loads(p.handle_tool_call("dkg_publish", {
+        "context_graph_id": "cg:test",
+        "quads": [
+            {"subject": "urn:root:1", "predicate": "urn:p", "object": "x"},
+            {"subject": "urn:root:2", "predicate": "urn:p", "object": "y"},
+        ],
+    }))
+    assert p._client.published["selection"] == ["urn:root:1", "urn:root:2"]
