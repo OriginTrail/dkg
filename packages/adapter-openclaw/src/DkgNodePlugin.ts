@@ -2760,8 +2760,33 @@ export class DkgNodePlugin {
         : undefined;
 
       const result = await this.publisher.publishVerifiableMemory({ contextGraphId, quads: rawQuads });
-      const summary = { kaId: result.kaId, kaCount: result.kas?.length ?? 0, quadsPublished: rawQuads.length };
-      return this.json(registration ? { ...summary, registration } : summary);
+      const summary: Record<string, unknown> = {
+        kaId: result.kaId,
+        kaCount: result.kas?.length ?? 0,
+        quadsPublished: rawQuads.length,
+      };
+      if (result.ual !== undefined) summary.ual = result.ual;
+      if (registration) summary.registration = registration;
+
+      // FIX E — the dkg_publish path publishes via POST /api/shared-memory/publish
+      // {assertionName}, which (like vm/publish) returns HTTP 207 with
+      // `contextGraphError` set when the KA minted on-chain but the context-graph
+      // binding FAILED (memory.ts:1772). `this.post` treats 207 as success, so
+      // without this the partial reads as clean success. The UAL/kaId are valid
+      // (the asset IS on-chain) — surface a PARTIAL/warning so the agent can retry
+      // the CG bind, mirroring handleAssertionPublish.
+      const contextGraphError = (result as Record<string, unknown>).contextGraphError;
+      if (typeof contextGraphError === 'string' && contextGraphError.length > 0) {
+        return this.json({
+          ...summary,
+          partial: true,
+          warning:
+            'Partial publish: the asset was minted on-chain (UAL/kaId are valid), but the context-graph ' +
+            `binding failed (${contextGraphError}). The on-chain asset is published; retry dkg_publish to ` +
+            're-attempt the context-graph binding.',
+        });
+      }
+      return this.json(summary);
     } catch (err: any) {
       return this.daemonError(err);
     }

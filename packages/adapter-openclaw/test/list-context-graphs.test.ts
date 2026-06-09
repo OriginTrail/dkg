@@ -421,6 +421,45 @@ describe('dkg_publish tool', () => {
     expect(ft.calls).toHaveLength(2);
     expect(String(ft.calls[1][0])).toContain('/api/shared-memory/publish');
   });
+
+  // ── FIX E — publish returns 207 contextGraphError → surface partial/warning ──
+  it('surfaces a 207 partial (minted on-chain, CG bind failed) as a WARNING, not plain success', async () => {
+    ft.addResponses(
+      new Response(JSON.stringify({ assertionUri: 'urn:assertion:z', status: 'swm-shared' }), { status: 201 }), // create OK
+      // publish → 207 body: minted (ual/kaId valid) but the CG binding failed.
+      new Response(
+        JSON.stringify({ kaId: 'kc-z', ual: 'did:dkg:1/0xauthor/9', status: 'confirmed', contextGraphError: 'context-graph binding timed out' }),
+        { status: 207, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+    const tool = findTool('dkg_publish');
+    const result = await tool.execute('call-207p', {
+      context_graph_id: 'testing',
+      quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'hello' }],
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.partial).toBe(true);
+    expect(parsed.kaId).toBe('kc-z');          // minted — kaId valid
+    expect(parsed.ual).toBe('did:dkg:1/0xauthor/9'); // UAL valid
+    expect(String(parsed.warning)).toContain('context-graph binding timed out');
+    expect(String(parsed.warning)).toMatch(/retry/i);
+  });
+
+  it('reports plain success on a 200 publish (no contextGraphError)', async () => {
+    ft.addResponses(
+      new Response(JSON.stringify({ assertionUri: 'urn:assertion:ok', status: 'swm-shared' }), { status: 201 }),
+      new Response(JSON.stringify({ kaId: 'kc-ok', ual: 'did:dkg:1/0xauthor/10', kas: [{ tokenId: '1', rootEntity: 'urn:a' }] }), { status: 200 }),
+    );
+    const tool = findTool('dkg_publish');
+    const result = await tool.execute('call-200', {
+      context_graph_id: 'testing',
+      quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'hello' }],
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed).not.toHaveProperty('partial');
+    expect(parsed).not.toHaveProperty('warning');
+    expect(parsed.kaId).toBe('kc-ok');
+  });
 });
 
 describe('dkg_query tool', () => {
