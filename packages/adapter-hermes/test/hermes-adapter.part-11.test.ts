@@ -267,7 +267,7 @@ class ReadMarkdownClient:
         return {"ok": True}
 
 provider._client = ReadMarkdownClient()
-result = json.loads(provider.handle_tool_call("dkg_import_artifact_read_markdown", {
+result = json.loads(provider.handle_tool_call("dkg_knowledge_asset_import_artifact_read_markdown", {
     "context_graph_id": "cg:test",
     "assertion_uri": "did:dkg:context-graph:cg:test/assertion/agent/imported",
     "max_bytes": "4096",
@@ -276,7 +276,7 @@ assert result["ok"] is True, result
 assert provider._client.calls[-1][1]["max_bytes"] == 4096, provider._client.calls
 
 for bad_max_bytes in [0, -1, 1.5, True, "   "]:
-    result = json.loads(provider.handle_tool_call("dkg_import_artifact_read_markdown", {
+    result = json.loads(provider.handle_tool_call("dkg_knowledge_asset_import_artifact_read_markdown", {
         "context_graph_id": "cg:test",
         "assertion_uri": "did:dkg:context-graph:cg:test/assertion/agent/imported",
         "max_bytes": bad_max_bytes,
@@ -312,7 +312,7 @@ class SemanticClient:
         return {"ok": True}
 
 provider._client = SemanticClient()
-result = json.loads(provider.handle_tool_call("dkg_semantic_enrichment_write", {
+result = json.loads(provider.handle_tool_call("dkg_knowledge_asset_semantic_enrichment_write", {
     "context_graph_id": "cg:test",
     "assertion_uri": "did:dkg:context-graph:cg:test/assertion/agent/imported",
     "semantic_quads": [
@@ -329,7 +329,7 @@ assert provider._client.calls[-1][1] == [
 ], provider._client.calls
 assert "name" not in provider._client.calls[-1][2], provider._client.calls
 
-name_result = json.loads(provider.handle_tool_call("dkg_semantic_enrichment_write", {
+name_result = json.loads(provider.handle_tool_call("dkg_knowledge_asset_semantic_enrichment_write", {
     "context_graph_id": "cg:test",
     "assertion_uri": "did:dkg:context-graph:cg:test/assertion/agent/imported",
     "semanticAssertionName": "semantic-imported",
@@ -339,7 +339,7 @@ name_result = json.loads(provider.handle_tool_call("dkg_semantic_enrichment_writ
 }))
 assert "target assertion names are not supported" in name_result["error"], name_result
 
-graph_result = json.loads(provider.handle_tool_call("dkg_semantic_enrichment_write", {
+graph_result = json.loads(provider.handle_tool_call("dkg_knowledge_asset_semantic_enrichment_write", {
     "context_graph_id": "cg:test",
     "assertion_uri": "did:dkg:context-graph:cg:test/assertion/agent/imported",
     "semantic_quads": [

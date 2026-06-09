@@ -383,9 +383,9 @@ expected_default = [
     "dkg_knowledge_asset_query",
     "dkg_knowledge_asset_share",
     "dkg_knowledge_asset_write",
-    "dkg_import_artifact_read_markdown",
-    "dkg_import_artifact_resolve",
-    "dkg_semantic_enrichment_write",
+    "dkg_knowledge_asset_import_artifact_read_markdown",
+    "dkg_knowledge_asset_import_artifact_resolve",
+    "dkg_knowledge_asset_semantic_enrichment_write",
     "dkg_context_graph_create",
     "dkg_context_graph_invite",
     "dkg_find_agents",
@@ -429,11 +429,11 @@ assert "sub_graph_name" in share_schema["parameters"]["properties"], share_schem
 assert share_schema["parameters"]["required"] == ["content", "context_graph_id"], share_schema
 missing_cg = provider.handle_tool_call("dkg_share", {"content": "alpha"})
 assert "context_graph_id is required" in missing_cg, missing_cg
-semantic_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_semantic_enrichment_write")
+semantic_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_knowledge_asset_semantic_enrichment_write")
 assert "name" not in semantic_schema["parameters"]["properties"], semantic_schema
 assert "Append model-derived triples" in semantic_schema["description"], semantic_schema
 assert "separate Working Memory assertion" not in semantic_schema["description"], semantic_schema
-resolver_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_import_artifact_resolve")
+resolver_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_knowledge_asset_import_artifact_resolve")
 assert "Optional validation/debug helper" in resolver_schema["description"], resolver_schema
 
 provider._config = {

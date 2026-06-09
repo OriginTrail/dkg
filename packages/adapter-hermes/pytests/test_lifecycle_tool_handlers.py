@@ -19,6 +19,12 @@ LEGACY_NAMES = [
     "dkg_assertion_query",
     "dkg_assertion_history",
     "dkg_assertion_import_file",
+    # B-H1: the import-artifact + semantic-enrichment trio renamed to the full
+    # dkg_knowledge_asset_* family for parity with OpenClaw (PR1) + MCP (PR2) +
+    # CONTRACT section 2. Guard against any regression to the old short names.
+    "dkg_import_artifact_resolve",
+    "dkg_import_artifact_read_markdown",
+    "dkg_semantic_enrichment_write",
 ]
 
 
