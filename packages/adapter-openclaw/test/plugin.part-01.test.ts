@@ -110,6 +110,23 @@ describe("DkgNodePlugin", () => {
     });
 
 
+    it('dkg_knowledge_asset_finalize rejects a zero/negative scheme_version (CONTRACT §C — must be >= 1)', async () => {
+      // The daemon rule is Number.isInteger && >= 1, so `0` (and negatives) are
+      // present-but-invalid and must be a tool error, never silent-dropped.
+      const { fetchMock, byName } = setupPluginWithFetch({});
+      for (const bad of [0, -1]) {
+        fetchMock.mockClear();
+        const res = await byName.get('dkg_knowledge_asset_finalize')!.execute('tc', {
+          context_graph_id: 'ctx',
+          name: 'notes',
+          scheme_version: bad,
+        });
+        expect(fetchMock, `scheme_version: ${bad}`).not.toHaveBeenCalled();
+        expect(res.details?.error).toMatch(/scheme_version.*positive integer/);
+      }
+    });
+
+
     it('dkg_knowledge_asset_publish POSTs to /vm/publish with options nested and NO author/selection overrides', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ ual: 'did:dkg:1/0xauthor/7', kaId: 'kc-1', status: 'confirmed' });
       const res = await byName.get('dkg_knowledge_asset_publish')!.execute('tc', {
@@ -156,6 +173,20 @@ describe("DkgNodePlugin", () => {
         context_graph_id: 'ctx',
         name: 'notes',
         publish_epochs: 0,
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(res.details?.error).toMatch(/publish_epochs.*positive integer/);
+    });
+
+
+    it('dkg_knowledge_asset_publish rejects a non-numeric publish_epochs (CONTRACT §C)', async () => {
+      // A present-but-non-numeric string (Number("x") → NaN) is invalid and must
+      // be a tool error, not silently dropped.
+      const { fetchMock, byName } = setupPluginWithFetch({});
+      const res = await byName.get('dkg_knowledge_asset_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        publish_epochs: 'x',
       });
       expect(fetchMock).not.toHaveBeenCalled();
       expect(res.details?.error).toMatch(/publish_epochs.*positive integer/);
