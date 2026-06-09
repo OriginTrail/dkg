@@ -53,7 +53,7 @@ dkg_knowledge_asset_write({
 });
 dkg_knowledge_asset_share({
   name: `turn-anno-${sessionKey}-${N}`,
-  entities: [turnUri, ...everyMintedRootUri], // see Query gotcha (3) below
+  entities: "all", // full share — preferred; pass an explicit array only for a subset (see Query gotcha (3))
 });
 ```
 
@@ -139,7 +139,7 @@ Things that consistently bite agents writing SPARQL via `dkg_query`:
 - Scoped query: omit `view`, pass `subGraphName: "<name>"` (legacy data-path query — works fine).
 - Cross-subgraph view: pass `view: "shared-working-memory"` alone, then filter in SPARQL via `GRAPH <did:dkg:context-graph:<cg>/<sub>/_shared_memory> { ... }`.
 
-**(3) `dkg_knowledge_asset_share` needs an explicit array via MCP.** The MCP rejects `entities: "all"` (must be array) and the daemon REST rejects empty arrays. Pass the explicit list of every root URI you minted — the turn URI plus every Decision/Finding/Task/file URI. Missing entries stay in WM, invisible to peers.
+**(3) `dkg_knowledge_asset_share`: prefer `entities: "all"` for a full share.** The MCP now **accepts** `entities: "all"` (or omit `entities` entirely) to share the WHOLE assertion — prefer that over enumerating an explicit array. A large explicit array can hit the share body-size limits for big assets; `"all"` cannot. Pass an **explicit array only for a selective subset** of roots — and note (CONTRACT §5) a subset share is SWM-only and is **NOT** VM-publishable as a subset: to publish on-chain, share the full set (or `"all"`). The daemon REST still rejects an **empty** array, so never send `[]` — use `"all"` / omit for "everything". Roots you leave out of a subset share stay in WM, invisible to peers.
 
 **(4) `code:` URI segments are percent-encoded.** Files like `gnosis+base wallets.zip` or `@scope/pkg` would break IRI parsing. The scanner applies `encodeURIComponent` per path segment. When constructing a file URI by hand, do the same: `urn:dkg:code:file:<owner>/<name>/${pathSegments.map(encodeURIComponent).join('/')}`.
 
@@ -160,7 +160,7 @@ Things that consistently bite agents writing SPARQL via `dkg_query`:
 2. dkg_memory_search "<label>" → reuse or mint URIs.
 3. dkg_knowledge_asset_create({ name: turn-anno-<sessionKey>-<N>, subGraphName: <route> }).
 4. dkg_knowledge_asset_write({ name, quads: [topics, mentions, durable artifacts, code-refs] }).
-5. dkg_knowledge_asset_share({ name, entities: [<turn-uri>, ...every-minted-root-uri] }).
+5. dkg_knowledge_asset_share({ name, entities: "all" }).  // full share; explicit array only for a subset (gotcha 3)
 ```
 
 That's it. The graph grows; teammates' agents see your work via auto-recall; humans ratify on-chain when worthwhile.
