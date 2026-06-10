@@ -114,7 +114,7 @@ Open to anyone — independent researchers, audit firms, AI-augmented teams. No 
 
 ## Codebase
 
-Code under audit: [`packages/evm-module` @ `1f4fa01b`](https://github.com/OriginTrail/dkg/tree/1f4fa01b41c689d641943a59b2bc3d7336ba2f1e/packages/evm-module)
+Code under audit: [packages/evm-module @ 36d9daeb](https://github.com/OriginTrail/dkg/tree/36d9daebee47ea0886a13e0d3b587f9ba512dc45/packages/evm-module)
 
 Commit **`36d9daebee47ea0886a13e0d3b587f9ba512dc45`** (OriginTrail/dkg `main`, 2026-06-10) — the frozen RC the honeypot is deployed from.\
 \
