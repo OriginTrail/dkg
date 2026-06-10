@@ -323,6 +323,11 @@ def test_publish_quads_create_failure_short_circuits(recording_client):
     assert "boom" in result["error"]
     assert result["assertionName"] in result["error"]
     assert "before recreating" in result["error"]
+    # FIX Y (#1076:1047): a created asset is auto-shared to SWM (WM draft empty), so
+    # recovery must point at dkg_knowledge_asset_history (lifecycle state, any layer)
+    # and NOT dkg_knowledge_asset_query (the WM-draft reader, which would read 0).
+    assert "dkg_knowledge_asset_history" in result["error"]
+    assert "not dkg_knowledge_asset_query" in result["error"]
     # publish was never attempted
     assert [p for p, _ in client.posts] == ["/api/knowledge-assets"]
 

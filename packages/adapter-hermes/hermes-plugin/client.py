@@ -761,8 +761,10 @@ class DKGClient:
                 f"Creating knowledge asset '{assertion_name}'{sub_graph_hint} failed ({base_error}). "
                 f"It most likely was NOT created, but if the daemon response was lost the asset may "
                 f"exist under this assertionName -- first check/recover by name with "
-                f"dkg_knowledge_asset_history or dkg_knowledge_asset_query (this assertionName and "
-                f"sub_graph_name) before recreating, to avoid orphaning a created asset."
+                f"dkg_knowledge_asset_history (this assertionName and sub_graph_name) before "
+                f"recreating, to avoid orphaning a created asset. NOTE: a created asset is "
+                f"auto-shared to SWM (its working-memory draft is empty), so use _history (lifecycle "
+                f"state regardless of layer) for existence, not dkg_knowledge_asset_query (Codex #1076:1047)."
             )
             return failure
         # The create route returns HTTP 207 { created:true, ..., errors:[{phase,
