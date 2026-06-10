@@ -181,9 +181,25 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     expect(second.content[0].text).toMatch(/already exists/);
   });
 
-  it('rejects bad assertion-name slugs at the schema layer (zod regex)', async () => {
+  it('create accepts any valid (IRI-safe) assertion name, not just a lowercase-hyphen slug (FIX P)', async () => {
+    // The daemon's real rule (validateAssertionName) accepts mixed-case, dots,
+    // and underscores — the old /^[a-z0-9-]+$/ slug regex was artificially strict.
+    for (const name of ['My_Asset.v2', 'Session2026', 'urn-ish_NAME.1']) {
+      const res = await server.call('dkg_knowledge_asset_create', { name });
+      expect(res.isError).toBeFalsy();
+    }
+  });
+
+  it('create rejects IRI-unsafe assertion names at the schema layer (FIX P)', async () => {
+    // Whitespace, "/", and >256 chars are rejected (validateAssertionName).
     await expect(
       server.call('dkg_knowledge_asset_create', { name: 'Invalid Name With Spaces' }),
+    ).rejects.toThrow();
+    await expect(
+      server.call('dkg_knowledge_asset_create', { name: 'has/slash' }),
+    ).rejects.toThrow();
+    await expect(
+      server.call('dkg_knowledge_asset_create', { name: 'a'.repeat(257) }),
     ).rejects.toThrow();
   });
 

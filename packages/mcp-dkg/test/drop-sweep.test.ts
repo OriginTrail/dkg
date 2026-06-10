@@ -14,9 +14,10 @@
  *    Discipline mirrors §0.8 fixture 4 ("the cheap blanket guard"). Single
  *    array of names, single forEach assertion, one test.
  *
- * 2. **Read-side regex-scope guard** — per matrix v0.5 §4.16 alignment
- *    paragraph, the `/^[a-z0-9-]+$/` regex on the assertion `name` argument
- *    is creator-side input validation only. Read-side / lookup-side tools
+ * 2. **Read-side name-scope guard** — the create-side assertion-`name`
+ *    validation (`validateAssertionName` — IRI-safe, ≤256 chars; FIX P aligned
+ *    it to the daemon rule and dropped the old `/^[a-z0-9-]+$/` slug regex) is
+ *    creator-side input validation only. Read-side / lookup-side tools
  *    (`dkg_knowledge_asset_write / share / finalize / publish / pull_from /
  *    discard / query` + `_history` + `_import_file`) MUST NOT inherit it —
  *    they look up assets that may have been minted by other agents whose
@@ -116,10 +117,9 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
 });
 
 /**
- * Regex-scope guard. Production source (matrix v0.5 §4.16 alignment paragraph)
- * documents that the slug regex applies ONLY to `dkg_knowledge_asset_create`'s
- * `name` arg. Every other tool that takes a `name` argument must accept
- * richer strings.
+ * Name-scope guard. The create-side `name` validation (`validateAssertionName`,
+ * FIX P) applies ONLY to `dkg_knowledge_asset_create`'s `name` arg. Every other
+ * tool that takes a `name` argument must accept richer strings.
  *
  * Test strategy: try a deliberately non-conforming name on each read-side
  * tool. The schema MUST NOT reject it (no -32602 / no zod throw at the
@@ -158,11 +158,11 @@ describe('regex-scope guard — read-side `name` arg accepts non-conforming slug
     await expect(server.call(toolName, args)).resolves.toBeDefined();
   });
 
-  // Positive control: dkg_knowledge_asset_create DOES enforce the regex (per
-  // assertion-lifecycle.test.ts:81). Re-asserting here so the asymmetry is
-  // visible in this file alone — a reviewer reading just `drop-sweep.test.ts`
-  // can see why the read-side test exists.
-  it('positive control: dkg_knowledge_asset_create rejects non-slug `name` (regex IS enforced creator-side)', async () => {
+  // Positive control: dkg_knowledge_asset_create DOES validate the name
+  // (validateAssertionName — rejects IRI-unsafe names like one with spaces).
+  // Re-asserting here so the asymmetry is visible in this file alone — a reviewer
+  // reading just `drop-sweep.test.ts` can see why the read-side test exists.
+  it('positive control: dkg_knowledge_asset_create rejects an IRI-unsafe `name` (validated creator-side)', async () => {
     await expect(
       server.call('dkg_knowledge_asset_create', { name: 'Bad Name With Spaces' }),
     ).rejects.toThrow();

@@ -34,6 +34,21 @@ const errResult = (text: string): ToolResult => ({
 const formatError = (e: unknown): string =>
   e instanceof Error ? e.message : String(e);
 
+/**
+ * The daemon's real assertion-name rule, replicated verbatim from
+ * `@origintrail-official/dkg-core` `validateAssertionName`
+ * (core/src/constants.ts:346-352). MCP does not depend on dkg-core, so the rule
+ * is inlined here (and on Hermes) rather than imported. Any IRI-safe name up to
+ * 256 chars — NOT a lowercase-hyphen slug. Keep in sync with the core source.
+ */
+function validateAssertionName(name: string): { valid: boolean; reason?: string } {
+  if (!name || name.length === 0) return { valid: false, reason: 'Assertion name cannot be empty' };
+  if (name.includes('/')) return { valid: false, reason: 'Assertion name cannot contain "/"' };
+  if (/[<>"{}|^`\\\s]/.test(name)) return { valid: false, reason: 'Assertion name contains characters unsafe for IRIs' };
+  if (name.length > 256) return { valid: false, reason: 'Assertion name exceeds 256 characters' };
+  return { valid: true };
+}
+
 function resolveProject(
   explicit: string | undefined,
   config: DkgConfig,
@@ -59,13 +74,16 @@ export function registerAssertionTools(
       description:
         'Step 1 of the canonical write flow (create → write → finalize → share → publish): ' +
         'create an empty Working Memory draft for a knowledge asset. Idempotent — ' +
-        'duplicate names land as `alreadyExists: true` rather than throwing. Slug must match ' +
-        '/^[a-z0-9-]+$/ for new names; pre-existing assets accept any name.',
+        'duplicate names land as `alreadyExists: true` rather than throwing. Accepts any ' +
+        'valid assertion name: an IRI-safe name up to 256 chars (no "/", no whitespace, no ' +
+        '<>"{}|^`\\ characters) — NOT restricted to a lowercase-hyphen slug.',
       inputSchema: {
         name: z
           .string()
-          .regex(/^[a-z0-9-]+$/, 'Assertion name must be lowercase a-z, 0-9, or hyphen')
-          .describe('Assertion name slug (e.g. "session-2026-04-30")'),
+          .refine((n) => validateAssertionName(n).valid, (n) => ({
+            message: validateAssertionName(n).reason ?? 'Invalid assertion name',
+          }))
+          .describe('Assertion name. Any IRI-safe name up to 256 chars (e.g. "session-2026-04-30", "My_Asset.v2") — no "/", whitespace, or <>"{}|^`\\ characters.'),
         projectId: z
           .string()
           .optional()
