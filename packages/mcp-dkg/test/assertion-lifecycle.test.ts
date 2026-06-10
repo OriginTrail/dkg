@@ -241,6 +241,26 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     expect(captured.entities).toBe('all');
   });
 
+  it('share trims whitespace from each entity URI before forwarding (FIX K)', async () => {
+    const captured: Record<string, unknown> = {};
+    const localClient = new FakeClient({
+      knowledgeAssetShare: async (args) => {
+        Object.assign(captured, args);
+        return { swmShared: true, promotedCount: 2 };
+      },
+    });
+    const localServer = new FakeServer();
+    registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+
+    const res = await localServer.call('dkg_knowledge_asset_share', {
+      name: 'doc',
+      entities: [' urn:root-1 ', '\turn:root-2\n'],
+    });
+    expect(res.isError).toBeFalsy();
+    // A whitespace-padded entity must reach the daemon trimmed (else wrong root).
+    expect(captured.entities).toEqual(['urn:root-1', 'urn:root-2']);
+  });
+
   it('discard marks the assertion discarded; subsequent writes fail', async () => {
     await server.call('dkg_knowledge_asset_create', { name: 'rollback' });
     await server.call('dkg_knowledge_asset_discard', { name: 'rollback' });

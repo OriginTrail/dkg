@@ -310,6 +310,10 @@ export function registerAssertionTools(
           '"entities" must be omitted, the string "all", or a non-empty array of root entity URIs.',
         );
       }
+      // FIX K: trim each root-entity URI before forwarding — a whitespace-padded
+      // entity (" urn:a ") would otherwise reach the daemon with the spaces and
+      // resolve to the wrong (or no) root. Parity with Hermes.
+      const trimmedEntities = Array.isArray(entities) ? entities.map((e) => String(e).trim()) : entities;
       try {
         // WM → SWM. The KA `swm/share` route is the same engine call
         // (`agent.assertion.promote`) the legacy promote used; omit `entities`
@@ -318,7 +322,7 @@ export function registerAssertionTools(
           contextGraphId: pid,
           name,
           subGraphName,
-          entities,
+          entities: trimmedEntities,
         });
         const scope = Array.isArray(entities)
           ? `${entities.length} entit${entities.length === 1 ? 'y' : 'ies'}`
