@@ -471,10 +471,12 @@ assert result["success"] is True, result
 assert result["rootEntities"] == ["urn:root:1", "urn:root:2"], result
 # Multi-root publish passes the explicit root list (not "all") so the client
 # loops one root per call and avoids the 409 MULTI_ROOT_PUBLISH_NOT_ATOMIC
-# single-root guard on /api/shared-memory/publish.
+# single-root guard on /api/shared-memory/publish. clear_after MUST be False
+# (FIX M): clear_after=True wipes the whole SWM remainder, destroying other
+# calls'/agents' unpublished roots; dkg_publish only owns what it just wrote.
 assert provider._client.published == (
     "cg:test",
-    {"selection": ["urn:root:1", "urn:root:2"], "clear_after": True, "sub_graph_name": ""},
+    {"selection": ["urn:root:1", "urn:root:2"], "clear_after": False, "sub_graph_name": ""},
 ), provider._client.published
 
 # Single-subject dkg_publish publishes the EXPLICIT root it just wrote, never
@@ -489,9 +491,10 @@ result = json.loads(provider.handle_tool_call("dkg_publish", {
 }))
 assert result["success"] is True, result
 assert result["rootEntities"] == ["urn:root:solo"], result
+# clear_after MUST be False (FIX M) — never wipe the SWM remainder.
 assert provider._client.published == (
     "cg:test",
-    {"selection": ["urn:root:solo"], "clear_after": True, "sub_graph_name": ""},
+    {"selection": ["urn:root:solo"], "clear_after": False, "sub_graph_name": ""},
 ), provider._client.published
 `;
     const result = spawnSync('python', ['-B', '-c', script], {

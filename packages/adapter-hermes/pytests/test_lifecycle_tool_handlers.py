@@ -698,3 +698,94 @@ def test_new_handlers_require_context_graph_id(provider, tool):
         args["layer"] = "swm"
     out = json.loads(provider.handle_tool_call(tool, args))
     assert "context_graph_id is required" in out["error"]
+
+
+# -- FIX M/N (#1079): dkg_publish clear_after=False + counts only on success --
+
+class _SelectionPublishProbe:
+    """Fake client for the #1079 _handle_publish selection path."""
+
+    def __init__(self, publish_response):
+        self.publish_call = None
+        self.publish_response = publish_response
+
+    def share(self, context_graph_id, quads, sub_graph_name=None):
+        return {"success": True}
+
+    def publish(self, context_graph_id, selection="all", clear_after=True, sub_graph_name=None):
+        self.publish_call = {"selection": selection, "clear_after": clear_after}
+        return self.publish_response
+
+
+def _selection_publish_provider(plugin_module, publish_response):
+    p = plugin_module.DKGMemoryProvider()
+    p._offline = False
+    p._config = {"publish_tool": "direct", "allow_direct_publish": True}
+    p._client = _SelectionPublishProbe(publish_response)
+    return p
+
+
+_PUB_Q2 = [
+    {"subject": "urn:r1", "predicate": "urn:p", "object": "a"},
+    {"subject": "urn:r2", "predicate": "urn:p", "object": "b"},
+]
+
+
+def test_dkg_publish_passes_clear_after_false(plugin_module):
+    # FIX M (#1079:1781): clear_after=True would wipe the whole SWM remainder
+    # (deleteByPattern over the bucket, no subject filter) — dkg_publish only
+    # owns the roots it wrote, so it must pass clear_after=False.
+    p = _selection_publish_provider(plugin_module, {
+        "success": True, "partial": False,
+        "published": [{"rootEntity": "urn:r1"}], "rootEntities": ["urn:r1", "urn:r2"],
+    })
+    p.handle_tool_call("dkg_publish", {"context_graph_id": "cg", "quads": _PUB_Q2})
+    assert p._client.publish_call["clear_after"] is False
+    assert p._client.publish_call["selection"] == ["urn:r1", "urn:r2"]
+
+
+def test_dkg_publish_no_counts_on_hard_failure(plugin_module):
+    # FIX N (#1079:1784): quadsPublished/rootEntities must NOT be stamped on a
+    # partial-failure dict — that would falsely imply everything published.
+    p = _selection_publish_provider(plugin_module, {
+        "success": False, "partial": True, "failedRoot": "urn:r2",
+        "publishedRoots": ["urn:r1"], "error": "mint failed",
+    })
+    out = json.loads(p.handle_tool_call("dkg_publish", {"context_graph_id": "cg", "quads": _PUB_Q2}))
+    assert out["success"] is False
+    assert "quadsPublished" not in out
+    assert "rootEntities" not in out
+    assert out["failedRoot"] == "urn:r2"
+
+
+def test_dkg_publish_counts_on_success(plugin_module):
+    p = _selection_publish_provider(plugin_module, {"success": True, "partial": False})
+    out = json.loads(p.handle_tool_call("dkg_publish", {"context_graph_id": "cg", "quads": _PUB_Q2}))
+    assert out["quadsPublished"] == 2
+    assert out["rootEntities"] == ["urn:r1", "urn:r2"]
+
+
+def test_dkg_publish_counts_on_confirmed_raw_body(plugin_module):
+    # a single-root passthrough returns the raw daemon body (no success key) —
+    # that is a confirmed publish and should be annotated.
+    p = _selection_publish_provider(plugin_module, {"kaId": "k", "ual": "u", "status": "confirmed"})
+    out = json.loads(p.handle_tool_call("dkg_publish", {
+        "context_graph_id": "cg",
+        "quads": [{"subject": "urn:solo", "predicate": "urn:p", "object": "o"}],
+    }))
+    assert out["quadsPublished"] == 1
+    assert out["rootEntities"] == ["urn:solo"]
+
+
+# -- FIX P (#1077:63 parity): create name desc states the real validation ------
+
+def test_create_name_description_aligns_to_validation(provider):
+    create = next(s for s in provider.get_tool_schemas()
+                  if s["name"] == "dkg_knowledge_asset_create")
+    desc = create["parameters"]["properties"]["name"]["description"]
+    # no false slug claim; states the real validateAssertionName rule
+    assert "lowercase letters, digits, hyphens" not in desc
+    assert "/" in desc
+    assert "256" in desc
+    assert "IRI-unsafe" in desc
+    assert "reserved" in desc
