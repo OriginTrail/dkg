@@ -7,7 +7,7 @@ doc_type: concept
 
 # Knowledge Assets
 
-A Knowledge Asset is published graph data with provenance and integrity. It packages RDF statements so other nodes can verify who published them, what was published, and whether the content still matches its commitment.
+A Knowledge Asset is published graph data with provenance and integrity. It packages RDF statements so other nodes can verify who published them, what was published, and whether the content still matches its commitment. Each publish mints one Knowledge Asset — a single ERC-721 token — that can describe multiple related entities.
 
 ![Knowledge Assets](../.gitbook/assets/knowledge-assets.png)
 
@@ -20,9 +20,9 @@ Use Knowledge Assets when knowledge needs to survive beyond local or team memory
 
 Agents should not convert every note into a Knowledge Asset. Most work starts in Working Memory and becomes a Knowledge Asset only after it is worth finalizing.
 
-## Knowledge Collections and UALs
+## Knowledge Assets and UALs
 
-A Knowledge Collection groups one or more Knowledge Assets into a single publish operation. After publication, each durable asset can be addressed through a UAL.
+The Knowledge Asset is minted to its author as an ERC-721 token; the publisher pays the TRAC cost. After publication, the asset is addressed through a UAL of the form `did:dkg:{chainId}/{contract}/{kaId}`, where `kaId` is the ERC-721 token id. The UAL stays the same even when the asset's content is updated, so citations remain valid across revisions.
 
 Use the UAL when another workflow needs to cite, fetch, or verify published knowledge. Use the Context Graph when the workflow needs the larger scoped memory domain around that asset.
 

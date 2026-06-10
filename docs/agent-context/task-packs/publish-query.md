@@ -12,21 +12,24 @@ doc_type: playbook
 1. Create or select a Context Graph.
 2. Create a Working Memory assertion.
 3. Write RDF quads.
-4. Query the assertion to verify.
-5. Promote to Shared Working Memory when peers should see it.
-6. Publish to Verifiable Memory only with explicit finality intent.
+4. Finalize (seal) the assertion.
+5. Query the assertion to verify.
+6. Share to Shared Working Memory when peers should see it.
+7. Publish to Verifiable Memory only with explicit finality intent.
 
 Node Skill tools:
 
 - `dkg_context_graph_create`
-- `dkg_assertion_create`
-- `dkg_assertion_write`
-- `dkg_assertion_query`
-- `dkg_assertion_promote`
+- `dkg_knowledge_asset_create`
+- `dkg_knowledge_asset_write`
+- `dkg_knowledge_asset_finalize`
+- `dkg_knowledge_asset_query`
+- `dkg_knowledge_asset_share`
+- `dkg_knowledge_asset_publish`
 - `dkg_shared_memory_publish`
 
 ## Query path
 
-- Use `dkg_memory_search` for recall.
+- Use `memory_search` for recall (`dkg_memory_search` on the MCP runtime).
 - Use `dkg_query` for SPARQL.
 - Use `GRAPH ?g { ... }` for sub-graph-routed data.

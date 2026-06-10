@@ -7,7 +7,7 @@ doc_type: how-to
 
 # Using an external SPARQL store (Oxigraph server, etc.)
 
-The DKG node can use any **SPARQL 1.1 Protocol**–compliant store instead of the built-in in-memory store. That gives you:
+The DKG node can use any **SPARQL 1.1 Protocol**–compliant store you run yourself, instead of its default daemon-managed local Oxigraph server (or the embedded `oxigraph-worker` fallback). That gives you:
 
 - **Real on-disk persistence** (e.g. Oxigraph server with RocksDB)
 - **Larger graphs** without holding everything in the Node process
@@ -57,6 +57,10 @@ Optional:
 
 3. Start the DKG node as usual; it will use the remote store for all triples.
 
+{% hint style="info" %}
+For a local Oxigraph server you do **not** have to run it yourself: set `"store": { "backend": "oxigraph-server" }` (the `dkg init` default) and the daemon fetches the pinned `oxigraph` binary, spawns it on `127.0.0.1`, and supervises it. Use the manual `sparql-http` steps above only when you run Oxigraph (or another SPARQL store) yourself or off-host.
+{% endhint %}
+
 ### Other stores
 
 - **Blazegraph:** One URL for both query and update. Set only `queryEndpoint` or set both options to the same URL (e.g. `http://127.0.0.1:9999/blazegraph/namespace/kb/sparql`).
@@ -83,6 +87,8 @@ const agent = await DKGAgent.create({
 await agent.start();
 ```
 
-## Default when no store is set
+## Store defaults
 
-If you do **not** set `store` / `storeConfig`, the node uses **`oxigraph-worker`** with a file under `dataDir` (N-Quads dump). That is fine for development and small nodes; for production or large graphs, use `sparql-http` with an external store.
+New installs default to a **daemon-managed local Oxigraph server** (`store.backend: "oxigraph-server"`): `dkg init`, `dkg openclaw/hermes/mcp setup`, or accepting the wizard default writes this block. The daemon fetches the pinned `oxigraph` binary on first boot and runs it on loopback, giving MVCC concurrent reads and incremental RocksDB persistence.
+
+If a config has **no** `store` block at all, the runtime falls back to the embedded in-process **`oxigraph-worker`** (a single-writer store that rewrites its on-disk N-Quads dump under `dataDir` on every flush) — fine for development and small nodes. For very large graphs or existing infrastructure, use `sparql-http` with an external store.

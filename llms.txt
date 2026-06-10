@@ -5,6 +5,7 @@ Use these current V10 docs first:
 - docs/README.md
 - docs/getting-started/quickstart.md
 - docs/getting-started/dkg-v10-t-c.md
+- docs/active-now/dkg-v10-premainnet-bounty.md
 - docs/active-now/dkg-v10-bounty.md
 - docs/use-dkg/README.md
 - docs/use-dkg/publish-and-query.md

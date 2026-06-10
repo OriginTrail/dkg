@@ -8,6 +8,7 @@
 
 ## Active Now
 
+* [OriginTrail DKG V10 Pre-Mainnet Bug Bounty](active-now/dkg-v10-premainnet-bounty.md)
 * [DKG V10 Bounty Program](active-now/dkg-v10-bounty.md)
 
 ## How DKG Works

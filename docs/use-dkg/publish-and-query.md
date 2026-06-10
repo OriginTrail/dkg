@@ -13,7 +13,7 @@ The default DKG V10 write lifecycle is:
 Working Memory -> Shared Working Memory -> Verifiable Memory
 ```
 
-Use Working Memory first when an agent is drafting or iterating. Promote to Shared Working Memory when peers should see it. Publish to Verifiable Memory only when the knowledge needs durable on-chain finality, and the wallet has funds.
+Use Working Memory first when an agent is drafting or iterating. Share to Shared Working Memory when peers should see it. Publish to Verifiable Memory only when the knowledge needs durable on-chain finality, and the wallet has funds.
 
 ## CLI shape
 
@@ -30,30 +30,32 @@ Bare context-graph IDs are scoped by the daemon before use. After `create`, use 
 
 Use `dkg assertion promote notes -c "$CG"` when you want to stop at Shared Working Memory without publishing to Verifiable Memory.
 
-Use `dkg shared-memory publish "$CG" --name notes` for the high-level finalize → promote → publish path. Publishing to Verifiable Memory requires an on-chain context graph, so run `dkg context-graph register "$CG"` before the publish step unless the context graph was already registered.
+Use `dkg shared-memory publish "$CG" --name notes` for the high-level finalize → share → publish path. Publishing to Verifiable Memory requires an on-chain context graph, so run `dkg context-graph register "$CG"` before the publish step unless the context graph was already registered.
 
 ## Agent shape
 
-Agents should use the Node Skill as the operational contract:
+Agents should follow the Node Skill lifecycle (create → write → finalize → share → publish):
 
-* `dkg_assertion_create`
-* `dkg_assertion_write`
-* `dkg_assertion_query`
-* `dkg_assertion_promote`
-* `dkg_shared_memory_publish`
+* `dkg_knowledge_asset_create`
+* `dkg_knowledge_asset_write`
+* `dkg_knowledge_asset_finalize`
+* `dkg_knowledge_asset_query`
+* `dkg_knowledge_asset_share` (formerly `dkg_assertion_promote`)
+* `dkg_knowledge_asset_publish`
+* `dkg_shared_memory_publish` (legacy CG-wide SWM-bridge publish)
 
 Do not publish to Verifiable Memory just because data exists. Publishing spends gas/TRAC and should be an explicit finality choice.
 
 ## Query Knowledge
 
-Use `dkg_memory_search` for free-text recall and `dkg_query` for precise SPARQL.
+Use `memory_search` (`dkg_memory_search` on the MCP runtime) for free-text recall and `dkg_query` for precise SPARQL.
 
 ### Free-text Recall
 
 Use memory search when the user asks what the node remembers about a topic:
 
 ```
-dkg_memory_search({ query: "relay discovery", limit: 10 })
+memory_search({ query: "relay discovery", limit: 10 })
 ```
 
 Search ranks higher-trust memory above lower-trust memory:
