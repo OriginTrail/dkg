@@ -20,34 +20,34 @@ DKG V10 separates memory by scope and trust into three memory layers. Every piec
 The normal lifecycle is:
 
 ```
-create assertion -> write triples -> finalize (seal) -> share -> publish
+create Knowledge Asset -> write triples -> finalize (seal) -> share -> publish
 ```
 
 Finalize seals the draft with an EIP-712 author attestation over its merkle root. Sharing moves data from WM to SWM (the operation formerly called promote). Publishing finalizes selected SWM data into VM. Publishing is not a normal save operation; it is a finality operation.
 
 ## Memory lifecycle
 
-The assertion lifecycle is the write path agents should prefer.
+The Knowledge Asset lifecycle is the write path agents should prefer. (In the CLI and lifecycle records, a Knowledge Asset is still called an _assertion_ while it is a Working Memory draft — see `dkg assertion …` and the `dkg:Assertion` record.)
 
-1. Create an assertion in Working Memory.
-2. Write RDF quads into that assertion.
-3. Query the assertion to verify what was written.
-4. Finalize (seal) the assertion — this computes its canonical merkle root and signs an EIP-712 author attestation.
-5. Share the assertion to Shared Working Memory when peers should see it.
+1. Create a Knowledge Asset in Working Memory.
+2. Write RDF quads into that Knowledge Asset.
+3. Query the Knowledge Asset to verify what was written.
+4. Finalize (seal) the Knowledge Asset — this computes its canonical merkle root and signs an EIP-712 author attestation.
+5. Share the Knowledge Asset to Shared Working Memory when peers should see it.
 6. Publish SWM to Verifiable Memory when on-chain finality is required.
 7. Read lifecycle history for audit and recovery.
 
 Operational implications:
 
-* Assertion names should be stable, lowercase slugs.
-* Writes are additive; discard and recreate if a stable assertion needs replacement.
+* Knowledge Asset names should be stable, lowercase slugs.
+* Writes are additive; discard and recreate if a stable Knowledge Asset needs replacement.
 * Sharing may target all roots or an explicit set of root entities.
 * Publishing costs funds and clears/finalizes selected shared memory.
 * Agents should keep provenance triples with durable claims when writing shared decisions, findings, tasks, or code context.
 
 ## Example
 
-An autoresearch agent may write every experiment note to Working Memory. When the result is useful to the team, it shares the assertion to Shared Working Memory so peer agents can query it. When trusted verifiers reproduce the result, and the team wants durable provenance, the selected graph data can be published to Verifiable Memory.
+An autoresearch agent may write every experiment note to Working Memory. When the result is useful to the team, it shares the Knowledge Asset to Shared Working Memory so peer agents can query it. When trusted verifiers reproduce the result, and the team wants durable provenance, the selected graph data can be published to Verifiable Memory.
 
 That same flow is useful outside research:
 

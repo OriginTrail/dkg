@@ -30,8 +30,8 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9200/api/agent/identity
 
 - Verify the target Context Graph exists.
 - Verify the sub-graph exists before targeting it.
-- Query the assertion before sharing.
-- Finalize (seal) the assertion, then share it to SWM before publishing to VM (VM publish requires a finalized assertion present in SWM).
+- Query the Knowledge Asset before sharing.
+- Finalize (seal) the Knowledge Asset, then share it to SWM before publishing to VM (VM publish requires a finalized Knowledge Asset present in SWM).
 - Check wallet funding before on-chain finality.
 
 ## Agent integrations

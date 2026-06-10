@@ -10,10 +10,10 @@ doc_type: playbook
 ## Write path
 
 1. Create or select a Context Graph.
-2. Create a Working Memory assertion.
+2. Create a Working Memory Knowledge Asset.
 3. Write RDF quads.
-4. Finalize (seal) the assertion.
-5. Query the assertion to verify.
+4. Finalize (seal) the Knowledge Asset.
+5. Query the Knowledge Asset to verify.
 6. Share to Shared Working Memory when peers should see it.
 7. Publish to Verifiable Memory only with explicit finality intent.
 

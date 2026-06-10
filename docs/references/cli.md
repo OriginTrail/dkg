@@ -35,15 +35,15 @@ dkg context-graph request-join <id> <curatorPeerId>   # request to join a curate
 dkg context-graph sign-join <id>         # sign a join-request delegation locally without forwarding
 dkg context-graph approve-join <id>      # approve a pending join request
 
-# Assertions (Working Memory drafts)
+# Working Memory Knowledge Asset drafts (CLI namespace: dkg assertion)
 dkg assertion import-file <name> -f <file> -c <cg>   # import a document into WM
 dkg assertion extraction-status <name> -c <cg>       # check document extraction status
-dkg assertion query <name> -c <cg>                   # read assertion quads from WM
+dkg assertion query <name> -c <cg>                   # read the WM draft's quads
 dkg assertion promote <name> -c <cg>                 # WM → SWM (the share operation; CLI verb retained)
 
 # Shared memory (team-visible) and publishing
-dkg shared-memory write <cg> [--name <name>] ...   # stage triples into a named WM assertion (write-first; share + publish later)
-dkg shared-memory publish <cg> --name <name>   # finalize + share + publish a staged WM assertion → Verifiable Memory (costs TRAC)
+dkg shared-memory write <cg> [--name <name>] ...   # stage triples into a named WM Knowledge Asset draft (write-first; share + publish later)
+dkg shared-memory publish <cg> --name <name>   # finalize + share + publish a staged WM Knowledge Asset → Verifiable Memory (costs TRAC)
 dkg publish <cg> -f <file>               # one-shot RDF publish to a context graph
 dkg verify <batchId> --context-graph <cg> --verified-graph <id>  # propose M-of-N verification
 dkg endorse <ual> --context-graph <cg> [--agent <addr>]  # endorse a published KA as the authenticated agent (--agent only asserts the token's agent matches)
