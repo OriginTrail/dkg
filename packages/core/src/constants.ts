@@ -1,4 +1,5 @@
 import { MemoryLayer, memoryLayerSlug } from './memory-model.js';
+import { assertSafeIri } from './sparql-safe.js';
 
 // ── V10 Protocol Stream IDs ─────────────────────────────────────────────
 
@@ -237,7 +238,11 @@ export function contextGraphSharedMemoryUri(contextGraphId: string, subGraphName
  * @param graphVar SPARQL variable bound to the named graph (default `?g`)
  */
 export function sharedMemoryReadBothFilter(swmGraph: string, graphVar: string = "?g"): string {
-  return `FILTER(((STRSTARTS(STR(${graphVar}), "${swmGraph}/") && !STRSTARTS(STR(${graphVar}), "${swmGraph}/staging/")) || STR(${graphVar}) = "${swmGraph}"))`;
+  const safeSwmGraph = assertSafeIri(swmGraph);
+  if (!/^\?[A-Za-z_][A-Za-z0-9_]*$/.test(graphVar)) {
+    throw new Error(`Unsafe SPARQL graph variable: ${graphVar}`);
+  }
+  return `FILTER(((STRSTARTS(STR(${graphVar}), "${safeSwmGraph}/") && !STRSTARTS(STR(${graphVar}), "${safeSwmGraph}/staging/")) || STR(${graphVar}) = "${safeSwmGraph}"))`;
 }
 
 export function contextGraphSharedMemoryMetaUri(contextGraphId: string, subGraphName?: string): string {

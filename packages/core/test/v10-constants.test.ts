@@ -28,6 +28,7 @@ import {
   contextGraphPrivateUri,
   contextGraphSharedMemoryUri,
   contextGraphSharedMemoryMetaUri,
+  sharedMemoryReadBothFilter,
   contextGraphVerifiableMemoryUri,
   contextGraphVerifiableMemoryMetaUri,
   contextGraphAssertionUri,
@@ -141,6 +142,19 @@ describe('V10 named graph URIs', () => {
 
   it('shared memory URI', () => {
     expect(contextGraphSharedMemoryUri(id)).toBe('did:dkg:context-graph:42/_shared_memory');
+  });
+
+  it('shared memory read-both filter covers bucket and non-staging per-KA graphs', () => {
+    expect(sharedMemoryReadBothFilter(contextGraphSharedMemoryUri(id), '?graph')).toBe(
+      'FILTER(((STRSTARTS(STR(?graph), "did:dkg:context-graph:42/_shared_memory/") && !STRSTARTS(STR(?graph), "did:dkg:context-graph:42/_shared_memory/staging/")) || STR(?graph) = "did:dkg:context-graph:42/_shared_memory"))',
+    );
+  });
+
+  it('shared memory read-both filter rejects unsafe interpolation inputs', () => {
+    expect(() => sharedMemoryReadBothFilter('did:dkg:context-graph:42/_shared_memory" } UNION { ?s ?p ?o } #'))
+      .toThrow(/Unsafe or empty IRI value/);
+    expect(() => sharedMemoryReadBothFilter(contextGraphSharedMemoryUri(id), '?g) } UNION { ?s ?p ?o } #'))
+      .toThrow(/Unsafe SPARQL graph variable/);
   });
 
   it('shared memory meta URI', () => {
