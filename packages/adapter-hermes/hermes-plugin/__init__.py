@@ -767,10 +767,16 @@ DKG_ASSERTION_PUBLISH_SCHEMA = {
                     "If the context graph is not yet registered on-chain, register it first "
                     "(idempotent), then publish. Registration may spend gas/TRAC. Default false -- "
                     "when false and the CG is unregistered, publish fails with the daemon's "
-                    "not-registered error."
+                    "not-registered error. CAVEAT: this uses the explicit register route, which "
+                    "registers with the daemon's DEFAULT publishPolicy (derived from access_policy) "
+                    "and does NOT preserve a context graph's stored custom publishPolicy / "
+                    "contribution governance. For a CG created with a non-default publishPolicy/PCA, "
+                    "register it explicitly with the desired policy first rather than relying on "
+                    "register_if_needed. (Read access is unaffected; daemon-side rehydration tracked "
+                    "in OriginTrail/dkg#1085.)"
                 ),
             },
-            "access_policy": {"type": "integer", "description": "Optional registration access policy (0 open, 1 private). REQUIRES register_if_needed: true — it only applies when registering the context graph, and is rejected if sent without it."},
+            "access_policy": {"type": "integer", "description": "Optional registration access policy (0 open, 1 private). REQUIRES register_if_needed: true — it only applies when registering the context graph, and is rejected if sent without it. Sets only the access policy; it does NOT preserve a stored custom publishPolicy (see register_if_needed; OriginTrail/dkg#1085)."},
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name (must match write/share time)."},
         },
         "required": ["context_graph_id", "name"],

@@ -654,6 +654,30 @@ def test_shared_memory_publish_register_desc_states_auto_register(provider):
     assert "gas/TRAC" in desc
 
 
+# -- FIX X (#1076:2396 / Option A): explicit-register publishPolicy caveat ------
+# The explicit register route uses the daemon's DEFAULT publishPolicy and does not
+# preserve a stored custom publishPolicy (daemon-side rehydration = dkg#1085). The
+# caveat lives on the explicit-register-exposed tool ONLY (dkg_knowledge_asset_
+# publish); dkg_shared_memory_publish uses the safe rehydrating auto-register path.
+
+def test_per_ka_publish_register_desc_carries_publish_policy_caveat(provider):
+    sch = next(s for s in provider.get_tool_schemas()
+               if s["name"] == "dkg_knowledge_asset_publish")
+    desc = sch["parameters"]["properties"]["register_if_needed"]["description"]
+    assert "DEFAULT publishPolicy" in desc
+    assert "does NOT preserve" in desc
+    assert "Read access is unaffected" in desc
+    assert "dkg#1085" in desc
+
+
+def test_shared_memory_publish_register_desc_has_no_publish_policy_caveat(provider):
+    # the safe auto-register path must NOT carry the explicit-register caveat
+    sch = next(s for s in provider.get_tool_schemas()
+               if s["name"] == "dkg_shared_memory_publish")
+    desc = sch["parameters"]["properties"]["register_if_needed"]["description"]
+    assert "dkg#1085" not in desc
+
+
 def test_access_policy_requires_register_helper(plugin_module):
     f = plugin_module._access_policy_requires_register_error
     assert f({"access_policy": 1}) is not None  # present without register -> error
