@@ -412,16 +412,20 @@ export function registerAssertionTools(
         // CONTRACT §1 Stage5 / §7: vm/publish returns HTTP 207 (treated as success
         // by DkgClient.request, which only throws on !res.ok) when the KA minted
         // on-chain but the context-graph binding FAILED — `contextGraphError` is
-        // present in the body. The UAL/kaId are valid (the asset IS on-chain), so
-        // this is NOT a hard failure, but it must NOT be reported as full success:
-        // surface a clear PARTIAL warning so the agent can retry the CG binding.
+        // present in the body. The UAL/kaId are valid and the asset IS published
+        // on-chain, so this is NOT a hard failure and must NOT be reported as full
+        // success — but the agent must NOT re-publish: a confirmed publish clears
+        // SWM, so a retry 409s VM_PUBLISH_PRECONDITION (and never re-binds the CG).
+        // The CG-binding retry is an operator/daemon concern.
         const contextGraphError = (result as Record<string, unknown>).contextGraphError;
         if (typeof contextGraphError === 'string' && contextGraphError.length > 0) {
           return ok(
-            `PARTIAL publish of knowledge asset '${name}' (project '${pid}'): the asset was minted ` +
-            `on-chain (UAL/kaId below are valid), but the context-graph binding FAILED ` +
-            `(${contextGraphError}). The on-chain asset is published; retry the publish to re-attempt ` +
-            `the context-graph binding.\n\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\``,
+            `PARTIAL publish of knowledge asset '${name}' (project '${pid}'): the asset IS published ` +
+            `on-chain (the UAL/kaId below are valid and final) — only the context-graph binding FAILED ` +
+            `(${contextGraphError}). Do NOT re-publish: the asset is already minted, the publish cleared ` +
+            `Shared Working Memory, and a retry will fail the VM precondition without re-binding the context ` +
+            `graph. Surface this to the operator to re-attempt the context-graph binding.` +
+            `\n\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\``,
           );
         }
         return ok(

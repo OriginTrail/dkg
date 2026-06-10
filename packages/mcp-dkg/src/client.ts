@@ -1070,7 +1070,9 @@ export class DkgClient {
     }));
     const created = await this.request<{
       assertionUri?: string;
-      seal?: Record<string, unknown>;
+      // The create response carries `merkleRoot` (the seal digest), not a `seal`
+      // object (knowledge-assets.ts:570).
+      merkleRoot?: string;
       errors?: Array<{ phase?: string; error?: string }>;
     }>(
       'POST',
@@ -1100,7 +1102,7 @@ export class DkgClient {
       ) as Error & Record<string, unknown>;
       err.assertionName = assertionName;
       err.assertionUri = created.assertionUri;
-      if (created.seal) err.seal = created.seal;
+      if (created.merkleRoot) err.merkleRoot = created.merkleRoot;
       err.phase = shareErr?.phase ?? 'swm-share';
       err.partial = true;
       throw err;
@@ -1128,7 +1130,7 @@ export class DkgClient {
       ) as Error & Record<string, unknown>;
       err.assertionName = assertionName;
       err.assertionUri = created.assertionUri;
-      if (created.seal) err.seal = created.seal;
+      if (created.merkleRoot) err.merkleRoot = created.merkleRoot;
       err.phase = 'vm-publish';
       err.cause = e;
       throw err;
@@ -1136,7 +1138,7 @@ export class DkgClient {
     return {
       ...published,
       ...(created.assertionUri ? { assertionUri: created.assertionUri } : {}),
-      ...(created.seal ? { seal: created.seal } : {}),
+      ...(created.merkleRoot ? { merkleRoot: created.merkleRoot } : {}),
     };
   }
 

@@ -456,6 +456,9 @@ describe('publish tools — write+publish helper + canonical SWM finalizer', () 
     expect(result.content[0].text).toContain('context-graph binding timed out');
     expect(result.content[0].text).toContain('kc-z');                 // kaId kept
     expect(result.content[0].text).toContain('did:dkg:1/0xauthor/9'); // UAL kept
+    // FIX I: do NOT advise re-running dkg_publish (mints a duplicate) — surface to operator.
+    expect(result.content[0].text).toMatch(/do not re-run dkg_publish/i);
+    expect(result.content[0].text).toMatch(/operator/i);
   });
 
   it('dkg_publish reports plain success on a 200 publish (no contextGraphError)', async () => {

@@ -114,9 +114,13 @@ export function registerPublishTools(
       title: 'Publish Fresh Quads',
       description:
         '"I have fresh quads, write+publish now." Two-call helper: ' +
-        'writes the supplied quads to Shared Working Memory, then ' +
-        'publishes the entire SWM in the CG to Verifiable Memory ' +
-        '(on-chain) and clears SWM. For the canonical step-wise flow ' +
+        'creates a fresh auto-named assertion from the supplied quads ' +
+        '(seal + share), then publishes THAT one assertion to Verifiable ' +
+        'Memory (on-chain). NOTE: this is two HTTP calls (create, then ' +
+        'publish), not a single transactional operation — either phase can ' +
+        'partially fail (a share-phase failure aborts before publish; a ' +
+        'context-graph-binding failure still mints the asset on-chain). For ' +
+        'the canonical step-wise flow ' +
         '(create → write → finalize → share → publish) use ' +
         '`dkg_knowledge_asset_create / write / finalize / share` followed ' +
         'by `dkg_knowledge_asset_publish` — that path keeps WM as a draft ' +
@@ -202,16 +206,19 @@ export function registerPublishTools(
         // {assertionName}, which (like vm/publish) returns HTTP 207 with
         // `contextGraphError` set when the KA minted on-chain but the context-graph
         // binding FAILED (memory.ts:1772). `this.request` treats 207 as success, so
-        // without this the partial reads as clean success. The UAL/kaId are valid
-        // (the asset IS on-chain) — surface a PARTIAL warning so the agent can retry
-        // the CG bind, mirroring dkg_knowledge_asset_publish.
+        // without this the partial reads as clean success. The UAL/kaId are valid and
+        // the asset IS published on-chain — surface a PARTIAL warning. The agent must
+        // NOT re-run dkg_publish: each call mints a FRESH assertion, so a retry would
+        // DUPLICATE the published asset and still not re-bind the CG. The CG-binding
+        // retry is an operator/daemon concern.
         const contextGraphError = (result as Record<string, unknown>).contextGraphError;
         const ual = (result as Record<string, unknown>).ual as string | undefined;
         const summary = [
           typeof contextGraphError === 'string' && contextGraphError.length > 0
-            ? `PARTIAL publish to '${cgId}': the asset was minted on-chain (KC/UAL below are valid), but the ` +
-              `context-graph binding FAILED (${contextGraphError}). The on-chain asset is published; retry ` +
-              `dkg_publish to re-attempt the context-graph binding.`
+            ? `PARTIAL publish to '${cgId}': the asset IS published on-chain (KC/UAL below are valid and ` +
+              `final) — only the context-graph binding FAILED (${contextGraphError}). Do NOT re-run ` +
+              `dkg_publish: it would mint a DUPLICATE asset and still not re-bind the context graph. Surface ` +
+              `this to the operator to re-attempt the context-graph binding.`
             : `Published ${wireQuads.length} quad(s) to '${cgId}'.`,
           registered ? `Registered context graph '${cgId}' on-chain.` : null,
           kaId ? `KC: ${kaId}` : null,

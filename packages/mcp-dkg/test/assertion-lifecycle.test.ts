@@ -393,6 +393,9 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     expect(res.content[0].text).toMatch(/PARTIAL/);
     expect(res.content[0].text).toContain('context-graph binding timed out');
     expect(res.content[0].text).toContain('"ual": "did:dkg:31337/0xauthor/7"'); // UAL still valid
+    // FIX I: a confirmed publish cleared SWM, so do NOT re-publish — surface to operator.
+    expect(res.content[0].text).toMatch(/do not re-publish/i);
+    expect(res.content[0].text).toMatch(/operator/i);
   });
 
   it('publish reports plain success on a 200 (no contextGraphError)', async () => {
