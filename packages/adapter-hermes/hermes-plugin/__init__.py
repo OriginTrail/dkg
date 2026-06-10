@@ -321,11 +321,13 @@ DKG_PUBLISH_SCHEMA = {
     "name": "dkg_publish",
     "description": (
         "One-shot write + publish helper: writes the supplied quads as a single fresh, "
-        "uniquely-named sealed assertion and publishes it to Verifiable Memory in one ATOMIC "
-        "operation. Chain-anchored, permanent, costs TRAC. Multi-root-safe: all subjects in the "
-        "quads publish together as one sealed assertion in a single atomic mint. Object "
-        "values starting with http://, https://, urn:, or did: are treated as URIs; everything "
-        "else becomes a string literal automatically.\n"
+        "uniquely-named sealed assertion, then publishes it to Verifiable Memory. The on-chain "
+        "MINT is atomic and multi-root-safe -- all subjects publish together as one sealed "
+        "assertion in a single mint. This is a TWO-STEP helper (create-and-seal, then publish), "
+        "so it can partially fail between steps; on a partial failure the result reports the "
+        "assertionName so you can recover by name (do not recreate). Chain-anchored, permanent, "
+        "costs TRAC. Object values starting with http://, https://, urn:, or did: are treated as "
+        "URIs; everything else becomes a string literal automatically.\n"
         "This atomic path requires the context graph to be registered on-chain; pass "
         "register_if_needed=true to register it first on a fresh CG.\n"
         "Always call dkg_wallet_balances first to verify sufficient TRAC."

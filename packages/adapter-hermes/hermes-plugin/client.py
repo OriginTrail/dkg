@@ -730,8 +730,11 @@ class DKGClient:
             failure["assertionName"] = assertion_name
             if created.get("assertionUri") is not None:
                 failure["assertionUri"] = created["assertionUri"]
-            if created.get("seal") is not None:
-                failure["seal"] = created["seal"]
+            # The create route returns merkleRoot (a hex string), NOT a `seal`
+            # object — created.get("seal") was always None, dropping the proof
+            # (Codex #1084:733). Carry merkleRoot.
+            if created.get("merkleRoot") is not None:
+                failure["merkleRoot"] = created["merkleRoot"]
             phases = ", ".join(
                 str(e.get("phase")) for e in create_errors if isinstance(e, dict) and e.get("phase")
             )
@@ -753,16 +756,16 @@ class DKGClient:
             # The on-chain publish failed AFTER the asset was created+sealed+shared
             # under the random assertion_name. Returning `published` verbatim would
             # drop that name and the agent would recreate the asset (orphaning the
-            # first) — Codex #1084:723. Merge the assertionName (+ assertionUri/seal)
-            # into the failure with a retry-not-recreate message.
+            # first) — Codex #1084:723. Merge the assertionName (+ assertionUri/
+            # merkleRoot) into the failure with a retry-not-recreate message.
             failure = dict(published) if isinstance(published, dict) else {"error": str(published)}
             failure["success"] = False
             failure["assertionName"] = assertion_name
             if isinstance(created, dict):
                 if created.get("assertionUri") is not None:
                     failure["assertionUri"] = created["assertionUri"]
-                if created.get("seal") is not None:
-                    failure["seal"] = created["seal"]
+                if created.get("merkleRoot") is not None:
+                    failure["merkleRoot"] = created["merkleRoot"]
             base_error = str(failure.get("error") or failure.get("message") or "publish failed")
             failure["error"] = (
                 f"Knowledge asset '{assertion_name}' was created, sealed, and shared to SWM, but the "
@@ -774,8 +777,10 @@ class DKGClient:
         if isinstance(created, dict):
             if created.get("assertionUri") is not None:
                 result["assertionUri"] = created["assertionUri"]
-            if created.get("seal") is not None:
-                result["seal"] = created["seal"]
+            # Carry merkleRoot (the create proof), not the always-None seal
+            # (Codex #1084:733).
+            if created.get("merkleRoot") is not None:
+                result["merkleRoot"] = created["merkleRoot"]
         result["assertionName"] = assertion_name
         return result
 
