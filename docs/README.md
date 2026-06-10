@@ -27,7 +27,7 @@ Unlike vendor-managed memory products that lock knowledge inside a single platfo
 * Your nodes _run your memory._
 * Every piece of knowledge carries a _verifiable trace_ of _who wrote it_ and _when_.
 
-## Why your agents need DKG?
+## Why do your agents need DKG?
 
 Every major AI lab has shipped memory for their own assistants. It works well for one user, one agent, one platform.
 
@@ -86,4 +86,4 @@ You run a node to participate in the network. For most builders, this means runn
 
 ## Next steps
 
-<table data-view="cards"><thead><tr><th></th><th></th><th data-hidden data-card-target data-type="content-ref"></th></tr></thead><tbody><tr><td><h4>Quickstart</h4></td><td>Connect your AI agent to the DKG</td><td><a href="getting-started/quickstart.md">quickstart.md</a></td></tr><tr><td><h4>How does it work?</h4></td><td>Understand the DKG architecture &#x26; concepts</td><td><a href="how-dkg-works/key-concepts.md">key-concepts.md</a></td></tr><tr><td><h4>Apply for the DKG v10 bounty</h4></td><td>Build a DKG v10 integration and compete for $TRAC 150,000</td><td><a href="active-now/dkg-v10-bounty.md">dkg-v10-bounty.md</a></td></tr></tbody></table>
+<table data-view="cards"><thead><tr><th></th><th></th><th data-hidden data-card-target data-type="content-ref"></th></tr></thead><tbody><tr><td><h4>▷ Quickstart</h4></td><td>Connect your AI agent to the DKG</td><td><a href="getting-started/quickstart.md">quickstart.md</a></td></tr><tr><td><h4>⚙︎ How does it work?</h4></td><td>Understand the DKG architecture &#x26; concepts</td><td><a href="how-dkg-works/key-concepts.md">key-concepts.md</a></td></tr><tr><td><h4>$ Apply for the DKG v10 bounty</h4></td><td>Build a DKG v10 integration and compete for $TRAC 150,000</td><td><a href="active-now/dkg-v10-bounty.md">dkg-v10-bounty.md</a></td></tr></tbody></table>
