@@ -20,7 +20,7 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { KeyedSerializer } from './keyed-mutex.js';
 import { floorPublishTokenAmount } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { errorCode, errorMessage, isTooLowAllowanceError, enrichEvmError, HUB_STALE_ERROR_MARKERS } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, HUB_STALE_ERROR_MARKERS } from './evm-adapter-errors.js';
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isKnownTransactionError, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
@@ -77,18 +77,27 @@ const KA_HIGH_WATER_VIEW_SIGNATURE = 'getMaxKaNumberForAuthor(address)';
  * block (not genesis) and runs ONCE per author per node lifetime (cached), so a
  * few hundred pages is fine; this cap only trips for a genuinely old pre-10.0.4
  * deployment on a small-range-cap RPC, where we fail loud with guidance instead
- * of silently issuing thousands of sequential calls. The default fallback
- * window is a conservative 2,000 blocks (the smallest common eth_getLogs cap);
- * at that size the budget covers ~3M blocks of contract lifetime. Operators on
- * an RPC that serves larger eth_getLogs ranges can widen the window via the
- * `kaHighWaterScanPageSize` config to cover an older pre-10.0.4 deployment in
- * fewer pages; the canonical fix remains deploying DKGKnowledgeAssets >= 10.0.4
- * (which removes the scan via the O(1) view). This is the coverage boundary.
+ * of silently issuing thousands of sequential calls. At the default 2,000-block
+ * window the budget covers ~3M blocks of contract lifetime; an older pre-10.0.4
+ * deployment is refused with actionable guidance — the dominant cost lever is
+ * the deploy-block anchor (an archive RPC), and the canonical fix is deploying
+ * DKGKnowledgeAssets >= 10.0.4 (which removes the scan via the O(1) view). The
+ * window can be widened (adapter-level `kaHighWaterScanPageSize`) on an RPC that
+ * serves larger eth_getLogs ranges.
  */
 const KA_HIGH_WATER_MAX_SCAN_PAGES = 1_500;
 
 /** Default pre-10.0.4 fallback eth_getLogs window — the smallest common cap. */
 const KA_HIGH_WATER_DEFAULT_PAGE_SIZE = 2_000;
+
+/**
+ * Per-backend timeout for a single KnowledgeAssetCreated scan page before
+ * failing over to the next eligible backend — generous enough for a slow
+ * archive getLogs, short enough that a hung backend can't add its stall to every
+ * page (the sticky preferred-backend ordering then keeps the hung one out of the
+ * front of the line for subsequent pages).
+ */
+const KA_HIGH_WATER_PAGE_TIMEOUT_MS = 15_000;
 
 /**
  * True for the UNAMBIGUOUS "the deployed DKGKnowledgeAssets has no
@@ -170,6 +179,93 @@ function kaHighWaterViewSelectorInCode(storage: Contract, code: string): boolean
   // `63` = PUSH4 opcode; the 4 selector bytes must follow it to count as a real
   // dispatcher entry (not a coincidental byte run elsewhere in the bytecode).
   return code.toLowerCase().includes(`63${selector.toLowerCase().slice(2)}`);
+}
+
+/**
+ * True only for errors that mean "this RPC cannot serve historical state at the
+ * requested block" — a pruned/non-archive node — as opposed to a real RPC
+ * outage / auth failure / timeout. The deploy-block search degrades to a
+ * genesis-anchored scan ONLY for these; every other failure is rethrown so a
+ * broken provider surfaces loudly instead of being masked as a pre-10.0.4
+ * fallback that triggers a large log sweep. Conservative substring match over
+ * the common provider phrasings (geth/erigon/nethermind/managed endpoints).
+ */
+/**
+ * Flatten an error into a single lowercased string across the nested fields
+ * ethers v6 / managed RPCs actually populate — `message`, `shortMessage`,
+ * `reason`, `body`, and recursively `error` / `info` / `cause` / `data`. The
+ * plain `errorMessage` reads only `.message`, so a managed-RPC denial whose text
+ * lives in `err.info.error.message` / `err.body` would otherwise be invisible.
+ */
+function allErrorText(err: unknown): string {
+  const parts: string[] = [];
+  const seen = new Set<unknown>();
+  const visit = (e: any, depth: number): void => {
+    if (e == null || depth > 5 || seen.has(e)) return;
+    if (typeof e === 'string') { parts.push(e); return; }
+    if (typeof e !== 'object') return;
+    seen.add(e);
+    for (const k of ['message', 'shortMessage', 'reason', 'body']) {
+      if (typeof e[k] === 'string') parts.push(e[k]);
+    }
+    for (const k of ['error', 'info', 'cause', 'data']) visit(e[k], depth + 1);
+  };
+  visit(err, 0);
+  return parts.join(' ').toLowerCase();
+}
+
+/**
+ * True when `err` is a TRANSIENT rate-limit / throttle from the RPC provider —
+ * keyed on the provider HTTP status (`429`; `errorStatus` recurses nested
+ * `cause`/`info`/`error` fields) plus a rate-limit / quota / compute-unit
+ * vocabulary guard, since providers routinely concatenate the upstream node's
+ * pruned-state text into their own throttle envelope.
+ *
+ * This is the ONE class the deploy-block search surfaces early instead of
+ * degrading: degrading would fire getCode retries + a page-1 `eth_getLogs` that
+ * only WORSEN a throttle, and it clears on its own. Everything else — a pruned
+ * node, a STATIC access/plan/archive denial, a transient timeout/503, or a hard
+ * 401 — falls through to the genesis scan. Crucially a "not archive / archive not
+ * on your plan" denial is NOT here: `eth_getLogs` does not need archive state, so
+ * the scan still computes the high-water mark on a non-archive provider, and
+ * surfacing it would needlessly fail a publish that would otherwise succeed (the
+ * scan surfaces a genuine TOTAL outage itself, on page 1).
+ */
+function isTransientThrottle(err: unknown): boolean {
+  if (errorStatus(err) === 429) return true;
+  const msg = allErrorText(err);
+  return /\b(too many requests|rate[ -]?limit|throttl|compute units?|capacity|quota|credits?|(daily|monthly|request|compute)[^.]{0,12}\blimit|limit reached|over (the )?limit)\b/.test(msg);
+}
+
+/**
+ * True ONLY when the deploy-block getCode failure is a genuine "this node does
+ * not retain historical state" condition. A transient throttle is excluded FIRST
+ * (see `isTransientThrottle`). Used by the head probe; the deploy-block search no
+ * longer gates degrade-vs-throw on it (it degrades on everything except a
+ * transient throttle, letting the genesis scan arbitrate).
+ */
+function isHistoricalStateUnavailable(err: unknown): boolean {
+  if (isTransientThrottle(err)) return false;
+
+  const msg = allErrorText(err);
+
+  // Genuine "node lacks historical state" shapes → degrade to the genesis log scan.
+  // NOTE: a bare `header not found` is intentionally NOT here — nodes also return
+  // it while out-of-sync / restarting, so it must surface rather than mask a real
+  // fault as a degrade (a "header not found" caused by pruning is accompanied by a
+  // pruned/older-than/archive phrase below, which still degrades).
+  return (
+    msg.includes('missing trie node') ||
+    msg.includes('state not available') ||
+    msg.includes('state is not available') ||
+    msg.includes('historical state') ||
+    msg.includes('pruned') ||
+    // "block is older than the latest N blocks" — the pruned-window shape, not a
+    // bare "older than" (which appears in unrelated messages).
+    /older than\b[^.]*\bblocks?\b/.test(msg) ||
+    // "requires an archive node" / "needs archive" — anchored on requires/needs.
+    /\b(requires?|needs?)\s+(an?\s+)?archive/.test(msg)
+  );
 }
 
 async function contractAddress(contract: Contract): Promise<string> {
@@ -365,8 +461,8 @@ export class EVMChainAdapterBase {
 
   /**
    * eth_getLogs block-window for the pre-10.0.4 getMaxKaNumberForAuthor fallback
-   * scan (config `kaHighWaterScanPageSize`, default 2,000 — the smallest common
-   * provider cap). See KA_HIGH_WATER_DEFAULT_PAGE_SIZE.
+   * scan (adapter-level config `kaHighWaterScanPageSize`; non-integer / `< 1`
+   * values fall back to KA_HIGH_WATER_DEFAULT_PAGE_SIZE = 2,000).
    */
   protected readonly kaHighWaterScanPageSize: number;
 
@@ -394,8 +490,13 @@ export class EVMChainAdapterBase {
 
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
+    // Floor a finite `>= 1` value (so e.g. 10000.5 -> 10000, preserving the
+    // window); only a `< 1` (or non-finite) value falls back to the default — a
+    // fractional value in (0,1) must NOT floor to 0 (which makes pages Infinity).
     this.kaHighWaterScanPageSize =
-      typeof config.kaHighWaterScanPageSize === 'number' && config.kaHighWaterScanPageSize > 0
+      typeof config.kaHighWaterScanPageSize === 'number' &&
+      Number.isFinite(config.kaHighWaterScanPageSize) &&
+      config.kaHighWaterScanPageSize >= 1
         ? Math.floor(config.kaHighWaterScanPageSize)
         : KA_HIGH_WATER_DEFAULT_PAGE_SIZE;
     // BUG-022 root-cause fix: force ethers' `PollingEventSubscriber`
@@ -1405,9 +1506,12 @@ export class EVMChainAdapterBase {
       throw bareRevert;
     }
 
-    const head = await this.provider.getBlockNumber();
-    const fromBlock = await this.resolveKaStorageDeployBlock(storageAddress, head);
-    const pageSize = this.kaHighWaterScanPageSize; // configurable eth_getLogs window (default 2,000)
+    // `fromBlock`, `head` and the candidate `scanProviders` come together so the
+    // range is consistent (head is the freshest backend's tip) AND each page is
+    // crawled on a backend whose tip covers it (querying a lagging backend for
+    // blocks above its tip can reject the range or silently truncate it).
+    const { fromBlock, head, scanProviders } = await this.resolveKaStorageDeployBlock(storageAddress);
+    const pageSize = this.kaHighWaterScanPageSize; // default 2,000 = smallest common eth_getLogs cap
     const pages = Math.ceil((head - fromBlock + 1) / pageSize);
     if (pages > KA_HIGH_WATER_MAX_SCAN_PAGES) {
       throw new Error(
@@ -1416,18 +1520,32 @@ export class EVMChainAdapterBase {
           `${pageSize}-block window (budget ${KA_HIGH_WATER_MAX_SCAN_PAGES} pages). The deployed ` +
           `DKGKnowledgeAssets (${storageAddress}) lacks the O(1) getMaxKaNumberForAuthor view. ` +
           `Remediations: use an archive RPC that serves historical eth_getCode so the scan ` +
-          `anchors at the deploy block${fromBlock === 0 ? ' (it fell back to genesis here)' : ''}; ` +
-          `raise kaHighWaterScanPageSize if your RPC serves larger eth_getLogs ranges; or deploy ` +
-          `DKGKnowledgeAssets >= 10.0.4 to remove the scan entirely (a single eth_call).`,
+          `anchors at the deploy block${fromBlock === 0 ? ' (it fell back to genesis here)' : ''}, ` +
+          `or deploy DKGKnowledgeAssets >= 10.0.4 to remove the scan entirely (a single eth_call).`,
       );
     }
 
     const filter = storage.filters.KnowledgeAssetCreated(null, normalized);
+    const connected = new Map<JsonRpcProvider, Contract>();
     const mask = (1n << 96n) - 1n;
     let max = -1n;
+    // Sticky preferred backend: the one that served the previous page. It is tried
+    // first for the next page (when it still covers it), so a backend that hung on
+    // an earlier page (and was failed-over past) doesn't sit at the front of the
+    // line re-stalling every subsequent page on its full timeout.
+    let preferred: JsonRpcProvider | undefined;
     for (let lo = fromBlock; lo <= head; lo += pageSize) {
       const hi = Math.min(lo + pageSize - 1, head);
-      const logs = await storage.queryFilter(filter, lo, hi);
+      const { logs, provider } = await this.queryKaCreatedPage(
+        storage,
+        filter,
+        lo,
+        hi,
+        scanProviders,
+        connected,
+        preferred,
+      );
+      preferred = provider;
       for (const log of logs) {
         const args = (log as ethers.EventLog).args;
         const rawId = args?.id ?? args?.[0];
@@ -1440,72 +1558,229 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * Binary-search the earliest block at which `address` has deployed bytecode —
-   * the contract's deploy block — so the pre-10.0.4 KnowledgeAssetCreated
-   * fallback starts at the contract's birth instead of genesis. Cached
-   * (immutable per address). The caller has already confirmed code exists at
-   * `head`.
+   * Query one `[lo, hi]` page of `KnowledgeAssetCreated` logs, trying each
+   * reachable backend whose tip COVERS the page (`backendHead >= hi`) — the
+   * sticky `preferred` backend first (when it still covers the page), then the
+   * rest freshest-first — and failing over to the next eligible backend on error.
+   * This keeps FallbackProvider-style resilience for the scan while never asking a
+   * backend for blocks above its own tip (which some nodes reject and others
+   * silently truncate). The freshest backend always covers the page (`hi <= head`
+   * = its tip), so there is always at least one candidate.
    *
-   * If historical `eth_getCode` is unavailable (a pruned/non-archive RPC, after
-   * the per-probe retries in `getContractCodeAtBlock`), we DEGRADE to block 0
-   * rather than either:
-   *   (a) hard-failing — pruned nodes can still serve the paginated
-   *       `queryFilter` scan, so a recent deployment on a short-history chain
-   *       still works (bounded by the page budget); or
-   *   (b) anchoring ABOVE the true deploy block (the old `catch => no code`
-   *       shape) — which would under-report the per-author high-water and
-   *       re-hand a burned `(author, number)`.
-   * Block 0 is the safe lower bound (`<= deploy`), so the scan never MISSES an
-   * event; it only costs more pages, which the budget guard bounds. The degraded
-   * `0` is NOT cached (a later call may reach an archive RPC and pin the real
-   * deploy block).
+   * Each attempt is bounded by `KA_HIGH_WATER_PAGE_TIMEOUT_MS` so a hung backend
+   * fails over after a bounded wait instead of stalling the whole scan; the
+   * serving backend is returned so the caller can stick to it for the next page.
    */
-  protected async resolveKaStorageDeployBlock(address: string, head: number): Promise<number> {
-    if (this.cachedKaStorageDeployBlock?.address === address) {
-      return this.cachedKaStorageDeployBlock.value;
-    }
-    let lo = 0;
-    let hi = head;
-    try {
-      while (lo < hi) {
-        const mid = lo + Math.floor((hi - lo) / 2);
-        const codeAtMid = await this.getContractCodeAtBlock(address, mid);
-        if (codeAtMid !== '0x') hi = mid;
-        else lo = mid + 1;
+  private async queryKaCreatedPage(
+    storage: Contract,
+    filter: unknown,
+    lo: number,
+    hi: number,
+    scanProviders: ReadonlyArray<{ provider: JsonRpcProvider; backendHead: number }>,
+    connected: Map<JsonRpcProvider, Contract>,
+    preferred?: JsonRpcProvider,
+  ): Promise<{ logs: ReadonlyArray<ethers.EventLog | ethers.Log>; provider: JsonRpcProvider }> {
+    // Eligible backends (tip covers the page), with the sticky preferred one moved
+    // to the front when it still qualifies; the remainder keep their freshest-first
+    // order from `scanProviders`.
+    const eligible = scanProviders.filter(({ backendHead }) => backendHead >= hi);
+    const ordered =
+      preferred && eligible.some(({ provider }) => provider === preferred)
+        ? [
+            ...eligible.filter(({ provider }) => provider === preferred),
+            ...eligible.filter(({ provider }) => provider !== preferred),
+          ]
+        : eligible;
+    let pageError: unknown;
+    for (const { provider } of ordered) {
+      let contract = connected.get(provider);
+      if (!contract) {
+        contract = storage.connect(provider) as Contract;
+        connected.set(provider, contract);
       }
-    } catch {
-      // Historical eth_getCode unavailable → degrade to the safe genesis lower
-      // bound (never anchors above deploy); not cached.
-      return 0;
+      try {
+        const logs = await withTimeout(
+          contract.queryFilter(filter as any, lo, hi),
+          KA_HIGH_WATER_PAGE_TIMEOUT_MS,
+          `getMaxKaNumberForAuthor KnowledgeAssetCreated getLogs [${lo}, ${hi}]`,
+        );
+        return { logs, provider };
+      } catch (err) {
+        pageError = err; // hung or errored — fail over to the next eligible backend
+      }
     }
-    this.cachedKaStorageDeployBlock = { address, value: lo };
-    return lo;
+    throw new Error(
+      `getMaxKaNumberForAuthor: no configured RPC could serve the KnowledgeAssetCreated ` +
+        `log range [${lo}, ${hi}]${pageError ? `: ${errorMessage(pageError)}` : ''}.`,
+      pageError ? { cause: pageError } : undefined,
+    );
   }
 
   /**
-   * `eth_getCode(address, block)` normalised to `'0x'` when there is genuinely
-   * no code, with a small retry so a transient RPC blip during the one-shot
-   * deploy-block binary search is not misread as "no code" (which would anchor
-   * the scan too high). A persistent failure THROWS rather than returning '0x';
-   * `resolveKaStorageDeployBlock` catches that and degrades to a genesis-anchored
-   * scan, so a historical-state-less RPC still works without ever anchoring
-   * above the true deploy block.
+   * Resolve the pre-10.0.4 KnowledgeAssetCreated fallback's scan range — the
+   * contract's deploy block (`fromBlock`, so the scan starts at the contract's
+   * birth instead of genesis) and the chain `head` — returned together so the
+   * caller's `[fromBlock, head]` is internally consistent (a separately-read head
+   * could be a lagging backend BELOW the deploy block, yielding an empty range
+   * and a wrong `-1n`).
+   *
+   * `head` is the FRESHEST block number across all reachable backends, so the
+   * scan never stops at a slightly-stale backend and under-reports the current
+   * max (which would re-hand a burned `(author, number)`). The deploy block is
+   * immutable, so pairing it with the max head is safe.
+   *
+   * The deploy block is cached (immutable per address); otherwise it is binary-
+   * searched on a backend that serves historical getCode, with each backend's
+   * search pinned to ITS OWN head (a quorum-1 `FallbackProvider` could otherwise
+   * mix block-number and getCode across backends and cache a stale head as the
+   * "deploy block"). We fail over across backends, so a pruned/lagging endpoint
+   * yields to a healthier archive secondary.
+   *
+   * If NO backend can pin the deploy block we DEGRADE to block 0 — the safe lower
+   * bound (`<= deploy`, so the scan never misses an event), bounded by the page
+   * budget — rather than hard-failing (pruned nodes still serve `queryFilter`).
+   * The degraded `0` is NOT cached. A real outage / auth / timeout (not a
+   * historical-state-unavailable shape) on every backend is RETHROWN, not masked
+   * as a pre-10.0.4 fallback (see `isHistoricalStateUnavailable`).
    */
-  private async getContractCodeAtBlock(address: string, block: number): Promise<string> {
+  protected async resolveKaStorageDeployBlock(
+    address: string,
+  ): Promise<{
+    fromBlock: number;
+    head: number;
+    scanProviders: ReadonlyArray<{ provider: JsonRpcProvider; backendHead: number }>;
+  }> {
+    // 1. Probe every reachable backend for its head; order freshest-first. A
+    //    head-probe failure on an UNREACHABLE backend is kept separate — it only
+    //    matters when NO backend is reachable at all; it must NOT force a throw
+    //    when a reachable (e.g. pruned) backend could still degrade to the scan.
+    let probeError: unknown;
+    const reachable: Array<{ provider: JsonRpcProvider; backendHead: number }> = [];
+    for (const provider of this.providers) {
+      try {
+        // Bound the probe: these are direct per-backend reads (not via the
+        // FallbackProvider), so without a timeout a hung `getBlockNumber()` would
+        // stall the whole resolution instead of failing over. A stall rejects and
+        // is treated like any other unreachable-backend error below.
+        const backendHead = await withTimeout(
+          provider.getBlockNumber(),
+          RPC_READ_STALL_TIMEOUT_MS,
+          'getMaxKaNumberForAuthor backend head probe',
+        );
+        reachable.push({ provider, backendHead });
+      } catch (err) {
+        if (!isHistoricalStateUnavailable(err)) probeError = err;
+      }
+    }
+    if (reachable.length === 0) {
+      if (probeError !== undefined) throw probeError;
+      throw new Error('getMaxKaNumberForAuthor: no RPC backend returned a block number to anchor the pre-10.0.4 fallback.');
+    }
+    reachable.sort((a, b) => b.backendHead - a.backendHead);
+    // `head` is the FRESHEST backend's tip. The caller crawls each page on the
+    // freshest backend whose tip COVERS that page (with failover), so it never
+    // queries blocks above a backend's own tip. The deploy block is immutable, so
+    // pairing it with this head is safe even when a different (archive) backend
+    // resolves it below.
+    const head = reachable[0].backendHead;
+
+    // 2. Deploy block (immutable): cache hit, else binary-search a backend that
+    //    serves historical getCode — each search uses ITS OWN head (self-
+    //    consistent); fail over across backends, freshest-first.
+    const cached = this.cachedKaStorageDeployBlock;
+    if (cached?.address === address) return { fromBlock: cached.value, head, scanProviders: reachable };
+    let throttle: unknown; // a transient rate-limit/throttle seen during the search
+    const throttledProviders = new Set<JsonRpcProvider>();
+    for (const { provider: searchProvider, backendHead } of reachable) {
+      try {
+        // Verify code at this backend's head before searching it; a head BEFORE
+        // deploy on this backend is skipped (would otherwise cache a stale value).
+        if ((await this.getContractCodeAtBlock(searchProvider, address, backendHead)) === '0x') {
+          continue;
+        }
+        let lo = 0;
+        let hi = backendHead;
+        while (lo < hi) {
+          const mid = lo + Math.floor((hi - lo) / 2);
+          const codeAtMid = await this.getContractCodeAtBlock(searchProvider, address, mid);
+          if (codeAtMid !== '0x') hi = mid;
+          else lo = mid + 1;
+        }
+        this.cachedKaStorageDeployBlock = { address, value: lo };
+        // Drop any backend that throttled earlier in this search from the scan too
+        // (same rationale as the degraded path below — a throttled endpoint must not
+        // be re-queried by the log scan). The backend that just pinned the deploy
+        // block isn't throttled, so this is always non-empty.
+        return { fromBlock: lo, head, scanProviders: reachable.filter((r) => !throttledProviders.has(r.provider)) };
+      } catch (err) {
+        // Always fail over to the next backend FIRST (a healthy archive can still
+        // pin the deploy block even if this one is denied/pruned/flaky). Track a
+        // transient throttle per-backend: re-querying that endpoint in the scan
+        // would only worsen its throttle, so it is dropped from the scan providers
+        // below. Everything else — pruned state, a STATIC access/plan/archive
+        // denial, a transient timeout/503, a hard 401 — is just dropped: the deploy
+        // anchor is a scan-range optimization, not a liveness gate, and the genesis
+        // scan still computes the answer on a non-archive backend (it needs no
+        // archive state) or surfaces a total outage.
+        if (isTransientThrottle(err)) {
+          throttle = err;
+          throttledProviders.add(searchProvider);
+        }
+      }
+    }
+    // No backend pinned the deploy block. Degrade to the genesis-anchored scan on
+    // the NON-throttled backends: dropping a throttled endpoint keeps the scan from
+    // worsening its throttle, while a healthy / non-archive backend still serves
+    // `eth_getLogs` (the scan needs no archive state) and computes the high-water
+    // mark — so one throttled archive must not abort a publish another backend can
+    // complete. `head` stays the FRESHEST tip (never lowered to a stale backend),
+    // so the scan can't under-report by skipping recent blocks: a page only a
+    // dropped backend could cover instead surfaces via `queryKaCreatedPage`. Only if
+    // EVERY reachable backend was throttled — nothing left to scan — do we surface
+    // the throttle. A genuine total outage on the remaining backends is likewise
+    // surfaced by the scan (page-1 throw with cause). The degraded `0` is not cached.
+    const scanProviders = reachable.filter((r) => !throttledProviders.has(r.provider));
+    if (scanProviders.length === 0) throw throttle;
+    return { fromBlock: 0, head, scanProviders };
+  }
+
+  /**
+   * `eth_getCode(address, block)` on a SPECIFIC `provider` (pinned to one backend
+   * for the deploy-block search), normalised to `'0x'` when there is genuinely no
+   * code, with a small retry so a transient blip is not misread as "no code"
+   * (which would anchor the scan too high). A persistent failure throws a wrapped
+   * error carrying the contract/block context, with the ORIGINAL error preserved
+   * as `cause` so `resolveKaStorageDeployBlock` (and operators) can classify and
+   * diagnose it — degrade only for historical-state-unavailable, surface real
+   * outages/auth/timeouts.
+   */
+  private async getContractCodeAtBlock(provider: JsonRpcProvider, address: string, block: number): Promise<string> {
     let lastErr: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
-        const code = await this.provider.getCode(address, block);
+        // Bound each attempt: this is a direct per-backend read (the deploy-block
+        // search is pinned to one backend, so it bypasses the FallbackProvider's
+        // own stall timeout). Without this, a hung `getCode` would block the search
+        // forever instead of failing over to the next backend; a stall rejects and
+        // is retried, then surfaced as the wrapped failure below. `getCode` is a
+        // light single-block state lookup, so the adapter-wide read-stall bound
+        // fits (the heavier getLogs scan page gets the larger
+        // `KA_HIGH_WATER_PAGE_TIMEOUT_MS`); the 3 attempts also absorb a transient
+        // blip before failing over.
+        const code = await withTimeout(
+          provider.getCode(address, block),
+          RPC_READ_STALL_TIMEOUT_MS,
+          `getMaxKaNumberForAuthor eth_getCode at block ${block}`,
+        );
         return code && code !== '0x' ? code : '0x';
       } catch (err) {
         lastErr = err;
       }
     }
     throw new Error(
-      `getMaxKaNumberForAuthor: historical eth_getCode for ${address} at block ${block} ` +
-        `failed after 3 attempts (${lastErr instanceof Error ? lastErr.message : String(lastErr)}); ` +
-        `cannot resolve the DKGKnowledgeAssets deploy block to anchor the pre-10.0.4 fallback ` +
-        `scan. Use an archive RPC that serves historical state, or deploy DKGKnowledgeAssets >= 10.0.4.`,
+      `getMaxKaNumberForAuthor: eth_getCode for DKGKnowledgeAssets ${address} at block ${block} ` +
+        `failed after 3 attempts: ${errorMessage(lastErr)}`,
+      { cause: lastErr },
     );
   }
 

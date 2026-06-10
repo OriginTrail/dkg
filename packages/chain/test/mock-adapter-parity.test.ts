@@ -205,6 +205,9 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // companion retry-wrapper for the deploy-block binary search's historical
   // eth_getCode probes — EVM-only, same rationale as resolveKaStorageDeployBlock.
   'getContractCodeAtBlock',
+  // per-page KnowledgeAssetCreated log-scan with cross-backend failover — EVM-only
+  // (the mock's getMaxKaNumberForAuthor is an in-memory scan, no providers).
+  'queryKaCreatedPage',
 ]);
 
 const NO_CHAIN_EXEMPT_FROM_EVM = new Set<string>([

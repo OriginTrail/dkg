@@ -46,6 +46,9 @@ function viewMock(impl: () => Promise<bigint>) {
 function makeAdapter(storage: any, head = 0) {
   const a = new EVMChainAdapter(minimalConfig());
   storage.target ??= '0x2222222222222222222222222222222222222222';
+  // The scan runs on storage.connect(scanProvider); the mock returns itself so
+  // its queryFilter is exercised (and records which provider it was bound to).
+  storage.connect ??= vi.fn(() => storage);
   (a as any).contracts = { knowledgeAssetStorage: storage };
   // getMaxKaNumberForAuthor now `await this.init()`s first (re-resolve handles
   // on Hub rotation). Mark initialized so init() short-circuits and the injected
@@ -56,6 +59,9 @@ function makeAdapter(storage: any, head = 0) {
     getBlockNumber: vi.fn(async () => head),
     getCode: vi.fn(async () => '0x6000'),
   };
+  // The deploy-block search iterates this.providers (per-backend consistency +
+  // failover); default it to the single scan-provider mock here.
+  (a as any).providers = [(a as any).provider];
   return a;
 }
 
@@ -466,7 +472,287 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
     expect((a as any).cachedKaStorageDeployBlock).toBeUndefined(); // degraded anchor not cached
   });
 
-  it('uses the configurable kaHighWaterScanPageSize window for the fallback scan', async () => {
+  it('rethrows a transient throttle during the deploy-block search immediately (no degrade that would worsen the throttle)', async () => {
+    const head = 100_000;
+    const queryFilter = vi.fn(async () => []);
+    const storage: any = { filters: { KnowledgeAssetCreated: vi.fn(() => 'F') }, queryFilter };
+    const a = makeAdapter(storage, head);
+    (a as any).provider.getCode = vi.fn(async (_addr: string, block?: number) => {
+      if (block !== undefined) throw new Error('429 Too Many Requests: rate limit exceeded'); // transient throttle
+      return '0x6000';
+    });
+    // A transient throttle is surfaced AT the deploy search (not failed-over /
+    // degraded), so it never even reaches the log scan — degrading would only fire
+    // getCode retries + a page-1 eth_getLogs that worsen the throttle. (A STATIC
+    // access/plan/archive denial would instead degrade — see the degrade cases.)
+    await expect(a.getMaxKaNumberForAuthor(AUTHOR)).rejects.toThrow('Too Many Requests');
+    expect(queryFilter).not.toHaveBeenCalled(); // not degraded into a log crawl
+    expect((a as any).cachedKaStorageDeployBlock).toBeUndefined();
+  });
+
+  it('surfaces a DEEPLY-NESTED 429 status even when the message text looks like pruned state (#1111 review)', async () => {
+    const head = 100_000;
+    const queryFilter = vi.fn(async () => []);
+    const storage: any = { filters: { KnowledgeAssetCreated: vi.fn(() => 'F') }, queryFilter };
+    const a = makeAdapter(storage, head);
+    // A managed RPC buries the throttle status at `cause.info.error.status` while
+    // concatenating the upstream node's `missing trie node` text into the message.
+    // The recursive `errorStatus` must find the 429 so the classifier surfaces the
+    // throttle instead of degrading into a genesis sweep that worsens it.
+    (a as any).provider.getCode = vi.fn(async (_addr: string, block?: number) => {
+      if (block !== undefined) {
+        const err: any = new Error('missing trie node');
+        err.cause = { info: { error: { status: 429, message: 'rate exceeded' } } };
+        throw err;
+      }
+      return '0x6000';
+    });
+    await expect(a.getMaxKaNumberForAuthor(AUTHOR)).rejects.toThrow(); // surfaced, not degraded
+    expect(queryFilter).not.toHaveBeenCalled(); // NOT degraded into a log sweep despite the "missing trie node" text
+    expect((a as any).cachedKaStorageDeployBlock).toBeUndefined();
+  });
+
+  it('does NOT silently mask a BARE "header not found" — it is not historical-state, so it surfaces via the scan (#1111 review)', async () => {
+    const head = 100_000;
+    // A bare "header not found" (NO pruned/archive companion phrase) is a transient
+    // sync/restart fault, NOT a historical-state-unavailable signal — so it is not
+    // in the degrade allow-list (thread M). An out-of-sync node that returns it on
+    // getCode also can't serve the log range, so the scan surfaces it on page 1
+    // (NOT a 1,500-page sweep against the unhealthy backend, and NOT a silent
+    // -1n).
+    const queryFilter = vi.fn(async () => {
+      throw new Error('header not found');
+    });
+    const storage: any = { filters: { KnowledgeAssetCreated: vi.fn(() => 'F') }, queryFilter };
+    const a = makeAdapter(storage, head);
+    (a as any).provider.getCode = vi.fn(async (_addr: string, block?: number) => {
+      if (block !== undefined) throw new Error('header not found');
+      return '0x6000';
+    });
+    await expect(a.getMaxKaNumberForAuthor(AUTHOR)).rejects.toThrow('header not found'); // surfaced by the scan
+    expect(queryFilter).toHaveBeenCalledTimes(1); // fails on page 1, no large sweep
+    expect((a as any).cachedKaStorageDeployBlock).toBeUndefined();
+  });
+
+  it('still degrades when "header not found" is accompanied by a genuine pruned-state phrase (#1111 review)', async () => {
+    const head = 100_000;
+    const queryFilter = vi.fn(async () => []);
+    const storage: any = { filters: { KnowledgeAssetCreated: vi.fn(() => 'F') }, queryFilter };
+    const a = makeAdapter(storage, head);
+    // A real pruned node pairs the missing header with a pruned/archive phrase; the
+    // companion phrase (here "missing trie node") still matches, so we degrade.
+    (a as any).provider.getCode = vi.fn(async (_addr: string, block?: number) => {
+      if (block !== undefined) throw new Error('missing trie node: header not found for the requested historical block');
+      return '0x6000';
+    });
+    expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(-1n); // degraded to a genesis-anchored scan
+    expect((queryFilter.mock.calls[0] as unknown as [unknown, number, number])[1]).toBe(0); // safe genesis lower bound
+    expect((a as any).cachedKaStorageDeployBlock).toBeUndefined();
+  });
+
+  it('degrades to genesis (never caches a stale head as the deploy block) when a backend head is behind the deploy block', async () => {
+    const queryFilter = vi.fn(async () => []);
+    const storage: any = { filters: { KnowledgeAssetCreated: vi.fn(() => 'F') }, queryFilter };
+    const a = makeAdapter(storage, 50); // a lagging backend reports head=50, BEFORE deploy
+    // untagged "latest" read shows code; tagged read at the stale head 50 shows none
+    (a as any).provider.getCode = vi.fn(async (_addr: string, block?: number) =>
+      block === undefined ? '0x6000' : '0x',
+    );
+    expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(-1n);
+    expect((a as any).cachedKaStorageDeployBlock).toBeUndefined(); // stale head NOT cached as deploy block
+    expect((queryFilter.mock.calls[0] as unknown as [unknown, number, number])[1]).toBe(0); // safe genesis lower bound
+  });
+
+  it('fails over to a healthy secondary backend for the deploy-block search when the first is pruned/lagging', async () => {
+    const head = 20_000;
+    const deployBlock = 12_000;
+    const queryFilter = vi.fn(async () => []);
+    const storage: any = {
+      target: '0x2222222222222222222222222222222222222222',
+      filters: { KnowledgeAssetCreated: vi.fn(() => 'F') },
+      queryFilter,
+    };
+    const a = makeAdapter(storage, head);
+    // backend 0: pruned — every tagged getCode is a historical-unavailable error
+    const b0 = {
+      getBlockNumber: vi.fn(async () => head),
+      getCode: vi.fn(async (_addr: string, block?: number) => {
+        if (block !== undefined) throw new Error('missing trie node');
+        return '0x6000';
+      }),
+    };
+    // backend 1: healthy archive — can pin the deploy block
+    const b1 = {
+      getBlockNumber: vi.fn(async () => head),
+      getCode: vi.fn(async (_addr: string, block?: number) => (block === undefined || block >= deployBlock ? '0x6000' : '0x')),
+    };
+    (a as any).providers = [b0, b1];
+
+    expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(-1n);
+    expect((queryFilter.mock.calls[0] as unknown as [unknown, number, number])[1]).toBe(deployBlock); // anchored via the healthy secondary
+    expect(b1.getCode).toHaveBeenCalled(); // failover used the secondary
+  });
+
+  it('drops a throttled backend from the scan even when another backend pins the deploy block (#1111 review)', async () => {
+    const head = 20_000;
+    const deployBlock = 12_000;
+    const storage: any = {
+      target: '0x8888888888888888888888888888888888888888',
+      filters: { KnowledgeAssetCreated: vi.fn(() => 'F') },
+    };
+    const a = makeAdapter(storage, 0);
+    (storage as any).connect = (p: any) => ({ filters: storage.filters, queryFilter: p.qf });
+    const throttledQF = vi.fn(async () => [{ args: { id: pack(9n) } }]); // must NOT be queried
+    const healthyQF = vi.fn(async () => [{ args: { id: pack(4n) } }]);
+    // b0 (freshest) throttles on getCode; b1 pins the deploy block. The anchored
+    // scan must EXCLUDE the throttled b0 so it isn't re-queried (worsening it).
+    const b0 = {
+      getBlockNumber: vi.fn(async () => head),
+      getCode: vi.fn(async (_a: string, block?: number) => {
+        if (block !== undefined) throw new Error('429 too many requests');
+        return '0x6000';
+      }),
+      qf: throttledQF,
+    };
+    const b1 = {
+      getBlockNumber: vi.fn(async () => head),
+      getCode: vi.fn(async (_a: string, block?: number) => (block === undefined || block >= deployBlock ? '0x6000' : '0x')),
+      qf: healthyQF,
+    };
+    (a as any).providers = [b0, b1];
+
+    expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(4n); // anchored at the deploy block, scanned via b1
+    expect((healthyQF.mock.calls[0] as unknown as [unknown, number, number])[1]).toBe(deployBlock); // anchored, not genesis
+    expect(throttledQF).not.toHaveBeenCalled(); // throttled backend NOT re-queried by the scan
+  });
+
+  it('degrades to a genesis scan (not a throw) when one backend is transient on getCode and the log range is still servable (#1111 review)', async () => {
+    const head = 20_000;
+    // Neither backend can pin the deploy block: b0 hits a transient 503 on
+    // historical getCode, b1 is pruned (missing trie node). But the log range is
+    // still servable, so the fallback must DEGRADE to the genesis scan and return
+    // the real max — one flaky archive endpoint must not abort the whole publish
+    // path (thread R). (An access/throttle denial would instead surface; 503 is a
+    // transient server error, not an auth/rate-limit denial.)
+    const queryFilter = vi.fn(async () => [{ args: { id: pack(7n) } }]);
+    const storage: any = {
+      target: '0x6666666666666666666666666666666666666666',
+      filters: { KnowledgeAssetCreated: vi.fn(() => 'F') },
+    };
+    (storage as any).connect = () => ({ filters: storage.filters, queryFilter });
+    const a = makeAdapter(storage, 0);
+    const b0 = {
+      getBlockNumber: vi.fn(async () => head),
+      getCode: vi.fn(async (_a: string, block?: number) => {
+        if (block !== undefined) throw new Error('503 Service Unavailable'); // transient, NOT auth/pruned
+        return '0x6000';
+      }),
+    };
+    const b1 = {
+      getBlockNumber: vi.fn(async () => head),
+      getCode: vi.fn(async (_a: string, block?: number) => {
+        if (block !== undefined) throw new Error('missing trie node'); // pruned
+        return '0x6000';
+      }),
+    };
+    (a as any).providers = [b0, b1];
+
+    expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(7n); // degraded + scanned, not aborted
+    expect((queryFilter.mock.calls[0] as unknown as [unknown, number, number])[1]).toBe(0); // genesis lower bound
+    expect((a as any).cachedKaStorageDeployBlock).toBeUndefined(); // degraded anchor not cached
+  });
+
+  it('does not abort on a denied freshest backend — a healthy archive secondary still pins the deploy block (#1111 review)', async () => {
+    const head = 20_000;
+    const deployBlock = 12_000;
+    const queryFilter = vi.fn(async () => []);
+    const storage: any = {
+      target: '0x7777777777777777777777777777777777777777',
+      filters: { KnowledgeAssetCreated: vi.fn(() => 'F') },
+      queryFilter,
+    };
+    const a = makeAdapter(storage, head);
+    // b0 (freshest) is access-denied on getCode; the search must STILL fail over to
+    // b1 and anchor at the real deploy block, not surface b0's 401 prematurely.
+    const b0 = {
+      getBlockNumber: vi.fn(async () => head),
+      getCode: vi.fn(async (_a: string, block?: number) => {
+        if (block !== undefined) throw new Error('403 Forbidden: archive not enabled on your plan');
+        return '0x6000';
+      }),
+    };
+    const b1 = {
+      getBlockNumber: vi.fn(async () => head),
+      getCode: vi.fn(async (_a: string, block?: number) => (block === undefined || block >= deployBlock ? '0x6000' : '0x')),
+    };
+    (a as any).providers = [b0, b1];
+
+    expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(-1n); // completed via b1, not aborted on b0
+    expect((queryFilter.mock.calls[0] as unknown as [unknown, number, number])[1]).toBe(deployBlock); // anchored via b1
+    expect(b1.getCode).toHaveBeenCalled();
+  });
+
+  it('times out a backend that HANGS on the head probe and resolves via a healthy backend instead of stalling (#1111 review)', async () => {
+    vi.useFakeTimers();
+    try {
+      const head = 20_000;
+      const deployBlock = 12_000;
+      const queryFilter = vi.fn(async () => [{ args: { id: pack(8n) } }]);
+      const storage: any = {
+        target: '0x4444444444444444444444444444444444444444',
+        filters: { KnowledgeAssetCreated: vi.fn(() => 'F') },
+      };
+      (storage as any).connect = () => ({ filters: storage.filters, queryFilter });
+      const a = makeAdapter(storage, 0);
+      // b0 HANGS forever on the head probe (getBlockNumber); b1 is healthy. The
+      // per-backend probe timeout must drop b0 and let the resolution use b1.
+      const code = (block?: number) => (block === undefined || block >= deployBlock ? '0x6000' : '0x');
+      const b0 = { getBlockNumber: vi.fn(() => new Promise<number>(() => {})), getCode: vi.fn(async () => '0x6000') };
+      const b1 = { getBlockNumber: vi.fn(async () => head), getCode: vi.fn(async (_a: string, block?: number) => code(block)) };
+      (a as any).providers = [b0, b1];
+
+      const resultP = a.getMaxKaNumberForAuthor(AUTHOR);
+      await vi.advanceTimersByTimeAsync(5_000); // drive b0's 4s head-probe stall timeout
+      expect(await resultP).toBe(8n); // resolved via b1 instead of hanging on b0
+      expect(b1.getBlockNumber).toHaveBeenCalled();
+      expect(queryFilter).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('times out a backend that HANGS on getCode during the deploy-block search and fails over (#1111 review)', async () => {
+    vi.useFakeTimers();
+    try {
+      const head = 20_000;
+      const deployBlock = 12_000;
+      const queryFilter = vi.fn(async () => []);
+      const storage: any = {
+        target: '0x5555555555555555555555555555555555555555',
+        filters: { KnowledgeAssetCreated: vi.fn(() => 'F') },
+        queryFilter,
+      };
+      const a = makeAdapter(storage, head);
+      const code = (block?: number) => (block === undefined || block >= deployBlock ? '0x6000' : '0x');
+      // b0 is reachable (head ok) but HANGS on getCode; the deploy-block search
+      // must time out its attempts and fail over to b1 rather than stalling.
+      const b0 = { getBlockNumber: vi.fn(async () => head), getCode: vi.fn(() => new Promise<string>(() => {})) };
+      const b1 = { getBlockNumber: vi.fn(async () => head), getCode: vi.fn(async (_a: string, block?: number) => code(block)) };
+      (a as any).providers = [b0, b1];
+
+      const resultP = a.getMaxKaNumberForAuthor(AUTHOR);
+      // b0's getCode hangs: 3 retry attempts x 4s each = 12s before failover to b1.
+      await vi.advanceTimersByTimeAsync(13_000);
+      expect(await resultP).toBe(-1n); // resolved via b1's deploy search instead of stalling on b0
+      expect((queryFilter.mock.calls[0] as unknown as [unknown, number, number])[1]).toBe(deployBlock); // anchored via b1
+      expect(b1.getCode).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('honors a valid kaHighWaterScanPageSize and defaults on a non-integer (no Infinity pages)', async () => {
+    // valid integer window widens the scan
     const head = 30_000;
     const queryFilter = vi.fn(async () => []);
     const storage: any = {
@@ -474,17 +760,323 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
       filters: { KnowledgeAssetCreated: vi.fn(() => 'F') },
       queryFilter,
     };
+    storage.connect = () => storage;
     const a = new EVMChainAdapter(minimalConfig({ kaHighWaterScanPageSize: 10_000 }));
     (a as any).contracts = { knowledgeAssetStorage: storage };
     (a as any).initialized = true;
-    (a as any).provider = {
-      getBlockNumber: vi.fn(async () => head),
-      getCode: vi.fn(async () => '0x6000'),
+    const prov = { getBlockNumber: vi.fn(async () => head), getCode: vi.fn(async () => '0x6000') };
+    (a as any).provider = prov;
+    (a as any).providers = [prov];
+    expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(-1n);
+    expect((queryFilter.mock.calls[0] as unknown as [unknown, number, number])[2]).toBe(9_999); // 10k window
+
+    // fractional >= 1 floors (PRESERVES the window): 10000.5 -> 10000, not the default
+    const big = new EVMChainAdapter(minimalConfig({ kaHighWaterScanPageSize: 10_000.5 }));
+    expect((big as any).kaHighWaterScanPageSize).toBe(10_000);
+    // only a (0,1) value would floor to 0 -> Infinity pages, so it falls back to the default
+    const sub1 = new EVMChainAdapter(minimalConfig({ kaHighWaterScanPageSize: 0.5 }));
+    expect((sub1 as any).kaHighWaterScanPageSize).toBe(2_000);
+  });
+
+  it('scans to the freshest head across backends (does not stop at a slightly-stale first backend)', async () => {
+    const deployBlock = 12_000;
+    const queryFilter = vi.fn(async () => []);
+    const storage: any = {
+      target: '0x2222222222222222222222222222222222222222',
+      filters: { KnowledgeAssetCreated: vi.fn(() => 'F') },
+      queryFilter,
     };
+    const a = makeAdapter(storage, 0);
+    const code = (block?: number) => (block === undefined || block >= deployBlock ? '0x6000' : '0x');
+    const b0 = { getBlockNumber: vi.fn(async () => 18_000), getCode: vi.fn(async (_a: string, block?: number) => code(block)) }; // first, slightly behind
+    const b1 = { getBlockNumber: vi.fn(async () => 20_000), getCode: vi.fn(async (_a: string, block?: number) => code(block)) }; // freshest
+    (a as any).providers = [b0, b1];
 
     expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(-1n);
-    // 10,000-block window (not the 2,000 default): first page is [0, 9999], 4 pages total over 30k blocks.
-    expect((queryFilter.mock.calls[0] as unknown as [unknown, number, number])[2]).toBe(9_999);
-    expect(queryFilter.mock.calls.length).toBe(Math.ceil((head + 1) / 10_000));
+    const lastHi = (queryFilter.mock.calls.at(-1) as unknown as [unknown, number, number])[2];
+    expect(lastHi).toBe(20_000); // freshest head, NOT b0's stale 18,000
+    // the log crawl is bound to the freshest backend (b1), not the shared/lagging one
+    expect(storage.connect).toHaveBeenCalledWith(b1);
+  });
+
+  it('wraps a deploy-block getCode failure with contract/block context and preserves the original as cause', async () => {
+    const head = 100_000;
+    const queryFilter = vi.fn(async () => []);
+    const storage: any = { filters: { KnowledgeAssetCreated: vi.fn(() => 'F') }, queryFilter };
+    const a = makeAdapter(storage, head);
+    // A transient throttle surfaces (it does not degrade), so it exercises the
+    // wrapped-with-context error path; a 503 / static plan denial would instead
+    // degrade to the scan (covered by the degrade tests below).
+    const orig = new Error('429 Too Many Requests: rate limit exceeded');
+    (a as any).provider.getCode = vi.fn(async (_addr: string, block?: number) => {
+      if (block !== undefined) throw orig;
+      return '0x6000';
+    });
+    const err = await a.getMaxKaNumberForAuthor(AUTHOR).then(() => null, (e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/eth_getCode for DKGKnowledgeAssets 0x[0-9a-fA-F]+ at block \d+/); // actionable context
+    expect(err.cause).toBe(orig); // original preserved for diagnostics
+    expect(queryFilter).not.toHaveBeenCalled();
+  });
+
+  // The deploy-block search surfaces only a TRANSIENT throttle (degrading fires
+  // getCode retries + a page-1 eth_getLogs that worsen it); everything else
+  // degrades, since the scan does not need archive state. Uses REAL provider
+  // throttle phrasings, including a throttle envelope that concatenates upstream
+  // pruned text.
+  const surfaceMessages = [
+    'missing trie node ...; rate limit exceeded', // throttle envelope concatenating upstream pruned text
+    'you have exceeded your compute units allowance', // Alchemy CU exhaustion
+    'too many requests, please slow down', // generic throttle
+    'request rate limit reached for your api key', // rate limit
+  ];
+  for (const message of surfaceMessages) {
+    it(`surfaces (does not degrade) the transient throttle: "${message}"`, async () => {
+      const queryFilter = vi.fn(async () => []);
+      const storage: any = { filters: { KnowledgeAssetCreated: vi.fn(() => 'F') }, queryFilter };
+      const a = makeAdapter(storage, 100_000);
+      (a as any).provider.getCode = vi.fn(async (_addr: string, block?: number) => {
+        if (block !== undefined) throw new Error(message);
+        return '0x6000';
+      });
+      await expect(a.getMaxKaNumberForAuthor(AUTHOR)).rejects.toThrow(message.slice(-15));
+      expect(queryFilter).not.toHaveBeenCalled();
+    });
+  }
+
+  it('surfaces a 429 throttle by status even when the message borrows pruned text and the status is nested', async () => {
+    const queryFilter = vi.fn(async () => []);
+    const storage: any = { filters: { KnowledgeAssetCreated: vi.fn(() => 'F') }, queryFilter };
+    const a = makeAdapter(storage, 100_000);
+    (a as any).provider.getCode = vi.fn(async (_addr: string, block?: number) => {
+      if (block !== undefined) {
+        const e: any = new Error('missing trie node'); // upstream node text, no rate-limit words
+        e.status = 429; // managed-RPC throttle — read via errorStatus through the wrapper's cause
+        throw e;
+      }
+      return '0x6000';
+    });
+    await expect(a.getMaxKaNumberForAuthor(AUTHOR)).rejects.toThrow(/missing trie node/);
+    expect(queryFilter).not.toHaveBeenCalled(); // NOT degraded into a sweep that worsens the throttle
+  });
+
+  it('detects a STRING-serialized throttle status ("429") via errorStatus coercion (#1111 review)', async () => {
+    const queryFilter = vi.fn(async () => []);
+    const storage: any = { filters: { KnowledgeAssetCreated: vi.fn(() => 'F') }, queryFilter };
+    const a = makeAdapter(storage, 100_000);
+    // Some wrapped RPC/fetch errors serialize the HTTP status as a digit string;
+    // errorStatus must coerce "429" so the throttle is still classified (single
+    // backend → throttled → nothing left to scan → surfaced).
+    (a as any).provider.getCode = vi.fn(async (_addr: string, block?: number) => {
+      if (block !== undefined) {
+        const e: any = new Error('upstream error');
+        e.info = { error: { status: '429' } }; // string status, nested
+        throw e;
+      }
+      return '0x6000';
+    });
+    await expect(a.getMaxKaNumberForAuthor(AUTHOR)).rejects.toThrow();
+    expect(queryFilter).not.toHaveBeenCalled(); // classified as a throttle (not degraded)
+  });
+
+  // Pruned/archive/plan getCode denials → degrade to the genesis scan: eth_getLogs
+  // does not need archive state, so the scan still computes the high-water mark on a
+  // non-archive provider. Includes geth/erigon pruned phrasings AND managed-RPC
+  // archive-on-plan denials (which a publish must NOT fail on).
+  const degrades = [
+    'this historical request requires an archive node', // pruned/archive
+    'block 50 is older than the latest 128 blocks', // geth/erigon pruned window
+    'this request requires an archive node, which is not available on your current plan', // archive-on-plan
+    'historical state access not enabled on your current tier', // plan denial borrowing "historical state"
+    'method eth_getCode is not allowed on this plan', // plan gating on getCode (logs still serve)
+    'missing trie node: free plan does not include archival data', // paywall borrowing pruned text
+    'please upgrade to Archive tier for this request', // billing CTA for archive
+  ];
+  for (const message of degrades) {
+    it(`degrades to a genesis scan on the non-archive/historical-state error: "${message}"`, async () => {
+      const queryFilter = vi.fn(async () => []);
+      const storage: any = { filters: { KnowledgeAssetCreated: vi.fn(() => 'F') }, queryFilter };
+      const a = makeAdapter(storage, 100_000);
+      (a as any).provider.getCode = vi.fn(async (_addr: string, block?: number) => {
+        if (block !== undefined) throw new Error(message);
+        return '0x6000';
+      });
+      expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(-1n);
+      expect((queryFilter.mock.calls[0] as unknown as [unknown, number, number])[1]).toBe(0); // anchored at genesis
+    });
+  }
+
+  it('surfaces a TOTAL auth failure via the scan (not a silent -1n) when getCode AND eth_getLogs are denied (#1111 review)', async () => {
+    // A hard auth failure (bad key) affects every method, so getCode degrades to the
+    // scan — and the scan then surfaces the 401 on page 1 rather than masking it as
+    // a -1n high-water mark. (A static archive/plan denial that ONLY gates getCode
+    // would instead return the real max from the still-servable logs — degrade set.)
+    const queryFilter = vi.fn(async () => {
+      throw new Error('401 Unauthorized: invalid api key');
+    });
+    const storage: any = { filters: { KnowledgeAssetCreated: vi.fn(() => 'F') }, queryFilter };
+    const a = makeAdapter(storage, 100_000);
+    (a as any).provider.getCode = vi.fn(async (_addr: string, block?: number) => {
+      if (block !== undefined) throw new Error('401 Unauthorized: invalid api key');
+      return '0x6000';
+    });
+    await expect(a.getMaxKaNumberForAuthor(AUTHOR)).rejects.toThrow('401 Unauthorized'); // surfaced by the scan
+    expect(queryFilter).toHaveBeenCalled(); // reached the scan (page 1), not pre-thrown
+  });
+
+  // A throttled getCode backend must NOT abort the publish when another reachable
+  // backend can still serve the log scan — regardless of order (guards against
+  // order-dependence). The throttled backend is dropped from the scan providers
+  // (re-querying it would worsen the throttle); the pruned-but-serving sibling
+  // (pruned nodes still serve eth_getLogs) computes the real high-water mark.
+  for (const prunedFirst of [true, false]) {
+    it(`drops a throttled backend and computes the answer via a serving sibling (pruned ${prunedFirst ? 'first' : 'second'}) (#1111 review)`, async () => {
+      const head = 100_000;
+      const queryFilter = vi.fn(async () => [{ args: { id: pack(5n) } }]); // an old KA exists, served by the sibling
+      const storage: any = {
+        target: '0x2222222222222222222222222222222222222222',
+        filters: { KnowledgeAssetCreated: vi.fn(() => 'F') },
+        queryFilter,
+      };
+      const a = makeAdapter(storage, 0);
+      const prunedBackend = {
+        getBlockNumber: vi.fn(async () => head),
+        getCode: vi.fn(async (_addr: string, block?: number) => {
+          if (block !== undefined) throw new Error('missing trie node');
+          return '0x6000';
+        }),
+      };
+      const throttledBackend = {
+        getBlockNumber: vi.fn(async () => head),
+        getCode: vi.fn(async (_addr: string, block?: number) => {
+          if (block !== undefined) throw new Error('429 too many requests');
+          return '0x6000';
+        }),
+      };
+      (a as any).providers = prunedFirst ? [prunedBackend, throttledBackend] : [throttledBackend, prunedBackend];
+      expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(5n); // computed via the serving sibling, NOT aborted on the 429
+      expect(queryFilter).toHaveBeenCalled(); // the scan ran (on the non-throttled backend)
+    });
+  }
+
+  it('scans over the resolving backend head (no empty-range skip when this.provider lags below the deploy block)', async () => {
+    const deployBlock = 12_000;
+    const backendHead = 20_000;
+    const queryFilter = vi.fn(async () => [{ args: { id: pack(3n) } }]); // an old KA exists
+    const storage: any = {
+      target: '0x2222222222222222222222222222222222222222',
+      filters: { KnowledgeAssetCreated: vi.fn(() => 'F') },
+      queryFilter,
+    };
+    const a = makeAdapter(storage, 5_000); // this.provider lags BELOW deploy — under a separate head read this would skip the scan
+    const backend = {
+      getBlockNumber: vi.fn(async () => backendHead),
+      getCode: vi.fn(async (_addr: string, block?: number) => (block === undefined || block >= deployBlock ? '0x6000' : '0x')),
+    };
+    (a as any).providers = [backend];
+
+    expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(3n); // scan ran (range from the resolving backend), found the KA
+    const [, lo, hi] = queryFilter.mock.calls[0] as unknown as [unknown, number, number];
+    expect(lo).toBe(deployBlock);
+    expect(hi).toBeGreaterThanOrEqual(deployBlock); // consistent [fromBlock, head] from one backend
+  });
+
+  it('degrades to genesis when an unreachable backend fails head-probe but a reachable backend is merely pruned', async () => {
+    const head = 100_000;
+    const queryFilter = vi.fn(async () => []);
+    const storage: any = {
+      target: '0x2222222222222222222222222222222222222222',
+      filters: { KnowledgeAssetCreated: vi.fn(() => 'F') },
+      queryFilter,
+    };
+    const a = makeAdapter(storage, 0);
+    // backend 0: completely down — getBlockNumber itself fails (a real, non-historical error)
+    const downBackend = { getBlockNumber: vi.fn(async () => { throw new Error('503 node is down'); }), getCode: vi.fn() };
+    // backend 1: reachable but pruned — historical getCode unavailable
+    const prunedBackend = {
+      getBlockNumber: vi.fn(async () => head),
+      getCode: vi.fn(async (_addr: string, block?: number) => {
+        if (block !== undefined) throw new Error('missing trie node');
+        return '0x6000';
+      }),
+    };
+    (a as any).providers = [downBackend, prunedBackend];
+
+    // The down backend's head-probe error must NOT force a throw — a reachable
+    // (pruned) backend exists, so we degrade to the genesis scan.
+    expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(-1n);
+    expect((queryFilter.mock.calls[0] as unknown as [unknown, number, number])[1]).toBe(0);
+  });
+
+  it('fails over the log scan to a capable secondary backend when the freshest one errors on queryFilter (#1111 review)', async () => {
+    const deployBlock = 12_000;
+    const head = 20_000;
+    const storage: any = {
+      target: '0x2222222222222222222222222222222222222222',
+      filters: { KnowledgeAssetCreated: vi.fn(() => 'F') },
+    };
+    const code = (block?: number) => (block === undefined || block >= deployBlock ? '0x6000' : '0x');
+    // Both backends at the same (freshest) head, so both COVER every page. The
+    // freshest errors on queryFilter; the scan must fail over to the secondary.
+    const freshestQF = vi.fn(async () => {
+      throw new Error('eth_getLogs is not available on this endpoint');
+    });
+    const secondaryQF = vi.fn(async () => [{ args: { id: pack(4n) } }]);
+    const b0 = { getBlockNumber: vi.fn(async () => head), getCode: vi.fn(async (_a: string, block?: number) => code(block)), qf: freshestQF };
+    const b1 = { getBlockNumber: vi.fn(async () => head), getCode: vi.fn(async (_a: string, block?: number) => code(block)), qf: secondaryQF };
+    const a = makeAdapter(storage, 0);
+    (storage as any).connect = (p: any) => ({ filters: storage.filters, queryFilter: p.qf });
+    (a as any).providers = [b0, b1];
+
+    expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(4n); // failed over to b1 and found the KA
+    expect(freshestQF).toHaveBeenCalled(); // freshest tried first (errored)
+    expect(secondaryQF).toHaveBeenCalled(); // failed over to the capable secondary
+  });
+
+  it('times out a HUNG freshest backend per page, fails over, then sticks to the server for later pages (#1111 review)', async () => {
+    vi.useFakeTimers();
+    try {
+      const deployBlock = 12_000;
+      const head = 14_500; // [12000,13999] + [14000,14500] = two 2000-block pages
+      const storage: any = {
+        target: '0x3333333333333333333333333333333333333333',
+        filters: { KnowledgeAssetCreated: vi.fn(() => 'F') },
+      };
+      const code = (block?: number) => (block === undefined || block >= deployBlock ? '0x6000' : '0x');
+      // Both backends at the same (freshest) head, so both COVER every page. The
+      // freshest HANGS on queryFilter (never settles); the per-page timeout must
+      // fire and fail over to the secondary, and the sticky-preferred ordering
+      // must keep the hung backend off the front of the line for page 2 (so its
+      // timeout is paid ONCE, not once per page).
+      const freshestQF = vi.fn(() => new Promise<never>(() => {})); // never resolves
+      const secondaryQF = vi.fn(async () => [{ args: { id: pack(6n) } }]);
+      const b0 = { getBlockNumber: vi.fn(async () => head), getCode: vi.fn(async (_a: string, block?: number) => code(block)), qf: freshestQF };
+      const b1 = { getBlockNumber: vi.fn(async () => head), getCode: vi.fn(async (_a: string, block?: number) => code(block)), qf: secondaryQF };
+      const a = makeAdapter(storage, 0);
+      (storage as any).connect = (p: any) => ({ filters: storage.filters, queryFilter: p.qf });
+      (a as any).providers = [b0, b1];
+
+      let settled = false;
+      const resultP = a.getMaxKaNumberForAuthor(AUTHOR).then((v) => {
+        settled = true;
+        return v;
+      });
+      // Before the 15s page timeout elapses, b0 is still "hanging" and the scan has
+      // NOT failed over — proving the wait is genuinely bounded by the timeout (not
+      // some unrelated synchronous failover). (15s = KA_HIGH_WATER_PAGE_TIMEOUT_MS.)
+      await vi.advanceTimersByTimeAsync(14_000);
+      expect(settled).toBe(false);
+      expect(secondaryQF).not.toHaveBeenCalled();
+      // Cross the timeout boundary: page 1 times out → fails over to b1; page 2 then
+      // runs on the sticky preferred b1 with no timer, completing the scan.
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(await resultP).toBe(6n);
+
+      // b0 paid its timeout exactly ONCE (page 1); page 2 went straight to b1.
+      expect(freshestQF).toHaveBeenCalledTimes(1);
+      expect(secondaryQF).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

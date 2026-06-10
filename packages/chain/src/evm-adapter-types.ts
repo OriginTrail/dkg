@@ -43,12 +43,16 @@ export interface EVMAdapterBaseConfig {
    */
   approvalPolicy?: ApprovalPolicy;
   /**
-   * eth_getLogs block-window (in blocks) for the pre-10.0.4
-   * `getMaxKaNumberForAuthor` `KnowledgeAssetCreated` fallback scan. Defaults to
-   * 2,000 — the smallest common provider range cap (e.g. Base Sepolia). Raise it
-   * on an RPC that serves larger `eth_getLogs` ranges so the bounded fallback
-   * covers an older pre-10.0.4 deployment in fewer calls. Values `<= 0` use the
-   * default. Irrelevant for >= 10.0.4 deployments (the O(1) view is used).
+   * Adapter/SDK-level tuning for the pre-10.0.4 `getMaxKaNumberForAuthor`
+   * `KnowledgeAssetCreated` fallback scan: the `eth_getLogs` block-window, in
+   * blocks. Default 2,000 — the smallest common provider range cap (e.g. Base
+   * Sepolia). Raise it (when constructing the adapter directly) on an RPC that
+   * serves larger ranges so the bounded fallback covers an older pre-10.0.4
+   * deployment in fewer calls. NOTE: this is an adapter-level option — the
+   * daemon/agent node config does not currently forward it. A finite value `>= 1`
+   * is floored to an integer (e.g. `10000.5` → `10000`); a non-finite or `< 1`
+   * value falls back to the default. Irrelevant for >= 10.0.4 deployments (the
+   * O(1) view is used).
    */
   kaHighWaterScanPageSize?: number;
 }

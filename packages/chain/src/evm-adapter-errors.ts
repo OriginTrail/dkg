@@ -22,13 +22,28 @@ export function errorCode(err: unknown): string {
 }
 
 export function errorStatus(err: unknown): number | undefined {
-  const raw =
-    (err as any)?.status ??
-    (err as any)?.statusCode ??
-    (err as any)?.response?.status ??
-    (err as any)?.error?.status ??
-    (err as any)?.error?.statusCode;
-  return typeof raw === 'number' ? raw : undefined;
+  // Walk the nested wrapper chains ethers v6 / managed RPCs actually populate, so
+  // a provider HTTP status buried at e.g. `err.cause.info.error.status` is still
+  // found (a shallow one-level read misses it and the caller would misclassify a
+  // 401/403/429 as a non-status error). Depth- and cycle-bounded.
+  const seen = new Set<unknown>();
+  const visit = (e: any, depth: number): number | undefined => {
+    if (e == null || typeof e !== 'object' || depth > 5 || seen.has(e)) return undefined;
+    seen.add(e);
+    for (const raw of [e.status, e.statusCode, e.response?.status, e.error?.status, e.error?.statusCode]) {
+      // Numeric, OR a digit-only string ("429"/"401") — several wrapped RPC/fetch
+      // errors serialize the HTTP status as a string, so coerce those too rather
+      // than missing them and falling back to message heuristics.
+      if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+      if (typeof raw === 'string' && /^\d{3}$/.test(raw.trim())) return Number(raw);
+    }
+    for (const k of ['cause', 'info', 'error']) {
+      const found = visit(e[k], depth + 1);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  };
+  return visit(err, 0);
 }
 
 export const ERROR_ABI_CONTRACTS = [
