@@ -759,12 +759,32 @@ class DKGClient:
                     "rootEntity": root,
                     **(result if isinstance(result, dict) else {"result": result}),
                 })
-            return {
+            # FIX Q (Codex #1079:764): a per-root child can be a 207 (minted but
+            # CG-binding failed — contextGraphError present), which passes
+            # _client_result_failed (no success:false) and is appended as a clean
+            # child. Don't hard-code partial:False — scan the children for a
+            # non-empty contextGraphError and flag the aggregate as partial so the
+            # bind failure isn't masked.
+            bind_failures = [
+                (entry.get("rootEntity"), entry["contextGraphError"])
+                for entry in published
+                if isinstance(entry.get("contextGraphError"), str) and entry["contextGraphError"]
+            ]
+            aggregate: Dict[str, Any] = {
                 "success": True,
-                "partial": False,
+                "partial": bool(bind_failures),
                 "published": published,
                 "rootEntities": roots,
             }
+            if bind_failures:
+                detail = "; ".join(f"{r}: {err}" for r, err in bind_failures)
+                aggregate["warning"] = (
+                    "Partial publish: all roots were minted on-chain, but the context-graph binding "
+                    f"failed for {len(bind_failures)} root(s) ({detail}). The assets ARE published; "
+                    "do NOT re-publish (re-running would mint duplicates and neither re-binds the "
+                    "context graph). Surface the binding failure to the node operator."
+                )
+            return aggregate
         payload: Dict[str, Any] = {
             "contextGraphId": _normalize_context_graph_id(context_graph_id),
             "selection": selection,

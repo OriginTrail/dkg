@@ -770,7 +770,7 @@ DKG_ASSERTION_PUBLISH_SCHEMA = {
                     "not-registered error."
                 ),
             },
-            "access_policy": {"type": "integer", "description": "Optional registration access policy used only with register_if_needed: 0 open, 1 private."},
+            "access_policy": {"type": "integer", "description": "Optional registration access policy (0 open, 1 private). REQUIRES register_if_needed: true — it only applies when registering the context graph, and is rejected if sent without it."},
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name (must match write/share time)."},
         },
         "required": ["context_graph_id", "name"],
@@ -916,7 +916,7 @@ DKG_SHARED_MEMORY_PUBLISH_SCHEMA = {
             "clear_after": {"type": "boolean", "description": "Clear published SWM after publish."},
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
             "register_if_needed": {"type": "boolean", "description": "Register a local CG before publishing."},
-            "access_policy": {"type": "integer", "description": "Optional registration access policy: 0 open, 1 private."},
+            "access_policy": {"type": "integer", "description": "Optional registration access policy (0 open, 1 private). REQUIRES register_if_needed: true — it only applies when registering the context graph, and is rejected if sent without it."},
         },
         "required": ["context_graph_id"],
     },
@@ -1834,6 +1834,9 @@ class DKGMemoryProvider(MemoryProvider):
         registration = None
         if args.get("register_if_needed") is not None and not isinstance(args.get("register_if_needed"), bool):
             return tool_error("register_if_needed must be a boolean.")
+        access_policy_dep_error = _access_policy_requires_register_error(args)
+        if access_policy_dep_error:
+            return tool_error(access_policy_dep_error)
         if args.get("register_if_needed") is True:
             access_policy = args.get("access_policy")
             access_policy_error = _validate_access_policy(access_policy)
@@ -2250,6 +2253,9 @@ class DKGMemoryProvider(MemoryProvider):
         registration = None
         if args.get("register_if_needed") is not None and not isinstance(args.get("register_if_needed"), bool):
             return tool_error("register_if_needed must be a boolean.")
+        access_policy_dep_error = _access_policy_requires_register_error(args)
+        if access_policy_dep_error:
+            return tool_error(access_policy_dep_error)
         if args.get("register_if_needed") is True:
             access_policy = args.get("access_policy")
             access_policy_error = _validate_access_policy(access_policy)
@@ -3003,6 +3009,23 @@ def _validate_access_policy(value: Any) -> Optional[str]:
         return None
     if type(value) is not int or value not in (0, 1):
         return "access_policy must be 0 (open) or 1 (private)."
+    return None
+
+
+def _access_policy_requires_register_error(args: Dict[str, Any]) -> Optional[str]:
+    """Reject access_policy supplied without register_if_needed (Codex #1084:1792).
+
+    access_policy is only honored inside the register_if_needed branch (it is the
+    privacy of the on-chain registration). A caller that sends access_policy
+    WITHOUT register_if_needed=true would silently lose the setting, so return a
+    tool error instead of dropping it. Returns ``None`` when there is nothing to
+    reject.
+    """
+    if args.get("access_policy") is not None and args.get("register_if_needed") is not True:
+        return (
+            "access_policy requires register_if_needed: true — it only applies when "
+            "registering the context graph on-chain."
+        )
     return None
 
 
