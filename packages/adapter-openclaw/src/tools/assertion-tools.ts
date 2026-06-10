@@ -23,7 +23,7 @@ export function buildAssertionTools(ctx: DkgToolHost): OpenClawTool[] {
         type: 'object',
         properties: {
           context_graph_id: { type: 'string', description: `Target context graph. ${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION}` },
-          name: { type: 'string', description: 'Assertion name (lowercase letters, digits, hyphens).' },
+          name: { type: 'string', description: 'Knowledge asset name. Any IRI-safe name up to 256 chars: no "/", no whitespace, no <>"{}|^`\\ characters. (Mixed case, dots, and underscores are fine — it is NOT restricted to a lowercase-hyphen slug.)' },
           sub_graph_name: { type: 'string', description: 'Optional sub-graph (must be pre-registered).' },
         },
         required: ['context_graph_id', 'name'],

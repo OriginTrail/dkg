@@ -68,6 +68,31 @@ describe("DkgNodePlugin", () => {
       });
     });
 
+    it('dkg_knowledge_asset_create accepts any valid (IRI-safe) name, not just a slug (FIX P)', async () => {
+      // The daemon's real rule (validateAssertionName) accepts mixed-case, dots,
+      // and underscores — the description no longer claims a lowercase-hyphen slug.
+      const { fetchMock, byName } = setupPluginWithFetch({ assertionUri: 'urn:x' });
+      const res = await byName.get('dkg_knowledge_asset_create')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'My_Asset.v2',
+      });
+      expect(res.details).not.toHaveProperty('error');
+      expect(JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string).name).toBe('My_Asset.v2');
+    });
+
+    it('dkg_knowledge_asset_create rejects IRI-unsafe names at the adapter boundary (FIX P)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ assertionUri: 'urn:x' });
+      for (const bad of ['has/slash', 'has space', 'a'.repeat(257)]) {
+        const res = await byName.get('dkg_knowledge_asset_create')!.execute('tc', {
+          context_graph_id: 'ctx',
+          name: bad,
+        });
+        expect(res.details?.error).toMatch(/"name" is invalid/);
+      }
+      // Nothing reached the daemon — all rejected at the boundary.
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
 
     // ── rc.17 new lifecycle verbs (CONTRACT §1 Stage3/Stage5 + side-verbs) ────
 

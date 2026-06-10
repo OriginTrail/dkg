@@ -24,6 +24,7 @@ import {
   normalizeDkgPublisherQuads,
   resolveDkgHome,
   toEip55Checksum,
+  validateAssertionName,
 } from '@origintrail-official/dkg-core';
 import {
   DkgDaemonClient,
@@ -3468,6 +3469,14 @@ export class DkgNodePlugin {
       const name = String(args.name ?? '').trim();
       if (!contextGraphId) return this.error('"context_graph_id" is required.');
       if (!name) return this.error('"name" is required.');
+      // Validate against the daemon's ACTUAL rule (`validateAssertionName`,
+      // core/src/constants.ts) — any IRI-safe name up to 256 chars, NOT a
+      // lowercase-hyphen slug. Fail fast at the boundary with the daemon's exact
+      // reason rather than letting the daemon 400.
+      const nameValidation = validateAssertionName(name);
+      if (!nameValidation.valid) {
+        return this.error(`"name" is invalid: ${nameValidation.reason}`);
+      }
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
       // Create stays on the legacy assertion route: it preserves the
       // `{ assertionUri, alreadyExists }` contract and name validation that the
