@@ -428,6 +428,46 @@ def test_publish_quads_recovery_omits_sub_graph_name_when_absent(recording_clien
     assert "sub-graph" not in result["error"]
 
 
+# -- FIX R (#1084:787): publish_quads annotates a 207 at the client ------------
+
+def test_publish_quads_annotates_207_partial_at_client(recording_client):
+    client = recording_client
+    client.responder = lambda path, body: (
+        {"assertionUri": "urn:a", "merkleRoot": "0xr"}
+        if path == "/api/knowledge-assets"
+        else {"kaId": "k", "ual": "u", "status": "confirmed", "contextGraphError": "bind failed"}
+    )
+    # the client itself (no handler wrap) returns the partial-annotated result
+    result = client.publish_quads("cg", _Q)
+    assert result["partial"] is True
+    assert "Partial publish" in result["warning"]
+    assert "bind failed" in result["warning"]
+    assert result["ual"] == "u"
+    assert result["assertionName"].startswith("hermes-publish-")
+
+
+def test_publish_quads_clean_200_not_partial(recording_client):
+    client = recording_client
+    client.responder = lambda path, body: (
+        {"assertionUri": "urn:a", "merkleRoot": "0xr"}
+        if path == "/api/knowledge-assets"
+        else {"kaId": "k", "ual": "u", "status": "confirmed"}
+    )
+    result = client.publish_quads("cg", _Q)
+    assert "partial" not in result
+    assert "warning" not in result
+
+
+def test_annotate_207_partial_client_helper(client_module):
+    f = client_module._annotate_207_partial
+    r = f({"ual": "u", "contextGraphError": "boom"})
+    assert r["partial"] is True and "boom" in r["warning"] and r["ual"] == "u"
+    assert "retry the publish" not in r["warning"].lower()
+    assert "partial" not in f({"ual": "u"})
+    assert "partial" not in f({"ual": "u", "contextGraphError": ""})
+    assert f("x") == "x"
+
+
 # -- Phase B (fast-follow): register_if_needed on the one-shot dkg_publish ----
 # The atomic assertionName fork does NOT auto-register the CG (LU-6 is selection-
 # fork only), so dkg_publish gets its own register lever (mirrors §G).
@@ -570,3 +610,34 @@ def test_publish_schema_has_register_if_needed(plugin_module):
     props = pub["parameters"]["properties"]
     assert props["register_if_needed"]["type"] == "boolean"
     assert "access_policy" in props
+
+
+# -- FIX S (#1084:1792): access_policy on dkg_publish requires register_if_needed
+# access_policy is only honoured inside the register_if_needed branch, so sending
+# it WITHOUT register_if_needed silently dropped the privacy setting — reject it.
+
+def test_publish_rejects_access_policy_without_register(plugin_module):
+    p = _register_provider(plugin_module, {"registered": "cg"})
+    out = json.loads(p.handle_tool_call("dkg_publish", {
+        "context_graph_id": "cg", "quads": _Q, "access_policy": 1,
+    }))
+    assert "access_policy requires register_if_needed" in out["error"]
+    # rejected before any register/publish — the privacy setting is never dropped
+    assert p._client.calls == []
+
+
+def test_publish_allows_access_policy_with_register(plugin_module):
+    p = _register_provider(plugin_module, {"registered": "cg"})
+    out = json.loads(p.handle_tool_call("dkg_publish", {
+        "context_graph_id": "cg", "quads": _Q,
+        "register_if_needed": True, "access_policy": 1,
+    }))
+    assert "access_policy requires register_if_needed" not in out.get("error", "")
+    assert p._client.calls[0] == ("register", "cg", 1)
+
+
+def test_publish_access_policy_description_notes_register_dependency(plugin_module):
+    p = _register_provider(plugin_module, {"registered": "cg"})
+    pub = next(s for s in p.get_tool_schemas() if s["name"] == "dkg_publish")
+    desc = pub["parameters"]["properties"]["access_policy"]["description"]
+    assert "REQUIRES register_if_needed" in desc
