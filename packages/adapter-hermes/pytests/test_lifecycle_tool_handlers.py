@@ -589,6 +589,67 @@ def test_validate_access_policy_helper_is_bool_safe(plugin_module):
     assert v(2) is not None and v(-1) is not None and v("1") is not None
 
 
+# -- FIX S (#1084:1792): access_policy requires register_if_needed -------------
+
+def test_per_ka_publish_rejects_access_policy_without_register(provider):
+    out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka", "access_policy": 1,
+    }))
+    assert "access_policy requires register_if_needed" in out["error"]
+    # nothing was published / registered
+    assert provider._client.calls == []
+
+
+def test_per_ka_publish_allows_access_policy_with_register(provider):
+    out = json.loads(provider.handle_tool_call("dkg_knowledge_asset_publish", {
+        "context_graph_id": "cg1", "name": "ka",
+        "register_if_needed": True, "access_policy": 1,
+    }))
+    assert "access_policy requires register_if_needed" not in out.get("error", "")
+    assert provider._client.calls[0] == ("register", "cg1", 1)
+
+
+def test_shared_memory_publish_rejects_access_policy_without_register(plugin_module):
+    class _Client:
+        def __init__(self):
+            self.calls = []
+
+        def register_context_graph(self, cg, access_policy=None):
+            self.calls.append("register")
+            return {"registered": cg}
+
+        def publish(self, cg, selection="all", clear_after=True, sub_graph_name=None):
+            self.calls.append("publish")
+            return {"status": "confirmed"}
+
+    p = plugin_module.DKGMemoryProvider()
+    p._offline = False
+    p._config = {"publish_tool": "direct", "allow_direct_publish": True}
+    p._client = _Client()
+    out = json.loads(p.handle_tool_call("dkg_shared_memory_publish", {
+        "context_graph_id": "cg1", "access_policy": 1,
+    }))
+    assert "access_policy requires register_if_needed" in out["error"]
+    assert p._client.calls == []  # rejected before register/publish
+
+
+def test_access_policy_descriptions_note_register_dependency(provider):
+    for tool in ("dkg_knowledge_asset_publish", "dkg_shared_memory_publish"):
+        sch = next(s for s in provider.get_tool_schemas() if s["name"] == tool)
+        desc = sch["parameters"]["properties"]["access_policy"]["description"]
+        assert "REQUIRES register_if_needed" in desc
+
+
+def test_access_policy_requires_register_helper(plugin_module):
+    f = plugin_module._access_policy_requires_register_error
+    assert f({"access_policy": 1}) is not None  # present without register -> error
+    assert f({"access_policy": 1, "register_if_needed": True}) is None
+    assert f({"register_if_needed": True}) is None  # no access_policy -> ok
+    assert f({}) is None
+    # register_if_needed falsey (not True) still rejects a present access_policy
+    assert f({"access_policy": 0, "register_if_needed": False}) is not None
+
+
 # -- Phase A (#1079): vm/publish 207 partial surfacing ----------------------
 
 def test_publish_207_partial_surfaces_warning_keeping_ual(provider):

@@ -113,6 +113,39 @@ def test_full_success_marks_partial_false(recording_client):
     assert result["partial"] is False
 
 
+def test_multi_root_207_child_flips_aggregate_partial(recording_client):
+    # FIX Q (#1079:764): a per-root child can be a 207 (minted but CG-bind failed
+    # — contextGraphError present) which passes _client_result_failed. The
+    # aggregate must NOT hard-code partial:False; it flags partial + warning.
+    client = recording_client
+
+    def responder(path, body):
+        root = body["selection"][0]
+        if root == "b":
+            return {"kaId": "ka-b", "status": "confirmed", "contextGraphError": "bind timed out"}
+        return {"kaId": "ka-" + root, "status": "confirmed"}
+
+    client.responder = responder
+    result = client.publish("cg:test", selection=["a", "b", "c"], clear_after=False)
+    # all roots minted -> success, but flagged partial because of the bind failure
+    assert result["success"] is True
+    assert result["partial"] is True
+    assert "bind timed out" in result["warning"]
+    assert "b" in result["warning"]
+    assert "do NOT re-publish" in result["warning"]
+    assert len(result["published"]) == 3
+
+
+def test_multi_root_no_207_child_partial_false(recording_client):
+    client = recording_client
+    client.responder = lambda path, body: {
+        "kaId": "ka-" + body["selection"][0], "status": "confirmed",
+    }
+    result = client.publish("cg:test", selection=["a", "b"], clear_after=False)
+    assert result["partial"] is False
+    assert "warning" not in result
+
+
 def test_context_graph_id_is_normalized(recording_client):
     client = recording_client
     client.publish("did:dkg:context-graph:cg1", selection=["a", "b"], clear_after=True)
