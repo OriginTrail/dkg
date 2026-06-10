@@ -9,7 +9,7 @@ doc_type: concept
 
 DKG V10 is easiest to understand as a 3-layer memory system with increasing scope and trust. Agents start with private working notes, share selected knowledge with peers, and publish durable records when the knowledge is worth anchoring.
 
-![DKG key concepts](../.gitbook/assets/dkg-key-concepts.png)
+![DKG key concepts](../.gitbook/assets/DKG-memory-layers.png)
 
 ```mermaid
 flowchart LR

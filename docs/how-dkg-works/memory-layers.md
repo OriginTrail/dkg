@@ -7,7 +7,7 @@ doc_type: concept
 
 # Memory Layers
 
-![DKG memory layers](../.gitbook/assets/dkg-memory-hr.png)
+![DKG memory layers](../.gitbook/assets/DKG-memory-layers.png)
 
 DKG V10 separates memory by scope and trust into three memory layers. Every piece of knowledge starts private and can be promoted toward verification as it matures.
 
