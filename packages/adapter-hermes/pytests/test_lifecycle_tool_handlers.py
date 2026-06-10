@@ -168,6 +168,16 @@ def test_share_entities_array_passes_through(provider):
     assert provider._client.calls[-1][3] == ["urn:a", "urn:b"]
 
 
+def test_share_entities_array_is_stripped_before_promote(provider):
+    # FIX K (#1079:2157): each entity is validated with .strip() but the
+    # UNSTRIPPED list was forwarded — " urn:a " must reach the daemon stripped.
+    provider.handle_tool_call("dkg_knowledge_asset_share", {
+        "context_graph_id": "cg1", "name": "ka",
+        "entities": [" urn:a ", "urn:b\t", "  urn:c"],
+    })
+    assert provider._client.calls[-1][3] == ["urn:a", "urn:b", "urn:c"]
+
+
 def test_share_entities_omitted_is_none_not_coerced(provider):
     provider.handle_tool_call("dkg_knowledge_asset_share", {
         "context_graph_id": "cg1", "name": "ka",
@@ -597,6 +607,14 @@ def test_publish_207_partial_surfaces_warning_keeping_ual(provider):
     # the UAL / kaId stay visible — the asset IS on-chain
     assert out["ual"] == "did:dkg:1/0xabc/5"
     assert out["kaId"] == "ka1"
+    # FIX I (#1076:3663): the warning must NOT tell the agent to retry the
+    # publish (mint succeeded + SWM cleared); it must say don't-re-publish + why
+    # + surface to the operator.
+    warning = out["warning"]
+    assert "retry the publish" not in warning.lower()
+    assert "Do NOT re-run publish" in warning
+    assert "duplicate" in warning and "VM precondition" in warning
+    assert "node operator" in warning
 
 
 def test_publish_200_clean_success_not_marked_partial(provider):
@@ -625,6 +643,17 @@ def test_annotate_vm_publish_partial_helper(plugin_module):
     assert "partial" not in f({"ual": "u"})
     assert "partial" not in f({"ual": "u", "contextGraphError": ""})
     assert f("x") == "x"  # non-dict passthrough
+
+
+def test_annotate_vm_publish_partial_warning_no_retry_guidance(plugin_module):
+    # FIX I (#1076:3663): the 207 warning must not advise re-publishing.
+    f = plugin_module._annotate_vm_publish_partial
+    warning = f({"ual": "u", "contextGraphError": "bind failed"})["warning"]
+    assert "retry the publish" not in warning.lower()
+    assert "Do NOT re-run publish" in warning
+    assert "dkg_publish" in warning and "duplicate" in warning
+    assert "dkg_knowledge_asset_publish" in warning and "VM precondition" in warning
+    assert "node operator" in warning
 
 
 # -- pull_from handler ------------------------------------------------------
