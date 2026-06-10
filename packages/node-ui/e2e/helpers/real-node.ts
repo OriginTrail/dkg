@@ -36,10 +36,12 @@ export const SEEDED_CGS = [PRIMARY_CG, SECONDARY_CG] as const;
  * `NUM_CORE_NODES` nodes boot as `core`; the rest are `edge`.
  */
 export const UI_NODE = Number(process.env.DEVNET_NODE || process.env.UI_NODE_ID) || 1;
-// Default 4 — matches playwright.config.ts. scripts/devnet.sh pins minSig=3, so
-// a VM publish needs minSig OTHER core peers = 4 nodes total; node1 (relay hub)
-// then settles at EXPECTED_MIN_PEERS = N-1 = 3.
-export const NUM_NODES = Number(process.env.PLAYWRIGHT_DEVNET_NUM_NODES) || 4;
+// Default 6 (4 core + 2 edge) — matches playwright.config.ts, which now also
+// threads PLAYWRIGHT_DEVNET_NUM_NODES into the runner process so this fallback is
+// only hit by direct (non-playwright) imports. scripts/devnet.sh pins minSig=3,
+// so a VM publish needs minSig OTHER core peers (4 core nodes); node1 (relay hub)
+// then settles at EXPECTED_MIN_PEERS = N-1 = 5.
+export const NUM_NODES = Number(process.env.PLAYWRIGHT_DEVNET_NUM_NODES) || 6;
 export const NUM_CORE_NODES = Number(process.env.NUM_CORE_NODES) || 4;
 /** node1 is the relay hub every other node dials. */
 export const IS_RELAY_HUB = UI_NODE === 1;
