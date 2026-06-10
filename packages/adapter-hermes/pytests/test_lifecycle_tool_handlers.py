@@ -640,6 +640,20 @@ def test_access_policy_descriptions_note_register_dependency(provider):
         assert "REQUIRES register_if_needed" in desc
 
 
+# -- FIX V (#1076:memory-tools:24): shared-mem-publish register_if_needed wording
+
+def test_shared_memory_publish_register_desc_states_auto_register(provider):
+    # The CG-wide selection publish AUTO-registers an unregistered CG regardless of
+    # register_if_needed (memory.ts:1928) at gas/TRAC cost. register_if_needed only
+    # sets the access_policy of that registration — it does NOT gate whether
+    # registration happens. The description must not imply otherwise.
+    sch = next(s for s in provider.get_tool_schemas() if s["name"] == "dkg_shared_memory_publish")
+    desc = sch["parameters"]["properties"]["register_if_needed"]["description"]
+    assert "does NOT gate whether registration happens" in desc
+    assert "AUTO-register" in desc
+    assert "gas/TRAC" in desc
+
+
 def test_access_policy_requires_register_helper(plugin_module):
     f = plugin_module._access_policy_requires_register_error
     assert f({"access_policy": 1}) is not None  # present without register -> error
