@@ -2749,6 +2749,12 @@ export class DkgNodePlugin {
       if (args.access_policy !== undefined && args.access_policy !== 0 && args.access_policy !== 1) {
         return this.error('"access_policy" must be 0 (open) or 1 (private).');
       }
+      // FIX S: `access_policy` only applies when registering the CG — reject it
+      // (rather than silently drop the privacy setting) when register_if_needed
+      // is not true.
+      if (args.access_policy !== undefined && !registerIfNeeded) {
+        return this.error('"access_policy" requires "register_if_needed": true — it only applies when registering the context graph.');
+      }
 
       // CONTRACT §G: publishing requires the CG to be registered on-chain and the
       // daemon does NOT auto-register. When `register_if_needed` is true, register
@@ -3636,6 +3642,12 @@ export class DkgNodePlugin {
       if (args.access_policy !== undefined && args.access_policy !== 0 && args.access_policy !== 1) {
         return this.error('"access_policy" must be 0 (open) or 1 (private).');
       }
+      // FIX S: `access_policy` only applies when registering the CG — reject it
+      // (rather than silently drop the privacy setting) when register_if_needed
+      // is not true.
+      if (args.access_policy !== undefined && !registerIfNeeded) {
+        return this.error('"access_policy" requires "register_if_needed": true — it only applies when registering the context graph.');
+      }
 
       // CONTRACT §G: vm/publish requires the CG to be registered on-chain and does
       // NOT auto-register. When `register_if_needed` is true, register first
@@ -3947,6 +3959,12 @@ export class DkgNodePlugin {
       }
       if (args.access_policy !== undefined && args.access_policy !== 0 && args.access_policy !== 1) {
         return this.error('"access_policy" must be 0 (open) or 1 (private).');
+      }
+      // FIX S: `access_policy` only applies when registering the CG — reject it
+      // (rather than silently drop the privacy setting) when register_if_needed
+      // is not true.
+      if (args.access_policy !== undefined && !registerIfNeeded) {
+        return this.error('"access_policy" requires "register_if_needed": true — it only applies when registering the context graph.');
       }
       const registration = registerIfNeeded
         ? await this.registerContextGraphIfNeeded(contextGraphId, args.access_policy as number | undefined)

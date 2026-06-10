@@ -45,7 +45,7 @@ export function buildMemoryTools(ctx: DkgToolHost): OpenClawTool[] {
           },
           access_policy: {
             type: 'number',
-            description: 'Optional registration access policy used only when `register_if_needed` is true: `0` for open, `1` for private.',
+            description: 'Optional registration access policy: `0` for open, `1` for private. Requires `register_if_needed: true` — it only applies when registering the CG, and is rejected otherwise.',
           },
         },
         required: ['context_graph_id'],

@@ -371,6 +371,19 @@ describe('dkg_publish tool', () => {
     expect(String(ft.calls[0][0])).toContain('/api/context-graph/register');
   });
 
+  it('rejects access_policy when register_if_needed is not set (FIX S)', async () => {
+    const tool = findTool('dkg_publish');
+    const result = await tool.execute('call-ap', {
+      context_graph_id: 'testing',
+      quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'hello' }],
+      access_policy: 1, // valid 0|1 but no register_if_needed
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toMatch(/access_policy.*requires.*register_if_needed/i);
+    // Nothing published — rejected before any daemon call.
+    expect(ft.calls).toHaveLength(0);
+  });
+
   // ── FIX A — create 207 share-phase partial-failure → do NOT publish ──────
   it('aborts (no publish) when create returns a 207 share-phase partial-failure, surfacing the assertionName', async () => {
     ft.addResponses(
@@ -1069,18 +1082,25 @@ describe('dkg_publish SWM-first flow', () => {
     expect(ft.calls).toHaveLength(0);
   });
 
-  it('accepts a valid access_policy without register_if_needed (no register call; publishes)', async () => {
+  it('accepts a valid access_policy WITH register_if_needed:true (registers then publishes) — FIX S', async () => {
     ft.addResponses(
-      new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),
-      new Response(JSON.stringify({ kaId: 'kc-2', kas: [] }), { status: 200 }),
+      new Response(JSON.stringify({ registered: 'testing' }), { status: 200 }), // register
+      new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),      // create
+      new Response(JSON.stringify({ kaId: 'kc-2', kas: [] }), { status: 200 }),  // publish
     );
 
     const tool = findTool('dkg_publish');
-    const result = await tool.execute('call-2b', { context_graph_id: 'testing', quads: VALID_QUADS, access_policy: 1 });
+    const result = await tool.execute('call-2b', {
+      context_graph_id: 'testing',
+      quads: VALID_QUADS,
+      register_if_needed: true,
+      access_policy: 1,
+    });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.kaId).toBe('kc-2');
-    // access_policy only matters when register_if_needed:true → no register call here.
-    expect(String(ft.calls[0][0])).toContain('/api/knowledge-assets');
+    // access_policy is honored — it reaches the register call.
+    expect(String(ft.calls[0][0])).toContain('/api/context-graph/register');
+    expect(JSON.parse(ft.calls[0][1]?.body as string).accessPolicy).toBe(1);
   });
 });
 

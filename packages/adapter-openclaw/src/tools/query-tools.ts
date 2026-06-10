@@ -51,7 +51,7 @@ export function buildQueryTools(ctx: DkgToolHost): OpenClawTool[] {
           },
           access_policy: {
             type: 'number',
-            description: 'Used only when `register_if_needed` is true: `0` for open, `1` for private.',
+            description: 'Registration access policy: `0` for open, `1` for private. Requires `register_if_needed: true` — it only applies when registering the CG, and is rejected otherwise.',
           },
         },
         required: ['context_graph_id', 'quads'],

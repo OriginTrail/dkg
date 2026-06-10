@@ -166,6 +166,16 @@ describe("DkgNodePlugin", () => {
       expect(body.contextGraphId).toBe('ctx');
     });
 
+    it('dkg_shared_memory_publish rejects access_policy without register_if_needed (FIX S)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({});
+      const res = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        access_policy: 1, // valid 0|1 but no register_if_needed
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(res.details?.error).toMatch(/access_policy.*requires.*register_if_needed/i);
+    });
+
 
     it('dkg_shared_memory_publish can register the context graph before publish when requested', async () => {
       const fetchMock = vi.fn(async (url: string) => {

@@ -389,6 +389,17 @@ describe("DkgNodePlugin", () => {
       expect(res.details?.error).toMatch(/register_if_needed.*boolean/);
     });
 
+    it('dkg_knowledge_asset_publish rejects access_policy without register_if_needed (FIX S)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({});
+      const res = await byName.get('dkg_knowledge_asset_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        access_policy: 1, // valid 0|1 but no register_if_needed
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(res.details?.error).toMatch(/access_policy.*requires.*register_if_needed/i);
+    });
+
 
     it('dkg_knowledge_asset_pull_from POSTs to /wm/pull-from with layer + onConflict (camelCase body)', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ wmDraft: 'open', seededFrom: { layer: 'swm' } });
