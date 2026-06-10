@@ -320,16 +320,16 @@ DKG_SHARE_SCHEMA = {
 DKG_PUBLISH_SCHEMA = {
     "name": "dkg_publish",
     "description": (
-        "One-shot write + publish helper: write supplied quads to Shared Working Memory, "
-        "then publish SWM to Verifiable Memory. Chain-anchored, permanent, costs TRAC. "
-        "Object values starting with http://, https://, urn:, or did: are treated as "
-        "URIs. Everything else becomes a string literal automatically.\n"
-        "NON-ATOMIC for multiple root subjects: this legacy path mints ONE root per call "
-        "(the daemon rejects atomic multi-root). On a partial failure, already-published "
-        "roots stay on-chain (TRAC spent, irreversible) and the result reports which "
-        "published vs failed vs were not attempted — re-publish only the failed/remaining "
-        "roots. For a single named asset prefer dkg_knowledge_asset_publish, which seals the "
-        "whole asset and is the atomic-safe path.\n"
+        "One-shot write + publish helper: writes the supplied quads as a single fresh, "
+        "uniquely-named sealed assertion, then publishes it to Verifiable Memory. The on-chain "
+        "MINT is atomic and multi-root-safe -- all subjects publish together as one sealed "
+        "assertion in a single mint. This is a TWO-STEP helper (create-and-seal, then publish), "
+        "so it can partially fail between steps; on a partial failure the result reports the "
+        "assertionName so you can recover by name (do not recreate). Chain-anchored, permanent, "
+        "costs TRAC. Object values starting with http://, https://, urn:, or did: are treated as "
+        "URIs; everything else becomes a string literal automatically.\n"
+        "This atomic path requires the context graph to be registered on-chain; pass "
+        "register_if_needed=true to register it first on a fresh CG.\n"
         "Always call dkg_wallet_balances first to verify sufficient TRAC."
     ),
     "parameters": {
@@ -354,6 +354,22 @@ DKG_PUBLISH_SCHEMA = {
                 },
                 "description": "Array of RDF triples to write and publish.",
             },
+            "register_if_needed": {
+                "type": "boolean",
+                "description": (
+                    "If the context graph is not yet registered on-chain, register it first "
+                    "(idempotent), then publish. Registration may spend gas/TRAC. Default false -- "
+                    "when false and the CG is unregistered, publish fails with the daemon's "
+                    "not-registered error. CAVEAT: this uses the explicit register route, which "
+                    "registers with the daemon's DEFAULT publishPolicy (derived from access_policy) "
+                    "and does NOT preserve a context graph's stored custom publishPolicy / "
+                    "contribution governance. For a CG created with a non-default publishPolicy/PCA, "
+                    "register it explicitly with the desired policy first rather than relying on "
+                    "register_if_needed. (Read access is unaffected; daemon-side rehydration tracked "
+                    "in OriginTrail/dkg#1085.)"
+                ),
+            },
+            "access_policy": {"type": "integer", "description": "Optional registration access policy (0 open, 1 private). REQUIRES register_if_needed: true — it only applies when registering the context graph, and is rejected if sent without it. Sets only the access policy; it does NOT preserve a stored custom publishPolicy (see register_if_needed; OriginTrail/dkg#1085)."},
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph scope."},
         },
         "required": ["context_graph_id", "quads"],
@@ -1777,41 +1793,67 @@ class DKGMemoryProvider(MemoryProvider):
         quads = _normalize_quads(args.get("quads"))
         if not quads:
             return tool_error("quads must contain at least one item with subject, predicate, and object.")
-        share_result = self._client.share(cg, quads, sub_graph_name=_first_text(args, "sub_graph_name"))
-        if share_result.get("success") is False:
-            return json.dumps(share_result)
-        roots = _quad_root_entities(quads)
-        # ALWAYS publish the EXPLICIT roots this call just wrote — never "all".
-        # selection="all" publishes the WHOLE shared-memory graph (every
-        # unpublished root in the CG/sub-graph), so a one-shot dkg_publish would
-        # over-scope and mint other agents'/calls' unpublished SWM content
-        # (Codex #1750). Passing the explicit list also makes the client loop
-        # one-root-per-call (dedup + clearAfter-on-last + partial-failure
-        # transparency all apply uniformly, single or multi root). The CG-wide
-        # "all" remains available only on dkg_shared_memory_publish, where the
-        # agent explicitly opts in.
-        result = self._client.publish(
+        # register_if_needed: the atomic assertionName fork (publish_quads) does
+        # NOT auto-register the CG (LU-6 transparent register-then-publish is the
+        # selection fork only, memory.ts:1874+), so on a fresh, never-registered
+        # CG the publish would fail "not registered on-chain" on a real chain.
+        # When true, register the CG first (idempotent — short-circuits if already
+        # registered) BEFORE publishing, so this one-shot is self-contained on a
+        # fresh CG. Mirrors the §G register block on dkg_knowledge_asset_publish.
+        registration = None
+        if args.get("register_if_needed") is not None and not isinstance(args.get("register_if_needed"), bool):
+            return tool_error("register_if_needed must be a boolean.")
+        access_policy_dep_error = _access_policy_requires_register_error(args)
+        if access_policy_dep_error:
+            return tool_error(access_policy_dep_error)
+        if args.get("register_if_needed") is True:
+            access_policy = args.get("access_policy")
+            access_policy_error = _validate_access_policy(access_policy)
+            if access_policy_error:
+                return tool_error(access_policy_error)
+            registration = self._client.register_context_graph(cg, access_policy)
+            if _client_result_failed(registration):
+                error = str(registration.get("error") or registration.get("message") or "").lower()
+                # "already registered"/"already exists" is success — continue.
+                # Any other registration failure is fatal: surface it and do NOT publish.
+                if "already registered" not in error and "already exists" not in error:
+                    return json.dumps(registration)
+                # Normalize the already-registered short-circuit to a success
+                # shape (Codex #1084:1810) — leaving the raw {success:false,...} on
+                # result["registration"] makes a clean publish look partly failed.
+                registration = {"alreadyRegistered": True}
+        # Publish via the ATOMIC assertionName fork (parity with OpenClaw + MCP):
+        # create a fresh uniquely-named assertion with these quads (auto-finalize
+        # + promote), then publish that ONE sealed assertion by name. The daemon
+        # publishes only that assertion's exact merkleRoot — multi-root-safe,
+        # correctly scoped, in a single atomic operation. No per-root loop, no
+        # dedup, no partial-failure shape (those apply only to the explicit
+        # CG-wide dkg_shared_memory_publish, which stays on the selection path).
+        result = self._client.publish_quads(
             cg,
-            selection=roots,
-            # clear_after=False (FIX M / Codex #1079:1781): on the selection path,
-            # clearSharedMemoryAfter=true makes the daemon wipe the WHOLE SWM
-            # remainder (deleteByPattern over every SWM graph under the bucket, no
-            # subject filter — dkg-publisher.ts:1528-1535), destroying every other
-            # call's/agent's unpublished roots. dkg_publish only owns the roots it
-            # just wrote, so it must NOT clear the remainder. (The published roots
-            # are cleared unconditionally regardless.) Matches the sibling
-            # dkg_shared_memory_publish default for an explicit-root selection.
-            clear_after=False,
+            quads,
             sub_graph_name=_first_text(args, "sub_graph_name"),
         )
-        # Only stamp the per-call counts on a non-hard-failure result (FIX N /
-        # Codex #1079:1784): the client returns a partial-failure dict
-        # ({success:false, failedRoot, ...}) when a root mint fails — attaching
-        # quadsPublished/rootEntities there would falsely imply everything
-        # published. Confirmed / 207-partial results are fine to annotate.
-        if isinstance(result, dict) and not _client_result_failed(result):
-            result["quadsPublished"] = len(quads)
-            result["rootEntities"] = roots
+        # publish_quads already annotates a 207 (contextGraphError) partial at the
+        # client (FIX R / Codex #1084:787), so this is an IDEMPOTENT safety net:
+        # re-annotating an already-partial result re-sets the same partial/warning
+        # (no-op), and it still catches a raw 207 if the client path is ever
+        # bypassed. A clean 200 / FIX A/B failure dict (no contextGraphError) is
+        # left untouched.
+        result = _annotate_vm_publish_partial(result)
+        if isinstance(result, dict):
+            # Only stamp the per-call count on a non-hard-failure result (FIX N /
+            # Codex #1084:1821): publish_quads returns a partial-failure dict
+            # ({success:false, ...}) on create-207 / publish-fail — stamping
+            # quadsPublished there would falsely imply it published. A confirmed
+            # result or a 207-partial (minted) is fine to annotate.
+            if not _client_result_failed(result):
+                result["quadsPublished"] = len(quads)
+            # Registration context stays on any result (incl. a publish failure):
+            # the register step itself succeeded / was already-registered, so it
+            # is not misleading and aids recovery.
+            if registration is not None:
+                result["registration"] = registration
         return json.dumps(result)
 
     def _handle_shared_memory_publish(self, args: Dict[str, Any]) -> str:
@@ -2856,15 +2898,6 @@ def _normalize_semantic_quads(raw_quads: Any) -> Tuple[List[Dict[str, str]], Opt
             "object": object_value if _is_safe_iri(object_value) or object_value.startswith('"') else _quote_literal(object_value),
         })
     return quads, None
-
-
-def _quad_root_entities(quads: List[Dict[str, str]]) -> List[str]:
-    roots: List[str] = []
-    for quad in quads:
-        subject = str(quad.get("subject", "")).strip()
-        if subject and subject not in roots:
-            roots.append(subject)
-    return roots
 
 
 def _coerce_limit(value: Any, default: int, maximum: int) -> int:
