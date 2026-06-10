@@ -81,6 +81,18 @@ function isKaHighWaterViewUnavailable(err: unknown): boolean {
     || msg.includes('missing revert data');
 }
 
+async function contractAddress(contract: Contract): Promise<string> {
+  const getAddress = (contract as any).getAddress;
+  if (typeof getAddress === 'function') {
+    return ethers.getAddress(await getAddress.call(contract));
+  }
+  const target = (contract as any).target;
+  if (typeof target === 'string') {
+    return ethers.getAddress(target);
+  }
+  throw new Error('DKGKnowledgeAssets address is unavailable from the resolved contract handle.');
+}
+
 export class EVMChainAdapterBase {
   /** See `ChainAdapter.deploymentId`. */
   get deploymentId(): string {
@@ -1214,7 +1226,10 @@ export class EVMChainAdapterBase {
    *      `queryFilter(filter, 0)` scanned `[0, latest]` in one RPC call and hit
    *      provider block-range caps (#1080); this legacy path uses small bounded
    *      windows instead. Transient RPC failures are rethrown, not hidden by a
-   *      historical crawl on the same provider.
+   *      historical crawl on the same provider. Empty selector-call responses
+   *      only reach the fallback after confirming bytecode exists at the
+   *      resolved storage address, so a bad Hub address fails loudly instead of
+   *      reconciling from empty logs.
    */
   async getMaxKaNumberForAuthor(author: string): Promise<bigint> {
     const storage = this.contracts.knowledgeAssetStorage;
@@ -1233,6 +1248,12 @@ export class EVMChainAdapterBase {
           throw err;
         }
       }
+    }
+
+    const storageAddress = await contractAddress(storage);
+    const code = await this.provider.getCode(storageAddress);
+    if (!code || code === '0x') {
+      throw new Error(`DKGKnowledgeAssets resolved to ${storageAddress}, but no contract code is deployed there.`);
     }
 
     const filter = storage.filters.KnowledgeAssetCreated(null, normalized);

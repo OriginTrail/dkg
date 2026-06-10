@@ -44,8 +44,12 @@ function viewMock(impl: () => Promise<bigint>) {
 
 function makeAdapter(storage: any, head = 0) {
   const a = new EVMChainAdapter(minimalConfig());
+  storage.target ??= '0x2222222222222222222222222222222222222222';
   (a as any).contracts = { knowledgeAssetStorage: storage };
-  (a as any).provider = { getBlockNumber: vi.fn(async () => head) };
+  (a as any).provider = {
+    getBlockNumber: vi.fn(async () => head),
+    getCode: vi.fn(async () => '0x6000'),
+  };
   return a;
 }
 
@@ -117,6 +121,29 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
     expect(await makeAdapter(storage, 1_500).getMaxKaNumberForAuthor(AUTHOR)).toBe(3n);
     expect(view.staticCall).toHaveBeenCalledTimes(1);
     expect(queryFilter).toHaveBeenCalledWith('F', 0, 1500);
+  });
+
+  it('fails loudly instead of scanning empty logs when the resolved storage address has no code', async () => {
+    const badData: any = new Error('could not decode result data');
+    badData.code = 'BAD_DATA';
+    const queryFilter = vi.fn(async () => []);
+    const storage = {
+      target: '0x3333333333333333333333333333333333333333',
+      getMaxKaNumberForAuthor: viewMock(async () => {
+        throw badData;
+      }),
+      filters: { KnowledgeAssetCreated: vi.fn(() => 'F') },
+      queryFilter,
+    };
+    const a = makeAdapter(storage, 100);
+    (a as any).provider.getCode.mockResolvedValueOnce('0x');
+
+    await expect(a.getMaxKaNumberForAuthor(AUTHOR)).rejects.toThrow(
+      'no contract code is deployed there',
+    );
+    expect((a as any).provider.getCode).toHaveBeenCalledWith(storage.target);
+    expect(queryFilter).not.toHaveBeenCalled();
+    expect((a as any).provider.getBlockNumber).not.toHaveBeenCalled();
   });
 
   it('returns -1n when neither the view nor legacy logs yields a number', async () => {
