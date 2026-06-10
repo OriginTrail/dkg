@@ -428,7 +428,11 @@ describe('dkg_publish tool', () => {
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.error).toBeTruthy();
     expect(parsed.error).toMatch(/openclaw-publish-/);            // the generated name, for recovery
-    expect(parsed.error).toMatch(/dkg_knowledge_asset_history|dkg_knowledge_asset_query/i); // check-before-recreate guidance
+    // FIX Y: point recovery at _history (lifecycle state, any layer) — the WM
+    // draft is empty after the create's promote, so _query would falsely read
+    // "not created".
+    expect(parsed.error).toMatch(/dkg_knowledge_asset_history/);
+    expect(parsed.error).toMatch(/NOT dkg_knowledge_asset_query/i);
     expect(parsed.error).toMatch(/duplicate/i);
     // only the create call was made — no publish.
     expect(ft.calls).toHaveLength(1);
