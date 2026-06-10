@@ -69,6 +69,18 @@ const BOUND_CONTRACT_INVALIDATORS = new Map<string, (adapter: EVMChainAdapterBas
   ['Chronos',                    (a) => { (a as any).contracts.chronos = undefined; }],
 ]);
 
+function isKaHighWaterViewUnavailable(err: unknown): boolean {
+  if (err instanceof Error) enrichEvmError(err);
+  const code = errorCode(err);
+  const msg = errorMessage(err).toLowerCase();
+
+  if (code === 'BAD_DATA') return true;
+  return msg.includes('could not decode result data')
+    || msg.includes('function selector')
+    || msg.includes('selector not recognized')
+    || msg.includes('missing revert data');
+}
+
 export class EVMChainAdapterBase {
   /** See `ChainAdapter.deploymentId`. */
   get deploymentId(): string {
@@ -1217,7 +1229,7 @@ export class EVMChainAdapterBase {
         const max = await getMax.staticCall(normalized);
         return BigInt(max);
       } catch (err) {
-        if (!this.isKaHighWaterViewUnavailable(err)) {
+        if (!isKaHighWaterViewUnavailable(err)) {
           throw err;
         }
       }
@@ -1240,18 +1252,6 @@ export class EVMChainAdapterBase {
       }
     }
     return max;
-  }
-
-  private isKaHighWaterViewUnavailable(err: unknown): boolean {
-    if (err instanceof Error) enrichEvmError(err);
-    const code = errorCode(err);
-    const msg = errorMessage(err).toLowerCase();
-
-    if (code === 'BAD_DATA') return true;
-    return msg.includes('could not decode result data')
-      || msg.includes('function selector')
-      || msg.includes('selector not recognized')
-      || msg.includes('missing revert data');
   }
 
   async getKnowledgeAssetsLifecycleAddress(): Promise<string> {
