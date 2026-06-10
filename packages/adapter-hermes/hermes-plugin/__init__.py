@@ -363,7 +363,7 @@ DKG_PUBLISH_SCHEMA = {
                     "not-registered error."
                 ),
             },
-            "access_policy": {"type": "integer", "description": "Optional registration access policy used only with register_if_needed: 0 open, 1 private."},
+            "access_policy": {"type": "integer", "description": "Optional registration access policy (0 open, 1 private). REQUIRES register_if_needed: true — it only applies when registering the context graph, and is rejected if sent without it."},
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph scope."},
         },
         "required": ["context_graph_id", "quads"],
@@ -1797,6 +1797,9 @@ class DKGMemoryProvider(MemoryProvider):
         registration = None
         if args.get("register_if_needed") is not None and not isinstance(args.get("register_if_needed"), bool):
             return tool_error("register_if_needed must be a boolean.")
+        access_policy_dep_error = _access_policy_requires_register_error(args)
+        if access_policy_dep_error:
+            return tool_error(access_policy_dep_error)
         if args.get("register_if_needed") is True:
             access_policy = args.get("access_policy")
             access_policy_error = _validate_access_policy(access_policy)
@@ -1825,12 +1828,12 @@ class DKGMemoryProvider(MemoryProvider):
             quads,
             sub_graph_name=_first_text(args, "sub_graph_name"),
         )
-        # The publish leg goes through /api/shared-memory/publish, which returns
-        # HTTP 207 with a non-empty contextGraphError when the asset is minted
-        # on-chain (UAL valid) but the CG-binding failed (memory.ts:1772). Surface
-        # that as a PARTIAL/warning (Codex #1077:1115 parity), keeping ual/kaId/
-        # assertionName visible. A clean 200 is untouched; no-op on the FIX A/B
-        # partial-failure dicts (they carry no contextGraphError).
+        # publish_quads already annotates a 207 (contextGraphError) partial at the
+        # client (FIX R / Codex #1084:787), so this is an IDEMPOTENT safety net:
+        # re-annotating an already-partial result re-sets the same partial/warning
+        # (no-op), and it still catches a raw 207 if the client path is ever
+        # bypassed. A clean 200 / FIX A/B failure dict (no contextGraphError) is
+        # left untouched.
         result = _annotate_vm_publish_partial(result)
         if isinstance(result, dict):
             # Only stamp the per-call count on a non-hard-failure result (FIX N /

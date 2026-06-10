@@ -171,6 +171,35 @@ def _client_result_failed(result: Any) -> bool:
     return result.get("success") is False or result.get("ok") is False or bool(result.get("error"))
 
 
+def _annotate_207_partial(result: Any) -> Any:
+    """Flag a vm/publish 207 (minted, CG-binding failed) at the client.
+
+    A 207 carries a non-empty ``contextGraphError`` but no ``success:false``, so it
+    flows back as apparent success. Annotating it HERE makes the client
+    safe-by-default (Codex #1084:787) — a caller that does not re-wrap still sees
+    the partial state. Mirrors ``_annotate_vm_publish_partial`` in ``__init__.py``
+    (which the handler can re-apply idempotently); the client cannot import that
+    helper without a circular dependency, so the same shape/text lives here.
+    """
+    if not isinstance(result, dict):
+        return result
+    context_graph_error = result.get("contextGraphError")
+    if isinstance(context_graph_error, str) and context_graph_error:
+        return {
+            **result,
+            "partial": True,
+            "warning": (
+                "Partial publish: the knowledge asset was minted on-chain (UAL/kaId are valid) "
+                f"and IS published, but the context-graph binding failed ({context_graph_error}). "
+                "Do NOT re-run publish — dkg_publish would mint a duplicate and "
+                "dkg_knowledge_asset_publish would fail the VM precondition (a confirmed publish "
+                "clears Shared Working Memory), and neither re-binds the context graph. Surface "
+                "this binding failure to the node operator."
+            ),
+        }
+    return result
+
+
 def _to_write_quads(quads: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """Map each quad to exactly {subject, predicate, object} for a WM write.
 
@@ -793,7 +822,11 @@ class DKGClient:
             if created.get("merkleRoot") is not None:
                 result["merkleRoot"] = created["merkleRoot"]
         result["assertionName"] = assertion_name
-        return result
+        # FIX R (Codex #1084:787): annotate a 207 (contextGraphError) HERE so the
+        # client is safe-by-default — a caller that does not re-wrap still sees the
+        # partial state. The handler's _annotate_vm_publish_partial re-applies the
+        # same fields idempotently.
+        return _annotate_207_partial(result)
 
     def publish_one_root(self, context_graph_id: str, root_entity: str,
                          clear_after: bool,
