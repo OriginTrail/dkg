@@ -309,14 +309,36 @@ def test_publish_quads_unique_name_per_call(recording_client):
 
 
 def test_publish_quads_create_failure_short_circuits(recording_client):
+    # FIX W (#1084:743): the create HARD-failure must surface the assertionName so a
+    # created-but-lost-response is recoverable by name (mirrors the share/publish
+    # failure branches) — NOT return the raw error verbatim, which drops the name.
     client = recording_client
     client.responder = lambda path, body: (
         {"success": False, "error": "boom"} if path == "/api/knowledge-assets" else {"status": "confirmed"}
     )
     result = client.publish_quads("cg", [{"subject": "urn:s", "predicate": "urn:p", "object": "o"}])
-    assert result == {"success": False, "error": "boom"}
+    assert result["success"] is False
+    assert result["assertionName"].startswith("hermes-publish-")
+    # the original daemon error stays visible, wrapped in recover-by-name guidance
+    assert "boom" in result["error"]
+    assert result["assertionName"] in result["error"]
+    assert "before recreating" in result["error"]
     # publish was never attempted
     assert [p for p, _ in client.posts] == ["/api/knowledge-assets"]
+
+
+def test_publish_quads_create_failure_carries_sub_graph_name(recording_client):
+    # FIX W: recovery by name needs the sub-graph the create targeted.
+    client = recording_client
+    client.responder = lambda path, body: (
+        {"success": False, "error": "boom"} if path == "/api/knowledge-assets" else {"status": "confirmed"}
+    )
+    result = client.publish_quads(
+        "cg", [{"subject": "urn:s", "predicate": "urn:p", "object": "o"}],
+        sub_graph_name="evidence",
+    )
+    assert result["subGraphName"] == "evidence"
+    assert "sub-graph 'evidence'" in result["error"]
 
 
 # -- FIX A (#1084:714): create 207 with errors[] (share failed) -> no publish -

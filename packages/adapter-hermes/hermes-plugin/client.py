@@ -741,7 +741,30 @@ class DKGClient:
             create_payload["subGraphName"] = sub_graph_name
         created = self._post("/api/knowledge-assets", create_payload)
         if _client_result_failed(created):
-            return created
+            # The create call surfaced an error, but the asset is created under a
+            # client-generated assertion_name BEFORE the response is read. A lost/
+            # garbled response (timeout, transport blip) can therefore report a
+            # hard failure while the asset actually landed daemon-side. Returning
+            # the raw error verbatim drops that name, so the agent recreates it
+            # (orphaning the first). Surface assertionName (+ subGraphName) on the
+            # create-failure too — mirroring the share/publish-failure branches
+            # below — so the caller can recover by name instead of recreating
+            # (Codex #1084:743).
+            failure = dict(created) if isinstance(created, dict) else {"error": str(created)}
+            failure["success"] = False
+            failure["assertionName"] = assertion_name
+            if sub_graph_name:
+                failure["subGraphName"] = sub_graph_name
+            base_error = str(failure.get("error") or failure.get("message") or "create failed")
+            sub_graph_hint = f" (sub-graph '{sub_graph_name}')" if sub_graph_name else ""
+            failure["error"] = (
+                f"Creating knowledge asset '{assertion_name}'{sub_graph_hint} failed ({base_error}). "
+                f"It most likely was NOT created, but if the daemon response was lost the asset may "
+                f"exist under this assertionName -- first check/recover by name with "
+                f"dkg_knowledge_asset_history or dkg_knowledge_asset_query (this assertionName and "
+                f"sub_graph_name) before recreating, to avoid orphaning a created asset."
+            )
+            return failure
         # The create route returns HTTP 207 { created:true, ..., errors:[{phase,
         # error}] } when create+finalize succeeded but an opt-in tail FAILED — for
         # us that is the promote/swm-share (knowledge-assets.ts:575-614). _post
