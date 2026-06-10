@@ -20,7 +20,7 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { KeyedSerializer } from './keyed-mutex.js';
 import { floorPublishTokenAmount } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { errorMessage, isTooLowAllowanceError, enrichEvmError, HUB_STALE_ERROR_MARKERS } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, isTooLowAllowanceError, enrichEvmError, HUB_STALE_ERROR_MARKERS } from './evm-adapter-errors.js';
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isKnownTransactionError, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
@@ -1194,13 +1194,15 @@ export class EVMChainAdapterBase {
    * reconciliation so a stale-local-DB / fresh device never re-hands a burned
    * `(author, number)`.
    *
-   * Strict O(1): reads the `getMaxKaNumberForAuthor(address) -> int256` view on
-   * `DKGKnowledgeAssets` (>= 10.0.4) — a single `eth_call`, natively bounded, no
-   * `eth_getLogs` scan (#1080). The off-chain allocator's next number is
-   * `result + 1` (so a never-minted author, `-1`, starts at 0). There is no
-   * log-scan fallback by design: V10 deploys the 10.0.4 contract fresh, so the
-   * view is authoritative from genesis; an absent selector is a misconfigured
-   * deployment and should fail loudly rather than silently crawl chain history.
+   * Resolution order:
+   *   1. `DKGKnowledgeAssets >= 10.0.4` exposes the O(1)
+   *      `getMaxKaNumberForAuthor(address) -> int256` view — a single `eth_call`.
+   *   2. Pre-10.0.4 deployments do not have that selector, so they fall back to
+   *      a paginated `KnowledgeAssetCreated(id, author)` scan. The previous
+   *      `queryFilter(filter, 0)` scanned `[0, latest]` in one RPC call and hit
+   *      provider block-range caps (#1080); this legacy path uses small bounded
+   *      windows instead. Transient RPC failures are rethrown, not hidden by a
+   *      historical crawl on the same provider.
    */
   async getMaxKaNumberForAuthor(author: string): Promise<bigint> {
     const storage = this.contracts.knowledgeAssetStorage;
@@ -1208,8 +1210,48 @@ export class EVMChainAdapterBase {
       throw new Error('DKGKnowledgeAssets not deployed on this chain.');
     }
     const normalized = ethers.getAddress(author);
-    const max = await storage.getMaxKaNumberForAuthor.staticCall(normalized);
-    return BigInt(max);
+
+    const getMax = (storage as any).getMaxKaNumberForAuthor;
+    if (typeof getMax?.staticCall === 'function') {
+      try {
+        const max = await getMax.staticCall(normalized);
+        return BigInt(max);
+      } catch (err) {
+        if (!this.isKaHighWaterViewUnavailable(err)) {
+          throw err;
+        }
+      }
+    }
+
+    const filter = storage.filters.KnowledgeAssetCreated(null, normalized);
+    const head = await this.provider.getBlockNumber();
+    const pageSize = 2_000; // <= the smallest common eth_getLogs block-range cap
+    const mask = (1n << 96n) - 1n;
+    let max = -1n;
+    for (let lo = 0; lo <= head; lo += pageSize) {
+      const hi = Math.min(lo + pageSize - 1, head);
+      const logs = await storage.queryFilter(filter, lo, hi);
+      for (const log of logs) {
+        const args = (log as ethers.EventLog).args;
+        const rawId = args?.id ?? args?.[0];
+        if (rawId === undefined || rawId === null) continue;
+        const num = BigInt(rawId) & mask;
+        if (num > max) max = num;
+      }
+    }
+    return max;
+  }
+
+  private isKaHighWaterViewUnavailable(err: unknown): boolean {
+    if (err instanceof Error) enrichEvmError(err);
+    const code = errorCode(err);
+    const msg = errorMessage(err).toLowerCase();
+
+    if (code === 'BAD_DATA') return true;
+    return msg.includes('could not decode result data')
+      || msg.includes('function selector')
+      || msg.includes('selector not recognized')
+      || msg.includes('missing revert data');
   }
 
   async getKnowledgeAssetsLifecycleAddress(): Promise<string> {

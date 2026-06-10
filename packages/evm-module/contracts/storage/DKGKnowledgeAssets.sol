@@ -333,13 +333,11 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     ///         expected path, where every KA is minted under this contract — it is
     ///         authoritative for ALL of an author's KAs. But if this storage is
     ///         upgraded IN PLACE over a pre-10.0.4 deployment that already minted KAs,
-    ///         those historical authors read `-1` until their next mint. Callers MUST
-    ///         therefore treat this as a fast-path floor, NOT the sole allocation
-    ///         source, across such an upgrade: the off-chain allocator retains its own
-    ///         persisted counter plus a bounded `KnowledgeAssetCreated` scan as the
-    ///         reconciliation floor, and `createKnowledgeAsset`'s `KaIdAlreadyMinted`
-    ///         guard is the on-chain backstop against reusing a burned `(author,
-    ///         number)`.
+    ///         those historical authors read `-1` until their next mint. Such an
+    ///         in-place upgrade is not supported unless the mapping is backfilled or
+    ///         the allocator is explicitly configured to reconcile historical mints by
+    ///         another source. The repository deployment flow is a fresh asset-storage
+    ///         redeploy/Hub rotation, not bytecode replacement over existing storage.
     /// @param  author The attested author address (the high 160 bits of a packed kaId).
     /// @return The highest KA `number` already minted under `author`, or `-1` if none.
     function getMaxKaNumberForAuthor(address author) external view returns (int256) {
