@@ -190,11 +190,16 @@ describe('SKILL.md file', () => {
     // ~90 lines of content the OTHER tests in this suite (and skill-route-parity)
     // explicitly REQUIRE, so a lower cap would force regressing required docs.
     //
-    // 900 lines stays a realistic ceiling: well below the documented Agent Skills
+    // The cap was raised 800 → 900 → 950 across rc.17 agent-tooling as the doc grew
+    // with the lifecycle teaching + the review-round accuracy corrections (UAL format,
+    // register/publishPolicy caveat, create-failure recovery semantics) — content we
+    // deliberately added, where trimming would regress the accuracy we just fixed.
+    //
+    // 950 lines stays a realistic ceiling: well below the documented Agent Skills
     // "should be concise" guidance for very large skills, while still catching
     // unbounded growth (e.g. an accidental dump of full OpenAPI schema in-line).
     const lines = skillContent.split('\n').length;
-    expect(lines).toBeLessThan(900);
+    expect(lines).toBeLessThan(950);
   });
 });
 
