@@ -1094,8 +1094,10 @@ export class DkgClient {
       const err = new Error(
         `Create failed for one-shot publish (asset name "${assertionName}"): ${e instanceof Error ? e.message : String(e)}. ` +
         `The asset MAY have been created server-side even though the response failed. Before retrying, check via ` +
-        `dkg_knowledge_asset_history / dkg_knowledge_asset_query for "${assertionName}" to avoid minting a ` +
-        `DUPLICATE; if it exists, re-share + publish it by name rather than re-running this tool.`,
+        `dkg_knowledge_asset_history for "${assertionName}" to avoid minting a DUPLICATE. A created asset is ` +
+        `auto-shared to SWM (its working-memory draft is empty), so use _history (lifecycle state regardless ` +
+        `of layer) for existence — NOT dkg_knowledge_asset_query, which reads the empty WM draft and would ` +
+        `falsely report "not created". If it exists, re-share + publish it by name rather than re-running this tool.`,
       ) as Error & Record<string, unknown>;
       err.assertionName = assertionName;
       err.phase = 'create';

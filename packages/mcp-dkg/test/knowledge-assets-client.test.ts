@@ -277,7 +277,11 @@ describe('DkgClient knowledge-assets — publish/finalize option serialization',
     const err = await client.publishQuads({ contextGraphId: 'cg-1', quads: [{ subject: 's', predicate: 'p', object: 'o' }] }).catch((e) => e);
     expect(err.assertionName).toMatch(/mcp-publish-/);
     expect(err.phase).toBe('create');
-    expect(err.message).toMatch(/dkg_knowledge_asset_history|dkg_knowledge_asset_query/i); // check-before-recreate
+    // FIX Y: point recovery at _history (lifecycle state, any layer) — the WM
+    // draft is empty after the create's promote, so _query would falsely read
+    // "not created".
+    expect(err.message).toMatch(/dkg_knowledge_asset_history/);
+    expect(err.message).toMatch(/NOT dkg_knowledge_asset_query/i);
     expect(err.message).toMatch(/duplicate/i);
     // only the create call was made — no publish.
     expect(calls).toHaveLength(1);
