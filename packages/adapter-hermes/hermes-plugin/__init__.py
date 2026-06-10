@@ -609,7 +609,14 @@ DKG_ASSERTION_CREATE_SCHEMA = {
         "type": "object",
         "properties": {
             "context_graph_id": {"type": "string", "description": TARGET_CONTEXT_GRAPH_DESCRIPTION},
-            "name": {"type": "string", "description": "Assertion name."},
+            "name": {
+                "type": "string",
+                "description": (
+                    "Knowledge asset name. Must not contain '/', whitespace, or IRI-unsafe "
+                    "characters (<>\"{}|^`\\), must be at most 256 characters, and must not be a "
+                    "reserved B3 KA identifier."
+                ),
+            },
             "sub_graph_name": {"type": "string", "description": "Optional sub-graph name."},
         },
         "required": ["context_graph_id", "name"],
@@ -1778,10 +1785,23 @@ class DKGMemoryProvider(MemoryProvider):
         result = self._client.publish(
             cg,
             selection=roots,
-            clear_after=True,
+            # clear_after=False (FIX M / Codex #1079:1781): on the selection path,
+            # clearSharedMemoryAfter=true makes the daemon wipe the WHOLE SWM
+            # remainder (deleteByPattern over every SWM graph under the bucket, no
+            # subject filter — dkg-publisher.ts:1528-1535), destroying every other
+            # call's/agent's unpublished roots. dkg_publish only owns the roots it
+            # just wrote, so it must NOT clear the remainder. (The published roots
+            # are cleared unconditionally regardless.) Matches the sibling
+            # dkg_shared_memory_publish default for an explicit-root selection.
+            clear_after=False,
             sub_graph_name=_first_text(args, "sub_graph_name"),
         )
-        if isinstance(result, dict):
+        # Only stamp the per-call counts on a non-hard-failure result (FIX N /
+        # Codex #1079:1784): the client returns a partial-failure dict
+        # ({success:false, failedRoot, ...}) when a root mint fails — attaching
+        # quadsPublished/rootEntities there would falsely imply everything
+        # published. Confirmed / 207-partial results are fine to annotate.
+        if isinstance(result, dict) and not _client_result_failed(result):
             result["quadsPublished"] = len(quads)
             result["rootEntities"] = roots
         return json.dumps(result)
