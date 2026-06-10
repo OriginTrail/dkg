@@ -2032,6 +2032,32 @@ describe('Workspace: conditionalShare (CAS)', () => {
     expect(result.shareOperationId).toBeTruthy();
   });
 
+  it('does not treat promoted per-KA data as stale CAS bucket state', async () => {
+    const predicate = 'http://example.org/status';
+    const promotedGraph = `${WORKSPACE_GRAPH}/0x1111111111111111111111111111111111111111/1`;
+    await store.insert([q(ENTITY, predicate, '"promoted"', promotedGraph)]);
+
+    const result = await publisher.conditionalShare(CONTEXT_GRAPH, [
+      q(ENTITY, predicate, '"recruiting"'),
+    ], {
+      publisherPeerId: 'peer1',
+      conditions: [{
+        subject: ENTITY,
+        predicate,
+        expectedValue: null,
+      }],
+    });
+
+    expect(result.shareOperationId).toBeTruthy();
+    const check = await store.query(
+      `SELECT ?o WHERE { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> <${predicate}> ?o } }`,
+    );
+    expect(check.type).toBe('bindings');
+    if (check.type === 'bindings') {
+      expect(check.bindings.map((b) => b.o)).toContain('"recruiting"');
+    }
+  });
+
   it('StaleWriteError includes condition and actual value', async () => {
     const initial = [q(ENTITY, 'http://example.org/status', '"traveling"')];
     await publisher.share(CONTEXT_GRAPH, initial, { publisherPeerId: 'peer1' });

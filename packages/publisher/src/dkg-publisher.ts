@@ -1105,8 +1105,8 @@ export class DKGPublisher implements Publisher {
 
     for (const cond of options.conditions) {
       const ask = cond.expectedValue === null
-        ? `ASK { GRAPH ?g { <${cond.subject}> <${cond.predicate}> ?o } ${sharedMemoryReadBothFilter(swmGraph)} }`
-        : `ASK { GRAPH ?g { <${cond.subject}> <${cond.predicate}> ${cond.expectedValue} } ${sharedMemoryReadBothFilter(swmGraph)} }`;
+        ? `ASK { GRAPH <${swmGraph}> { <${cond.subject}> <${cond.predicate}> ?o } }`
+        : `ASK { GRAPH <${swmGraph}> { <${cond.subject}> <${cond.predicate}> ${cond.expectedValue} } }`;
       const result = await this.store.query(ask);
 
       if (result.type !== 'boolean') {
@@ -1115,7 +1115,7 @@ export class DKGPublisher implements Publisher {
 
       const shouldExist = cond.expectedValue !== null;
       if (result.value !== shouldExist) {
-        const sel = `SELECT ?o WHERE { GRAPH ?g { <${cond.subject}> <${cond.predicate}> ?o } ${sharedMemoryReadBothFilter(swmGraph)} } LIMIT 1`;
+        const sel = `SELECT ?o WHERE { GRAPH <${swmGraph}> { <${cond.subject}> <${cond.predicate}> ?o } } LIMIT 1`;
         const cur = await this.store.query(sel);
         const actual = cur.type === 'bindings' && cur.bindings.length > 0 ? cur.bindings[0].o ?? null : null;
         throw new StaleWriteError(cond, actual);
