@@ -29,11 +29,11 @@
  *    asymmetry by passing a non-conforming name to each read-side tool
  *    and confirming the schema does NOT reject it.
  *
- * Both tests register every production-side tool module (6 register
- * functions, mirroring `src/index.ts`) so the assertions run against the
- * full surface. Adding a new register function in production without
- * adding it here means this file silently under-covers — an explicit
- * regression in the next wave's W?-Q audit.
+ * The drop-sweep + tool-count test registers every production-side tool
+ * module (all 7 register functions, mirroring `src/index.ts`) so the
+ * assertions run against the full surface. Adding a new register function in
+ * production without adding it here means this file silently under-covers — an
+ * explicit regression in the next wave's W?-Q audit.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { registerReadTools } from '../src/tools.js';
@@ -42,6 +42,7 @@ import { registerMemorySearchTool } from '../src/tools/memory-search.js';
 import { registerSetupTools } from '../src/tools/setup.js';
 import { registerHealthTools } from '../src/tools/health.js';
 import { registerPublishTools } from '../src/tools/publish.js';
+import { registerChatTools } from '../src/tools/chat.js';
 import { FakeServer, FakeClient, makeConfig } from './harness.js';
 
 /**
@@ -80,13 +81,15 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
     server = new FakeServer();
     const client = new FakeClient();
     const config = makeConfig();
-    // Mirror src/index.ts. If a new register* call lands in production, add it here too.
+    // Mirror src/index.ts (all 7 register* calls). If a new register* call lands
+    // in production, add it here too.
     registerReadTools(server.asMcpServer(), client.asDkgClient(), config);
     registerAssertionTools(server.asMcpServer(), client.asDkgClient(), config);
     registerMemorySearchTool(server.asMcpServer(), client.asDkgClient(), config);
     registerSetupTools(server.asMcpServer(), client.asDkgClient(), config);
     registerHealthTools(server.asMcpServer(), client.asDkgClient(), config);
     registerPublishTools(server.asMcpServer(), client.asDkgClient(), config);
+    registerChatTools(server.asMcpServer(), client.asDkgClient(), config);
   });
 
   it.each(DROPPED_TOOLS)('does not register %s', (name) => {
@@ -107,12 +110,14 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
   // when a new tool is intentionally added, drop when a tool is
   // removed, and keep a comment trail so future drops are auditable.
   // rc.17 agent-tooling PR2: +3 net-new knowledge-asset lifecycle verbs
-  // (finalize / publish / pull_from) under registerAssertionTools take the
-  // 6-module surface counted here from 25 → 28. (The full production surface in
-  // src/index.ts also registers registerChatTools (+2), so the README's
-  // "30 tools" = these 28 + 2 chat tools.)
-  it('registered surface contains exactly 28 tools (post-PR locked count)', () => {
-    expect(server.tools.size).toBe(28);
+  // (finalize / publish / pull_from) under registerAssertionTools took the
+  // assertion-module surface from 25 → 28. This fixture now registers ALL 7
+  // production modules (incl. registerChatTools, +2), matching src/index.ts and
+  // the README's "30 tools" — so the locked count is the full 30-tool surface
+  // (previously this guard registered only 6 modules and locked 28, silently
+  // under-covering registerChatTools).
+  it('registered surface contains exactly 30 tools (full production surface, post-PR locked count)', () => {
+    expect(server.tools.size).toBe(30);
   });
 });
 

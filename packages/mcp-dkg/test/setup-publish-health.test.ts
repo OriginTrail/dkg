@@ -419,6 +419,26 @@ describe('publish tools — write+publish helper + canonical SWM finalizer', () 
     expect(published).toBe(false); // publish NOT attempted
   });
 
+  // ── FIX S — accessPolicy requires registerIfNeeded ────────────────────────
+  it('dkg_publish rejects accessPolicy without registerIfNeeded (FIX S)', async () => {
+    const result = await server.call('dkg_publish', {
+      contextGraphId: 'cg',
+      quads: [{ subject: 'urn:s:1', predicate: 'urn:p:type', object: 'urn:Note' }],
+      accessPolicy: 1, // valid 0|1 but no registerIfNeeded
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/accessPolicy.*requires.*registerIfNeeded/i);
+  });
+
+  it('dkg_shared_memory_publish rejects accessPolicy without registerIfNeeded (FIX S)', async () => {
+    const result = await server.call('dkg_shared_memory_publish', {
+      contextGraphId: 'cg',
+      accessPolicy: 1,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/accessPolicy.*requires.*registerIfNeeded/i);
+  });
+
   // F3+F13 (qa-review-round-1 F3 + qa-review-round-2 F13): chain
   // provenance echoed on publish responses so callers can verify
   // post-hoc which chain the publish landed on. User explicit:

@@ -146,7 +146,7 @@ export function registerPublishTools(
           .union([z.literal(0), z.literal(1)])
           .optional()
           .describe(
-            'Used only when `registerIfNeeded: true`. 0 = open, 1 = private.',
+            '0 = open, 1 = private. Requires `registerIfNeeded: true` — it only applies when registering the CG, and is rejected otherwise.',
           ),
       },
     },
@@ -155,6 +155,11 @@ export function registerPublishTools(
       if (!cgId) return errResult('"contextGraphId" is required.');
       if (!quads.length) {
         return errResult('"quads" must be a non-empty array.');
+      }
+      // FIX S: accessPolicy only applies when registering the CG — reject it
+      // (rather than silently drop the privacy setting) when registerIfNeeded != true.
+      if (accessPolicy !== undefined && registerIfNeeded !== true) {
+        return errResult('"accessPolicy" requires "registerIfNeeded": true — it only applies when registering the context graph.');
       }
       // Auto-type the object: URI vs literal. Mirrors the adapter's
       // handlePublish at `DkgNodePlugin.ts:2721-2729` byte-for-byte so
@@ -281,7 +286,7 @@ export function registerPublishTools(
           .union([z.literal(0), z.literal(1)])
           .optional()
           .describe(
-            'Used only when `registerIfNeeded: true`. 0 = open, 1 = private.',
+            '0 = open, 1 = private. Requires `registerIfNeeded: true` — it only applies when registering the CG, and is rejected otherwise.',
           ),
       },
     },
@@ -294,6 +299,11 @@ export function registerPublishTools(
     }): Promise<ToolResult> => {
       const cgId = contextGraphId.trim();
       if (!cgId) return errResult('"contextGraphId" is required.');
+      // FIX S: accessPolicy only applies when registering the CG — reject it
+      // (rather than silently drop the privacy setting) when registerIfNeeded != true.
+      if (accessPolicy !== undefined && registerIfNeeded !== true) {
+        return errResult('"accessPolicy" requires "registerIfNeeded": true — it only applies when registering the context graph.');
+      }
       // Mirror handleAssertionPromote's `entities` validation: omit →
       // daemon-side default (selection="all"); non-empty array of
       // strings only — no other shapes silently 400 at the daemon.

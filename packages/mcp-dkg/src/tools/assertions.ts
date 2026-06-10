@@ -384,7 +384,7 @@ export function registerAssertionTools(
         accessPolicy: z
           .union([z.literal(0), z.literal(1)])
           .optional()
-          .describe('Used only when `registerIfNeeded: true`. 0 = open, 1 = private.'),
+          .describe('0 = open, 1 = private. Requires `registerIfNeeded: true` — it only applies when registering the CG, and is rejected otherwise.'),
         // CONTRACT §D: clear_shared_memory_after is NOT exposed on the per-asset
         // publish tool — on vm/publish it is graph-wide destructive (wipes every
         // other agent's unpublished SWM under the CG/sub-graph). The this-asset
@@ -405,6 +405,11 @@ export function registerAssertionTools(
     }): Promise<ToolResult> => {
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
+      // FIX S: accessPolicy only applies when registering the CG — reject it
+      // (rather than silently drop the privacy setting) when registerIfNeeded != true.
+      if (accessPolicy !== undefined && registerIfNeeded !== true) {
+        return errResult('"accessPolicy" requires "registerIfNeeded": true — it only applies when registering the context graph.');
+      }
       // CONTRACT §G: vm/publish requires the CG to be registered on-chain and does
       // NOT auto-register. When registerIfNeeded is true, register first (the
       // client short-circuits an already-registered CG via alreadyRegistered), then

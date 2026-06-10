@@ -524,6 +524,12 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     ).rejects.toThrow();
   });
 
+  it('publish rejects accessPolicy without registerIfNeeded (FIX S)', async () => {
+    const res = await server.call('dkg_knowledge_asset_publish', { name: 'doc', accessPolicy: 1 });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/accessPolicy.*requires.*registerIfNeeded/i);
+  });
+
   it('publish rejects a non-integral publishEpochs at the schema boundary (CONTRACT §C)', async () => {
     // 1.9 must be REJECTED (zod .int()), not coerced to 1 — a present-but-invalid
     // numeric is a tool error, same as 0 / -1.

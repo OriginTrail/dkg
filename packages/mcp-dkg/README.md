@@ -174,7 +174,7 @@ The lifecycle tool family that lets agents stage memory, seal it, share it, publ
 
 | Tool | Step | What it does |
 |---|---|---|
-| `dkg_knowledge_asset_create` | 1 | Create an empty Working Memory assertion graph (knowledge asset). Idempotent — duplicate names land as `alreadyExists: true`. Slug `/^[a-z0-9-]+$/`. |
+| `dkg_knowledge_asset_create` | 1 | Create an empty Working Memory assertion graph (knowledge asset). Idempotent — duplicate names land as `alreadyExists: true`. Name validation matches the daemon's `validateAssertionName`: any IRI-safe name up to 256 chars (no `/`, no whitespace, no `` <>"{}|^`\ `` characters), and not a reserved B3 KA id — NOT restricted to a lowercase-hyphen slug. |
 | `dkg_knowledge_asset_write` | 2 | Append RDF quads into an existing WM assertion. Set-merge — duplicates collapse. To replace, call `dkg_knowledge_asset_discard` first or mint a unique name. |
 | `dkg_knowledge_asset_finalize` | 3 | **Seal** the WM draft (the "git commit"): compute the merkleRoot over the whole assertion, build + sign an EIP-712 AuthorAttestation, stamp the seal. Returns `merkleRoot`, `authorAddress`, `schemeVersion`, `chainId`, `kav10Address`, `eip712Digest`. Seals the entire draft — no subset parameter. |
 | `dkg_knowledge_asset_share` | 4 | Share a WM assertion (or specific root entities) from private WM to Shared Working Memory so teammates see it (formerly "promote"). Omit `entities` for a full share, which auto-seals best-effort; a subset share is SWM-only and not publishable to VM as a subset. |
