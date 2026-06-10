@@ -140,13 +140,18 @@ export function registerPublishTools(
           .boolean()
           .optional()
           .describe(
-            'When true, register the CG on-chain before publishing if needed. May spend gas/TRAC; opt-in only.',
+            'When true, register the CG on-chain before publishing if needed. May spend gas/TRAC; opt-in only. ' +
+            'CAVEAT: this uses the explicit register route, which registers with the daemon\'s DEFAULT ' +
+            'publishPolicy (derived from accessPolicy) and does NOT preserve a context graph\'s stored custom ' +
+            'publishPolicy / contribution governance. For a CG created with a non-default publishPolicy/PCA, ' +
+            'register it explicitly with the desired policy first rather than relying on registerIfNeeded. ' +
+            '(Read access is unaffected; daemon-side rehydration tracked in OriginTrail/dkg#1085.)',
           ),
         accessPolicy: z
           .union([z.literal(0), z.literal(1)])
           .optional()
           .describe(
-            '0 = open, 1 = private. Requires `registerIfNeeded: true` — it only applies when registering the CG, and is rejected otherwise.',
+            '0 = open, 1 = private. Requires `registerIfNeeded: true` — it only applies when registering the CG, and is rejected otherwise. Sets only the access policy; it does NOT preserve a stored custom publishPolicy (see registerIfNeeded; OriginTrail/dkg#1085).',
           ),
       },
     },

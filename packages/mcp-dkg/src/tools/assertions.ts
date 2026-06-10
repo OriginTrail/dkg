@@ -379,12 +379,17 @@ export function registerAssertionTools(
           .describe(
             'If the context graph is not yet registered on-chain, register it first (idempotent), then ' +
             'publish. Registration may spend gas/TRAC; opt-in. Default false — when false and the CG is ' +
-            'unregistered, publish fails with the daemon\'s not-registered error.',
+            'unregistered, publish fails with the daemon\'s not-registered error. CAVEAT: this uses the ' +
+            'explicit register route, which registers with the daemon\'s DEFAULT publishPolicy (derived from ' +
+            'accessPolicy) and does NOT preserve a context graph\'s stored custom publishPolicy / ' +
+            'contribution governance. For a CG created with a non-default publishPolicy/PCA, register it ' +
+            'explicitly with the desired policy first rather than relying on registerIfNeeded. (Read access ' +
+            'is unaffected; daemon-side rehydration tracked in OriginTrail/dkg#1085.)',
           ),
         accessPolicy: z
           .union([z.literal(0), z.literal(1)])
           .optional()
-          .describe('0 = open, 1 = private. Requires `registerIfNeeded: true` — it only applies when registering the CG, and is rejected otherwise.'),
+          .describe('0 = open, 1 = private. Requires `registerIfNeeded: true` — it only applies when registering the CG, and is rejected otherwise. Sets only the access policy; it does NOT preserve a stored custom publishPolicy (see registerIfNeeded; OriginTrail/dkg#1085).'),
         // CONTRACT §D: clear_shared_memory_after is NOT exposed on the per-asset
         // publish tool — on vm/publish it is graph-wide destructive (wipes every
         // other agent's unpublished SWM under the CG/sub-graph). The this-asset

@@ -343,6 +343,11 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     // CONTRACT §G: per-KA publish can register the CG on-chain first (mirrors
     // dkg_shared_memory_publish) — vm/publish requires a registered CG.
     expect(schema).toHaveProperty('registerIfNeeded');
+    // FIX X (#1076:2396 / Option A): the explicit-register route uses the daemon's
+    // DEFAULT publishPolicy and does NOT preserve a stored custom publishPolicy
+    // (daemon-side rehydration tracked in dkg#1085). The caveat must be present here.
+    expect((schema.registerIfNeeded as { description?: string }).description).toContain('DEFAULT publishPolicy');
+    expect((schema.registerIfNeeded as { description?: string }).description).toContain('OriginTrail/dkg#1085');
     // CONTRACT §D: clear-after is DROPPED from the per-asset publish tool — on
     // vm/publish it is graph-wide destructive (wipes other agents' SWM). The
     // CG-wide clear stays on dkg_publish / dkg_shared_memory_publish.

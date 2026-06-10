@@ -450,6 +450,20 @@ describe('publish tools — write+publish helper + canonical SWM finalizer', () 
     expect(registerIfNeeded?.description).toContain('gas/TRAC');
   });
 
+  it('FIX X: dkg_publish carries the explicit-register publishPolicy caveat, dkg_shared_memory_publish does NOT', () => {
+    // The explicit-register route uses the daemon's DEFAULT publishPolicy and does
+    // not preserve a stored custom publishPolicy (daemon-side rehydration = dkg#1085).
+    // The caveat belongs on dkg_publish (explicit register) but NOT on the safe
+    // rehydrating auto-register path of dkg_shared_memory_publish.
+    const pubDesc = server.get('dkg_publish').config.inputSchema?.registerIfNeeded?.description as string;
+    expect(pubDesc).toContain('DEFAULT publishPolicy');
+    expect(pubDesc).toContain('OriginTrail/dkg#1085');
+
+    const sharedDesc = server.get('dkg_shared_memory_publish').config.inputSchema?.registerIfNeeded?.description as string;
+    expect(sharedDesc).not.toContain('DEFAULT publishPolicy');
+    expect(sharedDesc).not.toContain('dkg#1085');
+  });
+
   // F3+F13 (qa-review-round-1 F3 + qa-review-round-2 F13): chain
   // provenance echoed on publish responses so callers can verify
   // post-hoc which chain the publish landed on. User explicit:
