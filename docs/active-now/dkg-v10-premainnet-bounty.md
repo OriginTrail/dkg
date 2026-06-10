@@ -118,7 +118,9 @@ Code under audit: [`packages/evm-module` @ `1f4fa01b`](https://github.com/Origin
 
 Commit **`36d9daebee47ea0886a13e0d3b587f9ba512dc45`** (OriginTrail/dkg `main`, 2026-06-10) — the frozen RC the honeypot is deployed from.\
 \
-Pre mainnet deployment Hub contract address on Base Mainnet: [0x26146f51e31a95c075228a34cfc696f09e4c36c3](https://basescan.org/address/0x26146f51e31a95c075228a34cfc696f09e4c36c3)
+Pre mainnet deployment Hub contract address on Base Mainnet: [0x26146f51e31a95c075228a34cfc696f09e4c36c3](https://basescan.org/address/0x26146f51e31a95c075228a34cfc696f09e4c36c3)\
+\
+Token honeypot contract address: [0x27ff0e72552d7df824f0b561442f3a91a8f9e47e](https://basescan.org/address/0x27ff0e72552d7df824f0b561442f3a91a8f9e47e)
 
 ## Path to mainnet
 
