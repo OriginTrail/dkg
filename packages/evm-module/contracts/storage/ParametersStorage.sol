@@ -15,6 +15,8 @@ contract ParametersStorage is INamed, IVersioned, HubDependent {
     ///         typed `address` field.
     event ProtocolTreasurySet(address indexed treasury);
 
+    error ZeroShardingTableSizeLimit();
+
     string private constant _NAME = "ParametersStorage";
     // protocol treasury fee (`protocolTreasuryFee`, `protocolTreasury`,
     // `MAX_PROTOCOL_TREASURY_FEE`) skimmed from the staker-bound TRAC on
@@ -177,7 +179,7 @@ contract ParametersStorage is INamed, IVersioned, HubDependent {
         // freeze ALL node admission (even the first insert), bricking staking. 0
         // is never a meaningful table size — reject it rather than let it act as
         // an implicit pause switch.
-        require(shardingTableSizeLimit_ > 0, "shardingTableSizeLimit must be > 0");
+        if (shardingTableSizeLimit_ == 0) revert ZeroShardingTableSizeLimit();
         shardingTableSizeLimit = shardingTableSizeLimit_;
 
         emit ParameterChanged("shardingTableSizeLimit", shardingTableSizeLimit);

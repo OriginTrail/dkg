@@ -75,9 +75,8 @@ describe('@unit ShardingTable enforces shardingTableSizeLimit', () => {
 
   it('rejects setting the size limit to 0 (would freeze all node admission)', async () => {
     await deploy();
-    await expect(ParametersStorage.setShardingTableSizeLimit(0)).to.be.revertedWith(
-      'shardingTableSizeLimit must be > 0',
-    );
+    await expect(ParametersStorage.setShardingTableSizeLimit(0))
+      .to.be.revertedWithCustomError(ParametersStorage, 'ZeroShardingTableSizeLimit');
     // A positive limit is still accepted.
     await ParametersStorage.setShardingTableSizeLimit(1);
     expect(await ParametersStorage.shardingTableSizeLimit()).to.equal(1);
