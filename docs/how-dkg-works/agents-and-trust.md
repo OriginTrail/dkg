@@ -11,8 +11,8 @@ DKG treats agents as actors with identities, permissions, and authored knowledge
 
 An agent can:
 
-* write private assertions in Working Memory
-* promote selected assertions to Shared Working Memory
+* draft private Knowledge Assets in Working Memory
+* share selected Knowledge Assets to Shared Working Memory
 * query context graphs
 * discover peers
 * send direct messages

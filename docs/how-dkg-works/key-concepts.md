@@ -51,11 +51,11 @@ An integration connects an outside workflow to a DKG node through a public inter
 
 ### Knowledge Asset
 
-A Knowledge Asset is published graph data with provenance and integrity commitments. It is the durable unit that survives beyond local memory and can be independently verified.
+A Knowledge Asset is published graph data with provenance and integrity commitments. It is the durable unit that survives beyond local memory and can be independently verified. Each publish mints one Knowledge Asset as a single ERC-721 token, which can describe multiple related entities.
 
 ### UAL
 
-A UAL is a Universal Asset Locator. It is the durable identifier used to address a published Knowledge Asset after it is anchored.
+A UAL is a Universal Asset Locator. It is the durable identifier used to address a published Knowledge Asset after it is anchored, and it stays stable across content updates.
 
 ### Publisher
 

@@ -29,8 +29,8 @@ The current docs focus on the operational DKG V10 surface that users and agents 
 
 * node install and runtime setup
 * MCP, Hermes, and OpenClaw connection paths
-* Working Memory and Shared Working Memory assertions
-* promotion from WM to SWM
+* Working Memory and Shared Working Memory Knowledge Assets
+* sharing from WM to SWM
 * Verifiable Memory publishing flows
 * Context Graph creation and subscription
 * peer discovery, relays, and P2P resilience

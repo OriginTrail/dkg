@@ -12,7 +12,7 @@ Run `dkg <command> --help` for the current option surface.
 Common commands:
 
 ```bash
-dkg init                                 # interactive setup — node name, role, relay
+dkg init                                 # interactive setup — node name, role, relay, triple-store backend (default: oxigraph-server)
 dkg start [-f]                           # start the node daemon (-f for foreground)
 dkg stop                                 # graceful shutdown
 dkg status                               # node health, peer count, identity
@@ -35,28 +35,28 @@ dkg context-graph request-join <id> <curatorPeerId>   # request to join a curate
 dkg context-graph sign-join <id>         # sign a join-request delegation locally without forwarding
 dkg context-graph approve-join <id>      # approve a pending join request
 
-# Assertions (Working Memory drafts)
+# Working Memory Knowledge Asset drafts (CLI namespace: dkg assertion)
 dkg assertion import-file <name> -f <file> -c <cg>   # import a document into WM
 dkg assertion extraction-status <name> -c <cg>       # check document extraction status
-dkg assertion query <name> -c <cg>                   # read assertion quads from WM
-dkg assertion promote <name> -c <cg>                 # WM → SWM
+dkg assertion query <name> -c <cg>                   # read the WM draft's quads
+dkg assertion promote <name> -c <cg>                 # WM → SWM (the share operation; CLI verb retained)
 
 # Shared memory (team-visible) and publishing
-dkg shared-memory write <cg> ...         # write triples directly to SWM
-dkg shared-memory publish <cg>           # SWM → Verifiable Memory (costs TRAC)
+dkg shared-memory write <cg> [--name <name>] ...   # stage triples into a named WM Knowledge Asset draft (write-first; share + publish later)
+dkg shared-memory publish <cg> --name <name>   # finalize + share + publish a staged WM Knowledge Asset → Verifiable Memory (costs TRAC)
 dkg publish <cg> -f <file>               # one-shot RDF publish to a context graph
 dkg verify <batchId> --context-graph <cg> --verified-graph <id>  # propose M-of-N verification
-dkg endorse <ual> --context-graph <cg> --agent <addr>  # endorse a published KA
+dkg endorse <ual> --context-graph <cg> [--agent <addr>]  # endorse a published KA as the authenticated agent (--agent only asserts the token's agent matches)
 
 # Querying
 dkg query [cg] -q "<sparql>"             # SPARQL against a local context graph
 dkg query-remote <peer> -q "<sparql>"    # query a remote peer over P2P
-dkg sync                                 # catch up on data from peers
+dkg sync catchup-status <cg>             # show background catch-up status for a context graph
 dkg subscribe <cg>                       # subscribe to a CG's gossip topics
 
 # Async publisher (optional, for batching)
 dkg publisher enable                     # enable the async publisher
-dkg publisher enqueue <cg> ...           # enqueue a publish job
+dkg publisher enqueue <cg> --root <e> --namespace <n> --scope <s> --authority-proof-ref <ref> --share-operation-id <id>   # enqueue a publish job (flags required)
 dkg publisher jobs                       # list publisher jobs
 dkg publisher stats                      # publisher throughput stats
 
@@ -80,6 +80,9 @@ dkg mcp serve                            # run the MCP server on stdio (invoked 
 dkg integration list [--tier community]  # default tier filter is `verified`+
 dkg integration info <slug>              # show details for one entry
 dkg integration install <slug>           # install cli/mcp kind; --allow-community for community-tier entries
+
+# Health & maintenance
+dkg doctor [--json] [--no-orphan-scan]     # diagnose install state, version skew, orphan clones, config sanity
 
 # Update / rollback
 dkg update [--check] [--allow-prerelease]  # update node software

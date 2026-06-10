@@ -81,7 +81,7 @@ Skip the framework wiring — run the daemon directly and use the CLI or HTTP AP
 
 ```bash
 npm install -g @origintrail-official/dkg
-dkg init      # creates ~/.dkg/config.json (auto-funds wallets on testnet if faucet reachable)
+dkg init      # interactive: prompts for node name, role, triple-store backend (default: oxigraph-server), relay, API port; auto-funds wallets on testnet if faucet reachable
 dkg start     # starts the node daemon on http://127.0.0.1:9200
 ```
 

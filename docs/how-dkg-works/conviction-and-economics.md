@@ -73,6 +73,10 @@ dkg context-graph register <id> --publish-policy 0 --pca-account-id <accountId>
 
 The daemon preflights ownership so a local curator cannot claim someone else's PCA. `pcaAccountId` is valid only for curated publish policy.
 
+## Protocol Treasury Fee
+
+A governance-set protocol fee (default 3%, capped at 10%) is skimmed from the staker-bound TRAC on every paid publish, update, or lifetime extension. Publishers pay the same gross price — the fee comes out of the amount that would otherwise flow into the staker reward pool. The fee is dormant until governance sets a treasury recipient, so a fresh deployment charges nothing until it is enabled.
+
 ## Staker Conviction
 
 Staker conviction is the supply-side commitment mechanism. V10 staking positions are represented as transferable ERC-721 NFTs. Each position records the staked amount, node identity, lock tier, multiplier, and expiry behavior.

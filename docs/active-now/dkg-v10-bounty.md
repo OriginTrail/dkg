@@ -47,7 +47,7 @@ If you are unsure what to build, start from one of these. They are concrete, bui
 #### Illustrative suggestions
 
 * **ChatGPT / Claude plugin or MCP server that writes to Working Memory.** Every drafted artifact — chat, research note, code analysis — is deposited into the author's Working Memory with provenance and an agent-assigned status tag. Turns any conversation into durable, attributable knowledge.
-* **Slack threads → Shared Memory.** An agent that watches a channel, identifies substantive exchanges (not chitchat), and promotes them into Shared Memory and team Context Graph membership.
+* **Slack threads → Shared Memory.** An agent that watches a channel, identifies substantive exchanges (not chitchat), and shares them into Shared Memory and team Context Graph membership.
 * **DKG as a memory backend for an existing RAG pipeline.** Swap a team's vector-store-plus-prompt retrieval loop for a DKG-backed one. Agents get provenance and promotion paths for free, and downstream context oracles become consumable without a rewrite.
 * **GitHub → Working Memory ingestion.** Every issue, PR, and review comment in a repo flows into the author's Working Memory with code-aware tagging. The engineering knowledge a team generates daily, captured.
 
@@ -66,7 +66,7 @@ Your own idea is welcome. The list is a starting point, not a constraint.
 
 A submission is in scope if it does **both** of the following:
 
-1. Writes to or reads from **Working Memory** or **Shared Memory** on a DKG v10 node through a supported public interface and respecting v10 primitives (UAL, Knowledge Asset, Knowledge Collection, Context Graph, Integration, Curator).
+1. Writes to or reads from **Working Memory** or **Shared Memory** on a DKG v10 node through a supported public interface and respecting v10 primitives (UAL, Knowledge Asset, Context Graph, Integration, Curator).
 2. Connects that capability to a product, project, or agent advancing the LLM-Wiki / autoresearch direction.
 
 Supported public interfaces for this round are:
@@ -100,7 +100,7 @@ Every accepted integration must respect the v10 design principles. These are non
 * **Conversational consensus.** Endorsement and voting occur through agent conversation, not UI buttons.
 * **Project-centric layering.** The three memory layers nest inside a project, not the other way around. Integrations should respect this hierarchy.
 * **No merge/conflict UI on Shared Memory.** Shared Memory is gossiped, not merged.
-* **Terminology discipline.** Use the established v10 vocabulary exactly: Context Graph, Integration, Curator, Entity, Knowledge Asset, Knowledge Collection, SHARE, PUBLISH, Projects (not "Memory Explorer"). Deviations should be justified in the submission.
+* **Terminology discipline.** Use the established v10 vocabulary exactly: Context Graph, Integration, Curator, Entity, Knowledge Asset, SHARE, PUBLISH, Projects (not "Memory Explorer"). Deviations should be justified in the submission.
 
 ### 8. Submission requirements
 
