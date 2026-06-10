@@ -414,6 +414,27 @@ describe('dkg_publish tool', () => {
     expect(String(ft.calls[0][0])).toContain('/api/knowledge-assets');
   });
 
+  // ── FIX W — create HARD failure surfaces the assertionName for recovery ──
+  it('surfaces the generated assertionName when the create call HARD-fails (FIX W)', async () => {
+    ft.addResponses(
+      // create → 500: the asset MAY have been created server-side despite the failure.
+      new Response(JSON.stringify({ error: 'daemon timeout after commit' }), { status: 500 }),
+    );
+    const tool = findTool('dkg_publish');
+    const result = await tool.execute('call-createfail', {
+      context_graph_id: 'testing',
+      quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'hello' }],
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toBeTruthy();
+    expect(parsed.error).toMatch(/openclaw-publish-/);            // the generated name, for recovery
+    expect(parsed.error).toMatch(/dkg_knowledge_asset_history|dkg_knowledge_asset_query/i); // check-before-recreate guidance
+    expect(parsed.error).toMatch(/duplicate/i);
+    // only the create call was made — no publish.
+    expect(ft.calls).toHaveLength(1);
+    expect(String(ft.calls[0][0])).toContain('/api/knowledge-assets');
+  });
+
   // ── FIX B — publish fails after create → surface the assertionName ───────
   it('surfaces the created assertionName when the publish call fails after a successful create', async () => {
     ft.addResponses(

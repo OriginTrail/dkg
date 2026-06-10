@@ -176,6 +176,18 @@ describe("DkgNodePlugin", () => {
       expect(res.details?.error).toMatch(/access_policy.*requires.*register_if_needed/i);
     });
 
+    it('dkg_shared_memory_publish register_if_needed description states the auto-register reality (FIX V)', () => {
+      const { byName } = setupPluginWithFetch({});
+      const desc = byName.get('dkg_shared_memory_publish')!.parameters.properties.register_if_needed.description as string;
+      // The CG-wide selection publish AUTO-registers an unregistered CG at gas/TRAC
+      // cost regardless of register_if_needed (memory.ts:1928); the flag only sets
+      // the registration's access_policy. The description must not imply it gates
+      // whether registration happens.
+      expect(desc).toMatch(/does NOT gate whether registration happens/i);
+      expect(desc).toMatch(/AUTO-register/i);
+      expect(desc).toContain('gas/TRAC');
+    });
+
 
     it('dkg_shared_memory_publish can register the context graph before publish when requested', async () => {
       const fetchMock = vi.fn(async (url: string) => {

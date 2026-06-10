@@ -20,8 +20,9 @@ export function buildMemoryTools(ctx: DkgToolHost): OpenClawTool[] {
         'graph to Verifiable Memory (on-chain) and clear SWM. To publish a SINGLE named knowledge asset, ' +
         'prefer `dkg_knowledge_asset_publish` (multi-root-safe). This bulk route is single-root-per-call: ' +
         'with more than one root entity in SWM it returns 409 MULTI_ROOT_PUBLISH_NOT_ATOMIC. Use after ' +
-        '`dkg_knowledge_asset_share`. If the context graph is still local-only/unregistered, set ' +
-        '`register_if_needed: true` to explicitly upgrade it to on-chain registration before publishing.',
+        '`dkg_knowledge_asset_share`. NOTE: this CG-wide publish AUTO-registers an unregistered context ' +
+        'graph on-chain at gas/TRAC cost regardless of `register_if_needed` — omitting the flag is NOT ' +
+        'gas-free. `register_if_needed` only lets you set the registration\'s `access_policy`.',
       parameters: {
         type: 'object',
         properties: {
@@ -37,7 +38,7 @@ export function buildMemoryTools(ctx: DkgToolHost): OpenClawTool[] {
           },
           register_if_needed: {
             type: 'boolean',
-            description: 'When true, explicitly register the context graph on-chain before publishing if needed. This may spend gas/TRAC; it is opt-in and not the default.',
+            description: 'Run an EXPLICIT on-chain registration before publishing, which lets you set `access_policy` on that registration. NOTE: this does NOT gate whether registration happens — a CG-wide publish AUTO-registers an unregistered context graph at gas/TRAC cost regardless of this flag. Set it only to choose the registration\'s access_policy (the implicit auto-register on publish otherwise defaults the policy).',
           },
           reveal_on_chain: {
             type: 'boolean',
@@ -45,7 +46,7 @@ export function buildMemoryTools(ctx: DkgToolHost): OpenClawTool[] {
           },
           access_policy: {
             type: 'number',
-            description: 'Optional registration access policy: `0` for open, `1` for private. Requires `register_if_needed: true` — it only applies when registering the CG, and is rejected otherwise.',
+            description: 'Optional access policy (`0` open, `1` private) for the EXPLICIT registration. Requires `register_if_needed: true` — it only applies to that explicit registration and is rejected otherwise (the implicit auto-register on publish defaults the policy).',
           },
         },
         required: ['context_graph_id'],
