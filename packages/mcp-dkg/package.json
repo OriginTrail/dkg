@@ -39,6 +39,7 @@
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:integration": "vitest run test/mcp-daemon-contract.integration.test.ts test/mcp-tool-surface.integration.test.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {
