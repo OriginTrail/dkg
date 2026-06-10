@@ -116,7 +116,9 @@ Open to anyone — independent researchers, audit firms, AI-augmented teams. No 
 
 Code under audit: [`packages/evm-module` @ `1f4fa01b`](https://github.com/OriginTrail/dkg/tree/1f4fa01b41c689d641943a59b2bc3d7336ba2f1e/packages/evm-module)
 
-Commit `1f4fa01b41c689d641943a59b2bc3d7336ba2f1e` (OriginTrail/dkg `main`, 2026-06-09) — the frozen RC the honeypot is deployed from.
+Commit `1f4fa01b41c689d641943a59b2bc3d7336ba2f1e` (OriginTrail/dkg `main`, 2026-06-09) — the frozen RC the honeypot is deployed from.\
+\
+Pre mainnet deployment Hub contract address on Base Mainnet: [0x26146f51e31a95c075228a34cfc696f09e4c36c3](https://basescan.org/address/0x26146f51e31a95c075228a34cfc696f09e4c36c3)
 
 ## Path to mainnet
 
