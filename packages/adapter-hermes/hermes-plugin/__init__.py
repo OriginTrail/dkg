@@ -2156,6 +2156,11 @@ class DKGMemoryProvider(MemoryProvider):
             elif isinstance(entities, list):
                 if not entities or not all(isinstance(e, str) and e.strip() for e in entities):
                     return tool_error('entities must be "all", a non-empty array of strings, or omitted.')
+                # Normalize to the stripped values (Codex #1079:2157) — the
+                # validation strips each entity but the UNSTRIPPED list was being
+                # forwarded, so " urn:a " reached the daemon with surrounding
+                # whitespace and resolved to the wrong / no root entity.
+                entities = [str(e).strip() for e in entities]
             else:
                 return tool_error('entities must be "all", a non-empty array of strings, or omitted.')
         return json.dumps(self._client.promote_assertion(name, cg, entities, _first_text(args, "sub_graph_name")))
@@ -2935,9 +2940,15 @@ def _annotate_vm_publish_partial(result: Any) -> Any:
     knowledge-assets.ts:291-300). Python ``requests`` does not raise on 207, so the
     body flows through as plain success. This is NOT a hard failure (the asset IS
     published), but it must NOT be reported as full success: add ``partial: true``
-    + a ``warning`` so the agent retries the CG binding while the UAL stays visible.
-    A 200 with no ``contextGraphError`` is left untouched (clean success). Parity
-    with OpenClaw 54998c9c7 / MCP f8c364e5a.
+    + a ``warning`` while the UAL stays visible. A 200 with no ``contextGraphError``
+    is left untouched (clean success).
+
+    The warning MUST NOT tell the agent to retry the publish (Codex #1076:3663):
+    the mint already succeeded and a confirmed publish clears SWM, so re-running
+    ``dkg_publish`` would mint a DUPLICATE and re-running ``dkg_knowledge_asset_publish``
+    would 409 the VM precondition (SWM already cleared) — and neither re-binds the
+    CG (there is no client-side re-bind route). The CG-binding failure is a
+    node-side / operator concern. Parity with OpenClaw 54998c9c7 / MCP f8c364e5a.
     """
     if not isinstance(result, dict):
         return result
@@ -2947,9 +2958,12 @@ def _annotate_vm_publish_partial(result: Any) -> Any:
             **result,
             "partial": True,
             "warning": (
-                "Partial publish: the knowledge asset was minted on-chain (UAL/kaId are valid), "
-                f"but the context-graph binding failed ({context_graph_error}). The on-chain asset "
-                "is published; retry the publish to re-attempt the context-graph binding."
+                "Partial publish: the knowledge asset was minted on-chain (UAL/kaId are valid) "
+                f"and IS published, but the context-graph binding failed ({context_graph_error}). "
+                "Do NOT re-run publish — dkg_publish would mint a duplicate and "
+                "dkg_knowledge_asset_publish would fail the VM precondition (a confirmed publish "
+                "clears Shared Working Memory), and neither re-binds the context graph. Surface "
+                "this binding failure to the node operator."
             ),
         }
     return result
