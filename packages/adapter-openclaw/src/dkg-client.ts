@@ -1052,7 +1052,9 @@ export class DkgDaemonClient {
       );
       err.assertionName = assertionName;
       err.assertionUri = created?.assertionUri;
-      if (created?.seal) err.seal = created.seal;
+      // The create response carries `merkleRoot` (the seal digest), not a `seal`
+      // object (knowledge-assets.ts:570) — surface it for recovery/verification.
+      if (created?.merkleRoot) err.merkleRoot = created.merkleRoot;
       err.phase = shareErr?.phase ?? 'swm-share';
       err.partial = true;
       throw err;
@@ -1076,7 +1078,7 @@ export class DkgDaemonClient {
       );
       err.assertionName = assertionName;
       err.assertionUri = created?.assertionUri;
-      if (created?.seal) err.seal = created.seal;
+      if (created?.merkleRoot) err.merkleRoot = created.merkleRoot;
       err.phase = 'vm-publish';
       err.cause = e;
       throw err;
@@ -1084,7 +1086,7 @@ export class DkgDaemonClient {
     return {
       ...(typeof published === 'object' && published !== null ? published : {}),
       assertionUri: created?.assertionUri,
-      ...(created?.seal ? { seal: created.seal } : {}),
+      ...(created?.merkleRoot ? { merkleRoot: created.merkleRoot } : {}),
     };
   }
 
@@ -1360,10 +1362,15 @@ export class DkgDaemonClient {
     name: string,
     opts?: { subGraphName?: string; entities?: string[] | 'all' },
   ): Promise<{ swmShared: boolean; promotedCount: number }> {
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, {
+    // Only include the optional fields when actually set — don't spread the whole
+    // opts object (which would carry `entities: undefined` / `subGraphName:
+    // undefined` keys). Parity with MCP's knowledgeAssetShare body construction.
+    const body: Record<string, unknown> = {
       contextGraphId: normalizeContextGraphId(contextGraphId),
-      ...(opts ?? {}),
-    });
+    };
+    if (opts?.subGraphName) body.subGraphName = opts.subGraphName;
+    if (opts?.entities !== undefined) body.entities = opts.entities;
+    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, body);
   }
 
   /** Publish to VM — mint or update on chain (git push origin main). */

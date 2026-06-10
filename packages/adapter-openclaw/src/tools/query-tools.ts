@@ -15,8 +15,11 @@ export function buildQueryTools(ctx: DkgToolHost): OpenClawTool[] {
     {
       name: 'dkg_publish',
       description:
-        'One-shot write + publish helper: writes the supplied quads to Shared Working Memory, then publishes ' +
-        'all SWM in the CG to Verifiable Memory (on-chain) and clears SWM. For the canonical stepwise flow ' +
+        'One-shot write + publish helper: creates a fresh auto-named assertion from the supplied quads ' +
+        '(seal + share), then publishes THAT one assertion to Verifiable Memory (on-chain). NOTE: this is ' +
+        'two HTTP calls (create, then publish), not a single transactional operation — either phase can ' +
+        'partially fail (a share-phase failure aborts before publish; a context-graph-binding failure still ' +
+        'mints the asset on-chain). For the canonical stepwise flow ' +
         '(create → write → finalize → share → publish) use `dkg_knowledge_asset_create/write/finalize/share` ' +
         'followed by `dkg_knowledge_asset_publish`. Publishing requires the context graph to be registered ' +
         'on-chain — set `register_if_needed: true` to register it first (idempotent) before publishing.',

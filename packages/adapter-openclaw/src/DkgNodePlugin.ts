@@ -2772,17 +2772,20 @@ export class DkgNodePlugin {
       // {assertionName}, which (like vm/publish) returns HTTP 207 with
       // `contextGraphError` set when the KA minted on-chain but the context-graph
       // binding FAILED (memory.ts:1772). `this.post` treats 207 as success, so
-      // without this the partial reads as clean success. The UAL/kaId are valid
-      // (the asset IS on-chain) — surface a PARTIAL/warning so the agent can retry
-      // the CG bind, mirroring handleAssertionPublish.
+      // without this the partial reads as clean success. The UAL/kaId are valid and
+      // the asset IS published on-chain — surface a PARTIAL/warning. The agent must
+      // NOT re-run dkg_publish: each call mints a FRESH assertion, so a retry would
+      // DUPLICATE the already-published asset and still not re-bind the CG. The
+      // CG-binding retry is an operator/daemon concern.
       const contextGraphError = (result as Record<string, unknown>).contextGraphError;
       if (typeof contextGraphError === 'string' && contextGraphError.length > 0) {
         return this.json({
           ...summary,
           partial: true,
           warning:
-            'Partial publish: the asset was minted on-chain (UAL/kaId are valid), but the context-graph ' +
-            `binding failed (${contextGraphError}). The on-chain asset is published; retry dkg_publish to ` +
+            'Partial publish: the asset IS published on-chain (the UAL/kaId are valid and final) — only the ' +
+            `context-graph binding failed (${contextGraphError}). Do NOT re-run dkg_publish: it would mint a ` +
+            'DUPLICATE asset and still not re-bind the context graph. Surface this to the operator to ' +
             're-attempt the context-graph binding.',
         });
       }
@@ -3647,9 +3650,11 @@ export class DkgNodePlugin {
       // CONTRACT §1 Stage5 / §7: vm/publish returns HTTP 207 (treated as success by
       // the HTTP client) when the KA minted on-chain but the context-graph binding
       // FAILED — `contextGraphError` is present in the body. The UAL/kaId are valid
-      // (the asset IS on-chain), so this is NOT a hard failure, but it must NOT be
-      // reported as full success: surface a clear PARTIAL so the agent can retry the
-      // CG binding.
+      // and the asset IS published on-chain, so this is NOT a hard failure and must
+      // NOT be reported as full success — but the agent must NOT re-publish: a
+      // confirmed publish clears SWM, so a re-publish 409s VM_PUBLISH_PRECONDITION
+      // (and never re-binds the CG). The CG-binding retry is an operator/daemon
+      // concern; surface the partial for a human to follow up.
       const contextGraphError =
         merged && typeof merged === 'object'
           ? (merged as Record<string, unknown>).contextGraphError
@@ -3659,9 +3664,11 @@ export class DkgNodePlugin {
           ...(merged as Record<string, unknown>),
           partial: true,
           warning:
-            'Partial publish: the knowledge asset was minted on-chain (UAL/kaId are valid), but the ' +
-            `context-graph binding failed (${contextGraphError}). The on-chain asset is published; retry ` +
-            'the publish to re-attempt the context-graph binding.',
+            'Partial publish: the knowledge asset IS published on-chain (the UAL/kaId are valid and final) ' +
+            `— only the context-graph binding failed (${contextGraphError}). Do NOT re-publish: the asset is ` +
+            'already minted, the publish cleared Shared Working Memory, and a retry will fail the VM ' +
+            'precondition without re-binding the context graph. Surface this to the operator to re-attempt the ' +
+            'context-graph binding.',
         });
       }
       return this.json(merged);

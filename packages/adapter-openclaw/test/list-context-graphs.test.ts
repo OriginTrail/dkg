@@ -442,7 +442,10 @@ describe('dkg_publish tool', () => {
     expect(parsed.kaId).toBe('kc-z');          // minted — kaId valid
     expect(parsed.ual).toBe('did:dkg:1/0xauthor/9'); // UAL valid
     expect(String(parsed.warning)).toContain('context-graph binding timed out');
-    expect(String(parsed.warning)).toMatch(/retry/i);
+    // FIX I: do NOT advise re-running dkg_publish (would mint a duplicate) — tell
+    // the agent it's published + surface to the operator for the CG-binding retry.
+    expect(String(parsed.warning)).toMatch(/do not re-run dkg_publish/i);
+    expect(String(parsed.warning)).toMatch(/operator/i);
   });
 
   it('reports plain success on a 200 publish (no contextGraphError)', async () => {
