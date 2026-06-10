@@ -21,6 +21,11 @@
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "ZeroShardingTableSizeLimit",
+    "type": "error"
+  },
+  {
     "anonymous": false,
     "inputs": [
       {

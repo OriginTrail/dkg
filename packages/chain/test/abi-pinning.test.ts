@@ -186,7 +186,10 @@ const PINNED_DIGESTS: Record<string, string> = {
   // from staker-bound TRAC on every paid publish / update / extend by
   // `KnowledgeAssetsLifecycle` + `PublishingConviction` (no ABI change on
   // those two — internal logic + version bump only).
-  ParametersStorage:            'a152ef475986c81b4077648980156aeaa2b91541057a9ad9bfcfd969ee7feb63',
+  //
+  // Updated PR #1083: added `ZeroShardingTableSizeLimit()` for the
+  // governance guard that rejects `setShardingTableSizeLimit(0)`.
+  ParametersStorage:            '7816845cbccd120eaf44eccea56f530e9c8e8894023d0693fddcc8546161575d',
   // Added PR #470 round 3: pin the V10 NFT-backed PCA contract so that
   // any drift in its events (CostCovered / WindowSettled /
   // AccountFinalSwept / TokensAddedToEpochRange consumers) or errors
