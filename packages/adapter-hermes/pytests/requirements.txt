@@ -6,4 +6,11 @@
 # Install: pip install -r packages/adapter-hermes/pytests/requirements.txt
 pytest==9.0.2
 eth-utils==6.0.0
+# eth-utils ships NO keccak backend by default; eth_utils.to_checksum_address
+# computes a keccak256 to pick the EIP-55 casing and RAISES without one, which
+# _normalize_wm_agent_address swallows into a lowercase address — silently
+# breaking test_finalize_handler_normalizes_author_to_checksum on a clean
+# install (it only passed where pycryptodome happened to be present). Pin the
+# pycryptodome backend explicitly so the checksum path always works.
+eth-hash[pycryptodome]==0.8.0
 requests==2.32.5

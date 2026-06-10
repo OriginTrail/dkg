@@ -35,10 +35,22 @@ const candidates =
 // only `pytest --version` would mark a machine with global pytest but without
 // eth_utils/requests as "runnable", so pytest would run and fail on the missing
 // import instead of skipping. Keep this in sync with pytests/requirements.txt.
+//
+// Also EXERCISE eth_utils.to_checksum_address: it needs an eth-hash keccak
+// backend (pycryptodome) that imports fine but only RAISES at call time when
+// absent — without this call the probe would pass on a backend-less machine and
+// the suite would silently produce lowercase addresses (the CI finalize-checksum
+// failure). Calling it here makes a missing backend a clean skip, not a red test.
 function pytestProbe(cmd, prefix) {
   const probe = spawnSync(
     cmd,
-    [...prefix, '-c', 'import pytest, eth_utils, requests'],
+    [
+      ...prefix,
+      '-c',
+      'import pytest, requests; from eth_utils import to_checksum_address; '
+        + "assert to_checksum_address('0x52908400098527886e0f7030069857d2e4169ee7')"
+        + " == '0x52908400098527886E0F7030069857D2E4169EE7'",
+    ],
     { stdio: 'ignore' },
   );
   return probe.status === 0;

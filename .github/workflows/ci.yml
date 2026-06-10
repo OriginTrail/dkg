@@ -636,11 +636,12 @@ jobs:
       # interpreter + the plugin's runtime/test deps.
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          # Pin to a concrete interpreter (matches the other CI lanes' pins and
-          # the version pytests/requirements.txt was validated against). A
-          # floating '3.x' resolves to the newest runner Python (3.14), where
-          # eth-utils 6.0.0's transitive cytoolz C-extension breaks
-          # to_checksum_address at call time and the finalize EIP-55 test fails.
+          # Pin a concrete interpreter for reproducibility (matches the other CI
+          # lanes' pins and the version pytests/requirements.txt was validated
+          # against), rather than a floating '3.x'. NOTE: the finalize EIP-55
+          # checksum failure was NOT a Python-version issue — it was a missing
+          # eth-hash keccak backend (now pinned in requirements.txt); this pin is
+          # hygiene, not the fix.
           python-version: '3.13'
       - name: Install Hermes plugin Python test deps
         run: python -m pip install -r packages/adapter-hermes/pytests/requirements.txt
