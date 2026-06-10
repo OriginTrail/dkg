@@ -57,20 +57,28 @@ test.describe('Ownership transfer + delegated KA update (API)', () => {
     expect(list.ok).toBe(true);
   });
 
-  test('KA update endpoint accepts quads after WM→VM pipeline', async () => {
+  test('KA update without a precomputed attestation is rejected (not silently accepted)', async () => {
     const cgs = await listContextGraphs(1);
     requireDevnetPrecondition(test, cgs.length === 0, 'No CGs');
     const cgId = cgs[0]!.id;
-    await runWmSwmVmPipeline({ contextGraphId: cgId });
+    const { kaId } = await runWmSwmVmPipeline({ contextGraphId: cgId });
     const stamp = Date.now();
     const res = await devnetApiFetch('/api/update', {
       method: 'POST',
       body: JSON.stringify({
         contextGraphId: cgId,
+        kaId,
         quads: buildTestQuads(cgId, stamp, `Delegated update ${stamp}`),
       }),
     });
-    expect([200, 400, 422]).toContain(res.status);
+    // On-chain KA update is gated behind a signed UpdateAuthorAttestation. A bare
+    // quads update with no `precomputedUpdateAttestation` MUST be rejected — the
+    // previous `expect([200,400,422]).toContain(res.status)` would have passed
+    // even if the attestation enforcement regressed to ACCEPT un-attested updates.
+    // Mirror the tightened sibling in wm-swm-vm-lifecycle.devnet.spec.ts.
+    expect(res.ok).toBe(false);
+    const body = await res.text();
+    expect(body).toMatch(/precomputedUpdateAttestation|attestation/i);
   });
 
   test('second agent registration succeeds on devnet node2', async () => {

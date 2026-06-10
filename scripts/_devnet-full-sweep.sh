@@ -31,6 +31,17 @@ SCRIPTS=(
   "random-sampling"
 )
 
+# DESTRUCTIVE subscription tests are OPT-IN (SUBSCRIPTION_TESTS=1) — NOT in the
+# default sweep. They DELETE a node's context-graph subscriptions and restart it;
+# against a REUSED operator devnet that silently drops pre-existing subscriptions
+# (subscription-cap now snapshots + restores its node's cap, but subscription-clear
+# wipes the active subscription set, which the sweep can't restore). When enabled
+# they run LAST, on disjoint nodes (clear→node1, cap→node2) so neither restarts
+# the other's node and the publish ACK quorum is left intact for earlier scripts.
+if [ "${SUBSCRIPTION_TESTS:-0}" = "1" ]; then
+  SCRIPTS+=("subscription-clear" "subscription-cap")
+fi
+
 # soak-rs is intentionally NOT in the default list — it's 30+ minutes and
 # only meaningful as a separate long-running test. Add SOAK=1 to include.
 if [ "${SOAK:-0}" = "1" ]; then

@@ -215,6 +215,14 @@ export async function createWmAssertion(opts: {
   name: string;
   quads: PublishQuads[];
   promote?: boolean;
+  /**
+   * Finalize the WM assertion at create time. Defaults to `true` for
+   * back-compat with every existing caller. Pass `false` to exercise the
+   * rc.17 #1004 path where `promote` auto-finalizes a FULL promote — i.e. the
+   * real Node UI journey (write → Promote All → Publish-to-VM) with no explicit
+   * finalize step.
+   */
+  finalize?: boolean;
   subGraphName?: string;
   nodeNum?: number;
 }): Promise<{ ok: boolean; status: number; body: string }> {
@@ -225,7 +233,7 @@ export async function createWmAssertion(opts: {
       contextGraphId: opts.contextGraphId,
       name: opts.name,
       quads: opts.quads,
-      finalize: true,
+      finalize: opts.finalize ?? true,
       // rc.17 KA-routes-unification: the inline SWM-promote flag is `alsoShareSwm`
       // (the old `promote` is silently ignored → the assertion never reaches SWM).
       alsoShareSwm: opts.promote ?? false,
