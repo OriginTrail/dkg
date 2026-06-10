@@ -130,7 +130,9 @@ export function buildAssertionTools(ctx: DkgToolHost): OpenClawTool[] {
       description:
         'Step 5 of the canonical flow. Publish ONE finalized + shared knowledge asset (by name) from Shared ' +
         'Working Memory to Verifiable Memory on-chain, minting or updating it. Returns the asset\'s UAL ' +
-        '(Universal Asset Locator, `did:dkg:<chainId>/<author>/<number>`) plus `kaId`, `txHash`, `status`, ' +
+        '(Universal Asset Locator, `did:dkg:<chainId>/<knowledgeAssetsContractAddress>/<number>` — the middle ' +
+        'segment is the KnowledgeAssets (KAV10) contract address, NOT the author; the separate `authorAddress` ' +
+        'response field is the (different) seal author) plus `kaId`, `txHash`, `status`, ' +
         'and `kas`. The seal already selects the author and the whole asset — do not pass author or selection ' +
         'overrides. Prefer this over dkg_shared_memory_publish when publishing a single named asset; it is ' +
         'multi-root-safe and avoids the legacy single-root SWM constraint. Fails 409 if the asset is not yet ' +

@@ -113,7 +113,7 @@ curl -X POST $BASE_URL/api/knowledge-assets -H "Authorization: Bearer $TOKEN" -H
 curl -X POST $BASE_URL/api/knowledge-assets/notes/wm/write -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"contextGraphId":"my-project","quads":[{"subject":"https://example.org/alice","predicate":"https://schema.org/name","object":"\"Alice\""}]}'
 curl -X POST $BASE_URL/api/knowledge-assets/notes/wm/finalize -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"contextGraphId":"my-project"}'
 curl -X POST $BASE_URL/api/knowledge-assets/notes/swm/share -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"contextGraphId":"my-project","entities":"all"}'
-curl -X POST $BASE_URL/api/knowledge-assets/notes/vm/publish -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"contextGraphId":"my-project"}'   # → { "kaId": "...", "ual": "did:dkg:<chainId>/<addr>/<number>", "txHash": "0x...", ... }
+curl -X POST $BASE_URL/api/knowledge-assets/notes/vm/publish -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"contextGraphId":"my-project"}'   # → { "kaId": "...", "ual": "did:dkg:<chainId>/<kasAddress>/<number>", "txHash": "0x...", ... }
 curl -X POST $BASE_URL/api/query -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"sparql":"SELECT * WHERE { ?s ?p ?o } LIMIT 10","contextGraphId":"my-project","view":"working-memory","agentAddress":"YOUR_PEER_ID"}'
 ```
 
@@ -313,7 +313,7 @@ SWM is for knowledge you've promoted from WM and want peers to see. Data arrives
 {
   "kaId":   "...",                                  // packed on-chain KA id (response-only)
   "status": "confirmed",
-  "ual":    "did:dkg:<chainId>/<addr>/<number>",    // the UAL — see below
+  "ual":    "did:dkg:<chainId>/<kasAddress>/<number>",    // the UAL — see below
   "txHash": "0x...",
   "merkleRoot": "...",
   "authorAddress": "0x...",                          // the SEAL author
@@ -322,12 +322,14 @@ SWM is for knowledge you've promoted from WM and want peers to see. Data arrives
 }
 ```
 
-A **UAL** (Universal Asset Locator) is the on-chain identifier for the published
-knowledge asset: `did:dkg:<chainId>/<authorAddress>/<number>`. It materializes **only at
-VM publish** — it is not known at create / write / finalize / share. Store the returned
-`ual` (and/or `kaId` / `kas[].tokenId`) to reference the asset later (e.g. for
-`/api/update`, `/api/endorse`). **There is no `kaNumber` field** at the v10.0 floor — the
-identifiers you get back are `kaId`, `ual`, and `kas[].tokenId`.
+A **UAL** (Universal Asset Locator) is the on-chain identifier for the published knowledge
+asset: `did:dkg:<chainId>/<kasAddress>/<number>` — the middle segment is the KnowledgeAssets
+(KAV10) **contract** address (`kav10Address`), **NOT** the author (the separate `authorAddress`
+field above is the different seal author; don't conflate). It materializes **only at VM
+publish** — not at create / write / finalize / share. Store the returned `ual` (and/or `kaId` /
+`kas[].tokenId`) to reference the asset later (e.g. for `/api/update`, `/api/endorse`). **There
+is no `kaNumber` field** at the v10.0 floor — the identifiers you get back are `kaId`, `ual`,
+and `kas[].tokenId`.
 
 **Status codes:** `200` confirmed · `207` minted but the CG-binding step failed
 (`contextGraphError` present; the UAL is still valid) · `502` did not confirm ·
@@ -833,7 +835,7 @@ This entire surface was empirically driven by [PR #720](https://github.com/Origi
 | 401 | Unauthorized — invalid or missing token | Re-authenticate or refresh token |
 | 402 | Insufficient TRAC for publication | Check balances, notify node operator |
 | 403 | Forbidden — publishPolicy or allowList violation | Verify CG membership and publish authority |
-| 404 | Resource not found | Verify resource identifiers (assertion name, CG ID, **UAL** = the on-chain Universal Asset Locator `did:dkg:<chainId>/<addr>/<number>` returned by `vm/publish`) |
+| 404 | Resource not found | Verify resource identifiers (assertion name, CG ID, **UAL** = the on-chain Universal Asset Locator `did:dkg:<chainId>/<kasAddress>/<number>` returned by `vm/publish`) |
 | 409 `VM_PUBLISH_PRECONDITION` | `vm/publish` called on an assertion that is not finalized, or has no quads in SWM | Call `wm/finalize` then `swm/share` before publishing |
 | 409 `WM_DRAFT_CONFLICT` | `wm/pull-from` onto an existing dirty WM draft | Pass `onConflict: "replace"`, or `wm/discard` the draft first |
 | 409 `MULTI_ROOT_PUBLISH_NOT_ATOMIC` | `/api/shared-memory/publish` resolved >1 root entity | Loop one root per call (`clearAfter: false` on all but the last); or use per-KA `vm/publish` |

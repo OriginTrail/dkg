@@ -128,7 +128,11 @@ describe('SKILL.md file', () => {
     // UAL is defined and tied to the publish response (CONTRACT §1 Stage5).
     expect(skillContent).toContain('UAL');
     expect(skillContent).toContain('Universal Asset Locator');
-    expect(skillContent).toContain('did:dkg:<chainId>/<addr>/<number>');
+    // The UAL middle segment is the KnowledgeAssets (KAV10) CONTRACT address, NOT
+    // the author (getDKGKnowledgeAssetsAddress; update-handler.ts:208/361).
+    expect(skillContent).toContain('did:dkg:<chainId>/<kasAddress>/<number>');
+    expect(skillContent).not.toContain('did:dkg:<chainId>/<author>/<number>');
+    expect(skillContent).not.toContain('did:dkg:<chainId>/<authorAddress>/<number>');
     // The canonical 5-stage sequence is spelled out.
     expect(skillContent).toContain('create → write → finalize → share → publish');
   });
