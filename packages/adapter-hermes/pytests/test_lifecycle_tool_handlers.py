@@ -152,6 +152,22 @@ def test_share_description_softens_publish_ready_and_notes_finalize(provider):
     assert "author_agent_address" in desc and "scheme_version" in desc
 
 
+def test_publish_description_ual_middle_segment_is_contract_not_author(provider):
+    # Codex #1077:346 — the daemon builds the UAL as
+    # did:dkg:<chainId>/<kasAddress>/<id> where the middle segment is the
+    # KnowledgeAssets (KAV10) CONTRACT address (update-handler.ts:208/361), NOT
+    # the author. The description must not state <author> there, and must keep the
+    # separate authorAddress response field accurate (the seal author).
+    pub = next(s for s in provider.get_tool_schemas()
+               if s["name"] == "dkg_knowledge_asset_publish")
+    desc = pub["description"]
+    assert "did:dkg:<chainId>/<knowledgeAssetsContractAddress>/<id>" in desc
+    assert "<chainId>/<author>/" not in desc
+    assert "KnowledgeAssets (KAV10) contract address, NOT the author" in desc
+    # the authorAddress response field is still described as the (different) seal author
+    assert "authorAddress" in desc and "seal author" in desc
+
+
 # -- B: entities accepts "all" | string[] | omitted -------------------------
 
 def test_share_entities_all_passes_through(provider):
