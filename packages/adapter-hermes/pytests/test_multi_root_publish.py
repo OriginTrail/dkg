@@ -663,3 +663,18 @@ def test_publish_access_policy_description_notes_register_dependency(plugin_modu
     pub = next(s for s in p.get_tool_schemas() if s["name"] == "dkg_publish")
     desc = pub["parameters"]["properties"]["access_policy"]["description"]
     assert "REQUIRES register_if_needed" in desc
+
+
+# -- FIX X (#1076:2396 / Option A): dkg_publish explicit-register publishPolicy caveat
+# dkg_publish exposes the explicit register route (no rehydration), so its
+# register_if_needed must carry the default-publishPolicy caveat (daemon-side
+# rehydration tracked in dkg#1085).
+
+def test_publish_register_desc_carries_publish_policy_caveat(plugin_module):
+    p = _register_provider(plugin_module, {"registered": "cg"})
+    pub = next(s for s in p.get_tool_schemas() if s["name"] == "dkg_publish")
+    desc = pub["parameters"]["properties"]["register_if_needed"]["description"]
+    assert "DEFAULT publishPolicy" in desc
+    assert "does NOT preserve" in desc
+    assert "Read access is unaffected" in desc
+    assert "dkg#1085" in desc
