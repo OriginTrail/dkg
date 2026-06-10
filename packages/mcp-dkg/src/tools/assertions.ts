@@ -343,7 +343,9 @@ export function registerAssertionTools(
         'Step 5 of the canonical write flow: publish ONE finalized + shared ' +
         'knowledge asset (by name) from Shared Working Memory to Verifiable ' +
         'Memory on-chain, minting or updating it. Returns the asset\'s UAL ' +
-        '(Universal Asset Locator, `did:dkg:<chainId>/<author>/<number>`) plus ' +
+        '(Universal Asset Locator, `did:dkg:<chainId>/<knowledgeAssetsContractAddress>/<number>` — ' +
+        'the middle segment is the KnowledgeAssets (KAV10) contract address, NOT the author; the ' +
+        'separate `authorAddress` response field is the (different) seal author) plus ' +
         '`kaId`, `txHash`, `status`, and `kas`. The seal already selects the ' +
         'author and the whole asset — do not pass author or selection overrides. ' +
         'Prefer this over dkg_shared_memory_publish when publishing a single ' +
