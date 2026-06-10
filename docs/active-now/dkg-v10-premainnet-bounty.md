@@ -4,94 +4,147 @@ icon: bug
 
 # OriginTrail DKG V10 Pre-Mainnet Bug Bounty
 
-**Trust the source — including the source code.** Break the V10 economic contracts before they go live. Open to anyone.
+**Trust the source — including the source code.** _Break the DKG V10 economic contracts before they go live. Open to anyone._
 
-<table data-header-hidden><thead><tr><th width="199"></th><th></th></tr></thead><tbody><tr><td>Theme</td><td>Attack the final V10 release-candidate economic contracts (<code>dkg-evm-module</code>) deployed as a public pre-mainnet</td></tr><tr><td>Total program value</td><td>300,000 $TRAC — 200,000 in live honeypots &#x26; a 100,000 reward pool</td></tr><tr><td>Status</td><td>Open — public pre-mainnet, no allowlist</td></tr><tr><td>Issued by</td><td><a href="https://origintrail.io">OriginTrail</a></td></tr></tbody></table>
-
-{% hint style="warning" %}
-**This is a `v0.1` draft.** Items marked **TBD** — the submission contact, triage and payout SLAs, the per-tier capture cap, and exact dates — are finalized before the program opens. Full terms and conditions will be aligned with counsel under the project's Apache 2.0 / governing-law framework.
-{% endhint %}
+<table data-header-hidden><thead><tr><th width="199"></th><th></th></tr></thead><tbody><tr><td>Theme</td><td>Break the full DKG V10 on-chain contract set (<code>@origintrail-official/dkg-evm-module</code> @ <code>10.0.0-rc.17</code>) deployed as a public pre-mainnet</td></tr><tr><td>Total program value</td><td>300,000 $TRAC — a 200,000 capturable honeypot pool + a 100,000 severity-reward pool</td></tr><tr><td>Honeypot</td><td>Live on Base mainnet with real TRAC — one capped vault (~60,000) + cold reserve, redeployed across captures</td></tr><tr><td>Window</td><td>Phase 1 (Track 1 honeypot): June 10 → June 17, 2026</td></tr><tr><td>Submit</td><td><a href="https://github.com/OriginTrail/dkg/security/advisories/new">GitHub Private Vulnerability Reporting</a> or <a href="mailto:bounty@origin-trail.com">bounty@origin-trail.com</a></td></tr><tr><td>Issued by</td><td><a href="https://origintrail.io">OriginTrail</a></td></tr></tbody></table>
 
 ## The program in one line
 
-The final V10 release candidate — the exact contract bytecode intended for mainnet — is deployed as a public pre-mainnet, funded with **300,000 TRAC**: **200,000 in live honeypots** plus a **100,000 reward pool**. Anyone can attack it. What survives ships; what doesn't gets fixed first.
+The final V10 release candidate — the exact contract bytecode intended for mainnet — is deployed as a public **pre-mainnet**, funded with **300,000 TRAC: a 200,000 honeypot pool plus a 100,000 severity-reward pool**. Two tracks: **capture** real TRAC from the honeypot on the value-handling contracts, and **severity rewards for bugs in _any_ V10 contract**. The honeypot runs as a single isolated, **capped** live vault — redeployed across captures so no single bug can take more than the cap. Anyone can attack it. What survives ships; what doesn't gets fixed first.
 
 ## Why
 
-On 29 May 2026, a researcher using Claude Opus 4.8 found a critical, \~4-year-old soundness flaw in Zcash's Orchard pool — one that had passed repeated expert review — in about a day, with a working proof-of-concept. The lesson is plain: frontier AI now finds deep economic bugs faster than traditional review, and that power favors whoever uses it first. On-chain value-handling code only launches once and mistakes are irreversible, so the V10 economic contracts are deployed as a pre-mainnet and attacked — by humans and AI — before user funds are committed. Passing this program is the gate to mainnet.
+On 29 May 2026, a researcher using Claude Opus 4.8 found a critical, \~4-year-old soundness flaw in Zcash's Orchard pool — one that had passed repeated expert review — in about a day, with a working proof-of-concept. The lesson is plain: frontier AI now finds deep economic bugs faster than traditional review, and that power favors whoever uses it first. On-chain value-handling code launches once and mistakes are irreversible, so the V10 economic contracts are deployed as a pre-mainnet and attacked — by humans and AI — **before** user funds are committed. Passing this program is the gate to mainnet.
 
-## Scope — the V10 economic contracts (`dkg-evm-module`)
+## Scope — the full V10 on-chain contract set (`@origintrail-official/dkg-evm-module`)
 
-TRAC is fixed-supply with minting permanently disabled, so the target is not a counterfeit token — it is forging an unbacked economic position: a conviction NFT that claims rewards or principal without the stake behind it.
-
-* **Conviction NFTs** — `DKGStakingConvictionNFT` and the Publisher conviction wrapper: the mint path, the wrapper↔position binding, lock tiers, transfer/burn, and the V8→V10 migration mint path.
-* **Staking & rewards** — `StakingV10`, `StakingStorage`, `ConvictionStakingStorage`: deposits, withdrawals, delegation, and claims from the finite pre-funded reward pool.
-* **Locks** — the immutable lock spec and any path that mutates, bypasses, or unwraps a position early.
-* **Access control** — mint authorization resolved through the Hub, the Hub registry itself, `initialize()` guards, admin/pause roles, upgrade paths, multisig + timelock.
-
-{% hint style="info" %}
-**Primary invariant under test:** a conviction NFT exists **if and only if** a real, backed position of equal amount and tier exists in storage under the same owner — and minting is reachable only through the staking flow, never with caller-supplied values. Break that binding and it's **Critical**.
+{% hint style="warning" %}
+**Exact target:** npm package `@origintrail-official/dkg-evm-module`, version `10.0.0-rc.17` (or the pinned launch RC), in the `OriginTrail/dkg` monorepo under `packages/evm-module`. **Do not** confuse this with the legacy standalone `dkg-evm-module` (v8.1.0, repo `OriginTrail/dkg-evm-module`) — the frozen V8.1 module, which has **none** of these contracts.
 {% endhint %}
 
-**Out of scope:** off-chain software / UI unless it causes on-chain loss, the production network and real user funds, social engineering, DoS, and issues already in the public tracker.
+**Every V10 on-chain contract is in scope, under two reward tracks.** Both pay the same severity bands; **capture** (drain real TRAC, keep it) is an additional bonus available only on the honeypot track.
+
+### Track 1 — Honeypot: the value-handling contracts (capture + severity)
+
+TRAC is fixed-supply with minting permanently disabled, so the target is not a counterfeit token — it is **forging an unbacked economic position**: a conviction NFT that claims rewards or principal without the stake behind it.
+
+* **Conviction NFTs** — `DKGStakingConvictionNFT` and `DKGPublishingConvictionNFT` (+ `PublishingConviction` / `PublishingConvictionStorage`): the mint path, the wrapper↔position binding, lock tiers, transfer/burn, and the V8→V10 migration mint path.
+* **Staking & rewards** — `StakingV10`, `ConvictionStakingStorage` (the canonical V10 store **and TRAC vault**): deposits, withdrawals, delegation, relock/redelegate, and claims. _(`StakingStorage` is V8 legacy, read only by the V8→V10 drain path — in scope for the migration cutover.)_
+* **Reward accrual** — `RandomSampling` / `RandomSamplingStorage`: per-epoch score, score-per-stake settlement, and the delegator/operator reward split that funds claims.
+* **Locks** — the lock-tier ladder in `ConvictionStakingStorage` and any path that mutates, bypasses, or unwraps a position early.
+* **Access control** — mint authorization resolved through the **Hub**, the Hub registry itself (`setContractAddress`, `forwardCall`, `setAndReinitializeContracts`), `initialize()` guards, the `onlyContracts` set-membership gate (`HubDependent`), admin/pause roles, the multisig (`ICustodian`) + timelock, and the upgrade path (address-swap; **no delegatecall proxy**). _(Shared infra — also guards Track 2.)_
+
+{% hint style="info" %}
+**Primary invariant under test:** a conviction NFT exists **if and only if** a real, backed position of equal amount and tier exists in storage under the same owner — and minting is reachable only through the staking flow, never with caller-supplied amount/tier/multiplier. Break that binding and it's **Critical**. A value-draining bug here can **capture** the live honeypot vault (you keep it, up to the cap) on top of the severity reward.
+{% endhint %}
+
+### Track 2 — General audit: every other deployed contract (severity)
+
+Every remaining V10 contract at the pinned RC is in scope for the **severity reward** — no honeypot (these don't custody the bounty pool, so there is nothing to "capture"), but paid by the same bands as Track 1:
+
+* **Knowledge Assets** — `DKGKnowledgeAssets`, `KnowledgeAssetsStorage`, `KnowledgeAssetsLifecycle`, `KnowledgeCollection`, and the rc.17 per-KA memory-model contracts.
+* **Context Graphs** — `ContextGraphStorage`, `ContextGraphValueStorage`, `ContextGraphs`, `ContextGraphNameRegistry`.
+* **Identity & profiles** — `IdentityStorage`, `Identity`, `ProfileStorage`, `Profile`.
+* **Network & accounting** — `ShardingTable(Storage)`, `Ask(Storage)`, `EpochStorage*`, `Chronos`, `DelegatorsInfo`, `PaymasterManager` / `Paymaster`, `WhitelistStorage`, `ParametersStorage`.
+
+Any on-chain bug counts: asset/fund loss, access-control or mint-authorization bypass, incorrect settlement or accounting, permanent state corruption or freeze.
+
+**Out of scope:** off-chain software / UI (unless it causes on-chain loss), the production network and real user funds, social engineering, pure off-chain DoS, and issues already in the public tracker.
+
+### Verified lock-tier schedule
+
+The contracts seed exactly **four locked tiers** plus a liquid rest state (`ConvictionStakingStorage` baseline ladder):
+
+| Tier | Lock (wall-clock) | Effective-stake multiplier | Withdrawable |
+| --- | --- | --- | --- |
+| **0** (rest) | none | 1.0× | always (liquid) |
+| **1** | 30 days | 1.5× | after expiry |
+| **3** | 90 days | 2.0× | after expiry |
+| **6** | 180 days | 3.5× | after expiry |
+| **12** | 366 days | 6.0× | after expiry |
+
+New tiers are append-only and governance-gated (`addTier`, Hub-owner / multisig). Multiplier is read from the tier table — **never** caller-supplied.
 
 ## The honeypots — 200,000 TRAC
 
-Real staked principal across the lock tiers, active Publisher and Staker conviction positions, and a funded reward pool — production economics mirrored exactly, fully isolated from any live deployment. Because a forged position drains a bounded target (principal + rewards), the prize is pre-funded. If you can take it through a genuine bug, you keep it — capped per tier and on top of the severity reward. Demonstrating a viable attack path is rewarded even if no funds move. The only TRAC at risk is this pool — by design.
+Real staked principal across the lock tiers, active Publisher and Staker conviction positions, and seeded reward state — production economics mirrored at scale, deployed on **Base mainnet** with **real TRAC**, fully isolated from any live deployment (its own Hub + full stack). **If you can take it through a genuine bug, you keep it** — up to the live-vault cap, on top of the severity reward. Demonstrating a viable attack path is rewarded even if no funds move. The only TRAC at risk is this pool — by design.
 
-| Bucket | TRAC | Share |
-| --- | ---: | ---: |
-| Conviction staking accounts | 120,000 | 60% |
-| Publisher conviction accounts | 40,000 | 20% |
-| Reward pool (claimable reserve) | 30,000 | 15% |
-| Reserve / migration / transitional | 10,000 | 5% |
-| **Total** | **200,000** | **100%** |
+**How it's funded — one capped live vault + cold reserve.** With real TRAC and no on-chain clawback, the only cap that holds against a malicious researcher is a _structural_ one: the live vault is funded with only its cap, so a drain can never exceed it. The 200,000 is deployed as a single isolated live vault plus a cold reserve that redeploys it after each capture:
 
-* **Conviction staking — 120,000 TRAC (\~12 accounts).** Barbell-shaped: a 40,000 whale (longest lock) and a 20,000 sub-whale make a single-account drain worth real effort; four 8,000 accounts cover one per lock tier; six near-minimum accounts (\~4,600 each) exercise the min-stake boundary, rounding, and many-staker interactions.
-* **Publisher conviction — 40,000 TRAC (\~6 accounts).** One 16,000 publisher whale, two 8,000 mid publishers, and three near-minimum publishers (\~2,700 each) — all running active publishing flows.
-* **Supporting pools — 40,000 TRAC.** A 30,000 reward reserve sized well above total honeypot claims (so the "claim more than you're owed" path is testable), plus 10,000 across accounts awaiting V8→V10 migration and accounts left mid-unstake / mid-claim.
+| Allocation | TRAC | Role |
+| --- | --- | --- |
+| **Live vault** — one isolated stack | \~60,000 TRAC | the active target; its balance **is** the cap on any single capture |
+| **Cold reserve** | \~140,000 TRAC | redeploys a fresh vault after each capture (topped up so re-arms are funded) |
+| **Total committed** | **200,000** | total downside, bounded here regardless of caps |
 
 {% hint style="info" %}
-**Confirm against spec:** four lock tiers are assumed — adjust counts to the real schedule; near-minimum amounts are set to the chain's actual minimum stake / conviction-mint thresholds. Deployed on the primary RC chain (Base); Gnosis, if covered, is a separate incremental pool, not carved from these 200k.
+**One vault, one ceiling.** All staker and publisher conviction route into a single `ConvictionStakingStorage` whose sole outflow is `transferStake`, so a binding-break drains the whole live vault in one tx — and the vault's \~60,000 balance is the structural ceiling on any single capture. After a valid drain the surface closes until the bug is patch-verified, then a fresh vault redeploys from reserve. The program runs across several sequential captures before the committed pool is exhausted.
 {% endhint %}
 
-## Rewards
+**What's in the live vault.** A representative slice that keeps every bug class reachable at moderate magnitude:
 
-A **100,000 TRAC reward pool** prices severity, on top of the **200,000 TRAC honeypot** paid via capture. Top-heavy by design — most of the pool sits behind the economically critical classes. Bands are in TRAC, USD-peggable at payout.
+* **Conviction staking across all four lock tiers** (1/3/6/12) spread over a few sharding-active nodes — a tier-12 "whale" position large enough to make a single-account drain worth real effort, plus mid and several small co-delegators that stress many-staker / shared-denominator / cross-node / dust-rounding interactions.
+* **Publisher conviction** — `DKGPublishingConvictionNFT` accounts with committed TRAC and harness-published knowledge assets.
+* **Seeded reward state** — so the "claim more than you're owed" path is live. Rewards are _accrual-based_ (random-sampling proofs that compound into positions), so this is **harness-seeded** (a published KA + computed proofs over a few short epochs), not a static balance.
+* **Migration / transitional** — accounts awaiting V8→V10 migration and positions left mid-unstake / mid-claim.
+
+## General audit rewards
+
+A **100,000 TRAC reward pool** prices severity for findings in **any** V10 contract, on top of the 200,000 TRAC honeypot captured on the value-handling contracts (Track 1).
 
 | Severity | Example | Reward (TRAC) |
-| --- | --- | ---: |
-| **Critical** | Minting an unbacked / over-stated conviction NFT; decoupling an NFT from its stake; minting outside the staking flow; draining principal or the reward pool; Hub-registry takeover; bypassing locks; permanent fund freeze | 25,000–45,000 + capture (cap **TBD**) |
-| **High** | Conditional / partial loss; access-control or mint-authorization bypass without immediate theft; temporary freeze | 8,000–18,000 |
-| **Medium** | Bounded impact — reward / accounting drift, incorrect settlement, value leakage without large-scale theft | 2,000–5,000 |
-| **Low** | Minor impact under narrow preconditions | up to 1,000 (discretionary) |
+| --- | --- | --- |
+| **Critical** | Minting an unbacked / over-stated conviction NFT; decoupling an NFT from its stake; minting outside the staking flow; Hub-registry takeover; bypassing locks; permanent fund freeze | **20,000–40,000** + capture up to the live-vault cap (\~60,000) |
+| **High** | Conditional / partial loss; access-control or mint-authorization bypass without immediate theft; temporary freeze; breaking a contract's functionality (e.g. minting Knowledge Assets) in an impactful way | **10,000–15,000** |
+| **Medium** | Bounded impact — reward / accounting drift, incorrect settlement, value leakage without large-scale theft | **2,000–5,000** |
+| **Low** | Minor impact under narrow preconditions | up to **1,000** (discretionary) |
 | **Informational** | No economic-loss path | recognition + credit |
 
-**Minimum bar.** Severity = economic impact × exploitability, not novelty; no-impact findings are credited but unpaid. Paid rewards begin at Medium; the economically critical floor is High and above — direct or conditional fund-loss classes, which require a working PoC on the honeypot, stack the capture and AI bonus, and gate the launch.
-
-{% hint style="info" %}
-**AI-assisted bonus.** Use Claude Opus 4.8 and agentic tooling freely — the threat model assumes an AI-capable adversary, and the point is to be that adversary first, under authorization. Critical / High findings with a reproducible AI-assisted methodology earn the multiplier.
-{% endhint %}
+**Minimum bar.** Severity = economic impact × breaking intended system behavior; no-impact findings are credited but unpaid. All reported bugs require a **working PoC**: on the live honeypot for Track 1 (which additionally stacks the capture bonus), or against the pinned RC / a forked deployment for Track 2. These gate the launch.
 
 ## Participate
 
 Open to anyone — independent researchers, audit firms, AI-augmented teams. No invitation or allowlist; attack the public pre-mainnet honeypots and submit what you find.
 
-* **Submit:** the security contact / Immunefi listing (**TBD**), or the address in the repo's [`SECURITY.md`](https://github.com/OriginTrail/dkg/blob/main/SECURITY.md).
-* **Triage:** acknowledged within **TBD** hours; severity assessed within **TBD** business days.
+* **Submit:** GitHub Private Vulnerability Reporting — [https://github.com/OriginTrail/dkg/security/advisories/new](https://github.com/OriginTrail/dkg/security/advisories/new) (preferred), or email **bounty@origin-trail.com**.
+* **Triage:** acknowledged within **48 hours**; severity assessed within **5 business days**.
 * **Payout:** in TRAC after validation, subject to sanctions screening.
-* **Disclosure:** coordinated — no public disclosure before a fix ships; credit on opt-in.
-* **Safe harbor:** good-faith research within these rules will not be met with legal action. Full T&C aligned with the project's Apache 2.0 / governing-law framework — to be finalized with counsel.
+* **Disclosure:** coordinated — **no public disclosure before a fix ships** (hard requirement for bounty reward); credit on opt-in.
+* **Safe harbor:** good-faith research within these rules will not be met with legal action. Full T&C aligned with the project's Apache 2.0 license.
+
+## Codebase
+
+Code under audit: [`packages/evm-module` @ `1f4fa01b`](https://github.com/OriginTrail/dkg/tree/1f4fa01b41c689d641943a59b2bc3d7336ba2f1e/packages/evm-module)
+
+Commit `1f4fa01b41c689d641943a59b2bc3d7336ba2f1e` (OriginTrail/dkg `main`, 2026-06-09) — the frozen RC the honeypot is deployed from.
 
 ## Path to mainnet
 
-1. Freeze the final-RC contracts → internal AI-assisted audit + invariant testing.
-2. Deploy as the public pre-mainnet with honeypots live → open bounty.
-3. Remediate, re-audit, and machine-verify the core invariants: every NFT backed 1:1; lock integrity; no over-withdrawal; claims ≤ reward pool.
-4. Mainnet — launched from verified code, guarded with conservative caps, a pause guardian, and timelocked admin actions.
+DKG V10 reaches mainnet in four phases. **Phase 1 — the Frontier-AI Resilience Gate (this bounty) — is the pass/fail checkpoint:** what survives ships, what breaks gets fixed first.
 
-Step 3 is the gate. No program eliminates all risk — which is why mainnet stays capped and guarded even after a clean bounty.
+```mermaid
+gantt
+    title DKG V10 — Path to Mainnet
+    dateFormat YYYY-MM-DD
+    axisFormat %b %d
 
-***
+    section Phase 0 · Freeze
+    Final-RC contracts frozen & deployed to pre-mainnet :done, p0, 2026-06-02, 2026-06-10
 
-_Issued by OriginTrail d.o.o. · Pre-Mainnet Bug Bounty · `v0.1` draft. For the current official channel and submission thread, see_ [_origintrail.io_](https://origintrail.io)_._
+    section Phase 1 · Frontier-AI Resilience Gate
+    Honeypot bounty — Track 1 (live vault, real TRAC)   :active, p1, 2026-06-10, 7d
+    Patch-verify Critical / High findings               :p1fix, 2026-06-14, 3d
+
+    section Phase 2 · Mainnet Launch
+    DKG V10 Mainnet Launch (week)                       :crit, m1, 2026-06-17, 7d
+
+    section Phase 3 · Continuous Audit
+    General audit — Track 2 (every V10 contract)        :p3, 2026-06-17, 28d
+```
+
+| Phase | Milestone | Window | Gate to advance |
+| --- | --- | --- | --- |
+| **0** | Final-RC freeze & pre-mainnet deployment | ✅ Completed | Exact mainnet bytecode (`@origintrail-official/dkg-evm-module` `10.0.0-rc.17`) live on Base mainnet as an isolated, capped honeypot |
+| **1** | **Frontier-AI Resilience Gate** — Track 1 honeypot bounty | June 10 → **June 17, 2026** (1 week) | Honeypot survives; all Critical / High findings patch-verified |
+| **2** | **DKG V10 Mainnet Launch** | Week of June 17, 2026 | Bounty-hardened, feature-complete V10 goes live |
+| **3** | **Continuous general audit** — Track 2 | Ongoing, post-launch | Severity-priced findings across every V10 contract |
