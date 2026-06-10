@@ -74,11 +74,13 @@ function isKaHighWaterViewUnavailable(err: unknown): boolean {
   const code = errorCode(err);
   const msg = errorMessage(err).toLowerCase();
 
-  if (code === 'BAD_DATA') return true;
-  return msg.includes('could not decode result data')
-    || msg.includes('function selector')
-    || msg.includes('selector not recognized')
-    || msg.includes('missing revert data');
+  if (code === 'BAD_DATA') {
+    return msg.includes('could not decode result data')
+      && msg.includes('value="0x"')
+      && msg.includes('getmaxkanumberforauthor');
+  }
+  return msg.includes('function selector')
+    || msg.includes('selector not recognized');
 }
 
 async function contractAddress(contract: Contract): Promise<string> {

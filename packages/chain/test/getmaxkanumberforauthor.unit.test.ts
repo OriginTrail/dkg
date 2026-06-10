@@ -34,6 +34,7 @@ function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterCon
 
 const AUTHOR = ethers.getAddress('0x1111111111111111111111111111111111111111');
 const pack = (n: bigint) => (BigInt(AUTHOR) << 96n) | n; // packed kaId for AUTHOR
+const EMPTY_VIEW_RESULT = 'could not decode result data (value="0x", info={ method: "getMaxKaNumberForAuthor", signature: "getMaxKaNumberForAuthor(address)" }, code=BAD_DATA, version=6.16.0)';
 
 /** A ContractMethod-shaped mock: a function carrying a `.staticCall`. */
 function viewMock(impl: () => Promise<bigint>) {
@@ -106,7 +107,7 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
   });
 
   it('falls back to the bounded scan when an older deployment cannot decode the view result', async () => {
-    const badData: any = new Error('could not decode result data');
+    const badData: any = new Error(EMPTY_VIEW_RESULT);
     badData.code = 'BAD_DATA';
     const view = viewMock(async () => {
       throw badData;
@@ -124,7 +125,7 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
   });
 
   it('fails loudly instead of scanning empty logs when the resolved storage address has no code', async () => {
-    const badData: any = new Error('could not decode result data');
+    const badData: any = new Error(EMPTY_VIEW_RESULT);
     badData.code = 'BAD_DATA';
     const queryFilter = vi.fn(async () => []);
     const storage = {
@@ -185,6 +186,42 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
     await expect(
       makeAdapter(storage, 100).getMaxKaNumberForAuthor(AUTHOR),
     ).rejects.toThrow('Paused');
+    expect(queryFilter).not.toHaveBeenCalled();
+  });
+
+  it('rethrows malformed BAD_DATA instead of treating every decode failure as an absent view', async () => {
+    const err: any = new Error(
+      'could not decode result data (value="0x1234", info={ method: "getMaxKaNumberForAuthor", signature: "getMaxKaNumberForAuthor(address)" }, code=BAD_DATA, version=6.16.0)',
+    );
+    err.code = 'BAD_DATA';
+    const queryFilter = vi.fn(async () => [{ args: { id: pack(9n) } }]);
+    const storage = {
+      getMaxKaNumberForAuthor: viewMock(async () => {
+        throw err;
+      }),
+      filters: { KnowledgeAssetCreated: vi.fn(() => 'F') },
+      queryFilter,
+    };
+    await expect(
+      makeAdapter(storage, 100).getMaxKaNumberForAuthor(AUTHOR),
+    ).rejects.toThrow('0x1234');
+    expect(queryFilter).not.toHaveBeenCalled();
+  });
+
+  it('rethrows generic missing-revert-data errors instead of hiding call failures behind a scan', async () => {
+    const err: any = new Error('missing revert data');
+    err.code = 'CALL_EXCEPTION';
+    const queryFilter = vi.fn(async () => [{ args: { id: pack(9n) } }]);
+    const storage = {
+      getMaxKaNumberForAuthor: viewMock(async () => {
+        throw err;
+      }),
+      filters: { KnowledgeAssetCreated: vi.fn(() => 'F') },
+      queryFilter,
+    };
+    await expect(
+      makeAdapter(storage, 100).getMaxKaNumberForAuthor(AUTHOR),
+    ).rejects.toThrow('missing revert data');
     expect(queryFilter).not.toHaveBeenCalled();
   });
 });
