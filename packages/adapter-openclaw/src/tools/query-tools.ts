@@ -47,11 +47,16 @@ export function buildQueryTools(ctx: DkgToolHost): OpenClawTool[] {
             description:
               'If the context graph is not yet registered on-chain, register it first (idempotent), then publish. ' +
               'Registration may spend gas/TRAC; it is opt-in. Default false — when false and the CG is ' +
-              'unregistered, publish fails with the daemon\'s not-registered error.',
+              'unregistered, publish fails with the daemon\'s not-registered error. CAVEAT: this uses the ' +
+              'explicit register route, which registers with the daemon\'s DEFAULT publishPolicy (derived from ' +
+              'access_policy) and does NOT preserve a context graph\'s stored custom publishPolicy / ' +
+              'contribution governance. For a CG created with a non-default publishPolicy/PCA, register it ' +
+              'explicitly with the desired policy first rather than relying on register_if_needed. (Read access ' +
+              'is unaffected; daemon-side rehydration tracked in OriginTrail/dkg#1085.)',
           },
           access_policy: {
             type: 'number',
-            description: 'Registration access policy: `0` for open, `1` for private. Requires `register_if_needed: true` — it only applies when registering the CG, and is rejected otherwise.',
+            description: 'Registration access policy: `0` for open, `1` for private. Requires `register_if_needed: true` — it only applies when registering the CG, and is rejected otherwise. Sets only the access policy; it does NOT preserve a stored custom publishPolicy (see register_if_needed; OriginTrail/dkg#1085).',
           },
         },
         required: ['context_graph_id', 'quads'],

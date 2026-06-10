@@ -499,6 +499,29 @@ describe("DkgNodePlugin", () => {
   });
 
 
+  // FIX X (#1076:2396 / Option A): the explicit-register route registers with the
+  // daemon's DEFAULT publishPolicy and does NOT preserve a CG's stored custom
+  // publishPolicy (daemon-side rehydration tracked in dkg#1085). The caveat is on
+  // the two explicit-register-exposed tools and ABSENT on dkg_shared_memory_publish
+  // (which uses the safe rehydrating auto-register path).
+  it('register_if_needed publishPolicy caveat is present on the per-KA/one-shot publish tools, absent on shared-memory', () => {
+    const plugin = new DkgNodePlugin();
+    const registeredTools: OpenClawTool[] = [];
+    plugin.register({ config: {}, registerTool: (t) => registeredTools.push(t), registerHook: () => {}, on: () => {}, logger: {} });
+    const byName = new Map(registeredTools.map((t) => [t.name, t] as const));
+
+    for (const name of ['dkg_knowledge_asset_publish', 'dkg_publish']) {
+      const desc = byName.get(name)!.parameters.properties.register_if_needed.description as string;
+      expect(desc, name).toContain('DEFAULT publishPolicy');
+      expect(desc, name).toContain('OriginTrail/dkg#1085');
+    }
+    // The safe rehydrating auto-register tool must NOT carry the caveat.
+    const shared = byName.get('dkg_shared_memory_publish')!.parameters.properties.register_if_needed.description as string;
+    expect(shared).not.toContain('DEFAULT publishPolicy');
+    expect(shared).not.toContain('dkg#1085');
+  });
+
+
   // ---------------------------------------------------------------------------
   // No v9 back-compat: v10-rc is the first product release. Any v9-era field
   // (`contextGraph_id`, stringified `include_shared_memory`, etc.) is out of scope
