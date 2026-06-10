@@ -766,6 +766,17 @@ describe("DkgNodePlugin", () => {
       expect(bad.content[0].text).toContain('entities');
     });
 
+    it('dkg_knowledge_asset_share trims whitespace from each entity URI before the wire (FIX K)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ promoted: 1 });
+      await byName.get('dkg_knowledge_asset_share')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'notes',
+        entities: [' urn:root-1 ', '\turn:root-2\n'],
+      });
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(JSON.parse(init.body as string).entities).toEqual(['urn:root-1', 'urn:root-2']);
+    });
+
 
     it('dkg_knowledge_asset_share omits entities when not supplied (daemon default kicks in)', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ promoted: 1 });

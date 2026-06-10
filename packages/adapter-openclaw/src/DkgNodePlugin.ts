@@ -3573,7 +3573,10 @@ export class DkgNodePlugin {
       } else if (raw === 'all') {
         entities = 'all';
       } else if (Array.isArray(raw) && raw.length > 0 && raw.every((e) => typeof e === 'string')) {
-        entities = raw.map((e) => String(e));
+        // FIX K: trim each root-entity URI before forwarding — a whitespace-padded
+        // entity (" urn:a ") would otherwise reach the daemon with the spaces and
+        // resolve to the wrong (or no) root. Parity with Hermes.
+        entities = raw.map((e) => String(e).trim());
       } else {
         return this.error('"entities" must be omitted, the string "all", or a non-empty array of root entity URIs.');
       }
