@@ -389,6 +389,45 @@ def test_publish_quads_publish_failure_merges_assertion_name(recording_client):
     assert "dkg_shared_memory_publish" not in result["error"]
 
 
+# -- FIX O (#1084:730): recovery payloads carry subGraphName + mention it -------
+
+def test_publish_quads_create_207_carries_sub_graph_name(recording_client):
+    client = recording_client
+    client.responder = lambda path, body: (
+        {"created": True, "assertionUri": "urn:a", "merkleRoot": "0xr",
+         "errors": [{"phase": "swm-share", "error": "x"}]}
+        if path == "/api/knowledge-assets" else {"status": "confirmed"}
+    )
+    result = client.publish_quads("cg", _Q, sub_graph_name="notes")
+    assert result["subGraphName"] == "notes"
+    assert "sub-graph 'notes'" in result["error"]
+    assert "sub_graph_name" in result["error"]  # guidance mentions it for recovery
+
+
+def test_publish_quads_publish_fail_carries_sub_graph_name(recording_client):
+    client = recording_client
+    client.responder = lambda path, body: (
+        {"assertionUri": "urn:a", "merkleRoot": "0xr", "swmShared": True}
+        if path == "/api/knowledge-assets"
+        else {"success": False, "error": "chain revert"}
+    )
+    result = client.publish_quads("cg", _Q, sub_graph_name="notes")
+    assert result["subGraphName"] == "notes"
+    assert "sub-graph 'notes'" in result["error"]
+    assert "sub_graph_name" in result["error"]
+
+
+def test_publish_quads_recovery_omits_sub_graph_name_when_absent(recording_client):
+    client = recording_client
+    client.responder = lambda path, body: (
+        {"created": True, "errors": [{"phase": "swm-share", "error": "x"}]}
+        if path == "/api/knowledge-assets" else {"status": "confirmed"}
+    )
+    result = client.publish_quads("cg", _Q)
+    assert "subGraphName" not in result
+    assert "sub-graph" not in result["error"]
+
+
 # -- Phase B (fast-follow): register_if_needed on the one-shot dkg_publish ----
 # The atomic assertionName fork does NOT auto-register the CG (LU-6 is selection-
 # fork only), so dkg_publish gets its own register lever (mirrors §G).

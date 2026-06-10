@@ -815,28 +815,25 @@ def test_new_handlers_require_context_graph_id(provider, tool):
     assert "context_graph_id is required" in out["error"]
 
 
-# -- FIX M/N (#1079): dkg_publish clear_after=False + counts only on success --
+# -- FIX N (#1084:1821): dkg_publish quadsPublished only on a non-hard-failure --
+# (On #1084 dkg_publish uses the atomic publish_quads fork — FIX M's clear_after
+#  is N/A here; only the quadsPublished count needs the failure guard.)
 
-class _SelectionPublishProbe:
-    """Fake client for the #1079 _handle_publish selection path."""
+class _PublishQuadsProbe:
+    """Fake client for the #1084 _handle_publish publish_quads path."""
 
-    def __init__(self, publish_response):
-        self.publish_call = None
-        self.publish_response = publish_response
+    def __init__(self, publish_quads_response):
+        self.publish_quads_response = publish_quads_response
 
-    def share(self, context_graph_id, quads, sub_graph_name=None):
-        return {"success": True}
-
-    def publish(self, context_graph_id, selection="all", clear_after=True, sub_graph_name=None):
-        self.publish_call = {"selection": selection, "clear_after": clear_after}
-        return self.publish_response
+    def publish_quads(self, context_graph_id, quads, sub_graph_name=None):
+        return self.publish_quads_response
 
 
-def _selection_publish_provider(plugin_module, publish_response):
+def _publish_quads_provider(plugin_module, publish_quads_response):
     p = plugin_module.DKGMemoryProvider()
     p._offline = False
     p._config = {"publish_tool": "direct", "allow_direct_publish": True}
-    p._client = _SelectionPublishProbe(publish_response)
+    p._client = _PublishQuadsProbe(publish_quads_response)
     return p
 
 
@@ -846,50 +843,32 @@ _PUB_Q2 = [
 ]
 
 
-def test_dkg_publish_passes_clear_after_false(plugin_module):
-    # FIX M (#1079:1781): clear_after=True would wipe the whole SWM remainder
-    # (deleteByPattern over the bucket, no subject filter) — dkg_publish only
-    # owns the roots it wrote, so it must pass clear_after=False.
-    p = _selection_publish_provider(plugin_module, {
-        "success": True, "partial": False,
-        "published": [{"rootEntity": "urn:r1"}], "rootEntities": ["urn:r1", "urn:r2"],
-    })
-    p.handle_tool_call("dkg_publish", {"context_graph_id": "cg", "quads": _PUB_Q2})
-    assert p._client.publish_call["clear_after"] is False
-    assert p._client.publish_call["selection"] == ["urn:r1", "urn:r2"]
-
-
-def test_dkg_publish_no_counts_on_hard_failure(plugin_module):
-    # FIX N (#1079:1784): quadsPublished/rootEntities must NOT be stamped on a
-    # partial-failure dict — that would falsely imply everything published.
-    p = _selection_publish_provider(plugin_module, {
-        "success": False, "partial": True, "failedRoot": "urn:r2",
-        "publishedRoots": ["urn:r1"], "error": "mint failed",
+def test_dkg_publish_no_quads_published_on_hard_failure(plugin_module):
+    # FIX N (#1084:1821): publish_quads returns a partial-failure dict on
+    # create-207 / publish-fail — quadsPublished must NOT be stamped there.
+    p = _publish_quads_provider(plugin_module, {
+        "success": False, "assertionName": "hermes-publish-x", "error": "not shared",
     })
     out = json.loads(p.handle_tool_call("dkg_publish", {"context_graph_id": "cg", "quads": _PUB_Q2}))
     assert out["success"] is False
     assert "quadsPublished" not in out
-    assert "rootEntities" not in out
-    assert out["failedRoot"] == "urn:r2"
+    assert out["assertionName"] == "hermes-publish-x"
 
 
-def test_dkg_publish_counts_on_success(plugin_module):
-    p = _selection_publish_provider(plugin_module, {"success": True, "partial": False})
+def test_dkg_publish_quads_published_on_confirmed(plugin_module):
+    p = _publish_quads_provider(plugin_module, {"kaId": "k", "ual": "u", "status": "confirmed"})
     out = json.loads(p.handle_tool_call("dkg_publish", {"context_graph_id": "cg", "quads": _PUB_Q2}))
     assert out["quadsPublished"] == 2
-    assert out["rootEntities"] == ["urn:r1", "urn:r2"]
 
 
-def test_dkg_publish_counts_on_confirmed_raw_body(plugin_module):
-    # a single-root passthrough returns the raw daemon body (no success key) —
-    # that is a confirmed publish and should be annotated.
-    p = _selection_publish_provider(plugin_module, {"kaId": "k", "ual": "u", "status": "confirmed"})
-    out = json.loads(p.handle_tool_call("dkg_publish", {
-        "context_graph_id": "cg",
-        "quads": [{"subject": "urn:solo", "predicate": "urn:p", "object": "o"}],
-    }))
-    assert out["quadsPublished"] == 1
-    assert out["rootEntities"] == ["urn:solo"]
+def test_dkg_publish_quads_published_on_207_partial(plugin_module):
+    # a 207-partial (minted, CG-bind failed) is NOT a hard failure -> annotate.
+    p = _publish_quads_provider(plugin_module, {
+        "kaId": "k", "ual": "u", "status": "confirmed", "contextGraphError": "bind failed",
+    })
+    out = json.loads(p.handle_tool_call("dkg_publish", {"context_graph_id": "cg", "quads": _PUB_Q2}))
+    assert out["partial"] is True
+    assert out["quadsPublished"] == 2
 
 
 # -- FIX P (#1077:63 parity): create name desc states the real validation ------
