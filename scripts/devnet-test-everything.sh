@@ -128,13 +128,13 @@ run_lifecycle() {
   local name="ev-${tag}-${TS}" root="urn:ev:${tag}:${TS}"
   local finalize="true"; [ "$mode" = "wm" ] && finalize="false"
   local quads; quads=$(gen_quads "$cg" "$root" "$tag" "$entities")
-  local wm; wm=$(api "$node" POST /api/assertion/create "{\"contextGraphId\":\"$cg\",\"name\":\"$name\",\"finalize\":$finalize,\"quads\":$quads}")
+  local wm; wm=$(api "$node" POST /api/knowledge-assets "{\"contextGraphId\":\"$cg\",\"name\":\"$name\",\"finalize\":$finalize,\"quads\":$quads}")
   printf '%s' "$wm" | grep -qiE '"written"|"assertionUri"|"ok"' || { bad "[$tag] WM create failed: $(printf '%s' "$wm" | head -c 160)"; return 1; }
   if [ "$mode" = "wm" ]; then
     ok "[$tag] local-only WM write on node$node ($entities entities, unregistered — no on-chain)"
     return 0
   fi
-  local pr; pr=$(api "$node" POST "/api/assertion/${name}/promote" "{\"contextGraphId\":\"$cg\"}")
+  local pr; pr=$(api "$node" POST "/api/knowledge-assets/${name}/swm/share" "{\"contextGraphId\":\"$cg\"}")
   printf '%s' "$pr" | grep -qiE 'promot|"ok"|swm' || { bad "[$tag] promote failed: $(printf '%s' "$pr" | head -c 160)"; return 1; }
   log "[$tag] WM→SWM promoted on node$node"
   if [ "$mode" = "swm" ]; then
@@ -159,8 +159,8 @@ sec "WARM-UP — prime the SWM hosting mesh (cold-boot first-publish race)"
 CG_WARM=$(create_cg 1 "ev-warmup-$TS" 0 1 true)
 if [ -n "$CG_WARM" ]; then
   WN="ev-warmup-$TS"
-  api 1 POST /api/assertion/create "{\"contextGraphId\":\"$CG_WARM\",\"name\":\"$WN\",\"finalize\":true,\"quads\":$(gen_quads "$CG_WARM" "urn:warm:$TS" warm 2)}" >/dev/null
-  api 1 POST "/api/assertion/${WN}/promote" "{\"contextGraphId\":\"$CG_WARM\"}" >/dev/null
+  api 1 POST /api/knowledge-assets "{\"contextGraphId\":\"$CG_WARM\",\"name\":\"$WN\",\"finalize\":true,\"quads\":$(gen_quads "$CG_WARM" "urn:warm:$TS" warm 2)}" >/dev/null
+  api 1 POST "/api/knowledge-assets/${WN}/swm/share" "{\"contextGraphId\":\"$CG_WARM\"}" >/dev/null
   publish_with_retry 1 "$CG_WARM" "$WN" 240
   [ -n "$PUB_KAID" ] && ok "mesh primed — warm-up publish minted (cold window absorbed)" \
     || log "warm-up publish didn't mint within 240s — proceeding (scenarios retry independently)"
@@ -271,11 +271,11 @@ if [ "${FAST:-0}" != "1" ]; then
       "$CG_BIG" "$BNAME" "$(gen_quads "$CG_BIG" "$BROOT" "big" "$BIG_ENTITIES")" > "$TMP"
     SZ=$(( $(wc -c < "$TMP") / 1024 ))
     log "big assertion body = ${SZ}KB (${BIG_ENTITIES} entities, ~$((BIG_ENTITIES*3+2)) quads)"
-    WB=$(curl -sS --max-time 300 -X POST -H "Authorization: Bearer $AUTH_TOKEN" -H 'Content-Type: application/json' --data @"$TMP" "http://127.0.0.1:$P/api/assertion/create")
+    WB=$(curl -sS --max-time 300 -X POST -H "Authorization: Bearer $AUTH_TOKEN" -H 'Content-Type: application/json' --data @"$TMP" "http://127.0.0.1:$P/api/knowledge-assets")
     rm -f "$TMP"
     if printf '%s' "$WB" | grep -qiE '"written"|"assertionUri"'; then
       ok "big-file WM create (${SZ}KB) accepted on node2"
-      PR=$(curl -sS --max-time 240 -X POST -H "Authorization: Bearer $AUTH_TOKEN" -H 'Content-Type: application/json' -d "{\"contextGraphId\":\"$CG_BIG\"}" "http://127.0.0.1:$P/api/assertion/${BNAME}/promote")
+      PR=$(curl -sS --max-time 240 -X POST -H "Authorization: Bearer $AUTH_TOKEN" -H 'Content-Type: application/json' -d "{\"contextGraphId\":\"$CG_BIG\"}" "http://127.0.0.1:$P/api/knowledge-assets/${BNAME}/swm/share")
       if printf '%s' "$PR" | grep -qiE 'promot|"ok"|swm'; then
         ok "big-file promoted WM→SWM (${SZ}KB)"
         publish_with_retry 2 "$CG_BIG" "$BNAME" 200 300
