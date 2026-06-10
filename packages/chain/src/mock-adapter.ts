@@ -1159,7 +1159,7 @@ export class MockChainAdapter implements ChainAdapter {
    * OT-RFC-43 Option 1 — highest per-author KA number minted in this mock, or
    * -1n if none. Scans the in-memory collections (keyed by kaId; reservedKaId
    * publishes store the packed id) and returns `max(kaId & ((1<<96)-1))` for
-   * the author. Mirrors the EVM adapter's KnowledgeAssetCreated-by-author scan.
+   * the author. Mirrors the EVM adapter's reconciled chain high-water semantics.
    */
   async getMaxKaNumberForAuthor(author: string): Promise<bigint> {
     const target = author.toLowerCase();

@@ -148,7 +148,12 @@ const PINNED_DIGESTS: Record<string, string> = {
   // caller-supplied `uint256 kaId` (the packed author-namespaced id), and two
   // guard errors were added — `KaIdAlreadyMinted(uint256)` and
   // `KaIdNamespaceMismatch(uint256,address)` — plus a deprecated accessor.
-  DKGKnowledgeAssets:           'da5e46f24dd410b30c90bad66060b9da240aa4b0426c24a1550b0e1b6168b5ea',
+  // Re-pinned again (#1080): added the O(1) `getMaxKaNumberForAuthor(address)
+  // -> int256` view so the off-chain allocator reconciles its floor with one
+  // eth_call instead of an unbounded `KnowledgeAssetCreated` log scan. Pure
+  // function-only ABI addition (events + errors unchanged); the chain-local
+  // copy is refreshed in lockstep with the evm-module ABI in the same PR.
+  DKGKnowledgeAssets:           '60d8dc58619c25fd31df1da34d4944369edbc2d5d4031dcb14f6965152c718a9',
   // V8 `KnowledgeCollection` ABI was moved to `abi/archive/` in
   // `archive-non-v10-contracts`; the pin entry is intentionally dropped.
   // Updated for SPEC_CG_MEMORY_MODEL: per-CG hosting committees and

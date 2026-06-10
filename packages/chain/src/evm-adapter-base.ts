@@ -20,7 +20,7 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { KeyedSerializer } from './keyed-mutex.js';
 import { floorPublishTokenAmount } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { errorMessage, isTooLowAllowanceError, enrichEvmError, HUB_STALE_ERROR_MARKERS } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, isTooLowAllowanceError, enrichEvmError, HUB_STALE_ERROR_MARKERS } from './evm-adapter-errors.js';
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isKnownTransactionError, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
@@ -68,6 +68,32 @@ const BOUND_CONTRACT_INVALIDATORS = new Map<string, (adapter: EVMChainAdapterBas
   ['DKGPublishingConvictionNFT', (a) => { (a as any).contracts.dkgPublishingConvictionNFT = undefined; }],
   ['Chronos',                    (a) => { (a as any).contracts.chronos = undefined; }],
 ]);
+
+function isKaHighWaterViewUnavailable(err: unknown): boolean {
+  if (err instanceof Error) enrichEvmError(err);
+  const code = errorCode(err);
+  const msg = errorMessage(err).toLowerCase();
+
+  if (code === 'BAD_DATA') {
+    return msg.includes('could not decode result data')
+      && msg.includes('value="0x"')
+      && msg.includes('getmaxkanumberforauthor');
+  }
+  return msg.includes('function selector')
+    || msg.includes('selector not recognized');
+}
+
+async function contractAddress(contract: Contract): Promise<string> {
+  const getAddress = (contract as any).getAddress;
+  if (typeof getAddress === 'function') {
+    return ethers.getAddress(await getAddress.call(contract));
+  }
+  const target = (contract as any).target;
+  if (typeof target === 'string') {
+    return ethers.getAddress(target);
+  }
+  throw new Error('DKGKnowledgeAssets address is unavailable from the resolved contract handle.');
+}
 
 export class EVMChainAdapterBase {
   /** See `ChainAdapter.deploymentId`. */
@@ -1190,10 +1216,22 @@ export class EVMChainAdapterBase {
 
   /**
    * OT-RFC-43 Option 1 — highest per-author KA `number` already minted on chain,
-   * or `-1n` if `author` never minted. Enumerates `KnowledgeAssetCreated(id,
-   * author, ...)` logs filtered by the indexed `author` topic and returns
-   * `max(id & ((1<<96)-1))`. Backs the allocator's cold-start reconciliation so
-   * a stale-local-DB / fresh device never re-hands a burned `(author, number)`.
+   * or `-1n` if `author` never minted. Backs the allocator's cold-start
+   * reconciliation so a stale-local-DB / fresh device never re-hands a burned
+   * `(author, number)`.
+   *
+   * Resolution order:
+   *   1. `DKGKnowledgeAssets >= 10.0.4` exposes the O(1)
+   *      `getMaxKaNumberForAuthor(address) -> int256` view — a single `eth_call`.
+   *   2. Pre-10.0.4 deployments do not have that selector, so they fall back to
+   *      a paginated `KnowledgeAssetCreated(id, author)` scan. The previous
+   *      `queryFilter(filter, 0)` scanned `[0, latest]` in one RPC call and hit
+   *      provider block-range caps (#1080); this legacy path uses small bounded
+   *      windows instead. Transient RPC failures are rethrown, not hidden by a
+   *      historical crawl on the same provider. Empty selector-call responses
+   *      only reach the fallback after confirming bytecode exists at the
+   *      resolved storage address, so a bad Hub address fails loudly instead of
+   *      reconciling from empty logs.
    */
   async getMaxKaNumberForAuthor(author: string): Promise<bigint> {
     const storage = this.contracts.knowledgeAssetStorage;
@@ -1201,20 +1239,40 @@ export class EVMChainAdapterBase {
       throw new Error('DKGKnowledgeAssets not deployed on this chain.');
     }
     const normalized = ethers.getAddress(author);
-    // KnowledgeAssetCreated(uint256 indexed id, address indexed author, ...):
-    // filter by the second indexed topic (author). fromBlock 0 — devnets are
-    // cheap; a production fromBlock = deployment block is a future optimization
-    // (there is no per-author counter view on-chain under variant 1a).
+
+    const getMax = (storage as any).getMaxKaNumberForAuthor;
+    if (typeof getMax?.staticCall === 'function') {
+      try {
+        const max = await getMax.staticCall(normalized);
+        return BigInt(max);
+      } catch (err) {
+        if (!isKaHighWaterViewUnavailable(err)) {
+          throw err;
+        }
+      }
+    }
+
+    const storageAddress = await contractAddress(storage);
+    const code = await this.provider.getCode(storageAddress);
+    if (!code || code === '0x') {
+      throw new Error(`DKGKnowledgeAssets resolved to ${storageAddress}, but no contract code is deployed there.`);
+    }
+
     const filter = storage.filters.KnowledgeAssetCreated(null, normalized);
-    const logs = await storage.queryFilter(filter, 0);
-    const MASK = (1n << 96n) - 1n;
+    const head = await this.provider.getBlockNumber();
+    const pageSize = 2_000; // <= the smallest common eth_getLogs block-range cap
+    const mask = (1n << 96n) - 1n;
     let max = -1n;
-    for (const log of logs) {
-      const args = (log as ethers.EventLog).args;
-      const rawId = args?.id ?? args?.[0];
-      if (rawId === undefined || rawId === null) continue;
-      const num = BigInt(rawId) & MASK;
-      if (num > max) max = num;
+    for (let lo = 0; lo <= head; lo += pageSize) {
+      const hi = Math.min(lo + pageSize - 1, head);
+      const logs = await storage.queryFilter(filter, lo, hi);
+      for (const log of logs) {
+        const args = (log as ethers.EventLog).args;
+        const rawId = args?.id ?? args?.[0];
+        if (rawId === undefined || rawId === null) continue;
+        const num = BigInt(rawId) & mask;
+        if (num > max) max = num;
+      }
     }
     return max;
   }

@@ -911,10 +911,11 @@ export interface ChainAdapter {
    * for `author`, or `-1n` if the author has never minted. Used by the allocator's
    * cold-start reconciliation (`nextNumber = max(local, chainMax) + 1`) so a
    * stale-local-DB / fresh device never re-hands a burned `(author, number)`.
-   * Derived by enumerating `KnowledgeAssetCreated(id, author, ...)` logs filtered
-   * by the indexed `author` topic and taking `max(id & ((1<<96)-1))`. Optional:
-   * adapters that cannot enumerate logs may omit it (the allocator then trusts
-   * its local store and relies on the contract's `_safeMint` revert as backstop).
+   * EVM adapters prefer the O(1) `DKGKnowledgeAssets.getMaxKaNumberForAuthor`
+   * view when available and may fall back to a bounded historical
+   * `KnowledgeAssetCreated` scan for older deployments. Optional: adapters that
+   * cannot reconcile chain state may omit it (the allocator then trusts its local
+   * store and relies on the contract's `_safeMint` revert as backstop).
    */
   getMaxKaNumberForAuthor?(author: string): Promise<bigint>;
 
