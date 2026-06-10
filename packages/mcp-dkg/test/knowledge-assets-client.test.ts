@@ -268,4 +268,19 @@ describe('DkgClient knowledge-assets — publish/finalize option serialization',
     expect(calls).toHaveLength(2);
     expect(calls[1].url).toContain('/api/shared-memory/publish');
   });
+
+  // FIX W — create HARD failure surfaces the generated assertionName for recovery.
+  it('publishQuads surfaces the generated assertionName when the create call HARD-fails', async () => {
+    const { client, calls } = makeSequencedClient([
+      { status: 500, body: { error: 'daemon timeout after commit' } }, // create fails (may have committed)
+    ]);
+    const err = await client.publishQuads({ contextGraphId: 'cg-1', quads: [{ subject: 's', predicate: 'p', object: 'o' }] }).catch((e) => e);
+    expect(err.assertionName).toMatch(/mcp-publish-/);
+    expect(err.phase).toBe('create');
+    expect(err.message).toMatch(/dkg_knowledge_asset_history|dkg_knowledge_asset_query/i); // check-before-recreate
+    expect(err.message).toMatch(/duplicate/i);
+    // only the create call was made — no publish.
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toContain('/api/knowledge-assets');
+  });
 });

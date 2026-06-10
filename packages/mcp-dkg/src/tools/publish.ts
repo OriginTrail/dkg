@@ -258,10 +258,11 @@ export function registerPublishTools(
         'MULTI_ROOT_PUBLISH_NOT_ATOMIC when more than one root entity is in ' +
         'SWM. Use after `dkg_knowledge_asset_share`. Pass `rootEntities` to ' +
         'publish only specific roots (subset publishes default to NOT ' +
-        'clearing SWM, so other unpublished roots are not dropped). Set ' +
-        '`registerIfNeeded: true` to upgrade a local-only CG to on-chain ' +
-        'registration before publishing — note this MAY spend gas/TRAC; ' +
-        'opt-in only.',
+        'clearing SWM, so other unpublished roots are not dropped). NOTE: this ' +
+        'CG-wide publish AUTO-registers an unregistered context graph on-chain at ' +
+        'gas/TRAC cost regardless of `registerIfNeeded` — omitting the flag is ' +
+        'NOT gas-free. `registerIfNeeded` only lets you set the registration\'s ' +
+        '`accessPolicy`.',
       inputSchema: {
         contextGraphId: z.string().min(1).describe(`Target context graph id. ${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION}`),
         rootEntities: z
@@ -280,13 +281,13 @@ export function registerPublishTools(
           .boolean()
           .optional()
           .describe(
-            'When true, register the CG on-chain before publishing if needed. May spend gas/TRAC; opt-in only.',
+            'Run an EXPLICIT on-chain registration before publishing, which lets you set `accessPolicy` on that registration. NOTE: this does NOT gate whether registration happens — a CG-wide publish AUTO-registers an unregistered context graph at gas/TRAC cost regardless of this flag. Set it only to choose the registration\'s accessPolicy (the implicit auto-register on publish otherwise defaults the policy).',
           ),
         accessPolicy: z
           .union([z.literal(0), z.literal(1)])
           .optional()
           .describe(
-            '0 = open, 1 = private. Requires `registerIfNeeded: true` — it only applies when registering the CG, and is rejected otherwise.',
+            '0 = open, 1 = private — for the EXPLICIT registration. Requires `registerIfNeeded: true` — it only applies to that explicit registration and is rejected otherwise (the implicit auto-register on publish defaults the policy).',
           ),
       },
     },

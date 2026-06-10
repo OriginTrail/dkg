@@ -1068,22 +1068,40 @@ export class DkgClient {
       predicate: q.predicate,
       object: q.object,
     }));
-    const created = await this.request<{
+    // FIX W — wrap the create call: on a HARD failure the generated
+    // `assertionName` would otherwise be lost in the throw, so a retry mints a
+    // DUPLICATE if the asset was actually created (e.g. the daemon committed but
+    // the HTTP response failed). Surface the name + recovery guidance.
+    let created: {
       assertionUri?: string;
       // The create response carries `merkleRoot` (the seal digest), not a `seal`
       // object (knowledge-assets.ts:570).
       merkleRoot?: string;
       errors?: Array<{ phase?: string; error?: string }>;
-    }>(
-      'POST',
-      '/api/knowledge-assets',
-      {
-        contextGraphId: cgId,
-        name: assertionName,
-        quads: wireQuads,
-        promote: true,
-      },
-    );
+    };
+    try {
+      created = await this.request(
+        'POST',
+        '/api/knowledge-assets',
+        {
+          contextGraphId: cgId,
+          name: assertionName,
+          quads: wireQuads,
+          promote: true,
+        },
+      );
+    } catch (e) {
+      const err = new Error(
+        `Create failed for one-shot publish (asset name "${assertionName}"): ${e instanceof Error ? e.message : String(e)}. ` +
+        `The asset MAY have been created server-side even though the response failed. Before retrying, check via ` +
+        `dkg_knowledge_asset_history / dkg_knowledge_asset_query for "${assertionName}" to avoid minting a ` +
+        `DUPLICATE; if it exists, re-share + publish it by name rather than re-running this tool.`,
+      ) as Error & Record<string, unknown>;
+      err.assertionName = assertionName;
+      err.phase = 'create';
+      err.cause = e;
+      throw err;
+    }
 
     // FIX A — the create route returns HTTP 207 `{ created:true, …, errors:[…] }`
     // when create+finalize succeeded but the `promote:true` share phase FAILED

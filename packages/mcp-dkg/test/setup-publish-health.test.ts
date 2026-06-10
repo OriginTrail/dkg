@@ -439,6 +439,17 @@ describe('publish tools — write+publish helper + canonical SWM finalizer', () 
     expect(result.content[0].text).toMatch(/accessPolicy.*requires.*registerIfNeeded/i);
   });
 
+  it('dkg_shared_memory_publish registerIfNeeded description states the auto-register reality (FIX V)', () => {
+    const registerIfNeeded = server.get('dkg_shared_memory_publish').config.inputSchema?.registerIfNeeded;
+    // The CG-wide selection publish AUTO-registers an unregistered CG at gas/TRAC
+    // cost regardless of registerIfNeeded (memory.ts:1928); the flag only sets the
+    // registration's accessPolicy. The description must not imply it gates whether
+    // registration happens.
+    expect(registerIfNeeded?.description).toMatch(/does NOT gate whether registration happens/i);
+    expect(registerIfNeeded?.description).toMatch(/AUTO-register/i);
+    expect(registerIfNeeded?.description).toContain('gas/TRAC');
+  });
+
   // F3+F13 (qa-review-round-1 F3 + qa-review-round-2 F13): chain
   // provenance echoed on publish responses so callers can verify
   // post-hoc which chain the publish landed on. User explicit:
