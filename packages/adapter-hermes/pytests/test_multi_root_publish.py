@@ -244,10 +244,17 @@ def test_handle_publish_result_has_no_per_root_shape(plugin_module):
         assert key not in out, key
 
 
-def test_dkg_publish_description_is_atomic(plugin_module):
+def test_dkg_publish_description_atomic_mint_two_step(plugin_module):
+    # FIX L (#1084:324): the ATOMIC claim is scoped to the on-chain MINT
+    # (multi-root-safe); the whole helper is a TWO-STEP create-then-publish that
+    # can partially fail — it must NOT be called "one ATOMIC operation".
     p = _publish_provider(plugin_module)
     desc = next(s for s in p.get_tool_schemas() if s["name"] == "dkg_publish")["description"]
-    assert "ATOMIC" in desc or "atomic" in desc
+    assert "atomic" in desc.lower()
+    assert "one ATOMIC operation" not in desc
+    assert "TWO-STEP" in desc or "two-step" in desc.lower()
+    assert "partially fail" in desc.lower()
+    assert "multi-root-safe" in desc
     assert "NON-ATOMIC" not in desc
     assert "per-root" not in desc.lower()
 
@@ -259,7 +266,8 @@ def test_publish_quads_two_calls_create_then_publish_by_name(recording_client):
 
     def responder(path, body):
         if path == "/api/knowledge-assets":
-            return {"assertionUri": "urn:a", "seal": {"merkleRoot": "0xr"}}
+            # the create route returns merkleRoot (a hex string), not a seal object
+            return {"assertionUri": "urn:a", "merkleRoot": "0xr"}
         return {"kaId": "ka", "ual": "did:dkg:1/0xabc/5", "status": "confirmed"}
 
     client.responder = responder
@@ -279,10 +287,11 @@ def test_publish_quads_two_calls_create_then_publish_by_name(recording_client):
     # assertionName fork — name only, NO selection
     assert publish_body == {"contextGraphId": "cg", "assertionName": create_body["name"]}
     assert "selection" not in publish_body
-    # merged result surfaces ual/assertionUri/seal/assertionName
+    # merged result surfaces ual/assertionUri/merkleRoot/assertionName
     assert result["ual"] == "did:dkg:1/0xabc/5"
     assert result["assertionUri"] == "urn:a"
-    assert result["seal"] == {"merkleRoot": "0xr"}
+    assert result["merkleRoot"] == "0xr"
+    assert "seal" not in result  # FIX J: the always-None seal is gone
     assert result["assertionName"] == create_body["name"]
 
 
@@ -316,7 +325,7 @@ def test_publish_quads_create_207_errors_does_not_publish(recording_client):
     client = recording_client
     client.responder = lambda path, body: (
         {
-            "created": True, "assertionUri": "urn:a", "seal": {"merkleRoot": "0xr"},
+            "created": True, "assertionUri": "urn:a", "merkleRoot": "0xr",
             "status": "wm-sealed",
             "errors": [{"phase": "swm-share", "error": "gossip timeout"}],
         }
@@ -329,7 +338,9 @@ def test_publish_quads_create_207_errors_does_not_publish(recording_client):
     # assertionName + recovery context surfaced
     assert result["assertionName"].startswith("hermes-publish-")
     assert result["assertionUri"] == "urn:a"
-    assert result["seal"] == {"merkleRoot": "0xr"}
+    # FIX J (#1084:733): carry merkleRoot (the create proof), not the always-None seal
+    assert result["merkleRoot"] == "0xr"
+    assert "seal" not in result
     assert "swm-share" in result["error"]
     assert "NOT shared" in result["error"]
     assert "recreate" in result["error"].lower()
@@ -356,7 +367,7 @@ def test_publish_quads_create_empty_errors_publishes(recording_client):
 def test_publish_quads_publish_failure_merges_assertion_name(recording_client):
     client = recording_client
     client.responder = lambda path, body: (
-        {"assertionUri": "urn:a", "seal": {"m": "r"}, "swmShared": True}
+        {"assertionUri": "urn:a", "merkleRoot": "0xr", "swmShared": True}
         if path == "/api/knowledge-assets"
         else {"success": False, "error": "chain revert: insufficient TRAC"}
     )
@@ -366,7 +377,9 @@ def test_publish_quads_publish_failure_merges_assertion_name(recording_client):
     # the random name is kept (don't recreate — retry by name)
     assert result["assertionName"].startswith("hermes-publish-")
     assert result["assertionUri"] == "urn:a"
-    assert result["seal"] == {"m": "r"}
+    # FIX J (#1084:733): carry merkleRoot, not the always-None seal
+    assert result["merkleRoot"] == "0xr"
+    assert "seal" not in result
     assert "insufficient TRAC" in result["error"]
     assert "shared to SWM" in result["error"]
     assert "Retry the publish" in result["error"]
