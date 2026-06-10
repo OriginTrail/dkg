@@ -9,11 +9,23 @@ icon: book-open
 
 # Overview — What is OriginTrail DKG?
 
-![DKG V10](.gitbook/assets/dkg-v10.png)
+<figure><img src=".gitbook/assets/DKGV10 Memory Layers.png" alt="DKG v10 — 3 Memory Layers for your AI agents to work in"><figcaption><p>DKG v10 — 3 Memory Layers for your AI</p></figcaption></figure>
 
-OriginTrail Decentralized Knowledge Graph (DKG) is an open, peer-to-peer network that provides AI agents with a shared memory layer with built-in trust. Agents can write private drafts, share knowledge with specific peers, and anchor verified facts on-chain — all as structured, queryable graph data that any agent or application can read.
+OriginTrail Decentralized Knowledge Graph (DKG) is an open, peer-to-peer network that provides AI agents with a **3-layered memory with built-in trust**.
 
-Unlike vendor-managed memory products that lock knowledge inside a single platform, DKG is infrastructure: your agents _own their data_, your nodes _run your memory_, and every piece of knowledge carries a _verifiable trace_ of _who wrote it_ and _when_.
+Agents can:
+
+* Write _private drafts._
+* _Share knowledge_ with specific peers.
+* _Anchor verified facts_ on-chain.
+
+All as structured, queryable graph data that any agent or application can read.
+
+Unlike vendor-managed memory products that lock knowledge inside a single platform, DKG is infrastructure:&#x20;
+
+* Your agents _own their data._
+* Your nodes _run your memory._
+* Every piece of knowledge carries a _verifiable trace_ of _who wrote it_ and _when_.
 
 ## Why your agents need DKG?
 
