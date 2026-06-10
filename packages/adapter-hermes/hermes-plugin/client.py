@@ -728,6 +728,10 @@ class DKGClient:
             failure = dict(created)
             failure["success"] = False
             failure["assertionName"] = assertion_name
+            # Carry subGraphName too (Codex #1084:730) — recovery by name needs the
+            # same sub-graph the asset was created in.
+            if sub_graph_name:
+                failure["subGraphName"] = sub_graph_name
             if created.get("assertionUri") is not None:
                 failure["assertionUri"] = created["assertionUri"]
             # The create route returns merkleRoot (a hex string), NOT a `seal`
@@ -738,11 +742,13 @@ class DKGClient:
             phases = ", ".join(
                 str(e.get("phase")) for e in create_errors if isinstance(e, dict) and e.get("phase")
             )
+            sub_graph_hint = f" (sub-graph '{sub_graph_name}')" if sub_graph_name else ""
             failure["error"] = (
-                f"Knowledge asset '{assertion_name}' was created and sealed but a later stage "
-                f"failed ({phases or 'share'}), so it was NOT shared to SWM and was NOT published. "
-                f"Share it with dkg_knowledge_asset_share (this name), then publish with "
-                f"dkg_knowledge_asset_publish (this name) -- do NOT recreate the asset."
+                f"Knowledge asset '{assertion_name}'{sub_graph_hint} was created and sealed but a "
+                f"later stage failed ({phases or 'share'}), so it was NOT shared to SWM and was NOT "
+                f"published. Share it with dkg_knowledge_asset_share (this name and sub_graph_name), "
+                f"then publish with dkg_knowledge_asset_publish (this name and sub_graph_name) -- do "
+                f"NOT recreate the asset."
             )
             return failure
         publish_payload: Dict[str, Any] = {
@@ -761,16 +767,21 @@ class DKGClient:
             failure = dict(published) if isinstance(published, dict) else {"error": str(published)}
             failure["success"] = False
             failure["assertionName"] = assertion_name
+            # Carry subGraphName too (Codex #1084:730) — recovery by name needs it.
+            if sub_graph_name:
+                failure["subGraphName"] = sub_graph_name
             if isinstance(created, dict):
                 if created.get("assertionUri") is not None:
                     failure["assertionUri"] = created["assertionUri"]
                 if created.get("merkleRoot") is not None:
                     failure["merkleRoot"] = created["merkleRoot"]
             base_error = str(failure.get("error") or failure.get("message") or "publish failed")
+            sub_graph_hint = f" (sub-graph '{sub_graph_name}')" if sub_graph_name else ""
             failure["error"] = (
-                f"Knowledge asset '{assertion_name}' was created, sealed, and shared to SWM, but the "
-                f"on-chain publish failed ({base_error}). Retry the publish by name with "
-                f"dkg_knowledge_asset_publish (this assertionName) -- do NOT recreate the asset."
+                f"Knowledge asset '{assertion_name}'{sub_graph_hint} was created, sealed, and shared "
+                f"to SWM, but the on-chain publish failed ({base_error}). Retry the publish by name "
+                f"with dkg_knowledge_asset_publish (this assertionName and sub_graph_name) -- do NOT "
+                f"recreate the asset."
             )
             return failure
         result: Dict[str, Any] = dict(published) if isinstance(published, dict) else {"result": published}
