@@ -18,7 +18,7 @@ import { resolve } from 'node:path';
  */
 export default defineConfig({
   test: {
-    include: [resolve(__dirname, 'automated.test.ts')],
+    include: [resolve(__dirname, 'automated.test.ts'), resolve(__dirname, 'high-issues.test.ts')],
     testTimeout: 240_000,
     hookTimeout: 240_000,
     pool: 'forks',
