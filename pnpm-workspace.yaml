@@ -12,3 +12,4 @@ packages:
   - "devnet/edge-update-flow"
   - "devnet/greenfield-10min"
   - "devnet/rich-scenario"
+  - "devnet/issue-liveness"
