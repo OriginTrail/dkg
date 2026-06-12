@@ -1,5 +1,11 @@
-import { describe, it, expect } from 'vitest';
-import { composeAbortSignals, isRecoverableSendError, DEFAULT_SEND_TIMEOUT_MS, ProtocolRouter } from '../src/protocol-router.js';
+import { describe, it, expect, vi } from 'vitest';
+import {
+  composeAbortSignals,
+  isRecoverableSendError,
+  DEFAULT_SEND_TIMEOUT_MS,
+  ProtocolRouter,
+  QuietRetryableHandlerError,
+} from '../src/protocol-router.js';
 import type { DKGNode } from '../src/node.js';
 import type { PeerResolver } from '../src/network/peer-resolver.js';
 
@@ -20,6 +26,12 @@ describe('ProtocolRouter', () => {
       expect(isRecoverableSendError(new Error('no valid addresses'))).toBe(true);
       expect(isRecoverableSendError(new Error('NO_RESERVATION'))).toBe(true);
       expect(isRecoverableSendError(new Error('no reservation for relay'))).toBe(true);
+    });
+
+    it('returns true for retryable sync responder backpressure aborts', () => {
+      expect(isRecoverableSendError(new Error('sync responder queue full'))).toBe(true);
+      expect(isRecoverableSendError(new Error('sync responder peer queue full'))).toBe(true);
+      expect(isRecoverableSendError(new Error('sync responder queue wait exceeded'))).toBe(true);
     });
 
     // Regression for the May 2026 multi-node soak: libp2p surfaces
@@ -174,6 +186,56 @@ describe('ProtocolRouter', () => {
       expect(seenSignal?.aborted).toBe(true);
       expect(stream.sent).toBeNull();
       expect(stream.aborted?.message).toMatch(/node stopping/);
+    });
+
+    it('aborts quietly for retryable handler backpressure', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const fixture = makeInboundFixture();
+        fixture.router.register(PROTOCOL, async () => {
+          throw new QuietRetryableHandlerError('sync responder peer queue full');
+        });
+        const stream = new FakeInboundStream([new Uint8Array([0x01])]);
+
+        await fixture.invoke(stream);
+
+        expect(stream.sent).toBeNull();
+        expect(stream.aborted?.message).toBe('sync responder peer queue full');
+        expect(errorSpy).not.toHaveBeenCalled();
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('does not mask non-abort handler failures just because the handler signal is aborted', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        let seenSignal: AbortSignal | undefined;
+        const fixture = makeInboundFixture();
+        fixture.router.register(PROTOCOL, async (_data, _peer, options) => {
+          seenSignal = options?.signal;
+          await new Promise<void>((resolve) => {
+            options?.signal?.addEventListener('abort', () => resolve(), { once: true });
+          });
+          throw new Error('store query failed');
+        });
+        const stream = new FakeInboundStream([new Uint8Array([0x01])]);
+        const inbound = fixture.invoke(stream);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        stream.dispatchEvent(new Event('close'));
+        await inbound;
+
+        expect(seenSignal?.aborted).toBe(true);
+        expect(stream.sent).toBeNull();
+        expect(stream.aborted?.message).toBe('handler error');
+        expect(errorSpy).toHaveBeenCalledWith(
+          expect.stringContaining('[ProtocolRouter] handler error'),
+          'store query failed',
+        );
+      } finally {
+        errorSpy.mockRestore();
+      }
     });
   });
 

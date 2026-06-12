@@ -32,6 +32,7 @@ export function isRecoverableSendError(err: unknown): boolean {
     msg.includes('epipe') ||
     msg.includes('aborted') ||
     msg.includes('no valid addresses') ||
+    (msg.includes('sync responder') && (msg.includes('queue full') || msg.includes('queue wait exceeded'))) ||
     // libp2p dial exhaustion — every known multiaddr for the peer
     // failed in one attempt. Surfaced by `transportManager.dial` and
     // by `dialProtocol` after iterating every relay/transport
@@ -116,6 +117,13 @@ export interface ProtocolRouterOptions {
    * call-time surface.
    */
   peerResolver?: PeerResolver;
+}
+
+export class QuietRetryableHandlerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'QuietRetryableHandlerError';
+  }
 }
 
 export class ProtocolRouter {
@@ -383,7 +391,7 @@ export class ProtocolRouter {
         stream.send(responseData);
         await stream.close(stopSignal ? { signal: stopSignal } : undefined);
       } catch (err) {
-        if (stopSignal?.aborted || handlerSignal?.aborted) {
+        if ((stopSignal?.aborted || handlerSignal?.aborted) && isAbortRelatedError(err, handlerSignal, stopSignal)) {
           try {
             const abortReason = stopSignal?.aborted ? stopSignal.reason : handlerSignal?.reason;
             stream.abort(asAbortError(abortReason));
@@ -395,6 +403,14 @@ export class ProtocolRouter {
         // F3: peer closed/reset the stream before the response was written —
         // routine churn, not a fault. Downgrade to a quiet warn (no "error"
         // token) so it doesn't spam the node log as a red error line.
+        if (err instanceof QuietRetryableHandlerError) {
+          try {
+            stream.abort(err);
+          } catch {
+            // stream already closed
+          }
+          return;
+        }
         if (isBenignStreamClosure(err)) {
           console.warn(`[ProtocolRouter] stream closed by peer before response on ${protocolId} from ${connection.remotePeer.toString().slice(-8)}`);
         } else {
@@ -1337,6 +1353,18 @@ function asAbortError(reason: unknown): Error {
   const err = new Error(typeof reason === 'string' ? reason : 'aborted');
   (err as Error & { name: string }).name = 'AbortError';
   return err;
+}
+
+function isAbortRelatedError(
+  err: unknown,
+  handlerSignal: AbortSignal | undefined,
+  stopSignal: AbortSignal | undefined,
+): boolean {
+  if (err === handlerSignal?.reason || err === stopSignal?.reason) return true;
+  const error = err instanceof Error ? err : undefined;
+  if (error?.name === 'AbortError') return true;
+  const msg = (error?.message ?? String(err)).toLowerCase();
+  return msg.includes('aborted') || msg.includes('aborterror');
 }
 
 // F3: a peer that closes/resets its side of a stream before we finish

@@ -1,4 +1,8 @@
-import { createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
+import {
+  createOperationContext,
+  QuietRetryableHandlerError,
+  type OperationContext,
+} from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import {
   serializeWorkspacePublicSnapshotQuads,
@@ -450,6 +454,12 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         logDebug(createOperationContext('sync'), `Sync responder total for "${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): ${totalDurationMs}ms`);
       }
       return new TextEncoder().encode(nquads.join('\n'));
+    }).catch((err) => {
+      if (err instanceof SyncResponderBusyError) {
+        logDebug(createOperationContext('sync'), `Sync responder busy for "${contextGraphId}" from peer ${peerId} (phase=${phase}): ${err.message}`);
+        throw new QuietRetryableHandlerError(err.message);
+      }
+      throw err;
     });
   });
 }
