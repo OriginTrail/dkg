@@ -441,7 +441,7 @@ describe('Phase D - VM reconcile damping', () => {
     let primeCalls = 0;
     vi.spyOn(internals as any, 'primeCatchupConnections').mockImplementation(async () => {
       primeCalls += 1;
-      if (primeCalls >= 2) {
+      if (primeCalls >= 1) {
         connectedPeers = ['peer-empty', 'peer-discovered'];
       }
     });
@@ -462,7 +462,7 @@ describe('Phase D - VM reconcile damping', () => {
     expensiveScans = 0;
 
     await expect(internals.reconcileChainOrdinal('57', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(primeCalls).toBeGreaterThanOrEqual(2);
+    expect(primeCalls).toBeGreaterThanOrEqual(1);
     expect(fetch).toHaveBeenCalledTimes(3);
     expect(expensiveScans).toBeGreaterThan(0);
   });
@@ -650,6 +650,31 @@ describe('Phase D - VM reconcile damping', () => {
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
+  it('rechecks the root SWM generation when subgraph enumeration fails during negative-cache validation', async () => {
+    const internals = await boot();
+    const onChainCgId = 58n;
+    const entity = 'urn:fact:root-fallback-arrival';
+    const value = 'Root fallback arrived after cache';
+    const root = computeFlatKCRootV10(
+      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
+      [],
+    );
+    registerUnmatchedKC(internals.chain, 9018n, onChainCgId, bytesToHex(root));
+
+    vi.spyOn(GraphManager.prototype, 'listSubGraphs').mockRejectedValue(new Error('subgraph listing failed'));
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+
+    await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
+
+    const seededRoot = await seedSwmSnapshot(internals.store, '58', entity, value);
+    expect(bytesToHex(seededRoot)).toBe(bytesToHex(root));
+
+    await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+  });
+
   it('keeps an unreadable negative-cache generation damped until backoff expires', async () => {
     const internals = await boot();
     const onChainCgId = 45n;
@@ -771,6 +796,31 @@ describe('Phase D - VM reconcile damping', () => {
       maxPeers: 1,
       peerRotationKey: '47',
     });
+  });
+
+  it('extends active-fetch attempts after the first fetch round dials another peer', async () => {
+    const internals = await boot();
+    const onChainCgId = 59n;
+    registerUnmatchedKC(internals.chain, 9019n, onChainCgId);
+
+    let connectedPeers = ['peer-initial'];
+    (agent as any).node.libp2p.getConnections = () =>
+      connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockImplementation(async () => {
+      if (connectedPeers.length === 1) {
+        connectedPeers = ['peer-initial', 'peer-dialed'];
+      }
+      return {
+        ...emptyCatchupStats(),
+        connectedPeers: connectedPeers.length,
+        selectedPeers: 1,
+      };
+    });
+
+    await expect(internals.reconcileChainOrdinal('59', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it('does not negative-cache no-swm when active fetch reaches no sync-capable peer', async () => {

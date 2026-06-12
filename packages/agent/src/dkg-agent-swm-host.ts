@@ -2190,12 +2190,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     candidateNamespaces: VmReconcileSwmNamespace[];
     peerTopologyKey: string;
   }> {
-    let candidateNamespaces = this.vmReconcileRootSwmCandidateNamespaces(localCgId);
-    try {
-      candidateNamespaces = await this.collectVmReconcileSwmCandidateNamespaces(localCgId);
-    } catch {
-      // The root SWM namespace is always the minimum candidate set.
-    }
+    const candidateNamespaces = await this.collectVmReconcileSwmCandidateNamespacesBestEffort(localCgId);
     return {
       candidateNamespaces,
       swmGen: await this.readVmReconcileSwmGen(candidateNamespaces) ?? 'unreadable',
@@ -2222,6 +2217,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
       ...this.vmReconcileRootSwmCandidateNamespaces(localCgId),
       ...subGraphNamespaces,
     ];
+  }
+
+  async collectVmReconcileSwmCandidateNamespacesBestEffort(this: DKGAgent, localCgId: string): Promise<VmReconcileSwmNamespace[]> {
+    try {
+      return await this.collectVmReconcileSwmCandidateNamespaces(localCgId);
+    } catch {
+      return this.vmReconcileRootSwmCandidateNamespaces(localCgId);
+    }
   }
 
   vmReconcileSwmNamespaceKey(this: DKGAgent, candidateNamespaces: VmReconcileSwmNamespace[]): string {
@@ -2366,7 +2369,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         this.vmReconcileFetchCooldownAt.delete(localCgId);
         return false;
       }
-      const currentNamespaces = await this.collectVmReconcileSwmCandidateNamespaces(localCgId);
+      const currentNamespaces = await this.collectVmReconcileSwmCandidateNamespacesBestEffort(localCgId);
       if (this.vmReconcileSwmNamespaceKey(currentNamespaces) !== this.vmReconcileSwmNamespaceKey(cached.candidateNamespaces)) {
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         return false;
@@ -2500,24 +2503,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.recentReconciledUals.deleteByPrefix(prefix, cacheKey);
   }
 
-  async vmReconcileActiveFetchAttemptLimit(this: DKGAgent): Promise<number> {
-    try {
-      await this.primeCatchupConnections();
-    } catch {
-      // Best effort only; active fetch can still use currently connected peers.
-    }
+  vmReconcileConnectedPeerCount(this: DKGAgent): number {
     try {
       const libp2p = (this.node as any)?.libp2p;
       const getConnections = libp2p?.getConnections;
-      if (typeof getConnections !== 'function') return 1;
+      if (typeof getConnections !== 'function') return 0;
       const uniquePeers = new Set<string>(
         (getConnections.call(libp2p) as Array<{ remotePeer?: { toString(): string } }>)
           .map((connection) => connection.remotePeer?.toString())
           .filter((peerId): peerId is string => typeof peerId === 'string' && peerId.length > 0),
       );
-      return Math.max(1, uniquePeers.size);
+      return uniquePeers.size;
     } catch {
-      return 1;
+      return 0;
     }
   }
 
@@ -2606,7 +2604,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'fetch', ordinal, kaId: kaId.toString(), ual,
         });
-        const maxAttempts = await this.vmReconcileActiveFetchAttemptLimit();
+        let maxAttempts = 1;
         for (let attempt = 0; attempt < maxAttempts && outcome === 'no-swm'; attempt += 1) {
           try {
             const fetchResult = await this.syncContextGraphFromConnectedPeers(localCgId, {
@@ -2614,6 +2612,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
               maxPeers: 1,
               peerRotationKey: localCgId,
             });
+            maxAttempts = Math.min(
+              DKGAgentBase.VM_RECONCILE_ACTIVE_FETCH_MAX_ATTEMPTS,
+              Math.max(maxAttempts, fetchResult.connectedPeers ?? 0, this.vmReconcileConnectedPeerCount()),
+            );
             if ((fetchResult.peersTried ?? 0) === 0 && (fetchResult.syncCapablePeers ?? 0) === 0) {
               continue;
             }
@@ -2623,6 +2625,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
             activeFetchHadUsableResponse = true;
           } catch (err) {
             this.log.info(ctx, `Phase B: active fetch for "${localCgId}" (ordinal ${ordinal}) failed: ${err instanceof Error ? err.message : String(err)}`);
+            maxAttempts = Math.min(
+              DKGAgentBase.VM_RECONCILE_ACTIVE_FETCH_MAX_ATTEMPTS,
+              Math.max(maxAttempts, this.vmReconcileConnectedPeerCount()),
+            );
             continue;
           }
           outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
