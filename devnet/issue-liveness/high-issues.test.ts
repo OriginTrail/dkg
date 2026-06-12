@@ -150,26 +150,33 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
   // ── #1124 — public CG cannot reach storage-ACK quorum ───────────────────
   // The end-to-end multi-node repro needs a host-mode sharded topology
   // (non-member storage cores); on a 6-node local devnet every core IS a CG
-  // member so the bug can't manifest. The ROOT CAUSE is reproduced in CI at the
-  // agent layer: packages/agent/test/issue-1124-host-mode-plaintext.test.ts
-  // asserts host-mode ingest drops a public-CG plaintext SWM share (the
-  // NO_DATA_IN_SWM source). Keep this devnet stub for the eventual sharded
-  // topology fixture.
-  it.skip('GH #1124: public CG publish reaches storage-ACK quorum (devnet variant; CI root-cause test in agent)');
+  // member so the bug can't manifest. A single-process unit repro is also not a
+  // clean red→green signal: `ingestSwmHostModeEnvelope` drops a public-CG
+  // plaintext share at TWO independent gates — the `isCiphertext` sniff AND the
+  // curated-agent authority check (which rejects a CG with no agent allowlist,
+  // i.e. exactly the public-CG case). Since the fix must change both, isolating
+  // either gate gives a false signal. Needs a host-mode sharded fixture that
+  // exercises the full public-CG ingest path.
+  it.skip('GH #1124: public CG publish reaches storage-ACK quorum (needs host-mode sharded fixture — multi-gate ingest)');
 
   // ── #1097 — documented one-shot publish flow returns 500 ────────────────
   it('GH #1097: SKILL.md one-shot publish (create{quads} → publish{assertionName}) works', async () => {
     const node = pubNode ?? readNode(1);
     const cg = `gh1097-${STAMP}`;
-    await post(node, '/api/context-graph/create', { id: cg, name: 'gh1097' });
+    await post(node, '/api/context-graph/create', { id: cg, name: 'gh1097', accessPolicy: 0 });
     await post(node, '/api/context-graph/register', { id: cg });
     const create = await post(node, '/api/knowledge-assets', {
       contextGraphId: cg, name: 'gh1097-ka',
       quads: [{ subject: `${ENTITY}/1097`, predicate: 'https://schema.org/name', object: '"OneShot"' }],
     });
-    void create;
+    // The documented one-shot flow must actually WORK end to end — not merely
+    // avoid a 500. Assert the create SUCCEEDS, then the publish-by-assertionName
+    // SUCCEEDS (today this 500s → "documented flow returns 500"). Any other
+    // non-500 failure (404/409/422) would have falsely satisfied a `!== 500`.
+    expect([200, 201], `create failed: ${create.status} ${JSON.stringify(create.body)}`).toContain(create.status);
     const pub = await post(node, '/api/shared-memory/publish', { contextGraphId: cg, assertionName: 'gh1097-ka' });
-    expect(pub.status).not.toBe(500);
+    expect(pub.status, `publish failed: ${pub.status} ${JSON.stringify(pub.body)}`).toBe(200);
+    expect(['confirmed', 'finalized', 'vm-confirmed', 'tentative']).toContain(pub.body?.status);
   });
 
   // ── publish-dependent repros (require the beforeAll publish to have landed) ──

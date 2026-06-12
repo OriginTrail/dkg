@@ -194,10 +194,13 @@ describe.runIf(LIVENESS_ENABLED)('GH #158 — CCL not-found error mapping (with 
 });
 
 describe.runIf(LIVENESS_ENABLED)('GH #309 — /api/status exposes the default agent address', () => {
-  it('status body carries defaultAgentAddress for WM-query scoping', async () => {
+  it('status body carries a real defaultAgentAddress for WM-query scoping', async () => {
     const res = await fetch(url('/api/status'), { headers: { Authorization: `Bearer ${daemon!.token}` } });
     const body = (await res.json()) as Record<string, unknown>;
-    expect(body.defaultAgentAddress).toBeDefined();
+    // Must be a usable EVM address — `null`/`""`/`undefined` still leaves
+    // integrations unable to scope WM queries, so `toBeDefined()` is too weak.
+    expect(body.defaultAgentAddress, `defaultAgentAddress=${JSON.stringify(body.defaultAgentAddress)}`)
+      .toMatch(/^0x[0-9a-fA-F]{40}$/);
   });
 });
 
