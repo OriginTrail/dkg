@@ -2188,6 +2188,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
   async collectVmReconcileSwmCandidateState(this: DKGAgent, localCgId: string): Promise<{
     swmGen: string;
     candidateNamespaces: VmReconcileSwmNamespace[];
+    peerTopologyKey: string;
   }> {
     let candidateNamespaces = this.vmReconcileRootSwmCandidateNamespaces(localCgId);
     try {
@@ -2198,6 +2199,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return {
       candidateNamespaces,
       swmGen: await this.readVmReconcileSwmGen(candidateNamespaces) ?? 'unreadable',
+      peerTopologyKey: this.vmReconcilePeerTopologyKey(),
     };
   }
 
@@ -2227,6 +2229,22 @@ export class SwmHostModeMethods extends DKGAgentBase {
       .map((namespace) => `${namespace.metaGraph}\0${namespace.dataGraph}`)
       .sort()
       .join('\n');
+  }
+
+  vmReconcilePeerTopologyKey(this: DKGAgent): string {
+    try {
+      const libp2p = (this.node as any)?.libp2p;
+      const getConnections = libp2p?.getConnections;
+      if (typeof getConnections !== 'function') return 'unreadable';
+      const peers = new Set<string>(
+        (getConnections.call(libp2p) as Array<{ remotePeer?: { toString(): string } }>)
+          .map((connection) => connection.remotePeer?.toString())
+          .filter((peerId): peerId is string => typeof peerId === 'string' && peerId.length > 0),
+      );
+      return [...peers].sort().join('\n');
+    } catch {
+      return 'unreadable';
+    }
   }
 
   async readVmReconcileSwmGen(this: DKGAgent, candidateNamespaces: VmReconcileSwmNamespace[]): Promise<string | null> {
@@ -2329,6 +2347,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (Date.now() >= cached.nextRetryAt) return false;
 
     try {
+      if (this.vmReconcilePeerTopologyKey() !== cached.peerTopologyKey) {
+        this.vmReconcileNegativeCache.delete(cacheKey);
+        this.vmReconcileFetchCooldownAt.delete(localCgId);
+        return false;
+      }
       const currentNamespaces = await this.collectVmReconcileSwmCandidateNamespaces(localCgId);
       if (this.vmReconcileSwmNamespaceKey(currentNamespaces) !== this.vmReconcileSwmNamespaceKey(cached.candidateNamespaces)) {
         this.vmReconcileNegativeCache.delete(cacheKey);
@@ -2352,7 +2375,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   recordVmReconcileNegativeCache(this: DKGAgent,
     cacheKey: string,
-    state: { swmGen: string; candidateNamespaces: VmReconcileSwmNamespace[] },
+    state: { swmGen: string; candidateNamespaces: VmReconcileSwmNamespace[]; peerTopologyKey: string },
   ): void {
     const previous = this.vmReconcileNegativeCache.get(cacheKey);
     const failures = (previous?.failures ?? 0) + 1;
@@ -2365,6 +2388,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       nextRetryAt: Date.now() + backoff,
       swmGen: state.swmGen,
       candidateNamespaces: state.candidateNamespaces,
+      peerTopologyKey: state.peerTopologyKey,
     });
   }
 
@@ -2490,7 +2514,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       versionBlock,
     };
 
-    let swmState: { swmGen: string; candidateNamespaces: VmReconcileSwmNamespace[] } | undefined;
+    let swmState: { swmGen: string; candidateNamespaces: VmReconcileSwmNamespace[]; peerTopologyKey: string } | undefined;
     let activeFetchRan = false;
     let activeFetchHadUsableResponse = false;
     let outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);

@@ -399,6 +399,36 @@ describe('Phase D - VM reconcile damping', () => {
     expect(expensiveScans).toBe(0);
   });
 
+  it('does not reuse a negative cache entry after catchup peer topology changes', async () => {
+    const internals = await boot();
+    const onChainCgId = 54n;
+    registerUnmatchedKC(internals.chain, 9014n, onChainCgId);
+
+    let connectedPeers = ['peer-empty'];
+    (agent as any).node.libp2p.getConnections = () =>
+      connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const originalQuery = internals.store.query.bind(internals.store);
+    let expensiveScans = 0;
+    vi.spyOn(internals.store, 'query').mockImplementation(async (sparql: string) => {
+      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
+      return originalQuery(sparql);
+    });
+
+    await expect(internals.reconcileChainOrdinal('54', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(expensiveScans).toBeGreaterThan(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
+
+    expensiveScans = 0;
+    connectedPeers = ['peer-empty', 'peer-newly-reachable'];
+
+    await expect(internals.reconcileChainOrdinal('54', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(expensiveScans).toBeGreaterThan(0);
+  });
+
   it('does not reuse a negative cache entry when the same KA has a newer merkle root', async () => {
     const internals = await boot();
     const onChainCgId = 46n;

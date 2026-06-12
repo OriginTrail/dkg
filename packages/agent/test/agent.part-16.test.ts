@@ -707,7 +707,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           };
         });
 
-        await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+        const firstResult = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
           maxPeers: 1,
           peerRotationKey: 'runtime-contextGraph',
         });
@@ -720,6 +720,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           peerRotationKey: 'runtime-contextGraph',
         });
 
+        expect(firstResult.connectedPeers).toBe(3);
+        expect(firstResult.selectedPeers).toBe(1);
+        expect(firstResult.syncCapablePeers).toBe(1);
+        expect(firstResult.peersTried).toBe(1);
         expect(triedPeers).toEqual(['peer-preferred', 'peer-core', 'peer-edge']);
       } finally {
         await agent.stop().catch(() => {});

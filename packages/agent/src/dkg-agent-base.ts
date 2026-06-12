@@ -700,6 +700,7 @@ export class DKGAgentBase {
     nextRetryAt: number;
     swmGen: string;
     candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
+    peerTopologyKey: string;
   }>();
   /** Phase D/A4 — per-CG active-fetch cooldown so one sweep cannot fan out repeated fetches. */
   protected readonly vmReconcileFetchCooldownAt = new Map<string, number>();
