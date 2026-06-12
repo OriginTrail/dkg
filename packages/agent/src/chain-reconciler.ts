@@ -190,4 +190,10 @@ export class RecentUalSet {
       if (oldest !== undefined) this.seen.delete(oldest);
     }
   }
+
+  deleteByPrefix(prefix: string, except?: string): void {
+    for (const key of this.seen.keys()) {
+      if (key !== except && key.startsWith(prefix)) this.seen.delete(key);
+    }
+  }
 }

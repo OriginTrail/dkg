@@ -94,6 +94,15 @@ function emptyCatchupStats() {
   };
 }
 
+function noProtocolCatchupStats() {
+  return {
+    ...emptyCatchupStats(),
+    syncCapablePeers: 0,
+    peersTried: 0,
+    peersSucceeded: 0,
+  };
+}
+
 async function insertWorkspaceOperationMeta(
   store: TripleStore,
   metaGraph: string,
@@ -288,11 +297,16 @@ describe('Phase D - VM reconcile damping', () => {
     return agent as unknown as AgentInternals;
   }
 
-  function registerUnmatchedKC(chain: MockChainAdapter, kaId: bigint, onChainCgId: bigint): void {
+  function registerUnmatchedKC(
+    chain: MockChainAdapter,
+    kaId: bigint,
+    onChainCgId: bigint,
+    merkleRootHex = '0x' + kaId.toString(16).padStart(64, '0'),
+  ): void {
     chain.__registerKC({
       kaId,
       contextGraphId: onChainCgId,
-      merkleRootHex: '0x' + kaId.toString(16).padStart(64, '0'),
+      merkleRootHex,
       chunks: [],
     });
   }
@@ -318,6 +332,41 @@ describe('Phase D - VM reconcile damping', () => {
     await expect(internals.reconcileChainOrdinal('42', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(expensiveScans).toBe(0);
+  });
+
+  it('does not reuse a negative cache entry when the same KA has a newer merkle root', async () => {
+    const internals = await boot();
+    const onChainCgId = 46n;
+    registerUnmatchedKC(internals.chain, 9006n, onChainCgId, '0x' + '11'.repeat(32));
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const originalQuery = internals.store.query.bind(internals.store);
+    let expensiveScans = 0;
+    vi.spyOn(internals.store, 'query').mockImplementation(async (sparql: string) => {
+      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
+      return originalQuery(sparql);
+    });
+
+    await expect(internals.reconcileChainOrdinal('46', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(expensiveScans).toBeGreaterThan(0);
+
+    expensiveScans = 0;
+    await expect(internals.reconcileChainOrdinal('46', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(expensiveScans).toBe(0);
+
+    registerUnmatchedKC(internals.chain, 9006n, onChainCgId, '0x' + '22'.repeat(32));
+    await expect(internals.reconcileChainOrdinal('46', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    // New root bypasses the negative-cache deferral and re-runs the SWM scan;
+    // the independent per-CG active-fetch cooldown may still suppress another
+    // network fetch in the same sweep interval.
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(expensiveScans).toBeGreaterThan(0);
+    const cacheKeys = Array.from(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).keys());
+    expect(cacheKeys).toHaveLength(1);
+    expect(cacheKeys[0]).toContain('22'.repeat(32));
+    expect(cacheKeys[0]).not.toContain('11'.repeat(32));
   });
 
   it('keeps an unreadable negative-cache generation damped until backoff expires', async () => {
@@ -411,6 +460,34 @@ describe('Phase D - VM reconcile damping', () => {
     await internals.reconcileChainOrdinal('44', onChainCgId, 1, undefined);
 
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls through a no-protocol active-fetch peer before caching a miss', async () => {
+    const internals = await boot();
+    const onChainCgId = 47n;
+    registerUnmatchedKC(internals.chain, 9007n, onChainCgId);
+    (agent as any).node.libp2p.getConnections = () => [
+      { remotePeer: { toString: () => 'peer-no-protocol' } },
+      { remotePeer: { toString: () => 'peer-empty' } },
+    ];
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers')
+      .mockResolvedValueOnce(noProtocolCatchupStats())
+      .mockResolvedValueOnce(emptyCatchupStats());
+
+    await expect(internals.reconcileChainOrdinal('47', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenNthCalledWith(1, '47', {
+      includeSharedMemory: true,
+      maxPeers: 1,
+      peerRotationKey: '47',
+    });
+    expect(fetch).toHaveBeenNthCalledWith(2, '47', {
+      includeSharedMemory: true,
+      maxPeers: 1,
+      peerRotationKey: '47',
+    });
   });
 });
 
