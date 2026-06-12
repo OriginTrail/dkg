@@ -332,6 +332,43 @@ describe('sync requester progress accounting', () => {
     expect(setCheckpoint).not.toHaveBeenCalled();
   });
 
+  it('does not advance durable checkpoints for metadata-only responses', async () => {
+    const setCheckpoint = vi.fn();
+    const deleteCheckpoint = vi.fn();
+    const fetchSyncPages = vi.fn(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => pageResult(contextGraphId, phase, { nextOffset: phase === 'meta' ? 5 : 0 }));
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['meta-only-cg'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        metaOnlyResponses: 1,
+      }),
+      storeInsert: async () => {},
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.metaOnlyResponses).toBe(1);
+    expect(summary.completedPhases).toBe(0);
+    expect(summary.checkpointAdvances).toBe(0);
+    expect(deleteCheckpoint).not.toHaveBeenCalled();
+    expect(setCheckpoint).not.toHaveBeenCalled();
+  });
+
   it('continues shared-memory sync after a denied context graph', async () => {
     const fetchSyncPages = vi.fn(async (
       _ctx: OperationContext,

@@ -172,7 +172,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       summary.metaOnlyResponses += processed.metaOnlyResponses;
       summary.dataRejectedMissingMeta += processed.dataRejectedMissingMeta;
 
-      const updateCheckpoints = processed.dataRejectedMissingMeta === 0;
+      const updateCheckpoints = processed.dataRejectedMissingMeta === 0 && processed.metaOnlyResponses === 0;
       if (
         processed.emptyResponses > 0 ||
         processed.dataRejectedMissingMeta > 0 ||

@@ -67,7 +67,7 @@ function insertedTriples(result: SyncFromPeerResult): number {
 
 function madeSyncProgress(result: SyncFromPeerResult): boolean {
   if (typeof result === 'number') return true;
-  return (result.completedPhases ?? 0) > 0 || (result.checkpointAdvances ?? 0) > 0;
+  return result.insertedTriples > 0 || (result.completedPhases ?? 0) > 0 || (result.checkpointAdvances ?? 0) > 0;
 }
 
 function hadBackoffWorthyFailure(result: SyncFromPeerResult): boolean {

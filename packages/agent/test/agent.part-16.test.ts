@@ -265,6 +265,58 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     });
 
 
+    it('clears inline catchup denied when another peer cleanly serves nothing new', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupDeniedButCleanEmpty',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const deniedPeer = { toString: () => 'peer-denied-empty' };
+        const cleanPeer = { toString: () => 'peer-clean-empty' };
+        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+          { remotePeer: deniedPeer } as any,
+          { remotePeer: cleanPeer } as any,
+        ]);
+        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+
+        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockImplementation(async (peerId: string) => ({
+          insertedTriples: 0,
+          fetchedMetaTriples: 0,
+          fetchedDataTriples: 0,
+          insertedMetaTriples: 0,
+          insertedDataTriples: 0,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          emptyResponses: peerId === 'peer-clean-empty' ? 1 : 0,
+          metaOnlyResponses: 0,
+          dataRejectedMissingMeta: 0,
+          rejectedKcs: 0,
+          failedPeers: 0,
+          deniedPhases: peerId === 'peer-denied-empty' ? 1 : 0,
+        }));
+
+        const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+
+        expect(result.deniedPeers).toBe(1);
+        expect(result.denied).toBe(false);
+        expect(result.peersSucceeded).toBe(1);
+        expect(result.dataSynced).toBe(0);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+
     it('keeps inline catchup denied when peers only serve metadata', async () => {
       const agent = await DKGAgent.create({
         name: 'RuntimeCatchupDeniedWithMetadataOnly',

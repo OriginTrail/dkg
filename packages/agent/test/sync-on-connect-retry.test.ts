@@ -328,6 +328,38 @@ describe('runSyncOnConnect callbacks', () => {
     expect(synced).toEqual([{ peerId: remotePeer, fresh: false }]);
   });
 
+  it('treats inserted triples as progress even when optional phase counters are omitted', async () => {
+    const remotePeer = freshPeerIdString();
+    const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
+
+    const outcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => [],
+      syncFromPeer: async () => ({
+        insertedTriples: 3,
+        timedOutPhases: 1,
+        failedPeers: 0,
+        deniedPhases: 0,
+      }),
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => ({
+        insertedTriples: 0,
+        timedOutPhases: 0,
+        failedPeers: 0,
+        deniedPhases: 0,
+      }),
+      logInfo: noopLog,
+      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+    });
+
+    expect(outcome).toBe('synced');
+    expect(synced).toEqual([{ peerId: remotePeer, fresh: false }]);
+  });
+
   it('tags failures that happen after durable sync completes', async () => {
     const remotePeer = freshPeerIdString();
     const syncingPeers = new Set<string>();
