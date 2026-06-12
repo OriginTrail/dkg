@@ -379,6 +379,13 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 
+const DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE = 32;
+
+function normalizeHostModeReconcileBatchSize(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE;
+  return Math.max(1, Math.floor(value));
+}
+
 export class SwmHostModeMethods extends DKGAgentBase {
   /**
    * OT-RFC-38 LU-6 — initialize the on-disk opaque ciphertext store
@@ -779,9 +786,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   /**
    * Periodic reconciler driven by `hostModeReconcilerTimer`. Sweeps
-   * every locally-known CG and ensures host-mode subscription is
-   * in sync. Cheap to call repeatedly because the per-CG
-   * reconciler is idempotent.
+   * a bounded slice of locally-known CGs and ensures host-mode
+   * subscription is in sync. The cursor rotates through the stable
+   * sorted set so large stores converge without each tick touching
+   * every known graph.
    *
    * Serialized via `hostModeReconcileInflight` so an overlap with
    * the cleanup timer (or a manual call from a test) doesn't
@@ -796,9 +804,22 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const inflight = (async () => {
       try {
         const graphManager = new GraphManager(this.store);
-        const knownCgs = await graphManager.listContextGraphs();
-        for (const cgId of knownCgs) {
-          await this.reconcileSwmHostModeSubscription(cgId);
+        const knownCgs = (await graphManager.listContextGraphs()).sort();
+        if (knownCgs.length === 0) {
+          this.hostModeReconcileCursor = 0;
+          return;
+        }
+        const batchSize = normalizeHostModeReconcileBatchSize(this.config.swmHostMode?.reconcileBatchSize);
+        const start = this.hostModeReconcileCursor % knownCgs.length;
+        const count = Math.min(batchSize, knownCgs.length);
+        for (let i = 0; i < count; i++) {
+          const index = (start + i) % knownCgs.length;
+          const cgId = knownCgs[index];
+          try {
+            await this.reconcileSwmHostModeSubscription(cgId);
+          } finally {
+            this.hostModeReconcileCursor = (index + 1) % knownCgs.length;
+          }
         }
       } finally {
         this.hostModeReconcileInflight = undefined;
@@ -1732,7 +1753,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const sparql = `SELECT ?o WHERE { ${graphClause} { <${subject}> <${CIPHERTEXT_CHUNK_PREDICATE}> ?o } } LIMIT 1`;
     let result;
     try {
-      result = await this.store.query(sparql);
+      result = await this.store.query(sparql, { source: 'agent.ciphertextChunkCatchup' });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       this.log.warn(ctx, `LU-11 chunk-catchup store query failed cg=${req.contextGraphId} chunkIndex=${req.chunkIndex}: ${reason}`);

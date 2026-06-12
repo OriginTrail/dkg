@@ -2801,7 +2801,7 @@ export class PublishMethods extends DKGAgentBase {
         ${sharedMemoryReadBothFilter(swmGraph)}
       }`;
     }
-    const result = await this.store.query(sparql);
+    const result = await this.store.query(sparql, { source: 'agent.resolveLiftWorkspaceSlice' });
     return result.type === 'quads' ? result.quads : [];
   }
 

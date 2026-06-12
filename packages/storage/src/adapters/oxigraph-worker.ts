@@ -2,7 +2,7 @@ import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { TripleStore, Quad, QueryResult } from '../triple-store.js';
+import type { TripleStore, Quad, QueryResult, TripleStoreQueryOptions } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 
 /**
@@ -214,7 +214,7 @@ export class OxigraphWorkerStore implements TripleStore {
   async insert(quads: Quad[]): Promise<void> { return this.call('insert', quads); }
   async delete(quads: Quad[]): Promise<void> { return this.call('delete', quads); }
   async deleteByPattern(pattern: Partial<Quad>): Promise<number> { return this.call('deleteByPattern', pattern); }
-  async query(sparql: string): Promise<QueryResult> { return this.call('query', sparql); }
+  async query(sparql: string, _options?: TripleStoreQueryOptions): Promise<QueryResult> { return this.call('query', sparql); }
   async hasGraph(graphUri: string): Promise<boolean> { return this.call('hasGraph', graphUri); }
   async createGraph(graphUri: string): Promise<void> { return this.call('createGraph', graphUri); }
   async dropGraph(graphUri: string): Promise<void> { return this.call('dropGraph', graphUri); }

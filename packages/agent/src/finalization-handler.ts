@@ -300,7 +300,7 @@ export class FinalizationHandler {
       }
     }`;
 
-    const result = await this.store.query(sparql);
+    const result = await this.store.query(sparql, { source: 'agent.finalization.sharedMemorySlice' });
     return result.type === 'quads' ? result.quads : [];
   }
 
@@ -327,7 +327,7 @@ export class FinalizationHandler {
 
     const roots: Uint8Array[] = [];
     try {
-      const result = await this.store.query(sparql);
+      const result = await this.store.query(sparql, { source: 'agent.finalization.privateRoots' });
       if (result.type === 'bindings') {
         for (const row of result.bindings) {
           const hex = (row['root'] as string).replace(/^"(.*)".*$/, '$1').replace(/^0x/, '');
@@ -375,7 +375,7 @@ export class FinalizationHandler {
       }
     }`;
     try {
-      const result = await this.store.query(sparql);
+      const result = await this.store.query(sparql, { source: 'agent.finalization.keepRootCopySignal' });
       if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
       let sawFalse = false;
       for (const row of result.bindings) {
@@ -421,7 +421,7 @@ export class FinalizationHandler {
     } LIMIT 1`;
 
     try {
-      const result = await this.store.query(sparql);
+      const result = await this.store.query(sparql, { source: 'agent.finalization.publisherPeerId' });
       if (result.type === 'bindings' && result.bindings.length > 0) {
         const raw = result.bindings[0]['peerId'] as string;
         const peerId = raw.replace(/^"(.*)".*$/, '$1');

@@ -1,6 +1,6 @@
 import { createServer, type Server } from 'node:http';
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { SparqlHttpStore, createTripleStore, type Quad } from '../src/index.js';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { SparqlHttpStore, createTripleStore, type Quad, type SparqlHttpSlowQueryEvent } from '../src/index.js';
 import { LIST_GRAPHS_CACHE_TTL_MS } from '../src/adapters/sparql-http.js';
 
 let server: Server;
@@ -25,7 +25,7 @@ function startTestServer(): Promise<void> {
           res.end();
           return;
         }
-        if (req.url === '/query') {
+        if (req.url?.startsWith('/query')) {
           if (decoded.includes('ASK')) {
             res.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
             res.end(JSON.stringify({ boolean: true }));
@@ -116,6 +116,105 @@ describe('SparqlHttpStore (test server)', () => {
       expect(result.bindings.length).toBe(1);
       expect(result.bindings[0]['name']).toBe('"Alice"');
     }
+  });
+
+  it('emits sampled slow-query events with source tags and query fingerprints', async () => {
+    let clock = 0;
+    const events: SparqlHttpSlowQueryEvent[] = [];
+    const taggedStore = new SparqlHttpStore({
+      queryEndpoint: queryUrl,
+      updateEndpoint: updateUrl,
+      slowQueryThresholdMs: 10,
+      onSlowQuery: (event) => events.push(event),
+      now: () => clock,
+    });
+
+    const pending = taggedStore.query(
+      'SELECT ?name WHERE { GRAPH <http://ex.org/g1> { <http://ex.org/alice> <http://schema.org/name> ?name } }',
+      { source: 'unit test/source' },
+    );
+    clock = 25;
+    await pending;
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      source: 'unit_test/source',
+      operation: 'select',
+      elapsedMs: 25,
+      thresholdMs: 10,
+      endpoint: queryUrl,
+    });
+    expect(events[0].queryHash).toMatch(/^[a-f0-9]{16}$/);
+    expect(events[0].queryBytes).toBeGreaterThan(0);
+    expect(events[0]).not.toHaveProperty('sparql');
+  });
+
+  it('honors slow-query sample rate zero', async () => {
+    let clock = 0;
+    const events: SparqlHttpSlowQueryEvent[] = [];
+    const sampledOutStore = new SparqlHttpStore({
+      queryEndpoint: queryUrl,
+      updateEndpoint: updateUrl,
+      slowQueryThresholdMs: 1,
+      slowQuerySampleRate: 0,
+      onSlowQuery: (event) => events.push(event),
+      now: () => clock,
+    });
+
+    const pending = sampledOutStore.query('ASK { GRAPH <http://ex.org/g> { ?s ?p ?o } }', {
+      source: 'sampled-out',
+    });
+    clock = 50;
+    await pending;
+
+    expect(events).toHaveLength(0);
+  });
+
+  it('does not let slow-query hook failures fail the query', async () => {
+    let clock = 0;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = new SparqlHttpStore({
+      queryEndpoint: queryUrl,
+      updateEndpoint: updateUrl,
+      slowQueryThresholdMs: 1,
+      onSlowQuery: () => { throw new Error('sink down'); },
+      now: () => clock,
+    });
+
+    try {
+      const pending = store.query('ASK { GRAPH <http://ex.org/g> { ?s ?p ?o } }', {
+        source: 'throwing-hook',
+      });
+      clock = 50;
+      const result = await pending;
+      expect(result.type).toBe('boolean');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('slow query hook failed'));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('redacts endpoint query strings from slow-query telemetry', async () => {
+    let clock = 0;
+    const events: SparqlHttpSlowQueryEvent[] = [];
+    const store = new SparqlHttpStore({
+      queryEndpoint: `${queryUrl}?token=secret#fragment`,
+      updateEndpoint: updateUrl,
+      slowQueryThresholdMs: 1,
+      onSlowQuery: (event) => events.push(event),
+      now: () => clock,
+    });
+
+    const pending = store.query('ASK { GRAPH <http://ex.org/g> { ?s ?p ?o } }', {
+      source: 'secret-endpoint',
+    });
+    clock = 50;
+    await pending;
+
+    expect(events).toHaveLength(1);
+    expect(events[0].endpoint).toBe(queryUrl);
+    expect(events[0].endpoint).not.toContain('secret');
+    expect(events[0].endpoint).not.toContain('#fragment');
   });
 
   it('query ASK returns boolean', async () => {

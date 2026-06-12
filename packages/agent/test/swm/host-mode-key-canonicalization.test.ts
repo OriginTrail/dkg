@@ -28,6 +28,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DKGAgent } from '../../src/index.js';
 import { SwmHostModeStore } from '../../src/swm/host-mode-store.js';
+import { GraphManager } from '@origintrail-official/dkg-storage';
 
 /**
  * Minimal in-memory gossip transport — mirrors the surface the agent
@@ -87,6 +88,9 @@ interface AgentInternals {
   swmHostModeSubscribed: Map<string, string>;
   swmHostModeHandlers: Map<string, unknown>;
   wireIdToLocalCgId: Map<string, string>;
+  config: { swmHostMode?: { reconcileBatchSize?: number } };
+  hostModeReconcileCursor: number;
+  reconcileSwmHostModeSubscription(contextGraphId: string): Promise<void>;
   enqueueHostModePersistence(contextGraphId: string, subscribe: boolean): void;
   awaitHostModePersistence(contextGraphId: string): Promise<void>;
   hostModePersistenceStoreKey(rawCgId: string): string;
@@ -129,6 +133,65 @@ describe('host-mode bookkeeping key canonicalisation', () => {
     await installHostModeStore(core, dataDir);
     return { core, bus };
   }
+
+  it('reconcileHostModeSubscriptions advances a bounded cursor instead of sweeping every CG per tick', async () => {
+    const { core } = await makeCore();
+    const internals = core as unknown as AgentInternals;
+    internals.config.swmHostMode = { ...(internals.config.swmHostMode ?? {}), reconcileBatchSize: 2 };
+    const graphManager = new GraphManager(core.store);
+    const cgIds = ['cursor-cg-d', 'cursor-cg-b', 'cursor-cg-a', 'cursor-cg-c'];
+    for (const cgId of cgIds) {
+      await core.store.insert([{
+        subject: `http://example.org/${cgId}`,
+        predicate: 'http://schema.org/name',
+        object: `"${cgId}"`,
+        graph: graphManager.dataGraphUri(cgId),
+      }]);
+    }
+    const knownCgs = (await graphManager.listContextGraphs()).sort();
+    expect(knownCgs.length).toBeGreaterThanOrEqual(4);
+    const calls: string[] = [];
+    internals.reconcileSwmHostModeSubscription = async (contextGraphId: string) => {
+      calls.push(contextGraphId);
+    };
+
+    await core.reconcileHostModeSubscriptions();
+    expect(calls).toEqual(knownCgs.slice(0, 2));
+    expect(internals.hostModeReconcileCursor).toBe(2);
+
+    await core.reconcileHostModeSubscriptions();
+    expect(calls).toEqual([...knownCgs.slice(0, 2), ...knownCgs.slice(2, 4)]);
+    expect(internals.hostModeReconcileCursor).toBe(4 % knownCgs.length);
+  });
+
+  it('reconcileHostModeSubscriptions advances past a failing CG so later CGs are not starved', async () => {
+    const { core } = await makeCore();
+    const internals = core as unknown as AgentInternals;
+    internals.config.swmHostMode = { ...(internals.config.swmHostMode ?? {}), reconcileBatchSize: 2 };
+    const graphManager = new GraphManager(core.store);
+    const cgIds = ['failing-cursor-cg-a', 'failing-cursor-cg-b', 'failing-cursor-cg-c'];
+    for (const cgId of cgIds) {
+      await core.store.insert([{
+        subject: `http://example.org/${cgId}`,
+        predicate: 'http://schema.org/name',
+        object: `"${cgId}"`,
+        graph: graphManager.dataGraphUri(cgId),
+      }]);
+    }
+    const knownCgs = (await graphManager.listContextGraphs()).sort();
+    const calls: string[] = [];
+    internals.reconcileSwmHostModeSubscription = async (contextGraphId: string) => {
+      calls.push(contextGraphId);
+      if (contextGraphId === knownCgs[0]) throw new Error('boom');
+    };
+
+    await expect(core.reconcileHostModeSubscriptions()).rejects.toThrow('boom');
+    expect(calls).toEqual([knownCgs[0]]);
+    expect(internals.hostModeReconcileCursor).toBe(1);
+
+    await core.reconcileHostModeSubscriptions();
+    expect(calls).toEqual([knownCgs[0], knownCgs[1], knownCgs[2]]);
+  });
 
   it('cleartext subscribe followed by wire-hash subscribe for the same CG is idempotent', async () => {
     const { core } = await makeCore();

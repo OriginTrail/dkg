@@ -496,6 +496,8 @@ export class DKGAgentBase {
   protected readonly swmHostModeHandlers = new Map<string, (topic: string, data: Uint8Array, from: string) => void>();
   /** Async lock for the host-mode reconciler so simultaneous calls don't double-subscribe. */
   protected hostModeReconcileInflight?: Promise<void>;
+  /** Rotating cursor for bounded host-mode reconcile sweeps over known context graphs. */
+  protected hostModeReconcileCursor = 0;
   /**
    * OT-RFC-43 A2 — the KA-number allocator, retained on the agent (also
    * forwarded to the publisher as `kaAllocator`). Held here so

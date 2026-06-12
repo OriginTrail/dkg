@@ -253,7 +253,7 @@ export class GossipPublishHandler {
           return;
         }
         const sparql = `SELECT DISTINCT ?s WHERE { GRAPH ?g { ?s ?p ?o } VALUES ?s { ${rootEntities.map(e => `<${e}>`).join(' ')} } FILTER(STRSTARTS(STR(?g), "${dataGraph}/_verifiable_memory/") || STR(?g) = "${dataGraph}") }`;
-        const result = await this.store.query(sparql);
+        const result = await this.store.query(sparql, { source: 'agent.gossipPublishValidation' });
         const existingEntities = new Set<string>(
           result.type === 'bindings' ? result.bindings.map(b => b['s']).filter(Boolean) : [],
         );
