@@ -11,7 +11,7 @@ import {
   validateSubGraphName,
   isSafeIri,
 } from '@origintrail-official/dkg-core';
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import type { DKGAgent, ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
 import type { DkgConfig } from '../config.js';
 import { enforceSignedRequestPostBody } from '../auth.js';
 
@@ -568,6 +568,77 @@ function rejectKnownNonWritableContextGraph(
   return null;
 }
 
+function contextGraphValidationUnavailable(
+  res: ServerResponse,
+  message: string,
+): null {
+  jsonResponse(res, 503, {
+    code: "CONTEXT_GRAPH_VALIDATION_UNAVAILABLE",
+    error: `Failed to validate contextGraphId against known context graphs: ${message}`,
+  });
+  return null;
+}
+
+function hasSyncedSubscription(probe: ContextGraphWritePreflightProbe): boolean {
+  return (
+    (probe.inMemorySubscription?.subscribed === true && probe.inMemorySubscription.synced === true) ||
+    (probe.persistedSubscription?.subscribed === true && probe.persistedSubscription.synced === true)
+  );
+}
+
+function exactProbeIsLocallyWritable(
+  probe: ContextGraphWritePreflightProbe,
+  requireLocalWritable: boolean,
+): boolean {
+  if (!probe.exists) return false;
+  if (!requireLocalWritable) {
+    return hasSyncedSubscription(probe) || probe.hasLocalContent || probe.declarationFound;
+  }
+  return hasSyncedSubscription(probe) || (probe.hasLocalContent && probe.exists);
+}
+
+function exactProbeCanFastAccept(
+  probe: ContextGraphWritePreflightProbe,
+  requireLocalWritable: boolean,
+  callerAgentAddress: string | null,
+): boolean {
+  if (!exactProbeIsLocallyWritable(probe, requireLocalWritable)) return false;
+  if (!callerAgentAddress) return true;
+  return probe.callerAuthorized === true;
+}
+
+function exactProbeIsAuthoritativeBearerDeny(
+  probe: ContextGraphWritePreflightProbe,
+  callerAgentAddress: string | null,
+): boolean {
+  return (
+    !!callerAgentAddress &&
+    probe.exists &&
+    probe.declarationFound &&
+    probe.accessPolicy === "private" &&
+    probe.callerAuthorized === false
+  );
+}
+
+function exactProbeIsStaleSubscription(probe: ContextGraphWritePreflightProbe): boolean {
+  return hasSyncedSubscription(probe) && !probe.exists && !probe.hasLocalContent;
+}
+
+function rejectUnknownContextGraph(
+  res: ServerResponse,
+  raw: string,
+): null {
+  jsonResponse(res, 400, {
+    code: "CONTEXT_GRAPH_NOT_FOUND",
+    error:
+      `Unknown contextGraphId "${raw}". Write operations must target an existing ` +
+      `context graph. Use /api/context-graph/list or dkg_list_context_graphs and ` +
+      `pass the canonical id (for curated graphs, "<curatorAddress>/<slug>") ` +
+      `or full did:dkg:context-graph:... URI.`,
+  });
+  return null;
+}
+
 /**
  * Resolve a write target to a known, canonical context graph id.
  *
@@ -582,6 +653,10 @@ export async function resolveRequiredWriteContextGraphId(
     }): Promise<ExistingContextGraphRow[]>;
     contextGraphHasLocalContent?: (contextGraphId: string) => Promise<boolean>;
     contextGraphExists?: (contextGraphId: string) => Promise<boolean>;
+    probeContextGraphWritePreflight?: (
+      contextGraphId: string,
+      opts?: { callerAgentAddress?: string | null },
+    ) => Promise<ContextGraphWritePreflightProbe>;
   },
   contextGraphId: unknown,
   res: ServerResponse,
@@ -604,20 +679,37 @@ export async function resolveRequiredWriteContextGraphId(
     return null;
   }
 
+  const callerAgentAddress = normalizeContextGraphCallerAddress(
+    opts.callerAgentAddress,
+  );
+  if (agent.probeContextGraphWritePreflight) {
+    try {
+      const probe = await agent.probeContextGraphWritePreflight(candidateId, {
+        callerAgentAddress,
+      });
+      if (exactProbeCanFastAccept(probe, requireLocalWritable, callerAgentAddress)) {
+        return candidateId;
+      }
+      if (exactProbeIsStaleSubscription(probe)) {
+        return rejectUnknownContextGraph(res, raw);
+      }
+      if (exactProbeIsAuthoritativeBearerDeny(probe, callerAgentAddress)) {
+        return rejectUnknownContextGraph(res, raw);
+      }
+    } catch {
+      // Fall back to the composite list path. If that is also unavailable,
+      // the caller receives the bounded validation-unavailable response below.
+    }
+  }
+
   let contextGraphs: ExistingContextGraphRow[];
   try {
-    const callerAgentAddress = normalizeContextGraphCallerAddress(
-      opts.callerAgentAddress,
-    );
     contextGraphs = callerAgentAddress
       ? await agent.listContextGraphs({ callerAgentAddress })
       : await agent.listContextGraphs();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    jsonResponse(res, 500, {
-      error: `Failed to validate contextGraphId against known context graphs: ${message}`,
-    });
-    return null;
+    return contextGraphValidationUnavailable(res, message);
   }
 
   const knownIds = contextGraphs
@@ -712,15 +804,7 @@ export async function resolveRequiredWriteContextGraphId(
     }
   }
 
-  jsonResponse(res, 400, {
-    code: "CONTEXT_GRAPH_NOT_FOUND",
-    error:
-      `Unknown contextGraphId "${raw}". Write operations must target an existing ` +
-      `context graph. Use /api/context-graph/list or dkg_list_context_graphs and ` +
-      `pass the canonical id (for curated graphs, "<curatorAddress>/<slug>") ` +
-      `or full did:dkg:context-graph:... URI.`,
-  });
-  return null;
+  return rejectUnknownContextGraph(res, raw);
 }
 
 export function validateEntities(entities: unknown, res: ServerResponse): boolean {

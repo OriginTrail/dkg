@@ -650,8 +650,20 @@ export interface ContextGraphSubscriptionRecord {
 
 export interface ContextGraphSubscriptionStore {
   loadAll(): Promise<ContextGraphSubscriptionRecord[]>;
+  load?(contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null>;
   save(record: ContextGraphSubscriptionRecord): Promise<void>;
   delete(contextGraphId: string): Promise<void>;
+}
+
+export interface ContextGraphWritePreflightProbe {
+  exists: boolean;
+  hasLocalContent: boolean;
+  inMemorySubscription?: Pick<ContextGraphSub, 'subscribed' | 'synced'>;
+  persistedSubscription?: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'synced'>;
+  declarationFound: boolean;
+  accessPolicy?: 'public' | 'private';
+  curator?: string;
+  callerAuthorized?: boolean;
 }
 
 export type ContextGraphMemberPrincipalType = 'node' | 'agent' | 'identity';

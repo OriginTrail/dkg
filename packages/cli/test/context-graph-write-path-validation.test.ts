@@ -20,6 +20,10 @@ type ContextGraphRow = {
   synced?: boolean;
   hasLocalContent?: boolean;
   exists?: boolean;
+  declarationFound?: boolean;
+  callerAuthorized?: boolean;
+  persistedSubscribed?: boolean;
+  persistedSynced?: boolean;
 };
 
 describe('context graph write-path validation', () => {
@@ -37,7 +41,10 @@ describe('context graph write-path validation', () => {
     daemonState.promoteWorkerUnavailableReason = null;
   });
 
-  function makeAgent(rows: ContextGraphRow[] = [{ id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true, synced: true }]) {
+  function makeAgent(
+    rows: ContextGraphRow[] = [{ id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true, synced: true }],
+    options: { exactPreflight?: boolean } = {},
+  ) {
     const create = vi.fn(async (contextGraphId: string, name: string) =>
       `did:dkg:context-graph:${contextGraphId}/assertion/${CALLER}/${name}`);
     const write = vi.fn(async () => undefined);
@@ -77,8 +84,48 @@ describe('context graph write-path validation', () => {
     const assertContextGraphOwner = vi.fn(async () => undefined);
     const storeInsert = vi.fn(async () => undefined);
 
+    const probeContextGraphWritePreflight = vi.fn(async (contextGraphId: string, probeOpts?: { callerAgentAddress?: string | null }) => {
+      const row = rows.find((candidate) =>
+        candidate.id === contextGraphId || candidate.uri === `did:dkg:context-graph:${contextGraphId}`,
+      );
+      if (!row) {
+        return {
+          exists: false,
+          hasLocalContent: false,
+          declarationFound: false,
+        };
+      }
+      return {
+        exists: row.exists !== false,
+        hasLocalContent: row.hasLocalContent === true,
+        ...((row.subscribed !== undefined || row.synced !== undefined)
+          ? { inMemorySubscription: {
+              subscribed: row.subscribed === true,
+              synced: row.synced === true,
+            } }
+          : {}),
+        ...((row.persistedSubscribed !== undefined || row.persistedSynced !== undefined)
+          ? { persistedSubscription: {
+              subscribed: row.persistedSubscribed === true,
+              synced: row.persistedSynced === true,
+            } }
+          : {}),
+        declarationFound: row.declarationFound ?? row.exists !== false,
+        ...(row.accessPolicy === 'private' || row.accessPolicy === 'public'
+          ? { accessPolicy: row.accessPolicy }
+          : {}),
+        ...(probeOpts?.callerAgentAddress && row.accessPolicy === 'public'
+          ? { callerAuthorized: true }
+          : {}),
+        ...(probeOpts?.callerAgentAddress && row.accessPolicy === 'private'
+          ? { callerAuthorized: row.callerAuthorized === true }
+          : {}),
+      };
+    });
+
     return {
       listContextGraphs: vi.fn(async () => rows),
+      ...(options.exactPreflight ? { probeContextGraphWritePreflight } : {}),
       getDefaultAgentAddress: vi.fn(() => undefined),
       contextGraphHasLocalContent: vi.fn(async (contextGraphId: string) =>
         rows.some((row) => row.id === contextGraphId && row.hasLocalContent === true),
@@ -635,6 +682,155 @@ describe('context graph write-path validation', () => {
     expect(agent.listContextGraphs).toHaveBeenCalledWith({ callerAgentAddress: CALLER });
     expect(agent.contextGraphExists).not.toHaveBeenCalled();
     expect(agent.calls.share).not.toHaveBeenCalled();
+  });
+
+  it('accepts exact synced owner targets through the preflight probe when list is down', async () => {
+    const agent = makeAgent([
+      {
+        id: 'fast-owner-cg',
+        uri: 'did:dkg:context-graph:fast-owner-cg',
+        subscribed: true,
+        synced: true,
+        declarationFound: true,
+      },
+    ], { exactPreflight: true });
+    agent.listContextGraphs.mockRejectedValueOnce(new Error('list timeout'));
+    await startRoutes(agent);
+
+    const result = await post('/api/knowledge-assets', {
+      contextGraphId: 'fast-owner-cg',
+      name: 'draft',
+    });
+
+    expect(result.status).toBe(201);
+    expect(agent.probeContextGraphWritePreflight).toHaveBeenCalledWith('fast-owner-cg', {
+      callerAgentAddress: null,
+    });
+    expect(agent.listContextGraphs).not.toHaveBeenCalled();
+    expect(agent.calls.create).toHaveBeenCalledWith('fast-owner-cg', 'draft', { subGraphName: undefined });
+  });
+
+  it('denies stale subscribed rows instead of creating shadow context graphs', async () => {
+    const agent = makeAgent([
+      {
+        id: 'stale-cg',
+        uri: 'did:dkg:context-graph:stale-cg',
+        subscribed: true,
+        synced: true,
+        exists: false,
+        hasLocalContent: false,
+        declarationFound: false,
+      },
+    ], { exactPreflight: true });
+    agent.listContextGraphs.mockRejectedValueOnce(new Error('list timeout'));
+    await startRoutes(agent);
+
+    const result = await post('/api/knowledge-assets', {
+      contextGraphId: 'stale-cg',
+      name: 'draft',
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_FOUND' });
+    expect(agent.listContextGraphs).not.toHaveBeenCalled();
+    expect(agent.calls.create).not.toHaveBeenCalled();
+  });
+
+  it('denies non-member bearer writes to private exact targets from the live probe', async () => {
+    const agent = makeAgent([
+      {
+        id: 'private-cg',
+        uri: 'did:dkg:context-graph:private-cg',
+        subscribed: true,
+        synced: true,
+        accessPolicy: 'private',
+        declarationFound: true,
+        callerAuthorized: false,
+      },
+    ], { exactPreflight: true });
+    agent.resolveAgentByToken.mockReturnValue(CALLER);
+    agent.listContextGraphs.mockRejectedValueOnce(new Error('list timeout'));
+    await startRoutes(agent, CALLER, 'agent-token');
+
+    const result = await post('/api/shared-memory/write', {
+      contextGraphId: 'private-cg',
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_FOUND' });
+    expect(agent.listContextGraphs).not.toHaveBeenCalled();
+    expect(agent.calls.share).not.toHaveBeenCalled();
+  });
+
+  it('accepts bearer writes to exact private targets when the probe authorizes the caller', async () => {
+    const agent = makeAgent([
+      {
+        id: 'member-private-cg',
+        uri: 'did:dkg:context-graph:member-private-cg',
+        subscribed: true,
+        synced: true,
+        accessPolicy: 'private',
+        declarationFound: true,
+        callerAuthorized: true,
+      },
+    ], { exactPreflight: true });
+    agent.resolveAgentByToken.mockReturnValue(CALLER);
+    agent.listContextGraphs.mockRejectedValueOnce(new Error('list timeout'));
+    await startRoutes(agent, CALLER, 'agent-token');
+
+    const result = await post('/api/shared-memory/write', {
+      contextGraphId: 'member-private-cg',
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
+    });
+
+    expect(result.status).toBe(200);
+    expect(agent.listContextGraphs).not.toHaveBeenCalled();
+    expect(agent.calls.share).toHaveBeenCalledWith(
+      'member-private-cg',
+      [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
+      expect.objectContaining({ callerAgentAddress: CALLER }),
+    );
+  });
+
+  it('does not bearer-fast-accept exact declarations without explicit access policy', async () => {
+    const agent = makeAgent([
+      {
+        id: 'unknown-policy-cg',
+        uri: 'did:dkg:context-graph:unknown-policy-cg',
+        subscribed: true,
+        synced: true,
+        declarationFound: true,
+      },
+    ], { exactPreflight: true });
+    agent.resolveAgentByToken.mockReturnValue(CALLER);
+    agent.listContextGraphs.mockRejectedValueOnce(new Error('list timeout'));
+    await startRoutes(agent, CALLER, 'agent-token');
+
+    const result = await post('/api/shared-memory/write', {
+      contextGraphId: 'unknown-policy-cg',
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
+    });
+
+    expect(result.status).toBe(503);
+    expect(result.body).toMatchObject({ code: 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE' });
+    expect(agent.calls.share).not.toHaveBeenCalled();
+  });
+
+  it('returns a bounded unavailable response when list validation is down and no exact fast path applies', async () => {
+    const agent = makeAgent([], { exactPreflight: true });
+    agent.listContextGraphs.mockRejectedValueOnce(new Error('list timeout'));
+    await startRoutes(agent);
+
+    const result = await post('/api/knowledge-assets', {
+      contextGraphId: 'missing-cg',
+      name: 'draft',
+    });
+
+    expect(result.status).toBe(503);
+    expect(result.body).toMatchObject({ code: 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE' });
+    expect(result.body.error).toContain('Failed to validate contextGraphId against known context graphs: list timeout');
+    expect(agent.calls.create).not.toHaveBeenCalled();
   });
 
   it('rejects sub-graph creation for unknown context graphs before mutation', async () => {

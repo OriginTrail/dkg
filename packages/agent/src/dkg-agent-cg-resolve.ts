@@ -331,6 +331,7 @@ import {
   type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionStore,
+  type ContextGraphWritePreflightProbe,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
@@ -451,6 +452,119 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const result = await this.store.query(sparql);
     if (result.type === 'boolean') return result.value;
     return result.type === 'bindings' && result.bindings.length > 0;
+  }
+
+  async probeContextGraphWritePreflight(
+    this: DKGAgent,
+    contextGraphId: string,
+    opts?: { callerAgentAddress?: string | null },
+  ): Promise<ContextGraphWritePreflightProbe> {
+    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const metaSubjectUri = contextGraphDataGraphUri(contextGraphId);
+    const subscriptionStore = this.config.contextGraphSubscriptionStore;
+
+    const persistedSubscriptionPromise = subscriptionStore
+      ? (subscriptionStore.load
+          ? subscriptionStore.load(contextGraphId)
+          : subscriptionStore.loadAll().then((rows) => rows.find((row) => row.id === contextGraphId) ?? null))
+      : Promise.resolve(null);
+    const declarationPromise = this.store.query(`
+      SELECT ?access ?curator WHERE {
+        {
+          GRAPH <${ontologyGraph}> {
+            <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+            OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?access }
+            OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?curator }
+          }
+        } UNION {
+          GRAPH <${agentsGraph}> {
+            <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+            OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?access }
+            OPTIONAL { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?curator }
+          }
+        } UNION {
+          GRAPH <${cgMetaGraph}> {
+            <${metaSubjectUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+            OPTIONAL { <${metaSubjectUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?access }
+            OPTIONAL { <${metaSubjectUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?curator }
+          }
+        }
+      }
+    `);
+
+    const [exists, hasLocalContent, persistedSubscription, declarationResult] = await Promise.all([
+      this.contextGraphExists(contextGraphId),
+      this.contextGraphHasLocalContent(contextGraphId),
+      persistedSubscriptionPromise,
+      declarationPromise,
+    ]);
+
+    let accessPolicy: 'public' | 'private' | undefined;
+    let declarationFound = false;
+    const curators: string[] = [];
+    if (declarationResult.type === 'bindings') {
+      declarationFound = declarationResult.bindings.length > 0;
+      let sawPublic = false;
+      let sawPrivate = false;
+      for (const row of declarationResult.bindings as Record<string, string>[]) {
+        const access = row['access'];
+        if (typeof access === 'string') {
+          const normalized = stripLiteral(access).trim().toLowerCase();
+          if (normalized === 'private') sawPrivate = true;
+          if (normalized === 'public') sawPublic = true;
+        }
+        const curator = row['curator'];
+        if (typeof curator === 'string' && curator.trim()) curators.push(curator);
+      }
+      if (sawPrivate) accessPolicy = 'private';
+      else if (sawPublic) accessPolicy = 'public';
+    }
+
+    let checksum: string | null = null;
+    const rawCaller = opts?.callerAgentAddress?.trim();
+    if (rawCaller) {
+      const didPrefix = 'did:dkg:agent:';
+      const rawAddress = rawCaller.startsWith(didPrefix) ? rawCaller.slice(didPrefix.length) : rawCaller;
+      if (ethers.isAddress(rawAddress)) checksum = ethers.getAddress(rawAddress);
+    }
+
+    let callerAuthorized: boolean | undefined;
+    if (checksum && declarationFound) {
+      if (accessPolicy === 'public') {
+        callerAuthorized = true;
+      } else if (accessPolicy === 'private') {
+        const curatorMatch = curators.some((curator) =>
+          this.curatorDidMatchesChecksumAgent(curator, checksum),
+        );
+        const allowlisted = await this.callerIsAllowlistedAgentParticipant(contextGraphId, checksum);
+        callerAuthorized = curatorMatch || allowlisted;
+      }
+    }
+
+    const inMemorySubscription = this.subscribedContextGraphs.get(contextGraphId);
+    return {
+      exists,
+      hasLocalContent,
+      ...(inMemorySubscription
+        ? { inMemorySubscription: {
+            subscribed: inMemorySubscription.subscribed,
+            synced: inMemorySubscription.synced,
+          } }
+        : {}),
+      ...(persistedSubscription
+        ? { persistedSubscription: {
+            subscribed: persistedSubscription.subscribed,
+            synced: persistedSubscription.synced,
+          } }
+        : {}),
+      declarationFound,
+      ...(accessPolicy ? { accessPolicy } : {}),
+      ...(curators[0] ? { curator: curators[0] } : {}),
+      ...(callerAuthorized !== undefined ? { callerAuthorized } : {}),
+    };
   }
 
   /**

@@ -141,6 +141,48 @@ describe('ensureContextGraphLocal', () => {
 
     await expect(agent.contextGraphExists('workspace-only')).resolves.toBe(true);
   }, 15000);
+
+  it('probes write preflight policy and curator declarations from the AGENTS graph', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    const contextGraphId = 'agents-declared-private';
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+    const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    const caller = new ethers.Wallet(HARDHAT_KEYS.DEPLOYER).address;
+
+    await store.insert([
+      {
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: agentsGraph,
+      },
+      {
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"private"',
+        graph: agentsGraph,
+      },
+      {
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.DKG_CURATOR,
+        object: `did:dkg:agent:${caller}`,
+        graph: agentsGraph,
+      },
+    ]);
+
+    const probe = await agent.probeContextGraphWritePreflight(contextGraphId, {
+      callerAgentAddress: caller,
+    });
+
+    expect(probe).toMatchObject({
+      exists: true,
+      declarationFound: true,
+      accessPolicy: 'private',
+      callerAuthorized: true,
+    });
+  }, 15000);
 });
 
 describe('implicit SWM context graph metadata', () => {

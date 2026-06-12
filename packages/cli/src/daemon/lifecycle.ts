@@ -1265,6 +1265,22 @@ export async function runDaemonInner(
         coreHosted: row.core_hosted == null ? undefined : row.core_hosted === 1,
         syncScoped: row.sync_scoped === 1,
       })),
+      load: async (contextGraphId) => {
+        const row = dashDb.getContextGraphSubscription(contextGraphId);
+        return row ? {
+          id: row.context_graph_id,
+          name: row.name ?? undefined,
+          subscribed: row.subscribed === 1,
+          synced: row.synced === 1,
+          sharedMemorySynced: row.shared_memory_synced == null ? undefined : row.shared_memory_synced === 1,
+          metaSynced: row.meta_synced == null ? undefined : row.meta_synced === 1,
+          onChainId: row.on_chain_id ?? undefined,
+          onChainHash: row.on_chain_hash ?? undefined,
+          lastReconciledOrdinal: row.last_reconciled_ordinal ?? undefined,
+          coreHosted: row.core_hosted == null ? undefined : row.core_hosted === 1,
+          syncScoped: row.sync_scoped === 1,
+        } : null;
+      },
       save: async (record) => {
         dashDb.upsertContextGraphSubscription({
           context_graph_id: record.id,

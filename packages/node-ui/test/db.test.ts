@@ -729,6 +729,30 @@ describe('DashboardDB — context graph subscriptions', () => {
       last_reconciled_ordinal: 5,
     }]);
   });
+
+  it('loads one context graph subscription by id', () => {
+    db.upsertContextGraphSubscription({
+      context_graph_id: 'project-a',
+      subscribed: 1,
+      synced: 1,
+      sync_scoped: 1,
+      updated_at: 1000,
+    });
+    db.upsertContextGraphSubscription({
+      context_graph_id: 'project-b',
+      subscribed: 0,
+      synced: 0,
+      sync_scoped: 0,
+      updated_at: 2000,
+    });
+
+    expect(db.getContextGraphSubscription('project-b')).toMatchObject({
+      context_graph_id: 'project-b',
+      subscribed: 0,
+      synced: 0,
+    });
+    expect(db.getContextGraphSubscription('missing')).toBeUndefined();
+  });
 });
 
 describe('DashboardDB — V17 subscription columns migration (Phase B)', () => {

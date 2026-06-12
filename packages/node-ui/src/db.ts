@@ -957,6 +957,13 @@ export class DashboardDB {
     ).all() as ContextGraphSubscriptionRow[];
   }
 
+  getContextGraphSubscription(contextGraphId: string): ContextGraphSubscriptionRow | undefined {
+    return this.stmt(
+      'getContextGraphSubscription',
+      'SELECT * FROM context_graph_subscriptions WHERE context_graph_id = ?',
+    ).get(contextGraphId) as ContextGraphSubscriptionRow | undefined;
+  }
+
   deleteContextGraphSubscription(contextGraphId: string): void {
     this.stmt('deleteContextGraphSubscription', 'DELETE FROM context_graph_subscriptions WHERE context_graph_id = ?').run(contextGraphId);
   }
