@@ -2862,7 +2862,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphIds: allowedContextGraphIds,
       createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
       fetchSyncPages: this.fetchSyncPages.bind(this),
-      processSharedMemoryBatch: (wsDataQuads, wsMetaQuads) => this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(wsDataQuads, wsMetaQuads),
+      processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId) =>
+        this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(wsDataQuads, wsMetaQuads, contextGraphId),
       ensureContextGraph: async (contextGraphId) => {
         const graphManager = new GraphManager(this.store);
         await graphManager.ensureContextGraph(contextGraphId);

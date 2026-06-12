@@ -145,6 +145,54 @@ describe('sync responder graph admission planner', () => {
     expect(out).not.toContain('"child-leak"');
   });
 
+  it('keeps parent durable partitions when a child CG has a reserved partition name', async () => {
+    const cgId = 'planner-reserved-child-cg';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    const parentPartition = `${cgPrefix}/context/1`;
+    const reservedNameChildId = `${cgId}/context`;
+    const reservedNameChildPrefix = `did:dkg:context-graph:${reservedNameChildId}`;
+    const reservedNameChildMeta = `${reservedNameChildPrefix}/_meta`;
+    const reservedNameChildSwm = `${reservedNameChildPrefix}/_shared_memory`;
+    const assertionNameChildId = `${cgId}/assertion`;
+    const assertionNameChildPrefix = `did:dkg:context-graph:${assertionNameChildId}`;
+    const assertionNameChildMeta = `${assertionNameChildPrefix}/_meta`;
+    const assertionNameChildPartition = `${assertionNameChildPrefix}/context/1`;
+    const regularChildId = `${cgId}/team`;
+    const regularChildPrefix = `did:dkg:context-graph:${regularChildId}`;
+    const regularChildMeta = `${regularChildPrefix}/_meta`;
+    const regularChildNumericPartition = `${regularChildPrefix}/1`;
+    const regularChildNumericMeta = `${regularChildPrefix}/1/_meta`;
+
+    await store.insert([
+      q(parentPartition, 'urn:parent:partition', 'http://schema.org/name', '"parent-context-partition"'),
+      q(reservedNameChildMeta, reservedNameChildPrefix, RDF_TYPE, DKG_CONTEXT_GRAPH),
+      q(reservedNameChildPrefix, 'urn:reserved-child:data', 'http://schema.org/name', '"reserved-child-leak"'),
+      q(reservedNameChildSwm, 'urn:reserved-child:swm', 'http://schema.org/name', '"reserved-child-swm-leak"'),
+      q(assertionNameChildMeta, assertionNameChildPrefix, RDF_TYPE, DKG_CONTEXT_GRAPH),
+      q(assertionNameChildPartition, 'urn:assertion-child:partition', 'http://schema.org/name', '"assertion-child-partition-leak"'),
+      q(regularChildMeta, regularChildPrefix, RDF_TYPE, DKG_CONTEXT_GRAPH),
+      q(regularChildNumericPartition, 'urn:regular-child:partition', 'http://schema.org/name', '"regular-child-numeric-leak"'),
+      q(regularChildNumericMeta, 'urn:regular-child:meta', `${DKG_NS}merkleRoot`, '"regular-child-numeric-meta-leak"'),
+    ]);
+
+    const cap = registerTestSyncHandler(store);
+    const out = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 5000,
+    });
+
+    expect(lineGraphsFromNquads(out).has(parentPartition)).toBe(true);
+    expect(out).toContain('"parent-context-partition"');
+    expect(out).not.toContain('"reserved-child-leak"');
+    expect(out).not.toContain('"reserved-child-swm-leak"');
+    expect(out).not.toContain('"assertion-child-partition-leak"');
+    expect(out).not.toContain('"regular-child-numeric-leak"');
+    expect(out).not.toContain('"regular-child-numeric-meta-leak"');
+  });
+
   it('preserves durable meta admission without per-row EXISTS filters', async () => {
     const cgId = 'planner-meta-cg';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;

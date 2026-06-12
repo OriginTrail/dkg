@@ -36,7 +36,7 @@ interface SharedMemorySyncContext {
     deadline: number,
     snapshotRef?: string,
   ) => Promise<SyncPageResult>;
-  processSharedMemoryBatch: (wsDataQuads: Quad[], wsMetaQuads: Quad[]) => Promise<{
+  processSharedMemoryBatch: (wsDataQuads: Quad[], wsMetaQuads: Quad[], contextGraphId: string) => Promise<{
     verifiedData: Quad[];
     verifiedMeta: Quad[];
     totalFetchedDataQuads: number;
@@ -103,7 +103,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const fetchDurationMs = Date.now() - fetchStartedAt;
 
       const verifyStartedAt = Date.now();
-      const processed = await processSharedMemoryBatch(wsDataResult.quads, wsMetaResult.quads);
+      const processed = await processSharedMemoryBatch(wsDataResult.quads, wsMetaResult.quads, pid);
       const verifyDurationMs = Date.now() - verifyStartedAt;
       logInfo(ctx, `  shared memory: ${processed.totalFetchedDataQuads} data + ${processed.totalFetchedMetaQuads} meta triples fetched`);
       summary.bytesReceived += wsMetaResult.bytesReceived + wsDataResult.bytesReceived;
@@ -194,17 +194,29 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
 
 function sharedMemoryOwnershipKeyFromGraph(contextGraphId: string, dataGraph: string): string | undefined {
   const rootGraph = contextGraphWorkspaceGraphUri(contextGraphId);
-  if (dataGraph === rootGraph) return contextGraphId;
+  if (isSharedMemoryBucketOrDescendant(dataGraph, rootGraph)) return contextGraphId;
 
   const prefix = `did:dkg:context-graph:${contextGraphId}/`;
   const suffix = '/_shared_memory';
-  if (!dataGraph.startsWith(prefix) || !dataGraph.endsWith(suffix)) return undefined;
+  if (!dataGraph.startsWith(prefix)) return undefined;
 
-  const subGraphName = dataGraph.slice(prefix.length, -suffix.length);
+  const remainder = dataGraph.slice(prefix.length);
+  const suffixAt = remainder.indexOf(suffix);
+  if (suffixAt <= 0) return undefined;
+  const subGraphName = remainder.slice(0, suffixAt);
+  const tail = remainder.slice(suffixAt + suffix.length);
+  if (tail && (!tail.startsWith('/') || tail.startsWith('/staging/'))) return undefined;
   if (!subGraphName || subGraphName.includes('/')) return undefined;
   if (!validateSubGraphName(subGraphName).valid) return undefined;
 
   return `${contextGraphId}\0${subGraphName}`;
+}
+
+function isSharedMemoryBucketOrDescendant(dataGraph: string, bucketGraph: string): boolean {
+  return dataGraph === bucketGraph || (
+    dataGraph.startsWith(`${bucketGraph}/`) &&
+    !dataGraph.startsWith(`${bucketGraph}/staging/`)
+  );
 }
 
 interface PublicSnapshotMetadata {

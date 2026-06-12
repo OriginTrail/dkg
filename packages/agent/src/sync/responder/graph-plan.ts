@@ -364,13 +364,26 @@ async function isDescendantOfKnownChildContextGraph(
   graph: string,
 ): Promise<boolean> {
   if (graph === cgPrefix || !graph.startsWith(`${cgPrefix}/`)) return false;
+  if (await isKnownContextGraph(store, graph)) return true;
+  if (graph.endsWith('/_meta')) {
+    const graphOwner = graph.slice(0, -'/_meta'.length);
+    if (await isKnownContextGraph(store, graphOwner)) return true;
+  }
   const remainder = graph.slice(cgPrefix.length + 1);
   const segments = remainder.split('/').filter(Boolean);
+  if (isDurableContextPartitionGraphSegments(segments)) return false;
   let childUri = cgPrefix;
   for (const segment of segments) {
     childUri = `${childUri}/${segment}`;
     if (await isKnownContextGraph(store, childUri)) return true;
   }
+  return false;
+}
+
+function isDurableContextPartitionGraphSegments(segments: readonly string[]): boolean {
+  if (segments[0] !== 'context') return false;
+  if (segments.length === 2) return /^[0-9]+$/.test(segments[1]);
+  if (segments.length === 3) return /^[0-9]+$/.test(segments[1]) && segments[2] === '_meta';
   return false;
 }
 
