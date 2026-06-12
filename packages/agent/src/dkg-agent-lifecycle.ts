@@ -212,7 +212,7 @@ import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
-import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome } from './sync/on-connect/sync-on-connect.js';
+import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   ensureWorkspaceEncryptionKey,
@@ -2306,7 +2306,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * them into our local store. Used on peer:connect for initial catch-up,
    * with a per-peer guard to avoid overlapping sync storms.
    */
-  async trySyncFromPeer(this: DKGAgent, remotePeer: string): Promise<SyncOnConnectOutcome | 'not-started'> {
+  async trySyncFromPeer(
+    this: DKGAgent,
+    remotePeer: string,
+    onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
+  ): Promise<SyncOnConnectOutcome | 'not-started'> {
     if (!this.started) {
       return 'not-started';
     }
@@ -2330,12 +2334,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       },
       onPeerSynced: (peerId, outcome) => {
         const progressAt = Math.max(Date.now(), (this.lastSyncProgressAt.get(peerId) ?? 0) + 1);
-        this.lastSyncProgressAt.set(peerId, progressAt);
+        if (outcome?.progress) {
+          this.lastSyncProgressAt.set(peerId, progressAt);
+        }
         if (outcome?.fresh ?? true) {
           this.lastSuccessfulSyncAt.set(peerId, progressAt);
         }
         this.skippedNoSyncPeers.delete(peerId);
         this.syncReconcilerBackoff.delete(peerId);
+        if (outcome) {
+          onSyncAccounting?.(outcome);
+        }
       },
     });
   }
@@ -2377,7 +2386,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    *   - is in {@link skippedNoSyncPeers} and now advertises `PROTOCOL_SYNC`
    *     (covers the case where the `peer:update` listener missed the
    *     event for whatever reason), or
-   *   - has no recent clean success or progress/denial cooldown marker, or
+   *   - has no recent clean success or useful-progress cooldown marker, or
    *     whose newest marker is older than {@link SYNC_STALENESS_THRESHOLD_MS}
    *     (covers slow identify, transport-level reconnects that didn't fire
    *     connection:open, and any future failure mode of the event-driven path).
@@ -2418,19 +2427,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
       const shortPeer = peerId.slice(-8);
       this.log.info(ctx, `Sync reconciler retrying ${shortPeer} (last success: ${lastOk == null ? 'never' : `${Math.round((now - lastOk) / 1000)}s ago`}${backoff ? `, prior failures: ${backoff.failures}` : ''})`);
-      this.trySyncFromPeer(peerId)
+      let syncAccountingClearedBackoff = false;
+      this.trySyncFromPeer(peerId, () => {
+        syncAccountingClearedBackoff = true;
+      })
         .then((outcome) => {
           if (outcome === 'skipped-no-sync' || outcome === 'already-syncing' || outcome === 'not-started') {
             return;
           }
-          // `onPeerSynced` clears the backoff when a round makes progress
-          // (even if it was not fresh enough to stamp lastSuccessfulSyncAt).
+          // `onPeerSynced` clears the backoff when a round makes progress or
+          // gets a clean denial. Only useful progress writes the cooldown
+          // marker; denial-only rounds must remain eligible next tick because
+          // a later ACL approval does not emit peer:update/connection:open.
           // If the attempt resolved without advancing either marker, treat it
-          // as a genuine sync failure so peer backoff grows. A peer that still
-          // does not advertise PROTOCOL_SYNC is handled above and remains
-          // eligible on every reconciler tick, so a missed identify update
-          // cannot stretch into a 5/10/20/60-minute delay.
+          // as a genuine sync failure so peer backoff grows unless sync
+          // accounting explicitly cleared backoff for this attempt. A peer
+          // that still does not advertise PROTOCOL_SYNC is handled above and
+          // remains eligible on every reconciler tick, so a missed identify
+          // update cannot stretch into a 5/10/20/60-minute delay.
           if (
+            !syncAccountingClearedBackoff &&
             this.lastSuccessfulSyncAt.get(peerId) === lastOk &&
             this.lastSyncProgressAt.get(peerId) === lastProgress
           ) {
@@ -3197,7 +3213,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         || (r.shared ? r.shared.insertedMetaTriples > 0 : false)
       );
       const peerTimedOut = r.durable.timedOutPhases > 0 || (r.shared ? r.shared.timedOutPhases > 0 : false);
-      if (!durableFailed && !sharedFailed) {
+      if (!durableFailed || (r.shared && !sharedFailed)) {
         peersResponded++;
       }
       if (

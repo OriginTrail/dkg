@@ -89,6 +89,42 @@ describe('catchup runner progress accounting', () => {
     expect(catchupPeerSucceeded(transportFailure, null, false)).toBe(false);
   });
 
+  it('counts either durable or shared-memory transport response as peer responded', () => {
+    const durableAnswered = {
+      failedPeers: 0,
+      timedOutPhases: 0,
+      completedPhases: 1,
+      checkpointAdvances: 0,
+      insertedTriples: 0,
+    };
+    const sharedTransportFailure = {
+      failedPeers: 1,
+      timedOutPhases: 0,
+      completedPhases: 0,
+      checkpointAdvances: 0,
+      insertedTriples: 0,
+    };
+    expect(catchupPeerResponded(durableAnswered, sharedTransportFailure)).toBe(true);
+    expect(catchupPeerSucceeded(durableAnswered, sharedTransportFailure, false)).toBe(false);
+
+    const durableTransportFailure = {
+      failedPeers: 1,
+      timedOutPhases: 0,
+      completedPhases: 0,
+      checkpointAdvances: 0,
+      insertedTriples: 0,
+    };
+    const sharedAnswered = {
+      failedPeers: 0,
+      timedOutPhases: 0,
+      completedPhases: 1,
+      checkpointAdvances: 0,
+      insertedTriples: 0,
+    };
+    expect(catchupPeerResponded(durableTransportFailure, sharedAnswered)).toBe(true);
+    expect(catchupPeerSucceeded(durableTransportFailure, sharedAnswered, false)).toBe(false);
+  });
+
   it('does not count denied or failed peers as success', () => {
     expect(catchupPeerSucceeded({
       failedPeers: 0,

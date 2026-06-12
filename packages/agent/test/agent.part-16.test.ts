@@ -203,6 +203,38 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(phaseFailure.peersSucceeded).toBe(0);
         expect(phaseFailure.diagnostics.durable.failedPeers).toBe(0);
         expect(phaseFailure.diagnostics.durable.failedPhases).toBe(1);
+
+        const syncSharedMemoryFromPeerDetailed = vi.spyOn(agent as any, 'syncSharedMemoryFromPeerDetailed').mockResolvedValue({
+          insertedTriples: 0,
+          fetchedMetaTriples: 0,
+          fetchedDataTriples: 0,
+          insertedMetaTriples: 0,
+          insertedDataTriples: 0,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          emptyResponses: 0,
+          droppedDataTriples: 0,
+          failedPeers: 1,
+          failedPhases: 0,
+          deniedPhases: 0,
+        });
+        syncFromPeerDetailed.mockResolvedValueOnce(durableResult({
+          completedPhases: 1,
+        }));
+
+        const durableOnlyResponse = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          includeSharedMemory: true,
+        });
+
+        expect(durableOnlyResponse.peersTried).toBe(1);
+        expect(durableOnlyResponse.peersResponded).toBe(1);
+        expect(durableOnlyResponse.peersSucceeded).toBe(0);
+        expect(durableOnlyResponse.diagnostics.durable.failedPeers).toBe(0);
+        expect(durableOnlyResponse.diagnostics.sharedMemory.failedPeers).toBe(1);
+        syncSharedMemoryFromPeerDetailed.mockRestore();
       } finally {
         await agent.stop().catch(() => {});
       }

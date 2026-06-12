@@ -90,6 +90,8 @@ export function catchupPeerSucceeded(
   peerDenied: boolean,
 ): boolean {
   if (!catchupPeerResponded(durable, shared) || peerDenied) return false;
+  const peerTransportFailed = (durable.failedPeers ?? 0) > 0 || (shared ? (shared.failedPeers ?? 0) > 0 : false);
+  if (peerTransportFailed) return false;
   const peerPhaseFailed = (durable.failedPhases ?? 0) > 0 || (shared ? (shared.failedPhases ?? 0) > 0 : false);
   if (peerPhaseFailed) return false;
   const durableProgress = (durable.insertedDataTriples ?? durable.insertedTriples ?? 0) > 0
@@ -116,7 +118,7 @@ export function catchupPeerResponded(
 ): boolean {
   const durableFailed = (durable.failedPeers ?? 0) > 0;
   const sharedFailed = shared ? (shared.failedPeers ?? 0) > 0 : false;
-  return !durableFailed && !sharedFailed;
+  return shared ? !durableFailed || !sharedFailed : !durableFailed;
 }
 
 export interface CatchupRunner {

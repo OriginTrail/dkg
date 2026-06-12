@@ -1045,7 +1045,7 @@ export class DKGAgentBase {
    * periodic reconciler treats membership as a strong hint to retry.
    *
    * Entries are cleared on `connection:close` and after sync progress or a
-   * clean denial-only response (see `lastSyncProgressAt`).
+   * clean denial-only response.
    */
   protected readonly skippedNoSyncPeers = new Set<string>();
   /**
@@ -1059,18 +1059,19 @@ export class DKGAgentBase {
   protected readonly lastSuccessfulSyncAt = new Map<string, number>();
   /**
    * Per-peer timestamp of the most recent sync-on-connect attempt that made
-   * useful progress or completed as a clean denial-only round. This is split
-   * from `lastSuccessfulSyncAt` so partial progress with a timeout clears
-   * peer-level backoff without marking the peer fresh for reconnect
-   * suppression.
+   * useful progress. This is split from `lastSuccessfulSyncAt` so partial
+   * progress with a timeout clears peer-level backoff without marking the
+   * peer fresh for reconnect suppression. Denial-only rounds intentionally do
+   * not write this long-lived marker; ACL approval has no peer-update event,
+   * so denied peers must remain eligible on the next reconciler cadence.
    */
   protected readonly lastSyncProgressAt = new Map<string, number>();
   /**
    * Per-peer sync-reconciler backoff. `failures` is the count of
    * consecutive reconciler attempts that did NOT produce a successful
    * sync; `nextRetryAt` is the epoch-ms before which the reconciler
-   * skips this peer. Reset on successful progress / denial-only clean
-   * response (`onPeerSynced`) and pruned after stale disconnects. See
+   * skips this peer. Reset on useful progress or a clean denial-only response
+   * (`onPeerSynced`) and pruned after stale disconnects. See
    * `SYNC_BACKOFF_BASE_MS`.
    */
   protected readonly syncReconcilerBackoff = new Map<string, SyncReconcilerBackoff>();

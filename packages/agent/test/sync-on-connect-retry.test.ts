@@ -190,9 +190,9 @@ describe('runSyncOnConnect callbacks', () => {
     expect(synced).toEqual([]);
   });
 
-  it('marks denial-only sync as backoff-clearing but not fresh', async () => {
+  it('marks denial-only sync as backoff-clearing but not fresh or progress', async () => {
     const remotePeer = freshPeerIdString();
-    const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
+    const synced: Array<{ peerId: string; fresh: boolean | undefined; progress: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
       remotePeer,
@@ -219,11 +219,11 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh, progress: outcome?.progress }),
     });
 
     expect(outcome).toBe('synced');
-    expect(synced).toEqual([{ peerId: remotePeer, fresh: false }]);
+    expect(synced).toEqual([{ peerId: remotePeer, fresh: false, progress: false }]);
   });
 
   it('does not fire onPeerSynced when denial-only accounting also has a timeout', async () => {
@@ -330,7 +330,7 @@ describe('runSyncOnConnect callbacks', () => {
 
   it('treats inserted triples as progress even when optional phase counters are omitted', async () => {
     const remotePeer = freshPeerIdString();
-    const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
+    const synced: Array<{ peerId: string; fresh: boolean | undefined; progress: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
       remotePeer,
@@ -353,11 +353,11 @@ describe('runSyncOnConnect callbacks', () => {
         deniedPhases: 0,
       }),
       logInfo: noopLog,
-      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh, progress: outcome?.progress }),
     });
 
     expect(outcome).toBe('synced');
-    expect(synced).toEqual([{ peerId: remotePeer, fresh: false }]);
+    expect(synced).toEqual([{ peerId: remotePeer, fresh: false, progress: true }]);
   });
 
   it('does not treat metadata-only summaries as progress or clean freshness', async () => {
@@ -1268,6 +1268,87 @@ describe('DKGAgent sync state lifecycle', () => {
       expect((agent as any).lastSyncProgressAt.has(remotePeer)).toBe(false);
       expect((agent as any).syncReconcilerBackoff.has(remotePeer)).toBe(false);
       expect((agent as any).lastSyncDisconnectedAt.has(remotePeer)).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('does not recreate reconciler backoff for denial-only sync without writing the long progress cooldown', async () => {
+    const agent = await DKGAgent.create({
+      name: 'DenialOnlyNoProgressCooldown',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+    try {
+      await agent.start();
+
+      const remotePeer = freshPeerIdString();
+      vi.spyOn(agent.node.libp2p, 'getPeers').mockReturnValue([peerIdFromString(remotePeer)]);
+      vi.spyOn(agent as any, 'getPeerProtocols').mockResolvedValue([PROTOCOL_SYNC]);
+      (agent as any).skippedNoSyncPeers.add(remotePeer);
+      (agent as any).syncReconcilerBackoff.set(remotePeer, {
+        failures: 2,
+        nextRetryAt: Date.now() - 60_000,
+      });
+
+      const syncFromPeerDetailed = vi.fn(async () => ({
+        insertedTriples: 0,
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 0,
+        bytesReceived: 0,
+        resumedPhases: 0,
+        timedOutPhases: 0,
+        completedPhases: 0,
+        checkpointAdvances: 0,
+        emptyResponses: 0,
+        metaOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+        rejectedKcs: 0,
+        failedPeers: 0,
+        failedPhases: 0,
+        deniedPhases: 1,
+      }));
+      (agent as any).syncFromPeerDetailed = syncFromPeerDetailed;
+      (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
+        insertedTriples: 0,
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 0,
+        bytesReceived: 0,
+        resumedPhases: 0,
+        timedOutPhases: 0,
+        completedPhases: 0,
+        checkpointAdvances: 0,
+        emptyResponses: 0,
+        droppedDataTriples: 0,
+        failedPeers: 0,
+        failedPhases: 0,
+        deniedPhases: 0,
+      });
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent as any).discoverContextGraphsFromStore = async () => 0;
+
+      await (agent as any).reconcileSyncFromConnectedPeers();
+      await flushMicrotasks();
+      await new Promise(r => setTimeout(r, 0));
+
+      expect(syncFromPeerDetailed).toHaveBeenCalledTimes(1);
+      expect((agent as any).skippedNoSyncPeers.has(remotePeer)).toBe(false);
+      expect((agent as any).syncReconcilerBackoff.has(remotePeer)).toBe(false);
+      expect((agent as any).lastSuccessfulSyncAt.has(remotePeer)).toBe(false);
+      expect((agent as any).lastSyncProgressAt.has(remotePeer)).toBe(false);
+
+      await (agent as any).reconcileSyncFromConnectedPeers();
+      await flushMicrotasks();
+      await new Promise(r => setTimeout(r, 0));
+
+      expect(syncFromPeerDetailed).toHaveBeenCalledTimes(2);
+      expect((agent as any).syncReconcilerBackoff.has(remotePeer)).toBe(false);
+      expect((agent as any).lastSuccessfulSyncAt.has(remotePeer)).toBe(false);
+      expect((agent as any).lastSyncProgressAt.has(remotePeer)).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }

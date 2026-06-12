@@ -15,6 +15,11 @@ interface SyncProgressSummary {
 
 type SyncFromPeerResult = number | SyncProgressSummary;
 
+export interface SyncOnConnectPeerOutcome {
+  fresh: boolean;
+  progress?: boolean;
+}
+
 interface SyncOnConnectContext {
   remotePeer: string;
   syncingPeers: Set<string>;
@@ -43,11 +48,11 @@ interface SyncOnConnectContext {
   onPeerSkippedNoSync?: (peerId: string, protocols: string[]) => void;
   /**
    * Optional. Called after sync accounting shows either real progress or a
-   * denial-only clean response. `fresh=false` clears peer backoff and starts
-   * the periodic reconciler cooldown without marking the peer as cleanly
-   * fresh for reconnect suppression.
+   * denial-only clean response. `fresh=false` clears peer backoff without
+   * marking the peer as cleanly fresh for reconnect suppression; `progress`
+   * controls whether the periodic reconciler may write its long cooldown.
    */
-  onPeerSynced?: (peerId: string, outcome?: { fresh: boolean }) => void;
+  onPeerSynced?: (peerId: string, outcome?: SyncOnConnectPeerOutcome) => void;
 }
 
 export type SyncOnConnectOutcome = 'synced' | 'skipped-no-sync' | 'already-syncing';
@@ -218,7 +223,10 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     const cleanDurableRound = cleanDurableDetailedRound && !sawDurableMetadataOnlyDetailedSync;
     const clearsPeerBackoff = madeProgress || (!sawBackoffWorthyFailure && (cleanDurableRound || sawDeniedPhase));
     if (clearsPeerBackoff) {
-      context.onPeerSynced?.(remotePeer, { fresh: !sawBackoffWorthyFailure && !sawDeniedPhase && !sawFailedPhase && cleanDurableRound });
+      context.onPeerSynced?.(remotePeer, {
+        fresh: !sawBackoffWorthyFailure && !sawDeniedPhase && !sawFailedPhase && cleanDurableRound,
+        progress: madeProgress,
+      });
     }
     return 'synced';
   } catch (err) {
