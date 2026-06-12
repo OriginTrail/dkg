@@ -164,6 +164,43 @@ export class ContextGraphMetaProjection {
     return [...touched];
   }
 
+  async listDeclaredContextGraphIds(): Promise<string[]> {
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+
+    assertSafeIri(ontologyGraph);
+    assertSafeIri(agentsGraph);
+
+    const result = await this.store.query(`
+      SELECT DISTINCT ?ctxGraph WHERE {
+        {
+          GRAPH <${ontologyGraph}> {
+            ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+          }
+        } UNION {
+          GRAPH <${agentsGraph}> {
+            ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+          }
+        } UNION {
+          GRAPH ?g {
+            ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+            FILTER(STRSTARTS(STR(?ctxGraph), "${CONTEXT_GRAPH_PREFIX}"))
+            FILTER(STR(?g) = CONCAT(STR(?ctxGraph), "/_meta"))
+          }
+        }
+      }
+    `);
+    if (result.type !== 'bindings') return [];
+
+    const ids = new Set<string>();
+    for (const row of result.bindings) {
+      const uri = typeof row['ctxGraph'] === 'string' ? stripTerm(row['ctxGraph']) : '';
+      const id = contextGraphIdFromContextGraphUri(uri);
+      if (id) ids.add(id);
+    }
+    return [...ids].sort();
+  }
+
   private async rebuild(contextGraphId: string): Promise<ContextGraphMetaRecord> {
     const uri = contextGraphDataUri(contextGraphId);
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);

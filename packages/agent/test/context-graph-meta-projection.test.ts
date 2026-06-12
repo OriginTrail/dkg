@@ -6,6 +6,43 @@ import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection
 import { DKGAgent } from '../src/dkg-agent.js';
 
 describe('ContextGraphMetaProjection', () => {
+  it('enumerates declared context graph ids from ontology, agents, and root _meta graphs', async () => {
+    const store = new OxigraphStore();
+    const projection = new ContextGraphMetaProjection(store);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    const ontologyId = 'projection-list-ontology';
+    const agentsId = 'projection-list-agents';
+    const metaId = '0x0000000000000000000000000000000000000abc/projection-list-meta';
+
+    await store.insert([
+      {
+        subject: contextGraphDataGraphUri(ontologyId),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: contextGraphDataGraphUri(agentsId),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: agentsGraph,
+      },
+      {
+        subject: contextGraphDataGraphUri(metaId),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: contextGraphMetaGraphUri(metaId),
+      },
+    ]);
+
+    expect(await projection.listDeclaredContextGraphIds()).toEqual([
+      agentsId,
+      metaId,
+      ontologyId,
+    ].sort());
+  });
+
   it('loads AGENTS graph policy rows and invalidates allowlist mutations', async () => {
     const store = new OxigraphStore();
     const projection = new ContextGraphMetaProjection(store);
