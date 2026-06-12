@@ -37,6 +37,7 @@
 * [Storage SPARQL HTTP](use-dkg/storage-sparql-http.md)
 * [Host-Mode Manual Subscribe](use-dkg/host-mode-manual-subscribe.md)
 * [Updates & Rollback](use-dkg/updates-and-rollback.md)
+  * [Upgrading to rc.17 — land it clean](UPGRADE_TO_RC17.md)
 * [Migrate to npm](use-dkg/migrate-to-npm.md)
 * [Troubleshooting](use-dkg/troubleshooting.md)
 
