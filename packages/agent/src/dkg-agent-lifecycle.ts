@@ -243,6 +243,7 @@ import { createCursorState, type CursorState } from './reconcile-cursor.js';
 const DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS = 64;
 /** Yield to the event loop every N activations so concurrent store work can interleave. */
 const REHYDRATE_THROTTLE_BATCH = 8;
+const catchupPeerOrderSignatures = new WeakMap<object, Map<string, string>>();
 
 // type alias so listPendingJoinApprovalRetries() retains its old
 // public shape while it stubs out to []. PR-12 rebuilds the operator
@@ -3046,12 +3047,29 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options?: { maxPeers?: number; peerRotationKey?: string },
   ): Array<{ toString(): string }> {
     const maxPeers = options?.maxPeers;
-    if (maxPeers === undefined || !Number.isInteger(maxPeers) || maxPeers <= 0 || peers.length <= maxPeers) {
+    if (maxPeers === undefined || !Number.isInteger(maxPeers) || maxPeers <= 0) {
+      return peers;
+    }
+
+    const rotationKey = options?.peerRotationKey;
+    if (rotationKey) {
+      const orderedPeerSignature = JSON.stringify(peers.map((peer) => peer.toString()));
+      let signatures = catchupPeerOrderSignatures.get(this);
+      if (!signatures) {
+        signatures = new Map<string, string>();
+        catchupPeerOrderSignatures.set(this, signatures);
+      }
+      if (signatures.get(rotationKey) !== orderedPeerSignature) {
+        this.vmReconcileCatchupPeerCursor.set(rotationKey, 0);
+        signatures.set(rotationKey, orderedPeerSignature);
+      }
+    }
+
+    if (peers.length <= maxPeers) {
       return peers;
     }
 
     let start = 0;
-    const rotationKey = options?.peerRotationKey;
     if (rotationKey) {
       start = (this.vmReconcileCatchupPeerCursor.get(rotationKey) ?? 0) % peers.length;
       this.vmReconcileCatchupPeerCursor.set(rotationKey, (start + maxPeers) % peers.length);

@@ -26,7 +26,7 @@ import {
   contextGraphWorkspaceGraphUri,
   contextGraphWorkspaceMetaGraphUri,
 } from '@origintrail-official/dkg-core';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
 import type { ReplicationEvent, ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
 import { DKGAgent } from '../src/index.js';
 
@@ -171,6 +171,25 @@ async function seedSwmSnapshot(store: TripleStore, localCgId: string, entity: st
   await store.insert([
     { subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: wsGraph },
     { subject: `urn:dkg:share:${entity}`, predicate: 'http://dkg.io/ontology/rootEntity', object: entity, graph: wsMetaGraph },
+  ]);
+  return computeFlatKCRootV10(
+    [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
+    [],
+  );
+}
+
+async function seedSwmSnapshotInSubGraph(
+  store: TripleStore,
+  localCgId: string,
+  subGraphName: string,
+  entity: string,
+  value: string,
+): Promise<Uint8Array> {
+  const graphManager = new GraphManager(store);
+  await store.insert([
+    { subject: `urn:test:subgraph-marker:${subGraphName}`, predicate: 'http://schema.org/name', object: '"marker"', graph: graphManager.subGraphUri(localCgId, subGraphName) },
+    { subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: graphManager.sharedMemoryUri(localCgId, subGraphName) },
+    { subject: `urn:dkg:share:${subGraphName}`, predicate: 'http://dkg.io/ontology/rootEntity', object: entity, graph: graphManager.sharedMemoryMetaUri(localCgId, subGraphName) },
   ]);
   return computeFlatKCRootV10(
     [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
@@ -506,6 +525,30 @@ describe('Phase D - VM reconcile damping', () => {
     await insertPrivateMerkleRoot(internals.store, '49', entity, privateRoot);
 
     await expect(internals.reconcileChainOrdinal('49', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+  });
+
+  it('invalidates a negative cache entry when matching SWM arrives in a new subgraph namespace', async () => {
+    const internals = await boot();
+    const onChainCgId = 53n;
+    const entity = 'urn:fact:new-subgraph-arrival';
+    const value = 'Subgraph SWM arrived after cache';
+    const root = computeFlatKCRootV10(
+      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
+      [],
+    );
+    registerUnmatchedKC(internals.chain, 9013n, onChainCgId, bytesToHex(root));
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+
+    await expect(internals.reconcileChainOrdinal('53', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
+
+    await seedSwmSnapshotInSubGraph(internals.store, '53', 'code', entity, value);
+
+    await expect(internals.reconcileChainOrdinal('53', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });

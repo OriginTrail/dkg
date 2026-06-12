@@ -726,6 +726,72 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       }
     });
 
+    it('resets VM reconcile catchup rotation when a core peer joins before the cursor', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupRotationCoreJoin',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const peerEdgeA = { toString: () => 'peer-edge-a' };
+        const peerEdgeB = { toString: () => 'peer-edge-b' };
+        const peerCore = { toString: () => 'peer-core-new' };
+        let connections = [
+          { remotePeer: peerEdgeA } as any,
+          { remotePeer: peerEdgeB } as any,
+        ];
+        vi.spyOn(agent.node.libp2p, 'getConnections').mockImplementation(() => connections);
+        vi.spyOn((agent as any).discovery, 'findAgents').mockResolvedValue([]);
+        vi.spyOn(agent as any, 'ensurePeerConnected').mockResolvedValue(undefined);
+        vi.spyOn(agent as any, 'waitForSyncProtocol').mockResolvedValue(true);
+
+        const triedPeers: string[] = [];
+        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockImplementation(async (...args: unknown[]) => {
+          triedPeers.push(String(args[0]));
+          return {
+            insertedTriples: 0,
+            fetchedMetaTriples: 0,
+            fetchedDataTriples: 0,
+            insertedMetaTriples: 0,
+            insertedDataTriples: 0,
+            bytesReceived: 0,
+            resumedPhases: 0,
+            emptyResponses: 1,
+            metaOnlyResponses: 0,
+            dataRejectedMissingMeta: 0,
+            rejectedKcs: 0,
+            failedPeers: 0,
+            deniedPhases: 0,
+          };
+        });
+
+        await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          maxPeers: 1,
+          peerRotationKey: 'runtime-contextGraph',
+        });
+
+        (agent as any).knownCorePeerIds.add('peer-core-new');
+        connections = [
+          { remotePeer: peerEdgeA } as any,
+          { remotePeer: peerCore } as any,
+          { remotePeer: peerEdgeB } as any,
+        ];
+
+        await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          maxPeers: 1,
+          peerRotationKey: 'runtime-contextGraph',
+        });
+
+        expect(triedPeers).toEqual(['peer-edge-a', 'peer-core-new']);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
 
     // "allocates a fresh sync deadline per context graph" removed: the
     // test mocks `fetchSyncPages` with a signature that the current

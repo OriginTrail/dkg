@@ -2189,18 +2189,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     swmGen: string;
     candidateNamespaces: VmReconcileSwmNamespace[];
   }> {
-    const graphManager = new GraphManager(this.store);
-    const candidateNamespaces: VmReconcileSwmNamespace[] = [{
-      metaGraph: contextGraphWorkspaceMetaGraphUri(localCgId),
-      dataGraph: contextGraphWorkspaceGraphUri(localCgId),
-    }];
+    let candidateNamespaces = this.vmReconcileRootSwmCandidateNamespaces(localCgId);
     try {
-      for (const sg of await graphManager.listSubGraphs(localCgId)) {
-        candidateNamespaces.push({
-          metaGraph: graphManager.sharedMemoryMetaUri(localCgId, sg),
-          dataGraph: graphManager.sharedMemoryUri(localCgId, sg),
-        });
-      }
+      candidateNamespaces = await this.collectVmReconcileSwmCandidateNamespaces(localCgId);
     } catch {
       // The root SWM namespace is always the minimum candidate set.
     }
@@ -2208,6 +2199,34 @@ export class SwmHostModeMethods extends DKGAgentBase {
       candidateNamespaces,
       swmGen: await this.readVmReconcileSwmGen(candidateNamespaces) ?? 'unreadable',
     };
+  }
+
+  vmReconcileRootSwmCandidateNamespaces(this: DKGAgent, localCgId: string): VmReconcileSwmNamespace[] {
+    return [{
+      metaGraph: contextGraphWorkspaceMetaGraphUri(localCgId),
+      dataGraph: contextGraphWorkspaceGraphUri(localCgId),
+    }];
+  }
+
+  async collectVmReconcileSwmCandidateNamespaces(this: DKGAgent, localCgId: string): Promise<VmReconcileSwmNamespace[]> {
+    const graphManager = new GraphManager(this.store);
+    const subGraphNamespaces = (await graphManager.listSubGraphs(localCgId))
+      .map((sg) => ({
+        metaGraph: graphManager.sharedMemoryMetaUri(localCgId, sg),
+        dataGraph: graphManager.sharedMemoryUri(localCgId, sg),
+      }))
+      .sort((a, b) => `${a.metaGraph}\0${a.dataGraph}`.localeCompare(`${b.metaGraph}\0${b.dataGraph}`));
+    return [
+      ...this.vmReconcileRootSwmCandidateNamespaces(localCgId),
+      ...subGraphNamespaces,
+    ];
+  }
+
+  vmReconcileSwmNamespaceKey(this: DKGAgent, candidateNamespaces: VmReconcileSwmNamespace[]): string {
+    return candidateNamespaces
+      .map((namespace) => `${namespace.metaGraph}\0${namespace.dataGraph}`)
+      .sort()
+      .join('\n');
   }
 
   async readVmReconcileSwmGen(this: DKGAgent, candidateNamespaces: VmReconcileSwmNamespace[]): Promise<string | null> {
@@ -2303,16 +2322,22 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   async shouldDeferVmReconcileByNegativeCache(this: DKGAgent,
     cacheKey: string,
+    localCgId: string,
   ): Promise<boolean> {
     const cached = this.vmReconcileNegativeCache.get(cacheKey);
     if (!cached) return false;
     if (Date.now() >= cached.nextRetryAt) return false;
 
-    const pattern = this.vmReconcileWorkspaceOperationPattern(cached.candidateNamespaces.map((namespace) => namespace.metaGraph));
-    if (!pattern) return true;
-    if (cached.swmGen === 'unreadable') return true;
     try {
-      const currentSwmGen = await this.readVmReconcileSwmGen(cached.candidateNamespaces);
+      const currentNamespaces = await this.collectVmReconcileSwmCandidateNamespaces(localCgId);
+      if (this.vmReconcileSwmNamespaceKey(currentNamespaces) !== this.vmReconcileSwmNamespaceKey(cached.candidateNamespaces)) {
+        this.vmReconcileNegativeCache.delete(cacheKey);
+        return false;
+      }
+      const pattern = this.vmReconcileWorkspaceOperationPattern(currentNamespaces.map((namespace) => namespace.metaGraph));
+      if (!pattern) return true;
+      if (cached.swmGen === 'unreadable') return true;
+      const currentSwmGen = await this.readVmReconcileSwmGen(currentNamespaces);
       if (currentSwmGen === null) return true;
       if (currentSwmGen !== cached.swmGen) {
         this.vmReconcileNegativeCache.delete(cacheKey);
@@ -2432,7 +2457,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // cursor advances without redoing chain reads + an SWM scan.
       if (this.recentReconciledUals.has(cacheKey)) return { status: 'already', blockNumber: versionBlock };
 
-      if (await this.shouldDeferVmReconcileByNegativeCache(cacheKey)) {
+      if (await this.shouldDeferVmReconcileByNegativeCache(cacheKey, localCgId)) {
         this.emitReplication({
           contextGraphId: localCgId,
           onChainCgId: onChainCgId.toString(),
