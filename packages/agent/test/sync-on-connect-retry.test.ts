@@ -190,7 +190,7 @@ describe('runSyncOnConnect callbacks', () => {
     expect(synced).toEqual([]);
   });
 
-  it('fires onPeerSynced when a detailed sync summary is denial-only', async () => {
+  it('marks denial-only sync as backoff-clearing but not fresh', async () => {
     const remotePeer = freshPeerIdString();
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
@@ -223,7 +223,7 @@ describe('runSyncOnConnect callbacks', () => {
     });
 
     expect(outcome).toBe('synced');
-    expect(synced).toEqual([{ peerId: remotePeer, fresh: true }]);
+    expect(synced).toEqual([{ peerId: remotePeer, fresh: false }]);
   });
 
   it('does not fire onPeerSynced when denial-only accounting also has a timeout', async () => {

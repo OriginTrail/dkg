@@ -182,7 +182,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
 
     const clearsPeerBackoff = madeProgress || (!sawBackoffWorthyFailure && (cleanDetailedRound || sawDeniedPhase));
     if (clearsPeerBackoff) {
-      context.onPeerSynced?.(remotePeer, { fresh: !sawBackoffWorthyFailure });
+      context.onPeerSynced?.(remotePeer, { fresh: !sawBackoffWorthyFailure && !sawDeniedPhase });
     }
     return 'synced';
   } catch (err) {

@@ -325,8 +325,80 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
         expect(result.deniedPeers).toBe(1);
         expect(result.denied).toBe(true);
-        expect(result.dataSynced).toBe(1);
-        expect(result.sharedMemorySynced).toBe(1);
+        expect(result.peersSucceeded).toBe(0);
+        expect(result.dataSynced).toBe(0);
+        expect(result.sharedMemorySynced).toBe(0);
+        expect(result.diagnostics.durable.insertedMetaTriples).toBe(1);
+        expect(result.diagnostics.sharedMemory.insertedMetaTriples).toBe(1);
+        expect(result.diagnostics.durable.metaOnlyResponses).toBe(1);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it('does not count metadata-only inline catchup as synced data or peer success', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupMetadataOnlyNoDenial',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const remotePeer = { toString: () => 'peer-meta-only-clean' };
+        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+          { remotePeer } as any,
+        ]);
+        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+
+        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockResolvedValue({
+          insertedTriples: 1,
+          fetchedMetaTriples: 1,
+          fetchedDataTriples: 0,
+          insertedMetaTriples: 1,
+          insertedDataTriples: 0,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          emptyResponses: 0,
+          metaOnlyResponses: 1,
+          dataRejectedMissingMeta: 0,
+          rejectedKcs: 0,
+          failedPeers: 0,
+          deniedPhases: 0,
+        });
+        vi.spyOn(agent as any, 'syncSharedMemoryFromPeerDetailed').mockResolvedValue({
+          insertedTriples: 1,
+          fetchedMetaTriples: 1,
+          fetchedDataTriples: 0,
+          insertedMetaTriples: 1,
+          insertedDataTriples: 0,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          emptyResponses: 0,
+          droppedDataTriples: 0,
+          failedPeers: 0,
+          deniedPhases: 0,
+        });
+
+        const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          includeSharedMemory: true,
+        });
+
+        expect(result.denied).toBe(false);
+        expect(result.deniedPeers).toBe(0);
+        expect(result.peersSucceeded).toBe(0);
+        expect(result.dataSynced).toBe(0);
+        expect(result.sharedMemorySynced).toBe(0);
         expect(result.diagnostics.durable.insertedMetaTriples).toBe(1);
         expect(result.diagnostics.sharedMemory.insertedMetaTriples).toBe(1);
         expect(result.diagnostics.durable.metaOnlyResponses).toBe(1);

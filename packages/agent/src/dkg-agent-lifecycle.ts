@@ -3169,20 +3169,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const sharedFailed = r.shared ? r.shared.failedPeers > 0 : false;
       const peerDeniedRound = r.durable.deniedPhases > 0
         || (r.shared ? r.shared.deniedPhases > 0 : false);
-      const durableProgress = r.durable.insertedTriples > 0
+      const durableProgress = r.durable.insertedDataTriples > 0
         || r.durable.checkpointAdvances > 0
         || (r.durable.completedPhases > 0 && r.durable.resumedPhases > 0);
       const sharedProgress = r.shared
-        ? r.shared.insertedTriples > 0
+        ? r.shared.insertedDataTriples > 0
           || r.shared.checkpointAdvances > 0
           || (r.shared.completedPhases > 0 && r.shared.resumedPhases > 0)
         : false;
       const peerMadeProgress = durableProgress || sharedProgress;
+      const peerMetadataOnly = !peerMadeProgress && (
+        r.durable.insertedMetaTriples > 0
+        || r.durable.metaOnlyResponses > 0
+        || (r.shared ? r.shared.insertedMetaTriples > 0 : false)
+      );
       const peerTimedOut = r.durable.timedOutPhases > 0 || (r.shared ? r.shared.timedOutPhases > 0 : false);
-      if (!durableFailed && !sharedFailed && !peerDeniedRound && (peerMadeProgress || !peerTimedOut)) {
+      if (!durableFailed && !sharedFailed && !peerDeniedRound && (peerMadeProgress || (!peerTimedOut && !peerMetadataOnly))) {
         peersSucceeded++;
       }
-      dataSynced += r.durable.insertedTriples;
+      dataSynced += r.durable.insertedDataTriples;
       diagnostics.durable.fetchedMetaTriples += r.durable.fetchedMetaTriples;
       diagnostics.durable.fetchedDataTriples += r.durable.fetchedDataTriples;
       diagnostics.durable.insertedMetaTriples += r.durable.insertedMetaTriples;
@@ -3199,7 +3204,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       diagnostics.durable.failedPeers += r.durable.failedPeers;
       let peerDenied = r.durable.deniedPhases > 0;
       if (r.shared) {
-        sharedMemorySynced += r.shared.insertedTriples;
+        sharedMemorySynced += r.shared.insertedDataTriples;
         diagnostics.sharedMemory.fetchedMetaTriples += r.shared.fetchedMetaTriples;
         diagnostics.sharedMemory.fetchedDataTriples += r.shared.fetchedDataTriples;
         diagnostics.sharedMemory.insertedMetaTriples += r.shared.insertedMetaTriples;
