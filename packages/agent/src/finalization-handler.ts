@@ -43,11 +43,14 @@ export type ResolveContextGraphOnChainId = (
   contextGraphId: string,
 ) => Promise<string | null | undefined>;
 
+export type MarkContextGraphMetaDirtyFromQuads = (quads: readonly Quad[]) => void;
+
 export class FinalizationHandler {
   private readonly store: TripleStore;
   private readonly chain: ChainAdapter | undefined;
   private readonly eventBus: EventBus | undefined;
   private readonly resolveContextGraphOnChainId: ResolveContextGraphOnChainId | undefined;
+  private readonly markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads | undefined;
   private readonly log = new Logger('FinalizationHandler');
   private readonly processedUals = new Set<string>();
 
@@ -56,11 +59,13 @@ export class FinalizationHandler {
     chain: ChainAdapter | undefined,
     eventBus?: EventBus,
     resolveContextGraphOnChainId?: ResolveContextGraphOnChainId,
+    markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads,
   ) {
     this.store = store;
     this.chain = chain;
     this.eventBus = eventBus;
     this.resolveContextGraphOnChainId = resolveContextGraphOnChainId;
+    this.markContextGraphMetaDirtyFromQuads = markContextGraphMetaDirtyFromQuads;
   }
 
   async handleFinalizationMessage(data: Uint8Array, contextGraphId: string): Promise<void> {
@@ -928,12 +933,14 @@ export class FinalizationHandler {
         } }`,
       );
       if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
-        await this.store.insert(generateSubGraphRegistration({
+        const regQuads = generateSubGraphRegistration({
           contextGraphId,
           subGraphName,
           createdBy: publisherAddress || 'finalization-discovery',
           timestamp: new Date(),
-        }));
+        });
+        await this.store.insert(regQuads);
+        this.markContextGraphMetaDirtyFromQuads?.(regQuads);
         this.log.info(ctx, `Finalization: auto-registered sub-graph "${subGraphName}" in context graph "${contextGraphId}"`);
       }
     }

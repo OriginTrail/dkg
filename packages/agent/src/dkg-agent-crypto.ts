@@ -428,10 +428,13 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     const seen = new Set<string>();
     const agents: string[] = [];
     let sawAgentGate = false;
+    const meta = await this.getCgMeta(contextGraphId);
+    const revoked = new Set(meta.revokedAgents.map((addr) => addr.toLowerCase()));
     const add = (value: string | undefined) => {
       if (!value || !ethers.isAddress(value)) return;
       const checksum = ethers.getAddress(value);
       const key = checksum.toLowerCase();
+      if (revoked.has(key)) return;
       if (seen.has(key)) return;
       seen.add(key);
       agents.push(checksum);
@@ -443,26 +446,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       add(agentAddress);
     }
 
-    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const result = await this.store.query(
-      `SELECT ?agent WHERE {
-        GRAPH <${cgMetaGraph}> {
-          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent }
-          UNION
-          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent }
-        }
-      }`,
-    );
-    if (result.type === 'bindings') {
-      if (result.bindings.length > 0) sawAgentGate = true;
-      for (const row of result.bindings) {
-        const raw = row['agent'];
-        if (typeof raw === 'string') {
-          add(raw.replace(/^"/, '').replace(/"(@[a-zA-Z-]+|\^\^<[^>]+>)?$/, ''));
-        }
-      }
-    }
+    if (meta.allowedAgents.length > 0 || meta.participantAgents.length > 0) sawAgentGate = true;
+    for (const agent of meta.allowedAgents) add(agent);
+    for (const agent of meta.participantAgents) add(agent);
 
     return sawAgentGate ? agents : null;
   }

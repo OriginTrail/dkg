@@ -2736,7 +2736,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       fetchSyncPages: this.fetchSyncPages.bind(this),
       sinceBatchIdFor,
       processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
-      storeInsert: (quads) => this.store.insert(quads),
+      storeInsert: async (quads) => {
+        await this.store.insert(quads);
+        this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+      },
       deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
       setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
       logInfo: (opCtx, message) => this.log.info(opCtx, message),
@@ -2867,7 +2870,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const graphManager = new GraphManager(this.store);
         await graphManager.ensureContextGraph(contextGraphId);
       },
-      storeInsert: (quads) => this.store.insert(quads),
+      storeInsert: async (quads) => {
+        await this.store.insert(quads);
+        this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+      },
       publicSnapshotStore: this.publicSnapshotStore,
       deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
       setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),

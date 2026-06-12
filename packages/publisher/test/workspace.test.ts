@@ -659,6 +659,39 @@ describe('SharedMemoryHandler', () => {
     expect(workspaceOwned.get(CONTEXT_GRAPH)?.has(ENTITY)).toBe(true);
   });
 
+  it('notifies context-graph meta invalidation after SWM sub-graph auto-registration', async () => {
+    const dirtyQuads: Quad[] = [];
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: workspaceOwned,
+      markContextGraphMetaDirtyFromQuads: (quads) => { dirtyQuads.push(...quads); },
+    });
+    const subGraphName = 'tasks';
+    const subGraphGraph = `${DATA_GRAPH}/${subGraphName}`;
+    const nquads = `<${ENTITY}> <http://schema.org/name> "SubGraph Handler Test" <${DATA_GRAPH}> .`;
+    const msg = encodeWorkspacePublishRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      subGraphName,
+      nquads: new TextEncoder().encode(nquads),
+      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeer',
+      shareOperationId: 'ws-handler-subgraph-dirty',
+      timestampMs: Date.now(),
+    });
+
+    await handler.handle(msg, '12D3KooWPeer');
+
+    expect(dirtyQuads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          subject: subGraphGraph,
+          predicate: 'http://schema.org/name',
+          object: `"${subGraphName}"`,
+          graph: `${DATA_GRAPH}/_meta`,
+        }),
+      ]),
+    );
+  });
+
   it('rejects raw workspace gossip when the context graph is agent-gated', async () => {
     const wallet = ethers.Wallet.createRandom();
     await store.insert([{

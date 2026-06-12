@@ -205,6 +205,33 @@ describe('SharedMemoryHandler agent-gated gossip', () => {
     await expectStoredName('Private Agent Signed');
   });
 
+  it('rejects signed SWM gossip when the projection oracle tombstones the agent', async () => {
+    const allowed = ethers.Wallet.createRandom();
+    const recipientKey = recipientKeyFor(allowed.address);
+    let recipientLookups = 0;
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: workspaceOwned,
+      localAgentAddresses: () => [allowed.address],
+      workspaceRecipientPrivateKeys: () => {
+        recipientLookups += 1;
+        return [recipientKey];
+      },
+      contextGraphMetaOracle: async () => ({
+        accessPolicy: 'private',
+        allowedAgents: [allowed.address],
+        revokedAgents: [allowed.address],
+      }),
+    });
+    await insertAgentGate(DKG_ONTOLOGY.DKG_ALLOWED_AGENT, allowed.address);
+
+    const raw = workspaceMessage('Projection Revoked', 'ws-agent-gate-projection-revoked');
+    const encrypted = await encryptWorkspaceMessage(allowed.address, raw, recipientKey);
+    await handler.handle(await signWorkspaceMessage(allowed, encrypted), PEER_ID);
+
+    await expectWorkspaceEmpty();
+    expect(recipientLookups).toBe(0);
+  });
+
   it.each([
     ['DKG_ALLOWED_AGENT', DKG_ONTOLOGY.DKG_ALLOWED_AGENT],
     ['DKG_PARTICIPANT_AGENT', DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT],

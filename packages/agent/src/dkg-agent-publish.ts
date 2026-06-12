@@ -1517,6 +1517,7 @@ export class PublishMethods extends DKGAgentBase {
     ];
 
     await this.store.insert(quads);
+    this.contextGraphMetaProjection.markDirtyFromQuads(quads);
     await gm.ensureContextGraph(contextGraphId);
     await this.store.flush?.();
     this.subscribeToContextGraph(contextGraphId);
