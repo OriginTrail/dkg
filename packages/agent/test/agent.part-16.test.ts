@@ -662,6 +662,70 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       }
     });
 
+    it('can limit VM reconcile catchup to one ordered peer and rotate on later attempts', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupSinglePeerRotation',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        agent.subscribeToContextGraph('runtime-contextGraph');
+        (agent as any).preferredSyncPeers.set('runtime-contextGraph', 'peer-preferred');
+        (agent as any).knownCorePeerIds.add('peer-core');
+
+        const peerEdge = { toString: () => 'peer-edge' };
+        const peerCore = { toString: () => 'peer-core' };
+        const peerPreferred = { toString: () => 'peer-preferred' };
+        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+          { remotePeer: peerEdge } as any,
+          { remotePeer: peerCore } as any,
+          { remotePeer: peerPreferred } as any,
+        ]);
+        vi.spyOn((agent as any).discovery, 'findAgents').mockResolvedValue([]);
+        vi.spyOn(agent as any, 'ensurePeerConnected').mockResolvedValue(undefined);
+        vi.spyOn(agent as any, 'waitForSyncProtocol').mockResolvedValue(true);
+
+        const triedPeers: string[] = [];
+        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockImplementation(async (...args: unknown[]) => {
+          triedPeers.push(String(args[0]));
+          return {
+            insertedTriples: 0,
+            fetchedMetaTriples: 0,
+            fetchedDataTriples: 0,
+            insertedMetaTriples: 0,
+            insertedDataTriples: 0,
+            bytesReceived: 0,
+            resumedPhases: 0,
+            emptyResponses: 1,
+            metaOnlyResponses: 0,
+            dataRejectedMissingMeta: 0,
+            rejectedKcs: 0,
+            failedPeers: 0,
+            deniedPhases: 0,
+          };
+        });
+
+        await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          maxPeers: 1,
+          peerRotationKey: 'runtime-contextGraph',
+        });
+        await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          maxPeers: 1,
+          peerRotationKey: 'runtime-contextGraph',
+        });
+        await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          maxPeers: 1,
+          peerRotationKey: 'runtime-contextGraph',
+        });
+
+        expect(triedPeers).toEqual(['peer-preferred', 'peer-core', 'peer-edge']);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
 
     // "allocates a fresh sync deadline per context graph" removed: the
     // test mocks `fetchSyncPages` with a signature that the current

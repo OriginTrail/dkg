@@ -2978,7 +2978,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   async syncContextGraphFromConnectedPeers(this: DKGAgent,
     contextGraphId: string,
-    options?: { includeSharedMemory?: boolean },
+    options?: { includeSharedMemory?: boolean; maxPeers?: number; peerRotationKey?: string },
   ): Promise<{
     connectedPeers: number;
     syncCapablePeers: number;
@@ -3025,19 +3025,39 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     await this.primeCatchupConnections();
 
-    const peers = this.selectCatchupPeers(
+    const orderedPeers = this.selectCatchupPeers(
       [...new Map(
         this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
       ).values()],
       preferredPeerId,
       isPrivateContextGraph,
     );
-    const coreCount = peers.filter((p) => this.knownCorePeerIds.has(p.toString())).length;
+    const peers = this.selectCatchupPeerWindow(orderedPeers, options);
+    const coreCount = orderedPeers.filter((p) => this.knownCorePeerIds.has(p.toString())).length;
     this.log.info(
       ctx,
-      `catchup peer order for "${contextGraphId}": preferred=${preferredPeerId ?? 'none'} cores=${coreCount} total=${peers.length}`,
+      `catchup peer order for "${contextGraphId}": preferred=${preferredPeerId ?? 'none'} cores=${coreCount} total=${orderedPeers.length} selected=${peers.length}`,
     );
     return this.runCatchupOverPeers(contextGraphId, includeSharedMemory, peers);
+  }
+
+  selectCatchupPeerWindow(this: DKGAgent,
+    peers: Array<{ toString(): string }>,
+    options?: { maxPeers?: number; peerRotationKey?: string },
+  ): Array<{ toString(): string }> {
+    const maxPeers = options?.maxPeers;
+    if (maxPeers === undefined || !Number.isInteger(maxPeers) || maxPeers <= 0 || peers.length <= maxPeers) {
+      return peers;
+    }
+
+    let start = 0;
+    const rotationKey = options?.peerRotationKey;
+    if (rotationKey) {
+      start = (this.vmReconcileCatchupPeerCursor.get(rotationKey) ?? 0) % peers.length;
+      this.vmReconcileCatchupPeerCursor.set(rotationKey, (start + maxPeers) % peers.length);
+    }
+
+    return [...peers.slice(start), ...peers.slice(0, start)].slice(0, maxPeers);
   }
 
   async runCatchupOverPeers(this: DKGAgent,

@@ -32,6 +32,8 @@ import { DKGAgent } from '../src/index.js';
 
 interface AgentInternals {
   recordCoreHostedPublicCg(cgId: string, swmGraphId?: string): Promise<void>;
+  reconcileChainOrdinal(localCgId: string, onChainCgId: bigint, ordinal: number, headBlock: number | undefined): Promise<{ status: string }>;
+  syncContextGraphFromConnectedPeers(contextGraphId: string, options?: { includeSharedMemory?: boolean; maxPeers?: number; peerRotationKey?: string }): Promise<unknown>;
   runVmReconcileForCg(localCgId: string): Promise<void>;
   runVmReconcileSweep(): Promise<void>;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string; lastReconciledOrdinal?: number }>;
@@ -51,6 +53,60 @@ function stubNode(agent: DKGAgent): void {
     peerId: '12D3KooWCoreFillTestPeer',
     libp2p: { getPeers: () => [] },
   };
+}
+
+function emptyCatchupStats() {
+  return {
+    connectedPeers: 1,
+    syncCapablePeers: 1,
+    peersTried: 1,
+    peersSucceeded: 1,
+    dataSynced: 0,
+    sharedMemorySynced: 0,
+    denied: false,
+    diagnostics: {
+      noProtocolPeers: 0,
+      durable: {
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 0,
+        bytesReceived: 0,
+        resumedPhases: 0,
+        emptyResponses: 1,
+        metaOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+        rejectedKcs: 0,
+        failedPeers: 0,
+      },
+      sharedMemory: {
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 0,
+        bytesReceived: 0,
+        resumedPhases: 0,
+        emptyResponses: 1,
+        droppedDataTriples: 0,
+        failedPeers: 0,
+      },
+    },
+  };
+}
+
+async function insertWorkspaceOperationMeta(
+  store: TripleStore,
+  metaGraph: string,
+  opId: string,
+  rootEntity: string,
+  publishedAt: string,
+): Promise<void> {
+  const subject = `urn:dkg:share:${opId}`;
+  await store.insert([
+    { graph: metaGraph, subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation' },
+    { graph: metaGraph, subject, predicate: 'http://dkg.io/ontology/rootEntity', object: rootEntity },
+    { graph: metaGraph, subject, predicate: 'http://dkg.io/ontology/publishedAt', object: `"${publishedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
+  ]);
 }
 
 /** Seed a local SWM snapshot for one KA under a CG and return its flat-KC root. */
@@ -211,6 +267,150 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(sub!.coreHosted).toBe(true);
     expect(sub!.onChainId).toBe('9');              // rebound to the new graph
     expect(sub!.lastReconciledOrdinal).toBe(0);    // stale watermark dropped
+  });
+});
+
+describe('Phase D - VM reconcile damping', () => {
+  let agent: DKGAgent | null = null;
+
+  afterEach(async () => {
+    if (agent) {
+      await agent.stop().catch(() => undefined);
+      agent = null;
+    }
+    vi.restoreAllMocks();
+  });
+
+  async function boot(): Promise<AgentInternals> {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'VmReconcileDamping', chainAdapter: chain });
+    stubNode(agent);
+    return agent as unknown as AgentInternals;
+  }
+
+  function registerUnmatchedKC(chain: MockChainAdapter, kaId: bigint, onChainCgId: bigint): void {
+    chain.__registerKC({
+      kaId,
+      contextGraphId: onChainCgId,
+      merkleRootHex: '0x' + kaId.toString(16).padStart(64, '0'),
+      chunks: [],
+    });
+  }
+
+  it('negative-caches a missing SWM snapshot and skips the expensive scan plus active fetch during backoff', async () => {
+    const internals = await boot();
+    const onChainCgId = 42n;
+    registerUnmatchedKC(internals.chain, 9001n, onChainCgId);
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const originalQuery = internals.store.query.bind(internals.store);
+    let expensiveScans = 0;
+    vi.spyOn(internals.store, 'query').mockImplementation(async (sparql: string) => {
+      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
+      return originalQuery(sparql);
+    });
+
+    await expect(internals.reconcileChainOrdinal('42', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(expensiveScans).toBeGreaterThan(0);
+
+    expensiveScans = 0;
+    await expect(internals.reconcileChainOrdinal('42', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(expensiveScans).toBe(0);
+  });
+
+  it('keeps an unreadable negative-cache generation damped until backoff expires', async () => {
+    const internals = await boot();
+    const onChainCgId = 45n;
+    registerUnmatchedKC(internals.chain, 9005n, onChainCgId);
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const originalQuery = internals.store.query.bind(internals.store);
+    let expensiveScans = 0;
+    let generationReads = 0;
+    vi.spyOn(internals.store, 'query').mockImplementation(async (sparql: string) => {
+      if (sparql.includes('COUNT(?root) AS ?rootCount')) {
+        generationReads++;
+        if (generationReads <= 2) throw new Error('transient generation read failure');
+      }
+      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
+      return originalQuery(sparql);
+    });
+
+    await expect(internals.reconcileChainOrdinal('45', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(expensiveScans).toBeGreaterThan(0);
+
+    expensiveScans = 0;
+    await expect(internals.reconcileChainOrdinal('45', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(expensiveScans).toBe(0);
+    expect(generationReads).toBe(2);
+  });
+
+  it('invalidates the retry cache only for operation changes in the candidate SWM namespace', async () => {
+    const internals = await boot();
+    const onChainCgId = 43n;
+    registerUnmatchedKC(internals.chain, 9002n, onChainCgId);
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const originalQuery = internals.store.query.bind(internals.store);
+    let expensiveScans = 0;
+    vi.spyOn(internals.store, 'query').mockImplementation(async (sparql: string) => {
+      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
+      return originalQuery(sparql);
+    });
+
+    await insertWorkspaceOperationMeta(
+      internals.store,
+      contextGraphWorkspaceMetaGraphUri('43'),
+      'existing-root-op',
+      'urn:fact:existing',
+      '2030-01-01T00:00:00.000Z',
+    );
+
+    await internals.reconcileChainOrdinal('43', onChainCgId, 0, undefined);
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    await insertWorkspaceOperationMeta(
+      internals.store,
+      'did:dkg:context-graph:43/code/_shared_memory_meta',
+      'unrelated-subgraph-op',
+      'urn:fact:unrelated',
+      '2040-01-01T00:00:00.000Z',
+    );
+
+    expensiveScans = 0;
+    await internals.reconcileChainOrdinal('43', onChainCgId, 0, undefined);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(expensiveScans).toBe(0);
+
+    await insertWorkspaceOperationMeta(
+      internals.store,
+      contextGraphWorkspaceMetaGraphUri('43'),
+      'candidate-root-op-with-older-timestamp',
+      'urn:fact:candidate',
+      '2020-01-01T00:00:00.000Z',
+    );
+
+    await internals.reconcileChainOrdinal('43', onChainCgId, 0, undefined);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(expensiveScans).toBeGreaterThan(0);
+  });
+
+  it('runs at most one active fetch per CG sweep interval across different pending ordinals', async () => {
+    const internals = await boot();
+    const onChainCgId = 44n;
+    registerUnmatchedKC(internals.chain, 9003n, onChainCgId);
+    registerUnmatchedKC(internals.chain, 9004n, onChainCgId);
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+
+    await internals.reconcileChainOrdinal('44', onChainCgId, 0, undefined);
+    await internals.reconcileChainOrdinal('44', onChainCgId, 1, undefined);
+
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
 

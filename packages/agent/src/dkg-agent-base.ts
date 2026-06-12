@@ -669,6 +669,10 @@ export class DKGAgentBase {
    */
   static readonly VM_RECONCILE_SWEEP_INTERVAL_MS =
     Number(process.env['DKG_VM_RECONCILE_INTERVAL_MS']) || 60_000;
+  static readonly VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS =
+    Math.max(5_000, DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS);
+  static readonly VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS =
+    Number(process.env['DKG_VM_RECONCILE_BACKOFF_MAX_MS']) || 10 * 60_000;
   /**
    * Blocks a completed ordinal must be buried by before its watermark advance
    * commits (reorg gate). The data is promoted to VM eagerly; only the cursor
@@ -690,6 +694,17 @@ export class DKGAgentBase {
   protected readonly reconcileCursors = new Map<string, CursorState>();
   /** Phase B — bounded dedupe of recently-reconciled UALs (live-burst guard). */
   protected readonly recentReconciledUals = new RecentUalSet();
+  /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
+  protected readonly vmReconcileNegativeCache = new Map<string, {
+    failures: number;
+    nextRetryAt: number;
+    swmGen: string;
+    candidateMetaGraphs: string[];
+  }>();
+  /** Phase D/A4 — per-CG active-fetch cooldown so one sweep cannot fan out repeated fetches. */
+  protected readonly vmReconcileFetchCooldownAt = new Map<string, number>();
+  /** Phase D/A4 — round-robin cursor over the already ordered catch-up peer list. */
+  protected readonly vmReconcileCatchupPeerCursor = new Map<string, number>();
   protected hostModeReconcilerTimer: ReturnType<typeof setInterval> | null = null;
   protected hostModePruneTimer: ReturnType<typeof setInterval> | null = null;
   // rc.9 PR-10: joinApprovalRetryQueue + joinApprovalRetryTimer

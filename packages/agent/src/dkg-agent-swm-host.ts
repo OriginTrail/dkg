@@ -8,7 +8,7 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -33,7 +33,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  Logger, createOperationContext, sparqlString, isSafeIri, assertSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -251,7 +251,7 @@ import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResu
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
 import { buildManualCclFacts, resolveFactsFromSnapshot, type CclFactResolutionMode } from './ccl-fact-resolution.js';
 import {
-  strip, stripLiteral, jsonLdToQuads,
+  stripLiteral, jsonLdToQuads,
   type JsonLdContent,
 } from './dkg-agent-utils.js';
 import {
@@ -2184,6 +2184,117 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
   }
 
+  async collectVmReconcileSwmCandidateState(this: DKGAgent, localCgId: string): Promise<{
+    swmGen: string;
+    candidateMetaGraphs: string[];
+  }> {
+    const graphManager = new GraphManager(this.store);
+    const candidateMetaGraphs = [contextGraphWorkspaceMetaGraphUri(localCgId)];
+    try {
+      for (const sg of await graphManager.listSubGraphs(localCgId)) {
+        candidateMetaGraphs.push(graphManager.sharedMemoryMetaUri(localCgId, sg));
+      }
+    } catch {
+      // The root SWM namespace is always the minimum candidate set.
+    }
+    return {
+      candidateMetaGraphs,
+      swmGen: await this.readVmReconcileSwmGen(candidateMetaGraphs) ?? 'unreadable',
+    };
+  }
+
+  async readVmReconcileSwmGen(this: DKGAgent, candidateMetaGraphs: string[]): Promise<string | null> {
+    const pattern = this.vmReconcileWorkspaceOperationPattern(candidateMetaGraphs);
+    if (!pattern) return 'empty:0';
+    try {
+      const result = await this.store.query(`SELECT
+        (COUNT(DISTINCT ?op) AS ?opCount)
+        (COUNT(?root) AS ?rootCount)
+        (MAX(?ts) AS ?maxTs)
+      WHERE {
+        ${pattern}
+      }`);
+      if (result.type === 'bindings' && result.bindings.length > 0) {
+        const row = result.bindings[0];
+        const opCount = typeof row['opCount'] === 'string' ? stripLiteral(row['opCount']) : '0';
+        const rootCount = typeof row['rootCount'] === 'string' ? stripLiteral(row['rootCount']) : '0';
+        const maxTs = typeof row['maxTs'] === 'string' ? stripLiteral(row['maxTs']) : '';
+        return `ops:${opCount};roots:${rootCount};maxTs:${maxTs}`;
+      }
+    } catch {
+      // A failed cheap probe is not evidence that the expensive merkle scan
+      // should run again immediately.
+    }
+    return null;
+  }
+
+  vmReconcileWorkspaceOperationPattern(this: DKGAgent, candidateMetaGraphs: string[]): string {
+    const branches: string[] = [];
+    for (const graph of candidateMetaGraphs) {
+      try {
+        branches.push(`{ GRAPH <${assertSafeIri(graph)}> {
+          ?op <http://dkg.io/ontology/rootEntity> ?root .
+          OPTIONAL { ?op <http://dkg.io/ontology/publishedAt> ?ts . }
+        } }`);
+      } catch {
+        // Skip unsafe graph names instead of building a malformed query.
+      }
+    }
+    return branches.join(' UNION ');
+  }
+
+  async shouldDeferVmReconcileByNegativeCache(this: DKGAgent,
+    ual: string,
+  ): Promise<boolean> {
+    const cached = this.vmReconcileNegativeCache.get(ual);
+    if (!cached) return false;
+    if (Date.now() >= cached.nextRetryAt) return false;
+
+    const pattern = this.vmReconcileWorkspaceOperationPattern(cached.candidateMetaGraphs);
+    if (!pattern) return true;
+    if (cached.swmGen === 'unreadable') return true;
+    try {
+      const currentSwmGen = await this.readVmReconcileSwmGen(cached.candidateMetaGraphs);
+      if (currentSwmGen === null) return true;
+      if (currentSwmGen !== cached.swmGen) {
+        this.vmReconcileNegativeCache.delete(ual);
+        return false;
+      }
+    } catch {
+      // Stay damped until the backoff expires; a failed cheap probe is not
+      // evidence that the expensive merkle scan should run again immediately.
+    }
+    return true;
+  }
+
+  recordVmReconcileNegativeCache(this: DKGAgent,
+    ual: string,
+    state: { swmGen: string; candidateMetaGraphs: string[] },
+  ): void {
+    const previous = this.vmReconcileNegativeCache.get(ual);
+    const failures = (previous?.failures ?? 0) + 1;
+    const backoff = Math.min(
+      DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
+      DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS * 2 ** Math.max(0, failures - 1),
+    );
+    this.vmReconcileNegativeCache.set(ual, {
+      failures,
+      nextRetryAt: Date.now() + backoff,
+      swmGen: state.swmGen,
+      candidateMetaGraphs: state.candidateMetaGraphs,
+    });
+  }
+
+  shouldRunVmReconcileActiveFetch(this: DKGAgent, localCgId: string): boolean {
+    const now = Date.now();
+    const lastFetchAt = this.vmReconcileFetchCooldownAt.get(localCgId);
+    if (lastFetchAt !== undefined && now - lastFetchAt < DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS) {
+      return false;
+    }
+    this.vmReconcileFetchCooldownAt.set(localCgId, now);
+    return true;
+  }
+
   /**
    * Reconcile a single per-CG registration ordinal: resolve the kaId + its
    * latest on-chain merkle root + publisher, build the UAL, and ask the
@@ -2218,6 +2329,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // cursor advances without redoing chain reads + an SWM scan.
       if (this.recentReconciledUals.has(ual)) return { status: 'already', blockNumber: versionBlock };
 
+      if (await this.shouldDeferVmReconcileByNegativeCache(ual)) {
+        this.emitReplication({
+          contextGraphId: localCgId,
+          onChainCgId: onChainCgId.toString(),
+          action: 'defer',
+          ordinal,
+          kaId: kaId.toString(),
+          ual,
+          detail: 'negative-cache',
+        });
+        return { status: 'pending' };
+      }
+
       merkleRoot = await this.chain.getLatestMerkleRoot!(kaId);
       publisherAddress = (this.chain.getLatestMerkleRootPublisher
         ? await this.chain.getLatestMerkleRootPublisher(kaId)
@@ -2239,24 +2363,38 @@ export class SwmHostModeMethods extends DKGAgentBase {
       versionBlock,
     };
 
+    let swmState: { swmGen: string; candidateMetaGraphs: string[] } | undefined;
     let outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
     if (outcome === 'no-swm') {
+      swmState = await this.collectVmReconcileSwmCandidateState(localCgId);
       // Active fetch: pull the missing snapshot core-first (selectCatchupPeers
       // already prioritises known cores + the preferred sync peer), then retry.
-      this.emitReplication({
-        contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
-        action: 'fetch', ordinal, kaId: kaId.toString(), ual,
-      });
-      try {
-        await this.syncContextGraphFromConnectedPeers(localCgId, { includeSharedMemory: true });
-      } catch (err) {
-        this.log.info(ctx, `Phase B: active fetch for "${localCgId}" (ordinal ${ordinal}) failed: ${err instanceof Error ? err.message : String(err)}`);
+      if (this.shouldRunVmReconcileActiveFetch(localCgId)) {
+        this.emitReplication({
+          contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
+          action: 'fetch', ordinal, kaId: kaId.toString(), ual,
+        });
+        try {
+          await this.syncContextGraphFromConnectedPeers(localCgId, {
+            includeSharedMemory: true,
+            maxPeers: 1,
+            peerRotationKey: localCgId,
+          });
+        } catch (err) {
+          this.log.info(ctx, `Phase B: active fetch for "${localCgId}" (ordinal ${ordinal}) failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
+        if (outcome === 'no-swm') {
+          swmState = await this.collectVmReconcileSwmCandidateState(localCgId);
+        }
+      } else {
+        this.log.info(ctx, `Phase B: active fetch for "${localCgId}" (ordinal ${ordinal}) skipped by per-CG cooldown`);
       }
-      outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
     }
 
     switch (outcome) {
       case 'promoted':
+        this.vmReconcileNegativeCache.delete(ual);
         this.recentReconciledUals.add(ual);
         this.emitReplication({
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
@@ -2271,8 +2409,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'already', ordinal, kaId: kaId.toString(), ual,
         });
+        this.vmReconcileNegativeCache.delete(ual);
         return { status: 'already', blockNumber: versionBlock };
       case 'no-swm':
+        this.recordVmReconcileNegativeCache(
+          ual,
+          swmState ?? await this.collectVmReconcileSwmCandidateState(localCgId),
+        );
+        this.emitReplication({
+          contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
+          action: 'defer', ordinal, kaId: kaId.toString(), ual, detail: outcome,
+        });
+        return { status: 'pending' };
       case 'unverified':
       default:
         this.emitReplication({
