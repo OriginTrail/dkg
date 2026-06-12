@@ -135,6 +135,38 @@ describe('sync requester progress accounting', () => {
     expect(fetchSyncPages).toHaveBeenCalledWith(ctx, 'peer-a', 'next-cg', false, 'data', expect.any(String), expect.any(Number), undefined, undefined);
   });
 
+  it('counts multiple durable context-graph failures as one failed peer', async () => {
+    const fetchSyncPages = vi.fn(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => {
+      if (contextGraphId.startsWith('fail-')) throw new Error(`sync responder busy for ${contextGraphId}`);
+      return pageResult(contextGraphId, phase);
+    });
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['fail-one', 'fail-two', 'next-cg'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => durableProcessResult(),
+      storeInsert: async () => {},
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.failedPeers).toBe(1);
+    expect(summary.deniedPhases).toBe(0);
+    expect(fetchSyncPages).toHaveBeenCalledWith(ctx, 'peer-a', 'next-cg', false, 'data', expect.any(String), expect.any(Number), undefined, undefined);
+  });
+
   it('continues durable sync after a verification failure and closes the active phase', async () => {
     const phases: string[] = [];
     const fetchSyncPages = vi.fn(async (
@@ -335,6 +367,40 @@ describe('sync requester progress accounting', () => {
     expect(fetchSyncPages).toHaveBeenCalledWith(ctx, 'peer-a', 'open-swm', true, 'data', expect.any(String), expect.any(Number));
   });
 
+  it('counts multiple shared-memory context-graph failures as one failed peer', async () => {
+    const fetchSyncPages = vi.fn(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => {
+      if (contextGraphId.startsWith('fail-')) throw new Error(`sync responder busy for ${contextGraphId}`);
+      return pageResult(contextGraphId, phase);
+    });
+
+    const summary = await runSharedMemorySync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['fail-one', 'fail-two', 'open-swm'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processSharedMemoryBatch: async () => sharedMemoryProcessResult(),
+      ensureContextGraph: async () => {},
+      storeInsert: async () => {},
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      ensureOwnedMap: () => new Map(),
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.failedPeers).toBe(1);
+    expect(summary.deniedPhases).toBe(0);
+    expect(fetchSyncPages).toHaveBeenCalledWith(ctx, 'peer-a', 'open-swm', true, 'data', expect.any(String), expect.any(Number));
+  });
+
   it('does not count zero-offset empty shared-memory completions as progress', async () => {
     const summary = await runSharedMemorySync({
       ctx,
@@ -434,6 +500,7 @@ describe('sync requester progress accounting', () => {
     expect(summary.checkpointAdvances).toBe(1);
     expect(summary.insertedTriples).toBe(0);
     expect(setCheckpoint).toHaveBeenCalledWith('large-swm:snapshot:snapshot-ref', 500);
+    expect(deleteCheckpoint).not.toHaveBeenCalled();
     expect(storeInsert).not.toHaveBeenCalled();
     expect(ensureContextGraph).not.toHaveBeenCalled();
   });

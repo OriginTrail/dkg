@@ -129,6 +129,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     }
   };
 
+  let peerFailed = false;
   for (const [index, pid] of contextGraphIds.entries()) {
     let activePhase: 'fetch' | 'verify' | 'store' | undefined;
     const startPhase = (phase: 'fetch' | 'verify' | 'store') => {
@@ -217,9 +218,12 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         onAccessDenied?.(pid);
         summary.deniedPhases += 1;
       } else {
-        summary.failedPeers += 1;
+        peerFailed = true;
       }
     }
+  }
+  if (peerFailed) {
+    summary.failedPeers = 1;
   }
   if (summary.insertedTriples > 0) {
     logInfo(ctx, `Sync complete: ${summary.insertedTriples} verified triples from ${remotePeerId}`);

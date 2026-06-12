@@ -121,6 +121,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     }
   };
 
+  let peerFailed = false;
   for (const [index, pid] of contextGraphIds.entries()) {
     try {
       const wsGraph = contextGraphWorkspaceGraphUri(pid);
@@ -187,8 +188,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       summary.checkpointAdvances += snapshotSync.checkpointAdvances;
       const snapshotDurationMs = Date.now() - snapshotStartedAt;
       if (!snapshotSync.completed) {
-        recordPhaseOutcome(wsMetaResult);
-        recordPhaseOutcome(wsDataResult);
         continue;
       }
 
@@ -233,9 +232,12 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       if ((err as Error & { syncDenied?: boolean }).syncDenied) {
         summary.deniedPhases += 1;
       } else {
-        summary.failedPeers += 1;
+        peerFailed = true;
       }
     }
+  }
+  if (peerFailed) {
+    summary.failedPeers = 1;
   }
   if (summary.insertedTriples > 0) {
     logInfo(ctx, `SWM sync complete: ${summary.insertedTriples} triples from ${remotePeerId}`);
