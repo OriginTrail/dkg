@@ -115,13 +115,14 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
   });
 
   // ── #1124 — public CG cannot reach storage-ACK quorum ───────────────────
-  // Topology-specific: reproduces on the testnet where sharded host-mode cores
-  // are NOT members of the public CG and drop its plaintext SWM share (so the
-  // storage-ACK reads find NO_DATA_IN_SWM). On a 6-node local devnet every core
-  // IS a member, so the publish succeeds and the bug can't manifest — verified
-  // manually on testnet (daemon logs show `NO_DATA_IN_SWM`). Needs a host-mode
-  // sharded fixture (non-member storage cores) to repro deterministically.
-  it.skip('GH #1124: public CG publish reaches storage-ACK quorum (needs host-mode sharded cores)');
+  // The end-to-end multi-node repro needs a host-mode sharded topology
+  // (non-member storage cores); on a 6-node local devnet every core IS a CG
+  // member so the bug can't manifest. The ROOT CAUSE is reproduced in CI at the
+  // agent layer: packages/agent/test/issue-1124-host-mode-plaintext.test.ts
+  // asserts host-mode ingest drops a public-CG plaintext SWM share (the
+  // NO_DATA_IN_SWM source). Keep this devnet stub for the eventual sharded
+  // topology fixture.
+  it.skip('GH #1124: public CG publish reaches storage-ACK quorum (devnet variant; CI root-cause test in agent)');
 
   // ── #1097 — documented one-shot publish flow returns 500 ────────────────
   it('GH #1097: SKILL.md one-shot publish (create{quads} → publish{assertionName}) works', async () => {

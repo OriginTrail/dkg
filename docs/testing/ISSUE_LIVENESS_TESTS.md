@@ -44,6 +44,7 @@ for chain or network behaviour.
 | [#1091](https://github.com/OriginTrail/dkg/issues/1091) | `packages/random-sampling/test/e2e-hardhat-chain.test.ts` | CI integration (real Hardhat) |
 | [#1121](https://github.com/OriginTrail/dkg/issues/1121) | `packages/publisher/test/async-lift-canonicalization-and-encryption.test.ts` | CI unit |
 | [#1122](https://github.com/OriginTrail/dkg/issues/1122) | `packages/publisher/test/async-lift-canonicalization-and-encryption.test.ts` | CI unit |
+| [#1124](https://github.com/OriginTrail/dkg/issues/1124) | `packages/agent/test/issue-1124-host-mode-plaintext.test.ts` | CI unit |
 | [#886](https://github.com/OriginTrail/dkg/issues/886) | `devnet/issue-liveness/high-issues.test.ts` | devnet (multi-node) |
 | [#1093](https://github.com/OriginTrail/dkg/issues/1093) | `devnet/issue-liveness/high-issues.test.ts` | devnet (multi-node) |
 | [#1094](https://github.com/OriginTrail/dkg/issues/1094) | `devnet/issue-liveness/high-issues.test.ts` | devnet (multi-node) |
@@ -54,14 +55,13 @@ for chain or network behaviour.
 | [#1104](https://github.com/OriginTrail/dkg/issues/1104) | `devnet/issue-liveness/high-issues.test.ts` | devnet (multi-node) |
 | [#614](https://github.com/OriginTrail/dkg/issues/614) | `packages/evm-module/test/issue-liveness-contracts.test.ts` | pending fixture (`it.skip` + recipe) |
 | [#1099](https://github.com/OriginTrail/dkg/issues/1099) | `devnet/issue-liveness/high-issues.test.ts` | pending fixture (`it.skip` + recipe) |
-| [#1124](https://github.com/OriginTrail/dkg/issues/1124) | `devnet/issue-liveness/high-issues.test.ts` | pending fixture (`it.skip` + recipe) |
 | [#723](https://github.com/OriginTrail/dkg/issues/723) | `devnet/issue-liveness/high-issues.test.ts` | emergent metric (`it.skip` + recipe) |
 | [#999](https://github.com/OriginTrail/dkg/issues/999) | `devnet/issue-liveness/high-issues.test.ts` | load-dependent (`it.skip` + recipe) |
 | [#1008](https://github.com/OriginTrail/dkg/issues/1008) | `devnet/issue-liveness/high-issues.test.ts` | load-dependent (`it.skip` + recipe) |
 
 ### Why three tiers
 
-- **CI unit / integration (11):** single-process or single-Hardhat-node bugs,
+- **CI unit / integration (12):** single-process or single-Hardhat-node bugs,
   reproduced in the package test dirs. These run in the normal `turbo test` CI
   lanes (Tornado / Bura / Kosava) and are red today.
 - **Devnet multi-node (8):** publish → quorum → replication bugs that cannot be
@@ -69,15 +69,15 @@ for chain or network behaviour.
   (`./scripts/devnet.sh start 6` + bootstrap, `pnpm test:devnet:issue-liveness`),
   not the standard CI lanes. A `CONTROL` test proves SWM data actually
   replicated, so the repros can't pass for the wrong reason.
-- **Pending fixture / emergent (6):** issues whose faithful reproduction needs a
-  fixture, topology, or scale that doesn't exist yet (#614 billing-window math,
-  #1124 host-mode sharded cores, #1099 gossip-retention timing) — or that are
-  emergent / load-dependent and have **no** deterministic single-run assertion
-  (#723 is a 6-hour network-wide RS proof-rate metric; #999/#1008 are
-  store-saturation hangs that only appear under sustained load). For these a
-  fake green-able test would be a **false positive**, which is worse than an
-  honest `it.skip` carrying the exact repro recipe. Each was confirmed live on a
-  real node / testnet during the QA sweep; unskip when its fixture lands.
+- **Pending fixture / emergent (5):** issues whose faithful reproduction needs a
+  fixture or scale that doesn't exist yet (#614 billing-window math, #1099
+  gossip-retention timing) — or that are emergent / load-dependent and have **no**
+  deterministic single-run assertion (#723 is a 6-hour network-wide RS
+  proof-rate metric; #999/#1008 are store-saturation hangs that only appear under
+  sustained load). For these a fake green-able test would be a **false positive**,
+  which is worse than an honest `it.skip` carrying the exact repro recipe. Each
+  was confirmed live on a real node / testnet during the QA sweep; unskip when
+  its fixture lands.
 
 The 8 fix-in-flight highs (#886, #1093–#1098, #1104) are also fixed on PR #1107:
 when it merges their devnet repros start passing → they go green.
