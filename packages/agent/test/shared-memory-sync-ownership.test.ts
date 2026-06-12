@@ -161,6 +161,57 @@ describe('runSharedMemorySync ownership hydration', () => {
     }
   });
 
+  it('rejects replicated sub-graph SWM registrations excluded by local child-CG state', async () => {
+    const worker = new SyncVerifyWorker();
+    const inserted: Quad[] = [];
+    const dataQuads: Quad[] = [
+      { graph: SUB_GRAPH_SWM, subject: ROOT_ENTITY, predicate: 'http://schema.org/name', object: '"colliding-sub"' },
+    ];
+    const metaQuads: Quad[] = [
+      ...subGraphRegistrationMeta(SUB_GRAPH),
+      ...workspaceOperationMeta(SUB_GRAPH_META, 'urn:dkg:share:colliding-sub', ROOT_ENTITY, 'peer-colliding-sub'),
+    ];
+
+    try {
+      const summary = await runSharedMemorySync({
+        ctx: createOperationContext('sync'),
+        remotePeerId: '12D3KooWRequesterExcludedRegistration',
+        contextGraphIds: [CG_ID],
+        createContextGraphSyncDeadline: () => Date.now() + 30_000,
+        fetchSyncPages: async (_ctx, _peer, _cg, _includeSwm, phase) => (
+          phase === 'data' ? page(dataQuads, phase) : page(metaQuads, phase)
+        ),
+        processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames) =>
+          worker.processSharedMemoryBatch(
+            wsDataQuads,
+            wsMetaQuads,
+            contextGraphId,
+            registeredSubGraphNames,
+            excludedSubGraphNames,
+          ),
+        getRegisteredSubGraphNames: async () => [],
+        getExcludedSubGraphNames: async () => [SUB_GRAPH],
+        ensureContextGraph: async () => {},
+        storeInsert: async (quads) => {
+          inserted.push(...quads);
+        },
+        deleteCheckpoint: () => {},
+        setCheckpoint: () => {},
+        ensureOwnedMap: () => new Map<string, string>(),
+        logInfo: () => {},
+        logWarn: () => {},
+        logDebug: () => {},
+      });
+
+      expect(summary.failedPeers).toBe(0);
+      expect(summary.droppedDataTriples).toBe(1);
+      expect(summary.insertedDataTriples).toBe(0);
+      expect(inserted.some((quad) => quad.graph === SUB_GRAPH_SWM)).toBe(false);
+    } finally {
+      await worker.close();
+    }
+  });
+
   it('accepts descendant SWM data graphs verified by their bucket meta graph', async () => {
     const worker = new SyncVerifyWorker();
     const ownedMaps = new Map<string, Map<string, string>>();

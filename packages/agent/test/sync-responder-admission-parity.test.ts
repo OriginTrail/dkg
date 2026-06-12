@@ -149,6 +149,7 @@ describe('sync responder graph admission planner', () => {
     const cgId = 'planner-reserved-child-cg';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
     const parentPartition = `${cgPrefix}/context/1`;
+    const parentAssertion = `${cgPrefix}/assertion/0xabc/final`;
     const reservedNameChildId = `${cgId}/context`;
     const reservedNameChildPrefix = `did:dkg:context-graph:${reservedNameChildId}`;
     const reservedNameChildMeta = `${reservedNameChildPrefix}/_meta`;
@@ -165,6 +166,9 @@ describe('sync responder graph admission planner', () => {
 
     await store.insert([
       q(parentPartition, 'urn:parent:partition', 'http://schema.org/name', '"parent-context-partition"'),
+      q(parentAssertion, 'urn:parent:assertion', 'http://schema.org/name', '"parent-assertion"'),
+      q(`${cgPrefix}/_meta`, 'urn:lifecycle:reserved-vm', `${DKG_NS}memoryLayer`, `"${MemoryLayer.VerifiableMemory}"`),
+      q(`${cgPrefix}/_meta`, 'urn:lifecycle:reserved-vm', `${DKG_NS}assertionGraph`, parentAssertion),
       q(reservedNameChildMeta, reservedNameChildPrefix, RDF_TYPE, DKG_CONTEXT_GRAPH),
       q(reservedNameChildPrefix, 'urn:reserved-child:data', 'http://schema.org/name', '"reserved-child-leak"'),
       q(reservedNameChildSwm, 'urn:reserved-child:swm', 'http://schema.org/name', '"reserved-child-swm-leak"'),
@@ -185,7 +189,9 @@ describe('sync responder graph admission planner', () => {
     });
 
     expect(lineGraphsFromNquads(out).has(parentPartition)).toBe(true);
+    expect(lineGraphsFromNquads(out).has(parentAssertion)).toBe(true);
     expect(out).toContain('"parent-context-partition"');
+    expect(out).toContain('"parent-assertion"');
     expect(out).not.toContain('"reserved-child-leak"');
     expect(out).not.toContain('"reserved-child-swm-leak"');
     expect(out).not.toContain('"assertion-child-partition-leak"');
@@ -333,6 +339,7 @@ describe('sync responder graph admission planner', () => {
     expect(metaGraphs.has(childSwmMeta)).toBe(false);
     expect(metaOut).toContain(`${DKG_NS}SubGraph`);
     expect(metaOut).toContain(`did:dkg:context-graph:${cgId}/registered`);
+    expect(metaOut).not.toContain(`did:dkg:context-graph:${cgId}/child`);
   });
 
   it('does not serve stale SWM rows from a previous request after same-graph writes', async () => {

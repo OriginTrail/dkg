@@ -36,9 +36,15 @@ parentPort!.on('message', async (message: { id: number; method: string; args: un
       return;
     }
     if (message.method === 'processSharedMemoryBatch') {
-      const [wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames] =
-        message.args as [Quad[], Quad[], string, readonly string[] | undefined];
-      const result = processSharedMemoryBatch(wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames);
+      const [wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames] =
+        message.args as [Quad[], Quad[], string, readonly string[] | undefined, readonly string[] | undefined];
+      const result = processSharedMemoryBatch(
+        wsDataQuads,
+        wsMetaQuads,
+        contextGraphId,
+        registeredSubGraphNames,
+        excludedSubGraphNames,
+      );
       parentPort!.postMessage({ id: message.id, result });
       return;
     }
@@ -209,6 +215,7 @@ function processSharedMemory(
   wsMetaQuads: Quad[],
   contextGraphId?: string,
   registeredSubGraphNames?: readonly string[],
+  excludedSubGraphNames?: readonly string[],
 ): SharedMemoryProcessResult {
   const DKG_ROOT_ENTITY = 'http://dkg.io/ontology/rootEntity';
   const DKG_WORKSPACE_OP = 'http://dkg.io/ontology/WorkspaceOperation';
@@ -224,7 +231,7 @@ function processSharedMemory(
   const META_SUFFIX = '_meta';
   const effectiveRegisteredSubGraphNames = contextGraphId === undefined
     ? registeredSubGraphNames
-    : combineRegisteredSubGraphNames(contextGraphId, registeredSubGraphNames, wsMetaQuads);
+    : combineRegisteredSubGraphNames(contextGraphId, registeredSubGraphNames, excludedSubGraphNames, wsMetaQuads);
 
   // Codex review on #885 — keep validity scoped per (meta graph, op
   // subject). Pre-fix the Sets were global, so an op subject that
@@ -375,13 +382,16 @@ function allowedRootsForSwmDataGraph(
 function combineRegisteredSubGraphNames(
   contextGraphId: string,
   localNames: readonly string[] | undefined,
+  excludedNames: readonly string[] | undefined,
   wsMetaQuads: readonly Quad[],
 ): string[] {
   const out = new Set<string>();
+  const excluded = new Set((excludedNames ?? []).filter((name) => validateSubGraphName(name).valid));
   for (const name of localNames ?? []) {
-    if (validateSubGraphName(name).valid) out.add(name);
+    if (validateSubGraphName(name).valid && !excluded.has(name)) out.add(name);
   }
   for (const name of replicatedRegisteredSubGraphNames(contextGraphId, wsMetaQuads)) {
+    if (excluded.has(name)) continue;
     out.add(name);
   }
   return [...out];
@@ -496,6 +506,7 @@ function processSharedMemoryBatch(
   wsMetaQuads: Quad[],
   contextGraphId?: string,
   registeredSubGraphNames?: readonly string[],
+  excludedSubGraphNames?: readonly string[],
 ): SharedMemoryBatchProcessResult {
   const totalFetchedDataQuads = wsDataQuads.length;
   const totalFetchedMetaQuads = wsMetaQuads.length;
@@ -511,7 +522,13 @@ function processSharedMemoryBatch(
     };
   }
 
-  const processed = processSharedMemory(wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames);
+  const processed = processSharedMemory(
+    wsDataQuads,
+    wsMetaQuads,
+    contextGraphId,
+    registeredSubGraphNames,
+    excludedSubGraphNames,
+  );
   return {
     verifiedData: processed.validQuads,
     verifiedMeta: wsMetaQuads,

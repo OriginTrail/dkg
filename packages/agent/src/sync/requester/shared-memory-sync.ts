@@ -36,7 +36,13 @@ interface SharedMemorySyncContext {
     deadline: number,
     snapshotRef?: string,
   ) => Promise<SyncPageResult>;
-  processSharedMemoryBatch: (wsDataQuads: Quad[], wsMetaQuads: Quad[], contextGraphId: string, registeredSubGraphNames?: readonly string[]) => Promise<{
+  processSharedMemoryBatch: (
+    wsDataQuads: Quad[],
+    wsMetaQuads: Quad[],
+    contextGraphId: string,
+    registeredSubGraphNames?: readonly string[],
+    excludedSubGraphNames?: readonly string[],
+  ) => Promise<{
     verifiedData: Quad[];
     verifiedMeta: Quad[];
     totalFetchedDataQuads: number;
@@ -49,6 +55,7 @@ interface SharedMemorySyncContext {
   storeInsert: (quads: Quad[]) => Promise<void>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
+  getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
   ensureOwnedMap: (ownershipKey: string) => Map<string, string>;
@@ -69,6 +76,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     storeInsert,
     publicSnapshotStore,
     getRegisteredSubGraphNames,
+    getExcludedSubGraphNames,
     deleteCheckpoint,
     setCheckpoint,
     ensureOwnedMap,
@@ -108,7 +116,16 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const registeredSubGraphNames = getRegisteredSubGraphNames
         ? await getRegisteredSubGraphNames(pid)
         : undefined;
-      const processed = await processSharedMemoryBatch(wsDataResult.quads, wsMetaResult.quads, pid, registeredSubGraphNames);
+      const excludedSubGraphNames = getExcludedSubGraphNames
+        ? await getExcludedSubGraphNames(pid)
+        : undefined;
+      const processed = await processSharedMemoryBatch(
+        wsDataResult.quads,
+        wsMetaResult.quads,
+        pid,
+        registeredSubGraphNames,
+        excludedSubGraphNames,
+      );
       const verifyDurationMs = Date.now() - verifyStartedAt;
       logInfo(ctx, `  shared memory: ${processed.totalFetchedDataQuads} data + ${processed.totalFetchedMetaQuads} meta triples fetched`);
       summary.bytesReceived += wsMetaResult.bytesReceived + wsDataResult.bytesReceived;

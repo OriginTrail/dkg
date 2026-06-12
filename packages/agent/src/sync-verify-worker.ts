@@ -204,11 +204,16 @@ export class SyncVerifyWorker {
     wsMetaQuads: Quad[],
     contextGraphId: string,
     registeredSubGraphNames?: readonly string[],
+    excludedSubGraphNames?: readonly string[],
   ): Promise<SharedMemoryBatchProcessResult> {
     const id = this.nextId++;
     return new Promise<SharedMemoryBatchProcessResult>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, method: 'processSharedMemoryBatch', args: [wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames] });
+      this.worker.postMessage({
+        id,
+        method: 'processSharedMemoryBatch',
+        args: [wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames],
+      });
     });
   }
 

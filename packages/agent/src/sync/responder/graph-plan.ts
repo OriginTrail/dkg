@@ -90,10 +90,14 @@ export async function readSwmMetaPage(params: {
   const graphSet = new Set(params.graphList);
   const candidateGraphs = graphs.filter((graph) => graphSet.has(graph));
   const registrationGraph = contextGraphMetaGraphUri(params.contextGraphId);
+  const registrationNames = candidateGraphs
+    .map((graph) => subGraphNameFromSwmMetaGraph(params.contextGraphId, graph))
+    .filter((name): name is string => name !== undefined);
   return readSwmMetaRowsPage(
     params.store,
     candidateGraphs,
-    graphSet.has(registrationGraph) ? registrationGraph : null,
+    graphSet.has(registrationGraph) && registrationNames.length > 0 ? registrationGraph : null,
+    registrationNames,
     params.cutoffIso,
     params.offset,
     params.limit,
@@ -315,7 +319,7 @@ async function isDescendantOfKnownChildContextGraph(
   }
   const remainder = graph.slice(cgPrefix.length + 1);
   const segments = remainder.split('/').filter(Boolean);
-  if (isDurableContextPartitionGraphSegments(segments)) return false;
+  if (isParentOwnedReservedGraphSegments(segments)) return false;
   let childUri = cgPrefix;
   for (const segment of segments) {
     childUri = `${childUri}/${segment}`;
@@ -324,11 +328,25 @@ async function isDescendantOfKnownChildContextGraph(
   return false;
 }
 
+function isParentOwnedReservedGraphSegments(segments: readonly string[]): boolean {
+  return isDurableContextPartitionGraphSegments(segments) || isAssertionGraphSegments(segments);
+}
+
 function isDurableContextPartitionGraphSegments(segments: readonly string[]): boolean {
-  if (segments[0] !== 'context') return false;
-  if (segments.length === 2) return /^[0-9]+$/.test(segments[1]);
-  if (segments.length === 3) return /^[0-9]+$/.test(segments[1]) && segments[2] === '_meta';
-  return false;
+  return segments[0] === 'context' && (
+    (segments.length === 2 && /^[0-9]+$/.test(segments[1])) ||
+    (segments.length === 3 && /^[0-9]+$/.test(segments[1]) && segments[2] === '_meta')
+  );
+}
+
+function isAssertionGraphSegments(segments: readonly string[]): boolean {
+  return (
+    segments.length === 3 &&
+    segments[0] === 'assertion' &&
+    segments[1].startsWith('0x') &&
+    segments[1].length > 2 &&
+    segments[2].length > 0
+  );
 }
 
 async function readAdmittedAssertionGraphs(
@@ -413,6 +431,7 @@ async function readSwmMetaRowsPage(
   store: TripleStore,
   swmMetaGraphs: readonly string[],
   registrationGraph: string | null,
+  registrationNames: readonly string[],
   cutoffIso: string | null,
   offset: number,
   limit: number,
@@ -439,6 +458,7 @@ async function readSwmMetaRowsPage(
     ? `
       {
         GRAPH <${assertSafeIri(registrationGraph)}> {
+          VALUES ?subGraphName { ${registrationNames.map(sparqlString).join(' ')} }
           ?s <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_SUB_GRAPH}> ;
              <${SCHEMA_NAME}> ?subGraphName ;
              ?p ?o .
@@ -655,6 +675,16 @@ function durableDeltaGroupClause(
 
 function graphValues(graphs: readonly string[]): string {
   return dedupeStrings(graphs).map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
+}
+
+function subGraphNameFromSwmMetaGraph(contextGraphId: string, graph: string): string | undefined {
+  const rootGraph = `${contextGraphDataGraphUri(contextGraphId)}/_shared_memory_meta`;
+  if (graph === rootGraph) return undefined;
+  const prefix = `${contextGraphDataGraphUri(contextGraphId)}/`;
+  const suffix = '/_shared_memory_meta';
+  if (!graph.startsWith(prefix) || !graph.endsWith(suffix)) return undefined;
+  const name = graph.slice(prefix.length, -suffix.length);
+  return validateSubGraphName(name).valid ? name : undefined;
 }
 
 function isSharedMemoryBucketDescendantDataGraph(graph: string, bucketGraph: string): boolean {
