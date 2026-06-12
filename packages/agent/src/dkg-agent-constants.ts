@@ -95,7 +95,6 @@ export const DEBUG_SYNC_PROGRESS = process.env.DKG_DEBUG_SYNC_PROGRESS === '1';
 export const DEFAULT_SWM_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 export const SWM_CLEANUP_INTERVAL_MS = 15 * 60 * 1000; // run cleanup every 15 minutes
 export const SYNC_DENIED_RESPONSE = '__DKG_SYNC_DENIED__';
-export const SYNC_BUSY_RESPONSE = '__DKG_SYNC_BUSY__';
 
 // ── Gossip reconnect ──────────────────────────────────────────────────
 /**

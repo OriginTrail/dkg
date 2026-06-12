@@ -1,7 +1,6 @@
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { sendSyncRequest } from '../../p2p/sync-transport.js';
-import { SYNC_BUSY_RESPONSE } from '../../dkg-agent-constants.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from '../checkpoint/state.js';
 import {
@@ -128,10 +127,13 @@ function decodeSyncResponse(responseBytes: Uint8Array): string {
   return new TextDecoder().decode(responseBytes).trim();
 }
 
-function makeSyncBusyError(remotePeerId: string, contextGraphId: string, phase: SyncPhase): Error & { syncBusy: true } {
-  const error = new Error(`Sync responder busy at ${remotePeerId} for "${contextGraphId}" (${phase})`) as Error & { syncBusy: true };
-  error.syncBusy = true;
-  return error;
+// Compatibility-only: current responders must not emit this body on the
+// unchanged sync protocol, but requesters may still meet A2 pre-fix peers
+// during local/integration rolling tests. Treat it as retryable, not EOF.
+const LEGACY_SYNC_BUSY_RESPONSE = '__DKG_SYNC_BUSY__';
+
+function makeLegacySyncBusyError(remotePeerId: string, contextGraphId: string, phase: SyncPhase): Error {
+  return new Error(`Legacy sync responder busy at ${remotePeerId} for "${contextGraphId}" (${phase})`);
 }
 
 export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<SyncPageResult> {
@@ -219,8 +221,8 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         requestFactory: () => buildSyncRequest(contextGraphId, curOffset, syncPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId),
         send,
         validateResponse: (responseBytes) => {
-          if (decodeSyncResponse(responseBytes) === SYNC_BUSY_RESPONSE) {
-            throw makeSyncBusyError(remotePeerId, contextGraphId, phase);
+          if (decodeSyncResponse(responseBytes) === LEGACY_SYNC_BUSY_RESPONSE) {
+            throw makeLegacySyncBusyError(remotePeerId, contextGraphId, phase);
           }
         },
         onRetry: (attempt, delay, err) => {

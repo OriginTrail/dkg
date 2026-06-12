@@ -273,7 +273,7 @@ export class ProtocolRouter {
     logicalProtocolId: string,
     pool: MessageStreamPool,
   ): void {
-    pool.registerHandler(async (requestData, peerId) => {
+    pool.registerHandler(async (requestData, peerId, options) => {
       const handler = this.handlers.get(logicalProtocolId);
       if (!handler) {
         throw new Error(`no application handler for ${logicalProtocolId}`);
@@ -304,7 +304,8 @@ export class ProtocolRouter {
           throw new Error('peerId.toBytes not available on pooled handler');
         },
       };
-      return handler(requestData, wrappedPeerId);
+      const handlerSignal = composeAbortSignals(options?.signal, this.node.stopSignal);
+      return handler(requestData, wrappedPeerId, { signal: handlerSignal });
     });
   }
 

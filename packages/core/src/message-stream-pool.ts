@@ -127,6 +127,7 @@ export interface PoolNode {
 export type PooledStreamHandler = (
   requestData: Uint8Array,
   peerId: unknown,
+  options?: { signal?: AbortSignal },
 ) => Promise<Uint8Array>;
 
 export interface MessageStreamPoolOptions {
@@ -924,6 +925,18 @@ export class MessageStreamPool {
     // it). The finally now guarantees the local side is released
     // on every exit path.
     let cleanEof = true;
+    const streamController = new AbortController();
+    const abortInboundSignal = (reason: unknown) => {
+      if (!streamController.signal.aborted) {
+        streamController.abort(reason);
+      }
+    };
+    const onStreamClose = () => abortInboundSignal(new Error('pooled inbound stream closed by peer'));
+    const eventedStream = stream as Stream & {
+      addEventListener?: (type: 'close', listener: EventListener, options?: { once?: boolean }) => void;
+      removeEventListener?: (type: 'close', listener: EventListener) => void;
+    };
+    eventedStream.addEventListener?.('close', onStreamClose as EventListener, { once: true });
     try {
       for await (const frame of decodeFrames(
         stream as unknown as AsyncIterable<Uint8Array>,
@@ -951,8 +964,19 @@ export class MessageStreamPool {
         // whole pooled stream down and affect other in-flight
         // requests on this same peer).
         let response: Uint8Array;
+        const requestController = new AbortController();
+        const forwardStreamAbort = () => {
+          if (!requestController.signal.aborted) {
+            requestController.abort(streamController.signal.reason);
+          }
+        };
+        if (streamController.signal.aborted) {
+          forwardStreamAbort();
+        } else {
+          streamController.signal.addEventListener('abort', forwardStreamAbort, { once: true });
+        }
         try {
-          response = await handler(frame.payload, remotePeer);
+          response = await handler(frame.payload, remotePeer, { signal: requestController.signal });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           try {
@@ -962,6 +986,8 @@ export class MessageStreamPool {
             return;
           }
           continue;
+        } finally {
+          streamController.signal.removeEventListener('abort', forwardStreamAbort);
         }
         try {
           stream.send(encodeFrame(FrameType.RESPONSE, response));
@@ -972,6 +998,7 @@ export class MessageStreamPool {
       }
     } catch (err) {
       cleanEof = false;
+      abortInboundSignal(err instanceof Error ? err : new Error('pooled inbound reader error'));
       // Reader-side decode error or transport error — abort and let
       // the dialer reconnect.
       try {
@@ -980,6 +1007,8 @@ export class MessageStreamPool {
         // already torn down
       }
     } finally {
+      eventedStream.removeEventListener?.('close', onStreamClose as EventListener);
+      abortInboundSignal(new Error(cleanEof ? 'pooled inbound stream ended' : 'pooled inbound stream aborted'));
       // Clean EOF: remote half-closed gracefully. Close our local
       // write side too so the substream releases cleanly. Without
       // this, the local half stays open until the underlying

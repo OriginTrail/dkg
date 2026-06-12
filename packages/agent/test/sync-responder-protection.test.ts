@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { QueryOptions, QueryResult, TripleStore } from '@origintrail-official/dkg-storage';
-import { SYNC_BUSY_RESPONSE } from '../src/dkg-agent-constants.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 
 const REMOTE_A = '12D3KooWResponderCapPeerA';
@@ -129,7 +128,7 @@ describe('sync responder protection', () => {
     await Promise.all(requests);
   });
 
-  it('returns an explicit busy sentinel for requests beyond the per-peer responder queue', async () => {
+  it('rejects requests beyond the per-peer responder queue as transport failures', async () => {
     const releases: Array<() => void> = [];
     const store = {
       query: async () => {
@@ -147,7 +146,7 @@ describe('sync responder protection', () => {
     for (let i = 0; i < 5; i++) {
       requests.push(cap.invoke(envelope, REMOTE_A).finally(() => { completed += 1; }));
     }
-    await expect(cap.invoke(envelope, REMOTE_A).then((bytes) => new TextDecoder().decode(bytes))).resolves.toBe(SYNC_BUSY_RESPONSE);
+    await expect(cap.invoke(envelope, REMOTE_A)).rejects.toThrow(/sync responder peer queue full/);
 
     while (releases.length < 1) await new Promise((resolve) => setTimeout(resolve, 0));
     while (completed < requests.length) {
@@ -176,7 +175,7 @@ describe('sync responder protection', () => {
     for (let i = 0; i < 5; i++) {
       noisyRequests.push(cap.invoke(envelope, REMOTE_A).finally(() => { noisyCompleted += 1; }));
     }
-    await expect(cap.invoke(envelope, REMOTE_A).then((bytes) => new TextDecoder().decode(bytes))).resolves.toBe(SYNC_BUSY_RESPONSE);
+    await expect(cap.invoke(envelope, REMOTE_A)).rejects.toThrow(/sync responder peer queue full/);
 
     const otherPeer = cap.invoke(envelope, REMOTE_B);
     while (releases.length < 2) await new Promise((resolve) => setTimeout(resolve, 0));
