@@ -2377,12 +2377,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
     cacheKey: string,
     state: { swmGen: string; candidateNamespaces: VmReconcileSwmNamespace[]; peerTopologyKey: string },
   ): void {
+    this.pruneVmReconcileState();
     const previous = this.vmReconcileNegativeCache.get(cacheKey);
     const failures = (previous?.failures ?? 0) + 1;
     const backoff = Math.min(
       DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
       DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS * 2 ** Math.max(0, failures - 1),
     );
+    if (previous) this.vmReconcileNegativeCache.delete(cacheKey);
     this.vmReconcileNegativeCache.set(cacheKey, {
       failures,
       nextRetryAt: Date.now() + backoff,
@@ -2390,16 +2392,56 @@ export class SwmHostModeMethods extends DKGAgentBase {
       candidateNamespaces: state.candidateNamespaces,
       peerTopologyKey: state.peerTopologyKey,
     });
+    this.pruneVmReconcileState();
   }
 
   shouldRunVmReconcileActiveFetch(this: DKGAgent, localCgId: string): boolean {
     const now = Date.now();
+    this.pruneVmReconcileState(now);
     const lastFetchAt = this.vmReconcileFetchCooldownAt.get(localCgId);
     if (lastFetchAt !== undefined && now - lastFetchAt < DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS) {
       return false;
     }
+    if (lastFetchAt !== undefined) this.vmReconcileFetchCooldownAt.delete(localCgId);
     this.vmReconcileFetchCooldownAt.set(localCgId, now);
     return true;
+  }
+
+  pruneVmReconcileState(this: DKGAgent, now = Date.now()): void {
+    for (const [key, entry] of this.vmReconcileNegativeCache) {
+      if (now >= entry.nextRetryAt) {
+        this.vmReconcileNegativeCache.delete(key);
+      }
+    }
+    while (this.vmReconcileNegativeCache.size > DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES) {
+      const oldestKey = this.vmReconcileNegativeCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.vmReconcileNegativeCache.delete(oldestKey);
+    }
+
+    for (const [localCgId, lastFetchAt] of this.vmReconcileFetchCooldownAt) {
+      if (now - lastFetchAt >= DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS) {
+        this.vmReconcileFetchCooldownAt.delete(localCgId);
+      }
+    }
+    while (this.vmReconcileFetchCooldownAt.size > DKGAgentBase.VM_RECONCILE_CG_STATE_MAX_ENTRIES) {
+      const oldestKey = this.vmReconcileFetchCooldownAt.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.vmReconcileFetchCooldownAt.delete(oldestKey);
+    }
+
+    while (this.vmReconcileCatchupPeerCursor.size > DKGAgentBase.VM_RECONCILE_CG_STATE_MAX_ENTRIES) {
+      const oldestKey = this.vmReconcileCatchupPeerCursor.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.vmReconcileCatchupPeerCursor.delete(oldestKey);
+    }
+  }
+
+  clearVmReconcileStateForContextGraph(this: DKGAgent, localCgId: string): void {
+    const sub = this.subscribedContextGraphs.get(localCgId);
+    if (sub?.subscribed || sub?.coreHosted) return;
+    this.vmReconcileFetchCooldownAt.delete(localCgId);
+    this.vmReconcileCatchupPeerCursor.delete(localCgId);
   }
 
   vmReconcileCacheKey(this: DKGAgent, ual: string, merkleRoot: Uint8Array): string {
@@ -2460,6 +2502,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
   ): Promise<OrdinalOutcome> {
     const ctx = createOperationContext('system');
     const versionBlock = headBlock ?? 0;
+    this.pruneVmReconcileState();
 
     let kaId: bigint;
     let merkleRoot: Uint8Array;
@@ -2475,7 +2518,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
       ual = buildKnowledgeAssetUal(this.chain.chainId, storageAddr, kaId);
       merkleRoot = await this.chain.getLatestMerkleRoot!(kaId);
       cacheKey = this.vmReconcileCacheKey(ual, merkleRoot);
-      this.pruneVmReconcileCacheKeySiblings(cacheKey);
 
       // Recently reconciled (live-burst guard): treat as already-done so the
       // cursor advances without redoing chain reads + an SWM scan.
@@ -2559,6 +2601,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     switch (outcome) {
       case 'promoted':
+        this.pruneVmReconcileCacheKeySiblings(cacheKey);
         this.vmReconcileNegativeCache.delete(cacheKey);
         this.recentReconciledUals.add(cacheKey);
         this.emitReplication({
@@ -2567,8 +2610,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
         });
         return { status: 'reconciled', blockNumber: versionBlock };
       case 'already-confirmed':
+        this.pruneVmReconcileCacheKeySiblings(cacheKey);
+        this.recentReconciledUals.add(cacheKey);
+        this.emitReplication({
+          contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
+          action: 'already', ordinal, kaId: kaId.toString(), ual,
+        });
+        this.vmReconcileNegativeCache.delete(cacheKey);
+        return { status: 'already', blockNumber: versionBlock };
       case 'stale-target':
-        // Already in VM (or a newer update is) — done for cursor purposes.
+        // A newer root won; do not prune its cache/recent state.
         this.recentReconciledUals.add(cacheKey);
         this.emitReplication({
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),

@@ -459,9 +459,9 @@ describe('Phase D - VM reconcile damping', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(expensiveScans).toBeGreaterThan(0);
     const cacheKeys = Array.from(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).keys());
-    expect(cacheKeys).toHaveLength(1);
-    expect(cacheKeys[0]).toContain('22'.repeat(32));
-    expect(cacheKeys[0]).not.toContain('11'.repeat(32));
+    expect(cacheKeys).toHaveLength(2);
+    expect(cacheKeys.some((key) => key.includes('11'.repeat(32)))).toBe(true);
+    expect(cacheKeys.some((key) => key.includes('22'.repeat(32)))).toBe(true);
   });
 
   it('invalidates a negative cache entry when SWM data arrives without operation-meta changes', async () => {
@@ -738,6 +738,97 @@ describe('Phase D - VM reconcile damping', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
     expect(((internals as any).vmReconcileFetchCooldownAt as Map<string, unknown>).has('51')).toBe(false);
+  });
+
+  it('does not prune newer root cache state when a stale root is replayed', async () => {
+    const internals = await boot();
+    const onChainCgId = 55n;
+    const kaId = 9015n;
+    const staleRoot = new Uint8Array(32);
+    const freshRoot = new Uint8Array(32);
+    staleRoot[31] = 1;
+    freshRoot[31] = 2;
+    registerUnmatchedKC(internals.chain, kaId, onChainCgId, bytesToHex(staleRoot));
+
+    const storageAddr = await internals.chain.getDKGKnowledgeAssetsAddress();
+    const ual = buildKnowledgeAssetUal(internals.chain.chainId, storageAddr, kaId);
+    const staleKey = (internals as any).vmReconcileCacheKey(ual, staleRoot);
+    const freshKey = (internals as any).vmReconcileCacheKey(ual, freshRoot);
+    ((internals as any).recentReconciledUals as { add(key: string): void }).add(freshKey);
+    ((internals as any).vmReconcileNegativeCache as Map<string, unknown>).set(freshKey, {
+      failures: 1,
+      nextRetryAt: Date.now() + 60_000,
+      swmGen: 'empty:0',
+      candidateNamespaces: [],
+      peerTopologyKey: '',
+    });
+    vi.spyOn(internals as any, 'getOrCreateFinalizationHandler').mockReturnValue({
+      handleChainReconciledKC: vi.fn().mockResolvedValue('stale-target'),
+    });
+
+    await expect(internals.reconcileChainOrdinal('55', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'already', blockNumber: 0 });
+
+    expect(((internals as any).recentReconciledUals as { has(key: string): boolean }).has(freshKey)).toBe(true);
+    expect(((internals as any).recentReconciledUals as { has(key: string): boolean }).has(staleKey)).toBe(true);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).has(freshKey)).toBe(true);
+  });
+
+  it('prunes expired and oversized VM reconcile state and clears non-hosted CG state on unsubscribe', async () => {
+    const internals = await boot();
+    const negativeCache = (internals as any).vmReconcileNegativeCache as Map<string, {
+      failures: number;
+      nextRetryAt: number;
+      swmGen: string;
+      candidateNamespaces: unknown[];
+      peerTopologyKey: string;
+    }>;
+    const fetchCooldown = (internals as any).vmReconcileFetchCooldownAt as Map<string, number>;
+    const peerCursor = (internals as any).vmReconcileCatchupPeerCursor as Map<string, number>;
+    const now = Date.now();
+
+    negativeCache.set('expired', {
+      failures: 1,
+      nextRetryAt: now - 1,
+      swmGen: 'empty:0',
+      candidateNamespaces: [],
+      peerTopologyKey: '',
+    });
+    for (let i = 0; i < DKGAgent.VM_RECONCILE_CACHE_MAX_ENTRIES + 2; i += 1) {
+      negativeCache.set(`future-${i}`, {
+        failures: 1,
+        nextRetryAt: now + 60_000,
+        swmGen: 'empty:0',
+        candidateNamespaces: [],
+        peerTopologyKey: '',
+      });
+    }
+    fetchCooldown.set('expired-cg', now - DKGAgent.VM_RECONCILE_SWEEP_INTERVAL_MS - 1);
+    for (let i = 0; i < DKGAgent.VM_RECONCILE_CG_STATE_MAX_ENTRIES + 2; i += 1) {
+      fetchCooldown.set(`fetch-${i}`, now);
+      peerCursor.set(`cursor-${i}`, i);
+    }
+
+    (internals as any).pruneVmReconcileState(now);
+
+    expect(negativeCache.has('expired')).toBe(false);
+    expect(negativeCache.size).toBeLessThanOrEqual(DKGAgent.VM_RECONCILE_CACHE_MAX_ENTRIES);
+    expect(fetchCooldown.has('expired-cg')).toBe(false);
+    expect(fetchCooldown.size).toBeLessThanOrEqual(DKGAgent.VM_RECONCILE_CG_STATE_MAX_ENTRIES);
+    expect(peerCursor.size).toBeLessThanOrEqual(DKGAgent.VM_RECONCILE_CG_STATE_MAX_ENTRIES);
+
+    internals.subscribedContextGraphs.set('cleanup-cg', { subscribed: true });
+    fetchCooldown.set('cleanup-cg', now);
+    peerCursor.set('cleanup-cg', 7);
+    (agent as any).unsubscribeFromContextGraph('cleanup-cg');
+    expect(fetchCooldown.has('cleanup-cg')).toBe(false);
+    expect(peerCursor.has('cleanup-cg')).toBe(false);
+
+    internals.subscribedContextGraphs.set('hosted-cg', { subscribed: true, coreHosted: true });
+    fetchCooldown.set('hosted-cg', now);
+    peerCursor.set('hosted-cg', 3);
+    (agent as any).unsubscribeFromContextGraph('hosted-cg');
+    expect(fetchCooldown.has('hosted-cg')).toBe(true);
+    expect(peerCursor.has('hosted-cg')).toBe(true);
   });
 });
 

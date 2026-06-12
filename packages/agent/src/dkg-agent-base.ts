@@ -673,6 +673,10 @@ export class DKGAgentBase {
     Math.max(5_000, DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS);
   static readonly VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS =
     Number(process.env['DKG_VM_RECONCILE_BACKOFF_MAX_MS']) || 10 * 60_000;
+  static readonly VM_RECONCILE_CACHE_MAX_ENTRIES =
+    Math.max(1, Number(process.env['DKG_VM_RECONCILE_CACHE_MAX_ENTRIES']) || 1_000);
+  static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES =
+    Math.max(1, Number(process.env['DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES']) || 1_000);
   /**
    * Blocks a completed ordinal must be buried by before its watermark advance
    * commits (reorg gate). The data is promoted to VM eagerly; only the cursor

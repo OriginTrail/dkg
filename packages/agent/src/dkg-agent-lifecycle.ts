@@ -3056,6 +3056,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     const rotationKey = options?.peerRotationKey;
     if (rotationKey) {
+      this.pruneVmReconcileState();
       const orderedPeerSignature = JSON.stringify(peers.map((peer) => peer.toString()));
       let signatures = catchupPeerOrderSignatures.get(this);
       if (!signatures) {
@@ -3063,6 +3064,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         catchupPeerOrderSignatures.set(this, signatures);
       }
       if (signatures.get(rotationKey) !== orderedPeerSignature) {
+        this.vmReconcileCatchupPeerCursor.delete(rotationKey);
         this.vmReconcileCatchupPeerCursor.set(rotationKey, 0);
         signatures.set(rotationKey, orderedPeerSignature);
       }
@@ -3075,6 +3077,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let start = 0;
     if (rotationKey) {
       start = (this.vmReconcileCatchupPeerCursor.get(rotationKey) ?? 0) % peers.length;
+      this.vmReconcileCatchupPeerCursor.delete(rotationKey);
       this.vmReconcileCatchupPeerCursor.set(rotationKey, (start + maxPeers) % peers.length);
     }
 
@@ -3484,6 +3487,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options?: { persist?: boolean },
   ): ContextGraphSub {
     this.subscribedContextGraphs.set(contextGraphId, next);
+    if (!next.subscribed && !next.coreHosted) {
+      this.clearVmReconcileStateForContextGraph(contextGraphId);
+    }
     if (options?.persist !== false) {
       this.persistContextGraphSubscription(contextGraphId);
       if (next.subscribed) {
