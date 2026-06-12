@@ -265,6 +265,77 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     });
 
 
+    it('keeps inline catchup denied when peers only serve metadata', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupDeniedWithMetadataOnly',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const remotePeer = { toString: () => 'peer-meta-only' };
+        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+          { remotePeer } as any,
+        ]);
+        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+
+        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockResolvedValue({
+          insertedTriples: 1,
+          fetchedMetaTriples: 1,
+          fetchedDataTriples: 0,
+          insertedMetaTriples: 1,
+          insertedDataTriples: 0,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          emptyResponses: 0,
+          metaOnlyResponses: 1,
+          dataRejectedMissingMeta: 0,
+          rejectedKcs: 0,
+          failedPeers: 0,
+          deniedPhases: 1,
+        });
+        vi.spyOn(agent as any, 'syncSharedMemoryFromPeerDetailed').mockResolvedValue({
+          insertedTriples: 1,
+          fetchedMetaTriples: 1,
+          fetchedDataTriples: 0,
+          insertedMetaTriples: 1,
+          insertedDataTriples: 0,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          emptyResponses: 0,
+          droppedDataTriples: 0,
+          failedPeers: 0,
+          deniedPhases: 1,
+        });
+
+        const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          includeSharedMemory: true,
+        });
+
+        expect(result.deniedPeers).toBe(1);
+        expect(result.denied).toBe(true);
+        expect(result.dataSynced).toBe(1);
+        expect(result.sharedMemorySynced).toBe(1);
+        expect(result.diagnostics.durable.insertedMetaTriples).toBe(1);
+        expect(result.diagnostics.sharedMemory.insertedMetaTriples).toBe(1);
+        expect(result.diagnostics.durable.metaOnlyResponses).toBe(1);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+
     it('sync-on-connect re-reads sync scope after discovery for a second durable pass', async () => {
       const agent = await DKGAgent.create({
         name: 'SyncOnConnectDiscoveryRefresh',

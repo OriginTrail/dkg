@@ -3225,11 +3225,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     await this.refreshMetaSyncedFlags([contextGraphId]);
 
-    const servedByPeer = dataSynced > 0
-      || sharedMemorySynced > 0
-      || diagnostics.durable.insertedMetaTriples > 0
-      || diagnostics.sharedMemory.insertedMetaTriples > 0
-      || diagnostics.durable.metaOnlyResponses > 0;
+    const servedByPeer = diagnostics.durable.insertedDataTriples > 0
+      || diagnostics.sharedMemory.insertedDataTriples > 0;
 
     if (dataSynced > 0 || sharedMemorySynced > 0) {
       this.eventBus.emit(DKGEvent.PROJECT_SYNCED, {

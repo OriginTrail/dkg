@@ -182,7 +182,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       });
       summary.bytesReceived += snapshotSync.bytesReceived;
       summary.resumedPhases += snapshotSync.resumedPhases;
+      summary.timedOutPhases += snapshotSync.timedOutPhases;
+      summary.completedPhases += snapshotSync.completedPhases;
+      summary.checkpointAdvances += snapshotSync.checkpointAdvances;
       const snapshotDurationMs = Date.now() - snapshotStartedAt;
+      if (!snapshotSync.completed) {
+        recordPhaseOutcome(wsMetaResult);
+        recordPhaseOutcome(wsDataResult);
+        continue;
+      }
 
       const storeStartedAt = Date.now();
       await ensureContextGraph(pid);
@@ -275,10 +283,24 @@ async function syncPublicSnapshotsForMeta(params: {
   fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
-}): Promise<{ bytesReceived: number; resumedPhases: number }> {
+}): Promise<{
+  bytesReceived: number;
+  resumedPhases: number;
+  timedOutPhases: number;
+  completedPhases: number;
+  checkpointAdvances: number;
+  completed: boolean;
+}> {
   const snapshots = collectPublicSnapshotMetadata(params.metaQuads);
   if (snapshots.length === 0) {
-    return { bytesReceived: 0, resumedPhases: 0 };
+    return {
+      bytesReceived: 0,
+      resumedPhases: 0,
+      timedOutPhases: 0,
+      completedPhases: 0,
+      checkpointAdvances: 0,
+      completed: true,
+    };
   }
   if (!params.publicSnapshotStore) {
     throw new Error(
@@ -288,6 +310,9 @@ async function syncPublicSnapshotsForMeta(params: {
 
   let bytesReceived = 0;
   let resumedPhases = 0;
+  let timedOutPhases = 0;
+  let completedPhases = 0;
+  let checkpointAdvances = 0;
   for (const snapshot of snapshots) {
     if (await hasValidSnapshot(params.publicSnapshotStore, snapshot)) {
       continue;
@@ -305,11 +330,25 @@ async function syncPublicSnapshotsForMeta(params: {
     );
     bytesReceived += result.bytesReceived;
     resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
+    timedOutPhases += result.timedOut ? 1 : 0;
+    if (result.completed && (result.resumedFromOffset > 0 || result.nextOffset > result.resumedFromOffset)) {
+      completedPhases += 1;
+    }
+    if (result.nextOffset > result.resumedFromOffset) {
+      checkpointAdvances += 1;
+    }
 
     if (result.completed) params.deleteCheckpoint(result.checkpointKey);
     else {
       params.setCheckpoint(result.checkpointKey, result.nextOffset);
-      throw new Error(`Timed out while syncing shared-memory public snapshot ${snapshot.ref}`);
+      return {
+        bytesReceived,
+        resumedPhases,
+        timedOutPhases,
+        completedPhases,
+        checkpointAdvances,
+        completed: false,
+      };
     }
 
     const snapshotQuads = result.quads.map((quad) => ({ ...quad, graph: '' }));
@@ -323,7 +362,14 @@ async function syncPublicSnapshotsForMeta(params: {
     await params.publicSnapshotStore.putSnapshot({ digest: snapshot.digest, quads: snapshotQuads });
   }
 
-  return { bytesReceived, resumedPhases };
+  return {
+    bytesReceived,
+    resumedPhases,
+    timedOutPhases,
+    completedPhases,
+    checkpointAdvances,
+    completed: true,
+  };
 }
 
 function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): PublicSnapshotMetadata[] {
