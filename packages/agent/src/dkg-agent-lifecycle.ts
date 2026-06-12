@@ -3548,6 +3548,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     next: ContextGraphSub,
     options?: { persist?: boolean },
   ): ContextGraphSub {
+    this.invalidateListContextGraphsCache();
     this.subscribedContextGraphs.set(contextGraphId, next);
     if (!next.subscribed && !next.coreHosted) {
       this.clearVmReconcileStateForContextGraph(contextGraphId);
@@ -3574,6 +3575,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   persistContextGraphSubscription(this: DKGAgent, contextGraphId: string): void {
+    this.invalidateListContextGraphsCache();
     const store = this.config.contextGraphSubscriptionStore;
     if (!store) return;
     const sub = this.subscribedContextGraphs.get(contextGraphId);

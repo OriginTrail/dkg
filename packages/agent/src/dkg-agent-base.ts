@@ -691,6 +691,13 @@ export class DKGAgentBase {
   static readonly VM_RECONCILE_CONFIRMATION_DEPTH =
     Number(process.env['DKG_VM_RECONCILE_CONFIRMATION_DEPTH']) || 5;
 
+  static readonly LIST_CONTEXT_GRAPHS_CACHE_TTL_MS =
+    Math.max(0, Number(process.env['DKG_LIST_CONTEXT_GRAPHS_CACHE_TTL_MS']) || 5_000);
+  static readonly LIST_CONTEXT_GRAPHS_CACHE_MAX =
+    Math.max(1, Number(process.env['DKG_LIST_CONTEXT_GRAPHS_CACHE_MAX']) || 32);
+  static readonly LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS =
+    Math.max(1, Number(process.env['DKG_LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS']) || 200);
+
   protected messageHandler: MessageHandler | null = null;
   protected chainPoller: ChainEventPoller | null = null;
   protected swmCleanupTimer: ReturnType<typeof setInterval> | null = null;
@@ -764,6 +771,17 @@ export class DKGAgentBase {
   protected readonly config: DKGAgentConfig;
   protected started = false;
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
+  protected readonly listContextGraphsCache = new Map<string, {
+    expiresAt: number;
+    rows: Array<Record<string, unknown>>;
+  }>();
+  protected readonly listContextGraphsInFlight = new Map<string, Promise<Array<Record<string, unknown>>>>();
+  protected listContextGraphsCacheGeneration = 0;
+  protected invalidateListContextGraphsCache(): void {
+    this.listContextGraphsCacheGeneration += 1;
+    this.listContextGraphsCache.clear();
+    this.listContextGraphsInFlight.clear();
+  }
   protected readonly gossipRegistered = new Set<string>();
   protected readonly sharedMemoryGossipRegistered = new Set<string>();
   protected readonly seenOnChainIds = new Set<string>();

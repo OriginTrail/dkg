@@ -246,6 +246,21 @@ type JoinApprovalRetryEntry = {
   nextAttemptAt: number;
   lastError: string;
 };
+type ListContextGraphsRow = {
+  id: string;
+  uri: string;
+  name: string;
+  description?: string;
+  creator?: string;
+  curator?: string;
+  accessPolicy?: string;
+  createdAt?: string;
+  isSystem: boolean;
+  subscribed: boolean;
+  synced: boolean;
+  onChainId?: string;
+  callerInvolved?: boolean;
+};
 import { multiaddr } from '@multiformats/multiaddr';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
@@ -1611,31 +1626,109 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    * With a valid `callerAgentAddress` option, each row includes `callerInvolved`.
    * With no usable caller wallet, omit that field entirely so callers can infer membership from `curator`.
    */
-  async listContextGraphs(this: DKGAgent, opts?: { callerAgentAddress?: string | null }): Promise<Array<{
-    id: string;
-    uri: string;
-    name: string;
-    description?: string;
-    creator?: string;
-    /** Wallet-scoped curator DID (from _meta / ontology), if present. */
-    curator?: string;
-    /** Declared access policy literal, e.g. public / private. */
-    accessPolicy?: string;
-    createdAt?: string;
-    isSystem: boolean;
-    subscribed: boolean;
-    synced: boolean;
-    onChainId?: string;
-    /**
-     * When `callerAgentAddress` is omitted or invalid: property is omitted —
-     * clients fall back to comparing `curator` to identity (listing was not scoped to a caller).
-     * When a valid caller is provided: explicit true/false.
-     */
-    callerInvolved?: boolean;
-  }>> {
+  async listContextGraphs(this: DKGAgent, opts?: { callerAgentAddress?: string | null }): Promise<ListContextGraphsRow[]> {
+    const scopedListing = opts !== undefined;
+    let checksum: string | null = null;
+    const rawCaller = opts?.callerAgentAddress?.trim();
+    if (rawCaller && ethers.isAddress(rawCaller)) {
+      try {
+        checksum = ethers.getAddress(rawCaller);
+      } catch {
+        checksum = null;
+      }
+    }
+
+    const cloneRows = (rows: ListContextGraphsRow[]): ListContextGraphsRow[] => rows.map((row) => ({ ...row }));
+    const cacheKey = checksum
+      ? `wallet:${checksum.toLowerCase()}`
+      : scopedListing ? 'no-wallet' : 'owner-unscoped';
+    const cached = this.listContextGraphsCache.get(cacheKey);
+    if (cached) {
+      if (cached.expiresAt > Date.now()) {
+        this.listContextGraphsCache.delete(cacheKey);
+        this.listContextGraphsCache.set(cacheKey, cached);
+        return cloneRows(cached.rows as ListContextGraphsRow[]);
+      }
+      this.listContextGraphsCache.delete(cacheKey);
+    }
+
+    const inFlight = this.listContextGraphsInFlight.get(cacheKey);
+    if (inFlight) {
+      return cloneRows((await inFlight) as ListContextGraphsRow[]);
+    }
+
+    const generation = this.listContextGraphsCacheGeneration;
+    const task = (async () => {
+      const rows = await this.listContextGraphsUncached(checksum, scopedListing);
+      if (this.listContextGraphsCacheGeneration === generation) {
+        this.listContextGraphsCache.set(cacheKey, {
+          expiresAt: Date.now() + DKGAgentBase.LIST_CONTEXT_GRAPHS_CACHE_TTL_MS,
+          rows: cloneRows(rows) as Array<Record<string, unknown>>,
+        });
+        while (this.listContextGraphsCache.size > DKGAgentBase.LIST_CONTEXT_GRAPHS_CACHE_MAX) {
+          const oldest = this.listContextGraphsCache.keys().next().value;
+          if (!oldest) break;
+          this.listContextGraphsCache.delete(oldest);
+        }
+      }
+      return rows;
+    })();
+
+    this.listContextGraphsInFlight.set(cacheKey, task as Promise<Array<Record<string, unknown>>>);
+    try {
+      return cloneRows(await task);
+    } finally {
+      if (this.listContextGraphsInFlight.get(cacheKey) === task) {
+        this.listContextGraphsInFlight.delete(cacheKey);
+      }
+    }
+  }
+
+  protected async listContextGraphsUncached(this: DKGAgent, checksum: string | null, scopedListing: boolean): Promise<ListContextGraphsRow[]> {
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
-    const result = await this.store.query(`
+    const rowBudgetMs = Math.max(1, DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS);
+    const globalBudgetMs = Math.max(
+      rowBudgetMs,
+      Math.min(5_000, rowBudgetMs * Math.max(1, this.subscribedContextGraphs.size + 4)),
+    );
+    const deadlineAt = Date.now() + globalBudgetMs;
+
+    const withBudget = async <T>(
+      work: () => Promise<T>,
+      label: string,
+      budgetMs = rowBudgetMs,
+    ): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> => {
+      const remaining = deadlineAt - Date.now();
+      if (remaining <= 0) {
+        return { ok: false, error: new Error(`${label} exceeded listContextGraphs deadline`) };
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} exceeded listContextGraphs row budget`)),
+          Math.min(budgetMs, remaining),
+        );
+        const unref = (timer as { unref?: () => void } | undefined)?.unref;
+        if (typeof unref === 'function') unref.call(timer);
+      });
+      try {
+        const value = await Promise.race([Promise.resolve().then(work), timeout]);
+        return { ok: true, value };
+      } catch (error) {
+        return { ok: false, error };
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
+
+    const optional = async <T>(work: () => Promise<T>, label: string): Promise<T | undefined> => {
+      const result = await withBudget(work, label);
+      return result.ok ? result.value : undefined;
+    };
+
+    const initialRead = await withBudget(
+      () => this.store.query(`
       SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access ?isSystem WHERE {
         {
           GRAPH <${ontologyGraph}> {
@@ -1661,16 +1754,22 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           }
         }
       }
-    `);
+    `),
+      'ontology/agents definition scan',
+      globalBudgetMs,
+    );
+    const result = initialRead.ok ? initialRead.value : undefined;
 
     const prefix = 'did:dkg:context-graph:';
-    const seen = new Map<string, {
-      id: string; uri: string; name: string; description?: string;
-      creator?: string; curator?: string; accessPolicy?: string; createdAt?: string; isSystem: boolean;
-      subscribed: boolean; synced: boolean; onChainId?: string;
-    }>();
+    const seen = new Map<string, ListContextGraphsRow>();
+    const policyKnownByUri = new Map<string, boolean>();
+    const rememberRow = (row: ListContextGraphsRow, policyKnown: boolean): void => {
+      if (seen.has(row.uri)) return;
+      seen.set(row.uri, row);
+      policyKnownByUri.set(row.uri, policyKnown);
+    };
 
-    if (result.type === 'bindings') {
+    if (result?.type === 'bindings') {
       const byUri = new Map<string, Record<string, string>>();
       for (const row of result.bindings as Record<string, string>[]) {
         const uri = row['ctxGraph'] ?? '';
@@ -1678,13 +1777,16 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         byUri.set(uri, row);
       }
       // Parallel lookups — sequential await per ontology row multiplied list latency noticeably.
-      await Promise.all([...byUri.values()].map(async (row) => {
+      await Promise.allSettled([...byUri.values()].map(async (row) => {
         const uri = row['ctxGraph'] ?? '';
         if (seen.has(uri)) return;
         const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri;
         const sub = this.subscribedContextGraphs.get(id);
-        const onChainId = sub?.onChainId ?? (await this.getContextGraphOnChainId(id)) ?? undefined;
-        seen.set(uri, {
+        const onChainId = sub?.onChainId ?? (await optional(
+          () => this.getContextGraphOnChainId(id),
+          `on-chain id lookup for ${id}`,
+        )) ?? undefined;
+        rememberRow({
           id,
           uri,
           name: stripLiteral(row['name'] ?? id),
@@ -1706,7 +1808,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           // `markContextGraphSubscriptionState` at routes/context-graph.ts:1301).
           synced: sub?.synced ?? false,
           ...(onChainId ? { onChainId } : {}),
-        });
+        }, true);
       }));
     }
 
@@ -1719,7 +1821,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
 
       const metaGraph = contextGraphMetaGraphUri(id);
       const pUri = contextGraphDataGraphUri(id);
-      const metaResult = await this.store.query(`
+      const metaRead = await withBudget(
+        () => this.store.query(`
         SELECT ?name ?desc ?creator ?created ?curator ?access WHERE {
           GRAPH <${metaGraph}> {
             <${pUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
@@ -1731,12 +1834,18 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
             OPTIONAL { <${pUri}> <${DKG_ONTOLOGY.DKG_CREATED_AT}> ?created }
           }
         } LIMIT 1
-      `);
+      `),
+        `meta declaration lookup for ${id}`,
+      );
+      const metaResult = metaRead.ok ? metaRead.value : undefined;
 
-      if (metaResult.type === 'bindings' && metaResult.bindings.length > 0) {
+      if (metaResult?.type === 'bindings' && metaResult.bindings.length > 0) {
         const row = metaResult.bindings[0] as Record<string, string>;
-        const onChainId = sub.onChainId ?? (await this.getContextGraphOnChainId(id)) ?? undefined;
-        seen.set(uri, {
+        const onChainId = sub.onChainId ?? (await optional(
+          () => this.getContextGraphOnChainId(id),
+          `on-chain id lookup for ${id}`,
+        )) ?? undefined;
+        rememberRow({
           id,
           uri,
           name: stripLiteral(row['name'] ?? sub.name ?? id),
@@ -1749,7 +1858,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           subscribed: sub.subscribed,
           synced: sub.synced,
           ...(onChainId ? { onChainId } : {}),
-        });
+        }, true);
         continue;
       }
 
@@ -1789,11 +1898,14 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         // only the root caused legitimate synced projects to be
         // hidden as phantoms here (Codex tier-4m follow-up to N29,
         // same issue in a separate call site).
-        const hasContent = await this.contextGraphHasLocalContent(id);
+        const hasContent = await optional(
+          () => this.contextGraphHasLocalContent(id),
+          `local content probe for ${id}`,
+        );
         if (!hasContent) continue;
       }
 
-      seen.set(uri, {
+      rememberRow({
         id,
         uri,
         name: sub.name ?? id,
@@ -1801,27 +1913,41 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         subscribed: sub.subscribed,
         synced: sub.synced,
         ...(sub.onChainId ? { onChainId: sub.onChainId } : {}),
-      });
+      }, metaRead.ok);
     }
 
     const graphManager = new GraphManager(this.store);
-    const storedContextGraphs = await graphManager.listContextGraphs();
+    const storedRead = await withBudget(
+      () => graphManager.listContextGraphs(),
+      'storage context graph scan',
+      globalBudgetMs,
+    );
+    const storedContextGraphs = storedRead.ok ? storedRead.value : [];
     for (const id of storedContextGraphs) {
       const uri = `${prefix}${id}`;
       if (seen.has(uri)) continue;
       if (id === SYSTEM_CONTEXT_GRAPHS.AGENTS || id === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) continue;
 
       const sub = this.subscribedContextGraphs.get(id);
-      const onChainId = sub?.onChainId ?? (await this.getContextGraphOnChainId(id)) ?? undefined;
-      seen.set(uri, {
+      const onChainId = sub?.onChainId ?? (await optional(
+        () => this.getContextGraphOnChainId(id),
+        `on-chain id lookup for ${id}`,
+      )) ?? undefined;
+      const policyRead = await withBudget(
+        () => this.getExplicitAccessPolicy(id),
+        `access policy lookup for storage row ${id}`,
+      );
+      const accessPolicy = policyRead.ok && policyRead.value ? policyRead.value : undefined;
+      rememberRow({
         id,
         uri,
         name: sub?.name ?? id,
         isSystem: false,
         subscribed: sub?.subscribed ?? false,
         synced: sub?.synced ?? false,
+        ...(accessPolicy ? { accessPolicy } : {}),
         ...(onChainId ? { onChainId } : {}),
-      });
+      }, accessPolicy !== undefined);
     }
 
     let rows = Array.from(seen.values());
@@ -1831,21 +1957,15 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
      * so list rows lack `curator` and the sidebar cannot classify "mine" without a Bearer-scoped pass.
      * Backfill once (parallelised) — also removes duplicate SPARQL in the involvement pass below.
      */
-    rows = await Promise.all(rows.map(async (r) => {
+    const curatorBackfills = await Promise.allSettled(rows.map(async (r) => {
       if (r.curator?.trim()) return r;
-      const c = await this.getContextGraphCurator(r.id);
+      const c = await optional(
+        () => this.getContextGraphCurator(r.id),
+        `curator lookup for ${r.id}`,
+      );
       return c ? { ...r, curator: c } : r;
     }));
-
-    let checksum: string | null = null;
-    const rawCaller = opts?.callerAgentAddress?.trim();
-    if (rawCaller && ethers.isAddress(rawCaller)) {
-      try {
-        checksum = ethers.getAddress(rawCaller);
-      } catch {
-        checksum = null;
-      }
-    }
+    rows = curatorBackfills.map((entry, index) => entry.status === 'fulfilled' ? entry.value : rows[index]);
 
     // Privacy filter: curated/private CGs must never leak past the daemon to a non-member
     // caller. With no caller wallet (Bearer absent), drop all private rows; with a caller,
@@ -1855,23 +1975,30 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       const t = ap.trim().replace(/^["']|["']$/g, '').toLowerCase();
       return t === 'private';
     };
+    const policyKnown = (row: ListContextGraphsRow): boolean => policyKnownByUri.get(row.uri) !== false;
 
     if (!checksum) {
       // Without a caller wallet we still leave `callerInvolved` unset so the UI can use the
       // curator-vs-identity fallback for OPEN graphs.
-      return rows.filter((r) => !isPrivateRow(r.accessPolicy));
+      return rows.filter((r) => (!scopedListing || policyKnown(r)) && !isPrivateRow(r.accessPolicy));
     }
 
-    const annotated = await Promise.all(rows.map(async (r) => {
+    const annotatedSettled = await Promise.allSettled(rows.map(async (r) => {
       const curatorMatch = this.curatorDidMatchesChecksumAgent(r.curator, checksum);
-      const allowlisted = await this.callerIsAllowlistedAgentParticipant(r.id, checksum);
+      const allowlisted = await optional(
+        () => this.callerIsAllowlistedAgentParticipant(r.id, checksum),
+        `allowlist lookup for ${r.id}`,
+      ) ?? false;
       // `callerInvolved` must reflect ONLY the provided caller wallet.
       // Using local node identity (`creatorIsSelf`) leaks curated rows to unrelated callers.
       const involved = curatorMatch || allowlisted;
       return { ...r, callerInvolved: involved };
     }));
+    const annotated = annotatedSettled.map(
+      (entry, index) => entry.status === 'fulfilled' ? entry.value : { ...rows[index], callerInvolved: false },
+    );
 
-    return annotated.filter((r) => !isPrivateRow(r.accessPolicy) || r.callerInvolved === true);
+    return annotated.filter((r) => policyKnown(r) && (!isPrivateRow(r.accessPolicy) || r.callerInvolved === true));
   }
 
 }

@@ -575,6 +575,243 @@ describe('listContextGraphs merge', () => {
     const unauthenticated = await agent.listContextGraphs();
     expect(unauthenticated.find(p => p.id === 'my-curated')).toBeUndefined();
   }, 15000);
+
+  it('does not reject the whole list when one row enrichment fails', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    await store.insert([
+      {
+        subject: contextGraphDataGraphUri('healthy-enrichment-row'),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: contextGraphDataGraphUri('healthy-enrichment-row'),
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Healthy Row"',
+        graph: ontologyGraph,
+      },
+      {
+        subject: contextGraphDataGraphUri('broken-enrichment-row'),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: contextGraphDataGraphUri('broken-enrichment-row'),
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Broken Row"',
+        graph: ontologyGraph,
+      },
+    ]);
+
+    vi.spyOn(agent as any, 'getContextGraphOnChainId').mockImplementation(async (id: string) => {
+      if (id === 'broken-enrichment-row') throw new Error('simulated enrichment failure');
+      return undefined;
+    });
+
+    const contextGraphs = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(contextGraphs.find(p => p.id === 'healthy-enrichment-row')).toBeDefined();
+    expect(contextGraphs.find(p => p.id === 'broken-enrichment-row')).toBeDefined();
+  }, 15000);
+
+  it('drops subscribed rows from scoped output when policy enrichment fails', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'degraded-private-cg';
+    const metaGraph = contextGraphMetaGraphUri(id);
+    const contextGraphUri = contextGraphDataGraphUri(id);
+    await store.insert([
+      {
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: metaGraph,
+      },
+      {
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Degraded Private"',
+        graph: metaGraph,
+      },
+      {
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"private"',
+        graph: metaGraph,
+      },
+    ]);
+    (agent as any).subscribedContextGraphs.set(id, {
+      name: 'Degraded Private',
+      subscribed: true,
+      synced: false,
+      pendingMeta: true,
+    } satisfies ContextGraphSub);
+
+    const originalQuery = store.query.bind(store);
+    vi.spyOn(store, 'query').mockImplementation(async (query: string) => {
+      if (query.includes(`<${metaGraph}>`) && query.includes('SELECT ?name ?desc ?creator ?created ?curator ?access')) {
+        throw new Error('simulated policy read failure');
+      }
+      return originalQuery(query);
+    });
+
+    const stranger = ethers.Wallet.createRandom().address;
+    const fromStranger = await agent.listContextGraphs({ callerAgentAddress: stranger });
+    expect(fromStranger.find(p => p.id === id)).toBeUndefined();
+
+    const noWallet = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(noWallet.find(p => p.id === id)).toBeUndefined();
+  }, 15000);
+
+  it('drops storage-only rows from scoped output when policy enrichment fails', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    await store.insert([
+      {
+        subject: 'urn:workspace-only:policy-unknown',
+        predicate: 'http://schema.org/name',
+        object: '"Policy Unknown"',
+        graph: contextGraphSharedMemoryUri('policy-unknown-storage'),
+      },
+    ]);
+
+    const originalQuery = store.query.bind(store);
+    vi.spyOn(store, 'query').mockImplementation(async (query: string) => {
+      if (query.includes('SELECT ?policy WHERE') && query.includes(DKG_ONTOLOGY.DKG_ACCESS_POLICY)) {
+        throw new Error('simulated storage-tail policy read failure');
+      }
+      return originalQuery(query);
+    });
+
+    const explicitNoWallet = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(explicitNoWallet.find(p => p.id === 'policy-unknown-storage')).toBeUndefined();
+
+    const ownerLocal = await agent.listContextGraphs();
+    expect(ownerLocal.find(p => p.id === 'policy-unknown-storage')).toBeDefined();
+  }, 15000);
+
+  it('drops storage-only rows from scoped output when no explicit policy exists', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    await store.insert([
+      {
+        subject: 'urn:workspace-only:policy-absent',
+        predicate: 'http://schema.org/name',
+        object: '"Policy Absent"',
+        graph: contextGraphSharedMemoryUri('policy-absent-storage'),
+      },
+    ]);
+
+    const explicitNoWallet = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(explicitNoWallet.find(p => p.id === 'policy-absent-storage')).toBeUndefined();
+
+    const ownerLocal = await agent.listContextGraphs();
+    expect(ownerLocal.find(p => p.id === 'policy-absent-storage')).toBeDefined();
+  }, 15000);
+
+  it('invalidates wallet-scoped cached list results after agent revocation', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const owner = agent.getDefaultAgentAddress()!;
+    const member = ethers.Wallet.createRandom().address;
+    await agent.createContextGraph({
+      id: 'cached-revoke-cg',
+      name: 'Cached Revoke',
+      accessPolicy: 1,
+      allowedAgents: [member],
+    });
+
+    const before = await agent.listContextGraphs({ callerAgentAddress: member });
+    expect(before.find(p => p.id === 'cached-revoke-cg')).toBeDefined();
+
+    await agent.removeAgentFromContextGraph('cached-revoke-cg', member, owner);
+
+    const after = await agent.listContextGraphs({ callerAgentAddress: member });
+    expect(after.find(p => p.id === 'cached-revoke-cg')).toBeUndefined();
+  }, 15000);
+
+  it('invalidates wallet-scoped cached misses after agent invitation', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const owner = agent.getDefaultAgentAddress()!;
+    const member = ethers.Wallet.createRandom().address;
+    await agent.createContextGraph({
+      id: 'cached-invite-cg',
+      name: 'Cached Invite',
+      accessPolicy: 1,
+    });
+
+    const before = await agent.listContextGraphs({ callerAgentAddress: member });
+    expect(before.find(p => p.id === 'cached-invite-cg')).toBeUndefined();
+
+    await agent.inviteAgentToContextGraph('cached-invite-cg', member, owner);
+
+    const after = await agent.listContextGraphs({ callerAgentAddress: member });
+    expect(after.find(p => p.id === 'cached-invite-cg')).toBeDefined();
+  }, 15000);
+
+  it('single-flights same-scope list calls, caches results, and invalidates on subscription changes', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    const originalQuery = store.query.bind(store);
+    let releaseDefinitionScan: (() => void) | undefined;
+    const definitionScanGate = new Promise<void>((resolve) => {
+      releaseDefinitionScan = resolve;
+    });
+    let definitionScans = 0;
+    vi.spyOn(store, 'query').mockImplementation(async (query: string) => {
+      if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access ?isSystem')) {
+        definitionScans += 1;
+        if (definitionScans === 1) {
+          await definitionScanGate;
+        }
+      }
+      return originalQuery(query);
+    });
+
+    const first = agent.listContextGraphs({ callerAgentAddress: null });
+    const second = agent.listContextGraphs({ callerAgentAddress: null });
+    await Promise.resolve();
+    expect(definitionScans).toBe(1);
+    releaseDefinitionScan?.();
+    await Promise.all([first, second]);
+
+    await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(definitionScans).toBe(1);
+
+    (agent as any).setContextGraphSubscription('cache-invalidated-cg', {
+      name: 'Cache Invalidated',
+      subscribed: true,
+      synced: false,
+      onChainId: '0xabc123',
+    } satisfies ContextGraphSub, { persist: false });
+
+    const afterInvalidation = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(definitionScans).toBe(2);
+    expect(afterInvalidation.find(p => p.id === 'cache-invalidated-cg')).toBeDefined();
+  }, 15000);
 });
 
 describe('discoverContextGraphsFromChain', () => {
