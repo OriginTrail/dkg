@@ -21,6 +21,13 @@
 import { describe, expect, it } from 'vitest';
 import { buildSkillMd } from '../src/daemon/manifest.js';
 
+// Opt-in gate: these repros assert post-fix behaviour, so they are RED while
+// the bug is live. They are EXCLUDED from the default test lane (which must stay
+// green / mergeable) and run only under `RUN_ISSUE_LIVENESS=1` (the dedicated
+// issue-liveness CI lane). See package.json `test:issue-liveness`.
+const LIVENESS_ENABLED = !!process.env.RUN_ISSUE_LIVENESS;
+
+
 const OPTS = {
   version: '10.0.0-test',
   baseUrl: 'http://127.0.0.1:9200',
@@ -29,8 +36,8 @@ const OPTS = {
   extractionPipelines: ['text/markdown', 'application/pdf'],
 };
 
-describe('GH #1125 — served skill.md dynamic Node-Info substitution', () => {
-  it.fails(
+describe.runIf(LIVENESS_ENABLED)('GH #1125 — served skill.md dynamic Node-Info substitution', () => {
+  it(
     'substitutes the dynamic section (no literal "(dynamic)" left in output)',
     () => {
       const out = buildSkillMd(OPTS);
@@ -38,12 +45,12 @@ describe('GH #1125 — served skill.md dynamic Node-Info substitution', () => {
     },
   );
 
-  it.fails('renders the real node version into the served doc', () => {
+  it('renders the real node version into the served doc', () => {
     const out = buildSkillMd(OPTS);
     expect(out).toContain('**Node version:** 10.0.0-test');
   });
 
-  it.fails('renders the available extraction pipelines into the served doc', () => {
+  it('renders the available extraction pipelines into the served doc', () => {
     const out = buildSkillMd(OPTS);
     expect(out).toContain('application/pdf');
   });

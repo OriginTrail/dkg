@@ -120,13 +120,19 @@ function headers(): Record<string, string> {
 }
 
 beforeAll(async () => {
+  // Opt-in: don't spin a real daemon in the default lane (all repros are
+  // gated/skipped there). Only the dedicated issue-liveness run needs it.
+  if (!LIVENESS_ENABLED) return;
   daemon = await startDaemon();
-  // Local CG is enough — these are HTTP-contract bugs that fire before any
-  // chain op. (No on-chain register; an edge daemon can't anyway.)
+  // CURATED CG (accessPolicy:1): #757 is about curator-only moderation access,
+  // so the CG must actually have a curator (the daemon's default agent) for a
+  // non-curator token to be a meaningful 403 target. Local CG is enough — these
+  // are HTTP-contract bugs that fire before any chain op (an edge daemon can't
+  // on-chain register anyway).
   const res = await fetch(url('/api/context-graph/create'), {
     method: 'POST',
     headers: headers(),
-    body: JSON.stringify({ id: CG, name: 'Liveness Routes CG' }),
+    body: JSON.stringify({ id: CG, name: 'Liveness Routes CG', accessPolicy: 1 }),
   });
   if (!res.ok) throw new Error(`CG create failed: ${res.status} ${await res.text()}`);
 }, 120_000);

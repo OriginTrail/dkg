@@ -16,6 +16,13 @@
 import { describe, expect, it } from 'vitest';
 import { escapeDkgRdfLiteral } from '../src/publisher-extension.js';
 
+// Opt-in gate: these repros assert post-fix behaviour, so they are RED while
+// the bug is live. They are EXCLUDED from the default test lane (which must stay
+// green / mergeable) and run only under `RUN_ISSUE_LIVENESS=1` (the dedicated
+// issue-liveness CI lane). See package.json `test:issue-liveness`.
+const LIVENESS_ENABLED = !!process.env.RUN_ISSUE_LIVENESS;
+
+
 const NUL = String.fromCharCode(0x00);
 const VT = String.fromCharCode(0x0b);
 const DEL = String.fromCharCode(0x7f);
@@ -25,24 +32,27 @@ const DEL = String.fromCharCode(0x7f);
 // eslint-disable-next-line no-control-regex
 const RAW_CONTROL = /[\x00-\x1F\x7F]/;
 
-describe('GH #416 - escapeDkgRdfLiteral non-ECHAR control bytes', () => {
+describe.runIf(LIVENESS_ENABLED)('GH #416 - escapeDkgRdfLiteral non-ECHAR control bytes', () => {
   it('CONTROL: ECHAR shortcuts still produce canonical short forms', () => {
     expect(escapeDkgRdfLiteral('a"b\nc\td')).toBe('a\\"b\\nc\\td');
   });
 
-  it.fails('UCHAR-encodes NUL (0x00) instead of leaving it raw', () => {
-    expect(escapeDkgRdfLiteral(`a${NUL}b`)).toBe('a\\u0000b');
+  // RDF `\u` UCHAR hex is case-insensitive, so compare lowercased output — a
+  // correct fix that emits lowercase hex (``) is just as valid as
+  // uppercase and must not keep this red (Codex review on PR #1129).
+  it('UCHAR-encodes NUL (0x00) instead of leaving it raw', () => {
+    expect(escapeDkgRdfLiteral(`a${NUL}b`).toLowerCase()).toBe('a\\u0000b');
   });
 
-  it.fails('UCHAR-encodes VT (0x0B) instead of leaving it raw', () => {
-    expect(escapeDkgRdfLiteral(`a${VT}b`)).toBe('a\\u000Bb');
+  it('UCHAR-encodes VT (0x0B) instead of leaving it raw', () => {
+    expect(escapeDkgRdfLiteral(`a${VT}b`).toLowerCase()).toBe('a\\u000bb');
   });
 
-  it.fails('UCHAR-encodes DEL (0x7F) instead of leaving it raw', () => {
-    expect(escapeDkgRdfLiteral(`a${DEL}b`)).toBe('a\\u007Fb');
+  it('UCHAR-encodes DEL (0x7F) instead of leaving it raw', () => {
+    expect(escapeDkgRdfLiteral(`a${DEL}b`).toLowerCase()).toBe('a\\u007fb');
   });
 
-  it.fails('leaves no raw C0/DEL control byte in the output', () => {
+  it('leaves no raw C0/DEL control byte in the output', () => {
     const out = escapeDkgRdfLiteral(`x${NUL}${VT}${DEL}y`);
     expect(RAW_CONTROL.test(out)).toBe(false);
   });

@@ -68,7 +68,12 @@ const STAMP = Date.now();
 // Shared state for the publish-dependent repros (published once on a working core).
 let pubNode: Node | null = null;
 let preSubNode: Node; // subscribed BEFORE publish (#1098), distinct from pubNode
-const PRIV_CG = `high-priv-${STAMP}`;
+// PUBLIC seed CG (accessPolicy:0): the cross-node replication repros (#1098, #886)
+// assert peers SEE the published KA — on a CURATED CG those peers would have to
+// be invited/allowlisted first, so an unauthorized subscriber could fail for
+// membership reasons, not the replication bug. A public CG every devnet core can
+// host keeps the repros faithful (Codex review on PR #1129).
+const SEED_CG = `high-pub-${STAMP}`;
 const KA = `high-ka-${STAMP}`;
 const ENTITY = `https://example.org/high/${STAMP}`;
 let publishOk = false;
@@ -95,9 +100,9 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
     // reserved pre-sub peer).
     for (const n of PUBLISHER_CANDIDATES) {
       const node = readNode(n);
-      const probeCg = `${PRIV_CG}-probe${n}`;
+      const probeCg = `${SEED_CG}-probe${n}`;
       const probeKa = `${KA}-probe${n}`;
-      const created = await post(node, '/api/context-graph/create', { id: probeCg, name: `High Probe ${n}`, accessPolicy: 1 });
+      const created = await post(node, '/api/context-graph/create', { id: probeCg, name: `High Probe ${n}`, accessPolicy: 0 });
       if (created.status >= 400 && created.status !== 409) continue;
       const registered = await post(node, '/api/context-graph/register', { id: probeCg });
       if (registered.status >= 400 && registered.status !== 409) continue;
@@ -117,14 +122,14 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
     // Phase 2 — pre-subscribe the DISTINCT peer to the seed CG BEFORE the seed
     // publish (the precondition #1098 tests), then publish the seed KA on the
     // known-working publisher.
-    await post(pubNode, '/api/context-graph/create', { id: PRIV_CG, name: 'High Priv', accessPolicy: 1 });
-    await post(pubNode, '/api/context-graph/register', { id: PRIV_CG });
-    await post(preSubNode, '/api/context-graph/subscribe', { contextGraphId: PRIV_CG });
+    await post(pubNode, '/api/context-graph/create', { id: SEED_CG, name: 'High Pub', accessPolicy: 0 });
+    await post(pubNode, '/api/context-graph/register', { id: SEED_CG });
+    await post(preSubNode, '/api/context-graph/subscribe', { contextGraphId: SEED_CG });
     await sleep(3000);
-    const seed = await publishKaOn(pubNode, PRIV_CG, KA);
+    const seed = await publishKaOn(pubNode, SEED_CG, KA);
     publishOk = seed.ok;
     if (!publishOk) {
-      throw new Error('HARNESS: seed publish to PRIV_CG failed on the known-working publisher — publish-dependent repros cannot run.');
+      throw new Error('HARNESS: seed publish to SEED_CG failed on the known-working publisher — publish-dependent repros cannot run.');
     }
   }, 240_000);
 
@@ -171,28 +176,28 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
   // ── publish-dependent repros (require the beforeAll publish to have landed) ──
   it('GH #1095: lifecycle descriptor records a `published` event', async () => {
     expect(publishOk, 'beforeAll publish must have landed on a working core').toBe(true);
-    const r = await get(pubNode!, `/api/knowledge-assets/${KA}?contextGraphId=${PRIV_CG}`);
+    const r = await get(pubNode!, `/api/knowledge-assets/${KA}?contextGraphId=${SEED_CG}`);
     const events = (r.body?.events ?? []).map((e: any) => e.type);
     expect(events).toContain('published');
   });
 
   it('GH #1104: descriptor surfaces the published UAL (not only reservedUal)', async () => {
     expect(publishOk).toBe(true);
-    const r = await get(pubNode!, `/api/knowledge-assets/${KA}?contextGraphId=${PRIV_CG}`);
+    const r = await get(pubNode!, `/api/knowledge-assets/${KA}?contextGraphId=${SEED_CG}`);
     expect(r.body?.publishedUal ?? r.body?.ual).toBeTruthy();
   });
 
   it('GH #1094: wm/pull-from {layer:vm} seeds an edit draft (does not 500)', async () => {
     expect(publishOk).toBe(true);
     const r = await post(pubNode!, `/api/knowledge-assets/${KA}/wm/pull-from`, {
-      contextGraphId: PRIV_CG, layer: 'vm', onConflict: 'replace',
+      contextGraphId: SEED_CG, layer: 'vm', onConflict: 'replace',
     });
     expect(r.status).not.toBe(500);
   });
 
   it('GH #1096: /api/memory/search finds the published VM entity', async () => {
     expect(publishOk).toBe(true);
-    const r = await post(pubNode!, '/api/memory/search', { query: 'HighEntity', contextGraphId: PRIV_CG });
+    const r = await post(pubNode!, '/api/memory/search', { query: 'HighEntity', contextGraphId: SEED_CG });
     expect(r.body?.resultCount ?? r.body?.count ?? 0).toBeGreaterThan(0);
   });
 
@@ -200,7 +205,7 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
     expect(publishOk).toBe(true);
     await sleep(8000);
     const r = await post(preSubNode, '/api/query', {
-      sparql: `SELECT ?o WHERE { ?s <https://schema.org/name> ?o }`, contextGraphId: PRIV_CG, view: 'verifiable-memory',
+      sparql: `SELECT ?o WHERE { ?s <https://schema.org/name> ?o }`, contextGraphId: SEED_CG, view: 'verifiable-memory',
     });
     const names = (r.body?.result?.bindings ?? []).map((b: any) => b.o);
     expect(names.some((n: string) => String(n).includes('HighEntity'))).toBe(true);
@@ -219,10 +224,10 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
   it('GH #886: a node subscribing AFTER publish receives the historical VM KA', async () => {
     expect(publishOk).toBe(true);
     const late = readNode(6);
-    await post(late, '/api/context-graph/subscribe', { contextGraphId: PRIV_CG });
+    await post(late, '/api/context-graph/subscribe', { contextGraphId: SEED_CG });
     await sleep(12000);
     const r = await post(late, '/api/query', {
-      sparql: `SELECT ?o WHERE { ?s <https://schema.org/name> ?o }`, contextGraphId: PRIV_CG, view: 'verifiable-memory',
+      sparql: `SELECT ?o WHERE { ?s <https://schema.org/name> ?o }`, contextGraphId: SEED_CG, view: 'verifiable-memory',
     });
     const names = (r.body?.result?.bindings ?? []).map((b: any) => b.o);
     expect(names.some((n: string) => String(n).includes('HighEntity'))).toBe(true);

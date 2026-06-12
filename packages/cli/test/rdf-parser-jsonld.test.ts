@@ -19,6 +19,13 @@
 import { describe, expect, it } from 'vitest';
 import { detectFormat, supportedExtensions, parseRdf } from '../src/rdf-parser.js';
 
+// Opt-in gate: these repros assert post-fix behaviour, so they are RED while
+// the bug is live. They are EXCLUDED from the default test lane (which must stay
+// green / mergeable) and run only under `RUN_ISSUE_LIVENESS=1` (the dedicated
+// issue-liveness CI lane). See package.json `test:issue-liveness`.
+const LIVENESS_ENABLED = !!process.env.RUN_ISSUE_LIVENESS;
+
+
 const JSONLD_WITH_CONTEXT = JSON.stringify({
   '@context': { schema: 'https://schema.org/' },
   '@id': 'https://example.org/thing-15',
@@ -26,13 +33,13 @@ const JSONLD_WITH_CONTEXT = JSON.stringify({
   'schema:name': 'JsonLd15',
 });
 
-describe('GH #15 — JSON-LD ingest is advertised but non-functional', () => {
+describe.runIf(LIVENESS_ENABLED)('GH #15 — JSON-LD ingest is advertised but non-functional', () => {
   it('CONTROL: .jsonld is advertised as a supported format', () => {
     expect(supportedExtensions()).toContain('.jsonld');
     expect(detectFormat('thing.jsonld')).toBe('jsonld');
   });
 
-  it.fails('parses a .jsonld document that carries an @context', async () => {
+  it('parses a .jsonld document that carries an @context', async () => {
     const quads = await parseRdf(
       JSONLD_WITH_CONTEXT,
       'jsonld',
