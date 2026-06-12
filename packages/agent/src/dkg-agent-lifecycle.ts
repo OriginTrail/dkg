@@ -3800,7 +3800,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           }
 
           // Uniform layout: span the per-KA …/_shared_memory/{addr}/{number} graphs + bucket.
-          const wsGraphs = (await this.store.listGraphs()).filter(g => g === wsGraph || g.startsWith(`${wsGraph}/`));
+          const wsGraphs = await listGraphFamily(this.store, wsGraph);
           for (const re of rootEntities) {
             for (const g of wsGraphs) {
               // Exact root only; then skolemized descendants only (prefix would over-delete e.g. urn:foo vs urn:foobar)
@@ -3843,4 +3843,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return totalDeleted;
   }
 
+}
+
+async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<string[]> {
+  const graphs = await listGraphsByPrefix(store, `${rootGraph}/`);
+  if (await store.hasGraph(rootGraph)) {
+    graphs.unshift(rootGraph);
+  }
+  return graphs;
+}
+
+async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<string[]> {
+  return store.listGraphsByPrefix
+    ? store.listGraphsByPrefix(prefix)
+    : (await store.listGraphs()).filter((graph) => graph.startsWith(prefix));
 }

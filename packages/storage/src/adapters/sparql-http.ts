@@ -30,26 +30,6 @@ import type {
   AskResult,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
-import { performance } from 'node:perf_hooks';
-
-/**
- * Monotonic clock for the listGraphs cache TTL. Unlike `Date.now()`,
- * `performance.now()` never moves backwards on an NTP step / VM resume / manual
- * clock change, so the TTL can't be silently extended past its window (which
- * would defeat the outage re-validation guarantee).
- */
-const monotonicNow = (): number => performance.now();
-
-/**
- * R6-A: how long a managed-endpoint `listGraphs()` result may be served from
- * cache before it is re-validated against the store. The cache is also cleared
- * eagerly on every local write, so this TTL only bounds *non-write* staleness:
- * it collapses the peer-churn-driven burst of reconcile enumerations to at most
- * one scan per window (the actual CPU win) while guaranteeing the graph set is
- * re-read at least this often — so a managed-store outage/restart surfaces
- * within the window instead of being masked indefinitely (review round 1).
- */
-export const LIST_GRAPHS_CACHE_TTL_MS = 30_000;
 
 export interface SparqlHttpStoreOptions {
   /** SPARQL query endpoint URL (required). */
@@ -61,24 +41,14 @@ export interface SparqlHttpStoreOptions {
   /** Optional Authorization header value (e.g. "Bearer <token>" or "Basic <base64>"). */
   auth?: string;
   /**
-   * True when the daemon owns this endpoint end-to-end (a CLI-managed local
-   * `oxigraph-server`, signalled by `oxigraph-managed.ts`). When set, no
-   * external writer can mutate the store behind our back, so `listGraphs()`
-   * is served from an in-memory cache that is invalidated on every local
-   * write AND expires after {@link LIST_GRAPHS_CACHE_TTL_MS}. This kills the
-   * data-proportional `SELECT DISTINCT ?g` full scan that the 30 s host-mode
-   * reconcile (and on-demand CG enumeration) would otherwise re-run every
-   * cycle on an idle, data-rich node (R6-A).
-   *
-   * Leave false/undefined for operator-provided endpoints: a shared/external
-   * SPARQL server can gain graphs we did not write, which the cache would
-   * miss — so caching is unsafe there and `listGraphs()` always queries.
+   * Marker used by higher-level daemon flows to distinguish daemon-owned
+   * endpoints from operator-provided URLs. Graph-list indexing is handled by
+   * GraphSetIndexStore rather than this adapter.
    */
   managedByDkg?: boolean;
   /**
-   * Clock for the `listGraphs()` cache TTL. Test seam only; defaults to the
-   * monotonic {@link monotonicNow} (`performance.now`), never `Date.now`, so a
-   * backwards wall-clock jump can't extend the cache past its TTL.
+   * Deprecated compatibility option. Graph-list revalidation clocks are owned
+   * by GraphSetIndexStore.
    */
   now?: () => number;
 }
@@ -89,38 +59,6 @@ export class SparqlHttpStore implements TripleStore {
   private readonly timeout: number;
   private readonly headers: Record<string, string>;
 
-  /** R6-A: cache `listGraphs()` only for daemon-owned (managed) endpoints. */
-  private readonly cacheGraphList: boolean;
-  /** Monotonic clock for the cache TTL (defaults to performance.now). */
-  private readonly now: () => number;
-  /** Cached graph-name list; null = not built / invalidated by a write. */
-  private graphListCache: string[] | null = null;
-  /** Wall-clock (via {@link now}) when {@link graphListCache} was last built. */
-  private graphListCacheAt = 0;
-  /**
-   * Bumped on every local write. `listGraphs()` captures it before its
-   * async query and only stores the result if it is unchanged on return —
-   * so a write that lands while a rebuild is in flight discards the
-   * possibly-stale result instead of caching it.
-   */
-  private graphListCacheGen = 0;
-  /**
-   * In-flight rebuild promise (managed endpoints). Concurrent callers on a
-   * cold/expired cache share this single scan instead of each issuing their
-   * own `SELECT DISTINCT ?g` — without it, a burst of overlapping enumerations
-   * (reconcile + metrics CG-count + status) at startup or each TTL boundary
-   * would still run duplicate full scans, the exact load this fix targets.
-   */
-  private graphListInflight: Promise<string[]> | null = null;
-  /**
-   * The generation {@link graphListInflight} was started at. A caller may only
-   * join the in-flight scan when this still equals {@link graphListCacheGen};
-   * a write that bumps the generation mid-scan means the in-flight result is
-   * pre-write, so a later caller must start a fresh scan rather than observe a
-   * stale graph set (read-your-writes).
-   */
-  private graphListInflightGen = -1;
-
   constructor(options: SparqlHttpStoreOptions) {
     if (!options.queryEndpoint?.trim()) {
       throw new Error('sparql-http adapter requires options.queryEndpoint');
@@ -128,8 +66,6 @@ export class SparqlHttpStore implements TripleStore {
     this.queryEndpoint = options.queryEndpoint.replace(/\/$/, '');
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? 30_000;
-    this.cacheGraphList = options.managedByDkg === true;
-    this.now = options.now ?? monotonicNow;
     // Content-Type is set per-request in postQuery/postUpdate (direct POST:
     // application/sparql-query | application/sparql-update). Only shared
     // headers (e.g. Authorization) belong here.
@@ -137,18 +73,6 @@ export class SparqlHttpStore implements TripleStore {
     if (options.auth) {
       this.headers['Authorization'] = options.auth;
     }
-  }
-
-  /**
-   * Invalidate the cached graph list after a local write. A no-op when
-   * caching is disabled (external endpoints). Bumping the generation also
-   * causes any concurrently in-flight `listGraphs()` rebuild to drop its
-   * result rather than cache a pre-write snapshot.
-   */
-  private invalidateGraphListCache(): void {
-    if (!this.cacheGraphList) return;
-    this.graphListCache = null;
-    this.graphListCacheGen++;
   }
 
   private async postQuery(sparql: string, accept: string): Promise<Response> {
@@ -204,7 +128,6 @@ export class SparqlHttpStore implements TripleStore {
       const text = await res.text().catch(() => '');
       throw new Error(`SPARQL HTTP insert failed (${res.status}): ${text.slice(0, 300)}`);
     }
-    this.invalidateGraphListCache(); // a new graph may have appeared
   }
 
   async delete(quads: DKGQuad[]): Promise<void> {
@@ -223,7 +146,6 @@ export class SparqlHttpStore implements TripleStore {
       const text = await res.text().catch(() => '');
       throw new Error(`SPARQL HTTP delete failed (${res.status}): ${text.slice(0, 300)}`);
     }
-    this.invalidateGraphListCache(); // a graph may now be empty (gone from listGraphs)
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>): Promise<number> {
@@ -246,7 +168,6 @@ export class SparqlHttpStore implements TripleStore {
       const text = await res.text().catch(() => '');
       throw new Error(`SPARQL HTTP deleteByPattern failed (${res.status}): ${text.slice(0, 300)}`);
     }
-    this.invalidateGraphListCache(); // a graph may now be empty (gone from listGraphs)
     const after = await this.countQuads(graphUri);
     return Math.max(0, before - after);
   }
@@ -260,7 +181,6 @@ export class SparqlHttpStore implements TripleStore {
       const text = await res.text().catch(() => '');
       throw new Error(`SPARQL HTTP deleteBySubjectPrefix failed (${res.status}): ${text.slice(0, 300)}`);
     }
-    this.invalidateGraphListCache(); // the graph may now be empty (gone from listGraphs)
     const after = await this.countQuads(graphUri);
     return Math.max(0, before - after);
   }
@@ -327,70 +247,11 @@ export class SparqlHttpStore implements TripleStore {
       const text = await res.text().catch(() => '');
       throw new Error(`SPARQL HTTP dropGraph failed (${res.status}): ${text.slice(0, 300)}`);
     }
-    this.invalidateGraphListCache(); // the graph is gone from listGraphs
   }
 
   async listGraphs(): Promise<string[]> {
-    // R6-A: on a managed (daemon-owned) endpoint the graph set only changes
-    // when *we* write, so serve a warm cache and skip the full
-    // `SELECT DISTINCT ?g` quad-store scan — the dominant idle-node CPU cost
-    // on a data-rich node (re-run by the 30 s host-mode reconcile and every
-    // on-demand CG enumeration). The cache is cleared on every write and also
-    // expires after LIST_GRAPHS_CACHE_TTL_MS, so the burst of churn-driven
-    // re-enumerations collapses to one scan per window while a store
-    // outage/restart still surfaces within the TTL. Returns a copy so callers
-    // can't mutate it.
-    if (
-      this.cacheGraphList &&
-      this.graphListCache !== null &&
-      this.now() - this.graphListCacheAt < LIST_GRAPHS_CACHE_TTL_MS
-    ) {
-      return [...this.graphListCache];
-    }
-    // External (non-managed) endpoint: never cache (an outside writer could
-    // add a graph we'd miss), so just scan.
-    if (!this.cacheGraphList) {
-      return [...(await this.scanGraphs(this.graphListCacheGen))];
-    }
-    // Managed, cold/expired cache: coalesce concurrent callers onto one
-    // in-flight scan so a startup or TTL-boundary burst doesn't fan out into
-    // duplicate full scans (the very load this fix removes) — but only while no
-    // write has invalidated the cache since that scan started. A caller
-    // arriving after a write must not join the pre-write scan (it would observe
-    // a stale graph set); it starts a fresh one instead.
-    if (this.graphListInflight && this.graphListInflightGen === this.graphListCacheGen) {
-      return [...(await this.graphListInflight)];
-    }
-    const startGen = this.graphListCacheGen;
-    const scan = this.scanGraphs(startGen);
-    this.graphListInflight = scan;
-    this.graphListInflightGen = startGen;
-    try {
-      return [...(await scan)];
-    } finally {
-      // Clear only if a newer scan hasn't already replaced this one, so a
-      // post-write rebuild started while this scan was resolving isn't lost.
-      if (this.graphListInflight === scan) {
-        this.graphListInflight = null;
-        this.graphListInflightGen = -1;
-      }
-    }
-  }
-
-  /**
-   * Run the `SELECT DISTINCT ?g` enumeration and (for managed endpoints) cache
-   * the result, unless a write landed during the scan — the generation guard
-   * (`startGen` vs the current generation) discards a snapshot that may predate
-   * that write so the next call rebuilds.
-   */
-  private async scanGraphs(startGen: number): Promise<string[]> {
     const r = await this.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
-    const graphs = r.type === 'bindings' ? r.bindings.map((b) => b.g).filter(Boolean) : [];
-    if (this.cacheGraphList && startGen === this.graphListCacheGen) {
-      this.graphListCache = graphs;
-      this.graphListCacheAt = this.now();
-    }
-    return graphs;
+    return r.type === 'bindings' ? r.bindings.map((b) => b.g).filter(Boolean) : [];
   }
 
   async countQuads(graphUri?: string): Promise<number> {

@@ -15,6 +15,12 @@ import {
 
 const CG_PREFIX = 'did:dkg:context-graph:';
 
+async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<string[]> {
+  return store.listGraphsByPrefix
+    ? store.listGraphsByPrefix(prefix)
+    : (await store.listGraphs()).filter((graph) => graph.startsWith(prefix));
+}
+
 export class ContextGraphManager {
   private readonly store: TripleStore;
   private readonly ensuredContextGraphs = new Set<string>();
@@ -87,7 +93,7 @@ export class ContextGraphManager {
   }
 
   async listContextGraphs(): Promise<string[]> {
-    const graphs = await this.store.listGraphs();
+    const graphs = await listGraphsByPrefix(this.store, CG_PREFIX);
     const contextGraphs = new Set<string>();
     for (const g of graphs) {
       if (g.startsWith(CG_PREFIX)) {
@@ -116,7 +122,7 @@ export class ContextGraphManager {
    */
   async listSubGraphs(contextGraphId: string): Promise<string[]> {
     const prefix = `${CG_PREFIX}${contextGraphId}/`;
-    const allGraphs = await this.store.listGraphs();
+    const allGraphs = await listGraphsByPrefix(this.store, prefix);
     const subGraphNames = new Set<string>();
     const reservedPrefixes = ['_', 'assertion/', 'draft/', 'context/'];
     for (const g of allGraphs) {

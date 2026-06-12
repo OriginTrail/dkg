@@ -49,6 +49,10 @@ export function resolveManagedOxigraphPort(
 interface StoreConfigLike {
   backend?: unknown;
   options?: Record<string, unknown>;
+  graphSetIndex?: boolean | {
+    enabled?: boolean;
+    revalidateMs?: number;
+  };
 }
 
 interface ConfigLike {
@@ -79,6 +83,7 @@ export interface ManagedOxigraphPlan {
   storeConfigTemplate: {
     backend: 'sparql-http';
     options: Record<string, unknown>;
+    graphSetIndex?: StoreConfigLike['graphSetIndex'];
   };
   /**
    * largeLiteralStorage to apply when the operator didn't configure one.
@@ -140,16 +145,22 @@ export function planManagedOxigraph(
         }
       : undefined;
 
+  const graphSetIndex = config.store?.graphSetIndex;
+  const storeConfigTemplate: ManagedOxigraphPlan['storeConfigTemplate'] = {
+    backend: 'sparql-http',
+    // managedByDkg lets chain-reset wipe DROP ALL on the local RocksDB
+    // we own end-to-end; queryEndpoint/updateEndpoint added at launch.
+    options: { managedByDkg: true },
+  };
+  if (graphSetIndex !== undefined) {
+    storeConfigTemplate.graphSetIndex = graphSetIndex;
+  }
+
   return {
     port,
     location,
     cacheDir,
-    storeConfigTemplate: {
-      backend: 'sparql-http',
-      // managedByDkg lets chain-reset wipe DROP ALL on the local RocksDB
-      // we own end-to-end; queryEndpoint/updateEndpoint added at launch.
-      options: { managedByDkg: true },
-    },
+    storeConfigTemplate,
     largeLiteralStorage,
     sharedMemoryPublicSnapshotStorage,
   };
@@ -158,7 +169,11 @@ export function planManagedOxigraph(
 export interface ManagedOxigraphResult {
   handle: OxigraphServerHandle;
   /** Drop-in replacement for `config.store`. */
-  storeConfig: { backend: 'sparql-http'; options: Record<string, unknown> };
+  storeConfig: {
+    backend: 'sparql-http';
+    options: Record<string, unknown>;
+    graphSetIndex?: StoreConfigLike['graphSetIndex'];
+  };
   largeLiteralStorage: { enabled: boolean; thresholdBytes?: number; directory: string };
   /** Set only when the operator enabled the feature (else leave config as-is). */
   sharedMemoryPublicSnapshotStorage?: { enabled: boolean; directory: string };
@@ -206,16 +221,21 @@ export async function startManagedOxigraph(
     io: opts.serverIo,
   });
 
+  const storeConfig: ManagedOxigraphResult['storeConfig'] = {
+    backend: 'sparql-http',
+    options: {
+      ...plan.storeConfigTemplate.options,
+      queryEndpoint: handle.queryEndpoint,
+      updateEndpoint: handle.updateEndpoint,
+    },
+  };
+  if (plan.storeConfigTemplate.graphSetIndex !== undefined) {
+    storeConfig.graphSetIndex = plan.storeConfigTemplate.graphSetIndex;
+  }
+
   return {
     handle,
-    storeConfig: {
-      backend: 'sparql-http',
-      options: {
-        ...plan.storeConfigTemplate.options,
-        queryEndpoint: handle.queryEndpoint,
-        updateEndpoint: handle.updateEndpoint,
-      },
-    },
+    storeConfig,
     largeLiteralStorage: plan.largeLiteralStorage,
     sharedMemoryPublicSnapshotStorage: plan.sharedMemoryPublicSnapshotStorage,
   };
