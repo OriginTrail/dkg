@@ -194,5 +194,9 @@ export interface ConnectionInfo {
 }
 
 export interface StreamHandler {
-  (data: Uint8Array, peerId: PeerId): Promise<Uint8Array>;
+  (
+    data: Uint8Array,
+    peerId: PeerId,
+    options?: { signal?: AbortSignal },
+  ): Promise<Uint8Array>;
 }

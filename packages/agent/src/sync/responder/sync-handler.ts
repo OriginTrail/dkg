@@ -42,7 +42,7 @@ interface RegisterSyncHandlerParams {
    */
   register: (
     protocolId: string,
-    handler: (data: Uint8Array, peerId: string) => Promise<Uint8Array>,
+    handler: (data: Uint8Array, peerId: string, options?: { signal?: AbortSignal }) => Promise<Uint8Array>,
   ) => void;
   protocolSync: string;
   syncDeniedResponse: string;
@@ -55,6 +55,123 @@ interface RegisterSyncHandlerParams {
   authorizeSyncRequest: (request: SyncRequestEnvelope, remotePeerId: string) => Promise<boolean>;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
+}
+
+const SYNC_RESPONDER_GLOBAL_CONCURRENCY = 3;
+const SYNC_RESPONDER_PER_PEER_CONCURRENCY = 1;
+const SYNC_RESPONDER_QUEUE_LIMIT = 32;
+const SYNC_RESPONDER_MAX_QUEUE_WAIT_MS = 10_000;
+
+class SyncResponderBusyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SyncResponderBusyError';
+  }
+}
+
+interface SyncResponderQueueEntry {
+  peerId: string;
+  resolve: (release: () => void) => void;
+  reject: (error: Error) => void;
+  signal?: AbortSignal;
+  timer: ReturnType<typeof setTimeout>;
+  onAbort?: () => void;
+}
+
+function createSyncResponderLimiter() {
+  let running = 0;
+  const runningByPeer = new Map<string, number>();
+  const queue: SyncResponderQueueEntry[] = [];
+
+  const canRun = (peerId: string): boolean =>
+    running < SYNC_RESPONDER_GLOBAL_CONCURRENCY &&
+    (runningByPeer.get(peerId) ?? 0) < SYNC_RESPONDER_PER_PEER_CONCURRENCY;
+
+  const releaseFor = (peerId: string): (() => void) => {
+    let released = false;
+    running += 1;
+    runningByPeer.set(peerId, (runningByPeer.get(peerId) ?? 0) + 1);
+    return () => {
+      if (released) return;
+      released = true;
+      running -= 1;
+      const peerRunning = (runningByPeer.get(peerId) ?? 1) - 1;
+      if (peerRunning <= 0) runningByPeer.delete(peerId);
+      else runningByPeer.set(peerId, peerRunning);
+      pump();
+    };
+  };
+
+  const removeQueued = (entry: SyncResponderQueueEntry): boolean => {
+    const index = queue.indexOf(entry);
+    if (index < 0) return false;
+    queue.splice(index, 1);
+    clearTimeout(entry.timer);
+    if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort);
+    return true;
+  };
+
+  const startQueued = (entry: SyncResponderQueueEntry): void => {
+    clearTimeout(entry.timer);
+    if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort);
+    entry.resolve(releaseFor(entry.peerId));
+  };
+
+  const pump = (): void => {
+    for (let i = 0; i < queue.length && running < SYNC_RESPONDER_GLOBAL_CONCURRENCY;) {
+      const entry = queue[i];
+      if (!canRun(entry.peerId)) {
+        i += 1;
+        continue;
+      }
+      queue.splice(i, 1);
+      startQueued(entry);
+    }
+  };
+
+  const acquire = (peerId: string, signal?: AbortSignal): Promise<() => void> => {
+    throwIfAborted(signal);
+    if (canRun(peerId)) return Promise.resolve(releaseFor(peerId));
+    if (queue.length >= SYNC_RESPONDER_QUEUE_LIMIT) {
+      throw new SyncResponderBusyError('sync responder queue full');
+    }
+    return new Promise((resolve, reject) => {
+      const entry: SyncResponderQueueEntry = {
+        peerId,
+        resolve,
+        reject,
+        signal,
+        timer: setTimeout(() => {
+          if (removeQueued(entry)) reject(new SyncResponderBusyError('sync responder queue wait exceeded'));
+        }, SYNC_RESPONDER_MAX_QUEUE_WAIT_MS),
+      };
+      entry.onAbort = () => {
+        if (removeQueued(entry)) reject(asAbortError(signal?.reason));
+      };
+      if (signal) signal.addEventListener('abort', entry.onAbort, { once: true });
+      queue.push(entry);
+    });
+  };
+
+  return {
+    async run<T>(peerId: string, signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> {
+      const release = await acquire(peerId, signal);
+      try {
+        throwIfAborted(signal);
+        return await fn();
+      } finally {
+        release();
+      }
+    },
+  };
+}
+
+function asAbortError(reason: unknown): Error {
+  return reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw asAbortError(signal.reason);
 }
 
 export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
@@ -78,6 +195,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
   const syncSessionTokens = new Map<string, SyncSessionTokenEntry>();
   const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
   const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
+  const limiter = createSyncResponderLimiter();
 
   const pruneSyncSessionTokens = (now = Date.now()) => {
     for (const [key, entry] of syncSessionTokens) {
@@ -123,7 +241,8 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     };
   };
 
-  register(protocolSync, async (data, peerId) => {
+  register(protocolSync, async (data, peerId, options) => {
+    const signal = options?.signal;
     const handlerStartedAt = Date.now();
     const request = parseSyncRequest(data);
     const offset = Math.max(0, Math.min(Number.isSafeInteger(Number(request.offset)) ? Number(request.offset) : 0, 1_000_000));
@@ -134,6 +253,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     if (!contextGraphId || typeof contextGraphId !== 'string') {
       return new TextEncoder().encode('');
     }
+    throwIfAborted(signal);
 
     // Phase C: validate the optional delta hint into a non-negative bigint.
     // Malformed values are ignored so older or buggy requesters fall back to a
@@ -151,12 +271,15 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     const authStartedAt = Date.now();
     const authorized = await authorizeSyncRequest(request, peerId);
     const authDurationMs = Date.now() - authStartedAt;
+    throwIfAborted(signal);
     if (!authorized) {
       logWarn(createOperationContext('sync'), `Denied sync request for "${contextGraphId}" from peer ${peerId} (phase=${phase})`);
       return new TextEncoder().encode(syncDeniedResponse);
     }
 
-    if (isWorkspace) {
+    return limiter.run(peerId, signal, async () => {
+      throwIfAborted(signal);
+      if (isWorkspace) {
       const cutoff = sharedMemoryTtlMs > 0 ? new Date(Date.now() - sharedMemoryTtlMs).toISOString() : null;
       if (phase === 'snapshot') {
         const snapshotRef = request.snapshotRef?.trim();
@@ -189,6 +312,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           cutoffIso: cutoff,
           offset,
           limit,
+          signal,
           rowListMemo: session ? swmRowsMemo : undefined,
           rowListCacheKey: session?.rowListCacheKey,
           refreshRowList: session?.refreshRowList,
@@ -215,6 +339,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           cutoffIso: cutoff,
           offset,
           limit,
+          signal,
           rowListMemo: session ? swmRowsMemo : undefined,
           rowListCacheKey: session?.rowListCacheKey,
           refreshRowList: session?.refreshRowList,
@@ -242,6 +367,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         registeredSubGraphNames: await subGraphRegistrationMemo.get(contextGraphId, { refresh: offset === 0 }),
         offset,
         limit,
+        signal,
         rowListMemo: session ? durableMetaRowsMemo : undefined,
         rowListCacheKey: session?.rowListCacheKey,
         refreshRowList: session?.refreshRowList,
@@ -268,6 +394,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           sinceBatchId,
           offset,
           limit,
+          signal,
           rowListMemo: session ? durableDataRowsMemo : undefined,
           rowListCacheScope: session ? peerId : undefined,
           refreshRowList: session?.refreshRowList,
@@ -279,6 +406,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           sinceBatchId,
           offset,
           limit,
+          signal,
           rowListMemo: session ? durableDataRowsMemo : undefined,
           rowListCacheScope: session ? peerId : undefined,
           refreshRowList: session?.refreshRowList,
@@ -289,12 +417,13 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       if (serialized) nquads.push(serialized);
       const serializeDurationMs = Date.now() - serializeStartedAt;
       logDebug(createOperationContext('sync'), `Sync responder durable data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
-    }
+      }
 
-    const totalDurationMs = Date.now() - handlerStartedAt;
-    if (totalDurationMs > 100) {
-      logDebug(createOperationContext('sync'), `Sync responder total for "${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): ${totalDurationMs}ms`);
-    }
-    return new TextEncoder().encode(nquads.join('\n'));
+      const totalDurationMs = Date.now() - handlerStartedAt;
+      if (totalDurationMs > 100) {
+        logDebug(createOperationContext('sync'), `Sync responder total for "${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): ${totalDurationMs}ms`);
+      }
+      return new TextEncoder().encode(nquads.join('\n'));
+    });
   });
 }

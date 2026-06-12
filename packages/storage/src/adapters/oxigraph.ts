@@ -9,6 +9,7 @@ import type {
   SelectResult,
   ConstructResult,
   AskResult,
+  QueryOptions,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 
@@ -212,7 +213,8 @@ export class OxigraphStore implements TripleStore {
     return matches.length;
   }
 
-  async query(sparql: string): Promise<QueryResult> {
+  async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    throwIfAborted(options?.signal);
     const result = this.store.query(sparql);
 
     if (typeof result === 'boolean') {
@@ -354,6 +356,12 @@ export class OxigraphStore implements TripleStore {
     }
     await this.flushNow();
   }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  const reason = signal.reason;
+  throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
 }
 
 function quadToNQuad(q: DKGQuad): string {

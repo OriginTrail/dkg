@@ -34,11 +34,15 @@ export interface AskResult {
 
 export type QueryResult = SelectResult | ConstructResult | AskResult;
 
+export interface QueryOptions {
+  signal?: AbortSignal;
+}
+
 export interface TripleStore {
   insert(quads: Quad[]): Promise<void>;
   delete(quads: Quad[]): Promise<void>;
   deleteByPattern(pattern: Partial<Quad>): Promise<number>;
-  query(sparql: string): Promise<QueryResult>;
+  query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
 
   hasGraph(graphUri: string): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;

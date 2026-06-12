@@ -2,6 +2,7 @@ export {
   type Quad,
   type TripleStore,
   type QueryResult,
+  type QueryOptions,
   type SelectResult,
   type ConstructResult,
   type AskResult,

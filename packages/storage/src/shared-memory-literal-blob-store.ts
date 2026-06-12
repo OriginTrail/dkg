@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type {
   ConstructResult,
   Quad,
+  QueryOptions,
   QueryResult,
   SelectResult,
   TripleStore,
@@ -71,16 +72,16 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     return removed;
   }
 
-  async query(sparql: string): Promise<QueryResult> {
+  async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
     const rewritten = this.rewriteLargeLiteralConstants(sparql);
     if (!rewritten) {
-      const result = await this.inner.query(sparql);
+      const result = await this.inner.query(sparql, options);
       return this.hydrateQueryResult(result);
     }
 
     const [original, placeholder] = await Promise.all([
-      this.inner.query(sparql),
-      this.inner.query(rewritten),
+      this.inner.query(sparql, options),
+      this.inner.query(rewritten, options),
     ]);
     return this.hydrateQueryResult(mergeQueryResults(original, placeholder));
   }

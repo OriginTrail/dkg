@@ -54,6 +54,129 @@ describe('ProtocolRouter', () => {
     });
   });
 
+  describe('register() inbound abort signal', () => {
+    const PROTOCOL = '/dkg/test/inbound-abort/1.0.0';
+    const REMOTE_PEER = '12D3KooWInboundAbortPeer';
+
+    class FakeInboundStream extends EventTarget {
+      sent: Uint8Array | null = null;
+      aborted: Error | null = null;
+      closedWithSignal: AbortSignal | undefined;
+
+      constructor(private readonly chunks: Uint8Array[]) {
+        super();
+      }
+
+      send(data: Uint8Array): void {
+        this.sent = data;
+      }
+
+      async close(options?: { signal?: AbortSignal }): Promise<void> {
+        this.closedWithSignal = options?.signal;
+      }
+
+      abort(error: Error): void {
+        this.aborted = error;
+      }
+
+      async *[Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array> {
+        for (const chunk of this.chunks) yield chunk;
+      }
+    }
+
+    function makeInboundFixture(stopSignal?: AbortSignal) {
+      let inbound: ((stream: FakeInboundStream, connection: unknown) => Promise<void>) | null = null;
+      const node = {
+        get stopSignal() {
+          return stopSignal;
+        },
+        libp2p: {
+          handle: (_protocol: string, handler: (stream: FakeInboundStream, connection: unknown) => Promise<void>) => {
+            inbound = handler;
+          },
+          unhandle: () => undefined,
+        },
+      } as unknown as DKGNode;
+      const router = new ProtocolRouter(node);
+      const connection = {
+        remotePeer: {
+          toString: () => REMOTE_PEER,
+          toMultihash: () => ({ bytes: new Uint8Array([1, 2, 3]) }),
+        },
+      };
+      return {
+        router,
+        invoke: async (stream: FakeInboundStream) => {
+          if (!inbound) throw new Error('handler not registered');
+          await inbound(stream, connection);
+        },
+      };
+    }
+
+    it('passes a live AbortSignal to raw handlers and preserves it through close', async () => {
+      let seenSignal: AbortSignal | undefined;
+      const fixture = makeInboundFixture();
+      fixture.router.register(PROTOCOL, async (_data, _peer, options) => {
+        seenSignal = options?.signal;
+        return new Uint8Array([0xaa]);
+      });
+      const stream = new FakeInboundStream([new Uint8Array([0x01])]);
+
+      await fixture.invoke(stream);
+
+      expect(seenSignal).toBeDefined();
+      expect(seenSignal?.aborted).toBe(false);
+      expect(stream.sent).toEqual(new Uint8Array([0xaa]));
+      expect(stream.closedWithSignal).toBeUndefined();
+      expect(stream.aborted).toBeNull();
+    });
+
+    it('aborts the handler signal when the inbound stream closes while work is pending', async () => {
+      let seenSignal: AbortSignal | undefined;
+      const fixture = makeInboundFixture();
+      fixture.router.register(PROTOCOL, async (_data, _peer, options) => {
+        seenSignal = options?.signal;
+        await new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(options.signal?.reason), { once: true });
+        });
+        return new Uint8Array([0xbb]);
+      });
+      const stream = new FakeInboundStream([new Uint8Array([0x01])]);
+      const inbound = fixture.invoke(stream);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      stream.dispatchEvent(new Event('close'));
+      await inbound;
+
+      expect(seenSignal?.aborted).toBe(true);
+      expect(stream.sent).toBeNull();
+      expect(stream.aborted?.message).toMatch(/stream closed by peer/);
+    });
+
+    it('aborts the handler signal when node stop fires while work is pending', async () => {
+      const stopController = new AbortController();
+      let seenSignal: AbortSignal | undefined;
+      const fixture = makeInboundFixture(stopController.signal);
+      fixture.router.register(PROTOCOL, async (_data, _peer, options) => {
+        seenSignal = options?.signal;
+        await new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(options.signal?.reason), { once: true });
+        });
+        return new Uint8Array([0xcc]);
+      });
+      const stream = new FakeInboundStream([new Uint8Array([0x01])]);
+      const inbound = fixture.invoke(stream);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      stopController.abort(new Error('node stopping'));
+      await inbound;
+
+      expect(seenSignal?.aborted).toBe(true);
+      expect(stream.sent).toBeNull();
+      expect(stream.aborted?.message).toMatch(/node stopping/);
+    });
+  });
+
   describe('send() node stop abort propagation', () => {
     const FAKE_PEER_ID = '12D3KooWBzj7Hg2cKCdsKL6QcjC5UbLztKTvzCZQHaT4P4ZyJEAA';
 

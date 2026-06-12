@@ -362,19 +362,30 @@ export class ProtocolRouter {
       // error. By caching once we make the whole handler consistently
       // abortable, and `stream.close({ signal })` participates in shutdown.
       const stopSignal = this.node.stopSignal;
+      const streamController = new AbortController();
+      const onStreamClose = () => {
+        if (!streamController.signal.aborted) {
+          streamController.abort(new Error('stream closed by peer'));
+        }
+      };
+      stream.addEventListener('close', onStreamClose as EventListener, { once: true });
+      const handlerSignal = composeAbortSignals(streamController.signal, stopSignal);
       try {
-        const requestData = await readAllWithSignal(stream, limit, stopSignal);
+        const requestData = await readAllWithSignal(stream, limit, handlerSignal);
         const peerId = {
           toString: () => connection.remotePeer.toString(),
           toBytes: () => connection.remotePeer.toMultihash().bytes,
         };
-        const responseData = await handler(requestData, peerId);
+        const responseData = await handler(requestData, peerId, { signal: handlerSignal });
+        if (handlerSignal?.aborted) throw asAbortError(handlerSignal.reason);
+        stream.removeEventListener('close', onStreamClose as EventListener);
         stream.send(responseData);
         await stream.close(stopSignal ? { signal: stopSignal } : undefined);
       } catch (err) {
-        if (stopSignal?.aborted) {
+        if (stopSignal?.aborted || handlerSignal?.aborted) {
           try {
-            stream.abort(asAbortError(stopSignal.reason));
+            const abortReason = stopSignal?.aborted ? stopSignal.reason : handlerSignal?.reason;
+            stream.abort(asAbortError(abortReason));
           } catch {
             // stream already closed
           }
@@ -393,6 +404,8 @@ export class ProtocolRouter {
         } catch {
           // stream already closed
         }
+      } finally {
+        stream.removeEventListener('close', onStreamClose as EventListener);
       }
     }, { runOnLimitedConnection: true });
 

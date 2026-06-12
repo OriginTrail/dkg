@@ -1539,7 +1539,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // for sync only; other substrate protocols keep their dedup.)
     registerSyncHandler({
       register: (protocol, handler) =>
-        this.router.register(protocol, (data, peerIdObj) => handler(data, peerIdObj.toString())),
+        this.router.register(protocol, (data, peerIdObj, options) => handler(data, peerIdObj.toString(), options)),
       protocolSync: PROTOCOL_SYNC,
       syncDeniedResponse: SYNC_DENIED_RESPONSE,
       syncPageSize: SYNC_PAGE_SIZE,

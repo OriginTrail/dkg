@@ -260,6 +260,7 @@ export async function readSwmMetaPage(params: {
   cutoffIso: string | null;
   offset: number;
   limit: number;
+  signal?: AbortSignal;
   rowListMemo?: SyncRowListMemo;
   rowListCacheKey?: string;
   refreshRowList?: boolean;
@@ -275,7 +276,7 @@ export async function readSwmMetaPage(params: {
         refresh: params.refreshRowList,
         expiredMessage: 'Shared-memory meta sync session snapshot expired before page completion',
       },
-      () => readSwmMetaRows(params.store, candidateGraphs, params.cutoffIso),
+      () => readSwmMetaRows(params.store, candidateGraphs, params.cutoffIso, params.signal),
       params.offset,
       params.limit,
     );
@@ -286,6 +287,7 @@ export async function readSwmMetaPage(params: {
     params.cutoffIso,
     params.offset,
     params.limit,
+    params.signal,
   );
 }
 
@@ -297,6 +299,7 @@ export async function readSwmDataPage(params: {
   cutoffIso: string | null;
   offset: number;
   limit: number;
+  signal?: AbortSignal;
   rowListMemo?: SyncRowListMemo;
   rowListCacheKey?: string;
   refreshRowList?: boolean;
@@ -324,6 +327,7 @@ export async function readSwmDataPage(params: {
       params.limit,
       async () => true,
       cache,
+      params.signal,
     );
   }
 
@@ -333,6 +337,7 @@ export async function readSwmDataPage(params: {
     graphSet,
     candidateGraphsFor,
     params.cutoffIso!,
+    params.signal,
   );
   if (cache) {
     return readCachedRowsPage(cache, loadRows, params.offset, params.limit);
@@ -347,11 +352,12 @@ export async function readDurableMetaPage(params: {
   registeredSubGraphNames: readonly string[];
   offset: number;
   limit: number;
+  signal?: AbortSignal;
   rowListMemo?: SyncRowListMemo;
   rowListCacheKey?: string;
   refreshRowList?: boolean;
 }): Promise<SyncRow[]> {
-  const loadRows = () => readDurableMetaRows(params.store, params.contextGraphId, params.registeredSubGraphNames);
+  const loadRows = () => readDurableMetaRows(params.store, params.contextGraphId, params.registeredSubGraphNames, params.signal);
   if (params.rowListMemo && params.rowListCacheKey) {
     return readCachedRowsPage(
       {
@@ -378,6 +384,7 @@ export async function readDurableDataPage(params: {
   sinceBatchId: bigint | null;
   offset: number;
   limit: number;
+  signal?: AbortSignal;
   rowListMemo?: SyncRowListMemo;
   rowListCacheScope?: string;
   refreshRowList?: boolean;
@@ -393,11 +400,11 @@ export async function readDurableDataPage(params: {
   let assertionGraphs: Set<string> | null = null;
   const isAdmitted = async (graph: string): Promise<boolean> => {
     if (graph.includes('/assertion/')) {
-      assertionGraphs ??= await readAdmittedAssertionGraphs(params.store, params.contextGraphId);
+      assertionGraphs ??= await readAdmittedAssertionGraphs(params.store, params.contextGraphId, params.signal);
       const assertionGraph = graph.endsWith('/_meta') ? graph.slice(0, -'/_meta'.length) : graph;
       if (!assertionGraphs.has(assertionGraph)) return false;
     }
-    return !(await isDescendantOfKnownChildContextGraph(params.store, cgPrefix, graph));
+    return !(await isDescendantOfKnownChildContextGraph(params.store, cgPrefix, graph, params.signal));
   };
 
   if (params.sinceBatchId == null) {
@@ -414,6 +421,7 @@ export async function readDurableDataPage(params: {
           refresh: params.refreshRowList,
         }
         : undefined,
+      params.signal,
     );
   }
 
@@ -442,6 +450,7 @@ export async function readDurableDataPage(params: {
         refresh: params.refreshRowList,
       }
       : undefined,
+    params.signal,
   );
 }
 
@@ -452,9 +461,10 @@ async function readPagedRowsAcrossGraphs(
   limit: number,
   isAdmitted: (graph: string) => Promise<boolean>,
   cache?: RowListCache,
+  signal?: AbortSignal,
 ): Promise<SyncRow[]> {
   if (!cache) {
-    return readPagedRowsAcrossGraphsStoreBounded(store, graphs, offset, limit, isAdmitted);
+    return readPagedRowsAcrossGraphsStoreBounded(store, graphs, offset, limit, isAdmitted, signal);
   }
 
   const safeOffset = Math.max(0, Math.floor(offset));
@@ -467,7 +477,7 @@ async function readPagedRowsAcrossGraphs(
       if (!(await isAdmitted(graph))) continue;
       admittedGraphs.push(graph);
     }
-    return readRowsAcrossGraphs(store, admittedGraphs);
+    return readRowsAcrossGraphs(store, admittedGraphs, signal);
   };
 
   return readCachedRowsPage(
@@ -487,6 +497,7 @@ async function readPagedRowsAcrossGraphsStoreBounded(
   offset: number,
   limit: number,
   isAdmitted: (graph: string) => Promise<boolean>,
+  signal?: AbortSignal,
 ): Promise<SyncRow[]> {
   const admittedGraphs: string[] = [];
   for (const graph of graphs) {
@@ -494,7 +505,7 @@ async function readPagedRowsAcrossGraphsStoreBounded(
     admittedGraphs.push(graph);
   }
 
-  return readRowsPageAcrossGraphs(store, admittedGraphs, offset, limit);
+  return readRowsPageAcrossGraphs(store, admittedGraphs, offset, limit, signal);
 }
 
 async function readPagedDurableDeltaRowsAcrossGraphs(
@@ -505,9 +516,10 @@ async function readPagedDurableDeltaRowsAcrossGraphs(
   offset: number,
   limit: number,
   cache?: RowListCache,
+  signal?: AbortSignal,
 ): Promise<SyncRow[]> {
   if (!cache) {
-    return readDurableDeltaRowsPageAcrossGraphs(store, graphs, metaGraphs, sinceBatchId, offset, limit);
+    return readDurableDeltaRowsPageAcrossGraphs(store, graphs, metaGraphs, sinceBatchId, offset, limit, signal);
   }
 
   const safeOffset = Math.max(0, Math.floor(offset));
@@ -519,7 +531,7 @@ async function readPagedDurableDeltaRowsAcrossGraphs(
       ...cache,
       expiredMessage: cache.expiredMessage ?? 'Durable data sync session snapshot expired before page completion',
     },
-    () => readDurableDeltaRowsAcrossGraphs(store, graphs, metaGraphs, sinceBatchId),
+    () => readDurableDeltaRowsAcrossGraphs(store, graphs, metaGraphs, sinceBatchId, signal),
     safeOffset,
     safeLimit,
   );
@@ -598,7 +610,11 @@ async function readRegisteredSubGraphNames(
     .sort(compareCodePoint);
 }
 
-async function isKnownContextGraph(store: TripleStore, contextGraphUri: string): Promise<boolean> {
+async function isKnownContextGraph(
+  store: TripleStore,
+  contextGraphUri: string,
+  signal?: AbortSignal,
+): Promise<boolean> {
   const metaGraph = `${contextGraphUri}/_meta`;
   const res = await store.query(`
     ASK {
@@ -610,7 +626,7 @@ async function isKnownContextGraph(store: TripleStore, contextGraphUri: string):
         }
       }
     }
-  `);
+  `, { signal });
   return res.type === 'boolean' && res.value;
 }
 
@@ -618,20 +634,21 @@ async function isDescendantOfKnownChildContextGraph(
   store: TripleStore,
   cgPrefix: string,
   graph: string,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   if (graph === cgPrefix || !graph.startsWith(`${cgPrefix}/`)) return false;
   const remainder = graph.slice(cgPrefix.length + 1);
   const segments = remainder.split('/').filter(Boolean);
   if (isParentOwnedReservedGraphSegments(segments)) return false;
-  if (await isKnownContextGraph(store, graph)) return true;
+  if (await isKnownContextGraph(store, graph, signal)) return true;
   if (graph.endsWith('/_meta')) {
     const graphOwner = graph.slice(0, -'/_meta'.length);
-    if (await isKnownContextGraph(store, graphOwner)) return true;
+    if (await isKnownContextGraph(store, graphOwner, signal)) return true;
   }
   let childUri = cgPrefix;
   for (const segment of segments) {
     childUri = `${childUri}/${segment}`;
-    if (await isKnownContextGraph(store, childUri)) return true;
+    if (await isKnownContextGraph(store, childUri, signal)) return true;
   }
   return false;
 }
@@ -662,6 +679,7 @@ function isAssertionGraphSegments(segments: readonly string[]): boolean {
 async function readAdmittedAssertionGraphs(
   store: TripleStore,
   contextGraphId: string,
+  signal?: AbortSignal,
 ): Promise<Set<string>> {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const res = await store.query(`
@@ -672,7 +690,7 @@ async function readAdmittedAssertionGraphs(
         FILTER(?layer != ${sparqlString(MemoryLayer.WorkingMemory)})
       }
     }
-  `);
+  `, { signal });
   if (res.type !== 'bindings') return new Set();
   return new Set(res.bindings.map((row) => row['g']).filter(Boolean));
 }
@@ -680,6 +698,7 @@ async function readAdmittedAssertionGraphs(
 async function readRowsAcrossGraphs(
   store: TripleStore,
   graphs: readonly string[],
+  signal?: AbortSignal,
 ): Promise<SyncRow[]> {
   const values = graphValues(graphs);
   if (!values) return [];
@@ -688,7 +707,7 @@ async function readRowsAcrossGraphs(
       VALUES ?g { ${values} }
       GRAPH ?g { ?s ?p ?o }
     }
-  `);
+  `, { signal });
   if (res.type !== 'bindings') return [];
   return res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
@@ -701,6 +720,7 @@ async function readRowsPageAcrossGraphs(
   graphs: readonly string[],
   offset: number,
   limit: number,
+  signal?: AbortSignal,
 ): Promise<SyncRow[]> {
   const safeOffset = Math.max(0, Math.floor(offset));
   const safeLimit = Math.max(0, Math.floor(limit));
@@ -714,7 +734,7 @@ async function readRowsPageAcrossGraphs(
     ORDER BY ?g ?s ?p ?o
     OFFSET ${safeOffset}
     LIMIT ${safeLimit}
-  `);
+  `, { signal });
   if (res.type !== 'bindings') return [];
   return res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
@@ -725,6 +745,7 @@ async function readSwmMetaRows(
   store: TripleStore,
   swmMetaGraphs: readonly string[],
   cutoffIso: string | null,
+  signal?: AbortSignal,
 ): Promise<SyncRow[]> {
   const swmMetaValues = graphValues(swmMetaGraphs);
   if (!swmMetaValues) return [];
@@ -740,7 +761,7 @@ async function readSwmMetaRows(
     : ''}
       }
     }
-  `);
+  `, { signal });
   if (res.type !== 'bindings') return [];
   return res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
@@ -754,6 +775,7 @@ async function readSwmMetaRowsPage(
   cutoffIso: string | null,
   offset: number,
   limit: number,
+  signal?: AbortSignal,
 ): Promise<SyncRow[]> {
   const safeOffset = Math.max(0, Math.floor(offset));
   const safeLimit = Math.max(0, Math.floor(limit));
@@ -780,7 +802,7 @@ async function readSwmMetaRowsPage(
     ORDER BY ?g ?s ?p ?o
     OFFSET ${safeOffset}
     LIMIT ${safeLimit}
-  `);
+  `, { signal });
   if (res.type !== 'bindings') return [];
   return res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
@@ -793,15 +815,16 @@ async function readFreshSwmDataRows(
   graphSet: ReadonlySet<string>,
   candidateGraphsFor: (graph: string) => string[],
   cutoffIso: string,
+  signal?: AbortSignal,
 ): Promise<SyncRow[]> {
   const rows: SyncRow[] = [];
   for (const graph of dataGraphs) {
     const metaGraph = `${graph}_meta`;
     if (!graphSet.has(metaGraph)) continue;
-    const roots = await readFreshSwmRoots(store, metaGraph, cutoffIso);
+    const roots = await readFreshSwmRoots(store, metaGraph, cutoffIso, signal);
     if (roots.size === 0) continue;
     const rootPrefixes = [...roots].map((root) => `${root}/.well-known/genid/`);
-    const graphRows = await readRowsAcrossGraphs(store, candidateGraphsFor(graph));
+    const graphRows = await readRowsAcrossGraphs(store, candidateGraphsFor(graph), signal);
     rows.push(...graphRows.filter((row) =>
       roots.has(row.s) || rootPrefixes.some((prefix) => row.s.startsWith(prefix)),
     ));
@@ -813,6 +836,7 @@ async function readFreshSwmRoots(
   store: TripleStore,
   metaGraph: string,
   cutoffIso: string,
+  signal?: AbortSignal,
 ): Promise<Set<string>> {
   const res = await store.query(`
     SELECT DISTINCT ?root WHERE {
@@ -823,7 +847,7 @@ async function readFreshSwmRoots(
         FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)
       }
     }
-  `);
+  `, { signal });
   if (res.type !== 'bindings') return new Set();
   return new Set(res.bindings.map((row) => row['root']).filter(Boolean));
 }
@@ -832,13 +856,14 @@ async function readDurableMetaRows(
   store: TripleStore,
   contextGraphId: string,
   registeredSubGraphNames: readonly string[],
+  signal?: AbortSignal,
 ): Promise<SyncRow[]> {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const cgEntity = contextGraphDataGraphUri(contextGraphId);
   const registeredSubGraphSubjects = new Set(dedupeStrings(registeredSubGraphNames)
     .filter((name) => validateSubGraphName(name).valid)
     .map((name) => `${cgEntity}/${name}`));
-  const rows = await readRowsAcrossGraphs(store, [metaGraph]);
+  const rows = await readRowsAcrossGraphs(store, [metaGraph], signal);
   const nonWorkingLifecycles = new Set<string>();
   for (const row of rows) {
     if (row.p === DKG_MEMORY_LAYER && stripLiteral(row.o) !== MemoryLayer.WorkingMemory) {
@@ -884,6 +909,7 @@ async function readDurableDeltaRowsPageAcrossGraphs(
   sinceBatchId: bigint,
   offset: number,
   limit: number,
+  signal?: AbortSignal,
 ): Promise<SyncRow[]> {
   const safeOffset = Math.max(0, Math.floor(offset));
   const safeLimit = Math.max(0, Math.floor(limit));
@@ -898,7 +924,7 @@ async function readDurableDeltaRowsPageAcrossGraphs(
     ORDER BY ?g ?s ?p ?o
     OFFSET ${safeOffset}
     LIMIT ${safeLimit}
-  `);
+  `, { signal });
   if (res.type !== 'bindings') return [];
   return res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
@@ -910,6 +936,7 @@ async function readDurableDeltaRowsAcrossGraphs(
   graphs: readonly string[],
   metaGraphs: readonly string[],
   sinceBatchId: bigint,
+  signal?: AbortSignal,
 ): Promise<SyncRow[]> {
   const values = graphValues(graphs);
   if (!values) return [];
@@ -919,7 +946,7 @@ async function readDurableDeltaRowsAcrossGraphs(
       ${durableDeltaWhereClauseForGraphs(values, metaGraphs)}
     }
     ${durableDeltaGroupClause(metaGraphs, sinceBatchId, true)}
-  `);
+  `, { signal });
   if (res.type !== 'bindings') return [];
   return res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))

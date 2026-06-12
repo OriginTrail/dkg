@@ -1,6 +1,7 @@
 import type {
   TripleStore,
   Quad as DKGQuad,
+  QueryOptions,
   QueryResult,
   SelectResult,
   ConstructResult,
@@ -87,14 +88,18 @@ export class BlazegraphStore implements TripleStore {
   // Queries
   // -------------------------------------------------------------------
 
-  async query(sparql: string): Promise<QueryResult> {
+  async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    if (options?.signal?.aborted) {
+      const reason = options.signal.reason;
+      throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
+    }
     const trimmed = sparql.trim();
     const upper = trimmed.toUpperCase();
     const isAsk = upper.startsWith('ASK');
     const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
 
     if (isConstruct) {
-      return this.queryConstruct(trimmed);
+      return this.queryConstruct(trimmed, options);
     }
 
     // Direct POST (W3C SPARQL 1.1 Protocol): send the query as the raw
@@ -111,6 +116,7 @@ export class BlazegraphStore implements TripleStore {
         Accept: 'application/sparql-results+json',
       },
       body: trimmed,
+      signal: options?.signal,
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
@@ -136,7 +142,7 @@ export class BlazegraphStore implements TripleStore {
     return { type: 'bindings', bindings } satisfies SelectResult;
   }
 
-  private async queryConstruct(sparql: string): Promise<ConstructResult> {
+  private async queryConstruct(sparql: string, options?: QueryOptions): Promise<ConstructResult> {
     const res = await fetch(this.url, {
       method: 'POST',
       headers: {
@@ -144,6 +150,7 @@ export class BlazegraphStore implements TripleStore {
         Accept: 'text/x-nquads, application/n-quads',
       },
       body: sparql,
+      signal: options?.signal,
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
