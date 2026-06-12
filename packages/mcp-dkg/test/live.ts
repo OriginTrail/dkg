@@ -25,7 +25,7 @@ export type { ToolResult } from './harness.js';
 
 export const LIVE = process.env.MCP_INTEGRATION_TEST === '1';
 
-export const API = process.env.DKG_API ?? 'http://127.0.0.1:9201';
+export const API = process.env.DKG_API ?? 'http://127.0.0.1:9200';
 export const API2 = process.env.DKG_API2 ?? process.env.DKG_API_2 ?? '';
 export const TOKEN = process.env.DKG_TOKEN ?? '';
 export const TOKEN2 = process.env.DKG_TOKEN2 ?? process.env.DKG_TOKEN ?? '';

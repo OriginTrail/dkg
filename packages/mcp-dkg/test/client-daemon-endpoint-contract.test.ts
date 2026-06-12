@@ -58,18 +58,35 @@ const clientSrc = stripComments(clientSrcRaw);
 // plus segment parsing (`verb === "write"` …). Normalise the PREFIX
 // template + the bare `=== PREFIX` create-route check into plain literals
 // so the matchers below compare apples to apples.
+// Comment-strip every route file BEFORE matching (Codex review on PR #1075):
+// without this, the `quoted` fallback below can be satisfied by a JSDoc or
+// error string that still mentions a REMOVED route, leaving a dead client
+// path looking "served".
 const routesDir = join(here, '../../cli/src/daemon/routes');
 const daemonSrc = readdirSync(routesDir)
   .filter((f) => f.endsWith('.ts'))
-  .map((f) => readFileSync(join(routesDir, f), 'utf8'))
+  .map((f) => stripComments(readFileSync(join(routesDir, f), 'utf8')))
   .join('\n')
   .replace(/\$\{PREFIX\}/g, '/api/knowledge-assets')
   .replace(/===\s*PREFIX\b/g, '=== "/api/knowledge-assets"');
 
+// The KA family route file alone — used for the descriptor-GET dispatch
+// check, which is specific to that file's segment parser.
+const kaRouteSrc = stripComments(
+  readFileSync(join(routesDir, 'knowledge-assets.ts'), 'utf8'),
+);
+
 function stripComments(src: string): string {
+  // Whole-line `//` comments are removed BEFORE block comments on purpose:
+  // a line comment that mentions a glob like `/api/*` contains a literal
+  // `/*` that would otherwise open a phantom block-comment match and eat
+  // real dispatch code up to the next `*/` (this exact case lives in
+  // agent-chat.ts and silently swallowed `path === "/api/chat"` — Codex
+  // review on PR #1075). Stripping line comments first deletes that `/*`
+  // before the block pass can trip on it.
   return src
-    .replace(/\/\*[\s\S]*?\*\//g, '') // block comments
-    .replace(/^\s*\/\/.*$/gm, ''); // whole-line comments
+    .replace(/^\s*\/\/.*$/gm, '') // whole-line comments first
+    .replace(/\/\*[\s\S]*?\*\//g, ''); // then block comments
 }
 
 function escapeRegex(s: string): string {
@@ -98,11 +115,39 @@ function clientApiPrefixes(): Set<string> {
 function daemonServesLiteral(p: string): boolean {
   // Primary: an explicit `path === "<p>"` dispatch (covers every route the
   // client calls). Fallback: the exact quoted path token appears anywhere
-  // in route source (tolerates a handler that matches via a helper rather
-  // than a bare `path ===`).
+  // in the COMMENT-STRIPPED route source (tolerates a handler that matches
+  // via a helper rather than a bare `path ===`, without letting JSDoc or
+  // error strings about retired routes satisfy the check).
   const exact = new RegExp(`path\\s*===\\s*["'\`]${escapeRegex(p)}["'\`]`);
   const quoted = new RegExp(`["'\`]${escapeRegex(p)}["'\`]`);
   return exact.test(daemonSrc) || quoted.test(daemonSrc);
+}
+
+/**
+ * Extract the PARAMETERIZED Knowledge-Asset template routes the client
+ * builds (`/api/knowledge-assets/${name}/...`). The static-prefix scan
+ * collapses these to the bare `/api/knowledge-assets` prefix, so a daemon
+ * that dropped a post-`:name` route would stay green there (Codex review
+ * on PR #1075). This is scoped to the KA family on purpose: that is the
+ * only surface with real mid-path params. Non-KA templates like
+ * `/api/sub-graph/list${qs}` are LITERAL paths with a query-string append
+ * (the hole abuts a path char, not a `/`), so the prefix scan already
+ * covers their static path — they are not parameterized routes.
+ *
+ * Each `/${…}` path-param hole becomes `/*` and any `?…` query suffix is
+ * dropped, yielding patterns like `/api/knowledge-assets/*` and
+ * `/api/knowledge-assets/*​/wm/quads`.
+ */
+function clientKaParamRoutes(): Set<string> {
+  const out = new Set<string>();
+  for (const m of clientSrc.matchAll(/`(?:\$\{this\.api\})?(\/api\/knowledge-assets\/[^`]*?)`/g)) {
+    const normalized = m[1]
+      .replace(/\?.*$/, '') // drop any query string (`?${params}` / `?${qs}`)
+      .replace(/\/\$\{[^}]*\}/g, '/*') // slash-preceded path-param holes → `/*`
+      .replace(/\/+$/, '');
+    if (normalized.includes('*')) out.add(normalized);
+  }
+  return out;
 }
 
 /** A KA lifecycle verb is served if the segment dispatch handles it. */
@@ -169,5 +214,37 @@ describe('MCP client ↔ daemon endpoint contract (static)', () => {
       `KA_VERB_ROUTES references suffixes the MCP client no longer calls: ${stale.join(', ')}. ` +
         `Update KA_VERB_ROUTES to match packages/mcp-dkg/src/client.ts.`,
     ).toEqual([]);
+  });
+
+  it('every parameterized KA client route is accounted for (no route hides behind a /${…} hole)', () => {
+    // The static-prefix scan collapses `/api/knowledge-assets/${name}/wm/quads`
+    // to `/api/knowledge-assets`, so a daemon that drops a post-param route
+    // would stay green there (Codex review on PR #1075). Close the gap from
+    // the CLIENT side: every KA param route must either map onto a
+    // KA_VERB_ROUTES row (whose daemon dispatch is asserted above) or be the
+    // bare KA descriptor read (whose GET dispatch is asserted below). A new
+    // KA param route fails here until it gets a contract row.
+    const patterns = clientKaParamRoutes();
+    expect(patterns.size, 'KA-param-route extractor captured nothing — extractor regression').toBeGreaterThan(5);
+
+    const verbSuffixes = new Set(KA_VERB_ROUTES.map((r) => r.suffix));
+    const unaccounted = [...patterns].filter((p) => {
+      if (p === '/api/knowledge-assets/*') return false; // descriptor read — see GET test
+      const m = p.match(/^\/api\/knowledge-assets\/\*(\/.+)$/);
+      return !(m && verbSuffixes.has(m[1]));
+    });
+    expect(
+      unaccounted,
+      `Parameterized KA client routes with no daemon-side contract check: ${unaccounted.join(', ')}.\n` +
+        `Add a KA_VERB_ROUTES row (or a dedicated dispatch assertion) for each.`,
+    ).toEqual([]);
+  });
+
+  it('the bare KA descriptor read (GET /api/knowledge-assets/:name) is still dispatched', () => {
+    // The client reads lifecycle descriptors via `GET ${PREFIX}/${name}?…`.
+    // That path has no verb suffix, so KA_VERB_ROUTES can't cover it — pin
+    // the GET dispatch in the KA route file directly.
+    expect(clientKaParamRoutes().has('/api/knowledge-assets/*'), 'client no longer reads the bare descriptor — update this test').toBe(true);
+    expect(kaRouteSrc).toMatch(/method\s*===\s*["'`]GET["'`]/);
   });
 });

@@ -66,7 +66,7 @@ import type { ToolResult } from './harness.js';
 
 const ENABLED = process.env.MCP_INTEGRATION_TEST === '1';
 
-const API = process.env.DKG_API ?? 'http://127.0.0.1:9201';
+const API = process.env.DKG_API ?? 'http://127.0.0.1:9200';
 const API2 = process.env.DKG_API2 ?? process.env.DKG_API_2 ?? '';
 const TOKEN = process.env.DKG_TOKEN ?? '';
 const TOKEN2 = process.env.DKG_TOKEN2 ?? process.env.DKG_TOKEN ?? '';
@@ -688,17 +688,27 @@ describe.skipIf(!ENABLED)('MCP tool surface ↔ live daemon (no mocks)', () => {
         // create→write→finalize→share→publish lifecycle) — finalize alone
         // leaves nothing in shared memory for the publish to mint.
         await client.knowledgeAssetShare({ contextGraphId: CG, name: oName });
+        // Resolve THIS node's identity id from the live daemon instead of
+        // hardcoding '1' (which only holds on a specific devnet layout —
+        // Codex review on PR #1075). If the node exposes none, publish
+        // without the override: the other option plumbing is still proven.
+        const status = (await client.getStatus()) as { identityId?: unknown };
+        const ownId = String(status.identityId ?? '');
         const published = await client.knowledgeAssetPublish({
           contextGraphId: CG,
           name: oName,
           clearAfter: true,
           publishEpochs: 2,
-          // Use this node's own identity id — a valid override the daemon accepts.
-          publisherNodeIdentityIdOverride: '1',
+          ...(/^[1-9]\d*$/.test(ownId) ? { publisherNodeIdentityIdOverride: ownId } : {}),
         });
         expect(published).toBeTypeOf('object');
-        const hasId = ['kaId', 'ual', 'knowledgeAssetId', 'txHash', 'batchId', 'status'].some((k) => k in published);
-        expect(hasId, `publish-with-options had no recognizable key: ${Object.keys(published).join(', ')}`).toBe(true);
+        // A bare `status` must not count as success (a vm-failed body would
+        // pass): require a real on-chain identifier + no error shape.
+        const hasId = ['kaId', 'ual', 'knowledgeAssetId', 'txHash', 'batchId'].some((k) => k in published);
+        expect(hasId, `publish-with-options had no on-chain identifier: ${Object.keys(published).join(', ')}`).toBe(true);
+        const pubBody = published as { status?: unknown; errors?: unknown[] };
+        expect(pubBody.errors ?? []).toEqual([]);
+        expect(String(pubBody.status ?? '')).not.toMatch(/fail|error/i);
       },
       PUBLISH_TIMEOUT_MS,
     );

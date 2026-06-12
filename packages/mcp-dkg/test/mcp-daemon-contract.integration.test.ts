@@ -53,7 +53,10 @@ import type { DkgConfig } from '../src/config.js';
 
 const ENABLED = process.env.MCP_INTEGRATION_TEST === '1';
 
-const API = process.env.DKG_API ?? 'http://127.0.0.1:9201';
+// Default to the daemon's standard port (9200). Devnet nodes listen on
+// 9201+ (scripts/devnet.sh API_PORT_BASE) — export DKG_API explicitly for
+// those, as the run instructions in the header show.
+const API = process.env.DKG_API ?? 'http://127.0.0.1:9200';
 const TOKEN = process.env.DKG_TOKEN ?? '';
 const CG = process.env.DKG_PROJECT ?? process.env.DKG_CG ?? 'devnet-test';
 
@@ -81,6 +84,7 @@ describe.skipIf(!ENABLED)('MCP ↔ daemon live contract', () => {
   let client: DkgClient;
   let server: FakeServer;
   let peerId: string;
+  let agentAddress: string;
 
   // Shared lifecycle state across the ordered KA steps below.
   const kaName = `${RUN}-ka`;
@@ -113,10 +117,14 @@ describe.skipIf(!ENABLED)('MCP ↔ daemon live contract', () => {
         }). Is the node running and is DKG_TOKEN correct?`,
       );
     }
-    // WM-view reads are scoped to the raw peer ID (see DkgClient.query
-    // JSDoc), so we capture it once for the working-memory query leg.
     peerId = String(identity.peerId ?? '');
     expect(peerId, 'daemon /api/agent/identity returned no peerId').toBeTruthy();
+    // WM-view reads are scoped to the agent's on-chain ADDRESS (0x…), not
+    // the peerId — verified live: querying working-memory with the peerId
+    // returns zero rows for a draft the agent just wrote, with the address
+    // it returns them. Capture it for the WM query leg.
+    agentAddress = String(identity.agentAddress ?? identity.agentDid ?? '');
+    expect(agentAddress, 'daemon /api/agent/identity returned no agentAddress').toBeTruthy();
 
     // Ensure the target CG exists locally and is registered on chain so the
     // VM-publish legs can mint. Both calls are idempotent (alreadyExists /
@@ -202,13 +210,18 @@ describe.skipIf(!ENABLED)('MCP ↔ daemon live contract', () => {
     async () => {
       const published = await client.knowledgeAssetPublish({ contextGraphId: CG, name: kaName });
       expect(published).toBeTypeOf('object');
-      // Tolerate exact shape variance but require a recognizable on-chain
-      // result key — an empty/garbage body would be semantic drift.
+      // A bare `status` must NOT count as success — a 207-style partial
+      // failure ({ status: 'vm-failed', errors: [...] }) would otherwise
+      // pass (Codex review on PR #1075). Require a real on-chain
+      // identifier AND reject error-shaped bodies.
       const keys = Object.keys(published);
-      const hasIdentifier = ['kaId', 'ual', 'knowledgeAssetId', 'txHash', 'batchId', 'status'].some(
+      const hasIdentifier = ['kaId', 'ual', 'knowledgeAssetId', 'txHash', 'batchId'].some(
         (k) => k in published,
       );
-      expect(hasIdentifier, `publish response had no recognizable key: ${keys.join(', ')}`).toBe(true);
+      expect(hasIdentifier, `publish response had no on-chain identifier: ${keys.join(', ')}`).toBe(true);
+      const body = published as { status?: unknown; errors?: unknown[] };
+      expect(body.errors ?? [], `publish reported errors: ${JSON.stringify(body.errors)}`).toEqual([]);
+      expect(String(body.status ?? '')).not.toMatch(/fail|error/i);
     },
     PUBLISH_TIMEOUT_MS,
   );
@@ -217,32 +230,74 @@ describe.skipIf(!ENABLED)('MCP ↔ daemon live contract', () => {
   // Catches `view` enum drift and /api/query body-field drift: a removed
   // view value or renamed field makes the daemon 400 and the call throw.
 
-  it('POST /api/query (working-memory) returns bindings', async () => {
+  // Each tier query asserts the SEEDED DATA comes back, not merely that
+  // `bindings` is an array — `{ bindings: [] }` from a mis-routed view must
+  // FAIL, not pass (Codex review on PR #1075). Each query targets a layer
+  // where the data demonstrably lives AT THAT MOMENT: a fresh WM draft for
+  // working-memory, a shared-but-unpublished KA for shared-working-memory
+  // (publish would clear SWM), and the already-published kaRoot for VM.
+
+  it('POST /api/query (working-memory) returns the draft just written', async () => {
+    const probeName = `${RUN}-wmprobe`;
+    const probeRoot = `urn:mcpci:${RUN}:wmprobe`;
+    await client.createKnowledgeAsset({ contextGraphId: CG, name: probeName });
+    await client.knowledgeAssetWrite({
+      contextGraphId: CG,
+      name: probeName,
+      quads: [{ subject: probeRoot, predicate: 'urn:mcpci:p', object: '"wm-probe"' }],
+    });
     const r = await client.query({
-      sparql: `SELECT ?p ?o WHERE { <${kaRoot}> ?p ?o }`,
+      sparql: `SELECT ?p ?o WHERE { <${probeRoot}> ?p ?o }`,
       contextGraphId: CG,
       view: 'working-memory',
-      agentAddress: peerId,
+      agentAddress, // the agent ADDRESS — WM is address-scoped (see beforeAll)
     });
     expect(Array.isArray(r.bindings)).toBe(true);
+    expect(
+      r.bindings.length,
+      'working-memory view returned no rows for a draft written moments ago — view routing drift',
+    ).toBeGreaterThan(0);
+    expect(JSON.stringify(r.bindings)).toContain('wm-probe');
   });
 
-  it('POST /api/query (shared-working-memory) is accepted', async () => {
+  it('POST /api/query (shared-working-memory) returns the shared (unpublished) data', async () => {
+    // Self-contained: a publish would CLEAR SWM (it moves to VM), so seed a
+    // KA that is finalized + shared but NOT published, then query SWM.
+    const swmName = `${RUN}-swmprobe`;
+    const swmRoot = `urn:mcpci:${RUN}:swmprobe`;
+    await client.createKnowledgeAsset({ contextGraphId: CG, name: swmName });
+    await client.knowledgeAssetWrite({
+      contextGraphId: CG,
+      name: swmName,
+      quads: [{ subject: swmRoot, predicate: 'urn:mcpci:p', object: '"swm-probe"' }],
+    });
+    await client.knowledgeAssetFinalize({ contextGraphId: CG, name: swmName });
+    await client.knowledgeAssetShare({ contextGraphId: CG, name: swmName });
     const r = await client.query({
-      sparql: `SELECT ?p ?o WHERE { <${kaRoot}> ?p ?o }`,
+      sparql: `SELECT ?p ?o WHERE { <${swmRoot}> ?p ?o }`,
       contextGraphId: CG,
       view: 'shared-working-memory',
     });
     expect(Array.isArray(r.bindings)).toBe(true);
+    expect(
+      r.bindings.length,
+      `shared-working-memory view returned no rows for a freshly shared root <${swmRoot}> — view routing drift`,
+    ).toBeGreaterThan(0);
+    expect(JSON.stringify(r.bindings)).toContain('swm-probe');
   });
 
-  it('POST /api/query (verifiable-memory) is accepted', async () => {
+  it('POST /api/query (verifiable-memory) returns the minted lifecycle data', async () => {
     const r = await client.query({
       sparql: `SELECT ?p ?o WHERE { <${kaRoot}> ?p ?o }`,
       contextGraphId: CG,
       view: 'verifiable-memory',
     });
     expect(Array.isArray(r.bindings)).toBe(true);
+    expect(
+      r.bindings.length,
+      `verifiable-memory view returned no rows for the published root <${kaRoot}> — view routing drift`,
+    ).toBeGreaterThan(0);
+    expect(JSON.stringify(r.bindings)).toContain('urn:mcpci:p');
   });
 
   it('dkg_query tool round-trips against the daemon', async () => {
@@ -280,12 +335,17 @@ describe.skipIf(!ENABLED)('MCP ↔ daemon live contract', () => {
         alsoPublishVm: true,
       });
       expect(res).toBeTypeOf('object');
-      const hasIdentifier = ['kaId', 'ual', 'knowledgeAssetId', 'txHash', 'status'].some(
+      // No bare-'status' success (a vm-failed body must not pass): require
+      // a real on-chain identifier and reject error shapes.
+      const hasIdentifier = ['kaId', 'ual', 'knowledgeAssetId', 'txHash', 'batchId'].some(
         (k) => k in res,
       );
-      expect(hasIdentifier, `atomic publish had no recognizable key: ${Object.keys(res).join(', ')}`).toBe(
+      expect(hasIdentifier, `atomic publish had no on-chain identifier: ${Object.keys(res).join(', ')}`).toBe(
         true,
       );
+      const atomicBody = res as { status?: unknown; errors?: unknown[] };
+      expect(atomicBody.errors ?? []).toEqual([]);
+      expect(String(atomicBody.status ?? '')).not.toMatch(/fail|error/i);
     },
     PUBLISH_TIMEOUT_MS,
   );
@@ -318,10 +378,13 @@ describe.skipIf(!ENABLED)('MCP ↔ daemon live contract', () => {
         alsoShareSwm: true,
       });
       const published = await client.knowledgeAssetPublish({ contextGraphId: CG, name: sealedName });
-      const hasIdentifier = ['kaId', 'ual', 'knowledgeAssetId', 'txHash', 'batchId', 'status'].some(
+      const hasIdentifier = ['kaId', 'ual', 'knowledgeAssetId', 'txHash', 'batchId'].some(
         (k) => k in published,
       );
-      expect(hasIdentifier, `default-seal publish had no recognizable key: ${Object.keys(published).join(', ')}`).toBe(true);
+      expect(hasIdentifier, `default-seal publish had no on-chain identifier: ${Object.keys(published).join(', ')}`).toBe(true);
+      const sealedBody = published as { status?: unknown; errors?: unknown[] };
+      expect(sealedBody.errors ?? []).toEqual([]);
+      expect(String(sealedBody.status ?? '')).not.toMatch(/fail|error/i);
     },
     PUBLISH_TIMEOUT_MS,
   );
