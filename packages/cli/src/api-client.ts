@@ -1191,6 +1191,9 @@ export class ApiClient {
             insertedDataTriples: number;
             bytesReceived: number;
             resumedPhases: number;
+            timedOutPhases: number;
+            completedPhases: number;
+            checkpointAdvances: number;
             emptyResponses: number;
             metaOnlyResponses: number;
             dataRejectedMissingMeta: number;
@@ -1204,6 +1207,9 @@ export class ApiClient {
             insertedDataTriples: number;
             bytesReceived: number;
             resumedPhases: number;
+            timedOutPhases: number;
+            completedPhases: number;
+            checkpointAdvances: number;
             emptyResponses: number;
             droppedDataTriples: number;
             failedPeers: number;
@@ -1240,6 +1246,9 @@ export class ApiClient {
             insertedDataTriples: number;
             bytesReceived: number;
             resumedPhases: number;
+            timedOutPhases: number;
+            completedPhases: number;
+            checkpointAdvances: number;
             emptyResponses: number;
             metaOnlyResponses: number;
             dataRejectedMissingMeta: number;
@@ -1253,6 +1262,9 @@ export class ApiClient {
             insertedDataTriples: number;
             bytesReceived: number;
             resumedPhases: number;
+            timedOutPhases: number;
+            completedPhases: number;
+            checkpointAdvances: number;
             emptyResponses: number;
             droppedDataTriples: number;
             failedPeers: number;
@@ -1294,6 +1306,9 @@ export class ApiClient {
           insertedDataTriples: number;
           bytesReceived: number;
           resumedPhases: number;
+          timedOutPhases: number;
+          completedPhases: number;
+          checkpointAdvances: number;
           emptyResponses: number;
           metaOnlyResponses: number;
           dataRejectedMissingMeta: number;
@@ -1307,6 +1322,9 @@ export class ApiClient {
           insertedDataTriples: number;
           bytesReceived: number;
           resumedPhases: number;
+          timedOutPhases: number;
+          completedPhases: number;
+          checkpointAdvances: number;
           emptyResponses: number;
           droppedDataTriples: number;
           failedPeers: number;

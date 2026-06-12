@@ -33,6 +33,9 @@ export interface CatchupJobResult {
       insertedDataTriples: number;
       bytesReceived: number;
       resumedPhases: number;
+      timedOutPhases: number;
+      completedPhases: number;
+      checkpointAdvances: number;
       emptyResponses: number;
       metaOnlyResponses: number;
       dataRejectedMissingMeta: number;
@@ -46,6 +49,9 @@ export interface CatchupJobResult {
       insertedDataTriples: number;
       bytesReceived: number;
       resumedPhases: number;
+      timedOutPhases: number;
+      completedPhases: number;
+      checkpointAdvances: number;
       emptyResponses: number;
       droppedDataTriples: number;
       failedPeers: number;
@@ -56,6 +62,29 @@ export interface CatchupJobResult {
 export interface CatchupRunRequest {
   contextGraphId: string;
   includeSharedMemory: boolean;
+}
+
+export interface CatchupPhaseProgress {
+  timedOutPhases?: number;
+  completedPhases?: number;
+  checkpointAdvances?: number;
+  failedPeers?: number;
+}
+
+export function catchupPeerSucceeded(
+  durable: CatchupPhaseProgress,
+  shared: CatchupPhaseProgress | null | undefined,
+  peerDenied: boolean,
+): boolean {
+  const durableFailed = (durable.failedPeers ?? 0) > 0;
+  const sharedFailed = shared ? (shared.failedPeers ?? 0) > 0 : false;
+  const durableProgress = (durable.completedPhases ?? 0) > 0 || (durable.checkpointAdvances ?? 0) > 0;
+  const sharedProgress = shared
+    ? (shared.completedPhases ?? 0) > 0 || (shared.checkpointAdvances ?? 0) > 0
+    : false;
+  const peerMadeProgress = durableProgress || sharedProgress;
+  const peerTimedOut = (durable.timedOutPhases ?? 0) > 0 || (shared ? (shared.timedOutPhases ?? 0) > 0 : false);
+  return !durableFailed && !sharedFailed && !peerDenied && (peerMadeProgress || !peerTimedOut);
 }
 
 export interface CatchupRunner {

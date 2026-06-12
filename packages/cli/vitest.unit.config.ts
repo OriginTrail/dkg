@@ -27,6 +27,7 @@ export default defineConfig({
           'test/resolve-standalone-install.test.ts',
           'test/nat-status.test.ts',
           'test/core-prereq-check.test.ts',
+          'test/catchup-runner.test.ts',
           'test/relay-status-block.test.ts',
           'test/supervisor-liveness.test.ts',
           'test/promote-async-routes.test.ts',

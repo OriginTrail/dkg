@@ -116,11 +116,11 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
   const recordPhaseOutcome = (result: SyncPageResult, options: { updateCheckpoint: boolean }) => {
     summary.resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
     summary.timedOutPhases += result.timedOut ? 1 : 0;
+    if (!options.updateCheckpoint) return;
     summary.completedPhases += result.completed ? 1 : 0;
     if (result.nextOffset > result.resumedFromOffset) {
       summary.checkpointAdvances += 1;
     }
-    if (!options.updateCheckpoint) return;
     if (result.completed) deleteCheckpoint(result.checkpointKey);
     else if (result.nextOffset > 0 || result.resumedFromOffset > 0) {
       setCheckpoint(result.checkpointKey, result.nextOffset);

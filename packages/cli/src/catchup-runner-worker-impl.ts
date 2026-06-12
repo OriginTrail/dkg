@@ -1,5 +1,5 @@
 import { parentPort } from 'node:worker_threads';
-import type { CatchupJobResult, CatchupRunRequest } from './catchup-runner.js';
+import { catchupPeerSucceeded, type CatchupJobResult, type CatchupRunRequest } from './catchup-runner.js';
 
 type InvokeResultMessage = {
   type: 'invoke-result';
@@ -63,6 +63,9 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       insertedDataTriples: 0,
       bytesReceived: 0,
       resumedPhases: 0,
+      timedOutPhases: 0,
+      completedPhases: 0,
+      checkpointAdvances: 0,
       emptyResponses: 0,
       metaOnlyResponses: 0,
       dataRejectedMissingMeta: 0,
@@ -76,6 +79,9 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       insertedDataTriples: 0,
       bytesReceived: 0,
       resumedPhases: 0,
+      timedOutPhases: 0,
+      completedPhases: 0,
+      checkpointAdvances: 0,
       emptyResponses: 0,
       droppedDataTriples: 0,
       failedPeers: 0,
@@ -118,6 +124,9 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     insertedDataTriples: 0,
     bytesReceived: 0,
     resumedPhases: 0,
+    timedOutPhases: 0,
+    completedPhases: 0,
+    checkpointAdvances: 0,
     emptyResponses: 0,
     metaOnlyResponses: 0,
     dataRejectedMissingMeta: 0,
@@ -133,6 +142,9 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     insertedDataTriples: 0,
     bytesReceived: 0,
     resumedPhases: 0,
+    timedOutPhases: 0,
+    completedPhases: 0,
+    checkpointAdvances: 0,
     emptyResponses: 0,
     droppedDataTriples: 0,
     failedPeers: 1,
@@ -156,6 +168,9 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     diagnostics.durable.insertedDataTriples += durable.insertedDataTriples;
     diagnostics.durable.bytesReceived += durable.bytesReceived;
     diagnostics.durable.resumedPhases += durable.resumedPhases;
+    diagnostics.durable.timedOutPhases += durable.timedOutPhases ?? 0;
+    diagnostics.durable.completedPhases += durable.completedPhases ?? 0;
+    diagnostics.durable.checkpointAdvances += durable.checkpointAdvances ?? 0;
     diagnostics.durable.emptyResponses += durable.emptyResponses;
     diagnostics.durable.metaOnlyResponses += durable.metaOnlyResponses;
     diagnostics.durable.dataRejectedMissingMeta += durable.dataRejectedMissingMeta;
@@ -171,6 +186,9 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       diagnostics.sharedMemory.insertedDataTriples += shared.insertedDataTriples;
       diagnostics.sharedMemory.bytesReceived += shared.bytesReceived;
       diagnostics.sharedMemory.resumedPhases += shared.resumedPhases;
+      diagnostics.sharedMemory.timedOutPhases += shared.timedOutPhases ?? 0;
+      diagnostics.sharedMemory.completedPhases += shared.completedPhases ?? 0;
+      diagnostics.sharedMemory.checkpointAdvances += shared.checkpointAdvances ?? 0;
       diagnostics.sharedMemory.emptyResponses += shared.emptyResponses;
       diagnostics.sharedMemory.droppedDataTriples += shared.droppedDataTriples;
       diagnostics.sharedMemory.failedPeers += shared.failedPeers;
@@ -182,14 +200,11 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     }
 
     // Count peers that completed a sync round without a transport
-    // failure AND without an explicit denial. The subscribe job uses
-    // this to flip the terminal status to `unreachable` when no peer
-    // could even respond — distinct from a curated CG that explicitly
-    // denied us. Mirrors the inline `syncContextGraphFromConnectedPeers`
-    // path in `dkg-agent.ts` so both runners report the same shape.
-    const durableFailed = durable.failedPeers > 0;
-    const sharedFailed = shared ? shared.failedPeers > 0 : false;
-    if (!durableFailed && !sharedFailed && !peerDenied) {
+    // failure/denial and either made phase/checkpoint progress, or cleanly
+    // completed with no timeout. Mirrors the inline
+    // `syncContextGraphFromConnectedPeers` path so both runners report the
+    // same shape.
+    if (catchupPeerSucceeded(durable, shared, peerDenied)) {
       peersSucceeded += 1;
     }
   }
