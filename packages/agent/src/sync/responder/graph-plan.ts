@@ -205,7 +205,8 @@ export async function readDurableDataPage(params: {
   const isAdmitted = async (graph: string): Promise<boolean> => {
     if (graph.includes('/assertion/')) {
       assertionGraphs ??= await readAdmittedAssertionGraphs(params.store, params.contextGraphId);
-      if (!assertionGraphs.has(graph)) return false;
+      const assertionGraph = graph.endsWith('/_meta') ? graph.slice(0, -'/_meta'.length) : graph;
+      if (!assertionGraphs.has(assertionGraph)) return false;
     }
     return !(await isDescendantOfKnownChildContextGraph(params.store, cgPrefix, graph));
   };
@@ -354,11 +355,11 @@ function isDurableContextPartitionGraphSegments(segments: readonly string[]): bo
 
 function isAssertionGraphSegments(segments: readonly string[]): boolean {
   return (
-    segments.length === 3 &&
     segments[0] === 'assertion' &&
     segments[1].startsWith('0x') &&
     segments[1].length > 2 &&
-    segments[2].length > 0
+    segments[2].length > 0 &&
+    (segments.length === 3 || (segments.length === 4 && segments[3] === '_meta'))
   );
 }
 

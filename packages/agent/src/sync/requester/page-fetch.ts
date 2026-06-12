@@ -164,7 +164,6 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     const parseStartedAt = Date.now();
     const parsed = await parseAndFilter(nquadsText, graphUri, contextGraphId);
     const parseDurationMs = Date.now() - parseStartedAt;
-    if (parsed.totalQuads === 0) break;
 
     const stepDurationMs = transportDurationMs + decodeDurationMs + parseDurationMs;
     if (stepDurationMs > 100) {
@@ -172,6 +171,11 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         ctx,
         `Sync page timing for "${contextGraphId}" offset=${curOffset} phase=${phase}: transport=${transportDurationMs}ms decode=${decodeDurationMs}ms parse=${parseDurationMs}ms`,
       );
+    }
+
+    if (parsed.totalQuads === 0) {
+      if (parsed.quads.length > 0) allQuads.push(...parsed.quads);
+      break;
     }
 
     allQuads.push(...parsed.quads);
