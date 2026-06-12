@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
+import { SYNC_BUSY_RESPONSE } from '../src/dkg-agent-constants.js';
 
 /**
  * Regression tests for the rc.9 PR-E codex review chain on #569.
@@ -925,5 +926,46 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     // failure should not bypass to a send).
     expect(buildCalls).toBe(3);
     expect(sendCalls).toBe(1);
+  });
+
+  it('retries explicit responder busy sentinels before parsing a page', async () => {
+    const warnings: string[] = [];
+    let sendCalls = 0;
+
+    await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: CG_ID,
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 3,
+        syncPageSize: 100,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => 0,
+          set: () => {},
+          delete: () => {},
+        },
+        buildSyncRequest: async () => new TextEncoder().encode('request'),
+        parseAndFilter: singleQuadParser,
+        send: async () => {
+          sendCalls++;
+          return new TextEncoder().encode(sendCalls === 1 ? SYNC_BUSY_RESPONSE : 'one-quad-line');
+        },
+        logWarn: (_ctx, message) => { warnings.push(message); },
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    expect(sendCalls).toBe(2);
+    expect(warnings.some((message) => message.includes('responder busy'))).toBe(true);
   });
 });

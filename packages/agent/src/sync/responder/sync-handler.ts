@@ -5,6 +5,7 @@ import {
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type { SyncRequestEnvelope } from '../auth/request-build.js';
+import { SYNC_BUSY_RESPONSE } from '../../dkg-agent-constants.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../durable-session.js';
 import {
   createResponderGraphListMemo,
@@ -424,6 +425,12 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         logDebug(createOperationContext('sync'), `Sync responder total for "${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): ${totalDurationMs}ms`);
       }
       return new TextEncoder().encode(nquads.join('\n'));
+    }).catch((err) => {
+      if (err instanceof SyncResponderBusyError) {
+        logDebug(createOperationContext('sync'), `Sync responder busy for "${contextGraphId}" from peer ${peerId} (phase=${phase})`);
+        return new TextEncoder().encode(SYNC_BUSY_RESPONSE);
+      }
+      throw err;
     });
   });
 }

@@ -87,6 +87,20 @@ describe('OxigraphWorkerStore resilience', () => {
     }
   });
 
+  it('rejects a queued READ promptly when the caller aborts', async () => {
+    const store = makeStore({ operationTimeoutMs: 60_000 });
+    try {
+      const busy = store.insert(quads(50_000));
+      const controller = new AbortController();
+      const read = store.query(BUSY_QUERY, { signal: controller.signal });
+      controller.abort(new Error('caller aborted queued read'));
+      await expect(read).rejects.toThrow(/caller aborted queued read/);
+      await busy.catch(() => {});
+    } finally {
+      await closeQuietly(store);
+    }
+  });
+
   it('does NOT bound mutations — a large insert under a tiny timeout still completes', async () => {
     // The whole point of read-only scoping: a write is never reported as a clean
     // failure while it's still in flight. With a 5ms bound a 50k insert (>>5ms)

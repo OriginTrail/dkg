@@ -68,6 +68,12 @@ interface SyncSendParams {
     timeoutMs: number,
     messageId: string,
   ) => Promise<Uint8Array>;
+  /**
+   * Optional per-attempt response validator. Throwing here keeps the attempt
+   * inside `withRetry`, which lets sync-level retry sentinels share the same
+   * bounded backoff path as transport failures.
+   */
+  validateResponse?: (responseBytes: Uint8Array) => void | Promise<void>;
   protocolId: string;
   onRetry: (attempt: number, delay: number, err: unknown) => void;
 }
@@ -77,7 +83,9 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
     async () => {
       const requestBytes = await params.requestFactory();
       const messageId = randomUUID();
-      return params.send(params.remotePeerId, params.protocolId, requestBytes, params.timeoutMs, messageId);
+      const responseBytes = await params.send(params.remotePeerId, params.protocolId, requestBytes, params.timeoutMs, messageId);
+      await params.validateResponse?.(responseBytes);
+      return responseBytes;
     },
     {
       maxAttempts: params.retryAttempts,

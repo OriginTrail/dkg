@@ -1,6 +1,7 @@
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { sendSyncRequest } from '../../p2p/sync-transport.js';
+import { SYNC_BUSY_RESPONSE } from '../../dkg-agent-constants.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from '../checkpoint/state.js';
 import {
@@ -123,6 +124,16 @@ interface FetchSyncPagesParams {
   logDebug: (ctx: OperationContext, message: string) => void;
 }
 
+function decodeSyncResponse(responseBytes: Uint8Array): string {
+  return new TextDecoder().decode(responseBytes).trim();
+}
+
+function makeSyncBusyError(remotePeerId: string, contextGraphId: string, phase: SyncPhase): Error & { syncBusy: true } {
+  const error = new Error(`Sync responder busy at ${remotePeerId} for "${contextGraphId}" (${phase})`) as Error & { syncBusy: true };
+  error.syncBusy = true;
+  return error;
+}
+
 export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<SyncPageResult> {
   const {
     ctx,
@@ -207,6 +218,11 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         // full rationale (codex review on #569 follow-ups #1, #4-#8).
         requestFactory: () => buildSyncRequest(contextGraphId, curOffset, syncPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId),
         send,
+        validateResponse: (responseBytes) => {
+          if (decodeSyncResponse(responseBytes) === SYNC_BUSY_RESPONSE) {
+            throw makeSyncBusyError(remotePeerId, contextGraphId, phase);
+          }
+        },
         onRetry: (attempt, delay, err) => {
           logWarn(ctx, `Sync page retry ${attempt}/${syncPageRetryAttempts} for offset ${offset} (delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`);
         },
@@ -214,7 +230,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       const transportDurationMs = Date.now() - transportStartedAt;
 
       const decodeStartedAt = Date.now();
-      const nquadsText = new TextDecoder().decode(responseBytes).trim();
+      const nquadsText = decodeSyncResponse(responseBytes);
       const decodeDurationMs = Date.now() - decodeStartedAt;
       bytesReceived += responseBytes.byteLength;
       if (
