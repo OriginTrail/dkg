@@ -90,9 +90,6 @@ export async function readSwmMetaPage(params: {
   const graphSet = new Set(params.graphList);
   const candidateGraphs = graphs.filter((graph) => graphSet.has(graph));
   const registrationGraph = contextGraphMetaGraphUri(params.contextGraphId);
-  const registrationNames = candidateGraphs
-    .map((graph) => subGraphNameFromSwmMetaGraph(params.contextGraphId, graph))
-    .filter((name): name is string => name !== undefined);
   const swmRows = await readSwmMetaRowsPage(
     params.store,
     candidateGraphs,
@@ -100,7 +97,11 @@ export async function readSwmMetaPage(params: {
     params.offset,
     params.limit,
   );
-  if (params.offset !== 0 || !graphSet.has(registrationGraph) || registrationNames.length === 0) {
+  const registrationNames = dedupeStrings(swmRows
+    .map((row) => subGraphNameFromSwmMetaGraph(params.contextGraphId, row.g))
+    .filter((name): name is string => name !== undefined))
+    .sort(compareCodePoint);
+  if (!graphSet.has(registrationGraph) || registrationNames.length === 0) {
     return swmRows;
   }
   const registrationRows = await readSwmRegistrationRows(
@@ -354,12 +355,14 @@ function isDurableContextPartitionGraphSegments(segments: readonly string[]): bo
 }
 
 function isAssertionGraphSegments(segments: readonly string[]): boolean {
+  if (segments.length !== 3 && !(segments.length === 4 && segments[3] === '_meta')) {
+    return false;
+  }
   return (
     segments[0] === 'assertion' &&
     segments[1].startsWith('0x') &&
     segments[1].length > 2 &&
-    segments[2].length > 0 &&
-    (segments.length === 3 || (segments.length === 4 && segments[3] === '_meta'))
+    segments[2].length > 0
   );
 }
 

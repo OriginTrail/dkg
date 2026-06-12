@@ -151,6 +151,7 @@ describe('sync responder graph admission planner', () => {
     const parentPartition = `${cgPrefix}/context/1`;
     const parentAssertion = `${cgPrefix}/assertion/0xabc/final`;
     const parentAssertionMeta = `${parentAssertion}/_meta`;
+    const malformedAssertion = `${cgPrefix}/assertion/foo`;
     const reservedNameChildId = `${cgId}/context`;
     const reservedNameChildPrefix = `did:dkg:context-graph:${reservedNameChildId}`;
     const reservedNameChildMeta = `${reservedNameChildPrefix}/_meta`;
@@ -169,6 +170,7 @@ describe('sync responder graph admission planner', () => {
       q(parentPartition, 'urn:parent:partition', 'http://schema.org/name', '"parent-context-partition"'),
       q(parentAssertion, 'urn:parent:assertion', 'http://schema.org/name', '"parent-assertion"'),
       q(parentAssertionMeta, 'urn:parent:assertion', `${DKG_NS}merkleRoot`, '"parent-assertion-meta"'),
+      q(malformedAssertion, 'urn:malformed:assertion', 'http://schema.org/name', '"malformed-assertion-leak"'),
       q(`${cgPrefix}/_meta`, 'urn:lifecycle:reserved-vm', `${DKG_NS}memoryLayer`, `"${MemoryLayer.VerifiableMemory}"`),
       q(`${cgPrefix}/_meta`, 'urn:lifecycle:reserved-vm', `${DKG_NS}assertionGraph`, parentAssertion),
       q(reservedNameChildMeta, reservedNameChildPrefix, RDF_TYPE, DKG_CONTEXT_GRAPH),
@@ -199,6 +201,7 @@ describe('sync responder graph admission planner', () => {
     expect(out).not.toContain('"reserved-child-leak"');
     expect(out).not.toContain('"reserved-child-swm-leak"');
     expect(out).not.toContain('"assertion-child-partition-leak"');
+    expect(out).not.toContain('"malformed-assertion-leak"');
     expect(out).not.toContain('"regular-child-numeric-leak"');
     expect(out).not.toContain('"regular-child-numeric-meta-leak"');
   });
@@ -346,17 +349,18 @@ describe('sync responder graph admission planner', () => {
     expect(metaOut).not.toContain(`did:dkg:context-graph:${cgId}/child`);
   });
 
-  it('serves SWM registration rows as an offset-zero meta prelude only', async () => {
+  it('serves bounded SWM registration preludes for subgraphs present in the current meta page', async () => {
     const cgId = 'planner-swm-registration-prelude-cg';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
-    const rootSwmMeta = `${cgPrefix}/_shared_memory_meta`;
-    const registeredSwmMeta = `${cgPrefix}/registered/_shared_memory_meta`;
+    const alphaSwmMeta = `${cgPrefix}/alpha/_shared_memory_meta`;
+    const bravoSwmMeta = `${cgPrefix}/bravo/_shared_memory_meta`;
     const now = '2026-06-01T00:00:00.000Z';
 
     await store.insert([
-      ...subGraphRegistrationQuads(cgId, 'registered'),
-      ...workspaceOpQuads(cgId, 'root', 'urn:swm:prelude:root', rootSwmMeta, now),
-      ...workspaceOpQuads(cgId, 'registered', 'urn:swm:prelude:registered', registeredSwmMeta, now),
+      ...subGraphRegistrationQuads(cgId, 'alpha'),
+      ...subGraphRegistrationQuads(cgId, 'bravo'),
+      ...workspaceOpQuads(cgId, 'alpha', 'urn:swm:prelude:alpha', alphaSwmMeta, now),
+      ...workspaceOpQuads(cgId, 'bravo', 'urn:swm:prelude:bravo', bravoSwmMeta, now),
     ]);
 
     const cap = registerTestSyncHandler(store);
@@ -365,22 +369,24 @@ describe('sync responder graph admission planner', () => {
       includeSharedMemory: true,
       phase: 'meta',
       offset: 0,
-      limit: 1,
+      limit: 5,
     });
     const second = await cap.invoke({
       contextGraphId: cgId,
       includeSharedMemory: true,
       phase: 'meta',
-      offset: 1,
-      limit: 1,
+      offset: 5,
+      limit: 5,
     });
 
     expect(first).toContain(`${DKG_NS}SubGraph`);
-    expect(first).toContain(`did:dkg:context-graph:${cgId}/registered`);
-    expect(linesFromNquads(first).length).toBeGreaterThan(1);
-    expect(second).not.toContain(`${DKG_NS}SubGraph`);
-    expect(second).not.toContain(`did:dkg:context-graph:${cgId}/registered`);
-    expect(lineGraphsFromNquads(second).has(rootSwmMeta)).toBe(true);
+    expect(first).toContain(`did:dkg:context-graph:${cgId}/alpha`);
+    expect(first).not.toContain(`did:dkg:context-graph:${cgId}/bravo`);
+    expect(linesFromNquads(first).length).toBeGreaterThan(5);
+    expect(second).toContain(`${DKG_NS}SubGraph`);
+    expect(second).toContain(`did:dkg:context-graph:${cgId}/bravo`);
+    expect(second).not.toContain(`did:dkg:context-graph:${cgId}/alpha`);
+    expect(lineGraphsFromNquads(second).has(bravoSwmMeta)).toBe(true);
   });
 
   it('does not serve stale SWM rows from a previous request after same-graph writes', async () => {
