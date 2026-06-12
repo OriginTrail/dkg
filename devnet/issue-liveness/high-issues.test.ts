@@ -2,17 +2,20 @@
  * Issue-liveness repros for HIGH / pre-mainnet issues that are only observable
  * across a live multi-node devnet (publish → quorum → replication).
  *
- * Each is an `it.fails` repro: asserts the CORRECT behaviour, fails today (bug
- * live on `main`), flips RED when fixed → drop `.fails` and close the issue.
- * Nine of these are also fixed on PR #1107 (`fix-in-flight`): when #1107 merges
- * they should start passing, which is the cue to unwrap them.
+ * Each repro asserts the CORRECT behaviour, so it is RED today (the bug is live
+ * on `main`) and turns GREEN once fixed — it stays red until the issue is
+ * closed. Eight of these are fixed on PR #1107: when #1107 merges they start
+ * passing.
  *
- * Preconditions:
+ * These cover the inherently MULTI-NODE issues (publish → quorum → replication),
+ * which can't be reproduced in the single-process unit lanes. They run on the
+ * devnet harness, NOT the standard CI lanes:
  *   ./scripts/devnet.sh clean && ./scripts/devnet.sh start 6
  *   Run: pnpm test:devnet:issue-liveness
  *
- * Covered: #1093 #1094 #1095 #1096 #1097 #1098 #1099 #1104 #886 #1124
- * Documented stubs (need a dedicated harness): #1013 #936
+ * Multi-node coverage here: #1093 #1094 #1095 #1096 #1097 #1098 #1104 #886.
+ * The single-process variants of #462 #936 #1013 #1078 live in their package
+ * test dirs (run in CI) — see the pointers at the bottom of this file.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
@@ -97,7 +100,7 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
   }, 240_000);
 
   // ── #1093 — ACK pool poisoning: not every core can publish ──────────────
-  it.fails('GH #1093: every core node can publish to VM (no pool_below_quorum)', async () => {
+  it('GH #1093: every core node can publish to VM (no pool_below_quorum)', async () => {
     const results: Record<number, boolean> = {};
     for (const n of CORES) {
       const node = readNode(n);
@@ -121,7 +124,7 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
   it.skip('GH #1124: public CG publish reaches storage-ACK quorum (needs host-mode sharded cores)');
 
   // ── #1097 — documented one-shot publish flow returns 500 ────────────────
-  it.fails('GH #1097: SKILL.md one-shot publish (create{quads} → publish{assertionName}) works', async () => {
+  it('GH #1097: SKILL.md one-shot publish (create{quads} → publish{assertionName}) works', async () => {
     const node = pubNode ?? readNode(1);
     const cg = `gh1097-${STAMP}`;
     await post(node, '/api/context-graph/create', { id: cg, name: 'gh1097' });
@@ -136,20 +139,20 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
   });
 
   // ── publish-dependent repros (require the beforeAll publish to have landed) ──
-  it.fails('GH #1095: lifecycle descriptor records a `published` event', async () => {
+  it('GH #1095: lifecycle descriptor records a `published` event', async () => {
     expect(publishOk, 'beforeAll publish must have landed on a working core').toBe(true);
     const r = await get(pubNode!, `/api/knowledge-assets/${KA}?contextGraphId=${PRIV_CG}`);
     const events = (r.body?.events ?? []).map((e: any) => e.type);
     expect(events).toContain('published');
   });
 
-  it.fails('GH #1104: descriptor surfaces the published UAL (not only reservedUal)', async () => {
+  it('GH #1104: descriptor surfaces the published UAL (not only reservedUal)', async () => {
     expect(publishOk).toBe(true);
     const r = await get(pubNode!, `/api/knowledge-assets/${KA}?contextGraphId=${PRIV_CG}`);
     expect(r.body?.publishedUal ?? r.body?.ual).toBeTruthy();
   });
 
-  it.fails('GH #1094: wm/pull-from {layer:vm} seeds an edit draft (does not 500)', async () => {
+  it('GH #1094: wm/pull-from {layer:vm} seeds an edit draft (does not 500)', async () => {
     expect(publishOk).toBe(true);
     const r = await post(pubNode!, `/api/knowledge-assets/${KA}/wm/pull-from`, {
       contextGraphId: PRIV_CG, layer: 'vm', onConflict: 'replace',
@@ -157,13 +160,13 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
     expect(r.status).not.toBe(500);
   });
 
-  it.fails('GH #1096: /api/memory/search finds the published VM entity', async () => {
+  it('GH #1096: /api/memory/search finds the published VM entity', async () => {
     expect(publishOk).toBe(true);
     const r = await post(pubNode!, '/api/memory/search', { query: 'HighEntity', contextGraphId: PRIV_CG });
     expect(r.body?.resultCount ?? r.body?.count ?? 0).toBeGreaterThan(0);
   });
 
-  it.fails('GH #1098: a core subscribed BEFORE publish materializes the KA in VM', async () => {
+  it('GH #1098: a core subscribed BEFORE publish materializes the KA in VM', async () => {
     expect(publishOk).toBe(true);
     await sleep(8000);
     const r = await post(preSubNode, '/api/query', {
@@ -183,7 +186,7 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
   // deterministically.
   it.skip('GH #1099: SWM clear-after-publish propagates to late replicas (needs gossip-retention fixture)');
 
-  it.fails('GH #886: a node subscribing AFTER publish receives the historical VM KA', async () => {
+  it('GH #886: a node subscribing AFTER publish receives the historical VM KA', async () => {
     expect(publishOk).toBe(true);
     const late = readNode(6);
     await post(late, '/api/context-graph/subscribe', { contextGraphId: PRIV_CG });
@@ -201,14 +204,25 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
   // publisher runtime (DEVNET_ENABLE_PUBLISHER=1 + a publisher wallet) and an
   // EPCIS/async capture; assert a `finalized` capture carries a real txHash +
   // canonical UAL, not a `t<operationId>` provisional one.
-  it.skip('GH #1013: async finalized publish carries real on-chain provenance (needs publisher runtime)');
+  //
+  // CI variant: packages/publisher/test/issue-1013-async-finalization-honesty.test.ts
+  // pins the honesty invariant at the result-mapper layer (runs in CI).
+  it.skip('GH #1013: async finalized publish carries real on-chain provenance (devnet variant; CI variant in publisher)');
 
   // GH #936 — chain-driven VM reconcile assigns per-root tokenIds in
   // store-dependent order, so two replicas can map the same UAL to different
-  // content. Needs a multi-root KA published once, then TWO replicas
-  // independently reconciling it from chain; assert both map each rootEntity to
-  // the SAME tokenId (requires a persisted per-root index, e.g. dkg:kaIndex).
-  it.skip('GH #936: replicas agree on per-root tokenId→content mapping (needs 2-replica reconcile harness)');
+  // content.
+  //
+  // CI variant: packages/agent/test/issue-936-tokenid-determinism.test.ts drives
+  // two FinalizationHandler reconciles with divergent oxigraph insertion orders
+  // and asserts they agree on the rootEntity→tokenId mapping (runs in CI).
+  it.skip('GH #936: replicas agree on per-root tokenId→content mapping (devnet variant; CI variant in agent)');
+
+  // GH #462 — skill_request has NO authorization on PROTOCOL_MESSAGE.
+  // CI variant: packages/agent/test/issue-462-skill-acl.test.ts (runs in CI).
+
+  // GH #1078 — private hydration is not scoped to the committing memory layer.
+  // CI variant: packages/storage/test/issue-1078-private-layer-scope.test.ts.
 
   // GH #999 / #1008 — on a data-rich node the single oxigraph-worker thread
   // saturates under normal gossip+sync load and store-touching routes
@@ -225,18 +239,7 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
   // single-node assertion; not reproducible on a short local devnet run.
   it.skip('GH #723: network-wide RS challenge→valid-proof rate is healthy (emergent testnet metric)');
 
-  // GH #462 — PROTOCOL_MESSAGE skill_request has NO authorization: messaging.ts
-  // dispatches `handler(request, fromPeerId)` with only an Ed25519 signature
-  // check, no delegation/ACL. chat has an opt-in `chatAclCheck` but defaults to
-  // allow-all when unset. Needs a MessageHandler harness (two agents + a
-  // registered skill, no delegation) to assert an unauthorized peer is rejected.
-  it.skip('GH #462: skill_request from an unauthorized peer is rejected (needs MessageHandler ACL harness)');
-
-  // GH #1078 — private payload hydration is scoped to the CG-level `_private`
-  // graph, not to the memory layer / verifiable commitment, so a verifiable KA's
-  // private anchor can hydrate triples a different layer/version committed.
-  // Needs a PrivateContentStore test storing distinct private payloads under the
-  // same root across WM/SWM/VM authorities and asserting a VM-anchored read
-  // returns only the VM-committed slice.
-  it.skip('GH #1078: private hydration is scoped to the committing memory layer (needs layer-scoped private-store API)');
+  // GH #1091 — grindable RS challenge seed. CI variant:
+  // packages/random-sampling/test/e2e-hardhat-chain.test.ts reconstructs the
+  // seed from public block data and predicts the on-chain draw (runs in CI).
 });

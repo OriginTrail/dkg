@@ -26,7 +26,7 @@ afterEach(async () => {
 });
 
 describe('GH #11 — operational wallet private keys at rest', () => {
-  it.fails('does not persist raw private keys in plaintext in wallets.json', async () => {
+  it('does not persist raw private keys in plaintext in wallets.json', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'gh11-opwallets-'));
     dirs.push(dir);
 

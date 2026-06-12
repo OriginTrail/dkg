@@ -38,7 +38,7 @@ const baseRequest: LiftRequest = {
 };
 
 describe('GH #1122 — async lift preserves caller-provided root IRIs (sync parity)', () => {
-  it.fails('does not rewrite a caller root IRI to a generated dkg:… subject', () => {
+  it('does not rewrite a caller root IRI to a generated dkg:… subject', () => {
     const out = validateLiftPublishPayload({
       request: baseRequest,
       resolved: {
@@ -53,7 +53,7 @@ describe('GH #1122 — async lift preserves caller-provided root IRIs (sync pari
 });
 
 describe('GH #1121 — async lift carries an inline-encryption path for private CGs', () => {
-  it.fails('a private (ownerOnly) async publish maps to PublishOptions with an encryption callback', () => {
+  it('a private (ownerOnly) async publish maps to PublishOptions with an encryption callback', () => {
     const opts = mapLiftRequestToPublishOptions({
       request: { ...baseRequest, accessPolicy: 'ownerOnly' },
       validation: { authorityProofRef: 'devnet-proof', transitionType: 'CREATE' },

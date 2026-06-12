@@ -133,7 +133,7 @@ afterAll(async () => {
 });
 
 describe('GH #787 — SWM write with N-Quad string quads', () => {
-  it.fails('returns a 4xx (not 500) for string-shaped quads', async () => {
+  it('returns a 4xx (not 500) for string-shaped quads', async () => {
     const res = await fetch(url('/api/shared-memory/write'), {
       method: 'POST',
       headers: headers(),
@@ -149,7 +149,7 @@ describe('GH #787 — SWM write with N-Quad string quads', () => {
 });
 
 describe('GH #306 — KA wm/write with N-Quad string quads', () => {
-  it.fails('returns a 4xx (not 500) for string-shaped quads', async () => {
+  it('returns a 4xx (not 500) for string-shaped quads', async () => {
     await fetch(url('/api/knowledge-assets'), {
       method: 'POST',
       headers: headers(),
@@ -167,7 +167,7 @@ describe('GH #306 — KA wm/write with N-Quad string quads', () => {
 });
 
 describe('GH #158 — CCL not-found error mapping (with a real CG)', () => {
-  it.fails('ccl/eval on an existing CG with an unknown policy returns 4xx not 500', async () => {
+  it('ccl/eval on an existing CG with an unknown policy returns 4xx not 500', async () => {
     const res = await fetch(url('/api/ccl/eval'), {
       method: 'POST',
       headers: headers(),
@@ -180,7 +180,7 @@ describe('GH #158 — CCL not-found error mapping (with a real CG)', () => {
 });
 
 describe('GH #309 — /api/status exposes the default agent address', () => {
-  it.fails('status body carries defaultAgentAddress for WM-query scoping', async () => {
+  it('status body carries defaultAgentAddress for WM-query scoping', async () => {
     const res = await fetch(url('/api/status'), { headers: { Authorization: `Bearer ${daemon!.token}` } });
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.defaultAgentAddress).toBeDefined();
@@ -188,7 +188,7 @@ describe('GH #309 — /api/status exposes the default agent address', () => {
 });
 
 describe('GH #757 — join-requests endpoint must be curator-gated', () => {
-  it.fails(
+  it(
     'a non-curator agent token is rejected (403) from reading another CG curator\'s join-requests',
     async () => {
       // The CG (created in beforeAll with the node-admin/default-agent token)

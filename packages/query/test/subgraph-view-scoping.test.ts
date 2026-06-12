@@ -66,7 +66,7 @@ describe('GH #184 / #675 — sub-graph scoping in view-based WM reads', () => {
     expect(subjects).toContain(ROOT_ENTITY);
   });
 
-  it.fails(
+  it(
     'GH #675: WM view (no subGraphName) ALSO includes sub-graph WM data',
     async () => {
       const result = await engine.query(
@@ -78,7 +78,7 @@ describe('GH #184 / #675 — sub-graph scoping in view-based WM reads', () => {
     },
   );
 
-  it.fails(
+  it(
     'GH #184: WM view + subGraphName scopes to the sub-graph instead of throwing',
     async () => {
       const result = await engine.query(

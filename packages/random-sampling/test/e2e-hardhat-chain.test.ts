@@ -229,6 +229,80 @@ describe('Random Sampling E2E (Hardhat)', () => {
     if (snapshotId) await revertSnapshot(snapshotId);
   });
 
+  // Issue-liveness repro for GH #1091 — "RandomSampling: replace grindable
+  // challenge seed with commit-reveal / VRF (durable fix)."
+  // https://github.com/OriginTrail/dkg/issues/1091
+  //
+  // `_deriveChallengeSeed` mixes only PUBLIC, off-chain-recomputable inputs
+  // (`block.difficulty`/prevrandao, `blockhash(...)`, `msg.sender`), and the
+  // weighted picker `previewChallengeForSeed` is a public view. A node can
+  // therefore reconstruct the seed from public block data and PREDICT its own
+  // draw — the basis for grinding across periods until challenged only on chunks
+  // it actually stores, which defeats proof-of-storage.
+  //
+  // This test asserts the CORRECT (post-fix) behaviour, so it is RED today (the
+  // draw IS predictable from public data) and turns GREEN once the seed is made
+  // unpredictable (commit-reveal in period N for N+1, or a VRF). It uses REC2 (a
+  // staked, sharded node) so it does not disturb the REC1 prover test above.
+  it('GH #1091: a node cannot predict its own challenge from public block data (grindable seed)', async () => {
+    const provider = createProvider();
+    const ctx = getSharedContext();
+    const rec2 = new ethers.Wallet(HARDHAT_KEYS.REC2_OP, provider);
+
+    const hub = new ethers.Contract(
+      ctx.hubAddress,
+      ['function getContractAddress(string) view returns (address)'],
+      provider,
+    );
+    const rsAddress: string = await hub.getContractAddress('RandomSampling');
+    const rs = new ethers.Contract(
+      rsAddress,
+      [
+        'function createChallenge()',
+        'function previewChallengeForSeed(bytes32 seed, uint256 targetEpoch) view returns (uint256 cgId, uint256 kaId, uint256 chunkId)',
+        'event ChallengeGenerated(uint72 indexed identityId, uint256 indexed contextGraphId, uint256 indexed knowledgeAssetId, uint256 chunkId, uint256 epoch, uint256 activeProofPeriodStartBlock)',
+      ],
+      rec2,
+    );
+
+    // The node generates its challenge for the current proof period.
+    const tx = await rs.createChallenge();
+    const receipt = await tx.wait();
+    const challengeBlockNumber: number = receipt.blockNumber;
+
+    const parsed = receipt.logs
+      .map((l: ethers.Log) => { try { return rs.interface.parseLog(l); } catch { return null; } })
+      .find((p: ethers.LogDescription | null) => p?.name === 'ChallengeGenerated');
+    expect(parsed, 'ChallengeGenerated event must be emitted').toBeTruthy();
+    const actualKaId: bigint = parsed!.args.knowledgeAssetId;
+    const actualChunkId: bigint = parsed!.args.chunkId;
+    const challengeEpoch: bigint = parsed!.args.epoch;
+
+    // ── Attacker view: reconstruct the seed from PUBLIC block data only ──
+    // Post-Paris `block.difficulty` == prevrandao == the block's `mixHash`.
+    // `blockhash(block.number - ((difficulty % 256) + 1))` is an already-mined,
+    // publicly-readable block hash.
+    const hexN = (n: number) => '0x' + n.toString(16);
+    const challengeBlock = await provider.send('eth_getBlockByNumber', [hexN(challengeBlockNumber), false]);
+    const difficulty = BigInt(challengeBlock.mixHash ?? challengeBlock.difficulty);
+    const offset = (difficulty % 256n) + 1n;
+    const refBlock = await provider.send('eth_getBlockByNumber', [hexN(challengeBlockNumber - Number(offset)), false]);
+    const reconstructedSeed = ethers.solidityPackedKeccak256(
+      ['uint256', 'bytes32', 'address', 'uint8'],
+      [difficulty, refBlock.hash, rec2.address, 1],
+    );
+
+    // Replay the public picker with the reconstructed seed + the challenge's
+    // epoch — exactly what an attacker runs off-chain BEFORE committing a proof.
+    const predicted = await rs.previewChallengeForSeed(reconstructedSeed, challengeEpoch);
+    const predictsActualDraw = predicted.kaId === actualKaId && predicted.chunkId === actualChunkId;
+
+    // CORRECT (post-fix): the draw must NOT be reconstructable from public block
+    // data. Today it is — `predictsActualDraw` is true — so this assertion is
+    // RED until #1091 lands a commit-reveal / VRF seed.
+    expect(predictsActualDraw, 'challenge draw was predicted from public block data alone').toBe(false);
+  }, 90_000);
+
   it('drives the prover end-to-end against the real RandomSampling.sol', async () => {
     const ctx = getSharedContext();
 
