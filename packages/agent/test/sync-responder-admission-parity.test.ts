@@ -275,6 +275,7 @@ describe('sync responder graph admission planner', () => {
   it('serves registered SWM subgraphs while denying unregistered and child-CG collisions', async () => {
     const cgId = 'planner-swm-cg';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    const cgMeta = `${cgPrefix}/_meta`;
     const rootSwm = `${cgPrefix}/_shared_memory`;
     const rootSwmMeta = `${cgPrefix}/_shared_memory_meta`;
     const registeredSwm = `${cgPrefix}/registered/_shared_memory`;
@@ -328,7 +329,10 @@ describe('sync responder graph admission planner', () => {
 
     expect(metaGraphs.has(rootSwmMeta)).toBe(true);
     expect(metaGraphs.has(registeredSwmMeta)).toBe(true);
+    expect(metaGraphs.has(cgMeta)).toBe(true);
     expect(metaGraphs.has(childSwmMeta)).toBe(false);
+    expect(metaOut).toContain(`${DKG_NS}SubGraph`);
+    expect(metaOut).toContain(`did:dkg:context-graph:${cgId}/registered`);
   });
 
   it('does not serve stale SWM rows from a previous request after same-graph writes', async () => {

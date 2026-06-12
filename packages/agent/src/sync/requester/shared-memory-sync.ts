@@ -199,7 +199,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
 
 function sharedMemoryOwnershipKeyFromGraph(contextGraphId: string, dataGraph: string): string | undefined {
   const rootGraph = contextGraphWorkspaceGraphUri(contextGraphId);
-  if (isSharedMemoryBucketOrDescendant(dataGraph, rootGraph)) return contextGraphId;
+  if (dataGraph === rootGraph || isSharedMemoryBucketDescendantDataGraph(dataGraph, rootGraph)) return contextGraphId;
 
   const prefix = `did:dkg:context-graph:${contextGraphId}/`;
   const suffix = '/_shared_memory';
@@ -208,20 +208,24 @@ function sharedMemoryOwnershipKeyFromGraph(contextGraphId: string, dataGraph: st
   const remainder = dataGraph.slice(prefix.length);
   const suffixAt = remainder.indexOf(suffix);
   if (suffixAt <= 0) return undefined;
+  const bucketGraph = dataGraph.slice(0, prefix.length + suffixAt + suffix.length);
   const subGraphName = remainder.slice(0, suffixAt);
   const tail = remainder.slice(suffixAt + suffix.length);
-  if (tail && (!tail.startsWith('/') || tail.startsWith('/staging/'))) return undefined;
+  if (tail && (!tail.startsWith('/') || !isSharedMemoryBucketDescendantDataGraph(dataGraph, bucketGraph))) {
+    return undefined;
+  }
   if (!subGraphName || subGraphName.includes('/')) return undefined;
   if (!validateSubGraphName(subGraphName).valid) return undefined;
 
   return `${contextGraphId}\0${subGraphName}`;
 }
 
-function isSharedMemoryBucketOrDescendant(dataGraph: string, bucketGraph: string): boolean {
-  return dataGraph === bucketGraph || (
-    dataGraph.startsWith(`${bucketGraph}/`) &&
-    !dataGraph.startsWith(`${bucketGraph}/staging/`)
-  );
+function isSharedMemoryBucketDescendantDataGraph(dataGraph: string, bucketGraph: string): boolean {
+  if (!dataGraph.startsWith(`${bucketGraph}/`)) return false;
+  const tail = dataGraph.slice(bucketGraph.length + 1);
+  if (tail.startsWith('staging/')) return false;
+  const parts = tail.split('/');
+  return parts.length === 2 && parts[0].length > 0 && /^[0-9]+$/.test(parts[1]);
 }
 
 interface PublicSnapshotMetadata {

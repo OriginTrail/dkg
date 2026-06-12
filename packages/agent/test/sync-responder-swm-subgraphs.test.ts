@@ -32,6 +32,8 @@ const CG_ID = 'devnet-test';
 const CG_PREFIX = `did:dkg:context-graph:${CG_ID}`;
 const ROOT_SWM = `${CG_PREFIX}/_shared_memory`;
 const ROOT_SWM_META = `${CG_PREFIX}/_shared_memory_meta`;
+const ROOT_SWM_DESCENDANT = `${ROOT_SWM}/0xabc/1`;
+const ROOT_SWM_MALFORMED_DESCENDANT = `${ROOT_SWM}/0xabc/1/extra`;
 const SUB_NAME = 'ai-tools';
 const SUB_SWM = `${CG_PREFIX}/${SUB_NAME}/_shared_memory`;
 const SUB_SWM_META = `${CG_PREFIX}/${SUB_NAME}/_shared_memory_meta`;
@@ -132,6 +134,8 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
       // branch widens past the root URI to genid descendants).
       { graph: ROOT_SWM, subject: ROOT_ENTITY, predicate: 'http://schema.org/name', object: '"root-payload"' },
       { graph: ROOT_SWM, subject: `${ROOT_ENTITY}/.well-known/genid/abc`, predicate: 'http://schema.org/value', object: '"root-child"' },
+      { graph: ROOT_SWM_DESCENDANT, subject: ROOT_ENTITY, predicate: 'http://schema.org/description', object: '"root-promoted-descendant"' },
+      { graph: ROOT_SWM_MALFORMED_DESCENDANT, subject: ROOT_ENTITY, predicate: 'http://schema.org/description', object: '"malformed-descendant-leak"' },
       ...workspaceOpQuads(SHARE_OP_ROOT, ROOT_ENTITY, ROOT_SWM_META, NOW_ISO),
 
       // --- SUB-GRAPH SWM (the gap target) ---
@@ -179,6 +183,8 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
 
       const graphs = lineGraphsFromNquads(out);
       expect(graphs.has(ROOT_SWM)).toBe(true);
+      expect(graphs.has(ROOT_SWM_DESCENDANT)).toBe(true);
+      expect(graphs.has(ROOT_SWM_MALFORMED_DESCENDANT)).toBe(false);
       expect(graphs.has(SUB_SWM)).toBe(true);
       expect(graphs.has(OTHER_SUB_SWM)).toBe(true);
 
@@ -187,6 +193,8 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
       expect(out).toContain('"sub-ai-tools-payload"');
       expect(out).toContain('"sub-decisions-payload"');
       expect(out).toContain('"root-child"');
+      expect(out).toContain('"root-promoted-descendant"');
+      expect(out).not.toContain('"malformed-descendant-leak"');
     });
 
     it('does NOT return SWM meta graphs (those are the meta phase)', async () => {
@@ -256,7 +264,7 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
       expect(graphs.has(OTHER_SUB_SWM)).toBe(false);
     });
 
-    it('does NOT include the durable top-level _meta', async () => {
+    it('includes only sub-graph registration rows from the top-level _meta', async () => {
       const out = await cap.invoke({
         contextGraphId: CG_ID,
         offset: 0,
@@ -266,7 +274,11 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
       });
 
       const graphs = lineGraphsFromNquads(out);
-      expect(graphs.has(UNRELATED_DURABLE_META)).toBe(false);
+      expect(graphs.has(UNRELATED_DURABLE_META)).toBe(true);
+      expect(out).toContain(`${DKG_NS}SubGraph`);
+      expect(out).toContain('http://schema.org/name');
+      expect(out).not.toContain(`${DKG_NS}createdAt`);
+      expect(out).not.toContain('"2026-05-10T00:00:00Z"');
     });
   });
 

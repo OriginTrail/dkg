@@ -89,29 +89,15 @@ export async function readSwmMetaPage(params: {
   const graphs = await planSwmGraphs(params.store, params.contextGraphId, true);
   const graphSet = new Set(params.graphList);
   const candidateGraphs = graphs.filter((graph) => graphSet.has(graph));
-  if (!params.cutoffIso) {
-    return readPagedRowsAcrossGraphs(params.store, candidateGraphs, params.offset, params.limit, async () => true);
-  }
-
-  const rows: SyncRow[] = [];
-  let skip = params.offset;
-  let remaining = params.limit;
-  for (const graph of candidateGraphs) {
-    if (skip > 0) {
-      const count = await countFreshSwmMetaGraphRows(params.store, graph, params.cutoffIso);
-      if (skip >= count) {
-        skip -= count;
-        continue;
-      }
-    }
-
-    const page = await readFreshSwmMetaGraphRowsPage(params.store, graph, params.cutoffIso, skip, remaining);
-    rows.push(...page);
-    remaining -= page.length;
-    skip = 0;
-    if (remaining <= 0) break;
-  }
-  return rows;
+  const registrationGraph = contextGraphMetaGraphUri(params.contextGraphId);
+  return readSwmMetaRowsPage(
+    params.store,
+    candidateGraphs,
+    graphSet.has(registrationGraph) ? registrationGraph : null,
+    params.cutoffIso,
+    params.offset,
+    params.limit,
+  );
 }
 
 export async function readSwmDataPage(params: {
@@ -125,7 +111,7 @@ export async function readSwmDataPage(params: {
   const dataGraphs = await planSwmGraphs(params.store, params.contextGraphId, false);
   const graphSet = new Set(params.graphList);
   const candidateGraphsFor = (graph: string) => params.graphList
-    .filter((candidate) => candidate === graph || candidate.startsWith(`${graph}/`))
+    .filter((candidate) => candidate === graph || isSharedMemoryBucketDescendantDataGraph(candidate, graph))
     .sort(compareCodePoint);
 
   if (!params.cutoffIso) {
@@ -423,52 +409,57 @@ async function readRowsPageAcrossGraphs(
     .filter((row) => row.s && row.p && row.o && row.g);
 }
 
-async function countFreshSwmMetaGraphRows(
+async function readSwmMetaRowsPage(
   store: TripleStore,
-  graph: string,
-  cutoffIso: string,
-): Promise<number> {
-  const res = await store.query(`
-    SELECT (COUNT(*) AS ?count) WHERE {
-      GRAPH <${assertSafeIri(graph)}> {
-        ?s ?p ?o .
-        ?s <${DKG_PUBLISHED_AT}> ?ts .
-        FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)
-      }
-    }
-  `);
-  if (res.type !== 'bindings') return 0;
-  const value = parseIntegerLiteral(res.bindings[0]?.['count']);
-  if (value == null || value < 0n) return 0;
-  return Number(value > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : value);
-}
-
-async function readFreshSwmMetaGraphRowsPage(
-  store: TripleStore,
-  graph: string,
-  cutoffIso: string,
+  swmMetaGraphs: readonly string[],
+  registrationGraph: string | null,
+  cutoffIso: string | null,
   offset: number,
   limit: number,
 ): Promise<SyncRow[]> {
   const safeOffset = Math.max(0, Math.floor(offset));
   const safeLimit = Math.max(0, Math.floor(limit));
   if (safeLimit === 0) return [];
+  const swmMetaValues = graphValues(swmMetaGraphs);
+  const swmMetaClause = swmMetaValues
+    ? `
+      {
+        VALUES ?g { ${swmMetaValues} }
+        GRAPH ?g {
+          ?s ?p ?o .
+          ${cutoffIso
+            ? `
+          ?s <${DKG_PUBLISHED_AT}> ?ts .
+          FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)`
+            : ''}
+        }
+      }`
+    : '';
+  const registrationClause = registrationGraph
+    ? `
+      {
+        GRAPH <${assertSafeIri(registrationGraph)}> {
+          ?s <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_SUB_GRAPH}> ;
+             <${SCHEMA_NAME}> ?subGraphName ;
+             ?p ?o .
+        }
+        BIND(<${assertSafeIri(registrationGraph)}> AS ?g)
+      }`
+    : '';
+  if (!swmMetaClause && !registrationClause) return [];
+  const union = [registrationClause, swmMetaClause].filter(Boolean).join(' UNION ');
   const res = await store.query(`
-    SELECT ?s ?p ?o WHERE {
-      GRAPH <${assertSafeIri(graph)}> {
-        ?s ?p ?o .
-        ?s <${DKG_PUBLISHED_AT}> ?ts .
-        FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)
-      }
+    SELECT DISTINCT ?g ?s ?p ?o WHERE {
+      ${union}
     }
-    ORDER BY ?s ?p ?o
+    ORDER BY ?g ?s ?p ?o
     OFFSET ${safeOffset}
     LIMIT ${safeLimit}
   `);
   if (res.type !== 'bindings') return [];
   return res.bindings
-    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: graph }))
-    .filter((row) => row.s && row.p && row.o);
+    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
+    .filter((row) => row.s && row.p && row.o && row.g);
 }
 
 async function countFreshSwmDataGraphRows(
@@ -664,6 +655,14 @@ function durableDeltaGroupClause(
 
 function graphValues(graphs: readonly string[]): string {
   return dedupeStrings(graphs).map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
+}
+
+function isSharedMemoryBucketDescendantDataGraph(graph: string, bucketGraph: string): boolean {
+  if (!graph.startsWith(`${bucketGraph}/`)) return false;
+  const tail = graph.slice(bucketGraph.length + 1);
+  if (tail.startsWith('staging/')) return false;
+  const parts = tail.split('/');
+  return parts.length === 2 && parts[0].length > 0 && /^[0-9]+$/.test(parts[1]);
 }
 
 function dedupeStrings(values: readonly string[]): string[] {

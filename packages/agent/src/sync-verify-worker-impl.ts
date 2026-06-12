@@ -5,6 +5,9 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncVerifyResult, SyncVerifyLogEntry, SyncParseResult, SharedMemoryProcessResult, DurableBatchProcessResult, SharedMemoryBatchProcessResult } from './sync-verify-worker.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const DKG_SUB_GRAPH = `${DKG_NS}SubGraph`;
+const SCHEMA_NAME = 'http://schema.org/name';
 
 parentPort!.on('message', async (message: { id: number; method: string; args: unknown[] }) => {
   try {
@@ -208,7 +211,6 @@ function processSharedMemory(
   registeredSubGraphNames?: readonly string[],
 ): SharedMemoryProcessResult {
   const DKG_ROOT_ENTITY = 'http://dkg.io/ontology/rootEntity';
-  const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
   const DKG_WORKSPACE_OP = 'http://dkg.io/ontology/WorkspaceOperation';
   const DKG_PUBLISHED_AT = 'http://dkg.io/ontology/publishedAt';
   const DKG_PUBLISHER_PEER_ID = 'http://dkg.io/ontology/publisherPeerId';
@@ -220,6 +222,9 @@ function processSharedMemory(
   //   <cgPrefix>/<sub>/_shared_memory <-> <cgPrefix>/<sub>/_shared_memory_meta
   // Stripping the suffix yields the matching data graph URI.
   const META_SUFFIX = '_meta';
+  const effectiveRegisteredSubGraphNames = contextGraphId === undefined
+    ? registeredSubGraphNames
+    : combineRegisteredSubGraphNames(contextGraphId, registeredSubGraphNames, wsMetaQuads);
 
   // Codex review on #885 — keep validity scoped per (meta graph, op
   // subject). Pre-fix the Sets were global, so an op subject that
@@ -270,7 +275,7 @@ function processSharedMemory(
     if (q.predicate !== DKG_ROOT_ENTITY) continue;
     const validForGraph = validOpsByMeta.get(q.graph);
     if (!validForGraph || !validForGraph.has(q.subject)) continue;
-    const dataGraph = swmDataGraphFromMetaGraph(q.graph, contextGraphId, META_SUFFIX, registeredSubGraphNames);
+    const dataGraph = swmDataGraphFromMetaGraph(q.graph, contextGraphId, META_SUFFIX, effectiveRegisteredSubGraphNames);
     if (!dataGraph) continue;
     const entity = q.object.startsWith('"') ? stripLiteral(q.object) : q.object;
     let s = allowedRootsByDataGraph.get(dataGraph);
@@ -315,7 +320,7 @@ function processSharedMemory(
   for (const q of wsMetaQuads) {
     const validForGraph = validOpsByMeta.get(q.graph);
     if (q.predicate === DKG_ROOT_ENTITY && validForGraph?.has(q.subject)) {
-      const dataGraph = swmDataGraphFromMetaGraph(q.graph, contextGraphId, META_SUFFIX, registeredSubGraphNames);
+      const dataGraph = swmDataGraphFromMetaGraph(q.graph, contextGraphId, META_SUFFIX, effectiveRegisteredSubGraphNames);
       if (!dataGraph) continue;
       const entity = q.object.startsWith('"') ? stripLiteral(q.object) : q.object;
       const creator = opCreators.get(q.subject);
@@ -360,11 +365,67 @@ function allowedRootsForSwmDataGraph(
   const exact = allowedRootsByDataGraph.get(graph);
   if (exact) return exact;
   for (const [bucketGraph, allowed] of allowedRootsByDataGraph) {
-    if (graph.startsWith(`${bucketGraph}/`) && !graph.startsWith(`${bucketGraph}/staging/`)) {
+    if (isSharedMemoryBucketDescendantDataGraph(graph, bucketGraph)) {
       return allowed;
     }
   }
   return undefined;
+}
+
+function combineRegisteredSubGraphNames(
+  contextGraphId: string,
+  localNames: readonly string[] | undefined,
+  wsMetaQuads: readonly Quad[],
+): string[] {
+  const out = new Set<string>();
+  for (const name of localNames ?? []) {
+    if (validateSubGraphName(name).valid) out.add(name);
+  }
+  for (const name of replicatedRegisteredSubGraphNames(contextGraphId, wsMetaQuads)) {
+    out.add(name);
+  }
+  return [...out];
+}
+
+function replicatedRegisteredSubGraphNames(
+  contextGraphId: string,
+  wsMetaQuads: readonly Quad[],
+): string[] {
+  const rootMetaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+  const typedSubjects = new Set<string>();
+  const namesBySubject = new Map<string, Set<string>>();
+
+  for (const q of wsMetaQuads) {
+    if (q.graph !== rootMetaGraph) continue;
+    if (q.predicate === RDF_TYPE && q.object === DKG_SUB_GRAPH) {
+      typedSubjects.add(q.subject);
+    } else if (q.predicate === SCHEMA_NAME) {
+      const name = stripLiteral(q.object);
+      if (!validateSubGraphName(name).valid) continue;
+      let names = namesBySubject.get(q.subject);
+      if (!names) {
+        names = new Set<string>();
+        namesBySubject.set(q.subject, names);
+      }
+      names.add(name);
+    }
+  }
+
+  const out = new Set<string>();
+  for (const subject of typedSubjects) {
+    for (const name of namesBySubject.get(subject) ?? []) {
+      out.add(name);
+    }
+  }
+  return [...out];
+}
+
+function isSharedMemoryBucketDescendantDataGraph(graph: string, bucketGraph: string): boolean {
+  if (!graph.startsWith(`${bucketGraph}/`)) return false;
+  const tail = graph.slice(bucketGraph.length + 1);
+  if (tail.startsWith('staging/')) return false;
+  const parts = tail.split('/');
+  return parts.length === 2 && parts[0].length > 0 && /^[0-9]+$/.test(parts[1]);
 }
 
 function processDurableBatch(

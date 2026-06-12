@@ -13,8 +13,10 @@ const ROOT_GRAPH = contextGraphSharedMemoryUri(CG_ID);
 const SUB_GRAPH_SWM = contextGraphSharedMemoryUri(CG_ID, SUB_GRAPH);
 const ROOT_META_GRAPH = contextGraphSharedMemoryMetaUri(CG_ID);
 const SUB_GRAPH_META = contextGraphSharedMemoryMetaUri(CG_ID, SUB_GRAPH);
+const ROOT_CG_META_GRAPH = `did:dkg:context-graph:${CG_ID}/_meta`;
 const DKG = 'http://dkg.io/ontology/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const SCHEMA_NAME = 'http://schema.org/name';
 
 function page(quads: Quad[], phase: SyncPhase): SyncPageResult {
   return {
@@ -33,6 +35,15 @@ function workspaceOperationMeta(graph: string, op: string, root: string, publish
     { graph, subject: op, predicate: `${DKG}publishedAt`, object: '"2030-01-01T00:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' },
     { graph, subject: op, predicate: `${DKG}rootEntity`, object: root },
     { graph, subject: op, predicate: `${DKG}publisherPeerId`, object: `"${publisherPeerId}"` },
+  ];
+}
+
+function subGraphRegistrationMeta(name: string): Quad[] {
+  const subject = `did:dkg:context-graph:${CG_ID}/${name}`;
+  return [
+    { graph: ROOT_CG_META_GRAPH, subject, predicate: RDF_TYPE, object: `${DKG}SubGraph` },
+    { graph: ROOT_CG_META_GRAPH, subject, predicate: SCHEMA_NAME, object: `"${name}"` },
+    { graph: ROOT_CG_META_GRAPH, subject, predicate: `${DKG}createdBy`, object: '"remote-peer"' },
   ];
 }
 
@@ -96,6 +107,60 @@ describe('runSharedMemorySync ownership hydration', () => {
     expect(ownedMaps.get(`${CG_ID}\0${SUB_GRAPH}`)?.get(ROOT_ENTITY)).toBe('peer-sub');
   });
 
+  it('accepts sub-graph SWM when the remote registration is replicated in the same meta batch', async () => {
+    const worker = new SyncVerifyWorker();
+    const ownedMaps = new Map<string, Map<string, string>>();
+    const inserted: Quad[] = [];
+    const dataQuads: Quad[] = [
+      { graph: SUB_GRAPH_SWM, subject: ROOT_ENTITY, predicate: 'http://schema.org/name', object: '"remote-sub"' },
+    ];
+    const metaQuads: Quad[] = [
+      ...subGraphRegistrationMeta(SUB_GRAPH),
+      ...workspaceOperationMeta(SUB_GRAPH_META, 'urn:dkg:share:remote-sub', ROOT_ENTITY, 'peer-remote-sub'),
+    ];
+
+    try {
+      const summary = await runSharedMemorySync({
+        ctx: createOperationContext('sync'),
+        remotePeerId: '12D3KooWRequesterReplicatedRegistration',
+        contextGraphIds: [CG_ID],
+        createContextGraphSyncDeadline: () => Date.now() + 30_000,
+        fetchSyncPages: async (_ctx, _peer, _cg, _includeSwm, phase) => (
+          phase === 'data' ? page(dataQuads, phase) : page(metaQuads, phase)
+        ),
+        processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames) =>
+          worker.processSharedMemoryBatch(wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames),
+        getRegisteredSubGraphNames: async () => [],
+        ensureContextGraph: async () => {},
+        storeInsert: async (quads) => {
+          inserted.push(...quads);
+        },
+        deleteCheckpoint: () => {},
+        setCheckpoint: () => {},
+        ensureOwnedMap: (key) => {
+          let map = ownedMaps.get(key);
+          if (!map) {
+            map = new Map<string, string>();
+            ownedMaps.set(key, map);
+          }
+          return map;
+        },
+        logInfo: () => {},
+        logWarn: () => {},
+        logDebug: () => {},
+      });
+
+      expect(summary.failedPeers).toBe(0);
+      expect(summary.droppedDataTriples).toBe(0);
+      expect(summary.insertedDataTriples).toBe(1);
+      expect(inserted.some((quad) => quad.graph === ROOT_CG_META_GRAPH && quad.predicate === SCHEMA_NAME)).toBe(true);
+      expect(inserted.some((quad) => quad.graph === SUB_GRAPH_SWM)).toBe(true);
+      expect(ownedMaps.get(`${CG_ID}\0${SUB_GRAPH}`)?.get(ROOT_ENTITY)).toBe('peer-remote-sub');
+    } finally {
+      await worker.close();
+    }
+  });
+
   it('accepts descendant SWM data graphs verified by their bucket meta graph', async () => {
     const worker = new SyncVerifyWorker();
     const ownedMaps = new Map<string, Map<string, string>>();
@@ -155,6 +220,47 @@ describe('runSharedMemorySync ownership hydration', () => {
       expect(insertedDataGraphs).toEqual([rootDescendantGraph, subDescendantGraph].sort());
       expect(ownedMaps.get(CG_ID)?.get(ROOT_ENTITY)).toBe('peer-root-descendant');
       expect(ownedMaps.get(`${CG_ID}\0${SUB_GRAPH}`)?.get(subEntity)).toBe('peer-sub-descendant');
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it('rejects malformed descendant SWM data graphs under an otherwise valid bucket', async () => {
+    const worker = new SyncVerifyWorker();
+    const inserted: Quad[] = [];
+    const malformedDescendantGraph = `${ROOT_GRAPH}/0xabc/1/extra`;
+    const metaQuads = workspaceOperationMeta(ROOT_META_GRAPH, 'urn:dkg:share:malformed-descendant', ROOT_ENTITY, 'peer-root');
+    const dataQuads: Quad[] = [
+      { graph: malformedDescendantGraph, subject: ROOT_ENTITY, predicate: 'http://schema.org/name', object: '"malformed-descendant"' },
+    ];
+
+    try {
+      const summary = await runSharedMemorySync({
+        ctx: createOperationContext('sync'),
+        remotePeerId: '12D3KooWRequesterMalformedDescendant',
+        contextGraphIds: [CG_ID],
+        createContextGraphSyncDeadline: () => Date.now() + 30_000,
+        fetchSyncPages: async (_ctx, _peer, _cg, _includeSwm, phase) => (
+          phase === 'data' ? page(dataQuads, phase) : page(metaQuads, phase)
+        ),
+        processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId) =>
+          worker.processSharedMemoryBatch(wsDataQuads, wsMetaQuads, contextGraphId),
+        ensureContextGraph: async () => {},
+        storeInsert: async (quads) => {
+          inserted.push(...quads);
+        },
+        deleteCheckpoint: () => {},
+        setCheckpoint: () => {},
+        ensureOwnedMap: () => new Map<string, string>(),
+        logInfo: () => {},
+        logWarn: () => {},
+        logDebug: () => {},
+      });
+
+      expect(summary.failedPeers).toBe(0);
+      expect(summary.droppedDataTriples).toBe(1);
+      expect(summary.insertedDataTriples).toBe(0);
+      expect(inserted.some((quad) => quad.graph === malformedDescendantGraph)).toBe(false);
     } finally {
       await worker.close();
     }
