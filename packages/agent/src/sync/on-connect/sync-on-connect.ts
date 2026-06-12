@@ -136,11 +136,13 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
   let madeProgress = false;
   let sawDeniedPhase = false;
   let sawBackoffWorthyFailure = false;
+  let sawMetadataOnlyDetailedSync = false;
   let cleanDetailedRound = false;
   const recordSyncAccounting = (result: SyncFromPeerResult): void => {
     madeProgress = madeProgress || madeSyncProgress(result);
     sawDeniedPhase = sawDeniedPhase || hadDeniedPhase(result);
     sawBackoffWorthyFailure = sawBackoffWorthyFailure || hadBackoffWorthyFailure(result);
+    sawMetadataOnlyDetailedSync = sawMetadataOnlyDetailedSync || (typeof result !== 'number' && metadataOnlySync(result));
     cleanDetailedRound = cleanDetailedRound || cleanDetailedSync(result);
   };
   const runNonTransportStep = async <T>(step: () => Promise<T>): Promise<T> => {
@@ -202,9 +204,10 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       logInfo(ctx, `Skipping shared memory sync from peer ${shortPeer} (syncSharedMemoryOnConnect=false)`);
     }
 
-    const clearsPeerBackoff = madeProgress || (!sawBackoffWorthyFailure && (cleanDetailedRound || sawDeniedPhase));
+    const cleanNonMetadataRound = cleanDetailedRound && !sawMetadataOnlyDetailedSync;
+    const clearsPeerBackoff = madeProgress || (!sawBackoffWorthyFailure && (cleanNonMetadataRound || sawDeniedPhase));
     if (clearsPeerBackoff) {
-      context.onPeerSynced?.(remotePeer, { fresh: !sawBackoffWorthyFailure && !sawDeniedPhase });
+      context.onPeerSynced?.(remotePeer, { fresh: !sawBackoffWorthyFailure && !sawDeniedPhase && !sawMetadataOnlyDetailedSync });
     }
     return 'synced';
   } catch (err) {

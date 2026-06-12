@@ -1,5 +1,5 @@
 import { parentPort } from 'node:worker_threads';
-import { catchupPeerSucceeded, type CatchupJobResult, type CatchupRunRequest } from './catchup-runner.js';
+import { catchupPeerResponded, catchupPeerSucceeded, type CatchupJobResult, type CatchupRunRequest } from './catchup-runner.js';
 
 type InvokeResultMessage = {
   type: 'invoke-result';
@@ -48,6 +48,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
 
   let syncCapablePeers = 0;
   let peersTried = 0;
+  let peersResponded = 0;
   let peersSucceeded = 0;
   let dataSynced = 0;
   let sharedMemorySynced = 0;
@@ -199,6 +200,10 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       deniedPeers += 1;
     }
 
+    if (catchupPeerResponded(durable, shared)) {
+      peersResponded += 1;
+    }
+
     // Count peers that completed a sync round without a transport
     // failure/denial and either made phase/checkpoint progress, or cleanly
     // completed with no timeout. Mirrors the inline
@@ -212,16 +217,15 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   diagnostics.noProtocolPeers = noProtocolPeers;
   await invoke('finalizeCatchup', request.contextGraphId, dataSynced, sharedMemorySynced);
 
-  const peerCompletedSuccessfully = peersSucceeded > 0;
-
   return {
     connectedPeers: prepared.connectedPeers,
     syncCapablePeers,
     peersTried,
+    peersResponded,
     peersSucceeded,
     dataSynced,
     sharedMemorySynced,
-    denied: deniedPeers > 0 && !peerCompletedSuccessfully,
+    denied: deniedPeers > 0,
     deniedPeers,
     diagnostics,
   };

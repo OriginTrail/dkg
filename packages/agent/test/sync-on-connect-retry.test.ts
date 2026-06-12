@@ -395,6 +395,41 @@ describe('runSyncOnConnect callbacks', () => {
     expect(synced).toEqual([]);
   });
 
+  it('does not let clean shared-memory accounting make durable metadata-only sync fresh', async () => {
+    const remotePeer = freshPeerIdString();
+    const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
+
+    const outcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => ['cg-metadata-only'],
+      syncFromPeer: async () => ({
+        insertedTriples: 1,
+        insertedDataTriples: 0,
+        insertedMetaTriples: 1,
+        metaOnlyResponses: 1,
+        timedOutPhases: 0,
+        failedPeers: 0,
+        deniedPhases: 0,
+      }),
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => ({
+        insertedTriples: 0,
+        timedOutPhases: 0,
+        failedPeers: 0,
+        deniedPhases: 0,
+      }),
+      logInfo: noopLog,
+      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+    });
+
+    expect(outcome).toBe('synced');
+    expect(synced).toEqual([]);
+  });
+
   it('tags failures that happen after durable sync completes', async () => {
     const remotePeer = freshPeerIdString();
     const syncingPeers = new Set<string>();

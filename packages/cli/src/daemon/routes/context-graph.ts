@@ -1547,19 +1547,15 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
         const d = result.diagnostics?.durable;
         const s = result.diagnostics?.sharedMemory;
+        const servedUsableData =
+          result.dataSynced > 0 ||
+          result.sharedMemorySynced > 0;
         const cleanResponse =
-          result.dataSynced > 0 ||
-          result.sharedMemorySynced > 0 ||
+          servedUsableData ||
           (d?.emptyResponses ?? 0) > 0 ||
-          (d?.metaOnlyResponses ?? 0) > 0 ||
-          (s?.emptyResponses ?? 0) > 0;
-        const servedByPeer =
-          result.dataSynced > 0 ||
-          result.sharedMemorySynced > 0 ||
-          (d?.insertedMetaTriples ?? 0) > 0 ||
-          (s?.insertedMetaTriples ?? 0) > 0 ||
-          (d?.metaOnlyResponses ?? 0) > 0;
-        if (result.denied && !servedByPeer) {
+          (s?.emptyResponses ?? 0) > 0 ||
+          (!result.denied && (d?.metaOnlyResponses ?? 0) > 0);
+        if (result.denied && !servedUsableData) {
           job.status = "denied";
           job.error = result.deniedPeers > 1 ? `Sync denied by ${result.deniedPeers} remote peers` : "Sync denied by remote peer";
           if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} denied by remote peer(s): ${result.deniedPeers}`);
@@ -1573,7 +1569,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
               ...(shouldSyncSharedMemory ? { sharedMemorySynced: true } : {}),
               ...(hasContent ? { metaSynced: true } : {}),
             });
-          } else if (result.peersTried > 0 && result.peersSucceeded === 0) {
+          } else if (result.peersTried > 0 && (result.peersResponded ?? result.peersSucceeded) === 0) {
             // No peer answered within the run — curator likely offline
             // or no node currently holds this CG. Distinct from `denied`
             // so the UI can render "couldn't reach the curator" copy +

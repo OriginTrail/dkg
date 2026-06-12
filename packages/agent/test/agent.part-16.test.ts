@@ -157,6 +157,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         const timeoutOnly = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
 
         expect(timeoutOnly.peersTried).toBe(1);
+        expect(timeoutOnly.peersResponded).toBe(1);
         expect(timeoutOnly.peersSucceeded).toBe(0);
         expect(timeoutOnly.diagnostics.durable.timedOutPhases).toBe(1);
         expect(timeoutOnly.diagnostics.durable.failedPeers).toBe(0);
@@ -169,6 +170,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         const zeroOffsetCompletionWithTimeout = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
 
         expect(zeroOffsetCompletionWithTimeout.peersTried).toBe(1);
+        expect(zeroOffsetCompletionWithTimeout.peersResponded).toBe(1);
         expect(zeroOffsetCompletionWithTimeout.peersSucceeded).toBe(0);
         expect(zeroOffsetCompletionWithTimeout.diagnostics.durable.timedOutPhases).toBe(1);
         expect(zeroOffsetCompletionWithTimeout.diagnostics.durable.completedPhases).toBe(1);
@@ -182,6 +184,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         const progressWithTimeout = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
 
         expect(progressWithTimeout.peersTried).toBe(1);
+        expect(progressWithTimeout.peersResponded).toBe(1);
         expect(progressWithTimeout.peersSucceeded).toBe(1);
         expect(progressWithTimeout.diagnostics.durable.timedOutPhases).toBe(1);
         expect(progressWithTimeout.diagnostics.durable.completedPhases).toBe(1);
@@ -191,7 +194,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       }
     });
 
-    it('reports denied peers without marking the whole inline catchup denied when another peer serves data', async () => {
+    it('reports raw denied peers even when another peer serves data', async () => {
       const agent = await DKGAgent.create({
         name: 'RuntimeCatchupDeniedButServed',
         listenHost: '127.0.0.1',
@@ -256,7 +259,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
 
         expect(result.deniedPeers).toBe(1);
-        expect(result.denied).toBe(false);
+        expect(result.denied).toBe(true);
+        expect(result.peersResponded).toBe(2);
         expect(result.peersSucceeded).toBe(1);
         expect(result.dataSynced).toBe(1);
       } finally {
@@ -265,7 +269,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     });
 
 
-    it('clears inline catchup denied when another peer cleanly serves nothing new', async () => {
+    it('keeps raw denied when another peer cleanly serves nothing new', async () => {
       const agent = await DKGAgent.create({
         name: 'RuntimeCatchupDeniedButCleanEmpty',
         listenHost: '127.0.0.1',
@@ -308,7 +312,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
 
         expect(result.deniedPeers).toBe(1);
-        expect(result.denied).toBe(false);
+        expect(result.denied).toBe(true);
+        expect(result.peersResponded).toBe(2);
         expect(result.peersSucceeded).toBe(1);
         expect(result.dataSynced).toBe(0);
       } finally {
@@ -377,6 +382,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
         expect(result.deniedPeers).toBe(1);
         expect(result.denied).toBe(true);
+        expect(result.peersResponded).toBe(1);
         expect(result.peersSucceeded).toBe(0);
         expect(result.dataSynced).toBe(0);
         expect(result.sharedMemorySynced).toBe(0);
@@ -448,6 +454,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
         expect(result.denied).toBe(false);
         expect(result.deniedPeers).toBe(0);
+        expect(result.peersResponded).toBe(1);
         expect(result.peersSucceeded).toBe(0);
         expect(result.dataSynced).toBe(0);
         expect(result.sharedMemorySynced).toBe(0);

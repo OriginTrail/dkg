@@ -1178,6 +1178,8 @@ export class ApiClient {
         connectedPeers: number;
         syncCapablePeers: number;
         peersTried: number;
+        peersResponded: number;
+        peersSucceeded: number;
         dataSynced: number;
         sharedMemorySynced: number;
         denied: boolean;
@@ -1233,6 +1235,8 @@ export class ApiClient {
         connectedPeers: number;
         syncCapablePeers: number;
         peersTried: number;
+        peersResponded: number;
+        peersSucceeded: number;
         dataSynced: number;
         sharedMemorySynced: number;
         denied: boolean;
@@ -1292,6 +1296,7 @@ export class ApiClient {
       connectedPeers: number;
       syncCapablePeers: number;
       peersTried: number;
+      peersResponded: number;
       peersSucceeded: number;
       dataSynced: number;
       sharedMemorySynced: number;

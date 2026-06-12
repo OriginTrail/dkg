@@ -2967,13 +2967,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     syncCapablePeers: number;
     peersTried: number;
     /**
+     * Subset of `peersTried` whose sync-capable peer produced a non-transport-
+     * failed round. Denials, metadata-only rows, and timeout-after-response
+     * still count as responses; daemon status mapping uses this to avoid
+     * reporting reachable-but-failed peers as curator-offline.
+     */
+    peersResponded: number;
+    /**
      * Subset of `peersTried` whose sync round finished without a transport
-     * failure AND without an explicit ACL denial. Used by the daemon
-     * subscribe job to distinguish a real "curator unreachable" outcome
-     * (`peersTried > 0 && peersSucceeded === 0 && !denied`) from a slow
-     * public CG (some peers responded with empty / meta-only) — the UI
-     * surfaces a dedicated `unreachable` terminal status with a "send
-     * signed join request" CTA instead of the generic timeout copy.
+     * failure, without an explicit ACL denial, and with either real progress
+     * or a clean non-metadata-only empty completion.
      */
     peersSucceeded: number;
     dataSynced: number;
@@ -3028,6 +3031,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     connectedPeers: number;
     syncCapablePeers: number;
     peersTried: number;
+    peersResponded: number;
     peersSucceeded: number;
     dataSynced: number;
     sharedMemorySynced: number;
@@ -3038,6 +3042,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const ctx = createOperationContext('sync');
     let syncCapablePeers = 0;
     let peersTried = 0;
+    let peersResponded = 0;
     let dataSynced = 0;
     let sharedMemorySynced = 0;
     let noProtocolPeers = 0;
@@ -3185,6 +3190,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         || (r.shared ? r.shared.insertedMetaTriples > 0 : false)
       );
       const peerTimedOut = r.durable.timedOutPhases > 0 || (r.shared ? r.shared.timedOutPhases > 0 : false);
+      if (!durableFailed && !sharedFailed) {
+        peersResponded++;
+      }
       if (!durableFailed && !sharedFailed && !peerDeniedRound && (peerMadeProgress || (!peerTimedOut && !peerMetadataOnly))) {
         peersSucceeded++;
       }
@@ -3231,8 +3239,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     await this.refreshMetaSyncedFlags([contextGraphId]);
 
-    const peerCompletedSuccessfully = peersSucceeded > 0;
-
     if (dataSynced > 0 || sharedMemorySynced > 0) {
       this.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
         contextGraphId,
@@ -3245,10 +3251,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       connectedPeers: peers.length,
       syncCapablePeers,
       peersTried,
+      peersResponded,
       peersSucceeded,
       dataSynced,
       sharedMemorySynced,
-      denied: accessDeniedPeers > 0 && !peerCompletedSuccessfully,
+      denied: accessDeniedPeers > 0,
       deniedPeers: accessDeniedPeers,
       diagnostics,
     };
