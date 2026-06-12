@@ -3867,12 +3867,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 async function getSharedMemorySubGraphAdmission(
   store: TripleStore,
   contextGraphId: string,
-  subGraphsPromise: Promise<Array<{ name: string }>>,
+  subGraphsPromise: Promise<Array<{ name: string; uri?: string }>>,
 ): Promise<{ registered: string[]; excluded: string[] }> {
   const registered: string[] = [];
   const excluded: string[] = [];
   for (const subGraph of await subGraphsPromise) {
     const childContextGraphUri = `${contextGraphDataGraphUri(contextGraphId)}/${subGraph.name}`;
+    if (subGraph.uri && subGraph.uri !== childContextGraphUri) continue;
     if (await isKnownContextGraphUri(store, childContextGraphUri)) {
       excluded.push(subGraph.name);
     } else {

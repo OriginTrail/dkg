@@ -93,15 +93,23 @@ export async function readSwmMetaPage(params: {
   const registrationNames = candidateGraphs
     .map((graph) => subGraphNameFromSwmMetaGraph(params.contextGraphId, graph))
     .filter((name): name is string => name !== undefined);
-  return readSwmMetaRowsPage(
+  const swmRows = await readSwmMetaRowsPage(
     params.store,
     candidateGraphs,
-    graphSet.has(registrationGraph) && registrationNames.length > 0 ? registrationGraph : null,
-    registrationNames,
     params.cutoffIso,
     params.offset,
     params.limit,
   );
+  if (params.offset !== 0 || !graphSet.has(registrationGraph) || registrationNames.length === 0) {
+    return swmRows;
+  }
+  const registrationRows = await readSwmRegistrationRows(
+    params.store,
+    registrationGraph,
+    params.contextGraphId,
+    registrationNames,
+  );
+  return [...registrationRows, ...swmRows].sort(compareRows);
 }
 
 export async function readSwmDataPage(params: {
@@ -276,7 +284,7 @@ async function readRegisteredSubGraphNames(
 ): Promise<string[]> {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const res = await store.query(`
-    SELECT DISTINCT ?name WHERE {
+    SELECT DISTINCT ?sg ?name WHERE {
       GRAPH <${assertSafeIri(metaGraph)}> {
         ?sg <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_SUB_GRAPH}> ;
             <${SCHEMA_NAME}> ?name .
@@ -285,8 +293,13 @@ async function readRegisteredSubGraphNames(
   `);
   if (res.type !== 'bindings') return [];
   return res.bindings
-    .map((row) => stripLiteral(row['name']))
-    .filter((name) => name && validateSubGraphName(name).valid)
+    .map((row) => ({ subject: row['sg'], name: stripLiteral(row['name']) }))
+    .filter(({ subject, name }) =>
+      name &&
+      validateSubGraphName(name).valid &&
+      subject === `${contextGraphDataGraphUri(contextGraphId)}/${name}`,
+    )
+    .map(({ name }) => name)
     .sort(compareCodePoint);
 }
 
@@ -430,8 +443,6 @@ async function readRowsPageAcrossGraphs(
 async function readSwmMetaRowsPage(
   store: TripleStore,
   swmMetaGraphs: readonly string[],
-  registrationGraph: string | null,
-  registrationNames: readonly string[],
   cutoffIso: string | null,
   offset: number,
   limit: number,
@@ -442,7 +453,6 @@ async function readSwmMetaRowsPage(
   const swmMetaValues = graphValues(swmMetaGraphs);
   const swmMetaClause = swmMetaValues
     ? `
-      {
         VALUES ?g { ${swmMetaValues} }
         GRAPH ?g {
           ?s ?p ?o .
@@ -452,25 +462,12 @@ async function readSwmMetaRowsPage(
           FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)`
             : ''}
         }
-      }`
+      `
     : '';
-  const registrationClause = registrationGraph
-    ? `
-      {
-        GRAPH <${assertSafeIri(registrationGraph)}> {
-          VALUES ?subGraphName { ${registrationNames.map(sparqlString).join(' ')} }
-          ?s <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_SUB_GRAPH}> ;
-             <${SCHEMA_NAME}> ?subGraphName ;
-             ?p ?o .
-        }
-        BIND(<${assertSafeIri(registrationGraph)}> AS ?g)
-      }`
-    : '';
-  if (!swmMetaClause && !registrationClause) return [];
-  const union = [registrationClause, swmMetaClause].filter(Boolean).join(' UNION ');
+  if (!swmMetaClause) return [];
   const res = await store.query(`
     SELECT DISTINCT ?g ?s ?p ?o WHERE {
-      ${union}
+      ${swmMetaClause}
     }
     ORDER BY ?g ?s ?p ?o
     OFFSET ${safeOffset}
@@ -480,6 +477,33 @@ async function readSwmMetaRowsPage(
   return res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
     .filter((row) => row.s && row.p && row.o && row.g);
+}
+
+async function readSwmRegistrationRows(
+  store: TripleStore,
+  registrationGraph: string,
+  contextGraphId: string,
+  registrationNames: readonly string[],
+): Promise<SyncRow[]> {
+  const values = registrationNames
+    .map((name) => `(<${assertSafeIri(`${contextGraphDataGraphUri(contextGraphId)}/${name}`)}> ${sparqlString(name)})`)
+    .join(' ');
+  if (!values) return [];
+  const res = await store.query(`
+    SELECT DISTINCT ?s ?p ?o WHERE {
+      VALUES (?s ?subGraphName) { ${values} }
+      GRAPH <${assertSafeIri(registrationGraph)}> {
+        ?s <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_SUB_GRAPH}> ;
+           <${SCHEMA_NAME}> ?subGraphName ;
+           ?p ?o .
+      }
+    }
+    ORDER BY ?s ?p ?o
+  `);
+  if (res.type !== 'bindings') return [];
+  return res.bindings
+    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: registrationGraph }))
+    .filter((row) => row.s && row.p && row.o);
 }
 
 async function countFreshSwmDataGraphRows(

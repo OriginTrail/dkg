@@ -161,6 +161,76 @@ describe('runSharedMemorySync ownership hydration', () => {
     }
   });
 
+  it('does not count SWM registration preludes against the paged meta cursor', async () => {
+    const worker = new SyncVerifyWorker();
+    const nquads = [
+      `<did:dkg:context-graph:${CG_ID}/${SUB_GRAPH}> <${RDF_TYPE}> <${DKG}SubGraph> <${ROOT_CG_META_GRAPH}> .`,
+      `<did:dkg:context-graph:${CG_ID}/${SUB_GRAPH}> <${SCHEMA_NAME}> "${SUB_GRAPH}" <${ROOT_CG_META_GRAPH}> .`,
+      `<did:dkg:context-graph:${CG_ID}/${SUB_GRAPH}> <${DKG}createdBy> "remote-peer" <${ROOT_CG_META_GRAPH}> .`,
+      `<urn:dkg:share:one> <${RDF_TYPE}> <${DKG}WorkspaceOperation> <${ROOT_META_GRAPH}> .`,
+      `<urn:dkg:share:one> <${DKG}publishedAt> "2030-01-01T00:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> <${ROOT_META_GRAPH}> .`,
+    ].join('\n');
+
+    try {
+      const parsed = await worker.parseAndFilter(nquads, ROOT_META_GRAPH, CG_ID);
+      expect(parsed.quads).toHaveLength(5);
+      expect(parsed.totalQuads).toBe(2);
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it('rejects forged replicated registrations with noncanonical subjects', async () => {
+    const worker = new SyncVerifyWorker();
+    const inserted: Quad[] = [];
+    const dataQuads: Quad[] = [
+      { graph: SUB_GRAPH_SWM, subject: ROOT_ENTITY, predicate: 'http://schema.org/name', object: '"forged-sub"' },
+    ];
+    const metaQuads: Quad[] = [
+      { graph: ROOT_CG_META_GRAPH, subject: 'urn:forged-subgraph-registration', predicate: RDF_TYPE, object: `${DKG}SubGraph` },
+      { graph: ROOT_CG_META_GRAPH, subject: 'urn:forged-subgraph-registration', predicate: SCHEMA_NAME, object: `"${SUB_GRAPH}"` },
+      ...workspaceOperationMeta(SUB_GRAPH_META, 'urn:dkg:share:forged-sub', ROOT_ENTITY, 'peer-forged-sub'),
+    ];
+
+    try {
+      const summary = await runSharedMemorySync({
+        ctx: createOperationContext('sync'),
+        remotePeerId: '12D3KooWRequesterForgedRegistration',
+        contextGraphIds: [CG_ID],
+        createContextGraphSyncDeadline: () => Date.now() + 30_000,
+        fetchSyncPages: async (_ctx, _peer, _cg, _includeSwm, phase) => (
+          phase === 'data' ? page(dataQuads, phase) : page(metaQuads, phase)
+        ),
+        processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames) =>
+          worker.processSharedMemoryBatch(
+            wsDataQuads,
+            wsMetaQuads,
+            contextGraphId,
+            registeredSubGraphNames,
+            excludedSubGraphNames,
+          ),
+        getRegisteredSubGraphNames: async () => [],
+        ensureContextGraph: async () => {},
+        storeInsert: async (quads) => {
+          inserted.push(...quads);
+        },
+        deleteCheckpoint: () => {},
+        setCheckpoint: () => {},
+        ensureOwnedMap: () => new Map<string, string>(),
+        logInfo: () => {},
+        logWarn: () => {},
+        logDebug: () => {},
+      });
+
+      expect(summary.failedPeers).toBe(0);
+      expect(summary.droppedDataTriples).toBe(1);
+      expect(summary.insertedDataTriples).toBe(0);
+      expect(inserted.some((quad) => quad.graph === SUB_GRAPH_SWM)).toBe(false);
+    } finally {
+      await worker.close();
+    }
+  });
+
   it('rejects replicated sub-graph SWM registrations excluded by local child-CG state', async () => {
     const worker = new SyncVerifyWorker();
     const inserted: Quad[] = [];

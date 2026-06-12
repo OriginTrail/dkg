@@ -342,6 +342,43 @@ describe('sync responder graph admission planner', () => {
     expect(metaOut).not.toContain(`did:dkg:context-graph:${cgId}/child`);
   });
 
+  it('serves SWM registration rows as an offset-zero meta prelude only', async () => {
+    const cgId = 'planner-swm-registration-prelude-cg';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    const rootSwmMeta = `${cgPrefix}/_shared_memory_meta`;
+    const registeredSwmMeta = `${cgPrefix}/registered/_shared_memory_meta`;
+    const now = '2026-06-01T00:00:00.000Z';
+
+    await store.insert([
+      ...subGraphRegistrationQuads(cgId, 'registered'),
+      ...workspaceOpQuads(cgId, 'root', 'urn:swm:prelude:root', rootSwmMeta, now),
+      ...workspaceOpQuads(cgId, 'registered', 'urn:swm:prelude:registered', registeredSwmMeta, now),
+    ]);
+
+    const cap = registerTestSyncHandler(store);
+    const first = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'meta',
+      offset: 0,
+      limit: 1,
+    });
+    const second = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'meta',
+      offset: 1,
+      limit: 1,
+    });
+
+    expect(first).toContain(`${DKG_NS}SubGraph`);
+    expect(first).toContain(`did:dkg:context-graph:${cgId}/registered`);
+    expect(linesFromNquads(first).length).toBeGreaterThan(1);
+    expect(second).not.toContain(`${DKG_NS}SubGraph`);
+    expect(second).not.toContain(`did:dkg:context-graph:${cgId}/registered`);
+    expect(lineGraphsFromNquads(second).has(rootSwmMeta)).toBe(true);
+  });
+
   it('does not serve stale SWM rows from a previous request after same-graph writes', async () => {
     const cgId = 'planner-swm-freshness-cg';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;

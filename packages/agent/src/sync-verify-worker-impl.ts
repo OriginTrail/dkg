@@ -204,9 +204,10 @@ function verifySyncedData(
 function parseAndFilterNQuads(text: string, graphUri: string, contextGraphId: string): SyncParseResult {
   const quads = parseNQuads(text);
   const cgUriPrefix = `did:dkg:context-graph:${contextGraphId}/`;
+  const unpagedPreludeKeys = swmRegistrationPreludeKeys(quads, graphUri, contextGraphId);
   return {
     quads: quads.filter((q) => q.graph === graphUri || q.graph.startsWith(cgUriPrefix)),
-    totalQuads: quads.length,
+    totalQuads: quads.filter((q) => !unpagedPreludeKeys.has(quadKey(q))).length,
   };
 }
 
@@ -424,10 +425,64 @@ function replicatedRegisteredSubGraphNames(
   const out = new Set<string>();
   for (const subject of typedSubjects) {
     for (const name of namesBySubject.get(subject) ?? []) {
+      if (subject !== canonicalSubGraphUri(contextGraphId, name)) continue;
       out.add(name);
     }
   }
   return [...out];
+}
+
+function swmRegistrationPreludeKeys(
+  quads: readonly Quad[],
+  graphUri: string,
+  contextGraphId: string,
+): Set<string> {
+  const rootSwmMetaGraph = `did:dkg:context-graph:${contextGraphId}/_shared_memory_meta`;
+  const rootMetaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+  if (graphUri !== rootSwmMetaGraph) return new Set();
+
+  const typedSubjects = new Set<string>();
+  const namesBySubject = new Map<string, Set<string>>();
+  for (const q of quads) {
+    if (q.graph !== rootMetaGraph) continue;
+    if (q.predicate === RDF_TYPE && q.object === DKG_SUB_GRAPH) {
+      typedSubjects.add(q.subject);
+    } else if (q.predicate === SCHEMA_NAME) {
+      const name = stripLiteral(q.object);
+      if (!validateSubGraphName(name).valid) continue;
+      let names = namesBySubject.get(q.subject);
+      if (!names) {
+        names = new Set<string>();
+        namesBySubject.set(q.subject, names);
+      }
+      names.add(name);
+    }
+  }
+
+  const registrationSubjects = new Set<string>();
+  for (const subject of typedSubjects) {
+    for (const name of namesBySubject.get(subject) ?? []) {
+      if (subject === canonicalSubGraphUri(contextGraphId, name)) {
+        registrationSubjects.add(subject);
+      }
+    }
+  }
+
+  const keys = new Set<string>();
+  for (const q of quads) {
+    if (q.graph === rootMetaGraph && registrationSubjects.has(q.subject)) {
+      keys.add(quadKey(q));
+    }
+  }
+  return keys;
+}
+
+function canonicalSubGraphUri(contextGraphId: string, name: string): string {
+  return `did:dkg:context-graph:${contextGraphId}/${name}`;
+}
+
+function quadKey(q: Quad): string {
+  return `${q.graph}\0${q.subject}\0${q.predicate}\0${q.object}`;
 }
 
 function isSharedMemoryBucketDescendantDataGraph(graph: string, bucketGraph: string): boolean {
