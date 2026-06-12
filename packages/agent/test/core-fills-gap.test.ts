@@ -429,6 +429,35 @@ describe('Phase D - VM reconcile damping', () => {
     expect(expensiveScans).toBeGreaterThan(0);
   });
 
+  it('does not reuse a negative cache entry when catchup ranking changes for the same peer set', async () => {
+    const internals = await boot();
+    const onChainCgId = 56n;
+    registerUnmatchedKC(internals.chain, 9016n, onChainCgId);
+
+    (agent as any).node.libp2p.getConnections = () => [
+      { remotePeer: { toString: () => 'peer-reclassified' } },
+    ];
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const originalQuery = internals.store.query.bind(internals.store);
+    let expensiveScans = 0;
+    vi.spyOn(internals.store, 'query').mockImplementation(async (sparql: string) => {
+      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
+      return originalQuery(sparql);
+    });
+
+    await expect(internals.reconcileChainOrdinal('56', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(expensiveScans).toBeGreaterThan(0);
+
+    expensiveScans = 0;
+    (internals as any).knownCorePeerIds.add('peer-reclassified');
+
+    await expect(internals.reconcileChainOrdinal('56', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(expensiveScans).toBeGreaterThan(0);
+  });
+
   it('does not reuse a negative cache entry when the same KA has a newer merkle root', async () => {
     const internals = await boot();
     const onChainCgId = 46n;
@@ -464,7 +493,7 @@ describe('Phase D - VM reconcile damping', () => {
     expect(cacheKeys.some((key) => key.includes('22'.repeat(32)))).toBe(true);
   });
 
-  it('invalidates a negative cache entry when SWM data arrives without operation-meta changes', async () => {
+  it('retries an incomplete SWM operation when data arrives without operation-meta changes', async () => {
     const internals = await boot();
     const onChainCgId = 48n;
     const entity = 'urn:fact:data-arrival';
@@ -485,7 +514,7 @@ describe('Phase D - VM reconcile damping', () => {
     );
 
     await expect(internals.reconcileChainOrdinal('48', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
 
     await insertWorkspaceDataTriple(internals.store, '48', entity, value);
 
@@ -494,7 +523,7 @@ describe('Phase D - VM reconcile damping', () => {
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
-  it('invalidates a negative cache entry when SWM data changes without triple-count changes', async () => {
+  it('retries an incomplete SWM operation when data changes without triple-count changes', async () => {
     const internals = await boot();
     const onChainCgId = 52n;
     const entity = 'urn:fact:data-replacement';
@@ -517,7 +546,7 @@ describe('Phase D - VM reconcile damping', () => {
     await insertWorkspaceDataTriple(internals.store, '52', entity, staleValue);
 
     await expect(internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
 
     await replaceWorkspaceDataTriple(internals.store, '52', entity, freshValue);
 
@@ -526,7 +555,7 @@ describe('Phase D - VM reconcile damping', () => {
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
-  it('invalidates a negative cache entry when private-root metadata arrives without operation-meta changes', async () => {
+  it('retries an incomplete SWM operation when private-root metadata arrives without operation-meta changes', async () => {
     const internals = await boot();
     const onChainCgId = 49n;
     const entity = 'urn:fact:private-arrival';
@@ -550,7 +579,7 @@ describe('Phase D - VM reconcile damping', () => {
     await insertWorkspaceDataTriple(internals.store, '49', entity, value);
 
     await expect(internals.reconcileChainOrdinal('49', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
 
     await insertPrivateMerkleRoot(internals.store, '49', entity, privateRoot);
 
@@ -612,7 +641,7 @@ describe('Phase D - VM reconcile damping', () => {
     expect(generationReads).toBe(2);
   });
 
-  it('invalidates the retry cache only for operation changes in the candidate SWM namespace', async () => {
+  it('does not negative-cache misses once candidate SWM operation metadata exists', async () => {
     const internals = await boot();
     const onChainCgId = 43n;
     registerUnmatchedKC(internals.chain, 9002n, onChainCgId);
@@ -635,6 +664,7 @@ describe('Phase D - VM reconcile damping', () => {
 
     await internals.reconcileChainOrdinal('43', onChainCgId, 0, undefined);
     expect(fetch).toHaveBeenCalledTimes(1);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
 
     await insertWorkspaceOperationMeta(
       internals.store,
@@ -647,7 +677,7 @@ describe('Phase D - VM reconcile damping', () => {
     expensiveScans = 0;
     await internals.reconcileChainOrdinal('43', onChainCgId, 0, undefined);
     expect(fetch).toHaveBeenCalledTimes(1);
-    expect(expensiveScans).toBe(0);
+    expect(expensiveScans).toBeGreaterThan(0);
 
     await insertWorkspaceOperationMeta(
       internals.store,
@@ -657,6 +687,7 @@ describe('Phase D - VM reconcile damping', () => {
       '2020-01-01T00:00:00.000Z',
     );
 
+    expensiveScans = 0;
     await internals.reconcileChainOrdinal('43', onChainCgId, 0, undefined);
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(expensiveScans).toBeGreaterThan(0);

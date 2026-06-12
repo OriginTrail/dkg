@@ -8,7 +8,7 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -2199,7 +2199,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return {
       candidateNamespaces,
       swmGen: await this.readVmReconcileSwmGen(candidateNamespaces) ?? 'unreadable',
-      peerTopologyKey: this.vmReconcilePeerTopologyKey(),
+      peerTopologyKey: await this.vmReconcilePeerTopologyKey(localCgId),
     };
   }
 
@@ -2231,17 +2231,29 @@ export class SwmHostModeMethods extends DKGAgentBase {
       .join('\n');
   }
 
-  vmReconcilePeerTopologyKey(this: DKGAgent): string {
+  async vmReconcilePeerTopologyKey(this: DKGAgent, localCgId: string): Promise<string> {
     try {
+      const preferredPeerId = await this.resolvePreferredSyncPeerId(localCgId);
+      const isPrivateContextGraph = await this.isPrivateContextGraph(localCgId);
       const libp2p = (this.node as any)?.libp2p;
       const getConnections = libp2p?.getConnections;
       if (typeof getConnections !== 'function') return 'unreadable';
-      const peers = new Set<string>(
+      const peers = [...new Map(
         (getConnections.call(libp2p) as Array<{ remotePeer?: { toString(): string } }>)
-          .map((connection) => connection.remotePeer?.toString())
-          .filter((peerId): peerId is string => typeof peerId === 'string' && peerId.length > 0),
-      );
-      return [...peers].sort().join('\n');
+          .map((connection) => [connection.remotePeer?.toString(), connection.remotePeer] as const)
+          .filter((entry): entry is readonly [string, { toString(): string }] =>
+            typeof entry[0] === 'string' && entry[0].length > 0 && !!entry[1],
+          ),
+      ).values()];
+      const orderedPeers = this.selectCatchupPeers(peers, preferredPeerId, isPrivateContextGraph);
+      return JSON.stringify(orderedPeers.map((peer) => {
+        const peerId = peer.toString();
+        return {
+          peerId,
+          preferred: peerId === preferredPeerId,
+          core: this.knownCorePeerIds.has(peerId),
+        };
+      }));
     } catch {
       return 'unreadable';
     }
@@ -2275,27 +2287,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
         const maxTs = typeof row['maxTs'] === 'string' ? stripLiteral(row['maxTs']) : '';
         const dataTripleCount = typeof row['dataTripleCount'] === 'string' ? stripLiteral(row['dataTripleCount']) : '0';
         const privateRootCount = typeof row['privateRootCount'] === 'string' ? stripLiteral(row['privateRootCount']) : '0';
-        const dataDigest = await this.readVmReconcileDataDigest(dataGraph);
-        if (dataDigest === null) return null;
-        const privateRootsResult = await this.store.query(`SELECT DISTINCT ?privateRoot WHERE {
-          GRAPH <${metaGraph}> {
-            ?privateEntity <http://dkg.io/ontology/privateMerkleRoot> ?privateRoot .
-          }
-        } ORDER BY STR(?privateRoot)`);
-        const privateRoots = privateRootsResult.type === 'bindings'
-          ? privateRootsResult.bindings
-            .map((binding) => typeof binding['privateRoot'] === 'string' ? stripLiteral(binding['privateRoot']) : '')
-            .filter((value) => value.length > 0)
-            .join(',')
-          : '';
         parts.push([
           `meta:${namespace.metaGraph}`,
           `data:${namespace.dataGraph}`,
           `ops:${opCount}`,
           `roots:${rootCount}`,
           `maxTs:${maxTs}`,
-          `dataTriples:${dataTripleCount}:${dataDigest}`,
-          `privateRoots:${privateRootCount}:${privateRoots}`,
+          `dataTriples:${dataTripleCount}`,
+          `privateRoots:${privateRootCount}`,
         ].join(';'));
       }
       return parts.join('|');
@@ -2306,21 +2305,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return null;
   }
 
-  async readVmReconcileDataDigest(this: DKGAgent, dataGraph: string): Promise<string | null> {
-    const result = await this.store.query(`SELECT ?s ?p ?o WHERE {
-      GRAPH <${dataGraph}> { ?s ?p ?o . }
-    } ORDER BY STR(?s) STR(?p) STR(?o)`);
-    if (result.type !== 'bindings') return null;
-    const hash = createHash('sha256');
-    for (const binding of result.bindings) {
-      hash.update(typeof binding['s'] === 'string' ? binding['s'] : '');
-      hash.update('\0');
-      hash.update(typeof binding['p'] === 'string' ? binding['p'] : '');
-      hash.update('\0');
-      hash.update(typeof binding['o'] === 'string' ? binding['o'] : '');
-      hash.update('\n');
-    }
-    return hash.digest('hex');
+  vmReconcileSwmGenHasOperations(this: DKGAgent, swmGen: string): boolean {
+    return swmGen.split('|').some((part) => {
+      const match = /(?:^|;)ops:(\d+)(?:;|$)/.exec(part);
+      return match ? Number(match[1]) > 0 : false;
+    });
   }
 
   vmReconcileWorkspaceOperationPattern(this: DKGAgent, candidateMetaGraphs: string[]): string {
@@ -2366,7 +2355,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (Date.now() >= cached.nextRetryAt) return false;
 
     try {
-      if (this.vmReconcilePeerTopologyKey() !== cached.peerTopologyKey) {
+      if (await this.vmReconcilePeerTopologyKey(localCgId) !== cached.peerTopologyKey) {
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         this.vmReconcileFetchCooldownAt.delete(localCgId);
         return false;
@@ -2397,6 +2386,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     localCgId: string,
     state: { swmGen: string; candidateNamespaces: VmReconcileSwmNamespace[]; peerTopologyKey: string },
   ): void {
+    // Existing SWM operations can be missing payload/private-root pieces; keep
+    // that retry path uncached instead of probing full data graphs here.
+    if (this.vmReconcileSwmGenHasOperations(state.swmGen)) {
+      return;
+    }
     this.pruneVmReconcileState();
     const previous = this.vmReconcileNegativeCache.get(cacheKey);
     const failures = (previous?.failures ?? 0) + 1;
