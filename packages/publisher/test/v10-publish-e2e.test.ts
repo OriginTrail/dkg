@@ -60,9 +60,13 @@ describe('V10 Publish E2E', () => {
     // double-spends the setup path and reverts before the skipped shard tests run.
 
     const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    // Public CG (accessPolicy 0 / publishPolicy 1): these E2E tests exercise ACK
+    // collection + createKnowledgeAssets round-trip mechanics with PLAINTEXT, not
+    // curated ciphertext, so a curated CG would revert with
+    // CuratedCGRequiresCiphertextCommitment (#1072).
     const cgResult = await adapter.createOnChainContextGraph({
-      accessPolicy: 1,
-      publishPolicy: 0,
+      accessPolicy: 0,
+      publishPolicy: 1,
     });
     if (!cgResult.success || cgResult.contextGraphId === 0n) {
       throw new Error(`Failed to create on-chain context graph: ${JSON.stringify(cgResult)}`);

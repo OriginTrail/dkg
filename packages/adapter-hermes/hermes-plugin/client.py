@@ -157,6 +157,68 @@ def _looks_already_exists(message: Any) -> bool:
     return "already exists" in lower or "already exist" in lower or "already registered" in lower
 
 
+def _client_result_failed(result: Any) -> bool:
+    """Canonical failure detector for daemon responses.
+
+    Mirrors ``_client_result_failed`` in ``__init__.py`` so the multi-root
+    publish loop can stop on the first failing root without importing the
+    plugin module (which would be circular). All ``_post``/``_get`` failure
+    shapes set ``success: False`` (and/or carry an ``error``), so the same
+    three-way check applies here.
+    """
+    if not isinstance(result, dict):
+        return False
+    return result.get("success") is False or result.get("ok") is False or bool(result.get("error"))
+
+
+def _annotate_207_partial(result: Any) -> Any:
+    """Flag a vm/publish 207 (minted, CG-binding failed) at the client.
+
+    A 207 carries a non-empty ``contextGraphError`` but no ``success:false``, so it
+    flows back as apparent success. Annotating it HERE makes the client
+    safe-by-default (Codex #1084:787) — a caller that does not re-wrap still sees
+    the partial state. Mirrors ``_annotate_vm_publish_partial`` in ``__init__.py``
+    (which the handler can re-apply idempotently); the client cannot import that
+    helper without a circular dependency, so the same shape/text lives here.
+    """
+    if not isinstance(result, dict):
+        return result
+    context_graph_error = result.get("contextGraphError")
+    if isinstance(context_graph_error, str) and context_graph_error:
+        return {
+            **result,
+            "partial": True,
+            "warning": (
+                "Partial publish: the knowledge asset was minted on-chain (UAL/kaId are valid) "
+                f"and IS published, but the context-graph binding failed ({context_graph_error}). "
+                "Do NOT re-run publish — dkg_publish would mint a duplicate and "
+                "dkg_knowledge_asset_publish would fail the VM precondition (a confirmed publish "
+                "clears Shared Working Memory), and neither re-binds the context graph. Surface "
+                "this binding failure to the node operator."
+            ),
+        }
+    return result
+
+
+def _to_write_quads(quads: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Map each quad to exactly {subject, predicate, object} for a WM write.
+
+    The write wire shape is {subject,predicate,object} only — the daemon pins
+    every triple to the per-KA WM graph itself and silently overrides any
+    client-supplied ``graph`` (CONTRACT §0 invariant 2 / §A). Strip ``graph``
+    (and any other extra key) HERE in the client, not just in the tool schema:
+    a hand-built quad object or a passthrough map can still carry ``graph``.
+    """
+    return [
+        {
+            "subject": q.get("subject"),
+            "predicate": q.get("predicate"),
+            "object": q.get("object"),
+        }
+        for q in quads
+    ]
+
+
 def _is_blocked_import_path(path: Path) -> bool:
     name = path.name.lower()
     if name in _BLOCKED_IMPORT_NAMES:
@@ -372,7 +434,9 @@ class DKGClient:
         """POST /api/knowledge-assets/{name}/wm/write — write quads to the assertion graph."""
         payload: Dict[str, Any] = {
             "contextGraphId": _normalize_context_graph_id(context_graph_id),
-            "quads": quads,
+            # Strip any per-quad `graph` at the client (CONTRACT §A) — the wire
+            # shape is {subject,predicate,object} only, daemon-pinned.
+            "quads": _to_write_quads(quads),
         }
         if sub_graph_name:
             payload["subGraphName"] = sub_graph_name
@@ -486,6 +550,71 @@ class DKGClient:
             payload["subGraphName"] = sub_graph_name
         return self._post(f"/api/knowledge-assets/{quote(assertion_name, safe='')}/swm/share", payload)
 
+    def finalize_assertion(self, assertion_name: str, context_graph_id: str,
+                           sub_graph_name: Optional[str] = None,
+                           author_agent_address: Optional[str] = None,
+                           scheme_version: Optional[int] = None) -> Dict[str, Any]:
+        """POST /api/knowledge-assets/{name}/wm/finalize — seal the WM draft.
+
+        Computes the merkle root and signs the EIP-712 AuthorAttestation
+        node-side. Finalize always seals the WHOLE draft (no subset parameter).
+        ``author_agent_address`` attributes the seal to a specific agent EOA;
+        omit it to let the daemon default the author to the request token's
+        agent. The pre-signed attestation path is intentionally NOT exposed —
+        Hermes relies on node-side signing, exactly like OpenClaw/MCP (no
+        client-side EIP-712, no raw preSignedAuthorAttestation).
+        """
+        payload: Dict[str, Any] = {"contextGraphId": _normalize_context_graph_id(context_graph_id)}
+        if sub_graph_name:
+            payload["subGraphName"] = sub_graph_name
+        if author_agent_address:
+            payload["authorAgentAddress"] = author_agent_address
+        if scheme_version is not None:
+            payload["schemeVersion"] = scheme_version
+        return self._post(f"/api/knowledge-assets/{quote(assertion_name, safe='')}/wm/finalize", payload)
+
+    def publish_finalized_assertion(self, assertion_name: str, context_graph_id: str,
+                                    sub_graph_name: Optional[str] = None,
+                                    options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """POST /api/knowledge-assets/{name}/vm/publish — publish a sealed KA.
+
+        This is the Fork-1 (finalized-assertion) publish: multi-root safe, the
+        seal selects the author and the whole asset. The daemon REJECTS
+        ``assertionName``, author overrides, and any ``selection`` — never send
+        them (knowledge-assets.ts:307-343). ``options`` carries the nested
+        finalized-publish controls ({ publishEpochs?, clearSharedMemoryAfter?,
+        publisherNodeIdentityIdOverride? }). Surfaces { kaId, ual, txHash,
+        status } on success; 409 VM_PUBLISH_PRECONDITION when not finalized +
+        shared.
+        """
+        payload: Dict[str, Any] = {"contextGraphId": _normalize_context_graph_id(context_graph_id)}
+        if sub_graph_name:
+            payload["subGraphName"] = sub_graph_name
+        if options:
+            payload["options"] = options
+        return self._post(f"/api/knowledge-assets/{quote(assertion_name, safe='')}/vm/publish", payload)
+
+    def pull_from(self, assertion_name: str, context_graph_id: str, layer: str,
+                  on_conflict: Optional[str] = None,
+                  sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
+        """POST /api/knowledge-assets/{name}/wm/pull-from — reseed a WM draft.
+
+        Seeds a fresh Working Memory draft from the asset's current Shared
+        Working Memory (``layer="swm"``) or Verifiable Memory (``layer="vm"``)
+        state — the edit-loop primitive (git checkout). ``on_conflict`` defaults
+        to "reject" server-side; pass "replace" to overwrite a dirty draft
+        (otherwise an open draft 409s WM_DRAFT_CONFLICT).
+        """
+        payload: Dict[str, Any] = {
+            "contextGraphId": _normalize_context_graph_id(context_graph_id),
+            "layer": layer,
+        }
+        if on_conflict:
+            payload["onConflict"] = on_conflict
+        if sub_graph_name:
+            payload["subGraphName"] = sub_graph_name
+        return self._post(f"/api/knowledge-assets/{quote(assertion_name, safe='')}/wm/pull-from", payload)
+
     def discard_assertion(self, assertion_name: str, context_graph_id: str,
                           sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
         """POST /api/knowledge-assets/{name}/wm/discard — discard a WM assertion."""
@@ -576,10 +705,263 @@ class DKGClient:
             payload["subGraphName"] = sub_graph_name
         return self._post("/api/shared-memory/write", payload)
 
+    def publish_quads(self, context_graph_id: str, quads: List[Dict[str, str]],
+                      sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
+        """One-shot publish via the ATOMIC assertionName fork (mirrors OpenClaw +
+        MCP).
+
+        Creates a fresh, uniquely-named assertion with the supplied quads
+        (auto-finalize is driven by non-empty quads — CONTRACT §1 Stage1 — and
+        ``promote:true`` shares it into SWM in the same call), then publishes
+        that single sealed assertion by name. The daemon's assertionName fork
+        (memory.ts:1703-1808) reads the seal keyed to the assertion's exact
+        merkleRoot and publishes ONLY that assertion ATOMICALLY — multi-root-safe,
+        correctly scoped, no per-root loop, no partial-failure.
+
+        The write wire shape is ``{subject, predicate, object}`` only; any
+        per-quad ``graph`` is stripped (CONTRACT §0 invariant 2). ``finalize:true``
+        is unread and dropped; ``promote:true`` is the create route's
+        ``alsoShareSwm`` alias.
+
+        NOTE: unlike the selection fork, the assertionName fork does NOT
+        auto-register the CG (LU-6 transparent register-then-publish is
+        selection-fork only, memory.ts:1874+); on a fresh, never-registered CG on
+        a REAL chain it surfaces the daemon's "not registered on-chain" error
+        (skipped for mock/none chains — publisher dkg-publisher.ts:1198-1222).
+        """
+        cg_id = _normalize_context_graph_id(context_graph_id)
+        assertion_name = f"hermes-publish-{uuid.uuid4().hex}"
+        create_payload: Dict[str, Any] = {
+            "contextGraphId": cg_id,
+            "name": assertion_name,
+            "quads": _to_write_quads(quads),
+            "promote": True,
+        }
+        if sub_graph_name:
+            create_payload["subGraphName"] = sub_graph_name
+        created = self._post("/api/knowledge-assets", create_payload)
+        if _client_result_failed(created):
+            # The create call surfaced an error, but the asset is created under a
+            # client-generated assertion_name BEFORE the response is read. A lost/
+            # garbled response (timeout, transport blip) can therefore report a
+            # hard failure while the asset actually landed daemon-side. Returning
+            # the raw error verbatim drops that name, so the agent recreates it
+            # (orphaning the first). Surface assertionName (+ subGraphName) on the
+            # create-failure too — mirroring the share/publish-failure branches
+            # below — so the caller can recover by name instead of recreating
+            # (Codex #1084:743).
+            failure = dict(created) if isinstance(created, dict) else {"error": str(created)}
+            failure["success"] = False
+            failure["assertionName"] = assertion_name
+            if sub_graph_name:
+                failure["subGraphName"] = sub_graph_name
+            base_error = str(failure.get("error") or failure.get("message") or "create failed")
+            sub_graph_hint = f" (sub-graph '{sub_graph_name}')" if sub_graph_name else ""
+            failure["error"] = (
+                f"Creating knowledge asset '{assertion_name}'{sub_graph_hint} failed ({base_error}). "
+                f"It most likely was NOT created, but if the daemon response was lost the asset may "
+                f"exist under this assertionName -- first check/recover by name with "
+                f"dkg_knowledge_asset_history (this assertionName and sub_graph_name) before "
+                f"recreating, to avoid orphaning a created asset. NOTE: a created asset is "
+                f"auto-shared to SWM (its working-memory draft is empty), so use _history (lifecycle "
+                f"state regardless of layer) for existence, not dkg_knowledge_asset_query (Codex #1076:1047)."
+            )
+            return failure
+        # The create route returns HTTP 207 { created:true, ..., errors:[{phase,
+        # error}] } when create+finalize succeeded but an opt-in tail FAILED — for
+        # us that is the promote/swm-share (knowledge-assets.ts:575-614). _post
+        # does not raise on 207 and _client_result_failed does not inspect
+        # errors[], so without this check we would publish an assertion that was
+        # sealed but NEVER SHARED (Codex #1084:714). Do NOT touch the global
+        # _client_result_failed (the multi-root loop shares it) — check errors[]
+        # here, targeted. On a share-phase failure, do not publish; surface the
+        # error AND the assertionName so the caller can recover (share then
+        # publish by name) without recreating the asset.
+        create_errors = created.get("errors") if isinstance(created, dict) else None
+        if isinstance(create_errors, list) and create_errors:
+            failure = dict(created)
+            failure["success"] = False
+            failure["assertionName"] = assertion_name
+            # Carry subGraphName too (Codex #1084:730) — recovery by name needs the
+            # same sub-graph the asset was created in.
+            if sub_graph_name:
+                failure["subGraphName"] = sub_graph_name
+            if created.get("assertionUri") is not None:
+                failure["assertionUri"] = created["assertionUri"]
+            # The create route returns merkleRoot (a hex string), NOT a `seal`
+            # object — created.get("seal") was always None, dropping the proof
+            # (Codex #1084:733). Carry merkleRoot.
+            if created.get("merkleRoot") is not None:
+                failure["merkleRoot"] = created["merkleRoot"]
+            phases = ", ".join(
+                str(e.get("phase")) for e in create_errors if isinstance(e, dict) and e.get("phase")
+            )
+            sub_graph_hint = f" (sub-graph '{sub_graph_name}')" if sub_graph_name else ""
+            failure["error"] = (
+                f"Knowledge asset '{assertion_name}'{sub_graph_hint} was created and sealed but a "
+                f"later stage failed ({phases or 'share'}), so it was NOT shared to SWM and was NOT "
+                f"published. Share it with dkg_knowledge_asset_share (this name and sub_graph_name), "
+                f"then publish with dkg_knowledge_asset_publish (this name and sub_graph_name) -- do "
+                f"NOT recreate the asset."
+            )
+            return failure
+        publish_payload: Dict[str, Any] = {
+            "contextGraphId": cg_id,
+            "assertionName": assertion_name,
+        }
+        if sub_graph_name:
+            publish_payload["subGraphName"] = sub_graph_name
+        published = self._post("/api/shared-memory/publish", publish_payload)
+        if _client_result_failed(published):
+            # The on-chain publish failed AFTER the asset was created+sealed+shared
+            # under the random assertion_name. Returning `published` verbatim would
+            # drop that name and the agent would recreate the asset (orphaning the
+            # first) — Codex #1084:723. Merge the assertionName (+ assertionUri/
+            # merkleRoot) into the failure with a retry-not-recreate message.
+            failure = dict(published) if isinstance(published, dict) else {"error": str(published)}
+            failure["success"] = False
+            failure["assertionName"] = assertion_name
+            # Carry subGraphName too (Codex #1084:730) — recovery by name needs it.
+            if sub_graph_name:
+                failure["subGraphName"] = sub_graph_name
+            if isinstance(created, dict):
+                if created.get("assertionUri") is not None:
+                    failure["assertionUri"] = created["assertionUri"]
+                if created.get("merkleRoot") is not None:
+                    failure["merkleRoot"] = created["merkleRoot"]
+            base_error = str(failure.get("error") or failure.get("message") or "publish failed")
+            sub_graph_hint = f" (sub-graph '{sub_graph_name}')" if sub_graph_name else ""
+            failure["error"] = (
+                f"Knowledge asset '{assertion_name}'{sub_graph_hint} was created, sealed, and shared "
+                f"to SWM, but the on-chain publish failed ({base_error}). Retry the publish by name "
+                f"with dkg_knowledge_asset_publish (this assertionName and sub_graph_name) -- do NOT "
+                f"recreate the asset."
+            )
+            return failure
+        result: Dict[str, Any] = dict(published) if isinstance(published, dict) else {"result": published}
+        if isinstance(created, dict):
+            if created.get("assertionUri") is not None:
+                result["assertionUri"] = created["assertionUri"]
+            # Carry merkleRoot (the create proof), not the always-None seal
+            # (Codex #1084:733).
+            if created.get("merkleRoot") is not None:
+                result["merkleRoot"] = created["merkleRoot"]
+        result["assertionName"] = assertion_name
+        # FIX R (Codex #1084:787): annotate a 207 (contextGraphError) HERE so the
+        # client is safe-by-default — a caller that does not re-wrap still sees the
+        # partial state. The handler's _annotate_vm_publish_partial re-applies the
+        # same fields idempotently.
+        return _annotate_207_partial(result)
+
+    def publish_one_root(self, context_graph_id: str, root_entity: str,
+                         clear_after: bool,
+                         sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
+        """POST /api/shared-memory/publish for a SINGLE root entity.
+
+        Fork-2 of the legacy SWM-bridge is single-root-only: a request whose
+        ``selection`` resolves to more than one root is rejected with
+        ``409 MULTI_ROOT_PUBLISH_NOT_ATOMIC`` (``memory.ts:1864-1872``). Callers
+        with multiple roots must loop over this helper one root per call (see
+        ``publish`` below and CONTRACT §3).
+        """
+        payload: Dict[str, Any] = {
+            "contextGraphId": _normalize_context_graph_id(context_graph_id),
+            "selection": [root_entity],
+            "clearAfter": clear_after,
+        }
+        if sub_graph_name:
+            payload["subGraphName"] = sub_graph_name
+        return self._post("/api/shared-memory/publish", payload)
+
     def publish(self, context_graph_id: str, selection: Any = "all",
                 clear_after: bool = True,
                 sub_graph_name: Optional[str] = None) -> Dict[str, Any]:
-        """POST /api/shared-memory/publish — publish SWM to Verifiable Memory (costs TRAC)."""
+        """POST /api/shared-memory/publish — publish SWM to Verifiable Memory (costs TRAC).
+
+        The legacy SWM-bridge (Fork-2) is single-root-only. When ``selection`` is
+        an explicit list of root entities, partition it into ONE publish call per
+        root, passing ``clearAfter=False`` on all but the last call so unpublished
+        roots are not dropped from SWM mid-loop (CONTRACT §3). A multi-root
+        ``selection="all"`` would otherwise 409 with MULTI_ROOT_PUBLISH_NOT_ATOMIC.
+
+        ``selection="all"`` is forwarded as-is: the daemon resolves the roots
+        server-side and 409s if more than one is publishable, so callers that may
+        hold multiple roots should pass an explicit list (see ``_handle_publish``).
+        """
+        if isinstance(selection, list):
+            # Dedupe preserving first-seen order: quads can name the same root
+            # subject more than once, and an undeduped list would publish the
+            # same root twice -> double on-chain work / double TRAC spend, and
+            # the second call may hit an already-cleared state (CONTRACT §F).
+            roots = list(dict.fromkeys(
+                stripped for r in selection if (stripped := str(r).strip())
+            ))
+            if not roots:
+                return {"success": False, "error": "No root entities to publish."}
+            if len(roots) == 1:
+                return self.publish_one_root(
+                    context_graph_id, roots[0], clear_after=clear_after,
+                    sub_graph_name=sub_graph_name)
+            published: List[Dict[str, Any]] = []
+            last = len(roots) - 1
+            for index, root in enumerate(roots):
+                result = self.publish_one_root(
+                    context_graph_id, root,
+                    clear_after=(clear_after and index == last),
+                    sub_graph_name=sub_graph_name)
+                if _client_result_failed(result):
+                    # Legacy multi-root publish is NON-ATOMIC: it mints one root
+                    # per call and on-chain mints are irreversible, so we stop on
+                    # the first failure but report the partial state EXPLICITLY —
+                    # which roots already published (TRAC spent, on chain) vs the
+                    # one that failed vs the ones never attempted (CONTRACT §G1).
+                    published_roots = [entry["rootEntity"] for entry in published]
+                    not_attempted = roots[index + 1:]
+                    failure = dict(result) if isinstance(result, dict) else {"error": str(result)}
+                    failure["success"] = False
+                    failure["partial"] = bool(published)
+                    failure["published"] = published
+                    failure["publishedRoots"] = published_roots
+                    failure["failedRoot"] = root
+                    failure["notAttemptedRoots"] = not_attempted
+                    failure["message"] = (
+                        f"Non-atomic multi-root publish stopped at '{root}'. "
+                        f"{len(published_roots)} root(s) already published on-chain (TRAC spent, "
+                        f"irreversible): {published_roots}. {len(not_attempted)} root(s) not attempted: "
+                        f"{not_attempted}. Re-publish only the failed/remaining roots — do NOT retry "
+                        f"the whole set (the published roots would mint again)."
+                    )
+                    return failure
+                published.append({
+                    "rootEntity": root,
+                    **(result if isinstance(result, dict) else {"result": result}),
+                })
+            # FIX Q (Codex #1079:764): a per-root child can be a 207 (minted but
+            # CG-binding failed — contextGraphError present), which passes
+            # _client_result_failed (no success:false) and is appended as a clean
+            # child. Don't hard-code partial:False — scan the children for a
+            # non-empty contextGraphError and flag the aggregate as partial so the
+            # bind failure isn't masked.
+            bind_failures = [
+                (entry.get("rootEntity"), entry["contextGraphError"])
+                for entry in published
+                if isinstance(entry.get("contextGraphError"), str) and entry["contextGraphError"]
+            ]
+            aggregate: Dict[str, Any] = {
+                "success": True,
+                "partial": bool(bind_failures),
+                "published": published,
+                "rootEntities": roots,
+            }
+            if bind_failures:
+                detail = "; ".join(f"{r}: {err}" for r, err in bind_failures)
+                aggregate["warning"] = (
+                    "Partial publish: all roots were minted on-chain, but the context-graph binding "
+                    f"failed for {len(bind_failures)} root(s) ({detail}). The assets ARE published; "
+                    "do NOT re-publish (re-running would mint duplicates and neither re-binds the "
+                    "context graph). Surface the binding failure to the node operator."
+                )
+            return aggregate
         payload: Dict[str, Any] = {
             "contextGraphId": _normalize_context_graph_id(context_graph_id),
             "selection": selection,

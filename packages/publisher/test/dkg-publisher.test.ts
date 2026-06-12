@@ -75,7 +75,11 @@ describe('DKGPublisher', () => {
     const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
     await mintTokens(_provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    const cgId = await createTestContextGraph(chain);
+    // PR #1072: these tests publish PLAINTEXT to exercise lifecycle/mint/update/
+    // event/UAL/reserved-namespace/share mechanics (no ciphertext commitment),
+    // so use a PUBLIC CG (accessPolicy 0) — a curated CG would now revert with
+    // CuratedCGRequiresCiphertextCommitment.
+    const cgId = await createTestContextGraph(chain, undefined, 0);
     CONTEXT_GRAPH = String(cgId);
     GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
     _kav10Address = await chain.getKnowledgeAssetsLifecycleAddress();

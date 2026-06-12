@@ -289,4 +289,58 @@ describe.skipIf(!ENABLED)('MCP ↔ daemon live contract', () => {
     },
     PUBLISH_TIMEOUT_MS,
   );
+
+  // ── create finalize-mode contract (rc.17 seal) — REAL daemon, no canned
+  // responses. The retired fake-fetcher tests pinned only the OUTGOING
+  // `finalize` field; these prove the daemon actually honors it. ─────────
+  it('createKnowledgeAsset finalize:false leaves the draft unsealed — publish is rejected', async () => {
+    const draftName = `${RUN}-draftonly`;
+    await client.createKnowledgeAsset({
+      contextGraphId: CG,
+      name: draftName,
+      finalize: false,
+      quads: [{ subject: `urn:mcpci:${RUN}:draft`, predicate: RDF_TYPE, object: 'urn:mcpci:Thing' }],
+    });
+    await expect(
+      client.knowledgeAssetPublish({ contextGraphId: CG, name: draftName }),
+      'publish must be rejected for a finalize:false (unsealed) create',
+    ).rejects.toThrow(/seal|finaliz|precondition/i);
+  });
+
+  it(
+    'createKnowledgeAsset default (finalize omitted) seals — publish succeeds',
+    async () => {
+      const sealedName = `${RUN}-defaultseal`;
+      await client.createKnowledgeAsset({
+        contextGraphId: CG,
+        name: sealedName,
+        quads: [{ subject: `urn:mcpci:${RUN}:sealed`, predicate: RDF_TYPE, object: 'urn:mcpci:Thing' }],
+        alsoShareSwm: true,
+      });
+      const published = await client.knowledgeAssetPublish({ contextGraphId: CG, name: sealedName });
+      const hasIdentifier = ['kaId', 'ual', 'knowledgeAssetId', 'txHash', 'batchId', 'status'].some(
+        (k) => k in published,
+      );
+      expect(hasIdentifier, `default-seal publish had no recognizable key: ${Object.keys(published).join(', ')}`).toBe(true);
+    },
+    PUBLISH_TIMEOUT_MS,
+  );
+
+  // ── publishQuads failure recovery — a REAL failing create (nonexistent
+  // context graph), not a sequenced canned 500. The recovery contract
+  // (carry the generated assertionName, phase, and point the operator at
+  // _history not _query) is what an agent needs to avoid double-minting. ──
+  it('publishQuads surfaces assertionName + history-recovery hint when the create REALLY fails', async () => {
+    const err = await client
+      .publishQuads({
+        contextGraphId: `no-such-cg-${RUN}`,
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"v"' }],
+      })
+      .catch((e) => e as Error & { assertionName?: string; phase?: string });
+    expect(err).toBeInstanceOf(Error);
+    expect(err.assertionName, 'recovery error must carry the generated assertionName').toMatch(/mcp-publish-/);
+    expect(err.phase).toBe('create');
+    expect(err.message).toMatch(/dkg_knowledge_asset_history/);
+    expect(err.message).toMatch(/duplicate/i);
+  });
 });

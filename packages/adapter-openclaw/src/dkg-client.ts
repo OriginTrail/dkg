@@ -172,10 +172,6 @@ function optionalContextGraphId(value: string | undefined): string | undefined {
   return normalizeContextGraphId(value) || undefined;
 }
 
-function toContextGraphUri(value: string): string {
-  return `${CONTEXT_GRAPH_URI_PREFIX}${normalizeContextGraphId(value)}`;
-}
-
 function normalizeContextGraphRequest<T extends { contextGraphId: string }>(request: T): T {
   return {
     ...request,
@@ -284,6 +280,7 @@ function assertExclusiveAuthorFields(args: {
 
 function assertCreateFinalizeFieldsHaveQuads(args: {
   quads?: unknown[];
+  finalize?: boolean;
   authorAgentAddress?: string;
   preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
   schemeVersion?: number;
@@ -292,8 +289,11 @@ function assertCreateFinalizeFieldsHaveQuads(args: {
     args.authorAgentAddress != null ||
     args.preSignedAuthorAttestation != null ||
     args.schemeVersion !== undefined;
-  if (hasFinalizeOnlyField && !(Array.isArray(args.quads) && args.quads.length > 0)) {
-    throw new Error('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads');
+  // These fields only take effect at finalize, so they require both non-empty
+  // quads AND finalize !== false — mirrors the daemon create-route guard.
+  const willFinalize = Array.isArray(args.quads) && args.quads.length > 0 && args.finalize !== false;
+  if (hasFinalizeOnlyField && !willFinalize) {
+    throw new Error('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads and finalize !== false');
   }
 }
 
@@ -1021,27 +1021,96 @@ export class DkgDaemonClient {
       );
     }
     const assertionName = `openclaw-publish-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const quadsWithGraph = quads.map((q) => ({
+    // The write wire shape is `{subject, predicate, object}` only — the daemon
+    // pins every quad to the per-KA WM graph itself, so a client-supplied
+    // `graph` is ignored/overridden (CONTRACT §0 invariant 2). Auto-finalize is
+    // driven purely by non-empty `quads` (CONTRACT §1 Stage1), so `finalize:true`
+    // is unread and dropped. `promote:true` is kept: the create route reads it as
+    // the `alsoShareSwm` alias (CONTRACT §1 Stage1).
+    const wireQuads = quads.map((q) => ({
       subject: q.subject,
       predicate: q.predicate,
       object: q.object,
-      graph: q.graph || toContextGraphUri(cgId),
     }));
-    const created: any = await this.post('/api/knowledge-assets', {
-      contextGraphId: cgId,
-      name: assertionName,
-      quads: quadsWithGraph,
-      finalize: true,
-      promote: true,
-    });
-    const published = await this.post('/api/shared-memory/publish', {
-      contextGraphId: cgId,
-      assertionName,
-    });
+    // FIX W — wrap the create call: on a HARD failure the generated
+    // `assertionName` would otherwise be lost in the throw, so a retry mints a
+    // DUPLICATE if the asset was actually created (e.g. the daemon committed but
+    // the HTTP response failed). Surface the name + recovery guidance.
+    let created: any;
+    try {
+      created = await this.post('/api/knowledge-assets', {
+        contextGraphId: cgId,
+        name: assertionName,
+        quads: wireQuads,
+        promote: true,
+      });
+    } catch (e: any) {
+      const err: any = new Error(
+        `Create failed for one-shot publish (asset name "${assertionName}"): ${e?.message ?? String(e)}. The ` +
+        `asset MAY have been created server-side even though the response failed. Before retrying, check via ` +
+        `dkg_knowledge_asset_history for "${assertionName}" to avoid minting a DUPLICATE. A created asset is ` +
+        `auto-shared to SWM (its working-memory draft is empty), so use _history (lifecycle state regardless ` +
+        `of layer) for existence — NOT dkg_knowledge_asset_query, which reads the empty WM draft and would ` +
+        `falsely report "not created". If it exists, re-share + publish it by name rather than re-running this tool.`,
+      );
+      err.assertionName = assertionName;
+      err.phase = 'create';
+      err.cause = e;
+      throw err;
+    }
+
+    // FIX A — the create route returns HTTP 207 `{ created:true, …, errors:[…] }`
+    // when create+finalize succeeded but the `promote:true` share phase FAILED
+    // (knowledge-assets.ts:614). `this.post` treats 207 as success (2xx, no
+    // throw), so without this check we would publish an UNSHARED assertion and
+    // mask the real error. If the share failed, do NOT publish — surface the
+    // sealed-but-unshared asset by name so the caller can recover with the
+    // lifecycle tools instead of recreating it.
+    if (Array.isArray(created?.errors) && created.errors.length > 0) {
+      const shareErr = created.errors.find((e: any) => e?.phase === 'swm-share') ?? created.errors[0];
+      const err: any = new Error(
+        `Publish aborted: the asset was created + sealed in Working Memory as "${assertionName}", but ` +
+        `sharing it to Shared Working Memory FAILED (${shareErr?.error ?? 'unknown error'}). The on-chain ` +
+        `publish was NOT attempted. Do NOT recreate — re-share the existing sealed asset by name with ` +
+        `dkg_knowledge_asset_share, then publish it with dkg_knowledge_asset_publish.`,
+      );
+      err.assertionName = assertionName;
+      err.assertionUri = created?.assertionUri;
+      // The create response carries `merkleRoot` (the seal digest), not a `seal`
+      // object (knowledge-assets.ts:570) — surface it for recovery/verification.
+      if (created?.merkleRoot) err.merkleRoot = created.merkleRoot;
+      err.phase = shareErr?.phase ?? 'swm-share';
+      err.partial = true;
+      throw err;
+    }
+
+    // FIX B — the asset is created + sealed + shared; only the on-chain publish
+    // remains. If it fails, the random `assertionName` would be lost and the next
+    // dkg_publish would mint a DUPLICATE. Catch + rethrow carrying the name so the
+    // caller can retry the publish of the existing asset, not recreate it.
+    let published: unknown;
+    try {
+      published = await this.post('/api/shared-memory/publish', {
+        contextGraphId: cgId,
+        assertionName,
+      });
+    } catch (e: any) {
+      const err: any = new Error(
+        `Publish failed for asset "${assertionName}": ${e?.message ?? String(e)}. The asset is created + ` +
+        `sealed + shared to Shared Working Memory; only the on-chain publish failed. Do NOT recreate — retry ` +
+        `the publish of this asset by name with dkg_knowledge_asset_publish.`,
+      );
+      err.assertionName = assertionName;
+      err.assertionUri = created?.assertionUri;
+      if (created?.merkleRoot) err.merkleRoot = created.merkleRoot;
+      err.phase = 'vm-publish';
+      err.cause = e;
+      throw err;
+    }
     return {
       ...(typeof published === 'object' && published !== null ? published : {}),
       assertionUri: created?.assertionUri,
-      ...(created?.seal ? { seal: created.seal } : {}),
+      ...(created?.merkleRoot ? { merkleRoot: created.merkleRoot } : {}),
     };
   }
 
@@ -1209,6 +1278,13 @@ export class DkgDaemonClient {
     opts?: {
       subGraphName?: string;
       quads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+      /**
+       * Seal the draft after writing `quads` (default true). `false` keeps an
+       * editable WM draft that never touches the chain — the only lifecycle
+       * available to local-only / on-chain-unregistered CGs. Cannot be combined
+       * with `alsoShareSwm`/`alsoPublishVm` (those require a sealed assertion).
+       */
+      finalize?: boolean;
       authorAgentAddress?: string;
       preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
       schemeVersion?: number;
@@ -1248,12 +1324,21 @@ export class DkgDaemonClient {
   async knowledgeAssetWrite(
     contextGraphId: string,
     name: string,
-    quads: Array<{ subject: string; predicate: string; object: string; graph: string }>,
+    quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
     opts?: { subGraphName?: string },
   ): Promise<{ written: number }> {
+    // Strip any per-quad `graph` at the client (CONTRACT §A): the write wire
+    // shape is `{subject, predicate, object}` only and the daemon pins every
+    // quad to the per-KA WM graph (§0 invariant 2), so a caller-supplied or
+    // normalizer-emitted `graph` is dropped here — not just in the tool schema.
+    const wireQuads = quads.map((q) => ({
+      subject: q.subject,
+      predicate: q.predicate,
+      object: q.object,
+    }));
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/write`, {
       contextGraphId: normalizeContextGraphId(contextGraphId),
-      quads,
+      quads: wireQuads,
       ...(opts ?? {}),
     });
   }
@@ -1308,10 +1393,15 @@ export class DkgDaemonClient {
     name: string,
     opts?: { subGraphName?: string; entities?: string[] | 'all' },
   ): Promise<{ swmShared: boolean; promotedCount: number }> {
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, {
+    // Only include the optional fields when actually set — don't spread the whole
+    // opts object (which would carry `entities: undefined` / `subGraphName:
+    // undefined` keys). Parity with MCP's knowledgeAssetShare body construction.
+    const body: Record<string, unknown> = {
       contextGraphId: normalizeContextGraphId(contextGraphId),
-      ...(opts ?? {}),
-    });
+    };
+    if (opts?.subGraphName) body.subGraphName = opts.subGraphName;
+    if (opts?.entities !== undefined) body.entities = opts.entities;
+    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, body);
   }
 
   /** Publish to VM — mint or update on chain (git push origin main). */

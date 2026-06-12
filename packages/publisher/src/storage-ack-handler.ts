@@ -13,6 +13,7 @@ import {
   ciphertextChunkStoreGraph,
   ciphertextChunkStoreSubject,
   CIPHERTEXT_CHUNK_PREDICATE,
+  sharedMemoryReadBothFilter,
 } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
@@ -1260,7 +1261,7 @@ export class StorageACKHandler {
     if (rootEntities.length === 0) {
       // read-both: per-KA …/_shared_memory/{addr}/{number} graphs (promote) + the legacy
       // bucket; exclude the transient /staging/ graphs (they would corrupt the recompute).
-      const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } FILTER((STRSTARTS(STR(?g), "${graphUri}/") && !STRSTARTS(STR(?g), "${graphUri}/staging/")) || STR(?g) = "${graphUri}") }`;
+      const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } ${sharedMemoryReadBothFilter(graphUri)} }`;
       const result = await this.store.query(sparql);
       return result.type === 'quads' ? result.quads : [];
     }
@@ -1269,7 +1270,7 @@ export class StorageACKHandler {
     for (const entity of rootEntities) {
       assertSafeIri(entity);
       const genidPrefix = `${entity}/.well-known/genid/`;
-      const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o . FILTER(?s = <${entity}> || STRSTARTS(STR(?s), "${genidPrefix}")) } FILTER((STRSTARTS(STR(?g), "${graphUri}/") && !STRSTARTS(STR(?g), "${graphUri}/staging/")) || STR(?g) = "${graphUri}") }`;
+      const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o . FILTER(?s = <${entity}> || STRSTARTS(STR(?s), "${genidPrefix}")) } ${sharedMemoryReadBothFilter(graphUri)} }`;
       const result = await this.store.query(sparql);
       if (result.type === 'quads') {
         allQuads.push(...result.quads);

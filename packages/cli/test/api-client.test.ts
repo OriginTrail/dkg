@@ -260,6 +260,31 @@ describe('ApiClient', () => {
       expect(body.quads).toHaveLength(1);
     });
 
+    it('createKnowledgeAsset() forwards finalize:false for a draft-only write', async () => {
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 201, body: { name: 'draft', written: 1, status: 'draft-open' } });
+      globalThis.fetch = fetch;
+      await client.createKnowledgeAsset('cg-1', 'draft', {
+        finalize: false,
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g' }],
+      });
+
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/knowledge-assets`);
+      const body = JSON.parse(calls[0].opts.body as string);
+      expect(body).toMatchObject({ contextGraphId: 'cg-1', name: 'draft', finalize: false });
+      expect(body.quads).toHaveLength(1);
+    });
+
+    it('createKnowledgeAsset() omits finalize when unspecified (server default seals)', async () => {
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 201, body: { name: 'draft', status: 'wm-sealed' } });
+      globalThis.fetch = fetch;
+      await client.createKnowledgeAsset('cg-1', 'draft', {
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g' }],
+      });
+
+      const body = JSON.parse(calls[0].opts.body as string);
+      expect(body).not.toHaveProperty('finalize');
+    });
+
     it('query() sends sparql, optional context graph id, and partition opt-in', async () => {
       const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { result: [] } });
       globalThis.fetch = fetch;

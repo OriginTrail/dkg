@@ -58,7 +58,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, escapeDkgRdfLiteral, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, sparqlIri, contextGraphSharedMemoryUri, sharedMemoryReadBothFilter, contextGraphAssertionUri, contextGraphMetaUri, escapeDkgRdfLiteral, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
 import { skolemizeByEntity, findReservedSubjectPrefix, isSkolemizedUri, type PublishOptions, type PublishResult } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
@@ -362,13 +362,19 @@ function subjectMatchesPublishRoot(subject: string, root: string): boolean {
   return subject === root || (isSkolemizedUri(subject) && subject.startsWith(`${root}${SKOLEM_GENID_SEGMENT}`));
 }
 
-async function resolvePublishRootEntities(
+// Exported for the OT-RFC-46 read-both regression test (the route mocks the
+// store, so the SPARQL scope can only be exercised against a real store).
+export async function resolvePublishRootEntities(
   agent: DKGAgent,
   contextGraphId: string,
   selection: SharedMemoryPublishSelection,
   subGraphName?: string,
 ): Promise<string[]> {
   const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
+  // OT-RFC-46 read-both: include the per-KA layer graphs `promote` writes into,
+  // not just the bare bucket — otherwise a selection-mode publish of a promoted
+  // root 400s here before `publishFromSharedMemory` (which reads both) runs.
+  const swmGraphScope = sharedMemoryReadBothFilter(swmGraph);
 
   if (selection !== "all") {
     const requestedRoots = [...new Set(
@@ -381,12 +387,13 @@ async function resolvePublishRootEntities(
     const values = requestedRoots.map((root) => sparqlIri(root)).join(" ");
     const result = await agent.store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE {
-        GRAPH <${swmGraph}> {
+        GRAPH ?g {
           VALUES ?root { ${values} }
           ?s ?p ?o .
           FILTER(?p != <${WORKSPACE_OWNER_PREDICATE}>)
           FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "${SKOLEM_GENID_SEGMENT}")))
         }
+        ${swmGraphScope}
       }`,
     );
     const quads: Quad[] = result.type === "quads"
@@ -405,10 +412,11 @@ async function resolvePublishRootEntities(
 
   const result = await agent.store.query(
     `CONSTRUCT { ?s ?p ?o } WHERE {
-      GRAPH <${swmGraph}> {
+      GRAPH ?g {
         ?s ?p ?o .
         FILTER(?p != <${WORKSPACE_OWNER_PREDICATE}>)
       }
+      ${swmGraphScope}
     }`,
   );
   const quads: Quad[] = result.type === "quads"

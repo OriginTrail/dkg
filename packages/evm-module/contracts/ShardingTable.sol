@@ -5,6 +5,7 @@ pragma solidity ^0.8.20;
 import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
 import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
+import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {INamed} from "./interfaces/INamed.sol";
@@ -23,7 +24,7 @@ contract ShardingTable is INamed, IVersioned, ContractStatus, IInitializable {
     // `019_deploy_sharding_table.ts` that referenced `migrateOldShardingTable`
     // is removed in the same PR (the function it called no longer exists,
     // so the branch was already unreachable on V10 deploys).
-    string private constant _VERSION = "10.0.2";
+    string private constant _VERSION = "10.0.3";
 
     ProfileStorage public profileStorage;
     ShardingTableStorage public shardingTableStorage;
@@ -31,6 +32,12 @@ contract ShardingTable is INamed, IVersioned, ContractStatus, IInitializable {
     ///         `stakingStorage` reference; the V8 archive is unmaintained
     ///         post-migration so its `getNodeStake` is not a faithful read.
     ConvictionStakingStorage public convictionStakingStorage;
+
+    /// @notice The sharding table is full: `nodesCount` has reached the
+    ///         governance-configured `shardingTableSizeLimit`. The cap bounds
+    ///         the O(n) re-index loops in `insertNode`/`removeNode` so they
+    ///         cannot exceed the block gas limit.
+    error ShardingTableIsFull(uint72 nodesCount, uint16 sizeLimit);
 
     // solhint-disable-next-line no-empty-blocks
     constructor(address hubAddress) ContractStatus(hubAddress) {}
@@ -135,6 +142,20 @@ contract ShardingTable is INamed, IVersioned, ContractStatus, IInitializable {
     function _insertNode(uint72 index, uint72 identityId, uint256 newNodeHashRingPosition) internal virtual {
         ShardingTableStorage sts = shardingTableStorage;
         ProfileStorage ps = profileStorage;
+
+        // SECURITY FIX: enforce the configured size cap. `shardingTableSizeLimit`
+        // (default 500) had a setter but was checked at NO insert site, so the
+        // table could grow without bound — making the O(n) re-index loops in
+        // insertNode/removeNode (both walk every node after the touched index)
+        // exceed the block gas limit, which freezes unstake/redelegate/leave
+        // and any other op that re-indexes the table. ParametersStorage is
+        // resolved from the Hub at call time (it is deployed AFTER ShardingTable,
+        // so it cannot be cached in initialize() without breaking deployment).
+        uint72 nodesCount = sts.nodesCount();
+        uint16 sizeLimit = ParametersStorage(hub.getContractAddress("ParametersStorage")).shardingTableSizeLimit();
+        if (nodesCount >= sizeLimit) {
+            revert ShardingTableIsFull(nodesCount, sizeLimit);
+        }
 
         if (sts.nodeExists(identityId)) {
             revert ShardingTableLib.NodeAlreadyInTheShardingTable(identityId);

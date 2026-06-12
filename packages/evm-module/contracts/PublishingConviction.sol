@@ -5,6 +5,7 @@ pragma solidity ^0.8.20;
 import {INamed} from "./interfaces/INamed.sol";
 import {IVersioned} from "./interfaces/IVersioned.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
+import {IPublishingConvictionErrors} from "./interfaces/IPublishingConvictionErrors.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {Chronos} from "./storage/Chronos.sol";
 import {EpochStorage} from "./storage/EpochStorage.sol";
@@ -87,7 +88,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *     (including a staker pool watcher) can flush pending sweeps. The
  *     account's `fullySwept` flag short-circuits redundant work.
  */
-contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializable {
+contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializable, IPublishingConvictionErrors {
     string private constant _NAME = "PublishingConviction";
     // Version history:
     //   1.0.0 — initial split-out from `DKGPublishingConvictionNFT` v2.0.0.
@@ -206,8 +207,9 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
     error ZeroAddressDependency(string name);
     error OnlyConvictionNFT(address caller);
     error NoConvictionAccount(address publishingAgent);
-    error InsufficientAllowance(uint256 accountId, uint40 epoch, uint96 required, uint96 available);
-    error AccountExpired(uint256 accountId, uint40 expiresAtEpoch);
+    // `InsufficientAllowance` / `AccountExpired` are declared in
+    // {IPublishingConvictionErrors} (shared with KnowledgeAssetsLifecycle's
+    // fall-through catch) so the two contracts can never drift on selector.
     error InvalidAmount();
     error ZeroAgentAddress();
     error AgentCapReached(uint256 accountId, uint256 cap);

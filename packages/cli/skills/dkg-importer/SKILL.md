@@ -14,7 +14,7 @@ graphs other agents and the scanners produce.
 
 For the general node API surface (auth, contextGraphs, SWM/VM publish, SPARQL)
 see [`packages/cli/skills/dkg-node/SKILL.md`](../dkg-node/SKILL.md). This skill
-sits one layer above: it assumes you already know how to call `dkg_assertion_*`
+sits one layer above: it assumes you already know how to call `dkg_knowledge_asset_*`
 and focuses on **how to call them at scale, repeatedly, without losing data on
 restart and without fragmenting the graph against parallel producers**.
 

@@ -170,7 +170,10 @@ describe('UpdateHandler', () => {
     const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
     await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    const cgId = await createTestContextGraph(chain);
+    // Public CG (accessPolicy 0): these tests publish PLAINTEXT to exercise KA
+    // update lifecycle / gossip / ordering / replay mechanics, not curated /
+    // ciphertext semantics, so they must not require a ciphertext commitment.
+    const cgId = await createTestContextGraph(chain, undefined, 0);
     CONTEXT_GRAPH = String(cgId);
     DATA_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
     _provider = createProvider();

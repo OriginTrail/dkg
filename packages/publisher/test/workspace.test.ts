@@ -122,7 +122,10 @@ async function encryptWorkspaceMessage(
 }
 
 beforeAll(async () => {
-  const cgId = await createTestContextGraph();
+  // Public CG (accessPolicy 0): these tests publish PLAINTEXT to exercise
+  // workspace/SWM/lifecycle mechanics, not curated/ciphertext semantics, so a
+  // curated CG would now revert (#1072 CuratedCGRequiresCiphertextCommitment).
+  const cgId = await createTestContextGraph(undefined, undefined, 0);
   CONTEXT_GRAPH = String(cgId);
   DATA_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
   WORKSPACE_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
@@ -2027,6 +2030,32 @@ describe('Workspace: conditionalShare (CAS)', () => {
 
     const result = await publisher.conditionalShare(CONTEXT_GRAPH, quads, opts);
     expect(result.shareOperationId).toBeTruthy();
+  });
+
+  it('does not treat promoted per-KA data as stale CAS bucket state', async () => {
+    const predicate = 'http://example.org/status';
+    const promotedGraph = `${WORKSPACE_GRAPH}/0x1111111111111111111111111111111111111111/1`;
+    await store.insert([q(ENTITY, predicate, '"promoted"', promotedGraph)]);
+
+    const result = await publisher.conditionalShare(CONTEXT_GRAPH, [
+      q(ENTITY, predicate, '"recruiting"'),
+    ], {
+      publisherPeerId: 'peer1',
+      conditions: [{
+        subject: ENTITY,
+        predicate,
+        expectedValue: null,
+      }],
+    });
+
+    expect(result.shareOperationId).toBeTruthy();
+    const check = await store.query(
+      `SELECT ?o WHERE { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> <${predicate}> ?o } }`,
+    );
+    expect(check.type).toBe('bindings');
+    if (check.type === 'bindings') {
+      expect(check.bindings.map((b) => b.o)).toContain('"recruiting"');
+    }
   });
 
   it('StaleWriteError includes condition and actual value', async () => {

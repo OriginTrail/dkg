@@ -96,7 +96,6 @@ const QuadSchema = z.object({
     .describe(
       'Object — URI or literal. Auto-detected: values starting with http://, https://, urn:, or did: pass as URIs; anything else becomes a literal.',
     ),
-  graph: z.string().optional().describe('Optional named graph URI'),
 });
 
 export function registerPublishTools(
@@ -115,14 +114,20 @@ export function registerPublishTools(
       title: 'Publish Fresh Quads',
       description:
         '"I have fresh quads, write+publish now." Two-call helper: ' +
-        'writes the supplied quads to Shared Working Memory, then ' +
-        'publishes the entire SWM in the CG to Verifiable Memory ' +
-        '(on-chain) and clears SWM. For the canonical step-wise flow ' +
-        '(write → promote → publish) use `dkg_assertion_create / write ' +
-        '/ promote` followed by `dkg_shared_memory_publish` — that ' +
-        'path keeps WM as a draft staging area before SWM. Use ' +
-        '`dkg_publish` only when you have fresh quads to anchor ' +
-        'immediately.',
+        'creates a fresh auto-named assertion from the supplied quads ' +
+        '(seal + share), then publishes THAT one assertion to Verifiable ' +
+        'Memory (on-chain). NOTE: this is two HTTP calls (create, then ' +
+        'publish), not a single transactional operation — either phase can ' +
+        'partially fail (a share-phase failure aborts before publish; a ' +
+        'context-graph-binding failure still mints the asset on-chain). For ' +
+        'the canonical step-wise flow ' +
+        '(create → write → finalize → share → publish) use ' +
+        '`dkg_knowledge_asset_create / write / finalize / share` followed ' +
+        'by `dkg_knowledge_asset_publish` — that path keeps WM as a draft ' +
+        'staging area before SWM. Use `dkg_publish` only when you have ' +
+        'fresh quads to anchor immediately. Publishing requires the context ' +
+        'graph to be registered on-chain — set `registerIfNeeded: true` to ' +
+        'register it first (idempotent) before publishing.',
       inputSchema: {
         contextGraphId: z.string().min(1).describe(`Target context graph id. ${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION}`),
         quads: z
@@ -131,26 +136,66 @@ export function registerPublishTools(
           .describe(
             'Non-empty array of quads to publish. Object values are auto-typed (URI vs literal).',
           ),
+        registerIfNeeded: z
+          .boolean()
+          .optional()
+          .describe(
+            'When true, register the CG on-chain before publishing if needed. May spend gas/TRAC; opt-in only. ' +
+            'CAVEAT: this uses the explicit register route, which registers with the daemon\'s DEFAULT ' +
+            'publishPolicy (derived from accessPolicy) and does NOT preserve a context graph\'s stored custom ' +
+            'publishPolicy / contribution governance. For a CG created with a non-default publishPolicy/PCA, ' +
+            'register it explicitly with the desired policy first rather than relying on registerIfNeeded. ' +
+            '(Read access is unaffected; daemon-side rehydration tracked in OriginTrail/dkg#1085.)',
+          ),
+        accessPolicy: z
+          .union([z.literal(0), z.literal(1)])
+          .optional()
+          .describe(
+            '0 = open, 1 = private. Requires `registerIfNeeded: true` — it only applies when registering the CG, and is rejected otherwise. Sets only the access policy; it does NOT preserve a stored custom publishPolicy (see registerIfNeeded; OriginTrail/dkg#1085).',
+          ),
       },
     },
-    async ({ contextGraphId, quads }): Promise<ToolResult> => {
+    async ({ contextGraphId, quads, registerIfNeeded, accessPolicy }): Promise<ToolResult> => {
       const cgId = contextGraphId.trim();
       if (!cgId) return errResult('"contextGraphId" is required.');
       if (!quads.length) {
         return errResult('"quads" must be a non-empty array.');
       }
+      // FIX S: accessPolicy only applies when registering the CG — reject it
+      // (rather than silently drop the privacy setting) when registerIfNeeded != true.
+      if (accessPolicy !== undefined && registerIfNeeded !== true) {
+        return errResult('"accessPolicy" requires "registerIfNeeded": true — it only applies when registering the context graph.');
+      }
       // Auto-type the object: URI vs literal. Mirrors the adapter's
       // handlePublish at `DkgNodePlugin.ts:2721-2729` byte-for-byte so
       // a memory written via either surface lands as identical triples.
+      // Wire shape is {subject, predicate, object} only — no per-quad `graph`
+      // (CONTRACT §0 invariant 2; the daemon pins quads to the per-KA WM graph).
       const wireQuads = quads.map((q) => {
         const objVal = String(q.object ?? '');
         return {
           subject: String(q.subject ?? ''),
           predicate: String(q.predicate ?? ''),
           object: isUri(objVal) ? objVal : `"${escapeRdfLiteral(objVal)}"`,
-          graph: q.graph ? String(q.graph) : '',
         };
       });
+
+      // CONTRACT §G: publishing requires the CG to be registered on-chain and the
+      // daemon does NOT auto-register. When registerIfNeeded is true, register
+      // first (the client short-circuits an already-registered CG via its typed
+      // alreadyRegistered flag — no double-mint), mirroring dkg_shared_memory_publish.
+      // A hard registration failure is a tool error: do NOT publish.
+      let registered = false;
+      if (registerIfNeeded === true) {
+        try {
+          const reg = await client.registerContextGraph({ id: cgId, accessPolicy });
+          registered = !reg.alreadyRegistered;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          return errResult(`Failed to register context graph: ${message}`);
+        }
+      }
+
       try {
         const result = await client.publishQuads({
           contextGraphId: cgId,
@@ -167,9 +212,27 @@ export function registerPublishTools(
         // succeeds; if the wallet-balances probe itself fails the
         // publish stands and we just omit the chain line.
         const chainId = await resolveChainId(client);
+        // FIX E — the dkg_publish path publishes via POST /api/shared-memory/publish
+        // {assertionName}, which (like vm/publish) returns HTTP 207 with
+        // `contextGraphError` set when the KA minted on-chain but the context-graph
+        // binding FAILED (memory.ts:1772). `this.request` treats 207 as success, so
+        // without this the partial reads as clean success. The UAL/kaId are valid and
+        // the asset IS published on-chain — surface a PARTIAL warning. The agent must
+        // NOT re-run dkg_publish: each call mints a FRESH assertion, so a retry would
+        // DUPLICATE the published asset and still not re-bind the CG. The CG-binding
+        // retry is an operator/daemon concern.
+        const contextGraphError = (result as Record<string, unknown>).contextGraphError;
+        const ual = (result as Record<string, unknown>).ual as string | undefined;
         const summary = [
-          `Published ${wireQuads.length} quad(s) to '${cgId}'.`,
+          typeof contextGraphError === 'string' && contextGraphError.length > 0
+            ? `PARTIAL publish to '${cgId}': the asset IS published on-chain (KC/UAL below are valid and ` +
+              `final) — only the context-graph binding FAILED (${contextGraphError}). Do NOT re-run ` +
+              `dkg_publish: it would mint a DUPLICATE asset and still not re-bind the context graph. Surface ` +
+              `this to the operator to re-attempt the context-graph binding.`
+            : `Published ${wireQuads.length} quad(s) to '${cgId}'.`,
+          registered ? `Registered context graph '${cgId}' on-chain.` : null,
           kaId ? `KC: ${kaId}` : null,
+          ual ? `UAL: ${ual}` : null,
           kas?.length ? `KAs: ${kas.length}` : null,
           txHash ? `Tx: ${txHash}` : null,
           chainId ? `Chain: ${chainId}` : null,
@@ -192,15 +255,19 @@ export function registerPublishTools(
     {
       title: 'Publish Shared Working Memory',
       description:
-        'Canonical step-4 finalizer for "publish existing SWM" (one HTTP ' +
-        'call). Publishes all Shared Working Memory in a context graph to ' +
-        'Verifiable Memory (on-chain) and clears SWM. Use after ' +
-        '`dkg_assertion_promote` to finalize promoted data. Pass ' +
-        '`rootEntities` to publish only specific roots (subset publishes ' +
-        'default to NOT clearing SWM, so other unpublished roots are not ' +
-        'dropped). Set `registerIfNeeded: true` to upgrade a local-only CG ' +
-        'to on-chain registration before publishing — note this MAY spend ' +
-        'gas/TRAC; opt-in only.',
+        'SWM-bridge / CG-wide publish (legacy, retained). Publishes all ' +
+        'Shared Working Memory in a context graph to Verifiable Memory ' +
+        '(on-chain) and clears SWM. To publish a SINGLE named knowledge ' +
+        'asset, prefer `dkg_knowledge_asset_publish` (multi-root-safe); this ' +
+        'bulk route is single-root-per-call and returns 409 ' +
+        'MULTI_ROOT_PUBLISH_NOT_ATOMIC when more than one root entity is in ' +
+        'SWM. Use after `dkg_knowledge_asset_share`. Pass `rootEntities` to ' +
+        'publish only specific roots (subset publishes default to NOT ' +
+        'clearing SWM, so other unpublished roots are not dropped). NOTE: this ' +
+        'CG-wide publish AUTO-registers an unregistered context graph on-chain at ' +
+        'gas/TRAC cost regardless of `registerIfNeeded` — omitting the flag is ' +
+        'NOT gas-free. `registerIfNeeded` only lets you set the registration\'s ' +
+        '`accessPolicy`.',
       inputSchema: {
         contextGraphId: z.string().min(1).describe(`Target context graph id. ${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION}`),
         rootEntities: z
@@ -219,13 +286,13 @@ export function registerPublishTools(
           .boolean()
           .optional()
           .describe(
-            'When true, register the CG on-chain before publishing if needed. May spend gas/TRAC; opt-in only.',
+            'Run an EXPLICIT on-chain registration before publishing, which lets you set `accessPolicy` on that registration. NOTE: this does NOT gate whether registration happens — a CG-wide publish AUTO-registers an unregistered context graph at gas/TRAC cost regardless of this flag. Set it only to choose the registration\'s accessPolicy (the implicit auto-register on publish otherwise defaults the policy).',
           ),
         accessPolicy: z
           .union([z.literal(0), z.literal(1)])
           .optional()
           .describe(
-            'Used only when `registerIfNeeded: true`. 0 = open, 1 = private.',
+            '0 = open, 1 = private — for the EXPLICIT registration. Requires `registerIfNeeded: true` — it only applies to that explicit registration and is rejected otherwise (the implicit auto-register on publish defaults the policy).',
           ),
       },
     },
@@ -238,6 +305,11 @@ export function registerPublishTools(
     }): Promise<ToolResult> => {
       const cgId = contextGraphId.trim();
       if (!cgId) return errResult('"contextGraphId" is required.');
+      // FIX S: accessPolicy only applies when registering the CG — reject it
+      // (rather than silently drop the privacy setting) when registerIfNeeded != true.
+      if (accessPolicy !== undefined && registerIfNeeded !== true) {
+        return errResult('"accessPolicy" requires "registerIfNeeded": true — it only applies when registering the context graph.');
+      }
       // Mirror handleAssertionPromote's `entities` validation: omit →
       // daemon-side default (selection="all"); non-empty array of
       // strings only — no other shapes silently 400 at the daemon.

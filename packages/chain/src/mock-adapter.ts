@@ -656,6 +656,27 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   /**
+   * Mock parity for the publisher SDK's fundability gate. Mirrors
+   * `PublishingConviction.coverPublishingCost`: discount the base cost by the
+   * account's tier (with the 1-wei post-discount floor), then compare against
+   * the per-epoch base allowance (`committedTRAC / lockDurationEpochs`,
+   * integer-divided so a few-wei squat floors to 0) plus the top-up buffer.
+   * The mock doesn't track per-window publish spend, so this is the account's
+   * nominal current capacity — enough to tell a genuinely-funding account
+   * from a squatted/underfunded one for THIS publish's cost.
+   */
+  async convictionAccountCanCover(accountId: bigint, baseCost: bigint): Promise<boolean> {
+    if (baseCost <= 0n) return true;
+    const acct = this.convictionAccounts.get(accountId);
+    if (!acct || acct.lockDurationEpochs <= 0) return false;
+    const BPS_DENOMINATOR = 10_000n;
+    let discountedCost = (baseCost * (BPS_DENOMINATOR - BigInt(acct.discountBps))) / BPS_DENOMINATOR;
+    if (discountedCost === 0n && baseCost > 0n) discountedCost = 1n;
+    const baseEpochAllowance = acct.committedTRAC / BigInt(acct.lockDurationEpochs);
+    return baseEpochAllowance + acct.topUpBuffer >= discountedCost;
+  }
+
+  /**
    * Mock owner-lookup for the daemon's curated-CG registration
    * preflight (`local curator == ownerOf(pcaAccountId)`).
    */
@@ -1159,7 +1180,7 @@ export class MockChainAdapter implements ChainAdapter {
    * OT-RFC-43 Option 1 — highest per-author KA number minted in this mock, or
    * -1n if none. Scans the in-memory collections (keyed by kaId; reservedKaId
    * publishes store the packed id) and returns `max(kaId & ((1<<96)-1))` for
-   * the author. Mirrors the EVM adapter's KnowledgeAssetCreated-by-author scan.
+   * the author. Mirrors the EVM adapter's reconciled chain high-water semantics.
    */
   async getMaxKaNumberForAuthor(author: string): Promise<bigint> {
     const target = author.toLowerCase();

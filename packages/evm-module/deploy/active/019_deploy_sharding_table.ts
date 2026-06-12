@@ -39,4 +39,9 @@ func.dependencies = [
   'ShardingTableStorage',
   'StakingStorage',
   'ConvictionStakingStorage',
+  // `_insertNode` enforces `shardingTableSizeLimit` by resolving ParametersStorage
+  // from the Hub at call time. Declare the dependency so any deploy/fixture that
+  // brings up ShardingTable also Hub-registers ParametersStorage (it has no
+  // dependency on ShardingTable, so no cycle).
+  'ParametersStorage',
 ];

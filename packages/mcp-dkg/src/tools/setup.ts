@@ -141,7 +141,7 @@ export function registerSetupTools(
           accessPolicy,
           publishPolicy,
         });
-        // Mirror dkg_assertion_create's idempotency surfacing: distinct
+        // Mirror dkg_knowledge_asset_create's idempotency surfacing: distinct
         // success messages for "newly created" vs "already existed" so
         // callers don't have to do an extra `dkg_list_context_graphs`
         // round-trip to figure out which path the daemon took.
@@ -209,7 +209,7 @@ export function registerSetupTools(
   //
   // Rationale (the create-family-wide view): the three `*_create`
   // tools have asymmetric daemon-side idempotency:
-  //   - dkg_assertion_create   → daemon-idempotent (`alreadyExists: true`)
+  //   - dkg_knowledge_asset_create → daemon-idempotent (`alreadyExists: true`)
   //   - dkg_context_graph_create → daemon-idempotent (returns existing CG)
   //   - dkg_sub_graph_create   → daemon-strict (409 on duplicate)
   //

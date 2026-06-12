@@ -43,6 +43,17 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      }
+    ],
+    "name": "CuratedCGRequiresCiphertextCommitment",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "IncompleteCiphertextCommitment",
     "type": "error"

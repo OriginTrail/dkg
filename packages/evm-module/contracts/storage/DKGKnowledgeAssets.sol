@@ -84,7 +84,7 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     error GetLatestKnowledgeAssetIdDeprecated();
 
     string private constant _NAME = "DKGKnowledgeAssets";
-    string private constant _VERSION = "10.0.3";
+    string private constant _VERSION = "10.0.4";
 
     string private _tokenURI;
 
@@ -176,6 +176,17 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     /// distinct and a curated KC must not collide its random-sampling
     /// granularity with its public-projection leaf count.
     mapping(uint256 => uint32) public ciphertextChunkCounts;
+
+    /// @notice OT-RFC-43 Option 1 (variant 1a): per-author high-water KA `number`
+    ///         (the low 96 bits of the packed kaId), stored as `maxNumber + 1` so
+    ///         the default `0` unambiguously means "this author has never minted".
+    ///         Lets the off-chain allocator reconcile its cold-start floor with a
+    ///         single O(1) `getMaxKaNumberForAuthor` view instead of an unbounded
+    ///         `KnowledgeAssetCreated` log scan (which overflows the `eth_getLogs`
+    ///         block-range cap on networks with deep history). Appended at the END
+    ///         of storage to preserve the slot layout of every field above (see the
+    ///         layout note on `_deprecatedKnowledgeAssetsCounter`).
+    mapping(address => uint256) private _authorKaNumberHighWater;
 
     constructor(
         address hubAddress,
@@ -277,6 +288,18 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
 
         kc.minted = 1;
         _totalMintedKnowledgeAssetsCounter += 1;
+
+        // OT-RFC-43 Option 1: record the per-author high-water `number` BEFORE the
+        // `_safeMint` interaction (checks-effects-interactions — `_safeMint` calls
+        // `onERC721Received` on a contract recipient). Stored as `number + 1` so the
+        // default 0 means "never minted"; only ever raised, never lowered, so a
+        // gap-filling mint of a lower number can never regress the floor. Backs the
+        // O(1) `getMaxKaNumberForAuthor` allocator reconcile.
+        uint256 mintedNumber = uint96(knowledgeAssetId); // low 96 bits = per-author number
+        if (mintedNumber + 1 > _authorKaNumberHighWater[author]) {
+            _authorKaNumberHighWater[author] = mintedNumber + 1;
+        }
+
         _safeMint(author, knowledgeAssetId);
 
         emit KnowledgeAssetCreated(
@@ -292,6 +315,34 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
         );
 
         return knowledgeAssetId;
+    }
+
+    /// @notice OT-RFC-43 Option 1 (variant 1a): the highest KA `number` already
+    ///         minted under `author` (the low 96 bits of its packed kaId), or `-1`
+    ///         if `author` has never minted a KA.
+    /// @dev    O(1) replacement for enumerating `KnowledgeAssetCreated(id, author)`
+    ///         logs. The off-chain allocator's next number for `author` is
+    ///         `getMaxKaNumberForAuthor(author) + 1`, so a brand-new author (result
+    ///         `-1`) correctly starts at number 0. Returns `int256` so "never minted"
+    ///         is a true sentinel rather than colliding with a legitimately-minted
+    ///         number 0.
+    ///
+    ///         PRECONDITION — not backfilled across an in-place storage upgrade.
+    ///         `_authorKaNumberHighWater` is only populated by `createKnowledgeAsset`
+    ///         from this version (10.0.4) onward. On a fresh deploy or redeploy — the
+    ///         expected path, where every KA is minted under this contract — it is
+    ///         authoritative for ALL of an author's KAs. But if this storage is
+    ///         upgraded IN PLACE over a pre-10.0.4 deployment that already minted KAs,
+    ///         those historical authors read `-1` until their next mint. Such an
+    ///         in-place upgrade is not supported unless the mapping is backfilled or
+    ///         the allocator is explicitly configured to reconcile historical mints by
+    ///         another source. The repository deployment flow is a fresh asset-storage
+    ///         redeploy/Hub rotation, not bytecode replacement over existing storage.
+    /// @param  author The attested author address (the high 160 bits of a packed kaId).
+    /// @return The highest KA `number` already minted under `author`, or `-1` if none.
+    function getMaxKaNumberForAuthor(address author) external view returns (int256) {
+        uint256 highWater = _authorKaNumberHighWater[author];
+        return highWater == 0 ? int256(-1) : int256(highWater) - 1;
     }
 
     function getKnowledgeAsset(

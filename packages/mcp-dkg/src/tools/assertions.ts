@@ -10,7 +10,7 @@
  *
  * Argument-key alignment per matrix v0.5 OQ-a: `name` flows through every
  * tool unchanged, matching the OpenClaw adapter (`DkgNodePlugin.ts:2399+`).
- * The `name` regex on `dkg_assertion_create` is creator-side input
+ * The `name` regex on `dkg_knowledge_asset_create` is creator-side input
  * validation only; read-side and import paths accept any pre-existing
  * assertion name.
  */
@@ -34,6 +34,21 @@ const errResult = (text: string): ToolResult => ({
 const formatError = (e: unknown): string =>
   e instanceof Error ? e.message : String(e);
 
+/**
+ * The daemon's real assertion-name rule, replicated verbatim from
+ * `@origintrail-official/dkg-core` `validateAssertionName`
+ * (core/src/constants.ts:346-352). MCP does not depend on dkg-core, so the rule
+ * is inlined here (and on Hermes) rather than imported. Any IRI-safe name up to
+ * 256 chars — NOT a lowercase-hyphen slug. Keep in sync with the core source.
+ */
+function validateAssertionName(name: string): { valid: boolean; reason?: string } {
+  if (!name || name.length === 0) return { valid: false, reason: 'Assertion name cannot be empty' };
+  if (name.includes('/')) return { valid: false, reason: 'Assertion name cannot contain "/"' };
+  if (/[<>"{}|^`\\\s]/.test(name)) return { valid: false, reason: 'Assertion name contains characters unsafe for IRIs' };
+  if (name.length > 256) return { valid: false, reason: 'Assertion name exceeds 256 characters' };
+  return { valid: true };
+}
+
 function resolveProject(
   explicit: string | undefined,
   config: DkgConfig,
@@ -51,21 +66,24 @@ export function registerAssertionTools(
   client: DkgClient,
   config: DkgConfig,
 ): void {
-  // ── dkg_assertion_create ────────────────────────────────────────
+  // ── dkg_knowledge_asset_create ──────────────────────────────────
   server.registerTool(
-    'dkg_assertion_create',
+    'dkg_knowledge_asset_create',
     {
-      title: 'Create Assertion',
+      title: 'Create Knowledge Asset',
       description:
-        'Step 1 of the canonical write flow: create an empty Working Memory ' +
-        'assertion graph. Idempotent — duplicate names land as ' +
-        '`alreadyExists: true` rather than throwing. Slug must match ' +
-        '/^[a-z0-9-]+$/ for new names; pre-existing assertions accept any name.',
+        'Step 1 of the canonical write flow (create → write → finalize → share → publish): ' +
+        'create an empty Working Memory draft for a knowledge asset. Idempotent — ' +
+        'duplicate names land as `alreadyExists: true` rather than throwing. Accepts any ' +
+        'valid assertion name: an IRI-safe name up to 256 chars (no "/", no whitespace, no ' +
+        '<>"{}|^`\\ characters) — NOT restricted to a lowercase-hyphen slug.',
       inputSchema: {
         name: z
           .string()
-          .regex(/^[a-z0-9-]+$/, 'Assertion name must be lowercase a-z, 0-9, or hyphen')
-          .describe('Assertion name slug (e.g. "session-2026-04-30")'),
+          .refine((n) => validateAssertionName(n).valid, (n) => ({
+            message: validateAssertionName(n).reason ?? 'Invalid assertion name',
+          }))
+          .describe('Assertion name. Any IRI-safe name up to 256 chars (e.g. "session-2026-04-30", "My_Asset.v2") — no "/", whitespace, or <>"{}|^`\\ characters.'),
         projectId: z
           .string()
           .optional()
@@ -102,17 +120,17 @@ export function registerAssertionTools(
     },
   );
 
-  // ── dkg_assertion_write ─────────────────────────────────────────
+  // ── dkg_knowledge_asset_write ───────────────────────────────────
   server.registerTool(
-    'dkg_assertion_write',
+    'dkg_knowledge_asset_write',
     {
-      title: 'Write Quads to Assertion',
+      title: 'Write Quads to Knowledge Asset',
       description:
         'Step 2 of the canonical write flow: append RDF quads into an ' +
-        'existing Working Memory assertion. Writes are additive (set-merge); ' +
-        'callers that want replace semantics should call `dkg_assertion_discard` ' +
-        'first or mint a unique assertion name per snapshot.\n\n' +
-        'IMPORTANT — quad shape: each quad has subject/predicate/object/graph. ' +
+        'existing Working Memory draft. Writes are additive (set-merge); ' +
+        'callers that want replace semantics should call `dkg_knowledge_asset_discard` ' +
+        'first or mint a unique asset name per snapshot.\n\n' +
+        'IMPORTANT — triple shape: each triple has subject/predicate/object. ' +
         'Subjects and predicates are ALWAYS URIs (no spaces). The `object` field ' +
         'accepts EITHER a URI (no surrounding quotes) OR a literal string ' +
         'WRAPPED IN DOUBLE QUOTES. Most common mistake: passing free-text ' +
@@ -142,11 +160,10 @@ export function registerAssertionTools(
                 '  Lang-tagged:     "\\"hello\\"@en"\n' +
                 'A literal without surrounding quotes will be parsed as a URI and FAIL on spaces.',
               ),
-              graph: z.string().optional().describe('Optional named graph URI (same rules as subject)'),
             }),
           )
           .min(1)
-          .describe('Non-empty array of RDF quads to append'),
+          .describe('Non-empty array of RDF triples to append'),
         projectId: z.string().optional().describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
         subGraphName: z.string().optional(),
       },
@@ -156,15 +173,15 @@ export function registerAssertionTools(
       if (!pid) return projectErr();
       try {
         // Append to the KA's WM draft. Strip angle brackets from URIs (the
-        // engine wants bare URIs) and carry `graph` through when supplied;
-        // omitted graph lets the WM-write engine derive the draft graph.
+        // engine wants bare URIs). Wire shape is {subject, predicate, object}
+        // only — no per-quad `graph` (CONTRACT §0 invariant 2; the daemon pins
+        // every triple to the per-KA WM graph and overrides any client value).
         const strip = (t: string): string =>
           t.startsWith('<') && t.endsWith('>') ? t.slice(1, -1) : t;
         const kaQuads = quads.map((q) => ({
           subject: strip(q.subject),
           predicate: strip(q.predicate),
           object: q.object,
-          ...(q.graph ? { graph: strip(q.graph) } : {}),
         }));
         const { written } = await client.knowledgeAssetWrite({
           contextGraphId: pid,
@@ -181,23 +198,101 @@ export function registerAssertionTools(
     },
   );
 
-  // ── dkg_assertion_promote ───────────────────────────────────────
+  // ── dkg_knowledge_asset_finalize ────────────────────────────────
   server.registerTool(
-    'dkg_assertion_promote',
+    'dkg_knowledge_asset_finalize',
     {
-      title: 'Promote Assertion to SWM',
+      title: 'Finalize (Seal) Knowledge Asset',
       description:
-        'Step 3 of the canonical write flow: promote a Working Memory ' +
-        'assertion (or specific root entities within it) from private WM to ' +
-        'Shared Working Memory so teammates see it. Omit `entities` to ' +
-        'promote every root entity.',
+        'Step 3 of the canonical write flow: seal a knowledge asset\'s Working ' +
+        'Memory draft — computes the merkle root and signs the EIP-712 ' +
+        'AuthorAttestation. Finalize always seals the WHOLE draft (there is no ' +
+        'subset parameter). A FULL share (dkg_knowledge_asset_share with ' +
+        '`entities` omitted or "all") auto-seals for you, so you only need to ' +
+        'call this explicitly before sharing a SELECTIVE subset of entities, or ' +
+        'to re-seal after editing a previously-sealed draft. (External-signer / ' +
+        'pre-signed attestation is a tracked follow-up and is not exposed by this ' +
+        'tool — author with authorAgentAddress.)',
       inputSchema: {
-        name: z.string().describe('Existing assertion name'),
-        entities: z
-          .array(z.string())
+        name: z.string().describe('Existing knowledge asset name to finalize'),
+        authorAgentAddress: z
+          .string()
           .optional()
           .describe(
-            'Root entity URIs to promote. Omit to promote all roots.',
+            'Optional 0x author address to attest as. Omit to let the daemon ' +
+            'default the author to the request token\'s agent.',
+          ),
+        // CONTRACT §C: scheme_version is a POSITIVE integer (daemon >= 1) — zod
+        // rejects 0 / negative / non-integer at the boundary as a tool error.
+        schemeVersion: z.number().int().positive().optional().describe('Optional attestation scheme version (positive integer)'),
+        projectId: z.string().optional().describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
+        subGraphName: z.string().optional(),
+      },
+    },
+    async ({ name, authorAgentAddress, schemeVersion, projectId, subGraphName }): Promise<ToolResult> => {
+      const pid = resolveProject(projectId, config);
+      if (!pid) return projectErr();
+      try {
+        // Seal the WHOLE WM draft (CONTRACT §1 Stage3 — no subset scope on
+        // finalize). The author defaults to the request token's agent when
+        // `authorAgentAddress` is omitted; pre-signed attestations are not
+        // surfaced on this tool (they require the packed reservedKaId — out of
+        // scope here), matching the OpenClaw adapter.
+        const result = await client.knowledgeAssetFinalize({
+          contextGraphId: pid,
+          name,
+          subGraphName,
+          authorAgentAddress,
+          schemeVersion,
+        });
+        return ok(
+          `Finalized (sealed) knowledge asset '${name}' (project '${pid}'):\n\n\`\`\`json\n${JSON.stringify(
+            result,
+            null,
+            2,
+          )}\n\`\`\``,
+        );
+      } catch (e) {
+        return errResult(`Failed to finalize knowledge asset: ${formatError(e)}`);
+      }
+    },
+  );
+
+  // ── dkg_knowledge_asset_share ───────────────────────────────────
+  server.registerTool(
+    'dkg_knowledge_asset_share',
+    {
+      title: 'Share Knowledge Asset to SWM',
+      description:
+        'Step 4 of the canonical write flow: share a knowledge asset (or ' +
+        'specific root entities within it) from private Working Memory to ' +
+        'Shared Working Memory so teammates see it. A FULL share (omit ' +
+        '`entities` or pass "all") attempts a best-effort auto-seal: when the ' +
+        'seal SUCCEEDS the asset is publish-ready — follow it with ' +
+        'dkg_knowledge_asset_publish to mint the asset on-chain (Verifiable ' +
+        'Memory). But on a capability/signing gap (no local signing key / ' +
+        'non-V10 adapter / unregistered CG) the auto-seal is skipped and the ' +
+        'asset is shared UNSEALED — a later dkg_knowledge_asset_publish then ' +
+        '409s requiring an explicit finalize. For predictable publishing, call ' +
+        'dkg_knowledge_asset_finalize EXPLICITLY first (this is also required to ' +
+        'carry custom finalize/attestation options — authorAgentAddress / ' +
+        'schemeVersion — which the auto-seal cannot). A SELECTIVE subset (`entities` set ' +
+        'to a proper subset) shares to SWM only for peer visibility, is NOT ' +
+        'auto-sealed, and is NOT publishable to Verifiable Memory: ' +
+        'dkg_knowledge_asset_publish reconstructs the seal\'s full root set and ' +
+        'rejects a truncated SWM with a merkleRoot mismatch. To publish on-chain, ' +
+        'share the full asset (or model the subset as its own knowledge asset).',
+      inputSchema: {
+        name: z.string().describe('Existing knowledge asset name'),
+        // CONTRACT §B: accept "all" | string[] | omitted. The daemon reads
+        // parsed.entities and treats "all"/omitted as a full share.
+        entities: z
+          .union([z.literal('all'), z.array(z.string())])
+          .optional()
+          .describe(
+            'Root entities to share. Omit (or pass the string "all") to share all ' +
+            'roots (auto-seals + publish-ready). A subset (non-empty array) shares ' +
+            'to SWM only and is NOT publishable to Verifiable Memory.',
           ),
         projectId: z.string().optional().describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
         subGraphName: z.string().optional(),
@@ -206,41 +301,240 @@ export function registerAssertionTools(
     async ({ name, entities, projectId, subGraphName }): Promise<ToolResult> => {
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
-      // Provided entities must be a non-empty array of URIs; omitted means
-      // "promote all roots" (daemon-side default).
-      if (entities !== undefined && entities.length === 0) {
+      // CONTRACT §B: "all" | string[] | omitted. Pass "all" / omitted through as a
+      // full share (omitted ⇒ undefined ⇒ daemon default); a non-empty array is the
+      // subset. An empty array is rejected client-side (the daemon would 400 it) —
+      // fail fast, never coerce to "all" or omit.
+      if (Array.isArray(entities) && entities.length === 0) {
         return errResult(
-          '"entities" must be omitted or a non-empty array of root entity URIs.',
+          '"entities" must be omitted, the string "all", or a non-empty array of root entity URIs.',
         );
       }
+      // FIX K: trim each root-entity URI before forwarding — a whitespace-padded
+      // entity (" urn:a ") would otherwise reach the daemon with the spaces and
+      // resolve to the wrong (or no) root. Parity with Hermes.
+      const trimmedEntities = Array.isArray(entities) ? entities.map((e) => String(e).trim()) : entities;
       try {
         // WM → SWM. The KA `swm/share` route is the same engine call
         // (`agent.assertion.promote`) the legacy promote used; omit `entities`
-        // to share every root (the route's default), or pass a subset.
+        // to share every root (the route's default), pass "all", or pass a subset.
         await client.knowledgeAssetShare({
           contextGraphId: pid,
           name,
           subGraphName,
-          entities: entities && entities.length > 0 ? entities : undefined,
+          entities: trimmedEntities,
         });
-        const scope = entities && entities.length > 0
+        const scope = Array.isArray(entities)
           ? `${entities.length} entit${entities.length === 1 ? 'y' : 'ies'}`
           : 'all root entities';
-        return ok(`Promoted ${scope} from assertion '${name}' (project '${pid}') to SWM.`);
+        return ok(`Shared ${scope} from knowledge asset '${name}' (project '${pid}') to SWM.`);
       } catch (e) {
-        return errResult(`Failed to promote assertion: ${formatError(e)}`);
+        return errResult(`Failed to share knowledge asset: ${formatError(e)}`);
       }
     },
   );
 
-  // ── dkg_assertion_discard ───────────────────────────────────────
+  // ── dkg_knowledge_asset_publish ─────────────────────────────────
   server.registerTool(
-    'dkg_assertion_discard',
+    'dkg_knowledge_asset_publish',
     {
-      title: 'Discard Assertion',
+      title: 'Publish Knowledge Asset to VM',
       description:
-        'Discard a Working Memory assertion without promoting it. Idempotent — ' +
-        'no-op on a missing assertion. Use before re-writing an assertion ' +
+        'Step 5 of the canonical write flow: publish ONE finalized + shared ' +
+        'knowledge asset (by name) from Shared Working Memory to Verifiable ' +
+        'Memory on-chain, minting or updating it. Returns the asset\'s UAL ' +
+        '(Universal Asset Locator, `did:dkg:<chainId>/<knowledgeAssetsContractAddress>/<number>` — ' +
+        'the middle segment is the KnowledgeAssets (KAV10) contract address, NOT the author; the ' +
+        'separate `authorAddress` response field is the (different) seal author) plus ' +
+        '`kaId`, `txHash`, `status`, and `kas`. The seal already selects the ' +
+        'author and the whole asset — do not pass author or selection overrides. ' +
+        'Prefer this over dkg_shared_memory_publish when publishing a single ' +
+        'named asset; it is multi-root-safe and avoids the legacy single-root ' +
+        'SWM constraint. Fails 409 if the asset is not yet finalized + shared ' +
+        '(run dkg_knowledge_asset_finalize / dkg_knowledge_asset_share first). ' +
+        'vm/publish requires the context graph to be registered on-chain — set ' +
+        '`registerIfNeeded: true` to register it first (idempotent) before publishing.',
+      inputSchema: {
+        // CONTRACT §C: publishEpochs is a POSITIVE integer (zod rejects 0 /
+        // negative / non-integer at the boundary → a fail-fast tool error).
+        name: z.string().describe('Knowledge asset name to publish (must be finalized + shared)'),
+        publishEpochs: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe('Optional number of epochs to publish for (positive integer)'),
+        // CONTRACT §C: NON-NEGATIVE integer as a decimal string (daemon /^\d+$/).
+        // Validated at the boundary so a bad value is a clear tool error, not a
+        // generic client throw.
+        publisherNodeIdentityIdOverride: z
+          .string()
+          .regex(/^\d+$/, 'publisher_node_identity_id_override must be a non-negative integer (decimal string)')
+          .optional()
+          .describe('Optional publisher node identity id override (non-negative integer, decimal string)'),
+        // CONTRACT §G: vm/publish requires the CG to be registered on-chain and
+        // does NOT auto-register. registerIfNeeded registers first (idempotent),
+        // mirroring dkg_shared_memory_publish.
+        registerIfNeeded: z
+          .boolean()
+          .optional()
+          .describe(
+            'If the context graph is not yet registered on-chain, register it first (idempotent), then ' +
+            'publish. Registration may spend gas/TRAC; opt-in. Default false — when false and the CG is ' +
+            'unregistered, publish fails with the daemon\'s not-registered error. CAVEAT: this uses the ' +
+            'explicit register route, which registers with the daemon\'s DEFAULT publishPolicy (derived from ' +
+            'accessPolicy) and does NOT preserve a context graph\'s stored custom publishPolicy / ' +
+            'contribution governance. For a CG created with a non-default publishPolicy/PCA, register it ' +
+            'explicitly with the desired policy first rather than relying on registerIfNeeded. (Read access ' +
+            'is unaffected; daemon-side rehydration tracked in OriginTrail/dkg#1085.)',
+          ),
+        accessPolicy: z
+          .union([z.literal(0), z.literal(1)])
+          .optional()
+          .describe('0 = open, 1 = private. Requires `registerIfNeeded: true` — it only applies when registering the CG, and is rejected otherwise. Sets only the access policy; it does NOT preserve a stored custom publishPolicy (see registerIfNeeded; OriginTrail/dkg#1085).'),
+        // CONTRACT §D: clear_shared_memory_after is NOT exposed on the per-asset
+        // publish tool — on vm/publish it is graph-wide destructive (wipes every
+        // other agent's unpublished SWM under the CG/sub-graph). The this-asset
+        // cleanup runs unconditionally regardless. The CG-wide clear stays on
+        // dkg_publish / dkg_shared_memory_publish.
+        projectId: z.string().optional().describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
+        subGraphName: z.string().optional(),
+      },
+    },
+    async ({
+      name,
+      publishEpochs,
+      publisherNodeIdentityIdOverride,
+      registerIfNeeded,
+      accessPolicy,
+      projectId,
+      subGraphName,
+    }): Promise<ToolResult> => {
+      const pid = resolveProject(projectId, config);
+      if (!pid) return projectErr();
+      // FIX S: accessPolicy only applies when registering the CG — reject it
+      // (rather than silently drop the privacy setting) when registerIfNeeded != true.
+      if (accessPolicy !== undefined && registerIfNeeded !== true) {
+        return errResult('"accessPolicy" requires "registerIfNeeded": true — it only applies when registering the context graph.');
+      }
+      // CONTRACT §G: vm/publish requires the CG to be registered on-chain and does
+      // NOT auto-register. When registerIfNeeded is true, register first (the
+      // client short-circuits an already-registered CG via alreadyRegistered), then
+      // publish — mirroring dkg_shared_memory_publish. A hard registration failure
+      // is a tool error: do NOT publish.
+      if (registerIfNeeded === true) {
+        try {
+          await client.registerContextGraph({ id: pid, accessPolicy });
+        } catch (err) {
+          return errResult(`Failed to register context graph: ${formatError(err)}`);
+        }
+      }
+      try {
+        // Per-KA sealed publish (CONTRACT §1 Stage5). The seal selects the author
+        // and the whole asset, so author/selection overrides are never sent. The
+        // daemon returns the UAL plus kaId/txHash/status/kas; 409
+        // VM_PUBLISH_PRECONDITION (not finalized / empty SWM) and 502 (on-chain
+        // not-confirmed) surface verbatim. MCP is JSON-facing, so the node
+        // identity id override is a decimal string (not a JS number).
+        const result = await client.knowledgeAssetPublish({
+          contextGraphId: pid,
+          name,
+          subGraphName,
+          publishEpochs,
+          publisherNodeIdentityIdOverride,
+        });
+        // CONTRACT §1 Stage5 / §7: vm/publish returns HTTP 207 (treated as success
+        // by DkgClient.request, which only throws on !res.ok) when the KA minted
+        // on-chain but the context-graph binding FAILED — `contextGraphError` is
+        // present in the body. The UAL/kaId are valid and the asset IS published
+        // on-chain, so this is NOT a hard failure and must NOT be reported as full
+        // success — but the agent must NOT re-publish: a confirmed publish clears
+        // SWM, so a retry 409s VM_PUBLISH_PRECONDITION (and never re-binds the CG).
+        // The CG-binding retry is an operator/daemon concern.
+        const contextGraphError = (result as Record<string, unknown>).contextGraphError;
+        if (typeof contextGraphError === 'string' && contextGraphError.length > 0) {
+          return ok(
+            `PARTIAL publish of knowledge asset '${name}' (project '${pid}'): the asset IS published ` +
+            `on-chain (the UAL/kaId below are valid and final) — only the context-graph binding FAILED ` +
+            `(${contextGraphError}). Do NOT re-publish: the asset is already minted, the publish cleared ` +
+            `Shared Working Memory, and a retry will fail the VM precondition without re-binding the context ` +
+            `graph. Surface this to the operator to re-attempt the context-graph binding.` +
+            `\n\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\``,
+          );
+        }
+        return ok(
+          `Published knowledge asset '${name}' (project '${pid}') to Verifiable Memory:\n\n\`\`\`json\n${JSON.stringify(
+            result,
+            null,
+            2,
+          )}\n\`\`\``,
+        );
+      } catch (e) {
+        return errResult(`Failed to publish knowledge asset: ${formatError(e)}`);
+      }
+    },
+  );
+
+  // ── dkg_knowledge_asset_pull_from ───────────────────────────────
+  server.registerTool(
+    'dkg_knowledge_asset_pull_from',
+    {
+      title: 'Pull Knowledge Asset into WM Draft',
+      description:
+        'Seed a fresh Working Memory draft for a knowledge asset from its ' +
+        'current Shared Working Memory (swm) or Verifiable Memory (vm) state — ' +
+        'the edit-loop primitive (like git checkout). Use this to re-open an ' +
+        'already-shared or published asset for editing. Fails 409 ' +
+        '(WM_DRAFT_CONFLICT) if an open draft already exists; pass ' +
+        '`onConflict: "replace"` to overwrite it or discard the draft first.',
+      inputSchema: {
+        name: z.string().describe('Knowledge asset name to seed a draft for'),
+        layer: z
+          .enum(['swm', 'vm'])
+          .describe('Which layer to seed the draft from: "swm" (Shared Working Memory) or "vm" (Verifiable Memory)'),
+        onConflict: z
+          .enum(['reject', 'replace'])
+          .optional()
+          .describe('What to do if an open WM draft already exists. Defaults to "reject".'),
+        projectId: z.string().optional().describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
+        subGraphName: z.string().optional(),
+      },
+    },
+    async ({ name, layer, onConflict, projectId, subGraphName }): Promise<ToolResult> => {
+      const pid = resolveProject(projectId, config);
+      if (!pid) return projectErr();
+      try {
+        // Seed a fresh WM draft from SWM/VM (CONTRACT §1 side-verbs). A dirty
+        // draft → 409 WM_DRAFT_CONFLICT, surfaced verbatim; the agent can retry
+        // with onConflict:"replace".
+        const result = await client.knowledgeAssetPullFrom({
+          contextGraphId: pid,
+          name,
+          layer,
+          onConflict,
+          subGraphName,
+        });
+        return ok(
+          `Seeded a WM draft for knowledge asset '${name}' (project '${pid}') from ${layer.toUpperCase()}:\n\n\`\`\`json\n${JSON.stringify(
+            result,
+            null,
+            2,
+          )}\n\`\`\``,
+        );
+      } catch (e) {
+        return errResult(`Failed to pull knowledge asset into a WM draft: ${formatError(e)}`);
+      }
+    },
+  );
+
+  // ── dkg_knowledge_asset_discard ─────────────────────────────────
+  server.registerTool(
+    'dkg_knowledge_asset_discard',
+    {
+      title: 'Discard Knowledge Asset Draft',
+      description:
+        'Discard a Working Memory draft without sharing it. Idempotent — ' +
+        'no-op on a missing draft. Use before re-writing an asset ' +
         'whose name you want to keep stable but whose contents you want to ' +
         '*replace* rather than *merge*.',
       inputSchema: {
@@ -265,16 +559,19 @@ export function registerAssertionTools(
     },
   );
 
-  // ── dkg_assertion_query ─────────────────────────────────────────
+  // ── dkg_knowledge_asset_query ───────────────────────────────────
   server.registerTool(
-    'dkg_assertion_query',
+    'dkg_knowledge_asset_query',
     {
-      title: 'Dump Assertion Quads',
+      title: 'Dump Knowledge Asset Quads',
       description:
-        'Return every quad in a Working Memory assertion. Not a SPARQL ' +
-        'endpoint — for ad-hoc filtering use `dkg_query` with ' +
-        '`view: "working-memory"`. The canonical introspection step for the ' +
-        '`assertion_create + assertion_write + assertion_promote` round-trip.',
+        'Return every quad in a knowledge asset\'s Working Memory DRAFT (the ' +
+        'un-shared working copy). Query it BEFORE sharing: a FULL share empties ' +
+        'the WM draft, so a query after sharing returns 0 quads. To inspect ' +
+        'already-shared content use `dkg_query` with `view: ' +
+        '"shared-working-memory"` (or `"verifiable-memory"` once published). Not ' +
+        'a SPARQL endpoint — for ad-hoc filtering of the draft use `dkg_query` ' +
+        'with `view: "working-memory"`.',
       inputSchema: {
         name: z.string().describe('Existing assertion name'),
         projectId: z.string().optional().describe(`${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION} Defaults to .dkg/config.yaml.`),
@@ -302,13 +599,13 @@ export function registerAssertionTools(
     },
   );
 
-  // ── dkg_assertion_import_file ───────────────────────────────────
+  // ── dkg_knowledge_asset_import_file ─────────────────────────────
   // Wave-2 P1 add (audit §7 item 4). Wraps
   // `POST /api/knowledge-assets/{name}/wm/import-file` (multipart/form-data) —
   // the daemon's extraction pipeline turns markdown / PDF / DOCX /
   // etc. into RDF triples and writes them into the assertion's graph.
   server.registerTool(
-    'dkg_import_artifact_resolve',
+    'dkg_knowledge_asset_import_artifact_resolve',
     {
       title: 'Resolve Imported Artifact',
       description:
@@ -338,7 +635,7 @@ export function registerAssertionTools(
   );
 
   server.registerTool(
-    'dkg_import_artifact_read_markdown',
+    'dkg_knowledge_asset_import_artifact_read_markdown',
     {
       title: 'Read Imported Artifact Markdown',
       description:
@@ -370,7 +667,7 @@ export function registerAssertionTools(
   );
 
   server.registerTool(
-    'dkg_semantic_enrichment_write',
+    'dkg_knowledge_asset_semantic_enrichment_write',
     {
       title: 'Write Semantic Enrichment',
       description:
@@ -428,12 +725,12 @@ export function registerAssertionTools(
   );
 
   server.registerTool(
-    'dkg_assertion_import_file',
+    'dkg_knowledge_asset_import_file',
     {
-      title: 'Import File into Assertion',
+      title: 'Import File into Knowledge Asset',
       description:
         'Import a local document (markdown, PDF, DOCX, etc.) into a ' +
-        'Working Memory assertion: the daemon runs its extraction ' +
+        'Working Memory draft: the daemon runs its extraction ' +
         'pipeline and writes the resulting triples. text/markdown is ' +
         'native; other types need a registered converter (extraction ' +
         'returns `status: "skipped"` if none). Useful for seeding a ' +
@@ -537,13 +834,13 @@ export function registerAssertionTools(
     },
   );
 
-  // ── dkg_assertion_history ───────────────────────────────────────
+  // ── dkg_knowledge_asset_history ─────────────────────────────────
   // Wave-2 P3 add (audit §7 item 12). Wraps
   // `GET /api/knowledge-assets/{name}` — lifecycle introspection.
   server.registerTool(
-    'dkg_assertion_history',
+    'dkg_knowledge_asset_history',
     {
-      title: 'Assertion History',
+      title: 'Knowledge Asset History',
       description:
         "Fetch an assertion's lifecycle descriptor: author, " +
         'extraction status, promotion state, timestamps. Returns a ' +

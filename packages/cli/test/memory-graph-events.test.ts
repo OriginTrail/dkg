@@ -178,6 +178,96 @@ describe('daemon memory_graph_changed route emissions', () => {
     });
   });
 
+  it('honors finalize:false on POST /api/knowledge-assets — writes quads but does NOT seal', async () => {
+    // OT-RFC-43 §10.5.5: an explicit finalize:false keeps an editable WM draft.
+    // The atomic create still WRITES the quads, but must NOT finalize — finalize
+    // binds the author attestation + reserves the on-chain identity, so it would
+    // 4xx on a local-only / on-chain-unregistered CG. Regression for the
+    // integration finding where finalize:false was silently ignored when quads
+    // were present (shouldAutoFinalize = quads.length > 0).
+    const create = vi.fn().mockResolvedValue('did:dkg:context-graph:project-a/assertion/0x0/draft');
+    const write = vi.fn().mockResolvedValue(undefined);
+    const finalize = vi.fn();
+    const history = vi.fn().mockResolvedValue(null);
+    const ctx = createContext('/api/knowledge-assets', {
+      contextGraphId: 'project-a',
+      name: 'draft',
+      finalize: false,
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
+    }, {
+      agent: { assertion: { create, write, finalize, history }, resolveAgentByToken: () => undefined } as unknown as RequestContext['agent'],
+    });
+
+    await handleKnowledgeAssetsRoutes(ctx);
+
+    expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(201);
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(finalize).not.toHaveBeenCalled();
+    const body = responseBody(ctx);
+    expect(body).toMatchObject({ name: 'draft', written: 1, status: 'draft-open' });
+    expect(body).not.toHaveProperty('merkleRoot');
+  });
+
+  it('auto-finalizes when finalize is omitted (default) — writes AND seals', async () => {
+    const create = vi.fn().mockResolvedValue('did:dkg:context-graph:project-a/assertion/0x0/draft');
+    const write = vi.fn().mockResolvedValue(undefined);
+    const finalize = vi.fn().mockResolvedValue({ merkleRoot: new Uint8Array(32) });
+    const history = vi.fn().mockResolvedValue(null);
+    const ctx = createContext('/api/knowledge-assets', {
+      contextGraphId: 'project-a',
+      name: 'draft',
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
+    }, {
+      agent: { assertion: { create, write, finalize, history }, resolveAgentByToken: () => undefined } as unknown as RequestContext['agent'],
+    });
+
+    await handleKnowledgeAssetsRoutes(ctx);
+
+    expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(201);
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(finalize).toHaveBeenCalledTimes(1);
+    expect(responseBody(ctx)).toMatchObject({ name: 'draft', written: 1, status: 'wm-sealed' });
+  });
+
+  it('rejects finalize:false combined with alsoShareSwm before any mutation', async () => {
+    const create = vi.fn();
+    const ctx = createContext('/api/knowledge-assets', {
+      contextGraphId: 'project-a',
+      name: 'draft',
+      finalize: false,
+      alsoShareSwm: true,
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
+    }, {
+      agent: { assertion: { create }, resolveAgentByToken: () => undefined } as unknown as RequestContext['agent'],
+    });
+
+    await handleKnowledgeAssetsRoutes(ctx);
+
+    expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(400);
+    expect(responseBody(ctx).error).toMatch(/require a finalized assertion/);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('rejects alsoShareSwm with no quads (nothing to seal) before any mutation', async () => {
+    // The tail share/publish needs a SEALED assertion; with no quads the create
+    // never finalizes, so a naive run would land a durable empty draft and fail
+    // late. Reject the request-shape error upfront instead of orphaning state.
+    const create = vi.fn();
+    const ctx = createContext('/api/knowledge-assets', {
+      contextGraphId: 'project-a',
+      name: 'draft',
+      alsoShareSwm: true,
+    }, {
+      agent: { assertion: { create }, resolveAgentByToken: () => undefined } as unknown as RequestContext['agent'],
+    });
+
+    await handleKnowledgeAssetsRoutes(ctx);
+
+    expect((ctx.res as unknown as { statusCode: number }).statusCode).toBe(400);
+    expect(responseBody(ctx).error).toMatch(/require a finalized assertion/);
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it('emits an assertion_finalized refresh on POST /api/knowledge-assets/:name/wm/finalize', async () => {
     // Regression test for the bug found during PR #436 devnet validation:
     // the chained create handler emitted memory_graph_changed for the

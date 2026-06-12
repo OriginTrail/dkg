@@ -48,7 +48,7 @@ describe("DkgNodePlugin", () => {
     const originalFetch = globalThis.fetch;
 
 
-    it('dkg_assertion_import_file infers content-type for common formats (kept in sync with CLI UPLOAD_CONTENT_TYPES)', async () => {
+    it('dkg_knowledge_asset_import_file infers content-type for common formats (kept in sync with CLI UPLOAD_CONTENT_TYPES)', async () => {
       const { writeFileSync, mkdtempSync } = await import('node:fs');
       const { join } = await import('node:path');
       const { tmpdir } = await import('node:os');
@@ -72,7 +72,7 @@ describe("DkgNodePlugin", () => {
         const tmpDir = mkdtempSync(join(tmpdir(), 'dkg-mime-'));
         const filePath = join(tmpDir, fileName);
         writeFileSync(filePath, 'dummy');
-        await byName.get('dkg_assertion_import_file')!.execute('tc', {
+        await byName.get('dkg_knowledge_asset_import_file')!.execute('tc', {
           context_graph_id: 'ctx',
           name: 'notes',
           file_path: filePath,
@@ -83,7 +83,7 @@ describe("DkgNodePlugin", () => {
     });
 
 
-    it('dkg_assertion_import_file falls through to octet-stream for unknown extensions (no contentType form field)', async () => {
+    it('dkg_knowledge_asset_import_file falls through to octet-stream for unknown extensions (no contentType form field)', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ assertionUri: 'urn:x' });
       const { writeFileSync, mkdtempSync } = await import('node:fs');
       const { join } = await import('node:path');
@@ -91,7 +91,7 @@ describe("DkgNodePlugin", () => {
       const tmpDir = mkdtempSync(join(tmpdir(), 'dkg-unknown-'));
       const filePath = join(tmpDir, 'blob.xyz');
       writeFileSync(filePath, 'dummy');
-      await byName.get('dkg_assertion_import_file')!.execute('tc', {
+      await byName.get('dkg_knowledge_asset_import_file')!.execute('tc', {
         context_graph_id: 'ctx',
         name: 'notes',
         file_path: filePath,
@@ -164,6 +164,28 @@ describe("DkgNodePlugin", () => {
       // would publish to the root shared-memory graph instead of the sub-graph.
       expect(body.subGraphName).toBe('protocols');
       expect(body.contextGraphId).toBe('ctx');
+    });
+
+    it('dkg_shared_memory_publish rejects access_policy without register_if_needed (FIX S)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({});
+      const res = await byName.get('dkg_shared_memory_publish')!.execute('tc', {
+        context_graph_id: 'ctx',
+        access_policy: 1, // valid 0|1 but no register_if_needed
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(res.details?.error).toMatch(/access_policy.*requires.*register_if_needed/i);
+    });
+
+    it('dkg_shared_memory_publish register_if_needed description states the auto-register reality (FIX V)', () => {
+      const { byName } = setupPluginWithFetch({});
+      const desc = byName.get('dkg_shared_memory_publish')!.parameters.properties.register_if_needed.description as string;
+      // The CG-wide selection publish AUTO-registers an unregistered CG at gas/TRAC
+      // cost regardless of register_if_needed (memory.ts:1928); the flag only sets
+      // the registration's access_policy. The description must not imply it gates
+      // whether registration happens.
+      expect(desc).toMatch(/does NOT gate whether registration happens/i);
+      expect(desc).toMatch(/AUTO-register/i);
+      expect(desc).toContain('gas/TRAC');
     });
 
 

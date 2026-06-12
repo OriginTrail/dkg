@@ -134,7 +134,16 @@ contract ConvictionStakingStorage is INamed, IVersioned, Guardian {
     //             the 60 days preceding V10 launch. Validated against
     //             `_tierDuration(lockTier)` and the current block
     //             timestamp; tier-0 callers MUST pass 0.
-    string private constant _VERSION = "10.0.2";
+    //   10.0.3 — Reward carries (audit fix: mid-epoch redelegate/relock
+    //           orphaned the current epoch's settled delegator score).
+    //           * NEW `RewardCarry` struct + `rewardCarries` mapping:
+    //             pointers to RSS (epoch, identityId, delegatorKey) score
+    //             slots that the position's CURRENT node/key no longer
+    //             reaches. Written by `StakingV10.redelegate` / `relock`,
+    //             drained by `StakingV10._claim`.
+    //           * `createNewPositionFromExisting` migrates carries across
+    //             the relock burn-mint; `deletePosition` deletes them.
+    string private constant _VERSION = "10.0.3";
 
     // Multiplier scale, matches DKGStakingConvictionNFT._convictionMultiplier
     // (returns 1e18-scaled values so fractional tiers like 1.5x and 3.5x
@@ -342,6 +351,40 @@ contract ConvictionStakingStorage is INamed, IVersioned, Guardian {
     // ============================================================
     mapping(uint40 => TierConfig) internal _tiers;
     uint40[] public tierIds;
+
+    // ============================================================
+    //   v10.0.3 — Reward carries (mid-epoch redelegate / relock)
+    // ============================================================
+    //
+    // A mid-epoch `redelegate` flips `pos.identityId`, and a `relock`
+    // re-keys the position under a fresh tokenId. In both cases the
+    // delegator score already settled in RandomSamplingStorage under the
+    // OLD (epoch, identityId, delegatorKey) slot becomes unreachable from
+    // `StakingV10._claim`, which reads only the position's CURRENT node +
+    // key — silently forfeiting up to one epoch's rewards. Each carry is
+    // a POINTER to such a slot; the score value itself stays in RSS.
+    // `StakingV10._claim` integrates matured carries (epoch closed) and
+    // clears them.
+    struct RewardCarry {
+        uint72 identityId;
+        uint32 epoch;
+        bytes32 delegatorKey;
+    }
+
+    // Bounded so a position's claim/withdraw can never be self-bricked by
+    // an excessive number of same-epoch redelegations (carries from past
+    // epochs are flushed on every claim).
+    uint256 public constant MAX_REWARD_CARRIES = 32;
+
+    mapping(uint256 => RewardCarry[]) internal rewardCarries;
+
+    event RewardCarryAdded(
+        uint256 indexed tokenId,
+        uint72 indexed identityId,
+        uint32 epoch,
+        bytes32 delegatorKey
+    );
+    event RewardCarriesCleared(uint256 indexed tokenId, uint32 maxEpoch, uint256 removed);
 
     // ============================================================
     //          Tier admin events (v2.1.0)
@@ -1119,6 +1162,20 @@ contract ConvictionStakingStorage is INamed, IVersioned, Guardian {
         _popNodeToken(identityId, oldTokenId);
         _pushNodeToken(identityId, newTokenId);
 
+        // v10.0.3 — carries follow the position across the burn-mint so
+        // same-epoch redelegate→relock sequences keep their pointers.
+        // `newTokenId` is freshly minted (monotonic counter, "New token
+        // used" guard above) so its carry list starts empty.
+        RewardCarry[] storage oldCarries = rewardCarries[oldTokenId];
+        uint256 carryCount = oldCarries.length;
+        if (carryCount > 0) {
+            RewardCarry[] storage newCarries = rewardCarries[newTokenId];
+            for (uint256 i; i < carryCount; i++) {
+                newCarries.push(oldCarries[i]);
+            }
+            delete rewardCarries[oldTokenId];
+        }
+
         // nodeStakeV10 is invariant — same identity, same raw. No emit.
 
         emit PositionReplaced(
@@ -1136,6 +1193,59 @@ contract ConvictionStakingStorage is INamed, IVersioned, Guardian {
         require(positions[tokenId].identityId != 0, "No position");
         positions[tokenId].lastClaimedEpoch = epoch;
         emit LastClaimedEpochUpdated(tokenId, epoch);
+    }
+
+    // ============================================================
+    //        v10.0.3 — Reward-carry mutators (see struct docs)
+    // ============================================================
+
+    /// @notice Record a pointer to an RSS delegator-score slot the
+    ///         position's current node/key no longer reaches. Idempotent
+    ///         per (identityId, epoch, delegatorKey): the RSS slot
+    ///         accumulates across repeat visits (e.g. A→B→A→C in one
+    ///         epoch), so a single pointer integrates all of them.
+    function addRewardCarry(
+        uint256 tokenId,
+        uint72 identityId,
+        uint32 epoch,
+        bytes32 delegatorKey
+    ) external onlyContracts {
+        require(positions[tokenId].identityId != 0, "No position");
+        RewardCarry[] storage list = rewardCarries[tokenId];
+        uint256 len = list.length;
+        for (uint256 i; i < len; i++) {
+            RewardCarry storage c = list[i];
+            if (c.identityId == identityId && c.epoch == epoch && c.delegatorKey == delegatorKey) {
+                return;
+            }
+        }
+        require(len < MAX_REWARD_CARRIES, "Carry limit");
+        list.push(RewardCarry({identityId: identityId, epoch: epoch, delegatorKey: delegatorKey}));
+        emit RewardCarryAdded(tokenId, identityId, epoch, delegatorKey);
+    }
+
+    /// @notice Drop every carry with `epoch <= maxEpoch` (already
+    ///         integrated by the caller's claim pass). Swap-and-pop from
+    ///         the tail so each swapped-in element was already visited.
+    function clearRewardCarries(uint256 tokenId, uint32 maxEpoch) external onlyContracts {
+        RewardCarry[] storage list = rewardCarries[tokenId];
+        uint256 removed;
+        uint256 i = list.length;
+        while (i > 0) {
+            i--;
+            if (list[i].epoch <= maxEpoch) {
+                list[i] = list[list.length - 1];
+                list.pop();
+                removed++;
+            }
+        }
+        if (removed > 0) {
+            emit RewardCarriesCleared(tokenId, maxEpoch, removed);
+        }
+    }
+
+    function getRewardCarries(uint256 tokenId) external view returns (RewardCarry[] memory) {
+        return rewardCarries[tokenId];
     }
 
     function setMigrationEpoch(uint256 tokenId, uint32 epoch) external onlyContracts {
@@ -1182,6 +1292,10 @@ contract ConvictionStakingStorage is INamed, IVersioned, Guardian {
         }
 
         delete positions[tokenId];
+        // v10.0.3 — drop any leftover carries. `StakingV10.withdraw`
+        // auto-claims first, so only current-epoch (immature) carries can
+        // remain here — forfeited like all other current-epoch score.
+        delete rewardCarries[tokenId];
         emit PositionDeleted(tokenId);
     }
 

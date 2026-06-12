@@ -374,16 +374,18 @@ spec.loader.exec_module(module)
 provider = module.DKGMemoryProvider()
 names = sorted(schema["name"] for schema in provider.get_tool_schemas())
 expected_default = [
-    "dkg_assertion_create",
-    "dkg_assertion_discard",
-    "dkg_assertion_history",
-    "dkg_assertion_import_file",
-    "dkg_assertion_promote",
-    "dkg_assertion_query",
-    "dkg_assertion_write",
-    "dkg_import_artifact_read_markdown",
-    "dkg_import_artifact_resolve",
-    "dkg_semantic_enrichment_write",
+    "dkg_knowledge_asset_create",
+    "dkg_knowledge_asset_discard",
+    "dkg_knowledge_asset_finalize",
+    "dkg_knowledge_asset_history",
+    "dkg_knowledge_asset_import_file",
+    "dkg_knowledge_asset_pull_from",
+    "dkg_knowledge_asset_query",
+    "dkg_knowledge_asset_share",
+    "dkg_knowledge_asset_write",
+    "dkg_knowledge_asset_import_artifact_read_markdown",
+    "dkg_knowledge_asset_import_artifact_resolve",
+    "dkg_knowledge_asset_semantic_enrichment_write",
     "dkg_context_graph_create",
     "dkg_context_graph_invite",
     "dkg_find_agents",
@@ -427,11 +429,11 @@ assert "sub_graph_name" in share_schema["parameters"]["properties"], share_schem
 assert share_schema["parameters"]["required"] == ["content", "context_graph_id"], share_schema
 missing_cg = provider.handle_tool_call("dkg_share", {"content": "alpha"})
 assert "context_graph_id is required" in missing_cg, missing_cg
-semantic_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_semantic_enrichment_write")
+semantic_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_knowledge_asset_semantic_enrichment_write")
 assert "name" not in semantic_schema["parameters"]["properties"], semantic_schema
 assert "Append model-derived triples" in semantic_schema["description"], semantic_schema
 assert "separate Working Memory assertion" not in semantic_schema["description"], semantic_schema
-resolver_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_import_artifact_resolve")
+resolver_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_knowledge_asset_import_artifact_resolve")
 assert "Optional validation/debug helper" in resolver_schema["description"], resolver_schema
 
 provider._config = {
@@ -442,6 +444,7 @@ provider._config = {
 disabled_names = sorted(schema["name"] for schema in provider.get_tool_schemas())
 assert "dkg_publish" not in disabled_names, disabled_names
 assert "dkg_shared_memory_publish" not in disabled_names, disabled_names
+assert "dkg_knowledge_asset_publish" not in disabled_names, disabled_names
 assert "dkg_context_graph_invite" not in disabled_names, disabled_names
 guarded = provider.handle_tool_call("dkg_shared_memory_publish", {"context_graph_id": "cg:test"})
 assert "disabled by the adapter publish guard" in guarded, guarded
@@ -451,11 +454,13 @@ assert "Context graph admin tools are disabled" in admin_guarded, admin_guarded
 provider._config = {"publish_tool": "direct", "allow_direct_publish": True}
 direct_schemas = provider.get_tool_schemas()
 direct_names = sorted(schema["name"] for schema in direct_schemas)
-for name in ["dkg_publish", "dkg_shared_memory_publish"]:
+for name in ["dkg_publish", "dkg_shared_memory_publish", "dkg_knowledge_asset_publish"]:
     assert name in direct_names, direct_names
 publish_schema = next(schema for schema in direct_schemas if schema["name"] == "dkg_publish")
 quad_props = publish_schema["parameters"]["properties"]["quads"]["items"]["properties"]
-assert "graph" in quad_props, publish_schema
+# No per-quad graph on the write/publish quad schema — the daemon pins triples
+# to the per-KA graph itself (CONTRACT inv.2). Parity with OpenClaw + MCP.
+assert "graph" not in quad_props, publish_schema
 
 provider._config = {
     "publish_tool": "direct",

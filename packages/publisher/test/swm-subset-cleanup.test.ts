@@ -72,7 +72,10 @@ describe('SWM subset publish cleanup', () => {
     const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
     await mintTokens(_provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    const cgId = await createTestContextGraph();
+    // Public CG (accessPolicy 0): these tests publish PLAINTEXT to exercise SWM
+    // subset-cleanup mechanics, not curated/ciphertext semantics, so they must not
+    // trip CuratedCGRequiresCiphertextCommitment (PR #1072).
+    const cgId = await createTestContextGraph(undefined, undefined, 0);
     CONTEXT_GRAPH = String(cgId);
     WORKSPACE_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
     WORKSPACE_META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;

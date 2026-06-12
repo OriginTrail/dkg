@@ -101,6 +101,19 @@ describe('publish tools — pure surface + client-side guards (no node)', () => 
     expect(() => server.parse('dkg_publish', { contextGraphId: 'cg', quads: [] })).toThrow();
   });
 
+  // CONTRACT §0 invariant 2 (OpenClaw query-tools parity): the dkg_publish
+  // one-shot quad element schema must NOT advertise a per-quad `graph` — the
+  // daemon pins quads to the per-KA WM graph and overrides any client value.
+  // (`.element.shape` is zod's stable object-shape introspection.)
+  it('dkg_publish schema exposes no per-quad graph field (subject/predicate/object only)', () => {
+    const schema = server.get('dkg_publish').config.inputSchema!;
+    const quadShape = (schema.quads as unknown as { element: { shape: Record<string, unknown> } }).element.shape;
+    expect(quadShape).toHaveProperty('subject');
+    expect(quadShape).toHaveProperty('predicate');
+    expect(quadShape).toHaveProperty('object');
+    expect(quadShape).not.toHaveProperty('graph');
+  });
+
   it('dkg_shared_memory_publish rejects an empty rootEntities array client-side (before any daemon call)', async () => {
     const s = new FakeServer();
     registerPublishTools(s.asMcpServer(), liveClient({ api: DEAD }), liveConfig({ api: DEAD }));

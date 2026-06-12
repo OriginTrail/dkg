@@ -61,7 +61,9 @@ describe('End-to-end: Publish → Replicate → Query', () => {
     const { hubAddress } = getSharedContext();
     const provider = createProvider();
     await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, TEST_PUBLISHER_ADDRESS, ethers.parseEther('5000000'));
-    const cgId = await createTestContextGraph();
+    // Public CG (accessPolicy 0): these tests publish plaintext to exercise
+    // publish/replicate/query lifecycle, not curated/ciphertext semantics.
+    const cgId = await createTestContextGraph(undefined, undefined, 0);
     CONTEXT_GRAPH = String(cgId);
     GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
     _provider = provider;

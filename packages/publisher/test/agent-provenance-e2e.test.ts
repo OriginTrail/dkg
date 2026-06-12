@@ -87,7 +87,12 @@ beforeAll(async () => {
   // that the harness owns this.
 
   const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-  const cgId = await createTestContextGraph(chain);
+  // PUBLIC CG (accessPolicy 0): these walkthrough diagrams publish PLAINTEXT to
+  // exercise author-attestation / attribution / cost / update mechanics, not
+  // curated/ciphertext semantics. A curated CG would now require a ciphertext
+  // commitment (#1072 CuratedCGRequiresCiphertextCommitment) the bare publisher
+  // here never supplies.
+  const cgId = await createTestContextGraph(chain, undefined, 0);
   CONTEXT_GRAPH = String(cgId);
   GRAPH_URI = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
   coreId = BigInt(ctx.coreProfileId);

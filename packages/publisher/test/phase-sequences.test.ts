@@ -84,7 +84,11 @@ describe('Phase-sequence contracts', () => {
     await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
 
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    const cgId = await createTestContextGraph(chain);
+    // PR #1072: these phase-sequence tests publish PLAINTEXT to pin phase
+    // ordering / ACK / WAL / workspace mechanics, not curated/ciphertext
+    // semantics. Use a PUBLIC CG (accessPolicy 0) so plaintext publishes
+    // don't revert with CuratedCGRequiresCiphertextCommitment.
+    const cgId = await createTestContextGraph(chain, undefined, 0);
     CONTEXT_GRAPH = String(cgId);
     _provider = provider;
     _kav10Address = await chain.getKnowledgeAssetsLifecycleAddress();

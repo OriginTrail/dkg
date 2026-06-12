@@ -47,7 +47,7 @@ The `command` is the absolute path to the Node binary running this CLI (`process
 
 No tokens or URLs in the JSON — those live in `~/.dkg/config.yaml` and the daemon-written `~/.dkg/auth.token`. If no client is detected, run `dkg mcp setup --print-only` to emit the JSON for manual paste.
 
-After `dkg mcp setup` runs, restart your client so it discovers the MCP. Verify by asking the agent: *"What tools does dkg expose?"* The `tools/list` response must include `dkg_assertion_create`, `dkg_assertion_write`, and `dkg_memory_search`.
+After `dkg mcp setup` runs, restart your client so it discovers the MCP. Verify by asking the agent: *"What tools does dkg expose?"* The `tools/list` response must include `dkg_knowledge_asset_create`, `dkg_knowledge_asset_write`, and `dkg_memory_search`.
 
 ### Manual config (alternative)
 
@@ -138,15 +138,16 @@ autoShare: true
 
 `.dkg/` is gitignored repo-wide so this file stays local to each operator. The `tokenFile` path is resolved relative to the YAML; default of `~/.dkg/auth.token` matches what `dkg start` writes on first boot.
 
-## Tool surface (21 tools)
+## Tool surface (30 tools)
 
-All tools are available the moment `dkg mcp setup` registers the MCP with your client. They group into six categories tracking how a session typically uses memory: discover the graph, write to it, finalize it, recall from it, query it, and check it.
+All tools are available the moment `dkg mcp setup` registers the MCP with your client. They group into seven categories tracking how a session typically uses memory: check health, discover the graph, set it up, drive the knowledge-asset lifecycle (create → write → finalize → share → publish), recall from it, query it, and message other agents.
 
 ### Health / identity
 
 | Tool | What it does |
 |---|---|
 | `dkg_status` | Show DKG node status: peer ID, connected peers, multiaddrs, wallet addresses. First call most agents make to verify the daemon is running. |
+| `dkg_peer_info` | Look up a peer by peer ID: connection state, transports, and diagnostic blocks (connections, peer store, outbox). |
 | `dkg_wallet_balances` | TRAC and ETH balances per operational wallet, plus chain id and RPC URL. Use before publishing to verify funds. |
 
 ### Discovery (graph navigation)
@@ -167,30 +168,36 @@ All tools are available the moment `dkg mcp setup` registers the MCP with your c
 | `dkg_subscribe` | Subscribe to a context graph so its data syncs locally from peers. Defaults to also syncing Shared Working Memory; pass `includeSharedMemory: false` to skip SWM. |
 | `dkg_sub_graph_create` | Create a named sub-graph inside a context graph (e.g. `code`, `tasks`, `meta`). Idempotent — pre-existing sub-graphs are silently reused. |
 
-### Write (the canonical assertion lifecycle)
+### Write (the canonical knowledge-asset lifecycle)
 
-The four-tool write flow that lets agents stage memory, share it, and recover from mistakes — the canonical V10 pattern, mirrored byte-for-byte across the OpenClaw adapter and the umbrella CLI.
+The lifecycle tool family that lets agents stage memory, seal it, share it, publish it on chain, and recover from mistakes — the canonical V10 pattern, mirrored byte-for-byte across the OpenClaw adapter and the umbrella CLI. The 5-stage sequence is **create → write → finalize → share → publish**.
 
 | Tool | Step | What it does |
 |---|---|---|
-| `dkg_assertion_create` | 1 | Create an empty Working Memory assertion graph. Idempotent — duplicate names land as `alreadyExists: true`. Slug `/^[a-z0-9-]+$/`. |
-| `dkg_assertion_write` | 2 | Append RDF quads into an existing WM assertion. Set-merge — duplicates collapse. To replace, call `dkg_assertion_discard` first or mint a unique name. |
-| `dkg_assertion_promote` | 3 | Promote a WM assertion (or specific root entities) from private WM to Shared Working Memory so teammates see it. Omit `entities` to promote every root. |
-| `dkg_assertion_discard` | rollback | Discard a WM assertion without promoting it. Idempotent — no-op on a missing assertion. Use before re-writing an assertion whose name you want to keep stable. |
-| `dkg_assertion_query` | introspect | Return every quad in a WM assertion. The canonical introspection step for the create + write + promote round-trip. |
-| `dkg_assertion_import_file` | bulk | Import a local document (markdown, PDF, DOCX, HTML, txt, csv) into a WM assertion via the daemon's extraction pipeline. Useful for seeding a context graph from existing documents in one step. |
-| `dkg_assertion_history` | audit | An assertion's lifecycle descriptor: author, extraction status, promotion state, timestamps. Returns 404 if no record exists. |
+| `dkg_knowledge_asset_create` | 1 | Create an empty Working Memory assertion graph (knowledge asset). Idempotent — duplicate names land as `alreadyExists: true`. Name validation matches the daemon's `validateAssertionName`: any IRI-safe name up to 256 chars (no `/`, no whitespace, no `` <>"{}|^`\ `` characters), and not a reserved B3 KA id — NOT restricted to a lowercase-hyphen slug. |
+| `dkg_knowledge_asset_write` | 2 | Append RDF quads into an existing WM assertion. Set-merge — duplicates collapse. To replace, call `dkg_knowledge_asset_discard` first or mint a unique name. |
+| `dkg_knowledge_asset_finalize` | 3 | **Seal** the WM draft (the "git commit"): compute the merkleRoot over the whole assertion, build + sign an EIP-712 AuthorAttestation, stamp the seal. Returns `merkleRoot`, `authorAddress`, `schemeVersion`, `chainId`, `kav10Address`, `eip712Digest`. Seals the entire draft — no subset parameter. |
+| `dkg_knowledge_asset_share` | 4 | Share a WM assertion (or specific root entities) from private WM to Shared Working Memory so teammates see it (formerly "promote"). Omit `entities` for a full share, which auto-seals best-effort; a subset share is SWM-only and not publishable to VM as a subset. |
+| `dkg_knowledge_asset_publish` | 5 | **Mint / update on chain** (the sealed assertion → Verifiable Memory). Takes no selector (the seal commits the whole assertion). Returns the **UAL** + `kaId` + `txHash` — see "The canonical round-trip" below. |
+| `dkg_knowledge_asset_pull_from` | edit-loop | Seed a fresh WM draft from the current SWM or VM state (the "git checkout"). Body `{ layer: "swm" \| "vm", onConflict?: "reject" \| "replace" }`; `409 WM_DRAFT_CONFLICT` on a dirty draft unless `replace`. |
+| `dkg_knowledge_asset_discard` | rollback | Discard a WM assertion without sharing it. Idempotent — no-op on a missing assertion. Use before re-writing an assertion whose name you want to keep stable. |
+| `dkg_knowledge_asset_query` | introspect | Return every quad in a WM assertion. The canonical introspection step for the create + write + share round-trip. |
+| `dkg_knowledge_asset_import_file` | bulk | Import a local document (markdown, PDF, DOCX, HTML, txt, csv) into a WM assertion via the daemon's extraction pipeline. Useful for seeding a context graph from existing documents in one step. |
+| `dkg_knowledge_asset_history` | audit | An assertion's lifecycle descriptor: author, extraction status, share state, timestamps. Returns 404 if no record exists. |
+| `dkg_knowledge_asset_import_artifact_resolve` | import | Re-check the metadata of a completed imported attachment. |
+| `dkg_knowledge_asset_import_artifact_read_markdown` | import | Safely read the content-addressed Markdown blob for a completed imported attachment. |
+| `dkg_knowledge_asset_semantic_enrichment_write` | import | Append model-derived semantic triples + provenance to an imported assertion. |
 
-### Publish (SWM → on-chain)
+### Publish bridges (SWM → on-chain)
 
-Two distinct surfaces (both documented in `SKILL.md §4a`):
+The canonical per-KA sealed publish is `dkg_knowledge_asset_publish` (step 5 of the lifecycle above — returns the **UAL**). Two additional SWM-bridge surfaces exist (all documented in `SKILL.md §4a`):
 
 | Tool | When to use |
 |---|---|
-| `dkg_publish` | "I have fresh quads, publish them now." Two-call helper: writes the supplied quads to SWM, then publishes the entire SWM in the CG to Verifiable Memory and clears SWM. Skip the WM staging area. |
-| `dkg_shared_memory_publish` | Canonical step-4 finalizer for the stepwise flow (`assertion_create + write + promote` → this). Publishes existing SWM (filterable by `rootEntities`), clears SWM. Pass `registerIfNeeded: true` to upgrade a local-only CG to on-chain registration in the same call (may spend gas/TRAC). |
+| `dkg_publish` | "I have fresh quads, publish them now." Two-call helper (SWM-bridge / CG-wide): writes the supplied quads to SWM, then publishes the entire SWM in the CG to Verifiable Memory and clears SWM. Skip the WM staging area. |
+| `dkg_shared_memory_publish` | SWM-bridge / CG-wide flush (legacy, retained) for the stepwise flow. Publishes existing SWM (filterable by `rootEntities`), clears SWM. Single-root-per-call — loop one root per call for multiple roots. Pass `registerIfNeeded: true` to upgrade a local-only CG to on-chain registration in the same call (may spend gas/TRAC). |
 
-Both ship ungated — no `agent.canPublishToVm` flag — to mirror the OpenClaw adapter exactly.
+All publish surfaces ship ungated — no `agent.canPublishToVm` flag — to mirror the OpenClaw adapter exactly.
 
 ### Search & query
 
@@ -199,17 +206,25 @@ Both ship ungated — no `agent.canPublishToVm` flag — to mirror the OpenClaw 
 | `dkg_memory_search` | Trust-weighted free-text recall across WM/SWM/VM in the agent-context graph (and an optional project graph). Higher-trust layers (VM > SWM > WM) collapse lower-trust hits for the same entity URI. Each hit surfaces `contextGraphId`, `layer`, and `trustWeight`. Use this for "ask my memory anything" recall. |
 | `dkg_query` | Execute SPARQL SELECT / ASK / CONSTRUCT against a context graph. Known prefixes are auto-prepended. Scope with `view`: `"working-memory"` (default), `"shared-working-memory"`, or `"verifiable-memory"`. Set `includeSharedMemory: true` alongside `view: "working-memory"` to query WM ∪ SWM in one call. |
 
+### Messaging (agent-to-agent)
+
+| Tool | What it does |
+|---|---|
+| `dkg_send_message` | Send a direct message to another agent over P2P (best-effort; fails gracefully when the peer is offline). |
+| `dkg_check_inbox` | Read inbound direct messages addressed to this node's agents. |
+
 ## The canonical round-trip
 
 Lifted from the repo-root README's [DKG V10 as agent memory quickstart](../../README.md#round-trip-write-then-recall), reproduced here for completeness:
 
-1. `dkg_assertion_create` with a slug name (idempotent — re-runs return `alreadyExists: true`).
-2. `dkg_assertion_write` with one or more quads (additive set-merge).
+1. `dkg_knowledge_asset_create` with a slug name (idempotent — re-runs return `alreadyExists: true`).
+2. `dkg_knowledge_asset_write` with one or more quads (additive set-merge).
 3. `dkg_memory_search` with a keyword from the write — the just-written triple comes back from the WM layer with `trustWeight` set.
-4. *(optional)* `dkg_assertion_promote` to advance the lifecycle to SWM and gossip to peers.
-5. *(optional)* `dkg_shared_memory_publish` to finalize on-chain (costs TRAC + gas, clears SWM).
+4. *(optional)* `dkg_knowledge_asset_finalize` to **seal** the draft (the EIP-712 "git commit" — note: this is the rc.17 *seal* verb, distinct from the on-chain mint in step 6).
+5. *(optional)* `dkg_knowledge_asset_share` to advance the lifecycle to SWM and gossip to peers (a full share auto-seals best-effort, so step 4 can be skipped for the common case).
+6. *(optional)* `dkg_knowledge_asset_publish` to **mint on chain** (costs TRAC + gas, clears SWM). The response carries the asset's **UAL** (`did:dkg:<chainId>/<addr>/<number>`) plus `kaId` and `txHash` — store the UAL to reference the asset later.
 
-For ad-hoc filtering or non-text-search queries, `dkg_query` is the lower-level SPARQL surface. For one-shot fresh-quads-to-VM writes that skip the WM staging area, use `dkg_publish` instead of the assertion lifecycle — but prefer the lifecycle for anything an agent will iterate on.
+For ad-hoc filtering or non-text-search queries, `dkg_query` is the lower-level SPARQL surface. For one-shot fresh-quads-to-VM writes that skip the WM staging area, use `dkg_publish` instead of the knowledge-asset lifecycle — but prefer the lifecycle for anything an agent will iterate on.
 
 ## View semantics
 
@@ -278,13 +293,14 @@ Per-turn state is kept in `~/.cache/dkg-mcp/sessions/*.json`; safe to delete at 
 
 | File | Purpose |
 |---|---|
-| `src/index.ts` | Stdio MCP server entrypoint. Boots `McpServer` and registers the 21 tools. |
+| `src/index.ts` | Stdio MCP server entrypoint. Boots `McpServer` and registers the 30 tools. |
 | `src/tools.ts` | Read tools (`dkg_list_context_graphs`, `dkg_sub_graph_list`, `dkg_query`, `dkg_get_entity`, `dkg_list_activity`, `dkg_get_agent`). |
-| `src/tools/assertions.ts` | Assertion lifecycle (`dkg_assertion_*` × 7). |
-| `src/tools/health.ts` | `dkg_status`, `dkg_wallet_balances`. |
+| `src/tools/assertions.ts` | Knowledge-asset lifecycle (`dkg_knowledge_asset_*` × 13: create/write/finalize/share/publish/pull_from/discard/query/history/import_file + import_artifact_resolve/read_markdown + semantic_enrichment_write). |
+| `src/tools/health.ts` | `dkg_status`, `dkg_peer_info`, `dkg_wallet_balances`. |
 | `src/tools/memory-search.ts` | `dkg_memory_search` with WM/SWM/VM fan-out and trust-weighted ranking. |
-| `src/tools/publish.ts` | `dkg_publish`, `dkg_shared_memory_publish`. |
+| `src/tools/publish.ts` | `dkg_publish`, `dkg_shared_memory_publish` (SWM-bridge surfaces; per-KA publish lives in `assertions.ts`). |
 | `src/tools/setup.ts` | `dkg_context_graph_create`, `dkg_subscribe`, `dkg_sub_graph_create`. |
+| `src/tools/chat.ts` | `dkg_send_message`, `dkg_check_inbox`. |
 | `src/client.ts` | `DkgClient` HTTP wrapper. Re-exported as `@origintrail-official/dkg-mcp/client`. |
 | `src/manifest/{publish,fetch,install}.ts` | Project manifest publish/install pipeline. Re-exported as `@origintrail-official/dkg-mcp/manifest/*` and consumed by the umbrella CLI's daemon routes. |
 | `hooks/capture-chat.mjs` | Cursor/Claude Code chat-turn capture hook (above). |

@@ -21,6 +21,7 @@ import {INamed} from "./interfaces/INamed.sol";
 import {IVersioned} from "./interfaces/IVersioned.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {IDKGPublishingConvictionNFT} from "./interfaces/IDKGPublishingConvictionNFT.sol";
+import {IPublishingConvictionErrors} from "./interfaces/IPublishingConvictionErrors.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
@@ -102,12 +103,26 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
     // storage slot at the end of the inheritance chain; KAV10 owns its
     // slots below the inherited chain and V10 deploys are redeploy +
     // reinit, so no storage-layout migration is required.
+    // 10.0.3 → 10.0.4: curated publishes and paid legacy curated updates
+    // must carry a ciphertext commitment before entering value-weighted
+    // random-sampling state.
+    // 10.0.4 → 10.0.5: audit fix — the conviction (PCA discount) branch in
+    // `publish`/`update` now FALLS THROUGH to direct spend instead of
+    // reverting when `coverPublishingCost` fails for a payment reason
+    // (`InsufficientAllowance` / `AccountExpired`). Agent registration is
+    // permissionless and requires no consent (RFC-001 §3.6), so a hard
+    // revert on the conviction branch let anyone register a victim against
+    // a deliberately-underfunded account and brick that victim's paid
+    // publishes/updates indefinitely. This extends the existing
+    // "stale registration MUST NOT brick the publisher" intent (already
+    // applied to the expired / epoch-mismatch gate) to the
+    // underfunded-active case.
     // 2.0.0 → 2.0.1 (PATCH): protocol treasury fee skimmed inside
     // `_addTokens` (publisher pays the same gross amount; the fee is taken
     // out of the staker-bound net). Patch-level on purpose — the EIP-712
     // author-attestation domain version (`_EIP712_VERSION_HASH`) MUST stay
     // pinned at "2.0.0" so previously signed attestations keep verifying.
-    string private constant _VERSION = "10.0.3";
+    string private constant _VERSION = "10.0.5";
 
     // --- V10 publish input (grouped to bypass the 16-arg stack limit) ---
 
@@ -138,17 +153,16 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
         /// @notice V10 flat-KC Merkle leaf count (sorted + deduped), must match
         ///         off-chain `V10MerkleTree` built from the same publish payload.
         uint32 merkleLeafCount;
-        // ── RFC-39 Phase A.5: curated-CG ciphertext commitment (OPTIONAL) ──
+        // ── RFC-39 Phase A.5: curated-CG ciphertext commitment ──
         /// @notice RFC-39: Merkle root over `[keccak256(ct_i)]` in
         ///         `swmMessageIndex` order for this publish batch's ciphertext
         ///         chunks (one chunk per SWM message — LU-11 Option B).
         ///         MUST be `bytes32(0)` for public CGs (rejected with
         ///         `PublicCGCannotHaveCiphertextCommitment`). For curated CGs,
-        ///         MAY be `bytes32(0)` (legacy/transitional path — picker
-        ///         skips that KC in the curated draw) OR non-zero AND paired
-        ///         with a non-zero `ciphertextChunkCount` (full commitment —
-        ///         KC participates in the curated draw). Partial commitments
-        ///         (one zero, one non-zero) revert with
+        ///         MUST be non-zero AND paired with a non-zero
+        ///         `ciphertextChunkCount`; otherwise the publish reverts with
+        ///         `CuratedCGRequiresCiphertextCommitment`. Partial
+        ///         commitments (one zero, one non-zero) revert with
         ///         `IncompleteCiphertextCommitment`.
         bytes32 ciphertextChunksRoot;
         /// @notice RFC-39: number of ciphertext chunks in this batch (==
@@ -219,9 +233,10 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
         // left their commitment frozen to the initial publish and the
         // random-sampling challenge surface would point at stale
         // ciphertext after the first update. Same zero-or-paired
-        // contract as `PublishParams` (zero on metadata-only or
-        // public-CG updates; both non-zero on curated commitment
-        // rotation). Appended at the END of the struct so the
+        // contract as `PublishParams`: zero for public-CG updates or
+        // metadata-only legacy curated KCs without prior commitment;
+        // both non-zero for curated commitment rotation or paid
+        // legacy-curated growth. Appended at the END of the struct so the
         // positional ABI for pre-existing 12-field callers stays
         // intact — they encode the same prefix and ABI decoder
         // zero-fills the trailing pair (Codex PR #630 R1 #1 on
@@ -271,6 +286,12 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
     ///      leaking into a public publish would silently bloat storage and
     ///      mislead off-chain indexers about which KCs are sampleable).
     error PublicCGCannotHaveCiphertextCommitment(uint256 contextGraphId);
+
+    /// @dev A curated-CG publish or paid update attempted to introduce
+    ///      sampling value without a full ciphertext commitment. Curated KCs
+    ///      without commitments are unchallengeable by design, so KAV10 must
+    ///      not let them enter the value-weighted challenge surface.
+    error CuratedCGRequiresCiphertextCommitment(uint256 contextGraphId);
 
     /// @dev RFC-39 Phase A.5: a curated-CG publish carried a partial ciphertext
     ///      commitment (root without count, or vice versa). The two are
@@ -495,20 +516,20 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
                 p.epochs == uint256(lockDurationEpochs);
         }
 
+        // Discount branch when eligible; otherwise (or on a PCA-side payment
+        // failure) direct spend. The conviction attempt MUST NOT brick the
+        // publisher — agent registration is permissionless and consent-free,
+        // so an underfunded account a third party registered us against falls
+        // through here instead of reverting. See {_coverViaConvictionOrFallThrough}.
         if (useConviction) {
-            // Discount branch. The NFT auto-resolves the paying account
-            // from `agentToAccountId[msg.sender]`, deducts the discounted
-            // cost, distributes it across the KC's epoch range (active
-            // sink), and lazily settles any elapsed billing windows
-            // (passive sink). KAv10 MUST NOT call `_distributeTokens`
-            // here — the NFT is the funding agent on this branch.
-            publishingConvictionNFT.coverPublishingCost(
-                msg.sender,
+            useConviction = _coverViaConvictionOrFallThrough(
                 p.tokenAmount,
                 currentEpoch,
                 uint40(p.epochs)
             );
-        } else {
+        }
+
+        if (!useConviction) {
             // Direct-spend branch. `transferFrom(msg.sender, CSS, fullCost)`
             // + epoch-range distribution. The named core (if non-zero) still
             // earns publishing-factor credit through `_executePublishCore`'s
@@ -519,6 +540,63 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
         }
 
         return kaId;
+    }
+
+    /**
+     * @dev Attempt to fund a publish/update via the caller's conviction
+     *      account (PCA discount branch). Returns `true` if the cost was
+     *      covered via conviction, `false` if the caller should fall through
+     *      to direct spend.
+     *
+     *      Audit fix: agent registration is permissionless and requires no
+     *      consent from the agent (RFC-001 §3.6). A hard revert here let an
+     *      attacker register a victim against a deliberately-underfunded
+     *      account and brick that victim's paid publishes/updates. We
+     *      therefore swallow ONLY the PCA-side "cannot pay" errors
+     *      (`InsufficientAllowance`, `AccountExpired`) and fall through to
+     *      direct spend — mirroring the gate's existing
+     *      "stale registration MUST NOT brick the publisher" intent. Any
+     *      other revert is a genuine fault and is re-thrown unchanged so we
+     *      never mask real bugs or silently downgrade on unexpected state.
+     *
+     *      `coverPublishingCost` is an external call to the NFT contract, so
+     *      a revert rolls back all of its state writes atomically — the
+     *      fall-through starts from clean state with no partial PCA effects.
+     */
+    function _coverViaConvictionOrFallThrough(
+        uint96 baseCost,
+        uint40 kcStartEpoch,
+        uint40 kcEpochs
+    ) internal returns (bool covered) {
+        try publishingConvictionNFT.coverPublishingCost(msg.sender, baseCost, kcStartEpoch, kcEpochs) returns (
+            uint96
+        ) {
+            return true;
+        } catch (bytes memory reason) {
+            bytes4 selector;
+            if (reason.length >= 4) {
+                // solhint-disable-next-line no-inline-assembly
+                assembly {
+                    selector := mload(add(reason, 0x20))
+                }
+            }
+            // Selectors come from {IPublishingConvictionErrors} — the SAME
+            // declarations `PublishingConviction` reverts with — so the
+            // compiler keeps the catch side and the revert side in lock-step;
+            // a signature change there breaks this file too.
+            if (
+                selector == IPublishingConvictionErrors.InsufficientAllowance.selector ||
+                selector == IPublishingConvictionErrors.AccountExpired.selector
+            ) {
+                // Expected "cannot pay via conviction" — fall through.
+                return false;
+            }
+            // Unexpected fault — bubble up verbatim.
+            // solhint-disable-next-line no-inline-assembly
+            assembly {
+                revert(add(reason, 0x20), mload(reason))
+            }
+        }
     }
 
     // ========================================================================
@@ -606,31 +684,32 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
         // KC.
         //
         // Semantics:
-        //   - Public CG  + any non-zero ciphertext field → revert
+        //   - Public CG + any non-zero ciphertext field → revert
         //     (catches client bugs; curated-only payload leaking to public).
-        //   - Curated CG + both fields zero                → no commitment
-        //     persisted; picker treats the KC as "skip in curated draw"
-        //     (legacy / pre-LU-11 publishes — forward-only adoption per
-        //     RFC-39 §6.4, Q4).
-        //   - Curated CG + both fields non-zero            → commitment
+        //   - Curated CG + both fields non-zero → commitment
         //     persisted; KC participates in curated draw.
-        //   - Curated CG + exactly one field zero          → revert
+        //   - Curated CG + both fields zero → revert
+        //     (unchallengeable encrypted KC must not enter value-weighted
+        //     sampling state).
+        //   - Curated CG + exactly one field zero → revert
         //     (partial commitment would zero-divide the picker or verify
         //     against the empty-tree zero).
         //
         // The cached `_hasCiphertextCommitment` carries the populate decision
         // forward to the post-create persistence call below — avoids a
-        // second `getIsCurated` read and the two zero-checks that already
-        // gated this branch.
+        // second pair of zero-checks that already gated this branch.
+        bool _isCurated = contextGraphStorage.getIsCurated(p.contextGraphId);
         bool _hasCiphertextCommitment =
             p.ciphertextChunksRoot != bytes32(0) || p.ciphertextChunkCount != 0;
-        if (_hasCiphertextCommitment) {
-            if (!contextGraphStorage.getIsCurated(p.contextGraphId)) {
-                revert PublicCGCannotHaveCiphertextCommitment(p.contextGraphId);
+        if (_isCurated) {
+            if (!_hasCiphertextCommitment) {
+                revert CuratedCGRequiresCiphertextCommitment(p.contextGraphId);
             }
             if (p.ciphertextChunksRoot == bytes32(0) || p.ciphertextChunkCount == 0) {
                 revert IncompleteCiphertextCommitment();
             }
+        } else if (_hasCiphertextCommitment) {
+            revert PublicCGCannotHaveCiphertextCommitment(p.contextGraphId);
         }
 
         // H7: SafeCast guards the uint96 cast in _validateTokenAmount.
@@ -1189,19 +1268,19 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
                 remainingEpochs <= uint40(lockDurationEpochs);
         }
 
+        // Discount branch when eligible; otherwise (or on a PCA-side payment
+        // failure) direct spend. As in `publish`, the conviction attempt MUST
+        // NOT brick the updater — a consent-free agent registration on an
+        // underfunded account falls through here rather than reverting.
         if (useConviction) {
-            // Discount branch — delta funds the KC's REMAINING epoch range
-            // `[currentEpoch, currentEpoch + remainingEpochs - 1]` via the
-            // active sink. The active sink may extend past the conviction
-            // account's `expiresAtEpoch` (harmless — the staker pool just
-            // gets funded normally for those epochs).
-            publishingConvictionNFT.coverPublishingCost(
-                msg.sender,
+            useConviction = _coverViaConvictionOrFallThrough(
                 deltaTokenAmount,
                 currentEpoch,
                 remainingEpochs
             );
-        } else {
+        }
+
+        if (!useConviction) {
             uint96 netDeltaTokenAmount = _addTokens(deltaTokenAmount);
             _distributeTokens(netDeltaTokenAmount, uint256(remainingEpochs), currentEpoch);
         }
@@ -1456,9 +1535,13 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
         //     unprovable. Once a KC has been committed, every
         //     subsequent update MUST rotate the commitment in lockstep
         //     with the plaintext one.
-        //   - Curated CG + KC has no prior commitment + zero pair → no-op
-        //     (legacy / pre-LU-11 path; picker still skips this KC in
-        //     the curated draw until the first commitment lands).
+        //   - Curated CG + KC has no prior commitment + zero pair + delta 0
+        //     → no-op (legacy / pre-LU-11 metadata maintenance; picker still
+        //     skips this KC in the curated draw until the first commitment
+        //     lands).
+        //   - Curated CG + KC has no prior commitment + zero pair + delta > 0
+        //     → revert. Value growth would otherwise add weight for a KC that
+        //     cannot satisfy a ciphertext proof when sampled.
         //   - Curated CG + both fields non-zero → commitment rotated
         //     (or set for the first time).
         //   - Curated CG + exactly one field zero → revert
@@ -1479,10 +1562,11 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
                 // KC was previously committed; a zero-pair update would
                 // strand the stale commitment.
                 revert IncompleteCiphertextCommitment();
+            } else if (deltaTokenAmount > 0) {
+                revert CuratedCGRequiresCiphertextCommitment(contextGraphId);
             }
             // else: legacy / pre-LU-11 curated KC, no commitment yet —
-            // zero-pair update is permitted (mirrors the publish
-            // legacy-path behaviour).
+            // zero-pair metadata-only update is permitted.
         } else if (_hasNewCiphertextCommitment) {
             revert PublicCGCannotHaveCiphertextCommitment(contextGraphId);
         }

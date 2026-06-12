@@ -113,15 +113,46 @@ describe('SKILL.md file', () => {
     expect(skillContent).toContain('/api/knowledge-assets/{name}/wm/extraction-status');
   });
 
+  it('documents the rc.17 lifecycle verbs (finalize / publish / pull-from) + the UAL', () => {
+    // CONTRACT §1: the 5-stage lifecycle (create → write → finalize → share →
+    // publish) and the pull-from edit-loop primitive must all be taught, and the
+    // UAL returned at publish must be defined.
+    expect(skillContent).toContain('/api/knowledge-assets/{name}/wm/finalize');
+    expect(skillContent).toContain('/api/knowledge-assets/{name}/vm/publish');
+    expect(skillContent).toContain('/api/knowledge-assets/{name}/wm/pull-from');
+    // The new tool names are advertised in the tool-reference table.
+    expect(skillContent).toContain('dkg_knowledge_asset_finalize');
+    expect(skillContent).toContain('dkg_knowledge_asset_publish');
+    expect(skillContent).toContain('dkg_knowledge_asset_pull_from');
+    expect(skillContent).toContain('dkg_knowledge_asset_share');
+    // UAL is defined and tied to the publish response (CONTRACT §1 Stage5).
+    expect(skillContent).toContain('UAL');
+    expect(skillContent).toContain('Universal Asset Locator');
+    // The UAL middle segment is the KnowledgeAssets (KAV10) CONTRACT address, NOT
+    // the author (getDKGKnowledgeAssetsAddress; update-handler.ts:208/361).
+    expect(skillContent).toContain('did:dkg:<chainId>/<kasAddress>/<number>');
+    expect(skillContent).not.toContain('did:dkg:<chainId>/<author>/<number>');
+    expect(skillContent).not.toContain('did:dkg:<chainId>/<authorAddress>/<number>');
+    // The canonical 5-stage sequence is spelled out.
+    expect(skillContent).toContain('create → write → finalize → share → publish');
+  });
+
   it('documents imported attachment semantic enrichment as same-assertion append', () => {
-    expect(skillContent).toContain('dkg_import_artifact_read_markdown');
-    expect(skillContent).toContain('dkg_import_artifact_resolve');
-    expect(skillContent).toContain('dkg_semantic_enrichment_write');
+    // rc.17 rename (CONTRACT §2): the import-artifact / semantic-enrichment tools
+    // are part of the dkg_knowledge_asset_* family now — no dkg_assertion_* /
+    // dkg_import_artifact_* / dkg_semantic_enrichment_* back-compat names remain.
+    expect(skillContent).toContain('dkg_knowledge_asset_import_artifact_read_markdown');
+    expect(skillContent).toContain('dkg_knowledge_asset_import_artifact_resolve');
+    expect(skillContent).toContain('dkg_knowledge_asset_semantic_enrichment_write');
     expect(skillContent).toContain('appends model-derived semantic triples');
     expect(skillContent).toContain('same imported assertion graph');
     expect(skillContent).toContain('Optional metadata re-check');
     expect(skillContent).toContain('rejects target assertion names');
     expect(skillContent).not.toContain('separate Working Memory assertion');
+    // The legacy short names must be fully gone from the canonical skill doc.
+    expect(skillContent).not.toContain('dkg_import_artifact_read_markdown');
+    expect(skillContent).not.toContain('dkg_import_artifact_resolve');
+    expect(skillContent).not.toContain('dkg_semantic_enrichment_write');
   });
 
   it('documents error status codes', () => {
@@ -151,12 +182,24 @@ describe('SKILL.md file', () => {
     // 500-line cap would force regressions of legitimate
     // documentation that other tests REQUIRE.
     //
-    // 800 lines is a realistic ceiling: well below the documented
-    // Agent Skills "should be concise" guidance for very large
-    // skills, while still catching unbounded growth (e.g. an
-    // accidental dump of full OpenAPI schema in-line).
+    // rc.17 agent-tooling (PR1) raised the cap 800 → 900: the doc now teaches the
+    // full GitHub-shaped KA lifecycle — the two new on-chain verbs
+    // (`wm/finalize` seal + `vm/publish` mint), the `wm/pull-from` edit-loop
+    // primitive, the publish response body + UAL definition, and the canonical
+    // 5-stage workflow (create → write → finalize → share → publish). That is
+    // ~90 lines of content the OTHER tests in this suite (and skill-route-parity)
+    // explicitly REQUIRE, so a lower cap would force regressing required docs.
+    //
+    // The cap was raised 800 → 900 → 950 across rc.17 agent-tooling as the doc grew
+    // with the lifecycle teaching + the review-round accuracy corrections (UAL format,
+    // register/publishPolicy caveat, create-failure recovery semantics) — content we
+    // deliberately added, where trimming would regress the accuracy we just fixed.
+    //
+    // 950 lines stays a realistic ceiling: well below the documented Agent Skills
+    // "should be concise" guidance for very large skills, while still catching
+    // unbounded growth (e.g. an accidental dump of full OpenAPI schema in-line).
     const lines = skillContent.split('\n').length;
-    expect(lines).toBeLessThan(800);
+    expect(lines).toBeLessThan(950);
   });
 });
 

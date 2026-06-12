@@ -196,6 +196,18 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // `updateKnowledgeCollectionV10` accepts any ack without recovery, so
   // there is no on-chain digest to reproduce here.
   'getUpdateAckDigestFields',
+  // #1080 follow-up: `resolveKaStorageDeployBlock` binary-searches the deployed
+  // DKGKnowledgeAssets contract's birth block to anchor the pre-10.0.4
+  // KnowledgeAssetCreated fallback scan (avoids a from-genesis crawl under a
+  // 2,000-block eth_getLogs cap). EVM-only — the mock's getMaxKaNumberForAuthor
+  // is an in-memory scan with no chain, deploy block, or eth_getCode to resolve.
+  'resolveKaStorageDeployBlock',
+  // companion retry-wrapper for the deploy-block binary search's historical
+  // eth_getCode probes — EVM-only, same rationale as resolveKaStorageDeployBlock.
+  'getContractCodeAtBlock',
+  // per-page KnowledgeAssetCreated log-scan with cross-backend failover — EVM-only
+  // (the mock's getMaxKaNumberForAuthor is an in-memory scan, no providers).
+  'queryKaCreatedPage',
 ]);
 
 const NO_CHAIN_EXEMPT_FROM_EVM = new Set<string>([

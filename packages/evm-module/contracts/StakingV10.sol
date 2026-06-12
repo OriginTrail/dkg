@@ -128,7 +128,15 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     //             new `expiryShortenedBy` arg (CSS v4.1.0). `stake` always
     //             passes 0; `_convertToNFT` passes 0 except for eligible
     //             6m/12m migrants.
-    string private constant _VERSION = "10.0.2";
+    //   10.0.3 — Audit fix: mid-epoch `redelegate`/`relock` orphaned the
+    //           current epoch's settled delegator score (the old
+    //           (epoch, node, key) RSS slot was never read again after the
+    //           identity flip / tokenId re-key).
+    //           * `redelegate` / `relock` record a `RewardCarry` pointer in
+    //             CSS when the settled score is non-zero.
+    //           * `_claim` integrates matured carries (epoch closed) via the
+    //             extracted `_nodeEpochReward` helper, then clears them.
+    string private constant _VERSION = "10.0.3";
 
     // ========================================================================
     // Constants
@@ -424,16 +432,38 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         // is already in rest state; any non-zero expiry must have elapsed.
         if (pos.expiryTimestamp != 0 && block.timestamp < uint256(pos.expiryTimestamp)) revert LockStillActive();
 
-        _prepareForStakeChangeV10(chronos.getCurrentEpoch(), oldTokenId, pos.identityId);
+        uint256 currentEpoch = chronos.getCurrentEpoch();
+        uint256 settledEpochScore18 = _prepareForStakeChangeV10(currentEpoch, oldTokenId, pos.identityId);
+
+        // v10.0.3 — baseline the NEW tokenId's settlement cursor at the
+        // current score-per-stake BEFORE the position exists under it
+        // (cursor-bump-only branch: `positions[newTokenId].identityId == 0`).
+        // Without this the new key re-integrates the epoch's score from 0
+        // at the NEW multiplier — over-crediting the delegator and
+        // overdrawing the node's epoch pool. Mirrors the `stake` baseline.
+        _prepareForStakeChangeV10(currentEpoch, newTokenId, pos.identityId);
 
         // M1 + L11 — same-identity relock. CSS reads the multiplier from the
-        //            tier table; no need to pass it in.
+        //            tier table; no need to pass it in. Migrates any existing
+        //            reward carries from oldTokenId to newTokenId (v10.0.3).
         convictionStorage.createNewPositionFromExisting(
             oldTokenId,
             newTokenId,
             pos.identityId,
             newLockTier
         );
+
+        // v10.0.3 — the score settled this epoch lives in RSS under the OLD
+        // tokenId's delegator key, which `_claim(newTokenId)` would never
+        // read. Carry the pointer across the burn-mint.
+        if (settledEpochScore18 > 0) {
+            convictionStorage.addRewardCarry(
+                newTokenId,
+                pos.identityId,
+                uint32(currentEpoch),
+                bytes32(oldTokenId)
+            );
+        }
 
         ConvictionStakingStorage.Position memory posAfter = convictionStorage.getPosition(newTokenId);
         emit Relocked(newTokenId, newLockTier, uint64(posAfter.expiryTimestamp));
@@ -487,8 +517,21 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         // effective stake (which shifts the delegator's contribution
         // between the two nodes at `currentEpoch`).
         uint256 currentEpoch = chronos.getCurrentEpoch();
-        _prepareForStakeChangeV10(currentEpoch, tokenId, oldIdentityId);
+        uint256 oldNodeEpochScore18 = _prepareForStakeChangeV10(currentEpoch, tokenId, oldIdentityId);
         _prepareForStakeChangeV10(currentEpoch, tokenId, newIdentityId);
+
+        // v10.0.3 — the score settled on the OLD node for the in-progress
+        // epoch becomes unreachable once `pos.identityId` flips (later
+        // claims read only the current node). Record a carry pointer so
+        // the next claim integrates it against the old node's pool.
+        if (oldNodeEpochScore18 > 0) {
+            convictionStorage.addRewardCarry(
+                tokenId,
+                oldIdentityId,
+                uint32(currentEpoch),
+                bytes32(tokenId)
+            );
+        }
 
         // D25 — in-place node swap. tokenId + expiryEpoch + reward cursor
         // preserved; per-node diffs + per-node raw + pending expiry
@@ -770,42 +813,40 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             );
             uint256 delegatorScore18 = settledDelegatorScore18 + unsettledDelegatorScore18;
 
-            uint256 nodeScore18 = randomSamplingStorage.getNodeEpochScore(e, identityId);
+            rewardTotal += _nodeEpochReward(e, identityId, delegatorScore18);
+        }
 
-            // H1 — on epochs with `scorePerStake36 > 0 && nodeScore18 == 0` we
-            // still fall through here. That combination is essentially
-            // impossible in production (score-per-stake can only be advanced
-            // by submitProof, which also adds to node score), but defensive:
-            // there is no fee to collect and no reward, so epochReward stays 0.
-            uint256 epochReward = 0;
-            if (nodeScore18 > 0) {
-                uint256 netNodeRewards;
-                if (!convictionStorage.isOperatorFeeClaimedForEpoch(identityId, e)) {
-                    uint256 allNodesScore18 = randomSamplingStorage.getAllNodesEpochScore(e);
-                    if (allNodesScore18 > 0) {
-                        uint256 grossNodeRewards = (epochStorage.getEpochPool(EPOCH_POOL_INDEX, e)
-                            * nodeScore18) / allNodesScore18;
-                        uint96 operatorFeeAmount = uint96(
-                            (grossNodeRewards
-                                * profileStorage.getOperatorFeePercentageByTimestampReverse(identityId, chronos.timestampForEpoch(e + 1) - 1))
-                                / parametersStorage.maxOperatorFee()
-                        );
-                        netNodeRewards = grossNodeRewards - operatorFeeAmount;
-                        convictionStorage.setIsOperatorFeeClaimedForEpoch(identityId, e, true);
-                        convictionStorage.setNetNodeEpochRewards(identityId, e, netNodeRewards);
-                        // v4.0.0 — operator-fee balance lives on CSS now.
-                        convictionStorage.increaseOperatorFeeBalance(identityId, operatorFeeAmount);
-                    }
-                } else {
-                    netNodeRewards = convictionStorage.getNetNodeEpochRewards(identityId, e);
+        // v10.0.3 — integrate matured reward carries (pointers to RSS score
+        // slots recorded by mid-epoch `redelegate`/`relock`; see CSS struct
+        // docs). A carry matures once its epoch is <= `claimToEpoch`.
+        {
+            ConvictionStakingStorage.RewardCarry[] memory carries =
+                convictionStorage.getRewardCarries(tokenId);
+            bool carriesMatured = false;
+            for (uint256 i = 0; i < carries.length; i++) {
+                if (uint256(carries[i].epoch) > claimToEpoch) continue;
+                carriesMatured = true;
+                // The main loop above already integrated the position's
+                // CURRENT (node, key) slot for every epoch in the window —
+                // skip a carry that points at it (e.g. A→B→A round-trip).
+                if (carries[i].identityId == identityId && carries[i].delegatorKey == delegatorKey) {
+                    continue;
                 }
-
-                if (delegatorScore18 > 0) {
-                    epochReward = (delegatorScore18 * netNodeRewards) / nodeScore18;
-                }
+                uint256 carryScore18 = randomSamplingStorage.getEpochNodeDelegatorScore(
+                    uint256(carries[i].epoch),
+                    carries[i].identityId,
+                    carries[i].delegatorKey
+                );
+                if (carryScore18 == 0) continue;
+                rewardTotal += _nodeEpochReward(
+                    uint256(carries[i].epoch),
+                    carries[i].identityId,
+                    carryScore18
+                );
             }
-
-            rewardTotal += epochReward;
+            if (carriesMatured) {
+                convictionStorage.clearRewardCarries(tokenId, uint32(claimToEpoch));
+            }
         }
 
         if (rewardTotal == 0) {
@@ -1056,6 +1097,52 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     // ========================================================================
     // Internal helpers — V10 score-per-stake settlement
     // ========================================================================
+
+    /**
+     * @dev Convert a delegator's epoch score on `identityId` into TRAC,
+     *      lazily materializing the node's operator-fee split for `(e,
+     *      identityId)` on first touch. Extracted from the `_claim` epoch
+     *      loop (v10.0.3) so reward carries share the exact same math.
+     *
+     *      H1 note — on epochs with `scorePerStake36 > 0 && nodeScore18 ==
+     *      0` this returns 0. That combination is essentially impossible in
+     *      production (score-per-stake can only be advanced by submitProof,
+     *      which also adds to node score), but defensive: there is no fee
+     *      to collect and no reward.
+     */
+    function _nodeEpochReward(
+        uint256 e,
+        uint72 identityId,
+        uint256 delegatorScore18
+    ) internal returns (uint256 epochReward) {
+        uint256 nodeScore18 = randomSamplingStorage.getNodeEpochScore(e, identityId);
+        if (nodeScore18 == 0) return 0;
+
+        uint256 netNodeRewards;
+        if (!convictionStorage.isOperatorFeeClaimedForEpoch(identityId, e)) {
+            uint256 allNodesScore18 = randomSamplingStorage.getAllNodesEpochScore(e);
+            if (allNodesScore18 > 0) {
+                uint256 grossNodeRewards = (epochStorage.getEpochPool(EPOCH_POOL_INDEX, e)
+                    * nodeScore18) / allNodesScore18;
+                uint96 operatorFeeAmount = uint96(
+                    (grossNodeRewards
+                        * profileStorage.getOperatorFeePercentageByTimestampReverse(identityId, chronos.timestampForEpoch(e + 1) - 1))
+                        / parametersStorage.maxOperatorFee()
+                );
+                netNodeRewards = grossNodeRewards - operatorFeeAmount;
+                convictionStorage.setIsOperatorFeeClaimedForEpoch(identityId, e, true);
+                convictionStorage.setNetNodeEpochRewards(identityId, e, netNodeRewards);
+                // v4.0.0 — operator-fee balance lives on CSS now.
+                convictionStorage.increaseOperatorFeeBalance(identityId, operatorFeeAmount);
+            }
+        } else {
+            netNodeRewards = convictionStorage.getNetNodeEpochRewards(identityId, e);
+        }
+
+        if (delegatorScore18 > 0) {
+            epochReward = (delegatorScore18 * netNodeRewards) / nodeScore18;
+        }
+    }
 
     /**
      * @dev D26 — settle the delegator's score accumulator for `epoch` up to

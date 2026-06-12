@@ -15,10 +15,14 @@ export function buildQueryTools(ctx: DkgToolHost): OpenClawTool[] {
     {
       name: 'dkg_publish',
       description:
-        'One-shot write + publish helper: writes the supplied quads to Shared Working Memory, then publishes ' +
-        'all SWM in the CG to Verifiable Memory (on-chain) and clears SWM. For the canonical stepwise flow ' +
-        '(write → promote → publish) use `dkg_assertion_create/write/promote` followed by ' +
-        '`dkg_shared_memory_publish`.',
+        'One-shot write + publish helper: creates a fresh auto-named assertion from the supplied quads ' +
+        '(seal + share), then publishes THAT one assertion to Verifiable Memory (on-chain). NOTE: this is ' +
+        'two HTTP calls (create, then publish), not a single transactional operation — either phase can ' +
+        'partially fail (a share-phase failure aborts before publish; a context-graph-binding failure still ' +
+        'mints the asset on-chain). For the canonical stepwise flow ' +
+        '(create → write → finalize → share → publish) use `dkg_knowledge_asset_create/write/finalize/share` ' +
+        'followed by `dkg_knowledge_asset_publish`. Publishing requires the context graph to be registered ' +
+        'on-chain — set `register_if_needed: true` to register it first (idempotent) before publishing.',
       parameters: {
         type: 'object',
         properties: {
@@ -31,13 +35,28 @@ export function buildQueryTools(ctx: DkgToolHost): OpenClawTool[] {
                 subject: { type: 'string', description: 'Subject URI.' },
                 predicate: { type: 'string', description: 'Predicate URI.' },
                 object: { type: 'string', description: 'Object — URI or literal (URI auto-detected by prefix).' },
-                graph: { type: 'string', description: 'Optional named graph URI.' },
               },
               required: ['subject', 'predicate', 'object'],
             },
             description:
               'Quads to publish. Example: `[{ subject: "https://example.org/a", predicate: "https://schema.org/name", object: "Alpha" }]`. ' +
               'Object values starting with http://, https://, urn:, did: are passed as URIs; anything else becomes a literal.',
+          },
+          register_if_needed: {
+            type: 'boolean',
+            description:
+              'If the context graph is not yet registered on-chain, register it first (idempotent), then publish. ' +
+              'Registration may spend gas/TRAC; it is opt-in. Default false — when false and the CG is ' +
+              'unregistered, publish fails with the daemon\'s not-registered error. CAVEAT: this uses the ' +
+              'explicit register route, which registers with the daemon\'s DEFAULT publishPolicy (derived from ' +
+              'access_policy) and does NOT preserve a context graph\'s stored custom publishPolicy / ' +
+              'contribution governance. For a CG created with a non-default publishPolicy/PCA, register it ' +
+              'explicitly with the desired policy first rather than relying on register_if_needed. (Read access ' +
+              'is unaffected; daemon-side rehydration tracked in OriginTrail/dkg#1085.)',
+          },
+          access_policy: {
+            type: 'number',
+            description: 'Registration access policy: `0` for open, `1` for private. Requires `register_if_needed: true` — it only applies when registering the CG, and is rejected otherwise. Sets only the access policy; it does NOT preserve a stored custom publishPolicy (see register_if_needed; OriginTrail/dkg#1085).',
           },
         },
         required: ['context_graph_id', 'quads'],

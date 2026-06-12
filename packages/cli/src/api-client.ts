@@ -81,6 +81,7 @@ function assertExclusiveAuthorFields(args: {
 
 function assertCreateFinalizeFieldsHaveQuads(args: {
   quads?: unknown[];
+  finalize?: boolean;
   authorAgentAddress?: string;
   preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
   schemeVersion?: number;
@@ -89,8 +90,11 @@ function assertCreateFinalizeFieldsHaveQuads(args: {
     args.authorAgentAddress != null ||
     args.preSignedAuthorAttestation != null ||
     args.schemeVersion !== undefined;
-  if (hasFinalizeOnlyField && !(Array.isArray(args.quads) && args.quads.length > 0)) {
-    throw new Error('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads');
+  // These fields only take effect at finalize, so they require both non-empty
+  // quads AND finalize !== false — mirrors the daemon create-route guard.
+  const willFinalize = Array.isArray(args.quads) && args.quads.length > 0 && args.finalize !== false;
+  if (hasFinalizeOnlyField && !willFinalize) {
+    throw new Error('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads and finalize !== false');
   }
 }
 
@@ -550,13 +554,25 @@ export class ApiClient {
   // surface). The legacy assertion/* + shared-memory/* methods below remain
   // for back-compat during the migration window.
 
-  /** Create a KA + open a WM draft (atomic: pass `quads` to auto write+finalize). */
+  /**
+   * Create a KA + open a WM draft. Pass `quads` to write them atomically; by
+   * default the draft is also sealed (finalized). Pass `finalize: false` to
+   * write a draft WITHOUT sealing — an editable WM-only assertion that never
+   * touches the chain (the only lifecycle available to local-only /
+   * on-chain-unregistered CGs).
+   */
   async createKnowledgeAsset(
     contextGraphId: string,
     name: string,
     options?: {
       subGraphName?: string;
       quads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+      /**
+       * Seal the draft after writing `quads` (default true). `false` keeps an
+       * editable WM draft and never touches the chain. Cannot be combined with
+       * `alsoShareSwm`/`alsoPublishVm` (those require a sealed assertion).
+       */
+      finalize?: boolean;
       authorAgentAddress?: string;
       preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
       schemeVersion?: number;

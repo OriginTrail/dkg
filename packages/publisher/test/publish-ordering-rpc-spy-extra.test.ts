@@ -110,7 +110,10 @@ describe('Publish ordering & RPC spy — P-1 / P-6 / P-7', () => {
     await mintTokens(_provider, hubAddress, HARDHAT_KEYS.DEPLOYER, wallet.address, ethers.parseEther('5000000'));
 
     const cgChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    const cgIdBn = await createTestContextGraph(cgChain);
+    // Public CG (accessPolicy 0): these tests publish plaintext to exercise
+    // SWM/chain ordering, write-ahead txHash, and nonce serialization — not
+    // curated/ciphertext semantics — so they must not require a ciphertext commitment.
+    const cgIdBn = await createTestContextGraph(cgChain, undefined, 0);
     cgId = String(cgIdBn);
     _kav10Address = await cgChain.getKnowledgeAssetsLifecycleAddress();
   }, 120_000);

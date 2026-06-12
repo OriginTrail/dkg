@@ -1,4 +1,5 @@
 import { MemoryLayer, memoryLayerSlug } from './memory-model.js';
+import { assertSafeIri } from './sparql-safe.js';
 
 // ── V10 Protocol Stream IDs ─────────────────────────────────────────────
 
@@ -219,6 +220,29 @@ export function contextGraphPrivateUri(contextGraphId: string): string {
 export function contextGraphSharedMemoryUri(contextGraphId: string, subGraphName?: string): string {
   if (subGraphName) return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/_shared_memory`;
   return `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
+}
+
+/**
+ * SPARQL `FILTER` scoping a `GRAPH ?g` pattern to a shared-working-memory
+ * bucket's OT-RFC-46 read-both layout: the bare bucket `<swmGraph>` AND its
+ * per-KA layer graphs (`<swmGraph>/<addr>/<number>`), excluding the
+ * `<swmGraph>/staging/` sub-tree.
+ *
+ * Single source of truth for this predicate. It was previously copy-pasted
+ * across the publisher, agent, storage-ACK and daemon SWM read paths, and the
+ * publish-from-SWM selection bug came from those copies drifting apart. Reuse
+ * this anywhere a SWM read must see promoted (per-KA) data so the paths stay in
+ * lockstep.
+ *
+ * @param swmGraph bucket URI from `contextGraphSharedMemoryUri(...)`
+ * @param graphVar SPARQL variable bound to the named graph (default `?g`)
+ */
+export function sharedMemoryReadBothFilter(swmGraph: string, graphVar: string = "?g"): string {
+  const safeSwmGraph = assertSafeIri(swmGraph);
+  if (!/^\?[A-Za-z_][A-Za-z0-9_]*$/.test(graphVar)) {
+    throw new Error(`Unsafe SPARQL graph variable: ${graphVar}`);
+  }
+  return `FILTER(((STRSTARTS(STR(${graphVar}), "${safeSwmGraph}/") && !STRSTARTS(STR(${graphVar}), "${safeSwmGraph}/staging/")) || STR(${graphVar}) = "${safeSwmGraph}"))`;
 }
 
 export function contextGraphSharedMemoryMetaUri(contextGraphId: string, subGraphName?: string): string {

@@ -15,11 +15,13 @@ contract ParametersStorage is INamed, IVersioned, HubDependent {
     ///         typed `address` field.
     event ProtocolTreasurySet(address indexed treasury);
 
+    error ZeroShardingTableSizeLimit();
+
     string private constant _NAME = "ParametersStorage";
     // protocol treasury fee (`protocolTreasuryFee`, `protocolTreasury`,
     // `MAX_PROTOCOL_TREASURY_FEE`) skimmed from the staker-bound TRAC on
     // every paid publish / update / lifetime-extension.
-    string private constant _VERSION = "10.0.2";
+    string private constant _VERSION = "10.0.3";
 
     uint96 public minimumStake;
     uint96 public maximumStake;
@@ -172,6 +174,12 @@ contract ParametersStorage is INamed, IVersioned, HubDependent {
     }
 
     function setShardingTableSizeLimit(uint16 shardingTableSizeLimit_) external onlyOwnerOrMultiSigOwner {
+        // Reject 0: ShardingTable._insertNode now enforces this cap
+        // (`nodesCount >= limit` reverts ShardingTableIsFull), so a 0 limit would
+        // freeze ALL node admission (even the first insert), bricking staking. 0
+        // is never a meaningful table size — reject it rather than let it act as
+        // an implicit pause switch.
+        if (shardingTableSizeLimit_ == 0) revert ZeroShardingTableSizeLimit();
         shardingTableSizeLimit = shardingTableSizeLimit_;
 
         emit ParameterChanged("shardingTableSizeLimit", shardingTableSizeLimit);

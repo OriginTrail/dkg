@@ -78,11 +78,11 @@ describe("DkgNodePlugin", () => {
     });
 
 
-    it('dkg_assertion_promote description points to dkg_shared_memory_publish as the next step', () => {
-      // dkg_publish is a one-shot write-AND-publish helper. After promote the
-      // data is already in SWM, so the correct finalizer is
-      // dkg_shared_memory_publish — calling dkg_publish would append
-      // duplicates. The promote description must steer agents correctly.
+    it('dkg_knowledge_asset_share description points to dkg_knowledge_asset_publish as the next step', () => {
+      // rc.17 (CONTRACT §2 promote→share, §1 Stage5): after a FULL share the
+      // draft auto-seals best-effort and the publish-ready finalizer is the
+      // per-KA dkg_knowledge_asset_publish. The share description must steer the
+      // agent to it and explain the subset-is-not-publishable rule (§5).
       const plugin = new DkgNodePlugin();
       const tools: OpenClawTool[] = [];
       plugin.register({
@@ -92,15 +92,17 @@ describe("DkgNodePlugin", () => {
         on: () => {},
         logger: {},
       });
-      const promote = tools.find((t) => t.name === 'dkg_assertion_promote')!;
-      expect(promote.description).toContain('dkg_shared_memory_publish');
-      expect(promote.description).toMatch(/NOT dkg_publish/);
+      const share = tools.find((t) => t.name === 'dkg_knowledge_asset_share')!;
+      expect(share.description).toContain('dkg_knowledge_asset_publish');
+      expect(share.description).toMatch(/auto-seal/i);
+      // §5 subset-vs-full language must be present.
+      expect(share.description).toMatch(/NOT publishable to Verifiable Memory/i);
     });
 
 
-    it('dkg_assertion_write escapes every N-Triples ECHAR control character in literal objects', async () => {
+    it('dkg_knowledge_asset_write escapes every N-Triples ECHAR control character in literal objects', async () => {
       const { fetchMock, byName } = setupPluginWithFetch({ written: 1 });
-      await byName.get('dkg_assertion_write')!.execute('tc', {
+      await byName.get('dkg_knowledge_asset_write')!.execute('tc', {
         context_graph_id: 'ctx',
         name: 'notes',
         quads: [

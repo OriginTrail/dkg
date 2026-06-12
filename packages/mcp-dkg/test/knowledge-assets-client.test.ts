@@ -115,4 +115,24 @@ describe('DkgClient knowledge-assets — client-side precondition guards (no moc
       }),
     ).rejects.toThrow(/require non-empty quads/);
   });
+
+  it('createKnowledgeAsset rejects finalize-only fields when finalize:false before HTTP (daemon parity)', async () => {
+    await expect(
+      client().createKnowledgeAsset({
+        contextGraphId: 'cg-1',
+        name: 'f',
+        authorAgentAddress: '0xauthor',
+        finalize: false,
+        quads: [{ subject: 's', predicate: 'p', object: 'o' }],
+      }),
+    ).rejects.toThrow(/require non-empty quads and finalize !== false/);
+  });
 });
+
+// The retired fake-fetcher versions of the wire-shape tests (per-quad `graph`
+// stripping on write, `finalize:false` forwarding, omit-finalize default) and
+// the `publishQuads` failure-recovery contracts now live as REAL round-trips
+// in `mcp-tool-surface.integration.test.ts`: the seal contract is proven by
+// the real daemon's VM_PUBLISH_PRECONDITION 409, and the create-phase
+// recovery error by a genuinely failing create (nonexistent context graph) —
+// not a canned response.

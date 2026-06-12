@@ -277,19 +277,19 @@ describe.skipIf(!ENABLED)('MCP tool surface ↔ live daemon (no mocks)', () => {
     const root = `urn:mcpts:${RUN}:s1`;
     const langTagged = '"hello world"@en';
 
-    it('dkg_assertion_create opens a WM draft', async () => {
-      const text = notError(await server.call('dkg_assertion_create', { name: aName, projectId: CG }), 'assertion_create');
+    it('dkg_knowledge_asset_create opens a WM draft', async () => {
+      const text = notError(await server.call('dkg_knowledge_asset_create', { name: aName, projectId: CG }), 'assertion_create');
       expect(text).toMatch(/Created assertion|already exists/);
     });
 
-    it('dkg_assertion_create is idempotent (already exists on re-create)', async () => {
-      const text = notError(await server.call('dkg_assertion_create', { name: aName, projectId: CG }), 'assertion_create#2');
+    it('dkg_knowledge_asset_create is idempotent (already exists on re-create)', async () => {
+      const text = notError(await server.call('dkg_knowledge_asset_create', { name: aName, projectId: CG }), 'assertion_create#2');
       expect(text).toMatch(/already exists/i);
     });
 
-    it('dkg_assertion_write appends quads (incl. an @en literal)', async () => {
+    it('dkg_knowledge_asset_write appends quads (incl. an @en literal)', async () => {
       const text = notError(
-        await server.call('dkg_assertion_write', {
+        await server.call('dkg_knowledge_asset_write', {
           name: aName,
           projectId: CG,
           quads: [
@@ -302,30 +302,149 @@ describe.skipIf(!ENABLED)('MCP tool surface ↔ live daemon (no mocks)', () => {
       expect(text).toMatch(/Wrote 2 quad/);
     });
 
-    it('dkg_assertion_query dumps the draft and preserves the @en tag', async () => {
-      const text = notError(await server.call('dkg_assertion_query', { name: aName, projectId: CG }), 'assertion_query');
+    it('dkg_knowledge_asset_query dumps the draft and preserves the @en tag', async () => {
+      const text = notError(await server.call('dkg_knowledge_asset_query', { name: aName, projectId: CG }), 'assertion_query');
       expect(text).toMatch(/2 quad/);
       // The @en lang-tag must round-trip through the real daemon + JSON dump.
       expect(text).toContain('@en');
     });
 
-    it('dkg_assertion_promote promotes a root entity to SWM', async () => {
+    it('dkg_knowledge_asset_share promotes a root entity to SWM', async () => {
       const text = notError(
-        await server.call('dkg_assertion_promote', { name: aName, projectId: CG, entities: [root] }),
-        'assertion_promote',
+        await server.call('dkg_knowledge_asset_share', { name: aName, projectId: CG, entities: [root] }),
+        'assertion_share',
       );
-      expect(text).toMatch(/Promoted/);
+      expect(text).toMatch(/Shared 1 entity/);
     });
 
-    it('dkg_assertion_history returns a lifecycle descriptor', async () => {
-      notError(await server.call('dkg_assertion_history', { name: aName, projectId: CG }), 'assertion_history');
+    it('share MOVES the promoted quads WM → SWM (the real daemon empties the draft)', async () => {
+      // rc.17 contract: promote/share deletes the shared subset from the WM
+      // draft (production `store.delete(... graph: wmGraphUri)`). Both quads
+      // above share the promoted root, so the post-share WM dump must be
+      // empty — proven against the REAL store, not a hand-model of it.
+      const text = notError(await server.call('dkg_knowledge_asset_query', { name: aName, projectId: CG }), 'post-share query');
+      expect(text).toMatch(/0 quad/);
     });
 
-    it('dkg_assertion_import_file imports a local markdown file', async () => {
+    it('dkg_knowledge_asset_history returns a lifecycle descriptor', async () => {
+      notError(await server.call('dkg_knowledge_asset_history', { name: aName, projectId: CG }), 'assertion_history');
+    });
+
+    // ── rc.17 seal contract + the 3 new lifecycle verbs, end-to-end ──
+    // finalize seals the WHOLE draft; a SUBSET share does NOT auto-seal;
+    // vm/publish reconstructs the seal's root set so it must hard-fail on
+    // an unsealed draft. All proven by the REAL daemon's responses (the
+    // retired FakeClient hand-modeled exactly these rules — and could
+    // silently diverge from them).
+    describe('seal contract: subset-share → publish blocked → finalize → publish → pull_from', () => {
+      const sName = `${RUN}-seal`;
+      const sRoot = `urn:mcpts:${RUN}:seal1`;
+      const sOther = `urn:mcpts:${RUN}:seal2`;
+
+      it('create + write a two-root draft', async () => {
+        notError(await server.call('dkg_knowledge_asset_create', { name: sName, projectId: CG }), 'seal:create');
+        const text = notError(
+          await server.call('dkg_knowledge_asset_write', {
+            name: sName,
+            projectId: CG,
+            quads: [
+              { subject: sRoot, predicate: RDF_TYPE, object: 'urn:mcpts:Note' },
+              { subject: sOther, predicate: RDF_TYPE, object: 'urn:mcpts:Note' },
+            ],
+          }),
+          'seal:write',
+        );
+        expect(text).toMatch(/Wrote 2 quad/);
+      });
+
+      it('a SUBSET share does not auto-seal, and leaves the unshared root in WM', async () => {
+        notError(
+          await server.call('dkg_knowledge_asset_share', { name: sName, projectId: CG, entities: [sRoot] }),
+          'seal:subset-share',
+        );
+        // Only sRoot's quad moved out of the WM draft; sOther's stays.
+        const text = notError(await server.call('dkg_knowledge_asset_query', { name: sName, projectId: CG }), 'seal:post-subset-query');
+        expect(text).toMatch(/1 quad/);
+        expect(text).toContain(sOther);
+      });
+
+      it('publish on the UNSEALED draft is rejected by the real daemon', async () => {
+        const res = await server.call('dkg_knowledge_asset_publish', { name: sName, projectId: CG });
+        expect(res.isError, 'publish must fail on an unsealed draft (subset share does not auto-seal)').toBe(true);
+        expect(res.content[0].text).toMatch(/seal|finaliz|precondition/i);
+      });
+
+      it('dkg_knowledge_asset_finalize seals the draft', async () => {
+        notError(await server.call('dkg_knowledge_asset_finalize', { name: sName, projectId: CG }), 'seal:finalize');
+      });
+
+      it('dkg_knowledge_asset_pull_from plumbs the route and surfaces the daemon seal-requirement verbatim (GH #1094 live)', async () => {
+        // Verified against the REAL daemon (every reachable path probed:
+        // wm/finalize-then-share, share-all auto-seal, and even the default
+        // atomic create that returns a merkleRoot): the route's "sealed
+        // entity list" store is never populated, so pull-from 500s with
+        // "No sealed entity list … pull-from requires a finalized assertion"
+        // on ALL paths — the GH #1094 bug (red repro in the devnet
+        // issue-liveness suite; fix tracked on PR #1107). What the TOOL
+        // SURFACE owns — reaching the right route and rendering the daemon's
+        // response verbatim — is exactly what this asserts. The moment the
+        // #1094 fix lands and the route starts seeding drafts, this test goes
+        // red and MUST be upgraded to the positive leg:
+        //   share(all) → pull_from {layer:"swm"/"vm", onConflict:"replace"}
+        //   → expect(/Seeded a WM draft/).
+        notError(
+          await server.call('dkg_knowledge_asset_share', { name: sName, projectId: CG }),
+          'seal:share-all',
+        );
+        const res = await server.call('dkg_knowledge_asset_pull_from', { name: sName, projectId: CG, layer: 'swm', onConflict: 'replace' });
+        expect(res.isError, 'pull_from unexpectedly succeeded — #1094 fix landed? Upgrade this test to the positive seeding leg.').toBe(true);
+        expect(res.content[0].text).toMatch(/No sealed entity list|requires a finalized assertion/);
+      });
+
+      it(
+        'finalize → share(all) → publish mints the sealed asset on-chain (canonical order)',
+        async () => {
+          // The real daemon's publish reconstructs the seal's root set OUT OF
+          // SWM — the earlier subset share only moved sRoot there, so the
+          // sealed remainder had to be shared too (done above) before publish
+          // can select it. (Verified live: publishing without that share 409s
+          // with "No quads in shared memory … matching selection".)
+          const text = notError(
+            await server.call('dkg_knowledge_asset_publish', { name: sName, projectId: CG }),
+            'seal:publish',
+          );
+          expect(text).toMatch(/did:dkg:/);
+        },
+        PUBLISH_TIMEOUT_MS,
+      );
+    });
+
+    it('write accepts (and the client strips) a forged per-quad graph — real daemon round-trip', async () => {
+      // CONTRACT §A: the daemon pins quads to the per-KA WM graph; the
+      // client drops any caller-supplied `graph` before the POST. Proven
+      // here by the real daemon ACCEPTING the write and the quad landing
+      // in the KA's WM draft (a non-stripped graph would either 400 or
+      // land outside the draft and break the query-back).
+      const gName = `${RUN}-graphstrip`;
+      notError(await server.call('dkg_knowledge_asset_create', { name: gName, projectId: CG }), 'graphstrip:create');
+      notError(
+        await server.call('dkg_knowledge_asset_write', {
+          name: gName,
+          projectId: CG,
+          quads: [{ subject: `urn:mcpts:${RUN}:g1`, predicate: RDF_TYPE, object: 'urn:mcpts:Note', graph: 'urn:my-graph:forged' }],
+        }),
+        'graphstrip:write',
+      );
+      const text = notError(await server.call('dkg_knowledge_asset_query', { name: gName, projectId: CG }), 'graphstrip:query');
+      expect(text).toMatch(/1 quad/);
+      expect(text).toContain(`urn:mcpts:${RUN}:g1`);
+    });
+
+    it('dkg_knowledge_asset_import_file imports a local markdown file', async () => {
       const filePath = path.join(tempDir, 'notes.md');
       await writeFile(filePath, '# Imported Heading\n\nA short markdown body for extraction.\n', 'utf-8');
       const text = notError(
-        await server.call('dkg_assertion_import_file', { name: `${RUN}-import`, projectId: CG, filePath }),
+        await server.call('dkg_knowledge_asset_import_file', { name: `${RUN}-import`, projectId: CG, filePath }),
         'assertion_import_file',
       );
       expect(text).toMatch(/Imported 'notes\.md'/);
@@ -358,9 +477,9 @@ describe.skipIf(!ENABLED)('MCP tool surface ↔ live daemon (no mocks)', () => {
         expect(trioUri, 'daemon import response must carry assertionUri').toMatch(/^did:dkg:/);
       });
 
-      it('dkg_import_artifact_resolve resolves the imported artifact metadata', async () => {
+      it('dkg_knowledge_asset_import_artifact_resolve resolves the imported artifact metadata', async () => {
         const text = notError(
-          await server.call('dkg_import_artifact_resolve', { projectId: CG, assertionUri: trioUri }),
+          await server.call('dkg_knowledge_asset_import_artifact_resolve', { projectId: CG, assertionUri: trioUri }),
           'import_artifact_resolve',
         );
         // Deterministic metadata from the REAL store: the source file hash
@@ -369,9 +488,9 @@ describe.skipIf(!ENABLED)('MCP tool surface ↔ live daemon (no mocks)', () => {
         expect(text).toMatch(/"canReadMarkdown": true/);
       });
 
-      it('dkg_import_artifact_read_markdown returns the real stored bytes', async () => {
+      it('dkg_knowledge_asset_import_artifact_read_markdown returns the real stored bytes', async () => {
         const text = notError(
-          await server.call('dkg_import_artifact_read_markdown', { projectId: CG, assertionUri: trioUri, maxBytes: 4096 }),
+          await server.call('dkg_knowledge_asset_import_artifact_read_markdown', { projectId: CG, assertionUri: trioUri, maxBytes: 4096 }),
           'import_artifact_read_markdown',
         );
         // The exact heading written above must come back out of the
@@ -379,9 +498,9 @@ describe.skipIf(!ENABLED)('MCP tool surface ↔ live daemon (no mocks)', () => {
         expect(text).toContain(trioHeading);
       });
 
-      it('dkg_semantic_enrichment_write appends model triples with provenance', async () => {
+      it('dkg_knowledge_asset_semantic_enrichment_write appends model triples with provenance', async () => {
         const text = notError(
-          await server.call('dkg_semantic_enrichment_write', {
+          await server.call('dkg_knowledge_asset_semantic_enrichment_write', {
             projectId: CG,
             assertionUri: trioUri,
             semanticQuads: [
@@ -396,7 +515,7 @@ describe.skipIf(!ENABLED)('MCP tool surface ↔ live daemon (no mocks)', () => {
 
       it('zod (.strict()) rejects enrichment quads that smuggle a graph field', async () => {
         await expect(
-          server.call('dkg_semantic_enrichment_write', {
+          server.call('dkg_knowledge_asset_semantic_enrichment_write', {
             projectId: CG,
             assertionUri: trioUri,
             semanticQuads: [
@@ -407,7 +526,7 @@ describe.skipIf(!ENABLED)('MCP tool surface ↔ live daemon (no mocks)', () => {
       });
     });
 
-    it('dkg_assertion_discard drops the WM draft (real daemon semantics)', async () => {
+    it('dkg_knowledge_asset_discard drops the WM draft (real daemon semantics)', async () => {
       // NOTE: the retired FakeClient modeled discard as a permanent
       // tombstone that made later writes throw. The REAL daemon treats
       // discard as "drop the current WM draft" — querying afterwards shows
@@ -415,34 +534,34 @@ describe.skipIf(!ENABLED)('MCP tool surface ↔ live daemon (no mocks)', () => {
       // here is exactly the false-confidence we are removing, so this pins
       // the daemon's actual contract instead.
       const dName = `${RUN}-discard`;
-      notError(await server.call('dkg_assertion_create', { name: dName, projectId: CG }), 'discard:create');
+      notError(await server.call('dkg_knowledge_asset_create', { name: dName, projectId: CG }), 'discard:create');
       notError(
-        await server.call('dkg_assertion_write', {
+        await server.call('dkg_knowledge_asset_write', {
           name: dName,
           projectId: CG,
           quads: [{ subject: `urn:mcpts:${RUN}:d`, predicate: 'urn:p', object: '"v"' }],
         }),
         'discard:write',
       );
-      const before = notError(await server.call('dkg_assertion_query', { name: dName, projectId: CG }), 'discard:query-before');
+      const before = notError(await server.call('dkg_knowledge_asset_query', { name: dName, projectId: CG }), 'discard:query-before');
       expect(before).toMatch(/1 quad/);
-      notError(await server.call('dkg_assertion_discard', { name: dName, projectId: CG }), 'discard');
-      const after = notError(await server.call('dkg_assertion_query', { name: dName, projectId: CG }), 'discard:query-after');
+      notError(await server.call('dkg_knowledge_asset_discard', { name: dName, projectId: CG }), 'discard');
+      const after = notError(await server.call('dkg_knowledge_asset_query', { name: dName, projectId: CG }), 'discard:query-after');
       expect(after, 'discard should have dropped the WM draft').toMatch(/0 quad/);
     });
 
     // ── Client-side guards: zod + pre-HTTP validation. These hold with
     // NO daemon mock — the real client/zod reject before any network call.
     it('zod rejects a bad assertion-name slug before any daemon call', async () => {
-      await expect(server.call('dkg_assertion_create', { name: 'Bad Name With Spaces', projectId: CG })).rejects.toThrow();
+      await expect(server.call('dkg_knowledge_asset_create', { name: 'Bad Name With Spaces', projectId: CG })).rejects.toThrow();
     });
 
     it('zod rejects an empty quads array on write', async () => {
-      await expect(server.call('dkg_assertion_write', { name: aName, projectId: CG, quads: [] })).rejects.toThrow();
+      await expect(server.call('dkg_knowledge_asset_write', { name: aName, projectId: CG, quads: [] })).rejects.toThrow();
     });
 
     it('promote rejects an empty entities array (omit or non-empty)', async () => {
-      const res = await server.call('dkg_assertion_promote', { name: aName, projectId: CG, entities: [] });
+      const res = await server.call('dkg_knowledge_asset_share', { name: aName, projectId: CG, entities: [] });
       expect(res.isError).toBe(true);
       expect(res.content[0].text).toMatch(/non-empty array/);
     });

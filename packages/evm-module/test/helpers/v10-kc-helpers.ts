@@ -355,13 +355,13 @@ export async function buildPublishParams(args: {
    */
   reservedKaId?: bigint;
   /**
-   * RFC-39 Phase A.5 curated-CG ciphertext commitment (optional).
-   * Defaults to `bytes32(0)` + `0` — the explicit "no commitment" sentinel
-   * the contract treats as: legal on public CGs (default behavior); legal
-   * on curated CGs (legacy / pre-LU-11 path — KC won't be sampleable in
-   * the curated draw). Curated-CG tests that exercise the sampleable path
-   * MUST set both to non-zero values; the contract enforces the
-   * paired-or-zero invariant via `IncompleteCiphertextCommitment`.
+   * RFC-39 Phase A.5 curated-CG ciphertext commitment.
+   * Defaults to `bytes32(0)` + `0`, which is legal only on public CGs.
+   * Curated-CG publishes MUST set both fields to non-zero values; otherwise
+   * KAV10 reverts before the KA can enter value-weighted sampling.
+   * The contract enforces both the required-curated and paired-or-zero
+   * invariants via `CuratedCGRequiresCiphertextCommitment` and
+   * `IncompleteCiphertextCommitment`.
    *
    * Note: the on-chain ACK digest DOES include these fields plus `isImmutable`
    * (`KnowledgeAssetsLifecycle._executePublishCore` packs
@@ -529,7 +529,10 @@ export async function buildUpdateParams(args: {
   newMerkleLeafCount?: number;
   /**
    * RFC-39 curated-CG ciphertext commitment for the update (optional).
-   * Defaults to `bytes32(0)` + `0`. The on-chain ACK digest binds BOTH fields
+   * Defaults to `bytes32(0)` + `0`, which is legal on public-CG updates and
+   * metadata-only updates for legacy curated KAs that do not yet have a
+   * commitment. Curated paid updates MUST set both fields to non-zero values.
+   * The on-chain ACK digest binds BOTH fields
    * (`KnowledgeAssetsLifecycle._executeUpdateCore`), so they MUST be passed
    * here — not spread onto the returned struct after signing — or the receiver
    * quorum signatures fail recovery with `SignerIsNotNodeOperator`.

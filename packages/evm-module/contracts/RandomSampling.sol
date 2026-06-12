@@ -26,7 +26,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "RandomSampling";
-    string private constant _VERSION = "10.0.3";
+    string private constant _VERSION = "10.0.4";
     uint256 public constant SCALE18 = 1e18;
 
     /// @notice Maximum number of in-CG resamples when the picker hits an
@@ -452,9 +452,23 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     /**
-     * @dev Builds the per-call randomness seed from block state + caller. Same
-     *      entropy mix as the V8 implementation — kept identical to preserve
-     *      seed quality across the Phase 10 upgrade.
+     * @dev Builds the per-call randomness seed from block state + caller.
+     *
+     *      AUDIT INTERIM (v10.0.4): `tx.gasprice` and `block.timestamp` were
+     *      removed from the mix. `tx.gasprice` is fully chosen by the caller
+     *      at zero cost, and `previewChallengeForSeed` is public — together
+     *      they let a node grind gas price off-chain in a SINGLE tx until the
+     *      drawn challenge lands on a chunk it actually stores, defeating the
+     *      proof-of-storage guarantee. `block.timestamp` adds proposer wiggle
+     *      to the same search. Dropping both downgrades the attack from
+     *      "free deterministic targeting in one tx" to "must be the block
+     *      proposer and grind constrained block fields".
+     *
+     *      This is NOT a complete fix: the remaining `prevrandao` /
+     *      `blockhash` inputs are still proposer-influenceable. The durable
+     *      fix is commit–reveal (commit in period N, draw against period
+     *      N+1's then-unknown block) or a VRF the node cannot grind — a
+     *      coordinated node+contract release tracked separately.
      */
     function _deriveChallengeSeed(address originalSender) internal view returns (bytes32) {
         return
@@ -463,8 +477,6 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
                     block.difficulty,
                     blockhash(block.number - ((block.difficulty % 256) + 1)),
                     originalSender,
-                    block.timestamp,
-                    tx.gasprice,
                     uint8(1) // sector = 1 by default
                 )
             );

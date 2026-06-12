@@ -103,7 +103,11 @@ async function publishOneKCV10(opts: {
     ethers.parseEther('500000'),
   );
 
-  const contextGraphId = await createTestContextGraph(adapter);
+  // Public CG (accessPolicy 0): publishOneKCV10 exercises §F2 mint / replay /
+  // byte-size lifecycle mechanics with PLAINTEXT, not curated ciphertext. A
+  // curated CG would (correctly) require a ciphertext commitment the plaintext
+  // path never carries, reverting with CuratedCGRequiresCiphertextCommitment.
+  const contextGraphId = await createTestContextGraph(adapter, undefined, 0);
 
   const kaCount = opts.kaCount ?? 1;
   const byteSize = opts.byteSize ?? 256n;

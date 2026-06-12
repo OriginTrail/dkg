@@ -16,6 +16,7 @@ const CONTEXT_GRAPH = 'publish-boundary';
 const CONTEXT_GRAPH_URI = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const SWM_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
 const SWM_META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
+const PER_KA_SWM_GRAPH = `${SWM_GRAPH}/0x1111111111111111111111111111111111111111/1`;
 const WORKSPACE_OWNER_PREDICATE = 'http://dkg.io/ontology/workspaceOwner';
 
 function q(subject: string, predicate = 'http://schema.org/name', object = '"value"', graph = SWM_GRAPH): Quad {
@@ -67,6 +68,22 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     const publishArgs = publishSpy.mock.calls[0][0];
     expect(publishArgs.quads).toEqual([
       { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"value"', graph: '' },
+    ]);
+  });
+
+  it('selection "all" reads promoted per-KA SWM graphs', async () => {
+    const { publisher, store, publishSpy } = await makePublisher();
+    await store.insert([
+      q('urn:test:root:one', 'http://schema.org/name', '"promoted"', PER_KA_SWM_GRAPH),
+    ]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all')).resolves.toMatchObject({
+      status: 'tentative',
+    });
+
+    expect(publishSpy).toHaveBeenCalledTimes(1);
+    expect(publishSpy.mock.calls[0][0].quads).toEqual([
+      { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"promoted"', graph: '' },
     ]);
   });
 
@@ -129,6 +146,23 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       ]),
     );
     expect(publishArgs.quads.every((qq) => qq.subject === 'urn:test:root:one')).toBe(true);
+  });
+
+  it('explicit rootEntities selection reads promoted per-KA SWM graphs', async () => {
+    const { publisher, store, publishSpy } = await makePublisher();
+    await store.insert([
+      q('urn:test:root:one', 'http://schema.org/name', '"promoted"', PER_KA_SWM_GRAPH),
+      q('urn:test:root:two', 'http://schema.org/name', '"bare"'),
+    ]);
+
+    await expect(
+      publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: ['urn:test:root:one'] }),
+    ).resolves.toMatchObject({ status: 'tentative' });
+
+    expect(publishSpy).toHaveBeenCalledTimes(1);
+    expect(publishSpy.mock.calls[0][0].quads).toEqual([
+      { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"promoted"', graph: '' },
+    ]);
   });
 
   it('publishes both explicit rootEntities as one KA when they resolve to multiple payload roots (OT-RFC-44)', async () => {

@@ -47,7 +47,9 @@ describe('subtractFinalizedExactQuads', () => {
     const provider = createProvider();
     const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
     await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
-    const cgId = await createTestContextGraph();
+    // Public CG (accessPolicy 0): these tests publish PLAINTEXT to exercise async-lift
+    // subtraction mechanics, not curated/ciphertext semantics (#1072).
+    const cgId = await createTestContextGraph(undefined, undefined, 0);
     CONTEXT_GRAPH = cgId.toString();
     _provider = provider;
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);

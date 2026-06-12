@@ -92,7 +92,11 @@ beforeAll(async () => {
   await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
 
   const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-  const cgId = await createTestContextGraph(chain);
+  // PR #1072: these regression tests publish PLAINTEXT to exercise lifecycle /
+  // update / ordering / SWM / provenance mechanics (not curated/ciphertext
+  // semantics), so use a PUBLIC CG (accessPolicy 0) that does not require a
+  // ciphertext commitment.
+  const cgId = await createTestContextGraph(chain, undefined, 0);
   CONTEXT_GRAPH = String(cgId);
   DATA_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
   WORKSPACE_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;

@@ -63,10 +63,6 @@ function optionalContextGraphId(contextGraphIdOrUri: string | undefined): string
   return normalizeContextGraphId(contextGraphIdOrUri) || undefined;
 }
 
-function toContextGraphUri(contextGraphIdOrUri: string): string {
-  return `${CONTEXT_GRAPH_URI_PREFIX}${normalizeContextGraphId(contextGraphIdOrUri)}`;
-}
-
 /**
  * Author attestation produced by an external signer. Mirrors the
  * `packages/cli/src/api-client.ts` reference so finalize / create KA flows can
@@ -122,6 +118,7 @@ function assertExclusiveAuthorFields(args: {
 
 function assertCreateFinalizeFieldsHaveQuads(args: {
   quads?: unknown[];
+  finalize?: boolean;
   authorAgentAddress?: string;
   preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
   schemeVersion?: number;
@@ -130,8 +127,11 @@ function assertCreateFinalizeFieldsHaveQuads(args: {
     args.authorAgentAddress != null ||
     args.preSignedAuthorAttestation != null ||
     args.schemeVersion !== undefined;
-  if (hasFinalizeOnlyField && !(Array.isArray(args.quads) && args.quads.length > 0)) {
-    throw new Error('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads');
+  // These fields only take effect at finalize, so they require both non-empty
+  // quads AND finalize !== false — mirrors the daemon create-route guard.
+  const willFinalize = Array.isArray(args.quads) && args.quads.length > 0 && args.finalize !== false;
+  if (hasFinalizeOnlyField && !willFinalize) {
+    throw new Error('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads and finalize !== false');
   }
 }
 
@@ -1061,35 +1061,108 @@ export class DkgClient {
   }): Promise<Record<string, unknown>> {
     const cgId = normalizeContextGraphId(args.contextGraphId);
     const assertionName = `mcp-publish-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const quadsWithGraph = args.quads.map((q) => ({
+    // The write wire shape is `{subject, predicate, object}` only — the daemon
+    // pins every quad to the per-KA WM graph itself, so a client-supplied
+    // `graph` is ignored/overridden (CONTRACT §0 invariant 2). Auto-finalize is
+    // driven purely by non-empty `quads` (CONTRACT §1 Stage1), so `finalize:true`
+    // is unread and dropped. `promote:true` is kept: the create route reads it as
+    // the `alsoShareSwm` alias (CONTRACT §1 Stage1). Mirrors the OpenClaw adapter.
+    const wireQuads = args.quads.map((q) => ({
       subject: q.subject,
       predicate: q.predicate,
       object: q.object,
-      graph: q.graph || toContextGraphUri(cgId),
     }));
-    const created = await this.request<{ assertionUri?: string; seal?: Record<string, unknown> }>(
-      'POST',
-      '/api/knowledge-assets',
-      {
-        contextGraphId: cgId,
-        name: assertionName,
-        quads: quadsWithGraph,
-        finalize: true,
-        promote: true,
-      },
-    );
-    const published = await this.request<Record<string, unknown>>(
-      'POST',
-      '/api/shared-memory/publish',
-      {
-        contextGraphId: cgId,
-        assertionName,
-      },
-    );
+    // FIX W — wrap the create call: on a HARD failure the generated
+    // `assertionName` would otherwise be lost in the throw, so a retry mints a
+    // DUPLICATE if the asset was actually created (e.g. the daemon committed but
+    // the HTTP response failed). Surface the name + recovery guidance.
+    let created: {
+      assertionUri?: string;
+      // The create response carries `merkleRoot` (the seal digest), not a `seal`
+      // object (knowledge-assets.ts:570).
+      merkleRoot?: string;
+      errors?: Array<{ phase?: string; error?: string }>;
+    };
+    try {
+      created = await this.request(
+        'POST',
+        '/api/knowledge-assets',
+        {
+          contextGraphId: cgId,
+          name: assertionName,
+          quads: wireQuads,
+          promote: true,
+        },
+      );
+    } catch (e) {
+      const err = new Error(
+        `Create failed for one-shot publish (asset name "${assertionName}"): ${e instanceof Error ? e.message : String(e)}. ` +
+        `The asset MAY have been created server-side even though the response failed. Before retrying, check via ` +
+        `dkg_knowledge_asset_history for "${assertionName}" to avoid minting a DUPLICATE. A created asset is ` +
+        `auto-shared to SWM (its working-memory draft is empty), so use _history (lifecycle state regardless ` +
+        `of layer) for existence — NOT dkg_knowledge_asset_query, which reads the empty WM draft and would ` +
+        `falsely report "not created". If it exists, re-share + publish it by name rather than re-running this tool.`,
+      ) as Error & Record<string, unknown>;
+      err.assertionName = assertionName;
+      err.phase = 'create';
+      err.cause = e;
+      throw err;
+    }
+
+    // FIX A — the create route returns HTTP 207 `{ created:true, …, errors:[…] }`
+    // when create+finalize succeeded but the `promote:true` share phase FAILED
+    // (knowledge-assets.ts:614). `this.request` treats 207 as success (2xx, no
+    // throw), so without this check we would publish an UNSHARED assertion and
+    // mask the real error. If the share failed, do NOT publish — surface the
+    // sealed-but-unshared asset by name so the caller can recover with the
+    // lifecycle tools instead of recreating it.
+    if (Array.isArray(created.errors) && created.errors.length > 0) {
+      const shareErr = created.errors.find((e) => e?.phase === 'swm-share') ?? created.errors[0];
+      const err = new Error(
+        `Publish aborted: the asset was created + sealed in Working Memory as "${assertionName}", but ` +
+        `sharing it to Shared Working Memory FAILED (${shareErr?.error ?? 'unknown error'}). The on-chain ` +
+        `publish was NOT attempted. Do NOT recreate — re-share the existing sealed asset by name with ` +
+        `dkg_knowledge_asset_share, then publish it with dkg_knowledge_asset_publish.`,
+      ) as Error & Record<string, unknown>;
+      err.assertionName = assertionName;
+      err.assertionUri = created.assertionUri;
+      if (created.merkleRoot) err.merkleRoot = created.merkleRoot;
+      err.phase = shareErr?.phase ?? 'swm-share';
+      err.partial = true;
+      throw err;
+    }
+
+    // FIX B — the asset is created + sealed + shared; only the on-chain publish
+    // remains. If it fails, the random `assertionName` would be lost and the next
+    // dkg_publish would mint a DUPLICATE. Catch + rethrow carrying the name so the
+    // caller can retry the publish of the existing asset, not recreate it.
+    let published: Record<string, unknown>;
+    try {
+      published = await this.request<Record<string, unknown>>(
+        'POST',
+        '/api/shared-memory/publish',
+        {
+          contextGraphId: cgId,
+          assertionName,
+        },
+      );
+    } catch (e) {
+      const err = new Error(
+        `Publish failed for asset "${assertionName}": ${e instanceof Error ? e.message : String(e)}. The asset ` +
+        `is created + sealed + shared to Shared Working Memory; only the on-chain publish failed. Do NOT ` +
+        `recreate — retry the publish of this asset by name with dkg_knowledge_asset_publish.`,
+      ) as Error & Record<string, unknown>;
+      err.assertionName = assertionName;
+      err.assertionUri = created.assertionUri;
+      if (created.merkleRoot) err.merkleRoot = created.merkleRoot;
+      err.phase = 'vm-publish';
+      err.cause = e;
+      throw err;
+    }
     return {
       ...published,
       ...(created.assertionUri ? { assertionUri: created.assertionUri } : {}),
-      ...(created.seal ? { seal: created.seal } : {}),
+      ...(created.merkleRoot ? { merkleRoot: created.merkleRoot } : {}),
     };
   }
 
@@ -1155,6 +1228,13 @@ export class DkgClient {
     name: string;
     subGraphName?: string;
     quads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
+    /**
+     * Seal the draft after writing `quads` (default true). `false` keeps an
+     * editable WM draft that never touches the chain — the only lifecycle
+     * available to local-only / on-chain-unregistered CGs. Cannot be combined
+     * with `alsoShareSwm`/`alsoPublishVm` (those require a sealed assertion).
+     */
+    finalize?: boolean;
     authorAgentAddress?: string;
     preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
     schemeVersion?: number;
@@ -1169,6 +1249,7 @@ export class DkgClient {
     };
     if (args.subGraphName) body.subGraphName = args.subGraphName;
     if (args.quads) body.quads = args.quads;
+    if (args.finalize !== undefined) body.finalize = args.finalize;
     if (args.authorAgentAddress) body.authorAgentAddress = args.authorAgentAddress;
     if (args.preSignedAuthorAttestation) {
       body.preSignedAuthorAttestation = args.preSignedAuthorAttestation;
@@ -1203,15 +1284,24 @@ export class DkgClient {
   async knowledgeAssetWrite(args: {
     contextGraphId: string;
     name: string;
-    // `graph` is optional: the WM-write engine (agent.assertion.write) derives
-    // the draft's named graph when omitted — the legacy triples path relied on
-    // exactly this, so callers may pass bare subject/predicate/object.
+    // `graph` is accepted on the input for caller convenience but is STRIPPED
+    // before the POST (CONTRACT §A) — the write wire shape is
+    // {subject,predicate,object} only and the daemon pins every quad to the
+    // per-KA WM graph (§0 invariant 2), overriding any client-supplied graph.
     quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>;
     subGraphName?: string;
   }): Promise<{ written: number }> {
+    // Strip any per-quad `graph` at the client (CONTRACT §A) — not just the
+    // tool schema — so a hand-built or normalizer-emitted `graph` can't reach
+    // the wire.
+    const wireQuads = args.quads.map((q) => ({
+      subject: q.subject,
+      predicate: q.predicate,
+      object: q.object,
+    }));
     const body: Record<string, unknown> = {
       contextGraphId: normalizeContextGraphId(args.contextGraphId),
-      quads: args.quads,
+      quads: wireQuads,
     };
     if (args.subGraphName) body.subGraphName = args.subGraphName;
     return this.request<{ written: number }>(

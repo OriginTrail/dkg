@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, sharedMemoryReadBothFilter } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
@@ -1105,8 +1105,8 @@ export class DKGPublisher implements Publisher {
 
     for (const cond of options.conditions) {
       const ask = cond.expectedValue === null
-        ? `ASK { GRAPH ?g { <${cond.subject}> <${cond.predicate}> ?o } FILTER(((STRSTARTS(STR(?g), "${swmGraph}/") && !STRSTARTS(STR(?g), "${swmGraph}/staging/")) || STR(?g) = "${swmGraph}")) }`
-        : `ASK { GRAPH ?g { <${cond.subject}> <${cond.predicate}> ${cond.expectedValue} } FILTER(((STRSTARTS(STR(?g), "${swmGraph}/") && !STRSTARTS(STR(?g), "${swmGraph}/staging/")) || STR(?g) = "${swmGraph}")) }`;
+        ? `ASK { GRAPH <${swmGraph}> { <${cond.subject}> <${cond.predicate}> ?o } }`
+        : `ASK { GRAPH <${swmGraph}> { <${cond.subject}> <${cond.predicate}> ${cond.expectedValue} } }`;
       const result = await this.store.query(ask);
 
       if (result.type !== 'boolean') {
@@ -1115,7 +1115,7 @@ export class DKGPublisher implements Publisher {
 
       const shouldExist = cond.expectedValue !== null;
       if (result.value !== shouldExist) {
-        const sel = `SELECT ?o WHERE { GRAPH ?g { <${cond.subject}> <${cond.predicate}> ?o } FILTER(((STRSTARTS(STR(?g), "${swmGraph}/") && !STRSTARTS(STR(?g), "${swmGraph}/staging/")) || STR(?g) = "${swmGraph}")) } LIMIT 1`;
+        const sel = `SELECT ?o WHERE { GRAPH <${swmGraph}> { <${cond.subject}> <${cond.predicate}> ?o } } LIMIT 1`;
         const cur = await this.store.query(sel);
         const actual = cur.type === 'bindings' && cur.bindings.length > 0 ? cur.bindings[0].o ?? null : null;
         throw new StaleWriteError(cond, actual);
@@ -1230,7 +1230,7 @@ export class DKGPublisher implements Publisher {
 
     let sparql: string;
     if (selection === 'all') {
-      sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } FILTER(((STRSTARTS(STR(?g), "${swmGraph}/") && !STRSTARTS(STR(?g), "${swmGraph}/staging/")) || STR(?g) = "${swmGraph}")) }`;
+      sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } ${sharedMemoryReadBothFilter(swmGraph)} }`;
     } else {
       const roots = [...new Set(
         selection.rootEntities
@@ -1255,7 +1255,7 @@ export class DKGPublisher implements Publisher {
             || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
           )
         }
-        FILTER(((STRSTARTS(STR(?g), "${swmGraph}/") && !STRSTARTS(STR(?g), "${swmGraph}/staging/")) || STR(?g) = "${swmGraph}"))
+        ${sharedMemoryReadBothFilter(swmGraph)}
       }`;
     }
 
@@ -1990,6 +1990,13 @@ export class DKGPublisher implements Publisher {
     // `lockDurationEpochs` when one is found AND the caller did not
     // explicitly override the publish lifetime. Wallets without a PCA
     // (direct-spend branch) use the ordinary default lifetime.
+    // LU-5: pricing follows the byteSize that gets signed into the V10
+    // digest. For curated (encrypted-inline) publishes that's the
+    // ciphertext byte count; for public publishes it stays as plaintext
+    // bytes. Single source of truth so ACK pricing == chain tx pricing.
+    // Resolved BEFORE the PCA coercion below so the fundability probe can
+    // price the prospective lock-lifetime publish.
+    const effectiveByteSize = useEncryptedInline ? stagingByteSize : publicByteSize;
     let publishEpochs = explicitPublishEpochs ?? DEFAULT_PUBLISH_EPOCHS;
     if (
       explicitPublishEpochs === undefined &&
@@ -2003,11 +2010,56 @@ export class DKGPublisher implements Publisher {
         if (accountId > 0n) {
           const lockEpochs = await this.chain.getConvictionAccountLockDurationEpochs(accountId);
           if (lockEpochs > 0) {
-            publishEpochs = lockEpochs;
-            this.log.info(
-              ctx,
-              `PCA-funded publish detected (signer=${publisherSigner.address}, accountId=${accountId}) — coercing publishEpochs to lockDurationEpochs=${lockEpochs}`,
-            );
+            // Only snap the lifetime to the PCA lock if the account can
+            // actually cover THIS publish's discounted cost right now. Agent
+            // registration is consent-free (RFC-001 §3.6), so a third party
+            // can squat this signer against an underfunded PCA; since the
+            // contract's conviction branch now falls through to direct spend
+            // instead of reverting, coercing an unfundable account would
+            // publish at the PCA-lock lifetime AND full price rather than the
+            // caller's default. Price the prospective lock-lifetime publish
+            // (the exact base cost the coerced tx would carry) and ask the
+            // chain whether the PCA covers its discounted cost — a coarse
+            // "balance > 0" gate is not enough, since a nonzero-but-short
+            // account (or a few-wei squat) would still be coerced and then
+            // fall through to full-price direct spend. Adapters without the
+            // probe keep the legacy unconditional coercion.
+            let canFundDiscount = true;
+            if (typeof this.chain.convictionAccountCanCover === 'function') {
+              // The coverage probe is only meaningful against the REAL
+              // publish price. If we cannot price the prospective
+              // lock-lifetime publish — adapter lacks the quote, or the
+              // quote call reverts — treat the publish as "funding
+              // unverifiable" and do NOT coerce. Falling back to the
+              // protocol minimum (`lockEpochs` wei) would let a partial or
+              // squatted PCA pass the probe against that lower bound and
+              // then fall through to full-price direct spend at the wrong
+              // lifetime — the exact regression this gate exists to prevent.
+              if (typeof this.chain.getRequiredPublishTokenAmount !== 'function') {
+                canFundDiscount = false;
+              } else {
+                try {
+                  const quoted = await this.chain.getRequiredPublishTokenAmount(effectiveByteSize, lockEpochs);
+                  // Mirror the min-clamp applied to the real tx below.
+                  const prospectiveBaseCost = quoted > BigInt(lockEpochs) ? quoted : BigInt(lockEpochs);
+                  canFundDiscount = await this.chain.convictionAccountCanCover(accountId, prospectiveBaseCost);
+                } catch {
+                  canFundDiscount = false;
+                }
+              }
+            }
+            if (canFundDiscount) {
+              publishEpochs = lockEpochs;
+              this.log.info(
+                ctx,
+                `PCA-funded publish detected (signer=${publisherSigner.address}, accountId=${accountId}) — coercing publishEpochs to lockDurationEpochs=${lockEpochs}`,
+              );
+            } else {
+              this.log.info(
+                ctx,
+                `Signer ${publisherSigner.address} is a registered PCA agent (accountId=${accountId}) but funding for this publish's discounted cost could not be confirmed — NOT coercing publishEpochs; publishing at requested lifetime=${publishEpochs} via direct spend`,
+              );
+            }
           }
         }
       } catch (err) {
@@ -2026,11 +2078,6 @@ export class DKGPublisher implements Publisher {
         );
       }
     }
-    // LU-5: pricing follows the byteSize that gets signed into the V10
-    // digest. For curated (encrypted-inline) publishes that's the
-    // ciphertext byte count; for public publishes it stays as plaintext
-    // bytes. Single source of truth so ACK pricing == chain tx pricing.
-    const effectiveByteSize = useEncryptedInline ? stagingByteSize : publicByteSize;
     let precomputedTokenAmount = canAttemptOnChainPublish ? BigInt(publishEpochs) : 0n;
     if (canAttemptOnChainPublish && typeof this.chain.getRequiredPublishTokenAmount === 'function') {
       try {
@@ -4379,7 +4426,7 @@ export class DKGPublisher implements Publisher {
     const values = entities.map((e) => `<${e}>`).join(' ');
     // Per-KA SWM: when pulling from SWM the source spans the per-KA prefix, not one bucket.
     const sourcePattern = sourceLayer === 'swm'
-      ? `GRAPH ?g { VALUES ?root { ${values} } ?s ?p ?o . FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))) } FILTER((STRSTARTS(STR(?g), "${sourceGraph}/") && !STRSTARTS(STR(?g), "${sourceGraph}/staging/")) || STR(?g) = "${sourceGraph}")`
+      ? `GRAPH ?g { VALUES ?root { ${values} } ?s ?p ?o . FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))) } ${sharedMemoryReadBothFilter(sourceGraph)}`
       : `GRAPH <${sourceGraph}> { VALUES ?root { ${values} } ?s ?p ?o . FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))) }`;
     const gather = await this.store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE { ${sourcePattern} }`,

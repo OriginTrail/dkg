@@ -253,7 +253,7 @@ describe('@unit RandomSampling', () => {
 
   describe('version()', () => {
     it('Should return correct version', async () => {
-      expect(await RandomSampling.version()).to.equal('10.0.3');
+      expect(await RandomSampling.version()).to.equal('10.0.4');
     });
   });
 

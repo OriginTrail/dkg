@@ -135,14 +135,25 @@ const PINNED_DIGESTS: Record<string, string> = {
   // rotates the commitment.
 
   // Greenfield rename (rc.12): logic + storage pair replaces the legacy names.
-  KnowledgeAssetsLifecycle:     '45957310345c8cc8dd027ccf006bd0730e47510d72f8d14857de251788b10a52',
+  // Updated PR #1072 (RFC-39): the chain-local ABI now declares the new
+  // `CuratedCGRequiresCiphertextCommitment(uint256)` error. evm-adapter-abi
+  // resolves this contract from packages/chain/abi/ first (the evm-module copy
+  // is only a fallback), so the error had to be added here for chain-side revert
+  // decoding to name it instead of "unknown custom error". Digest now matches
+  // the evm-module ABI surface.
+  KnowledgeAssetsLifecycle:     'e9c457c5208f0a2da42ec9ced785e1241da4c1a1c6e4ef05d28828b9022ad5d1',
 
   // Re-pinned for OT-RFC-43 Option-1 (variant 1a, PR #975): deterministic
   // author-namespaced KA identity. `createKnowledgeAsset` now takes an explicit
   // caller-supplied `uint256 kaId` (the packed author-namespaced id), and two
   // guard errors were added — `KaIdAlreadyMinted(uint256)` and
   // `KaIdNamespaceMismatch(uint256,address)` — plus a deprecated accessor.
-  DKGKnowledgeAssets:           'da5e46f24dd410b30c90bad66060b9da240aa4b0426c24a1550b0e1b6168b5ea',
+  // Re-pinned again (#1080): added the O(1) `getMaxKaNumberForAuthor(address)
+  // -> int256` view so the off-chain allocator reconciles its floor with one
+  // eth_call instead of an unbounded `KnowledgeAssetCreated` log scan. Pure
+  // function-only ABI addition (events + errors unchanged); the chain-local
+  // copy is refreshed in lockstep with the evm-module ABI in the same PR.
+  DKGKnowledgeAssets:           '60d8dc58619c25fd31df1da34d4944369edbc2d5d4031dcb14f6965152c718a9',
   // V8 `KnowledgeCollection` ABI was moved to `abi/archive/` in
   // `archive-non-v10-contracts`; the pin entry is intentionally dropped.
   // Updated for SPEC_CG_MEMORY_MODEL: per-CG hosting committees and
@@ -180,7 +191,10 @@ const PINNED_DIGESTS: Record<string, string> = {
   // from staker-bound TRAC on every paid publish / update / extend by
   // `KnowledgeAssetsLifecycle` + `PublishingConviction` (no ABI change on
   // those two — internal logic + version bump only).
-  ParametersStorage:            'a152ef475986c81b4077648980156aeaa2b91541057a9ad9bfcfd969ee7feb63',
+  //
+  // Updated PR #1083: added `ZeroShardingTableSizeLimit()` for the
+  // governance guard that rejects `setShardingTableSizeLimit(0)`.
+  ParametersStorage:            '7816845cbccd120eaf44eccea56f530e9c8e8894023d0693fddcc8546161575d',
   // Added PR #470 round 3: pin the V10 NFT-backed PCA contract so that
   // any drift in its events (CostCovered / WindowSettled /
   // AccountFinalSwept / TokensAddedToEpochRange consumers) or errors

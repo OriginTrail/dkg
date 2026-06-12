@@ -267,7 +267,7 @@ class ReadMarkdownClient:
         return {"ok": True}
 
 provider._client = ReadMarkdownClient()
-result = json.loads(provider.handle_tool_call("dkg_import_artifact_read_markdown", {
+result = json.loads(provider.handle_tool_call("dkg_knowledge_asset_import_artifact_read_markdown", {
     "context_graph_id": "cg:test",
     "assertion_uri": "did:dkg:context-graph:cg:test/assertion/agent/imported",
     "max_bytes": "4096",
@@ -276,7 +276,7 @@ assert result["ok"] is True, result
 assert provider._client.calls[-1][1]["max_bytes"] == 4096, provider._client.calls
 
 for bad_max_bytes in [0, -1, 1.5, True, "   "]:
-    result = json.loads(provider.handle_tool_call("dkg_import_artifact_read_markdown", {
+    result = json.loads(provider.handle_tool_call("dkg_knowledge_asset_import_artifact_read_markdown", {
         "context_graph_id": "cg:test",
         "assertion_uri": "did:dkg:context-graph:cg:test/assertion/agent/imported",
         "max_bytes": bad_max_bytes,
@@ -293,7 +293,7 @@ class AssertionWriteClient:
         return {"ok": True}
 
 provider._client = AssertionWriteClient()
-result = json.loads(provider.handle_tool_call("dkg_assertion_write", {
+result = json.loads(provider.handle_tool_call("dkg_knowledge_asset_write", {
     "context_graph_id": "cg:test",
     "name": "notes",
     "quads": [
@@ -312,7 +312,7 @@ class SemanticClient:
         return {"ok": True}
 
 provider._client = SemanticClient()
-result = json.loads(provider.handle_tool_call("dkg_semantic_enrichment_write", {
+result = json.loads(provider.handle_tool_call("dkg_knowledge_asset_semantic_enrichment_write", {
     "context_graph_id": "cg:test",
     "assertion_uri": "did:dkg:context-graph:cg:test/assertion/agent/imported",
     "semantic_quads": [
@@ -329,7 +329,7 @@ assert provider._client.calls[-1][1] == [
 ], provider._client.calls
 assert "name" not in provider._client.calls[-1][2], provider._client.calls
 
-name_result = json.loads(provider.handle_tool_call("dkg_semantic_enrichment_write", {
+name_result = json.loads(provider.handle_tool_call("dkg_knowledge_asset_semantic_enrichment_write", {
     "context_graph_id": "cg:test",
     "assertion_uri": "did:dkg:context-graph:cg:test/assertion/agent/imported",
     "semanticAssertionName": "semantic-imported",
@@ -339,7 +339,7 @@ name_result = json.loads(provider.handle_tool_call("dkg_semantic_enrichment_writ
 }))
 assert "target assertion names are not supported" in name_result["error"], name_result
 
-graph_result = json.loads(provider.handle_tool_call("dkg_semantic_enrichment_write", {
+graph_result = json.loads(provider.handle_tool_call("dkg_knowledge_asset_semantic_enrichment_write", {
     "context_graph_id": "cg:test",
     "assertion_uri": "did:dkg:context-graph:cg:test/assertion/agent/imported",
     "semantic_quads": [
@@ -353,7 +353,7 @@ for tool_name, args in [
     ("memory_search", {"query": "alpha beta", "context_graph": "legacy"}),
     ("dkg_share", {"content": "alpha", "context_graph": "legacy"}),
     ("dkg_shared_memory_publish", {"context_graph": "legacy"}),
-    ("dkg_assertion_write", {
+    ("dkg_knowledge_asset_write", {
         "context_graph": "legacy",
         "name": "notes",
         "quads": [{"subject": "urn:s", "predicate": "urn:p", "object": "o"}],
@@ -441,20 +441,20 @@ result = json.loads(provider.handle_tool_call("dkg_shared_memory_publish", {
     "register_if_needed": True,
 }))
 assert result["success"] is True and provider._client.published is True, result
-assert "registration" in result, result
+# FIX H (#1084:1810): the already-registered short-circuit normalizes the
+# registration to a success shape — it must NOT carry the raw {success:false}.
+assert result["registration"] == {"alreadyRegistered": True}, result
 
+# dkg_publish (one-shot) routes through the ATOMIC assertionName fork
+# (client.publish_quads): create a uniquely-named sealed assertion + publish it
+# by name in one atomic mint — no per-root selection/loop (parity w/ OpenClaw+MCP).
 class PublishClient:
     def __init__(self):
-        self.shared = None
-        self.published = None
+        self.publish_quads_call = None
 
-    def share(self, context_graph_id, quads, sub_graph_name=None):
-        self.shared = (context_graph_id, quads, sub_graph_name)
-        return {"success": True}
-
-    def publish(self, context_graph_id, **kwargs):
-        self.published = (context_graph_id, kwargs)
-        return {"success": True}
+    def publish_quads(self, context_graph_id, quads, sub_graph_name=None):
+        self.publish_quads_call = (context_graph_id, quads, sub_graph_name)
+        return {"kaId": "ka", "ual": "did:dkg:1/0xabc/5", "status": "confirmed"}
 
 provider._client = PublishClient()
 result = json.loads(provider.handle_tool_call("dkg_publish", {
@@ -465,12 +465,14 @@ result = json.loads(provider.handle_tool_call("dkg_publish", {
         {"subject": "urn:root:1", "predicate": "urn:p2", "object": "three"},
     ],
 }))
-assert result["success"] is True, result
-assert result["rootEntities"] == ["urn:root:1", "urn:root:2"], result
-assert provider._client.published == (
-    "cg:test",
-    {"selection": "all", "clear_after": True, "sub_graph_name": ""},
-), provider._client.published
+# Multi-subject quads publish atomically in ONE call — no 409, no over-scope.
+assert result["ual"] == "did:dkg:1/0xabc/5", result
+assert result["quadsPublished"] == 3, result
+assert provider._client.publish_quads_call[0] == "cg:test", provider._client.publish_quads_call
+assert len(provider._client.publish_quads_call[1]) == 3, provider._client.publish_quads_call
+# The obsolete selection-fork result fields are gone.
+for _k in ("rootEntities", "partial", "publishedRoots", "failedRoot", "notAttemptedRoots"):
+    assert _k not in result, _k
 `;
     const result = spawnSync('python', ['-B', '-c', script], {
       cwd: process.cwd(),

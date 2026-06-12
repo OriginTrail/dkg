@@ -92,7 +92,11 @@ beforeAll(async () => {
   const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
   await mintTokens(_provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
   const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-  const cgId = await createTestContextGraph(chain);
+  // PR #1072: these lifecycle/merkle/update/tentative tests publish PLAINTEXT
+  // (no encrypt hook) to exercise publish mechanics — not curated/ciphertext
+  // semantics. A curated CG now reverts plaintext publishes
+  // (CuratedCGRequiresCiphertextCommitment), so use a PUBLIC CG (accessPolicy 0).
+  const cgId = await createTestContextGraph(chain, undefined, 0);
   CONTEXT_GRAPH = String(cgId);
   GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
   _kav10Address = await chain.getKnowledgeAssetsLifecycleAddress();

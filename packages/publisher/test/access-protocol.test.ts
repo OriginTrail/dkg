@@ -40,7 +40,10 @@ describe('Access Protocol', () => {
     const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
     await mintTokens(_provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    const cgId = await createTestContextGraph();
+    // Public CG (accessPolicy 0): these tests publish PLAINTEXT to exercise the
+    // off-chain access protocol + private-metadata mechanics, not curated-CG
+    // ciphertext semantics, so a curated CG would revert (CuratedCGRequiresCiphertextCommitment).
+    const cgId = await createTestContextGraph(undefined, undefined, 0);
     CONTEXT_GRAPH = String(cgId);
     GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
     _kav10Address = await chain.getKnowledgeAssetsLifecycleAddress();

@@ -866,7 +866,15 @@ describe('DkgDaemonClient', () => {
     const createBody = JSON.parse(createOpts?.body as string);
     expect(createBody.contextGraphId).toBe('testing');
     expect(createBody.quads).toHaveLength(1);
-    expect(createBody.finalize).toBe(true);
+    // CONTRACT §1 Stage1 / §0 invariant 2: `finalize:true` is unread by the
+    // create route (auto-finalize is driven by non-empty quads) and must be
+    // dropped; per-quad `graph` is daemon-pinned and must not be sent. The
+    // write wire shape is `{subject,predicate,object}` only. `promote:true`
+    // stays (the create route reads it as the `alsoShareSwm` alias).
+    expect(createBody.finalize).toBeUndefined();
+    expect(createBody.promote).toBe(true);
+    expect(createBody.quads[0]).toEqual({ subject: 'urn:a', predicate: 'urn:b', object: '"value"' });
+    expect(createBody.quads[0]).not.toHaveProperty('graph');
 
     const [pubUrl, pubOpts] = fetchCalls[1];
     expect(pubUrl).toBe('http://localhost:9200/api/shared-memory/publish');
@@ -1104,6 +1112,33 @@ describe('DkgDaemonClient', () => {
       expect(body()).toMatchObject({ contextGraphId: 'cg-1', name: 'f', alsoShareSwm: true });
     });
 
+    it('createKnowledgeAsset forwards finalize:false for a draft-only write', async () => {
+      ok({ name: 'f', written: 1, status: 'draft-open' });
+      await client.createKnowledgeAsset('cg-1', 'f', {
+        finalize: false,
+        quads: [{ subject: 's', predicate: 'p', object: 'o', graph: '' }],
+      });
+      expect(url()).toBe('http://localhost:9200/api/knowledge-assets');
+      expect(body()).toMatchObject({ contextGraphId: 'cg-1', name: 'f', finalize: false });
+    });
+
+    it('createKnowledgeAsset omits finalize when unspecified (server default seals)', async () => {
+      ok({ name: 'f', status: 'wm-sealed' });
+      await client.createKnowledgeAsset('cg-1', 'f', {
+        quads: [{ subject: 's', predicate: 'p', object: 'o', graph: '' }],
+      });
+      expect(body()).not.toHaveProperty('finalize');
+    });
+
+    it('createKnowledgeAsset rejects finalize-only fields when finalize:false (parity with daemon)', async () => {
+      await expect(client.createKnowledgeAsset('cg-1', 'f', {
+        authorAgentAddress: '0xauthor',
+        finalize: false,
+        quads: [{ subject: 's', predicate: 'p', object: 'o', graph: '' }],
+      })).rejects.toThrow(/require non-empty quads and finalize !== false/);
+      expect(fetchCalls).toHaveLength(0);
+    });
+
     it('knowledgeAssetWrite URL-encodes the name and POSTs to .../wm/write', async () => {
       ok({ written: 2 });
       await client.knowledgeAssetWrite('cg-1', 'meeting notes', [
@@ -1111,6 +1146,21 @@ describe('DkgDaemonClient', () => {
       ]);
       expect(url()).toBe('http://localhost:9200/api/knowledge-assets/meeting%20notes/wm/write');
       expect(body().quads).toHaveLength(1);
+    });
+
+    it('knowledgeAssetWrite strips any per-quad `graph` at the client (CONTRACT §A)', async () => {
+      ok({ written: 1 });
+      // Even a NON-EMPTY graph must be dropped before the POST — the daemon pins
+      // every quad to the per-KA WM graph, so the write wire shape is
+      // {subject,predicate,object} only. Stripping at the client (not just the
+      // tool schema) defends a hand-built or normalizer-emitted `graph`.
+      await client.knowledgeAssetWrite('cg-1', 'notes', [
+        { subject: 's', predicate: 'p', object: 'o', graph: 'urn:my-graph:forged' },
+      ]);
+      const quads = body().quads as Array<Record<string, unknown>>;
+      expect(quads).toHaveLength(1);
+      expect(quads[0]).not.toHaveProperty('graph');
+      expect(quads[0]).toEqual({ subject: 's', predicate: 'p', object: 'o' });
     });
 
     it('knowledgeAssetPullFrom sends layer + onConflict to .../wm/pull-from', async () => {
