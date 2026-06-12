@@ -164,6 +164,19 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
 
       const validWsQuads = processed.verifiedData;
       const dropped = processed.droppedDataTriples;
+      const hydrateOwnership = () => {
+        for (const { dataGraph, entity, creator } of processed.entityCreators) {
+          const ownershipKey = sharedMemoryOwnershipKeyFromGraph(pid, dataGraph);
+          if (!ownershipKey) {
+            logWarn(ctx, `SWM sync skipped ownership cache hydration for "${entity}" from unexpected graph "${dataGraph}"`);
+            continue;
+          }
+          const ownedMap = ensureOwnedMap(ownershipKey);
+          if (!ownedMap.has(entity)) {
+            ownedMap.set(entity, creator);
+          }
+        }
+      };
       if (dropped > 0) {
         logWarn(ctx, `SWM sync dropped ${dropped} triples with invalid subjects (not in meta rootEntity or skolemized child)`);
         summary.droppedDataTriples += dropped;
@@ -188,6 +201,14 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       summary.checkpointAdvances += snapshotSync.checkpointAdvances;
       const snapshotDurationMs = Date.now() - snapshotStartedAt;
       if (!snapshotSync.completed) {
+        if (validWsQuads.length > 0) {
+          await ensureContextGraph(pid);
+          await storeInsert(validWsQuads);
+          summary.insertedTriples += validWsQuads.length;
+          summary.insertedDataTriples += validWsQuads.length;
+          recordPhaseOutcome(wsDataResult);
+          hydrateOwnership();
+        }
         continue;
       }
 
@@ -207,17 +228,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       recordPhaseOutcome(wsMetaResult);
       recordPhaseOutcome(wsDataResult);
 
-      for (const { dataGraph, entity, creator } of processed.entityCreators) {
-        const ownershipKey = sharedMemoryOwnershipKeyFromGraph(pid, dataGraph);
-        if (!ownershipKey) {
-          logWarn(ctx, `SWM sync skipped ownership cache hydration for "${entity}" from unexpected graph "${dataGraph}"`);
-          continue;
-        }
-        const ownedMap = ensureOwnedMap(ownershipKey);
-        if (!ownedMap.has(entity)) {
-          ownedMap.set(entity, creator);
-        }
-      }
+      hydrateOwnership();
       const storeDurationMs = Date.now() - storeStartedAt;
 
       logInfo(ctx, `SWM sync for "${pid}": ${validWsQuads.length} data + ${processed.verifiedMeta.length} meta triples`);

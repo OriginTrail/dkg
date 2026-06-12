@@ -594,4 +594,101 @@ describe('sync requester progress accounting', () => {
     expect(storeInsert).not.toHaveBeenCalled();
     expect(ensureContextGraph).not.toHaveBeenCalled();
   });
+
+  it('stores shared-memory data and advances only data checkpoints on snapshot timeout', async () => {
+    const setCheckpoint = vi.fn();
+    const deleteCheckpoint = vi.fn();
+    const storeInsert = vi.fn();
+    const ensureContextGraph = vi.fn();
+    const dataQuad = quad('large-swm-data');
+    const snapshotMeta: Quad[] = [
+      {
+        subject: 'did:dkg:assertion:with-snapshot',
+        predicate: 'http://dkg.io/ontology/publicSnapshotRef',
+        object: '"snapshot-ref"',
+        graph: 'did:dkg:context-graph:large-swm/_shared_memory_meta',
+      } as Quad,
+      {
+        subject: 'did:dkg:assertion:with-snapshot',
+        predicate: 'http://dkg.io/ontology/publicQuadsDigest',
+        object: '"snapshot-digest"',
+        graph: 'did:dkg:context-graph:large-swm/_shared_memory_meta',
+      } as Quad,
+      {
+        subject: 'did:dkg:assertion:with-snapshot',
+        predicate: 'http://dkg.io/ontology/publicQuadsCount',
+        object: '"10"',
+        graph: 'did:dkg:context-graph:large-swm/_shared_memory_meta',
+      } as Quad,
+    ];
+    const fetchSyncPages = vi.fn(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta' | 'snapshot',
+    ) => {
+      if (phase === 'snapshot') {
+        return pageResult(contextGraphId, phase, {
+          checkpointKey: `${contextGraphId}:snapshot:snapshot-ref`,
+          completed: false,
+          timedOut: true,
+          nextOffset: 500,
+        });
+      }
+      if (phase === 'data') {
+        return pageResult(contextGraphId, phase, {
+          completed: false,
+          timedOut: true,
+          nextOffset: 7,
+        });
+      }
+      return pageResult(contextGraphId, phase, {
+        completed: false,
+        timedOut: true,
+        nextOffset: 5,
+      });
+    });
+
+    const summary = await runSharedMemorySync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['large-swm'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processSharedMemoryBatch: async () => ({
+        ...sharedMemoryProcessResult(),
+        emptyResponses: 0,
+        verifiedData: [dataQuad],
+        verifiedMeta: snapshotMeta,
+        totalFetchedDataQuads: 1,
+        totalFetchedMetaQuads: snapshotMeta.length,
+      }),
+      ensureContextGraph,
+      storeInsert,
+      publicSnapshotStore: {
+        getSnapshot: async () => null,
+        putSnapshot: async () => ({ ref: 'snapshot-ref', byteLength: 0 }),
+      },
+      deleteCheckpoint,
+      setCheckpoint,
+      ensureOwnedMap: () => new Map(),
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.failedPeers).toBe(0);
+    expect(summary.timedOutPhases).toBe(2);
+    expect(summary.checkpointAdvances).toBe(2);
+    expect(summary.insertedDataTriples).toBe(1);
+    expect(summary.insertedMetaTriples).toBe(0);
+    expect(ensureContextGraph).toHaveBeenCalledWith('large-swm');
+    expect(storeInsert).toHaveBeenCalledTimes(1);
+    expect(storeInsert).toHaveBeenCalledWith([dataQuad]);
+    expect(setCheckpoint).toHaveBeenCalledWith('large-swm:snapshot:snapshot-ref', 500);
+    expect(setCheckpoint).toHaveBeenCalledWith('large-swm:data', 7);
+    expect(setCheckpoint).not.toHaveBeenCalledWith('large-swm:meta', expect.any(Number));
+    expect(deleteCheckpoint).not.toHaveBeenCalled();
+  });
 });

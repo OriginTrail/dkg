@@ -136,14 +136,16 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
   let madeProgress = false;
   let sawDeniedPhase = false;
   let sawBackoffWorthyFailure = false;
-  let sawMetadataOnlyDetailedSync = false;
-  let cleanDetailedRound = false;
-  const recordSyncAccounting = (result: SyncFromPeerResult): void => {
+  let sawDurableMetadataOnlyDetailedSync = false;
+  let cleanDurableDetailedRound = false;
+  const recordSyncAccounting = (result: SyncFromPeerResult, phase: 'durable' | 'shared'): void => {
     madeProgress = madeProgress || madeSyncProgress(result);
     sawDeniedPhase = sawDeniedPhase || hadDeniedPhase(result);
     sawBackoffWorthyFailure = sawBackoffWorthyFailure || hadBackoffWorthyFailure(result);
-    sawMetadataOnlyDetailedSync = sawMetadataOnlyDetailedSync || (typeof result !== 'number' && metadataOnlySync(result));
-    cleanDetailedRound = cleanDetailedRound || cleanDetailedSync(result);
+    if (phase === 'durable') {
+      sawDurableMetadataOnlyDetailedSync = sawDurableMetadataOnlyDetailedSync || (typeof result !== 'number' && metadataOnlySync(result));
+      cleanDurableDetailedRound = cleanDurableDetailedRound || cleanDetailedSync(result);
+    }
   };
   const runNonTransportStep = async <T>(step: () => Promise<T>): Promise<T> => {
     try {
@@ -172,7 +174,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     logInfo(ctx, `Syncing from peer ${shortPeer}...`);
     const knownCgsBefore = new Set(getSyncContextGraphs() ?? []);
     const synced = await syncFromPeer(remotePeer);
-    recordSyncAccounting(synced);
+    recordSyncAccounting(synced, 'durable');
     logInfo(ctx, `Synced ${insertedTriples(synced)} data triples from peer ${shortPeer}`);
 
     const syncScope = new Set<string>([
@@ -189,7 +191,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     if (newlyDiscovered.length > 0) {
       logInfo(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — syncing durable data from ${shortPeer}`);
       const discoverSynced = await syncFromPeer(remotePeer, newlyDiscovered);
-      recordSyncAccounting(discoverSynced);
+      recordSyncAccounting(discoverSynced, 'durable');
       logInfo(ctx, `Synced ${insertedTriples(discoverSynced)} durable triples for newly discovered CG(s) from ${shortPeer}`);
       await runNonTransportStep(() => refreshMetaSyncedFlags(newlyDiscovered));
     }
@@ -198,16 +200,16 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     const wsContextGraphIds = getSyncContextGraphs() ?? [];
     if (syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
       const wsSynced = await syncSharedMemoryFromPeer(remotePeer, wsContextGraphIds);
-      recordSyncAccounting(wsSynced);
+      recordSyncAccounting(wsSynced, 'shared');
       logInfo(ctx, `Synced ${insertedTriples(wsSynced)} shared memory triples from peer ${shortPeer}`);
     } else if (!syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
       logInfo(ctx, `Skipping shared memory sync from peer ${shortPeer} (syncSharedMemoryOnConnect=false)`);
     }
 
-    const cleanNonMetadataRound = cleanDetailedRound && !sawMetadataOnlyDetailedSync;
-    const clearsPeerBackoff = madeProgress || (!sawBackoffWorthyFailure && (cleanNonMetadataRound || sawDeniedPhase));
+    const cleanDurableRound = cleanDurableDetailedRound && !sawDurableMetadataOnlyDetailedSync;
+    const clearsPeerBackoff = madeProgress || (!sawBackoffWorthyFailure && (cleanDurableRound || sawDeniedPhase));
     if (clearsPeerBackoff) {
-      context.onPeerSynced?.(remotePeer, { fresh: !sawBackoffWorthyFailure && !sawDeniedPhase && !sawMetadataOnlyDetailedSync });
+      context.onPeerSynced?.(remotePeer, { fresh: !sawBackoffWorthyFailure && !sawDeniedPhase && cleanDurableRound });
     }
     return 'synced';
   } catch (err) {
