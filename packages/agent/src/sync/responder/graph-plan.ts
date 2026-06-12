@@ -111,32 +111,39 @@ export async function readSwmDataPage(params: {
 }): Promise<SyncRow[]> {
   const dataGraphs = await planSwmGraphs(params.store, params.contextGraphId, false);
   const graphSet = new Set(params.graphList);
+  const candidateGraphsFor = (graph: string) => params.graphList
+    .filter((candidate) => candidate === graph || candidate.startsWith(`${graph}/`))
+    .sort(compareCodePoint);
+
   if (!params.cutoffIso) {
-    const rows = (await Promise.all(dataGraphs
-      .filter((graph) => graphSet.has(graph) || params.graphList.some((candidate) => candidate.startsWith(`${graph}/`)))
-      .flatMap((graph) => params.graphList.filter((candidate) => candidate === graph || candidate.startsWith(`${graph}/`)))
-      .map((graph) => readGraphRows(params.store, graph))))
-      .flat()
-      .sort(compareRows);
-    return rows.slice(params.offset, params.offset + params.limit);
+    const candidateGraphs = dedupeStrings(dataGraphs.flatMap(candidateGraphsFor)).sort(compareCodePoint);
+    return readPagedRowsAcrossGraphs(params.store, candidateGraphs, params.offset, params.limit, async () => true);
   }
 
   const rows: SyncRow[] = [];
+  let skip = params.offset;
+  let remaining = params.limit;
   for (const graph of dataGraphs) {
     const metaGraph = `${graph}_meta`;
     if (!graphSet.has(metaGraph)) continue;
-    const roots = await readFreshWorkspaceRoots(params.store, metaGraph, params.cutoffIso);
-    if (roots.size === 0) continue;
-    const rootList = [...roots];
-    for (const candidate of params.graphList) {
-      if (candidate !== graph && !candidate.startsWith(`${graph}/`)) continue;
-      rows.push(...await readGraphRows(params.store, candidate, (row) =>
-        roots.has(row.s) || rootList.some((root) => row.s.startsWith(`${root}/.well-known/genid/`)),
-      ));
+    for (const candidate of candidateGraphsFor(graph)) {
+      if (skip > 0) {
+        const count = await countFreshSwmDataGraphRows(params.store, candidate, metaGraph, params.cutoffIso);
+        if (skip >= count) {
+          skip -= count;
+          continue;
+        }
+      }
+
+      const page = await readFreshSwmDataGraphRowsPage(params.store, candidate, metaGraph, params.cutoffIso, skip, remaining);
+      rows.push(...page);
+      remaining -= page.length;
+      skip = 0;
+      if (remaining <= 0) break;
     }
+    if (remaining <= 0) break;
   }
-  rows.sort(compareRows);
-  return dedupeRows(rows).slice(params.offset, params.offset + params.limit);
+  return rows;
 }
 
 export async function readDurableMetaPage(params: {
@@ -145,13 +152,12 @@ export async function readDurableMetaPage(params: {
   offset: number;
   limit: number;
 }): Promise<SyncRow[]> {
-  const metaGraph = contextGraphMetaGraphUri(params.contextGraphId);
-  const metaRows = await readGraphRows(params.store, metaGraph);
-  const allowedSubjects = collectDurableMetaSubjects(metaRows, params.contextGraphId);
-  if (allowedSubjects.size === 0) return [];
-  const rows = metaRows.filter((row) => allowedSubjects.has(row.s));
-  rows.sort(compareRows);
-  return rows.slice(params.offset, params.offset + params.limit);
+  return readDurableMetaRowsPage(
+    params.store,
+    params.contextGraphId,
+    params.offset,
+    params.limit,
+  );
 }
 
 export async function readDurableCanonicalDataPage(params: {
@@ -373,51 +379,6 @@ async function readAdmittedAssertionGraphs(
   return new Set(res.bindings.map((row) => row['g']).filter(Boolean));
 }
 
-function collectDurableMetaSubjects(
-  rows: readonly SyncRow[],
-  contextGraphId: string,
-): Set<string> {
-  const cgEntity = contextGraphDataGraphUri(contextGraphId);
-  const allowed = new Set<string>([cgEntity]);
-  const nonWorkingLifecycle = new Set<string>();
-  const assertionNames: string[] = [];
-  const assertionSubjects = new Set<string>();
-
-  for (const row of rows) {
-    if (row.s.startsWith('did:dkg:activity:') || row.s.startsWith('did:dkg:join-request:')) {
-      allowed.add(row.s);
-    }
-    if (row.s.includes('/assertion/')) {
-      assertionSubjects.add(row.s);
-    }
-    if (row.p === DKG_MEMORY_LAYER && stripLiteral(row.o) !== MemoryLayer.WorkingMemory) {
-      nonWorkingLifecycle.add(row.s);
-    }
-  }
-
-  for (const row of rows) {
-    if (nonWorkingLifecycle.has(row.s)) {
-      allowed.add(row.s);
-      if (row.p === DKG_ASSERTION_GRAPH) allowed.add(row.o);
-      if (row.p === DKG_ASSERTION_NAME) assertionNames.push(stripLiteral(row.o));
-    }
-    if (
-      (row.p === 'http://www.w3.org/ns/prov#generated' || row.p === 'http://www.w3.org/ns/prov#used') &&
-      nonWorkingLifecycle.has(row.o)
-    ) {
-      allowed.add(row.s);
-    }
-  }
-
-  for (const assertionName of assertionNames) {
-    const suffix = `/${assertionName}`;
-    for (const subject of assertionSubjects) {
-      if (subject.endsWith(suffix)) allowed.add(subject);
-    }
-  }
-  return allowed;
-}
-
 async function readFreshWorkspaceSubjects(
   store: TripleStore,
   metaGraph: string,
@@ -432,24 +393,6 @@ async function readFreshWorkspaceSubjects(
     }
   `);
   return new Set(res.type === 'bindings' ? res.bindings.map((row) => row['subject']).filter(Boolean) : []);
-}
-
-async function readFreshWorkspaceRoots(
-  store: TripleStore,
-  metaGraph: string,
-  cutoffIso: string,
-): Promise<Set<string>> {
-  const res = await store.query(`
-    SELECT DISTINCT ?root WHERE {
-      GRAPH <${assertSafeIri(metaGraph)}> {
-        ?op <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
-            <${DKG_PUBLISHED_AT}> ?ts ;
-            <${DKG_ROOT_ENTITY}> ?root .
-        FILTER(?ts >= "${cutoffIso}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
-      }
-    }
-  `);
-  return new Set(res.type === 'bindings' ? res.bindings.map((row) => row['root']).filter(Boolean) : []);
 }
 
 async function readGraphRows(
@@ -504,6 +447,123 @@ async function readGraphRowsPage(
   if (res.type !== 'bindings') return [];
   return res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: graph }))
+    .filter((row) => row.s && row.p && row.o);
+}
+
+async function countFreshSwmDataGraphRows(
+  store: TripleStore,
+  graph: string,
+  metaGraph: string,
+  cutoffIso: string,
+): Promise<number> {
+  const res = await store.query(`
+    SELECT (COUNT(*) AS ?count) WHERE {
+      {
+        SELECT DISTINCT ?s ?p ?o WHERE {
+          ${freshSwmDataWhereClause(graph, metaGraph, cutoffIso)}
+        }
+      }
+    }
+  `);
+  if (res.type !== 'bindings') return 0;
+  const value = parseIntegerLiteral(res.bindings[0]?.['count']);
+  if (value == null || value < 0n) return 0;
+  return Number(value > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : value);
+}
+
+async function readFreshSwmDataGraphRowsPage(
+  store: TripleStore,
+  graph: string,
+  metaGraph: string,
+  cutoffIso: string,
+  offset: number,
+  limit: number,
+): Promise<SyncRow[]> {
+  const safeOffset = Math.max(0, Math.floor(offset));
+  const safeLimit = Math.max(0, Math.floor(limit));
+  if (safeLimit === 0) return [];
+  const res = await store.query(`
+    SELECT DISTINCT ?s ?p ?o WHERE {
+      ${freshSwmDataWhereClause(graph, metaGraph, cutoffIso)}
+    }
+    ORDER BY ?s ?p ?o
+    OFFSET ${safeOffset}
+    LIMIT ${safeLimit}
+  `);
+  if (res.type !== 'bindings') return [];
+  return res.bindings
+    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: graph }))
+    .filter((row) => row.s && row.p && row.o);
+}
+
+function freshSwmDataWhereClause(graph: string, metaGraph: string, cutoffIso: string): string {
+  return `
+      GRAPH <${assertSafeIri(metaGraph)}> {
+        ?op <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
+            <${DKG_PUBLISHED_AT}> ?ts ;
+            <${DKG_ROOT_ENTITY}> ?root .
+        FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+      }
+      GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+      FILTER(sameTerm(?s, ?root) || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))
+  `;
+}
+
+async function readDurableMetaRowsPage(
+  store: TripleStore,
+  contextGraphId: string,
+  offset: number,
+  limit: number,
+): Promise<SyncRow[]> {
+  const safeOffset = Math.max(0, Math.floor(offset));
+  const safeLimit = Math.max(0, Math.floor(limit));
+  if (safeLimit === 0) return [];
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  const cgEntity = contextGraphDataGraphUri(contextGraphId);
+  const workingMemory = sparqlString(MemoryLayer.WorkingMemory);
+  const res = await store.query(`
+    SELECT ?s ?p ?o WHERE {
+      GRAPH <${assertSafeIri(metaGraph)}> { ?s ?p ?o }
+      FILTER(
+        STR(?s) = ${sparqlString(cgEntity)} ||
+        STRSTARTS(STR(?s), "did:dkg:activity:") ||
+        STRSTARTS(STR(?s), "did:dkg:join-request:") ||
+        EXISTS {
+          GRAPH <${assertSafeIri(metaGraph)}> {
+            ?lc <${DKG_MEMORY_LAYER}> ?layer .
+            FILTER(STR(?layer) != ${workingMemory})
+            {
+              FILTER(sameTerm(?lc, ?s))
+            } UNION {
+              ?lc <${DKG_ASSERTION_GRAPH}> ?s .
+            } UNION {
+              ?lc <${DKG_ASSERTION_NAME}> ?aname .
+              FILTER(
+                CONTAINS(STR(?s), "/assertion/") &&
+                STRENDS(STR(?s), CONCAT("/", STR(?aname)))
+              )
+            }
+          }
+        } ||
+        EXISTS {
+          GRAPH <${assertSafeIri(metaGraph)}> {
+            { ?evt <http://www.w3.org/ns/prov#generated> ?parent }
+            UNION
+            { ?evt <http://www.w3.org/ns/prov#used> ?parent }
+            FILTER(sameTerm(?evt, ?s))
+            ?parent <${DKG_MEMORY_LAYER}> ?eventLayer .
+            FILTER(STR(?eventLayer) != ${workingMemory})
+          }
+        }
+      )
+    }
+    ORDER BY ?s ?p ?o
+    OFFSET ${safeOffset}
+    LIMIT ${safeLimit}
+  `);
+  if (res.type !== 'bindings') return [];
+  return res.bindings
+    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: metaGraph }))
     .filter((row) => row.s && row.p && row.o);
 }
 
@@ -600,14 +660,13 @@ function durableDeltaGroupClause(
   `;
 }
 
-function dedupeRows(rows: readonly SyncRow[]): SyncRow[] {
+function dedupeStrings(values: readonly string[]): string[] {
   const seen = new Set<string>();
-  const out: SyncRow[] = [];
-  for (const row of rows) {
-    const key = `${row.g}\u0000${row.s}\u0000${row.p}\u0000${row.o}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(row);
+  const out: string[] = [];
+  for (const value of values) {
+    if (seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
   }
   return out;
 }
