@@ -36,7 +36,7 @@ interface SharedMemorySyncContext {
     deadline: number,
     snapshotRef?: string,
   ) => Promise<SyncPageResult>;
-  processSharedMemoryBatch: (wsDataQuads: Quad[], wsMetaQuads: Quad[], contextGraphId: string) => Promise<{
+  processSharedMemoryBatch: (wsDataQuads: Quad[], wsMetaQuads: Quad[], contextGraphId: string, registeredSubGraphNames?: readonly string[]) => Promise<{
     verifiedData: Quad[];
     verifiedMeta: Quad[];
     totalFetchedDataQuads: number;
@@ -48,6 +48,7 @@ interface SharedMemorySyncContext {
   ensureContextGraph: (contextGraphId: string) => Promise<void>;
   storeInsert: (quads: Quad[]) => Promise<void>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
   ensureOwnedMap: (ownershipKey: string) => Map<string, string>;
@@ -67,6 +68,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     ensureContextGraph,
     storeInsert,
     publicSnapshotStore,
+    getRegisteredSubGraphNames,
     deleteCheckpoint,
     setCheckpoint,
     ensureOwnedMap,
@@ -103,7 +105,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const fetchDurationMs = Date.now() - fetchStartedAt;
 
       const verifyStartedAt = Date.now();
-      const processed = await processSharedMemoryBatch(wsDataResult.quads, wsMetaResult.quads, pid);
+      const registeredSubGraphNames = getRegisteredSubGraphNames
+        ? await getRegisteredSubGraphNames(pid)
+        : undefined;
+      const processed = await processSharedMemoryBatch(wsDataResult.quads, wsMetaResult.quads, pid, registeredSubGraphNames);
       const verifyDurationMs = Date.now() - verifyStartedAt;
       logInfo(ctx, `  shared memory: ${processed.totalFetchedDataQuads} data + ${processed.totalFetchedMetaQuads} meta triples fetched`);
       summary.bytesReceived += wsMetaResult.bytesReceived + wsDataResult.bytesReceived;

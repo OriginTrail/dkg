@@ -124,7 +124,8 @@ describe('runSharedMemorySync ownership hydration', () => {
           phase === 'data' ? page(dataQuads, phase) : page(metaQuads, phase)
         ),
         processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId) =>
-          worker.processSharedMemoryBatch(wsDataQuads, wsMetaQuads, contextGraphId),
+          worker.processSharedMemoryBatch(wsDataQuads, wsMetaQuads, contextGraphId, [SUB_GRAPH]),
+        getRegisteredSubGraphNames: async () => [SUB_GRAPH],
         ensureContextGraph: async () => {},
         storeInsert: async (quads) => {
           inserted.push(...quads);
@@ -238,6 +239,49 @@ describe('runSharedMemorySync ownership hydration', () => {
       expect(summary.droppedDataTriples).toBe(1);
       expect(summary.insertedDataTriples).toBe(0);
       expect(inserted.some((quad) => quad.graph === fakeDataGraph)).toBe(false);
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it('rejects unregistered child-CG-shaped SWM descendants', async () => {
+    const worker = new SyncVerifyWorker();
+    const inserted: Quad[] = [];
+    const childMetaGraph = contextGraphSharedMemoryMetaUri(CG_ID, 'child');
+    const childDataGraph = `${contextGraphSharedMemoryUri(CG_ID, 'child')}/0xabc/1`;
+    const metaQuads = workspaceOperationMeta(childMetaGraph, 'urn:dkg:share:child-cg', 'urn:swm:child-cg', 'peer-child');
+    const dataQuads: Quad[] = [
+      { graph: childDataGraph, subject: 'urn:swm:child-cg', predicate: 'http://schema.org/name', object: '"child-cg-descendant"' },
+    ];
+
+    try {
+      const summary = await runSharedMemorySync({
+        ctx: createOperationContext('sync'),
+        remotePeerId: '12D3KooWRequesterChildCgFake',
+        contextGraphIds: [CG_ID],
+        createContextGraphSyncDeadline: () => Date.now() + 30_000,
+        fetchSyncPages: async (_ctx, _peer, _cg, _includeSwm, phase) => (
+          phase === 'data' ? page(dataQuads, phase) : page(metaQuads, phase)
+        ),
+        processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames) =>
+          worker.processSharedMemoryBatch(wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames),
+        getRegisteredSubGraphNames: async () => [],
+        ensureContextGraph: async () => {},
+        storeInsert: async (quads) => {
+          inserted.push(...quads);
+        },
+        deleteCheckpoint: () => {},
+        setCheckpoint: () => {},
+        ensureOwnedMap: () => new Map<string, string>(),
+        logInfo: () => {},
+        logWarn: () => {},
+        logDebug: () => {},
+      });
+
+      expect(summary.failedPeers).toBe(0);
+      expect(summary.droppedDataTriples).toBe(1);
+      expect(summary.insertedDataTriples).toBe(0);
+      expect(inserted.some((quad) => quad.graph === childDataGraph)).toBe(false);
     } finally {
       await worker.close();
     }

@@ -33,8 +33,9 @@ parentPort!.on('message', async (message: { id: number; method: string; args: un
       return;
     }
     if (message.method === 'processSharedMemoryBatch') {
-      const [wsDataQuads, wsMetaQuads, contextGraphId] = message.args as [Quad[], Quad[], string];
-      const result = processSharedMemoryBatch(wsDataQuads, wsMetaQuads, contextGraphId);
+      const [wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames] =
+        message.args as [Quad[], Quad[], string, readonly string[] | undefined];
+      const result = processSharedMemoryBatch(wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames);
       parentPort!.postMessage({ id: message.id, result });
       return;
     }
@@ -204,6 +205,7 @@ function processSharedMemory(
   wsDataQuads: Quad[],
   wsMetaQuads: Quad[],
   contextGraphId?: string,
+  registeredSubGraphNames?: readonly string[],
 ): SharedMemoryProcessResult {
   const DKG_ROOT_ENTITY = 'http://dkg.io/ontology/rootEntity';
   const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -268,7 +270,7 @@ function processSharedMemory(
     if (q.predicate !== DKG_ROOT_ENTITY) continue;
     const validForGraph = validOpsByMeta.get(q.graph);
     if (!validForGraph || !validForGraph.has(q.subject)) continue;
-    const dataGraph = swmDataGraphFromMetaGraph(q.graph, contextGraphId, META_SUFFIX);
+    const dataGraph = swmDataGraphFromMetaGraph(q.graph, contextGraphId, META_SUFFIX, registeredSubGraphNames);
     if (!dataGraph) continue;
     const entity = q.object.startsWith('"') ? stripLiteral(q.object) : q.object;
     let s = allowedRootsByDataGraph.get(dataGraph);
@@ -313,7 +315,7 @@ function processSharedMemory(
   for (const q of wsMetaQuads) {
     const validForGraph = validOpsByMeta.get(q.graph);
     if (q.predicate === DKG_ROOT_ENTITY && validForGraph?.has(q.subject)) {
-      const dataGraph = swmDataGraphFromMetaGraph(q.graph, contextGraphId, META_SUFFIX);
+      const dataGraph = swmDataGraphFromMetaGraph(q.graph, contextGraphId, META_SUFFIX, registeredSubGraphNames);
       if (!dataGraph) continue;
       const entity = q.object.startsWith('"') ? stripLiteral(q.object) : q.object;
       const creator = opCreators.get(q.subject);
@@ -335,6 +337,7 @@ function swmDataGraphFromMetaGraph(
   metaGraph: string,
   contextGraphId: string | undefined,
   metaSuffix: string,
+  registeredSubGraphNames?: readonly string[],
 ): string | undefined {
   if (!metaGraph.endsWith('/_shared_memory_meta')) return undefined;
   if (contextGraphId === undefined) return metaGraph.slice(0, -metaSuffix.length);
@@ -346,6 +349,7 @@ function swmDataGraphFromMetaGraph(
   if (!metaGraph.startsWith(prefix) || !metaGraph.endsWith(suffix)) return undefined;
   const subGraphName = metaGraph.slice(prefix.length, -suffix.length);
   if (!validateSubGraphName(subGraphName).valid) return undefined;
+  if (!registeredSubGraphNames?.includes(subGraphName)) return undefined;
   return metaGraph.slice(0, -metaSuffix.length);
 }
 
@@ -430,6 +434,7 @@ function processSharedMemoryBatch(
   wsDataQuads: Quad[],
   wsMetaQuads: Quad[],
   contextGraphId?: string,
+  registeredSubGraphNames?: readonly string[],
 ): SharedMemoryBatchProcessResult {
   const totalFetchedDataQuads = wsDataQuads.length;
   const totalFetchedMetaQuads = wsMetaQuads.length;
@@ -445,7 +450,7 @@ function processSharedMemoryBatch(
     };
   }
 
-  const processed = processSharedMemory(wsDataQuads, wsMetaQuads, contextGraphId);
+  const processed = processSharedMemory(wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames);
   return {
     verifiedData: processed.validQuads,
     verifiedMeta: wsMetaQuads,

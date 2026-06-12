@@ -156,6 +156,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       const queryStartedAt = Date.now();
       const rows = sinceBatchId == null
         ? await (async () => {
+          const graphList = await graphListMemo.get({ refresh: offset === 0 });
           const canonicalRows = await readDurableCanonicalDataPage({
             store,
             contextGraphId,
@@ -165,7 +166,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           if (canonicalRows.length === limit) return canonicalRows;
           return readDurableDataPage({
             store,
-            graphList: await graphListMemo.get({ refresh: offset === 0 }),
+            graphList,
             contextGraphId,
             sinceBatchId,
             offset,

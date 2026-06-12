@@ -244,28 +244,13 @@ async function readPagedRowsAcrossGraphs(
   limit: number,
   isAdmitted: (graph: string) => Promise<boolean>,
 ): Promise<SyncRow[]> {
-  let skip = offset;
-  let remaining = limit;
-  const rows: SyncRow[] = [];
-
+  const admittedGraphs: string[] = [];
   for (const graph of graphs) {
     if (!(await isAdmitted(graph))) continue;
-    if (skip > 0) {
-      const count = await countGraphRows(store, graph);
-      if (skip >= count) {
-        skip -= count;
-        continue;
-      }
-    }
-
-    const page = await readGraphRowsPage(store, graph, skip, remaining);
-    rows.push(...page);
-    remaining -= page.length;
-    skip = 0;
-    if (remaining <= 0) break;
+    admittedGraphs.push(graph);
   }
 
-  return rows;
+  return readRowsPageAcrossGraphs(store, admittedGraphs, offset, limit);
 }
 
 async function readPagedDurableDeltaRowsAcrossGraphs(
@@ -276,34 +261,7 @@ async function readPagedDurableDeltaRowsAcrossGraphs(
   offset: number,
   limit: number,
 ): Promise<SyncRow[]> {
-  let skip = offset;
-  let remaining = limit;
-  const rows: SyncRow[] = [];
-
-  for (const graph of graphs) {
-    if (skip > 0) {
-      const count = await countDurableDeltaGraphRows(store, graph, metaGraphs, sinceBatchId);
-      if (skip >= count) {
-        skip -= count;
-        continue;
-      }
-    }
-
-    const page = await readDurableDeltaGraphRowsPage(
-      store,
-      graph,
-      metaGraphs,
-      sinceBatchId,
-      skip,
-      remaining,
-    );
-    rows.push(...page);
-    remaining -= page.length;
-    skip = 0;
-    if (remaining <= 0) break;
-  }
-
-  return rows;
+  return readDurableDeltaRowsPageAcrossGraphs(store, graphs, metaGraphs, sinceBatchId, offset, limit);
 }
 
 async function planSwmGraphs(
@@ -438,6 +396,31 @@ async function readGraphRowsPage(
   return res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: graph }))
     .filter((row) => row.s && row.p && row.o);
+}
+
+async function readRowsPageAcrossGraphs(
+  store: TripleStore,
+  graphs: readonly string[],
+  offset: number,
+  limit: number,
+): Promise<SyncRow[]> {
+  const safeOffset = Math.max(0, Math.floor(offset));
+  const safeLimit = Math.max(0, Math.floor(limit));
+  const values = graphValues(graphs);
+  if (safeLimit === 0 || !values) return [];
+  const res = await store.query(`
+    SELECT ?g ?s ?p ?o WHERE {
+      VALUES ?g { ${values} }
+      GRAPH ?g { ?s ?p ?o }
+    }
+    ORDER BY ?g ?s ?p ?o
+    OFFSET ${safeOffset}
+    LIMIT ${safeLimit}
+  `);
+  if (res.type !== 'bindings') return [];
+  return res.bindings
+    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
+    .filter((row) => row.s && row.p && row.o && row.g);
 }
 
 async function countFreshSwmMetaGraphRows(
@@ -605,32 +588,9 @@ async function readDurableMetaRowsPage(
     .filter((row) => row.s && row.p && row.o);
 }
 
-async function countDurableDeltaGraphRows(
+async function readDurableDeltaRowsPageAcrossGraphs(
   store: TripleStore,
-  graph: string,
-  metaGraphs: readonly string[],
-  sinceBatchId: bigint,
-): Promise<number> {
-  const res = await store.query(`
-    PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
-    SELECT (COUNT(*) AS ?count) WHERE {
-      {
-        SELECT ?s ?p ?o WHERE {
-          ${durableDeltaWhereClause(graph, metaGraphs)}
-        }
-        ${durableDeltaGroupClause(metaGraphs, sinceBatchId)}
-      }
-    }
-  `);
-  if (res.type !== 'bindings') return 0;
-  const value = parseIntegerLiteral(res.bindings[0]?.['count']);
-  if (value == null || value < 0n) return 0;
-  return Number(value > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : value);
-}
-
-async function readDurableDeltaGraphRowsPage(
-  store: TripleStore,
-  graph: string,
+  graphs: readonly string[],
   metaGraphs: readonly string[],
   sinceBatchId: bigint,
   offset: number,
@@ -638,35 +598,38 @@ async function readDurableDeltaGraphRowsPage(
 ): Promise<SyncRow[]> {
   const safeOffset = Math.max(0, Math.floor(offset));
   const safeLimit = Math.max(0, Math.floor(limit));
-  if (safeLimit === 0) return [];
+  const values = graphValues(graphs);
+  if (safeLimit === 0 || !values) return [];
   const res = await store.query(`
     PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
-    SELECT ?s ?p ?o WHERE {
-      ${durableDeltaWhereClause(graph, metaGraphs)}
+    SELECT ?g ?s ?p ?o WHERE {
+      ${durableDeltaWhereClauseForGraphs(values, metaGraphs)}
     }
-    ${durableDeltaGroupClause(metaGraphs, sinceBatchId)}
-    ORDER BY ?s ?p ?o
+    ${durableDeltaGroupClause(metaGraphs, sinceBatchId, true)}
+    ORDER BY ?g ?s ?p ?o
     OFFSET ${safeOffset}
     LIMIT ${safeLimit}
   `);
   if (res.type !== 'bindings') return [];
   return res.bindings
-    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: graph }))
-    .filter((row) => row.s && row.p && row.o);
+    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
+    .filter((row) => row.s && row.p && row.o && row.g);
 }
 
-function durableDeltaWhereClause(
-  graph: string,
+function durableDeltaWhereClauseForGraphs(
+  graphValuesClause: string,
   metaGraphs: readonly string[],
 ): string {
   const values = metaGraphs.map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
   if (!values) {
     return `
-          GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+      VALUES ?g { ${graphValuesClause} }
+      GRAPH ?g { ?s ?p ?o }
     `;
   }
   return `
-      GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+      VALUES ?g { ${graphValuesClause} }
+      GRAPH ?g { ?s ?p ?o }
       OPTIONAL {
         {
           SELECT ?deltaRoot ?deltaBid WHERE {
@@ -690,12 +653,17 @@ function durableDeltaWhereClause(
 function durableDeltaGroupClause(
   metaGraphs: readonly string[],
   sinceBatchId: bigint,
+  includeGraph: boolean = false,
 ): string {
   if (metaGraphs.length === 0) return '';
   return `
-    GROUP BY ?s ?p ?o
+    GROUP BY ${includeGraph ? '?g ' : ''}?s ?p ?o
     HAVING(COUNT(?deltaBatch) = 0 || MAX(?deltaBatch) > ${sinceBatchId.toString()})
   `;
+}
+
+function graphValues(graphs: readonly string[]): string {
+  return dedupeStrings(graphs).map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
 }
 
 function dedupeStrings(values: readonly string[]): string[] {

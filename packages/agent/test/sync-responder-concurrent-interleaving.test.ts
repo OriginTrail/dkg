@@ -41,14 +41,16 @@ function watchBoundedPageQuery(
     const normalized = sparql.replace(/\s+/g, ' ').trim();
     const isTargetPageQuery = /^SELECT (?:DISTINCT )?\?s \?p \?o WHERE \{/.test(normalized) &&
       normalized.includes(`GRAPH <${graph}>`);
-    if (isTargetPageQuery) {
+    const isTargetMultiGraphPageQuery = /^SELECT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
+      normalized.includes(`VALUES ?g { <${graph}>`);
+    if (isTargetPageQuery || isTargetMultiGraphPageQuery) {
       observedPageQueries++;
-      expect(normalized).toContain('ORDER BY ?s ?p ?o');
+      expect(normalized).toMatch(/ORDER BY \?g \?s \?p \?o|ORDER BY \?s \?p \?o/);
       expect(normalized).toContain(`OFFSET ${expectedOffset}`);
       expect(normalized).toContain(`LIMIT ${expectedLimit}`);
     }
     const result = await originalQuery(sparql);
-    if (isTargetPageQuery && result.type === 'bindings') {
+    if ((isTargetPageQuery || isTargetMultiGraphPageQuery) && result.type === 'bindings') {
       expect(result.bindings.length).toBeLessThanOrEqual(expectedLimit);
     }
     return result;
@@ -230,6 +232,79 @@ describe('sync responder pagination interleaving', () => {
     expect(out).not.toContain('"meta-089"');
     expect(out).not.toContain('"meta-095"');
     expect(out).not.toContain('"noise-leak"');
+  });
+
+  it('refreshes the graph list before canonical page-zero durable fallback', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'memo-refresh-before-canonical-fallback';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    const fallbackGraph = `${cgPrefix}/context/1`;
+    await store.insert([
+      q(cgPrefix, 0),
+      q(fallbackGraph, 1),
+    ]);
+
+    const originalListGraphs = store.listGraphs.bind(store);
+    let listGraphCalls = 0;
+    store.listGraphs = async () => {
+      listGraphCalls++;
+      return originalListGraphs();
+    };
+
+    const cap = registerTestSyncHandler(store, { syncPageSize: 2 });
+    const out = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 2,
+    });
+
+    expect(listGraphCalls).toBe(1);
+    expect(out).toContain('"row-000"');
+    expect(out).toContain('"row-001"');
+    expect(lineGraphsFromNquads(out)).toEqual(new Set([cgPrefix, fallbackGraph]));
+  });
+
+  it('durable fallback pages admitted graphs with one global store query', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'single-query-durable-fallback';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    const fallbackGraph = `${cgPrefix}/context/1`;
+    await store.insert([
+      q(cgPrefix, 0),
+      q(fallbackGraph, 1),
+    ]);
+
+    const originalQuery = store.query.bind(store);
+    let globalPageQueries = 0;
+    store.query = (async (sparql: string) => {
+      const normalized = sparql.replace(/\s+/g, ' ').trim();
+      if (normalized.includes('COUNT(*)')) {
+        throw new Error(`durable fallback should not count per graph: ${normalized}`);
+      }
+      if (
+        /^SELECT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
+        normalized.includes(`VALUES ?g { <${cgPrefix}> <${fallbackGraph}>`) &&
+        normalized.includes('ORDER BY ?g ?s ?p ?o')
+      ) {
+        globalPageQueries++;
+      }
+      return originalQuery(sparql);
+    }) as OxigraphStore['query'];
+
+    const cap = registerTestSyncHandler(store, { syncPageSize: 1 });
+    const out = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 1,
+      limit: 1,
+    });
+
+    expect(globalPageQueries).toBe(1);
+    expect(out).toContain('"row-001"');
+    expect(out).not.toContain('"row-000"');
   });
 
   it('reuses the responder graph-list memo across nearby page requests', async () => {
