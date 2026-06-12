@@ -538,12 +538,20 @@ async function readDurableMetaRowsPage(
   if (safeLimit === 0) return [];
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const cgEntity = contextGraphDataGraphUri(contextGraphId);
+  const registeredSubGraphSubjects = (await readRegisteredSubGraphNames(store, contextGraphId))
+    .map((name) => `<${assertSafeIri(`${cgEntity}/${name}`)}>`);
+  const registeredSubGraphSubjectClause = registeredSubGraphSubjects.length === 0
+    ? ''
+    : `${registeredSubGraphSubjects.length === 1
+      ? `sameTerm(?s, ${registeredSubGraphSubjects[0]})`
+      : `?s IN (${registeredSubGraphSubjects.join(', ')})`} ||`;
   const workingMemory = sparqlString(MemoryLayer.WorkingMemory);
   const res = await store.query(`
     SELECT ?s ?p ?o WHERE {
       GRAPH <${assertSafeIri(metaGraph)}> { ?s ?p ?o }
       FILTER(
         STR(?s) = ${sparqlString(cgEntity)} ||
+        ${registeredSubGraphSubjectClause}
         STRSTARTS(STR(?s), "did:dkg:activity:") ||
         STRSTARTS(STR(?s), "did:dkg:join-request:") ||
         EXISTS {

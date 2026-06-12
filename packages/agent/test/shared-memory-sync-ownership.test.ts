@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createOperationContext, contextGraphSharedMemoryMetaUri, contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
-import type { Quad } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
@@ -45,6 +45,27 @@ function subGraphRegistrationMeta(name: string): Quad[] {
     { graph: ROOT_CG_META_GRAPH, subject, predicate: SCHEMA_NAME, object: `"${name}"` },
     { graph: ROOT_CG_META_GRAPH, subject, predicate: `${DKG}createdBy`, object: '"remote-peer"' },
   ];
+}
+
+async function registeredSubGraphNamesFromStore(store: OxigraphStore, contextGraphId: string): Promise<string[]> {
+  const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
+  const result = await store.query(`
+    SELECT DISTINCT ?sg ?name WHERE {
+      GRAPH <${metaGraph}> {
+        ?sg <${RDF_TYPE}> <${DKG}SubGraph> ;
+            <${SCHEMA_NAME}> ?name .
+      }
+    }
+  `);
+  if (result.type !== 'bindings') return [];
+  return result.bindings
+    .map((row) => {
+      const subject = row['sg'] ?? '';
+      const name = (row['name'] ?? '').replace(/^"|"$/g, '');
+      return subject === `${prefix}${name}` ? name : undefined;
+    })
+    .filter((name): name is string => name !== undefined);
 }
 
 describe('runSharedMemorySync ownership hydration', () => {
@@ -163,6 +184,69 @@ describe('runSharedMemorySync ownership hydration', () => {
       expect(inserted.some((quad) => quad.graph === SUB_GRAPH_SWM)).toBe(false);
       expect(ownedMaps.get(`${CG_ID}\0${SUB_GRAPH}`)?.get(ROOT_ENTITY)).toBeUndefined();
     } finally {
+      await worker.close();
+    }
+  });
+
+  it('accepts sub-graph SWM after durable registration rows are local', async () => {
+    const worker = new SyncVerifyWorker();
+    const durableStore = new OxigraphStore();
+    const ownedMaps = new Map<string, Map<string, string>>();
+    const inserted: Quad[] = [];
+    const dataQuads: Quad[] = [
+      { graph: SUB_GRAPH_SWM, subject: ROOT_ENTITY, predicate: 'http://schema.org/name', object: '"durable-registered-sub"' },
+    ];
+    const metaQuads: Quad[] = [
+      ...workspaceOperationMeta(SUB_GRAPH_META, 'urn:dkg:share:durable-sub', ROOT_ENTITY, 'peer-durable-sub'),
+    ];
+
+    try {
+      await durableStore.insert(subGraphRegistrationMeta(SUB_GRAPH));
+      const summary = await runSharedMemorySync({
+        ctx: createOperationContext('sync'),
+        remotePeerId: '12D3KooWRequesterDurableRegisteredSub',
+        contextGraphIds: [CG_ID],
+        createContextGraphSyncDeadline: () => Date.now() + 30_000,
+        fetchSyncPages: async (_ctx, _peer, _cg, _includeSwm, phase) => (
+          phase === 'data' ? page(dataQuads, phase) : page(metaQuads, phase)
+        ),
+        processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames) =>
+          worker.processSharedMemoryBatch(
+            wsDataQuads,
+            wsMetaQuads,
+            contextGraphId,
+            registeredSubGraphNames,
+            excludedSubGraphNames,
+          ),
+        getRegisteredSubGraphNames: (contextGraphId) => registeredSubGraphNamesFromStore(durableStore, contextGraphId),
+        ensureContextGraph: async () => {},
+        storeInsert: async (quads) => {
+          inserted.push(...quads);
+        },
+        deleteCheckpoint: () => {},
+        setCheckpoint: () => {},
+        ensureOwnedMap: (key) => {
+          let map = ownedMaps.get(key);
+          if (!map) {
+            map = new Map<string, string>();
+            ownedMaps.set(key, map);
+          }
+          return map;
+        },
+        logInfo: () => {},
+        logWarn: () => {},
+        logDebug: () => {},
+      });
+
+      expect(summary.failedPeers).toBe(0);
+      expect(summary.droppedDataTriples).toBe(0);
+      expect(summary.insertedDataTriples).toBe(1);
+      expect(summary.insertedMetaTriples).toBe(metaQuads.length);
+      expect(inserted.some((quad) => quad.graph === SUB_GRAPH_SWM)).toBe(true);
+      expect(inserted.some((quad) => quad.graph === SUB_GRAPH_META)).toBe(true);
+      expect(ownedMaps.get(`${CG_ID}\0${SUB_GRAPH}`)?.get(ROOT_ENTITY)).toBe('peer-durable-sub');
+    } finally {
+      await durableStore.close();
       await worker.close();
     }
   });

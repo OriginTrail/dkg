@@ -4,6 +4,7 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   DKG_NS,
   RDF_TYPE,
+  SCHEMA_NAME,
   lineGraphsFromNquads,
   linesFromNquads,
   registerTestSyncHandler,
@@ -212,9 +213,15 @@ describe('sync responder graph admission planner', () => {
     const cgMeta = `${cgPrefix}/_meta`;
     const vmAssertion = `${cgPrefix}/assertion/0xabc/final`;
     const wmAssertion = `${cgPrefix}/assertion/0xabc/draft`;
+    const registeredSubGraph = `${cgPrefix}/registered`;
 
     await store.insert([
       q(cgMeta, cgPrefix, `${DKG_NS}createdAt`, '"2026-06-01T00:00:00Z"'),
+      ...subGraphRegistrationQuads(cgId, 'registered'),
+      q(cgMeta, 'urn:forged-subgraph-registration', RDF_TYPE, `${DKG_NS}SubGraph`),
+      q(cgMeta, 'urn:forged-subgraph-registration', SCHEMA_NAME, '"forged"'),
+      q(cgMeta, `${cgPrefix}/context`, RDF_TYPE, `${DKG_NS}SubGraph`),
+      q(cgMeta, `${cgPrefix}/context`, SCHEMA_NAME, '"context"'),
       q(cgMeta, 'did:dkg:activity:1', 'http://schema.org/name', '"activity"'),
       q(cgMeta, 'did:dkg:join-request:1', 'http://schema.org/name', '"join"'),
       q(cgMeta, 'urn:lifecycle:vm', `${DKG_NS}memoryLayer`, `"${MemoryLayer.VerifiableMemory}"`),
@@ -238,11 +245,16 @@ describe('sync responder graph admission planner', () => {
     });
 
     expect(out).toContain(cgPrefix);
+    expect(out).toContain(registeredSubGraph);
+    expect(out).toContain(`${DKG_NS}SubGraph`);
+    expect(out).toContain(SCHEMA_NAME);
     expect(out).toContain('did:dkg:activity:1');
     expect(out).toContain('did:dkg:join-request:1');
     expect(out).toContain('urn:lifecycle:vm');
     expect(out).toContain(vmAssertion);
     expect(out).toContain('urn:event:vm');
+    expect(out).not.toContain('urn:forged-subgraph-registration');
+    expect(out).not.toContain(`${cgPrefix}/context`);
     expect(out).not.toContain('urn:lifecycle:wm');
     expect(out).not.toContain('wm-assertion-meta-leak');
     expect(out).not.toContain('noise-leak');
