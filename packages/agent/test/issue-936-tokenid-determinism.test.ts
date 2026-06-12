@@ -30,6 +30,13 @@ import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { FinalizationHandler } from '../src/finalization-handler.js';
 
+// Opt-in gate: these repros assert post-fix behaviour, so they are RED while
+// the bug is live. They are EXCLUDED from the default test lane (which must stay
+// green / mergeable) and run only under `RUN_ISSUE_LIVENESS=1` (the dedicated
+// issue-liveness CI lane). See package.json `test:issue-liveness`.
+const LIVENESS_ENABLED = !!process.env.RUN_ISSUE_LIVENESS;
+
+
 const CG = 'gh936-cg';
 const ON_CHAIN_CG = '42';
 const UAL = 'did:dkg:evm:31337/0xABC/7';
@@ -103,7 +110,7 @@ async function reconcile(insertOrder: typeof ROOTS): Promise<Record<string, stri
   return readRootTokenMap(store);
 }
 
-describe('GH #936 — chain-driven reconcile must map each root to a deterministic tokenId', () => {
+describe.runIf(LIVENESS_ENABLED)('GH #936 — chain-driven reconcile must map each root to a deterministic tokenId', () => {
   it('two replicas reconciling the same KC agree on the rootEntity→tokenId mapping', async () => {
     // Replica A and replica B received the same 3 roots in DIFFERENT orders
     // (independent share-time histories). oxigraph's SPARQL binding order

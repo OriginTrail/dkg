@@ -62,6 +62,13 @@ import { InMemoryProverWal, RandomSamplingProver } from '../src/index.js';
 
 const TEST_CHAIN_ID = 31337n;
 
+// Opt-in gate for the GH #1091 issue-liveness repro below: it asserts post-fix
+// behaviour and is RED while the bug is live, so it must NOT run in the default
+// test lane (which has to stay green / mergeable). It runs only under
+// `RUN_ISSUE_LIVENESS=1` (the dedicated issue-liveness CI lane). The rest of this
+// file (the real prover e2e) always runs.
+const LIVENESS_ENABLED = !!process.env.RUN_ISSUE_LIVENESS;
+
 describe('Random Sampling E2E (Hardhat)', () => {
   const ROOT = 'urn:experiment:wsd';
   const publishQuads = [
@@ -244,7 +251,7 @@ describe('Random Sampling E2E (Hardhat)', () => {
   // draw IS predictable from public data) and turns GREEN once the seed is made
   // unpredictable (commit-reveal in period N for N+1, or a VRF). It uses REC2 (a
   // staked, sharded node) so it does not disturb the REC1 prover test above.
-  it('GH #1091: a node cannot predict its own challenge from public block data (grindable seed)', async () => {
+  it.runIf(LIVENESS_ENABLED)('GH #1091: a node cannot predict its own challenge from public block data (grindable seed)', async () => {
     const provider = createProvider();
     const ctx = getSharedContext();
     const rec2 = new ethers.Wallet(HARDHAT_KEYS.REC2_OP, provider);

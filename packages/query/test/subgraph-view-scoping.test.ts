@@ -25,6 +25,13 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { contextGraphLayerUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 
+// Opt-in gate: these repros assert post-fix behaviour, so they are RED while
+// the bug is live. They are EXCLUDED from the default test lane (which must stay
+// green / mergeable) and run only under `RUN_ISSUE_LIVENESS=1` (the dedicated
+// issue-liveness CI lane). See package.json `test:issue-liveness`.
+const LIVENESS_ENABLED = !!process.env.RUN_ISSUE_LIVENESS;
+
+
 const CG = 'subgraph-view-cg';
 const ADDR = '0x1111111111111111111111111111111111111111';
 const SUB = 'research-alpha';
@@ -42,7 +49,7 @@ function q(s: string, p: string, o: string, g: string) {
   return { subject: s, predicate: p, object: o, graph: g };
 }
 
-describe('GH #184 / #675 — sub-graph scoping in view-based WM reads', () => {
+describe.runIf(LIVENESS_ENABLED)('GH #184 / #675 — sub-graph scoping in view-based WM reads', () => {
   let store: OxigraphStore;
   let engine: DKGQueryEngine;
 

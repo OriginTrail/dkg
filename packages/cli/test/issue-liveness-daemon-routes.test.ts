@@ -5,10 +5,10 @@
  * (port 9548 per packages/cli/vitest.config.ts). Zero chain mocks. Each test
  * reproduces a confirmed-live production bug from the rc.17 QA sweep and asserts
  * the CORRECT behaviour, so it is RED while the bug is live and GREEN once fixed
- * (then close the linked GitHub issue). These deliberately fail in the normal
- * `pnpm test` CLI lane — that failing IS the live-bug signal. This is a
- * reproducing-test PR (#1129); the lane is expected to be red until the fixes
- * land.
+ * (then close the linked GitHub issue). These repros are EXCLUDED from the normal
+ * `pnpm test` CLI lane (which must stay green / mergeable) via the
+ * `RUN_ISSUE_LIVENESS` gate, and run red only on the dedicated issue-liveness
+ * lane (`RUN_ISSUE_LIVENESS=1`).
  *
  * Covered:
  *   #787  — POST /api/shared-memory/write with N-Quad *string* quads → 500
@@ -35,6 +35,13 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { ethers } from 'ethers';
 import { getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+
+// Opt-in gate: these repros assert post-fix behaviour, so they are RED while
+// the bug is live. They are EXCLUDED from the default test lane (which must stay
+// green / mergeable) and run only under `RUN_ISSUE_LIVENESS=1` (the dedicated
+// issue-liveness CI lane). See package.json `test:issue-liveness`.
+const LIVENESS_ENABLED = !!process.env.RUN_ISSUE_LIVENESS;
+
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
@@ -133,7 +140,7 @@ afterAll(async () => {
   }
 });
 
-describe('GH #787 — SWM write with N-Quad string quads', () => {
+describe.runIf(LIVENESS_ENABLED)('GH #787 — SWM write with N-Quad string quads', () => {
   it('returns a 4xx (not 500) for string-shaped quads', async () => {
     const res = await fetch(url('/api/shared-memory/write'), {
       method: 'POST',
@@ -149,7 +156,7 @@ describe('GH #787 — SWM write with N-Quad string quads', () => {
   });
 });
 
-describe('GH #306 — KA wm/write with N-Quad string quads', () => {
+describe.runIf(LIVENESS_ENABLED)('GH #306 — KA wm/write with N-Quad string quads', () => {
   it('returns a 4xx (not 500) for string-shaped quads', async () => {
     await fetch(url('/api/knowledge-assets'), {
       method: 'POST',
@@ -167,7 +174,7 @@ describe('GH #306 — KA wm/write with N-Quad string quads', () => {
   });
 });
 
-describe('GH #158 — CCL not-found error mapping (with a real CG)', () => {
+describe.runIf(LIVENESS_ENABLED)('GH #158 — CCL not-found error mapping (with a real CG)', () => {
   it('ccl/eval on an existing CG with an unknown policy returns 4xx not 500', async () => {
     const res = await fetch(url('/api/ccl/eval'), {
       method: 'POST',
@@ -180,7 +187,7 @@ describe('GH #158 — CCL not-found error mapping (with a real CG)', () => {
   });
 });
 
-describe('GH #309 — /api/status exposes the default agent address', () => {
+describe.runIf(LIVENESS_ENABLED)('GH #309 — /api/status exposes the default agent address', () => {
   it('status body carries defaultAgentAddress for WM-query scoping', async () => {
     const res = await fetch(url('/api/status'), { headers: { Authorization: `Bearer ${daemon!.token}` } });
     const body = (await res.json()) as Record<string, unknown>;
@@ -188,7 +195,7 @@ describe('GH #309 — /api/status exposes the default agent address', () => {
   });
 });
 
-describe('GH #757 — join-requests endpoint must be curator-gated', () => {
+describe.runIf(LIVENESS_ENABLED)('GH #757 — join-requests endpoint must be curator-gated', () => {
   it(
     'a non-curator agent token is rejected (403) from reading another CG curator\'s join-requests',
     async () => {

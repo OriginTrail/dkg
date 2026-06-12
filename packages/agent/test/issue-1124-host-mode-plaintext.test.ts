@@ -33,6 +33,13 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
 
+// Opt-in gate: these repros assert post-fix behaviour, so they are RED while
+// the bug is live. They are EXCLUDED from the default test lane (which must stay
+// green / mergeable) and run only under `RUN_ISSUE_LIVENESS=1` (the dedicated
+// issue-liveness CI lane). See package.json `test:issue-liveness`.
+const LIVENESS_ENABLED = !!process.env.RUN_ISSUE_LIVENESS;
+
+
 const PUBLIC_CG = 'gh1124-public-cg';
 
 const dirs: string[] = [];
@@ -41,7 +48,7 @@ afterEach(async () => {
   dirs.length = 0;
 });
 
-describe('GH #1124 — host-mode cores must retain a public CG plaintext SWM share', () => {
+describe.runIf(LIVENESS_ENABLED)('GH #1124 — host-mode cores must retain a public CG plaintext SWM share', () => {
   it('a plaintext (public-CG) SWM gossip envelope is stored, not dropped, by host-mode ingest', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'gh1124-'));
     dirs.push(dataDir);
@@ -53,34 +60,39 @@ describe('GH #1124 — host-mode cores must retain a public CG plaintext SWM sha
       nodeRole: 'core',
       dataDir,
     } as never);
-    await (agent as any).initializeSwmHostModeStore();
-    const hostStore = (agent as any).swmHostModeStore;
-    expect(hostStore, 'host-mode store must be initialised for a core node').toBeTruthy();
+    // Teardown in `finally` so the agent is always closed even when the
+    // assertion below fails (the RED path while #1124 is live) — otherwise the
+    // open DKGAgent leaks background resources into later agent tests.
+    try {
+      await (agent as any).initializeSwmHostModeStore();
+      const hostStore = (agent as any).swmHostModeStore;
+      expect(hostStore, 'host-mode store must be initialised for a core node').toBeTruthy();
 
-    // A PUBLIC-CG SWM share: the publisher emits this as PLAINTEXT (no curated
-    // key). It is a valid WORKSPACE_PUBLISH gossip envelope whose payload is NOT
-    // one of the two encrypted carriers.
-    const plaintextPayload = new TextEncoder().encode(
-      '<urn:gh1124:thing> <https://schema.org/name> "Public Thing" .',
-    );
-    const envelope = encodeGossipEnvelope({
-      version: GOSSIP_ENVELOPE_VERSION,
-      type: GOSSIP_TYPE_WORKSPACE_PUBLISH,
-      contextGraphId: PUBLIC_CG,
-      agentAddress: '0x1111111111111111111111111111111111111111',
-      timestamp: String(1_700_000_000_000),
-      signature: new Uint8Array(64),
-      payload: plaintextPayload,
-    });
+      // A PUBLIC-CG SWM share: the publisher emits this as PLAINTEXT (no curated
+      // key). It is a valid WORKSPACE_PUBLISH gossip envelope whose payload is
+      // NOT one of the two encrypted carriers.
+      const plaintextPayload = new TextEncoder().encode(
+        '<urn:gh1124:thing> <https://schema.org/name> "Public Thing" .',
+      );
+      const envelope = encodeGossipEnvelope({
+        version: GOSSIP_ENVELOPE_VERSION,
+        type: GOSSIP_TYPE_WORKSPACE_PUBLISH,
+        contextGraphId: PUBLIC_CG,
+        agentAddress: '0x1111111111111111111111111111111111111111',
+        timestamp: String(1_700_000_000_000),
+        signature: new Uint8Array(64),
+        payload: plaintextPayload,
+      });
 
-    await (agent as any).ingestSwmHostModeEnvelope(PUBLIC_CG, envelope, '12D3KooWPublisher');
+      await (agent as any).ingestSwmHostModeEnvelope(PUBLIC_CG, envelope, '12D3KooWPublisher');
 
-    // CORRECT (post-fix): the host-mode store retained the public-CG share so it
-    // can satisfy the storage-ACK read + member catchup. Today the plaintext
-    // envelope is dropped at the `isCiphertext` gate, so the store is empty.
-    const stats = await hostStore.stats();
-    expect(stats.totalEntries, 'host-mode store dropped the public-CG plaintext SWM share').toBeGreaterThan(0);
-
-    await agent.stop().catch(() => {});
+      // CORRECT (post-fix): the host-mode store retained the public-CG share so
+      // it can satisfy the storage-ACK read + member catchup. Today the plaintext
+      // envelope is dropped at the `isCiphertext` gate, so the store is empty.
+      const stats = await hostStore.stats();
+      expect(stats.totalEntries, 'host-mode store dropped the public-CG plaintext SWM share').toBeGreaterThan(0);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
   }, 30_000);
 });

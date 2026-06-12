@@ -19,13 +19,20 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadOpWallets } from '../src/op-wallets.js';
 
+// Opt-in gate: these repros assert post-fix behaviour, so they are RED while
+// the bug is live. They are EXCLUDED from the default test lane (which must stay
+// green / mergeable) and run only under `RUN_ISSUE_LIVENESS=1` (the dedicated
+// issue-liveness CI lane). See package.json `test:issue-liveness`.
+const LIVENESS_ENABLED = !!process.env.RUN_ISSUE_LIVENESS;
+
+
 const dirs: string[] = [];
 afterEach(async () => {
   await Promise.all(dirs.map((d) => rm(d, { recursive: true, force: true }).catch(() => {})));
   dirs.length = 0;
 });
 
-describe('GH #11 — operational wallet private keys at rest', () => {
+describe.runIf(LIVENESS_ENABLED)('GH #11 — operational wallet private keys at rest', () => {
   it('does not persist raw private keys in plaintext in wallets.json', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'gh11-opwallets-'));
     dirs.push(dir);

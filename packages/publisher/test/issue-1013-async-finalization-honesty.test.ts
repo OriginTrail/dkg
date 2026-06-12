@@ -25,6 +25,13 @@ import { describe, expect, it } from 'vitest';
 import { mapPublishResultToLiftJobSuccess } from '../src/index.js';
 import type { PublishResult } from '../src/publisher.js';
 
+// Opt-in gate: these repros assert post-fix behaviour, so they are RED while
+// the bug is live. They are EXCLUDED from the default test lane (which must stay
+// green / mergeable) and run only under `RUN_ISSUE_LIVENESS=1` (the dedicated
+// issue-liveness CI lane). See package.json `test:issue-liveness`.
+const LIVENESS_ENABLED = !!process.env.RUN_ISSUE_LIVENESS;
+
+
 function tentativeResult(localChainSkipReason: 'no-chain' | 'private-no-acks'): PublishResult {
   // A tentative, off-chain result (no `onChainResult`) carrying a provisional
   // UAL — exactly what `finalizeIntentionalLocalPublish` produces. The
@@ -40,7 +47,7 @@ function tentativeResult(localChainSkipReason: 'no-chain' | 'private-no-acks'): 
   } as unknown as PublishResult;
 }
 
-describe('GH #1013 — async lift must not report a private off-chain publish as finalized', () => {
+describe.runIf(LIVENESS_ENABLED)('GH #1013 — async lift must not report a private off-chain publish as finalized', () => {
   it(
     'rejects a private-no-acks tentative result instead of mapping it to a finalized lift job',
     () => {

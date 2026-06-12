@@ -28,6 +28,13 @@ import {
 import { MessageHandler, ed25519ToX25519Private } from '../src/index.js';
 import { Messenger } from '../src/p2p/messenger.js';
 
+// Opt-in gate: these repros assert post-fix behaviour, so they are RED while
+// the bug is live. They are EXCLUDED from the default test lane (which must stay
+// green / mergeable) and run only under `RUN_ISSUE_LIVENESS=1` (the dedicated
+// issue-liveness CI lane). See package.json `test:issue-liveness`.
+const LIVENESS_ENABLED = !!process.env.RUN_ISSUE_LIVENESS;
+
+
 const PEER_ATTACKER = '12D3KooWZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ';
 const PEER_VICTIM = '12D3KooWVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV';
 const SKILL = 'did:dkg:skill:victim/sensitive-action';
@@ -67,7 +74,7 @@ async function buildPair() {
   return { attacker, victim };
 }
 
-describe('GH #462 — skill_request must be authorization-gated, not just authenticated', () => {
+describe.runIf(LIVENESS_ENABLED)('GH #462 — skill_request must be authorization-gated, not just authenticated', () => {
   it(
     'a skill_request from an UNAUTHORIZED (but signed) peer is rejected and the skill handler does NOT run',
     async () => {
