@@ -1074,6 +1074,7 @@ export class DKGAgentBase {
    * by PR #237 (sync-refactor-rebased).
    */
   protected readonly syncCheckpoints = new Map<string, number>();
+  protected syncDeltaUnsafeWarningEmitted = false;
   protected syncVerifyWorker?: SyncVerifyWorker;
 
   /** Registered agents on this node: agentAddress → AgentKeyRecord */

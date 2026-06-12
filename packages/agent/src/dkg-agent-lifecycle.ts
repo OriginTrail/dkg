@@ -2726,6 +2726,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
   ): Promise<DurableSyncResult> {
     const ctx = createOperationContext('sync');
+    if (!sinceBatchIdFor && process.env.DKG_SYNC_DELTA === '1' && !this.syncDeltaUnsafeWarningEmitted) {
+      this.syncDeltaUnsafeWarningEmitted = true;
+      this.log.warn(
+        ctx,
+        'DKG_SYNC_DELTA=1 is not activated: V10 dkg:batchId is a KA id, not a safe per-CG delta cursor. Durable sync remains full-scan until an ordinal/version cursor exists.',
+      );
+    }
     return runDurableSync({
       ctx,
       remotePeerId,
