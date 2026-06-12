@@ -457,6 +457,9 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
  *   await agent.stop();
  */
 export class DKGAgent extends DKGAgentBase {
+  private chainContextGraphScanFailure:
+    | { signature: string; count: number }
+    | undefined;
 
   static async create(config: DKGAgentConfig): Promise<DKGAgent> {
     let wallet: DKGAgentWallet;
@@ -510,6 +513,7 @@ export class DKGAgent extends DKGAgentBase {
         tokenAddress: config.chainConfig.tokenAddress,
         chainId: config.chainConfig.chainId,
         approvalPolicy: config.chainConfig.approvalPolicy,
+        cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
       };
       if (config.chainConfig.adminPrivateKey) {
         chain = new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey });
@@ -1024,10 +1028,26 @@ export class DKGAgent extends DKGAgentBase {
 
     let onChainContextGraphs;
     try {
-      onChainContextGraphs = await this.chain.listContextGraphsFromChain();
+      onChainContextGraphs = await this.chain.listContextGraphsFromChain(undefined, { incremental: true });
     } catch (err) {
-      this.log.warn(ctx, `Chain context graph scan failed: ${err instanceof Error ? err.message : String(err)}`);
+      const message = err instanceof Error ? err.message : String(err);
+      const signature = message
+        .replace(/\[\d+,\s*\d+\]/g, '[range]')
+        .replace(/\b\d+\s+eth_getLogs calls/g, 'N eth_getLogs calls');
+      if (this.chainContextGraphScanFailure?.signature !== signature) {
+        this.log.warn(ctx, `Chain context graph scan failed: ${message}`);
+        this.chainContextGraphScanFailure = { signature, count: 1 };
+      } else {
+        this.chainContextGraphScanFailure.count += 1;
+      }
       return 0;
+    }
+    if (this.chainContextGraphScanFailure) {
+      this.log.info(
+        ctx,
+        `Chain context graph scan recovered after ${this.chainContextGraphScanFailure.count} failed attempt(s)`,
+      );
+      this.chainContextGraphScanFailure = undefined;
     }
 
     // Build a set of all known on-chain IDs (stored and computed) for fast dedup

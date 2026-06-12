@@ -9,9 +9,9 @@
  * via applyMixins(); see evm-adapter.ts for the assembly.
  */
 
-import { EVMChainAdapterBase } from './evm-adapter-base.js';
-import { ethers, Contract } from 'ethers';
-import type { CreateContextGraphParams, TxResult, ContextGraphOnChain, CreateOnChainContextGraphParams, CreateOnChainContextGraphResult, VerifyParams, PublishToContextGraphParams, OnChainPublishResult } from './chain-adapter.js';
+import { EVMChainAdapterBase, CG_REGISTRY_MAX_SCAN_PAGES, CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-base.js';
+import { ethers, Contract, type JsonRpcProvider } from 'ethers';
+import type { CreateContextGraphParams, TxResult, ContextGraphOnChain, ContextGraphChainScanOptions, CreateOnChainContextGraphParams, CreateOnChainContextGraphResult, VerifyParams, PublishToContextGraphParams, OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 
 export class ContextGraphMethods extends EVMChainAdapterBase {
@@ -100,20 +100,79 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     return { hash: receipt.hash, blockNumber: receipt.blockNumber, txIndex: receipt.index, success: true };
   }
 
-  async listContextGraphsFromChain(fromBlock?: number): Promise<ContextGraphOnChain[]> {
+  async listContextGraphsFromChain(
+    fromBlock?: number,
+    options?: ContextGraphChainScanOptions,
+  ): Promise<ContextGraphOnChain[]> {
     await this.init();
     const registry = this.contracts.contextGraphNameRegistry;
     if (!registry) return [];
     const eventFilter = registry.filters.NameClaimed();
-    const head = await this.provider.getBlockNumber();
-    const PAGE = 9_000;
-    const start = fromBlock ?? 0;
-    const results: ContextGraphOnChain[] = [];
+    const registryAddress = (await registry.getAddress()).toLowerCase();
+    const scan =
+      fromBlock === undefined
+        ? await this.resolveContractDeployBlock(
+            registryAddress,
+            'listContextGraphsFromChain',
+            'ContextGraphNameRegistry',
+          )
+        : { fromBlock, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) };
+    const { fromBlock: deployBlock, head, scanProviders } = scan;
+    const incremental = options?.incremental === true && fromBlock === undefined;
+    const watermark = incremental
+      ? this.contextGraphRegistryScanWatermarks.get(registryAddress)
+      : undefined;
+    const start = fromBlock ?? (
+      !incremental || watermark === undefined
+        ? deployBlock
+        : Math.max(deployBlock, watermark - CG_REGISTRY_REORG_BUFFER_BLOCKS)
+    );
+    if (start > head) return [];
 
-    // Paginate in PAGE-sized chunks to stay within RPC range limits.
-    for (let lo = start; lo <= head; lo += PAGE) {
-      const hi = Math.min(lo + PAGE - 1, head);
-      const logs = await registry.queryFilter(eventFilter, lo, hi);
+    const pageSize = this.cgRegistryScanPageSize;
+    const pages = Math.ceil((head - start + 1) / pageSize);
+    if (pages > CG_REGISTRY_MAX_SCAN_PAGES) {
+      throw new Error(
+        `listContextGraphsFromChain: ContextGraphNameRegistry scan would need ` +
+          `${pages} eth_getLogs calls over blocks [${start}, ${head}] at a ` +
+          `${pageSize}-block window (budget ${CG_REGISTRY_MAX_SCAN_PAGES} pages). ` +
+          `Use an RPC that can anchor the registry deploy block and serve the ` +
+          `requested log range, or increase cgRegistryScanPageSize for an RPC ` +
+          `known to support larger ranges.`,
+      );
+    }
+
+    const results: ContextGraphOnChain[] = [];
+    const connected = new Map<JsonRpcProvider, Contract>();
+    let preferred: JsonRpcProvider | undefined;
+    let scannedAnyPage = false;
+
+    // Incremental daemon scans can resume from the scanned prefix after a later
+    // page failure. Public list-all calls should remain all-or-error.
+    for (let lo = start; lo <= head; lo += pageSize) {
+      const hi = Math.min(lo + pageSize - 1, head);
+      let logs: ReadonlyArray<ethers.EventLog | ethers.Log>;
+      try {
+        const page = await this.queryEventLogsPage(
+          registry,
+          eventFilter,
+          lo,
+          hi,
+          scanProviders,
+          connected,
+          'listContextGraphsFromChain NameClaimed',
+          preferred,
+        );
+        logs = page.logs;
+        preferred = page.provider;
+      } catch (err) {
+        if (incremental && scannedAnyPage) return results;
+        throw err;
+      }
+      scannedAnyPage = true;
+      if (incremental) {
+        this.contextGraphRegistryScanWatermarks.set(registryAddress, hi + 1);
+      }
       for (const log of logs) {
         const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
         if (!parsed || parsed.name !== 'NameClaimed') continue;

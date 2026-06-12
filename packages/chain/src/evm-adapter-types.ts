@@ -55,6 +55,13 @@ export interface EVMAdapterBaseConfig {
    * O(1) view is used).
    */
   kaHighWaterScanPageSize?: number;
+  /**
+   * Adapter/SDK-level tuning for the ContextGraphNameRegistry discovery scan:
+   * the `eth_getLogs` block-window, in blocks. Default 2,000, matching the
+   * smallest common provider cap. A finite value `>= 1` is floored; a
+   * non-finite or `< 1` value falls back to the default.
+   */
+  cgRegistryScanPageSize?: number;
 }
 
 export interface EVMAdapterConfig extends EVMAdapterBaseConfig {

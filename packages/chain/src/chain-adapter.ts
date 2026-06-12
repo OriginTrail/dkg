@@ -248,6 +248,15 @@ export interface ContextGraphOnChain {
   description?: string;
 }
 
+export interface ContextGraphChainScanOptions {
+  /**
+   * When true and `fromBlock` is omitted, adapters may resume from an
+   * in-memory watermark with a reorg buffer. The default preserves public
+   * list-all semantics for SDK callers.
+   */
+  incremental?: boolean;
+}
+
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----
 
 /**
@@ -753,7 +762,7 @@ export interface ChainAdapter {
   /** Reveal cleartext name+description on-chain for a context graph you created. Optional. */
   revealContextGraphMetadata?(contextGraphId: string, name: string, description: string): Promise<TxResult>;
   /** List context graphs from chain via `NameClaimed` events. Optional; not supported on no-chain/mock. */
-  listContextGraphsFromChain?(fromBlock?: number): Promise<ContextGraphOnChain[]>;
+  listContextGraphsFromChain?(fromBlock?: number, options?: ContextGraphChainScanOptions): Promise<ContextGraphOnChain[]>;
 
   /**
    * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.

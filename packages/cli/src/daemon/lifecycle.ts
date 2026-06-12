@@ -1243,6 +1243,7 @@ export async function runDaemonInner(
       operationalKeys: opWallets.wallets.map((w) => w.privateKey),
       chainId: chainBase.chainId,
       approvalPolicy: resolveApprovalPolicy(chainBase.approvalPolicy) as ApprovalPolicy | undefined,
+      cgRegistryScanPageSize: chainBase.cgRegistryScanPageSize,
     } : undefined,
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
     // RFC ka-metadata-trim P3.3 — lifecycle PROV event writes (default true).

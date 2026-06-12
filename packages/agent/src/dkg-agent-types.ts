@@ -945,6 +945,8 @@ export interface DKGAgentConfig {
      * (`'per-publish'`, bounded-per-publish with on-chain 1n floor).
      */
     approvalPolicy?: ApprovalPolicy;
+    /** Optional ContextGraphNameRegistry `eth_getLogs` block-window tuning. */
+    cgRegistryScanPageSize?: number;
   };
   /** Cross-agent query access configuration. */
   queryAccess?: QueryAccessConfig;
