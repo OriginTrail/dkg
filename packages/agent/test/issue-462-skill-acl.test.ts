@@ -49,6 +49,16 @@ async function buildPair() {
   let attackerIncoming: DKGStreamHandler | null = null;
   let victimIncoming: DKGStreamHandler | null = null;
 
+  // Records every event the VICTIM emits. The victim emits MESSAGE_RECEIVED
+  // ({ from, type }) right after it has decrypted, signature-verified and
+  // parsed an inbound envelope — i.e. only once the transport + Ed25519 +
+  // parse pipeline has succeeded, and BEFORE the skill is dispatched. We use
+  // it as a positive control: a recorded `type: 'skill_request'` from the
+  // attacker proves the request was actually DELIVERED, so a green result can
+  // only mean "delivered then denied," never "never arrived (transport
+  // regression)."
+  const victimEvents: Array<{ name: unknown; payload: Record<string, unknown> }> = [];
+
   const routerAttacker: ProtocolRouter = {
     register: (_p: string, h: DKGStreamHandler) => { attackerIncoming = h; },
     send: async (_to: string, _p: string, data: Uint8Array) => {
@@ -67,18 +77,26 @@ async function buildPair() {
   const messengerA = new Messenger({ router: routerAttacker, idempotencyStore: new InMemoryMessageIdempotencyStore(), outboxStore: new InMemoryProtocolOutboxStore() });
   const messengerV = new Messenger({ router: routerVictim, idempotencyStore: new InMemoryMessageIdempotencyStore(), outboxStore: new InMemoryProtocolOutboxStore() });
 
+  const victimBus: EventBus = {
+    emit: (name: unknown, payload: unknown) => {
+      victimEvents.push({ name, payload: (payload ?? {}) as Record<string, unknown> });
+    },
+    on: () => {},
+    off: () => {},
+  } as unknown as EventBus;
+
   const attacker = new MessageHandler(messengerA, keyA, ed25519ToX25519Private(keyA.secretKey), PEER_ATTACKER, makeEventBus());
-  const victim = new MessageHandler(messengerV, keyV, ed25519ToX25519Private(keyV.secretKey), PEER_VICTIM, makeEventBus());
+  const victim = new MessageHandler(messengerV, keyV, ed25519ToX25519Private(keyV.secretKey), PEER_VICTIM, victimBus);
   attacker.registerPeerKey(PEER_VICTIM, keyV.publicKey);
   victim.registerPeerKey(PEER_ATTACKER, keyA.publicKey);
-  return { attacker, victim };
+  return { attacker, victim, victimEvents };
 }
 
 describe.runIf(LIVENESS_ENABLED)('GH #462 — skill_request must be authorization-gated, not just authenticated', () => {
   it(
     'a skill_request from an UNAUTHORIZED (but signed) peer is rejected and the skill handler does NOT run',
     async () => {
-      const { attacker, victim } = await buildPair();
+      const { attacker, victim, victimEvents } = await buildPair();
 
       // The victim registers a sensitive skill. It has NOT granted the attacker
       // any authorization — they merely share a libp2p connection.
@@ -89,6 +107,21 @@ describe.runIf(LIVENESS_ENABLED)('GH #462 — skill_request must be authorizatio
         skillUri: SKILL,
         inputData: new TextEncoder().encode('please run your sensitive action'),
       });
+
+      // Positive control: the request must actually have REACHED the victim
+      // (decrypted + signature-verified + parsed). Without this, a transport or
+      // signature regression that drops the message would also yield
+      // `res.success === false` + an uncalled handler and let this test pass for
+      // the WRONG reason. Asserting delivery makes a green result mean
+      // "delivered, then denied" — the real #462 security property — and a
+      // transport regression turns this RED instead of falsely green.
+      const deliveredSkillReq = victimEvents.some(
+        (e) => e.payload?.type === 'skill_request' && e.payload?.from === PEER_ATTACKER,
+      );
+      expect(
+        deliveredSkillReq,
+        'attacker skill_request never reached the victim — transport/signature broke, not an ACL result',
+      ).toBe(true);
 
       // CORRECT (post-fix): default-deny → the attacker gets an unauthorized
       // response and the skill body never executes. Today there is no ACL, so

@@ -164,11 +164,19 @@ describe.runIf(LIVENESS_ENABLED)('GH #787 — SWM write with N-Quad string quads
 
 describe.runIf(LIVENESS_ENABLED)('GH #306 — KA wm/write with N-Quad string quads', () => {
   it('returns a 4xx (not 500) for string-shaped quads', async () => {
-    await fetch(url('/api/knowledge-assets'), {
+    // Precondition: the KA must be created successfully, so the wm/write below
+    // exercises the QUAD-SHAPE validation path. If create silently failed, the
+    // write would 404 on a missing KA — a 4xx that would pass this test for the
+    // WRONG reason (Codex review on PR #1129). Assert the create succeeded.
+    const created = await fetch(url('/api/knowledge-assets'), {
       method: 'POST',
       headers: headers(),
       body: JSON.stringify({ contextGraphId: CG, name: 'ka-306' }),
     });
+    expect(
+      created.status,
+      'KA create precondition failed — wm/write would 404 on a missing KA, not exercise quad validation',
+    ).toBeLessThan(300);
     const res = await fetch(url('/api/knowledge-assets/ka-306/wm/write'), {
       method: 'POST',
       headers: headers(),
@@ -181,15 +189,17 @@ describe.runIf(LIVENESS_ENABLED)('GH #306 — KA wm/write with N-Quad string qua
 });
 
 describe.runIf(LIVENESS_ENABLED)('GH #158 — CCL not-found error mapping (with a real CG)', () => {
-  it('ccl/eval on an existing CG with an unknown policy returns 4xx not 500', async () => {
+  it('ccl/eval on an existing CG with an unknown policy returns 404 not 500', async () => {
     const res = await fetch(url('/api/ccl/eval'), {
       method: 'POST',
       headers: headers(),
       body: JSON.stringify({ contextGraphId: CG, name: 'no-such-policy' }),
     });
-    expect(res.status).not.toBe(500);
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(res.status).toBeLessThan(500);
+    // #158's contract is specifically "unknown policy ⇒ 404". Today it throws a
+    // 500. Asserting the exact 404 (not just any 4xx) means a wrong remap to
+    // 400/403/422 can't masquerade as fixed (Codex review on PR #1129). RED at
+    // 500 while the bug is live; GREEN only when the not-found maps to 404.
+    expect(res.status).toBe(404);
   });
 });
 

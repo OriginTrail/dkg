@@ -19,6 +19,9 @@
       "dependsOn": ["build"],
       "outputs": []
     },
+    "test:liveness": {
+      "cache": false
+    },
     "test:coverage": {
       "dependsOn": ["build"],
       "outputs": ["coverage/**"]
