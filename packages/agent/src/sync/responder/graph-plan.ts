@@ -22,7 +22,7 @@ const DKG_BATCH_ID = `${DKG}batchId`;
 const SCHEMA_NAME = 'http://schema.org/name';
 
 export interface GraphListMemo {
-  get(): Promise<readonly string[]>;
+  get(options?: { refresh?: boolean }): Promise<readonly string[]>;
 }
 
 export function createResponderGraphListMemo(
@@ -33,10 +33,10 @@ export function createResponderGraphListMemo(
   let cachedAt = 0;
   let inflight: Promise<readonly string[]> | null = null;
   return {
-    async get() {
+    async get(options?: { refresh?: boolean }) {
       const now = Date.now();
-      if (cached && now - cachedAt < ttlMs) return [...cached];
       if (inflight) return [...(await inflight)];
+      if (!options?.refresh && cached && now - cachedAt < ttlMs) return [...cached];
       inflight = store.listGraphs()
         .then((graphs) => {
           const sorted = [...new Set(graphs)].sort(compareCodePoint);
@@ -88,17 +88,30 @@ export async function readSwmMetaPage(params: {
 }): Promise<SyncRow[]> {
   const graphs = await planSwmGraphs(params.store, params.contextGraphId, true);
   const graphSet = new Set(params.graphList);
-  const rows: SyncRow[] = [];
-  for (const graph of graphs.filter((graph) => graphSet.has(graph))) {
-    const subjects = params.cutoffIso
-      ? await readFreshWorkspaceSubjects(params.store, graph, params.cutoffIso)
-      : null;
-    rows.push(...await readGraphRows(params.store, graph, (row) =>
-      !subjects || subjects.has(row.s),
-    ));
+  const candidateGraphs = graphs.filter((graph) => graphSet.has(graph));
+  if (!params.cutoffIso) {
+    return readPagedRowsAcrossGraphs(params.store, candidateGraphs, params.offset, params.limit, async () => true);
   }
-  rows.sort(compareRows);
-  return rows.slice(params.offset, params.offset + params.limit);
+
+  const rows: SyncRow[] = [];
+  let skip = params.offset;
+  let remaining = params.limit;
+  for (const graph of candidateGraphs) {
+    if (skip > 0) {
+      const count = await countFreshSwmMetaGraphRows(params.store, graph, params.cutoffIso);
+      if (skip >= count) {
+        skip -= count;
+        continue;
+      }
+    }
+
+    const page = await readFreshSwmMetaGraphRowsPage(params.store, graph, params.cutoffIso, skip, remaining);
+    rows.push(...page);
+    remaining -= page.length;
+    skip = 0;
+    if (remaining <= 0) break;
+  }
+  return rows;
 }
 
 export async function readSwmDataPage(params: {
@@ -379,42 +392,6 @@ async function readAdmittedAssertionGraphs(
   return new Set(res.bindings.map((row) => row['g']).filter(Boolean));
 }
 
-async function readFreshWorkspaceSubjects(
-  store: TripleStore,
-  metaGraph: string,
-  cutoffIso: string,
-): Promise<Set<string>> {
-  const res = await store.query(`
-    SELECT DISTINCT ?subject WHERE {
-      GRAPH <${assertSafeIri(metaGraph)}> {
-        ?subject <${DKG_PUBLISHED_AT}> ?ts .
-        FILTER(?ts >= "${cutoffIso}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
-      }
-    }
-  `);
-  return new Set(res.type === 'bindings' ? res.bindings.map((row) => row['subject']).filter(Boolean) : []);
-}
-
-async function readGraphRows(
-  store: TripleStore,
-  graph: string,
-  predicate?: (row: SyncRow) => boolean | Promise<boolean>,
-): Promise<SyncRow[]> {
-  const res = await store.query(`
-    SELECT ?s ?p ?o WHERE {
-      GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
-    }
-  `);
-  if (res.type !== 'bindings') return [];
-  const rows: SyncRow[] = [];
-  for (const row of res.bindings) {
-    const syncRow = { s: row['s'], p: row['p'], o: row['o'], g: graph };
-    if (!syncRow.s || !syncRow.p || !syncRow.o) continue;
-    if (!predicate || await predicate(syncRow)) rows.push(syncRow);
-  }
-  return rows;
-}
-
 async function countGraphRows(store: TripleStore, graph: string): Promise<number> {
   const res = await store.query(`
     SELECT (COUNT(*) AS ?count) WHERE {
@@ -439,6 +416,54 @@ async function readGraphRowsPage(
   const res = await store.query(`
     SELECT ?s ?p ?o WHERE {
       GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+    }
+    ORDER BY ?s ?p ?o
+    OFFSET ${safeOffset}
+    LIMIT ${safeLimit}
+  `);
+  if (res.type !== 'bindings') return [];
+  return res.bindings
+    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: graph }))
+    .filter((row) => row.s && row.p && row.o);
+}
+
+async function countFreshSwmMetaGraphRows(
+  store: TripleStore,
+  graph: string,
+  cutoffIso: string,
+): Promise<number> {
+  const res = await store.query(`
+    SELECT (COUNT(*) AS ?count) WHERE {
+      GRAPH <${assertSafeIri(graph)}> {
+        ?s ?p ?o .
+        ?s <${DKG_PUBLISHED_AT}> ?ts .
+        FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+      }
+    }
+  `);
+  if (res.type !== 'bindings') return 0;
+  const value = parseIntegerLiteral(res.bindings[0]?.['count']);
+  if (value == null || value < 0n) return 0;
+  return Number(value > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : value);
+}
+
+async function readFreshSwmMetaGraphRowsPage(
+  store: TripleStore,
+  graph: string,
+  cutoffIso: string,
+  offset: number,
+  limit: number,
+): Promise<SyncRow[]> {
+  const safeOffset = Math.max(0, Math.floor(offset));
+  const safeLimit = Math.max(0, Math.floor(limit));
+  if (safeLimit === 0) return [];
+  const res = await store.query(`
+    SELECT ?s ?p ?o WHERE {
+      GRAPH <${assertSafeIri(graph)}> {
+        ?s ?p ?o .
+        ?s <${DKG_PUBLISHED_AT}> ?ts .
+        FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+      }
     }
     ORDER BY ?s ?p ?o
     OFFSET ${safeOffset}

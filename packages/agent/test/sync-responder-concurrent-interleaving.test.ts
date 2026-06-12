@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { createResponderGraphListMemo } from '../src/sync/responder/graph-plan.js';
 import {
   DKG_NS,
   lineGraphsFromNquads,
   linesFromNquads,
   registerTestSyncHandler,
+  subGraphRegistrationQuads,
   workspaceOpQuads,
 } from './_helpers/sync-responder.js';
 
@@ -15,6 +17,16 @@ function q(graph: string, index: number): Quad {
     predicate: `${DKG_NS}label`,
     object: `"row-${index.toString().padStart(3, '0')}"`,
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 function watchBoundedPageQuery(
@@ -117,21 +129,47 @@ describe('sync responder pagination interleaving', () => {
     expect(out).not.toContain('"row-095"');
   });
 
+  it('uses bounded store-side paging for deep SWM meta pages', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'bounded-swm-meta';
+    const swmMetaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
+    await store.insert(Array.from({ length: 100 }, (_, index) => q(swmMetaGraph, index)));
+
+    const probe = watchBoundedPageQuery(store, swmMetaGraph, 90, 5);
+    const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: 0, syncPageSize: 5 });
+    const out = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'meta',
+      offset: 90,
+      limit: 5,
+    });
+
+    probe.assertObserved();
+    const lines = linesFromNquads(out);
+    expect(lines).toHaveLength(5);
+    expect(out).toContain('"row-090"');
+    expect(out).toContain('"row-094"');
+    expect(out).not.toContain('"row-089"');
+    expect(out).not.toContain('"row-095"');
+  });
+
   it('uses bounded store-side paging for deep SWM data pages with TTL filtering', async () => {
     const store = new OxigraphStore();
     const cgId = 'bounded-swm-ttl';
     const swmGraph = `did:dkg:context-graph:${cgId}/_shared_memory`;
+    const dataGraph = `${swmGraph}/0xabc/1`;
     const swmMetaGraph = `${swmGraph}_meta`;
     const now = new Date().toISOString();
     const rows: Quad[] = [];
     for (let index = 0; index < 100; index++) {
       const root = `urn:interleave:${index.toString().padStart(3, '0')}`;
-      rows.push(q(swmGraph, index));
+      rows.push(q(dataGraph, index));
       rows.push(...workspaceOpQuads(cgId, `op-${index}`, root, swmMetaGraph, now));
     }
     await store.insert(rows);
 
-    const probe = watchBoundedPageQuery(store, swmGraph, 90, 5);
+    const probe = watchBoundedPageQuery(store, dataGraph, 90, 5);
     const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: 60_000, syncPageSize: 5 });
     const out = await cap.invoke({
       contextGraphId: cgId,
@@ -144,6 +182,7 @@ describe('sync responder pagination interleaving', () => {
     probe.assertObserved();
     const lines = linesFromNquads(out);
     expect(lines).toHaveLength(5);
+    expect(lineGraphsFromNquads(out)).toEqual(new Set([dataGraph]));
     expect(out).toContain('"row-090"');
     expect(out).toContain('"row-094"');
     expect(out).not.toContain('"row-089"');
@@ -191,5 +230,105 @@ describe('sync responder pagination interleaving', () => {
     expect(out).not.toContain('"meta-089"');
     expect(out).not.toContain('"meta-095"');
     expect(out).not.toContain('"noise-leak"');
+  });
+
+  it('reuses the responder graph-list memo across nearby page requests', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'memo-swm';
+    const swmGraph = `did:dkg:context-graph:${cgId}/_shared_memory`;
+    await store.insert(Array.from({ length: 2 }, (_, index) => q(swmGraph, index)));
+    const originalListGraphs = store.listGraphs.bind(store);
+    let listGraphCalls = 0;
+    store.listGraphs = async () => {
+      listGraphCalls++;
+      return originalListGraphs();
+    };
+
+    const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: 0, syncPageSize: 1 });
+    await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+    });
+    await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'data',
+      offset: 1,
+      limit: 1,
+    });
+
+    expect(listGraphCalls).toBe(1);
+  });
+
+  it('keeps SWM data pagination stable when a subgraph appears after page zero', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'memo-stable-swm';
+    const rootSwm = `did:dkg:context-graph:${cgId}/_shared_memory`;
+    const subSwm = `did:dkg:context-graph:${cgId}/later/_shared_memory`;
+    await store.insert([
+      q(rootSwm, 0),
+      q(rootSwm, 1),
+    ]);
+
+    const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: 0, syncPageSize: 1 });
+    const first = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+    });
+
+    await store.insert([
+      ...subGraphRegistrationQuads(cgId, 'later'),
+      {
+        graph: subSwm,
+        subject: 'urn:interleave:000',
+        predicate: `${DKG_NS}label`,
+        object: '"new-subgraph-row"',
+      },
+    ]);
+
+    const second = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'data',
+      offset: 1,
+      limit: 1,
+    });
+
+    expect(first).toContain('"row-000"');
+    expect(second).toContain('"row-001"');
+    expect(second).not.toContain('"new-subgraph-row"');
+  });
+
+  it('joins an in-flight graph-list refresh before serving cached pages', async () => {
+    const firstRefresh = deferred<string[]>();
+    const secondRefresh = deferred<string[]>();
+    let calls = 0;
+    const store = {
+      listGraphs: async () => {
+        calls++;
+        return calls === 1 ? firstRefresh.promise : secondRefresh.promise;
+      },
+    } as unknown as OxigraphStore;
+    const memo = createResponderGraphListMemo(store);
+
+    const initial = memo.get({ refresh: true });
+    firstRefresh.resolve(['old']);
+    await expect(initial).resolves.toEqual(['old']);
+
+    const refreshing = memo.get({ refresh: true });
+    const overlappingRefresh = memo.get({ refresh: true });
+    const deepPage = memo.get();
+    secondRefresh.resolve(['new']);
+
+    await expect(refreshing).resolves.toEqual(['new']);
+    await expect(overlappingRefresh).resolves.toEqual(['new']);
+    await expect(deepPage).resolves.toEqual(['new']);
+    expect(calls).toBe(2);
   });
 });

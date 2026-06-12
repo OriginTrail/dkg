@@ -6,6 +6,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { SyncRequestEnvelope } from '../auth/request-build.js';
 import {
+  createResponderGraphListMemo,
   readDurableCanonicalDataPage,
   readDurableDataPage,
   readDurableMetaPage,
@@ -55,6 +56,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     logWarn,
     logDebug,
   } = params;
+  const graphListMemo = createResponderGraphListMemo(store);
 
   register(protocolSync, async (data, peerId) => {
     const handlerStartedAt = Date.now();
@@ -110,7 +112,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         const queryStartedAt = Date.now();
         const rows = await readSwmMetaPage({
           store,
-          graphList: await store.listGraphs(),
+          graphList: await graphListMemo.get({ refresh: offset === 0 }),
           contextGraphId,
           cutoffIso: cutoff,
           offset,
@@ -126,7 +128,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         const queryStartedAt = Date.now();
         const rows = await readSwmDataPage({
           store,
-          graphList: await store.listGraphs(),
+          graphList: await graphListMemo.get({ refresh: offset === 0 }),
           contextGraphId,
           cutoffIso: cutoff,
           offset,
@@ -163,7 +165,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           if (canonicalRows.length === limit) return canonicalRows;
           return readDurableDataPage({
             store,
-            graphList: await store.listGraphs(),
+            graphList: await graphListMemo.get({ refresh: offset === 0 }),
             contextGraphId,
             sinceBatchId,
             offset,
@@ -172,7 +174,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         })()
         : await readDurableDataPage({
           store,
-          graphList: await store.listGraphs(),
+          graphList: await graphListMemo.get({ refresh: offset === 0 }),
           contextGraphId,
           sinceBatchId,
           offset,
