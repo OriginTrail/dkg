@@ -253,6 +253,12 @@ describe('Random Sampling E2E (Hardhat)', () => {
   // staked, sharded node) so it does not disturb the REC1 prover test above.
   it.runIf(LIVENESS_ENABLED)('GH #1091: a node cannot predict its own challenge from public block data (grindable seed)', async () => {
     const provider = createProvider();
+    // This repro mutates shared Hardhat state (mines a REC2 challenge, pins
+    // prevrandao, mines blocks). Snapshot/revert around the WHOLE test so it
+    // can't leak state into the regular prover E2E that reuses the same fixture
+    // — the file's single afterAll revert is not enough once this also runs.
+    const liveSnapshot = await takeSnapshot();
+    try {
     const ctx = getSharedContext();
     const rec2 = new ethers.Wallet(HARDHAT_KEYS.REC2_OP, provider);
 
@@ -341,6 +347,11 @@ describe('Random Sampling E2E (Hardhat)', () => {
     // Today it is — `predictsActualDraw` is true — so this assertion is RED until
     // #1091 lands a commit-reveal / VRF seed.
     expect(predictsActualDraw, 'challenge draw was predicted before the tx was mined (grindable seed)').toBe(false);
+    } finally {
+      // Roll back ALL of this test's chain mutations so the prover E2E below
+      // (which reuses the shared fixture) starts from the same baseline.
+      await revertSnapshot(liveSnapshot);
+    }
   }, 90_000);
 
   it('drives the prover end-to-end against the real RandomSampling.sol', async () => {
