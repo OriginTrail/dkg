@@ -2,6 +2,9 @@ import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC, SYSTEM_CON
 
 interface SyncProgressSummary {
   insertedTriples: number;
+  insertedDataTriples?: number;
+  insertedMetaTriples?: number;
+  metaOnlyResponses?: number;
   completedPhases?: number;
   checkpointAdvances?: number;
   timedOutPhases?: number;
@@ -39,9 +42,9 @@ interface SyncOnConnectContext {
   onPeerSkippedNoSync?: (peerId: string, protocols: string[]) => void;
   /**
    * Optional. Called after sync accounting shows either real progress or a
-   * denial-only clean response. `fresh=false` means progress was made but
-   * the round also saw a timeout/failed phase, so peer backoff may be
-   * cleared but freshness gates should still allow a near-term retry.
+   * denial-only clean response. `fresh=false` clears peer backoff and starts
+   * the periodic reconciler cooldown without marking the peer as cleanly
+   * fresh for reconnect suppression.
    */
   onPeerSynced?: (peerId: string, outcome?: { fresh: boolean }) => void;
 }
@@ -67,7 +70,12 @@ function insertedTriples(result: SyncFromPeerResult): number {
 
 function madeSyncProgress(result: SyncFromPeerResult): boolean {
   if (typeof result === 'number') return true;
-  return result.insertedTriples > 0 || (result.completedPhases ?? 0) > 0 || (result.checkpointAdvances ?? 0) > 0;
+  const phaseProgress = !metadataOnlySync(result) && (
+    (result.completedPhases ?? 0) > 0 ||
+    (result.checkpointAdvances ?? 0) > 0
+  );
+  return insertedDataTriplesForProgress(result) > 0
+    || phaseProgress;
 }
 
 function hadBackoffWorthyFailure(result: SyncFromPeerResult): boolean {
@@ -85,7 +93,21 @@ function cleanDetailedSync(result: SyncFromPeerResult): boolean {
   return (
     (result.failedPeers ?? 0) === 0 &&
     (result.timedOutPhases ?? 0) === 0 &&
-    (result.deniedPhases ?? 0) === 0
+    (result.deniedPhases ?? 0) === 0 &&
+    !metadataOnlySync(result)
+  );
+}
+
+function insertedDataTriplesForProgress(result: SyncProgressSummary): number {
+  if (result.insertedDataTriples !== undefined) return result.insertedDataTriples;
+  return metadataOnlySync(result) ? 0 : result.insertedTriples;
+}
+
+function metadataOnlySync(result: SyncProgressSummary): boolean {
+  const insertedDataTriples = result.insertedDataTriples ?? 0;
+  return insertedDataTriples === 0 && (
+    (result.metaOnlyResponses ?? 0) > 0 ||
+    ((result.insertedMetaTriples ?? 0) > 0 && result.insertedTriples > 0)
   );
 }
 

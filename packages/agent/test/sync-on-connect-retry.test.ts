@@ -360,6 +360,41 @@ describe('runSyncOnConnect callbacks', () => {
     expect(synced).toEqual([{ peerId: remotePeer, fresh: false }]);
   });
 
+  it('does not treat metadata-only summaries as progress or clean freshness', async () => {
+    const remotePeer = freshPeerIdString();
+    const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
+
+    const outcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => [],
+      syncFromPeer: async () => ({
+        insertedTriples: 1,
+        insertedDataTriples: 0,
+        insertedMetaTriples: 1,
+        metaOnlyResponses: 1,
+        timedOutPhases: 0,
+        failedPeers: 0,
+        deniedPhases: 0,
+      }),
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => ({
+        insertedTriples: 0,
+        timedOutPhases: 0,
+        failedPeers: 0,
+        deniedPhases: 0,
+      }),
+      logInfo: noopLog,
+      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+    });
+
+    expect(outcome).toBe('synced');
+    expect(synced).toEqual([]);
+  });
+
   it('tags failures that happen after durable sync completes', async () => {
     const remotePeer = freshPeerIdString();
     const syncingPeers = new Set<string>();
@@ -1164,6 +1199,11 @@ describe('DKGAgent sync state lifecycle', () => {
       expect((agent as any).lastSuccessfulSyncAt.has(peerA)).toBe(false);
       expect((agent as any).lastSyncProgressAt.has(peerA)).toBe(true);
       expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
+
+      await (agent as any).reconcileSyncFromConnectedPeers();
+      await flushMicrotasks();
+
+      expect(calls).toEqual([peerA]);
     } finally {
       await agent.stop().catch(() => {});
     }

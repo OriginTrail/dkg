@@ -2377,10 +2377,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    *   - is in {@link skippedNoSyncPeers} and now advertises `PROTOCOL_SYNC`
    *     (covers the case where the `peer:update` listener missed the
    *     event for whatever reason), or
-   *   - has no `lastSuccessfulSyncAt` entry, or whose entry is older
-   *     than {@link SYNC_STALENESS_THRESHOLD_MS} (covers slow identify,
-   *     transport-level reconnects that didn't fire connection:open,
-   *     and any future failure mode of the event-driven path).
+   *   - has no recent clean success or progress/denial cooldown marker, or
+   *     whose newest marker is older than {@link SYNC_STALENESS_THRESHOLD_MS}
+   *     (covers slow identify, transport-level reconnects that didn't fire
+   *     connection:open, and any future failure mode of the event-driven path).
    *
    * Designed to be safe to call concurrently with the event-driven path
    * — `runSyncOnConnect` itself is idempotent via `syncingPeers`.
@@ -2396,9 +2396,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const lastOk = this.lastSuccessfulSyncAt.get(peerId);
       const lastDisconnected = this.lastSyncDisconnectedAt.get(peerId) ?? 0;
       const lastProgress = this.lastSyncProgressAt.get(peerId);
-      const stale = lastOk == null
-        || lastOk <= lastDisconnected
-        || (now - lastOk) >= SYNC_STALENESS_THRESHOLD_MS;
+      const lastSyncCooldown = Math.max(lastOk ?? 0, lastProgress ?? 0);
+      const stale = lastSyncCooldown === 0
+        || lastSyncCooldown <= lastDisconnected
+        || (now - lastSyncCooldown) >= SYNC_STALENESS_THRESHOLD_MS;
       if (!stale) continue;
       // Per-peer exponential backoff: a peer that can never be synced
       // (dead / NAT-stuck / persistently stream-resetting) never stamps

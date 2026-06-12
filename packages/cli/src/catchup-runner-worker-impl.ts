@@ -161,7 +161,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   );
   for (const { durable, shared } of perPeerResults) {
     let peerDenied = false;
-    dataSynced += durable.insertedTriples;
+    dataSynced += durable.insertedDataTriples ?? 0;
     diagnostics.durable.fetchedMetaTriples += durable.fetchedMetaTriples;
     diagnostics.durable.fetchedDataTriples += durable.fetchedDataTriples;
     diagnostics.durable.insertedMetaTriples += durable.insertedMetaTriples;
@@ -179,7 +179,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     peerDenied = peerDenied || durable.deniedPhases > 0;
 
     if (shared) {
-      sharedMemorySynced += shared.insertedTriples;
+      sharedMemorySynced += shared.insertedDataTriples ?? 0;
       diagnostics.sharedMemory.fetchedMetaTriples += shared.fetchedMetaTriples;
       diagnostics.sharedMemory.fetchedDataTriples += shared.fetchedDataTriples;
       diagnostics.sharedMemory.insertedMetaTriples += shared.insertedMetaTriples;
@@ -212,12 +212,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   diagnostics.noProtocolPeers = noProtocolPeers;
   await invoke('finalizeCatchup', request.contextGraphId, dataSynced, sharedMemorySynced);
 
-  const servedByPeer =
-    dataSynced > 0 ||
-    sharedMemorySynced > 0 ||
-    diagnostics.durable.insertedMetaTriples > 0 ||
-    diagnostics.sharedMemory.insertedMetaTriples > 0 ||
-    diagnostics.durable.metaOnlyResponses > 0;
+  const peerCompletedSuccessfully = peersSucceeded > 0;
 
   return {
     connectedPeers: prepared.connectedPeers,
@@ -226,7 +221,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     peersSucceeded,
     dataSynced,
     sharedMemorySynced,
-    denied: deniedPeers > 0 && !servedByPeer,
+    denied: deniedPeers > 0 && !peerCompletedSuccessfully,
     deniedPeers,
     diagnostics,
   };

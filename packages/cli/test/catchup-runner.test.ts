@@ -40,6 +40,28 @@ describe('catchup runner progress accounting', () => {
       completedPhases: 0,
       checkpointAdvances: 0,
       insertedTriples: 1,
+      insertedDataTriples: 1,
+    }, null, false)).toBe(true);
+  });
+
+  it('does not count metadata-only delivery as peer success', () => {
+    expect(catchupPeerSucceeded({
+      failedPeers: 0,
+      timedOutPhases: 0,
+      completedPhases: 0,
+      checkpointAdvances: 0,
+      insertedTriples: 1,
+      insertedDataTriples: 0,
+      insertedMetaTriples: 1,
+      metaOnlyResponses: 1,
+    }, null, false)).toBe(false);
+
+    expect(catchupPeerSucceeded({
+      failedPeers: 0,
+      timedOutPhases: 0,
+      completedPhases: 0,
+      checkpointAdvances: 0,
+      insertedTriples: 0,
     }, null, false)).toBe(true);
   });
 

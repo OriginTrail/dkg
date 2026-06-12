@@ -71,6 +71,9 @@ export interface CatchupPhaseProgress {
   checkpointAdvances?: number;
   failedPeers?: number;
   insertedTriples?: number;
+  insertedDataTriples?: number;
+  insertedMetaTriples?: number;
+  metaOnlyResponses?: number;
 }
 
 export function catchupPeerSucceeded(
@@ -80,17 +83,22 @@ export function catchupPeerSucceeded(
 ): boolean {
   const durableFailed = (durable.failedPeers ?? 0) > 0;
   const sharedFailed = shared ? (shared.failedPeers ?? 0) > 0 : false;
-  const durableProgress = (durable.insertedTriples ?? 0) > 0
+  const durableProgress = (durable.insertedDataTriples ?? durable.insertedTriples ?? 0) > 0
     || (durable.checkpointAdvances ?? 0) > 0
     || ((durable.completedPhases ?? 0) > 0 && (durable.resumedPhases ?? 0) > 0);
   const sharedProgress = shared
-    ? (shared.insertedTriples ?? 0) > 0
+    ? (shared.insertedDataTriples ?? shared.insertedTriples ?? 0) > 0
       || (shared.checkpointAdvances ?? 0) > 0
       || ((shared.completedPhases ?? 0) > 0 && (shared.resumedPhases ?? 0) > 0)
     : false;
   const peerMadeProgress = durableProgress || sharedProgress;
+  const peerMetadataOnly = !peerMadeProgress && (
+    (durable.insertedMetaTriples ?? 0) > 0
+    || (durable.metaOnlyResponses ?? 0) > 0
+    || (shared ? (shared.insertedMetaTriples ?? 0) > 0 : false)
+  );
   const peerTimedOut = (durable.timedOutPhases ?? 0) > 0 || (shared ? (shared.timedOutPhases ?? 0) > 0 : false);
-  return !durableFailed && !sharedFailed && !peerDenied && (peerMadeProgress || !peerTimedOut);
+  return !durableFailed && !sharedFailed && !peerDenied && (peerMadeProgress || (!peerTimedOut && !peerMetadataOnly));
 }
 
 export interface CatchupRunner {
