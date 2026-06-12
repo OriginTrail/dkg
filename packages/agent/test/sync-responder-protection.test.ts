@@ -48,6 +48,29 @@ function makeEnvelope(): SyncRequestEnvelope {
   };
 }
 
+function abortDuringListenerRegistration(message: string): AbortSignal {
+  let aborted = false;
+  let reason: Error | undefined;
+  return {
+    get aborted() {
+      return aborted;
+    },
+    get reason() {
+      return reason;
+    },
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+      if (type !== 'abort') return;
+      aborted = true;
+      reason = new Error(message);
+      if (typeof listener === 'function') listener(new Event('abort'));
+      else listener.handleEvent(new Event('abort'));
+    },
+    removeEventListener: () => undefined,
+    dispatchEvent: () => true,
+    onabort: null,
+  } as unknown as AbortSignal;
+}
+
 function captureHandler(
   store: TripleStore,
   options: { logWarn?: (ctx: OperationContext, message: string) => void } = {},
@@ -126,6 +149,33 @@ describe('sync responder protection', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     await Promise.all(requests);
+  });
+
+  it('removes queued requests that abort while registering the abort listener', async () => {
+    const releases: Array<() => void> = [];
+    const store = {
+      query: async () => {
+        const gate = deferred<void>();
+        releases.push(() => gate.resolve());
+        await gate.promise;
+        return { type: 'bindings', bindings: [] } satisfies QueryResult;
+      },
+    } as unknown as TripleStore;
+    const cap = captureHandler(store);
+    const envelope = makeEnvelope();
+
+    const first = cap.invoke(envelope, REMOTE_A);
+    const raced = cap.invoke(envelope, REMOTE_A, abortDuringListenerRegistration('listener registration aborted'));
+
+    await expect(raced).rejects.toThrow(/listener registration aborted/);
+
+    const later = cap.invoke(envelope, REMOTE_A);
+    while (releases.length < 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    releases.shift()?.();
+    await first;
+    while (releases.length < 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    releases.shift()?.();
+    await later;
   });
 
   it('rejects requests beyond the per-peer responder queue as transport failures', async () => {

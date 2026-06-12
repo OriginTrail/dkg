@@ -169,9 +169,12 @@ function createSyncResponderLimiter() {
       entry.onAbort = () => {
         if (removeQueued(entry)) reject(asAbortError(signal?.reason));
       };
-      if (signal) signal.addEventListener('abort', entry.onAbort, { once: true });
       incrementQueued(peerId);
       queue.push(entry);
+      if (signal) {
+        signal.addEventListener('abort', entry.onAbort, { once: true });
+        if (signal.aborted) entry.onAbort();
+      }
     });
   };
 

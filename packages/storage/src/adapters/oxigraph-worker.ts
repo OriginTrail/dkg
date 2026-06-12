@@ -218,6 +218,10 @@ export class OxigraphWorkerStore implements TripleStore {
         // A pending-op timer must not keep the process alive on its own.
         if (typeof timer.unref === 'function') timer.unref();
       }
+      this.pending.set(id, {
+        resolve: (v) => { cleanup(); resolve(v as T); },
+        reject: (e) => { cleanup(); reject(e); },
+      });
       if (signal) {
         onAbort = () => {
           if (this.pending.delete(id)) {
@@ -226,11 +230,11 @@ export class OxigraphWorkerStore implements TripleStore {
           }
         };
         signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
       }
-      this.pending.set(id, {
-        resolve: (v) => { cleanup(); resolve(v as T); },
-        reject: (e) => { cleanup(); reject(e); },
-      });
       try {
         this.worker.postMessage({ id, method, args });
       } catch (err) {
