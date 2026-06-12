@@ -3,6 +3,7 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import type { SyncPhase } from '../auth/request-build.js';
+import { didSyncPeerRespond, isSyncTransportFailure } from '../error-tags.js';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncPageResult } from './page-fetch.js';
 
@@ -23,6 +24,7 @@ export interface SharedMemorySyncSummary {
   emptyResponses: number;
   droppedDataTriples: number;
   failedPeers: number;
+  failedPhases: number;
 }
 
 interface SharedMemorySyncContext {
@@ -104,6 +106,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     emptyResponses: 0,
     droppedDataTriples: 0,
     failedPeers: 0,
+    failedPhases: 0,
   };
 
   const recordPhaseOutcome = (result: SyncPageResult) => {
@@ -123,6 +126,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
 
   let peerFailed = false;
   for (const [index, pid] of contextGraphIds.entries()) {
+    let peerRespondedForContextGraph = false;
     try {
       const wsGraph = contextGraphWorkspaceGraphUri(pid);
       const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(pid);
@@ -132,7 +136,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
 
       const fetchStartedAt = Date.now();
       const wsMetaResult = await fetchSyncPages(ctx, remotePeerId, pid, true, 'meta', wsMetaGraph, deadline);
+      peerRespondedForContextGraph = true;
       const wsDataResult = await fetchSyncPages(ctx, remotePeerId, pid, true, 'data', wsGraph, deadline);
+      peerRespondedForContextGraph = true;
       const fetchDurationMs = Date.now() - fetchStartedAt;
 
       const verifyStartedAt = Date.now();
@@ -242,6 +248,12 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       logWarn(ctx, `SWM sync for context graph "${pid}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
       if ((err as Error & { syncDenied?: boolean }).syncDenied) {
         summary.deniedPhases += 1;
+      } else if (
+        peerRespondedForContextGraph ||
+        didSyncPeerRespond(err) ||
+        !isSyncTransportFailure(err)
+      ) {
+        summary.failedPhases += 1;
       } else {
         peerFailed = true;
       }

@@ -46,6 +46,7 @@ export interface CatchupJobResult {
       dataRejectedMissingMeta: number;
       rejectedKcs: number;
       failedPeers: number;
+      failedPhases: number;
     };
     sharedMemory: {
       fetchedMetaTriples: number;
@@ -60,6 +61,7 @@ export interface CatchupJobResult {
       emptyResponses: number;
       droppedDataTriples: number;
       failedPeers: number;
+      failedPhases: number;
     };
   };
 }
@@ -75,6 +77,7 @@ export interface CatchupPhaseProgress {
   completedPhases?: number;
   checkpointAdvances?: number;
   failedPeers?: number;
+  failedPhases?: number;
   insertedTriples?: number;
   insertedDataTriples?: number;
   insertedMetaTriples?: number;
@@ -87,6 +90,8 @@ export function catchupPeerSucceeded(
   peerDenied: boolean,
 ): boolean {
   if (!catchupPeerResponded(durable, shared) || peerDenied) return false;
+  const peerPhaseFailed = (durable.failedPhases ?? 0) > 0 || (shared ? (shared.failedPhases ?? 0) > 0 : false);
+  if (peerPhaseFailed) return false;
   const durableProgress = (durable.insertedDataTriples ?? durable.insertedTriples ?? 0) > 0
     || (durable.checkpointAdvances ?? 0) > 0
     || ((durable.completedPhases ?? 0) > 0 && (durable.resumedPhases ?? 0) > 0);

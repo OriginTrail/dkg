@@ -1201,6 +1201,7 @@ export class ApiClient {
             dataRejectedMissingMeta: number;
             rejectedKcs: number;
             failedPeers: number;
+            failedPhases: number;
           };
           sharedMemory: {
             fetchedMetaTriples: number;
@@ -1215,6 +1216,7 @@ export class ApiClient {
             emptyResponses: number;
             droppedDataTriples: number;
             failedPeers: number;
+            failedPhases: number;
           };
         };
       }
@@ -1258,6 +1260,7 @@ export class ApiClient {
             dataRejectedMissingMeta: number;
             rejectedKcs: number;
             failedPeers: number;
+            failedPhases: number;
           };
           sharedMemory: {
             fetchedMetaTriples: number;
@@ -1272,6 +1275,7 @@ export class ApiClient {
             emptyResponses: number;
             droppedDataTriples: number;
             failedPeers: number;
+            failedPhases: number;
           };
         };
       }
@@ -1319,6 +1323,7 @@ export class ApiClient {
           dataRejectedMissingMeta: number;
           rejectedKcs: number;
           failedPeers: number;
+          failedPhases: number;
         };
         sharedMemory: {
           fetchedMetaTriples: number;
@@ -1333,6 +1338,7 @@ export class ApiClient {
           emptyResponses: number;
           droppedDataTriples: number;
           failedPeers: number;
+          failedPhases: number;
         };
       };
     };

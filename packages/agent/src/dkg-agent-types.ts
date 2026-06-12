@@ -690,6 +690,7 @@ export interface DurableSyncDiagnostics {
   dataRejectedMissingMeta: number;
   rejectedKcs: number;
   failedPeers: number;
+  failedPhases: number;
 }
 
 export interface SharedMemorySyncDiagnostics {
@@ -705,6 +706,7 @@ export interface SharedMemorySyncDiagnostics {
   emptyResponses: number;
   droppedDataTriples: number;
   failedPeers: number;
+  failedPhases: number;
 }
 
 export interface CatchupSyncDiagnostics {

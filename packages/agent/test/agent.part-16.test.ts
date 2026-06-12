@@ -131,6 +131,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           completedPhases: number;
           checkpointAdvances: number;
           failedPeers: number;
+          failedPhases: number;
         }> = {}) => ({
           insertedTriples: 0,
           fetchedMetaTriples: 0,
@@ -147,6 +148,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           dataRejectedMissingMeta: 0,
           rejectedKcs: 0,
           failedPeers: 0,
+          failedPhases: 0,
           deniedPhases: 0,
           ...overrides,
         });
@@ -189,6 +191,18 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(progressWithTimeout.diagnostics.durable.timedOutPhases).toBe(1);
         expect(progressWithTimeout.diagnostics.durable.completedPhases).toBe(1);
         expect(progressWithTimeout.diagnostics.durable.checkpointAdvances).toBe(1);
+
+        syncFromPeerDetailed.mockResolvedValueOnce(durableResult({
+          failedPhases: 1,
+        }));
+
+        const phaseFailure = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+
+        expect(phaseFailure.peersTried).toBe(1);
+        expect(phaseFailure.peersResponded).toBe(1);
+        expect(phaseFailure.peersSucceeded).toBe(0);
+        expect(phaseFailure.diagnostics.durable.failedPeers).toBe(0);
+        expect(phaseFailure.diagnostics.durable.failedPhases).toBe(1);
       } finally {
         await agent.stop().catch(() => {});
       }

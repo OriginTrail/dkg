@@ -2899,6 +2899,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         emptyResponses: 0,
         droppedDataTriples: 0,
         failedPeers: 0,
+        failedPhases: 0,
         deniedPhases: 0,
       };
     }
@@ -3063,6 +3064,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         dataRejectedMissingMeta: 0,
         rejectedKcs: 0,
         failedPeers: 0,
+        failedPhases: 0,
       },
       sharedMemory: {
         fetchedMetaTriples: 0,
@@ -3077,6 +3079,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         emptyResponses: 0,
         droppedDataTriples: 0,
         failedPeers: 0,
+        failedPhases: 0,
       },
     };
 
@@ -3135,6 +3138,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       dataRejectedMissingMeta: 0,
       rejectedKcs: 0,
       failedPeers: 1,
+      failedPhases: 0,
       deniedPhases: 0,
     });
     const emptyShared = (): SharedMemorySyncResult => ({
@@ -3151,6 +3155,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       emptyResponses: 0,
       droppedDataTriples: 0,
       failedPeers: 1,
+      failedPhases: 0,
       deniedPhases: 0,
     });
     const results = await Promise.all(syncCapable.map(async (remotePeerId) => {
@@ -3173,6 +3178,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // subscribe/VM catch-up path report a successful peer.
       const durableFailed = r.durable.failedPeers > 0;
       const sharedFailed = r.shared ? r.shared.failedPeers > 0 : false;
+      const durablePhaseFailed = (r.durable.failedPhases ?? 0) > 0;
+      const sharedPhaseFailed = r.shared ? (r.shared.failedPhases ?? 0) > 0 : false;
       const peerDeniedRound = r.durable.deniedPhases > 0
         || (r.shared ? r.shared.deniedPhases > 0 : false);
       const durableProgress = r.durable.insertedDataTriples > 0
@@ -3193,7 +3200,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (!durableFailed && !sharedFailed) {
         peersResponded++;
       }
-      if (!durableFailed && !sharedFailed && !peerDeniedRound && (peerMadeProgress || (!peerTimedOut && !peerMetadataOnly))) {
+      if (
+        !durableFailed &&
+        !sharedFailed &&
+        !durablePhaseFailed &&
+        !sharedPhaseFailed &&
+        !peerDeniedRound &&
+        (peerMadeProgress || (!peerTimedOut && !peerMetadataOnly))
+      ) {
         peersSucceeded++;
       }
       dataSynced += r.durable.insertedDataTriples;
@@ -3211,6 +3225,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       diagnostics.durable.dataRejectedMissingMeta += r.durable.dataRejectedMissingMeta;
       diagnostics.durable.rejectedKcs += r.durable.rejectedKcs;
       diagnostics.durable.failedPeers += r.durable.failedPeers;
+      diagnostics.durable.failedPhases += r.durable.failedPhases ?? 0;
       let peerDenied = r.durable.deniedPhases > 0;
       if (r.shared) {
         sharedMemorySynced += r.shared.insertedDataTriples;
@@ -3226,6 +3241,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         diagnostics.sharedMemory.emptyResponses += r.shared.emptyResponses;
         diagnostics.sharedMemory.droppedDataTriples += r.shared.droppedDataTriples;
         diagnostics.sharedMemory.failedPeers += r.shared.failedPeers;
+        diagnostics.sharedMemory.failedPhases += r.shared.failedPhases ?? 0;
         peerDenied = peerDenied || r.shared.deniedPhases > 0;
       }
       if (peerDenied) accessDeniedPeers++;

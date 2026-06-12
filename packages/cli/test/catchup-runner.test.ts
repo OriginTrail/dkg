@@ -92,6 +92,18 @@ describe('catchup runner progress accounting', () => {
   it('does not count denied or failed peers as success', () => {
     expect(catchupPeerSucceeded({
       failedPeers: 0,
+      failedPhases: 1,
+      timedOutPhases: 0,
+      completedPhases: 1,
+      checkpointAdvances: 0,
+    }, null, false)).toBe(false);
+    expect(catchupPeerResponded({
+      failedPeers: 0,
+      failedPhases: 1,
+    }, null)).toBe(true);
+
+    expect(catchupPeerSucceeded({
+      failedPeers: 0,
       timedOutPhases: 0,
       completedPhases: 1,
       checkpointAdvances: 0,

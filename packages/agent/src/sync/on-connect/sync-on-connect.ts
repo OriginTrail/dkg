@@ -9,6 +9,7 @@ interface SyncProgressSummary {
   checkpointAdvances?: number;
   timedOutPhases?: number;
   failedPeers?: number;
+  failedPhases?: number;
   deniedPhases?: number;
 }
 
@@ -88,10 +89,16 @@ function hadDeniedPhase(result: SyncFromPeerResult): boolean {
   return (result.deniedPhases ?? 0) > 0;
 }
 
+function hadFailedPhase(result: SyncFromPeerResult): boolean {
+  if (typeof result === 'number') return false;
+  return (result.failedPhases ?? 0) > 0;
+}
+
 function cleanDetailedSync(result: SyncFromPeerResult): boolean {
   if (typeof result === 'number') return true;
   return (
     (result.failedPeers ?? 0) === 0 &&
+    (result.failedPhases ?? 0) === 0 &&
     (result.timedOutPhases ?? 0) === 0 &&
     (result.deniedPhases ?? 0) === 0 &&
     !metadataOnlySync(result)
@@ -135,12 +142,14 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
   let durableSyncCompleted = false;
   let madeProgress = false;
   let sawDeniedPhase = false;
+  let sawFailedPhase = false;
   let sawBackoffWorthyFailure = false;
   let sawDurableMetadataOnlyDetailedSync = false;
   let cleanDurableDetailedRound = false;
   const recordSyncAccounting = (result: SyncFromPeerResult, phase: 'durable' | 'shared'): void => {
     madeProgress = madeProgress || madeSyncProgress(result);
     sawDeniedPhase = sawDeniedPhase || hadDeniedPhase(result);
+    sawFailedPhase = sawFailedPhase || hadFailedPhase(result);
     sawBackoffWorthyFailure = sawBackoffWorthyFailure || hadBackoffWorthyFailure(result);
     if (phase === 'durable') {
       sawDurableMetadataOnlyDetailedSync = sawDurableMetadataOnlyDetailedSync || (typeof result !== 'number' && metadataOnlySync(result));
@@ -209,7 +218,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     const cleanDurableRound = cleanDurableDetailedRound && !sawDurableMetadataOnlyDetailedSync;
     const clearsPeerBackoff = madeProgress || (!sawBackoffWorthyFailure && (cleanDurableRound || sawDeniedPhase));
     if (clearsPeerBackoff) {
-      context.onPeerSynced?.(remotePeer, { fresh: !sawBackoffWorthyFailure && !sawDeniedPhase && cleanDurableRound });
+      context.onPeerSynced?.(remotePeer, { fresh: !sawBackoffWorthyFailure && !sawDeniedPhase && !sawFailedPhase && cleanDurableRound });
     }
     return 'synced';
   } catch (err) {

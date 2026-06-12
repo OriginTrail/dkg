@@ -1,6 +1,7 @@
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { sendSyncRequest } from '../../p2p/sync-transport.js';
+import { markSyncPeerResponded } from '../error-tags.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from '../checkpoint/state.js';
 import {
@@ -261,24 +262,32 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       const transportDurationMs = Date.now() - transportStartedAt;
       throwIfAborted(signal);
 
-      const decodeStartedAt = Date.now();
-      const nquadsText = decodeSyncResponse(responseBytes);
-      const decodeDurationMs = Date.now() - decodeStartedAt;
-      bytesReceived += responseBytes.byteLength;
-      if (
-        nquadsText === syncDeniedResponse ||
-        (extraDeniedResponses && extraDeniedResponses.includes(nquadsText))
-      ) {
-        const error = new Error(`Sync denied by ${remotePeerId} for "${contextGraphId}" (${phase})`);
-        (error as Error & { syncDenied?: boolean }).syncDenied = true;
+      let parsed: { quads: Quad[]; totalQuads: number };
+      let decodeDurationMs = 0;
+      let parseDurationMs = 0;
+      try {
+        const decodeStartedAt = Date.now();
+        const nquadsText = decodeSyncResponse(responseBytes);
+        decodeDurationMs = Date.now() - decodeStartedAt;
+        bytesReceived += responseBytes.byteLength;
+        if (
+          nquadsText === syncDeniedResponse ||
+          (extraDeniedResponses && extraDeniedResponses.includes(nquadsText))
+        ) {
+          const error = new Error(`Sync denied by ${remotePeerId} for "${contextGraphId}" (${phase})`);
+          (error as Error & { syncDenied?: boolean }).syncDenied = true;
+          throw error;
+        }
+        if (!nquadsText) break;
+
+        const parseStartedAt = Date.now();
+        parsed = await parseAndFilter(nquadsText, graphUri, contextGraphId);
+        throwIfAborted(signal);
+        parseDurationMs = Date.now() - parseStartedAt;
+      } catch (error) {
+        markSyncPeerResponded(error);
         throw error;
       }
-      if (!nquadsText) break;
-
-      const parseStartedAt = Date.now();
-      const parsed = await parseAndFilter(nquadsText, graphUri, contextGraphId);
-      throwIfAborted(signal);
-      const parseDurationMs = Date.now() - parseStartedAt;
 
       const stepDurationMs = transportDurationMs + decodeDurationMs + parseDurationMs;
       if (stepDurationMs > 100) {

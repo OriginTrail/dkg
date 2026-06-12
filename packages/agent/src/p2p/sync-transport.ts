@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { withRetry } from '@origintrail-official/dkg-core';
+import { markSyncTransportFailure } from '../sync/error-tags.js';
 
 /**
  * Sync-page transport. Wraps `withRetry` around a per-attempt
@@ -87,14 +88,20 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
       const requestBytes = await params.requestFactory();
       throwIfAborted(params.signal);
       const messageId = randomUUID();
-      const responseBytes = await params.send(
-        params.remotePeerId,
-        params.protocolId,
-        requestBytes,
-        params.timeoutMs,
-        messageId,
-        params.signal,
-      );
+      let responseBytes: Uint8Array;
+      try {
+        responseBytes = await params.send(
+          params.remotePeerId,
+          params.protocolId,
+          requestBytes,
+          params.timeoutMs,
+          messageId,
+          params.signal,
+        );
+      } catch (error) {
+        markSyncTransportFailure(error);
+        throw error;
+      }
       throwIfAborted(params.signal);
       await params.validateResponse?.(responseBytes);
       throwIfAborted(params.signal);

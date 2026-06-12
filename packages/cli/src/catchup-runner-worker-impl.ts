@@ -72,6 +72,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       dataRejectedMissingMeta: 0,
       rejectedKcs: 0,
       failedPeers: 0,
+      failedPhases: 0,
     },
     sharedMemory: {
       fetchedMetaTriples: 0,
@@ -86,6 +87,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       emptyResponses: 0,
       droppedDataTriples: 0,
       failedPeers: 0,
+      failedPhases: 0,
     },
   };
 
@@ -133,6 +135,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     dataRejectedMissingMeta: 0,
     rejectedKcs: 0,
     failedPeers: 1,
+    failedPhases: 0,
     deniedPhases: 0,
   });
   const emptyShared = () => ({
@@ -149,6 +152,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     emptyResponses: 0,
     droppedDataTriples: 0,
     failedPeers: 1,
+    failedPhases: 0,
     deniedPhases: 0,
   });
   const perPeerResults = await Promise.all(
@@ -177,6 +181,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     diagnostics.durable.dataRejectedMissingMeta += durable.dataRejectedMissingMeta;
     diagnostics.durable.rejectedKcs += durable.rejectedKcs;
     diagnostics.durable.failedPeers += durable.failedPeers;
+    diagnostics.durable.failedPhases += durable.failedPhases ?? 0;
     peerDenied = peerDenied || durable.deniedPhases > 0;
 
     if (shared) {
@@ -193,6 +198,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       diagnostics.sharedMemory.emptyResponses += shared.emptyResponses;
       diagnostics.sharedMemory.droppedDataTriples += shared.droppedDataTriples;
       diagnostics.sharedMemory.failedPeers += shared.failedPeers;
+      diagnostics.sharedMemory.failedPhases += shared.failedPhases ?? 0;
       peerDenied = peerDenied || shared.deniedPhases > 0;
     }
 

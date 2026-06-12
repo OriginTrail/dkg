@@ -3,6 +3,7 @@ import { contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { PhaseCallback } from '@origintrail-official/dkg-publisher';
+import { didSyncPeerRespond, isSyncTransportFailure } from '../error-tags.js';
 import type { SyncPageResult } from './page-fetch.js';
 
 export interface DurableSyncSummary {
@@ -22,6 +23,7 @@ export interface DurableSyncSummary {
   dataRejectedMissingMeta: number;
   rejectedKcs: number;
   failedPeers: number;
+  failedPhases: number;
 }
 
 interface DurableSyncContext {
@@ -111,6 +113,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     dataRejectedMissingMeta: 0,
     rejectedKcs: 0,
     failedPeers: 0,
+    failedPhases: 0,
   };
 
   const recordPhaseOutcome = (result: SyncPageResult, options: { updateCheckpoint: boolean; countProgress?: boolean }) => {
@@ -135,6 +138,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
   let peerFailed = false;
   for (const [index, pid] of contextGraphIds.entries()) {
     let activePhase: 'fetch' | 'verify' | 'store' | undefined;
+    let peerRespondedForContextGraph = false;
     const startPhase = (phase: 'fetch' | 'verify' | 'store') => {
       activePhase = phase;
       onPhase?.(phase, 'start');
@@ -155,7 +159,9 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       startPhase('fetch');
       const fetchStartedAt = Date.now();
       const metaResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline);
+      peerRespondedForContextGraph = true;
       const dataResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline, undefined, sinceBatchIdFor?.(pid));
+      peerRespondedForContextGraph = true;
       endPhase();
       const fetchDurationMs = Date.now() - fetchStartedAt;
       const isSystemContextGraph = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(pid);
@@ -225,6 +231,12 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       if ((pidErr as Error & { syncDenied?: boolean }).syncDenied) {
         onAccessDenied?.(pid);
         summary.deniedPhases += 1;
+      } else if (
+        peerRespondedForContextGraph ||
+        didSyncPeerRespond(pidErr) ||
+        !isSyncTransportFailure(pidErr)
+      ) {
+        summary.failedPhases += 1;
       } else {
         peerFailed = true;
       }

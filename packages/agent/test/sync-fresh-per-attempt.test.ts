@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
+import { didSyncPeerRespond, isSyncTransportFailure } from '../src/sync/error-tags.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
 /**
@@ -138,6 +139,80 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     }
     return promise;
   }
+
+  it('tags exhausted send failures as transport failures without a peer response', async () => {
+    const transportError = new Error('dial failed');
+    const promise = fetchSyncPages({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId: CG_ID,
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: GRAPH_URI,
+      deadline: Date.now() + 60_000,
+      syncPageTimeoutMs: 5_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 1,
+      syncPageSize: 100,
+      syncDeniedResponse: '#DENIED',
+      debugSyncProgress: false,
+      protocolSync: PROTOCOL_ID,
+      checkpointStore: {
+        get: () => undefined,
+        set: () => {},
+        delete: () => {},
+      },
+      buildSyncRequest: async () => new TextEncoder().encode('request'),
+      parseAndFilter: singleQuadParser,
+      send: async () => {
+        throw transportError;
+      },
+      logWarn: noopLog,
+      logInfo: noopLog,
+      logDebug: noopLog,
+    });
+
+    await expect(promise).rejects.toBe(transportError);
+    expect(isSyncTransportFailure(transportError)).toBe(true);
+    expect(didSyncPeerRespond(transportError)).toBe(false);
+  });
+
+  it('tags parser failures after response bytes as peer responses', async () => {
+    const parseError = new Error('bad N-Quads');
+    const promise = fetchSyncPages({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId: CG_ID,
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: GRAPH_URI,
+      deadline: Date.now() + 60_000,
+      syncPageTimeoutMs: 5_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 1,
+      syncPageSize: 100,
+      syncDeniedResponse: '#DENIED',
+      debugSyncProgress: false,
+      protocolSync: PROTOCOL_ID,
+      checkpointStore: {
+        get: () => undefined,
+        set: () => {},
+        delete: () => {},
+      },
+      buildSyncRequest: async () => new TextEncoder().encode('request'),
+      parseAndFilter: async () => {
+        throw parseError;
+      },
+      send: async () => new TextEncoder().encode('one-quad-line'),
+      logWarn: noopLog,
+      logInfo: noopLog,
+      logDebug: noopLog,
+    });
+
+    await expect(promise).rejects.toBe(parseError);
+    expect(didSyncPeerRespond(parseError)).toBe(true);
+    expect(isSyncTransportFailure(parseError)).toBe(false);
+  });
 
   async function captureDurableSyncSessionId(options: {
     remotePeerId?: string;

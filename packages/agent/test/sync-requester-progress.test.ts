@@ -4,6 +4,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import { runDurableSync } from '../src/sync/requester/durable-sync.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { markSyncTransportFailure } from '../src/sync/error-tags.js';
 
 const ctx = { kind: 'system', id: 'test', startedAt: 0 } as OperationContext;
 const noop = () => {};
@@ -28,6 +29,12 @@ function pageResult(
 function deniedError(): Error & { syncDenied: boolean } {
   const err = new Error('access denied') as Error & { syncDenied: boolean };
   err.syncDenied = true;
+  return err;
+}
+
+function transportError(message: string): Error {
+  const err = new Error(message);
+  markSyncTransportFailure(err);
   return err;
 }
 
@@ -110,7 +117,7 @@ describe('sync requester progress accounting', () => {
       _includeSharedMemory: boolean,
       phase: 'data' | 'meta',
     ) => {
-      if (contextGraphId === 'shed-cg') throw new Error('sync responder busy');
+      if (contextGraphId === 'shed-cg') throw transportError('sync responder busy');
       return pageResult(contextGraphId, phase);
     });
 
@@ -130,6 +137,7 @@ describe('sync requester progress accounting', () => {
     });
 
     expect(summary.failedPeers).toBe(1);
+    expect(summary.failedPhases).toBe(0);
     expect(summary.deniedPhases).toBe(0);
     expect(summary.completedPhases).toBe(0);
     expect(fetchSyncPages).toHaveBeenCalledWith(ctx, 'peer-a', 'next-cg', false, 'data', expect.any(String), expect.any(Number), undefined, undefined);
@@ -143,7 +151,7 @@ describe('sync requester progress accounting', () => {
       _includeSharedMemory: boolean,
       phase: 'data' | 'meta',
     ) => {
-      if (contextGraphId.startsWith('fail-')) throw new Error(`sync responder busy for ${contextGraphId}`);
+      if (contextGraphId.startsWith('fail-')) throw transportError(`sync responder busy for ${contextGraphId}`);
       return pageResult(contextGraphId, phase);
     });
 
@@ -163,6 +171,7 @@ describe('sync requester progress accounting', () => {
     });
 
     expect(summary.failedPeers).toBe(1);
+    expect(summary.failedPhases).toBe(0);
     expect(summary.deniedPhases).toBe(0);
     expect(fetchSyncPages).toHaveBeenCalledWith(ctx, 'peer-a', 'next-cg', false, 'data', expect.any(String), expect.any(Number), undefined, undefined);
   });
@@ -200,11 +209,53 @@ describe('sync requester progress accounting', () => {
       logDebug: noop,
     });
 
-    expect(summary.failedPeers).toBe(1);
+    expect(summary.failedPeers).toBe(0);
+    expect(summary.failedPhases).toBe(1);
     expect(summary.deniedPhases).toBe(0);
     expect(summary.completedPhases).toBe(0);
     expect(fetchSyncPages).toHaveBeenCalledWith(ctx, 'peer-a', 'next-cg', false, 'data', expect.any(String), expect.any(Number), undefined, undefined);
     expect(phases.slice(0, 4)).toEqual(['fetch:start', 'fetch:end', 'verify:start', 'verify:end']);
+  });
+
+  it('continues durable sync after a post-response store failure without marking the peer unreachable', async () => {
+    const fetchSyncPages = vi.fn(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => pageResult(contextGraphId, phase, {
+      quads: phase === 'data' ? [quad(contextGraphId)] : [],
+    }));
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['store-fails', 'next-cg'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async (dataQuads) => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        verifiedData: dataQuads,
+        totalFetchedDataQuads: dataQuads.length,
+      }),
+      storeInsert: async (quads) => {
+        if (quads.some((q) => q.subject === 'store-fails')) {
+          throw new Error('store unavailable');
+        }
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.failedPeers).toBe(0);
+    expect(summary.failedPhases).toBe(1);
+    expect(summary.insertedDataTriples).toBe(1);
+    expect(fetchSyncPages).toHaveBeenCalledWith(ctx, 'peer-a', 'next-cg', false, 'data', expect.any(String), expect.any(Number), undefined, undefined);
   });
 
   it('does not count zero-offset empty durable completions as progress', async () => {
@@ -465,7 +516,7 @@ describe('sync requester progress accounting', () => {
       _includeSharedMemory: boolean,
       phase: 'data' | 'meta',
     ) => {
-      if (contextGraphId.startsWith('fail-')) throw new Error(`sync responder busy for ${contextGraphId}`);
+      if (contextGraphId.startsWith('fail-')) throw transportError(`sync responder busy for ${contextGraphId}`);
       return pageResult(contextGraphId, phase);
     });
 
@@ -487,7 +538,111 @@ describe('sync requester progress accounting', () => {
     });
 
     expect(summary.failedPeers).toBe(1);
+    expect(summary.failedPhases).toBe(0);
     expect(summary.deniedPhases).toBe(0);
+    expect(fetchSyncPages).toHaveBeenCalledWith(ctx, 'peer-a', 'open-swm', true, 'data', expect.any(String), expect.any(Number));
+  });
+
+  it('continues shared-memory sync after a post-response verifier failure without marking the peer unreachable', async () => {
+    const fetchSyncPages = vi.fn(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => pageResult(contextGraphId, phase, {
+      quads: phase === 'data' ? [quad(contextGraphId)] : [],
+    }));
+
+    const summary = await runSharedMemorySync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['verify-fails-swm', 'open-swm'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processSharedMemoryBatch: async (dataQuads) => {
+        if (dataQuads.some((q) => q.subject === 'verify-fails-swm')) {
+          throw new Error('SWM verification failed');
+        }
+        return sharedMemoryProcessResult();
+      },
+      ensureContextGraph: async () => {},
+      storeInsert: async () => {},
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      ensureOwnedMap: () => new Map(),
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.failedPeers).toBe(0);
+    expect(summary.failedPhases).toBe(1);
+    expect(fetchSyncPages).toHaveBeenCalledWith(ctx, 'peer-a', 'open-swm', true, 'data', expect.any(String), expect.any(Number));
+  });
+
+  it('counts shared-memory snapshot validation failures as phase failures after the peer responded', async () => {
+    const snapshotMeta: Quad[] = [
+      {
+        subject: 'did:dkg:assertion:with-bad-snapshot',
+        predicate: 'http://dkg.io/ontology/publicSnapshotRef',
+        object: '"bad-ref"',
+        graph: 'did:dkg:context-graph:bad-snapshot-swm/_shared_memory_meta',
+      } as Quad,
+      {
+        subject: 'did:dkg:assertion:with-bad-snapshot',
+        predicate: 'http://dkg.io/ontology/publicQuadsDigest',
+        object: '"expected-digest"',
+        graph: 'did:dkg:context-graph:bad-snapshot-swm/_shared_memory_meta',
+      } as Quad,
+      {
+        subject: 'did:dkg:assertion:with-bad-snapshot',
+        predicate: 'http://dkg.io/ontology/publicQuadsCount',
+        object: '"1"',
+        graph: 'did:dkg:context-graph:bad-snapshot-swm/_shared_memory_meta',
+      } as Quad,
+    ];
+    const fetchSyncPages = vi.fn(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta' | 'snapshot',
+    ) => pageResult(contextGraphId, phase, {
+      checkpointKey: phase === 'snapshot' ? `${contextGraphId}:snapshot:bad-ref` : `${contextGraphId}:${phase}`,
+      quads: phase === 'snapshot'
+        ? [quad('wrong-snapshot-data')]
+        : (phase === 'meta' && contextGraphId === 'bad-snapshot-swm' ? snapshotMeta : []),
+    }));
+
+    const summary = await runSharedMemorySync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['bad-snapshot-swm', 'open-swm'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processSharedMemoryBatch: async (_dataQuads, metaQuads) => ({
+        ...sharedMemoryProcessResult(),
+        emptyResponses: metaQuads.length === 0 ? 1 : 0,
+        verifiedMeta: metaQuads,
+        totalFetchedMetaQuads: metaQuads.length,
+      }),
+      ensureContextGraph: async () => {},
+      storeInsert: async () => {},
+      publicSnapshotStore: {
+        getSnapshot: async () => null,
+        putSnapshot: async () => ({ ref: 'bad-ref', byteLength: 0 }),
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      ensureOwnedMap: () => new Map(),
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.failedPeers).toBe(0);
+    expect(summary.failedPhases).toBe(1);
     expect(fetchSyncPages).toHaveBeenCalledWith(ctx, 'peer-a', 'open-swm', true, 'data', expect.any(String), expect.any(Number));
   });
 
