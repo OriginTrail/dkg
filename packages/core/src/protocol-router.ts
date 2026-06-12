@@ -313,6 +313,7 @@ export class ProtocolRouter {
         },
       };
       const handlerSignal = composeAbortSignals(options?.signal, this.node.stopSignal);
+      if (handlerSignal?.aborted) throw asAbortError(handlerSignal.reason);
       return handler(requestData, wrappedPeerId, { signal: handlerSignal });
     });
   }
@@ -385,6 +386,7 @@ export class ProtocolRouter {
           toString: () => connection.remotePeer.toString(),
           toBytes: () => connection.remotePeer.toMultihash().bytes,
         };
+        if (handlerSignal?.aborted) throw asAbortError(handlerSignal.reason);
         const responseData = await handler(requestData, peerId, { signal: handlerSignal });
         if (handlerSignal?.aborted) throw asAbortError(handlerSignal.reason);
         stream.removeEventListener('close', onStreamClose as EventListener);

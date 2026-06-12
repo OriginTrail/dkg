@@ -52,6 +52,18 @@ class FakeStream {
     else this.readBuf.push(data);
   }
 
+  feedAndAbortAfterDelivery(data: Uint8Array, error = new Error('stream closed after request frame')): void {
+    if (this.ended) return;
+    const w = this.waiters.shift();
+    if (w) {
+      w({ value: data, done: false });
+      queueMicrotask(() => this.abort(error));
+    } else {
+      this.readBuf.push(data);
+      queueMicrotask(() => this.abort(error));
+    }
+  }
+
   endRemote(): void {
     this.ended = true;
     while (this.waiters.length) {
@@ -728,6 +740,58 @@ describe('ProtocolRouter pooled inbound handler', () => {
     expect(seenSignal?.aborted).toBe(true);
     await inboundRun;
 
+    await router.closePooling();
+  });
+
+  it('skips pooled application handler dispatch when the stream aborts after the request frame is read', async () => {
+    type HandlerFn = (
+      stream: import('@libp2p/interface').Stream,
+      connection: { remotePeer: { toString: () => string; toMultihash: () => { bytes: Uint8Array } } },
+    ) => void | Promise<void>;
+    let inboundHandler: HandlerFn | null = null;
+    const node = {
+      libp2p: {
+        dialProtocol: async () => {
+          throw new Error('not used');
+        },
+        handle: (_protocolId: string, handler: HandlerFn) => {
+          if (_protocolId === POOLED_MESSAGE_PROTOCOL) {
+            inboundHandler = handler;
+          }
+        },
+        unhandle: () => undefined,
+        getConnections: () => [],
+        peerStore: { get: async () => ({ addresses: [] }) },
+      },
+    } as unknown as DKGNode;
+
+    const router = new ProtocolRouter(node);
+    router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+
+    let handlerCalls = 0;
+    router.register('/dkg/10.0.1/message', async () => {
+      handlerCalls += 1;
+      return new TextEncoder().encode('should-not-send');
+    });
+
+    expect(inboundHandler).toBeDefined();
+    const inboundStream = new FakeStream();
+    const inboundRun = inboundHandler!(inboundStream as unknown as import('@libp2p/interface').Stream, {
+      remotePeer: {
+        toString: () => PEER_NEW,
+        toMultihash: () => ({ bytes: new Uint8Array() }),
+      },
+    });
+    await flush();
+    inboundStream.feedAndAbortAfterDelivery(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('hi')));
+    await inboundRun;
+
+    expect(handlerCalls).toBe(0);
+    expect(inboundStream.sent).toHaveLength(0);
     await router.closePooling();
   });
 

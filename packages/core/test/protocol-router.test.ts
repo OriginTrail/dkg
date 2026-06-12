@@ -75,7 +75,10 @@ describe('ProtocolRouter', () => {
       aborted: Error | null = null;
       closedWithSignal: AbortSignal | undefined;
 
-      constructor(private readonly chunks: Uint8Array[]) {
+      constructor(
+        private readonly chunks: Uint8Array[],
+        private readonly afterReadComplete?: () => void,
+      ) {
         super();
       }
 
@@ -91,8 +94,29 @@ describe('ProtocolRouter', () => {
         this.aborted = error;
       }
 
-      async *[Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array> {
-        for (const chunk of this.chunks) yield chunk;
+      [Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array> {
+        let index = 0;
+        let completed = false;
+        return {
+          next: async () => {
+            if (index < this.chunks.length) {
+              return { value: this.chunks[index++], done: false };
+            }
+            if (!completed && this.afterReadComplete) {
+              completed = true;
+              return await new Promise<IteratorResult<Uint8Array>>((resolve) => {
+                setTimeout(() => {
+                  resolve({ value: undefined as unknown as Uint8Array, done: true });
+                  queueMicrotask(() => this.afterReadComplete?.());
+                }, 0);
+              });
+            }
+            return { value: undefined as unknown as Uint8Array, done: true };
+          },
+          [Symbol.asyncIterator]() {
+            return this;
+          },
+        };
       }
     }
 
@@ -161,6 +185,25 @@ describe('ProtocolRouter', () => {
       await inbound;
 
       expect(seenSignal?.aborted).toBe(true);
+      expect(stream.sent).toBeNull();
+      expect(stream.aborted?.message).toMatch(/stream closed by peer/);
+    });
+
+    it('skips raw handler dispatch when the stream aborts after the request body is read', async () => {
+      const fixture = makeInboundFixture();
+      let handlerCalls = 0;
+      fixture.router.register(PROTOCOL, async () => {
+        handlerCalls += 1;
+        return new Uint8Array([0xdd]);
+      });
+      let stream!: FakeInboundStream;
+      stream = new FakeInboundStream([new Uint8Array([0x01])], () => {
+        stream.dispatchEvent(new Event('close'));
+      });
+
+      await fixture.invoke(stream);
+
+      expect(handlerCalls).toBe(0);
       expect(stream.sent).toBeNull();
       expect(stream.aborted?.message).toMatch(/stream closed by peer/);
     });
