@@ -26,6 +26,10 @@ export interface GraphListMemo {
   get(options?: { refresh?: boolean }): Promise<readonly string[]>;
 }
 
+export interface SwmAdmissionMemo {
+  get(contextGraphId: string, options?: { refresh?: boolean }): Promise<readonly string[]>;
+}
+
 export function createResponderGraphListMemo(
   store: TripleStore,
   ttlMs = 10_000,
@@ -49,6 +53,33 @@ export function createResponderGraphListMemo(
           inflight = null;
         });
       return [...(await inflight)];
+    },
+  };
+}
+
+export function createResponderSwmAdmissionMemo(
+  store: TripleStore,
+  ttlMs = 10_000,
+): SwmAdmissionMemo {
+  const cached = new Map<string, { value: readonly string[]; cachedAt: number }>();
+  const inflight = new Map<string, Promise<readonly string[]>>();
+  return {
+    async get(contextGraphId: string, options?: { refresh?: boolean }) {
+      const now = Date.now();
+      const existing = cached.get(contextGraphId);
+      if (!options?.refresh && existing && now - existing.cachedAt < ttlMs) return [...existing.value];
+      const pending = inflight.get(contextGraphId);
+      if (pending) return [...(await pending)];
+      const load = readAdmittedSwmSubGraphNames(store, contextGraphId)
+        .then((names) => {
+          cached.set(contextGraphId, { value: names, cachedAt: Date.now() });
+          return names;
+        })
+        .finally(() => {
+          inflight.delete(contextGraphId);
+        });
+      inflight.set(contextGraphId, load);
+      return [...(await load)];
     },
   };
 }
@@ -82,12 +113,13 @@ export function serializeResponderRows(rows: readonly SyncRow[]): string {
 export async function readSwmMetaPage(params: {
   store: TripleStore;
   graphList: readonly string[];
+  registeredSubGraphNames: readonly string[];
   contextGraphId: string;
   cutoffIso: string | null;
   offset: number;
   limit: number;
 }): Promise<SyncRow[]> {
-  const graphs = await planSwmGraphs(params.store, params.contextGraphId, true);
+  const graphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, true);
   const graphSet = new Set(params.graphList);
   const candidateGraphs = graphs.filter((graph) => graphSet.has(graph));
   return readSwmMetaRowsPage(
@@ -102,12 +134,13 @@ export async function readSwmMetaPage(params: {
 export async function readSwmDataPage(params: {
   store: TripleStore;
   graphList: readonly string[];
+  registeredSubGraphNames: readonly string[];
   contextGraphId: string;
   cutoffIso: string | null;
   offset: number;
   limit: number;
 }): Promise<SyncRow[]> {
-  const dataGraphs = await planSwmGraphs(params.store, params.contextGraphId, false);
+  const dataGraphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, false);
   const graphSet = new Set(params.graphList);
   const candidateGraphsFor = (graph: string) => params.graphList
     .filter((candidate) => candidate === graph || isSharedMemoryBucketDescendantDataGraph(candidate, graph))
@@ -147,12 +180,14 @@ export async function readSwmDataPage(params: {
 export async function readDurableMetaPage(params: {
   store: TripleStore;
   contextGraphId: string;
+  registeredSubGraphNames: readonly string[];
   offset: number;
   limit: number;
 }): Promise<SyncRow[]> {
   return readDurableMetaRowsPage(
     params.store,
     params.contextGraphId,
+    params.registeredSubGraphNames,
     params.offset,
     params.limit,
   );
@@ -250,20 +285,33 @@ async function readPagedDurableDeltaRowsAcrossGraphs(
   return readDurableDeltaRowsPageAcrossGraphs(store, graphs, metaGraphs, sinceBatchId, offset, limit);
 }
 
-async function planSwmGraphs(
+async function readAdmittedSwmSubGraphNames(
   store: TripleStore,
   contextGraphId: string,
-  meta: boolean,
 ): Promise<string[]> {
   const cgPrefix = contextGraphDataGraphUri(contextGraphId);
-  const suffix = meta ? '/_shared_memory_meta' : '/_shared_memory';
-  const graphs = [`${cgPrefix}${suffix}`];
+  const names: string[] = [];
   for (const name of await readRegisteredSubGraphNames(store, contextGraphId)) {
     const childCgUri = `${cgPrefix}/${name}`;
     if (await isKnownContextGraph(store, childCgUri)) continue;
-    graphs.push(`${childCgUri}${suffix}`);
+    names.push(name);
   }
-  return graphs.sort(compareCodePoint);
+  return names.sort(compareCodePoint);
+}
+
+function swmGraphsForRegisteredSubGraphs(
+  contextGraphId: string,
+  registeredSubGraphNames: readonly string[],
+  meta: boolean,
+): string[] {
+  const cgPrefix = contextGraphDataGraphUri(contextGraphId);
+  const suffix = meta ? '/_shared_memory_meta' : '/_shared_memory';
+  return [
+    `${cgPrefix}${suffix}`,
+    ...dedupeStrings(registeredSubGraphNames)
+      .filter((name) => validateSubGraphName(name).valid)
+      .map((name) => `${cgPrefix}/${name}${suffix}`),
+  ].sort(compareCodePoint);
 }
 
 async function readRegisteredSubGraphNames(
@@ -531,6 +579,7 @@ function freshSwmDataWhereClause(graph: string, metaGraph: string, cutoffIso: st
 async function readDurableMetaRowsPage(
   store: TripleStore,
   contextGraphId: string,
+  registeredSubGraphNames: readonly string[],
   offset: number,
   limit: number,
 ): Promise<SyncRow[]> {
@@ -539,7 +588,8 @@ async function readDurableMetaRowsPage(
   if (safeLimit === 0) return [];
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const cgEntity = contextGraphDataGraphUri(contextGraphId);
-  const registeredSubGraphSubjects = (await readRegisteredSubGraphNames(store, contextGraphId))
+  const registeredSubGraphSubjects = dedupeStrings(registeredSubGraphNames)
+    .filter((name) => validateSubGraphName(name).valid)
     .map((name) => `<${assertSafeIri(`${cgEntity}/${name}`)}>`);
   const registeredSubGraphSubjectClause = registeredSubGraphSubjects.length === 0
     ? ''

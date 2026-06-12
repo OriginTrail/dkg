@@ -7,6 +7,7 @@ import {
 import type { SyncRequestEnvelope } from '../auth/request-build.js';
 import {
   createResponderGraphListMemo,
+  createResponderSwmAdmissionMemo,
   readDurableCanonicalDataPage,
   readDurableDataPage,
   readDurableMetaPage,
@@ -57,6 +58,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     logDebug,
   } = params;
   const graphListMemo = createResponderGraphListMemo(store);
+  const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
 
   register(protocolSync, async (data, peerId) => {
     const handlerStartedAt = Date.now();
@@ -113,6 +115,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         const rows = await readSwmMetaPage({
           store,
           graphList: await graphListMemo.get({ refresh: offset === 0 }),
+          registeredSubGraphNames: await swmAdmissionMemo.get(contextGraphId, { refresh: offset === 0 }),
           contextGraphId,
           cutoffIso: cutoff,
           offset,
@@ -129,6 +132,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         const rows = await readSwmDataPage({
           store,
           graphList: await graphListMemo.get({ refresh: offset === 0 }),
+          registeredSubGraphNames: await swmAdmissionMemo.get(contextGraphId, { refresh: offset === 0 }),
           contextGraphId,
           cutoffIso: cutoff,
           offset,
@@ -145,7 +149,13 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       if (nquads.length === 0) return new TextEncoder().encode('');
     } else if (phase === 'meta') {
       const queryStartedAt = Date.now();
-      const rows = await readDurableMetaPage({ store, contextGraphId, offset, limit });
+      const rows = await readDurableMetaPage({
+        store,
+        contextGraphId,
+        registeredSubGraphNames: await swmAdmissionMemo.get(contextGraphId, { refresh: offset === 0 }),
+        offset,
+        limit,
+      });
       const queryDurationMs = Date.now() - queryStartedAt;
       const serializeStartedAt = Date.now();
       const serialized = serializeResponderRows(rows);

@@ -382,6 +382,9 @@ describe('sync responder graph admission planner', () => {
       offset: 0,
       limit: 5,
     });
+    await store.insert([
+      q(`${cgPrefix}/bravo/_meta`, `${cgPrefix}/bravo`, RDF_TYPE, DKG_CONTEXT_GRAPH),
+    ]);
     const second = await cap.invoke({
       contextGraphId: cgId,
       includeSharedMemory: true,
