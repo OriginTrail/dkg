@@ -264,7 +264,7 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
       expect(graphs.has(OTHER_SUB_SWM)).toBe(false);
     });
 
-    it('includes only sub-graph registration rows from the top-level _meta', async () => {
+    it('does NOT include durable top-level _meta registration rows', async () => {
       const out = await cap.invoke({
         contextGraphId: CG_ID,
         offset: 0,
@@ -274,9 +274,9 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
       });
 
       const graphs = lineGraphsFromNquads(out);
-      expect(graphs.has(UNRELATED_DURABLE_META)).toBe(true);
-      expect(out).toContain(`${DKG_NS}SubGraph`);
-      expect(out).toContain('http://schema.org/name');
+      expect(graphs.has(UNRELATED_DURABLE_META)).toBe(false);
+      expect(out).not.toContain(`${DKG_NS}SubGraph`);
+      expect(out).not.toContain('http://schema.org/name');
       expect(out).not.toContain(`${DKG_NS}createdAt`);
       expect(out).not.toContain('"2026-05-10T00:00:00Z"');
     });

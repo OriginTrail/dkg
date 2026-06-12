@@ -342,15 +342,14 @@ describe('sync responder graph admission planner', () => {
 
     expect(metaGraphs.has(rootSwmMeta)).toBe(true);
     expect(metaGraphs.has(registeredSwmMeta)).toBe(true);
-    expect(metaGraphs.has(cgMeta)).toBe(true);
+    expect(metaGraphs.has(cgMeta)).toBe(false);
     expect(metaGraphs.has(childSwmMeta)).toBe(false);
-    expect(metaOut).toContain(`${DKG_NS}SubGraph`);
-    expect(metaOut).toContain(`did:dkg:context-graph:${cgId}/registered`);
+    expect(metaOut).not.toContain(`${DKG_NS}SubGraph`);
     expect(metaOut).not.toContain(`did:dkg:context-graph:${cgId}/child`);
   });
 
-  it('serves bounded SWM registration preludes for subgraphs present in the current meta page', async () => {
-    const cgId = 'planner-swm-registration-prelude-cg';
+  it('does not append SWM registration rows to paged meta responses', async () => {
+    const cgId = 'planner-swm-registration-page-cg';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
     const alphaSwmMeta = `${cgPrefix}/alpha/_shared_memory_meta`;
     const bravoSwmMeta = `${cgPrefix}/bravo/_shared_memory_meta`;
@@ -379,13 +378,9 @@ describe('sync responder graph admission planner', () => {
       limit: 5,
     });
 
-    expect(first).toContain(`${DKG_NS}SubGraph`);
-    expect(first).toContain(`did:dkg:context-graph:${cgId}/alpha`);
-    expect(first).not.toContain(`did:dkg:context-graph:${cgId}/bravo`);
-    expect(linesFromNquads(first).length).toBeGreaterThan(5);
-    expect(second).toContain(`${DKG_NS}SubGraph`);
-    expect(second).toContain(`did:dkg:context-graph:${cgId}/bravo`);
-    expect(second).not.toContain(`did:dkg:context-graph:${cgId}/alpha`);
+    expect(first).not.toContain(`${DKG_NS}SubGraph`);
+    expect(linesFromNquads(first)).toHaveLength(5);
+    expect(second).not.toContain(`${DKG_NS}SubGraph`);
     expect(lineGraphsFromNquads(second).has(bravoSwmMeta)).toBe(true);
   });
 

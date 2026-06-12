@@ -107,7 +107,7 @@ describe('runSharedMemorySync ownership hydration', () => {
     expect(ownedMaps.get(`${CG_ID}\0${SUB_GRAPH}`)?.get(ROOT_ENTITY)).toBe('peer-sub');
   });
 
-  it('accepts sub-graph SWM when the remote registration is replicated in the same meta batch', async () => {
+  it('rejects sub-graph SWM authorized only by a remote registration in the same meta batch', async () => {
     const worker = new SyncVerifyWorker();
     const ownedMaps = new Map<string, Map<string, string>>();
     const inserted: Quad[] = [];
@@ -128,8 +128,14 @@ describe('runSharedMemorySync ownership hydration', () => {
         fetchSyncPages: async (_ctx, _peer, _cg, _includeSwm, phase) => (
           phase === 'data' ? page(dataQuads, phase) : page(metaQuads, phase)
         ),
-        processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames) =>
-          worker.processSharedMemoryBatch(wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames),
+        processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames) =>
+          worker.processSharedMemoryBatch(
+            wsDataQuads,
+            wsMetaQuads,
+            contextGraphId,
+            registeredSubGraphNames,
+            excludedSubGraphNames,
+          ),
         getRegisteredSubGraphNames: async () => [],
         ensureContextGraph: async () => {},
         storeInsert: async (quads) => {
@@ -151,17 +157,17 @@ describe('runSharedMemorySync ownership hydration', () => {
       });
 
       expect(summary.failedPeers).toBe(0);
-      expect(summary.droppedDataTriples).toBe(0);
-      expect(summary.insertedDataTriples).toBe(1);
-      expect(inserted.some((quad) => quad.graph === ROOT_CG_META_GRAPH && quad.predicate === SCHEMA_NAME)).toBe(true);
-      expect(inserted.some((quad) => quad.graph === SUB_GRAPH_SWM)).toBe(true);
-      expect(ownedMaps.get(`${CG_ID}\0${SUB_GRAPH}`)?.get(ROOT_ENTITY)).toBe('peer-remote-sub');
+      expect(summary.droppedDataTriples).toBe(1);
+      expect(summary.insertedDataTriples).toBe(0);
+      expect(inserted.some((quad) => quad.graph === ROOT_CG_META_GRAPH && quad.predicate === SCHEMA_NAME)).toBe(false);
+      expect(inserted.some((quad) => quad.graph === SUB_GRAPH_SWM)).toBe(false);
+      expect(ownedMaps.get(`${CG_ID}\0${SUB_GRAPH}`)?.get(ROOT_ENTITY)).toBeUndefined();
     } finally {
       await worker.close();
     }
   });
 
-  it('does not count SWM registration preludes against the paged meta cursor', async () => {
+  it('counts replicated SWM registration rows against the paged meta cursor', async () => {
     const worker = new SyncVerifyWorker();
     const nquads = [
       `<did:dkg:context-graph:${CG_ID}/${SUB_GRAPH}> <${RDF_TYPE}> <${DKG}SubGraph> <${ROOT_CG_META_GRAPH}> .`,
@@ -174,7 +180,7 @@ describe('runSharedMemorySync ownership hydration', () => {
     try {
       const parsed = await worker.parseAndFilter(nquads, ROOT_META_GRAPH, CG_ID);
       expect(parsed.quads).toHaveLength(5);
-      expect(parsed.totalQuads).toBe(2);
+      expect(parsed.totalQuads).toBe(5);
     } finally {
       await worker.close();
     }

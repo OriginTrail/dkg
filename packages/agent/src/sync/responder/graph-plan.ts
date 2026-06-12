@@ -89,28 +89,13 @@ export async function readSwmMetaPage(params: {
   const graphs = await planSwmGraphs(params.store, params.contextGraphId, true);
   const graphSet = new Set(params.graphList);
   const candidateGraphs = graphs.filter((graph) => graphSet.has(graph));
-  const registrationGraph = contextGraphMetaGraphUri(params.contextGraphId);
-  const swmRows = await readSwmMetaRowsPage(
+  return readSwmMetaRowsPage(
     params.store,
     candidateGraphs,
     params.cutoffIso,
     params.offset,
     params.limit,
   );
-  const registrationNames = dedupeStrings(swmRows
-    .map((row) => subGraphNameFromSwmMetaGraph(params.contextGraphId, row.g))
-    .filter((name): name is string => name !== undefined))
-    .sort(compareCodePoint);
-  if (!graphSet.has(registrationGraph) || registrationNames.length === 0) {
-    return swmRows;
-  }
-  const registrationRows = await readSwmRegistrationRows(
-    params.store,
-    registrationGraph,
-    params.contextGraphId,
-    registrationNames,
-  );
-  return [...registrationRows, ...swmRows].sort(compareRows);
 }
 
 export async function readSwmDataPage(params: {
@@ -483,33 +468,6 @@ async function readSwmMetaRowsPage(
     .filter((row) => row.s && row.p && row.o && row.g);
 }
 
-async function readSwmRegistrationRows(
-  store: TripleStore,
-  registrationGraph: string,
-  contextGraphId: string,
-  registrationNames: readonly string[],
-): Promise<SyncRow[]> {
-  const values = registrationNames
-    .map((name) => `(<${assertSafeIri(`${contextGraphDataGraphUri(contextGraphId)}/${name}`)}> ${sparqlString(name)})`)
-    .join(' ');
-  if (!values) return [];
-  const res = await store.query(`
-    SELECT DISTINCT ?s ?p ?o WHERE {
-      VALUES (?s ?subGraphName) { ${values} }
-      GRAPH <${assertSafeIri(registrationGraph)}> {
-        ?s <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_SUB_GRAPH}> ;
-           <${SCHEMA_NAME}> ?subGraphName ;
-           ?p ?o .
-      }
-    }
-    ORDER BY ?s ?p ?o
-  `);
-  if (res.type !== 'bindings') return [];
-  return res.bindings
-    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: registrationGraph }))
-    .filter((row) => row.s && row.p && row.o);
-}
-
 async function countFreshSwmDataGraphRows(
   store: TripleStore,
   graph: string,
@@ -703,16 +661,6 @@ function durableDeltaGroupClause(
 
 function graphValues(graphs: readonly string[]): string {
   return dedupeStrings(graphs).map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
-}
-
-function subGraphNameFromSwmMetaGraph(contextGraphId: string, graph: string): string | undefined {
-  const rootGraph = `${contextGraphDataGraphUri(contextGraphId)}/_shared_memory_meta`;
-  if (graph === rootGraph) return undefined;
-  const prefix = `${contextGraphDataGraphUri(contextGraphId)}/`;
-  const suffix = '/_shared_memory_meta';
-  if (!graph.startsWith(prefix) || !graph.endsWith(suffix)) return undefined;
-  const name = graph.slice(prefix.length, -suffix.length);
-  return validateSubGraphName(name).valid ? name : undefined;
 }
 
 function isSharedMemoryBucketDescendantDataGraph(graph: string, bucketGraph: string): boolean {

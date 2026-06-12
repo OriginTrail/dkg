@@ -71,8 +71,8 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     return promise;
   }
 
-  it('keeps parsed prelude quads even when they do not advance the page cursor', async () => {
-    const preludeQuad = {
+  it('keeps parsed quads even when they do not advance the page cursor', async () => {
+    const parsedQuad = {
       graph: `${CG_ID}/_meta`,
       subject: `${CG_ID}/registered`,
       predicate: 'http://schema.org/name',
@@ -101,15 +101,15 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
           delete: () => {},
         },
         buildSyncRequest: async () => new TextEncoder().encode('request'),
-        parseAndFilter: async () => ({ quads: [preludeQuad], totalQuads: 0 }),
-        send: async () => new TextEncoder().encode('registration-prelude-only'),
+        parseAndFilter: async () => ({ quads: [parsedQuad], totalQuads: 0 }),
+        send: async () => new TextEncoder().encode('zero-count-page'),
         logWarn: noopLog,
         logInfo: noopLog,
         logDebug: noopLog,
       }),
     );
 
-    expect(result.quads).toEqual([preludeQuad]);
+    expect(result.quads).toEqual([parsedQuad]);
     expect(result.nextOffset).toBe(0);
     expect(result.completed).toBe(true);
   });
