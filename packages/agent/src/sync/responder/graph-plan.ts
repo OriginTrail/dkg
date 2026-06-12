@@ -6,6 +6,7 @@ import {
   validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 
 export type SyncRow = { s: string; p: string; o: string; g: string };
 
@@ -669,14 +670,6 @@ function durableDeltaGroupClause(
 
 function graphValues(graphs: readonly string[]): string {
   return dedupeStrings(graphs).map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
-}
-
-function isSharedMemoryBucketDescendantDataGraph(graph: string, bucketGraph: string): boolean {
-  if (!graph.startsWith(`${bucketGraph}/`)) return false;
-  const tail = graph.slice(bucketGraph.length + 1);
-  if (tail.startsWith('staging/')) return false;
-  const parts = tail.split('/');
-  return parts.length === 2 && parts[0].length > 0 && /^[0-9]+$/.test(parts[1]);
 }
 
 function dedupeStrings(values: readonly string[]): string[] {

@@ -3,6 +3,7 @@ import { validateSubGraphName } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncVerifyResult, SyncVerifyLogEntry, SyncParseResult, SharedMemoryProcessResult, DurableBatchProcessResult, SharedMemoryBatchProcessResult } from './sync-verify-worker.js';
+import { isSharedMemoryBucketDescendantDataGraph } from './sync/shared-memory-graphs.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -388,14 +389,6 @@ function combineRegisteredSubGraphNames(
     if (validateSubGraphName(name).valid && !excluded.has(name)) out.add(name);
   }
   return [...out];
-}
-
-function isSharedMemoryBucketDescendantDataGraph(graph: string, bucketGraph: string): boolean {
-  if (!graph.startsWith(`${bucketGraph}/`)) return false;
-  const tail = graph.slice(bucketGraph.length + 1);
-  if (tail.startsWith('staging/')) return false;
-  const parts = tail.split('/');
-  return parts.length === 2 && parts[0].length > 0 && /^[0-9]+$/.test(parts[1]);
 }
 
 function processDurableBatch(

@@ -3,6 +3,7 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import type { SyncPhase } from '../auth/request-build.js';
+import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncPageResult } from './page-fetch.js';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -235,14 +236,6 @@ function sharedMemoryOwnershipKeyFromGraph(contextGraphId: string, dataGraph: st
   if (!validateSubGraphName(subGraphName).valid) return undefined;
 
   return `${contextGraphId}\0${subGraphName}`;
-}
-
-function isSharedMemoryBucketDescendantDataGraph(dataGraph: string, bucketGraph: string): boolean {
-  if (!dataGraph.startsWith(`${bucketGraph}/`)) return false;
-  const tail = dataGraph.slice(bucketGraph.length + 1);
-  if (tail.startsWith('staging/')) return false;
-  const parts = tail.split('/');
-  return parts.length === 2 && parts[0].length > 0 && /^[0-9]+$/.test(parts[1]);
 }
 
 interface PublicSnapshotMetadata {
