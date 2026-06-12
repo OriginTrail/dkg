@@ -4,11 +4,8 @@
  * One real auth-enabled daemon (edge role) against the shared Hardhat node
  * (port 9548 per packages/cli/vitest.config.ts). Zero chain mocks. Each test
  * reproduces a confirmed-live production bug from the rc.17 QA sweep and asserts
- * the CORRECT behaviour, so it is RED while the bug is live and GREEN once fixed
- * (then close the linked GitHub issue). These repros are EXCLUDED from the normal
- * `pnpm test` CLI lane (which must stay green / mergeable) via the
- * `RUN_ISSUE_LIVENESS` gate, and run red only on the dedicated issue-liveness
- * lane (`RUN_ISSUE_LIVENESS=1`).
+ * the CORRECT behaviour, so it fails while the bug is live and passes once fixed
+ * (then close the linked GitHub issue).
  *
  * Covered:
  *   #787  — POST /api/shared-memory/write with N-Quad *string* quads → 500
@@ -35,13 +32,6 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { ethers } from 'ethers';
 import { getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
-
-// Opt-in gate: these repros assert post-fix behaviour, so they are RED while
-// the bug is live. They are EXCLUDED from the default test lane (which must stay
-// green / mergeable) and run only under `RUN_ISSUE_LIVENESS=1` (the dedicated
-// issue-liveness CI lane). See package.json `test:issue-liveness`.
-const LIVENESS_ENABLED = process.env.RUN_ISSUE_LIVENESS === '1';
-
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
@@ -120,9 +110,6 @@ function headers(): Record<string, string> {
 }
 
 beforeAll(async () => {
-  // Opt-in: don't spin a real daemon in the default lane (all repros are
-  // gated/skipped there). Only the dedicated issue-liveness run needs it.
-  if (!LIVENESS_ENABLED) return;
   daemon = await startDaemon();
   // CURATED CG (accessPolicy:1): #757 is about curator-only moderation access,
   // so the CG must actually have a curator (the daemon's default agent) for a
@@ -146,7 +133,7 @@ afterAll(async () => {
   }
 });
 
-describe.runIf(LIVENESS_ENABLED)('GH #787 — SWM write with N-Quad string quads', () => {
+describe('GH #787 — SWM write with N-Quad string quads', () => {
   it('returns a 4xx (not 500) for string-shaped quads', async () => {
     const res = await fetch(url('/api/shared-memory/write'), {
       method: 'POST',
@@ -162,7 +149,7 @@ describe.runIf(LIVENESS_ENABLED)('GH #787 — SWM write with N-Quad string quads
   });
 });
 
-describe.runIf(LIVENESS_ENABLED)('GH #306 — KA wm/write with N-Quad string quads', () => {
+describe('GH #306 — KA wm/write with N-Quad string quads', () => {
   it('returns a 4xx (not 500) for string-shaped quads', async () => {
     // Precondition: the KA must be created successfully, so the wm/write below
     // exercises the QUAD-SHAPE validation path. If create silently failed, the
@@ -188,7 +175,7 @@ describe.runIf(LIVENESS_ENABLED)('GH #306 — KA wm/write with N-Quad string qua
   });
 });
 
-describe.runIf(LIVENESS_ENABLED)('GH #158 — CCL not-found error mapping (with a real CG)', () => {
+describe('GH #158 — CCL not-found error mapping (with a real CG)', () => {
   it('ccl/eval on an existing CG with an unknown policy returns 404 not 500', async () => {
     const res = await fetch(url('/api/ccl/eval'), {
       method: 'POST',
@@ -203,7 +190,7 @@ describe.runIf(LIVENESS_ENABLED)('GH #158 — CCL not-found error mapping (with 
   });
 });
 
-describe.runIf(LIVENESS_ENABLED)('GH #309 — /api/status exposes the default agent address', () => {
+describe('GH #309 — /api/status exposes the default agent address', () => {
   it('status body carries a real defaultAgentAddress for WM-query scoping', async () => {
     const res = await fetch(url('/api/status'), { headers: { Authorization: `Bearer ${daemon!.token}` } });
     const body = (await res.json()) as Record<string, unknown>;
@@ -214,7 +201,7 @@ describe.runIf(LIVENESS_ENABLED)('GH #309 — /api/status exposes the default ag
   });
 });
 
-describe.runIf(LIVENESS_ENABLED)('GH #757 — join-requests endpoint must be curator-gated', () => {
+describe('GH #757 — join-requests endpoint must be curator-gated', () => {
   it(
     'a non-curator agent token is rejected (403) from reading another CG curator\'s join-requests',
     async () => {

@@ -16,13 +16,6 @@
 import { describe, expect, it } from 'vitest';
 import { escapeDkgRdfLiteral } from '../src/publisher-extension.js';
 
-// Opt-in gate: these repros assert post-fix behaviour, so they are RED while
-// the bug is live. They are EXCLUDED from the default test lane (which must stay
-// green / mergeable) and run only under `RUN_ISSUE_LIVENESS=1` (the dedicated
-// issue-liveness CI lane). See package.json `test:issue-liveness`.
-const LIVENESS_ENABLED = process.env.RUN_ISSUE_LIVENESS === '1';
-
-
 const NUL = String.fromCharCode(0x00);
 const VT = String.fromCharCode(0x0b);
 const DEL = String.fromCharCode(0x7f);
@@ -32,7 +25,7 @@ const DEL = String.fromCharCode(0x7f);
 // eslint-disable-next-line no-control-regex
 const RAW_CONTROL = /[\x00-\x1F\x7F]/;
 
-describe.runIf(LIVENESS_ENABLED)('GH #416 - escapeDkgRdfLiteral non-ECHAR control bytes', () => {
+describe('GH #416 - escapeDkgRdfLiteral non-ECHAR control bytes', () => {
   it('CONTROL: ECHAR shortcuts still produce canonical short forms', () => {
     expect(escapeDkgRdfLiteral('a"b\nc\td')).toBe('a\\"b\\nc\\td');
   });

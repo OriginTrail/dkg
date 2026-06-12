@@ -33,20 +33,13 @@ async function walkFiles(dir: string): Promise<string[]> {
   return out;
 }
 
-// Opt-in gate: these repros assert post-fix behaviour, so they are RED while
-// the bug is live. They are EXCLUDED from the default test lane (which must stay
-// green / mergeable) and run only under `RUN_ISSUE_LIVENESS=1` (the dedicated
-// issue-liveness CI lane). See package.json `test:issue-liveness`.
-const LIVENESS_ENABLED = process.env.RUN_ISSUE_LIVENESS === '1';
-
-
 const dirs: string[] = [];
 afterEach(async () => {
   await Promise.all(dirs.map((d) => rm(d, { recursive: true, force: true }).catch(() => {})));
   dirs.length = 0;
 });
 
-describe.runIf(LIVENESS_ENABLED)('GH #11 — operational wallet private keys at rest', () => {
+describe('GH #11 — operational wallet private keys at rest', () => {
   it('does not persist any wallet raw private key in plaintext anywhere on disk', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'gh11-opwallets-'));
     dirs.push(dir);

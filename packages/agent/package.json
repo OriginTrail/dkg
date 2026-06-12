@@ -9,7 +9,6 @@
     "benchmark:sync-worker": "node scripts/sync-worker-benchmark.cjs",
     "benchmark:sync-worker-responsiveness": "node scripts/sync-worker-responsiveness-benchmark.cjs",
     "test": "vitest run",
-    "test:liveness": "vitest run test/issue-462-skill-acl.test.ts test/issue-936-tokenid-determinism.test.ts test/op-wallets-at-rest-encryption.test.ts",
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"

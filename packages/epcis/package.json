@@ -7,7 +7,6 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
-    "test:liveness": "vitest run test/event-type-container-filter.test.ts",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },

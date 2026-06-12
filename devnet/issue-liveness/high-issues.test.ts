@@ -8,10 +8,11 @@
  * passing.
  *
  * These cover the inherently MULTI-NODE issues (publish → quorum → replication),
- * which can't be reproduced in the single-process unit lanes. They run on the
- * devnet harness, NOT the standard CI lanes:
+ * which can't be reproduced in the single-process unit lanes. In CI they run on
+ * the "Tornado: devnet integration (multi-node publish/sync)" lane, which boots
+ * the devnet itself. To run locally:
  *   ./scripts/devnet.sh clean && ./scripts/devnet.sh start 6
- *   Run: pnpm test:devnet:issue-liveness
+ *   pnpm test:devnet:issue-liveness
  *
  * Multi-node coverage here: #1093 #1094 #1095 #1096 #1097 #1098 #1104 #886.
  * The single-process variants of #462 #936 #1013 #1078 live in their package

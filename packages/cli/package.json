@@ -25,7 +25,6 @@
     "postinstall": "node ./scripts/bundle-markitdown-binaries.mjs --quiet --current-platform --best-effort",
     "markitdown:build": "node ./scripts/bundle-markitdown-binaries.mjs --build-current-platform",
     "test": "vitest run",
-    "test:liveness": "vitest run test/issue-liveness-daemon-routes.test.ts test/rdf-parser-jsonld.test.ts test/skill-md-dynamic-section.test.ts",
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:benchmark:publish-async-get": "vitest run --config vitest.benchmark.config.ts",
     "test:coverage": "vitest run --coverage",

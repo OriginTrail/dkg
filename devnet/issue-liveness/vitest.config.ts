@@ -5,16 +5,15 @@ import { resolve } from 'node:path';
  * Multi-node issue-liveness regression suite against a live devnet.
  *
  * Encodes confirmed-live cross-node bugs from the rc.17 QA sweep as plain
- * failing `it()` repros — each asserts the CORRECT behaviour, so it is RED while
- * the bug is live and turns GREEN when fixed, signalling the linked GitHub issue
- * can close. Manual-run (needs a live devnet), like the sibling devnet suites.
+ * failing `it()` repros — each asserts the CORRECT behaviour, so it fails while
+ * the bug is live and passes when fixed, signalling the linked GitHub issue
+ * can close. Runs in CI on the "Tornado: devnet integration (multi-node
+ * publish/sync)" lane, which boots the devnet itself.
  *
- * Preconditions:
+ * To run locally:
  *   pnpm run build
  *   ./scripts/devnet.sh clean && ./scripts/devnet.sh start 6
- *   node devnet/_bootstrap/bootstrap.cjs
- *
- * Run: pnpm test:devnet:issue-liveness
+ *   pnpm test:devnet:issue-liveness
  */
 // ESM package (`"type": "module"`) — `__dirname` is undefined when Vitest loads
 // this config, so derive paths from `import.meta.dirname` like the sibling

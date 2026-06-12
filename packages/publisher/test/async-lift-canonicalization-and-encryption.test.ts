@@ -24,13 +24,6 @@ import { validateLiftPublishPayload } from '../src/async-lift-validation.js';
 import { mapLiftRequestToPublishOptions } from '../src/async-lift-publish-options.js';
 import type { LiftRequest } from '../src/lift-job-types.js';
 
-// Opt-in gate: these repros assert post-fix behaviour, so they are RED while
-// the bug is live. They are EXCLUDED from the default test lane (which must stay
-// green / mergeable) and run only under `RUN_ISSUE_LIVENESS=1` (the dedicated
-// issue-liveness CI lane). See package.json `test:issue-liveness`.
-const LIVENESS_ENABLED = process.env.RUN_ISSUE_LIVENESS === '1';
-
-
 const CALLER_ROOT = 'urn:dmaast:tenant:tenant-a';
 
 const baseRequest: LiftRequest = {
@@ -44,7 +37,7 @@ const baseRequest: LiftRequest = {
   authority: { type: 'owner', proofRef: 'devnet-proof' },
 };
 
-describe.runIf(LIVENESS_ENABLED)('GH #1122 — async lift preserves caller-provided root IRIs (sync parity)', () => {
+describe('GH #1122 — async lift preserves caller-provided root IRIs (sync parity)', () => {
   it('does not rewrite a caller root IRI to a generated dkg:… subject', () => {
     const out = validateLiftPublishPayload({
       request: baseRequest,
@@ -59,7 +52,7 @@ describe.runIf(LIVENESS_ENABLED)('GH #1122 — async lift preserves caller-provi
   });
 });
 
-describe.runIf(LIVENESS_ENABLED)('GH #1121 — async lift carries an inline-encryption path for private CGs', () => {
+describe('GH #1121 — async lift carries an inline-encryption path for private CGs', () => {
   it('a private (ownerOnly) async publish maps to PublishOptions with an encryption callback', () => {
     const opts = mapLiftRequestToPublishOptions({
       request: { ...baseRequest, accessPolicy: 'ownerOnly' },

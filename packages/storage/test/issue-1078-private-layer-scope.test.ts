@@ -18,13 +18,6 @@
 import { describe, expect, it } from 'vitest';
 import { OxigraphStore, GraphManager, PrivateContentStore, type Quad } from '../src/index.js';
 
-// Opt-in gate: these repros assert post-fix behaviour, so they are RED while
-// the bug is live. They are EXCLUDED from the default test lane (which must stay
-// green / mergeable) and run only under `RUN_ISSUE_LIVENESS=1` (the dedicated
-// issue-liveness CI lane). See package.json `test:issue-liveness`.
-const LIVENESS_ENABLED = process.env.RUN_ISSUE_LIVENESS === '1';
-
-
 const CG = 'gh1078-cg';
 const ROOT = 'urn:gh1078:device';
 
@@ -32,7 +25,7 @@ function priv(predicate: string, object: string): Quad {
   return { subject: ROOT, predicate, object, graph: '' };
 }
 
-describe.runIf(LIVENESS_ENABLED)('GH #1078 — private payload storage must be scoped to the committing layer/commitment', () => {
+describe('GH #1078 — private payload storage must be scoped to the committing layer/commitment', () => {
   it(
     'a root hydrates only the authoritative private slice, not a different commitment for the same root',
     async () => {

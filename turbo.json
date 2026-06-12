@@ -1,7 +1,6 @@
 {
   "$schema": "https://turbo.build/schema.json",
   "globalEnv": ["DKG_SKIP_EVM_BUILD"],
-  "globalPassThroughEnv": ["RUN_ISSUE_LIVENESS"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
@@ -18,9 +17,6 @@
     "test": {
       "dependsOn": ["build"],
       "outputs": []
-    },
-    "test:liveness": {
-      "cache": false
     },
     "test:coverage": {
       "dependsOn": ["build"],
