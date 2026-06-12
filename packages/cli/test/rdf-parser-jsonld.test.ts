@@ -11,10 +11,11 @@
  * resolutions: implement JSON-LD (option B) OR stop advertising `.jsonld`
  * (option A). Either way the current state — advertised AND throwing — is the bug.
  *
- * Encoded as `it.fails`: asserting that a `.jsonld` file with `@context` parses
- * fails today (bug live). When JSON-LD ingest is implemented, flip to a plain
- * `it(...)` and close #15. (If option A is taken instead, replace this with a
- * test asserting `.jsonld` is absent from `supportedExtensions()`.)
+ * This asserts the CORRECT (post-fix) INVARIANT — the parser is never in an
+ * "advertised but broken" state — so it is RED while the bug is live and GREEN
+ * for EITHER accepted fix: implement JSON-LD (then it parses) OR stop advertising
+ * `.jsonld` (then there's nothing to parse). Written fix-agnostically so option A
+ * can't leave it stuck red (Codex review on PR #1129).
  */
 import { describe, expect, it } from 'vitest';
 import { detectFormat, supportedExtensions, parseRdf } from '../src/rdf-parser.js';
@@ -33,18 +34,19 @@ const JSONLD_WITH_CONTEXT = JSON.stringify({
   'schema:name': 'JsonLd15',
 });
 
-describe.runIf(LIVENESS_ENABLED)('GH #15 — JSON-LD ingest is advertised but non-functional', () => {
-  it('CONTROL: .jsonld is advertised as a supported format', () => {
-    expect(supportedExtensions()).toContain('.jsonld');
-    expect(detectFormat('thing.jsonld')).toBe('jsonld');
-  });
+describe.runIf(LIVENESS_ENABLED)('GH #15 — JSON-LD ingest must not be advertised-but-broken', () => {
+  it('a .jsonld document with @context is parseable, OR .jsonld is not advertised (no advertised-but-broken state)', async () => {
+    const advertised =
+      supportedExtensions().includes('.jsonld') || detectFormat('thing.jsonld') === 'jsonld';
 
-  it('parses a .jsonld document that carries an @context', async () => {
-    const quads = await parseRdf(
-      JSONLD_WITH_CONTEXT,
-      'jsonld',
-      'did:dkg:context-graph:gh15',
-    );
+    // Option A fix — `.jsonld` de-advertised: there is nothing to parse, the
+    // parser is consistent, pass.
+    if (!advertised) return;
+
+    // Still advertised → option B fix must hold: a JSON-LD doc with `@context`
+    // MUST parse. Today this throws ("requires the jsonld library"), so the test
+    // is RED. (A throw here is the live bug; an empty parse is also a failure.)
+    const quads = await parseRdf(JSONLD_WITH_CONTEXT, 'jsonld', 'did:dkg:context-graph:gh15');
     expect(quads.length).toBeGreaterThan(0);
   });
 });

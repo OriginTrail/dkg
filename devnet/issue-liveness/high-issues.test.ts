@@ -57,12 +57,6 @@ const post = (n: Node, p: string, b: unknown) => req(n, 'POST', p, b);
 const get = (n: Node, p: string) => req(n, 'GET', p, undefined);
 
 const CORES = [1, 2, 3, 4];
-// The pre-subscribed peer (#1098) MUST be distinct from the publisher, else
-// "did the pre-subscribed peer catch up?" degenerates into "does the author see
-// its own VM?" — a false positive. Reserve node 2 as the pre-sub peer and never
-// let it be chosen as the publisher.
-const PRE_SUB_NUM = 2;
-const PUBLISHER_CANDIDATES = CORES.filter((n) => n !== PRE_SUB_NUM);
 const STAMP = Date.now();
 
 // Shared state for the publish-dependent repros (published once on a working core).
@@ -91,14 +85,12 @@ async function publishKaOn(node: Node, cg: string, ka: string): Promise<{ ok: bo
 
 describe('HIGH issue liveness (multi-node devnet)', () => {
   beforeAll(async () => {
-    preSubNode = readNode(PRE_SUB_NUM);
-
-    // Phase 1 — find a core that can actually publish (some are ACK-poisoned by
-    // #1093). Each probe uses its OWN context graph + KA name so a partial/failed
-    // probe can't leave state that makes a later probe pass or fail for
-    // duplicate-name reasons. Probe the publisher candidates only (never the
-    // reserved pre-sub peer).
-    for (const n of PUBLISHER_CANDIDATES) {
+    // Phase 1 — find ANY core that can actually publish (some are ACK-poisoned by
+    // #1093). Probe ALL cores so the suite still runs even if the only healthy
+    // publisher happens to be node 2. Each probe uses its OWN context graph + KA
+    // name so a partial/failed probe can't leave state that makes a later probe
+    // pass or fail for duplicate-name reasons.
+    for (const n of CORES) {
       const node = readNode(n);
       const probeCg = `${SEED_CG}-probe${n}`;
       const probeKa = `${KA}-probe${n}`;
@@ -118,6 +110,13 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
         'Publish-dependent #1095/#1104/#1094/#1096/#1098/#886 repros cannot run.',
       );
     }
+
+    // The pre-subscribed peer (#1098) MUST be a DIFFERENT node than the
+    // publisher, else "did the pre-subscribed peer catch up?" degenerates into
+    // "does the author see its own VM?" — a false positive. Pick it AFTER the
+    // publisher is known (any core that isn't the publisher).
+    const preSubNum = CORES.find((n) => n !== pubNode!.num)!;
+    preSubNode = readNode(preSubNum);
 
     // Phase 2 — pre-subscribe the DISTINCT peer to the seed CG BEFORE the seed
     // publish (the precondition #1098 tests), then publish the seed KA on the

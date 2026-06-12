@@ -9,15 +9,29 @@
  * `wallets.json` (mode 0o600 but unencrypted). On mainnet those wallets hold
  * real TRAC/ETH, so plaintext-at-rest is a real exposure.
  *
- * `it.fails`: the assertion that the persisted file does NOT contain a raw
- * private key fails today (keys are plaintext). When the keystore is wired in,
- * drop `.fails` and close #11. Hermetic — tmpdir only.
+ * This asserts the CORRECT (post-fix) behaviour — no wallet's raw private key
+ * appears in plaintext ANYWHERE under the data dir — so it is RED while the keys
+ * are stored plaintext and GREEN once the keystore is wired in. It scans EVERY
+ * persisted file (not just `wallets.json`) so a valid fix that moves secrets into
+ * an encrypted keystore, renames the artifact, or leaves only non-secret
+ * metadata still turns it green (Codex review on PR #1129). Hermetic — tmpdir.
  */
 import { describe, expect, it, afterEach } from 'vitest';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadOpWallets } from '../src/op-wallets.js';
+
+/** Every regular file under `dir`, recursively. */
+async function walkFiles(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const p = join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...(await walkFiles(p)));
+    else if (entry.isFile()) out.push(p);
+  }
+  return out;
+}
 
 // Opt-in gate: these repros assert post-fix behaviour, so they are RED while
 // the bug is live. They are EXCLUDED from the default test lane (which must stay
@@ -33,20 +47,26 @@ afterEach(async () => {
 });
 
 describe.runIf(LIVENESS_ENABLED)('GH #11 — operational wallet private keys at rest', () => {
-  it('does not persist raw private keys in plaintext in wallets.json', async () => {
+  it('does not persist any wallet raw private key in plaintext anywhere on disk', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'gh11-opwallets-'));
     dirs.push(dir);
 
     const config = await loadOpWallets(dir, 2); // generates + persists on first call
-    const raw = await readFile(join(dir, 'wallets.json'), 'utf-8');
 
     // Control: the in-memory config really does carry private keys (so the
-    // negative assertion below is meaningful).
+    // negative assertion below is meaningful, not vacuously true).
     expect(config.wallets[0].privateKey).toMatch(/^0x[0-9a-fA-F]{64}$/);
 
-    // The on-disk file must not contain any wallet's raw private key verbatim.
+    // Scan EVERY persisted file (and the bare-hex form, in case a future writer
+    // strips the 0x prefix). No file may contain a wallet's raw private key.
+    const files = await walkFiles(dir);
+    const blobs = await Promise.all(files.map((f) => readFile(f, 'utf-8').catch(() => '')));
+    const combined = blobs.join('\n');
     for (const w of config.wallets) {
-      expect(raw).not.toContain(w.privateKey);
+      const hex = w.privateKey;
+      const bare = hex.replace(/^0x/, '');
+      expect(combined, `a persisted file under ${dir} contains a raw private key`).not.toContain(hex);
+      expect(combined).not.toContain(bare);
     }
   });
 });
