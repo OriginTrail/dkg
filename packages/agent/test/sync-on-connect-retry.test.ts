@@ -124,6 +124,72 @@ describe('runSyncOnConnect callbacks', () => {
     expect(synced).toEqual([]);
   });
 
+  it('fires onPeerSynced when detailed sync summaries are clean but empty', async () => {
+    const remotePeer = freshPeerIdString();
+    const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
+
+    const outcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => ['cg-clean-empty'],
+      syncFromPeer: async () => ({
+        insertedTriples: 0,
+        timedOutPhases: 0,
+        failedPeers: 0,
+        deniedPhases: 0,
+      }),
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => ({
+        insertedTriples: 0,
+        timedOutPhases: 0,
+        failedPeers: 0,
+        deniedPhases: 0,
+      }),
+      logInfo: noopLog,
+      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+    });
+
+    expect(outcome).toBe('synced');
+    expect(synced).toEqual([{ peerId: remotePeer, fresh: true }]);
+  });
+
+  it('does not fire onPeerSynced when clean empty accounting later times out', async () => {
+    const remotePeer = freshPeerIdString();
+    const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
+
+    const outcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => ['cg-clean-then-timeout'],
+      syncFromPeer: async () => ({
+        insertedTriples: 0,
+        timedOutPhases: 0,
+        failedPeers: 0,
+        deniedPhases: 0,
+      }),
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => ({
+        insertedTriples: 0,
+        completedPhases: 0,
+        checkpointAdvances: 0,
+        timedOutPhases: 1,
+        failedPeers: 0,
+        deniedPhases: 0,
+      }),
+      logInfo: noopLog,
+      onPeerSynced: (peerId, outcome) => synced.push({ peerId, fresh: outcome?.fresh }),
+    });
+
+    expect(outcome).toBe('synced');
+    expect(synced).toEqual([]);
+  });
+
   it('fires onPeerSynced when a detailed sync summary is denial-only', async () => {
     const remotePeer = freshPeerIdString();
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
