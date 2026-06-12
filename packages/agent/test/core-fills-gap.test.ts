@@ -118,6 +118,52 @@ async function insertWorkspaceOperationMeta(
   ]);
 }
 
+function bytesToHex(bytes: Uint8Array): string {
+  return `0x${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
+async function insertWorkspaceDataTriple(
+  store: TripleStore,
+  localCgId: string,
+  entity: string,
+  value: string,
+): Promise<void> {
+  await store.insert([{
+    subject: entity,
+    predicate: 'http://schema.org/name',
+    object: `"${value}"`,
+    graph: contextGraphWorkspaceGraphUri(localCgId),
+  }]);
+}
+
+async function replaceWorkspaceDataTriple(
+  store: TripleStore,
+  localCgId: string,
+  entity: string,
+  value: string,
+): Promise<void> {
+  await store.deleteByPattern({
+    subject: entity,
+    predicate: 'http://schema.org/name',
+    graph: contextGraphWorkspaceGraphUri(localCgId),
+  });
+  await insertWorkspaceDataTriple(store, localCgId, entity, value);
+}
+
+async function insertPrivateMerkleRoot(
+  store: TripleStore,
+  localCgId: string,
+  entity: string,
+  privateRoot: Uint8Array,
+): Promise<void> {
+  await store.insert([{
+    subject: entity,
+    predicate: 'http://dkg.io/ontology/privateMerkleRoot',
+    object: `"${bytesToHex(privateRoot)}"`,
+    graph: contextGraphWorkspaceMetaGraphUri(localCgId),
+  }]);
+}
+
 /** Seed a local SWM snapshot for one KA under a CG and return its flat-KC root. */
 async function seedSwmSnapshot(store: TripleStore, localCgId: string, entity: string, value: string): Promise<Uint8Array> {
   const wsGraph = contextGraphWorkspaceGraphUri(localCgId);
@@ -369,6 +415,101 @@ describe('Phase D - VM reconcile damping', () => {
     expect(cacheKeys[0]).not.toContain('11'.repeat(32));
   });
 
+  it('invalidates a negative cache entry when SWM data arrives without operation-meta changes', async () => {
+    const internals = await boot();
+    const onChainCgId = 48n;
+    const entity = 'urn:fact:data-arrival';
+    const value = 'Data arrived after cache';
+    const root = computeFlatKCRootV10(
+      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
+      [],
+    );
+    registerUnmatchedKC(internals.chain, 9008n, onChainCgId, bytesToHex(root));
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    await insertWorkspaceOperationMeta(
+      internals.store,
+      contextGraphWorkspaceMetaGraphUri('48'),
+      'data-arrival-op',
+      entity,
+      '2030-01-01T00:00:00.000Z',
+    );
+
+    await expect(internals.reconcileChainOrdinal('48', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
+
+    await insertWorkspaceDataTriple(internals.store, '48', entity, value);
+
+    await expect(internals.reconcileChainOrdinal('48', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+  });
+
+  it('invalidates a negative cache entry when SWM data changes without triple-count changes', async () => {
+    const internals = await boot();
+    const onChainCgId = 52n;
+    const entity = 'urn:fact:data-replacement';
+    const staleValue = 'Stale value';
+    const freshValue = 'Fresh value';
+    const root = computeFlatKCRootV10(
+      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${freshValue}"`, graph: '' }],
+      [],
+    );
+    registerUnmatchedKC(internals.chain, 9012n, onChainCgId, bytesToHex(root));
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    await insertWorkspaceOperationMeta(
+      internals.store,
+      contextGraphWorkspaceMetaGraphUri('52'),
+      'data-replacement-op',
+      entity,
+      '2030-01-01T00:00:00.000Z',
+    );
+    await insertWorkspaceDataTriple(internals.store, '52', entity, staleValue);
+
+    await expect(internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
+
+    await replaceWorkspaceDataTriple(internals.store, '52', entity, freshValue);
+
+    await expect(internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+  });
+
+  it('invalidates a negative cache entry when private-root metadata arrives without operation-meta changes', async () => {
+    const internals = await boot();
+    const onChainCgId = 49n;
+    const entity = 'urn:fact:private-arrival';
+    const value = 'Private root arrived after cache';
+    const privateRoot = new Uint8Array(32);
+    privateRoot[31] = 7;
+    const root = computeFlatKCRootV10(
+      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
+      [privateRoot],
+    );
+    registerUnmatchedKC(internals.chain, 9009n, onChainCgId, bytesToHex(root));
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    await insertWorkspaceOperationMeta(
+      internals.store,
+      contextGraphWorkspaceMetaGraphUri('49'),
+      'private-arrival-op',
+      entity,
+      '2030-01-01T00:00:00.000Z',
+    );
+    await insertWorkspaceDataTriple(internals.store, '49', entity, value);
+
+    await expect(internals.reconcileChainOrdinal('49', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
+
+    await insertPrivateMerkleRoot(internals.store, '49', entity, privateRoot);
+
+    await expect(internals.reconcileChainOrdinal('49', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+  });
+
   it('keeps an unreadable negative-cache generation damped until backoff expires', async () => {
     const internals = await boot();
     const onChainCgId = 45n;
@@ -488,6 +629,42 @@ describe('Phase D - VM reconcile damping', () => {
       maxPeers: 1,
       peerRotationKey: '47',
     });
+  });
+
+  it('does not negative-cache no-swm when active fetch reaches no sync-capable peer', async () => {
+    const internals = await boot();
+    const onChainCgId = 50n;
+    registerUnmatchedKC(internals.chain, 9010n, onChainCgId);
+    (agent as any).node.libp2p.getConnections = () => [
+      { remotePeer: { toString: () => 'peer-no-protocol-a' } },
+      { remotePeer: { toString: () => 'peer-no-protocol-b' } },
+    ];
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(noProtocolCatchupStats());
+
+    await expect(internals.reconcileChainOrdinal('50', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(((internals as any).vmReconcileFetchCooldownAt as Map<string, unknown>).has('50')).toBe(false);
+  });
+
+  it('does not negative-cache no-swm when every active fetch attempt fails', async () => {
+    const internals = await boot();
+    const onChainCgId = 51n;
+    registerUnmatchedKC(internals.chain, 9011n, onChainCgId);
+    (agent as any).node.libp2p.getConnections = () => [
+      { remotePeer: { toString: () => 'peer-fails-a' } },
+      { remotePeer: { toString: () => 'peer-fails-b' } },
+    ];
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockRejectedValue(new Error('fetch failed'));
+
+    await expect(internals.reconcileChainOrdinal('51', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    expect(((internals as any).vmReconcileFetchCooldownAt as Map<string, unknown>).has('51')).toBe(false);
   });
 });
 
