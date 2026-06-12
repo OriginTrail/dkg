@@ -13,6 +13,9 @@ export interface DurableSyncSummary {
   insertedDataTriples: number;
   bytesReceived: number;
   resumedPhases: number;
+  timedOutPhases: number;
+  completedPhases: number;
+  checkpointAdvances: number;
   deniedPhases: number;
   emptyResponses: number;
   metaOnlyResponses: number;
@@ -99,6 +102,9 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     insertedDataTriples: 0,
     bytesReceived: 0,
     resumedPhases: 0,
+    timedOutPhases: 0,
+    completedPhases: 0,
+    checkpointAdvances: 0,
     deniedPhases: 0,
     emptyResponses: 0,
     metaOnlyResponses: 0,
@@ -107,67 +113,74 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     failedPeers: 0,
   };
 
-  try {
-    for (const [index, pid] of contextGraphIds.entries()) {
+  const recordPhaseOutcome = (result: SyncPageResult, options: { updateCheckpoint: boolean }) => {
+    summary.resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
+    summary.timedOutPhases += result.timedOut ? 1 : 0;
+    summary.completedPhases += result.completed ? 1 : 0;
+    if (result.nextOffset > result.resumedFromOffset) {
+      summary.checkpointAdvances += 1;
+    }
+    if (!options.updateCheckpoint) return;
+    if (result.completed) deleteCheckpoint(result.checkpointKey);
+    else if (result.nextOffset > 0 || result.resumedFromOffset > 0) {
+      setCheckpoint(result.checkpointKey, result.nextOffset);
+    }
+  };
+
+  for (const [index, pid] of contextGraphIds.entries()) {
+    let activePhase: 'fetch' | 'verify' | 'store' | undefined;
+    const startPhase = (phase: 'fetch' | 'verify' | 'store') => {
+      activePhase = phase;
+      onPhase?.(phase, 'start');
+    };
+    const endPhase = () => {
+      if (!activePhase) return;
+      onPhase?.(activePhase, 'end');
+      activePhase = undefined;
+    };
+
+    try {
       const dataGraph = contextGraphDataGraphUri(pid);
       const metaGraph = contextGraphMetaGraphUri(pid);
       const deadline = createContextGraphSyncDeadline(contextGraphIds.length - index);
 
       logInfo(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
 
-      onPhase?.('fetch', 'start');
+      startPhase('fetch');
       const fetchStartedAt = Date.now();
-
-      let metaResult;
-      let dataResult;
-      try {
-        metaResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline);
-        dataResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline, undefined, sinceBatchIdFor?.(pid));
-      } catch (pidErr) {
-        // `runDurableSync` has a catch-all below that sets `deniedPhases`
-        // when a sync is rejected, but it collapses "which CG was
-        // denied?" into a single counter. The `onAccessDenied` callback
-        // exists precisely so callers (notably the daemon's subscribe
-        // route) can tell "peer refused to serve this CG" apart from
-        // "peer had nothing to send" per-graph. Re-throw so the outer
-        // catch-all still records the denial in the summary and we don't
-        // paper over genuine errors.
-        if ((pidErr as Error & { syncDenied?: boolean }).syncDenied) {
-          onPhase?.('fetch', 'end');
-          onAccessDenied?.(pid);
-        }
-        throw pidErr;
-      }
-
-      onPhase?.('fetch', 'end');
+      const metaResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline);
+      const dataResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline, undefined, sinceBatchIdFor?.(pid));
+      endPhase();
       const fetchDurationMs = Date.now() - fetchStartedAt;
       const isSystemContextGraph = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(pid);
 
-      onPhase?.('verify', 'start');
+      startPhase('verify');
       const verifyStartedAt = Date.now();
       const processed = await processDurableBatchInWorker(dataResult.quads, metaResult.quads, ctx, isSystemContextGraph);
-      onPhase?.('verify', 'end');
+      endPhase();
       const verifyDurationMs = Date.now() - verifyStartedAt;
 
       logInfo(ctx, `  meta: ${processed.totalFetchedMetaQuads} triples fetched`);
       logInfo(ctx, `  data: ${processed.totalFetchedDataQuads} triples fetched`);
       summary.bytesReceived += metaResult.bytesReceived + dataResult.bytesReceived;
-      summary.resumedPhases += (metaResult.resumedFromOffset > 0 ? 1 : 0) + (dataResult.resumedFromOffset > 0 ? 1 : 0);
       summary.fetchedMetaTriples += processed.totalFetchedMetaQuads;
       summary.fetchedDataTriples += processed.totalFetchedDataQuads;
       summary.emptyResponses += processed.emptyResponses;
       summary.metaOnlyResponses += processed.metaOnlyResponses;
       summary.dataRejectedMissingMeta += processed.dataRejectedMissingMeta;
 
+      const updateCheckpoints = processed.dataRejectedMissingMeta === 0;
       if (
         processed.emptyResponses > 0 ||
         processed.dataRejectedMissingMeta > 0 ||
         (processed.verifiedData.length === 0 && processed.verifiedMeta.length === 0 && processed.metaOnlyResponses > 0)
       ) {
+        recordPhaseOutcome(metaResult, { updateCheckpoint: updateCheckpoints });
+        recordPhaseOutcome(dataResult, { updateCheckpoint: updateCheckpoints });
         continue;
       }
 
-      onPhase?.('store', 'start');
+      startPhase('store');
       const storeStartedAt = Date.now();
       if (processed.verifiedData.length > 0) {
         await storeInsert(processed.verifiedData);
@@ -179,11 +192,9 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         summary.insertedTriples += processed.verifiedMeta.length;
         summary.insertedMetaTriples += processed.verifiedMeta.length;
       }
-      if (metaResult.completed) deleteCheckpoint(metaResult.checkpointKey);
-      else setCheckpoint(metaResult.checkpointKey, metaResult.nextOffset);
-      if (dataResult.completed) deleteCheckpoint(dataResult.checkpointKey);
-      else setCheckpoint(dataResult.checkpointKey, dataResult.nextOffset);
-      onPhase?.('store', 'end');
+      recordPhaseOutcome(metaResult, { updateCheckpoint: updateCheckpoints });
+      recordPhaseOutcome(dataResult, { updateCheckpoint: updateCheckpoints });
+      endPhase();
       const storeDurationMs = Date.now() - storeStartedAt;
 
       if (fetchDurationMs + verifyDurationMs + storeDurationMs > 100) {
@@ -197,16 +208,19 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         logWarn(ctx, `Rejected ${processed.rejectedKcs} KCs with invalid merkle roots from ${remotePeerId}`);
         summary.rejectedKcs += processed.rejectedKcs;
       }
+    } catch (pidErr) {
+      endPhase();
+      logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${pidErr instanceof Error ? pidErr.message : String(pidErr)}`);
+      if ((pidErr as Error & { syncDenied?: boolean }).syncDenied) {
+        onAccessDenied?.(pid);
+        summary.deniedPhases += 1;
+      } else {
+        summary.failedPeers += 1;
+      }
     }
-    if (summary.insertedTriples > 0) {
-      logInfo(ctx, `Sync complete: ${summary.insertedTriples} verified triples from ${remotePeerId}`);
-    }
-  } catch (err) {
-    logWarn(ctx, `Sync from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
-    if ((err as Error & { syncDenied?: boolean }).syncDenied) {
-      summary.deniedPhases += 1;
-    }
-    summary.failedPeers += 1;
+  }
+  if (summary.insertedTriples > 0) {
+    logInfo(ctx, `Sync complete: ${summary.insertedTriples} verified triples from ${remotePeerId}`);
   }
 
   return summary;

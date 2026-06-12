@@ -16,6 +16,9 @@ export interface SharedMemorySyncSummary {
   insertedDataTriples: number;
   bytesReceived: number;
   resumedPhases: number;
+  timedOutPhases: number;
+  completedPhases: number;
+  checkpointAdvances: number;
   deniedPhases: number;
   emptyResponses: number;
   droppedDataTriples: number;
@@ -94,14 +97,30 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     insertedDataTriples: 0,
     bytesReceived: 0,
     resumedPhases: 0,
+    timedOutPhases: 0,
+    completedPhases: 0,
+    checkpointAdvances: 0,
     deniedPhases: 0,
     emptyResponses: 0,
     droppedDataTriples: 0,
     failedPeers: 0,
   };
 
-  try {
-    for (const [index, pid] of contextGraphIds.entries()) {
+  const recordPhaseOutcome = (result: SyncPageResult) => {
+    summary.resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
+    summary.timedOutPhases += result.timedOut ? 1 : 0;
+    summary.completedPhases += result.completed ? 1 : 0;
+    if (result.nextOffset > result.resumedFromOffset) {
+      summary.checkpointAdvances += 1;
+    }
+    if (result.completed) deleteCheckpoint(result.checkpointKey);
+    else if (result.nextOffset > 0 || result.resumedFromOffset > 0) {
+      setCheckpoint(result.checkpointKey, result.nextOffset);
+    }
+  };
+
+  for (const [index, pid] of contextGraphIds.entries()) {
+    try {
       const wsGraph = contextGraphWorkspaceGraphUri(pid);
       const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(pid);
       const deadline = createContextGraphSyncDeadline(contextGraphIds.length - index);
@@ -130,12 +149,13 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const verifyDurationMs = Date.now() - verifyStartedAt;
       logInfo(ctx, `  shared memory: ${processed.totalFetchedDataQuads} data + ${processed.totalFetchedMetaQuads} meta triples fetched`);
       summary.bytesReceived += wsMetaResult.bytesReceived + wsDataResult.bytesReceived;
-      summary.resumedPhases += (wsMetaResult.resumedFromOffset > 0 ? 1 : 0) + (wsDataResult.resumedFromOffset > 0 ? 1 : 0);
       summary.fetchedMetaTriples += processed.totalFetchedMetaQuads;
       summary.fetchedDataTriples += processed.totalFetchedDataQuads;
       summary.emptyResponses += processed.emptyResponses;
 
       if (processed.emptyResponses > 0) {
+        recordPhaseOutcome(wsMetaResult);
+        recordPhaseOutcome(wsDataResult);
         continue;
       }
 
@@ -175,10 +195,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         summary.insertedTriples += processed.verifiedMeta.length;
         summary.insertedMetaTriples += processed.verifiedMeta.length;
       }
-      if (wsMetaResult.completed) deleteCheckpoint(wsMetaResult.checkpointKey);
-      else setCheckpoint(wsMetaResult.checkpointKey, wsMetaResult.nextOffset);
-      if (wsDataResult.completed) deleteCheckpoint(wsDataResult.checkpointKey);
-      else setCheckpoint(wsDataResult.checkpointKey, wsDataResult.nextOffset);
+      recordPhaseOutcome(wsMetaResult);
+      recordPhaseOutcome(wsDataResult);
 
       for (const { dataGraph, entity, creator } of processed.entityCreators) {
         const ownershipKey = sharedMemoryOwnershipKeyFromGraph(pid, dataGraph);
@@ -200,16 +218,17 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           `Requester SWM timing for "${pid}": fetch=${fetchDurationMs}ms verify=${verifyDurationMs}ms snapshots=${snapshotDurationMs}ms store+ownership=${storeDurationMs}ms`,
         );
       }
+    } catch (err) {
+      logWarn(ctx, `SWM sync for context graph "${pid}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
+      if ((err as Error & { syncDenied?: boolean }).syncDenied) {
+        summary.deniedPhases += 1;
+      } else {
+        summary.failedPeers += 1;
+      }
     }
-    if (summary.insertedTriples > 0) {
-      logInfo(ctx, `SWM sync complete: ${summary.insertedTriples} triples from ${remotePeerId}`);
-    }
-  } catch (err) {
-    logWarn(ctx, `SWM sync from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
-    if ((err as Error & { syncDenied?: boolean }).syncDenied) {
-      summary.deniedPhases += 1;
-    }
-    summary.failedPeers += 1;
+  }
+  if (summary.insertedTriples > 0) {
+    logInfo(ctx, `SWM sync complete: ${summary.insertedTriples} triples from ${remotePeerId}`);
   }
 
   return summary;

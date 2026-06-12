@@ -183,6 +183,7 @@ function installSharedMemorySyncMock(
       nextOffset: quads.length,
       checkpointKey: `mock:${phase}:${snapshotRef ?? 'graph'}`,
       completed: true,
+      timedOut: false,
     };
   };
 }

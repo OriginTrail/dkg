@@ -1,15 +1,26 @@
 import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
 
+interface SyncProgressSummary {
+  insertedTriples: number;
+  completedPhases?: number;
+  checkpointAdvances?: number;
+  timedOutPhases?: number;
+  failedPeers?: number;
+  deniedPhases?: number;
+}
+
+type SyncFromPeerResult = number | SyncProgressSummary;
+
 interface SyncOnConnectContext {
   remotePeer: string;
   syncingPeers: Set<string>;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
   knownCorePeerIds: Set<string>;
   getSyncContextGraphs: () => string[];
-  syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<number>;
+  syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<SyncFromPeerResult>;
   refreshMetaSyncedFlags: (contextGraphIds: Iterable<string>) => Promise<void>;
   discoverContextGraphsFromStore: () => Promise<number>;
-  syncSharedMemoryFromPeer: (peerId: string, contextGraphIds: string[]) => Promise<number>;
+  syncSharedMemoryFromPeer: (peerId: string, contextGraphIds: string[]) => Promise<SyncFromPeerResult>;
   syncSharedMemoryOnConnect?: boolean;
   logInfo: (ctx: OperationContext, message: string) => void;
   /**
@@ -27,12 +38,12 @@ interface SyncOnConnectContext {
    */
   onPeerSkippedNoSync?: (peerId: string, protocols: string[]) => void;
   /**
-   * Optional. Called after a successful sync (durable + SWM, including
-   * the newly-discovered-CGs second pass). The orchestrator stamps the
-   * peer's `lastSuccessfulSyncAt` so the periodic reconciler can decide
-   * whether the peer is overdue for another retry.
+   * Optional. Called after sync accounting shows either real progress or a
+   * denial-only clean response. `fresh=false` means progress was made but
+   * the round also saw a timeout/failed phase, so peer backoff may be
+   * cleared but freshness gates should still allow a near-term retry.
    */
-  onPeerSynced?: (peerId: string) => void;
+  onPeerSynced?: (peerId: string, outcome?: { fresh: boolean }) => void;
 }
 
 export type SyncOnConnectOutcome = 'synced' | 'skipped-no-sync' | 'already-syncing';
@@ -48,6 +59,25 @@ export class SyncOnConnectPostSyncError extends Error {
     this.originalError = originalError;
     this.backoffEligible = options.backoffEligible;
   }
+}
+
+function insertedTriples(result: SyncFromPeerResult): number {
+  return typeof result === 'number' ? result : result.insertedTriples;
+}
+
+function madeSyncProgress(result: SyncFromPeerResult): boolean {
+  if (typeof result === 'number') return true;
+  return (result.completedPhases ?? 0) > 0 || (result.checkpointAdvances ?? 0) > 0;
+}
+
+function hadBackoffWorthyFailure(result: SyncFromPeerResult): boolean {
+  if (typeof result === 'number') return false;
+  return (result.failedPeers ?? 0) > 0 || (result.timedOutPhases ?? 0) > 0;
+}
+
+function hadDeniedPhase(result: SyncFromPeerResult): boolean {
+  if (typeof result === 'number') return false;
+  return (result.deniedPhases ?? 0) > 0;
 }
 
 export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<SyncOnConnectOutcome> {
@@ -72,6 +102,14 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
   syncingPeers.add(remotePeer);
 
   let durableSyncCompleted = false;
+  let madeProgress = false;
+  let sawDeniedPhase = false;
+  let sawBackoffWorthyFailure = false;
+  const recordSyncAccounting = (result: SyncFromPeerResult): void => {
+    madeProgress = madeProgress || madeSyncProgress(result);
+    sawDeniedPhase = sawDeniedPhase || hadDeniedPhase(result);
+    sawBackoffWorthyFailure = sawBackoffWorthyFailure || hadBackoffWorthyFailure(result);
+  };
   const runNonTransportStep = async <T>(step: () => Promise<T>): Promise<T> => {
     try {
       return await step();
@@ -99,7 +137,8 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     logInfo(ctx, `Syncing from peer ${shortPeer}...`);
     const knownCgsBefore = new Set(getSyncContextGraphs() ?? []);
     const synced = await syncFromPeer(remotePeer);
-    logInfo(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
+    recordSyncAccounting(synced);
+    logInfo(ctx, `Synced ${insertedTriples(synced)} data triples from peer ${shortPeer}`);
 
     const syncScope = new Set<string>([
       SYSTEM_CONTEXT_GRAPHS.AGENTS,
@@ -115,7 +154,8 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     if (newlyDiscovered.length > 0) {
       logInfo(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — syncing durable data from ${shortPeer}`);
       const discoverSynced = await syncFromPeer(remotePeer, newlyDiscovered);
-      logInfo(ctx, `Synced ${discoverSynced} durable triples for newly discovered CG(s) from ${shortPeer}`);
+      recordSyncAccounting(discoverSynced);
+      logInfo(ctx, `Synced ${insertedTriples(discoverSynced)} durable triples for newly discovered CG(s) from ${shortPeer}`);
       await runNonTransportStep(() => refreshMetaSyncedFlags(newlyDiscovered));
     }
 
@@ -123,12 +163,16 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     const wsContextGraphIds = getSyncContextGraphs() ?? [];
     if (syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
       const wsSynced = await syncSharedMemoryFromPeer(remotePeer, wsContextGraphIds);
-      logInfo(ctx, `Synced ${wsSynced} shared memory triples from peer ${shortPeer}`);
+      recordSyncAccounting(wsSynced);
+      logInfo(ctx, `Synced ${insertedTriples(wsSynced)} shared memory triples from peer ${shortPeer}`);
     } else if (!syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
       logInfo(ctx, `Skipping shared memory sync from peer ${shortPeer} (syncSharedMemoryOnConnect=false)`);
     }
 
-    context.onPeerSynced?.(remotePeer);
+    const clearsPeerBackoff = madeProgress || (sawDeniedPhase && !sawBackoffWorthyFailure);
+    if (clearsPeerBackoff) {
+      context.onPeerSynced?.(remotePeer, { fresh: !sawBackoffWorthyFailure });
+    }
     return 'synced';
   } catch (err) {
     if (err instanceof SyncOnConnectPostSyncError) {

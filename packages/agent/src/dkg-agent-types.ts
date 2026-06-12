@@ -38,6 +38,7 @@ import type { ApprovalPolicy, ChainAdapter } from '@origintrail-official/dkg-cha
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
 import type { CclFactResolutionMode } from './ccl-fact-resolution.js';
+import type { SyncCheckpointStore } from './sync/checkpoint/state.js';
 import type { JsonLdContent } from './dkg-agent-utils.js';
 import type { SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import type { KaNumberAllocator } from './allocator.js';
@@ -681,6 +682,9 @@ export interface DurableSyncDiagnostics {
   insertedDataTriples: number;
   bytesReceived: number;
   resumedPhases: number;
+  timedOutPhases: number;
+  completedPhases: number;
+  checkpointAdvances: number;
   emptyResponses: number;
   metaOnlyResponses: number;
   dataRejectedMissingMeta: number;
@@ -695,6 +699,9 @@ export interface SharedMemorySyncDiagnostics {
   insertedDataTriples: number;
   bytesReceived: number;
   resumedPhases: number;
+  timedOutPhases: number;
+  completedPhases: number;
+  checkpointAdvances: number;
   emptyResponses: number;
   droppedDataTriples: number;
   failedPeers: number;
@@ -966,6 +973,8 @@ export interface DKGAgentConfig {
   };
   /** Durable local store for subscribed context-graph runtime state. */
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
+  /** Durable local store for paged sync checkpoints. Defaults to in-memory. */
+  syncCheckpointStore?: SyncCheckpointStore;
   /**
    * Cap on how many persisted context-graph subscriptions are *activated*
    * (gossip-subscribed + sync-tracked) when rehydrating at startup. A large

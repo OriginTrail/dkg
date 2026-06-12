@@ -344,6 +344,7 @@ import {
   type ReplicationEvent,
   type SyncReconcilerBackoff,
 } from './dkg-agent-types.js';
+import type { SyncCheckpointStore } from './sync/checkpoint/state.js';
 import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
@@ -1029,6 +1030,12 @@ export class DKGAgentBase {
    */
   protected readonly catchupOnConnectAt = new Map<string, number>();
   /**
+   * Per-peer timestamp of the last time all live connections to that peer
+   * were gone. Used to avoid suppressing reconnect catch-up with a
+   * `lastSuccessfulSyncAt` value from before an offline gap.
+   */
+  protected readonly lastSyncDisconnectedAt = new Map<string, number>();
+  /**
    * Peers whose most recent sync attempt found that their advertised
    * protocol list did NOT include `PROTOCOL_SYNC` — almost always a
    * libp2p identify race on the inbound side of `connection:open`,
@@ -1037,9 +1044,8 @@ export class DKGAgentBase {
    * an updated protocol list that contains `PROTOCOL_SYNC`, and the
    * periodic reconciler treats membership as a strong hint to retry.
    *
-   * Entries are also cleared on `connection:close` (no path to the peer
-   * anyway — the next `connection:open` will re-trigger sync-on-connect)
-   * and after a successful sync (see `lastSuccessfulSyncAt`).
+   * Entries are cleared on `connection:close` and after sync progress or a
+   * clean denial-only response (see `lastSyncProgressAt`).
    */
   protected readonly skippedNoSyncPeers = new Set<string>();
   /**
@@ -1052,12 +1058,20 @@ export class DKGAgentBase {
    */
   protected readonly lastSuccessfulSyncAt = new Map<string, number>();
   /**
+   * Per-peer timestamp of the most recent sync-on-connect attempt that made
+   * useful progress or completed as a clean denial-only round. This is split
+   * from `lastSuccessfulSyncAt` so partial progress with a timeout clears
+   * peer-level backoff without marking the peer fresh for reconnect
+   * suppression.
+   */
+  protected readonly lastSyncProgressAt = new Map<string, number>();
+  /**
    * Per-peer sync-reconciler backoff. `failures` is the count of
    * consecutive reconciler attempts that did NOT produce a successful
    * sync; `nextRetryAt` is the epoch-ms before which the reconciler
-   * skips this peer. Reset on a successful sync (`onPeerSynced`) and on
-   * `connection:close`. Bounded by the connected-peer set (one entry per
-   * peer, cleared on disconnect). See `SYNC_BACKOFF_BASE_MS`.
+   * skips this peer. Reset on successful progress / denial-only clean
+   * response (`onPeerSynced`) and pruned after stale disconnects. See
+   * `SYNC_BACKOFF_BASE_MS`.
    */
   protected readonly syncReconcilerBackoff = new Map<string, SyncReconcilerBackoff>();
   protected syncReconcilerTimer: ReturnType<typeof setInterval> | null = null;
@@ -1073,7 +1087,7 @@ export class DKGAgentBase {
    * can run CPU-bound hash checks off the main thread. Both introduced
    * by PR #237 (sync-refactor-rebased).
    */
-  protected readonly syncCheckpoints = new Map<string, number>();
+  protected syncCheckpoints: SyncCheckpointStore = new Map<string, number>();
   protected syncVerifyWorker?: SyncVerifyWorker;
 
   /** Registered agents on this node: agentAddress → AgentKeyRecord */
@@ -1142,5 +1156,6 @@ export class DKGAgentBase {
     this.profileManager = new ProfileManager(publisher, store);
     this.publisher.setWorkspaceAgentRecipientResolver((input) => (this as unknown as DKGAgent).resolveWorkspaceRecipientsGated(input));
     this.publisher.setWorkspaceSenderKeyEncryptor((input) => (this as unknown as DKGAgent).encryptWorkspacePayloadWithSenderKey(input));
+    this.syncCheckpoints = config.syncCheckpointStore ?? this.syncCheckpoints;
   }
 }

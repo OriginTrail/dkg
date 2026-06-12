@@ -1938,8 +1938,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       })();
 
       const now = Date.now();
+      const lastSuccessfulSync = this.lastSuccessfulSyncAt.get(remotePeer);
+      const lastDisconnected = this.lastSyncDisconnectedAt.get(remotePeer) ?? 0;
+      if (
+        lastSuccessfulSync != null &&
+        lastSuccessfulSync >= lastDisconnected &&
+        now - lastSuccessfulSync < SYNC_STALENESS_THRESHOLD_MS
+      ) {
+        return;
+      }
       const last = this.catchupOnConnectAt.get(remotePeer) ?? 0;
-      if (now - last < CATCHUP_ON_CONNECT_COOLDOWN_MS) return;
+      if (last >= lastDisconnected && now - last < CATCHUP_ON_CONNECT_COOLDOWN_MS) return;
       this.catchupOnConnectAt.set(remotePeer, now);
       setTimeout(() => {
         this.trySyncFromPeer(remotePeer).catch((err: unknown) => {
@@ -1948,26 +1957,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }, 3000);
     });
 
-    // Clear the per-peer cooldown timestamp when the last live connection
-    // to a peer is torn down. The cooldown's job is to dedupe overlapping
-    // `connection:open` bursts (libp2p can fire more than one when
-    // multiple transports come up for the same peer within a few hundred
-    // ms). Without this close handler, a peer that dropped and
-    // reconnected 10–20s later — exactly the flaky-relay case this
-    // catch-up hook is meant to repair — would be silently skipped for
-    // up to a minute, so catch-up would stall until some other trigger
-    // fires. `connection:close` fires per connection, so we only forget
-    // the timestamp once no live connection to the peer remains. Codex
-    // tier-4i finding at packages/agent/src/dkg-agent.ts:1105.
-    //
-    // We also drop the peer from `skippedNoSyncPeers` and forget its
-    // `lastSuccessfulSyncAt` here. The next `connection:open` will
-    // re-trigger sync-on-connect from scratch, so keeping stale entries
-    // would only cause memory leaks across long-lived nodes that see
-    // many transient peers. Note: a brief disconnect+reconnect of the
-    // SAME peer ID still benefits — the new sync-on-connect run will
-    // either succeed (and re-stamp `lastSuccessfulSyncAt`) or get
-    // re-added to `skippedNoSyncPeers` for the event/reconciler retry.
+    // Remember when the last live connection to a peer is gone. A3 keeps
+    // `lastSuccessfulSyncAt` and reconciler backoff across relay flaps, but
+    // the next `connection:open` must not suppress catch-up using a sync
+    // timestamp from before an offline gap. `lastSyncDisconnectedAt` is the
+    // boundary that distinguishes stale pre-disconnect success from a fresh
+    // sync in the current live session.
     this.node.libp2p.addEventListener('connection:close', (evt) => {
       const remotePeer = evt.detail.remotePeer.toString();
       if (remotePeer === this.node.libp2p.peerId.toString()) return;
@@ -1975,10 +1970,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         .getPeers()
         .some((p) => p.toString() === remotePeer);
       if (stillConnected) return;
-      this.catchupOnConnectAt.delete(remotePeer);
       this.skippedNoSyncPeers.delete(remotePeer);
-      this.lastSuccessfulSyncAt.delete(remotePeer);
-      this.syncReconcilerBackoff.delete(remotePeer);
+      this.lastSyncDisconnectedAt.set(remotePeer, Date.now());
     });
 
     // Event-driven sync-retry: libp2p emits `peer:update` whenever a
@@ -2323,17 +2316,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
       knownCorePeerIds: this.knownCorePeerIds,
       getSyncContextGraphs: () => this.config.syncContextGraphs ?? [],
-      syncFromPeer: (peerId, contextGraphIds) => this.syncFromPeer(peerId, contextGraphIds),
+      syncFromPeer: (peerId, contextGraphIds) => this.syncFromPeerDetailed(
+        peerId,
+        contextGraphIds ?? [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, ...(this.config.syncContextGraphs ?? [])],
+      ),
       refreshMetaSyncedFlags: (contextGraphIds) => this.refreshMetaSyncedFlags(contextGraphIds),
       discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
-      syncSharedMemoryFromPeer: (peerId, contextGraphIds) => this.syncSharedMemoryFromPeer(peerId, contextGraphIds),
+      syncSharedMemoryFromPeer: (peerId, contextGraphIds) => this.syncSharedMemoryFromPeerDetailed(peerId, contextGraphIds),
       syncSharedMemoryOnConnect: this.config.syncSharedMemoryOnConnect ?? true,
       logInfo: (ctx, message) => this.log.info(ctx, message),
       onPeerSkippedNoSync: (peerId) => {
         this.skippedNoSyncPeers.add(peerId);
       },
-      onPeerSynced: (peerId) => {
-        this.lastSuccessfulSyncAt.set(peerId, Date.now());
+      onPeerSynced: (peerId, outcome) => {
+        const progressAt = Math.max(Date.now(), (this.lastSyncProgressAt.get(peerId) ?? 0) + 1);
+        this.lastSyncProgressAt.set(peerId, progressAt);
+        if (outcome?.fresh ?? true) {
+          this.lastSuccessfulSyncAt.set(peerId, progressAt);
+        }
         this.skippedNoSyncPeers.delete(peerId);
         this.syncReconcilerBackoff.delete(peerId);
       },
@@ -2389,10 +2389,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!this.started) return;
     const now = Date.now();
     const ctx = createOperationContext('sync');
+    this.pruneSyncReconcilerState(now);
     for (const pid of this.node.libp2p.getPeers()) {
       const peerId = pid.toString();
       if (this.syncingPeers.has(peerId)) continue;
       const lastOk = this.lastSuccessfulSyncAt.get(peerId);
+      const lastProgress = this.lastSyncProgressAt.get(peerId);
       const stale = lastOk == null || (now - lastOk) >= SYNC_STALENESS_THRESHOLD_MS;
       if (!stale) continue;
       // Per-peer exponential backoff: a peer that can never be synced
@@ -2417,14 +2419,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           if (outcome === 'skipped-no-sync' || outcome === 'already-syncing' || outcome === 'not-started') {
             return;
           }
-          // `onPeerSynced` clears the backoff on a real success. If the
-          // attempt resolved WITHOUT advancing `lastSuccessfulSyncAt`
-          // (e.g. no progress), treat it as a genuine sync failure so the
-          // backoff grows. A peer that still does not advertise
-          // PROTOCOL_SYNC is handled above and remains eligible on every
-          // reconciler tick, so a missed identify update cannot stretch into
-          // a 5/10/20/60-minute delay.
-          if (this.lastSuccessfulSyncAt.get(peerId) === lastOk) {
+          // `onPeerSynced` clears the backoff when a round makes progress
+          // (even if it was not fresh enough to stamp lastSuccessfulSyncAt).
+          // If the attempt resolved without advancing either marker, treat it
+          // as a genuine sync failure so peer backoff grows. A peer that still
+          // does not advertise PROTOCOL_SYNC is handled above and remains
+          // eligible on every reconciler tick, so a missed identify update
+          // cannot stretch into a 5/10/20/60-minute delay.
+          if (
+            this.lastSuccessfulSyncAt.get(peerId) === lastOk &&
+            this.lastSyncProgressAt.get(peerId) === lastProgress
+          ) {
             this.recordSyncReconcilerFailure(peerId, probe);
           }
         })
@@ -2441,6 +2446,36 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this.recordSyncReconcilerFailure(peerId, probe);
           this.log.warn(ctx, `Sync reconciler retry failed for ${shortPeer}: ${message}`);
         });
+    }
+  }
+
+  pruneSyncReconcilerState(this: DKGAgent, now = Date.now()): void {
+    this.syncCheckpoints.pruneExpired?.(now);
+    const connected = new Set(this.node.libp2p.getPeers().map((pid) => pid.toString()));
+    for (const [peerId, ts] of this.catchupOnConnectAt) {
+      if (!connected.has(peerId) && now - ts >= SYNC_STALENESS_THRESHOLD_MS) {
+        this.catchupOnConnectAt.delete(peerId);
+      }
+    }
+    for (const [peerId, ts] of this.lastSyncDisconnectedAt) {
+      if (now - ts >= SYNC_STALENESS_THRESHOLD_MS) {
+        this.lastSyncDisconnectedAt.delete(peerId);
+      }
+    }
+    for (const [peerId, ts] of this.lastSuccessfulSyncAt) {
+      if (!connected.has(peerId) && now - ts >= SYNC_STALENESS_THRESHOLD_MS) {
+        this.lastSuccessfulSyncAt.delete(peerId);
+      }
+    }
+    for (const [peerId, ts] of this.lastSyncProgressAt) {
+      if (!connected.has(peerId) && now - ts >= SYNC_STALENESS_THRESHOLD_MS) {
+        this.lastSyncProgressAt.delete(peerId);
+      }
+    }
+    for (const [peerId, backoff] of this.syncReconcilerBackoff) {
+      if (!connected.has(peerId) && now >= backoff.nextRetryAt + SYNC_STALENESS_THRESHOLD_MS) {
+        this.syncReconcilerBackoff.delete(peerId);
+      }
     }
   }
 
@@ -2488,8 +2523,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * not produce a successful sync. `nextRetryAt` advances by
    * `SYNC_BACKOFF_BASE_MS * 2^(failures-1)` (capped at
    * `SYNC_BACKOFF_MAX_MS`) with ±`SYNC_BACKOFF_JITTER` randomisation to
-   * de-correlate retries across peers. Reset to absent on success
-   * (`onPeerSynced`) or disconnect (`connection:close`).
+   * de-correlate retries across peers. Reset to absent on successful
+   * progress / denial-only clean response (`onPeerSynced`). Disconnect
+   * no longer clears this immediately; stale disconnected entries are
+   * pruned by `pruneSyncReconcilerState`.
    */
   recordSyncReconcilerFailure(this: DKGAgent, peerId: string, probe: SyncReconcilerProbe): void {
     if (!this.started || !this.isPeerConnectedForSyncBackoff(peerId)) return;
@@ -2852,6 +2889,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         insertedDataTriples: 0,
         bytesReceived: 0,
         resumedPhases: 0,
+        timedOutPhases: 0,
+        completedPhases: 0,
+        checkpointAdvances: 0,
         emptyResponses: 0,
         droppedDataTriples: 0,
         failedPeers: 0,
@@ -2938,12 +2978,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
      * `true` iff at least one peer in this run explicitly denied the sync
      * by emitting a denial sentinel (`syncDenied` marker raised from
      * `sync/requester/page-fetch.ts`, rolled up via `deniedPhases`). Kept
-     * as a boolean instead of v10-rc-style `accessDeniedPeers: number`
-     * because the daemon catchup-status endpoint only ever cared about
-     * "any peer denied us?"; see `cli/src/daemon.ts` subscribe job.
-     * Replaces the pre-refactor per-peer `accessDeniedPeers` counter.
+     * as a boolean for the subscribe job's terminal status mapping.
      */
     denied: boolean;
+    /**
+     * Number of peers that explicitly denied at least one durable/SWM phase
+     * during this context-graph catch-up run.
+     */
+    deniedPeers: number;
     diagnostics: CatchupSyncDiagnostics;
   }> {
     const ctx = createOperationContext('sync');
@@ -2986,6 +3028,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     dataSynced: number;
     sharedMemorySynced: number;
     denied: boolean;
+    deniedPeers: number;
     diagnostics: CatchupSyncDiagnostics;
   }> {
     const ctx = createOperationContext('sync');
@@ -3003,6 +3046,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         insertedDataTriples: 0,
         bytesReceived: 0,
         resumedPhases: 0,
+        timedOutPhases: 0,
+        completedPhases: 0,
+        checkpointAdvances: 0,
         emptyResponses: 0,
         metaOnlyResponses: 0,
         dataRejectedMissingMeta: 0,
@@ -3016,6 +3062,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         insertedDataTriples: 0,
         bytesReceived: 0,
         resumedPhases: 0,
+        timedOutPhases: 0,
+        completedPhases: 0,
+        checkpointAdvances: 0,
         emptyResponses: 0,
         droppedDataTriples: 0,
         failedPeers: 0,
@@ -3069,6 +3118,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       insertedDataTriples: 0,
       bytesReceived: 0,
       resumedPhases: 0,
+      timedOutPhases: 0,
+      completedPhases: 0,
+      checkpointAdvances: 0,
       emptyResponses: 0,
       metaOnlyResponses: 0,
       dataRejectedMissingMeta: 0,
@@ -3084,6 +3136,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       insertedDataTriples: 0,
       bytesReceived: 0,
       resumedPhases: 0,
+      timedOutPhases: 0,
+      completedPhases: 0,
+      checkpointAdvances: 0,
       emptyResponses: 0,
       droppedDataTriples: 0,
       failedPeers: 1,
@@ -3102,18 +3157,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let accessDeniedPeers = 0;
     let peersSucceeded = 0;
     for (const r of results) {
-      // A peer "succeeded" when its sync round finished without a
-      // transport failure AND without an explicit denial. We treat the
-      // emergency `failedPeers: 1` produced by `emptyDurable()` /
-      // `emptyShared()` (set when `syncFromPeerDetailed` rejected) as
-      // the failure marker — anything else (data, meta-only, empty
-      // response) counts as a legitimate response from a host that
-      // happens to hold no/incomplete data for this CG.
+      // A peer "succeeded" when its sync round finished without a transport
+      // failure/denial and either made phase/checkpoint progress, or cleanly
+      // completed with no timeout. Empty responses still count as a
+      // legitimate host response, but a no-progress timeout must not make the
+      // subscribe/VM catch-up path report a successful peer.
       const durableFailed = r.durable.failedPeers > 0;
       const sharedFailed = r.shared ? r.shared.failedPeers > 0 : false;
       const peerDeniedRound = r.durable.deniedPhases > 0
         || (r.shared ? r.shared.deniedPhases > 0 : false);
-      if (!durableFailed && !sharedFailed && !peerDeniedRound) {
+      const durableProgress = r.durable.completedPhases > 0 || r.durable.checkpointAdvances > 0;
+      const sharedProgress = r.shared
+        ? r.shared.completedPhases > 0 || r.shared.checkpointAdvances > 0
+        : false;
+      const peerMadeProgress = durableProgress || sharedProgress;
+      const peerTimedOut = r.durable.timedOutPhases > 0 || (r.shared ? r.shared.timedOutPhases > 0 : false);
+      if (!durableFailed && !sharedFailed && !peerDeniedRound && (peerMadeProgress || !peerTimedOut)) {
         peersSucceeded++;
       }
       dataSynced += r.durable.insertedTriples;
@@ -3123,6 +3182,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       diagnostics.durable.insertedDataTriples += r.durable.insertedDataTriples;
       diagnostics.durable.bytesReceived += r.durable.bytesReceived;
       diagnostics.durable.resumedPhases += r.durable.resumedPhases;
+      diagnostics.durable.timedOutPhases += r.durable.timedOutPhases;
+      diagnostics.durable.completedPhases += r.durable.completedPhases;
+      diagnostics.durable.checkpointAdvances += r.durable.checkpointAdvances;
       diagnostics.durable.emptyResponses += r.durable.emptyResponses;
       diagnostics.durable.metaOnlyResponses += r.durable.metaOnlyResponses;
       diagnostics.durable.dataRejectedMissingMeta += r.durable.dataRejectedMissingMeta;
@@ -3137,6 +3199,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         diagnostics.sharedMemory.insertedDataTriples += r.shared.insertedDataTriples;
         diagnostics.sharedMemory.bytesReceived += r.shared.bytesReceived;
         diagnostics.sharedMemory.resumedPhases += r.shared.resumedPhases;
+        diagnostics.sharedMemory.timedOutPhases += r.shared.timedOutPhases;
+        diagnostics.sharedMemory.completedPhases += r.shared.completedPhases;
+        diagnostics.sharedMemory.checkpointAdvances += r.shared.checkpointAdvances;
         diagnostics.sharedMemory.emptyResponses += r.shared.emptyResponses;
         diagnostics.sharedMemory.droppedDataTriples += r.shared.droppedDataTriples;
         diagnostics.sharedMemory.failedPeers += r.shared.failedPeers;
@@ -3169,6 +3234,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       dataSynced,
       sharedMemorySynced,
       denied: accessDeniedPeers > 0,
+      deniedPeers: accessDeniedPeers,
       diagnostics,
     };
   }

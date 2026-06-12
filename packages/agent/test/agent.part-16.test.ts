@@ -59,6 +59,11 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           fetchedDataTriples: 0,
           insertedMetaTriples: 0,
           insertedDataTriples: 5,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 2,
+          checkpointAdvances: 0,
           emptyResponses: 0,
           metaOnlyResponses: 0,
           dataRejectedMissingMeta: 0,
@@ -71,6 +76,11 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           fetchedDataTriples: 0,
           insertedMetaTriples: 0,
           insertedDataTriples: 2,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 2,
+          checkpointAdvances: 0,
           emptyResponses: 0,
           droppedDataTriples: 0,
           failedPeers: 0,
@@ -97,6 +107,79 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     });
 
 
+    it('does not count no-progress catchup timeouts as peer success', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupTimeoutProgressAccounting',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const remotePeer = agent.node.peerId;
+        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+          { remotePeer } as any,
+        ]);
+        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+
+        const durableResult = (overrides: Partial<{
+          timedOutPhases: number;
+          completedPhases: number;
+          checkpointAdvances: number;
+          failedPeers: number;
+        }> = {}) => ({
+          insertedTriples: 0,
+          fetchedMetaTriples: 0,
+          fetchedDataTriples: 0,
+          insertedMetaTriples: 0,
+          insertedDataTriples: 0,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          emptyResponses: 0,
+          metaOnlyResponses: 0,
+          dataRejectedMissingMeta: 0,
+          rejectedKcs: 0,
+          failedPeers: 0,
+          deniedPhases: 0,
+          ...overrides,
+        });
+
+        const syncFromPeerDetailed = vi.spyOn(agent as any, 'syncFromPeerDetailed');
+        syncFromPeerDetailed.mockResolvedValueOnce(durableResult({ timedOutPhases: 1 }));
+
+        const timeoutOnly = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+
+        expect(timeoutOnly.peersTried).toBe(1);
+        expect(timeoutOnly.peersSucceeded).toBe(0);
+        expect(timeoutOnly.diagnostics.durable.timedOutPhases).toBe(1);
+        expect(timeoutOnly.diagnostics.durable.failedPeers).toBe(0);
+
+        syncFromPeerDetailed.mockResolvedValueOnce(durableResult({
+          timedOutPhases: 1,
+          completedPhases: 1,
+          checkpointAdvances: 1,
+        }));
+
+        const progressWithTimeout = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+
+        expect(progressWithTimeout.peersTried).toBe(1);
+        expect(progressWithTimeout.peersSucceeded).toBe(1);
+        expect(progressWithTimeout.diagnostics.durable.timedOutPhases).toBe(1);
+        expect(progressWithTimeout.diagnostics.durable.completedPhases).toBe(1);
+        expect(progressWithTimeout.diagnostics.durable.checkpointAdvances).toBe(1);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+
     it('sync-on-connect re-reads sync scope after discovery for a second durable pass', async () => {
       const agent = await DKGAgent.create({
         name: 'SyncOnConnectDiscoveryRefresh',
@@ -110,16 +193,48 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         const seenCalls: string[][] = [];
 
         (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
-        (agent as any).syncFromPeer = async (_peerId: string, contextGraphIds?: string[]) => {
+        (agent as any).syncFromPeerDetailed = async (_peerId: string, contextGraphIds?: string[]) => {
           seenCalls.push([...(contextGraphIds ?? [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, ...((agent as any).config.syncContextGraphs ?? [])])]);
-          return 0;
+          return {
+            fetchedMetaTriples: 0,
+            fetchedDataTriples: 0,
+            insertedTriples: 0,
+            insertedMetaTriples: 0,
+            insertedDataTriples: 0,
+            bytesReceived: 0,
+            resumedPhases: 0,
+            timedOutPhases: 0,
+            completedPhases: 1,
+            checkpointAdvances: 0,
+            emptyResponses: 0,
+            metaOnlyResponses: 0,
+            dataRejectedMissingMeta: 0,
+            rejectedKcs: 0,
+            failedPeers: 0,
+            deniedPhases: 0,
+          };
         };
         (agent as any).refreshMetaSyncedFlags = async () => undefined;
         (agent as any).discoverContextGraphsFromStore = async () => {
           (agent as any).config.syncContextGraphs = ['new-private-cg'];
           return 1;
         };
-        (agent as any).syncSharedMemoryFromPeer = async () => 0;
+        (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
+          fetchedMetaTriples: 0,
+          fetchedDataTriples: 0,
+          insertedTriples: 0,
+          insertedMetaTriples: 0,
+          insertedDataTriples: 0,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          emptyResponses: 0,
+          droppedDataTriples: 0,
+          failedPeers: 0,
+          deniedPhases: 0,
+        });
 
         await (agent as any).trySyncFromPeer(remotePeer);
 
@@ -193,6 +308,11 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
             fetchedDataTriples: 0,
             insertedMetaTriples: 0,
             insertedDataTriples: 0,
+            bytesReceived: 0,
+            resumedPhases: 0,
+            timedOutPhases: 0,
+            completedPhases: 2,
+            checkpointAdvances: 0,
             emptyResponses: 1,
             metaOnlyResponses: 0,
             dataRejectedMissingMeta: 0,
@@ -312,16 +432,48 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         const syncFromPeer = async () => {
           syncCallCount++;
           await syncGate;
-          return 7;
+          return {
+            fetchedMetaTriples: 0,
+            fetchedDataTriples: 7,
+            insertedTriples: 7,
+            insertedMetaTriples: 0,
+            insertedDataTriples: 7,
+            bytesReceived: 0,
+            resumedPhases: 0,
+            timedOutPhases: 0,
+            completedPhases: 1,
+            checkpointAdvances: 0,
+            emptyResponses: 0,
+            metaOnlyResponses: 0,
+            dataRejectedMissingMeta: 0,
+            rejectedKcs: 0,
+            failedPeers: 0,
+            deniedPhases: 0,
+          };
         };
 
         const origGet = agent.node.libp2p.peerStore.get.bind(agent.node.libp2p.peerStore);
         (agent.node.libp2p.peerStore as any).get = async (peerId: any) => {
           try { return await origGet(peerId); } catch { return { protocols: [PROTOCOL_SYNC] }; }
         };
-        (agent as any).syncFromPeer = syncFromPeer;
+        (agent as any).syncFromPeerDetailed = syncFromPeer;
         (agent as any).discoverContextGraphsFromStore = async () => {};
-        (agent as any).syncSharedMemoryFromPeer = async () => 0;
+        (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
+          fetchedMetaTriples: 0,
+          fetchedDataTriples: 0,
+          insertedTriples: 0,
+          insertedMetaTriples: 0,
+          insertedDataTriples: 0,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          emptyResponses: 0,
+          droppedDataTriples: 0,
+          failedPeers: 0,
+          deniedPhases: 0,
+        });
 
         const first = (agent as any).trySyncFromPeer(remotePeer);
         const second = (agent as any).trySyncFromPeer(remotePeer);

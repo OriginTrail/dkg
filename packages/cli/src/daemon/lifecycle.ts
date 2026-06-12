@@ -73,6 +73,7 @@ import {
   LlmClient,
   SqliteMessageIdempotencyStore,
   SqliteProtocolOutboxStore,
+  SqliteSyncCheckpointStore,
   SqliteKaNumberStore,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
@@ -1171,6 +1172,7 @@ export async function runDaemonInner(
       return DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS[idx];
     },
   });
+  const syncCheckpointStore = new SqliteSyncCheckpointStore(dashDb);
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain
@@ -1239,6 +1241,7 @@ export async function runDaemonInner(
     randomSamplingWalPath: config.randomSampling?.walPath,
     randomSamplingTickIntervalMs: config.randomSampling?.tickIntervalMs,
     randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
+    syncCheckpointStore,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,

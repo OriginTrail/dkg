@@ -4,6 +4,7 @@ export interface SyncCheckpointStore {
   get(key: string): number | undefined;
   set(key: string, value: number): void;
   delete(key: string): void;
+  pruneExpired?(nowMs?: number): number;
 }
 
 export function getSyncCheckpointKey(

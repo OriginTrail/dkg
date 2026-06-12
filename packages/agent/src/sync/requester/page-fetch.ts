@@ -58,6 +58,7 @@ export interface SyncPageResult {
   nextOffset: number;
   checkpointKey: string;
   completed: boolean;
+  timedOut: boolean;
 }
 
 interface FetchSyncPagesParams {
@@ -333,5 +334,6 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     nextOffset: offset,
     checkpointKey,
     completed: !timedOut,
+    timedOut,
   };
 }
