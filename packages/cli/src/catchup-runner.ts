@@ -66,9 +66,11 @@ export interface CatchupRunRequest {
 
 export interface CatchupPhaseProgress {
   timedOutPhases?: number;
+  resumedPhases?: number;
   completedPhases?: number;
   checkpointAdvances?: number;
   failedPeers?: number;
+  insertedTriples?: number;
 }
 
 export function catchupPeerSucceeded(
@@ -78,9 +80,13 @@ export function catchupPeerSucceeded(
 ): boolean {
   const durableFailed = (durable.failedPeers ?? 0) > 0;
   const sharedFailed = shared ? (shared.failedPeers ?? 0) > 0 : false;
-  const durableProgress = (durable.completedPhases ?? 0) > 0 || (durable.checkpointAdvances ?? 0) > 0;
+  const durableProgress = (durable.insertedTriples ?? 0) > 0
+    || (durable.checkpointAdvances ?? 0) > 0
+    || ((durable.completedPhases ?? 0) > 0 && (durable.resumedPhases ?? 0) > 0);
   const sharedProgress = shared
-    ? (shared.completedPhases ?? 0) > 0 || (shared.checkpointAdvances ?? 0) > 0
+    ? (shared.insertedTriples ?? 0) > 0
+      || (shared.checkpointAdvances ?? 0) > 0
+      || ((shared.completedPhases ?? 0) > 0 && (shared.resumedPhases ?? 0) > 0)
     : false;
   const peerMadeProgress = durableProgress || sharedProgress;
   const peerTimedOut = (durable.timedOutPhases ?? 0) > 0 || (shared ? (shared.timedOutPhases ?? 0) > 0 : false);

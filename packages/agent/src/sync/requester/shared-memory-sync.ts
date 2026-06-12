@@ -109,7 +109,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
   const recordPhaseOutcome = (result: SyncPageResult) => {
     summary.resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
     summary.timedOutPhases += result.timedOut ? 1 : 0;
-    summary.completedPhases += result.completed ? 1 : 0;
+    if (result.completed && (result.resumedFromOffset > 0 || result.nextOffset > result.resumedFromOffset)) {
+      summary.completedPhases += 1;
+    }
     if (result.nextOffset > result.resumedFromOffset) {
       summary.checkpointAdvances += 1;
     }

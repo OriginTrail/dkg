@@ -164,6 +164,18 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         syncFromPeerDetailed.mockResolvedValueOnce(durableResult({
           timedOutPhases: 1,
           completedPhases: 1,
+        }));
+
+        const zeroOffsetCompletionWithTimeout = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+
+        expect(zeroOffsetCompletionWithTimeout.peersTried).toBe(1);
+        expect(zeroOffsetCompletionWithTimeout.peersSucceeded).toBe(0);
+        expect(zeroOffsetCompletionWithTimeout.diagnostics.durable.timedOutPhases).toBe(1);
+        expect(zeroOffsetCompletionWithTimeout.diagnostics.durable.completedPhases).toBe(1);
+
+        syncFromPeerDetailed.mockResolvedValueOnce(durableResult({
+          timedOutPhases: 1,
+          completedPhases: 1,
           checkpointAdvances: 1,
         }));
 
@@ -174,6 +186,79 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(progressWithTimeout.diagnostics.durable.timedOutPhases).toBe(1);
         expect(progressWithTimeout.diagnostics.durable.completedPhases).toBe(1);
         expect(progressWithTimeout.diagnostics.durable.checkpointAdvances).toBe(1);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it('reports denied peers without marking the whole inline catchup denied when another peer serves data', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupDeniedButServed',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const deniedPeer = { toString: () => 'peer-denied' };
+        const servingPeer = { toString: () => 'peer-serving' };
+        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+          { remotePeer: deniedPeer } as any,
+          { remotePeer: servingPeer } as any,
+        ]);
+        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+
+        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockImplementation(async (peerId: string) => {
+          if (peerId === 'peer-denied') {
+            return {
+              insertedTriples: 0,
+              fetchedMetaTriples: 0,
+              fetchedDataTriples: 0,
+              insertedMetaTriples: 0,
+              insertedDataTriples: 0,
+              bytesReceived: 0,
+              resumedPhases: 0,
+              timedOutPhases: 0,
+              completedPhases: 0,
+              checkpointAdvances: 0,
+              emptyResponses: 0,
+              metaOnlyResponses: 0,
+              dataRejectedMissingMeta: 0,
+              rejectedKcs: 0,
+              failedPeers: 0,
+              deniedPhases: 1,
+            };
+          }
+          return {
+            insertedTriples: 1,
+            fetchedMetaTriples: 0,
+            fetchedDataTriples: 1,
+            insertedMetaTriples: 0,
+            insertedDataTriples: 1,
+            bytesReceived: 0,
+            resumedPhases: 0,
+            timedOutPhases: 0,
+            completedPhases: 0,
+            checkpointAdvances: 0,
+            emptyResponses: 0,
+            metaOnlyResponses: 0,
+            dataRejectedMissingMeta: 0,
+            rejectedKcs: 0,
+            failedPeers: 0,
+            deniedPhases: 0,
+          };
+        });
+
+        const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+
+        expect(result.deniedPeers).toBe(1);
+        expect(result.denied).toBe(false);
+        expect(result.peersSucceeded).toBe(1);
+        expect(result.dataSynced).toBe(1);
       } finally {
         await agent.stop().catch(() => {});
       }

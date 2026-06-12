@@ -117,7 +117,9 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     summary.resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
     summary.timedOutPhases += result.timedOut ? 1 : 0;
     if (!options.updateCheckpoint) return;
-    summary.completedPhases += result.completed ? 1 : 0;
+    if (result.completed && (result.resumedFromOffset > 0 || result.nextOffset > result.resumedFromOffset)) {
+      summary.completedPhases += 1;
+    }
     if (result.nextOffset > result.resumedFromOffset) {
       summary.checkpointAdvances += 1;
     }

@@ -15,6 +15,16 @@ describe('catchup runner progress accounting', () => {
       timedOutPhases: 1,
       completedPhases: 1,
       checkpointAdvances: 0,
+      insertedTriples: 0,
+    }, null, false)).toBe(false);
+
+    expect(catchupPeerSucceeded({
+      failedPeers: 0,
+      timedOutPhases: 1,
+      completedPhases: 1,
+      resumedPhases: 1,
+      checkpointAdvances: 0,
+      insertedTriples: 0,
     }, null, false)).toBe(true);
 
     expect(catchupPeerSucceeded({
@@ -22,6 +32,14 @@ describe('catchup runner progress accounting', () => {
       timedOutPhases: 1,
       completedPhases: 0,
       checkpointAdvances: 1,
+    }, null, false)).toBe(true);
+
+    expect(catchupPeerSucceeded({
+      failedPeers: 0,
+      timedOutPhases: 1,
+      completedPhases: 0,
+      checkpointAdvances: 0,
+      insertedTriples: 1,
     }, null, false)).toBe(true);
   });
 

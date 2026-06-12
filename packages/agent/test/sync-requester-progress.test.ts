@@ -98,7 +98,7 @@ describe('sync requester progress accounting', () => {
     expect(deniedCgs).toEqual(['pending-join']);
     expect(summary.deniedPhases).toBe(1);
     expect(summary.failedPeers).toBe(0);
-    expect(summary.completedPhases).toBe(2);
+    expect(summary.completedPhases).toBe(0);
     expect(fetchSyncPages).toHaveBeenCalledWith(ctx, 'peer-a', 'open-cg', false, 'meta', expect.any(String), expect.any(Number));
   });
 
@@ -131,7 +131,7 @@ describe('sync requester progress accounting', () => {
 
     expect(summary.failedPeers).toBe(1);
     expect(summary.deniedPhases).toBe(0);
-    expect(summary.completedPhases).toBe(2);
+    expect(summary.completedPhases).toBe(0);
     expect(fetchSyncPages).toHaveBeenCalledWith(ctx, 'peer-a', 'next-cg', false, 'data', expect.any(String), expect.any(Number), undefined, undefined);
   });
 
@@ -170,9 +170,62 @@ describe('sync requester progress accounting', () => {
 
     expect(summary.failedPeers).toBe(1);
     expect(summary.deniedPhases).toBe(0);
-    expect(summary.completedPhases).toBe(2);
+    expect(summary.completedPhases).toBe(0);
     expect(fetchSyncPages).toHaveBeenCalledWith(ctx, 'peer-a', 'next-cg', false, 'data', expect.any(String), expect.any(Number), undefined, undefined);
     expect(phases.slice(0, 4)).toEqual(['fetch:start', 'fetch:end', 'verify:start', 'verify:end']);
+  });
+
+  it('does not count zero-offset empty durable completions as progress', async () => {
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['empty-cg'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages: async (
+        _ctx: OperationContext,
+        _peer: string,
+        contextGraphId: string,
+        _includeSharedMemory: boolean,
+        phase: 'data' | 'meta',
+      ) => pageResult(contextGraphId, phase),
+      processDurableBatchInWorker: async () => durableProcessResult(),
+      storeInsert: async () => {},
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.completedPhases).toBe(0);
+    expect(summary.checkpointAdvances).toBe(0);
+  });
+
+  it('counts resumed durable completion as progress without advancing the checkpoint', async () => {
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['resumed-cg'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages: async (
+        _ctx: OperationContext,
+        _peer: string,
+        contextGraphId: string,
+        _includeSharedMemory: boolean,
+        phase: 'data' | 'meta',
+      ) => pageResult(contextGraphId, phase, { resumedFromOffset: 500, nextOffset: 500 }),
+      processDurableBatchInWorker: async () => durableProcessResult(),
+      storeInsert: async () => {},
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.resumedPhases).toBe(2);
+    expect(summary.completedPhases).toBe(2);
+    expect(summary.checkpointAdvances).toBe(0);
   });
 
   it('counts timeout with an advanced durable checkpoint as progress', async () => {
@@ -204,7 +257,7 @@ describe('sync requester progress accounting', () => {
     });
 
     expect(summary.timedOutPhases).toBe(1);
-    expect(summary.completedPhases).toBe(1);
+    expect(summary.completedPhases).toBe(0);
     expect(summary.checkpointAdvances).toBe(1);
     expect(deleteCheckpoint).toHaveBeenCalledWith('large-cg:meta');
     expect(setCheckpoint).toHaveBeenCalledWith('large-cg:data', 500);
@@ -278,7 +331,35 @@ describe('sync requester progress accounting', () => {
 
     expect(summary.deniedPhases).toBe(1);
     expect(summary.failedPeers).toBe(0);
-    expect(summary.completedPhases).toBe(2);
+    expect(summary.completedPhases).toBe(0);
     expect(fetchSyncPages).toHaveBeenCalledWith(ctx, 'peer-a', 'open-swm', true, 'data', expect.any(String), expect.any(Number));
+  });
+
+  it('does not count zero-offset empty shared-memory completions as progress', async () => {
+    const summary = await runSharedMemorySync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['empty-swm'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages: async (
+        _ctx: OperationContext,
+        _peer: string,
+        contextGraphId: string,
+        _includeSharedMemory: boolean,
+        phase: 'data' | 'meta',
+      ) => pageResult(contextGraphId, phase),
+      processSharedMemoryBatch: async () => sharedMemoryProcessResult(),
+      ensureContextGraph: async () => {},
+      storeInsert: async () => {},
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      ensureOwnedMap: () => new Map(),
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.completedPhases).toBe(0);
+    expect(summary.checkpointAdvances).toBe(0);
   });
 });

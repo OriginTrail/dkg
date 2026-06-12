@@ -1942,13 +1942,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const lastDisconnected = this.lastSyncDisconnectedAt.get(remotePeer) ?? 0;
       if (
         lastSuccessfulSync != null &&
-        lastSuccessfulSync >= lastDisconnected &&
+        lastSuccessfulSync > lastDisconnected &&
         now - lastSuccessfulSync < SYNC_STALENESS_THRESHOLD_MS
       ) {
         return;
       }
       const last = this.catchupOnConnectAt.get(remotePeer) ?? 0;
-      if (last >= lastDisconnected && now - last < CATCHUP_ON_CONNECT_COOLDOWN_MS) return;
+      if (last > lastDisconnected && now - last < CATCHUP_ON_CONNECT_COOLDOWN_MS) return;
       this.catchupOnConnectAt.set(remotePeer, now);
       setTimeout(() => {
         this.trySyncFromPeer(remotePeer).catch((err: unknown) => {
@@ -2394,8 +2394,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const peerId = pid.toString();
       if (this.syncingPeers.has(peerId)) continue;
       const lastOk = this.lastSuccessfulSyncAt.get(peerId);
+      const lastDisconnected = this.lastSyncDisconnectedAt.get(peerId) ?? 0;
       const lastProgress = this.lastSyncProgressAt.get(peerId);
-      const stale = lastOk == null || (now - lastOk) >= SYNC_STALENESS_THRESHOLD_MS;
+      const stale = lastOk == null
+        || lastOk <= lastDisconnected
+        || (now - lastOk) >= SYNC_STALENESS_THRESHOLD_MS;
       if (!stale) continue;
       // Per-peer exponential backoff: a peer that can never be synced
       // (dead / NAT-stuck / persistently stream-resetting) never stamps
@@ -3166,9 +3169,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const sharedFailed = r.shared ? r.shared.failedPeers > 0 : false;
       const peerDeniedRound = r.durable.deniedPhases > 0
         || (r.shared ? r.shared.deniedPhases > 0 : false);
-      const durableProgress = r.durable.completedPhases > 0 || r.durable.checkpointAdvances > 0;
+      const durableProgress = r.durable.insertedTriples > 0
+        || r.durable.checkpointAdvances > 0
+        || (r.durable.completedPhases > 0 && r.durable.resumedPhases > 0);
       const sharedProgress = r.shared
-        ? r.shared.completedPhases > 0 || r.shared.checkpointAdvances > 0
+        ? r.shared.insertedTriples > 0
+          || r.shared.checkpointAdvances > 0
+          || (r.shared.completedPhases > 0 && r.shared.resumedPhases > 0)
         : false;
       const peerMadeProgress = durableProgress || sharedProgress;
       const peerTimedOut = r.durable.timedOutPhases > 0 || (r.shared ? r.shared.timedOutPhases > 0 : false);
@@ -3218,6 +3225,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     await this.refreshMetaSyncedFlags([contextGraphId]);
 
+    const servedByPeer = dataSynced > 0
+      || sharedMemorySynced > 0
+      || diagnostics.durable.insertedMetaTriples > 0
+      || diagnostics.sharedMemory.insertedMetaTriples > 0
+      || diagnostics.durable.metaOnlyResponses > 0;
+
     if (dataSynced > 0 || sharedMemorySynced > 0) {
       this.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
         contextGraphId,
@@ -3233,7 +3246,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       peersSucceeded,
       dataSynced,
       sharedMemorySynced,
-      denied: accessDeniedPeers > 0,
+      denied: accessDeniedPeers > 0 && !servedByPeer,
       deniedPeers: accessDeniedPeers,
       diagnostics,
     };

@@ -568,6 +568,39 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
     }
   });
 
+  it('retries a freshly synced peer after a same-tick disconnect event', async () => {
+    const agent = await DKGAgent.create({
+      name: 'ReconcilerFreshButDisconnected',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+    });
+    try {
+      await agent.start();
+
+      const remotePeer = freshPeerIdString();
+      const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
+      vi.spyOn(agent.node.libp2p, 'getPeers').mockImplementation(
+        () => [...origGetPeers(), peerIdFromString(remotePeer)],
+      );
+
+      const now = Date.now();
+      (agent as any).lastSuccessfulSyncAt.set(remotePeer, now - 30_000);
+      (agent as any).lastSyncDisconnectedAt.set(remotePeer, now - 30_000);
+
+      const calls: string[] = [];
+      (agent as any).trySyncFromPeer = async (peerId: string) => {
+        calls.push(peerId);
+      };
+
+      await (agent as any).reconcileSyncFromConnectedPeers();
+      await flushMicrotasks();
+
+      expect(calls).toEqual([remotePeer]);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('skips peers that are currently being synced (re-entrancy guard)', async () => {
     const agent = await DKGAgent.create({
       name: 'ReconcilerSkipsInFlight',
@@ -943,22 +976,15 @@ describe('DKGAgent sync state lifecycle', () => {
       await agent.start();
 
       const remotePeer = freshPeerIdString();
-      (agent as any).lastSuccessfulSyncAt.set(remotePeer, Date.now() - 30_000);
-      (agent as any).catchupOnConnectAt.set(remotePeer, Date.now() - 30_000);
+      const sameTickBoundary = Date.now() - 30_000;
+      (agent as any).lastSuccessfulSyncAt.set(remotePeer, sameTickBoundary);
+      (agent as any).catchupOnConnectAt.set(remotePeer, sameTickBoundary);
+      (agent as any).lastSyncDisconnectedAt.set(remotePeer, sameTickBoundary);
       const calls: string[] = [];
       (agent as any).trySyncFromPeer = async (peerId: string) => {
         calls.push(peerId);
       };
-      vi.spyOn(agent.node.libp2p, 'getPeers').mockReturnValue([]);
 
-      agent.node.libp2p.dispatchEvent(new CustomEvent('connection:close', {
-        detail: {
-          remotePeer: { toString: () => remotePeer },
-          remoteAddr: { toString: () => '/ip4/1.2.3.4/tcp/1234' },
-          direction: 'inbound',
-          timeline: { open: Date.now() - 1000, close: Date.now() },
-        },
-      } as any));
       agent.node.libp2p.dispatchEvent(new CustomEvent('connection:open', {
         detail: {
           remotePeer: { toString: () => remotePeer },
@@ -968,7 +994,7 @@ describe('DKGAgent sync state lifecycle', () => {
         },
       } as any));
 
-      expect((agent as any).catchupOnConnectAt.has(remotePeer)).toBe(true);
+      expect((agent as any).catchupOnConnectAt.get(remotePeer)).toBeGreaterThan(sameTickBoundary);
       await new Promise(r => setTimeout(r, 3100));
       expect(calls).toEqual([remotePeer]);
     } finally {
