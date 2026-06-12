@@ -1848,20 +1848,25 @@ export async function runDaemonInner(
         return 0;
       }
     },
-    getContextGraphCount: async () =>
-      countContextGraphsFromGraphUris(
-        await agent.store.listGraphs(),
-        agent.getSubscribedContextGraphs().keys(),
-      ),
+    getContextGraphCount: async () => {
+      const [graphUris, contextGraphs] = await Promise.all([
+        agent.store.listGraphs(),
+        agent.listContextGraphs(),
+      ]);
+      const knownContextGraphIds = new Set(agent.getSubscribedContextGraphs().keys());
+      for (const contextGraph of contextGraphs) {
+        if (contextGraph.id) knownContextGraphIds.add(contextGraph.id);
+      }
+      return countContextGraphsFromGraphUris(graphUris, knownContextGraphIds);
+    },
     // The count getters below each issue a data-proportional full-scan COUNT,
     // but the only caller is the 30 s metrics tick (metricsSource is consumed
     // solely by MetricsCollector — no on-demand /api/status path), so each tick
     // already re-reads the store fresh and there is nothing concurrent to
     // coalesce. They are intentionally left uncached so a snapshot never serves
-    // a stale count and can't mask a store outage. The context-graph count uses
-    // the store graph inventory directly instead of the composite
-    // listContextGraphs() enrichment path; managed local stores serve this from
-    // the R6-A listGraphs cache. It intentionally includes private CG graphs.
+    // a stale count and can't mask a store outage. The context-graph count
+    // merges listContextGraphs() IDs with the store graph inventory, then
+    // dedupes local layer graphs. It intentionally includes private CG graphs.
     // These COUNTs are cheap (~0.015 CPU-s/tick on a 75k-triple store).
     getTotalTriples: async () => {
       const r = await agent.query(GET_TOTAL_TRIPLES_SPARQL);

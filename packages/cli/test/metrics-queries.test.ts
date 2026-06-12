@@ -53,6 +53,18 @@ describe('countContextGraphsFromGraphUris', () => {
       knownContextGraphs,
     ))
       .toBe(reservedSegmentId);
+    expect(contextGraphIdFromGraphUriForMetrics(
+      `did:dkg:context-graph:${nestedSlashId}/_meta`,
+    ))
+      .toBeNull();
+    expect(contextGraphIdFromGraphUriForMetrics(
+      `did:dkg:context-graph:${reservedSegmentId}/_meta`,
+    ))
+      .toBeNull();
+    expect(contextGraphIdFromGraphUriForMetrics(
+      `did:dkg:context-graph:${walletScoped}/_meta`,
+    ))
+      .toBe(walletScoped);
     expect(countContextGraphsFromGraphUris([
       `did:dkg:context-graph:${walletScoped}`,
       `did:dkg:context-graph:${walletScoped}/_meta`,
@@ -66,5 +78,12 @@ describe('countContextGraphsFromGraphUris', () => {
       'did:dkg:context-graph:agents',
       'urn:not-a-context-graph',
     ], knownContextGraphs)).toBe(4);
+  });
+
+  it('counts known context graphs that do not have a local graph yet', () => {
+    expect(countContextGraphsFromGraphUris([
+      'did:dkg:context-graph:agents/_meta',
+      'did:dkg:context-graph:agents/_shared_memory',
+    ], ['agents', 'joined-before-first-sync'])).toBe(2);
   });
 });

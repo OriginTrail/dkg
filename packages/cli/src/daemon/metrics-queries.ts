@@ -15,13 +15,11 @@ export const GET_TOTAL_TRIPLES_SPARQL =
   'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }';
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
-const CONTEXT_GRAPH_LAYER_MARKERS = [
+const CONTEXT_GRAPH_UNAMBIGUOUS_LAYER_MARKERS = [
   '/_shared_memory/',
   '/_shared_memory_snapshots/',
   '/_verifiable_memory/',
   '/_working_memory/',
-  '/assertion/',
-  '/context/',
 ] as const;
 const CONTEXT_GRAPH_RESERVED_SUFFIXES = [
   '/_shared_memory_meta',
@@ -30,7 +28,7 @@ const CONTEXT_GRAPH_RESERVED_SUFFIXES = [
   '/_rules',
   '/_meta',
 ] as const;
-const WALLET_SCOPED_CONTEXT_GRAPH_RE = /^0x[a-fA-F0-9]{40}\/[^/]+/;
+const WALLET_SCOPED_CONTEXT_GRAPH_RE = /^0x[a-fA-F0-9]{40}\/[^/]+$/;
 
 /**
  * Parse a SPARQL `COUNT` binding into a number. The value arrives as an RDF
@@ -50,6 +48,12 @@ function normalizeMetricContextGraphCandidates(knownContextGraphIds?: Iterable<s
   return [...new Set(knownContextGraphIds ?? [])]
     .filter(Boolean)
     .sort((a, b) => b.length - a.length);
+}
+
+function unambiguousMetricContextGraphId(candidate: string): string | null {
+  if (!candidate) return null;
+  if (!candidate.includes('/')) return candidate;
+  return WALLET_SCOPED_CONTEXT_GRAPH_RE.test(candidate) ? candidate : null;
 }
 
 export function contextGraphIdFromGraphUriForMetrics(
@@ -74,27 +78,20 @@ function contextGraphIdFromGraphUriForMetricsWithCandidates(
     if (rest === knownId || rest.startsWith(`${knownId}/`)) return knownId;
   }
 
-  for (const marker of CONTEXT_GRAPH_LAYER_MARKERS) {
-    const markerIndex = rest.indexOf(marker);
-    if (markerIndex > 0) {
-      rest = rest.slice(0, markerIndex);
-      break;
-    }
-  }
-
   for (const suffix of CONTEXT_GRAPH_RESERVED_SUFFIXES) {
     if (rest.endsWith(suffix)) {
-      rest = rest.slice(0, -suffix.length);
-      if (!rest) return null;
-      break;
+      return unambiguousMetricContextGraphId(rest.slice(0, -suffix.length));
     }
   }
 
-  const walletScoped = rest.match(WALLET_SCOPED_CONTEXT_GRAPH_RE)?.[0];
-  if (walletScoped) return walletScoped;
+  for (const marker of CONTEXT_GRAPH_UNAMBIGUOUS_LAYER_MARKERS) {
+    const markerIndex = rest.indexOf(marker);
+    if (markerIndex > 0) {
+      return unambiguousMetricContextGraphId(rest.slice(0, markerIndex));
+    }
+  }
 
-  const slash = rest.indexOf('/');
-  return slash === -1 ? rest : rest.slice(0, slash);
+  return unambiguousMetricContextGraphId(rest);
 }
 
 export function countContextGraphsFromGraphUris(
@@ -102,7 +99,7 @@ export function countContextGraphsFromGraphUris(
   knownContextGraphIds?: Iterable<string>,
 ): number {
   const knownCandidates = normalizeMetricContextGraphCandidates(knownContextGraphIds);
-  const contextGraphIds = new Set<string>();
+  const contextGraphIds = new Set<string>(knownCandidates);
   for (const graphUri of graphUris) {
     const contextGraphId = contextGraphIdFromGraphUriForMetricsWithCandidates(
       graphUri,
