@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
+import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
@@ -39,6 +40,66 @@ async function singleQuadParser(nquadsText: string): Promise<{ quads: never[]; t
   if (!nquadsText) return { quads: [], totalQuads: 0 };
   return { quads: [], totalQuads: 1 };
 }
+
+describe('sync checkpoint freshness', () => {
+  it('expires in-memory checkpoints on read', () => {
+    let now = 1_000;
+    const store = new MemorySyncCheckpointStore({ clock: () => now, ttlMs: 100 });
+
+    store.set('peer|cg|durable|data', 500);
+    expect(store.get('peer|cg|durable|data')).toEqual({
+      offset: 500,
+      updatedAtMs: 1_000,
+      expiresAtMs: 1_100,
+    });
+
+    now = 1_101;
+    expect(store.get('peer|cg|durable|data')).toBeUndefined();
+    expect(store.pruneExpired()).toBe(0);
+  });
+
+  it('resumes only from fresh checkpoint entries', async () => {
+    let now = 1_000;
+    const store = new MemorySyncCheckpointStore({ clock: () => now, ttlMs: 100 });
+    const key = getSyncCheckpointKey(REMOTE_PEER_ID, CG_ID, false, 'data');
+    store.set(key, 500);
+
+    const fetchOffset = async (): Promise<number> => {
+      let observedOffset = -1;
+      await fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: CG_ID,
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 100,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: store,
+        buildSyncRequest: async (_contextGraphId, offset) => {
+          observedOffset = offset;
+          return new TextEncoder().encode('request');
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => new Uint8Array(),
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      });
+      return observedOffset;
+    };
+
+    expect(await fetchOffset()).toBe(500);
+    now = 1_101;
+    expect(await fetchOffset()).toBe(0);
+  });
+});
 
 describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', () => {
   // Fake timers eliminate the real `withRetry` exponential backoff
@@ -715,7 +776,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => undefined,
           set: () => {},
           delete: () => {},
         },
@@ -774,7 +835,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => undefined,
           set: () => {},
           delete: () => {},
         },
@@ -835,7 +896,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => undefined,
           set: () => {},
           delete: () => {},
         },
@@ -899,7 +960,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => undefined,
           set: () => {},
           delete: () => {},
         },

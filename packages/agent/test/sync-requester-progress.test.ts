@@ -332,7 +332,55 @@ describe('sync requester progress accounting', () => {
     expect(setCheckpoint).not.toHaveBeenCalled();
   });
 
-  it('does not advance durable checkpoints for metadata-only responses', async () => {
+  it('advances only the durable meta checkpoint after storing metadata-only responses', async () => {
+    const metaQuad = quad('meta-only-meta');
+    const storeInsert = vi.fn(async () => {});
+    const setCheckpoint = vi.fn();
+    const deleteCheckpoint = vi.fn();
+    const fetchSyncPages = vi.fn(async (
+      _ctx: OperationContext,
+      _peer: string,
+      contextGraphId: string,
+      _includeSharedMemory: boolean,
+      phase: 'data' | 'meta',
+    ) => phase === 'meta'
+      ? pageResult(contextGraphId, phase, { nextOffset: 5, completed: false, timedOut: true })
+      : pageResult(contextGraphId, phase));
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-a',
+      contextGraphIds: ['meta-only-cg'],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages,
+      processDurableBatchInWorker: async () => ({
+        ...durableProcessResult(),
+        emptyResponses: 0,
+        metaOnlyResponses: 1,
+        verifiedMeta: [metaQuad],
+        totalFetchedMetaQuads: 1,
+      }),
+      storeInsert,
+      deleteCheckpoint,
+      setCheckpoint,
+      logInfo: noop,
+      logWarn: noop,
+      logDebug: noop,
+    });
+
+    expect(summary.metaOnlyResponses).toBe(1);
+    expect(summary.insertedMetaTriples).toBe(1);
+    expect(summary.completedPhases).toBe(0);
+    expect(summary.checkpointAdvances).toBe(0);
+    expect(storeInsert).toHaveBeenCalledWith([metaQuad]);
+    expect(deleteCheckpoint).not.toHaveBeenCalled();
+    expect(setCheckpoint).toHaveBeenCalledTimes(1);
+    expect(setCheckpoint).toHaveBeenCalledWith('meta-only-cg:meta', 5);
+  });
+
+  it('deletes only the durable meta checkpoint after completing metadata-only responses', async () => {
+    const metaQuad = quad('meta-only-complete-meta');
+    const storeInsert = vi.fn(async () => {});
     const setCheckpoint = vi.fn();
     const deleteCheckpoint = vi.fn();
     const fetchSyncPages = vi.fn(async (
@@ -346,15 +394,17 @@ describe('sync requester progress accounting', () => {
     const summary = await runDurableSync({
       ctx,
       remotePeerId: 'peer-a',
-      contextGraphIds: ['meta-only-cg'],
+      contextGraphIds: ['meta-only-complete'],
       createContextGraphSyncDeadline: () => Date.now() + 60_000,
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
         ...durableProcessResult(),
         emptyResponses: 0,
         metaOnlyResponses: 1,
+        verifiedMeta: [metaQuad],
+        totalFetchedMetaQuads: 1,
       }),
-      storeInsert: async () => {},
+      storeInsert,
       deleteCheckpoint,
       setCheckpoint,
       logInfo: noop,
@@ -363,9 +413,12 @@ describe('sync requester progress accounting', () => {
     });
 
     expect(summary.metaOnlyResponses).toBe(1);
+    expect(summary.insertedMetaTriples).toBe(1);
     expect(summary.completedPhases).toBe(0);
     expect(summary.checkpointAdvances).toBe(0);
-    expect(deleteCheckpoint).not.toHaveBeenCalled();
+    expect(storeInsert).toHaveBeenCalledWith([metaQuad]);
+    expect(deleteCheckpoint).toHaveBeenCalledTimes(1);
+    expect(deleteCheckpoint).toHaveBeenCalledWith('meta-only-complete:meta');
     expect(setCheckpoint).not.toHaveBeenCalled();
   });
 

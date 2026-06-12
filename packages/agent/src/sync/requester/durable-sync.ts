@@ -113,16 +113,19 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     failedPeers: 0,
   };
 
-  const recordPhaseOutcome = (result: SyncPageResult, options: { updateCheckpoint: boolean }) => {
+  const recordPhaseOutcome = (result: SyncPageResult, options: { updateCheckpoint: boolean; countProgress?: boolean }) => {
+    const countProgress = options.countProgress ?? true;
     summary.resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
     summary.timedOutPhases += result.timedOut ? 1 : 0;
+    if (options.updateCheckpoint && countProgress) {
+      if (result.completed && (result.resumedFromOffset > 0 || result.nextOffset > result.resumedFromOffset)) {
+        summary.completedPhases += 1;
+      }
+      if (result.nextOffset > result.resumedFromOffset) {
+        summary.checkpointAdvances += 1;
+      }
+    }
     if (!options.updateCheckpoint) return;
-    if (result.completed && (result.resumedFromOffset > 0 || result.nextOffset > result.resumedFromOffset)) {
-      summary.completedPhases += 1;
-    }
-    if (result.nextOffset > result.resumedFromOffset) {
-      summary.checkpointAdvances += 1;
-    }
     if (result.completed) deleteCheckpoint(result.checkpointKey);
     else if (result.nextOffset > 0 || result.resumedFromOffset > 0) {
       setCheckpoint(result.checkpointKey, result.nextOffset);
@@ -172,14 +175,19 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       summary.metaOnlyResponses += processed.metaOnlyResponses;
       summary.dataRejectedMissingMeta += processed.dataRejectedMissingMeta;
 
-      const updateCheckpoints = processed.dataRejectedMissingMeta === 0 && processed.metaOnlyResponses === 0;
+      const metadataOnlyResponse = processed.metaOnlyResponses > 0;
+      const updateMetaCheckpoint = processed.dataRejectedMissingMeta === 0
+        && (!metadataOnlyResponse || processed.verifiedMeta.length > 0);
+      const updateDataCheckpoint = processed.dataRejectedMissingMeta === 0 && !metadataOnlyResponse;
+      // Metadata-only pages may move the meta cursor after storage, but they
+      // still are not usable data progress for freshness/backoff accounting.
       if (
         processed.emptyResponses > 0 ||
         processed.dataRejectedMissingMeta > 0 ||
         (processed.verifiedData.length === 0 && processed.verifiedMeta.length === 0 && processed.metaOnlyResponses > 0)
       ) {
-        recordPhaseOutcome(metaResult, { updateCheckpoint: updateCheckpoints });
-        recordPhaseOutcome(dataResult, { updateCheckpoint: updateCheckpoints });
+        recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
+        recordPhaseOutcome(dataResult, { updateCheckpoint: updateDataCheckpoint });
         continue;
       }
 
@@ -195,8 +203,8 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         summary.insertedTriples += processed.verifiedMeta.length;
         summary.insertedMetaTriples += processed.verifiedMeta.length;
       }
-      recordPhaseOutcome(metaResult, { updateCheckpoint: updateCheckpoints });
-      recordPhaseOutcome(dataResult, { updateCheckpoint: updateCheckpoints });
+      recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
+      recordPhaseOutcome(dataResult, { updateCheckpoint: updateDataCheckpoint });
       endPhase();
       const storeDurationMs = Date.now() - storeStartedAt;
 

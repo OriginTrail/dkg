@@ -207,7 +207,7 @@ import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
-import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
+import { getSyncCheckpointKey, MemorySyncCheckpointStore } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
@@ -1087,7 +1087,7 @@ export class DKGAgentBase {
    * can run CPU-bound hash checks off the main thread. Both introduced
    * by PR #237 (sync-refactor-rebased).
    */
-  protected syncCheckpoints: SyncCheckpointStore = new Map<string, number>();
+  protected syncCheckpoints: SyncCheckpointStore = new MemorySyncCheckpointStore();
   protected syncVerifyWorker?: SyncVerifyWorker;
 
   /** Registered agents on this node: agentAddress → AgentKeyRecord */

@@ -188,7 +188,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   const allQuads: Quad[] = [];
   throwIfAborted(signal);
   const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId);
-  let offset = checkpointStore.get(checkpointKey) ?? 0;
+  let offset = checkpointStore.get(checkpointKey)?.offset ?? 0;
   const usesPageSession = usesResponderSession(includeSharedMemory, phase);
   const sessionStartedAt = Date.now();
   const savedResponderSession = usesPageSession

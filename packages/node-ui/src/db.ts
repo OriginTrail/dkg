@@ -2236,24 +2236,27 @@ export class SqliteSyncCheckpointStore {
     this.ttlMs = options.ttlMs ?? DEFAULT_SYNC_CHECKPOINT_TTL_MS;
   }
 
-  get(key: string): number | undefined {
+  get(key: string): { offset: number; updatedAtMs: number; expiresAtMs: number } | undefined {
     const now = this.clock();
     const row = this.db.prepare(
-      `SELECT offset, expires_at FROM sync_checkpoints WHERE key = ?`,
-    ).get(key) as { offset: number; expires_at: number } | undefined;
+      `SELECT offset, updated_at, expires_at FROM sync_checkpoints WHERE key = ?`,
+    ).get(key) as { offset: number; updated_at: number; expires_at: number } | undefined;
     if (!row) return undefined;
     if (row.expires_at < now) {
       this.delete(key);
       return undefined;
     }
-    return row.offset;
+    return {
+      offset: row.offset,
+      updatedAtMs: row.updated_at,
+      expiresAtMs: row.expires_at,
+    };
   }
 
-  set(key: string, value: number): void {
+  set(key: string, value: number, nowMs = this.clock()): void {
     if (!Number.isSafeInteger(value) || value < 0) {
       throw new Error(`Invalid sync checkpoint offset for ${key}: ${value}`);
     }
-    const now = this.clock();
     this.db.prepare(`
       INSERT INTO sync_checkpoints (key, offset, updated_at, expires_at)
       VALUES (?, ?, ?, ?)
@@ -2261,7 +2264,7 @@ export class SqliteSyncCheckpointStore {
         offset = excluded.offset,
         updated_at = excluded.updated_at,
         expires_at = excluded.expires_at
-    `).run(key, value, now, now + this.ttlMs);
+    `).run(key, value, nowMs, nowMs + this.ttlMs);
   }
 
   delete(key: string): void {

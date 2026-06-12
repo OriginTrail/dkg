@@ -1039,10 +1039,18 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
   it('round-trips, overwrites, deletes, and expires checkpoints', () => {
     const store = checkpointStore();
     store.set('peer|cg|durable|data', 500);
-    expect(store.get('peer|cg|durable|data')).toBe(500);
+    expect(store.get('peer|cg|durable|data')).toEqual({
+      offset: 500,
+      updatedAtMs: now,
+      expiresAtMs: now + 24 * 60 * 60 * 1000,
+    });
 
     store.set('peer|cg|durable|data', 750);
-    expect(store.get('peer|cg|durable|data')).toBe(750);
+    expect(store.get('peer|cg|durable|data')).toEqual({
+      offset: 750,
+      updatedAtMs: now,
+      expiresAtMs: now + 24 * 60 * 60 * 1000,
+    });
 
     store.delete('peer|cg|durable|data');
     expect(store.get('peer|cg|durable|data')).toBeUndefined();
@@ -1055,13 +1063,19 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
   it('persists non-expired checkpoints across DashboardDB reopen and prunes stale rows', () => {
     const store = checkpointStore();
     store.set('peer|cg|swm|data', 42);
+    store.set('peer|cg|swm|meta', 43);
     db.close();
 
     db = new DashboardDB({ dataDir: dir });
     const reopened = new SqliteSyncCheckpointStore(db, { clock: () => now });
-    expect(reopened.get('peer|cg|swm|data')).toBe(42);
+    expect(reopened.get('peer|cg|swm|data')).toEqual({
+      offset: 42,
+      updatedAtMs: now,
+      expiresAtMs: now + 24 * 60 * 60 * 1000,
+    });
 
     now += 24 * 60 * 60 * 1000 + 1;
+    expect(reopened.get('peer|cg|swm|data')).toBeUndefined();
     expect(reopened.pruneExpired(now)).toBe(1);
     const count = (db.db.prepare(`SELECT COUNT(*) AS c FROM sync_checkpoints`).get() as { c: number }).c;
     expect(count).toBe(0);
