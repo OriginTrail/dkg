@@ -3,16 +3,16 @@
  *
  * Why this file exists
  * --------------------
- * The per-PR unit tests in this package drive the tools against `FakeClient`
- * / a fake `fetcher` (see `harness.ts`). Those pin client-side contracts
- * (zod schemas, argument guards, output rendering) but return canned data
- * for ANY request — they are structurally blind to the failure mode a
+ * The per-PR unit tests in this package are mock-free (the in-memory
+ * `FakeClient` daemon double was retired): they cover registration, zod
+ * schemas, and pre-network guards — but by design they never perform a
+ * daemon round-trip, so they are structurally blind to the failure mode a
  * teammate hit in rc.17: "the agent tool surface wasn't updated all the way
  * with the new API and KA logic." A renamed endpoint, a reshaped response,
- * a tightened `view` enum, or a renamed body field all keep the mocked
- * tests green while the real round-trip is broken.
+ * a tightened `view` enum, or a renamed body field is only caught by a
+ * real round-trip.
  *
- * This suite removes the mock entirely. It wires the REAL `DkgClient`
+ * This suite is that round-trip. It wires the REAL `DkgClient`
  * (real global `fetch` → real daemon) plus the REAL `register*Tools()`
  * surface (the exact registration sequence from `src/index.ts`) and
  * exercises EVERY MCP tool end-to-end against a RUNNING devnet node —
@@ -330,6 +330,81 @@ describe.skipIf(!ENABLED)('MCP tool surface ↔ live daemon (no mocks)', () => {
       );
       expect(text).toMatch(/Imported 'notes\.md'/);
       expect(text).toMatch(/Extraction status/);
+    });
+
+    // ── Imported-artifact trio: resolve → read markdown → semantic
+    // enrichment, all against the REAL content-addressed file store.
+    // The MCP import tool's text output doesn't echo the assertion URI,
+    // so the seed import goes through the REAL client (same call the
+    // tool handler makes) to capture `assertionUri` from the daemon's
+    // response — then every tool below round-trips on that real URI.
+    describe('imported-artifact tools (resolve / read-markdown / enrichment)', () => {
+      const trioName = `${RUN}-trio`;
+      const trioHeading = `Trio Heading ${RUN}`;
+      let trioUri = '';
+
+      it('seed import returns a real assertionUri', async () => {
+        const filePath = path.join(tempDir, 'trio.md');
+        await writeFile(filePath, `# ${trioHeading}\n\nBody bytes for the artifact trio round-trip.\n`, 'utf-8');
+        const { readFile } = await import('node:fs/promises');
+        const result = await client.importAssertionFile({
+          contextGraphId: CG,
+          assertionName: trioName,
+          fileBuffer: await readFile(filePath),
+          fileName: 'trio.md',
+          contentType: 'text/markdown',
+        });
+        trioUri = String((result as Record<string, unknown>).assertionUri ?? '');
+        expect(trioUri, 'daemon import response must carry assertionUri').toMatch(/^did:dkg:/);
+      });
+
+      it('dkg_import_artifact_resolve resolves the imported artifact metadata', async () => {
+        const text = notError(
+          await server.call('dkg_import_artifact_resolve', { projectId: CG, assertionUri: trioUri }),
+          'import_artifact_resolve',
+        );
+        // Deterministic metadata from the REAL store: the source file hash
+        // and the markdown readability flag.
+        expect(text).toMatch(/"fileHash"/);
+        expect(text).toMatch(/"canReadMarkdown": true/);
+      });
+
+      it('dkg_import_artifact_read_markdown returns the real stored bytes', async () => {
+        const text = notError(
+          await server.call('dkg_import_artifact_read_markdown', { projectId: CG, assertionUri: trioUri, maxBytes: 4096 }),
+          'import_artifact_read_markdown',
+        );
+        // The exact heading written above must come back out of the
+        // content-addressed store — a true byte round-trip.
+        expect(text).toContain(trioHeading);
+      });
+
+      it('dkg_semantic_enrichment_write appends model triples with provenance', async () => {
+        const text = notError(
+          await server.call('dkg_semantic_enrichment_write', {
+            projectId: CG,
+            assertionUri: trioUri,
+            semanticQuads: [
+              { subject: `urn:mcpts:${RUN}:doc`, predicate: 'http://schema.org/about', object: '"Semantic topic"' },
+            ],
+            generationMethod: 'mcp-live-test',
+          }),
+          'semantic_enrichment_write',
+        );
+        expect(text).toContain(trioUri);
+      });
+
+      it('zod (.strict()) rejects enrichment quads that smuggle a graph field', async () => {
+        await expect(
+          server.call('dkg_semantic_enrichment_write', {
+            projectId: CG,
+            assertionUri: trioUri,
+            semanticQuads: [
+              { subject: 'urn:x', predicate: 'urn:p', object: '"v"', graph: 'urn:forged' },
+            ],
+          }),
+        ).rejects.toThrow();
+      });
     });
 
     it('dkg_assertion_discard drops the WM draft (real daemon semantics)', async () => {

@@ -40,7 +40,14 @@ import { registerMemorySearchTool } from '../src/tools/memory-search.js';
 import { registerSetupTools } from '../src/tools/setup.js';
 import { registerHealthTools } from '../src/tools/health.js';
 import { registerPublishTools } from '../src/tools/publish.js';
-import { FakeServer, FakeClient, makeConfig } from './harness.js';
+import { FakeServer } from './harness.js';
+import { liveClient, liveConfig } from './live.js';
+
+// NO MOCKS. These are pure surface-shape guards: tool registration and
+// zod-schema acceptance. They build the REAL `DkgClient` (which is never
+// invoked here — registration doesn't call it) and use `FakeServer.parse`
+// (schema-only, no handler/network) for the regex-scope checks. Nothing
+// touches the daemon, so no node is needed and there is no fake daemon.
 
 /**
  * The 10 tool names removed in W2-#18 (`c222ddcf`). Mirrors the audit's
@@ -76,15 +83,15 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
 
   beforeEach(() => {
     server = new FakeServer();
-    const client = new FakeClient();
-    const config = makeConfig();
+    const client = liveClient();
+    const config = liveConfig();
     // Mirror src/index.ts. If a new register* call lands in production, add it here too.
-    registerReadTools(server.asMcpServer(), client.asDkgClient(), config);
-    registerAssertionTools(server.asMcpServer(), client.asDkgClient(), config);
-    registerMemorySearchTool(server.asMcpServer(), client.asDkgClient(), config);
-    registerSetupTools(server.asMcpServer(), client.asDkgClient(), config);
-    registerHealthTools(server.asMcpServer(), client.asDkgClient(), config);
-    registerPublishTools(server.asMcpServer(), client.asDkgClient(), config);
+    registerReadTools(server.asMcpServer(), client, config);
+    registerAssertionTools(server.asMcpServer(), client, config);
+    registerMemorySearchTool(server.asMcpServer(), client, config);
+    registerSetupTools(server.asMcpServer(), client, config);
+    registerHealthTools(server.asMcpServer(), client, config);
+    registerPublishTools(server.asMcpServer(), client, config);
   });
 
   it.each(DROPPED_TOOLS)('does not register %s', (name) => {
@@ -123,13 +130,12 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
  */
 describe('regex-scope guard — read-side `name` arg accepts non-conforming slugs', () => {
   let server: FakeServer;
-  let client: FakeClient;
 
   beforeEach(() => {
     server = new FakeServer();
-    client = new FakeClient();
-    const config = makeConfig();
-    registerAssertionTools(server.asMcpServer(), client.asDkgClient(), config);
+    // Real client, never invoked: these tests assert the SCHEMA only, via
+    // `server.parse` (no handler, no network), so there is no daemon mock.
+    registerAssertionTools(server.asMcpServer(), liveClient(), liveConfig());
   });
 
   // The four read-side / lookup-side assertion tools. `dkg_assertion_create` is
@@ -140,22 +146,18 @@ describe('regex-scope guard — read-side `name` arg accepts non-conforming slug
     ['dkg_assertion_discard', { name: 'Bad Name With Spaces' }],
     ['dkg_assertion_query', { name: 'Bad Name With Spaces' }],
     ['dkg_assertion_history', { name: 'Bad Name With Spaces' }],
-  ])('%s schema accepts non-slug `name` (no zod throw at input boundary)', async (toolName, args) => {
-    // Don't care what the handler returns — it'll behaviourally produce a
-    // not-found result against the empty FakeClient state. The assertion
-    // is that the schema parse layer does NOT reject the input shape.
-    // If a future change adds the create-side regex to read-side schemas,
-    // this call rejects with a ZodError and the test fails.
-    await expect(server.call(toolName, args)).resolves.toBeDefined();
+  ])('%s schema accepts non-slug `name` (no zod throw at input boundary)', (toolName, args) => {
+    // Parse-only: the gate is "the schema parse layer does NOT reject the
+    // input shape." If a future change adds the create-side regex to
+    // read-side schemas, this parse throws a ZodError and the test fails.
+    expect(() => server.parse(toolName as string, args as Record<string, unknown>)).not.toThrow();
   });
 
   // Positive control: dkg_assertion_create DOES enforce the regex (per
-  // assertion-lifecycle.test.ts:81). Re-asserting here so the asymmetry is
+  // assertion-lifecycle.test.ts). Re-asserting here so the asymmetry is
   // visible in this file alone — a reviewer reading just `drop-sweep.test.ts`
   // can see why the read-side test exists.
-  it('positive control: dkg_assertion_create rejects non-slug `name` (regex IS enforced creator-side)', async () => {
-    await expect(
-      server.call('dkg_assertion_create', { name: 'Bad Name With Spaces' }),
-    ).rejects.toThrow();
+  it('positive control: dkg_assertion_create rejects non-slug `name` (regex IS enforced creator-side)', () => {
+    expect(() => server.parse('dkg_assertion_create', { name: 'Bad Name With Spaces' })).toThrow();
   });
 });

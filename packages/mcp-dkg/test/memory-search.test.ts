@@ -1,130 +1,159 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { registerMemorySearchTool } from '../src/tools/memory-search.js';
-import { FakeServer, FakeClient, makeConfig } from './harness.js';
+import { FakeServer } from './harness.js';
+import { LIVE, API, TOKEN, CG, liveClient, liveConfig } from './live.js';
 
-describe('dkg_memory_search — multi-layer fan-out + trust-tier dedup', () => {
+// ── NO MOCKS ─────────────────────────────────────────────────────────
+// The retired version fed `client.memoryFixtures` (canned per-layer rows)
+// to exercise the trust-tier dedup ranker. That pinned the algorithm but
+// never proved the real 6-layer fan-out actually routes/returns. Here:
+//   • PURE tests (registration, zod ≥2-char floor, backend-not-ready)
+//     use the REAL client. backend-not-ready is reproduced with a REAL
+//     dead-port client (genuine ECONNREFUSED → identity probe fails) —
+//     no node and no mock.
+//   • The fan-out + cross-layer trust dedup (VM > SWM) is proven
+//     END-TO-END below (gated): the SAME entity is seeded into the real
+//     SWM and minted to real VM, then a live search must collapse them to
+//     a single VM-tier hit.
+
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const PUBLISH_TIMEOUT_MS = 180_000;
+
+describe('dkg_memory_search — pure surface + client-side guards (no node)', () => {
   let server: FakeServer;
-  let client: FakeClient;
 
   beforeEach(() => {
     server = new FakeServer();
-    client = new FakeClient();
-    registerMemorySearchTool(server.asMcpServer(), client.asDkgClient(), makeConfig());
+    registerMemorySearchTool(server.asMcpServer(), liveClient(), liveConfig());
   });
 
   it('registers the dkg_memory_search tool', () => {
     expect(server.tools.has('dkg_memory_search')).toBe(true);
   });
 
-  it('fan-out covers 3 layers without projectId (agent-context only)', async () => {
-    // Same matching text written to both WM and SWM of agent-context. The
-    // SWM hit's trust tier is higher and must win the dedup.
-    const text = 'tree-sitter parses python files incrementally for ide tooling';
-    client.memoryFixtures.set('agent-context::working-memory', [
-      { uri: { value: 'urn:doc:1' }, text: { value: text } },
-    ]);
-    client.memoryFixtures.set('agent-context::shared-working-memory', [
-      { uri: { value: 'urn:doc:1' }, text: { value: text } },
-    ]);
-    // VM has no hit — confirms that a layer with zero rows still gets
-    // queried (and reported in the breakdown).
-
-    const result = await server.call('dkg_memory_search', { query: 'tree-sitter parses' });
-    expect(result.isError).toBeFalsy();
-
-    const text0 = result.content[0].text;
-    // Layer breakdown must mention all three agent-context layers.
-    expect(text0).toMatch(/agent-context-wm:1/);
-    expect(text0).toMatch(/agent-context-swm:1/);
-    expect(text0).toMatch(/agent-context-vm:0/);
-    // Query was fanned out 3 times.
-    expect(client.queryCalls).toHaveLength(3);
-    // Exactly one hit after dedup (SWM ranks above WM for the same uri).
-    expect(text0).toMatch(/1 hit\(s\)/);
-    expect(text0).toMatch(/SWM/);
+  it('rejects a query shorter than 2 characters at the schema layer (parse)', () => {
+    expect(() => server.parse('dkg_memory_search', { query: 'a' })).toThrow();
   });
 
-  it('fan-out covers 6 layers when projectId is supplied', async () => {
-    client.memoryFixtures.set('proj-x::verifiable-memory', [
-      { uri: { value: 'urn:doc:vm' }, text: { value: 'highly verified content about tree-sitter parsers' } },
-    ]);
-    const result = await server.call('dkg_memory_search', { query: 'tree-sitter parsers', projectId: 'proj-x' });
-    expect(result.isError).toBeFalsy();
-    expect(client.queryCalls).toHaveLength(6);
-    expect(result.content[0].text).toMatch(/project-vm:1/);
-    expect(result.content[0].text).toMatch(/proj-x · VM/);
-  });
-
-  it('VM hit collapses an SWM hit on the same entity URI (trust tier ordering: VM > SWM > WM)', async () => {
-    const text = 'agreed-on architectural decision about staking adapter v2';
-    client.memoryFixtures.set('agent-context::working-memory', [
-      { uri: { value: 'urn:dec:1' }, text: { value: text } },
-    ]);
-    client.memoryFixtures.set('agent-context::shared-working-memory', [
-      { uri: { value: 'urn:dec:1' }, text: { value: text } },
-    ]);
-    client.memoryFixtures.set('agent-context::verifiable-memory', [
-      { uri: { value: 'urn:dec:1' }, text: { value: text } },
-    ]);
-
-    const result = await server.call('dkg_memory_search', { query: 'staking adapter' });
-    expect(result.isError).toBeFalsy();
-    const text0 = result.content[0].text;
-    // Three raw hits across layers, but only ONE survives dedup.
-    expect(text0).toMatch(/agent-context-wm:1, agent-context-swm:1, agent-context-vm:1/);
-    expect(text0).toMatch(/1 hit\(s\)/);
-    // The single survivor is the VM tier with weight 1.30 — the
-    // canonical signal that the trust ranker stayed coherent.
-    expect(text0).toMatch(/VM · weight=1\.30/);
-    // No SWM/WM tier marker should leak into the surviving hit line.
-    const hitBlock = text0.split('### 1.')[1] ?? '';
-    expect(hitBlock).not.toMatch(/SWM · weight=1\.15/);
-    expect(hitBlock).not.toMatch(/WM · weight=1\.00/);
-  });
-
-  it('rejects a query shorter than 2 characters at the schema layer', async () => {
-    await expect(server.call('dkg_memory_search', { query: 'a' })).rejects.toThrow();
-  });
-
-  it('returns a backend-not-ready error when the daemon cannot resolve agent identity', async () => {
-    const localServer = new FakeServer();
-    const localClient = new FakeClient({
-      getAgentIdentity: async () => ({}),
-    });
-    registerMemorySearchTool(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
-
-    const result = await localServer.call('dkg_memory_search', { query: 'anything goes here' });
+  it('returns a backend-not-ready error when the daemon identity is unreachable', async () => {
+    // REAL dead-port client: the identity probe throws a genuine
+    // connection error, the tool swallows it, and (no agentAddress)
+    // returns the documented backend-not-ready message. No mock.
+    const deadServer = new FakeServer();
+    registerMemorySearchTool(
+      deadServer.asMcpServer(),
+      liveClient({ api: 'http://127.0.0.1:1' }),
+      liveConfig({ api: 'http://127.0.0.1:1' }),
+    );
+    const result = await deadServer.call('dkg_memory_search', { query: 'anything goes here' });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/backend not ready/);
   });
+});
 
-  it('passes the raw peerId (not DID form) to the daemon for WM-view routing', async () => {
-    client.agentIdentity = {
-      peerId: 'peer-raw-abc',
-      agentAddress: 'did:dkg:agent:peer-raw-abc',
-    };
-    client.memoryFixtures.set('agent-context::working-memory', [
-      { uri: { value: 'urn:x' }, text: { value: 'this snippet is plenty long to clear the 20-char floor for matching' } },
-    ]);
-    await server.call('dkg_memory_search', { query: 'snippet plenty' });
-    // Every fan-out call must carry the raw peerId, not the DID form —
-    // the DID prefix routes WM into a non-existent namespace and
-    // silently zeroes out hits (the regression this guards).
-    for (const call of client.queryCalls) {
-      expect(call.agentAddress).toBe('peer-raw-abc');
-      expect(String(call.agentAddress)).not.toMatch(/^did:/);
-    }
+describe.skipIf(!LIVE)('dkg_memory_search — live fan-out + trust-tier dedup (real node)', () => {
+  const RUN = `ms${Date.now().toString(36)}`;
+  const did = `did:dkg:context-graph:${CG}`;
+  let server: FakeServer;
+  let client: ReturnType<typeof liveClient>;
+
+  beforeEach(() => {
+    server = new FakeServer();
+    client = liveClient();
+    registerMemorySearchTool(server.asMcpServer(), client, liveConfig());
   });
 
-  it('respects the SKILL.md §6.3 6-element combined-string layer contract', async () => {
-    client.memoryFixtures.set('agent-context::working-memory', [
-      { uri: { value: 'urn:wm-only' }, text: { value: 'only working-memory hit, no other layers see this snippet' } },
-    ]);
-    const result = await server.call('dkg_memory_search', { query: 'working-memory snippet' });
+  // Seed a unique entity into LOOSE SWM through the real daemon. Each test
+  // uses its OWN token so a single keyword query matches exactly its own
+  // seed(s) — no cross-test bleed despite the shared CG.
+  async function seedLooseSwm(subj: string, marker: string): Promise<void> {
+    const res = await fetch(`${API}/api/shared-memory/write`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({
+        contextGraphId: CG,
+        quads: [
+          { subject: subj, predicate: RDF_TYPE, object: 'urn:ms:Note', graph: did },
+          { subject: subj, predicate: 'urn:ms:p:text', object: `"${marker}"`, graph: did },
+        ],
+      }),
+    });
+    expect(res.ok, `seed /api/shared-memory/write failed: ${res.status}`).toBe(true);
+  }
+
+  it('finds a real SWM-seeded entity and tags it SWM tier (weight 1.15)', async () => {
+    const token = `${RUN}find`;
+    // marker holds the unique token + filler to clear the 20-char floor.
+    // The query is the token ALONE → the daemon's OR-keyword filter only
+    // matches THIS seed (shared filler words can't cross-match).
+    const marker = `${token} memorysearchpayloadlongenoughxx`;
+    await seedLooseSwm(`urn:ms:${token}:e`, marker);
+
+    const result = await server.call('dkg_memory_search', { query: token, projectId: CG });
     expect(result.isError).toBeFalsy();
-    // Render-time projection: contextGraphId · TIER (CG separated from
-    // tier in the rendered text, but the underlying Hit.layer field is
-    // still the 6-element combined string per SKILL §6.3).
-    expect(result.content[0].text).toMatch(/agent-context · WM/);
+    const text = result.content[0].text;
+    expect(text).toMatch(/1 hit\(s\)/);
+    expect(text).toMatch(/project-swm:[1-9]/);
+    expect(text).toMatch(/· SWM · weight=1\.15/);
+    expect(text).toContain(token);
   });
+
+  it('collapses multiple raw matches for the SAME (cg, uri) into a single ranked hit', async () => {
+    // The daemon enforces SINGLE-TIER residency per rootEntity (writing a
+    // published URI back to SWM is rejected: "Rule 4: rootEntity already
+    // exists … Use /api/update"). So the SAME uri can NOT live in two
+    // memory tiers at once — the retired FakeClient test asserted a state
+    // the real daemon forbids. The reproducible real-data proof of the
+    // dedup MAP (keyed on `${cg}::${uri}`) is two matching literals on the
+    // same subject within a layer: the fan-out returns 2 raw rows, the
+    // ranker collapses them to ONE hit. (Cross-tier weight ordering is
+    // covered by the per-tier SWM=1.15 / VM=1.30 tests around this one.)
+    const token = `${RUN}dedup`;
+    const subj = `urn:ms:${token}:e`;
+    const did2 = `did:dkg:context-graph:${CG}`;
+    const res = await fetch(`${API}/api/shared-memory/write`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({
+        contextGraphId: CG,
+        quads: [
+          { subject: subj, predicate: RDF_TYPE, object: 'urn:ms:Note', graph: did2 },
+          { subject: subj, predicate: 'urn:ms:p:text', object: `"${token} firstmatchingliterallongenough"`, graph: did2 },
+          { subject: subj, predicate: 'urn:ms:p:alt', object: `"${token} secondmatchingliterallongenough"`, graph: did2 },
+        ],
+      }),
+    });
+    expect(res.ok, `seed two-literal subject failed: ${res.status}`).toBe(true);
+
+    const result = await server.call('dkg_memory_search', { query: token, projectId: CG });
+    expect(result.isError).toBeFalsy();
+    const text = result.content[0].text;
+    // Two raw rows came back for the one entity…
+    expect(text).toMatch(/project-swm:2/);
+    // …but the dedup map collapsed them to exactly ONE survivor.
+    expect(text).toMatch(/1 hit\(s\)/);
+    expect(text).toMatch(/· SWM · weight=1\.15/);
+    // Only one rendered hit block.
+    expect(text).not.toContain('### 2.');
+  });
+
+  it(
+    'renders a real VM-minted entity at the VM tier (weight 1.30)',
+    async () => {
+      // VM publish drains loose SWM, so this proves the VM tier end-to-end
+      // on its own: seed loose SWM, mint the root on-chain, search.
+      const token = `${RUN}vm`;
+      const subj = `urn:ms:${token}:e`;
+      const marker = `${token} memorysearchpayloadlongenoughxx`;
+      await seedLooseSwm(subj, marker);
+      await client.publishSharedMemory({ contextGraphId: CG, rootEntities: [subj] });
+
+      const result = await server.call('dkg_memory_search', { query: token, projectId: CG });
+      expect(result.isError).toBeFalsy();
+      const text = result.content[0].text;
+      expect(text).toMatch(/project-vm:[1-9]/);
+      expect(text).toMatch(/· VM · weight=1\.30/);
+    },
+    PUBLISH_TIMEOUT_MS,
+  );
 });

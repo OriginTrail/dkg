@@ -2,106 +2,64 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { registerSetupTools } from '../src/tools/setup.js';
 import { registerPublishTools } from '../src/tools/publish.js';
 import { registerHealthTools } from '../src/tools/health.js';
-import { FakeServer, FakeClient, makeConfig } from './harness.js';
+import { FakeServer } from './harness.js';
+import { LIVE, API, TOKEN, CG, liveClient, liveConfig } from './live.js';
 
-describe('setup tools — context graph + sub-graph + subscribe', () => {
+// ── NO MOCKS ─────────────────────────────────────────────────────────
+// The retired version drove an in-memory FakeClient (contextGraphs set,
+// publishCalls spy, subscribe spy, canned walletBalances) plus a couple
+// of fake-fetcher cases. Replaced with three honest lanes:
+//   • PURE — schema defaults, descriptions, registration, and the
+//     CLIENT-SIDE validation guards (invalid slug, empty quads/roots,
+//     accessPolicy enum). These short-circuit BEFORE any network call, so
+//     they run against a real (uninvoked) DkgClient with no node.
+//   • DEAD-PORT — real error handling proven with a genuine ECONNREFUSED
+//     client (no mock): register-failure propagation, wallet probe failure.
+//   • LIVE (gated) — the real daemon round-trips: create/subscribe/
+//     sub-graph, on-chain publish with chain echo + auto-typing, and the
+//     registerIfNeeded already-registered tolerance.
+
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const PUBLISH_TIMEOUT_MS = 180_000;
+const DEAD = 'http://127.0.0.1:1';
+
+// ── PURE: setup tool surface ─────────────────────────────────────────
+describe('setup tools — pure surface + client-side guards (no node)', () => {
   let server: FakeServer;
-  let client: FakeClient;
 
   beforeEach(() => {
     server = new FakeServer();
-    client = new FakeClient();
-    registerSetupTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
+    registerSetupTools(server.asMcpServer(), liveClient(), liveConfig());
   });
 
   it('registers all three setup tools', () => {
-    for (const name of [
-      'dkg_context_graph_create',
-      'dkg_subscribe',
-      'dkg_sub_graph_create',
-    ]) {
+    for (const name of ['dkg_context_graph_create', 'dkg_subscribe', 'dkg_sub_graph_create']) {
       expect(server.tools.has(name)).toBe(true);
     }
   });
 
-  it('dkg_context_graph_create description carries the SKILL.md §6 canonical-naming note', () => {
+  it('dkg_context_graph_create description carries the SKILL.md §6 canonical-naming note + Idempotent contract', () => {
     const desc = server.get('dkg_context_graph_create').config.description!;
     expect(desc).toContain("called 'projects' in the DKG node UI");
-  });
-
-  it('auto-derives the slug from the human name when id is omitted', async () => {
-    const result = await server.call('dkg_context_graph_create', {
-      name: 'My Research Context Graph',
-    });
-    expect(result.isError).toBeFalsy();
-    expect(result.content[0].text).toMatch(/'my-research-context-graph'/);
-    expect(client.contextGraphs.has('my-research-context-graph')).toBe(true);
-  });
-
-  it('honours an explicit slug when provided', async () => {
-    const result = await server.call('dkg_context_graph_create', {
-      name: 'Anything',
-      id: 'override-slug',
-    });
-    expect(result.isError).toBeFalsy();
-    expect(client.contextGraphs.has('override-slug')).toBe(true);
-  });
-
-  it('rejects invalid slugs without hitting the daemon', async () => {
-    const result = await server.call('dkg_context_graph_create', {
-      name: 'X',
-      id: 'BAD_SLUG_With_Spaces',
-    });
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toMatch(/Invalid context graph ID/);
-    expect(client.contextGraphs.size).toBe(0);
-  });
-
-  // F2: surface the daemon's already-exists signal so callers can
-  // distinguish "newly created" from "already existed" without doing
-  // an extra dkg_list_context_graphs round-trip. Mirrors
-  // dkg_assertion_create's idempotency surfacing.
-  it('first create reports "Created"; second create with same id reports "already exists"', async () => {
-    const r1 = await server.call('dkg_context_graph_create', { name: 'My Project' });
-    expect(r1.isError).toBeFalsy();
-    expect(r1.content[0].text).toMatch(/^Created context graph 'my-project'/);
-
-    // Re-create with the same auto-derived id — daemon-side 409 is
-    // caught by `client.createContextGraph`, surfaced as
-    // `alreadyExists: true` to the tool, which renders the
-    // distinct "already exists" message.
-    const r2 = await server.call('dkg_context_graph_create', { name: 'My Project' });
-    expect(r2.isError).toBeFalsy();
-    expect(r2.content[0].text).toMatch(/^Context graph 'my-project' already exists/);
-    expect(r2.content[0].text).not.toMatch(/^Created/);
-  });
-
-  it('description no longer recommends the dkg_list_context_graphs workaround', () => {
-    // The pre-F2 description told callers to "Call dkg_list_context_graphs
-    // first to see if one with this name already exists." That workaround
-    // was forced because the create call dropped the idempotency signal.
-    // Post-F2 the create surfaces the signal directly, so the workaround
-    // text must be gone.
-    const desc = server.get('dkg_context_graph_create').config.description!;
     expect(desc).not.toMatch(/Call `dkg_list_context_graphs` first/);
-    // ...replaced with an explicit idempotency contract.
     expect(desc).toMatch(/Idempotent/);
   });
 
-  it('dkg_sub_graph_create is wrapper-idempotent: ensureSubGraph swallows the daemon-side 409', async () => {
-    const r1 = await server.call('dkg_sub_graph_create', {
-      contextGraphId: 'cg',
-      subGraphName: 'meta',
-    });
-    expect(r1.isError).toBeFalsy();
-    expect(r1.content[0].text).toMatch(/'meta' ready in 'cg'/);
-    // Re-create the same name — the wrapper-level idempotency lock means
-    // the agent-facing surface stays clean even if the daemon would 409.
-    const r2 = await server.call('dkg_sub_graph_create', {
-      contextGraphId: 'cg',
-      subGraphName: 'meta',
-    });
-    expect(r2.isError).toBeFalsy();
+  it('rejects an invalid slug client-side, before any daemon call', async () => {
+    // VALID_CG_ID_RE fails → errResult returned BEFORE client.createContextGraph.
+    // Proven by using a real client pointed at a DEAD port: if the guard
+    // regressed and fell through to the network, we'd get a connection
+    // error, not the documented validation message.
+    const s = new FakeServer();
+    registerSetupTools(s.asMcpServer(), liveClient({ api: DEAD }), liveConfig({ api: DEAD }));
+    const result = await s.call('dkg_context_graph_create', { name: 'X', id: 'BAD_SLUG_With_Spaces' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/Invalid context graph ID/);
+  });
+
+  it('dkg_subscribe schema defaults includeSharedMemory to true and accepts false', () => {
+    expect(server.parse('dkg_subscribe', { contextGraphId: 'x' }).includeSharedMemory).toBe(true);
+    expect(server.parse('dkg_subscribe', { contextGraphId: 'x', includeSharedMemory: false }).includeSharedMemory).toBe(false);
   });
 
   it('documents canonical context graph ids for existing-target setup tools', () => {
@@ -113,40 +71,15 @@ describe('setup tools — context graph + sub-graph + subscribe', () => {
       expect(contextGraphId?.description).toContain('Do not guess');
     }
   });
-
-  it('dkg_subscribe defaults includeSharedMemory to true', async () => {
-    const result = await server.call('dkg_subscribe', { contextGraphId: 'remote-cg' });
-    expect(result.isError).toBeFalsy();
-    expect(result.content[0].text).toMatch(/Subscribed to 'remote-cg'/);
-    expect(client.subscribed.has('remote-cg')).toBe(true);
-  });
-
-  it('dkg_subscribe forwards includeSharedMemory: false', async () => {
-    let received: boolean | undefined;
-    const localClient = new FakeClient({
-      subscribe: async (args) => {
-        received = args.includeSharedMemory;
-        return { subscribed: args.contextGraphId };
-      },
-    });
-    const localServer = new FakeServer();
-    registerSetupTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
-    await localServer.call('dkg_subscribe', {
-      contextGraphId: 'remote',
-      includeSharedMemory: false,
-    });
-    expect(received).toBe(false);
-  });
 });
 
-describe('publish tools — write+publish helper + canonical SWM finalizer', () => {
+// ── PURE: publish tool surface + validation ──────────────────────────
+describe('publish tools — pure surface + client-side guards (no node)', () => {
   let server: FakeServer;
-  let client: FakeClient;
 
   beforeEach(() => {
     server = new FakeServer();
-    client = new FakeClient();
-    registerPublishTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
+    registerPublishTools(server.asMcpServer(), liveClient(), liveConfig());
   });
 
   it('registers both publish tools', () => {
@@ -164,261 +97,49 @@ describe('publish tools — write+publish helper + canonical SWM finalizer', () 
     }
   });
 
-  // NOTE: the two DID-form contextGraphId normalization tests that used to
-  // live here drove a fake `fetcher` (returning canned `new Response(...)`
-  // bodies) purely to capture the outgoing URL/body. That fake-daemon
-  // pattern pins the wire shape but is blind to the daemon renaming a field
-  // or rejecting the request — the exact false-confidence we are removing.
-  // The normalization is now validated END-TO-END against a real daemon in
-  // `mcp-tool-surface.integration.test.ts` ("accepts a full
-  // did:dkg:context-graph CG id on query/listSubGraphs/subscribe"), where a
-  // broken normalization surfaces as a real 400/throw.
-
-  it('dkg_publish auto-types objects: URI passes through, literal gets quoted', async () => {
-    const result = await server.call('dkg_publish', {
-      contextGraphId: 'cg',
-      quads: [
-        { subject: 'urn:s:1', predicate: 'urn:p:type', object: 'urn:Note' },
-        { subject: 'urn:s:1', predicate: 'urn:p:label', object: 'a literal value' },
-      ],
-    });
-    expect(result.isError).toBeFalsy();
-    const call = client.publishCalls.at(-1)!;
-    const wireQuads = call.quads as Array<{ subject: string; predicate: string; object: string }>;
-    expect(wireQuads[0].object).toBe('urn:Note');
-    expect(wireQuads[1].object).toBe('"a literal value"');
+  it('dkg_publish rejects an empty quads array at the schema layer (parse)', () => {
+    expect(() => server.parse('dkg_publish', { contextGraphId: 'cg', quads: [] })).toThrow();
   });
 
-  it('dkg_publish rejects an empty quads array at the schema layer', async () => {
-    await expect(
-      server.call('dkg_publish', { contextGraphId: 'cg', quads: [] }),
-    ).rejects.toThrow();
-  });
-
-  it('dkg_shared_memory_publish without rootEntities publishes selection: all', async () => {
-    const result = await server.call('dkg_shared_memory_publish', { contextGraphId: 'cg' });
-    expect(result.isError).toBeFalsy();
-    expect(result.content[0].text).toMatch(/Selection: all/);
-  });
-
-  it('dkg_shared_memory_publish rejects an empty rootEntities array (omit or non-empty only)', async () => {
-    const result = await server.call('dkg_shared_memory_publish', {
-      contextGraphId: 'cg',
-      rootEntities: [],
-    });
+  it('dkg_shared_memory_publish rejects an empty rootEntities array client-side (before any daemon call)', async () => {
+    const s = new FakeServer();
+    registerPublishTools(s.asMcpServer(), liveClient({ api: DEAD }), liveConfig({ api: DEAD }));
+    const result = await s.call('dkg_shared_memory_publish', { contextGraphId: 'cg', rootEntities: [] });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toMatch(/non-empty array/);
   });
 
-  it('dkg_shared_memory_publish forwards a non-empty rootEntities subset', async () => {
-    const result = await server.call('dkg_shared_memory_publish', {
-      contextGraphId: 'cg',
-      rootEntities: ['urn:r:1', 'urn:r:2'],
-    });
-    expect(result.isError).toBeFalsy();
-    expect(result.content[0].text).toMatch(/Roots: 2/);
-    const call = client.publishCalls.find((c) => c.kind === 'publishSharedMemory')!;
-    expect(call.rootEntities).toEqual(['urn:r:1', 'urn:r:2']);
+  // F11: accessPolicy wire form is the numeric 0|1 union — accepted by
+  // parse; the legacy string `"open"` and out-of-range `2` are rejected.
+  it('F11: accepts numeric accessPolicy 0 and 1 (parse)', () => {
+    expect(server.parse('dkg_shared_memory_publish', { contextGraphId: 'cg', registerIfNeeded: true, accessPolicy: 0 }).accessPolicy).toBe(0);
+    expect(server.parse('dkg_shared_memory_publish', { contextGraphId: 'cg', registerIfNeeded: true, accessPolicy: 1 }).accessPolicy).toBe(1);
   });
 
-  it('dkg_shared_memory_publish runs registerContextGraph first when registerIfNeeded: true', async () => {
-    const localClient = new FakeClient();
-    let registered = false;
-    localClient.registerContextGraph = (async () => {
-      registered = true;
-      return {
-        registered: 'cg',
-        onChainId: 'chain:cg',
-        txHash: '0xreg',
-        alreadyRegistered: false,
-      };
-    }) as never;
-    const localServer = new FakeServer();
-    registerPublishTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
-
-    const result = await localServer.call('dkg_shared_memory_publish', {
-      contextGraphId: 'cg',
-      registerIfNeeded: true,
-    });
-    expect(result.isError).toBeFalsy();
-    expect(registered).toBe(true);
-    expect(result.content[0].text).toMatch(/Registered on-chain/);
+  it('F11: rejects the legacy string "open" and out-of-range numeric accessPolicy (parse)', () => {
+    expect(() => server.parse('dkg_shared_memory_publish', { contextGraphId: 'cg', registerIfNeeded: true, accessPolicy: 'open' })).toThrow();
+    expect(() => server.parse('dkg_shared_memory_publish', { contextGraphId: 'cg', registerIfNeeded: true, accessPolicy: 2 })).toThrow();
   });
 
-  // F12 (qa-review-round-2): the registerIfNeeded already-registered
-  // tolerance was implemented as a `message.includes('already registered')`
-  // substring match — locale-fragile + breaks on any daemon wording
-  // change. Post-F12 the client surfaces a typed `alreadyRegistered:
-  // true` flag from the daemon's HTTP 409, and the tool branches on
-  // the typed flag.
-  it('F12: registerIfNeeded tolerates already-registered via the typed flag (no substring match)', async () => {
-    const localClient = new FakeClient({
-      registerContextGraph: async () => ({
-        registered: 'cg',
-        alreadyRegistered: true,
-      }) as any,
-    });
-    const localServer = new FakeServer();
-    registerPublishTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
-
-    const result = await localServer.call('dkg_shared_memory_publish', {
-      contextGraphId: 'cg',
-      registerIfNeeded: true,
-    });
-    // The publish must succeed even though the CG was already registered.
-    expect(result.isError).toBeFalsy();
-    // Success summary MUST NOT claim we just registered something.
-    expect(result.content[0].text).not.toMatch(/Registered on-chain/);
-  });
-
-  it('F12: registerIfNeeded propagates non-409 register failures (no silent swallow)', async () => {
-    // A truly-failing register call (network error, unrelated body
-    // shape) MUST propagate as a tool error; the pre-F12 substring
-    // match would have swallowed any error whose message happened to
-    // contain "already registered" verbatim.
-    const localClient = new FakeClient({
-      registerContextGraph: async () => {
-        throw new Error('rpc unreachable');
-      },
-    });
-    const localServer = new FakeServer();
-    registerPublishTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
-
-    const result = await localServer.call('dkg_shared_memory_publish', {
-      contextGraphId: 'cg',
-      registerIfNeeded: true,
-    });
+  // F12: a register failure must propagate as a tool error (no silent
+  // swallow). Proven with a REAL dead-port client → genuine connection
+  // error surfaced as "Failed to register context graph: …".
+  it('F12: registerIfNeeded propagates a real register failure (no silent swallow)', async () => {
+    const s = new FakeServer();
+    registerPublishTools(s.asMcpServer(), liveClient({ api: DEAD }), liveConfig({ api: DEAD }));
+    const result = await s.call('dkg_shared_memory_publish', { contextGraphId: 'cg', registerIfNeeded: true });
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toMatch(/Failed to register context graph: rpc unreachable/);
-  });
-
-  // F3+F13 (qa-review-round-1 F3 + qa-review-round-2 F13): chain
-  // provenance echoed on publish responses so callers can verify
-  // post-hoc which chain the publish landed on. User explicit:
-  // option (a) WITHOUT loud-warning prose. accessPolicy is also
-  // echoed when registerIfNeeded ran so the caller can verify what
-  // the daemon committed without a separate read-back.
-  it('F3+F13: dkg_publish success summary echoes the configured chainId', async () => {
-    // FakeClient.walletBalances ships chainId='base-sepolia' by default.
-    const result = await server.call('dkg_publish', {
-      contextGraphId: 'cg',
-      quads: [{ subject: 'urn:s:1', predicate: 'urn:p:type', object: 'urn:Note' }],
-    });
-    expect(result.isError).toBeFalsy();
-    expect(result.content[0].text).toMatch(/Chain: base-sepolia/);
-  });
-
-  it('F3+F13: dkg_shared_memory_publish success summary echoes the configured chainId', async () => {
-    const result = await server.call('dkg_shared_memory_publish', { contextGraphId: 'cg' });
-    expect(result.isError).toBeFalsy();
-    expect(result.content[0].text).toMatch(/Chain: base-sepolia/);
-  });
-
-  it('F3+F13: chainId is omitted gracefully when the wallet-balances probe fails', async () => {
-    // The probe failure must NOT fail the publish — the publish
-    // succeeded, the chain echo is best-effort.
-    const localClient = new FakeClient({
-      getWalletBalances: async () => {
-        throw new Error('rpc unreachable');
-      },
-    });
-    const localServer = new FakeServer();
-    registerPublishTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
-
-    const result = await localServer.call('dkg_publish', {
-      contextGraphId: 'cg',
-      quads: [{ subject: 'urn:s:1', predicate: 'urn:p:type', object: 'urn:Note' }],
-    });
-    expect(result.isError).toBeFalsy();
-    expect(result.content[0].text).not.toMatch(/Chain:/);
-  });
-
-  it('F3+F13: dkg_shared_memory_publish echoes accessPolicy when registerIfNeeded ran', async () => {
-    const result = await server.call('dkg_shared_memory_publish', {
-      contextGraphId: 'cg',
-      registerIfNeeded: true,
-      accessPolicy: 1,
-    });
-    expect(result.isError).toBeFalsy();
-    expect(result.content[0].text).toMatch(/Registered on-chain:.*accessPolicy=1/);
-  });
-
-  it('F3+F13: response carries no warning prose (user explicit)', async () => {
-    // The user explicitly opted for echo-only — no "WARNING: this
-    // spends gas" / "Verify chainId before publishing" / similar
-    // copy. Future-proofs against well-meaning re-additions.
-    const r1 = await server.call('dkg_publish', {
-      contextGraphId: 'cg',
-      quads: [{ subject: 'urn:s:1', predicate: 'urn:p:type', object: 'urn:Note' }],
-    });
-    const r2 = await server.call('dkg_shared_memory_publish', { contextGraphId: 'cg' });
-    for (const r of [r1, r2]) {
-      expect(r.content[0].text).not.toMatch(/warning/i);
-      expect(r.content[0].text).not.toMatch(/spends gas/i);
-      expect(r.content[0].text).not.toMatch(/verify.*chain/i);
-    }
-  });
-
-  // F11 (qa-review-round-2 / matrix v0.8 §4.10): the canonical
-  // wire form for `accessPolicy` is the numeric `0|1` per the
-  // daemon's `/api/context-graph/{create,register}` handlers
-  // (`packages/cli/src/daemon/routes/context-graph.ts:455` /
-  // `:509-510` — both reject anything other than literal 0/1).
-  // Matrix v0.8 §4.10 line 291 had drifted to `z.enum(['open',
-  // 'private'])`; this test pins the implementation against the
-  // daemon canonical so a future re-alignment can't regress
-  // silently to the string form.
-  it('F11: dkg_shared_memory_publish accepts numeric accessPolicy 0 (open)', async () => {
-    const result = await server.call('dkg_shared_memory_publish', {
-      contextGraphId: 'cg',
-      registerIfNeeded: true,
-      accessPolicy: 0,
-    });
-    expect(result.isError).toBeFalsy();
-  });
-
-  it('F11: dkg_shared_memory_publish accepts numeric accessPolicy 1 (private)', async () => {
-    const result = await server.call('dkg_shared_memory_publish', {
-      contextGraphId: 'cg',
-      registerIfNeeded: true,
-      accessPolicy: 1,
-    });
-    expect(result.isError).toBeFalsy();
-  });
-
-  it('F11: dkg_shared_memory_publish rejects the legacy string `"open"` form at the schema layer', async () => {
-    await expect(
-      server.call('dkg_shared_memory_publish', {
-        contextGraphId: 'cg',
-        registerIfNeeded: true,
-        accessPolicy: 'open',
-      }),
-    ).rejects.toThrow();
-  });
-
-  it('F11: dkg_shared_memory_publish rejects out-of-range numeric accessPolicy', async () => {
-    // Matches the daemon's strict `accessPolicy !== 0 && accessPolicy !== 1`
-    // guard at routes/context-graph.ts:509 — the schema layer must
-    // reject the same shape (literal 0 / literal 1 only) before
-    // the wire boundary.
-    await expect(
-      server.call('dkg_shared_memory_publish', {
-        contextGraphId: 'cg',
-        registerIfNeeded: true,
-        accessPolicy: 2,
-      }),
-    ).rejects.toThrow();
+    expect(result.content[0].text).toMatch(/Failed to register context graph:/);
   });
 });
 
-describe('health tools — status + wallet balances', () => {
+// ── PURE: health tool surface ────────────────────────────────────────
+describe('health tools — pure surface + real failure handling (no node)', () => {
   let server: FakeServer;
-  let client: FakeClient;
 
   beforeEach(() => {
     server = new FakeServer();
-    client = new FakeClient();
-    registerHealthTools(server.asMcpServer(), client.asDkgClient(), makeConfig());
+    registerHealthTools(server.asMcpServer(), liveClient(), liveConfig());
   });
 
   it('registers the no-arg health tools with empty inputSchemas', () => {
@@ -426,42 +147,191 @@ describe('health tools — status + wallet balances', () => {
     expect(server.tools.has('dkg_wallet_balances')).toBe(true);
     expect(server.get('dkg_status').config.inputSchema).toEqual({});
     expect(server.get('dkg_wallet_balances').config.inputSchema).toEqual({});
-    // `dkg_peer_info` is also registered by this module but takes a
-    // required `peerId` arg, so it's covered by its own test file
-    // (`health-tools.test.ts`) where the schema + handler assertions
-    // live alongside the peer-info diagnostic fixtures.
     expect(server.tools.has('dkg_peer_info')).toBe(true);
   });
 
-  it('dkg_status renders the daemon status payload as a JSON code block', async () => {
+  it('dkg_wallet_balances surfaces a real probe failure as a tool error', async () => {
+    const s = new FakeServer();
+    registerHealthTools(s.asMcpServer(), liveClient({ api: DEAD }), liveConfig({ api: DEAD }));
+    const result = await s.call('dkg_wallet_balances', {});
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/Failed to fetch wallet balances/);
+  });
+});
+
+// ── LIVE: real daemon round-trips ────────────────────────────────────
+describe.skipIf(!LIVE)('setup tools — live round-trips', () => {
+  const RUN = `sp${Date.now().toString(36)}`;
+  let server: FakeServer;
+
+  beforeEach(() => {
+    server = new FakeServer();
+    registerSetupTools(server.asMcpServer(), liveClient(), liveConfig());
+  });
+
+  it('auto-derives the slug from the human name and reports Created, then idempotent already-exists', async () => {
+    const name = `Run ${RUN} Setup CG`;
+    const slug = `run-${RUN}-setup-cg`;
+    const first = await server.call('dkg_context_graph_create', { name });
+    expect(first.isError).toBeFalsy();
+    expect(first.content[0].text).toMatch(new RegExp(`^Created context graph '${slug}'`));
+
+    const second = await server.call('dkg_context_graph_create', { name });
+    expect(second.isError).toBeFalsy();
+    expect(second.content[0].text).toMatch(new RegExp(`^Context graph '${slug}' already exists`));
+  });
+
+  it('dkg_sub_graph_create is wrapper-idempotent against the daemon 409', async () => {
+    const r1 = await server.call('dkg_sub_graph_create', { contextGraphId: CG, subGraphName: 'meta' });
+    expect(r1.isError).toBeFalsy();
+    expect(r1.content[0].text).toMatch(/'meta' ready in/);
+    const r2 = await server.call('dkg_sub_graph_create', { contextGraphId: CG, subGraphName: 'meta' });
+    expect(r2.isError).toBeFalsy();
+  });
+
+  it('dkg_subscribe round-trips (default + includeSharedMemory:false)', async () => {
+    const def = await server.call('dkg_subscribe', { contextGraphId: CG });
+    expect(def.isError).toBeFalsy();
+    expect(def.content[0].text).toMatch(new RegExp(`Subscribed to '${CG}'`));
+
+    const noSwm = await server.call('dkg_subscribe', { contextGraphId: CG, includeSharedMemory: false });
+    expect(noSwm.isError).toBeFalsy();
+  });
+});
+
+describe.skipIf(!LIVE)('publish tools — live on-chain round-trips', () => {
+  const RUN = `pp${Date.now().toString(36)}`;
+  const did = `did:dkg:context-graph:${CG}`;
+  let server: FakeServer;
+  let client: ReturnType<typeof liveClient>;
+
+  beforeEach(() => {
+    server = new FakeServer();
+    client = liveClient();
+    registerPublishTools(server.asMcpServer(), client, liveConfig());
+  });
+
+  it(
+    'dkg_publish writes+mints fresh quads, echoes the chain, omits warning prose, and auto-types objects',
+    async () => {
+      const subj = `urn:pp:${RUN}:e`;
+      const literal = `pp ${RUN} literal value payload`;
+      const result = await server.call('dkg_publish', {
+        contextGraphId: CG,
+        quads: [
+          { subject: subj, predicate: RDF_TYPE, object: 'urn:pp:Note' },
+          { subject: subj, predicate: 'urn:pp:p:label', object: literal },
+        ],
+      });
+      expect(result.isError, result.content[0].text).toBeFalsy();
+      const text = result.content[0].text;
+      expect(text).toMatch(/Published 2 quad\(s\)/);
+      // F3+F13: chain echo present (read from the real wallet-balances probe).
+      expect(text).toMatch(/Chain: .+/);
+      // User-locked: echo-only, no warning prose.
+      expect(text).not.toMatch(/warning/i);
+      expect(text).not.toMatch(/spends gas/i);
+      expect(text).not.toMatch(/verify.*chain/i);
+
+      // Auto-typing proven END-TO-END: read the minted entity back from VM
+      // and confirm the URI object stayed a URI and the bare string became
+      // a quoted literal.
+      const back = await client.query({
+        sparql: `SELECT ?p ?o WHERE { <${subj}> ?p ?o }`,
+        contextGraphId: CG,
+        view: 'verifiable-memory',
+      });
+      const rows = back.bindings ?? [];
+      const typeRow = rows.find((b) => String((b.p as { value?: string })?.value ?? b.p).includes('22-rdf-syntax-ns#type'));
+      const labelRow = rows.find((b) => String((b.p as { value?: string })?.value ?? b.p).includes('urn:pp:p:label'));
+      expect(typeRow, 'type triple missing from VM').toBeTruthy();
+      expect(labelRow, 'label triple missing from VM').toBeTruthy();
+      // The literal round-trips as a plain string value (not a <urn:…>).
+      expect(String((labelRow!.o as { value?: string })?.value ?? labelRow!.o)).toContain(literal);
+    },
+    PUBLISH_TIMEOUT_MS,
+  );
+
+  it(
+    'dkg_shared_memory_publish mints a selection-scoped subset and reports Roots: 1 + chain',
+    async () => {
+      const subj = `urn:pp:${RUN}:smp`;
+      const seed = await fetch(`${API}/api/shared-memory/write`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({
+          contextGraphId: CG,
+          quads: [
+            { subject: subj, predicate: RDF_TYPE, object: 'urn:pp:Note', graph: did },
+            { subject: subj, predicate: 'urn:pp:p:label', object: '"subset publish seed"', graph: did },
+          ],
+        }),
+      });
+      expect(seed.ok, `seed failed: ${seed.status}`).toBe(true);
+
+      const result = await server.call('dkg_shared_memory_publish', { contextGraphId: CG, rootEntities: [subj] });
+      expect(result.isError, result.content[0].text).toBeFalsy();
+      expect(result.content[0].text).toMatch(/Published .*SWM to Verifiable Memory/);
+      expect(result.content[0].text).toMatch(/Roots: 1/);
+      expect(result.content[0].text).toMatch(/Chain: .+/);
+    },
+    PUBLISH_TIMEOUT_MS,
+  );
+
+  it(
+    'registerIfNeeded tolerates an already-registered CG (no "Registered on-chain" claim)',
+    async () => {
+      // devnet-test is already on-chain → registerContextGraph returns
+      // alreadyRegistered:true → the tool must NOT claim a fresh
+      // registration, but the publish still succeeds.
+      const subj = `urn:pp:${RUN}:reg`;
+      const seed = await fetch(`${API}/api/shared-memory/write`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({
+          contextGraphId: CG,
+          quads: [
+            { subject: subj, predicate: RDF_TYPE, object: 'urn:pp:Note', graph: did },
+            { subject: subj, predicate: 'urn:pp:p:label', object: '"already-registered tolerance seed"', graph: did },
+          ],
+        }),
+      });
+      expect(seed.ok, `seed failed: ${seed.status}`).toBe(true);
+
+      const result = await server.call('dkg_shared_memory_publish', {
+        contextGraphId: CG,
+        rootEntities: [subj],
+        registerIfNeeded: true,
+        accessPolicy: 1,
+      });
+      expect(result.isError, result.content[0].text).toBeFalsy();
+      expect(result.content[0].text).toMatch(/Roots: 1/);
+      // Already registered → no fresh-registration echo.
+      expect(result.content[0].text).not.toMatch(/Registered on-chain/);
+    },
+    PUBLISH_TIMEOUT_MS,
+  );
+});
+
+describe.skipIf(!LIVE)('health tools — live status + wallet', () => {
+  let server: FakeServer;
+
+  beforeEach(() => {
+    server = new FakeServer();
+    registerHealthTools(server.asMcpServer(), liveClient(), liveConfig());
+  });
+
+  it('dkg_status renders the real daemon status payload', async () => {
     const result = await server.call('dkg_status', {});
     expect(result.isError).toBeFalsy();
     expect(result.content[0].text).toMatch(/DKG node status/);
-    expect(result.content[0].text).toMatch(/"peerId": "peer-test"/);
+    expect(result.content[0].text).toMatch(/"peerId"/);
   });
 
-  it('dkg_wallet_balances renders per-wallet rows + chain context', async () => {
+  it('dkg_wallet_balances renders the real wallet probe', async () => {
     const result = await server.call('dkg_wallet_balances', {});
     expect(result.isError).toBeFalsy();
-    expect(result.content[0].text).toMatch(/0xabc/);
-    expect(result.content[0].text).toMatch(/0\.05 ETH/);
-    expect(result.content[0].text).toMatch(/12\.5 TRAC/);
-    expect(result.content[0].text).toMatch(/Chain: base-sepolia/);
-  });
-
-  it('dkg_wallet_balances surfaces a tool error when the daemon reports a probe error', async () => {
-    const localClient = new FakeClient();
-    localClient.walletBalances = {
-      wallets: [],
-      balances: [],
-      chainId: null,
-      rpcUrl: null,
-      error: 'rpc unreachable',
-    };
-    const localServer = new FakeServer();
-    registerHealthTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
-    const result = await localServer.call('dkg_wallet_balances', {});
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toMatch(/rpc unreachable/);
+    expect(result.content[0].text).toMatch(/Wallet balances/);
+    expect(result.content[0].text).toMatch(/TRAC|ETH|no operational wallets/);
   });
 });

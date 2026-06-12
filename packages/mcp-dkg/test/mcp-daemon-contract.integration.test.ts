@@ -1,16 +1,16 @@
 /**
  * Live MCP agent-tool-surface ↔ daemon contract (opt-in, real node).
  *
- * What this proves that the mocked tests can't
- * --------------------------------------------
- * Every other test in this package drives the tools against `FakeClient`
- * / a fake fetcher (see `harness.ts`, `knowledge-assets-client.test.ts`).
- * Those pin the *outgoing request shape* but return `{ ok: true }` for
- * anything, so they are blind to the failure mode a teammate hit in
+ * What this proves that schema-only tests can't
+ * ---------------------------------------------
+ * The per-PR tests in this package are now mock-free (the in-memory
+ * `FakeClient` daemon double was retired): they cover registration, zod
+ * schemas, and pre-network guards, but never a daemon round-trip. This
+ * suite is the round-trip net for the failure mode a teammate hit in
  * rc.17 — "the agent tool surface wasn't updated all the way with the new
- * API and KA logic." When the daemon renamed an endpoint, changed a body
- * field, tightened a `view` enum, or reshaped a response, the mocks kept
- * passing while the real round-trip was broken.
+ * API and KA logic." When the daemon renames an endpoint, changes a body
+ * field, tightens a `view` enum, or reshapes a response, only a REAL
+ * client↔daemon walk catches it.
  *
  * This test wires the REAL `DkgClient` + the REAL `registerTools()`
  * surface (the exact registration sequence from `src/index.ts`) against a
