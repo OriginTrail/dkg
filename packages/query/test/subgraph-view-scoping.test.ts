@@ -29,7 +29,7 @@ import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 // the bug is live. They are EXCLUDED from the default test lane (which must stay
 // green / mergeable) and run only under `RUN_ISSUE_LIVENESS=1` (the dedicated
 // issue-liveness CI lane). See package.json `test:issue-liveness`.
-const LIVENESS_ENABLED = !!process.env.RUN_ISSUE_LIVENESS;
+const LIVENESS_ENABLED = process.env.RUN_ISSUE_LIVENESS === '1';
 
 
 const CG = 'subgraph-view-cg';

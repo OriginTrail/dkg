@@ -67,7 +67,7 @@ const TEST_CHAIN_ID = 31337n;
 // test lane (which has to stay green / mergeable). It runs only under
 // `RUN_ISSUE_LIVENESS=1` (the dedicated issue-liveness CI lane). The rest of this
 // file (the real prover e2e) always runs.
-const LIVENESS_ENABLED = !!process.env.RUN_ISSUE_LIVENESS;
+const LIVENESS_ENABLED = process.env.RUN_ISSUE_LIVENESS === '1';
 
 describe('Random Sampling E2E (Hardhat)', () => {
   const ROOT = 'urn:experiment:wsd';

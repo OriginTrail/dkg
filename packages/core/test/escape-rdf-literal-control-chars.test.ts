@@ -20,7 +20,7 @@ import { escapeDkgRdfLiteral } from '../src/publisher-extension.js';
 // the bug is live. They are EXCLUDED from the default test lane (which must stay
 // green / mergeable) and run only under `RUN_ISSUE_LIVENESS=1` (the dedicated
 // issue-liveness CI lane). See package.json `test:issue-liveness`.
-const LIVENESS_ENABLED = !!process.env.RUN_ISSUE_LIVENESS;
+const LIVENESS_ENABLED = process.env.RUN_ISSUE_LIVENESS === '1';
 
 
 const NUL = String.fromCharCode(0x00);
@@ -38,7 +38,7 @@ describe.runIf(LIVENESS_ENABLED)('GH #416 - escapeDkgRdfLiteral non-ECHAR contro
   });
 
   // RDF `\u` UCHAR hex is case-insensitive, so compare lowercased output — a
-  // correct fix that emits lowercase hex (``) is just as valid as
+  // correct fix that emits lowercase hex (`\u000b`) is just as valid as
   // uppercase and must not keep this red (Codex review on PR #1129).
   it('UCHAR-encodes NUL (0x00) instead of leaving it raw', () => {
     expect(escapeDkgRdfLiteral(`a${NUL}b`).toLowerCase()).toBe('a\\u0000b');

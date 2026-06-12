@@ -40,7 +40,7 @@ import { getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-contex
 // the bug is live. They are EXCLUDED from the default test lane (which must stay
 // green / mergeable) and run only under `RUN_ISSUE_LIVENESS=1` (the dedicated
 // issue-liveness CI lane). See package.json `test:issue-liveness`.
-const LIVENESS_ENABLED = !!process.env.RUN_ISSUE_LIVENESS;
+const LIVENESS_ENABLED = process.env.RUN_ISSUE_LIVENESS === '1';
 
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
