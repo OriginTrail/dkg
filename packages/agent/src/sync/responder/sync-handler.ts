@@ -294,17 +294,17 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     }
     const nquads: string[] = [];
 
-    const authStartedAt = Date.now();
-    const authorized = await authorizeSyncRequest(request, peerId);
-    const authDurationMs = Date.now() - authStartedAt;
-    throwIfAborted(signal);
-    if (!authorized) {
-      logWarn(createOperationContext('sync'), `Denied sync request for "${contextGraphId}" from peer ${peerId} (phase=${phase})`);
-      return new TextEncoder().encode(syncDeniedResponse);
-    }
-
     return limiter.run(peerId, signal, async () => {
       throwIfAborted(signal);
+      const authStartedAt = Date.now();
+      const authorized = await authorizeSyncRequest(request, peerId);
+      const authDurationMs = Date.now() - authStartedAt;
+      throwIfAborted(signal);
+      if (!authorized) {
+        logWarn(createOperationContext('sync'), `Denied sync request for "${contextGraphId}" from peer ${peerId} (phase=${phase})`);
+        return new TextEncoder().encode(syncDeniedResponse);
+      }
+
       if (store.queryCancellation === 'pre-dispatch' && !warnedPreDispatchCancellation) {
         warnedPreDispatchCancellation = true;
         logWarn(

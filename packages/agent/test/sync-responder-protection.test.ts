@@ -73,7 +73,10 @@ function abortDuringListenerRegistration(message: string): AbortSignal {
 
 function captureHandler(
   store: TripleStore,
-  options: { logWarn?: (ctx: OperationContext, message: string) => void } = {},
+  options: {
+    authorizeSyncRequest?: (request: SyncRequestEnvelope, remotePeerId: string) => Promise<boolean>;
+    logWarn?: (ctx: OperationContext, message: string) => void;
+  } = {},
 ) {
   let captured: ((
     data: Uint8Array,
@@ -90,7 +93,7 @@ function captureHandler(
     store,
     peerId: 'self-peer',
     parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,
-    authorizeSyncRequest: async () => true,
+    authorizeSyncRequest: options.authorizeSyncRequest ?? (async () => true),
     logWarn: options.logWarn ?? noopLog,
     logDebug: noopLog,
   });
@@ -149,6 +152,49 @@ describe('sync responder protection', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     await Promise.all(requests);
+  });
+
+  it('applies per-peer backpressure before authorization work starts', async () => {
+    const authGates: Array<ReturnType<typeof deferred<boolean>>> = [];
+    let authStarted = 0;
+    let inAuth = 0;
+    let maxInAuth = 0;
+    const cap = captureHandler(baseStore({
+      query: async () => {
+        throw new Error('denied requests should not query');
+      },
+    }), {
+      authorizeSyncRequest: async () => {
+        authStarted += 1;
+        inAuth += 1;
+        maxInAuth = Math.max(maxInAuth, inAuth);
+        const gate = deferred<boolean>();
+        authGates.push(gate);
+        try {
+          return await gate.promise;
+        } finally {
+          inAuth -= 1;
+        }
+      },
+    });
+    const envelope = makeEnvelope();
+
+    const first = cap.invoke(envelope, REMOTE_A);
+    const second = cap.invoke(envelope, REMOTE_A);
+    while (authStarted < 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(authStarted).toBe(1);
+    expect(maxInAuth).toBe(1);
+
+    authGates.shift()?.resolve(false);
+    await first;
+    while (authStarted < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(maxInAuth).toBe(1);
+
+    authGates.shift()?.resolve(false);
+    await second;
   });
 
   it('removes queued requests that abort while registering the abort listener', async () => {
