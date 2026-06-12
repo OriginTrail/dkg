@@ -171,6 +171,8 @@ describe('sync responder graph admission planner', () => {
       q(parentPartition, 'urn:parent:partition', 'http://schema.org/name', '"parent-context-partition"'),
       q(parentAssertion, 'urn:parent:assertion', 'http://schema.org/name', '"parent-assertion"'),
       q(parentAssertionMeta, 'urn:parent:assertion', `${DKG_NS}merkleRoot`, '"parent-assertion-meta"'),
+      q(`${parentPartition}/_meta`, parentPartition, RDF_TYPE, DKG_CONTEXT_GRAPH),
+      q(`${parentAssertion}/_meta`, parentAssertion, RDF_TYPE, DKG_CONTEXT_GRAPH),
       q(malformedAssertion, 'urn:malformed:assertion', 'http://schema.org/name', '"malformed-assertion-leak"'),
       q(`${cgPrefix}/_meta`, 'urn:lifecycle:reserved-vm', `${DKG_NS}memoryLayer`, `"${MemoryLayer.VerifiableMemory}"`),
       q(`${cgPrefix}/_meta`, 'urn:lifecycle:reserved-vm', `${DKG_NS}assertionGraph`, parentAssertion),
@@ -214,10 +216,13 @@ describe('sync responder graph admission planner', () => {
     const vmAssertion = `${cgPrefix}/assertion/0xabc/final`;
     const wmAssertion = `${cgPrefix}/assertion/0xabc/draft`;
     const registeredSubGraph = `${cgPrefix}/registered`;
+    const childCollisionSubGraph = `${cgPrefix}/child`;
 
     await store.insert([
       q(cgMeta, cgPrefix, `${DKG_NS}createdAt`, '"2026-06-01T00:00:00Z"'),
       ...subGraphRegistrationQuads(cgId, 'registered'),
+      ...subGraphRegistrationQuads(cgId, 'child'),
+      q(`${childCollisionSubGraph}/_meta`, childCollisionSubGraph, RDF_TYPE, DKG_CONTEXT_GRAPH),
       q(cgMeta, 'urn:forged-subgraph-registration', RDF_TYPE, `${DKG_NS}SubGraph`),
       q(cgMeta, 'urn:forged-subgraph-registration', SCHEMA_NAME, '"forged"'),
       q(cgMeta, `${cgPrefix}/context`, RDF_TYPE, `${DKG_NS}SubGraph`),
@@ -246,6 +251,7 @@ describe('sync responder graph admission planner', () => {
 
     expect(out).toContain(cgPrefix);
     expect(out).toContain(registeredSubGraph);
+    expect(out).toContain(childCollisionSubGraph);
     expect(out).toContain(`${DKG_NS}SubGraph`);
     expect(out).toContain(SCHEMA_NAME);
     expect(out).toContain('did:dkg:activity:1');

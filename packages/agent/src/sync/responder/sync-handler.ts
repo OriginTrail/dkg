@@ -7,6 +7,7 @@ import {
 import type { SyncRequestEnvelope } from '../auth/request-build.js';
 import {
   createResponderGraphListMemo,
+  createResponderSubGraphRegistrationMemo,
   createResponderSwmAdmissionMemo,
   readDurableCanonicalDataPage,
   readDurableDataPage,
@@ -58,6 +59,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     logDebug,
   } = params;
   const graphListMemo = createResponderGraphListMemo(store);
+  const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
   const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
 
   register(protocolSync, async (data, peerId) => {
@@ -152,7 +154,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       const rows = await readDurableMetaPage({
         store,
         contextGraphId,
-        registeredSubGraphNames: await swmAdmissionMemo.get(contextGraphId, { refresh: offset === 0 }),
+        registeredSubGraphNames: await subGraphRegistrationMemo.get(contextGraphId, { refresh: offset === 0 }),
         offset,
         limit,
       });

@@ -26,7 +26,7 @@ export interface GraphListMemo {
   get(options?: { refresh?: boolean }): Promise<readonly string[]>;
 }
 
-export interface SwmAdmissionMemo {
+export interface SubGraphNameMemo {
   get(contextGraphId: string, options?: { refresh?: boolean }): Promise<readonly string[]>;
 }
 
@@ -60,7 +60,21 @@ export function createResponderGraphListMemo(
 export function createResponderSwmAdmissionMemo(
   store: TripleStore,
   ttlMs = 10_000,
-): SwmAdmissionMemo {
+): SubGraphNameMemo {
+  return createSubGraphNameMemo((contextGraphId) => readAdmittedSwmSubGraphNames(store, contextGraphId), ttlMs);
+}
+
+export function createResponderSubGraphRegistrationMemo(
+  store: TripleStore,
+  ttlMs = 10_000,
+): SubGraphNameMemo {
+  return createSubGraphNameMemo((contextGraphId) => readRegisteredSubGraphNames(store, contextGraphId), ttlMs);
+}
+
+function createSubGraphNameMemo(
+  loadNames: (contextGraphId: string) => Promise<string[]>,
+  ttlMs: number,
+): SubGraphNameMemo {
   const cached = new Map<string, { value: readonly string[]; cachedAt: number }>();
   const inflight = new Map<string, Promise<readonly string[]>>();
   return {
@@ -70,7 +84,7 @@ export function createResponderSwmAdmissionMemo(
       if (!options?.refresh && existing && now - existing.cachedAt < ttlMs) return [...existing.value];
       const pending = inflight.get(contextGraphId);
       if (pending) return [...(await pending)];
-      const load = readAdmittedSwmSubGraphNames(store, contextGraphId)
+      const load = loadNames(contextGraphId)
         .then((names) => {
           cached.set(contextGraphId, { value: names, cachedAt: Date.now() });
           return names;
@@ -361,14 +375,14 @@ async function isDescendantOfKnownChildContextGraph(
   graph: string,
 ): Promise<boolean> {
   if (graph === cgPrefix || !graph.startsWith(`${cgPrefix}/`)) return false;
+  const remainder = graph.slice(cgPrefix.length + 1);
+  const segments = remainder.split('/').filter(Boolean);
+  if (isParentOwnedReservedGraphSegments(segments)) return false;
   if (await isKnownContextGraph(store, graph)) return true;
   if (graph.endsWith('/_meta')) {
     const graphOwner = graph.slice(0, -'/_meta'.length);
     if (await isKnownContextGraph(store, graphOwner)) return true;
   }
-  const remainder = graph.slice(cgPrefix.length + 1);
-  const segments = remainder.split('/').filter(Boolean);
-  if (isParentOwnedReservedGraphSegments(segments)) return false;
   let childUri = cgPrefix;
   for (const segment of segments) {
     childUri = `${childUri}/${segment}`;
