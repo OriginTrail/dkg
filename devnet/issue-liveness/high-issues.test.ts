@@ -22,6 +22,18 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import * as http from 'node:http';
 
+// Poll a condition until true or the (generous) deadline — replication latency
+// must not flip these into latency tests. They stay bug-sensitive: a long
+// timeout only fails if the KA NEVER materializes, not if it's merely slow.
+async function pollUntil(fn: () => Promise<boolean>, timeoutMs: number, intervalMs = 2000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await fn()) return true;
+    if (Date.now() + intervalMs >= deadline) return false;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 const REPO_ROOT = resolve(__dirname, '../..');
 const DEVNET_DIR = join(REPO_ROOT, '.devnet');
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -193,12 +205,19 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
     expect(r.body?.publishedUal ?? r.body?.ual).toBeTruthy();
   });
 
-  it('GH #1094: wm/pull-from {layer:vm} seeds an edit draft (does not 500)', async () => {
+  it('GH #1094: wm/pull-from {layer:vm} seeds an editable WM draft', async () => {
     expect(publishOk).toBe(true);
     const r = await post(pubNode!, `/api/knowledge-assets/${KA}/wm/pull-from`, {
       contextGraphId: SEED_CG, layer: 'vm', onConflict: 'replace',
     });
-    expect(r.status).not.toBe(500);
+    // The documented edit path must SUCCEED (today it 500s). `!== 500` alone
+    // would let a 404/409/422 look fixed, so require 200 + no error body.
+    expect(r.status, `wm/pull-from failed: ${r.status} ${JSON.stringify(r.body)}`).toBe(200);
+    expect(r.body?.error).toBeUndefined();
+    // Read back: the KA is now resolvable as an editable WM draft.
+    const desc = await get(pubNode!, `/api/knowledge-assets/${KA}?contextGraphId=${SEED_CG}`);
+    expect(desc.status).toBe(200);
+    expect(desc.body?.memoryLayer === 'WM' || desc.body?.wmCurrentAssertion || desc.body?.state === 'created').toBeTruthy();
   });
 
   it('GH #1096: /api/memory/search finds the published VM entity', async () => {
@@ -209,12 +228,16 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
 
   it('GH #1098: a core subscribed BEFORE publish materializes the KA in VM', async () => {
     expect(publishOk).toBe(true);
-    await sleep(8000);
-    const r = await post(preSubNode, '/api/query', {
-      sparql: `SELECT ?o WHERE { ?s <https://schema.org/name> ?o }`, contextGraphId: SEED_CG, view: 'verifiable-memory',
-    });
-    const names = (r.body?.result?.bindings ?? []).map((b: any) => b.o);
-    expect(names.some((n: string) => String(n).includes('HighEntity'))).toBe(true);
+    // Poll (generous deadline) rather than a fixed sleep, so a slow devnet does
+    // not flip this into a latency test — it only fails if the KA NEVER lands.
+    const found = await pollUntil(async () => {
+      const r = await post(preSubNode, '/api/query', {
+        sparql: `SELECT ?o WHERE { ?s <https://schema.org/name> ?o }`, contextGraphId: SEED_CG, view: 'verifiable-memory',
+      });
+      const names = (r.body?.result?.bindings ?? []).map((b: any) => b.o);
+      return names.some((n: string) => String(n).includes('HighEntity'));
+    }, 60_000);
+    expect(found, 'pre-subscribed peer never materialized the published KA in VM').toBe(true);
   });
 
   // GH #1099 — after a publish clears the publisher's SWM, a replica that
@@ -231,12 +254,16 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
     expect(publishOk).toBe(true);
     const late = readNode(6);
     await post(late, '/api/context-graph/subscribe', { contextGraphId: SEED_CG });
-    await sleep(12000);
-    const r = await post(late, '/api/query', {
-      sparql: `SELECT ?o WHERE { ?s <https://schema.org/name> ?o }`, contextGraphId: SEED_CG, view: 'verifiable-memory',
-    });
-    const names = (r.body?.result?.bindings ?? []).map((b: any) => b.o);
-    expect(names.some((n: string) => String(n).includes('HighEntity'))).toBe(true);
+    // Poll instead of a fixed sleep — catch-up of historical VM can legitimately
+    // take longer on a slow devnet; only fail if it NEVER arrives.
+    const found = await pollUntil(async () => {
+      const r = await post(late, '/api/query', {
+        sparql: `SELECT ?o WHERE { ?s <https://schema.org/name> ?o }`, contextGraphId: SEED_CG, view: 'verifiable-memory',
+      });
+      const names = (r.body?.result?.bindings ?? []).map((b: any) => b.o);
+      return names.some((n: string) => String(n).includes('HighEntity'));
+    }, 90_000);
+    expect(found, 'late subscriber never received the historical VM KA').toBe(true);
   });
 
   // ── documented stubs (need a dedicated harness) ─────────────────────────
