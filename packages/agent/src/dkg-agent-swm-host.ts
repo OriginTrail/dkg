@@ -2355,6 +2355,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (Date.now() >= cached.nextRetryAt) return false;
 
     try {
+      try {
+        await this.primeCatchupConnections();
+      } catch {
+        // Best effort only; an unchanged connection view can still honor the
+        // cached miss until the backoff expires.
+      }
       if (await this.vmReconcilePeerTopologyKey(localCgId) !== cached.peerTopologyKey) {
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         this.vmReconcileFetchCooldownAt.delete(localCgId);

@@ -3033,7 +3033,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       preferredPeerId,
       isPrivateContextGraph,
     );
-    const peers = this.selectCatchupPeerWindow(orderedPeers, options);
+    const peerPriorityRanks = new Map<string, number>();
+    for (const peer of orderedPeers) {
+      const peerId = peer.toString();
+      const rank = peerId === preferredPeerId ? 2 : this.knownCorePeerIds.has(peerId) ? 1 : 0;
+      if (rank > 0) peerPriorityRanks.set(peerId, rank);
+    }
+    const peers = this.selectCatchupPeerWindow(orderedPeers, { ...options, peerPriorityRanks });
     const coreCount = orderedPeers.filter((p) => this.knownCorePeerIds.has(p.toString())).length;
     this.log.info(
       ctx,
@@ -3046,7 +3052,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   selectCatchupPeerWindow(this: DKGAgent,
     peers: Array<{ toString(): string }>,
-    options?: { maxPeers?: number; peerRotationKey?: string },
+    options?: { maxPeers?: number; peerRotationKey?: string; peerPriorityRanks?: ReadonlyMap<string, number> },
   ): Array<{ toString(): string }> {
     const maxPeers = options?.maxPeers;
     if (maxPeers === undefined || !Number.isInteger(maxPeers) || maxPeers <= 0) {
@@ -3064,19 +3070,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const peerIds = peers.map((peer) => peer.toString());
       const previousOrder = this.vmReconcileCatchupPeerOrder.get(rotationKey);
       const nextPeerId = previousOrder?.nextPeerId;
+      const currentPriorityRank = (peerId: string): number => options?.peerPriorityRanks?.get(peerId) ?? 0;
+      const previousPriorityRank = (peerId: string): number => previousOrder?.priorityRanks?.[peerId] ?? 0;
+      const gainedPriority = (peerId: string): boolean => currentPriorityRank(peerId) > previousPriorityRank(peerId);
       if (nextPeerId) {
         const nextPeerIndex = peerIds.indexOf(nextPeerId);
         if (nextPeerIndex >= 0) {
           const previousPeers = new Set(previousOrder.orderedPeers);
-          const hasNewPrioritizedPeer = peerIds
+          const firstInvalidatingPeerIndex = peerIds
             .slice(0, nextPeerIndex)
-            .some((peerId) => !previousPeers.has(peerId));
-          start = hasNewPrioritizedPeer ? 0 : nextPeerIndex;
+            .findIndex((peerId) => (!previousPeers.has(peerId) && currentPriorityRank(peerId) > 0) || gainedPriority(peerId));
+          start = firstInvalidatingPeerIndex >= 0 ? firstInvalidatingPeerIndex : nextPeerIndex;
         } else {
           const previousPeers = new Set(previousOrder.orderedPeers);
-          const firstNewPeerIndex = peerIds.findIndex((peerId) => !previousPeers.has(peerId));
-          start = firstNewPeerIndex >= 0
-            ? firstNewPeerIndex
+          const firstInvalidatingPeerIndex = peerIds.findIndex((peerId) =>
+            (!previousPeers.has(peerId) && currentPriorityRank(peerId) > 0) || gainedPriority(peerId),
+          );
+          start = firstInvalidatingPeerIndex >= 0
+            ? firstInvalidatingPeerIndex
             : (this.vmReconcileCatchupPeerCursor.get(rotationKey) ?? 0) % peers.length;
         }
       } else {
@@ -3089,6 +3100,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.vmReconcileCatchupPeerOrder.set(rotationKey, {
         orderedPeers: peerIds,
         nextPeerId: peerIds[nextIndex],
+        priorityRanks: Object.fromEntries(
+          peerIds
+            .map((peerId) => [peerId, currentPriorityRank(peerId)] as const)
+            .filter(([, rank]) => rank > 0),
+        ),
       });
     }
 

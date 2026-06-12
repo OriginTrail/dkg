@@ -712,7 +712,11 @@ export class DKGAgentBase {
   protected readonly vmReconcileFetchCooldownAt = new Map<string, number>();
   /** Phase D/A4 — round-robin cursor over the already ordered catch-up peer list. */
   protected readonly vmReconcileCatchupPeerCursor = new Map<string, number>();
-  protected readonly vmReconcileCatchupPeerOrder = new Map<string, { orderedPeers: string[]; nextPeerId?: string }>();
+  protected readonly vmReconcileCatchupPeerOrder = new Map<string, {
+    orderedPeers: string[];
+    nextPeerId?: string;
+    priorityRanks?: Record<string, number>;
+  }>();
   protected hostModeReconcilerTimer: ReturnType<typeof setInterval> | null = null;
   protected hostModePruneTimer: ReturnType<typeof setInterval> | null = null;
   // rc.9 PR-10: joinApprovalRetryQueue + joinApprovalRetryTimer
