@@ -61,6 +61,7 @@ interface RegisterSyncHandlerParams {
 const SYNC_RESPONDER_GLOBAL_CONCURRENCY = 3;
 const SYNC_RESPONDER_PER_PEER_CONCURRENCY = 1;
 const SYNC_RESPONDER_QUEUE_LIMIT = 32;
+const SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT = 4;
 const SYNC_RESPONDER_MAX_QUEUE_WAIT_MS = 10_000;
 
 class SyncResponderBusyError extends Error {
@@ -82,6 +83,7 @@ interface SyncResponderQueueEntry {
 function createSyncResponderLimiter() {
   let running = 0;
   const runningByPeer = new Map<string, number>();
+  const queuedByPeer = new Map<string, number>();
   const queue: SyncResponderQueueEntry[] = [];
 
   const canRun = (peerId: string): boolean =>
@@ -103,16 +105,28 @@ function createSyncResponderLimiter() {
     };
   };
 
+  const incrementQueued = (peerId: string): void => {
+    queuedByPeer.set(peerId, (queuedByPeer.get(peerId) ?? 0) + 1);
+  };
+
+  const decrementQueued = (peerId: string): void => {
+    const count = (queuedByPeer.get(peerId) ?? 1) - 1;
+    if (count <= 0) queuedByPeer.delete(peerId);
+    else queuedByPeer.set(peerId, count);
+  };
+
   const removeQueued = (entry: SyncResponderQueueEntry): boolean => {
     const index = queue.indexOf(entry);
     if (index < 0) return false;
     queue.splice(index, 1);
+    decrementQueued(entry.peerId);
     clearTimeout(entry.timer);
     if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort);
     return true;
   };
 
   const startQueued = (entry: SyncResponderQueueEntry): void => {
+    decrementQueued(entry.peerId);
     clearTimeout(entry.timer);
     if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort);
     entry.resolve(releaseFor(entry.peerId));
@@ -136,6 +150,9 @@ function createSyncResponderLimiter() {
     if (queue.length >= SYNC_RESPONDER_QUEUE_LIMIT) {
       throw new SyncResponderBusyError('sync responder queue full');
     }
+    if ((queuedByPeer.get(peerId) ?? 0) >= SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT) {
+      throw new SyncResponderBusyError('sync responder peer queue full');
+    }
     return new Promise((resolve, reject) => {
       const entry: SyncResponderQueueEntry = {
         peerId,
@@ -150,6 +167,7 @@ function createSyncResponderLimiter() {
         if (removeQueued(entry)) reject(asAbortError(signal?.reason));
       };
       if (signal) signal.addEventListener('abort', entry.onAbort, { once: true });
+      incrementQueued(peerId);
       queue.push(entry);
     });
   };
@@ -197,6 +215,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
   const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
   const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
   const limiter = createSyncResponderLimiter();
+  let warnedPreDispatchCancellation = false;
 
   const pruneSyncSessionTokens = (now = Date.now()) => {
     for (const [key, entry] of syncSessionTokens) {
@@ -280,6 +299,13 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
 
     return limiter.run(peerId, signal, async () => {
       throwIfAborted(signal);
+      if (store.queryCancellation === 'pre-dispatch' && !warnedPreDispatchCancellation) {
+        warnedPreDispatchCancellation = true;
+        logWarn(
+          createOperationContext('sync'),
+          'Sync responder is using a store backend whose query AbortSignal is pre-dispatch only; in-flight sync queries cannot release responder capacity until the synchronous store call returns. Use oxigraph-worker or an HTTP SPARQL backend for interruptible long-query cancellation.',
+        );
+      }
       if (isWorkspace) {
       const cutoff = sharedMemoryTtlMs > 0 ? new Date(Date.now() - sharedMemoryTtlMs).toISOString() : null;
       if (phase === 'snapshot') {

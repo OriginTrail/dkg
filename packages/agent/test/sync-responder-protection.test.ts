@@ -12,6 +12,23 @@ const REMOTE_D = '12D3KooWResponderCapPeerD';
 
 const noopLog = (_ctx: OperationContext, _message: string) => {};
 
+function baseStore(overrides: Partial<TripleStore> = {}): TripleStore {
+  return {
+    query: async () => ({ type: 'bindings', bindings: [] }) satisfies QueryResult,
+    insert: async () => {},
+    delete: async () => {},
+    deleteByPattern: async () => 0,
+    hasGraph: async () => false,
+    createGraph: async () => {},
+    dropGraph: async () => {},
+    listGraphs: async () => [],
+    deleteBySubjectPrefix: async () => 0,
+    countQuads: async () => 0,
+    close: async () => {},
+    ...overrides,
+  };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;
@@ -32,7 +49,10 @@ function makeEnvelope(): SyncRequestEnvelope {
   };
 }
 
-function captureHandler(store: TripleStore) {
+function captureHandler(
+  store: TripleStore,
+  options: { logWarn?: (ctx: OperationContext, message: string) => void } = {},
+) {
   let captured: ((
     data: Uint8Array,
     peerId: string,
@@ -49,7 +69,7 @@ function captureHandler(store: TripleStore) {
     peerId: 'self-peer',
     parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,
     authorizeSyncRequest: async () => true,
-    logWarn: noopLog,
+    logWarn: options.logWarn ?? noopLog,
     logDebug: noopLog,
   });
 
@@ -109,7 +129,7 @@ describe('sync responder protection', () => {
     await Promise.all(requests);
   });
 
-  it('returns an explicit busy sentinel for requests beyond the bounded responder queue', async () => {
+  it('returns an explicit busy sentinel for requests beyond the per-peer responder queue', async () => {
     const releases: Array<() => void> = [];
     const store = {
       query: async () => {
@@ -124,7 +144,7 @@ describe('sync responder protection', () => {
 
     let completed = 0;
     const requests: Array<Promise<Uint8Array>> = [];
-    for (let i = 0; i < 33; i++) {
+    for (let i = 0; i < 5; i++) {
       requests.push(cap.invoke(envelope, REMOTE_A).finally(() => { completed += 1; }));
     }
     await expect(cap.invoke(envelope, REMOTE_A).then((bytes) => new TextDecoder().decode(bytes))).resolves.toBe(SYNC_BUSY_RESPONSE);
@@ -136,6 +156,40 @@ describe('sync responder protection', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     await Promise.all(requests);
+  });
+
+  it('keeps a noisy peer from consuming every shared queue slot', async () => {
+    const releases: Array<() => void> = [];
+    const store = {
+      query: async () => {
+        const gate = deferred<void>();
+        releases.push(() => gate.resolve());
+        await gate.promise;
+        return { type: 'bindings', bindings: [] } satisfies QueryResult;
+      },
+    } as unknown as TripleStore;
+    const cap = captureHandler(store);
+    const envelope = makeEnvelope();
+
+    let noisyCompleted = 0;
+    const noisyRequests: Array<Promise<Uint8Array>> = [];
+    for (let i = 0; i < 5; i++) {
+      noisyRequests.push(cap.invoke(envelope, REMOTE_A).finally(() => { noisyCompleted += 1; }));
+    }
+    await expect(cap.invoke(envelope, REMOTE_A).then((bytes) => new TextDecoder().decode(bytes))).resolves.toBe(SYNC_BUSY_RESPONSE);
+
+    const otherPeer = cap.invoke(envelope, REMOTE_B);
+    while (releases.length < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+    releases.shift()?.();
+    releases.shift()?.();
+    await otherPeer;
+
+    while (noisyCompleted < noisyRequests.length) {
+      const release = releases.shift();
+      if (release) release();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    await Promise.all(noisyRequests);
   });
 
   it('removes aborted queued requests and lets later work proceed', async () => {
@@ -187,5 +241,18 @@ describe('sync responder protection', () => {
 
     await expect(request).rejects.toThrow(/aborted by test/);
     expect(querySignal?.aborted).toBe(true);
+  });
+
+  it('warns once when the store cannot interrupt in-flight sync queries', async () => {
+    const warnings: string[] = [];
+    const cap = captureHandler(baseStore({ queryCancellation: 'pre-dispatch' }), {
+      logWarn: (_ctx, message) => warnings.push(message),
+    });
+
+    await cap.invoke(makeEnvelope(), REMOTE_A);
+    await cap.invoke(makeEnvelope(), REMOTE_B);
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('pre-dispatch only');
   });
 });

@@ -29,6 +29,10 @@ export interface SharedMemoryLiteralBlobStoreOptions {
 }
 
 export class SharedMemoryLiteralBlobStore implements TripleStore {
+  get queryCancellation() {
+    return this.inner.queryCancellation;
+  }
+
   private readonly inner: TripleStore;
   private readonly blobDir: string;
   private readonly thresholdBytes: number;

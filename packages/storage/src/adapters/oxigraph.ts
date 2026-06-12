@@ -18,6 +18,8 @@ type OxTerm = oxigraph.Term;
 type OxQuad = oxigraph.Quad;
 
 export class OxigraphStore implements TripleStore {
+  readonly queryCancellation = 'pre-dispatch' as const;
+
   private store: OxStore;
   private persistPath: string | undefined;
 
@@ -215,7 +217,11 @@ export class OxigraphStore implements TripleStore {
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
     throwIfAborted(options?.signal);
+    // The embedded Oxigraph binding executes synchronously, so a caller abort
+    // cannot interrupt this native call mid-flight. Use oxigraph-worker or an
+    // HTTP backend when long sync queries need prompt cancellation.
     const result = this.store.query(sparql);
+    throwIfAborted(options?.signal);
 
     if (typeof result === 'boolean') {
       return { type: 'boolean', value: result } satisfies AskResult;

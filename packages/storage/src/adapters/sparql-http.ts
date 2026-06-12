@@ -126,6 +126,8 @@ export interface SparqlHttpStoreOptions {
 }
 
 export class SparqlHttpStore implements TripleStore {
+  readonly queryCancellation = 'interruptible' as const;
+
   private readonly queryEndpoint: string;
   private readonly updateEndpoint: string;
   private readonly timeout: number;

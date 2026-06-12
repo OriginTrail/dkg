@@ -19,6 +19,8 @@ import { buildBlankNodeSafeDelete } from './sparql-http.js';
  * plus Blazegraph's N-Quads bulk-insert endpoint.
  */
 export class BlazegraphStore implements TripleStore {
+  readonly queryCancellation = 'interruptible' as const;
+
   private readonly url: string;
 
   constructor(url: string) {

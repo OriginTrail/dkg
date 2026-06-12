@@ -81,6 +81,8 @@ export interface OxigraphWorkerTimeoutError extends Error {
 }
 
 export class OxigraphWorkerStore implements TripleStore {
+  readonly queryCancellation = 'interruptible' as const;
+
   private worker: Worker;
   private nextId = 0;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
