@@ -3,11 +3,12 @@
  *
  * One real auth-enabled daemon (edge role) against the shared Hardhat node
  * (port 9548 per packages/cli/vitest.config.ts). Zero chain mocks. Each test
- * reproduces a confirmed-live production bug from the rc.17 QA sweep and is
- * encoded as `it.fails` — the assertion of CORRECT behaviour fails today (bug
- * live), keeping CI green. When a bug is fixed its test flips RED ("expected to
- * fail but passed") → drop `.fails`, make it a plain `it(...)`, and close the
- * linked GitHub issue.
+ * reproduces a confirmed-live production bug from the rc.17 QA sweep and asserts
+ * the CORRECT behaviour, so it is RED while the bug is live and GREEN once fixed
+ * (then close the linked GitHub issue). These deliberately fail in the normal
+ * `pnpm test` CLI lane — that failing IS the live-bug signal. This is a
+ * reproducing-test PR (#1129); the lane is expected to be red until the fixes
+ * land.
  *
  * Covered:
  *   #787  — POST /api/shared-memory/write with N-Quad *string* quads → 500

@@ -265,10 +265,49 @@ describe('Random Sampling E2E (Hardhat)', () => {
       rec2,
     );
 
-    // The node generates its challenge for the current proof period.
-    const tx = await rs.createChallenge();
-    const receipt = await tx.wait();
-    const challengeBlockNumber: number = receipt.blockNumber;
+    const hexN = (n: number) => '0x' + n.toString(16);
+
+    // ── PRE-prediction (the real #1091 threat): a proposer who controls
+    // `prevrandao` (or anyone, pre-v10.0.4, via the now-removed gasprice grind)
+    // can compute the draw BEFORE the createChallenge tx is mined. We simulate
+    // the proposer by pinning the next block's prevrandao to a chosen value, then
+    // computing the seed + previewing the draw with NOTHING but data known before
+    // the tx — `blockhash(N - offset)` is a PAST block, and N is the next block.
+    const chosenPrevrandao = '0x' + 'a5'.repeat(32);
+    await provider.send('hardhat_setPrevRandao', [chosenPrevrandao]);
+    // Stop auto-mining so we can stage the tx into the SAME block whose
+    // prevrandao we just pinned, and read N before it is mined.
+    await provider.send('evm_setAutomine', [false]);
+
+    const blockBefore: number = await provider.getBlockNumber();
+    const challengeBlockNumber = blockBefore + 1; // the block createChallenge will land in
+    const difficulty = BigInt(chosenPrevrandao); // prevrandao the proposer pinned for block N
+    const offset = (difficulty % 256n) + 1n;
+    const refBlock = await provider.send('eth_getBlockByNumber', [hexN(challengeBlockNumber - Number(offset)), false]);
+    const reconstructedSeed = ethers.solidityPackedKeccak256(
+      ['uint256', 'bytes32', 'address', 'uint8'],
+      [difficulty, refBlock.hash, rec2.address, 1],
+    );
+    // Predict the draw NOW — before createChallenge is mined — at the epoch
+    // createChallenge will read (`chronos.getCurrentEpoch()`). Epochs span many
+    // blocks, so the value is stable across the single mine below.
+    const rsViews = new ethers.Contract(rsAddress, ['function chronos() view returns (address)'], provider);
+    const chronosAddr: string = await rsViews.chronos();
+    const chronos = new ethers.Contract(chronosAddr, ['function getCurrentEpoch() view returns (uint256)'], provider);
+    const epochForPreview: bigint = await chronos.getCurrentEpoch();
+    const predicted = await rs.previewChallengeForSeed(reconstructedSeed, epochForPreview);
+
+    // Now mine the proposer's createChallenge into block N (with the pinned
+    // prevrandao). Send the tx (queued), then mine exactly one block.
+    const txResp = await rs.createChallenge();
+    await provider.send('evm_mine', []);
+    await provider.send('evm_setAutomine', [true]);
+    const receipt = await txResp.wait();
+    expect(receipt.blockNumber, 'createChallenge landed in the prevrandao-pinned block').toBe(challengeBlockNumber);
+
+    // Sanity: the mined block really carried our pinned prevrandao.
+    const minedBlock = await provider.send('eth_getBlockByNumber', [hexN(challengeBlockNumber), false]);
+    expect(BigInt(minedBlock.mixHash ?? minedBlock.difficulty)).toBe(difficulty);
 
     const parsed = receipt.logs
       .map((l: ethers.Log) => { try { return rs.interface.parseLog(l); } catch { return null; } })
@@ -276,31 +315,15 @@ describe('Random Sampling E2E (Hardhat)', () => {
     expect(parsed, 'ChallengeGenerated event must be emitted').toBeTruthy();
     const actualKaId: bigint = parsed!.args.knowledgeAssetId;
     const actualChunkId: bigint = parsed!.args.chunkId;
-    const challengeEpoch: bigint = parsed!.args.epoch;
 
-    // ── Attacker view: reconstruct the seed from PUBLIC block data only ──
-    // Post-Paris `block.difficulty` == prevrandao == the block's `mixHash`.
-    // `blockhash(block.number - ((difficulty % 256) + 1))` is an already-mined,
-    // publicly-readable block hash.
-    const hexN = (n: number) => '0x' + n.toString(16);
-    const challengeBlock = await provider.send('eth_getBlockByNumber', [hexN(challengeBlockNumber), false]);
-    const difficulty = BigInt(challengeBlock.mixHash ?? challengeBlock.difficulty);
-    const offset = (difficulty % 256n) + 1n;
-    const refBlock = await provider.send('eth_getBlockByNumber', [hexN(challengeBlockNumber - Number(offset)), false]);
-    const reconstructedSeed = ethers.solidityPackedKeccak256(
-      ['uint256', 'bytes32', 'address', 'uint8'],
-      [difficulty, refBlock.hash, rec2.address, 1],
-    );
-
-    // Replay the public picker with the reconstructed seed + the challenge's
-    // epoch — exactly what an attacker runs off-chain BEFORE committing a proof.
-    const predicted = await rs.previewChallengeForSeed(reconstructedSeed, challengeEpoch);
+    // The prediction was computed BEFORE the tx was mined, from only public /
+    // proposer-chosen inputs.
     const predictsActualDraw = predicted.kaId === actualKaId && predicted.chunkId === actualChunkId;
 
-    // CORRECT (post-fix): the draw must NOT be reconstructable from public block
-    // data. Today it is — `predictsActualDraw` is true — so this assertion is
-    // RED until #1091 lands a commit-reveal / VRF seed.
-    expect(predictsActualDraw, 'challenge draw was predicted from public block data alone').toBe(false);
+    // CORRECT (post-fix): the draw must NOT be predictable before the tx is mined.
+    // Today it is — `predictsActualDraw` is true — so this assertion is RED until
+    // #1091 lands a commit-reveal / VRF seed.
+    expect(predictsActualDraw, 'challenge draw was predicted before the tx was mined (grindable seed)').toBe(false);
   }, 90_000);
 
   it('drives the prover end-to-end against the real RandomSampling.sol', async () => {

@@ -57,17 +57,21 @@ const post = (n: Node, p: string, b: unknown) => req(n, 'POST', p, b);
 const get = (n: Node, p: string) => req(n, 'GET', p, undefined);
 
 const CORES = [1, 2, 3, 4];
+// The pre-subscribed peer (#1098) MUST be distinct from the publisher, else
+// "did the pre-subscribed peer catch up?" degenerates into "does the author see
+// its own VM?" — a false positive. Reserve node 2 as the pre-sub peer and never
+// let it be chosen as the publisher.
+const PRE_SUB_NUM = 2;
+const PUBLISHER_CANDIDATES = CORES.filter((n) => n !== PRE_SUB_NUM);
 const STAMP = Date.now();
 
 // Shared state for the publish-dependent repros (published once on a working core).
 let pubNode: Node | null = null;
-let preSubNode: Node; // subscribed BEFORE publish (#1098)
+let preSubNode: Node; // subscribed BEFORE publish (#1098), distinct from pubNode
 const PRIV_CG = `high-priv-${STAMP}`;
-const PUB_CG = `high-pub-${STAMP}`;
 const KA = `high-ka-${STAMP}`;
 const ENTITY = `https://example.org/high/${STAMP}`;
 let publishOk = false;
-let publishedUal = '';
 
 async function publishKaOn(node: Node, cg: string, ka: string): Promise<{ ok: boolean; body: any }> {
   await post(node, '/api/knowledge-assets', { contextGraphId: cg, name: ka });
@@ -82,20 +86,45 @@ async function publishKaOn(node: Node, cg: string, ka: string): Promise<{ ok: bo
 
 describe('HIGH issue liveness (multi-node devnet)', () => {
   beforeAll(async () => {
-    // Find a core that can publish (some are poisoned by #1093) and seed a
-    // private CG + a peer subscribed before publish.
-    preSubNode = readNode(2);
-    for (const n of CORES) {
+    preSubNode = readNode(PRE_SUB_NUM);
+
+    // Phase 1 — find a core that can actually publish (some are ACK-poisoned by
+    // #1093). Each probe uses its OWN context graph + KA name so a partial/failed
+    // probe can't leave state that makes a later probe pass or fail for
+    // duplicate-name reasons. Probe the publisher candidates only (never the
+    // reserved pre-sub peer).
+    for (const n of PUBLISHER_CANDIDATES) {
       const node = readNode(n);
-      const cg = `${PRIV_CG}-probe${n}`;
-      await post(node, '/api/context-graph/create', { id: PRIV_CG, name: 'High Priv', accessPolicy: 1 }).catch(() => {});
-      await post(node, '/api/context-graph/register', { id: PRIV_CG }).catch(() => {});
-      void cg;
-      // pre-subscribe node2 so #1098 can observe a missed KA
-      await post(preSubNode, '/api/context-graph/subscribe', { contextGraphId: PRIV_CG }).catch(() => {});
-      await sleep(3000);
-      const res = await publishKaOn(node, PRIV_CG, KA);
-      if (res.ok) { pubNode = node; publishOk = true; publishedUal = res.body?.ual ?? ''; break; }
+      const probeCg = `${PRIV_CG}-probe${n}`;
+      const probeKa = `${KA}-probe${n}`;
+      const created = await post(node, '/api/context-graph/create', { id: probeCg, name: `High Probe ${n}`, accessPolicy: 1 });
+      if (created.status >= 400 && created.status !== 409) continue;
+      const registered = await post(node, '/api/context-graph/register', { id: probeCg });
+      if (registered.status >= 400 && registered.status !== 409) continue;
+      const res = await publishKaOn(node, probeCg, probeKa);
+      if (res.ok) { pubNode = node; break; }
+    }
+    if (!pubNode) {
+      // Loud HARNESS failure (not a per-test green): without a working publisher
+      // the publish-dependent repros (#1095/#1104/#1094/#1096/#1098/#886) can't
+      // exercise anything. Fail the whole suite here so it's unmistakable.
+      throw new Error(
+        'HARNESS: no core node could publish to VM — check devnet health (#1093 ACK poisoning?). ' +
+        'Publish-dependent #1095/#1104/#1094/#1096/#1098/#886 repros cannot run.',
+      );
+    }
+
+    // Phase 2 — pre-subscribe the DISTINCT peer to the seed CG BEFORE the seed
+    // publish (the precondition #1098 tests), then publish the seed KA on the
+    // known-working publisher.
+    await post(pubNode, '/api/context-graph/create', { id: PRIV_CG, name: 'High Priv', accessPolicy: 1 });
+    await post(pubNode, '/api/context-graph/register', { id: PRIV_CG });
+    await post(preSubNode, '/api/context-graph/subscribe', { contextGraphId: PRIV_CG });
+    await sleep(3000);
+    const seed = await publishKaOn(pubNode, PRIV_CG, KA);
+    publishOk = seed.ok;
+    if (!publishOk) {
+      throw new Error('HARNESS: seed publish to PRIV_CG failed on the known-working publisher — publish-dependent repros cannot run.');
     }
   }, 240_000);
 

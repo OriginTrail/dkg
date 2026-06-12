@@ -11,15 +11,18 @@
  * returned `[ObjectEvent, EPCISDocument]`.) The fix should exclude container /
  * document classes from the event result set.
  *
- * Encoded as `it.fails`: asserting the generated query guards against the
- * EPCISDocument container fails today (bug live). When the builder excludes
- * containers, flip to a plain `it(...)` and close #709.
+ * This asserts the CORRECT (post-fix) behaviour, so it is RED while the bug is
+ * live and GREEN once the builder excludes containers — then close #709. The
+ * assertion is written to be agnostic to HOW the fix excludes the container so
+ * it can't stay red after a valid fix (Codex review on PR #1129): it fails for
+ * the buggy bare-prefix match and passes for either an explicit
+ * `!= …/EPCISDocument` exclusion OR a narrowed allow-list of concrete event
+ * classes.
  */
 import { describe, expect, it } from 'vitest';
 import { buildEpcisQuery } from '../src/query-builder.js';
 
 const CG = 'epcis-709-cg';
-const EPCIS_DOCUMENT = 'https://gs1.github.io/EPCIS/EPCISDocument';
 
 describe('GH #709 — EPCIS event-type filter excludes the document container', () => {
   it('CONTROL: a no-filter events query is generated and scopes ?eventType to the EPCIS namespace', () => {
@@ -28,13 +31,20 @@ describe('GH #709 — EPCIS event-type filter excludes the document container', 
     expect(sparql).toContain('https://gs1.github.io/EPCIS/');
   });
 
-  it.fails(
-    'a no-filter events query excludes the EPCISDocument container class',
-    () => {
-      const sparql = buildEpcisQuery({}, CG);
-      // The generated SPARQL must guard against the document container —
-      // e.g. `FILTER(?eventType != <…/EPCISDocument>)` or a NOT-IN / NOT-EXISTS.
-      expect(sparql).toContain(EPCIS_DOCUMENT);
-    },
-  );
+  it('a no-filter events query does not admit the EPCISDocument container as an event', () => {
+    const sparql = buildEpcisQuery({}, CG);
+
+    // The bug: `?eventType` is matched ONLY by the namespace prefix, which also
+    // matches the `.../EPCISDocument` container class. A correct fix either
+    // (a) explicitly excludes the container URI, or (b) narrows the type match
+    // to concrete event classes — in BOTH cases the bare prefix-only match is
+    // gone or guarded.
+    const usesBarePrefixMatch =
+      /STRSTARTS\(\s*STR\(\?eventType\)\s*,\s*"https:\/\/gs1\.github\.io\/EPCIS\/"\s*\)/.test(sparql);
+    const guardsTheContainer = sparql.includes('EPCISDocument');
+
+    // Correct iff the query is NOT "bare prefix match with no container guard".
+    // Today it IS exactly that → this is RED until #709 is fixed.
+    expect(usesBarePrefixMatch && !guardsTheContainer).toBe(false);
+  });
 });

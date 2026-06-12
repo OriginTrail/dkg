@@ -1,10 +1,12 @@
 /**
  * Multi-node issue-liveness regression suite (live devnet).
  *
- * Reproduces confirmed-live cross-node bugs from the rc.17 QA sweep. Each is an
- * `it.fails` repro: the assertion of CORRECT behaviour fails today (bug live),
- * so the suite is green while the bugs persist and turns RED when one is fixed —
- * signalling that the linked GitHub issue can close.
+ * Reproduces confirmed-live cross-node bugs from the rc.17 QA sweep. Each is a
+ * plain failing `it()` repro: it asserts the CORRECT behaviour, so it is RED
+ * while the bug is live and turns GREEN when fixed — signalling that the linked
+ * GitHub issue can close. Separate CONTROL tests prove the harness preconditions
+ * (SWM replicated, import landed) so a repro can't go red for a setup reason
+ * without you knowing which.
  *
  *   #705 / #923 — assertion lifecycle metadata (`dkg:state`, the `_meta`
  *                 lifecycle record) is written ONLY on the authoring node and is
@@ -179,34 +181,36 @@ describe('multi-node issue liveness', () => {
     expect(names.some((n: string) => String(n).includes('LivenessEntity'))).toBe(true);
   });
 
-  it.fails(
-    'GH #705/#923: node2 can resolve lifecycle state for the peer-authored assertion',
-    async () => {
-      // The lifecycle record lives only in node1's non-replicated `_meta`, so
-      // node2 sees zero lifecycle rows for the assertion it received via SWM.
-      const r = await post(node2, '/api/query', {
-        sparql:
-          'PREFIX dkg: <http://dkg.io/ontology/> SELECT ?a ?state WHERE { ?a a dkg:Assertion ; dkg:state ?state }',
-        contextGraphId: CG,
-        graphSuffix: '_meta',
-      });
-      const rows = r.body?.result?.bindings?.length ?? 0;
-      expect(rows).toBeGreaterThan(0);
-    },
-  );
+  it('GH #705/#923: node2 can resolve lifecycle state for the peer-authored assertion', async () => {
+    // The lifecycle record lives only in node1's non-replicated `_meta`, so
+    // node2 sees zero lifecycle rows for the assertion it received via SWM.
+    // Pin `?a` to OUR specific assertion (`KA` is unique per run) so unrelated
+    // metadata on node2 can't satisfy this for the wrong reason.
+    const r = await post(node2, '/api/query', {
+      sparql:
+        'PREFIX dkg: <http://dkg.io/ontology/> ' +
+        `SELECT ?a ?state WHERE { ?a a dkg:Assertion ; dkg:state ?state . FILTER(CONTAINS(STR(?a), ${JSON.stringify(KA)})) }`,
+      contextGraphId: CG,
+      graphSuffix: '_meta',
+    });
+    const rows = r.body?.result?.bindings?.length ?? 0;
+    expect(rows).toBeGreaterThan(0);
+  });
 
-  it.fails(
-    'GH #872: node2 (public-CG peer) can fetch the imported Markdown source bytes',
-    async () => {
-      // Skip cleanly if the import didn't land (keeps the assertion meaningful).
-      expect(importFileHash).not.toBe('');
-      const r = await post(node2, '/api/knowledge-assets/import-artifact/read-markdown', {
-        contextGraphId: CG,
-        assertionUri: importAssertionUri,
-        fileHash: importFileHash,
-      });
-      expect(r.status).toBe(200);
-      expect(String(r.body?.markdown ?? r.body)).toContain('Liveness Doc');
-    },
-  );
+  // CONTROL for #872 — proves the import fixture actually landed on node1, so a
+  // red #872 below is the cross-node bug, not a broken import setup.
+  it('CONTROL: node1 import-file fixture landed (fileHash + assertionUri captured)', () => {
+    expect(importFileHash).not.toBe('');
+    expect(importAssertionUri).not.toBe('');
+  });
+
+  it('GH #872: node2 (public-CG peer) can fetch the imported Markdown source bytes', async () => {
+    const r = await post(node2, '/api/knowledge-assets/import-artifact/read-markdown', {
+      contextGraphId: CG,
+      assertionUri: importAssertionUri,
+      fileHash: importFileHash,
+    });
+    expect(r.status).toBe(200);
+    expect(String(r.body?.markdown ?? r.body)).toContain('Liveness Doc');
+  });
 });
