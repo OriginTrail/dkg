@@ -700,16 +700,19 @@ export class DKGAgentBase {
   protected readonly recentReconciledUals = new RecentUalSet();
   /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
   protected readonly vmReconcileNegativeCache = new Map<string, {
+    localCgId: string;
     failures: number;
     nextRetryAt: number;
     swmGen: string;
     candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
     peerTopologyKey: string;
   }>();
+  protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
   /** Phase D/A4 — per-CG active-fetch cooldown so one sweep cannot fan out repeated fetches. */
   protected readonly vmReconcileFetchCooldownAt = new Map<string, number>();
   /** Phase D/A4 — round-robin cursor over the already ordered catch-up peer list. */
   protected readonly vmReconcileCatchupPeerCursor = new Map<string, number>();
+  protected readonly vmReconcileCatchupPeerOrder = new Map<string, { orderedPeers: string[]; nextPeerId?: string }>();
   protected hostModeReconcilerTimer: ReturnType<typeof setInterval> | null = null;
   protected hostModePruneTimer: ReturnType<typeof setInterval> | null = null;
   // rc.9 PR-10: joinApprovalRetryQueue + joinApprovalRetryTimer

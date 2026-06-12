@@ -756,6 +756,7 @@ describe('Phase D - VM reconcile damping', () => {
     const freshKey = (internals as any).vmReconcileCacheKey(ual, freshRoot);
     ((internals as any).recentReconciledUals as { add(key: string): void }).add(freshKey);
     ((internals as any).vmReconcileNegativeCache as Map<string, unknown>).set(freshKey, {
+      localCgId: '55',
       failures: 1,
       nextRetryAt: Date.now() + 60_000,
       swmGen: 'empty:0',
@@ -784,9 +785,11 @@ describe('Phase D - VM reconcile damping', () => {
     }>;
     const fetchCooldown = (internals as any).vmReconcileFetchCooldownAt as Map<string, number>;
     const peerCursor = (internals as any).vmReconcileCatchupPeerCursor as Map<string, number>;
+    const peerOrder = (internals as any).vmReconcileCatchupPeerOrder as Map<string, { orderedPeers: string[]; nextPeerId?: string }>;
     const now = Date.now();
 
     negativeCache.set('expired', {
+      localCgId: 'expired-cg',
       failures: 1,
       nextRetryAt: now - 1,
       swmGen: 'empty:0',
@@ -795,6 +798,7 @@ describe('Phase D - VM reconcile damping', () => {
     });
     for (let i = 0; i < DKGAgent.VM_RECONCILE_CACHE_MAX_ENTRIES + 2; i += 1) {
       negativeCache.set(`future-${i}`, {
+        localCgId: `future-cg-${i}`,
         failures: 1,
         nextRetryAt: now + 60_000,
         swmGen: 'empty:0',
@@ -806,6 +810,7 @@ describe('Phase D - VM reconcile damping', () => {
     for (let i = 0; i < DKGAgent.VM_RECONCILE_CG_STATE_MAX_ENTRIES + 2; i += 1) {
       fetchCooldown.set(`fetch-${i}`, now);
       peerCursor.set(`cursor-${i}`, i);
+      peerOrder.set(`cursor-${i}`, { orderedPeers: [`peer-${i}`], nextPeerId: `peer-${i}` });
     }
 
     (internals as any).pruneVmReconcileState(now);
@@ -815,20 +820,45 @@ describe('Phase D - VM reconcile damping', () => {
     expect(fetchCooldown.has('expired-cg')).toBe(false);
     expect(fetchCooldown.size).toBeLessThanOrEqual(DKGAgent.VM_RECONCILE_CG_STATE_MAX_ENTRIES);
     expect(peerCursor.size).toBeLessThanOrEqual(DKGAgent.VM_RECONCILE_CG_STATE_MAX_ENTRIES);
+    expect(peerOrder.size).toBeLessThanOrEqual(DKGAgent.VM_RECONCILE_CG_STATE_MAX_ENTRIES);
 
     internals.subscribedContextGraphs.set('cleanup-cg', { subscribed: true });
+    negativeCache.set('cleanup-cache', {
+      localCgId: 'cleanup-cg',
+      failures: 1,
+      nextRetryAt: now + 60_000,
+      swmGen: 'empty:0',
+      candidateNamespaces: [],
+      peerTopologyKey: '',
+    });
+    (internals as any).indexVmReconcileNegativeCacheEntry('cleanup-cg', 'cleanup-cache');
     fetchCooldown.set('cleanup-cg', now);
     peerCursor.set('cleanup-cg', 7);
+    peerOrder.set('cleanup-cg', { orderedPeers: ['peer-a'], nextPeerId: 'peer-a' });
     (agent as any).unsubscribeFromContextGraph('cleanup-cg');
+    expect(negativeCache.has('cleanup-cache')).toBe(false);
     expect(fetchCooldown.has('cleanup-cg')).toBe(false);
     expect(peerCursor.has('cleanup-cg')).toBe(false);
+    expect(peerOrder.has('cleanup-cg')).toBe(false);
 
     internals.subscribedContextGraphs.set('hosted-cg', { subscribed: true, coreHosted: true });
+    negativeCache.set('hosted-cache', {
+      localCgId: 'hosted-cg',
+      failures: 1,
+      nextRetryAt: now + 60_000,
+      swmGen: 'empty:0',
+      candidateNamespaces: [],
+      peerTopologyKey: '',
+    });
+    (internals as any).indexVmReconcileNegativeCacheEntry('hosted-cg', 'hosted-cache');
     fetchCooldown.set('hosted-cg', now);
     peerCursor.set('hosted-cg', 3);
+    peerOrder.set('hosted-cg', { orderedPeers: ['peer-b'], nextPeerId: 'peer-b' });
     (agent as any).unsubscribeFromContextGraph('hosted-cg');
+    expect(negativeCache.has('hosted-cache')).toBe(true);
     expect(fetchCooldown.has('hosted-cg')).toBe(true);
     expect(peerCursor.has('hosted-cg')).toBe(true);
+    expect(peerOrder.has('hosted-cg')).toBe(true);
   });
 });
 

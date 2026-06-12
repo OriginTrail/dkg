@@ -730,6 +730,29 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       }
     });
 
+    it('keeps VM reconcile catchup rotation anchored by peer id across connection order churn', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupRotationOrderChurn',
+        chainAdapter: new MockChainAdapter(),
+      });
+      const peer = (peerId: string) => ({ toString: () => peerId });
+      const select = (peerIds: string[]) => (agent as any)
+        .selectCatchupPeerWindow(peerIds.map(peer), {
+          maxPeers: 1,
+          peerRotationKey: 'runtime-contextGraph',
+        })
+        .map((selected: { toString(): string }) => selected.toString());
+
+      try {
+        expect(select(['peer-a', 'peer-b', 'peer-c'])).toEqual(['peer-a']);
+        expect(select(['peer-c', 'peer-a', 'peer-b'])).toEqual(['peer-b']);
+        expect(select(['peer-a', 'peer-c', 'peer-b'])).toEqual(['peer-c']);
+        expect((agent as any).vmReconcileCatchupPeerOrder.size).toBe(1);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
     it('resets VM reconcile catchup rotation when a core peer joins before the cursor', async () => {
       const agent = await DKGAgent.create({
         name: 'RuntimeCatchupRotationCoreJoin',

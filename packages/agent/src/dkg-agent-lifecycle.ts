@@ -243,7 +243,6 @@ import { createCursorState, type CursorState } from './reconcile-cursor.js';
 const DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS = 64;
 /** Yield to the event loop every N activations so concurrent store work can interleave. */
 const REHYDRATE_THROTTLE_BATCH = 8;
-const catchupPeerOrderSignatures = new WeakMap<object, Map<string, string>>();
 
 // type alias so listPendingJoinApprovalRetries() retains its old
 // public shape while it stubs out to []. PR-12 rebuilds the operator
@@ -3054,31 +3053,43 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return peers;
     }
 
-    const rotationKey = options?.peerRotationKey;
-    if (rotationKey) {
-      this.pruneVmReconcileState();
-      const orderedPeerSignature = JSON.stringify(peers.map((peer) => peer.toString()));
-      let signatures = catchupPeerOrderSignatures.get(this);
-      if (!signatures) {
-        signatures = new Map<string, string>();
-        catchupPeerOrderSignatures.set(this, signatures);
-      }
-      if (signatures.get(rotationKey) !== orderedPeerSignature) {
-        this.vmReconcileCatchupPeerCursor.delete(rotationKey);
-        this.vmReconcileCatchupPeerCursor.set(rotationKey, 0);
-        signatures.set(rotationKey, orderedPeerSignature);
-      }
-    }
-
     if (peers.length <= maxPeers) {
       return peers;
     }
 
     let start = 0;
+    const rotationKey = options?.peerRotationKey;
     if (rotationKey) {
-      start = (this.vmReconcileCatchupPeerCursor.get(rotationKey) ?? 0) % peers.length;
+      this.pruneVmReconcileState();
+      const peerIds = peers.map((peer) => peer.toString());
+      const previousOrder = this.vmReconcileCatchupPeerOrder.get(rotationKey);
+      const nextPeerId = previousOrder?.nextPeerId;
+      if (nextPeerId) {
+        const nextPeerIndex = peerIds.indexOf(nextPeerId);
+        if (nextPeerIndex >= 0) {
+          const previousPeers = new Set(previousOrder.orderedPeers);
+          const hasNewPrioritizedPeer = peerIds
+            .slice(0, nextPeerIndex)
+            .some((peerId) => !previousPeers.has(peerId));
+          start = hasNewPrioritizedPeer ? 0 : nextPeerIndex;
+        } else {
+          const previousPeers = new Set(previousOrder.orderedPeers);
+          const firstNewPeerIndex = peerIds.findIndex((peerId) => !previousPeers.has(peerId));
+          start = firstNewPeerIndex >= 0
+            ? firstNewPeerIndex
+            : (this.vmReconcileCatchupPeerCursor.get(rotationKey) ?? 0) % peers.length;
+        }
+      } else {
+        start = (this.vmReconcileCatchupPeerCursor.get(rotationKey) ?? 0) % peers.length;
+      }
+      const nextIndex = (start + maxPeers) % peers.length;
       this.vmReconcileCatchupPeerCursor.delete(rotationKey);
-      this.vmReconcileCatchupPeerCursor.set(rotationKey, (start + maxPeers) % peers.length);
+      this.vmReconcileCatchupPeerCursor.set(rotationKey, nextIndex);
+      this.vmReconcileCatchupPeerOrder.delete(rotationKey);
+      this.vmReconcileCatchupPeerOrder.set(rotationKey, {
+        orderedPeers: peerIds,
+        nextPeerId: peerIds[nextIndex],
+      });
     }
 
     return [...peers.slice(start), ...peers.slice(0, start)].slice(0, maxPeers);

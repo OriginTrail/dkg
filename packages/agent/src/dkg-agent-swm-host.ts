@@ -2338,6 +2338,25 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return branches.join(' UNION ');
   }
 
+  deleteVmReconcileNegativeCacheEntry(this: DKGAgent, cacheKey: string): void {
+    const existing = this.vmReconcileNegativeCache.get(cacheKey);
+    if (!existing) return;
+    this.vmReconcileNegativeCache.delete(cacheKey);
+    const keys = this.vmReconcileNegativeCacheKeysByCg.get(existing.localCgId);
+    if (!keys) return;
+    keys.delete(cacheKey);
+    if (keys.size === 0) this.vmReconcileNegativeCacheKeysByCg.delete(existing.localCgId);
+  }
+
+  indexVmReconcileNegativeCacheEntry(this: DKGAgent, localCgId: string, cacheKey: string): void {
+    let keys = this.vmReconcileNegativeCacheKeysByCg.get(localCgId);
+    if (!keys) {
+      keys = new Set<string>();
+      this.vmReconcileNegativeCacheKeysByCg.set(localCgId, keys);
+    }
+    keys.add(cacheKey);
+  }
+
   async shouldDeferVmReconcileByNegativeCache(this: DKGAgent,
     cacheKey: string,
     localCgId: string,
@@ -2348,13 +2367,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     try {
       if (this.vmReconcilePeerTopologyKey() !== cached.peerTopologyKey) {
-        this.vmReconcileNegativeCache.delete(cacheKey);
+        this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         this.vmReconcileFetchCooldownAt.delete(localCgId);
         return false;
       }
       const currentNamespaces = await this.collectVmReconcileSwmCandidateNamespaces(localCgId);
       if (this.vmReconcileSwmNamespaceKey(currentNamespaces) !== this.vmReconcileSwmNamespaceKey(cached.candidateNamespaces)) {
-        this.vmReconcileNegativeCache.delete(cacheKey);
+        this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         return false;
       }
       const pattern = this.vmReconcileWorkspaceOperationPattern(currentNamespaces.map((namespace) => namespace.metaGraph));
@@ -2363,7 +2382,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const currentSwmGen = await this.readVmReconcileSwmGen(currentNamespaces);
       if (currentSwmGen === null) return true;
       if (currentSwmGen !== cached.swmGen) {
-        this.vmReconcileNegativeCache.delete(cacheKey);
+        this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         return false;
       }
     } catch {
@@ -2375,6 +2394,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   recordVmReconcileNegativeCache(this: DKGAgent,
     cacheKey: string,
+    localCgId: string,
     state: { swmGen: string; candidateNamespaces: VmReconcileSwmNamespace[]; peerTopologyKey: string },
   ): void {
     this.pruneVmReconcileState();
@@ -2384,14 +2404,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
       DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
       DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS * 2 ** Math.max(0, failures - 1),
     );
-    if (previous) this.vmReconcileNegativeCache.delete(cacheKey);
+    if (previous) this.deleteVmReconcileNegativeCacheEntry(cacheKey);
     this.vmReconcileNegativeCache.set(cacheKey, {
+      localCgId,
       failures,
       nextRetryAt: Date.now() + backoff,
       swmGen: state.swmGen,
       candidateNamespaces: state.candidateNamespaces,
       peerTopologyKey: state.peerTopologyKey,
     });
+    this.indexVmReconcileNegativeCacheEntry(localCgId, cacheKey);
     this.pruneVmReconcileState();
   }
 
@@ -2410,13 +2432,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
   pruneVmReconcileState(this: DKGAgent, now = Date.now()): void {
     for (const [key, entry] of this.vmReconcileNegativeCache) {
       if (now >= entry.nextRetryAt) {
-        this.vmReconcileNegativeCache.delete(key);
+        this.deleteVmReconcileNegativeCacheEntry(key);
       }
     }
     while (this.vmReconcileNegativeCache.size > DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES) {
       const oldestKey = this.vmReconcileNegativeCache.keys().next().value;
       if (oldestKey === undefined) break;
-      this.vmReconcileNegativeCache.delete(oldestKey);
+      this.deleteVmReconcileNegativeCacheEntry(oldestKey);
     }
 
     for (const [localCgId, lastFetchAt] of this.vmReconcileFetchCooldownAt) {
@@ -2434,14 +2456,28 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const oldestKey = this.vmReconcileCatchupPeerCursor.keys().next().value;
       if (oldestKey === undefined) break;
       this.vmReconcileCatchupPeerCursor.delete(oldestKey);
+      this.vmReconcileCatchupPeerOrder.delete(oldestKey);
+    }
+    while (this.vmReconcileCatchupPeerOrder.size > DKGAgentBase.VM_RECONCILE_CG_STATE_MAX_ENTRIES) {
+      const oldestKey = this.vmReconcileCatchupPeerOrder.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.vmReconcileCatchupPeerOrder.delete(oldestKey);
+      this.vmReconcileCatchupPeerCursor.delete(oldestKey);
     }
   }
 
   clearVmReconcileStateForContextGraph(this: DKGAgent, localCgId: string): void {
     const sub = this.subscribedContextGraphs.get(localCgId);
     if (sub?.subscribed || sub?.coreHosted) return;
+    const negativeCacheKeys = this.vmReconcileNegativeCacheKeysByCg.get(localCgId);
+    if (negativeCacheKeys) {
+      for (const cacheKey of Array.from(negativeCacheKeys)) {
+        this.deleteVmReconcileNegativeCacheEntry(cacheKey);
+      }
+    }
     this.vmReconcileFetchCooldownAt.delete(localCgId);
     this.vmReconcileCatchupPeerCursor.delete(localCgId);
+    this.vmReconcileCatchupPeerOrder.delete(localCgId);
   }
 
   vmReconcileCacheKey(this: DKGAgent, ual: string, merkleRoot: Uint8Array): string {
@@ -2458,7 +2494,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const prefix = this.vmReconcileCacheKeyPrefix(cacheKey);
     for (const key of this.vmReconcileNegativeCache.keys()) {
       if (key !== cacheKey && key.startsWith(prefix)) {
-        this.vmReconcileNegativeCache.delete(key);
+        this.deleteVmReconcileNegativeCacheEntry(key);
       }
     }
     this.recentReconciledUals.deleteByPrefix(prefix, cacheKey);
@@ -2602,7 +2638,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     switch (outcome) {
       case 'promoted':
         this.pruneVmReconcileCacheKeySiblings(cacheKey);
-        this.vmReconcileNegativeCache.delete(cacheKey);
+        this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         this.recentReconciledUals.add(cacheKey);
         this.emitReplication({
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
@@ -2616,7 +2652,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'already', ordinal, kaId: kaId.toString(), ual,
         });
-        this.vmReconcileNegativeCache.delete(cacheKey);
+        this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         return { status: 'already', blockNumber: versionBlock };
       case 'stale-target':
         // A newer root won; do not prune its cache/recent state.
@@ -2625,7 +2661,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'already', ordinal, kaId: kaId.toString(), ual,
         });
-        this.vmReconcileNegativeCache.delete(cacheKey);
+        this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         return { status: 'already', blockNumber: versionBlock };
       case 'no-swm':
         if (activeFetchRan && !activeFetchHadUsableResponse) {
@@ -2633,6 +2669,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         } else {
           this.recordVmReconcileNegativeCache(
             cacheKey,
+            localCgId,
             swmState ?? await this.collectVmReconcileSwmCandidateState(localCgId),
           );
         }
