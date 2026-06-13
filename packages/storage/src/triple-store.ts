@@ -9,6 +9,10 @@ import {
   DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES,
   SharedMemoryLiteralBlobStore,
 } from './shared-memory-literal-blob-store.js';
+import {
+  GraphSetIndexStore,
+  type GraphSetIndexStoreOptions,
+} from './graph-set-index-store.js';
 
 export interface Quad {
   subject: string;
@@ -44,6 +48,7 @@ export interface TripleStore {
   createGraph(graphUri: string): Promise<void>;
   dropGraph(graphUri: string): Promise<void>;
   listGraphs(): Promise<string[]>;
+  listGraphsByPrefix?(prefix: string): Promise<string[]>;
 
   deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number>;
 
@@ -142,6 +147,7 @@ export interface TripleStoreConfig {
   backend: TripleStoreBackend;
   options?: Record<string, unknown>;
   largeLiteralStorage?: LargeLiteralStorageConfig;
+  graphSetIndex?: boolean | GraphSetIndexStoreOptions;
 }
 
 type AdapterFactory = (
@@ -169,8 +175,34 @@ export async function createTripleStore(
   }
   const store = await factory(config.options);
   const largeLiteralStorage = resolveLargeLiteralStorageOptions(config);
-  if (!largeLiteralStorage) return store;
-  return new SharedMemoryLiteralBlobStore(store, largeLiteralStorage);
+  const withLargeLiteralStorage = largeLiteralStorage
+    ? new SharedMemoryLiteralBlobStore(store, largeLiteralStorage)
+    : store;
+  return wrapGraphSetIndex(withLargeLiteralStorage, config);
+}
+
+function wrapGraphSetIndex(
+  store: TripleStore,
+  config: TripleStoreConfig,
+): TripleStore {
+  const graphSetIndex = config.graphSetIndex;
+  if (graphSetIndex === false) return store;
+  if (typeof graphSetIndex === 'object' && graphSetIndex.enabled === false) return store;
+  if (!shouldEnableGraphSetIndex(config)) return store;
+  const options = typeof graphSetIndex === 'object' ? graphSetIndex : undefined;
+  return new GraphSetIndexStore(store, options);
+}
+
+function shouldEnableGraphSetIndex(config: TripleStoreConfig): boolean {
+  if (config.graphSetIndex === true || typeof config.graphSetIndex === 'object') return true;
+  if (isDefaultLocalGraphSetIndexBackend(config.backend)) return true;
+  return config.options?.managedByDkg === true;
+}
+
+function isDefaultLocalGraphSetIndexBackend(backend: TripleStoreBackend): boolean {
+  return backend === 'oxigraph'
+    || backend === 'oxigraph-persistent'
+    || backend === 'oxigraph-worker';
 }
 
 function resolveLargeLiteralStorageOptions(

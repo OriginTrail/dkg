@@ -564,7 +564,7 @@ export class DKGQueryEngine implements QueryEngine {
   }
 
   private async discoverGraphsByPrefix(prefix: string): Promise<string[]> {
-    const allGraphs = await this.store.listGraphs();
+    const allGraphs = await listGraphsByPrefix(this.store, prefix);
     return allGraphs.filter(
       (g) => g.startsWith(prefix) && !g.includes('/_meta') && !g.includes('/staging/'),
     );
@@ -646,7 +646,7 @@ export class DKGQueryEngine implements QueryEngine {
       : await this.discoverRegisteredSubGraphNames(contextGraphId);
     const registeredAssertionGraphs = await this.discoverRegisteredAssertionGraphs(contextGraphId);
     const knownChildContextGraphs = await this.discoverKnownChildContextGraphUris(contextGraphId);
-    const allGraphs = await this.store.listGraphs();
+    const allGraphs = await listGraphFamily(this.store, `did:dkg:context-graph:${contextGraphId}`);
 
     for (const graph of allGraphs) {
       if (
@@ -934,6 +934,20 @@ function assertNoCallerDatasetClauses(sparql: string): void {
       'FROM clauses are not allowed on scoped local queries',
     );
   }
+}
+
+async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<string[]> {
+  return store.listGraphsByPrefix
+    ? store.listGraphsByPrefix(prefix)
+    : (await store.listGraphs()).filter((graph) => graph.startsWith(prefix));
+}
+
+async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<string[]> {
+  const graphs = await listGraphsByPrefix(store, `${rootGraph}/`);
+  if (await store.hasGraph(rootGraph)) {
+    graphs.unshift(rootGraph);
+  }
+  return graphs;
 }
 
 function hasCallerDatasetClause(sparql: string): boolean {

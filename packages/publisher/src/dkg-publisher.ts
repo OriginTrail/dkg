@@ -64,6 +64,20 @@ export {
 
 const WORKSPACE_OWNER_PREDICATE = 'http://dkg.io/ontology/workspaceOwner';
 
+async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<string[]> {
+  const graphs = await listGraphsByPrefix(store, `${rootGraph}/`);
+  if (await store.hasGraph(rootGraph)) {
+    graphs.unshift(rootGraph);
+  }
+  return graphs;
+}
+
+async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<string[]> {
+  return store.listGraphsByPrefix
+    ? store.listGraphsByPrefix(prefix)
+    : (await store.listGraphs()).filter((graph) => graph.startsWith(prefix));
+}
+
 /**
  * Minimal structural view of the OT-RFC-43 Option-1 KA-number allocator the
  * publisher needs to mint deterministic packed ids. The concrete
@@ -3519,25 +3533,35 @@ export class DKGPublisher implements Publisher {
     const SWM_META_SUFFIX = '/_shared_memory_meta';
     const CG_PREFIX = 'did:dkg:context-graph:';
     try {
-      const contextGraphs = await this.graphManager.listContextGraphs();
+      const allContextGraphs = await listGraphsByPrefix(this.store, CG_PREFIX);
       let total = 0;
 
       // Build list of (ownershipKey, swmMetaGraphUri) pairs: root + sub-graph scoped
       const targets: Array<{ ownershipKey: string; swmMetaGraph: string }> = [];
-      const allGraphs = await this.store.listGraphs();
-      for (const cgId of contextGraphs) {
-        targets.push({ ownershipKey: cgId, swmMetaGraph: this.graphManager.sharedMemoryMetaUri(cgId) });
-
-        // Discover sub-graph SWM meta graphs: did:dkg:context-graph:{cgId}/{sgName}/_shared_memory_meta
-        const sgPrefix = `${CG_PREFIX}${cgId}/`;
-        for (const g of allGraphs) {
-          if (g.startsWith(sgPrefix) && g.endsWith(SWM_META_SUFFIX)) {
-            const middle = g.slice(sgPrefix.length, g.length - SWM_META_SUFFIX.length);
-            if (middle && !middle.includes('/')) {
-              targets.push({ ownershipKey: `${cgId}\0${middle}`, swmMetaGraph: g });
-            }
-          }
-        }
+      const targetKeys = new Set<string>();
+      const swmMetaGraphs = allContextGraphs
+        .filter((graph) => graph.endsWith(SWM_META_SUFFIX))
+        .map((graph) => ({
+          graph,
+          cgPath: graph.slice(CG_PREFIX.length, graph.length - SWM_META_SUFFIX.length),
+        }))
+        .filter(({ cgPath }) => cgPath.length > 0);
+      for (const { graph, cgPath } of swmMetaGraphs) {
+        const slash = cgPath.lastIndexOf('/');
+        const rootId = slash > 0 ? cgPath.slice(0, slash) : '';
+        const subGraphName = slash > 0 ? cgPath.slice(slash + 1) : '';
+        const isRegisteredSubGraph =
+          rootId.length > 0 &&
+          subGraphName.length > 0 &&
+          !subGraphName.includes('/') &&
+          await this.isSubGraphRegistered(rootId, subGraphName);
+        const ownershipKey =
+          isRegisteredSubGraph
+            ? `${rootId}\0${subGraphName}`
+            : cgPath;
+        if (targetKeys.has(ownershipKey)) continue;
+        targetKeys.add(ownershipKey);
+        targets.push({ ownershipKey, swmMetaGraph: graph });
       }
 
       for (const { ownershipKey, swmMetaGraph } of targets) {
@@ -3758,9 +3782,9 @@ export class DKGPublisher implements Publisher {
 
     try {
       const peerToAddress = new Map<string, string | null>();
-      const allGraphs = await this.store.listGraphs();
+      const allGraphs = await listGraphsByPrefix(this.store, CG_PREFIX);
       // GH #748 Codex round 6 (user report): enumerate `_shared_memory_meta`
-      // graphs directly via `store.listGraphs()`. The earlier approach used
+      // graphs directly from the store's context-graph prefix. The earlier approach used
       // `graphManager.listContextGraphs()`, but that helper filters out CG
       // IDs containing a slash (storage/graph-manager.ts:104) to dedupe
       // sub-graph paths — which also excludes legitimate curated CGs of the
@@ -4202,8 +4226,7 @@ export class DKGPublisher implements Publisher {
    * graph is intentionally excluded — it is not under the `/` prefix).
    */
   private async swmGraphsUnder(bucketGraph: string): Promise<string[]> {
-    const all = await this.store.listGraphs();
-    return all.filter((g) => g === bucketGraph || g.startsWith(`${bucketGraph}/`));
+    return listGraphFamily(this.store, bucketGraph);
   }
 
   async assertionCreate(

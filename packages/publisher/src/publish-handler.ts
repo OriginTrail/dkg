@@ -189,7 +189,7 @@ export class PublishHandler {
       const swmGraph = this.graphManager.sharedMemoryUri(pending.contextGraphId);
       const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(pending.contextGraphId);
       // Uniform layout: span the per-KA …/_shared_memory/{addr}/{number} graphs + the bucket.
-      const swmGraphs = (await this.store.listGraphs()).filter(g => g === swmGraph || g.startsWith(`${swmGraph}/`));
+      const swmGraphs = await listGraphFamily(this.store, swmGraph);
       const rootEntities = new Set(pending.dataQuads.map(q => q.subject));
       for (const rootEntity of rootEntities) {
         for (const g of swmGraphs) {
@@ -574,6 +574,20 @@ export class PublishHandler {
       rejectionReason: reason,
     });
   }
+}
+
+async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<string[]> {
+  const graphs = await listGraphsByPrefix(store, `${rootGraph}/`);
+  if (await store.hasGraph(rootGraph)) {
+    graphs.unshift(rootGraph);
+  }
+  return graphs;
+}
+
+async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<string[]> {
+  return store.listGraphsByPrefix
+    ? store.listGraphsByPrefix(prefix)
+    : (await store.listGraphs()).filter((graph) => graph.startsWith(prefix));
 }
 
 // ── Helpers ──
