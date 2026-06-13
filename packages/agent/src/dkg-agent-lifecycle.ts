@@ -395,6 +395,18 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 
+const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
+
+function jitteredIntervalMs(intervalMs: number, ratio: number | undefined): number {
+  const normalizedRatio =
+    typeof ratio === 'number' && Number.isFinite(ratio)
+      ? Math.min(1, Math.max(0, ratio))
+      : DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO;
+  if (normalizedRatio === 0) return intervalMs;
+  const delta = intervalMs * normalizedRatio;
+  return Math.max(1, Math.round(intervalMs - delta + Math.random() * delta * 2));
+}
+
 export class LifecycleSyncMethods extends DKGAgentBase {
   async start(this: DKGAgent): Promise<void> {
     if (this.started) return;
@@ -2044,6 +2056,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // store's TTL/cap prune.
     if (this.swmHostModeStore) {
       const reconcileEveryMs = this.config.swmHostMode?.reconcileIntervalMs ?? 30_000;
+      const reconcileTimerMs = jitteredIntervalMs(
+        reconcileEveryMs,
+        this.config.swmHostMode?.reconcileJitterRatio,
+      );
       const pruneEveryMs = this.config.swmHostMode?.pruneIntervalMs ?? 5 * 60_000;
       this.reconcileHostModeSubscriptions().catch(() => {});
       this.hostModeReconcilerTimer = setInterval(() => {
@@ -2051,7 +2067,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const msg = err instanceof Error ? err.message : String(err);
           this.log.warn(createOperationContext('system'), `Host-mode reconciler tick failed: ${msg}`);
         });
-      }, reconcileEveryMs);
+      }, reconcileTimerMs);
       if (this.hostModeReconcilerTimer.unref) this.hostModeReconcilerTimer.unref();
       this.hostModePruneTimer = setInterval(() => {
         this.swmHostModeStore?.prune().catch((err: unknown) => {
@@ -2736,7 +2752,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       fetchSyncPages: this.fetchSyncPages.bind(this),
       sinceBatchIdFor,
       processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
-      storeInsert: (quads) => this.store.insert(quads),
+      storeInsert: async (quads) => {
+        await this.store.insert(quads);
+        this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+      },
       deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
       setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
       logInfo: (opCtx, message) => this.log.info(opCtx, message),
@@ -2867,7 +2886,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const graphManager = new GraphManager(this.store);
         await graphManager.ensureContextGraph(contextGraphId);
       },
-      storeInsert: (quads) => this.store.insert(quads),
+      storeInsert: async (quads) => {
+        await this.store.insert(quads);
+        this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+      },
       publicSnapshotStore: this.publicSnapshotStore,
       deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
       setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),

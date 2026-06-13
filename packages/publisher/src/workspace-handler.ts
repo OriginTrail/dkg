@@ -47,6 +47,14 @@ export type WorkspaceSenderKeyDecryptor = (
   ctx: OperationContext,
 ) => Promise<Uint8Array>;
 
+export interface ContextGraphMetaOracleRecord {
+  allowedPeers?: readonly string[];
+  allowedAgents?: readonly string[];
+  participantAgents?: readonly string[];
+  revokedAgents?: readonly string[];
+  accessPolicy?: string;
+}
+
 /**
  * Outcome of one `SharedMemoryHandler.handle()` invocation. Added
  * in rc.9 PR-C (codex R3) so the new substrate fan-out receiver
@@ -170,6 +178,10 @@ export class SharedMemoryHandler {
   private readonly sharedMemoryOwnedEntities: Map<string, Map<string, string>> = new Map();
   private readonly writeLocks: Map<string, Promise<void>>;
   private readonly localAgentAddresses?: () => readonly string[] | Promise<readonly string[]>;
+  private readonly contextGraphMetaOracle?: (
+    contextGraphId: string,
+  ) => Promise<ContextGraphMetaOracleRecord | null>;
+  private readonly markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
   /**
    * OT-RFC-38 / LU-6 Phase B — chain-backed fallback for the agent
    * allowlist read. Returns the participant-agent EOA set for a
@@ -285,6 +297,10 @@ export class SharedMemoryHandler {
       sharedMemoryOwnedEntities?: Map<string, Map<string, string>>;
       writeLocks?: Map<string, Promise<void>>;
       localAgentAddresses?: () => readonly string[] | Promise<readonly string[]>;
+      contextGraphMetaOracle?: (
+        contextGraphId: string,
+      ) => Promise<ContextGraphMetaOracleRecord | null>;
+      markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
       /**
        * OT-RFC-38 / LU-6 Phase B chain-backed agent-allowlist
        * fallback. See {@link SharedMemoryHandler#chainAgentGateOracle}.
@@ -340,6 +356,8 @@ export class SharedMemoryHandler {
     }
     this.writeLocks = options?.writeLocks ?? new Map();
     this.localAgentAddresses = options?.localAgentAddresses;
+    this.contextGraphMetaOracle = options?.contextGraphMetaOracle;
+    this.markContextGraphMetaDirtyFromQuads = options?.markContextGraphMetaDirtyFromQuads;
     this.chainAgentGateOracle = options?.chainAgentGateOracle;
     this.beaconCuratorOracle = options?.beaconCuratorOracle;
     this.workspaceRecipientPrivateKeys = options?.workspaceRecipientPrivateKeys;
@@ -966,6 +984,7 @@ export class SharedMemoryHandler {
             timestamp: new Date(),
           });
           await this.store.insert(regQuads);
+          this.markContextGraphMetaDirtyFromQuads?.(regQuads);
           this.log.info(ctx, `Auto-registered sub-graph "${subGraphName}" in context graph "${contextGraphId}" from SWM`);
         }
       }
@@ -1452,6 +1471,12 @@ export class SharedMemoryHandler {
    * is set (open CG — all peers allowed).
    */
   private async getContextGraphAllowedPeers(contextGraphId: string): Promise<string[] | null> {
+    const projected = await this.contextGraphMetaOracle?.(contextGraphId);
+    if (projected) {
+      const peers = [...new Set((projected.allowedPeers ?? []).filter((v): v is string => typeof v === 'string'))];
+      return peers.length > 0 ? peers : null;
+    }
+
     const cgMeta = contextGraphMetaUri(contextGraphId);
     const cgData = contextGraphDataUri(contextGraphId);
     const result = await this.store.query(
@@ -1472,6 +1497,18 @@ export class SharedMemoryHandler {
    * DKG_PARTICIPANT_AGENT metadata.
    */
   private async getContextGraphAgentGateAddresses(contextGraphId: string): Promise<string[] | null> {
+    const projected = await this.contextGraphMetaOracle?.(contextGraphId);
+    if (projected) {
+      const revoked = new Set((projected.revokedAgents ?? []).map((v) => v.toLowerCase()));
+      const projectedAgents = [...(projected.allowedAgents ?? []), ...(projected.participantAgents ?? [])];
+      const agents = projectedAgents
+        .filter((v): v is string => typeof v === 'string' && ethers.isAddress(v) && !revoked.has(v.toLowerCase()))
+        .map((v) => ethers.getAddress(v));
+      const unique = [...new Set(agents)];
+      if (unique.length > 0) return unique;
+      if (projectedAgents.length > 0) return [];
+    }
+
     const cgMeta = contextGraphMetaUri(contextGraphId);
     const cgData = contextGraphDataUri(contextGraphId);
     const result = await this.store.query(
@@ -1550,6 +1587,11 @@ export class SharedMemoryHandler {
   private async contextGraphHasPrivateAccessPolicy(contextGraphId: string): Promise<boolean> {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return false;
+    }
+
+    const projected = await this.contextGraphMetaOracle?.(contextGraphId);
+    if (projected?.accessPolicy) {
+      return projected.accessPolicy.trim().toLowerCase() === 'private';
     }
 
     const ontologyGraph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);

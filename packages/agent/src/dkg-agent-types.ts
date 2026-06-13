@@ -933,6 +933,8 @@ export interface DKGAgentConfig {
    *  - `registered`: TTL/byte-cap for on-chain registered CGs (typically larger).
    *  - `pruneIntervalMs`: how often the TTL/cap sweep runs.
    *  - `reconcileIntervalMs`: how often the host-mode subscription reconciler ensures cores are subscribed to all known curated CGs.
+   *  - `reconcileBatchSize`: max known CGs reconciled per tick. Default 32.
+   *  - `reconcileJitterRatio`: startup interval jitter ratio in [0, 1]. Default 0.15.
    */
   swmHostMode?: {
     enabled?: boolean;
@@ -940,6 +942,8 @@ export interface DKGAgentConfig {
     registered?: SwmHostModeStoreLimits;
     pruneIntervalMs?: number;
     reconcileIntervalMs?: number;
+    reconcileBatchSize?: number;
+    reconcileJitterRatio?: number;
     /**
      * OT-RFC-38 / LU-6 Phase B — discovery-beacon rate limits for
      * pre-registration (freemium-tier) ciphertext writes. All three

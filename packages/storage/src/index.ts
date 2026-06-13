@@ -7,6 +7,7 @@ export {
   type AskResult,
   type TripleStoreConfig,
   type TripleStoreBackend,
+  type TripleStoreQueryOptions,
   type LargeLiteralStorageConfig,
   registerTripleStoreAdapter,
   createTripleStore,
@@ -32,7 +33,12 @@ export {
 export { OxigraphStore } from './adapters/oxigraph.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';
 export { BlazegraphStore } from './adapters/blazegraph.js';
-export { SparqlHttpStore, type SparqlHttpStoreOptions } from './adapters/sparql-http.js';
+export {
+  SparqlHttpStore,
+  type SparqlHttpStoreOptions,
+  type SparqlHttpQueryOptions,
+  type SparqlHttpSlowQueryEvent,
+} from './adapters/sparql-http.js';
 export { ContextGraphManager, GraphManager } from './graph-manager.js';
 export { PrivateContentStore } from './private-store.js';
 

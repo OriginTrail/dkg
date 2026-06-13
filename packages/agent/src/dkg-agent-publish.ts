@@ -1517,6 +1517,7 @@ export class PublishMethods extends DKGAgentBase {
     ];
 
     await this.store.insert(quads);
+    this.contextGraphMetaProjection.markDirtyFromQuads(quads);
     await gm.ensureContextGraph(contextGraphId);
     await this.store.flush?.();
     this.subscribeToContextGraph(contextGraphId);
@@ -2800,7 +2801,7 @@ export class PublishMethods extends DKGAgentBase {
         ${sharedMemoryReadBothFilter(swmGraph)}
       }`;
     }
-    const result = await this.store.query(sparql);
+    const result = await this.store.query(sparql, { source: 'agent.resolveLiftWorkspaceSlice' });
     return result.type === 'quads' ? result.quads : [];
   }
 

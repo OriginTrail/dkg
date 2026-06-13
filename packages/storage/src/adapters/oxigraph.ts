@@ -9,6 +9,7 @@ import type {
   SelectResult,
   ConstructResult,
   AskResult,
+  TripleStoreQueryOptions,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 
@@ -212,7 +213,7 @@ export class OxigraphStore implements TripleStore {
     return matches.length;
   }
 
-  async query(sparql: string): Promise<QueryResult> {
+  async query(sparql: string, _options?: TripleStoreQueryOptions): Promise<QueryResult> {
     const result = this.store.query(sparql);
 
     if (typeof result === 'boolean') {

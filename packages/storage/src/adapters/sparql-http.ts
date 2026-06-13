@@ -28,8 +28,37 @@ import type {
   SelectResult,
   ConstructResult,
   AskResult,
+  TripleStoreQueryOptions,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
+import { createHash } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
+
+/**
+ * Monotonic clock for slow-query elapsed timing. Unlike `Date.now()`,
+ * `performance.now()` never moves backwards on an NTP step / VM resume / manual
+ * clock change, so an elapsed measurement can't go negative or be skewed by a
+ * wall-clock adjustment. (Graph-list caching now lives in GraphSetIndexStore.)
+ */
+const monotonicNow = (): number => performance.now();
+
+const DEFAULT_SLOW_QUERY_THRESHOLD_MS = 10_000;
+const DEFAULT_SLOW_QUERY_SAMPLE_RATE = 1;
+
+export interface SparqlHttpQueryOptions extends TripleStoreQueryOptions {
+  /** Caller tag used in slow-query telemetry, e.g. `agent.listContextGraphs`. */
+  source?: string;
+}
+
+export interface SparqlHttpSlowQueryEvent {
+  source: string;
+  operation: 'select' | 'ask' | 'construct' | 'describe' | 'unknown';
+  elapsedMs: number;
+  thresholdMs: number;
+  endpoint: string;
+  queryHash: string;
+  queryBytes: number;
+}
 
 export interface SparqlHttpStoreOptions {
   /** SPARQL query endpoint URL (required). */
@@ -46,6 +75,12 @@ export interface SparqlHttpStoreOptions {
    * GraphSetIndexStore rather than this adapter.
    */
   managedByDkg?: boolean;
+  /** Emit sampled slow-query events after this duration. Default 10_000 ms; set 0 to disable. */
+  slowQueryThresholdMs?: number;
+  /** Sampling rate for slow-query events, from 0 to 1. Default 1. */
+  slowQuerySampleRate?: number;
+  /** Optional sink for sampled slow-query events; defaults to a compact console warning. */
+  onSlowQuery?: (event: SparqlHttpSlowQueryEvent) => void;
   /**
    * Deprecated compatibility option. Graph-list revalidation clocks are owned
    * by GraphSetIndexStore.
@@ -59,6 +94,12 @@ export class SparqlHttpStore implements TripleStore {
   private readonly timeout: number;
   private readonly headers: Record<string, string>;
 
+  /** Monotonic clock for slow-query elapsed timing (defaults to performance.now). */
+  private readonly now: () => number;
+  private readonly slowQueryThresholdMs: number;
+  private readonly slowQuerySampleRate: number;
+  private readonly onSlowQuery?: (event: SparqlHttpSlowQueryEvent) => void;
+
   constructor(options: SparqlHttpStoreOptions) {
     if (!options.queryEndpoint?.trim()) {
       throw new Error('sparql-http adapter requires options.queryEndpoint');
@@ -66,6 +107,16 @@ export class SparqlHttpStore implements TripleStore {
     this.queryEndpoint = options.queryEndpoint.replace(/\/$/, '');
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? 30_000;
+    this.now = options.now ?? monotonicNow;
+    this.slowQueryThresholdMs = normalizeNonNegativeNumber(
+      options.slowQueryThresholdMs,
+      DEFAULT_SLOW_QUERY_THRESHOLD_MS,
+    );
+    this.slowQuerySampleRate = normalizeSampleRate(
+      options.slowQuerySampleRate,
+      DEFAULT_SLOW_QUERY_SAMPLE_RATE,
+    );
+    this.onSlowQuery = options.onSlowQuery;
     // Content-Type is set per-request in postQuery/postUpdate (direct POST:
     // application/sparql-query | application/sparql-update). Only shared
     // headers (e.g. Authorization) belong here.
@@ -75,7 +126,7 @@ export class SparqlHttpStore implements TripleStore {
     }
   }
 
-  private async postQuery(sparql: string, accept: string): Promise<Response> {
+  private async postQuery(sparql: string, accept: string, options?: SparqlHttpQueryOptions): Promise<Response> {
     // Direct POST (W3C SPARQL 1.1 Protocol §2.1.3): the query is the raw
     // request body with `application/sparql-query`, not URL-encoded form
     // data. Form-encoded bodies (`query=...`) are parsed by the server's
@@ -87,7 +138,7 @@ export class SparqlHttpStore implements TripleStore {
       method: 'POST',
       headers: { ...this.headers, 'Content-Type': 'application/sparql-query', Accept: accept },
       body: sparql,
-      signal: AbortSignal.timeout(this.timeout),
+      signal: combineAbortSignals(AbortSignal.timeout(this.timeout), options?.signal),
     });
     return res;
   }
@@ -185,43 +236,54 @@ export class SparqlHttpStore implements TripleStore {
     return Math.max(0, before - after);
   }
 
-  async query(sparql: string): Promise<QueryResult> {
+  async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
+    const startedAt = this.now();
     const trimmed = sparql.trim();
     const upper = trimmed.toUpperCase();
     const isAsk = upper.startsWith('ASK');
     const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
+    const operation = inferQueryOperation(trimmed);
 
-    if (isConstruct) {
-      return this.queryConstruct(trimmed);
-    }
-
-    const res = await this.postQuery(trimmed, 'application/sparql-results+json');
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
-    }
-
-    const json = (await res.json()) as W3CSelectResponse | W3CAskResponse;
-
-    if (isAsk || 'boolean' in json) {
-      return { type: 'boolean', value: (json as W3CAskResponse).boolean } satisfies AskResult;
-    }
-
-    const sr = json as W3CSelectResponse;
-    const vars = sr.head?.vars ?? [];
-    const bindings: Array<Record<string, string>> = (sr.results?.bindings ?? []).map((row) => {
-      const obj: Record<string, string> = {};
-      for (const v of vars) {
-        const cell = row[v];
-        if (cell) obj[v] = w3cTermToString(cell);
+    try {
+      if (isConstruct) {
+        return await this.queryConstruct(trimmed, options);
       }
-      return obj;
-    });
-    return { type: 'bindings', bindings } satisfies SelectResult;
+
+      const res = await this.postQuery(trimmed, 'application/sparql-results+json', options);
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
+      }
+
+      const json = (await res.json()) as W3CSelectResponse | W3CAskResponse;
+
+      if (isAsk || 'boolean' in json) {
+        return { type: 'boolean', value: (json as W3CAskResponse).boolean } satisfies AskResult;
+      }
+
+      const sr = json as W3CSelectResponse;
+      const vars = sr.head?.vars ?? [];
+      const bindings: Array<Record<string, string>> = (sr.results?.bindings ?? []).map((row) => {
+        const obj: Record<string, string> = {};
+        for (const v of vars) {
+          const cell = row[v];
+          if (cell) obj[v] = w3cTermToString(cell);
+        }
+        return obj;
+      });
+      return { type: 'bindings', bindings } satisfies SelectResult;
+    } finally {
+      this.maybeEmitSlowQuery({
+        sparql: trimmed,
+        source: options?.source,
+        operation,
+        startedAt,
+      });
+    }
   }
 
-  private async queryConstruct(sparql: string): Promise<ConstructResult> {
-    const res = await this.postQuery(sparql, 'application/n-quads, text/n-quads');
+  private async queryConstruct(sparql: string, options?: SparqlHttpQueryOptions): Promise<ConstructResult> {
+    const res = await this.postQuery(sparql, 'application/n-quads, text/n-quads', options);
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       throw new Error(`SPARQL HTTP construct failed (${res.status}): ${text.slice(0, 300)}`);
@@ -232,7 +294,10 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async hasGraph(graphUri: string): Promise<boolean> {
-    const r = await this.query(`ASK { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`);
+    const r = await this.query(
+      `ASK { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`,
+      { source: 'sparql-http.hasGraph' },
+    );
     return r.type === 'boolean' && r.value;
   }
 
@@ -250,7 +315,12 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async listGraphs(): Promise<string[]> {
-    const r = await this.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
+    // Direct `SELECT DISTINCT ?g` scan. Graph-list caching/indexing is owned by
+    // GraphSetIndexStore (C1 #1150), which decorates this adapter; the `source`
+    // tag keeps the underlying scan visible in slow-query telemetry.
+    const r = await this.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }', {
+      source: 'sparql-http.listGraphs',
+    });
     return r.type === 'bindings' ? r.bindings.map((b) => b.g).filter(Boolean) : [];
   }
 
@@ -258,7 +328,7 @@ export class SparqlHttpStore implements TripleStore {
     const sparql = graphUri
       ? `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`
       : `SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }`;
-    const r = await this.query(sparql);
+    const r = await this.query(sparql, { source: 'sparql-http.countQuads' });
     if (r.type === 'bindings' && r.bindings.length > 0) {
       const c = String(r.bindings[0].c ?? '');
       const stripped = c.replace(/^"|"$/g, '');
@@ -267,9 +337,107 @@ export class SparqlHttpStore implements TripleStore {
     return 0;
   }
 
+  private maybeEmitSlowQuery(input: {
+    sparql: string;
+    source?: string;
+    operation: SparqlHttpSlowQueryEvent['operation'];
+    startedAt: number;
+  }): void {
+    if (this.slowQueryThresholdMs <= 0 || this.slowQuerySampleRate <= 0) return;
+    const elapsedMs = this.now() - input.startedAt;
+    if (elapsedMs < this.slowQueryThresholdMs) return;
+    if (this.slowQuerySampleRate < 1 && Math.random() >= this.slowQuerySampleRate) return;
+
+    const event: SparqlHttpSlowQueryEvent = {
+      source: normalizeQuerySource(input.source),
+      operation: input.operation,
+      elapsedMs,
+      thresholdMs: this.slowQueryThresholdMs,
+      endpoint: sanitizeEndpointForTelemetry(this.queryEndpoint),
+      queryHash: hashQuery(input.sparql),
+      queryBytes: Buffer.byteLength(input.sparql, 'utf8'),
+    };
+
+    if (this.onSlowQuery) {
+      try {
+        this.onSlowQuery(event);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        console.warn(`SPARQL HTTP slow query hook failed: ${reason}`);
+      }
+      return;
+    }
+    console.warn(
+      `SPARQL HTTP slow query source=${event.source} operation=${event.operation} ` +
+      `elapsedMs=${Math.round(event.elapsedMs)} thresholdMs=${event.thresholdMs} ` +
+      `queryHash=${event.queryHash} queryBytes=${event.queryBytes} endpoint=${event.endpoint}`,
+    );
+  }
+
   async close(): Promise<void> {
     // Remote service — nothing to close.
   }
+}
+
+function normalizeNonNegativeNumber(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : fallback;
+}
+
+function normalizeSampleRate(value: number | undefined, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.min(1, Math.max(0, value));
+}
+
+function normalizeQuerySource(source: string | undefined): string {
+  const trimmed = source?.trim();
+  if (!trimmed) return 'unknown';
+  return trimmed.replace(/[^\w:./-]/g, '_').slice(0, 120) || 'unknown';
+}
+
+function inferQueryOperation(sparql: string): SparqlHttpSlowQueryEvent['operation'] {
+  const upper = sparql.trimStart().toUpperCase();
+  if (upper.startsWith('SELECT')) return 'select';
+  if (upper.startsWith('ASK')) return 'ask';
+  if (upper.startsWith('CONSTRUCT')) return 'construct';
+  if (upper.startsWith('DESCRIBE')) return 'describe';
+  return 'unknown';
+}
+
+function hashQuery(sparql: string): string {
+  return createHash('sha256').update(sparql).digest('hex').slice(0, 16);
+}
+
+function sanitizeEndpointForTelemetry(endpoint: string): string {
+  try {
+    const url = new URL(endpoint);
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return endpoint.split(/[?#]/, 1)[0];
+  }
+}
+
+function combineAbortSignals(timeoutSignal: AbortSignal, callerSignal?: AbortSignal): AbortSignal {
+  if (!callerSignal) return timeoutSignal;
+  if (timeoutSignal.aborted) return timeoutSignal;
+  if (callerSignal.aborted) return callerSignal;
+  if (typeof AbortSignal.any === 'function') {
+    return AbortSignal.any([timeoutSignal, callerSignal]);
+  }
+  const controller = new AbortController();
+  const abort = (signal: AbortSignal) => {
+    if (!controller.signal.aborted) {
+      controller.abort(signal.reason);
+    }
+  };
+  timeoutSignal.addEventListener('abort', () => abort(timeoutSignal), { once: true });
+  callerSignal.addEventListener('abort', () => abort(callerSignal), { once: true });
+  return controller.signal;
 }
 
 // ---------------------------------------------------------------------------

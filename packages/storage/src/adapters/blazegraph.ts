@@ -5,6 +5,7 @@ import type {
   SelectResult,
   ConstructResult,
   AskResult,
+  TripleStoreQueryOptions,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { buildBlankNodeSafeDelete } from './sparql-http.js';
@@ -87,7 +88,7 @@ export class BlazegraphStore implements TripleStore {
   // Queries
   // -------------------------------------------------------------------
 
-  async query(sparql: string): Promise<QueryResult> {
+  async query(sparql: string, _options?: TripleStoreQueryOptions): Promise<QueryResult> {
     const trimmed = sparql.trim();
     const upper = trimmed.toUpperCase();
     const isAsk = upper.startsWith('ASK');

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { OxigraphStore, GraphManager } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, GraphManager, type Quad } from '@origintrail-official/dkg-storage';
 import {
   encodeFinalizationMessage, type FinalizationMessageMsg, encodePublishRequest, createOperationContext,
   contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
@@ -247,8 +247,16 @@ describe('FinalizationHandler', () => {
     const publisherAddress = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
     const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
     const subGraphUri = `did:dkg:context-graph:${CONTEXT_GRAPH}/${subGraphName}`;
+    const dirtyQuads: Quad[] = [];
+    const localHandler = new FinalizationHandler(
+      store,
+      undefined,
+      undefined,
+      undefined,
+      (quads) => { dirtyQuads.push(...quads); },
+    );
 
-    await (handler as any).promoteSharedMemoryToCanonical(
+    await (localHandler as any).promoteSharedMemoryToCanonical(
       CONTEXT_GRAPH,
       [{ subject: entity, predicate: 'http://schema.org/name', object: '"Alice"', graph: '' }],
       'did:dkg:evm:31337/0xABC/1',
@@ -276,6 +284,16 @@ describe('FinalizationHandler', () => {
     );
     expect(registration.type).toBe('boolean');
     if (registration.type === 'boolean') expect(registration.value).toBe(true);
+    expect(dirtyQuads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          subject: subGraphUri,
+          predicate: 'http://schema.org/name',
+          object: `"${subGraphName}"`,
+          graph: metaGraph,
+        }),
+      ]),
+    );
 
     const canonical = await store.query(
       `ASK { GRAPH <${subGraphUri}> { <${entity}> <http://schema.org/name> ?o } }`,

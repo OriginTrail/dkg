@@ -38,11 +38,18 @@ export interface AskResult {
 
 export type QueryResult = SelectResult | ConstructResult | AskResult;
 
+export interface TripleStoreQueryOptions {
+  /** Human-readable caller tag used by adapters for diagnostics/telemetry. */
+  source?: string;
+  /** Optional caller cancellation signal. Adapters that cannot cancel may ignore it. */
+  signal?: AbortSignal;
+}
+
 export interface TripleStore {
   insert(quads: Quad[]): Promise<void>;
   delete(quads: Quad[]): Promise<void>;
   deleteByPattern(pattern: Partial<Quad>): Promise<number>;
-  query(sparql: string): Promise<QueryResult>;
+  query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult>;
 
   hasGraph(graphUri: string): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;

@@ -7,6 +7,7 @@ import type {
   QueryResult,
   SelectResult,
   TripleStore,
+  TripleStoreQueryOptions,
 } from './triple-store.js';
 
 export const EXTERNAL_LITERAL_REF_DATATYPE = 'http://dkg.io/ontology/externalLiteralRef';
@@ -71,16 +72,16 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     return removed;
   }
 
-  async query(sparql: string): Promise<QueryResult> {
+  async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     const rewritten = this.rewriteLargeLiteralConstants(sparql);
     if (!rewritten) {
-      const result = await this.inner.query(sparql);
+      const result = await this.inner.query(sparql, options);
       return this.hydrateQueryResult(result);
     }
 
     const [original, placeholder] = await Promise.all([
-      this.inner.query(sparql),
-      this.inner.query(rewritten),
+      this.inner.query(sparql, options),
+      this.inner.query(rewritten, options),
     ]);
     return this.hydrateQueryResult(mergeQueryResults(original, placeholder));
   }

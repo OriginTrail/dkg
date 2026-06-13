@@ -543,6 +543,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   }
 
   async reconcileSharedMemoryGossipSubscription(this: DKGAgent, contextGraphId: string): Promise<void> {
+    // Reconcile is the membership boundary; rebuild this CG's policy view
+    // before deciding whether to keep or drop the SWM subscription.
+    this.contextGraphMetaProjection.markDirty(contextGraphId);
     // OT-RFC-38 / LU-6 Phase B — subscribe on the wire-form (hash) topic.
     // Members compute the hash from their local cleartext id via
     // {@link gossipWireIdFor}; cores hosting CGs they never joined
@@ -812,6 +815,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           getContextGraphOwner: (id) => this.getContextGraphCreator(id),
           subscribeToContextGraph: (id, options) => this.subscribeToContextGraph(id, options),
           hasConfirmedMetaState: (id) => this.hasConfirmedMetaState(id),
+          getCgMeta: (id) => this.getCgMeta(id),
+          markCgMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
           persistContextGraphSubscription: (id) => this.persistContextGraphSubscriptionState(id),
         },
       );
@@ -825,6 +830,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         sharedMemoryOwnedEntities: this.workspaceOwnedEntities,
         writeLocks: this.writeLocks,
         localAgentAddresses: () => [...this.localAgents.keys()],
+        contextGraphMetaOracle: (cgId: string) => this.getCgMeta(cgId),
+        markContextGraphMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
         // OT-RFC-38 / LU-6 Phase B: chain-backed agent-allowlist
         // fallback. Cores hosting curated CGs they are NOT members
         // of have no local meta for the allowlist — without this,
@@ -1508,6 +1515,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // resolve the on-chain id locally so per-cgId promotion still
         // fires and the RS prover sees the KC.
         (cgName: string) => this.getContextGraphOnChainId(cgName),
+        (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
       );
     }
     return this.finalizationHandler;
