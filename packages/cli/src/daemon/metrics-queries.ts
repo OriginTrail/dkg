@@ -1,18 +1,11 @@
+import { DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
+
 // Canonical SPARQL + result parsing for the daemon's metrics reads.
 //
 // Extracted so cross-package consumers — currently the
 // `bench/store-read-latency` benchmark (regression guard for #939) — can
 // measure the EXACT production read path (both the query AND how its result is
 // parsed) instead of duplicated copies that could silently drift.
-
-/**
- * Total triples across the default graph and all named graphs. Run on the 30s
- * metrics-collector cadence via `getTotalTriples` (see the metrics source in
- * `lifecycle.ts`). It is the heaviest read the collector issues and the one the
- * store-read-latency benchmark tracks.
- */
-export const GET_TOTAL_TRIPLES_SPARQL =
-  'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }';
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 const CONTEXT_GRAPH_UNAMBIGUOUS_LAYER_MARKERS = [
@@ -29,6 +22,33 @@ const CONTEXT_GRAPH_RESERVED_SUFFIXES = [
   '/_meta',
 ] as const;
 const WALLET_SCOPED_CONTEXT_GRAPH_RE = /^0x[a-fA-F0-9]{40}\/[^/]+$/;
+
+/**
+ * Total triples across the default graph and all named graphs. Run on the 30s
+ * metrics-collector cadence via `getTotalTriples` (see the metrics source in
+ * `lifecycle.ts`). It is the heaviest read the collector issues and the one the
+ * store-read-latency benchmark tracks.
+ */
+export const GET_TOTAL_TRIPLES_SPARQL =
+  'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }';
+
+export const GET_CONTEXT_GRAPH_DECLARATIONS_SPARQL = `
+  SELECT DISTINCT ?ctxGraph WHERE {
+    GRAPH ?g {
+      ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+    }
+    FILTER(STRSTARTS(STR(?ctxGraph), "${CONTEXT_GRAPH_URI_PREFIX}"))
+  }
+`;
+
+type MetricSubscriptionCandidate = {
+  onChainId?: string;
+  pendingMeta?: boolean;
+  synced?: boolean;
+  metaSynced?: boolean;
+  sharedMemorySynced?: boolean;
+  coreHosted?: boolean;
+};
 
 /**
  * Parse a SPARQL `COUNT` binding into a number. The value arrives as an RDF
@@ -54,6 +74,40 @@ function unambiguousMetricContextGraphId(candidate: string): string | null {
   if (!candidate) return null;
   if (!candidate.includes('/')) return candidate;
   return WALLET_SCOPED_CONTEXT_GRAPH_RE.test(candidate) ? candidate : null;
+}
+
+export function contextGraphIdsFromDeclarationBindings(
+  bindings: readonly Record<string, string>[] | undefined,
+): string[] {
+  const contextGraphIds = new Set<string>();
+  for (const row of bindings ?? []) {
+    const uri = row.ctxGraph;
+    if (uri?.startsWith(CONTEXT_GRAPH_URI_PREFIX)) {
+      const id = uri.slice(CONTEXT_GRAPH_URI_PREFIX.length);
+      if (id) contextGraphIds.add(id);
+    }
+  }
+  return [...contextGraphIds];
+}
+
+export function contextGraphIdsFromMetricSubscriptionCandidates(
+  subscriptions: Iterable<readonly [string, MetricSubscriptionCandidate]>,
+): string[] {
+  const contextGraphIds = new Set<string>();
+  for (const [id, sub] of subscriptions) {
+    if (!id) continue;
+    if (
+      sub.onChainId
+      || sub.pendingMeta === true
+      || sub.synced === true
+      || sub.metaSynced === true
+      || sub.sharedMemorySynced === true
+      || sub.coreHosted === true
+    ) {
+      contextGraphIds.add(id);
+    }
+  }
+  return [...contextGraphIds];
 }
 
 export function contextGraphIdFromGraphUriForMetrics(

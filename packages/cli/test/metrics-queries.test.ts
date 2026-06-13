@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
+  contextGraphIdsFromDeclarationBindings,
+  contextGraphIdsFromMetricSubscriptionCandidates,
   contextGraphIdFromGraphUriForMetrics,
   countContextGraphsFromGraphUris,
   parseRdfInt,
@@ -85,5 +87,29 @@ describe('countContextGraphsFromGraphUris', () => {
       'did:dkg:context-graph:agents/_meta',
       'did:dkg:context-graph:agents/_shared_memory',
     ], ['agents', 'joined-before-first-sync'])).toBe(2);
+  });
+
+  it('uses declaration metadata to count backed slash-bearing context graphs', () => {
+    const declared = contextGraphIdsFromDeclarationBindings([
+      { ctxGraph: 'did:dkg:context-graph:team/context/alpha' },
+      { ctxGraph: 'did:dkg:context-graph:agents' },
+      { ctxGraph: 'urn:not-a-context-graph' },
+    ]);
+
+    expect(countContextGraphsFromGraphUris([
+      'did:dkg:context-graph:team/context/alpha/_meta',
+      'did:dkg:context-graph:team/context/alpha/_private',
+      'did:dkg:context-graph:agents/_shared_memory',
+    ], declared)).toBe(2);
+  });
+
+  it('excludes phantom subscription keys from metric candidates', () => {
+    expect(contextGraphIdsFromMetricSubscriptionCandidates([
+      ['phantom', { synced: false }],
+      ['chain-backed', { onChainId: '42' }],
+      ['pending-meta', { pendingMeta: true }],
+      ['local-sync/slash-id', { metaSynced: true }],
+      ['core-hosted', { coreHosted: true }],
+    ])).toEqual(['chain-backed', 'pending-meta', 'local-sync/slash-id', 'core-hosted']);
   });
 });

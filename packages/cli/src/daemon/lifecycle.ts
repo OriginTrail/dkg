@@ -14,7 +14,14 @@ import {
   type ServerResponse,
 } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
-import { countContextGraphsFromGraphUris, GET_TOTAL_TRIPLES_SPARQL, parseRdfInt } from "./metrics-queries.js";
+import {
+  contextGraphIdsFromDeclarationBindings,
+  contextGraphIdsFromMetricSubscriptionCandidates,
+  countContextGraphsFromGraphUris,
+  GET_CONTEXT_GRAPH_DECLARATIONS_SPARQL,
+  GET_TOTAL_TRIPLES_SPARQL,
+  parseRdfInt,
+} from "./metrics-queries.js";
 import {
   appendFile,
   chmod,
@@ -1849,13 +1856,26 @@ export async function runDaemonInner(
       }
     },
     getContextGraphCount: async () => {
-      const [graphUris, contextGraphs] = await Promise.all([
+      const [graphUris, contextGraphs, declarationResult] = await Promise.all([
         agent.store.listGraphs(),
         agent.listContextGraphs(),
+        agent.store.query(GET_CONTEXT_GRAPH_DECLARATIONS_SPARQL),
       ]);
-      const knownContextGraphIds = new Set(agent.getSubscribedContextGraphs().keys());
+      const knownContextGraphIds = new Set<string>();
       for (const contextGraph of contextGraphs) {
         if (contextGraph.id) knownContextGraphIds.add(contextGraph.id);
+      }
+      for (const contextGraphId of contextGraphIdsFromMetricSubscriptionCandidates(
+        agent.getSubscribedContextGraphs().entries(),
+      )) {
+        knownContextGraphIds.add(contextGraphId);
+      }
+      if (declarationResult.type === "bindings") {
+        for (const contextGraphId of contextGraphIdsFromDeclarationBindings(
+          declarationResult.bindings as Record<string, string>[],
+        )) {
+          knownContextGraphIds.add(contextGraphId);
+        }
       }
       return countContextGraphsFromGraphUris(graphUris, knownContextGraphIds);
     },
@@ -1865,8 +1885,9 @@ export async function runDaemonInner(
     // already re-reads the store fresh and there is nothing concurrent to
     // coalesce. They are intentionally left uncached so a snapshot never serves
     // a stale count and can't mask a store outage. The context-graph count
-    // merges listContextGraphs() IDs with the store graph inventory, then
-    // dedupes local layer graphs. It intentionally includes private CG graphs.
+    // merges filtered listContextGraphs() rows, locally declared CG metadata,
+    // and backed subscription rows with the store graph inventory, then dedupes
+    // local layer graphs. It intentionally includes private CG graphs.
     // These COUNTs are cheap (~0.015 CPU-s/tick on a 75k-triple store).
     getTotalTriples: async () => {
       const r = await agent.query(GET_TOTAL_TRIPLES_SPARQL);
