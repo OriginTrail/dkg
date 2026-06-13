@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import {
   authHeaders, removeParticipant, listParticipants,
   fetchAgents, listJoinRequests, approveJoinRequest, rejectJoinRequest,
-  type PendingJoinRequest,
+  getModelGrant, setModelShare,
+  type PendingJoinRequest, type SharedModelGrant,
 } from '../../api.js';
 import { useModalDismiss } from './useModalDismiss.js';
 
@@ -131,6 +132,15 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
   const [processingRequest, setProcessingRequest] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'allowlist' | 'requests'>('allowlist');
 
+  // Shared curator AI-model access (MVP): a single per-context-graph grant.
+  // Approved members inherit access when the curator enables sharing — there
+  // is NO separate recipient-side acceptance step.
+  const [modelSharingEnabled, setModelSharingEnabled] = useState(false);
+  const [modelId, setModelId] = useState<string | null>(null);
+  const [modelGrantLoaded, setModelGrantLoaded] = useState(false);
+  const [modelSaving, setModelSaving] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
+
   useEffect(() => {
     if (!open) return;
     fetch('/api/status', { headers: authHeaders() })
@@ -158,6 +168,22 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
     listJoinRequests(contextGraphId)
       .then((data) => setPendingRequests(data.requests))
       .catch(() => setPendingRequests([]));
+
+    // Fail CLOSED: if the grant can't be read, present sharing as disabled.
+    setModelGrantLoaded(false);
+    getModelGrant(contextGraphId)
+      .then((g: SharedModelGrant) => {
+        setModelSharingEnabled(!!g.enabled);
+        setModelId(g.modelId ?? null);
+        setModelError(null);
+        setModelGrantLoaded(true);
+      })
+      .catch(() => {
+        setModelSharingEnabled(false);
+        setModelId(null);
+        setModelError('Could not load model sharing status.');
+        setModelGrantLoaded(true);
+      });
   }, [open, contextGraphId]);
 
   // Esc-to-close + Tab focus-trap + focus-restore, same as Create/Join.
@@ -217,6 +243,30 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
       setAgentError(err?.message || 'Failed to reject');
     } finally {
       setProcessingRequest(null);
+    }
+  };
+
+  const handleToggleModelSharing = async (next: boolean) => {
+    const prev = modelSharingEnabled;
+    setModelSaving(true);
+    setModelError(null);
+    setModelSharingEnabled(next); // optimistic
+    try {
+      await setModelShare(contextGraphId, next);
+      if (!next) {
+        setModelId(null);
+      } else {
+        // Surface the model id the curator's node attached to the grant.
+        try {
+          const g = await getModelGrant(contextGraphId);
+          setModelId(g.modelId ?? null);
+        } catch { /* id is cosmetic; keep optimistic state */ }
+      }
+    } catch (err: any) {
+      setModelSharingEnabled(prev); // revert on failure
+      setModelError(err?.message || 'Failed to update model sharing.');
+    } finally {
+      setModelSaving(false);
     }
   };
 
@@ -353,6 +403,44 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
 
               <div className="v10-form-divider" />
 
+              {/* AI Model Access — MVP: one per-CG grant, membership-based.
+                  Enabling lets allowlisted members invoke the model this node
+                  runs. No separate recipient-side acceptance. */}
+              <div className="v10-form-group">
+                <label className="v10-form-label">AI Model Access</label>
+                <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 8 }}>
+                  Share the AI model this node runs with everyone on the allowlist. AI model access is tied to context graph membership — approved members inherit access when this is enabled. There is no separate acceptance step.
+                </div>
+                <label style={{
+                  display: 'flex', alignItems: 'center', gap: 8, fontSize: 12,
+                  color: 'var(--text-primary)',
+                  cursor: (!modelGrantLoaded || modelSaving) ? 'default' : 'pointer',
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={modelSharingEnabled}
+                    disabled={!modelGrantLoaded || modelSaving}
+                    onChange={(e) => handleToggleModelSharing(e.target.checked)}
+                    aria-label="Share curator AI model access with this context graph"
+                  />
+                  Share curator AI model access with this context graph
+                  {modelSaving && <span style={{ color: 'var(--text-tertiary)', fontSize: 10 }}>saving…</span>}
+                </label>
+                {modelSharingEnabled && modelId && (
+                  <div style={{
+                    fontSize: 10, color: 'var(--text-tertiary)', marginTop: 6,
+                    fontFamily: 'var(--font-mono)',
+                  }}>
+                    Current shared model: {modelId}
+                  </div>
+                )}
+                {modelError && (
+                  <div style={{ fontSize: 10, color: 'var(--text-danger)', marginTop: 6 }}>{modelError}</div>
+                )}
+              </div>
+
+              <div className="v10-form-divider" />
+
               {/* Invite code */}
               <div className="v10-form-group">
                 <label className="v10-form-label">Invite Code</label>
@@ -386,6 +474,15 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                     </button>
                   </div>
                 )}
+                {modelSharingEnabled && (
+                  <div style={{
+                    marginTop: 10, padding: '8px 10px', borderRadius: 6, fontSize: 11,
+                    color: 'var(--text-secondary)', background: 'var(--bg-surface)',
+                    border: '1px solid var(--accent-primary)',
+                  }}>
+                    Approved members of this context graph will also get access to the curator AI model.
+                  </div>
+                )}
               </div>
             </>
           )}
@@ -395,6 +492,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
               <label className="v10-form-label">Pending Join Requests</label>
               <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 8 }}>
                 Agents who submitted a signed request to join this context graph. Approve to add them to the allowlist.
+                {modelSharingEnabled && ' Approving also grants AI model access, which is enabled for this context graph.'}
               </div>
 
               {pendingRequests.length === 0 && (

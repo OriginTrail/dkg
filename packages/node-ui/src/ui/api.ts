@@ -502,6 +502,24 @@ export const approveJoinRequest = (contextGraphId: string, agentAddress: string)
 export const rejectJoinRequest = (contextGraphId: string, agentAddress: string) =>
   post<{ ok: boolean; status: string; agentAddress: string }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/reject-join`, { agentAddress });
 
+// --- Shared curator AI-model access (MVP) ---
+// A curator enables/disables model sharing per context graph; approved
+// members inherit access. Backend: packages/cli/src/daemon/routes/shared-model.ts.
+export interface SharedModelGrant {
+  contextGraphId: string;
+  enabled: boolean;
+  modelId?: string;
+}
+
+export const getModelGrant = (contextGraphId: string) =>
+  get<SharedModelGrant>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/model/grant`);
+
+export const setModelShare = (contextGraphId: string, enabled: boolean, modelId?: string) =>
+  post<{ ok: boolean; contextGraphId: string; enabled: boolean }>(
+    `/api/context-graph/${encodeURIComponent(contextGraphId)}/model/share`,
+    modelId ? { enabled, modelId } : { enabled },
+  );
+
 // --- Catch-up sync jobs ---
 export interface CatchupStatusResponse {
   jobId: string;
