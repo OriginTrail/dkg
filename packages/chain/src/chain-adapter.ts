@@ -248,6 +248,48 @@ export interface ContextGraphOnChain {
   description?: string;
 }
 
+export class ContextGraphChainScanPartialError extends Error {
+  readonly partialResults: ContextGraphOnChain[];
+  readonly scannedToBlock: number;
+  readonly failedFromBlock: number;
+  readonly failedToBlock: number;
+
+  constructor(
+    message: string,
+    opts: {
+      partialResults: ContextGraphOnChain[];
+      scannedToBlock: number;
+      failedFromBlock: number;
+      failedToBlock: number;
+      cause?: unknown;
+    },
+  ) {
+    super(message);
+    this.name = 'ContextGraphChainScanPartialError';
+    this.partialResults = opts.partialResults;
+    this.scannedToBlock = opts.scannedToBlock;
+    this.failedFromBlock = opts.failedFromBlock;
+    this.failedToBlock = opts.failedToBlock;
+    if (opts.cause !== undefined) {
+      (this as Error & { cause?: unknown }).cause = opts.cause;
+    }
+  }
+}
+
+export function isContextGraphChainScanPartialError(
+  err: unknown,
+): err is ContextGraphChainScanPartialError {
+  return (
+    err instanceof ContextGraphChainScanPartialError ||
+    (
+      typeof err === 'object' &&
+      err !== null &&
+      (err as { name?: unknown }).name === 'ContextGraphChainScanPartialError' &&
+      Array.isArray((err as { partialResults?: unknown }).partialResults)
+    )
+  );
+}
+
 export interface ContextGraphChainScanOptions {
   /**
    * When true and `fromBlock` is omitted, adapters may resume from an

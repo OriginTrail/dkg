@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { ContextGraphChainScanPartialError } from '../src/chain-adapter.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const ADMIN_PK = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
@@ -91,7 +92,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     ]);
   });
 
-  it('returns scanned-prefix results on a later page failure and resumes with a reorg buffer', async () => {
+  it('throws explicit partial scan failures with scanned-prefix results and resumes with a reorg buffer', async () => {
     const registry = makeRegistry();
     const { adapter, provider } = makeAdapter(registry, 4_999);
     provider.getBlockNumber
@@ -101,9 +102,13 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       .mockResolvedValueOnce([{ topics: [], data: '0x01', blockNumber: 10 }])
       .mockRejectedValueOnce(new Error('range too wide'));
 
-    const partial = await adapter.listContextGraphsFromChain(undefined, { incremental: true });
+    const partial = await adapter.listContextGraphsFromChain(undefined, { incremental: true }).catch((err) => err);
 
-    expect(partial).toHaveLength(1);
+    expect(partial).toBeInstanceOf(ContextGraphChainScanPartialError);
+    expect(partial.partialResults).toHaveLength(1);
+    expect(partial.scannedToBlock).toBe(1_999);
+    expect(partial.failedFromBlock).toBe(2_000);
+    expect(partial.failedToBlock).toBe(3_999);
     expect((adapter as any).contextGraphRegistryScanWatermarks.get(REGISTRY.toLowerCase())).toBe(2_000);
 
     registry.queryFilter.mockReset();

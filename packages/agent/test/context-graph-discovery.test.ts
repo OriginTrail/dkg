@@ -729,6 +729,57 @@ describe('discoverContextGraphsFromChain', () => {
       entry.level === 'info' && entry.message.includes('Chain context graph scan recovered after 2 failed attempt(s)'),
     )).toBe(true);
   }, 15000);
+
+  it('processes partial chain scan prefixes without marking the scan recovered', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    (chain as any).listContextGraphsFromChain = async () => {
+      const err = new Error(
+        'partial ContextGraphNameRegistry scan stopped after block 1999; failed page [2000, 3999]: range too wide',
+      ) as Error & {
+        partialResults: ContextGraphOnChain[];
+        scannedToBlock: number;
+        failedFromBlock: number;
+        failedToBlock: number;
+      };
+      err.name = 'ContextGraphChainScanPartialError';
+      err.partialResults = [
+        {
+          contextGraphId: '0xfeedbeef00000000000000000000000000000000000000000000000000000001',
+          name: 'partial-revealed',
+          creator: '0x1234',
+          accessPolicy: 0,
+          blockNumber: 100,
+          metadataRevealed: true,
+        },
+      ];
+      err.scannedToBlock = 1_999;
+      err.failedFromBlock = 2_000;
+      err.failedToBlock = 3_999;
+      throw err;
+    };
+    const entries: Array<{ level: string; message: string }> = [];
+    Logger.setSink((entry) => entries.push({ level: entry.level, message: entry.message }));
+    try {
+      const result = await createTestAgent({ chainAdapter: chain });
+      agent = result.agent;
+      await agent.start();
+
+      expect(await agent.discoverContextGraphsFromChain()).toBe(1);
+    } finally {
+      Logger.setSink(null);
+    }
+
+    const entry = agent!.getSubscribedContextGraphs().get('partial-revealed');
+    expect(entry).toBeDefined();
+    expect(entry!.onChainId).toBe('0xfeedbeef00000000000000000000000000000000000000000000000000000001');
+    expect((agent as any).chainContextGraphScanFailure?.count).toBe(1);
+    expect(entries.some((entry) =>
+      entry.level === 'warn' && entry.message.includes('Chain context graph scan failed'),
+    )).toBe(true);
+    expect(entries.some((entry) =>
+      entry.level === 'info' && entry.message.includes('Chain context graph scan recovered'),
+    )).toBe(false);
+  }, 15000);
 });
 
 describe('discoverContextGraphsFromStore', () => {

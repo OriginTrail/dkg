@@ -11,7 +11,7 @@
 
 import { EVMChainAdapterBase, CG_REGISTRY_MAX_SCAN_PAGES, CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-base.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
-import type { CreateContextGraphParams, TxResult, ContextGraphOnChain, ContextGraphChainScanOptions, CreateOnChainContextGraphParams, CreateOnChainContextGraphResult, VerifyParams, PublishToContextGraphParams, OnChainPublishResult } from './chain-adapter.js';
+import { ContextGraphChainScanPartialError, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 
 export class ContextGraphMethods extends EVMChainAdapterBase {
@@ -166,7 +166,20 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         logs = page.logs;
         preferred = page.provider;
       } catch (err) {
-        if (incremental && scannedAnyPage) return results;
+        if (incremental && scannedAnyPage) {
+          const message = err instanceof Error ? err.message : String(err);
+          throw new ContextGraphChainScanPartialError(
+            `listContextGraphsFromChain: partial ContextGraphNameRegistry scan ` +
+              `stopped after block ${lo - 1}; failed page [${lo}, ${hi}]: ${message}`,
+            {
+              partialResults: results,
+              scannedToBlock: lo - 1,
+              failedFromBlock: lo,
+              failedToBlock: hi,
+              cause: err,
+            },
+          );
+        }
         throw err;
       }
       scannedAnyPage = true;

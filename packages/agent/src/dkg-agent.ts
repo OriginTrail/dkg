@@ -85,7 +85,7 @@ import {
   ENTITY_PRED_ALT,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -443,6 +443,17 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
   kaNumber?: string;
   /** did:dkg:<chainId>/<agentAddrLower>/<number> reserved at finalize. */
   reservedUal?: string;
+}
+
+function isContextGraphChainScanPartialError(
+  err: unknown,
+): err is Error & { partialResults: ContextGraphOnChain[] } {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as { name?: unknown }).name === 'ContextGraphChainScanPartialError' &&
+    Array.isArray((err as { partialResults?: unknown }).partialResults)
+  );
 }
 
 /**
@@ -1027,6 +1038,7 @@ export class DKGAgent extends DKGAgentBase {
     }
 
     let onChainContextGraphs;
+    let partialChainScan = false;
     try {
       onChainContextGraphs = await this.chain.listContextGraphsFromChain(undefined, { incremental: true });
     } catch (err) {
@@ -1040,9 +1052,11 @@ export class DKGAgent extends DKGAgentBase {
       } else {
         this.chainContextGraphScanFailure.count += 1;
       }
-      return 0;
+      if (!isContextGraphChainScanPartialError(err)) return 0;
+      partialChainScan = true;
+      onChainContextGraphs = err.partialResults;
     }
-    if (this.chainContextGraphScanFailure) {
+    if (!partialChainScan && this.chainContextGraphScanFailure) {
       this.log.info(
         ctx,
         `Chain context graph scan recovered after ${this.chainContextGraphScanFailure.count} failed attempt(s)`,
