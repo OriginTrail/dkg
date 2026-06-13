@@ -35,6 +35,7 @@ const SWM_ROWS_PER_OP = 50;
 const DURABLE_COLD_BUDGET_MS = perfBudget('DURABLE_COLD', 45_000);
 const DURABLE_WARM_BUDGET_MS = perfBudget('DURABLE_WARM', 500);
 const DURABLE_META_BUDGET_MS = perfBudget('DURABLE_META', 500);
+const SWM_COLD_BUDGET_MS = perfBudget('SWM_COLD', 5_000);
 const SWM_DATA_BUDGET_MS = perfBudget('SWM_DATA', 500);
 const SWM_META_BUDGET_MS = perfBudget('SWM_META', 300);
 const describePerf = process.env.DKG_SYNC_RESPONDER_PERF === '1' ? describe : describe.skip;
@@ -205,8 +206,8 @@ describePerf('sync responder perf guard', () => {
     expect(linesFromNquads(deepest)).toHaveLength(PAGE_SIZE);
   }, 60_000);
 
-  it('serves SWM TTL data and meta pages under budget', async () => {
-    const dataFirst = await expectWithinBudget('SWM data offset 0', SWM_DATA_BUDGET_MS, () =>
+  it('builds SWM TTL snapshots once and serves warm data/meta pages under budget', async () => {
+    const dataFirst = await expectWithinBudget('SWM data cold snapshot', SWM_COLD_BUDGET_MS, () =>
       cap.invoke({
         contextGraphId: CG_ID,
         includeSharedMemory: true,
@@ -217,6 +218,18 @@ describePerf('sync responder perf guard', () => {
       }),
     );
     expect(linesFromNquads(dataFirst)).toHaveLength(PAGE_SIZE);
+
+    const dataWarmRetry = await expectWithinBudget('SWM data warm offset 0 retry', SWM_DATA_BUDGET_MS, () =>
+      cap.invoke({
+        contextGraphId: CG_ID,
+        includeSharedMemory: true,
+        phase: 'data',
+        offset: 0,
+        limit: PAGE_SIZE,
+        syncSessionId: SWM_DATA_SESSION_ID,
+      }),
+    );
+    expect(dataWarmRetry).toBe(dataFirst);
 
     const dataDeep = await expectWithinBudget('SWM data deepest page', SWM_DATA_BUDGET_MS, () =>
       cap.invoke({
@@ -230,7 +243,7 @@ describePerf('sync responder perf guard', () => {
     );
     expect(linesFromNquads(dataDeep)).toHaveLength(PAGE_SIZE);
 
-    const metaFirst = await expectWithinBudget('SWM meta offset 0', SWM_META_BUDGET_MS, () =>
+    const metaFirst = await expectWithinBudget('SWM meta cold snapshot', SWM_COLD_BUDGET_MS, () =>
       cap.invoke({
         contextGraphId: CG_ID,
         includeSharedMemory: true,
@@ -241,6 +254,18 @@ describePerf('sync responder perf guard', () => {
       }),
     );
     expect(linesFromNquads(metaFirst)).toHaveLength(PAGE_SIZE);
+
+    const metaWarmRetry = await expectWithinBudget('SWM meta warm offset 0 retry', SWM_META_BUDGET_MS, () =>
+      cap.invoke({
+        contextGraphId: CG_ID,
+        includeSharedMemory: true,
+        phase: 'meta',
+        offset: 0,
+        limit: PAGE_SIZE,
+        syncSessionId: SWM_META_SESSION_ID,
+      }),
+    );
+    expect(metaWarmRetry).toBe(metaFirst);
 
     const metaDeep = await expectWithinBudget('SWM meta deepest page', SWM_META_BUDGET_MS, () =>
       cap.invoke({
