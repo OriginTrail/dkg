@@ -43,6 +43,10 @@ type MetricSubscriptionCandidate = {
 };
 
 const HASH_CONTEXT_GRAPH_ID_RE = /^0x[a-fA-F0-9]{64}$/;
+const SYSTEM_CONTEXT_GRAPH_IDS = new Set<string>([
+  SYSTEM_CONTEXT_GRAPHS.AGENTS,
+  SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+]);
 
 /**
  * Parse a SPARQL `COUNT` binding into a number. The value arrives as an RDF
@@ -60,12 +64,13 @@ export function parseRdfInt(raw: string | undefined): number {
 
 function normalizeMetricContextGraphCandidates(knownContextGraphIds?: Iterable<string>): string[] {
   return [...new Set(knownContextGraphIds ?? [])]
-    .filter(Boolean)
+    .filter((id) => Boolean(id) && !SYSTEM_CONTEXT_GRAPH_IDS.has(id))
     .sort((a, b) => b.length - a.length);
 }
 
 function unambiguousMetricContextGraphId(candidate: string): string | null {
   if (!candidate) return null;
+  if (SYSTEM_CONTEXT_GRAPH_IDS.has(candidate)) return null;
   if (!candidate.includes('/')) return candidate;
   return WALLET_SCOPED_CONTEXT_GRAPH_RE.test(candidate) ? candidate : null;
 }
@@ -116,7 +121,22 @@ export function contextGraphIdsFromDeclarationBindings(
     const uri = row.ctxGraph;
     if (uri?.startsWith(CONTEXT_GRAPH_URI_PREFIX)) {
       const id = uri.slice(CONTEXT_GRAPH_URI_PREFIX.length);
-      if (id) contextGraphIds.add(id);
+      if (id && !SYSTEM_CONTEXT_GRAPH_IDS.has(id)) contextGraphIds.add(id);
+    }
+  }
+  return [...contextGraphIds];
+}
+
+export function contextGraphIdsFromLocalRootMetaGraphs(
+  graphUris: readonly string[],
+  candidateContextGraphIds: Iterable<string>,
+): string[] {
+  const graphUriSet = new Set(graphUris);
+  const contextGraphIds = new Set<string>();
+  for (const id of candidateContextGraphIds) {
+    if (!id || SYSTEM_CONTEXT_GRAPH_IDS.has(id)) continue;
+    if (graphUriSet.has(`${CONTEXT_GRAPH_URI_PREFIX}${id}/_meta`)) {
+      contextGraphIds.add(id);
     }
   }
   return [...contextGraphIds];
@@ -128,6 +148,7 @@ export function contextGraphIdsFromMetricSubscriptionCandidates(
   const contextGraphIdsByIdentity = new Map<string, string>();
   for (const [id, sub] of subscriptions) {
     if (!id) continue;
+    if (SYSTEM_CONTEXT_GRAPH_IDS.has(id)) continue;
     if (
       sub.onChainId
       || sub.pendingMeta === true

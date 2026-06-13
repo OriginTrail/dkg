@@ -17,6 +17,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   buildContextGraphDeclarationsSparql,
   contextGraphIdsFromDeclarationBindings,
+  contextGraphIdsFromLocalRootMetaGraphs,
   contextGraphIdsFromMetricSubscriptionCandidates,
   countContextGraphsFromGraphUris,
   GET_TOTAL_TRIPLES_SPARQL,
@@ -1864,8 +1865,15 @@ export async function runDaemonInner(
       for (const contextGraph of contextGraphs) {
         if (contextGraph.id) knownContextGraphIds.add(contextGraph.id);
       }
+      const subscribedContextGraphs = agent.getSubscribedContextGraphs();
       for (const contextGraphId of contextGraphIdsFromMetricSubscriptionCandidates(
-        agent.getSubscribedContextGraphs().entries(),
+        subscribedContextGraphs.entries(),
+      )) {
+        knownContextGraphIds.add(contextGraphId);
+      }
+      for (const contextGraphId of contextGraphIdsFromLocalRootMetaGraphs(
+        graphUris,
+        subscribedContextGraphs.keys(),
       )) {
         knownContextGraphIds.add(contextGraphId);
       }

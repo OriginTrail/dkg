@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   buildContextGraphDeclarationsSparql,
   contextGraphIdsFromDeclarationBindings,
+  contextGraphIdsFromLocalRootMetaGraphs,
   contextGraphIdsFromMetricSubscriptionCandidates,
   contextGraphIdFromGraphUriForMetrics,
   countContextGraphsFromGraphUris,
@@ -23,15 +24,15 @@ describe('parseRdfInt', () => {
 describe('countContextGraphsFromGraphUris', () => {
   it('counts bare context graphs once across reserved layer graphs', () => {
     expect(countContextGraphsFromGraphUris([
-      'did:dkg:context-graph:agents',
-      'did:dkg:context-graph:agents/_meta',
-      'did:dkg:context-graph:agents/_private',
-      'did:dkg:context-graph:agents/_shared_memory',
-      'did:dkg:context-graph:agents/_shared_memory_meta',
-      'did:dkg:context-graph:agents/_verifiable_memory/1',
-      'did:dkg:context-graph:agents/context/1/_meta',
-      'did:dkg:context-graph:agents/code',
-      'did:dkg:context-graph:agents/code/_shared_memory',
+      'did:dkg:context-graph:project',
+      'did:dkg:context-graph:project/_meta',
+      'did:dkg:context-graph:project/_private',
+      'did:dkg:context-graph:project/_shared_memory',
+      'did:dkg:context-graph:project/_shared_memory_meta',
+      'did:dkg:context-graph:project/_verifiable_memory/1',
+      'did:dkg:context-graph:project/context/1/_meta',
+      'did:dkg:context-graph:project/code',
+      'did:dkg:context-graph:project/code/_shared_memory',
     ])).toBe(1);
   });
 
@@ -39,7 +40,7 @@ describe('countContextGraphsFromGraphUris', () => {
     const walletScoped = '0xE5B8896800000000000000000000000000000000/tuesday-cg';
     const nestedSlashId = `${walletScoped}/phase-two`;
     const reservedSegmentId = 'team/context/alpha';
-    const knownContextGraphs = [walletScoped, nestedSlashId, reservedSegmentId, 'agents'];
+    const knownContextGraphs = [walletScoped, nestedSlashId, reservedSegmentId, 'project'];
 
     expect(contextGraphIdFromGraphUriForMetrics(
       `did:dkg:context-graph:${walletScoped}/_meta`,
@@ -76,18 +77,28 @@ describe('countContextGraphsFromGraphUris', () => {
       `did:dkg:context-graph:${nestedSlashId}/_meta`,
       `did:dkg:context-graph:${reservedSegmentId}`,
       `did:dkg:context-graph:${reservedSegmentId}/_meta`,
-      'did:dkg:context-graph:agents/code',
-      'did:dkg:context-graph:agents/code/_shared_memory',
-      'did:dkg:context-graph:agents',
+      'did:dkg:context-graph:project/code',
+      'did:dkg:context-graph:project/code/_shared_memory',
+      'did:dkg:context-graph:project',
       'urn:not-a-context-graph',
     ], knownContextGraphs)).toBe(4);
   });
 
   it('counts known context graphs that do not have a local graph yet', () => {
     expect(countContextGraphsFromGraphUris([
+      'did:dkg:context-graph:project/_meta',
+      'did:dkg:context-graph:project/_shared_memory',
+    ], ['project', 'joined-before-first-sync'])).toBe(2);
+  });
+
+  it('does not count system context graphs as user context graphs', () => {
+    expect(countContextGraphsFromGraphUris([
+      'did:dkg:context-graph:agents',
       'did:dkg:context-graph:agents/_meta',
-      'did:dkg:context-graph:agents/_shared_memory',
-    ], ['agents', 'joined-before-first-sync'])).toBe(2);
+      'did:dkg:context-graph:ontology',
+      'did:dkg:context-graph:ontology/_meta',
+      'did:dkg:context-graph:project/_meta',
+    ], ['agents', 'ontology', 'project'])).toBe(1);
   });
 
   it('uses declaration metadata to count backed slash-bearing context graphs', () => {
@@ -101,7 +112,15 @@ describe('countContextGraphsFromGraphUris', () => {
       'did:dkg:context-graph:team/context/alpha/_meta',
       'did:dkg:context-graph:team/context/alpha/_private',
       'did:dkg:context-graph:agents/_shared_memory',
-    ], declared)).toBe(2);
+    ], declared)).toBe(1);
+  });
+
+  it('uses exact local root meta graphs to back subscribed slash ids', () => {
+    expect(contextGraphIdsFromLocalRootMetaGraphs([
+      'did:dkg:context-graph:team/context/alpha/_meta',
+      'did:dkg:context-graph:team/context/beta/_meta',
+      'did:dkg:context-graph:project/code/_meta',
+    ], ['team/context/alpha', 'missing/slash', 'agents'])).toEqual(['team/context/alpha']);
   });
 
   it('excludes phantom subscription keys from metric candidates', () => {
