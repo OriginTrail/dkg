@@ -5,7 +5,7 @@ import {
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type { SyncRequestEnvelope } from '../auth/request-build.js';
-import { DURABLE_DATA_SYNC_SESSION_BUCKET_MS } from '../durable-session.js';
+import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../durable-session.js';
 import {
   createResponderGraphListMemo,
   createResponderSyncRowListMemo,
@@ -60,7 +60,8 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     logDebug,
   } = params;
   const graphListMemo = createResponderGraphListMemo(store);
-  const durableDataRowsMemo = createResponderSyncRowListMemo(DURABLE_DATA_SYNC_SESSION_BUCKET_MS);
+  const durableDataRowsMemo = createResponderSyncRowListMemo(DURABLE_DATA_SYNC_SESSION_TTL_MS);
+  const durableDataSessionTokens = new Map<string, string>();
   const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
   const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
 
@@ -168,6 +169,17 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       logDebug(createOperationContext('sync'), `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
     } else {
       const queryStartedAt = Date.now();
+      const durableSessionTokenKey = request.syncSessionId
+        ? `${peerId}:${contextGraphId}:${sinceBatchId == null ? 'full' : sinceBatchId.toString()}`
+        : undefined;
+      const refreshDurableSessionRows = Boolean(
+        durableSessionTokenKey &&
+        offset === 0 &&
+        durableDataSessionTokens.get(durableSessionTokenKey) !== request.syncSessionId,
+      );
+      if (durableSessionTokenKey && offset === 0) {
+        durableDataSessionTokens.set(durableSessionTokenKey, request.syncSessionId!);
+      }
       const rows = sinceBatchId == null
         ? await readDurableDataPage({
           store,
@@ -177,8 +189,8 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           offset,
           limit,
           rowListMemo: request.syncSessionId ? durableDataRowsMemo : undefined,
-          rowListCacheScope: request.syncSessionId ? `${peerId}:${request.syncSessionId}` : undefined,
-          refreshRowList: false,
+          rowListCacheScope: request.syncSessionId ? peerId : undefined,
+          refreshRowList: refreshDurableSessionRows,
         })
         : await readDurableDataPage({
           store,
@@ -188,8 +200,8 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           offset,
           limit,
           rowListMemo: request.syncSessionId ? durableDataRowsMemo : undefined,
-          rowListCacheScope: request.syncSessionId ? `${peerId}:${request.syncSessionId}` : undefined,
-          refreshRowList: false,
+          rowListCacheScope: request.syncSessionId ? peerId : undefined,
+          refreshRowList: refreshDurableSessionRows,
         });
       const queryDurationMs = Date.now() - queryStartedAt;
       const serializeStartedAt = Date.now();

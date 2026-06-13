@@ -3,7 +3,18 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import { sendSyncRequest } from '../../p2p/sync-transport.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from '../checkpoint/state.js';
-import { durableDataSyncSessionId } from '../durable-session.js';
+import { createDurableDataSyncSessionId } from '../durable-session.js';
+
+const MAX_UNFINISHED_DURABLE_DATA_SESSIONS = 4096;
+const unfinishedDurableDataSessions = new Map<string, string>();
+
+function rememberUnfinishedDurableDataSession(checkpointKey: string, syncSessionId: string): void {
+  if (!unfinishedDurableDataSessions.has(checkpointKey) && unfinishedDurableDataSessions.size >= MAX_UNFINISHED_DURABLE_DATA_SESSIONS) {
+    const oldest = unfinishedDurableDataSessions.keys().next().value;
+    if (oldest) unfinishedDurableDataSessions.delete(oldest);
+  }
+  unfinishedDurableDataSessions.set(checkpointKey, syncSessionId);
+}
 
 export interface SyncPageResult {
   quads: Quad[];
@@ -117,86 +128,98 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   let bytesReceived = 0;
   let timedOut = false;
   const syncSessionId = usesDurableDataSession
-    ? durableDataSyncSessionId({ remotePeerId, contextGraphId, sinceBatchId })
+    ? (unfinishedDurableDataSessions.get(checkpointKey) ?? createDurableDataSyncSessionId())
     : undefined;
 
-  while (true) {
-    if (Date.now() > deadline) {
-      timedOut = true;
-      break;
-    }
+  try {
+    while (true) {
+      if (Date.now() > deadline) {
+        timedOut = true;
+        break;
+      }
 
-    const remainingMs = Math.max(0, deadline - Date.now());
-    const timeoutMs = Math.min(
-      syncPageTimeoutMs,
-      Math.max(2000, Math.floor(remainingMs / syncRouterAttempts)),
-    );
-
-    const curOffset = offset;
-    const transportStartedAt = Date.now();
-    const responseBytes = await sendSyncRequest({
-      remotePeerId,
-      timeoutMs,
-      retryAttempts: syncPageRetryAttempts,
-      contextGraphId,
-      offset,
-      protocolId: protocolSync,
-      // `requestFactory` runs per-attempt so each retry carries a
-      // fresh `issuedAtMs`/`requestId`. Required for sync's auth
-      // gate (`SYNC_AUTH_MAX_AGE_MS` freshness TTL +
-      // `seenRequestIds` replay protection). The matching
-      // fresh-messageId-per-attempt is generated inside
-      // `sendSyncRequest`. See `sendSyncRequest`'s jsdoc for the
-      // full rationale (codex review on #569 follow-ups #1, #4-#8).
-      requestFactory: () => buildSyncRequest(contextGraphId, curOffset, syncPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId),
-      send,
-      onRetry: (attempt, delay, err) => {
-        logWarn(ctx, `Sync page retry ${attempt}/${syncPageRetryAttempts} for offset ${offset} (delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`);
-      },
-    });
-    const transportDurationMs = Date.now() - transportStartedAt;
-
-    const decodeStartedAt = Date.now();
-    const nquadsText = new TextDecoder().decode(responseBytes).trim();
-    const decodeDurationMs = Date.now() - decodeStartedAt;
-    bytesReceived += responseBytes.byteLength;
-    if (
-      nquadsText === syncDeniedResponse ||
-      (extraDeniedResponses && extraDeniedResponses.includes(nquadsText))
-    ) {
-      const error = new Error(`Sync denied by ${remotePeerId} for "${contextGraphId}" (${phase})`);
-      (error as Error & { syncDenied?: boolean }).syncDenied = true;
-      throw error;
-    }
-    if (!nquadsText) break;
-
-    const parseStartedAt = Date.now();
-    const parsed = await parseAndFilter(nquadsText, graphUri, contextGraphId);
-    const parseDurationMs = Date.now() - parseStartedAt;
-
-    const stepDurationMs = transportDurationMs + decodeDurationMs + parseDurationMs;
-    if (stepDurationMs > 100) {
-      logDebug(
-        ctx,
-        `Sync page timing for "${contextGraphId}" offset=${curOffset} phase=${phase}: transport=${transportDurationMs}ms decode=${decodeDurationMs}ms parse=${parseDurationMs}ms`,
+      const remainingMs = Math.max(0, deadline - Date.now());
+      const timeoutMs = Math.min(
+        syncPageTimeoutMs,
+        Math.max(2000, Math.floor(remainingMs / syncRouterAttempts)),
       );
-    }
 
-    if (parsed.totalQuads === 0) {
-      if (parsed.quads.length > 0) allQuads.push(...parsed.quads);
-      break;
-    }
+      const curOffset = offset;
+      const transportStartedAt = Date.now();
+      const responseBytes = await sendSyncRequest({
+        remotePeerId,
+        timeoutMs,
+        retryAttempts: syncPageRetryAttempts,
+        contextGraphId,
+        offset,
+        protocolId: protocolSync,
+        // `requestFactory` runs per-attempt so each retry carries a
+        // fresh `issuedAtMs`/`requestId`. Required for sync's auth
+        // gate (`SYNC_AUTH_MAX_AGE_MS` freshness TTL +
+        // `seenRequestIds` replay protection). The matching
+        // fresh-messageId-per-attempt is generated inside
+        // `sendSyncRequest`. See `sendSyncRequest`'s jsdoc for the
+        // full rationale (codex review on #569 follow-ups #1, #4-#8).
+        requestFactory: () => buildSyncRequest(contextGraphId, curOffset, syncPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId),
+        send,
+        onRetry: (attempt, delay, err) => {
+          logWarn(ctx, `Sync page retry ${attempt}/${syncPageRetryAttempts} for offset ${offset} (delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`);
+        },
+      });
+      const transportDurationMs = Date.now() - transportStartedAt;
 
-    allQuads.push(...parsed.quads);
-    offset += parsed.totalQuads;
+      const decodeStartedAt = Date.now();
+      const nquadsText = new TextDecoder().decode(responseBytes).trim();
+      const decodeDurationMs = Date.now() - decodeStartedAt;
+      bytesReceived += responseBytes.byteLength;
+      if (
+        nquadsText === syncDeniedResponse ||
+        (extraDeniedResponses && extraDeniedResponses.includes(nquadsText))
+      ) {
+        const error = new Error(`Sync denied by ${remotePeerId} for "${contextGraphId}" (${phase})`);
+        (error as Error & { syncDenied?: boolean }).syncDenied = true;
+        throw error;
+      }
+      if (!nquadsText) break;
 
-    if (debugSyncProgress) {
-      logInfo(
-        ctx,
-        `Sync progress for "${contextGraphId}" ${includeSharedMemory ? 'shared-memory' : 'durable'} ${phase}: transferred=${allQuads.length} bytes=${bytesReceived} offset=${offset}`,
-      );
+      const parseStartedAt = Date.now();
+      const parsed = await parseAndFilter(nquadsText, graphUri, contextGraphId);
+      const parseDurationMs = Date.now() - parseStartedAt;
+
+      const stepDurationMs = transportDurationMs + decodeDurationMs + parseDurationMs;
+      if (stepDurationMs > 100) {
+        logDebug(
+          ctx,
+          `Sync page timing for "${contextGraphId}" offset=${curOffset} phase=${phase}: transport=${transportDurationMs}ms decode=${decodeDurationMs}ms parse=${parseDurationMs}ms`,
+        );
+      }
+
+      if (parsed.totalQuads === 0) {
+        if (parsed.quads.length > 0) allQuads.push(...parsed.quads);
+        break;
+      }
+
+      allQuads.push(...parsed.quads);
+      offset += parsed.totalQuads;
+
+      if (debugSyncProgress) {
+        logInfo(
+          ctx,
+          `Sync progress for "${contextGraphId}" ${includeSharedMemory ? 'shared-memory' : 'durable'} ${phase}: transferred=${allQuads.length} bytes=${bytesReceived} offset=${offset}`,
+        );
+      }
+      if (parsed.totalQuads < syncPageSize) break;
     }
-    if (parsed.totalQuads < syncPageSize) break;
+  } catch (err) {
+    if (usesDurableDataSession && syncSessionId && !(err as Error & { syncDenied?: boolean }).syncDenied) {
+      rememberUnfinishedDurableDataSession(checkpointKey, syncSessionId);
+    }
+    throw err;
+  }
+
+  if (usesDurableDataSession && syncSessionId) {
+    if (timedOut) rememberUnfinishedDurableDataSession(checkpointKey, syncSessionId);
+    else unfinishedDurableDataSessions.delete(checkpointKey);
   }
 
   if (timedOut) {

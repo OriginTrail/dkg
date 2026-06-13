@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
-import { DURABLE_DATA_SYNC_SESSION_BUCKET_MS } from '../src/sync/durable-session.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
 /**
@@ -239,25 +238,125 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(observedBuilds[1].syncSessionId).toBe(observedBuilds[0].syncSessionId);
   });
 
-  it('reuses durable sync session ids across nearby fetch rounds', async () => {
-    vi.setSystemTime(1_700_000_000_000);
-
+  it('uses a fresh durable sync session id for each completed fetch round', async () => {
     const first = await captureDurableSyncSessionId();
     const second = await captureDurableSyncSessionId();
-    const otherPeer = await captureDurableSyncSessionId({ remotePeerId: `${REMOTE_PEER_ID}-other` });
-    const otherGraph = await captureDurableSyncSessionId({ contextGraphId: `${CG_ID}-other` });
-    const delta = await captureDurableSyncSessionId({ sinceBatchId: '42' });
 
     expect(typeof first).toBe('string');
     expect(first?.length).toBeGreaterThan(0);
-    expect(second).toBe(first);
-    expect(otherPeer).not.toBe(first);
-    expect(otherGraph).not.toBe(first);
-    expect(delta).not.toBe(first);
+    expect(second).not.toBe(first);
+  });
 
-    vi.setSystemTime(1_700_000_000_000 + DURABLE_DATA_SYNC_SESSION_BUCKET_MS);
-    const nextBucket = await captureDurableSyncSessionId();
-    expect(nextBucket).not.toBe(first);
+  it('reuses the durable sync session id after an incomplete fetch round', async () => {
+    vi.setSystemTime(1_700_000_000_000);
+    const observedBuilds: Array<{
+      offset: number;
+      syncSessionId: string | undefined;
+    }> = [];
+    let sendCalls = 0;
+
+    const first = await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: 'incomplete-session-cg',
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 1,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => 0,
+          set: () => {},
+          delete: () => {},
+        },
+        buildSyncRequest: async (
+          _contextGraphId,
+          offset,
+          _limit,
+          _includeSharedMemory,
+          _remotePeerId,
+          _phase,
+          _snapshotRef,
+          _sinceBatchId,
+          syncSessionId,
+        ) => {
+          observedBuilds.push({ offset, syncSessionId });
+          return new TextEncoder().encode(`request-${offset}`);
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => {
+          sendCalls++;
+          if (sendCalls === 1) {
+            vi.setSystemTime(1_700_000_060_001);
+            return new TextEncoder().encode('one-quad-line');
+          }
+          return new TextEncoder().encode('');
+        },
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    expect(first.completed).toBe(false);
+    expect(first.nextOffset).toBe(1);
+    const unfinishedSessionId = observedBuilds[0].syncSessionId;
+    expect(typeof unfinishedSessionId).toBe('string');
+
+    await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: 'incomplete-session-cg',
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 1,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => 1,
+          set: () => {},
+          delete: () => {},
+        },
+        buildSyncRequest: async (
+          _contextGraphId,
+          offset,
+          _limit,
+          _includeSharedMemory,
+          _remotePeerId,
+          _phase,
+          _snapshotRef,
+          _sinceBatchId,
+          syncSessionId,
+        ) => {
+          observedBuilds.push({ offset, syncSessionId });
+          return new TextEncoder().encode(`request-${offset}`);
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => new TextEncoder().encode(''),
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    expect(observedBuilds[observedBuilds.length - 1]).toEqual({
+      offset: 0,
+      syncSessionId: unfinishedSessionId,
+    });
   });
 
   it('restarts durable data checkpoints at offset zero with a stable sync session', async () => {

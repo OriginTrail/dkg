@@ -395,9 +395,9 @@ describe('sync responder pagination interleaving', () => {
     expect(peerASecond).toBe('');
   });
 
-  it('isolates overlapping durable-data row snapshots from the same peer by sync session', async () => {
+  it('refreshes same-peer durable-data snapshots when the page-zero session token changes', async () => {
     const store = new OxigraphStore();
-    const cgId = 'session-isolated-durable';
+    const cgId = 'session-refresh-durable';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
     await store.insert([q(cgPrefix, 1)]);
 
@@ -423,7 +423,7 @@ describe('sync responder pagination interleaving', () => {
     }, 'peer-a');
     expect(secondSessionPage).toContain('"row-000"');
 
-    const firstSessionNextPage = await cap.invoke({
+    const oldSessionNextPage = await cap.invoke({
       contextGraphId: cgId,
       includeSharedMemory: false,
       phase: 'data',
@@ -431,7 +431,27 @@ describe('sync responder pagination interleaving', () => {
       limit: 1,
       syncSessionId: 'session-old',
     }, 'peer-a');
-    expect(firstSessionNextPage).toBe('');
+    expect(oldSessionNextPage).toContain('"row-001"');
+  });
+
+  it('derives durable-data cache keys server-side instead of from arbitrary session ids', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'server-keyed-session-durable';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    await store.insert([q(cgPrefix, 1)]);
+
+    const cap = registerTestSyncHandler(store, { syncPageSize: 1 });
+    for (let i = 0; i < 40; i++) {
+      const page = await cap.invoke({
+        contextGraphId: cgId,
+        includeSharedMemory: false,
+        phase: 'data',
+        offset: 0,
+        limit: 1,
+        syncSessionId: `attacker-controlled-${i}`,
+      }, 'peer-a');
+      expect(page).toContain('"row-001"');
+    }
   });
 
   it('reuses a durable-data session snapshot on page-zero retry', async () => {
