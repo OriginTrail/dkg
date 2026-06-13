@@ -1120,4 +1120,52 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(sendCalls).toBe(1);
     expect(retryWarnings).toBe(0);
   });
+
+  it('rejects pre-aborted DOMException signals without mutating the reason', async () => {
+    const controller = new AbortController();
+    let buildCalls = 0;
+    let sendCalls = 0;
+
+    controller.abort();
+
+    await expect(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: CG_ID,
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 100,
+        syncDeniedResponse: '#DENIED',
+        signal: controller.signal,
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => 0,
+          set: () => {},
+          delete: () => {},
+        },
+        buildSyncRequest: async () => {
+          buildCalls++;
+          return new TextEncoder().encode('request');
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => {
+          sendCalls++;
+          return new TextEncoder().encode('');
+        },
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(buildCalls).toBe(0);
+    expect(sendCalls).toBe(0);
+  });
 });

@@ -1403,8 +1403,11 @@ function abortStream(stream: AbortableByteStream, reason: unknown): void {
 
 function asAbortError(reason: unknown): Error {
   if (reason instanceof Error) {
-    reason.name = 'AbortError';
-    return reason;
+    if (reason.name === 'AbortError') return reason;
+    const err = new Error(reason.message || 'aborted');
+    (err as Error & { name: string }).name = 'AbortError';
+    (err as Error & { cause?: unknown }).cause = reason;
+    return err;
   }
   const err = new Error(typeof reason === 'string' ? reason : 'aborted');
   (err as Error & { name: string }).name = 'AbortError';

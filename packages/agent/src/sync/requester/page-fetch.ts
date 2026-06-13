@@ -140,8 +140,11 @@ function makeLegacySyncBusyError(remotePeerId: string, contextGraphId: string, p
 
 function asAbortError(reason: unknown): Error {
   if (reason instanceof Error) {
-    reason.name = 'AbortError';
-    return reason;
+    if (reason.name === 'AbortError') return reason;
+    const err = new Error(reason.message || 'aborted');
+    err.name = 'AbortError';
+    (err as Error & { cause?: unknown }).cause = reason;
+    return err;
   }
   const err = new Error(typeof reason === 'string' ? reason : 'aborted');
   err.name = 'AbortError';

@@ -356,6 +356,42 @@ describe('ProtocolRouter', () => {
       expect(dialCalls).toBe(1);
     });
 
+    it('does not mutate default AbortController reasons while shutdown cancels backoff', async () => {
+      const stopController = new AbortController();
+      let dialCalls = 0;
+      let releaseDialed: () => void = () => {};
+      const dialed = new Promise<void>((resolve) => {
+        releaseDialed = resolve;
+      });
+      const node = {
+        get stopSignal() {
+          return stopController.signal;
+        },
+        libp2p: {
+          getConnections: () => [],
+          dialProtocol: async () => {
+            dialCalls += 1;
+            releaseDialed();
+            throw new Error('stream reset');
+          },
+          handle: () => undefined,
+          unhandle: () => undefined,
+          peerStore: { get: async () => { throw new Error('NotFound'); } },
+        },
+      } as unknown as DKGNode;
+      const peerResolver = { resolve: async () => [] } as unknown as PeerResolver;
+      const router = new ProtocolRouter(node, { peerResolver });
+
+      const sendPromise = router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), 5000);
+
+      await dialed;
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      expect(() => stopController.abort()).not.toThrow();
+      await expect(sendPromise).rejects.toMatchObject({ name: 'AbortError' });
+      expect(dialCalls).toBe(1);
+    });
+
     it('passes caller signals through close/dial work and does not retry caller aborts', async () => {
       const callerController = new AbortController();
       let dialCalls = 0;
