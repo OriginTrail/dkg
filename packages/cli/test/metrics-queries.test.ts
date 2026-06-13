@@ -136,12 +136,15 @@ describe('countContextGraphsFromGraphUris', () => {
   it('dedupes subscription candidates by stable chain or wire identity', () => {
     const hashKey = `0x${'a'.repeat(64)}`;
     const wireOnlyHash = `0x${'b'.repeat(64)}`;
+    const walletScoped = '0xE5B8896800000000000000000000000000000000/tuesday-cg';
     expect(contextGraphIdsFromMetricSubscriptionCandidates([
       [hashKey, { onChainId: '7', onChainHash: hashKey, coreHosted: true }],
       ['cleartext-cg', { onChainId: '7', onChainHash: hashKey, synced: true }],
       [wireOnlyHash, { onChainHash: wireOnlyHash, coreHosted: true }],
       ['wire-only-clear', { onChainHash: wireOnlyHash, synced: true }],
-    ])).toEqual(['cleartext-cg', 'wire-only-clear']);
+      ['tuesday-cg', { onChainId: '9', onChainHash: `0x${'c'.repeat(64)}`, synced: true }],
+      [walletScoped, { onChainId: '9', onChainHash: `0x${'c'.repeat(64)}`, synced: true }],
+    ])).toEqual(['cleartext-cg', 'wire-only-clear', walletScoped]);
   });
 
   it('builds declaration queries from known declaration graphs only', () => {

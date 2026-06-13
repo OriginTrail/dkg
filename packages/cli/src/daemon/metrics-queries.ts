@@ -175,6 +175,9 @@ function shouldPreferMetricContextGraphId(candidateId: string, existingId: strin
   const candidateIsHash = HASH_CONTEXT_GRAPH_ID_RE.test(candidateId);
   const existingIsHash = HASH_CONTEXT_GRAPH_ID_RE.test(existingId);
   if (candidateIsHash !== existingIsHash) return !candidateIsHash;
+  const candidateIsWalletScoped = WALLET_SCOPED_CONTEXT_GRAPH_RE.test(candidateId);
+  const existingIsWalletScoped = WALLET_SCOPED_CONTEXT_GRAPH_RE.test(existingId);
+  if (candidateIsWalletScoped !== existingIsWalletScoped) return candidateIsWalletScoped;
   return candidateId.length < existingId.length;
 }
 
