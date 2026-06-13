@@ -342,7 +342,6 @@ export class GossipPublishHandler {
           ual: request.ual,
           contextGraphId: request.contextGraphId,
           merkleRoot,
-          kaCount: kaMetadata.length > 0 ? 1 : 0,
           publisherPeerId: request.publisherAddress || 'unknown',
           timestamp: new Date(),
           subGraphName,
@@ -455,7 +454,7 @@ export class GossipPublishHandler {
   private async promoteGossipToConfirmed(
     ual: string,
     contextGraphId: string,
-    _kcMeta: { ual: string; contextGraphId: string; merkleRoot: Uint8Array; kaCount: number; publisherPeerId: string; timestamp: Date },
+    _kcMeta: { ual: string; contextGraphId: string; merkleRoot: Uint8Array; publisherPeerId: string; timestamp: Date },
     _kaMetadata: KAMetadata[],
   ): Promise<void> {
     const tentativeStatus = getTentativeStatusQuad(ual, contextGraphId);

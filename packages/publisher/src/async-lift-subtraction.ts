@@ -72,11 +72,17 @@ async function loadConfirmedRoots(
   const subGraphConstraint = subGraphName
     ? `?kc <${DKG}subGraphName> ${safeStringLiteral(subGraphName)} .`
     : `FILTER NOT EXISTS { ?kc <${DKG}subGraphName> ?subGraphName }`;
+  // Read-both (RFC ka-metadata-trim P3.1): the collapsed shape carries the
+  // entity pair directly on the confirmed UAL subject (?kc); legacy-shape
+  // rows synced from older nodes keep the `<ual>/<n>` + partOf form. The
+  // `?kc dkg:status "confirmed"` join constrains both branches to KC rows.
   const result = await store.query(
     `SELECT DISTINCT ?root WHERE {
       GRAPH <${metaGraph}> {
         VALUES ?rootValue { ${values} }
-        ?ka <${DKG}rootEntity> ?root ; <${DKG}partOf> ?kc .
+        { ?ka <${DKG}rootEntity> ?root ; <${DKG}partOf> ?kc . }
+        UNION
+        { ?kc <${DKG}rootEntity> ?root . }
         ?kc <${DKG}status> "confirmed" .
         ${subGraphConstraint}
         FILTER(STR(?root) = ?rootValue)

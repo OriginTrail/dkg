@@ -303,7 +303,6 @@ export class PublishHandler {
           ual: request.ual,
           contextGraphId,
           merkleRoot: computedMerkleRoot,
-          kaCount: kaMetadata.length > 0 ? 1 : 0,
           publisherPeerId: fromPeerId,
           timestamp: new Date(),
         },

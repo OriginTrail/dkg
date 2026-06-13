@@ -731,17 +731,22 @@ describe('publishJsonLd', () => {
       { localOnly: true },
     );
 
+    // RFC ka-metadata-trim Phase 2: `dkg:publicSnapshotRef` is no longer
+    // written — the disk-store ref IS `dkg:publicQuadsDigest` (a store-backed
+    // row is "digest + no `dkg:publicSnapshotGraph`").
     const metadata = await store.query(
-      `SELECT ?snapshotRef ?snapshotGraph WHERE {
+      `SELECT ?snapshotRef ?digest ?snapshotGraph WHERE {
         GRAPH <did:dkg:context-graph:async-seal-disk-snapshot/_shared_memory_meta> {
-          ?s <http://dkg.io/ontology/publicSnapshotRef> ?snapshotRef .
+          ?s <http://dkg.io/ontology/publicQuadsDigest> ?digest .
+          OPTIONAL { ?s <http://dkg.io/ontology/publicSnapshotRef> ?snapshotRef }
           OPTIONAL { ?s <http://dkg.io/ontology/publicSnapshotGraph> ?snapshotGraph }
         }
       }`,
     );
     expect(metadata.type).toBe('bindings');
     if (metadata.type === 'bindings') {
-      expect(metadata.bindings.some((row) => row['snapshotRef']?.includes('sha256:'))).toBe(true);
+      expect(metadata.bindings.some((row) => row['digest']?.includes('sha256:'))).toBe(true);
+      expect(metadata.bindings.every((row) => row['snapshotRef'] === undefined)).toBe(true);
       expect(metadata.bindings.every((row) => row['snapshotGraph'] === undefined)).toBe(true);
     }
 

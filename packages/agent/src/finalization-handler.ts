@@ -133,11 +133,15 @@ export class FinalizationHandler {
         }
       }
 
-      // Dedup guard: skip if this batch was already promoted (e.g. by ChainEventPoller)
+      // Dedup guard: skip if this batch was already promoted (e.g. by ChainEventPoller).
+      // Read-both (review F5): also ASK the label `_meta` — the minimal
+      // per-cgId partition shape carries no `dkg:status` row.
       const targetMetaGraph = ctxGraphId
         ? contextGraphMetaUri(contextGraphId, ctxGraphId)
         : `did:dkg:context-graph:${contextGraphId}/_meta`;
-      const alreadyPromoted = await this.isAlreadyConfirmed(msg.ual, targetMetaGraph);
+      const alreadyPromoted = await this.isAlreadyConfirmed(
+        msg.ual, targetMetaGraph, `did:dkg:context-graph:${contextGraphId}/_meta`,
+      );
       if (alreadyPromoted) {
         this.markProcessed(dedupeKey);
         this.log.info(ctx, `Finalization: ${msg.ual} already confirmed in ${ctxGraphId ? `context graph ${ctxGraphId}` : 'context graph'}, skipping`);
@@ -269,11 +273,26 @@ export class FinalizationHandler {
     }
   }
 
-  private async isAlreadyConfirmed(ual: string, metaGraph: string): Promise<boolean> {
+  /**
+   * Read-both (adversarial review F5, RFC ka-metadata-trim): the REQUIRED
+   * `dkg:status "confirmed"` ASK used to target only the per-cgId partition
+   * meta graph — but the minimal partition shape (`restateKaPartition`, the
+   * publisher's own same-graph promote) no longer carries `dkg:status`; the
+   * status row lives in the LABEL `_meta` graph. Without the fallback the
+   * gossip/chain-reconcile dedup never fired on new-shape stores and the
+   * publisher's own broadcast echo re-promoted. Old-shape stores (and the
+   * replica full-move path, which still writes status into the partition)
+   * keep their original semantics via the first GRAPH clause; `labelMetaGraph`
+   * is only consulted as the UNION branch.
+   */
+  private async isAlreadyConfirmed(ual: string, metaGraph: string, labelMetaGraph?: string): Promise<boolean> {
     try {
-      const result = await this.store.query(
-        `ASK { GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(ual)}> <http://dkg.io/ontology/status> "confirmed" } }`,
-      );
+      const safeUal = assertSafeIri(ual);
+      const partitionPattern = `GRAPH <${assertSafeIri(metaGraph)}> { <${safeUal}> <http://dkg.io/ontology/status> "confirmed" }`;
+      const ask = labelMetaGraph && labelMetaGraph !== metaGraph
+        ? `ASK { { ${partitionPattern} } UNION { GRAPH <${assertSafeIri(labelMetaGraph)}> { <${safeUal}> <http://dkg.io/ontology/status> "confirmed" } } }`
+        : `ASK { ${partitionPattern} }`;
+      const result = await this.store.query(ask);
       return result.type === 'boolean' && result.value === true;
     } catch {
       return false;
@@ -586,7 +605,9 @@ export class FinalizationHandler {
 
     // Idempotency — VM may already hold this (gossip beat the chain path, or a
     // prior sweep promoted it). Treat as success so the cursor can advance.
-    if (await this.isAlreadyConfirmed(ual, targetMetaGraph)) {
+    // Read-both (review F5): the minimal per-cgId partition shape carries no
+    // `dkg:status` row — the status lives in the label `_meta` graph.
+    if (await this.isAlreadyConfirmed(ual, targetMetaGraph, `did:dkg:context-graph:${contextGraphId}/_meta`)) {
       this.log.info(ctx, `Chain-reconcile: ${ual} already confirmed in VM, skipping`);
       return 'already-confirmed';
     }
@@ -1042,22 +1063,12 @@ export class FinalizationHandler {
 
     const wsPeerId = await this.getPublisherPeerIdFromMeta(contextGraphId, msgRootEntities, subGraphName);
     // Round 5 review §10 — propagate the on-chain-attested author into the
-    // confirmed `_meta` block so replicas emit `dkg:Publication` /
-    // `dkg:authoredBy` triples matching the originator's. We treat
-    // `address(0)` (the unattributed-publish sentinel) as "no author" by
-    // skipping the field; the dkg:Publication block in
-    // `generateKCMetadata` only fires when both `authorAddress` and
-    // `publishOperationId` are present, so the legacy no-author behaviour
-    // is preserved verbatim.
-    //
-    // `publishOperationId`: replicas don't have access to the originator's
-    // session-scoped publish-operation-id (that's a publisher-internal
-    // identifier). Use the canonical, content-addressable `txHash` instead —
-    // every node observing the chain converges on the same publication URI
-    // (`urn:dkg:publication:<txHash>`), even when the originator's URI
-    // (`urn:dkg:publication:<sessionId>-<seq>`) is different. SPARQL
-    // queries that select on `dkg:authoredBy` work either way; cross-node
-    // URI fragmentation is the documented trade-off.
+    // confirmed `_meta` block so replicas emit a `prov:wasAttributedTo`
+    // matching the originator's. We treat `address(0)` (the
+    // unattributed-publish sentinel) as "no author" by skipping the field,
+    // so the legacy no-author behaviour is preserved verbatim. (The former
+    // `dkg:Publication` / `dkg:authoredBy` mirror was dropped — RFC
+    // ka-metadata-trim Phase 1, zero readers.)
     const isUnattributed = !authorAddress
       || authorAddress === '0x0000000000000000000000000000000000000000'
       || authorAddress.toLowerCase() === '0x0000000000000000000000000000000000000000';
@@ -1065,13 +1076,12 @@ export class FinalizationHandler {
       ual,
       contextGraphId,
       merkleRoot,
-      kaCount: kaMetadata.length > 0 ? 1 : 0,
       publisherPeerId: wsPeerId || publisherAddress,
       timestamp: new Date(),
       subGraphName,
       ...(isUnattributed
         ? {}
-        : { authorAddress, publishOperationId: txHash }),
+        : { authorAddress }),
     };
 
     let blockTimestamp = Math.floor(Date.now() / 1000);

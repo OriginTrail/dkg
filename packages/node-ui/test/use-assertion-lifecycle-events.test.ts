@@ -25,9 +25,25 @@ describe('buildLifecycleEventsQuery — SPARQL shape', () => {
     // Both OPTIONAL; literal preferred by the reader, URI parse as
     // legacy fallback.
     expect(q).toContain('SELECT ?event ?type ?assertion ?name ?agent ?ts ?subGraphName ?assertionGraph');
-    expect(q).toContain('(COUNT(?root) AS ?entityCount)');
+    // RFC ka-metadata-trim Phase 2 — read-both entity counting: DISTINCT
+    // event-side rows (old stores) + the stable subject-side member stamp
+    // (new shape); the reader prefers the event-side count when > 0.
+    expect(q).toContain('(COUNT(DISTINCT ?root) AS ?entityCount)');
+    expect(q).toContain('(COUNT(DISTINCT ?subjRoot) AS ?subjectEntityCount)');
+    expect(q).toContain('OPTIONAL { ?event dkg:rootEntity ?root }');
+    expect(q).toContain('OPTIONAL { ?assertion dkg:rootEntity ?subjRoot }');
     expect(q).toContain('OPTIONAL { ?assertion dkg:subGraphName ?subGraphName }');
     expect(q).toContain('OPTIONAL { ?assertion dkg:assertionGraph ?assertionGraph }');
+  });
+
+  it('RFC ka-metadata-trim Phase 2 — agent binding reads wasAssociatedWith (legacy) with subject wasAttributedTo fallback', () => {
+    const q = buildLifecycleEventsQuery('cg-1');
+    expect(q).toContain('OPTIONAL { ?event prov:wasAssociatedWith ?agentAssoc }');
+    expect(q).toContain('OPTIONAL { ?assertion prov:wasAttributedTo ?agentAttr }');
+    expect(q).toContain('BIND(COALESCE(?agentAssoc, ?agentAttr) AS ?agent)');
+    // The old mandatory pattern must not come back — new events carry no
+    // prov:wasAssociatedWith row and would vanish from the feed.
+    expect(q).not.toContain('prov:wasAssociatedWith ?agent .');
   });
 
   it('COALESCEs created→`prov:generated` and promoted→`prov:used` (with a single outer type filter)', () => {

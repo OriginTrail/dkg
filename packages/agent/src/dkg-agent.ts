@@ -82,6 +82,7 @@ import {
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
+  ENTITY_PRED_ALT,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
@@ -573,6 +574,8 @@ export class DKGAgent extends DKGAgentBase {
       publicSnapshotStore,
       // OT-RFC-43 Option 1 — deterministic packed reservedKaId minting.
       kaAllocator: config.kaNumberAllocator,
+      // RFC ka-metadata-trim P3.3 — `metadata.provenanceEvents` (default true).
+      provenanceEvents: config.metadataProvenanceEvents,
     });
 
     try {
@@ -1891,16 +1894,31 @@ export class DKGAgent extends DKGAgentBase {
         const stateStr = strip(row['state']) as AssertionState;
         const layerStr = strip(row['memoryLayer']);
         const graphUri = row['assertionGraph'] ?? contextGraphAssertionUri(contextGraphId, addr, name);
-        const wmCurrentAssertion = strip(row['wm']);
-        const swmCurrentAssertion = strip(row['swm']);
+        // RFC ka-metadata-trim Phase 2 — the wm/swm pointers are only
+        // materialised when they DIVERGE from VM (the "all three equal"
+        // steady state is implicit). COALESCE a missing wm/swm to the vm
+        // value; old-store rows (always materialised) read identically.
         const vmCurrentAssertion = strip(row['vm']);
+        const wmCurrentAssertion = strip(row['wm']) ?? vmCurrentAssertion;
+        const swmCurrentAssertion = strip(row['swm']) ?? vmCurrentAssertion;
         const kaNumberStr = strip(row['kaNum']);
         const reservedUal = strip(row['reservedUal']);
 
         // Query all prov:Activity events that acted on this assertion
         // (linked via prov:used or prov:generated)
+        // RFC ka-metadata-trim Phase 0: the `OPTIONAL { ?event dkg:kcUal }`
+        // clause was removed — its only producer was the dead
+        // `generateAssertionPublishedMetadata` writer, so the binding never
+        // surfaced for live events.
+        // RFC ka-metadata-trim Phase 2 — read-both event shape:
+        //   - `dkg:fromLayer`/`dkg:toLayer` are no longer written (they are
+        //     100% determined by the event class); OPTIONAL here for
+        //     old-store rows, derived below otherwise.
+        //   - the event-side `dkg:rootEntity` rows are no longer written for
+        //     promote events; OPTIONAL here for old-store rows, with the
+        //     stable lifecycle-subject member stamp as the fallback below.
         const eventsResult = await agent.store.query(
-          `SELECT ?event ?type ?timestamp ?fromLayer ?toLayer ?shareOpId ?kcUal ?rootEntity WHERE {
+          `SELECT ?event ?type ?timestamp ?fromLayer ?toLayer ?shareOpId ?rootEntity WHERE {
             GRAPH <${metaGraph}> {
               { ?event <${PROV_NS}generated> <${lifecycleUri}> }
               UNION
@@ -1909,14 +1927,39 @@ export class DKGAgent extends DKGAgentBase {
               ?event a ?type .
               FILTER(STRSTARTS(STR(?type), "${DKG_NS}"))
               ?event <${PROV_NS}startedAtTime> ?timestamp .
-              ?event <${DKG_NS}fromLayer> ?fromLayer .
-              ?event <${DKG_NS}toLayer> ?toLayer .
+              OPTIONAL { ?event <${DKG_NS}fromLayer> ?fromLayer }
+              OPTIONAL { ?event <${DKG_NS}toLayer> ?toLayer }
               OPTIONAL { ?event <${DKG_NS}shareOperationId> ?shareOpId }
-              OPTIONAL { ?event <${DKG_NS}kcUal> ?kcUal }
               OPTIONAL { ?event <${DKG_NS}rootEntity> ?rootEntity }
             }
           } ORDER BY ?timestamp`,
         );
+
+        // Member entities on the STABLE lifecycle subject (SUBSTRATE-1 stamp,
+        // written at promote). Read-both (ENTITY_PRED_ALT) + DISTINCT because
+        // dual-written replica rows carry the same object under both names.
+        const subjectRoots: string[] = [];
+        const subjectRootsResult = await agent.store.query(
+          `SELECT DISTINCT ?root WHERE {
+            GRAPH <${metaGraph}> { <${lifecycleUri}> ${ENTITY_PRED_ALT} ?root }
+          }`,
+        );
+        if (subjectRootsResult.type === 'bindings') {
+          for (const b of subjectRootsResult.bindings) {
+            if (b['root']) subjectRoots.push(b['root']);
+          }
+        }
+
+        // Layer transition by event class (the writers no longer persist it):
+        //   created  ⇒ none→WM   · promoted  ⇒ WM→SWM
+        //   updated  ⇒ VM→VM     · discarded ⇒ WM→none
+        const LAYER_BY_TYPE: Record<string, { from: string; to: string }> = {
+          created: { from: 'none', to: MemoryLayer.WorkingMemory },
+          promoted: { from: MemoryLayer.WorkingMemory, to: MemoryLayer.SharedWorkingMemory },
+          published: { from: MemoryLayer.SharedWorkingMemory, to: MemoryLayer.VerifiableMemory },
+          updated: { from: MemoryLayer.VerifiableMemory, to: MemoryLayer.VerifiableMemory },
+          discarded: { from: MemoryLayer.WorkingMemory, to: 'none' },
+        };
 
         // Group event rows by event URI (rootEntity may produce multiple rows)
         const eventMap = new Map<string, AssertionEvent>();
@@ -1926,13 +1969,13 @@ export class DKGAgent extends DKGAgentBase {
             if (!eventUri) continue;
             if (!eventMap.has(eventUri)) {
               const typeSuffix = (b['type'] ?? '').replace(DKG_NS, '').replace('Assertion', '').toLowerCase();
+              const derived = LAYER_BY_TYPE[typeSuffix];
               eventMap.set(eventUri, {
                 type: (typeSuffix || stateStr) as AssertionState,
                 timestamp: strip(b['timestamp']) ?? '',
-                fromLayer: strip(b['fromLayer']) ?? '',
-                toLayer: strip(b['toLayer']) ?? '',
+                fromLayer: strip(b['fromLayer']) ?? derived?.from ?? '',
+                toLayer: strip(b['toLayer']) ?? derived?.to ?? '',
                 shareOperationId: strip(b['shareOpId']),
-                kcUal: strip(b['kcUal']),
                 rootEntities: b['rootEntity'] ? [b['rootEntity']] : undefined,
               });
             } else if (b['rootEntity']) {
@@ -1941,6 +1984,15 @@ export class DKGAgent extends DKGAgentBase {
               if (!existing.rootEntities.includes(b['rootEntity'])) {
                 existing.rootEntities.push(b['rootEntity']);
               }
+            }
+          }
+          // RFC ka-metadata-trim Phase 2 — promote events written by this
+          // release carry no event-side member rows; surface the lifecycle-
+          // subject member stamp instead so `events[].rootEntities` (API/MCP
+          // descriptor pass-through) keeps resolving.
+          for (const ev of eventMap.values()) {
+            if (ev.type === 'promoted' && !ev.rootEntities && subjectRoots.length > 0) {
+              ev.rootEntities = [...subjectRoots];
             }
           }
         }

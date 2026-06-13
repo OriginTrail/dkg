@@ -276,6 +276,63 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
     expect(vmData.bindings.length).toBeGreaterThan(0);
   }, 30_000);
 
+  it('F4 regression (Codex #898 after publish): WM-graph marker is UPDATED to "VM" and a stale re-promote is a no-op', async () => {
+    // Adversarial review F4: the publish-time SWM→VM flip briefly DELETED the
+    // per-KA `<wmGraph> dkg:memoryLayer` row (RFC ka-metadata-trim "orphan
+    // marker cleanup"). That row is the witness `assertAssertionDataPersisted`
+    // reads to classify a stale re-promote after a successful publish as a
+    // harmless no-op (the Codex #898 case, post-publish variant: the lifecycle
+    // URN's dkg:assertionGraph back-link has been re-pointed at the VM graph by
+    // then, so the URN fallback can no longer vouch for the WM graph). The fix
+    // UPDATES the marker in place to "VM" — keeping the witness and killing the
+    // misleading orphan "SWM" value.
+    const agent = await createAgent('DoublePromoteBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Double Promote E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'double-promote';
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: `${ENTITY_BASE}:dp`, predicate: 'http://schema.org/name', object: '"Double Promote"' },
+    ]);
+    const promoteResult = await agent.assertion.promote(CG_ID, name);
+    expect(promoteResult.promotedCount).toBeGreaterThan(0);
+
+    const pub = await agent.publishFromFinalizedAssertion(CG_ID, name);
+    expect(pub.status).toBe('confirmed');
+    expect(pub.kaId).toBeDefined();
+
+    // 1. The marker must now read "VM" on the per-KA WM graph URI the flip
+    //    derives from the minted kaId — present (not deleted), not "SWM".
+    const DKG = 'http://dkg.io/ontology/';
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    const kaId = BigInt(pub.kaId!);
+    const wmGraphFromKaId = contextGraphLayerUri(
+      CG_ID,
+      MemoryLayer.WorkingMemory,
+      '0x' + (kaId >> 96n).toString(16).padStart(40, '0'),
+      kaId & ((1n << 96n) - 1n),
+    );
+    const markerRes = await (agent as any).store.query(
+      `SELECT ?layer WHERE { GRAPH <${metaGraph}> { <${wmGraphFromKaId}> <${DKG}memoryLayer> ?layer } }`,
+    );
+    expect(markerRes.type).toBe('bindings');
+    expect(markerRes.bindings.map((b: Record<string, string>) => b['layer'])).toEqual([`"${MemoryLayer.VerifiableMemory}"`]);
+
+    // 2. Codex #898 post-publish: import-file extraction markers survive
+    //    promote+publish by design. With the WM marker deleted (pre-F4) the
+    //    stale re-promote below misfired AssertionNotPersistedError; the "VM"
+    //    marker short-circuits it to the harmless `{ promotedCount: 0 }` no-op.
+    const author = agent.defaultAgentAddress ?? agent.peerId;
+    const wmGraphPromoteSees = await (agent as any).publisher.wmGraphUri(CG_ID, author, name);
+    await (agent as any).store.insert([
+      { subject: wmGraphPromoteSees, predicate: `${DKG}extractionStatus`, object: '"completed"', graph: metaGraph },
+      { subject: wmGraphPromoteSees, predicate: `${DKG}structuralTripleCount`, object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', graph: metaGraph },
+    ]);
+    const second = await (agent as any).publisher.assertionPromote(CG_ID, name, author);
+    expect(second.promotedCount).toBe(0);
+  }, 30_000);
+
   it('selective promote does NOT auto-finalize (avoids the seal-all vs promote-subset merkleRoot mismatch)', async () => {
     // Regression for the #1004 review: auto-finalize seals the WHOLE assertion
     // (all root entities), but a SELECTIVE promote (opts.entities subset) ships

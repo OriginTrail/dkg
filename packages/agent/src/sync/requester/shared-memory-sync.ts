@@ -306,10 +306,11 @@ async function syncPublicSnapshotsForMeta(params: {
 }
 
 function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): PublicSnapshotMetadata[] {
-  const bySubject = new Map<string, { ref?: string; digest?: string; count?: number }>();
+  const bySubject = new Map<string, { ref?: string; digest?: string; count?: number; hasSnapshotGraph?: boolean }>();
   for (const quad of metaQuads) {
     if (
       quad.predicate !== `${DKG}publicSnapshotRef` &&
+      quad.predicate !== `${DKG}publicSnapshotGraph` &&
       quad.predicate !== `${DKG}publicQuadsDigest` &&
       quad.predicate !== `${DKG}publicQuadsCount`
     ) {
@@ -317,6 +318,7 @@ function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): PublicSnapsh
     }
     const entry = bySubject.get(quad.subject) ?? {};
     if (quad.predicate === `${DKG}publicSnapshotRef`) entry.ref = stripLiteral(quad.object)?.trim();
+    if (quad.predicate === `${DKG}publicSnapshotGraph`) entry.hasSnapshotGraph = true;
     if (quad.predicate === `${DKG}publicQuadsDigest`) entry.digest = stripLiteral(quad.object)?.trim();
     if (quad.predicate === `${DKG}publicQuadsCount`) entry.count = parseIntegerLiteral(quad.object);
     bySubject.set(quad.subject, entry);
@@ -324,16 +326,31 @@ function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): PublicSnapsh
 
   const byRef = new Map<string, PublicSnapshotMetadata>();
   for (const [subject, entry] of bySubject) {
-    if (!entry.ref) continue;
+    // Read-both (RFC ka-metadata-trim Phase 2): old-store rows carry an
+    // explicit `dkg:publicSnapshotRef` (byte-identical to the digest); new
+    // store-backed rows carry only the digest — their ref IS the digest
+    // (`putSnapshot` returns `ref === digest`). Rows with a
+    // `dkg:publicSnapshotGraph` are graph-backed, not snapshot-store-backed:
+    // their quads travel through ordinary graph sync, so they are NOT
+    // snapshot-fetch targets.
+    let ref = entry.ref;
+    if (!ref) {
+      // Derived (new-shape) rows must be complete to qualify — an incomplete
+      // digest-only row is ignored exactly as ref-less rows always were,
+      // rather than promoted into the hard integrity throw below (which
+      // stays reserved for explicit-ref rows written by older nodes).
+      if (entry.hasSnapshotGraph || !entry.digest || !Number.isInteger(entry.count)) continue;
+      ref = entry.digest;
+    }
     if (!entry.digest || !Number.isInteger(entry.count)) {
       throw new Error(`Shared-memory public snapshot metadata for ${subject} is missing digest/count`);
     }
-    const existing = byRef.get(entry.ref);
-    const metadata = { ref: entry.ref, digest: entry.digest, count: entry.count! };
+    const existing = byRef.get(ref);
+    const metadata = { ref, digest: entry.digest, count: entry.count! };
     if (existing && (existing.digest !== metadata.digest || existing.count !== metadata.count)) {
-      throw new Error(`Conflicting shared-memory public snapshot metadata for ${entry.ref}`);
+      throw new Error(`Conflicting shared-memory public snapshot metadata for ${ref}`);
     }
-    byRef.set(entry.ref, metadata);
+    byRef.set(ref, metadata);
   }
   return [...byRef.values()];
 }

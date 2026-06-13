@@ -1061,9 +1061,12 @@ describe('Tentative publish UAL uniqueness', () => {
       });
     }
 
+    // RFC ka-metadata-trim: KC rows no longer carry `rdf:type
+    // dkg:KnowledgeCollection` — a KC is identified by its `dkg:status` row
+    // (the same predicate the daemon counters use).
     const result = await store.query(
       `SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE {
-        GRAPH ?g { ?kc a <http://dkg.io/ontology/KnowledgeCollection> }
+        GRAPH ?g { ?kc <http://dkg.io/ontology/status> ?s }
       }`,
     );
 
@@ -1079,17 +1082,21 @@ describe('Tentative publish UAL uniqueness', () => {
   // `finalizeIntentionalLocalPublish` helper that handles the three
   // intentional-local branches MUST preserve the same provenance and
   // meta-graph-remap behaviour the pre-PR2 catch-block had. Without
-  // this, intentional-local publishes silently drop their RFC-001 §3.5
-  // `dkg:Publication` / `dkg:authoredBy` quads and (when the caller
-  // supplies a `targetMetaGraphUri`) write their `_meta` triples into
-  // the wrong graph. These two regressions pin the fix.
+  // this, intentional-local publishes silently drop their author
+  // attribution and (when the caller supplies a `targetMetaGraphUri`)
+  // write their `_meta` triples into the wrong graph. These two
+  // regressions pin the fix.
+  //
+  // RFC ka-metadata-trim Phase 1: the `dkg:Publication` / `dkg:authoredBy`
+  // mirror was dropped (zero readers); author attribution is now carried
+  // solely by `prov:wasAttributedTo` on the KC row, which this test pins.
   //
   // Both tests use the "private data — no ACKs collectable" intentional-
   // local branch: a numeric on-chain CG + V10-ready chain means the
   // publisher resolves a real `publisherSigner`, so the conditional
-  // spread of `authorAddress`/`publishOperationId` (gated on either a
-  // precomputedAttestation or a resolved signer) is exercised end-to-end.
-  it('intentional-local tentative publish (private-data branch) emits dkg:Publication + dkg:authoredBy provenance (RC11 / PR-A)', async () => {
+  // spread of `authorAddress` (gated on either a precomputedAttestation
+  // or a resolved signer) is exercised end-to-end.
+  it('intentional-local tentative publish (private-data branch) attributes the author via prov:wasAttributedTo (RC11 / PR-A)', async () => {
     const store = new OxigraphStore();
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const bus = new TypedEventBus();
@@ -1115,6 +1122,7 @@ describe('Tentative publish UAL uniqueness', () => {
 
     expect(result.status).toBe('tentative');
 
+    // RFC ka-metadata-trim: no dkg:Publication subjects are emitted anymore.
     const pubResult = await store.query(
       `SELECT ?pub WHERE {
         GRAPH ?g { ?pub a <http://dkg.io/ontology/Publication> }
@@ -1122,14 +1130,16 @@ describe('Tentative publish UAL uniqueness', () => {
     );
     expect(pubResult.type).toBe('bindings');
     if (pubResult.type === 'bindings') {
-      expect(pubResult.bindings.length).toBeGreaterThan(0);
+      expect(pubResult.bindings.length).toBe(0);
     }
 
+    // Author attribution survives on the KC row as prov:wasAttributedTo
+    // (agent DID with lowercased EVM address).
     const authorResult = await store.query(
       `SELECT ?author WHERE {
         GRAPH ?g {
-          ?pub a <http://dkg.io/ontology/Publication> .
-          ?pub <http://dkg.io/ontology/authoredBy> ?author .
+          ?kc <http://dkg.io/ontology/status> ?s .
+          ?kc <http://www.w3.org/ns/prov#wasAttributedTo> ?author .
         }
       }`,
     );
@@ -1138,7 +1148,7 @@ describe('Tentative publish UAL uniqueness', () => {
       expect(authorResult.bindings.length).toBeGreaterThan(0);
       const expectedAddr = new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address;
       const authors = authorResult.bindings.map((b) => b['author'].replace(/^"|"$/g, ''));
-      expect(authors).toContain(expectedAddr);
+      expect(authors).toContain(`did:dkg:agent:${expectedAddr.toLowerCase()}`);
     }
   });
 

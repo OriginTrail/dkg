@@ -11,9 +11,11 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
  *
  *   - KC UAL subjects (`dkg:batchId` + many siblings).
  *   - KA UAL subjects (`<UAL/tokenId>`; carry `dkg:partOf <KC>`).
- *   - Publication URIs (`urn:dkg:publication:<opId>`); reached from a
- *     KA via `<KA> dkg:publication <pub>`. The publication node itself
- *     carries `dkg:authoredBy`, `dkg:Publication` type, etc.
+ *
+ * RFC ka-metadata-trim Phase 1: the third arm that copied Publication
+ * URIs (`urn:dkg:publication:<opId>`) was removed together with the
+ * `dkg:Publication` writer — old-store publication nodes are no longer
+ * copied (zero readers).
  *
  * Per-KC granularity is the headline contract: each KC is gated by an
  * independent `FILTER NOT EXISTS` against the target graph, so a
@@ -32,8 +34,9 @@ type KcEntry = {
   batchId: number;
   rootEntity: string;
   tokenId: number;
-  /** When set, emit a `dkg:Publication` node + `<KA> dkg:publication <pubUri>` link.
-   *  Mirrors `generateKCMetadata` (`metadata.ts:172-185`). */
+  /** When set, emit a LEGACY (pre-trim) `dkg:Publication` node +
+   *  `<KA> dkg:publication <pubUri>` link, simulating rows written by
+   *  older nodes. The current writer no longer emits these. */
   publication?: { opId: string; author: string; merkleRootHex: string };
 };
 
@@ -52,11 +55,21 @@ const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
  * counting assertions in the tests stay readable.
  *   3 KC triples (batchId, kaCount, status)
  * + 3 KA triples (partOf, rootEntity, tokenId)
- * + 1 KA→pub link (when `publication` set)
- * + 5 publication triples (when `publication` set)
+ * + 1 KA→pub link (when legacy `publication` set)
+ * + 5 publication triples (when legacy `publication` set)
+ *
+ * NB: this counts what the legacy-shape FIXTURE writes into source.
+ * Since RFC ka-metadata-trim the backfill route copies only the KC/KA
+ * subjects — the publication NODE's 5 triples are not copied (the
+ * KA→pub link rides along: it sits on the KA subject).
  */
 function tripleCountForKc(kc: KcEntry): number {
   return 6 + (kc.publication ? 1 + 5 : 0);
+}
+
+/** What the trimmed backfill route actually copies for one KC. */
+function copiedTripleCountForKc(kc: KcEntry): number {
+  return 6 + (kc.publication ? 1 : 0);
 }
 
 async function seedCanonicalMeta(store: OxigraphStore, cg: CGEntry, graphOverride?: string): Promise<void> {
@@ -290,12 +303,13 @@ describe('POST /api/random-sampling/backfill-percgid-meta', () => {
     if (ask.type === 'boolean') expect(ask.value).toBe(true);
   });
 
-  it('preserves dkg:Publication / dkg:authoredBy provenance for backfilled KCs', async () => {
-    // Regression for Codex review on PR #763: an earlier revision
-    // matched provenance via `?kc dkg:authoredBy ?pub` — the wrong
-    // direction. `generateKCMetadata` emits `<KA> dkg:publication <pub>`
-    // and the publication node ITSELF carries `dkg:authoredBy`. The
-    // fix follows the KA→pub link.
+  it('RFC ka-metadata-trim: legacy dkg:Publication nodes are NOT copied (KC/KA rows still are)', async () => {
+    // The pre-trim route had a third UNION arm copying the publication
+    // node reached via `<KA> dkg:publication <pub>`. The writer was
+    // dropped (zero readers), and the repair tool dropped the arm with
+    // it. Legacy-shape sources (rows from older nodes) must still get
+    // their KC/KA rows rescued — the publication node simply stays
+    // behind in `<cg>/_meta`.
     const cgName = 'rs-backfill-provenance';
     const onChainId = '202';
     const opId = 'op-fixture-2026';
@@ -315,24 +329,30 @@ describe('POST /api/random-sampling/backfill-percgid-meta', () => {
     const body: any = await res.json();
     expect(res.status).toBe(200);
     expect(body.summary).toMatchObject({ backfilled: 1 });
+    expect(body.reports[0]).toMatchObject({
+      copiedKcCount: 1,
+      copiedTriples: copiedTripleCountForKc(kc),
+    });
 
-    // The publication URI MUST be in the target with its dkg:authoredBy.
     const target = `did:dkg:context-graph:${cgName}/context/${onChainId}/_meta`;
     const pubUri = `urn:dkg:publication:${opId}`;
-    const authorAsk = await store.query(
-      `ASK { GRAPH <${target}> { <${pubUri}> <${DKG_NS}authoredBy> ?author } }`,
-    );
-    expect(authorAsk.type).toBe('boolean');
-    if (authorAsk.type === 'boolean') expect(authorAsk.value).toBe(true);
 
-    const typeAsk = await store.query(
-      `ASK { GRAPH <${target}> { <${pubUri}> <${RDF_TYPE}> <${DKG_NS}Publication> } }`,
+    // KC row rescued.
+    const kcAsk = await store.query(
+      `ASK { GRAPH <${target}> { <${kc.ual}> <${DKG_NS}batchId> ?o } }`,
     );
-    expect(typeAsk.type).toBe('boolean');
-    if (typeAsk.type === 'boolean') expect(typeAsk.value).toBe(true);
+    expect(kcAsk.type).toBe('boolean');
+    if (kcAsk.type === 'boolean') expect(kcAsk.value).toBe(true);
 
-    // And the KA→pub link is preserved so future readers can resolve
-    // provenance from either direction.
+    // Publication node NOT copied.
+    const pubAsk = await store.query(
+      `ASK { GRAPH <${target}> { <${pubUri}> ?p ?o } }`,
+    );
+    expect(pubAsk.type).toBe('boolean');
+    if (pubAsk.type === 'boolean') expect(pubAsk.value).toBe(false);
+
+    // The legacy KA→pub edge rides along (it sits on the KA subject,
+    // which the second UNION arm copies wholesale).
     const kaPubAsk = await store.query(
       `ASK { GRAPH <${target}> { <${kc.ual}/${kc.tokenId}> <${DKG_NS}publication> <${pubUri}> } }`,
     );
@@ -451,11 +471,11 @@ describe('POST /api/random-sampling/backfill-percgid-meta', () => {
     expect(after).toBe(0);
   });
 
-  it('filters out CG-lifecycle subjects (only copies KC/KA/publication URIs)', async () => {
-    // Subjects without `dkg:batchId` (and not reached via `dkg:partOf`
-    // or `<KA> dkg:publication <s>`) belong to CG-level metadata —
-    // accessPolicy, createdAt on the cgEntity, etc. The publisher
-    // doesn't promote them into per-cgId; neither should the backfill.
+  it('filters out CG-lifecycle subjects (only copies KC/KA URIs)', async () => {
+    // Subjects without `dkg:batchId` (and not reached via `dkg:partOf`)
+    // belong to CG-level metadata — accessPolicy, createdAt on the
+    // cgEntity, etc. The publisher doesn't promote them into per-cgId;
+    // neither should the backfill.
     const cgName = 'rs-backfill-filter';
     const onChainId = '23';
     const kc: KcEntry = { ual: 'did:dkg:base:84532/0xDDD/5000001', batchId: 31, rootEntity: 'urn:test:e5', tokenId: 1 };

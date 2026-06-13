@@ -247,25 +247,50 @@ export function verifySyncedData(
     }
   }
 
-  // Find KA → KC relationships and root entities
+  // Find KA → KC relationships and root entities. Read-both (RFC
+  // ka-metadata-trim P3.1): legacy rows tie a token subject `<ual>/<n>` to
+  // its KC via `dkg:partOf`; collapsed-shape rows carry ALL member
+  // `dkg:rootEntity` rows directly on the merkleRoot-bearing UAL subject
+  // with NO partOf edge. kaRootEntity is a multi-map because the collapsed
+  // UAL subject holds every member root; legacy token subjects carry one
+  // row each, so legacy behaviour is unchanged. Keep this in sync with the
+  // identical logic in sync-verify-worker-impl.ts verifySyncedData.
   const kaToKc = new Map<string, string>();
-  const kaRootEntity = new Map<string, string>();
+  const kaRootEntity = new Map<string, string[]>();
 
   for (const q of metaQuads) {
     if (q.predicate === `${DKG_NS}partOf`) {
       kaToKc.set(q.subject, stripLiteral(q.object));
     }
     if (q.predicate === `${DKG_NS}rootEntity`) {
-      kaRootEntity.set(q.subject, stripLiteral(q.object));
+      const entity = stripLiteral(q.object);
+      const list = kaRootEntity.get(q.subject);
+      if (list) list.push(entity);
+      else kaRootEntity.set(q.subject, [entity]);
     }
+  }
+
+  // Self-map collapsed rows: a merkleRoot-bearing subject that carries its
+  // own rootEntity rows IS the KA (P3.1 — no token edge to join through).
+  // Keying on kcMerkleRoots guards against non-KA rootEntity carriers
+  // (lifecycle URNs, SWM op rows, …) minting bogus KCs. Without this,
+  // collapsed-shape KCs built no kaToKc entry and fell into the
+  // "no KA info — accept on trust" branch, skipping Merkle verification.
+  for (const kcUal of kcMerkleRoots.keys()) {
+    if (kaRootEntity.has(kcUal) && !kaToKc.has(kcUal)) kaToKc.set(kcUal, kcUal);
   }
 
   // Build KC → rootEntities[] map
   for (const [kaUri, kcUri] of kaToKc) {
-    const rootEntity = kaRootEntity.get(kaUri);
-    if (rootEntity && kcMerkleRoots.has(kcUri)) {
-      if (!kcRootEntities.has(kcUri)) kcRootEntities.set(kcUri, []);
-      kcRootEntities.get(kcUri)!.push(rootEntity);
+    const rootsForKa = kaRootEntity.get(kaUri);
+    if (!rootsForKa || !kcMerkleRoots.has(kcUri)) continue;
+    let list = kcRootEntities.get(kcUri);
+    if (!list) { list = []; kcRootEntities.set(kcUri, list); }
+    for (const re of rootsForKa) {
+      // Dedupe: pre-trim stores (and multi-root dual-shape writes) carry the
+      // same root on BOTH the aggregate UAL row and its `<ual>/<n>` token
+      // row — double-counting a partition would corrupt the recomputed root.
+      if (!list.includes(re)) list.push(re);
     }
   }
 

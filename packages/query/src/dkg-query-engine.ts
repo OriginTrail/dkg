@@ -764,11 +764,22 @@ export class DKGQueryEngine implements QueryEngine {
     // Look up KA metadata across all meta graphs, including subGraphName if recorded.
     // Design B (OT-RFC-44): one KA can hold MULTIPLE rootEntities, so collect
     // every `?ka <rootEntity>` binding (not just bindings[0]) — PR #968 salvage.
+    // Read-both (RFC ka-metadata-trim P3.1): the collapsed shape carries
+    // `dkg:rootEntity` directly on the UAL subject (no `<ual>/<n>` token rows,
+    // no `dkg:partOf`); legacy-shape rows synced from older nodes still use
+    // the token-row + partOf form, so both branches are queried.
     const metaResult = await this.store.query(
       `SELECT ?ka ?rootEntity ?ctxGraph ?sgName WHERE {
         GRAPH ?g {
-          ?ka <http://dkg.io/ontology/rootEntity> ?rootEntity .
-          ?ka <http://dkg.io/ontology/partOf> <${assertSafeIri(ual)}> .
+          {
+            ?ka <http://dkg.io/ontology/rootEntity> ?rootEntity .
+            ?ka <http://dkg.io/ontology/partOf> <${assertSafeIri(ual)}> .
+          }
+          UNION
+          {
+            <${assertSafeIri(ual)}> <http://dkg.io/ontology/rootEntity> ?rootEntity .
+            BIND(<${assertSafeIri(ual)}> AS ?ka)
+          }
           <${assertSafeIri(ual)}> <http://dkg.io/ontology/contextGraph> ?ctxGraph .
           OPTIONAL { <${assertSafeIri(ual)}> <http://dkg.io/ontology/subGraphName> ?sgName }
         }

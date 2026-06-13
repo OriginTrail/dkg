@@ -71,6 +71,11 @@ describe.sequential('auto-update versioned e2e', { timeout: 30_000 }, () => {
     execSync(`git clone "${bareRepo}" "${workDir}"`, { stdio: 'pipe' });
     git('git config user.email "test@example.com"', workDir);
     git('git config user.name "AutoUpdate E2E"', workDir);
+    // Hermetic against host gitconfig: a global `tag.gpgsign = true` turns
+    // the lightweight `git tag -f` in makeCommit() into a signed annotated
+    // tag and fails with "fatal: no tag message?".
+    git('git config tag.gpgsign false', workDir);
+    git('git config commit.gpgsign false', workDir);
     git('git checkout -B main', workDir);
 
     await writeFile(join(workDir, 'README.md'), 'fixture');

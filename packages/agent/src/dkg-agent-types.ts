@@ -795,6 +795,14 @@ export interface DKGAgentConfig {
    */
   kaNumberAllocator?: KaNumberAllocator;
   /**
+   * RFC ka-metadata-trim Phase 3 (P3.3) — daemon `metadata.provenanceEvents`
+   * config, forwarded into `DKGPublisherConfig.provenanceEvents`. Default
+   * `true`. When `false` ("lite mode"), the assertion-lifecycle writers skip
+   * the per-transition PROV event nodes (NOT the seal/state rows); the
+   * history API returns `events: []` gracefully.
+   */
+  metadataProvenanceEvents?: boolean;
+  /**
    * Core Node relay-server capacity tuning. Forwarded straight into
    * `DKGNodeConfig.relayServerCapacity` — sets the maximum number of
    * simultaneous circuit-relay v2 reservations this node will hold.

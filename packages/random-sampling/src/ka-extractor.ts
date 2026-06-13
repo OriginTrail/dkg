@@ -194,13 +194,27 @@ export async function extractV10KCFromStore(
   if (!ual) throw new KCNotFoundError(cgId, kaId);
   assertSafeIri(ual);
 
-  // 2. List KAs + root entities + private sub-roots.
+  // 2. List KAs + root entities + private sub-roots. Read-both
+  //    (RFC ka-metadata-trim P3.1): the collapsed shape carries
+  //    `dkg:rootEntity` + `dkg:privateMerkleRoot` directly on the UAL subject
+  //    (no `<ual>/<n>` + `dkg:partOf` token rows); legacy-shape rows synced
+  //    from older nodes still use the token-row form. Old-shape stores can
+  //    match BOTH branches (the aggregate UAL node also carried the entity
+  //    pair) — the dedupe below keeps roots and private leaves unique.
   const kaResult = await store.query(
     `SELECT ?ka ?root ?privRoot WHERE {
        GRAPH <${metaGraph}> {
-         ?ka <${DKG}partOf> <${ual}> ;
-             <${DKG}rootEntity> ?root .
-         OPTIONAL { ?ka <${DKG}privateMerkleRoot> ?privRoot }
+         {
+           ?ka <${DKG}partOf> <${ual}> ;
+               <${DKG}rootEntity> ?root .
+           OPTIONAL { ?ka <${DKG}privateMerkleRoot> ?privRoot }
+         }
+         UNION
+         {
+           <${ual}> <${DKG}rootEntity> ?root .
+           BIND(<${ual}> AS ?ka)
+           OPTIONAL { <${ual}> <${DKG}privateMerkleRoot> ?privRoot }
+         }
        }
      }`,
   );
@@ -218,6 +232,11 @@ export async function extractV10KCFromStore(
   const rootEntities: string[] = [];
   const privateRoots: Uint8Array[] = [];
   const seenRoots = new Set<string>();
+  // Distinct-hex dedupe: with the read-both UNION an old-shape store binds
+  // the same private root from BOTH the token row and the aggregate UAL row.
+  // V10MerkleTree dedupes leaves anyway, so dropping repeats here is
+  // semantics-preserving (and keeps debug output sane).
+  const seenPrivRoots = new Set<string>();
   for (const row of sortedRows) {
     const root = stripQuotes(row['root'] ?? '');
     if (root && !seenRoots.has(root)) {
@@ -226,7 +245,8 @@ export async function extractV10KCFromStore(
       seenRoots.add(root);
     }
     const privHex = stripQuotes(row['privRoot'] ?? '');
-    if (privHex) {
+    if (privHex && !seenPrivRoots.has(privHex)) {
+      seenPrivRoots.add(privHex);
       privateRoots.push(parseHexBytes(privHex));
     }
   }

@@ -2,6 +2,12 @@ const DKG_STREAMS = 'https://ontology.dkg.io/streams#';
 const SCHEMA = 'https://schema.org/';
 const DKG_ONT = 'http://dkg.io/ontology/';
 const ROOT_ENTITY = `${DKG_ONT}rootEntity`;
+// RFC ka-metadata-trim P3.1 read-both: the collapsed `_meta` shape carries
+// `dkg:rootEntity` directly on the UAL subject (no `<ual>/<n> dkg:partOf
+// <ual>` token rows), so every discovery query UNIONs the legacy partOf join
+// with the collapsed UAL-subject match. `dkg:publishedAt` on the KC/UAL row
+// is KEPT writer-side (generateKCMetadata) specifically for these queries'
+// newest-first ordering.
 const PART_OF = `${DKG_ONT}partOf`;
 const PUBLISHED_AT = `${DKG_ONT}publishedAt`;
 const STATUS = `${DKG_ONT}status`;
@@ -95,8 +101,9 @@ export function buildListQuery({ contextGraphId, subGraphName, limit, offset }: 
   {
     SELECT DISTINCT ?ual ?root ?receivedAt WHERE {
       GRAPH <${meta}> {
-        ?ka <${ROOT_ENTITY}> ?root .
-        ?ka <${PART_OF}> ?ual .
+        { ?ka <${PART_OF}> ?ual . ?ka <${ROOT_ENTITY}> ?root . }
+        UNION
+        { ?ual <${ROOT_ENTITY}> ?root . }
 ${registrationScopeClause('?ual', subGraphName, '        ')}
         ?ual <${PUBLISHED_AT}> ?receivedAt .
       }
@@ -143,8 +150,9 @@ export function buildCountQuery({ contextGraphId, subGraphName }: CountQueryPara
   const privateGraph = privateUri(contextGraphId, subGraphName);
   return `SELECT (COUNT(DISTINCT ?ual) AS ?count) WHERE {
   GRAPH <${meta}> {
-    ?ka <${ROOT_ENTITY}> ?root .
-    ?ka <${PART_OF}> ?ual .
+    { ?ka <${PART_OF}> ?ual . ?ka <${ROOT_ENTITY}> ?root . }
+    UNION
+    { ?ual <${ROOT_ENTITY}> ?root . }
 ${registrationScopeClause('?ual', subGraphName, '    ')}
   }
   {
@@ -167,8 +175,9 @@ export function buildSingleByUalQuery({ contextGraphId, subGraphName, ual }: Sin
   const privateGraph = privateUri(contextGraphId, subGraphName);
   return `SELECT ?root ?p ?o WHERE {
   GRAPH <${meta}> {
-    ?ka <${ROOT_ENTITY}> ?root .
-    ?ka <${PART_OF}> <${ual}> .
+    { ?ka <${PART_OF}> <${ual}> . ?ka <${ROOT_ENTITY}> ?root . }
+    UNION
+    { <${ual}> <${ROOT_ENTITY}> ?root . }
 ${registrationScopeClause(`<${ual}>`, subGraphName, '    ')}
   }
   {

@@ -36,8 +36,9 @@ describe('discovery — buildListQuery', () => {
   {
     SELECT DISTINCT ?ual ?root ?receivedAt WHERE {
       GRAPH <${META_URI}> {
-        ?ka <http://dkg.io/ontology/rootEntity> ?root .
-        ?ka <http://dkg.io/ontology/partOf> ?ual .
+        { ?ka <http://dkg.io/ontology/partOf> ?ual . ?ka <http://dkg.io/ontology/rootEntity> ?root . }
+        UNION
+        { ?ual <http://dkg.io/ontology/rootEntity> ?root . }
         ?ual <http://dkg.io/ontology/status> ?registrationStatus .
         FILTER(?registrationStatus IN ("confirmed", "tentative"))
         FILTER NOT EXISTS { ?ual <http://dkg.io/ontology/subGraphName> ?_subGraphName . }
@@ -136,8 +137,9 @@ describe('discovery — buildCountQuery', () => {
     expect(q).toBe(
       `SELECT (COUNT(DISTINCT ?ual) AS ?count) WHERE {
   GRAPH <${META_URI}> {
-    ?ka <http://dkg.io/ontology/rootEntity> ?root .
-    ?ka <http://dkg.io/ontology/partOf> ?ual .
+    { ?ka <http://dkg.io/ontology/partOf> ?ual . ?ka <http://dkg.io/ontology/rootEntity> ?root . }
+    UNION
+    { ?ual <http://dkg.io/ontology/rootEntity> ?root . }
     ?ual <http://dkg.io/ontology/status> ?registrationStatus .
     FILTER(?registrationStatus IN ("confirmed", "tentative"))
     FILTER NOT EXISTS { ?ual <http://dkg.io/ontology/subGraphName> ?_subGraphName . }
@@ -190,8 +192,9 @@ describe('discovery — buildSingleByUalQuery', () => {
     expect(q).toBe(
       `SELECT ?root ?p ?o WHERE {
   GRAPH <${META_URI}> {
-    ?ka <http://dkg.io/ontology/rootEntity> ?root .
-    ?ka <http://dkg.io/ontology/partOf> <did:dkg:1/0xabc> .
+    { ?ka <http://dkg.io/ontology/partOf> <did:dkg:1/0xabc> . ?ka <http://dkg.io/ontology/rootEntity> ?root . }
+    UNION
+    { <did:dkg:1/0xabc> <http://dkg.io/ontology/rootEntity> ?root . }
     <did:dkg:1/0xabc> <http://dkg.io/ontology/status> ?registrationStatus .
     FILTER(?registrationStatus IN ("confirmed", "tentative"))
     FILTER NOT EXISTS { <did:dkg:1/0xabc> <http://dkg.io/ontology/subGraphName> ?_subGraphName . }

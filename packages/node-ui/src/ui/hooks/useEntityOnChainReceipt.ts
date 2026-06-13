@@ -10,33 +10,43 @@
  *     writes, keyed by the FULL assertion URI, into the context-graph `_meta`:
  *        <assertionUri>  dkg:publishedAtTx        "0x…"            (real tx hash)
  *        <assertionUri>  dkg:publishedAtBlock     "N"^^xsd:integer
- *        <assertionUri>  dkg:publishedAtKaId      "<packed>"^^xsd:integer
  *        <assertionUri>  dkg:assertionFinalizedAt "…"^^xsd:dateTime
+ *     (`dkg:publishedAtKaId` is legacy — RFC ka-metadata-trim Phase 2 stopped
+ *      writing it; the packed id is read off the UAL subject's `dkg:batchId`
+ *      row instead, read-both with old-store receipt rows.)
  *   • the assertion lifecycle URN, in the SAME `_meta` graph, carries:
- *        <lifecycle>  dkg:rootEntity  <assertionUri> ;
- *                     dkg:reservedUal "did:dkg:evm:<chain>/<addr>/<n>" .
+ *        <lifecycle>  dkg:rootEntity  <memberEntity> ;   (one row per member —
+ *                     the objects are the seal's MEMBER ENTITIES, never the
+ *                     assertion URI itself)
+ *        <lifecycle>  dkg:reservedUal "did:dkg:evm:<chain>/<addr>/<n>" ;
+ *                     prov:wasAttributedTo <did:dkg:agent:0x…> .
+ *     The lifecycle URN is pinned to the assertion URI structurally:
+ *     lifecycle = urn:dkg:assertion:{cg}[:{sub}]:{addr}:{name} while the
+ *     assertion URI ends with /assertion/{addr}/{name} (constants.ts), and
+ *     names cannot contain "/" — so replacing "/"→":" in the assertion-URI
+ *     tail yields the URN tail unambiguously.
  *
- * The clicked node is an *entity*, not the KA. The bridge is the
- * `ShareTransition` record in `_shared_memory_meta`
- * (packages/publisher/src/metadata.ts), which links each member entity to its
- * assertion source:
+ * The clicked node is an *entity*, not the KA.
  *
- *     <urn:dkg:share:{opId}>  dkg:entities  <entity> ;
- *                             dkg:source    "assertion/{addr}/{name}" ;
- *                             dkg:agent     did:dkg:agent:{addr} ;
- *                             dkg:timestamp "…"^^xsd:dateTime .
- *
- * Resolution (two SPARQL hops):
- *   1. entity → ShareTransition → (addr, name, agent).
+ * Resolution (RFC ka-metadata-trim P3.4 — read-both):
+ *   0. PRIMARY: single hop straight off the seal subject in `_meta`. The
+ *      receipt rows are keyed by the assertion URI; the entity→assertion link
+ *      is the seal's member-entity rows (`dkg:assertionRootEntity` / the
+ *      §10.1-renamed `dkg:assertionEntity`) or the assertion-URI prefix of
+ *      the clicked entity (member entities are namespaced under their
+ *      assertion URI). `reservedUal`/`prov:wasAttributedTo` are read BOTH
+ *      from the seal subject itself (new shape, lifecycle merged — P3.2) and
+ *      from a separate lifecycle URN row joined on `dkg:rootEntity` (old
+ *      stores).
+ *   LEGACY fallback (old stores only — the publisher no longer writes
+ *   `ShareTransition` records):
+ *   1. entity → ShareTransition (`_shared_memory_meta`) → (addr, name, agent).
  *   2. (addr, name) + the clicked entity → `_meta`. Because the same
  *      `(addr, name)` can exist in BOTH a root partition and a sub-graph
  *      partition, we do not trust `(addr, name)` alone: we additionally require
- *      the receipt's assertion URI to be a PREFIX of the clicked entity (every
- *      member entity — the root and its skolem/genid descendants — is
- *      namespaced under its assertion URI), preferring prefix / longest
- *      matches, so the EXACT assertion the entity belongs to wins rather than
- *      an arbitrary same-named one. reservedUal is read by joining the
- *      lifecycle URN on `dkg:rootEntity = <assertionUri>` (no URN guessing).
+ *      the receipt's assertion URI to be a PREFIX of the clicked entity,
+ *      preferring prefix / longest matches, so the EXACT assertion the entity
+ *      belongs to wins rather than an arbitrary same-named one.
  *
  * Status semantics:
  *   • 'verified'  — a real on-chain receipt (tx hash) was found.
@@ -130,11 +140,72 @@ function sparqlIri(value: string): string {
 }
 
 /**
- * Step 1: entity → ShareTransition → assertion source / agent / timestamp.
- * Cross-subgraph `GRAPH ?g` over `_shared_memory_meta`, so we deliberately do
- * NOT pass contextGraphId (mirrors `useVerifiedMemoryAnchors`: passing it
- * constrains `GRAPH ?g` to CG-direct graphs and drops the share records).
+ * Hop 0 (PRIMARY — RFC ka-metadata-trim P3.4): resolve the receipt straight
+ * off the seal subject in `_meta`, no ShareTransition bridge. Read-both:
+ *   - entity link: seal `dkg:assertionRootEntity` (legacy name) and
+ *     `dkg:assertionEntity` (§10.1 rename), plus the assertion-URI prefix
+ *     match for namespaced member entities;
+ *   - `reservedUal` / attribution: from the seal subject itself (new shape —
+ *     once the P3.2 lifecycle merge lands) OR from the separate lifecycle
+ *     URN (current + old stores). Codex review "node-ui-receipt": the URN
+ *     never carries `dkg:rootEntity <assertionUri>` — its rootEntity rows
+ *     stamp MEMBER entities — so the lifecycle join goes through the CLICKED
+ *     entity and is pinned to ?asrt by the structural (addr,name)
+ *     correspondence (URN tail `:{addr}:{name}` ⟷ URI tail
+ *     `/assertion/{addr}/{name}`, names cannot contain "/").
  * `entityIri` MUST already be validated via `sparqlIri`.
+ */
+export function buildSealReceiptQuery(cgId: string, entityIri: string): string {
+  const metaGraph = `did:dkg:context-graph:${cgId}/_meta`;
+  const entityLit = sparqlStr(entityIri);
+  // RFC ka-metadata-trim Phase 2 — `dkg:publishedAtKaId` is no longer
+  // written (it was the third copy of the on-chain id). Read-both: prefer
+  // the legacy receipt row when present (old stores), else resolve the id
+  // off the UAL subject's `dkg:batchId` row — the UAL node is the
+  // reservedUal IRI, reachable from the seal subject (or the lifecycle
+  // URN) via `dkg:reservedUal`.
+  return `PREFIX dkg: <${DKG}>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+SELECT ?asrt ?tx ?block ?kaId ?batchId ?finalizedAt ?ual ?agentLc ?ualSelf ?agentSelf WHERE {
+  GRAPH <${metaGraph}> {
+    ?asrt dkg:publishedAtTx ?tx ;
+          dkg:publishedAtBlock ?block .
+    FILTER(
+      STRSTARTS("${entityLit}", STR(?asrt)) ||
+      EXISTS { ?asrt dkg:assertionRootEntity <${entityIri}> } ||
+      EXISTS { ?asrt dkg:assertionEntity <${entityIri}> }
+    )
+    OPTIONAL { ?asrt dkg:publishedAtKaId ?kaId . }
+    OPTIONAL { ?asrt dkg:assertionFinalizedAt ?finalizedAt . }
+    OPTIONAL {
+      ?lc dkg:rootEntity <${entityIri}> ;
+          dkg:reservedUal ?ual .
+      FILTER(STRENDS(STR(?lc), CONCAT(":", REPLACE(STRAFTER(STR(?asrt), "/assertion/"), "/", ":"))))
+      OPTIONAL { ?lc prov:wasAttributedTo ?agentLc . }
+    }
+    OPTIONAL { ?asrt dkg:reservedUal ?ualSelf . }
+    OPTIONAL { ?asrt prov:wasAttributedTo ?agentSelf . }
+    BIND(IRI(COALESCE(?ualSelf, ?ual)) AS ?ualNode)
+    OPTIONAL { ?ualNode dkg:batchId ?batchId . }
+  }
+} ORDER BY DESC(STRSTARTS("${entityLit}", STR(?asrt))) DESC(STRLEN(STR(?asrt))) LIMIT 1`;
+}
+
+/** `…/assertion/{addr}/{name}` → { addr, name } (assertion-URI form). */
+function parseAssertionUri(asrt: string): { addr: string; name: string } | null {
+  const m = asrt.match(/\/assertion\/([^/]+)\/(.+)$/);
+  if (!m) return null;
+  return { addr: m[1], name: m[2] };
+}
+
+/**
+ * LEGACY Step 1 (old stores): entity → ShareTransition → assertion source /
+ * agent / timestamp. The publisher stopped writing ShareTransition records
+ * (RFC ka-metadata-trim P3.4) — this hop only resolves rows written by older
+ * nodes. Cross-subgraph `GRAPH ?g` over `_shared_memory_meta`, so we
+ * deliberately do NOT pass contextGraphId (mirrors `useVerifiedMemoryAnchors`:
+ * passing it constrains `GRAPH ?g` to CG-direct graphs and drops the share
+ * records). `entityIri` MUST already be validated via `sparqlIri`.
  */
 function buildShareQuery(cgId: string, entityIri: string): string {
   return `PREFIX dkg: <${DKG}>
@@ -162,10 +233,12 @@ SELECT ?source ?agent ?ts WHERE {
  * URI must (a) end with `/assertion/{addr}/{name}` and (b) be a prefix of the
  * clicked entity URI, and we (c) order prefix-matches first then longest-first
  * so the most specific (correct) assertion wins under `LIMIT 1`. reservedUal is
- * joined off the lifecycle URN via `dkg:rootEntity`, avoiding any reconstructed
- * `urn:dkg:assertion:…` key.
+ * joined off the lifecycle URN via its member-entity `dkg:rootEntity` stamp on
+ * the clicked entity, pinned to `(addr, name)` by the URN tail (the URN never
+ * carries the assertion URI as a rootEntity object — Codex review
+ * "node-ui-receipt").
  */
-function buildReceiptQuery(cgId: string, entityIri: string, addr: string, name: string): string {
+export function buildReceiptQuery(cgId: string, entityIri: string, addr: string, name: string): string {
   const metaGraph = `did:dkg:context-graph:${cgId}/_meta`;
   const suffix = `/assertion/${addr}/${name}`;
   const entityLit = sparqlStr(entityIri);
@@ -173,11 +246,15 @@ function buildReceiptQuery(cgId: string, entityIri: string, addr: string, name: 
 SELECT ?ual ?tx ?block ?kaId ?finalizedAt WHERE {
   GRAPH <${metaGraph}> {
     ?asrt dkg:publishedAtTx ?tx ;
-          dkg:publishedAtBlock ?block ;
-          dkg:publishedAtKaId ?kaId .
+          dkg:publishedAtBlock ?block .
+    OPTIONAL { ?asrt dkg:publishedAtKaId ?kaId . }
     FILTER(STRENDS(STR(?asrt), "${sparqlStr(suffix)}"))
     OPTIONAL { ?asrt dkg:assertionFinalizedAt ?finalizedAt . }
-    OPTIONAL { ?lc dkg:rootEntity ?asrt ; dkg:reservedUal ?ual . }
+    OPTIONAL {
+      ?lc dkg:rootEntity <${entityIri}> ;
+          dkg:reservedUal ?ual .
+      FILTER(STRENDS(STR(?lc), "${sparqlStr(`:${addr}:${name}`)}"))
+    }
   }
 } ORDER BY DESC(STRSTARTS("${entityLit}", STR(?asrt))) DESC(STRLEN(STR(?asrt))) LIMIT 1`;
 }
@@ -214,9 +291,45 @@ export function useEntityOnChainReceipt(
           return;
         }
 
-        // ── Hop 1: find the entity's assertion via ShareTransition ──
+        // ── Hop 0 (PRIMARY): seal-subject receipt rows in `_meta` ──
         // NOTE: query rejections propagate to the outer catch → 'error' state,
-        // kept distinct from a clean "no rows" → 'offchain'.
+        // kept distinct from a clean "no rows" → fallback / 'offchain'.
+        const sealRes = await executeQuery(
+          buildSealReceiptQuery(contextGraphId, safeEntity),
+          contextGraphId,
+        );
+        if (version !== versionRef.current) return;
+        const sealRow = ((sealRes as any)?.result?.bindings ?? [])[0];
+        if (sealRow?.tx) {
+          const asrt = sealRow.asrt ? unwrapIri(bv(sealRow.asrt)) : '';
+          const parsedAsrt = parseAssertionUri(asrt);
+          const author = parsedAsrt?.addr ?? null;
+          // Prefer the new-shape (seal-subject) attribution/UAL rows; fall
+          // back to the lifecycle-URN attribution, then derive the agent DID
+          // from the parsed author address.
+          const agentRaw =
+            (sealRow.agentSelf ? unwrapIri(bv(sealRow.agentSelf)) : '') ||
+            (sealRow.agentLc ? unwrapIri(bv(sealRow.agentLc)) : '');
+          const agent = agentRaw || (author ? `did:dkg:agent:${author.toLowerCase()}` : null);
+          const ual = (sealRow.ualSelf ? bv(sealRow.ualSelf) : '') || (sealRow.ual ? bv(sealRow.ual) : '');
+          // Read-both (RFC ka-metadata-trim Phase 2): legacy
+          // `dkg:publishedAtKaId` receipt row (old stores) wins, else the
+          // UAL-subject `dkg:batchId` row carries the on-chain id.
+          const kaId = (sealRow.kaId ? bv(sealRow.kaId) : '') || (sealRow.batchId ? bv(sealRow.batchId) : '');
+          setState({
+            status: 'verified',
+            ual: ual || null,
+            txHash: bv(sealRow.tx) || null,
+            blockNumber: sealRow.block ? bv(sealRow.block) : null,
+            kaId: kaId || null,
+            author,
+            finalizedAt: sealRow.finalizedAt ? bv(sealRow.finalizedAt) : null,
+            agent,
+          });
+          return;
+        }
+
+        // ── LEGACY Hop 1 (old stores): entity → ShareTransition ──
         const shareRes = await executeQuery(buildShareQuery(contextGraphId, safeEntity));
         if (version !== versionRef.current) return;
 
@@ -237,7 +350,7 @@ export function useEntityOnChainReceipt(
           return;
         }
 
-        // ── Hop 2: pull the EXACT on-chain receipt from `_meta` ──
+        // ── LEGACY Hop 2: pull the EXACT on-chain receipt from `_meta` ──
         const receiptRes = await executeQuery(
           buildReceiptQuery(contextGraphId, safeEntity, parsed.addr, parsed.name),
           contextGraphId,

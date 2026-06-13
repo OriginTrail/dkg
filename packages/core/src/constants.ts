@@ -295,6 +295,28 @@ export function contextGraphRulesUri(contextGraphId: string): string {
  * Stable URI for an assertion's lifecycle record in `_meta`.
  * Persists across WM → SWM → VM transitions so assertions remain
  * queryable by identity after promotion.
+ *
+ * TODO(rfc-ka-trim) P3.2 (deferred): merge the lifecycle URN into the seal
+ * subject — return `contextGraphAssertionUri(...)` here (keep this URN shape
+ * as `assertionLifecycleUriLegacy` for read-both) so state/memoryLayer/
+ * assertionGraph/assertionName/kaId/reservedUal/per-layer pointers/
+ * wasAttributedTo land on the one `{cg}/assertion/{addr}/{name}` node
+ * (−5 quads/KA). Deferred from the Phase-3 stage because the audit during
+ * implementation surfaced two hazards that need their own pass:
+ *   1. Subject collision with AUTHOR-SIGNED material: the seal +
+ *      publish-receipt rows live on the seal subject; subject-scoped wipes
+ *      (`assertionCreate` clean-slate, `deleteByPattern({subject})` sites)
+ *      would delete them unless the preserve set is extended to
+ *      ASSERTION_SEAL_PREDICATES + ASSERTION_PUBLISH_RECEIPT_PREDICATES.
+ *   2. Identity double-allocation: the finalize `hasExistingKaId` guard,
+ *      the re-finalize reservedUal reuse and the A2 preserve step read
+ *      kaId/reservedUal by EXACT subject — each needs read-both
+ *      (new-subject ‖ this legacy URN) with new-first precedence, or
+ *      upgraded nodes re-allocate KA numbers and fork UALs.
+ * Read-both is also required in: history + resolveByKaId (dkg-agent.ts —
+ * the URN-prefix author parse), sync replication scope, promote guards,
+ * PROV event targets, node-ui receipt/lifecycle-feed hooks (the receipt
+ * hook already reads both shapes — see useEntityOnChainReceipt P3.4).
  */
 export function assertionLifecycleUri(contextGraphId: string, agentAddress: string, name: string, subGraphName?: string): string {
   if (subGraphName) return `urn:dkg:assertion:${contextGraphId}:${subGraphName}:${agentAddress}:${name}`;

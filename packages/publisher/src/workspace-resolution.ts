@@ -123,10 +123,12 @@ export async function storeWorkspaceOperationPublicQuads(params: {
     );
     const rootQuads = filterQuadsForRoot(normalizedQuads, root);
     const digest = workspacePublicQuadsDigest(rootQuads);
-    let snapshotRef: string | undefined;
     let snapshotGraph: string | undefined;
     if (params.publicSnapshotStore) {
-      snapshotRef = (await params.publicSnapshotStore.putSnapshot({ digest, quads: rootQuads })).ref;
+      // The store keys the snapshot by its digest (`ref === digest`), so the
+      // digest row below is the only pointer needed (RFC ka-metadata-trim
+      // Phase 2 — no more `dkg:publicSnapshotRef` duplicate).
+      await params.publicSnapshotStore.putSnapshot({ digest, quads: rootQuads });
     } else {
       snapshotGraph = workspaceOperationPublicSnapshotGraph(
         params.contextGraphId,
@@ -152,9 +154,12 @@ export async function storeWorkspaceOperationPublicQuads(params: {
       { subject, predicate: `${PROV}wasAttributedTo`, object: agentAddress ? agentDid(agentAddress) : lit(publisherPeerId), graph: workspaceMetaGraph },
       { subject, predicate: `${DKG}publishedAt`, object: dateLit(timestamp), graph: workspaceMetaGraph },
     );
-    if (snapshotRef) {
-      snapshotQuads.push({ subject, predicate: `${DKG}publicSnapshotRef`, object: lit(snapshotRef), graph: workspaceMetaGraph });
-    }
+    // RFC ka-metadata-trim Phase 2: `dkg:publicSnapshotRef` is no longer
+    // written — `FileWorkspacePublicSnapshotStore.putSnapshot` returns
+    // `ref === digest`, so the row was byte-identical to
+    // `dkg:publicQuadsDigest`. A store-backed snapshot row is now identified
+    // by "digest present AND no `dkg:publicSnapshotGraph` row"; readers are
+    // read-both (an explicit legacy ref row wins when present).
     if (snapshotGraph) {
       snapshotQuads.push({ subject, predicate: `${DKG}publicSnapshotGraph`, object: snapshotGraph, graph: workspaceMetaGraph });
     }
@@ -394,8 +399,13 @@ async function resolveCompactWorkspaceOperationPublicQuads(params: {
 
     const expectedDigest = stripLiteral(result.bindings[0]?.['digest'])?.trim();
     const expectedCount = parseIntegerLiteral(result.bindings[0]?.['count']);
-    const snapshotRef = stripLiteral(result.bindings[0]?.['snapshotRef'])?.trim();
     const snapshotGraph = result.bindings[0]?.['snapshotGraph'];
+    // Read-both (RFC ka-metadata-trim Phase 2): an explicit legacy
+    // `dkg:publicSnapshotRef` row wins (old stores); otherwise a row with a
+    // digest and NO snapshot graph is store-backed and its ref IS the digest
+    // (`putSnapshot` returns `ref === digest`).
+    const snapshotRef = stripLiteral(result.bindings[0]?.['snapshotRef'])?.trim()
+      ?? (snapshotGraph ? undefined : expectedDigest);
     if (!expectedDigest || !Number.isInteger(expectedCount)) {
       missingRoots.push(root);
       continue;

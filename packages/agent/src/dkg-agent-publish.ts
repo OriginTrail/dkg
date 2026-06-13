@@ -2065,7 +2065,9 @@ export class PublishMethods extends DKGAgentBase {
     const merkleHexBare = ethers.hexlify(merkleRoot).slice(2);
     // Re-stamp the WM pointer (idempotent: drop any prior value first so a
     // re-finalize / update advances WM without accumulating stale pointers).
-    await this._stampPointer(lifecycleUri, WM_CURRENT_ASSERTION_PRED, merkleHexBare, metaGraph);
+    // RFC ka-metadata-trim Phase 2: only materialised when it diverges from
+    // VM — readers COALESCE a missing wm pointer to vm.
+    await this._stampPointerIfDivergedFromVm(lifecycleUri, WM_CURRENT_ASSERTION_PRED, merkleHexBare, metaGraph);
 
     if (freshNumber !== undefined) {
       // chainId here is the EVM uint256 from getEvmChainId(); the reservedUal
@@ -2958,10 +2960,13 @@ export class PublishMethods extends DKGAgentBase {
         try {
           const priorBare = vmCurrent.startsWith('0x') ? vmCurrent.slice(2) : vmCurrent;
           const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
-          // Re-point VM + WM to the new merkle (drop-then-set), then record the
-          // revision chain via prov:wasRevisionOf <prior>.
+          // Re-point VM to the new merkle (drop-then-set), then record the
+          // revision chain via prov:wasRevisionOf <prior>. RFC ka-metadata-trim
+          // Phase 2: WM converges back to VM after the update mint, so the
+          // divergence-only stamp DELETES any stale WM row instead of
+          // duplicating the new merkle (readers COALESCE missing wm → vm).
           await this._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
-          await this._stampPointer(lifecycleUri, WM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
+          await this._stampPointerIfDivergedFromVm(lifecycleUri, WM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
           await this.store.insert([
             { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
             { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: `"${priorBare}"`, graph: metaGraph },
@@ -3126,6 +3131,26 @@ export class PublishMethods extends DKGAgentBase {
             await this.store.insert([
               { subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, object: vmGraph, graph: metaGraph },
             ]);
+            // RFC ka-metadata-trim Phase 2 (corrected by adversarial review
+            // F4) — WM-graph marker flip at the VM transition.
+            // `assertionCreate` stamps `<wmGraph> dkg:memoryLayer "WM"` on the
+            // per-KA number-keyed WM graph URI (assertionPromote flips it in
+            // place to "SWM"). The flip above only covers the lifecycle URN
+            // and the legacy name-keyed assertion URI; the data-graph-URI
+            // marker would otherwise read "SWM" forever — misleading, since
+            // the data now lives at VM. We UPDATE it to "VM" rather than
+            // DELETE it: `assertAssertionDataPersisted` (dkg-publisher.ts)
+            // reads this exact row as its "already promoted → harmless no-op"
+            // witness, so deleting it would make a stale re-promote after a
+            // successful publish misfire AssertionNotPersistedError when the
+            // preserved extraction markers are present (Codex #898 case).
+            // Any non-"WM" value short-circuits that guard, so "VM" keeps the
+            // no-op witness AND tells the truth about the layer.
+            const wmGraph = contextGraphLayerUri(contextGraphId, MemoryLayer.WorkingMemory, vmAuthor, vmNumber, opts?.subGraphName);
+            await this.store.deleteByPattern({ subject: wmGraph, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
+            await this.store.insert([
+              { subject: wmGraph, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph },
+            ]);
           }
         }
       } catch (err) {
@@ -3214,6 +3239,43 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   /**
+   * RFC ka-metadata-trim Phase 2 — divergence-only wm/swm pointer stamp.
+   * `dkg:vmCurrentAssertion` is always materialised; the wm/swm pointers are
+   * only written when they DIVERGE from the current VM value (the common
+   * "all three equal" steady state is implicit). When the new value equals
+   * VM, any prior row for `pred` is deleted instead (drop-then-skip), so a
+   * stale divergent pointer never lingers. Readers COALESCE a missing wm/swm
+   * to the vm value (see `agent.assertion.history()`), which also keeps
+   * old-store rows (always materialised) readable unchanged.
+   */
+  async _stampPointerIfDivergedFromVm(
+    this: DKGAgent,
+    lifecycleUri: string,
+    pred: string,
+    merkleHex: string,
+    metaGraph: string,
+  ): Promise<void> {
+    const bare = merkleHex.startsWith('0x') ? merkleHex.slice(2) : merkleHex;
+    let vmBare: string | undefined;
+    try {
+      const res = await this.store.query(
+        `SELECT ?vm WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm } } LIMIT 1`,
+      );
+      const raw = res.type === 'bindings' ? res.bindings[0]?.['vm'] : undefined;
+      vmBare = raw?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
+    } catch {
+      // On a failed VM read fall back to the always-write behaviour below —
+      // an extra convergent row is harmless (readers COALESCE), a missing
+      // divergent row is not.
+    }
+    if (vmBare !== undefined && vmBare === bare) {
+      await this.store.deleteByPattern({ subject: lifecycleUri, predicate: pred, graph: metaGraph });
+      return;
+    }
+    await this._stampPointer(lifecycleUri, pred, bare, metaGraph);
+  }
+
+  /**
    * OT-RFC-43 A2 (decision 2) — stamp `dkg:swmCurrentAssertion` on the
    * lifecycle URN when an assertion is promoted/shared into SWM. The pointer
    * value is the assertion's sealed merkle root hex (read from the seal on the
@@ -3240,7 +3302,10 @@ export class PublishMethods extends DKGAgentBase {
       const seal = parseAssertionSealQuads(metaQuads, assertionUri);
       if (!seal) return; // not finalized — nothing to point at
       const merkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
-      await this._stampPointer(lifecycleUri, SWM_CURRENT_ASSERTION_PRED, merkleHexBare, metaGraph);
+      // RFC ka-metadata-trim Phase 2: divergence-only — a re-promote of
+      // already-published content (swm == vm) materialises no row; readers
+      // COALESCE a missing swm pointer to vm.
+      await this._stampPointerIfDivergedFromVm(lifecycleUri, SWM_CURRENT_ASSERTION_PRED, merkleHexBare, metaGraph);
     } catch (err) {
       this.log.warn(
         createOperationContext('share'),

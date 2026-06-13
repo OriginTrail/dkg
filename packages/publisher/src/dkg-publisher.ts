@@ -19,11 +19,8 @@ import { validatePublishRequest } from './validation.js';
 import {
   generateConfirmedFullMetadata,
   generateOwnershipQuads,
-  generateAuthorshipProof,
-  generateShareTransitionMetadata,
   generateAssertionCreatedMetadata,
   generateAssertionPromotedMetadata,
-  generateAssertionPublishedMetadata,
   generateAssertionDiscardedMetadata,
   generateTentativeMetadata,
   toHex,
@@ -133,6 +130,14 @@ export interface DKGPublisherConfig {
    * flows; the real EVM adapter then throws on the missing reservedKaId.
    */
   kaAllocator?: KaIdAllocator;
+  /**
+   * RFC ka-metadata-trim Phase 3 (P3.3) — `metadata.provenanceEvents` config.
+   * Default `true`. When `false` ("lite mode"), the lifecycle writers skip the
+   * per-transition PROV event nodes (`dkg:AssertionCreated` /
+   * `dkg:AssertionPromoted` activities) but keep every state/identity row on
+   * the lifecycle subject; the history API returns `events: []` gracefully.
+   */
+  provenanceEvents?: boolean;
 }
 
 export interface WorkspaceSenderKeyEncryptInput {
@@ -405,11 +410,14 @@ export class DKGPublisher implements Publisher {
   private readonly kaAllocator?: KaIdAllocator;
   /** Authors whose allocator floor has been reconciled against the chain this process. */
   private readonly reconciledKaAuthors = new Set<string>();
+  /** RFC ka-metadata-trim P3.3 — gate for the lifecycle PROV event rows (default true). */
+  private readonly provenanceEvents: boolean;
 
   constructor(config: DKGPublisherConfig) {
     this.store = config.store;
     this.chain = config.chain;
     this.kaAllocator = config.kaAllocator;
+    this.provenanceEvents = config.provenanceEvents !== false;
     this.eventBus = config.eventBus;
     this.keypair = config.keypair;
     this.publisherNodeIdentityId = config.publisherNodeIdentityId ?? 0n;
@@ -1477,27 +1485,83 @@ export class DKGPublisher implements Publisher {
         }
 
         const ual = publishResult.ual;
-        const kaUals = publishResult.kaManifest.map(ka => `${ual}/${ka.tokenId}`);
-        const metaSubjects = new Set([ual, ...kaUals]);
-        const metaQuery = `CONSTRUCT { ?s ?p ?o } WHERE {
-          GRAPH <${defaultMetaGraph}> {
-            VALUES ?s { ${[...metaSubjects].map(s => `<${s}>`).join(' ')} }
-            ?s ?p ?o .
-          }
-        }`;
-        const metaResult = await this.store.query(metaQuery);
-        if (metaResult.type === 'quads' && metaResult.quads.length > 0) {
-          // Copy meta to the per-cgId graph (RS prover's
-          // `extractV10KCFromStore` resolves UALs from
-          // `dkg:batchId` here). On remap publishes the original
-          // copy at `<NAME>/_meta` is also moved; on same-graph
-          // publishes we leave the default copy in place so
-          // existing meta queries against the label-only URI
-          // continue to resolve.
-          await this.store.insert(metaResult.quads.map(q => ({ ...q, graph: ctxMetaGraph })));
-          if (ctxGraphId) {
+        if (ctxGraphId) {
+          // REMAP flow: the per-cgId partition is this KA's ONLY meta home —
+          // the default-graph rows are MOVED, not duplicated — so the full
+          // row set (status / accessPolicy / attribution / receipt / …) must
+          // travel with it. Wholesale CONSTRUCT-move, unchanged. The legacy
+          // `<ual>/<n>` subjects are included for old-shape rows still
+          // present in the default meta (RFC ka-metadata-trim P3.1
+          // read-both); collapsed-shape rows all live on the UAL subject.
+          const kaUals = publishResult.kaManifest.map(ka => `${ual}/${ka.tokenId}`);
+          const metaSubjects = new Set([ual, ...kaUals]);
+          const metaQuery = `CONSTRUCT { ?s ?p ?o } WHERE {
+            GRAPH <${defaultMetaGraph}> {
+              VALUES ?s { ${[...metaSubjects].map(s => `<${s}>`).join(' ')} }
+              ?s ?p ?o .
+            }
+          }`;
+          const metaResult = await this.store.query(metaQuery);
+          if (metaResult.type === 'quads' && metaResult.quads.length > 0) {
+            await this.store.insert(metaResult.quads.map(q => ({ ...q, graph: ctxMetaGraph })));
             await this.store.delete(metaResult.quads.map(q => ({ ...q, graph: defaultMetaGraph })));
           }
+        } else {
+          // RFC ka-metadata-trim Phase 3 (P3.5): same-graph publishes keep
+          // their full KC rows in the label `_meta`; the per-cgId partition
+          // gets ONLY the documented minimal shape (restateKaPartition
+          // parity) the RS prover needs:
+          //   - the collapsed member-entity pair on the UAL subject (the
+          //     partOf-equivalent linkage, P3.1 — no `<ual>/<n>` tokens),
+          //   - `dkg:batchId` (the UAL resolution edge),
+          //   - `dkg:merkleRoot` (+ `dkg:privateMerkleRoot` when present);
+          //   - `dkg:materializedVersion` is stamped below.
+          // The RS prover and the backfill route are read-both, so old
+          // wholesale-copied partitions keep working.
+          const DKG_ONT = 'http://dkg.io/ontology/';
+          const XSD_INT = 'http://www.w3.org/2001/XMLSchema#integer';
+          const partitionKaId = publishResult.onChainResult!.kaId ?? publishResult.onChainResult!.batchId;
+          const minimalMeta: Quad[] = [
+            { subject: ual, predicate: `${DKG_ONT}batchId`, object: `"${partitionKaId}"^^<${XSD_INT}>`, graph: ctxMetaGraph },
+            { subject: ual, predicate: `${DKG_ONT}merkleRoot`, object: `"${toHex(publishResult.merkleRoot)}"`, graph: ctxMetaGraph },
+          ];
+          const seenPartitionRoots = new Set<string>();
+          const seenPartitionPrivRoots = new Set<string>();
+          // Codex review "multi-root-access" (restateKaPartition parity):
+          // MULTI-root publishes additionally re-emit the legacy
+          // `<ual>/<tokenId>` token rows so the root↔privateMerkleRoot
+          // pairing stays recoverable; single-root keeps the full collapse.
+          const partitionMultiRoot =
+            new Set(publishResult.kaManifest.map((ka) => ka.rootEntity)).size > 1;
+          for (const ka of publishResult.kaManifest) {
+            if (!seenPartitionRoots.has(ka.rootEntity)) {
+              seenPartitionRoots.add(ka.rootEntity);
+              // RFC ka-metadata-trim Phase 2: single member row (the §10.1
+              // dual-write was collapsed back to `dkg:rootEntity`; readers
+              // stay read-both for dual-written replica rows).
+              minimalMeta.push(
+                { subject: ual, predicate: DKG_ROOT_ENTITY_LEGACY, object: ka.rootEntity, graph: ctxMetaGraph },
+              );
+            }
+            if (ka.privateMerkleRoot && ka.privateMerkleRoot.length > 0) {
+              const privHex = toHex(ka.privateMerkleRoot);
+              if (!seenPartitionPrivRoots.has(privHex)) {
+                seenPartitionPrivRoots.add(privHex);
+                minimalMeta.push({ subject: ual, predicate: `${DKG_ONT}privateMerkleRoot`, object: `"${privHex}"`, graph: ctxMetaGraph });
+              }
+            }
+            if (partitionMultiRoot) {
+              const kaUri = `${ual}/${ka.tokenId}`;
+              minimalMeta.push(
+                { subject: kaUri, predicate: DKG_ROOT_ENTITY_LEGACY, object: ka.rootEntity, graph: ctxMetaGraph },
+                { subject: kaUri, predicate: `${DKG_ONT}partOf`, object: ual, graph: ctxMetaGraph },
+              );
+              if (ka.privateMerkleRoot && ka.privateMerkleRoot.length > 0) {
+                minimalMeta.push({ subject: kaUri, predicate: `${DKG_ONT}privateMerkleRoot`, object: `"${toHex(ka.privateMerkleRoot)}"`, graph: ctxMetaGraph });
+              }
+            }
+          }
+          await this.store.insert(minimalMeta);
         }
 
         // Stamp the publish version so a later update can compare against it
@@ -1554,43 +1618,11 @@ export class DKGPublisher implements Publisher {
       }
     }
 
-    // Update assertion lifecycle records: promoted → published.
-    // Runs for both confirmed and tentative publishes since data has
-    // already moved to VM in either case.
-    if (publishResult.ual) {
-      const cgMetaGraph = contextGraphMetaUri(contextGraphId);
-      const publishedRoots = publishResult.kaManifest.map((ka: any) => ka.rootEntity);
-      const rootValues = publishedRoots.map((r) => `<${r}>`).join(' ');
-      const findAssertions = await this.store.query(
-        `SELECT DISTINCT ?assertion ?agent ?name WHERE {
-          GRAPH <${cgMetaGraph}> {
-            VALUES ?root { ${rootValues} }
-            ?assertion a <http://dkg.io/ontology/Assertion> ;
-                       <http://dkg.io/ontology/state> "promoted" ;
-                       <http://dkg.io/ontology/rootEntity> ?root ;
-                       <http://dkg.io/ontology/agent> ?agent ;
-                       <http://dkg.io/ontology/assertionName> ?name .
-          }
-        }`,
-      );
-      if (findAssertions.type === 'bindings') {
-        for (const row of findAssertions.bindings) {
-          const agentUri = row['agent'];
-          const assertionName = row['name']?.replace(/^"|"$/g, '');
-          if (!agentUri || !assertionName) continue;
-          const agentAddr = agentUri.replace('did:dkg:agent:', '');
-          const published = generateAssertionPublishedMetadata({
-            contextGraphId,
-            agentAddress: agentAddr,
-            assertionName,
-            kcUal: publishResult.ual,
-            timestamp: new Date(),
-          });
-          await this.store.delete(published.delete);
-          await this.store.insert(published.insert);
-        }
-      }
-    }
+    // RFC ka-metadata-trim Phase 0: the promoted→published lifecycle-record
+    // update that lived here was dead code — its SPARQL gate joined
+    // `dkg:agent`, a predicate the lifecycle writer never emits (it writes
+    // `prov:wasAttributedTo`), so it never fired. The SWM→VM flip is done
+    // imperatively in dkg-agent-publish.ts.
 
     return publishResult;
   }
@@ -2326,16 +2358,16 @@ export class DKGPublisher implements Publisher {
       // routing the pre-PR2 catch block did. Two strictly-additive
       // requirements relative to the minimal call above:
       //
-      //   1. `authorAddress` / `publishOperationId` — emits the
-      //      `dkg:Publication` + `dkg:authoredBy` quads that RFC-001 §3.5
-      //      requires for tentative publishes so downstream consumers
-      //      (`access-handler`, `assertion-history`, the verifiable-memory
-      //      view) can still attribute the publish locally before any
-      //      chain confirmation. The on-chain `KnowledgeBatch.authorAddress`
-      //      is canonical only once the publish confirms; until then this
-      //      is a self-claim. `publisherSigner` may be undefined
-      //      (no-chain / no-key path) — skip the fields in that case so
-      //      the publication subject is not emitted with a missing author.
+      //   1. `authorAddress` — feeds the KC row's `prov:wasAttributedTo`
+      //      so downstream consumers (`access-handler`,
+      //      `assertion-history`, the verifiable-memory view) can still
+      //      attribute the publish locally before any chain confirmation.
+      //      The on-chain `KnowledgeBatch.authorAddress` is canonical only
+      //      once the publish confirms; until then this is a self-claim.
+      //      `publisherSigner` may be undefined (no-chain / no-key path) —
+      //      skip the field in that case. (The former `dkg:Publication`
+      //      mirror keyed on `publishOperationId` was dropped — RFC
+      //      ka-metadata-trim Phase 1, zero readers.)
       //
       //   2. `targetMetaGraphUri` remap — every generated meta quad sits
       //      in the default `did:dkg:context-graph:<id>/_meta` graph. If
@@ -2350,7 +2382,6 @@ export class DKGPublisher implements Publisher {
           ual,
           contextGraphId,
           merkleRoot: kcMerkleRoot,
-          kaCount,
           publisherPeerId: normalizedPublisherPeerId || 'unknown',
           accessPolicy: effectiveAccessPolicy,
           allowedPeers: normalizedAllowedPeers,
@@ -2361,7 +2392,6 @@ export class DKGPublisher implements Publisher {
             ? {
                 authorAddress: (options.precomputedAttestation?.authorAddress
                   ?? publisherSigner!.address),
-                publishOperationId,
               }
             : {}),
         },
@@ -2747,14 +2777,12 @@ export class DKGPublisher implements Publisher {
             ual,
             contextGraphId,
             merkleRoot: kcMerkleRoot,
-            kaCount,
             publisherPeerId: normalizedPublisherPeerId || 'unknown',
             accessPolicy: effectiveAccessPolicy,
             allowedPeers: normalizedAllowedPeers,
             timestamp: new Date(),
             subGraphName: options.subGraphName,
             authorAddress: effectiveAuthorAddress,
-            publishOperationId,
           },
           kaMetadata,
           {
@@ -2801,30 +2829,10 @@ export class DKGPublisher implements Publisher {
           TrustLevel.SelfAttested,
         );
 
-        // Agent authorship proof (spec §9.0.6): sign keccak256(merkleRoot) and store in _meta
-        try {
-          const merkleHashBytes = ethers.keccak256(kcMerkleRoot);
-          const sig = await publisherSigner.signMessage(ethers.getBytes(merkleHashBytes));
-          const proofQuads = generateAuthorshipProof({
-            kcUal: ual,
-            contextGraphId,
-            agentAddress: publisherSigner.address,
-            signature: sig,
-            signedHash: merkleHashBytes,
-          });
-          if (options.targetMetaGraphUri) {
-            const defaultMeta = `did:dkg:context-graph:${contextGraphId}/_meta`;
-            const remapped = proofQuads.map((q) =>
-              q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
-            );
-            await this.store.insert(remapped);
-          } else {
-            await this.store.insert(proofQuads);
-          }
-          this.log.info(ctx, `Authorship proof stored for agent ${publisherSigner.address}`);
-        } catch (proofErr) {
-          this.log.warn(ctx, `Failed to generate authorship proof: ${proofErr instanceof Error ? proofErr.message : String(proofErr)}`);
-        }
+        // RFC ka-metadata-trim Phase 1: the off-chain AuthorshipProof block
+        // (`dkg:authoredBy` bnode + signature quads, spec §9.0.6) is no
+        // longer written — zero code readers; the on-chain
+        // `KnowledgeBatch.authorAddress` is canonical.
 
         status = 'confirmed';
         onPhase?.('chain:submit', 'end');
@@ -3036,8 +3044,14 @@ export class DKGPublisher implements Publisher {
           }
         }
         if (ualForPriors) {
+          // Read-both (RFC ka-metadata-trim P3.1): collapsed-shape rows carry
+          // `dkg:rootEntity` on the UAL subject; legacy rows on `<ual>/<n>`.
           const priorRes = await this.store.query(
-            `SELECT DISTINCT ?root WHERE { GRAPH <${labelMetaForPriors}> { ?ka <${DKG_ONT}partOf> <${ualForPriors}> ; <${DKG_ONT}rootEntity> ?root } }`,
+            `SELECT DISTINCT ?root WHERE { GRAPH <${labelMetaForPriors}> {
+               { ?ka <${DKG_ONT}partOf> <${ualForPriors}> ; <${DKG_ONT}rootEntity> ?root }
+               UNION
+               { <${ualForPriors}> <${DKG_ONT}rootEntity> ?root }
+             } }`,
           );
           if (priorRes.type === 'bindings') {
             for (const row of priorRes.bindings) {
@@ -4097,6 +4111,13 @@ export class DKGPublisher implements Publisher {
     // stale double-click then hits this guard with `layer="SWM"` and
     // must be treated as a harmless no-op rather than misclassified as
     // ASSERTION_NOT_PERSISTED.
+    //
+    // Adversarial review F4: the publish-time SWM→VM flip
+    // (dkg-agent-publish.ts) UPDATES the WM-graph marker to `"VM"` (it
+    // briefly deleted it, which would have erased this witness). Any
+    // non-"WM" value — "SWM" (post-promote), "VM" (post-publish), or a
+    // legacy old-store value — is the read-both no-op path here; only a
+    // literal "WM" falls through to the persistence check.
     if (typeof layerRaw === 'string') {
       const layerValue = stripSparqlLiteral(layerRaw);
       if (layerValue !== 'WM') return;
@@ -4327,7 +4348,7 @@ export class DKGPublisher implements Publisher {
       timestamp: new Date(),
       kaNumber,
       reservedUal,
-    });
+    }, { provenanceEvents: this.provenanceEvents });
     await this.store.insert(lifecycleQuads);
 
     await this.store.insert([{
@@ -4753,17 +4774,13 @@ export class DKGPublisher implements Publisher {
       graph: assertionMetaGraph,
     }]);
 
-    // Record ShareTransition metadata in _shared_memory_meta (spec §8)
-    const entities = [...new Set(effectiveQuads.map((q) => q.subject))];
-    const shareTransition = generateShareTransitionMetadata({
-      contextGraphId,
-      operationId,
-      agentAddress,
-      assertionName: name,
-      entities,
-      timestamp: new Date(),
-    });
-    await this.store.insert(shareTransition);
+    // RFC ka-metadata-trim Phase 3 (P3.4): the `ShareTransition` record
+    // (spec §8) is no longer written. Its only consumer — the node-ui
+    // on-chain-receipt hook — now reads the seal-subject receipt rows in
+    // `_meta` directly (read-both: it still falls back to ShareTransition
+    // rows for old stores). The entity→assertion bridge it provided is
+    // carried by the seal's `dkg:assertionRootEntity`/`dkg:assertionEntity`
+    // rows and the lifecycle record's member-entity stamps.
 
     // Update assertion lifecycle record in _meta: created → promoted
     const promotedKaNumber = await this.resolveKaNumber(contextGraphId, agentAddress, name, opts?.subGraphName);
@@ -4776,7 +4793,7 @@ export class DKGPublisher implements Publisher {
       shareOperationId: operationId,
       rootEntities: effectiveRoots,
       timestamp: new Date(),
-    });
+    }, { provenanceEvents: this.provenanceEvents });
     await this.store.delete(promoted.delete);
     await this.store.insert(promoted.insert);
 
@@ -4861,7 +4878,7 @@ export class DKGPublisher implements Publisher {
       assertionName: name,
       subGraphName,
       timestamp: new Date(),
-    });
+    }, { provenanceEvents: this.provenanceEvents });
     await this.store.delete(discarded.delete);
     await this.store.insert(discarded.insert);
 

@@ -351,8 +351,10 @@ describe('DKGPublisher', () => {
     });
 
     const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+    // RFC ka-metadata-trim: KC rows no longer carry `rdf:type
+    // dkg:KnowledgeCollection` — resolve the UAL by its `dkg:status` row.
     const metaResult = await store.query(
-      `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/KnowledgeCollection> } }`,
+      `SELECT ?ual WHERE { GRAPH <${metaGraph}> { ?ual <http://dkg.io/ontology/status> ?status } }`,
     );
 
     expect(metaResult.type).toBe('bindings');

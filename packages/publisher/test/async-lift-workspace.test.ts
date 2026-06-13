@@ -486,12 +486,16 @@ describe('async lift workspace resolution', () => {
       ], { publisherPeerId: 'peer1' });
 
       const metaGraph = graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH);
+      // RFC ka-metadata-trim Phase 2: no `dkg:publicSnapshotRef` row any
+      // more — the digest IS the snapshot-store ref (`putSnapshot` returns
+      // `ref === digest`); a store-backed row is "digest + no snapshotGraph".
       const metadata = await store.query(
-        `SELECT ?snapshotRef ?snapshotGraph ?payload WHERE {
+        `SELECT ?snapshotRef ?snapshotGraph ?digest ?payload WHERE {
           GRAPH <${metaGraph}> {
             ?s <${DKG}shareOperationId> "${write.shareOperationId}" .
             OPTIONAL { ?s <${DKG}publicSnapshotRef> ?snapshotRef }
             OPTIONAL { ?s <${DKG}publicSnapshotGraph> ?snapshotGraph }
+            OPTIONAL { ?s <${DKG}publicQuadsDigest> ?digest }
             OPTIONAL { ?s <${DKG}publicStagedQuads> ?payload }
           }
         }`,
@@ -499,11 +503,12 @@ describe('async lift workspace resolution', () => {
       expect(metadata.type).toBe('bindings');
       let snapshotRef: string | undefined;
       if (metadata.type === 'bindings') {
-        expect(metadata.bindings.some((row) => row['snapshotRef']?.includes('sha256:'))).toBe(true);
+        expect(metadata.bindings.some((row) => row['snapshotRef'])).toBe(false);
+        expect(metadata.bindings.some((row) => row['digest']?.includes('sha256:'))).toBe(true);
         expect(metadata.bindings.some((row) => row['snapshotGraph'])).toBe(false);
         expect(metadata.bindings.some((row) => row['payload'])).toBe(false);
         expect(JSON.stringify(metadata.bindings)).not.toContain(marker);
-        snapshotRef = metadata.bindings.map((row) => stripLiteral(row['snapshotRef'])).find(Boolean);
+        snapshotRef = metadata.bindings.map((row) => stripLiteral(row['digest'])).find(Boolean);
       }
       expect(snapshotRef).toBeDefined();
       const snapshotFile = snapshotFilePath(snapshotDir, snapshotRef!, 'nq');
@@ -671,7 +676,10 @@ describe('async lift workspace resolution', () => {
         expect(metadata.bindings.some((row) => row['digest']?.includes('sha256:'))).toBe(true);
         expect(metadata.bindings.some((row) => row['count'] === '"1"^^<http://www.w3.org/2001/XMLSchema#integer>')).toBe(true);
         expect(metadata.bindings.some((row) => row['payload'])).toBe(false);
-        expect(metadata.bindings.some((row) => row['snapshotRef']?.includes('sha256:'))).toBe(true);
+        // RFC ka-metadata-trim Phase 2: no `dkg:publicSnapshotRef` row — the
+        // digest IS the snapshot-store ref (store-backed = digest + no
+        // snapshotGraph row).
+        expect(metadata.bindings.some((row) => row['snapshotRef'])).toBe(false);
         expect(metadata.bindings.some((row) => row['snapshotGraph'])).toBe(false);
         expect(JSON.stringify(metadata.bindings)).not.toContain('externalized-');
       }
@@ -792,17 +800,22 @@ function stripLiteral(value: string | undefined): string | undefined {
 
 async function getPublicSnapshotRef(store: OxigraphStore, graphManager: GraphManager, shareOperationId: string): Promise<string> {
   const metaGraph = graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH);
+  // Read-both (RFC ka-metadata-trim Phase 2): `dkg:publicSnapshotRef` is no
+  // longer written (it was byte-identical to the digest); for store-backed
+  // rows the ref IS `dkg:publicQuadsDigest`. An explicit legacy ref row,
+  // when present, still wins.
   const result = await store.query(
-    `SELECT ?snapshotRef WHERE {
+    `SELECT ?snapshotRef ?digest WHERE {
       GRAPH <${metaGraph}> {
         ?s <${DKG}shareOperationId> "${shareOperationId}" ;
-           <${DKG}publicSnapshotRef> ?snapshotRef .
+           <${DKG}publicQuadsDigest> ?digest .
+        OPTIONAL { ?s <${DKG}publicSnapshotRef> ?snapshotRef }
       }
     } LIMIT 1`,
   );
   expect(result.type).toBe('bindings');
   if (result.type !== 'bindings') throw new Error('Unexpected snapshot metadata result');
-  const snapshotRef = stripLiteral(result.bindings[0]?.['snapshotRef']);
+  const snapshotRef = stripLiteral(result.bindings[0]?.['snapshotRef']) ?? stripLiteral(result.bindings[0]?.['digest']);
   if (!snapshotRef) throw new Error(`Missing public snapshot ref for ${shareOperationId}`);
   return snapshotRef;
 }

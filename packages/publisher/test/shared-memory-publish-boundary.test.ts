@@ -188,6 +188,11 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
 });
 
 describe('shared-memory metadata cleanup during predicate rename', () => {
+  // RFC ka-metadata-trim Phase 2: writers emit a single `dkg:rootEntity`
+  // member row (the §10.1 `dkg:entity` dual-write was collapsed), but the
+  // upsert cleanup stays delete-BOTH — replicas still hold dual-written rows
+  // synced from older nodes, and a stale `dkg:entity` link left behind would
+  // keep matching read-both (ENTITY_PRED_ALT) consumers forever.
   it('removes stale dkg:entity links when upserting one root from a multi-root share', async () => {
     const { publisher, store } = await makePublisher();
     const rootA = 'urn:test:cleanup:a';
@@ -198,26 +203,41 @@ describe('shared-memory metadata cleanup during predicate rename', () => {
       q(rootB, 'http://schema.org/name', '"B"', CONTEXT_GRAPH_URI),
     ], { publisherPeerId: 'peer-a' });
 
+    // Simulate an old-node replica row: the first share's op row ALSO carries
+    // the legacy dual-written `dkg:entity` link for rootA.
+    const firstOps = await store.query(
+      `SELECT DISTINCT ?op WHERE { GRAPH <${SWM_META_GRAPH}> { ?op <${DKG_ROOT_ENTITY_LEGACY}> <${rootA}> } }`,
+    );
+    expect(firstOps.type).toBe('bindings');
+    const firstOp = firstOps.type === 'bindings' ? firstOps.bindings[0]?.['op'] : undefined;
+    expect(firstOp).toBeDefined();
+    await store.insert([
+      { subject: firstOp!, predicate: DKG_ENTITY, object: rootA, graph: SWM_META_GRAPH },
+    ]);
+
     await publisher.share(CONTEXT_GRAPH, [
       q(rootA, 'http://schema.org/name', '"A updated"', CONTEXT_GRAPH_URI),
     ], { publisherPeerId: 'peer-a' });
 
-    const rootAOps = await store.query(
+    // The dual-written `dkg:entity` link from the older op row is gone …
+    const rootAEntityOps = await store.query(
       `SELECT DISTINCT ?op WHERE { GRAPH <${SWM_META_GRAPH}> { ?op <${DKG_ENTITY}> <${rootA}> } }`,
     );
-    expect(rootAOps.type).toBe('bindings');
-    if (rootAOps.type === 'bindings') {
-      expect(rootAOps.bindings).toHaveLength(1);
+    expect(rootAEntityOps.type).toBe('bindings');
+    if (rootAEntityOps.type === 'bindings') {
+      expect(rootAEntityOps.bindings).toHaveLength(0);
     }
 
+    // … rootB (untouched by the upsert) keeps resolving via the member row …
     const rootBMeta = await store.query(
-      `ASK { GRAPH <${SWM_META_GRAPH}> { ?op <${DKG_ENTITY}> <${rootB}> } }`,
+      `ASK { GRAPH <${SWM_META_GRAPH}> { ?op <${DKG_ROOT_ENTITY_LEGACY}> <${rootB}> } }`,
     );
     expect(rootBMeta.type).toBe('boolean');
     if (rootBMeta.type === 'boolean') {
       expect(rootBMeta.value).toBe(true);
     }
 
+    // … and exactly ONE op row (the upsert's) links rootA via `dkg:rootEntity`.
     const rootALegacyOps = await store.query(
       `SELECT DISTINCT ?op WHERE { GRAPH <${SWM_META_GRAPH}> { ?op <${DKG_ROOT_ENTITY_LEGACY}> <${rootA}> } }`,
     );

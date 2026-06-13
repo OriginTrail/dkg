@@ -705,11 +705,26 @@ function durableDeltaWhereClauseForGraphs(
           SELECT ?deltaRoot ?deltaBid WHERE {
             VALUES ?deltaMg { ${values} }
             GRAPH ?deltaMg {
-              ?deltaKa <${DKG_PART_OF}> ?deltaUal ;
-                       <${DKG_ROOT_ENTITY}> ?deltaRoot .
-              { ?deltaUal <${DKG_BATCH_ID}> ?deltaBid }
+              # Read-both (RFC ka-metadata-trim P3.1): legacy shape carries
+              # ual/n dkg:partOf ?ual token rows with batchId on the KA or UAL;
+              # the collapsed shape (post-trim) puts dkg:rootEntity + dkg:batchId
+              # directly on the UAL subject with no partOf token row. The second
+              # arm resolves collapsed KAs so a delta still narrows them; on
+              # old-shape stores it also matches the aggregate UAL row harmlessly.
+              # Without it, collapsed KAs bind no ?deltaBatch and are re-sent on
+              # every delta (correct, but defeats the optimization).
+              {
+                ?deltaKa <${DKG_PART_OF}> ?deltaUal ;
+                         <${DKG_ROOT_ENTITY}> ?deltaRoot .
+                { ?deltaUal <${DKG_BATCH_ID}> ?deltaBid }
+                UNION
+                { ?deltaKa <${DKG_BATCH_ID}> ?deltaBid }
+              }
               UNION
-              { ?deltaKa <${DKG_BATCH_ID}> ?deltaBid }
+              {
+                ?deltaUalc <${DKG_ROOT_ENTITY}> ?deltaRoot ;
+                           <${DKG_BATCH_ID}> ?deltaBid .
+              }
               FILTER(REGEX(STR(?deltaBid), "^-?\\\\d+$"))
             }
           }

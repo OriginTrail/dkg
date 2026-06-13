@@ -1011,6 +1011,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       );
     }
 
+    // Read-both note (RFC ka-metadata-trim P3.1): the first pattern matches
+    // the collapsed shape (`rootEntity` directly on the UAL target), the
+    // second the legacy `<ual>/<n> partOf <ual>` token rows synced from older
+    // nodes. Both were already queried here — no migration needed.
     const rootPatterns = namespaces.flatMap((ns) => [
       `GRAPH <${metaGraph}> { ${target} <${ns}rootEntity> ?root . }`,
       `GRAPH <${metaGraph}> { ?ka <${ns}partOf> ${target} ; <${ns}rootEntity> ?root . }`,

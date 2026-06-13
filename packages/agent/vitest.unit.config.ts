@@ -19,6 +19,7 @@ export default defineConfig({
       'test/swm/host-mode-store.test.ts',
       'test/swm/host-mode-key-canonicalization.test.ts',
       'test/profile-fix-verify.test.ts',
+      'test/sync-verify-collapsed.test.ts',
     ],
     testTimeout: 60_000,
     maxWorkers: 1,

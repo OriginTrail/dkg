@@ -511,6 +511,25 @@ describe('FinalizationHandler.handleChainReconciledKC (Phase B)', () => {
     expect(outcome).toBe('already-confirmed');
   });
 
+  it('F5 read-both: returns already-confirmed when status lives ONLY in the label _meta (minimal partition shape)', async () => {
+    // Adversarial review F5 / RFC ka-metadata-trim: the publisher's own
+    // same-graph promote writes the MINIMAL shape into the per-cgId partition
+    // meta — no `dkg:status` row there; the `confirmed` status lives in the
+    // label `_meta` graph. The dedup ASK must read both, or the reconciler /
+    // gossip echo re-promotes a KC the node itself just published.
+    const store = new OxigraphStore();
+    const merkleRoot = await seedSwmSnapshot(store);
+    const handler = new FinalizationHandler(store, makeBindingChain(42n));
+
+    const labelMetaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+    await store.insert([
+      { subject: UAL, predicate: 'http://dkg.io/ontology/status', object: '"confirmed"', graph: labelMetaGraph },
+    ]);
+
+    const outcome = await handler.handleChainReconciledKC(input(merkleRoot), createOperationContext('system'));
+    expect(outcome).toBe('already-confirmed');
+  });
+
   /**
    * Seed an SWM snapshot whose ONLY copy lives under a named sub-graph's
    * shared-memory namespace (not the root workspace). Registers the sub-graph

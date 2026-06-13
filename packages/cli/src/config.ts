@@ -486,6 +486,20 @@ export interface DkgConfig {
   workspaceTtlMs?: number;
   /** EPCIS plugin config. When set, POST /api/epcis/capture is enabled. */
   epcis?: { contextGraphId?: string };
+  /**
+   * Per-KA metadata writer tuning (RFC ka-metadata-trim Phase 3).
+   */
+  metadata?: {
+    /**
+     * P3.3 — write per-transition PROV event nodes (`dkg:AssertionCreated` /
+     * `dkg:AssertionPromoted` activities) into `_meta`. Default `true`.
+     * Set `false` ("lite mode") on high-throughput publishers / core nodes
+     * to skip the event rows: the seal, state and identity rows on the
+     * lifecycle subject are ALWAYS written regardless, and the history API
+     * simply returns `events: []` for ranges published while disabled.
+     */
+    provenanceEvents?: boolean;
+  };
   /** Async publisher runtime options. */
   publisher?: {
     enabled?: boolean;

@@ -466,12 +466,16 @@ describe('Workspace: publishFromSharedMemory', () => {
       expect(dataResult.bindings[0]['o']).toBe('"Context Enshrine"');
     }
 
+    // RFC ka-metadata-trim P3.1 (collapsed shape): KA rows are the UAL
+    // subject itself — identified by the member-entity pair, no `<ual>/<n>`
+    // token rows and no `dkg:partOf`.
     const metaResult = await store.query(
-      `SELECT ?s WHERE { GRAPH <${ctxMetaGraph}> { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/KnowledgeAsset> } }`,
+      `SELECT ?s WHERE { GRAPH <${ctxMetaGraph}> { ?s <http://dkg.io/ontology/rootEntity> ?root } }`,
     );
     expect(metaResult.type).toBe('bindings');
     if (metaResult.type === 'bindings') {
       expect(metaResult.bindings.length).toBeGreaterThan(0);
+      expect(metaResult.bindings[0]['s']).toBe(result.ual);
     }
   });
 

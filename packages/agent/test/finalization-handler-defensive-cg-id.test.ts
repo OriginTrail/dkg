@@ -155,7 +155,15 @@ describe('FinalizationHandler ctxGraphId resolution', () => {
     expect(resolver).toHaveBeenCalledTimes(1);
     expect(resolver).toHaveBeenCalledWith(CONTEXT_GRAPH);
     expect(queriedGraph(captured, RESOLVER_PER_CG_META_GRAPH)).toBe(true);
-    expect(queriedGraph(captured, LEGACY_META_GRAPH)).toBe(false);
+    // Adversarial review F5 (read-both dedup): the dedup ASK now legitimately
+    // UNIONs the label `_meta` graph as the status fallback (the minimal
+    // per-cgId partition shape carries no `dkg:status` row), so the legacy
+    // URI is allowed to appear — but ONLY inside the same read-both ASK that
+    // probes the resolver-target graph. A standalone probe of the legacy
+    // graph (the original regression: "use the wire iff present" downgrade
+    // routing dedup/promotion to `<cgName>/_meta`) must still trip this.
+    const legacyMentions = captured.filter((q) => q.includes(`<${LEGACY_META_GRAPH}>`));
+    expect(legacyMentions.every((q) => q.includes(`<${RESOLVER_PER_CG_META_GRAPH}>`))).toBe(true);
   });
 
   it('falls back to the legacy meta URI when no resolver is wired (back-compat)', async () => {
