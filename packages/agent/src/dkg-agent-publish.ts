@@ -149,6 +149,7 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
+import { emitPublicProjection } from './context-graph-public-projection.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
@@ -1287,7 +1288,60 @@ export class PublishMethods extends DKGAgentBase {
     await this.broadcastPublish(contextGraphId, result, ctx);
     onPhase?.('broadcast', 'end');
     this.log.info(ctx, `Publish complete — status=${result.status} kaId=${result.kaId}`);
+
+    // OT-RFC-49 §5.9 — refresh the private CG's public projection now the root
+    // is committed. No-op unless configured; best-effort and error-isolated so
+    // it can never affect the publish just completed.
+    await this.emitPublicProjectionAfterPublish(contextGraphId, result, ctx);
+
     return result;
+  }
+
+  /**
+   * OT-RFC-49 §5.9.3 — emit/refresh the public projection of a private CG once
+   * its VM publish is confirmed on chain. Binds the private CG into the public
+   * graph as a discoverable, verifiable node (floor: `a dkg:PrivateContextGraph`,
+   * UAL, `dct:accessRights dkg:Private`, `dkg:committedRoot`) while disclosing
+   * nothing beyond chain state (§5.9.1).
+   *
+   * No-op unless `publicProjectionContextGraphId` is configured; skips public
+   * CGs (they are their own public face, handled inside `emitPublicProjection`)
+   * and the discovery CG itself (recursion guard). Fully error-isolated — a
+   * projection failure logs and returns, never affecting the triggering publish.
+   */
+  async emitPublicProjectionAfterPublish(
+    this: DKGAgent,
+    contextGraphId: string,
+    result: PublishResult,
+    ctx: OperationContext,
+  ): Promise<void> {
+    try {
+      const target = this.config.publicProjectionContextGraphId;
+      // Off unless configured; never project the discovery CG into itself.
+      if (!target || contextGraphId === target) return;
+      // Only a confirmed publish has a real on-chain committed root.
+      if (result.status !== 'confirmed' || result.merkleRoot.length !== 32) return;
+      const committedRoot = `0x${Buffer.from(result.merkleRoot).toString('hex')}`;
+
+      await emitPublicProjection(
+        {
+          isPrivateContextGraph: (id) => this.isPrivateContextGraph(id),
+          resolveUal: async () => result.ual,
+          projectionGraph: () => contextGraphDataGraphUri(target),
+          // The projection is PUBLIC content; the target is a public CG, so
+          // this.publish keeps it plaintext and emit no-ops on the inner call.
+          publishProjection: async (_id, quads) => { await this.publish(target, quads); },
+          log: (level, message) =>
+            level === 'warn' ? this.log.warn(ctx, message) : this.log.info(ctx, message),
+        },
+        contextGraphId,
+        committedRoot,
+      );
+    } catch (err) {
+      // Defense-in-depth: emitPublicProjection already isolates its own errors,
+      // but a bug in target/root resolution must never break a good publish.
+      this.log.warn(ctx, `public projection skipped: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   async update(this: DKGAgent,

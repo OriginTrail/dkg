@@ -759,6 +759,16 @@ export type ReplicationEventSink = (event: ReplicationEvent) => void;
 
 export interface DKGAgentConfig {
   name: string;
+  /**
+   * OT-RFC-49 §5.9 — public-projection target. When set, a private CG's
+   * confirmed VM publishes emit/refresh a verifiable public projection (the
+   * floor: existence, UAL, access class, committed root) into this PUBLIC
+   * context graph, binding the private CG into the public graph as a
+   * discoverable, verifiable node without disclosing its contents. The target
+   * MUST be a public CG (a curated target would encrypt the projection and
+   * also self-recurse). Unset → projections are off.
+   */
+  publicProjectionContextGraphId?: string;
   framework?: string;
   description?: string;
   listenPort?: number;
