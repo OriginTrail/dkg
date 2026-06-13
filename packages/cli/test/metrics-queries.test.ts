@@ -146,6 +146,7 @@ describe('countContextGraphsFromGraphUris', () => {
     const hashKey = `0x${'a'.repeat(64)}`;
     const wireOnlyHash = `0x${'b'.repeat(64)}`;
     const walletScoped = '0xE5B8896800000000000000000000000000000000/tuesday-cg';
+    const reusedSlotHash = `0x${'d'.repeat(64)}`;
     expect(contextGraphIdsFromMetricSubscriptionCandidates([
       [hashKey, { onChainId: '7', onChainHash: hashKey, coreHosted: true }],
       ['cleartext-cg', { onChainId: '7', onChainHash: hashKey, synced: true }],
@@ -153,7 +154,9 @@ describe('countContextGraphsFromGraphUris', () => {
       ['wire-only-clear', { onChainHash: wireOnlyHash, synced: true }],
       ['tuesday-cg', { onChainId: '9', onChainHash: `0x${'c'.repeat(64)}`, synced: true }],
       [walletScoped, { onChainId: '9', onChainHash: `0x${'c'.repeat(64)}`, synced: true }],
-    ])).toEqual(['cleartext-cg', 'wire-only-clear', walletScoped]);
+      ['reused-slot-old', { onChainId: '11', onChainHash: reusedSlotHash, synced: true }],
+      ['reused-slot-new', { onChainId: '11', onChainHash: `0x${'e'.repeat(64)}`, synced: true }],
+    ])).toEqual(['cleartext-cg', 'wire-only-clear', walletScoped, 'reused-slot-old', 'reused-slot-new']);
     expect(shadowContextGraphIdsFromMetricSubscriptionCandidates([
       ['tuesday-cg', { onChainId: '9', onChainHash: `0x${'c'.repeat(64)}`, synced: true }],
       [walletScoped, { onChainId: '9', onChainHash: `0x${'c'.repeat(64)}`, synced: true }],
@@ -176,7 +179,7 @@ describe('countContextGraphsFromGraphUris', () => {
     expect(query).toContain('<did:dkg:context-graph:ontology>');
     expect(query).toContain('<did:dkg:context-graph:agents>');
     expect(query).toContain('<did:dkg:context-graph:plain-cg/_meta>');
-    expect(query).toContain('<did:dkg:context-graph:team/context/beta/_meta>');
+    expect(query).not.toContain('<did:dkg:context-graph:team/context/beta/_meta>');
     expect(query).toContain('<did:dkg:context-graph:plain-cg/code/_meta>');
     expect(query).not.toContain('<did:dkg:context-graph:plain-cg/_verifiable_memory/1/_meta>');
     expect(query).not.toContain('<did:dkg:context-graph:plain-cg>');

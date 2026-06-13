@@ -51,6 +51,7 @@ const NON_ROOT_DECLARATION_META_SEGMENTS = [
   '/_verifiable_memory/',
   '/_shared_memory_snapshots/',
   '/assertion/',
+  '/context/',
 ] as const;
 
 /**
@@ -179,11 +180,11 @@ function selectMetricSubscriptionCandidateIds(
       || sub.sharedMemorySynced === true
       || sub.coreHosted === true
     ) {
-      const identity = sub.onChainId
-        ? `chain:${sub.onChainId}`
-          : sub.onChainHash
-            ? `wire:${sub.onChainHash.toLowerCase()}`
-            : `local:${id}`;
+      const identity = sub.onChainHash
+        ? `wire:${sub.onChainHash.toLowerCase()}`
+        : sub.onChainId
+          ? `chain:${sub.onChainId}`
+          : `local:${id}`;
       let idsForIdentity = contextGraphIdsByStableIdentity.get(identity);
       if (!idsForIdentity) {
         idsForIdentity = new Set<string>();
