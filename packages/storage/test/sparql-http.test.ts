@@ -350,6 +350,32 @@ describe('SparqlHttpStore (test server)', () => {
       expect(listGraphsHits).toBe(1); // all three shared one in-flight scan
     });
 
+    it('lets aborted callers detach without cancelling the shared managed scan', async () => {
+      listGraphsHits = 0;
+      let release!: () => void;
+      listGraphsGate = new Promise<void>((r) => { release = r; });
+      const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+      const store = managedStore();
+      const firstController = new AbortController();
+      try {
+        const first = store.listGraphs({ signal: firstController.signal });
+        await delay(30);
+        expect(listGraphsHits).toBe(1);
+
+        firstController.abort(new Error('first caller left'));
+        await expect(first).rejects.toThrow(/first caller left/);
+
+        const second = store.listGraphs();
+        await delay(30);
+        expect(listGraphsHits).toBe(1);
+
+        release();
+        await expect(second).resolves.toContain('http://ex.org/g1');
+      } finally {
+        listGraphsGate = null;
+      }
+    });
+
     it('a write during an in-flight scan forces the next caller to re-scan, not join stale work', async () => {
       // Read-your-writes: if a scan is in flight and a write invalidates the
       // cache before it resolves, a caller arriving after the write must start

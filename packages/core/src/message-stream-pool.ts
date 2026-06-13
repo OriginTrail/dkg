@@ -989,6 +989,10 @@ export class MessageStreamPool {
         }
         try {
           response = await handler(frame.payload, remotePeer, { signal: requestController.signal });
+          if (requestController.signal.aborted) {
+            const reason = requestController.signal.reason;
+            throw reason instanceof Error ? reason : new Error(String(reason ?? 'pooled handler aborted'));
+          }
         } catch (err) {
           if (isAbortRelatedError(err, requestController.signal)) {
             cleanEof = false;

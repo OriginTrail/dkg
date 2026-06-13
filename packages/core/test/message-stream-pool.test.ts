@@ -495,6 +495,45 @@ describe('MessageStreamPool', () => {
     await pool.close();
   });
 
+  it('does not send a pooled response after the request signal aborts', async () => {
+    const stopController = new AbortController();
+    const node = makeFakeNode() as FakeNode & { stopSignal: AbortSignal };
+    Object.defineProperty(node, 'stopSignal', {
+      get: () => stopController.signal,
+    });
+    const pool = new MessageStreamPool(node, {
+      peerIdFromString: stubPeerIdFromString,
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+    });
+
+    let handlerStarted = false;
+    let releaseHandler!: () => void;
+    const handler: PooledStreamHandler = async () => {
+      handlerStarted = true;
+      await new Promise<void>((resolve) => {
+        releaseHandler = resolve;
+      });
+      return new TextEncoder().encode('too-late');
+    };
+    pool.registerHandler(handler);
+
+    const { remoteWrites, localReads } = node.simulateInboundDial(PEER_B);
+    remoteWrites.send(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('ping')));
+    while (!handlerStarted) await flush();
+
+    stopController.abort(new Error('node stopping'));
+    releaseHandler();
+    await flush();
+    await flush();
+
+    const accum = (remoteWrites as unknown as { readBuf: Uint8Array[] }).readBuf;
+    expect(accum).toHaveLength(0);
+    expect(localReads.abortReason?.message).toContain('node stopping');
+
+    await pool.close();
+  });
+
   it('inbound handler errors surface as ERROR frame, not stream teardown', async () => {
     const node = makeFakeNode();
     const pool = new MessageStreamPool(node, {

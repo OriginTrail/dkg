@@ -82,6 +82,21 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
 }
 
+function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work;
+  throwIfAborted(signal);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      const reason = signal.reason;
+      reject(reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(resolve, reject).finally(() => {
+      signal.removeEventListener('abort', onAbort);
+    });
+  });
+}
+
 /**
  * R6-A: how long a managed-endpoint `listGraphs()` result may be served from
  * cache before it is re-validated against the store. The cache is also cleared
@@ -407,22 +422,21 @@ export class SparqlHttpStore implements TripleStore {
     // arriving after a write must not join the pre-write scan (it would observe
     // a stale graph set); it starts a fresh one instead.
     if (this.graphListInflight && this.graphListInflightGen === this.graphListCacheGen) {
-      return [...(await this.graphListInflight)];
+      return [...(await raceAgainstAbort(this.graphListInflight, options?.signal))];
     }
     const startGen = this.graphListCacheGen;
-    const scan = this.scanGraphs(startGen, options);
-    this.graphListInflight = scan;
-    this.graphListInflightGen = startGen;
-    try {
-      return [...(await scan)];
-    } finally {
+    let scan!: Promise<string[]>;
+    scan = this.scanGraphs(startGen).finally(() => {
       // Clear only if a newer scan hasn't already replaced this one, so a
       // post-write rebuild started while this scan was resolving isn't lost.
       if (this.graphListInflight === scan) {
         this.graphListInflight = null;
         this.graphListInflightGen = -1;
       }
-    }
+    });
+    this.graphListInflight = scan;
+    this.graphListInflightGen = startGen;
+    return [...(await raceAgainstAbort(scan, options?.signal))];
   }
 
   /**
