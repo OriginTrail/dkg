@@ -710,7 +710,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     options: { signal?: AbortSignal } = {},
   ): Promise<boolean> {
     const isPrivate = await raceSyncAuthAgainstAbort(
-      this.isPrivateContextGraph(request.contextGraphId),
+      this.isPrivateContextGraph(request.contextGraphId, { signal: options.signal }),
       options.signal,
     );
     if (!isPrivate) {
@@ -1077,6 +1077,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    */
   async getExplicitAccessPolicy(this: DKGAgent,
     contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
   ): Promise<'public' | 'private' | null> {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return null;
@@ -1096,6 +1097,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           }
         }
       } LIMIT 1`,
+      { signal: options.signal },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return null;
     const policyValue = result.bindings[0]?.['policy'];
@@ -1161,7 +1163,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     );
   }
 
-  async isPrivateContextGraph(this: DKGAgent, contextGraphId: string): Promise<boolean> {
+  async isPrivateContextGraph(this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<boolean> {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return false;
     }
@@ -1189,7 +1194,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     // Codex review on #873 — policy lookup now delegated to the
     // shared `getExplicitAccessPolicy()` helper so this routing
     // function and the invite-path warning helper can never drift.
-    const policy = await this.getExplicitAccessPolicy(contextGraphId);
+    const policy = await this.getExplicitAccessPolicy(contextGraphId, { signal: options.signal });
     if (policy === 'private') return true;
     if (policy === 'public') return false;
     // policy === null falls through to the legacy heuristic below.
@@ -1212,6 +1217,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> ?peer }
         }
       }`,
+      { signal: options.signal },
     );
     if (allowlistResult.type === 'boolean' && allowlistResult.value === true) {
       return true;

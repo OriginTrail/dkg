@@ -377,7 +377,8 @@ export class SparqlHttpStore implements TripleStore {
     this.invalidateGraphListCache(); // the graph is gone from listGraphs
   }
 
-  async listGraphs(): Promise<string[]> {
+  async listGraphs(options?: QueryOptions): Promise<string[]> {
+    throwIfAborted(options?.signal);
     // R6-A: on a managed (daemon-owned) endpoint the graph set only changes
     // when *we* write, so serve a warm cache and skip the full
     // `SELECT DISTINCT ?g` quad-store scan — the dominant idle-node CPU cost
@@ -397,7 +398,7 @@ export class SparqlHttpStore implements TripleStore {
     // External (non-managed) endpoint: never cache (an outside writer could
     // add a graph we'd miss), so just scan.
     if (!this.cacheGraphList) {
-      return [...(await this.scanGraphs(this.graphListCacheGen))];
+      return [...(await this.scanGraphs(this.graphListCacheGen, options))];
     }
     // Managed, cold/expired cache: coalesce concurrent callers onto one
     // in-flight scan so a startup or TTL-boundary burst doesn't fan out into
@@ -409,7 +410,7 @@ export class SparqlHttpStore implements TripleStore {
       return [...(await this.graphListInflight)];
     }
     const startGen = this.graphListCacheGen;
-    const scan = this.scanGraphs(startGen);
+    const scan = this.scanGraphs(startGen, options);
     this.graphListInflight = scan;
     this.graphListInflightGen = startGen;
     try {
@@ -430,8 +431,8 @@ export class SparqlHttpStore implements TripleStore {
    * (`startGen` vs the current generation) discards a snapshot that may predate
    * that write so the next call rebuilds.
    */
-  private async scanGraphs(startGen: number): Promise<string[]> {
-    const r = await this.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
+  private async scanGraphs(startGen: number, options?: QueryOptions): Promise<string[]> {
+    const r = await this.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }', options);
     const graphs = r.type === 'bindings' ? r.bindings.map((b) => b.g).filter(Boolean) : [];
     if (this.cacheGraphList && startGen === this.graphListCacheGen) {
       this.graphListCache = graphs;

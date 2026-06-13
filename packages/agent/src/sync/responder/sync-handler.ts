@@ -355,10 +355,10 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           );
           const rows = await readSwmMetaPage({
             store,
-            graphList: await raceAgainstAbort(graphListMemo.get({ refresh: offset === 0 }), signal),
-            registeredSubGraphNames: await raceAgainstAbort(
-              swmAdmissionMemo.get(contextGraphId, { refresh: offset === 0 }),
-              signal,
+            graphList: await graphListMemo.get({ refresh: offset === 0, signal }),
+            registeredSubGraphNames: await swmAdmissionMemo.get(
+              contextGraphId,
+              { refresh: offset === 0, signal },
             ),
             contextGraphId,
             cutoffIso: cutoff,
@@ -385,10 +385,10 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           );
           const rows = await readSwmDataPage({
             store,
-            graphList: await raceAgainstAbort(graphListMemo.get({ refresh: offset === 0 }), signal),
-            registeredSubGraphNames: await raceAgainstAbort(
-              swmAdmissionMemo.get(contextGraphId, { refresh: offset === 0 }),
-              signal,
+            graphList: await graphListMemo.get({ refresh: offset === 0, signal }),
+            registeredSubGraphNames: await swmAdmissionMemo.get(
+              contextGraphId,
+              { refresh: offset === 0, signal },
             ),
             contextGraphId,
             cutoffIso: cutoff,
@@ -419,9 +419,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         const rows = await readDurableMetaPage({
           store,
           contextGraphId,
-          registeredSubGraphNames: await raceAgainstAbort(
-            subGraphRegistrationMemo.get(contextGraphId, { refresh: offset === 0 }),
-            signal,
+          registeredSubGraphNames: await subGraphRegistrationMemo.get(
+            contextGraphId,
+            { refresh: offset === 0, signal },
           ),
           offset,
           limit,
@@ -446,7 +446,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         );
         const rows = await readDurableDataPage({
           store,
-          graphList: await raceAgainstAbort(graphListMemo.get({ refresh: offset === 0 }), signal),
+          graphList: await graphListMemo.get({ refresh: offset === 0, signal }),
           contextGraphId,
           sinceBatchId,
           offset,

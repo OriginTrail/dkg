@@ -261,7 +261,9 @@ export class OxigraphWorkerStore implements TripleStore {
   async hasGraph(graphUri: string): Promise<boolean> { return this.call('hasGraph', graphUri); }
   async createGraph(graphUri: string): Promise<void> { return this.call('createGraph', graphUri); }
   async dropGraph(graphUri: string): Promise<void> { return this.call('dropGraph', graphUri); }
-  async listGraphs(): Promise<string[]> { return this.call('listGraphs'); }
+  async listGraphs(options?: QueryOptions): Promise<string[]> {
+    return this.callWithTimeout<string[]>(this.operationTimeoutMs, options?.signal, 'listGraphs');
+  }
   async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> { return this.call('deleteBySubjectPrefix', graphUri, prefix); }
   async countQuads(graphUri?: string): Promise<number> { return this.call('countQuads', graphUri); }
   async flush(): Promise<void> { return this.call('flush'); }

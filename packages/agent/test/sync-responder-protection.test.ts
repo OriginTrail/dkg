@@ -239,10 +239,12 @@ describe('sync responder protection', () => {
 
   it('races graph-list memo waits against stream abort and releases capacity', async () => {
     const listGate = deferred<readonly string[]>();
+    let listSignal: AbortSignal | undefined;
     let listCalls = 0;
     let authStarted = 0;
     const cap = captureHandler(baseStore({
-      listGraphs: async () => {
+      listGraphs: async (options?: QueryOptions) => {
+        listSignal = options?.signal;
         listCalls += 1;
         return listGate.promise;
       },
@@ -257,6 +259,7 @@ describe('sync responder protection', () => {
 
     const first = cap.invoke(envelope, REMOTE_A, controller.signal);
     while (listCalls < 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(listSignal).toBe(controller.signal);
     controller.abort(new Error('memo wait aborted'));
 
     await expect(first).rejects.toThrow(/memo wait aborted/);
@@ -264,6 +267,41 @@ describe('sync responder protection', () => {
     const later = cap.invoke(envelope, REMOTE_A);
     while (authStarted < 2) await new Promise((resolve) => setTimeout(resolve, 0));
     listGate.resolve([]);
+
+    await later;
+    expect(authStarted).toBe(2);
+  });
+
+  it('passes the stream abort signal to subgraph-name memo queries and releases capacity', async () => {
+    const queryGate = deferred<QueryResult>();
+    let querySignal: AbortSignal | undefined;
+    let queryCalls = 0;
+    let authStarted = 0;
+    const cap = captureHandler(baseStore({
+      query: async (_sparql: string, options?: QueryOptions) => {
+        querySignal = options?.signal;
+        queryCalls += 1;
+        return queryGate.promise;
+      },
+    }), {
+      authorizeSyncRequest: async () => {
+        authStarted += 1;
+        return true;
+      },
+    });
+    const controller = new AbortController();
+    const envelope = { ...makeEnvelope(), phase: 'meta' as const };
+
+    const first = cap.invoke(envelope, REMOTE_A, controller.signal);
+    while (queryCalls < 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(querySignal).toBe(controller.signal);
+    controller.abort(new Error('subgraph memo aborted'));
+
+    await expect(first).rejects.toThrow(/subgraph memo aborted/);
+
+    const later = cap.invoke(makeEnvelope(), REMOTE_A);
+    while (authStarted < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+    queryGate.resolve({ type: 'bindings', bindings: [] });
 
     await later;
     expect(authStarted).toBe(2);

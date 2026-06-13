@@ -60,7 +60,7 @@ export interface TripleStore {
   hasGraph(graphUri: string): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;
   dropGraph(graphUri: string): Promise<void>;
-  listGraphs(): Promise<string[]>;
+  listGraphs(options?: QueryOptions): Promise<string[]>;
 
   deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number>;
 

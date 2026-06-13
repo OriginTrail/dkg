@@ -271,10 +271,12 @@ export class OxigraphStore implements TripleStore {
     this.scheduleFlush();
   }
 
-  async listGraphs(): Promise<string[]> {
+  async listGraphs(options?: QueryOptions): Promise<string[]> {
+    throwIfAborted(options?.signal);
     const result = this.store.query(
       'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
     );
+    throwIfAborted(options?.signal);
     if (typeof result === 'boolean' || typeof result === 'string') return [];
     if (!Array.isArray(result)) return [];
     return (result as Map<string, OxTerm>[])

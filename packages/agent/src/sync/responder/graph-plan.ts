@@ -25,11 +25,11 @@ const PROV_GENERATED = 'http://www.w3.org/ns/prov#generated';
 const PROV_USED = 'http://www.w3.org/ns/prov#used';
 
 export interface GraphListMemo {
-  get(options?: { refresh?: boolean }): Promise<readonly string[]>;
+  get(options?: { refresh?: boolean; signal?: AbortSignal }): Promise<readonly string[]>;
 }
 
 export interface SubGraphNameMemo {
-  get(contextGraphId: string, options?: { refresh?: boolean }): Promise<readonly string[]>;
+  get(contextGraphId: string, options?: { refresh?: boolean; signal?: AbortSignal }): Promise<readonly string[]>;
 }
 
 export interface SyncRowListMemo {
@@ -55,11 +55,12 @@ export function createResponderGraphListMemo(
   let cachedAt = 0;
   let inflight: Promise<readonly string[]> | null = null;
   return {
-    async get(options?: { refresh?: boolean }) {
+    async get(options?: { refresh?: boolean; signal?: AbortSignal }) {
+      throwIfAborted(options?.signal);
       const now = Date.now();
-      if (inflight) return [...(await inflight)];
+      if (inflight) return [...(await raceAgainstAbort(inflight, options?.signal))];
       if (!options?.refresh && cached && now - cachedAt < ttlMs) return [...cached];
-      inflight = store.listGraphs()
+      inflight = store.listGraphs({ signal: options?.signal })
         .then((graphs) => {
           const sorted = [...new Set(graphs)].sort(compareCodePoint);
           cached = sorted;
@@ -69,7 +70,7 @@ export function createResponderGraphListMemo(
         .finally(() => {
           inflight = null;
         });
-      return [...(await inflight)];
+      return [...(await raceAgainstAbort(inflight, options?.signal))];
     },
   };
 }
@@ -189,30 +190,37 @@ export function createResponderSwmAdmissionMemo(
   store: TripleStore,
   ttlMs = 10_000,
 ): SubGraphNameMemo {
-  return createSubGraphNameMemo((contextGraphId) => readAdmittedSwmSubGraphNames(store, contextGraphId), ttlMs);
+  return createSubGraphNameMemo(
+    (contextGraphId, options) => readAdmittedSwmSubGraphNames(store, contextGraphId, options?.signal),
+    ttlMs,
+  );
 }
 
 export function createResponderSubGraphRegistrationMemo(
   store: TripleStore,
   ttlMs = 10_000,
 ): SubGraphNameMemo {
-  return createSubGraphNameMemo((contextGraphId) => readRegisteredSubGraphNames(store, contextGraphId), ttlMs);
+  return createSubGraphNameMemo(
+    (contextGraphId, options) => readRegisteredSubGraphNames(store, contextGraphId, options?.signal),
+    ttlMs,
+  );
 }
 
 function createSubGraphNameMemo(
-  loadNames: (contextGraphId: string) => Promise<string[]>,
+  loadNames: (contextGraphId: string, options?: { signal?: AbortSignal }) => Promise<string[]>,
   ttlMs: number,
 ): SubGraphNameMemo {
   const cached = new Map<string, { value: readonly string[]; cachedAt: number }>();
   const inflight = new Map<string, Promise<readonly string[]>>();
   return {
-    async get(contextGraphId: string, options?: { refresh?: boolean }) {
+    async get(contextGraphId: string, options?: { refresh?: boolean; signal?: AbortSignal }) {
+      throwIfAborted(options?.signal);
       const now = Date.now();
       const existing = cached.get(contextGraphId);
       if (!options?.refresh && existing && now - existing.cachedAt < ttlMs) return [...existing.value];
       const pending = inflight.get(contextGraphId);
-      if (pending) return [...(await pending)];
-      const load = loadNames(contextGraphId)
+      if (pending) return [...(await raceAgainstAbort(pending, options?.signal))];
+      const load = loadNames(contextGraphId, { signal: options?.signal })
         .then((names) => {
           cached.set(contextGraphId, { value: names, cachedAt: Date.now() });
           return names;
@@ -221,7 +229,7 @@ function createSubGraphNameMemo(
           inflight.delete(contextGraphId);
         });
       inflight.set(contextGraphId, load);
-      return [...(await load)];
+      return [...(await raceAgainstAbort(load, options?.signal))];
     },
   };
 }
@@ -587,12 +595,13 @@ function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined):
 async function readAdmittedSwmSubGraphNames(
   store: TripleStore,
   contextGraphId: string,
+  signal?: AbortSignal,
 ): Promise<string[]> {
   const cgPrefix = contextGraphDataGraphUri(contextGraphId);
   const names: string[] = [];
-  for (const name of await readRegisteredSubGraphNames(store, contextGraphId)) {
+  for (const name of await readRegisteredSubGraphNames(store, contextGraphId, signal)) {
     const childCgUri = `${cgPrefix}/${name}`;
-    if (await isKnownContextGraph(store, childCgUri)) continue;
+    if (await isKnownContextGraph(store, childCgUri, signal)) continue;
     names.push(name);
   }
   return names.sort(compareCodePoint);
@@ -616,6 +625,7 @@ function swmGraphsForRegisteredSubGraphs(
 async function readRegisteredSubGraphNames(
   store: TripleStore,
   contextGraphId: string,
+  signal?: AbortSignal,
 ): Promise<string[]> {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const res = await store.query(`
@@ -625,7 +635,7 @@ async function readRegisteredSubGraphNames(
             <${SCHEMA_NAME}> ?name .
       }
     }
-  `);
+  `, { signal });
   if (res.type !== 'bindings') return [];
   return res.bindings
     .map((row) => ({ subject: row['sg'], name: stripLiteral(row['name']) }))

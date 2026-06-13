@@ -182,9 +182,10 @@ export class BlazegraphStore implements TripleStore {
     await this.sparqlUpdate(`DROP SILENT GRAPH <${escapeUri(graphUri)}>`);
   }
 
-  async listGraphs(): Promise<string[]> {
+  async listGraphs(options?: QueryOptions): Promise<string[]> {
     const r = await this.query(
       'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
+      options,
     );
     if (r.type !== 'bindings') return [];
     return r.bindings.map((b) => b.g).filter(Boolean);
