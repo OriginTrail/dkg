@@ -149,7 +149,7 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
-import { emitPublicProjection } from './context-graph-public-projection.js';
+import { emitPublicProjection, buildPublicProjection } from './context-graph-public-projection.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
@@ -1650,6 +1650,21 @@ export class PublishMethods extends DKGAgentBase {
     );
     const metaGraph = contextGraphMetaUri(contextGraphId);
 
+    // OT-RFC-49 §5.9 — for a PRIVATE CG, write the public DCAT catalog entry
+    // into this same assertion via the NORMAL write path (so it lands in the
+    // correct wmGraphUri) BEFORE the seal reads it below. It becomes a public
+    // KA (subject = the CG UAL) committed in the CG's OWN merkle root; the
+    // publish-path partition keeps it out of the ciphertext and routes it to
+    // the public sink. Idempotent: identical quads dedupe in the store, so the
+    // double-finalize (explicit + promote) does not duplicate it.
+    if (await this.isPrivateContextGraph(contextGraphId)) {
+      const cgUal = contextGraphDataUri(contextGraphId);
+      // graph is a non-empty placeholder only (buildPublicProjection requires
+      // one); assertionWrite re-stamps it with the correct wmGraphUri.
+      const catalogQuads = buildPublicProjection({ ual: cgUal, accessPolicy: 'private', graph: assertionUri });
+      await this.publisher.assertionWrite(contextGraphId, name, agentAddress, catalogQuads, opts?.subGraphName);
+    }
+
     // 2. Pull the assertion's quads. Refuse to finalize an empty
     //    assertion — there's nothing to commit.
     const rawQuads = await this.publisher.assertionQuery(
@@ -1684,6 +1699,12 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
+    // OT-RFC-49 §5.9 — inject the public DCAT catalog entry for a PRIVATE CG
+    // so it rides in the CG's OWN merkle root as a public KA (subject = the CG
+    // UAL). Persisted to the same WM graph so promote/reload carry it; the
+    // publish-path partition keeps it out of the ciphertext and routes it to
+    // the public sink. Idempotent across re-finalize (fresh filter + the seal
+    // already contains it on the second pass).
     // 3. Compute merkleRoot using the SAME algorithm the publisher
     //    uses at publish-time (V10: keccak256-based merkle, sort+dedupe
     //    leaves). Drift between these two compute paths is the silent

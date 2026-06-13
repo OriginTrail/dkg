@@ -73,11 +73,21 @@ describe('OT-RFC-49 baseline — curated CG product-path publish (pre-catalog)',
     await publisher.assertion.write(CG, name, [
       { subject: 'urn:acme:shipment/SH-42', predicate: 'urn:acme:product', object: '"P-9"' },
     ]);
+    // Explicit finalize = the daemon product path (POST /vm/publish does
+    // assertion.finalize then publishFromFinalizedAssertion). The catalog
+    // injection lives in assertionFinalize; promote then carries the sealed
+    // content (incl. the catalog KA) to SWM for reload.
+    await publisher.assertion.finalize(CG, name);
     await publisher.assertion.promote(CG, name);
 
     const pub: any = await publisher.publishFromFinalizedAssertion(CG, name);
 
     expect(pub.status).toBe('confirmed');
-    expect(pub.kaManifest?.length ?? pub.knowledgeAssetsAmount).toBe(1); // data only — no catalog KA yet
+    // OT-RFC-49 combined model: the private publish now carries the data KA AND
+    // the public DCAT catalog KA (subject = the CG's own UAL), committed in the
+    // CG's own merkle root.
+    expect(pub.kaManifest.length).toBe(2);
+    const roots = pub.kaManifest.map((m: any) => String(m.rootEntity ?? m.entity ?? m.subject ?? ''));
+    expect(roots.some((r: string) => r.includes(CG))).toBe(true); // the catalog KA, keyed on the CG UAL
   });
 });
