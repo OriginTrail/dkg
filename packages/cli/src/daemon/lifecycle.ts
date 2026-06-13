@@ -1732,7 +1732,7 @@ export async function runDaemonInner(
   const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
   setTimeout(async () => {
     try {
-      const found = await agent.discoverContextGraphsFromChain();
+      const found = await agent.discoverContextGraphsFromChain({ incremental: true });
       if (found > 0)
         log(`Chain scan: discovered ${found} new context graph(s)`);
     } catch {
@@ -1741,7 +1741,7 @@ export async function runDaemonInner(
   }, 15_000);
   const chainScanTimer = setInterval(async () => {
     try {
-      const found = await agent.discoverContextGraphsFromChain();
+      const found = await agent.discoverContextGraphsFromChain({ incremental: true });
       if (found > 0)
         log(`Chain scan: discovered ${found} new context graph(s)`);
     } catch {

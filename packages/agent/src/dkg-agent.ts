@@ -456,6 +456,10 @@ function isContextGraphChainScanPartialError(
   );
 }
 
+export interface DiscoverContextGraphsFromChainOptions {
+  incremental?: boolean;
+}
+
 /**
  * High-level facade that ties together all DKG agent capabilities:
  * identity, networking, publishing, querying, discovery, and messaging.
@@ -1028,9 +1032,16 @@ export class DKGAgent extends DKGAgentBase {
   /**
    * Query the on-chain registry for all registered context graphs and
    * auto-subscribe to any not yet in the subscription registry.
+   *
+   * Defaults to a full scan so SDK callers can rebuild missing local state.
+   * Background daemon loops may opt into incremental scans to reuse the
+   * in-memory chain adapter watermark.
+   *
    * Returns the number of newly discovered context graphs.
    */
-  async discoverContextGraphsFromChain(): Promise<number> {
+  async discoverContextGraphsFromChain(
+    options: DiscoverContextGraphsFromChainOptions = {},
+  ): Promise<number> {
     const ctx = createOperationContext('system');
     if (!this.chain.listContextGraphsFromChain) {
       this.log.info(ctx, 'Chain adapter does not support listContextGraphsFromChain — skipping');
@@ -1040,7 +1051,8 @@ export class DKGAgent extends DKGAgentBase {
     let onChainContextGraphs;
     let partialChainScan = false;
     try {
-      onChainContextGraphs = await this.chain.listContextGraphsFromChain(undefined, { incremental: true });
+      const scanOptions = options.incremental ? { incremental: true } : undefined;
+      onChainContextGraphs = await this.chain.listContextGraphsFromChain(undefined, scanOptions);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const signature = message

@@ -699,6 +699,24 @@ describe('discoverContextGraphsFromChain', () => {
     expect(discovered).toBe(0);
   }, 15000);
 
+  it('keeps full chain discovery as the default and makes incremental opt-in', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const calls: unknown[] = [];
+    (chain as any).listContextGraphsFromChain = async (_fromBlock?: number, options?: unknown) => {
+      calls.push(options);
+      return [];
+    };
+
+    const result = await createTestAgent({ chainAdapter: chain });
+    agent = result.agent;
+    await agent.start();
+
+    expect(await agent.discoverContextGraphsFromChain()).toBe(0);
+    expect(await agent.discoverContextGraphsFromChain({ incremental: true })).toBe(0);
+
+    expect(calls).toEqual([undefined, { incremental: true }]);
+  }, 15000);
+
   it('warns once for repeated chain scan failures and logs recovery', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     let fail = true;
@@ -770,8 +788,8 @@ describe('discoverContextGraphsFromChain', () => {
       agent = result.agent;
       await agent.start();
 
-      expect(await agent.discoverContextGraphsFromChain()).toBe(1);
-      expect(await agent.discoverContextGraphsFromChain()).toBe(0);
+      expect(await agent.discoverContextGraphsFromChain({ incremental: true })).toBe(1);
+      expect(await agent.discoverContextGraphsFromChain({ incremental: true })).toBe(0);
     } finally {
       Logger.setSink(null);
     }

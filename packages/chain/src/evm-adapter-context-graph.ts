@@ -9,7 +9,7 @@
  * via applyMixins(); see evm-adapter.ts for the assembly.
  */
 
-import { EVMChainAdapterBase, CG_REGISTRY_MAX_SCAN_BLOCKS, CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-base.js';
+import { EVMChainAdapterBase, CG_REGISTRY_MAX_SCAN_PAGES, CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-base.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
@@ -133,14 +133,13 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
     const pageSize = this.cgRegistryScanPageSize;
     const pages = Math.ceil((head - start + 1) / pageSize);
-    const scanBlocks = head - start + 1;
-    const pageBudget = Math.ceil(CG_REGISTRY_MAX_SCAN_BLOCKS / pageSize);
-    if (scanBlocks > CG_REGISTRY_MAX_SCAN_BLOCKS) {
+    const blockBudget = CG_REGISTRY_MAX_SCAN_PAGES * pageSize;
+    if (pages > CG_REGISTRY_MAX_SCAN_PAGES) {
       throw new Error(
         `listContextGraphsFromChain: ContextGraphNameRegistry scan would need ` +
           `${pages} eth_getLogs calls over blocks [${start}, ${head}] at a ` +
-          `${pageSize}-block window (budget ${pageBudget} pages / ` +
-          `${CG_REGISTRY_MAX_SCAN_BLOCKS} blocks). ` +
+          `${pageSize}-block window (budget ${CG_REGISTRY_MAX_SCAN_PAGES} pages / ` +
+          `${blockBudget} blocks). ` +
           `Use an RPC that can anchor the registry deploy block and serve the ` +
           `requested log range, or increase cgRegistryScanPageSize for an RPC ` +
           `known to support larger ranges.`,
