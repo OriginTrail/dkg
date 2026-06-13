@@ -21,7 +21,7 @@ const CONTEXT_GRAPH_RESERVED_SUFFIXES = [
   '/_rules',
   '/_meta',
 ] as const;
-const WALLET_SCOPED_CONTEXT_GRAPH_RE = /^0x[a-fA-F0-9]{40}\/[^/]+$/;
+const WALLET_SCOPED_CONTEXT_GRAPH_RE = /^0x[a-fA-F0-9]{40}\/.+$/;
 
 /**
  * Total triples across the default graph and all named graphs. Run on the 30s

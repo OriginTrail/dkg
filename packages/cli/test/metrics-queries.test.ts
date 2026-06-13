@@ -59,7 +59,7 @@ describe('countContextGraphsFromGraphUris', () => {
     expect(contextGraphIdFromGraphUriForMetrics(
       `did:dkg:context-graph:${nestedSlashId}/_meta`,
     ))
-      .toBeNull();
+      .toBe(nestedSlashId);
     expect(contextGraphIdFromGraphUriForMetrics(
       `did:dkg:context-graph:${reservedSegmentId}/_meta`,
     ))
