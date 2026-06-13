@@ -7,6 +7,7 @@ import {
   contextGraphIdFromGraphUriForMetrics,
   countContextGraphsFromGraphUris,
   parseRdfInt,
+  shadowContextGraphIdsFromMetricSubscriptionCandidates,
 } from '../src/daemon/metrics-queries.js';
 
 // Guards the shared COUNT parser the daemon's metric getters depend on. The
@@ -115,12 +116,12 @@ describe('countContextGraphsFromGraphUris', () => {
     ], declared)).toBe(1);
   });
 
-  it('collapses bare shadow aliases when a wallet-scoped canonical id is present', () => {
+  it('does not collapse suffix-matching ids without proven shared identity', () => {
     const walletScoped = '0xE5B8896800000000000000000000000000000000/tuesday-cg';
     expect(countContextGraphsFromGraphUris([
       'did:dkg:context-graph:tuesday-cg/_meta',
       `did:dkg:context-graph:${walletScoped}/_meta`,
-    ], ['tuesday-cg', walletScoped])).toBe(1);
+    ], ['tuesday-cg', walletScoped])).toBe(2);
   });
 
   it('uses exact local root meta graphs to back subscribed slash ids', () => {
@@ -153,6 +154,10 @@ describe('countContextGraphsFromGraphUris', () => {
       ['tuesday-cg', { onChainId: '9', onChainHash: `0x${'c'.repeat(64)}`, synced: true }],
       [walletScoped, { onChainId: '9', onChainHash: `0x${'c'.repeat(64)}`, synced: true }],
     ])).toEqual(['cleartext-cg', 'wire-only-clear', walletScoped]);
+    expect(shadowContextGraphIdsFromMetricSubscriptionCandidates([
+      ['tuesday-cg', { onChainId: '9', onChainHash: `0x${'c'.repeat(64)}`, synced: true }],
+      [walletScoped, { onChainId: '9', onChainHash: `0x${'c'.repeat(64)}`, synced: true }],
+    ])).toEqual(['tuesday-cg']);
   });
 
   it('builds declaration queries from known declaration graphs only', () => {

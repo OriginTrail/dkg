@@ -22,6 +22,7 @@ import {
   countContextGraphsFromGraphUris,
   GET_TOTAL_TRIPLES_SPARQL,
   parseRdfInt,
+  shadowContextGraphIdsFromMetricSubscriptionCandidates,
 } from "./metrics-queries.js";
 import {
   appendFile,
@@ -1862,10 +1863,15 @@ export async function runDaemonInner(
         agent.listContextGraphs(),
       ]);
       const knownContextGraphIds = new Set<string>();
-      for (const contextGraph of contextGraphs) {
-        if (contextGraph.id) knownContextGraphIds.add(contextGraph.id);
-      }
       const subscribedContextGraphs = agent.getSubscribedContextGraphs();
+      const shadowContextGraphIds = new Set(
+        shadowContextGraphIdsFromMetricSubscriptionCandidates(subscribedContextGraphs.entries()),
+      );
+      for (const contextGraph of contextGraphs) {
+        if (contextGraph.id && !shadowContextGraphIds.has(contextGraph.id)) {
+          knownContextGraphIds.add(contextGraph.id);
+        }
+      }
       for (const contextGraphId of contextGraphIdsFromMetricSubscriptionCandidates(
         subscribedContextGraphs.entries(),
       )) {
@@ -1875,7 +1881,7 @@ export async function runDaemonInner(
         graphUris,
         subscribedContextGraphs.keys(),
       )) {
-        knownContextGraphIds.add(contextGraphId);
+        if (!shadowContextGraphIds.has(contextGraphId)) knownContextGraphIds.add(contextGraphId);
       }
       const declarationQuery = buildContextGraphDeclarationsSparql(graphUris, knownContextGraphIds);
       const declarationResult = declarationQuery
@@ -1885,7 +1891,7 @@ export async function runDaemonInner(
         for (const contextGraphId of contextGraphIdsFromDeclarationBindings(
           declarationResult.bindings as Record<string, string>[],
         )) {
-          knownContextGraphIds.add(contextGraphId);
+          if (!shadowContextGraphIds.has(contextGraphId)) knownContextGraphIds.add(contextGraphId);
         }
       }
       return countContextGraphsFromGraphUris(graphUris, knownContextGraphIds);

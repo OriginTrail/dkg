@@ -154,7 +154,20 @@ export function contextGraphIdsFromLocalRootMetaGraphs(
 export function contextGraphIdsFromMetricSubscriptionCandidates(
   subscriptions: Iterable<readonly [string, MetricSubscriptionCandidate]>,
 ): string[] {
+  return selectMetricSubscriptionCandidateIds(subscriptions).selected;
+}
+
+export function shadowContextGraphIdsFromMetricSubscriptionCandidates(
+  subscriptions: Iterable<readonly [string, MetricSubscriptionCandidate]>,
+): string[] {
+  return selectMetricSubscriptionCandidateIds(subscriptions).shadows;
+}
+
+function selectMetricSubscriptionCandidateIds(
+  subscriptions: Iterable<readonly [string, MetricSubscriptionCandidate]>,
+): { selected: string[]; shadows: string[] } {
   const contextGraphIdsByIdentity = new Map<string, string>();
+  const contextGraphIdsByStableIdentity = new Map<string, Set<string>>();
   for (const [id, sub] of subscriptions) {
     if (!id) continue;
     if (SYSTEM_CONTEXT_GRAPH_IDS.has(id)) continue;
@@ -168,16 +181,29 @@ export function contextGraphIdsFromMetricSubscriptionCandidates(
     ) {
       const identity = sub.onChainId
         ? `chain:${sub.onChainId}`
-        : sub.onChainHash
-          ? `wire:${sub.onChainHash.toLowerCase()}`
-          : `local:${id}`;
+          : sub.onChainHash
+            ? `wire:${sub.onChainHash.toLowerCase()}`
+            : `local:${id}`;
+      let idsForIdentity = contextGraphIdsByStableIdentity.get(identity);
+      if (!idsForIdentity) {
+        idsForIdentity = new Set<string>();
+        contextGraphIdsByStableIdentity.set(identity, idsForIdentity);
+      }
+      idsForIdentity.add(id);
       const existingId = contextGraphIdsByIdentity.get(identity);
       if (!existingId || shouldPreferMetricContextGraphId(id, existingId)) {
         contextGraphIdsByIdentity.set(identity, id);
       }
     }
   }
-  return [...contextGraphIdsByIdentity.values()];
+  const shadows: string[] = [];
+  for (const [identity, ids] of contextGraphIdsByStableIdentity) {
+    const selected = contextGraphIdsByIdentity.get(identity);
+    for (const id of ids) {
+      if (id !== selected) shadows.push(id);
+    }
+  }
+  return { selected: [...contextGraphIdsByIdentity.values()], shadows };
 }
 
 function shouldPreferMetricContextGraphId(candidateId: string, existingId: string): boolean {
@@ -188,17 +214,6 @@ function shouldPreferMetricContextGraphId(candidateId: string, existingId: strin
   const existingIsWalletScoped = WALLET_SCOPED_CONTEXT_GRAPH_RE.test(existingId);
   if (candidateIsWalletScoped !== existingIsWalletScoped) return candidateIsWalletScoped;
   return candidateId.length < existingId.length;
-}
-
-function canonicalizeMetricContextGraphIds(contextGraphIds: Iterable<string>): string[] {
-  const ids = [...new Set(contextGraphIds)].filter((id) => !SYSTEM_CONTEXT_GRAPH_IDS.has(id));
-  const walletScopedIds = ids.filter((id) => WALLET_SCOPED_CONTEXT_GRAPH_RE.test(id));
-  const shadowAliases = new Set<string>();
-  for (const id of walletScopedIds) {
-    const suffix = id.slice(id.indexOf('/') + 1);
-    if (suffix) shadowAliases.add(suffix);
-  }
-  return ids.filter((id) => !shadowAliases.has(id) || WALLET_SCOPED_CONTEXT_GRAPH_RE.test(id));
 }
 
 export function contextGraphIdFromGraphUriForMetrics(
@@ -252,5 +267,5 @@ export function countContextGraphsFromGraphUris(
     );
     if (contextGraphId) contextGraphIds.add(contextGraphId);
   }
-  return canonicalizeMetricContextGraphIds(contextGraphIds).length;
+  return contextGraphIds.size;
 }
