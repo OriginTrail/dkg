@@ -50,8 +50,6 @@ const SYSTEM_CONTEXT_GRAPH_IDS = new Set<string>([
 const NON_ROOT_DECLARATION_META_SEGMENTS = [
   '/_verifiable_memory/',
   '/_shared_memory_snapshots/',
-  '/assertion/',
-  '/context/',
 ] as const;
 
 /**

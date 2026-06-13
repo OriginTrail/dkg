@@ -192,7 +192,7 @@ describe('countContextGraphsFromGraphUris', () => {
     expect(query).toContain('<did:dkg:context-graph:ontology>');
     expect(query).toContain('<did:dkg:context-graph:agents>');
     expect(query).toContain('<did:dkg:context-graph:plain-cg/_meta>');
-    expect(query).not.toContain('<did:dkg:context-graph:team/context/beta/_meta>');
+    expect(query).toContain('<did:dkg:context-graph:team/context/beta/_meta>');
     expect(query).toContain('<did:dkg:context-graph:plain-cg/code/_meta>');
     expect(query).not.toContain('<did:dkg:context-graph:plain-cg/_verifiable_memory/1/_meta>');
     expect(query).not.toContain('<did:dkg:context-graph:plain-cg>');
