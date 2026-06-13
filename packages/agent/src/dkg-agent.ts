@@ -1044,6 +1044,7 @@ export class DKGAgent extends DKGAgentBase {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const signature = message
+        .replace(/stopped after block \d+/g, 'stopped after block N')
         .replace(/\[\d+,\s*\d+\]/g, '[range]')
         .replace(/\b\d+\s+eth_getLogs calls/g, 'N eth_getLogs calls');
       if (this.chainContextGraphScanFailure?.signature !== signature) {

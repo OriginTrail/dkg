@@ -119,6 +119,37 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(registry.queryFilter.mock.calls[0][2]).toBe(2_100);
   });
 
+  it('does not advance the incremental watermark when parsing a later page fails', async () => {
+    const registry = makeRegistry({
+      interface: {
+        parseLog: vi.fn(({ data }: { data: string }) => {
+          if (data === '0xbad') throw new Error('bad registry log');
+          return {
+            name: 'NameClaimed',
+            args: {
+              nameHash: '0xaaa0000000000000000000000000000000000000000000000000000000000001',
+              creator: '0x1111111111111111111111111111111111111111',
+              accessPolicy: 0,
+            },
+          };
+        }),
+      },
+    });
+    const { adapter, provider } = makeAdapter(registry, 2_100);
+    provider.getBlockNumber.mockResolvedValueOnce(2_100);
+    registry.queryFilter
+      .mockResolvedValueOnce([{ topics: [], data: '0x01', blockNumber: 10 }])
+      .mockResolvedValueOnce([{ topics: [], data: '0xbad', blockNumber: 2_000 }]);
+
+    const partial = await adapter.listContextGraphsFromChain(undefined, { incremental: true }).catch((err) => err);
+
+    expect(partial).toBeInstanceOf(ContextGraphChainScanPartialError);
+    expect(partial.partialResults).toHaveLength(1);
+    expect(partial.failedFromBlock).toBe(2_000);
+    expect(partial.failedToBlock).toBe(2_100);
+    expect((adapter as any).contextGraphRegistryScanWatermarks.get(REGISTRY.toLowerCase())).toBe(2_000);
+  });
+
   it('preserves public list-all semantics unless the caller opts into incremental scans', async () => {
     const registry = makeRegistry();
     const { adapter, provider } = makeAdapter(registry, 2_100);

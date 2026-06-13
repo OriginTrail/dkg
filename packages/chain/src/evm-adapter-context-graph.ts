@@ -151,7 +151,6 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     // page failure. Public list-all calls should remain all-or-error.
     for (let lo = start; lo <= head; lo += pageSize) {
       const hi = Math.min(lo + pageSize - 1, head);
-      let logs: ReadonlyArray<ethers.EventLog | ethers.Log>;
       try {
         const page = await this.queryEventLogsPage(
           registry,
@@ -163,8 +162,24 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           'listContextGraphsFromChain NameClaimed',
           preferred,
         );
-        logs = page.logs;
         preferred = page.provider;
+        const pageResults: ContextGraphOnChain[] = [];
+        for (const log of page.logs) {
+          const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
+          if (!parsed || parsed.name !== 'NameClaimed') continue;
+          pageResults.push({
+            contextGraphId: String(parsed.args.nameHash),
+            creator: String(parsed.args.creator),
+            accessPolicy: Number(parsed.args.accessPolicy),
+            blockNumber: log.blockNumber,
+            metadataRevealed: false,
+          });
+        }
+        results.push(...pageResults);
+        scannedAnyPage = true;
+        if (incremental) {
+          this.contextGraphRegistryScanWatermarks.set(registryAddress, hi + 1);
+        }
       } catch (err) {
         if (incremental && scannedAnyPage) {
           const message = err instanceof Error ? err.message : String(err);
@@ -181,21 +196,6 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           );
         }
         throw err;
-      }
-      scannedAnyPage = true;
-      if (incremental) {
-        this.contextGraphRegistryScanWatermarks.set(registryAddress, hi + 1);
-      }
-      for (const log of logs) {
-        const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
-        if (!parsed || parsed.name !== 'NameClaimed') continue;
-        results.push({
-          contextGraphId: String(parsed.args.nameHash),
-          creator: String(parsed.args.creator),
-          accessPolicy: Number(parsed.args.accessPolicy),
-          blockNumber: log.blockNumber,
-          metadataRevealed: false,
-        });
       }
     }
 
