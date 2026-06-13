@@ -1869,7 +1869,7 @@ export async function runDaemonInner(
       )) {
         knownContextGraphIds.add(contextGraphId);
       }
-      const declarationQuery = buildContextGraphDeclarationsSparql(graphUris);
+      const declarationQuery = buildContextGraphDeclarationsSparql(graphUris, knownContextGraphIds);
       const declarationResult = declarationQuery
         ? await agent.store.query(declarationQuery)
         : null;

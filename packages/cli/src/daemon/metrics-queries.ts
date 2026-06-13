@@ -70,20 +70,31 @@ function unambiguousMetricContextGraphId(candidate: string): string | null {
   return WALLET_SCOPED_CONTEXT_GRAPH_RE.test(candidate) ? candidate : null;
 }
 
-function declarationGraphUrisFromGraphUris(graphUris: readonly string[]): string[] {
+function declarationGraphUrisFromGraphUris(
+  graphUris: readonly string[],
+  knownContextGraphIds?: Iterable<string>,
+): string[] {
   const declarationGraphs = new Set<string>([
     `${CONTEXT_GRAPH_URI_PREFIX}${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}`,
     `${CONTEXT_GRAPH_URI_PREFIX}${SYSTEM_CONTEXT_GRAPHS.AGENTS}`,
   ]);
+  const knownCandidates = new Set(normalizeMetricContextGraphCandidates(knownContextGraphIds));
   for (const graphUri of graphUris) {
     if (!graphUri.startsWith(CONTEXT_GRAPH_URI_PREFIX)) continue;
-    if (graphUri.endsWith('/_meta')) declarationGraphs.add(graphUri);
+    if (!graphUri.endsWith('/_meta')) continue;
+    const id = graphUri.slice(CONTEXT_GRAPH_URI_PREFIX.length, -'/_meta'.length);
+    if (unambiguousMetricContextGraphId(id) === id || knownCandidates.has(id)) {
+      declarationGraphs.add(graphUri);
+    }
   }
   return [...declarationGraphs].sort();
 }
 
-export function buildContextGraphDeclarationsSparql(graphUris: readonly string[]): string | null {
-  const declarationGraphs = declarationGraphUrisFromGraphUris(graphUris);
+export function buildContextGraphDeclarationsSparql(
+  graphUris: readonly string[],
+  knownContextGraphIds?: Iterable<string>,
+): string | null {
+  const declarationGraphs = declarationGraphUrisFromGraphUris(graphUris, knownContextGraphIds);
   if (declarationGraphs.length === 0) return null;
   const values = declarationGraphs.map((graphUri) => sparqlIri(graphUri)).join(' ');
   return `

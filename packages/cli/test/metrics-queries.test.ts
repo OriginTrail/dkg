@@ -128,14 +128,22 @@ describe('countContextGraphsFromGraphUris', () => {
   it('builds declaration queries from known declaration graphs only', () => {
     const query = buildContextGraphDeclarationsSparql([
       'did:dkg:context-graph:team/context/alpha/_meta',
+      'did:dkg:context-graph:team/context/beta/_meta',
+      'did:dkg:context-graph:plain-cg/code/_meta',
+      'did:dkg:context-graph:plain-cg/_verifiable_memory/1/_meta',
       'did:dkg:context-graph:agents/_shared_memory',
       'did:dkg:context-graph:plain-cg',
-    ]);
+      'did:dkg:context-graph:plain-cg/_meta',
+    ], ['team/context/alpha']);
 
     expect(query).toContain('VALUES ?g');
     expect(query).toContain('<did:dkg:context-graph:team/context/alpha/_meta>');
     expect(query).toContain('<did:dkg:context-graph:ontology>');
     expect(query).toContain('<did:dkg:context-graph:agents>');
+    expect(query).toContain('<did:dkg:context-graph:plain-cg/_meta>');
+    expect(query).not.toContain('<did:dkg:context-graph:team/context/beta/_meta>');
+    expect(query).not.toContain('<did:dkg:context-graph:plain-cg/code/_meta>');
+    expect(query).not.toContain('<did:dkg:context-graph:plain-cg/_verifiable_memory/1/_meta>');
     expect(query).not.toContain('<did:dkg:context-graph:plain-cg>');
     expect(query).not.toContain('<did:dkg:context-graph:agents/_shared_memory>');
   });
