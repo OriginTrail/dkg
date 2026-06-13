@@ -1,4 +1,12 @@
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+export {
+  type SharedModelMessage,
+  type SharedModelRole,
+  type SharedModelInvokeRequest,
+  type SharedModelInvokeResponse,
+  type SharedModelGrant,
+  type SharedModelRuntimeConfig,
+} from './shared-model/types.js';
 export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry } from './op-wallets.js';
 export {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,

@@ -156,6 +156,12 @@ export const PROTOCOL_STORAGE_UPDATE_ACK = '/dkg/10.0.1/storage-update-ack';
  */
 export const PROTOCOL_GET_CIPHERTEXT_CHUNK = '/dkg/10.0.2/get-ciphertext-chunk';
 
+// Shared curator AI-model access (MVP): a member node invokes the model the
+// CG curator shares; request carries {contextGraphId, messages}, response
+// carries the completion. Gated by CG membership + per-member quota on the
+// curator's node. See packages/agent/src/dkg-agent-shared-model.ts.
+export const PROTOCOL_SHARED_MODEL_INVOKE = '/dkg/10.0.2/shared-model-invoke';
+
 export const DHT_PROTOCOL = '/dkg/kad/1.0.0';
 
 /** Maximum application payload size allowed for one DKG GossipSub message (10 MB). */
