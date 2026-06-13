@@ -3,9 +3,12 @@ import { DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import {
   buildPublicProjection,
   blindedAnchor,
+  emitPublicProjection,
   PUBLIC_PROJECTION_FLOOR_PREDICATES,
   type PublicProjectionInput,
+  type ProjectionEmitDeps,
 } from '../src/context-graph-public-projection.js';
+import type { Quad } from '@origintrail-official/dkg-storage';
 
 const UAL = 'did:dkg:otp:2043/0x5cadeface0000000000000000000000000000001/142';
 const ROOT = '0x' + '9f3c2a'.padEnd(64, '0');
@@ -109,5 +112,62 @@ describe('OT-RFC-49 §5.9.4 T2 — blinded anchor primitive', () => {
   it('differs across secrets (public cannot match without the secret) and across entities', () => {
     expect(blindedAnchor('secret-A', 'gtin:1')).not.toBe(blindedAnchor('secret-B', 'gtin:1'));
     expect(blindedAnchor('secret-A', 'gtin:1')).not.toBe(blindedAnchor('secret-A', 'gtin:2'));
+  });
+});
+
+describe('OT-RFC-49 §5.9.3 emit orchestration — on VM publish', () => {
+  interface Published { contextGraphId: string; quads: Quad[]; graph: string; }
+
+  const makeDeps = (over: Partial<ProjectionEmitDeps> & { isPrivate?: boolean } = {}) => {
+    const published: Published[] = [];
+    const logs: Array<{ level: string; message: string }> = [];
+    const deps: ProjectionEmitDeps = {
+      isPrivateContextGraph: async () => over.isPrivate ?? true,
+      resolveUal: async () => UAL,
+      projectionGraph: () => GRAPH,
+      publishProjection: async (contextGraphId, quads, graph) => { published.push({ contextGraphId, quads, graph }); },
+      log: (level, message) => logs.push({ level, message }),
+      ...over,
+    };
+    return { deps, published, logs };
+  };
+
+  it('publishes the floor for a private CG and reports emitted', async () => {
+    const { deps, published } = makeDeps();
+    const res = await emitPublicProjection(deps, 'cg-1', ROOT);
+    expect(res.emitted).toBe(true);
+    expect(published).toHaveLength(1);
+    expect(published[0].graph).toBe(GRAPH);
+    expect(published[0].quads).toHaveLength(4); // floor only (no publisher/accessService dep)
+    const root = published[0].quads.find(q => q.predicate === DKG_ONTOLOGY.DKG_COMMITTED_ROOT);
+    expect(root?.object).toBe(`"${ROOT}"`); // committedRoot threaded through
+  });
+
+  it('is a no-op for a public CG (a public CG is its own public face)', async () => {
+    const { deps, published } = makeDeps({ isPrivate: false });
+    const res = await emitPublicProjection(deps, 'cg-pub', ROOT);
+    expect(res.emitted).toBe(false);
+    expect(published).toHaveLength(0);
+  });
+
+  it('threads recommended fields when deps surface them', async () => {
+    const { deps, published } = makeDeps({
+      publisherIdentity: () => 'did:dkg:identity:0xpseudo',
+      accessService: () => 'https://grants.example/dkg',
+    });
+    await emitPublicProjection(deps, 'cg-1', ROOT);
+    const preds = published[0].quads.map(q => q.predicate);
+    expect(preds).toContain(DKG_ONTOLOGY.DCT_PUBLISHER);
+    expect(preds).toContain(DKG_ONTOLOGY.DKG_ACCESS_SERVICE);
+  });
+
+  it('isolates errors — a publish failure never throws, just logs and reports', async () => {
+    const { deps, logs } = makeDeps({
+      publishProjection: async () => { throw new Error('chain down'); },
+    });
+    const res = await emitPublicProjection(deps, 'cg-1', ROOT);
+    expect(res.emitted).toBe(false);
+    expect(res.error).toMatch(/chain down/);
+    expect(logs.some(l => l.level === 'warn' && /publish unaffected/.test(l.message))).toBe(true);
   });
 });

@@ -138,3 +138,74 @@ export const PUBLIC_PROJECTION_FLOOR_PREDICATES: readonly string[] = [
   DKG_ONTOLOGY.DCT_ACCESS_RIGHTS,
   DKG_ONTOLOGY.DKG_COMMITTED_ROOT,
 ];
+
+// ---------------------------------------------------------------------------
+// Orchestration: emit a private CG's projection on VM publish (§5.9.3).
+//
+// The capabilities the agent supplies are injected, so the orchestration —
+// the private-CG short-circuit, resolution order, build, publish, and (load-
+// bearing) error isolation — is unit-testable without a running node.
+// ---------------------------------------------------------------------------
+
+export interface ProjectionEmitDeps {
+  /** True iff the CG is private. Only private CGs get a projection (§5.9). */
+  isPrivateContextGraph(contextGraphId: string): Promise<boolean>;
+  /** Resolve the CG's UAL — the subject of the projection. */
+  resolveUal(contextGraphId: string): Promise<string>;
+  /** The public graph URI the projection KA is published into. */
+  projectionGraph(contextGraphId: string): string;
+  /** Publish the projection quads as a PUBLIC knowledge asset. */
+  publishProjection(contextGraphId: string, quads: Quad[], graph: string): Promise<void>;
+  /** Optional controlling identity for `dct:publisher` (MAY be a per-CG pseudonym). */
+  publisherIdentity?(contextGraphId: string): string | undefined;
+  /** Optional grant endpoint for `dkg:accessService`. */
+  accessService?(contextGraphId: string): string | undefined;
+  log?(level: 'info' | 'warn', message: string): void;
+}
+
+export interface ProjectionEmitResult {
+  emitted: boolean;
+  quads: Quad[];
+  /** Set when emission was attempted but failed; never thrown (see below). */
+  error?: string;
+}
+
+/**
+ * Emit (or refresh) the public projection for a CG after a VM publish commits
+ * `committedRoot` on chain. Public CGs are a no-op (they are their own public
+ * face). For a private CG, builds the floor (plus any recommended fields the
+ * deps surface) and publishes it.
+ *
+ * Error isolation is deliberate and load-bearing: a projection failure MUST
+ * NOT break the VM publish that triggered it, so this never throws — it logs
+ * and returns `{ emitted: false, error }`. The caller treats the projection as
+ * best-effort and the next publish refreshes it.
+ */
+export async function emitPublicProjection(
+  deps: ProjectionEmitDeps,
+  contextGraphId: string,
+  committedRoot: string,
+): Promise<ProjectionEmitResult> {
+  try {
+    if (!(await deps.isPrivateContextGraph(contextGraphId))) {
+      return { emitted: false, quads: [] };
+    }
+    const ual = await deps.resolveUal(contextGraphId);
+    const graph = deps.projectionGraph(contextGraphId);
+    const quads = buildPublicProjection({
+      ual,
+      accessPolicy: 'private',
+      committedRoot,
+      graph,
+      publisher: deps.publisherIdentity?.(contextGraphId),
+      accessService: deps.accessService?.(contextGraphId),
+    });
+    await deps.publishProjection(contextGraphId, quads, graph);
+    deps.log?.('info', `public projection refreshed for ${contextGraphId} @ root ${committedRoot}`);
+    return { emitted: true, quads };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    deps.log?.('warn', `public projection emit failed for ${contextGraphId}: ${message} (publish unaffected)`);
+    return { emitted: false, quads: [], error: message };
+  }
+}
