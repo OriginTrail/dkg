@@ -3,17 +3,41 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import { sendSyncRequest } from '../../p2p/sync-transport.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from '../checkpoint/state.js';
-import { createDurableDataSyncSessionId } from '../durable-session.js';
+import {
+  createDurableDataSyncSessionId,
+  DURABLE_DATA_SYNC_SESSION_TTL_MS,
+} from '../durable-session.js';
 
 const MAX_UNFINISHED_DURABLE_DATA_SESSIONS = 4096;
-const unfinishedDurableDataSessions = new Map<string, string>();
+type UnfinishedDurableDataSession = {
+  syncSessionId: string;
+  expiresAt: number;
+};
 
-function rememberUnfinishedDurableDataSession(checkpointKey: string, syncSessionId: string): void {
+const unfinishedDurableDataSessions = new Map<string, UnfinishedDurableDataSession>();
+
+function getUnfinishedDurableDataSession(checkpointKey: string, now = Date.now()): UnfinishedDurableDataSession | undefined {
+  const session = unfinishedDurableDataSessions.get(checkpointKey);
+  if (!session) return undefined;
+  if (session.expiresAt > now) return session;
+  unfinishedDurableDataSessions.delete(checkpointKey);
+  return undefined;
+}
+
+function rememberUnfinishedDurableDataSession(checkpointKey: string, session: UnfinishedDurableDataSession, now = Date.now()): void {
+  if (session.expiresAt <= now) {
+    unfinishedDurableDataSessions.delete(checkpointKey);
+    return;
+  }
   if (!unfinishedDurableDataSessions.has(checkpointKey) && unfinishedDurableDataSessions.size >= MAX_UNFINISHED_DURABLE_DATA_SESSIONS) {
     const oldest = unfinishedDurableDataSessions.keys().next().value;
     if (oldest) unfinishedDurableDataSessions.delete(oldest);
   }
-  unfinishedDurableDataSessions.set(checkpointKey, syncSessionId);
+  unfinishedDurableDataSessions.set(checkpointKey, session);
+}
+
+function isDurableDataSessionSupersededError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes('Durable data sync session was superseded');
 }
 
 export interface SyncPageResult {
@@ -120,10 +144,11 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId);
   let offset = checkpointStore.get(checkpointKey) ?? 0;
   const usesDurableDataSession = !includeSharedMemory && phase === 'data';
-  const savedDurableDataSessionId = usesDurableDataSession
-    ? unfinishedDurableDataSessions.get(checkpointKey)
+  const durableSessionStartedAt = Date.now();
+  const savedDurableDataSession = usesDurableDataSession
+    ? getUnfinishedDurableDataSession(checkpointKey, durableSessionStartedAt)
     : undefined;
-  if (usesDurableDataSession && offset > 0 && !savedDurableDataSessionId) {
+  if (usesDurableDataSession && offset > 0 && !savedDurableDataSession) {
     checkpointStore.delete(checkpointKey);
     offset = 0;
   }
@@ -131,7 +156,13 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   let bytesReceived = 0;
   let timedOut = false;
   const syncSessionId = usesDurableDataSession
-    ? (savedDurableDataSessionId ?? createDurableDataSyncSessionId())
+    ? (savedDurableDataSession?.syncSessionId ?? createDurableDataSyncSessionId())
+    : undefined;
+  const durableDataSession = usesDurableDataSession && syncSessionId
+    ? {
+      syncSessionId,
+      expiresAt: savedDurableDataSession?.expiresAt ?? durableSessionStartedAt + DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    }
     : undefined;
 
   try {
@@ -214,14 +245,17 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       if (parsed.totalQuads < syncPageSize) break;
     }
   } catch (err) {
-    if (usesDurableDataSession && syncSessionId && !(err as Error & { syncDenied?: boolean }).syncDenied) {
-      rememberUnfinishedDurableDataSession(checkpointKey, syncSessionId);
+    if (usesDurableDataSession && isDurableDataSessionSupersededError(err)) {
+      unfinishedDurableDataSessions.delete(checkpointKey);
+      checkpointStore.delete(checkpointKey);
+    } else if (usesDurableDataSession && durableDataSession && !(err as Error & { syncDenied?: boolean }).syncDenied) {
+      rememberUnfinishedDurableDataSession(checkpointKey, durableDataSession);
     }
     throw err;
   }
 
-  if (usesDurableDataSession && syncSessionId) {
-    if (timedOut) rememberUnfinishedDurableDataSession(checkpointKey, syncSessionId);
+  if (usesDurableDataSession && durableDataSession) {
+    if (timedOut) rememberUnfinishedDurableDataSession(checkpointKey, durableDataSession);
     else unfinishedDurableDataSessions.delete(checkpointKey);
   }
 
