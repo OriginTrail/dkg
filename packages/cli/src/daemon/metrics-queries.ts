@@ -112,6 +112,8 @@ export function buildContextGraphDeclarationsSparql(
   const declarationGraphs = declarationGraphUrisFromGraphUris(graphUris, knownContextGraphIds);
   if (declarationGraphs.length === 0) return null;
   const values = declarationGraphs.map((graphUri) => sparqlIri(graphUri)).join(' ');
+  const agentsGraph = `${CONTEXT_GRAPH_URI_PREFIX}${SYSTEM_CONTEXT_GRAPHS.AGENTS}`;
+  const ontologyGraph = `${CONTEXT_GRAPH_URI_PREFIX}${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}`;
   return `
     SELECT DISTINCT ?ctxGraph WHERE {
       VALUES ?g { ${values} }
@@ -119,6 +121,11 @@ export function buildContextGraphDeclarationsSparql(
         ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
       }
       FILTER(STRSTARTS(STR(?ctxGraph), "${CONTEXT_GRAPH_URI_PREFIX}"))
+      FILTER(
+        ?g = ${sparqlIri(agentsGraph)}
+        || ?g = ${sparqlIri(ontologyGraph)}
+        || STR(?g) = CONCAT(STR(?ctxGraph), "/_meta")
+      )
     }
   `;
 }

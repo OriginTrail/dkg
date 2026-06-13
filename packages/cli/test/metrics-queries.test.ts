@@ -175,6 +175,7 @@ describe('countContextGraphsFromGraphUris', () => {
     ], ['team/context/alpha']);
 
     expect(query).toContain('VALUES ?g');
+    expect(query).toContain('STR(?g) = CONCAT(STR(?ctxGraph), "/_meta")');
     expect(query).toContain('<did:dkg:context-graph:team/context/alpha/_meta>');
     expect(query).toContain('<did:dkg:context-graph:ontology>');
     expect(query).toContain('<did:dkg:context-graph:agents>');
