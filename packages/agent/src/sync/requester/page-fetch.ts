@@ -120,7 +120,10 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId);
   let offset = checkpointStore.get(checkpointKey) ?? 0;
   const usesDurableDataSession = !includeSharedMemory && phase === 'data';
-  if (usesDurableDataSession && offset > 0) {
+  const savedDurableDataSessionId = usesDurableDataSession
+    ? unfinishedDurableDataSessions.get(checkpointKey)
+    : undefined;
+  if (usesDurableDataSession && offset > 0 && !savedDurableDataSessionId) {
     checkpointStore.delete(checkpointKey);
     offset = 0;
   }
@@ -128,7 +131,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   let bytesReceived = 0;
   let timedOut = false;
   const syncSessionId = usesDurableDataSession
-    ? (unfinishedDurableDataSessions.get(checkpointKey) ?? createDurableDataSyncSessionId())
+    ? (savedDurableDataSessionId ?? createDurableDataSyncSessionId())
     : undefined;
 
   try {

@@ -354,7 +354,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     );
 
     expect(observedBuilds[observedBuilds.length - 1]).toEqual({
-      offset: 0,
+      offset: 1,
       syncSessionId: unfinishedSessionId,
     });
   });
