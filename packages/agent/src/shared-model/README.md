@@ -79,9 +79,30 @@ invoke is denied with a clear reason.
 | `POST /api/context-graph/:id/invite-with-model` | `{ agentAddress, shareModel?, modelId? }` | **Same-journey**: invite a member and (optionally) share the model in one call |
 | `POST /api/context-graph/:id/model/share` | `{ enabled, modelId? }` | Curator toggles sharing for a CG |
 | `GET  /api/context-graph/:id/model/grant` | — | Read the grant `{ enabled, modelId }` |
-| `POST /api/context-graph/:id/model/invoke` | `{ messages, maxTokens?, temperature? }` | Member invokes the curator's model |
+| `POST /api/context-graph/:id/model/invoke` | `{ messages, maxTokens?, temperature? }` | Member invokes the curator's model (native shape) |
+| `POST /api/context-graph/:id/model/v1/chat/completions` | OpenAI `{ model?, messages, max_tokens?, temperature? }` | **OpenAI-compatible** member usage (see below) |
 
 `messages` is the OpenAI shape: `[{ "role": "user", "content": "…" }]`.
+
+## Member usage — point any OpenAI client at the curator's model
+
+The `…/model/v1/chat/completions` endpoint makes the curator's shared model
+usable by **any OpenAI-compatible client**, so a member's agent transparently
+runs *on* the curator's model (membership- and quota-gated, same as `/invoke`).
+A member sets, against **their own node**:
+
+```
+OPENAI_BASE_URL = http://127.0.0.1:9200/api/context-graph/<cg-id>/model/v1
+OPENAI_API_KEY  = <the member node's auth token>   # ~/.dkg/auth.token
+```
+
+- **hermes**: set those in the hermes gateway's env/config — the member's hermes
+  agent now reasons on the curator's model.
+- **node-UI / Cursor / OpenAI SDK**: same two values.
+
+The endpoint maps the OpenAI request → `invokeContextGraphModel` (which routes
+P2P to the curator) → an OpenAI `chat.completion` response. Errors come back in
+OpenAI shape (`{ error: { message, type, code } }`). See `shared-model/openai.ts`.
 
 ## P2P protocol
 

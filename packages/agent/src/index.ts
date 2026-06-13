@@ -7,6 +7,13 @@ export {
   type SharedModelGrant,
   type SharedModelRuntimeConfig,
 } from './shared-model/types.js';
+export {
+  openAiMessagesToShared,
+  buildOpenAIChatCompletion,
+  openAiErrorBody,
+  type OpenAIChatRequest,
+  type OpenAIChatMessage,
+} from './shared-model/openai.js';
 export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry } from './op-wallets.js';
 export {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
