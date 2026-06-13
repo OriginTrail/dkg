@@ -102,9 +102,14 @@ describe('SWM snapshot catch-up sync', () => {
     installSharedMemorySyncMock(nodeB, nodeA, sourceSnapshots, { omitSnapshots: true });
 
     const detailed = await (nodeB as unknown as {
-      syncSharedMemoryFromPeerDetailed(peerId: string, contextGraphIds: string[]): Promise<{ failedPeers: number; insertedTriples: number }>;
+      syncSharedMemoryFromPeerDetailed(peerId: string, contextGraphIds: string[]): Promise<{ failedPeers: number; failedPhases: number; insertedTriples: number }>;
     }).syncSharedMemoryFromPeerDetailed(REMOTE_PEER, [CONTEXT_GRAPH]);
-    expect(detailed.failedPeers).toBe(1);
+    // The peer is reachable and responds; only its snapshot phase fails the
+    // digest/count check. That is a phase failure (failedPhases), not a peer
+    // reachability failure (failedPeers) — but it still suppresses the
+    // success-stamp/backoff via the lifecycle success-gate.
+    expect(detailed.failedPeers).toBe(0);
+    expect(detailed.failedPhases).toBe(1);
     expect(detailed.insertedTriples).toBe(0);
 
     const metaGraph = contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH);
