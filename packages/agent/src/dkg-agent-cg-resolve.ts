@@ -539,8 +539,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         const curatorMatch = curators.some((curator) =>
           this.curatorDidMatchesChecksumAgent(curator, checksum),
         );
-        const allowlisted = await this.callerIsAllowlistedAgentParticipant(contextGraphId, checksum);
-        callerAuthorized = curatorMatch || allowlisted;
+        callerAuthorized = curatorMatch
+          || await this.callerIsAllowlistedAgentParticipant(contextGraphId, checksum);
       }
     }
 

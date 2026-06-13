@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent, type ContextGraphSub } from '../src/index.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -172,6 +172,10 @@ describe('ensureContextGraphLocal', () => {
       },
     ]);
 
+    const allowlistSpy = vi
+      .spyOn(agent, 'callerIsAllowlistedAgentParticipant')
+      .mockRejectedValue(new Error('allowlist lookup should be skipped for curator'));
+
     const probe = await agent.probeContextGraphWritePreflight(contextGraphId, {
       callerAgentAddress: caller,
     });
@@ -182,6 +186,7 @@ describe('ensureContextGraphLocal', () => {
       accessPolicy: 'private',
       callerAuthorized: true,
     });
+    expect(allowlistSpy).not.toHaveBeenCalled();
   }, 15000);
 });
 

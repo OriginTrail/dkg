@@ -454,6 +454,33 @@ describe('context graph write-path validation', () => {
     expect(agent.calls.create).not.toHaveBeenCalled();
   });
 
+  it('resolves bare suffix matches before stale exact preflight rejects', async () => {
+    const agent = makeAgent([
+      { id: CANONICAL_CG, uri: CANONICAL_URI, subscribed: true, synced: true },
+      {
+        id: BARE_CG,
+        uri: BARE_URI,
+        subscribed: true,
+        synced: true,
+        exists: false,
+        hasLocalContent: false,
+      },
+    ], { exactPreflight: true });
+    await startRoutes(agent);
+
+    const result = await post('/api/knowledge-assets', {
+      contextGraphId: BARE_CG,
+      name: 'draft',
+    });
+
+    expect(result.status).toBe(400);
+    expect(result.body).toMatchObject({
+      code: 'CONTEXT_GRAPH_ID_NOT_CANONICAL',
+      canonicalContextGraphId: CANONICAL_CG,
+    });
+    expect(agent.calls.create).not.toHaveBeenCalled();
+  });
+
   it('rejects exact context graphs that are visible but not locally synced', async () => {
     const agent = makeAgent([
       {
@@ -722,7 +749,6 @@ describe('context graph write-path validation', () => {
         declarationFound: false,
       },
     ], { exactPreflight: true });
-    agent.listContextGraphs.mockRejectedValueOnce(new Error('list timeout'));
     await startRoutes(agent);
 
     const result = await post('/api/knowledge-assets', {
@@ -732,7 +758,7 @@ describe('context graph write-path validation', () => {
 
     expect(result.status).toBe(400);
     expect(result.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_FOUND' });
-    expect(agent.listContextGraphs).not.toHaveBeenCalled();
+    expect(agent.listContextGraphs).toHaveBeenCalledTimes(1);
     expect(agent.calls.create).not.toHaveBeenCalled();
   });
 
@@ -749,7 +775,6 @@ describe('context graph write-path validation', () => {
       },
     ], { exactPreflight: true });
     agent.resolveAgentByToken.mockReturnValue(CALLER);
-    agent.listContextGraphs.mockRejectedValueOnce(new Error('list timeout'));
     await startRoutes(agent, CALLER, 'agent-token');
 
     const result = await post('/api/shared-memory/write', {
@@ -759,7 +784,7 @@ describe('context graph write-path validation', () => {
 
     expect(result.status).toBe(400);
     expect(result.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_FOUND' });
-    expect(agent.listContextGraphs).not.toHaveBeenCalled();
+    expect(agent.listContextGraphs).toHaveBeenCalledTimes(1);
     expect(agent.calls.share).not.toHaveBeenCalled();
   });
 

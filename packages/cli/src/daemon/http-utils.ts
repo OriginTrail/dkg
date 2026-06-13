@@ -682,6 +682,8 @@ export async function resolveRequiredWriteContextGraphId(
   const callerAgentAddress = normalizeContextGraphCallerAddress(
     opts.callerAgentAddress,
   );
+  const isBareCandidateId = !candidateId.includes("/");
+  let deferredExactProbeReject = false;
   if (agent.probeContextGraphWritePreflight) {
     try {
       const probe = await agent.probeContextGraphWritePreflight(candidateId, {
@@ -691,10 +693,18 @@ export async function resolveRequiredWriteContextGraphId(
         return candidateId;
       }
       if (exactProbeIsStaleSubscription(probe)) {
-        return rejectUnknownContextGraph(res, raw);
+        if (isBareCandidateId) {
+          deferredExactProbeReject = true;
+        } else {
+          return rejectUnknownContextGraph(res, raw);
+        }
       }
       if (exactProbeIsAuthoritativeBearerDeny(probe, callerAgentAddress)) {
-        return rejectUnknownContextGraph(res, raw);
+        if (isBareCandidateId) {
+          deferredExactProbeReject = true;
+        } else {
+          return rejectUnknownContextGraph(res, raw);
+        }
       }
     } catch {
       // Fall back to the composite list path. If that is also unavailable,
@@ -716,7 +726,6 @@ export async function resolveRequiredWriteContextGraphId(
     .map((row) => (typeof row.id === "string" ? row.id : ""))
     .filter((id) => id.length > 0);
 
-  const isBareCandidateId = !candidateId.includes("/");
   const exact = contextGraphs.find((row) => {
     const id = typeof row.id === "string" ? row.id : "";
     const uri = typeof row.uri === "string" ? row.uri : "";
@@ -741,12 +750,13 @@ export async function resolveRequiredWriteContextGraphId(
       ),
     );
     if (exact?.id && typeof exact.id === "string" && suffixMatches.length > 0 && exactWritable) {
-      return exact.id;
+      if (!deferredExactProbeReject) return exact.id;
     }
     if (
       exact?.id &&
       typeof exact.id === "string" &&
       suffixMatches.length > 0 &&
+      !deferredExactProbeReject &&
       !isShadowLikeBareContextGraphRow(exact)
     ) {
       if (requireLocalWritable && !exactWritable) {
@@ -774,6 +784,9 @@ export async function resolveRequiredWriteContextGraphId(
         canonicalContextGraphIds: suffixMatches,
       });
       return null;
+    }
+    if (deferredExactProbeReject) {
+      return rejectUnknownContextGraph(res, raw);
     }
     if (exact?.id && typeof exact.id === "string") {
       if (requireLocalWritable && !exactWritable) {
