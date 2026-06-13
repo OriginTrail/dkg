@@ -125,3 +125,81 @@ The mechanics in Sections 3 and 4 — WM `assertion.write` + the reserved-subjec
 - The member-anchor custody path for the private payload (SWM ciphertext and VM LU-5/LU-11 ciphertext) under TTL + byte caps, with the contract requirement relaxed for the anchored path.
 
 **Resolved.** The earlier *await-vs-background* question — whether to await the separate projection publish or fire it in the background after the private publish — is moot: the facet rides the **same** publish and the **same** merkle root, so there is no second publish to sequence and no window where the private CG is committed but its facet is not yet discoverable.
+
+## Appendix A — Worked example: which triples live in which bucket, and when
+
+A private CG `acme-trace` (UAL `did:dkg:context-graph:acme-trace`) whose members record shipment data that must stay private. One member records one shipment. Prefixes: `ex: = https://acme.example/`, `dkg: = https://dkg.network/ontology#`, `dct: = http://purl.org/dc/terms/`; the private-data marker predicate is the legacy `http://dkg.io/ontology/privateDataAnchor` (`PRIVATE_DATA_ANCHOR`, `dkg-agent-constants.ts:13`).
+
+**The triples involved.**
+
+*Private data — the actual content the member authors:*
+```
+ex:shipment/SH-42   ex:product       ex:product/P-9 .
+ex:shipment/SH-42   ex:quantity      "500" .
+ex:shipment/SH-42   ex:destination   ex:facility/Lyon .
+```
+*Public facet — generated at publish, describes the CG itself (the floor, `buildPublicProjection`):*
+```
+<did:dkg:context-graph:acme-trace>  rdf:type          dkg:PrivateContextGraph .
+<did:dkg:context-graph:acme-trace>  dct:identifier    "did:dkg:context-graph:acme-trace" .
+<did:dkg:context-graph:acme-trace>  dct:accessRights  dkg:Private .
+```
+*Public marker — auto-inserted by `partitionPublishAsyncQuads` for the private root:*
+```
+ex:shipment/SH-42   <http://dkg.io/ontology/privateDataAnchor>   "true" .
+```
+
+### Timeline — bucket contents at each step
+
+**T1 — Agent writes to WM** (`assertion.write`, `dkg-agent.ts:1702`)
+
+| Bucket | Contents |
+|---|---|
+| **WM** (`…/acme-trace/_working_memory/{addr}/0`, author node only) | the 3 private data triples — **plaintext, local** |
+| SWM / Cores / Anchors / Chain / Outsider | empty |
+
+*No facet and no marker yet — both are publish-time artifacts.*
+
+**T2 — Members collaborate over SWM** (optional, `share`)
+
+| Bucket | Contents |
+|---|---|
+| **WM** (author) | unchanged |
+| **SWM** (`…/_shared_memory` on each member) | the 3 data triples, decrypted & applied **on members**; on the wire the envelope payload is **AEAD ciphertext** |
+| **Anchors** | hold the durable **ciphertext** envelope |
+| **Cores** | **nothing** |
+| Chain / Outsider | empty |
+
+**T3 — VM publish** (facet attached, one root seals everything)
+
+`partitionPublishAsyncQuads` splits the set; facet + marker are **public**, the shipment data is **private**; `computeFlatKCRootV10(publicQuads, privateRoots)` (`canonical-publish-payload.ts:51`) commits all of it under **one `merkleRoot`**.
+
+| Bucket | Contents |
+|---|---|
+| **Cores** (public facet graph `…/acme-trace/_facet`, plaintext, served openly) | `<…/acme-trace> a dkg:PrivateContextGraph ; dct:identifier "…" ; dct:accessRights dkg:Private .`<br/>`ex:shipment/SH-42 <…/privateDataAnchor> "true" .` |
+| **Anchors** (`…/_private` / `PrivateContentStore`, AEAD ciphertext) | the 3 shipment triples, **encrypted**; folded into the root as opaque `computePrivateRootV10` hashes |
+| **Chain** | one `merkleRoot` (covers facet + marker + private hashes), `kaId`, `txHash` |
+| **Members** | full plaintext (they are members) |
+| **Cores — private data** | **never received, not even ciphertext** |
+
+**T4 — An outsider discovers + verifies**
+
+| Step | Result |
+|---|---|
+| Outsider → **Cores**: facet-only request (no allowlist) | receives the **public facet** plaintext |
+| Outsider → **Chain**: read committed `merkleRoot` | verifies the facet quads are in that root |
+| What they learn | *a private CG exists here, at this UAL, gated* — **cannot** read SH-42's product/quantity/destination (anchor-held ciphertext) |
+
+### How are the public triples stored — a special subgraph?
+
+**Yes.** Each layer/visibility is a **distinct named graph** under the CG's DID (`constants.ts`), and the facet gets its own:
+
+| Named graph | Holds | Visible to |
+|---|---|---|
+| `…/acme-trace/_working_memory/{addr}/{n}` | WM drafts | author node only |
+| `…/acme-trace/_shared_memory` | SWM live state | members |
+| `…/acme-trace/_private` | encrypted VM payload | members (decrypt), anchors (custody) |
+| `…/acme-trace/_meta` | registration (curator, accessPolicy) | members / cores |
+| **`…/acme-trace/_facet`** *(proposed)* | **the public projection floor + private-data markers** | **anyone — served openly by cores** |
+
+The facet being its **own bounded named graph** is what makes the §7 facet-scoped open-serve safe: the gate releases exactly `…/_facet` and nothing else, so it cannot leak a gated triple. (Today's code instead emits the facet as a separate KA in a discovery CG; the `_facet` subgraph is the combined-model replacement and is not yet in code — the other `_meta`/`_private`/`_shared_memory` graphs already exist.)
