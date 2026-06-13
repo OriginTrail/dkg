@@ -61,7 +61,7 @@ describe('countContextGraphsFromGraphUris', () => {
     expect(contextGraphIdFromGraphUriForMetrics(
       `did:dkg:context-graph:${nestedSlashId}/_meta`,
     ))
-      .toBe(nestedSlashId);
+      .toBeNull();
     expect(contextGraphIdFromGraphUriForMetrics(
       `did:dkg:context-graph:${reservedSegmentId}/_meta`,
     ))
@@ -69,7 +69,11 @@ describe('countContextGraphsFromGraphUris', () => {
     expect(contextGraphIdFromGraphUriForMetrics(
       `did:dkg:context-graph:${walletScoped}/_meta`,
     ))
-      .toBe(walletScoped);
+      .toBeNull();
+    expect(countContextGraphsFromGraphUris([
+      `did:dkg:context-graph:${walletScoped}/_meta`,
+      `did:dkg:context-graph:${walletScoped}/child/_meta`,
+    ], [walletScoped])).toBe(1);
     expect(countContextGraphsFromGraphUris([
       `did:dkg:context-graph:${walletScoped}`,
       `did:dkg:context-graph:${walletScoped}/_meta`,

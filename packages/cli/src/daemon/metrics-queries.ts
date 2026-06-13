@@ -78,7 +78,7 @@ function unambiguousMetricContextGraphId(candidate: string): string | null {
   if (!candidate) return null;
   if (SYSTEM_CONTEXT_GRAPH_IDS.has(candidate)) return null;
   if (!candidate.includes('/')) return candidate;
-  return WALLET_SCOPED_CONTEXT_GRAPH_RE.test(candidate) ? candidate : null;
+  return null;
 }
 
 function declarationGraphUrisFromGraphUris(
