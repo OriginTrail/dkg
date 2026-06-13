@@ -1730,24 +1730,23 @@ export async function runDaemonInner(
   // Run an initial chain scan for context graphs we might not know about,
   // then repeat every 30 minutes as a fallback discovery mechanism.
   const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
-  setTimeout(async () => {
+  const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
+  let chainScanRuns = 0;
+  const runChainDiscoveryScan = async () => {
     try {
-      const found = await agent.discoverContextGraphsFromChain({ incremental: true });
+      const run = chainScanRuns++;
+      const incremental = run !== 0 && run % CHAIN_FULL_SCAN_EVERY !== 0;
+      const found = await agent.discoverContextGraphsFromChain(
+        incremental ? { incremental: true } : undefined,
+      );
       if (found > 0)
         log(`Chain scan: discovered ${found} new context graph(s)`);
     } catch {
       /* non-critical */
     }
-  }, 15_000);
-  const chainScanTimer = setInterval(async () => {
-    try {
-      const found = await agent.discoverContextGraphsFromChain({ incremental: true });
-      if (found > 0)
-        log(`Chain scan: discovered ${found} new context graph(s)`);
-    } catch {
-      /* non-critical */
-    }
-  }, CHAIN_SCAN_INTERVAL_MS);
+  };
+  setTimeout(runChainDiscoveryScan, 15_000);
+  const chainScanTimer = setInterval(runChainDiscoveryScan, CHAIN_SCAN_INTERVAL_MS);
   if (chainScanTimer.unref) chainScanTimer.unref();
 
   // Periodic peer health ping (every 2 minutes)
