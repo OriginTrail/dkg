@@ -5,6 +5,7 @@ import {
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type { SyncRequestEnvelope } from '../auth/request-build.js';
+import { DURABLE_DATA_SYNC_SESSION_BUCKET_MS } from '../durable-session.js';
 import {
   createResponderGraphListMemo,
   createResponderSyncRowListMemo,
@@ -59,7 +60,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     logDebug,
   } = params;
   const graphListMemo = createResponderGraphListMemo(store);
-  const durableDataRowsMemo = createResponderSyncRowListMemo();
+  const durableDataRowsMemo = createResponderSyncRowListMemo(DURABLE_DATA_SYNC_SESSION_BUCKET_MS);
   const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
   const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
 

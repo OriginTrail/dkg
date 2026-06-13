@@ -1,9 +1,9 @@
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { randomUUID } from 'node:crypto';
 import { sendSyncRequest } from '../../p2p/sync-transport.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from '../checkpoint/state.js';
+import { durableDataSyncSessionId } from '../durable-session.js';
 
 export interface SyncPageResult {
   quads: Quad[];
@@ -117,7 +117,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   let bytesReceived = 0;
   let timedOut = false;
   const syncSessionId = usesDurableDataSession
-    ? randomUUID()
+    ? durableDataSyncSessionId({ remotePeerId, contextGraphId, sinceBatchId })
     : undefined;
 
   while (true) {

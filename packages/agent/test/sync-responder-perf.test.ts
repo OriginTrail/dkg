@@ -10,20 +10,30 @@ import {
   type CapturedSyncHandler,
 } from './_helpers/sync-responder.js';
 
-const CG_ID = 'perf-cg';
+function perfBudget(name: string, fallbackMs: number): number {
+  const value = Number(process.env[`DKG_SYNC_RESPONDER_PERF_${name}_BUDGET_MS`]);
+  return Number.isFinite(value) && value > 0 ? value : fallbackMs;
+}
+
+const PERF_RUN_ID = (process.env.DKG_SYNC_RESPONDER_PERF_RUN_ID?.trim() || `${process.pid}-${Date.now().toString(36)}`)
+  .replace(/[^A-Za-z0-9_-]/g, '-');
+const CG_ID = `perf-cg-${PERF_RUN_ID}`;
 const CG_PREFIX = `did:dkg:context-graph:${CG_ID}`;
 const DATA_GRAPH = CG_PREFIX;
 const META_GRAPH = `${CG_PREFIX}/_meta`;
 const SWM_GRAPH = `${CG_PREFIX}/_shared_memory`;
 const SWM_META_GRAPH = `${CG_PREFIX}/_shared_memory_meta`;
+const DURABLE_SESSION_ID = `perf-durable-data-${PERF_RUN_ID}`;
 const PAGE_SIZE = 500;
 const DATA_ROWS = 150_000;
 const META_LIFECYCLES = 1_000;
 const SWM_OPS = 120;
 const SWM_ROWS_PER_OP = 50;
-const DURABLE_BUDGET_MS = 500;
-const SWM_DATA_BUDGET_MS = 500;
-const SWM_META_BUDGET_MS = 300;
+const DURABLE_COLD_BUDGET_MS = perfBudget('DURABLE_COLD', 45_000);
+const DURABLE_WARM_BUDGET_MS = perfBudget('DURABLE_WARM', 500);
+const DURABLE_META_BUDGET_MS = perfBudget('DURABLE_META', 500);
+const SWM_DATA_BUDGET_MS = perfBudget('SWM_DATA', 500);
+const SWM_META_BUDGET_MS = perfBudget('SWM_META', 300);
 const describePerf = process.env.DKG_SYNC_RESPONDER_PERF === '1' ? describe : describe.skip;
 
 function createPerfStore(): TripleStore {
@@ -121,38 +131,45 @@ describePerf('sync responder perf guard', () => {
       syncPageSize: PAGE_SIZE,
       sharedMemoryTtlMs: 60 * 60 * 1000,
     });
-    await cap.invoke({
-      contextGraphId: CG_ID,
-      includeSharedMemory: false,
-      phase: 'data',
-      offset: 0,
-      limit: 1,
-    });
   }, 300_000);
 
   afterAll(async () => {
     await store?.close();
   });
 
-  it('serves durable-data offset 0 and deepest page under budget', async () => {
-    const first = await expectWithinBudget('durable-data offset 0', DURABLE_BUDGET_MS, () =>
+  it('builds durable-data snapshot once and serves warm pages under budget', async () => {
+    const cold = await expectWithinBudget('durable-data cold snapshot', DURABLE_COLD_BUDGET_MS, () =>
       cap.invoke({
         contextGraphId: CG_ID,
         includeSharedMemory: false,
         phase: 'data',
         offset: 0,
         limit: PAGE_SIZE,
+        syncSessionId: DURABLE_SESSION_ID,
       }),
     );
-    expect(linesFromNquads(first)).toHaveLength(PAGE_SIZE);
+    expect(linesFromNquads(cold)).toHaveLength(PAGE_SIZE);
 
-    const deepest = await expectWithinBudget('durable-data deepest page', DURABLE_BUDGET_MS, () =>
+    const warmRetry = await expectWithinBudget('durable-data warm offset 0 retry', DURABLE_WARM_BUDGET_MS, () =>
+      cap.invoke({
+        contextGraphId: CG_ID,
+        includeSharedMemory: false,
+        phase: 'data',
+        offset: 0,
+        limit: PAGE_SIZE,
+        syncSessionId: DURABLE_SESSION_ID,
+      }),
+    );
+    expect(warmRetry).toBe(cold);
+
+    const deepest = await expectWithinBudget('durable-data warm deepest page', DURABLE_WARM_BUDGET_MS, () =>
       cap.invoke({
         contextGraphId: CG_ID,
         includeSharedMemory: false,
         phase: 'data',
         offset: DATA_ROWS - PAGE_SIZE,
         limit: PAGE_SIZE,
+        syncSessionId: DURABLE_SESSION_ID,
       }),
     );
     expect(linesFromNquads(deepest)).toHaveLength(PAGE_SIZE);
@@ -160,7 +177,7 @@ describePerf('sync responder perf guard', () => {
   }, 120_000);
 
   it('serves durable-meta offset 0 and deepest page under budget', async () => {
-    const first = await expectWithinBudget('durable-meta offset 0', DURABLE_BUDGET_MS, () =>
+    const first = await expectWithinBudget('durable-meta offset 0', DURABLE_META_BUDGET_MS, () =>
       cap.invoke({
         contextGraphId: CG_ID,
         includeSharedMemory: false,
@@ -171,7 +188,7 @@ describePerf('sync responder perf guard', () => {
     );
     expect(linesFromNquads(first)).toHaveLength(PAGE_SIZE);
 
-    const deepest = await expectWithinBudget('durable-meta deepest page', DURABLE_BUDGET_MS, () =>
+    const deepest = await expectWithinBudget('durable-meta deepest page', DURABLE_META_BUDGET_MS, () =>
       cap.invoke({
         contextGraphId: CG_ID,
         includeSharedMemory: false,
