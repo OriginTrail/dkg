@@ -1423,7 +1423,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         const pid = peerIdFromString(curatorPeerId);
 
         try {
-          await this.node.libp2p.dial(pid);
+          await this.node.libp2p.dial(pid, { signal: options.signal });
           throwIfSyncAuthAborted(options.signal);
           connections = this.node.libp2p.getConnections();
           isConnected = connections.some((c) => c.remotePeer.toString() === curatorPeerId);
@@ -1437,7 +1437,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
             const { multiaddr } = await import('@multiformats/multiaddr');
             const circuitAddr = multiaddr(`${agent.relayAddress}/p2p-circuit/p2p/${curatorPeerId}`);
             await this.node.libp2p.peerStore.merge(pid, { multiaddrs: [circuitAddr] });
-            await this.node.libp2p.dial(pid);
+            await this.node.libp2p.dial(pid, { signal: options.signal });
             throwIfSyncAuthAborted(options.signal);
             connections = this.node.libp2p.getConnections();
             isConnected = connections.some((c) => c.remotePeer.toString() === curatorPeerId);

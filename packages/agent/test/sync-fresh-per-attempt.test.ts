@@ -1011,6 +1011,55 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(warnings.some((message) => message.includes('Legacy sync responder busy'))).toBe(true);
   });
 
+  it('retries transport AbortErrors while the caller signal is still live', async () => {
+    const warnings: string[] = [];
+    const controller = new AbortController();
+    let sendCalls = 0;
+
+    await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: CG_ID,
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 3,
+        syncPageSize: 100,
+        syncDeniedResponse: '#DENIED',
+        signal: controller.signal,
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => 0,
+          set: () => {},
+          delete: () => {},
+        },
+        buildSyncRequest: async () => new TextEncoder().encode('request'),
+        parseAndFilter: singleQuadParser,
+        send: async () => {
+          sendCalls++;
+          if (sendCalls === 1) {
+            const err = new Error('remote stream aborted');
+            err.name = 'AbortError';
+            throw err;
+          }
+          return new TextEncoder().encode('one-quad-line');
+        },
+        logWarn: (_ctx, message) => { warnings.push(message); },
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    expect(controller.signal.aborted).toBe(false);
+    expect(sendCalls).toBe(2);
+    expect(warnings.some((message) => message.includes('remote stream aborted'))).toBe(true);
+  });
+
   it('passes caller abort signal to sync transport and does not retry aborts', async () => {
     const controller = new AbortController();
     let releaseSendStarted: () => void = () => {};

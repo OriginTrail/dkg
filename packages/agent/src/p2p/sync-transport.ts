@@ -104,7 +104,7 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
       maxAttempts: params.retryAttempts,
       baseDelayMs: 1000,
       signal: params.signal,
-      isRetryable: (err) => !isAbortError(err) && params.signal?.aborted !== true,
+      isRetryable: () => params.signal?.aborted !== true,
       onRetry: params.onRetry,
     },
   );
@@ -122,8 +122,4 @@ function asAbortError(reason: unknown): Error {
   const err = new Error(typeof reason === 'string' ? reason : 'aborted');
   err.name = 'AbortError';
   return err;
-}
-
-function isAbortError(err: unknown): boolean {
-  return err instanceof Error && err.name === 'AbortError';
 }
