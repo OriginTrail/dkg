@@ -9,7 +9,7 @@
  * via applyMixins(); see evm-adapter.ts for the assembly.
  */
 
-import { EVMChainAdapterBase, CG_REGISTRY_MAX_SCAN_PAGES, CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-base.js';
+import { EVMChainAdapterBase, CG_REGISTRY_MAX_SCAN_BLOCKS, CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-base.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
@@ -109,33 +109,38 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     if (!registry) return [];
     const eventFilter = registry.filters.NameClaimed();
     const registryAddress = (await registry.getAddress()).toLowerCase();
-    const scan =
-      fromBlock === undefined
-        ? await this.resolveContractDeployBlock(
-            registryAddress,
-            'listContextGraphsFromChain',
-            'ContextGraphNameRegistry',
-          )
-        : { fromBlock, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) };
-    const { fromBlock: deployBlock, head, scanProviders } = scan;
     const incremental = options?.incremental === true && fromBlock === undefined;
     const watermark = incremental
       ? this.contextGraphRegistryScanWatermarks.get(registryAddress)
       : undefined;
+    const scan =
+      fromBlock === undefined
+        ? incremental && watermark !== undefined
+          ? { fromBlock: 0, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) }
+          : await this.resolveContractDeployBlock(
+              registryAddress,
+              'listContextGraphsFromChain',
+              'ContextGraphNameRegistry',
+            )
+        : { fromBlock, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) };
+    const { fromBlock: deployBlock, head, scanProviders } = scan;
     const start = fromBlock ?? (
-      !incremental || watermark === undefined
-        ? deployBlock
-        : Math.max(deployBlock, watermark - CG_REGISTRY_REORG_BUFFER_BLOCKS)
+      incremental && watermark !== undefined
+        ? Math.max(0, watermark - CG_REGISTRY_REORG_BUFFER_BLOCKS)
+        : deployBlock
     );
     if (start > head) return [];
 
     const pageSize = this.cgRegistryScanPageSize;
     const pages = Math.ceil((head - start + 1) / pageSize);
-    if (pages > CG_REGISTRY_MAX_SCAN_PAGES) {
+    const scanBlocks = head - start + 1;
+    const pageBudget = Math.ceil(CG_REGISTRY_MAX_SCAN_BLOCKS / pageSize);
+    if (scanBlocks > CG_REGISTRY_MAX_SCAN_BLOCKS) {
       throw new Error(
         `listContextGraphsFromChain: ContextGraphNameRegistry scan would need ` +
           `${pages} eth_getLogs calls over blocks [${start}, ${head}] at a ` +
-          `${pageSize}-block window (budget ${CG_REGISTRY_MAX_SCAN_PAGES} pages). ` +
+          `${pageSize}-block window (budget ${pageBudget} pages / ` +
+          `${CG_REGISTRY_MAX_SCAN_BLOCKS} blocks). ` +
           `Use an RPC that can anchor the registry deploy block and serve the ` +
           `requested log range, or increase cgRegistryScanPageSize for an RPC ` +
           `known to support larger ranges.`,

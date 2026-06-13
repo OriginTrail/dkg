@@ -92,7 +92,10 @@ const KA_HIGH_WATER_DEFAULT_PAGE_SIZE = 2_000;
 
 const CG_REGISTRY_DEFAULT_PAGE_SIZE = 2_000;
 
-export const CG_REGISTRY_MAX_SCAN_PAGES = 1_500;
+const CG_REGISTRY_LEGACY_PAGE_SIZE = 9_000;
+
+/** Preserve the old default registry scan span while using smaller RPC-safe pages. */
+export const CG_REGISTRY_MAX_SCAN_BLOCKS = CG_REGISTRY_LEGACY_PAGE_SIZE * 1_500;
 
 export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
 

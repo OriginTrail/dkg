@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { ContextGraphChainScanPartialError } from '../src/chain-adapter.js';
+import { CG_REGISTRY_MAX_SCAN_BLOCKS, CG_REGISTRY_REORG_BUFFER_BLOCKS } from '../src/evm-adapter-base.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const ADMIN_PK = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
@@ -196,11 +197,40 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     ]);
   });
 
-  it('throws before queryFilter when the bounded registry scan would exceed the page budget', async () => {
+  it('resumes incremental scans from the watermark without deploy-block probing', async () => {
+    const registry = makeRegistry();
+    const { adapter, provider } = makeAdapter(registry, 2_100);
+    provider.getCode = vi.fn(async () => {
+      throw new Error('eth_getCode should not be called');
+    });
+    registry.queryFilter.mockResolvedValue([]);
+    (adapter as any).contextGraphRegistryScanWatermarks.set(REGISTRY.toLowerCase(), 2_050);
+
+    await adapter.listContextGraphsFromChain(undefined, { incremental: true });
+
+    expect(provider.getCode).not.toHaveBeenCalled();
+    expect(registry.queryFilter.mock.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+      [2_050 - CG_REGISTRY_REORG_BUFFER_BLOCKS, 2_100],
+    ]);
+  });
+
+  it('allows default registry scans beyond the old 3M page-count cap', async () => {
     const registry = makeRegistry();
     const { adapter } = makeAdapter(registry, 4_000_000);
+    registry.queryFilter.mockResolvedValue([]);
 
-    await expect(adapter.listContextGraphsFromChain()).rejects.toThrow(/ContextGraphNameRegistry scan would need/);
+    await expect(adapter.listContextGraphsFromChain()).resolves.toEqual([]);
+
+    expect(registry.queryFilter).toHaveBeenCalledTimes(Math.ceil((4_000_000 + 1) / 2_000));
+  });
+
+  it('throws before queryFilter when the bounded registry scan would exceed the block-span budget', async () => {
+    const registry = makeRegistry();
+    const { adapter } = makeAdapter(registry, CG_REGISTRY_MAX_SCAN_BLOCKS);
+
+    await expect(adapter.listContextGraphsFromChain()).rejects.toThrow(
+      new RegExp(`ContextGraphNameRegistry scan would need.*${CG_REGISTRY_MAX_SCAN_BLOCKS} blocks`),
+    );
     expect(registry.queryFilter).not.toHaveBeenCalled();
   });
 
