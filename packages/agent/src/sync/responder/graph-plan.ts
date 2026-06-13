@@ -21,6 +21,8 @@ const DKG_MEMORY_LAYER = `${DKG}memoryLayer`;
 const DKG_PART_OF = `${DKG}partOf`;
 const DKG_BATCH_ID = `${DKG}batchId`;
 const SCHEMA_NAME = 'http://schema.org/name';
+const PROV_GENERATED = 'http://www.w3.org/ns/prov#generated';
+const PROV_USED = 'http://www.w3.org/ns/prov#used';
 
 export interface GraphListMemo {
   get(options?: { refresh?: boolean }): Promise<readonly string[]>;
@@ -36,6 +38,13 @@ export interface SyncRowListMemo {
     loadRows: () => Promise<readonly SyncRow[]>,
     options?: { refresh?: boolean; requireExisting?: boolean },
   ): Promise<readonly SyncRow[] | null>;
+}
+
+interface RowListCache {
+  memo: SyncRowListMemo;
+  key: string;
+  refresh?: boolean;
+  expiredMessage?: string;
 }
 
 export function createResponderGraphListMemo(
@@ -251,10 +260,26 @@ export async function readSwmMetaPage(params: {
   cutoffIso: string | null;
   offset: number;
   limit: number;
+  rowListMemo?: SyncRowListMemo;
+  rowListCacheKey?: string;
+  refreshRowList?: boolean;
 }): Promise<SyncRow[]> {
   const graphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, true);
   const graphSet = new Set(params.graphList);
   const candidateGraphs = graphs.filter((graph) => graphSet.has(graph));
+  if (params.rowListMemo && params.rowListCacheKey) {
+    return readCachedRowsPage(
+      {
+        memo: params.rowListMemo,
+        key: params.rowListCacheKey,
+        refresh: params.refreshRowList,
+        expiredMessage: 'Shared-memory meta sync session snapshot expired before page completion',
+      },
+      () => readSwmMetaRows(params.store, candidateGraphs, params.cutoffIso),
+      params.offset,
+      params.limit,
+    );
+  }
   return readSwmMetaRowsPage(
     params.store,
     candidateGraphs,
@@ -272,42 +297,48 @@ export async function readSwmDataPage(params: {
   cutoffIso: string | null;
   offset: number;
   limit: number;
+  rowListMemo?: SyncRowListMemo;
+  rowListCacheKey?: string;
+  refreshRowList?: boolean;
 }): Promise<SyncRow[]> {
   const dataGraphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, false);
   const graphSet = new Set(params.graphList);
   const candidateGraphsFor = (graph: string) => params.graphList
     .filter((candidate) => candidate === graph || isSharedMemoryBucketDescendantDataGraph(candidate, graph))
     .sort(compareCodePoint);
+  const cache = params.rowListMemo && params.rowListCacheKey
+    ? {
+      memo: params.rowListMemo,
+      key: params.rowListCacheKey,
+      refresh: params.refreshRowList,
+      expiredMessage: 'Shared-memory data sync session snapshot expired before page completion',
+    }
+    : undefined;
 
   if (!params.cutoffIso) {
     const candidateGraphs = dedupeStrings(dataGraphs.flatMap(candidateGraphsFor)).sort(compareCodePoint);
-    return readPagedRowsAcrossGraphsStoreBounded(params.store, candidateGraphs, params.offset, params.limit, async () => true);
+    return readPagedRowsAcrossGraphs(
+      params.store,
+      candidateGraphs,
+      params.offset,
+      params.limit,
+      async () => true,
+      cache,
+    );
   }
 
-  const rows: SyncRow[] = [];
-  let skip = params.offset;
-  let remaining = params.limit;
-  for (const graph of dataGraphs) {
-    const metaGraph = `${graph}_meta`;
-    if (!graphSet.has(metaGraph)) continue;
-    for (const candidate of candidateGraphsFor(graph)) {
-      if (skip > 0) {
-        const count = await countFreshSwmDataGraphRows(params.store, candidate, metaGraph, params.cutoffIso);
-        if (skip >= count) {
-          skip -= count;
-          continue;
-        }
-      }
-
-      const page = await readFreshSwmDataGraphRowsPage(params.store, candidate, metaGraph, params.cutoffIso, skip, remaining);
-      rows.push(...page);
-      remaining -= page.length;
-      skip = 0;
-      if (remaining <= 0) break;
-    }
-    if (remaining <= 0) break;
+  const loadRows = () => readFreshSwmDataRows(
+    params.store,
+    dataGraphs,
+    graphSet,
+    candidateGraphsFor,
+    params.cutoffIso!,
+  );
+  if (cache) {
+    return readCachedRowsPage(cache, loadRows, params.offset, params.limit);
   }
-  return rows;
+  const rows = await loadRows();
+  return rows.slice(Math.max(0, Math.floor(params.offset)), Math.max(0, Math.floor(params.offset)) + Math.max(0, Math.floor(params.limit)));
 }
 
 export async function readDurableMetaPage(params: {
@@ -316,14 +347,28 @@ export async function readDurableMetaPage(params: {
   registeredSubGraphNames: readonly string[];
   offset: number;
   limit: number;
+  rowListMemo?: SyncRowListMemo;
+  rowListCacheKey?: string;
+  refreshRowList?: boolean;
 }): Promise<SyncRow[]> {
-  return readDurableMetaRowsPage(
-    params.store,
-    params.contextGraphId,
-    params.registeredSubGraphNames,
-    params.offset,
-    params.limit,
-  );
+  const loadRows = () => readDurableMetaRows(params.store, params.contextGraphId, params.registeredSubGraphNames);
+  if (params.rowListMemo && params.rowListCacheKey) {
+    return readCachedRowsPage(
+      {
+        memo: params.rowListMemo,
+        key: params.rowListCacheKey,
+        refresh: params.refreshRowList,
+        expiredMessage: 'Durable meta sync session snapshot expired before page completion',
+      },
+      loadRows,
+      params.offset,
+      params.limit,
+    );
+  }
+  const rows = await loadRows();
+  const safeOffset = Math.max(0, Math.floor(params.offset));
+  const safeLimit = Math.max(0, Math.floor(params.limit));
+  return rows.slice(safeOffset, safeOffset + safeLimit);
 }
 
 export async function readDurableDataPage(params: {
@@ -406,7 +451,7 @@ async function readPagedRowsAcrossGraphs(
   offset: number,
   limit: number,
   isAdmitted: (graph: string) => Promise<boolean>,
-  cache?: { memo: SyncRowListMemo; key: string; refresh?: boolean },
+  cache?: RowListCache,
 ): Promise<SyncRow[]> {
   if (!cache) {
     return readPagedRowsAcrossGraphsStoreBounded(store, graphs, offset, limit, isAdmitted);
@@ -425,14 +470,15 @@ async function readPagedRowsAcrossGraphs(
     return readRowsAcrossGraphs(store, admittedGraphs);
   };
 
-  const rows = await cache.memo.get(cache.key, loadRows, {
-    refresh: cache.refresh,
-    requireExisting: safeOffset > 0,
-  });
-  if (rows == null) {
-    throw new Error('Durable data sync session snapshot expired before page completion');
-  }
-  return [...rows].slice(safeOffset, safeOffset + safeLimit);
+  return readCachedRowsPage(
+    {
+      ...cache,
+      expiredMessage: cache.expiredMessage ?? 'Durable data sync session snapshot expired before page completion',
+    },
+    loadRows,
+    safeOffset,
+    safeLimit,
+  );
 }
 
 async function readPagedRowsAcrossGraphsStoreBounded(
@@ -458,7 +504,7 @@ async function readPagedDurableDeltaRowsAcrossGraphs(
   sinceBatchId: bigint,
   offset: number,
   limit: number,
-  cache?: { memo: SyncRowListMemo; key: string; refresh?: boolean },
+  cache?: RowListCache,
 ): Promise<SyncRow[]> {
   if (!cache) {
     return readDurableDeltaRowsPageAcrossGraphs(store, graphs, metaGraphs, sinceBatchId, offset, limit);
@@ -468,16 +514,32 @@ async function readPagedDurableDeltaRowsAcrossGraphs(
   const safeLimit = Math.max(0, Math.floor(limit));
   if (safeLimit === 0) return [];
 
-  const rows = await cache.memo.get(
-    cache.key,
-    () => readDurableDeltaRowsAcrossGraphs(store, graphs, metaGraphs, sinceBatchId),
+  return readCachedRowsPage(
     {
-      refresh: cache.refresh,
-      requireExisting: safeOffset > 0,
+      ...cache,
+      expiredMessage: cache.expiredMessage ?? 'Durable data sync session snapshot expired before page completion',
     },
+    () => readDurableDeltaRowsAcrossGraphs(store, graphs, metaGraphs, sinceBatchId),
+    safeOffset,
+    safeLimit,
   );
+}
+
+async function readCachedRowsPage(
+  cache: RowListCache,
+  loadRows: () => Promise<readonly SyncRow[]>,
+  offset: number,
+  limit: number,
+): Promise<SyncRow[]> {
+  const safeOffset = Math.max(0, Math.floor(offset));
+  const safeLimit = Math.max(0, Math.floor(limit));
+  if (safeLimit === 0) return [];
+  const rows = await cache.memo.get(cache.key, loadRows, {
+    refresh: cache.refresh,
+    requireExisting: safeOffset > 0,
+  });
   if (rows == null) {
-    throw new Error('Durable data sync session snapshot expired before page completion');
+    throw new Error(cache.expiredMessage ?? 'Sync session snapshot expired before page completion');
   }
   return [...rows].slice(safeOffset, safeOffset + safeLimit);
 }
@@ -615,18 +677,6 @@ async function readAdmittedAssertionGraphs(
   return new Set(res.bindings.map((row) => row['g']).filter(Boolean));
 }
 
-async function countGraphRows(store: TripleStore, graph: string): Promise<number> {
-  const res = await store.query(`
-    SELECT (COUNT(*) AS ?count) WHERE {
-      GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
-    }
-  `);
-  if (res.type !== 'bindings') return 0;
-  const value = parseIntegerLiteral(res.bindings[0]?.['count']);
-  if (value == null || value < 0n) return 0;
-  return Number(value > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : value);
-}
-
 async function readRowsAcrossGraphs(
   store: TripleStore,
   graphs: readonly string[],
@@ -671,6 +721,33 @@ async function readRowsPageAcrossGraphs(
     .filter((row) => row.s && row.p && row.o && row.g);
 }
 
+async function readSwmMetaRows(
+  store: TripleStore,
+  swmMetaGraphs: readonly string[],
+  cutoffIso: string | null,
+): Promise<SyncRow[]> {
+  const swmMetaValues = graphValues(swmMetaGraphs);
+  if (!swmMetaValues) return [];
+  const res = await store.query(`
+    SELECT DISTINCT ?g ?s ?p ?o WHERE {
+      VALUES ?g { ${swmMetaValues} }
+      GRAPH ?g {
+        ?s ?p ?o .
+        ${cutoffIso
+    ? `
+        ?s <${DKG_PUBLISHED_AT}> ?ts .
+        FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)`
+    : ''}
+      }
+    }
+  `);
+  if (res.type !== 'bindings') return [];
+  return res.bindings
+    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
+    .filter((row) => row.s && row.p && row.o && row.g)
+    .sort(compareRows);
+}
+
 async function readSwmMetaRowsPage(
   store: TripleStore,
   swmMetaGraphs: readonly string[],
@@ -710,131 +787,94 @@ async function readSwmMetaRowsPage(
     .filter((row) => row.s && row.p && row.o && row.g);
 }
 
-async function countFreshSwmDataGraphRows(
+async function readFreshSwmDataRows(
   store: TripleStore,
-  graph: string,
-  metaGraph: string,
+  dataGraphs: readonly string[],
+  graphSet: ReadonlySet<string>,
+  candidateGraphsFor: (graph: string) => string[],
   cutoffIso: string,
-): Promise<number> {
-  const res = await store.query(`
-    SELECT (COUNT(*) AS ?count) WHERE {
-      {
-        SELECT DISTINCT ?s ?p ?o WHERE {
-          ${freshSwmDataWhereClause(graph, metaGraph, cutoffIso)}
-        }
-      }
-    }
-  `);
-  if (res.type !== 'bindings') return 0;
-  const value = parseIntegerLiteral(res.bindings[0]?.['count']);
-  if (value == null || value < 0n) return 0;
-  return Number(value > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : value);
-}
-
-async function readFreshSwmDataGraphRowsPage(
-  store: TripleStore,
-  graph: string,
-  metaGraph: string,
-  cutoffIso: string,
-  offset: number,
-  limit: number,
 ): Promise<SyncRow[]> {
-  const safeOffset = Math.max(0, Math.floor(offset));
-  const safeLimit = Math.max(0, Math.floor(limit));
-  if (safeLimit === 0) return [];
-  const res = await store.query(`
-    SELECT DISTINCT ?s ?p ?o WHERE {
-      ${freshSwmDataWhereClause(graph, metaGraph, cutoffIso)}
-    }
-    ORDER BY ?s ?p ?o
-    OFFSET ${safeOffset}
-    LIMIT ${safeLimit}
-  `);
-  if (res.type !== 'bindings') return [];
-  return res.bindings
-    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: graph }))
-    .filter((row) => row.s && row.p && row.o);
+  const rows: SyncRow[] = [];
+  for (const graph of dataGraphs) {
+    const metaGraph = `${graph}_meta`;
+    if (!graphSet.has(metaGraph)) continue;
+    const roots = await readFreshSwmRoots(store, metaGraph, cutoffIso);
+    if (roots.size === 0) continue;
+    const rootPrefixes = [...roots].map((root) => `${root}/.well-known/genid/`);
+    const graphRows = await readRowsAcrossGraphs(store, candidateGraphsFor(graph));
+    rows.push(...graphRows.filter((row) =>
+      roots.has(row.s) || rootPrefixes.some((prefix) => row.s.startsWith(prefix)),
+    ));
+  }
+  return rows.sort(compareRows);
 }
 
-function freshSwmDataWhereClause(graph: string, metaGraph: string, cutoffIso: string): string {
-  return `
+async function readFreshSwmRoots(
+  store: TripleStore,
+  metaGraph: string,
+  cutoffIso: string,
+): Promise<Set<string>> {
+  const res = await store.query(`
+    SELECT DISTINCT ?root WHERE {
       GRAPH <${assertSafeIri(metaGraph)}> {
         ?op <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
             <${DKG_PUBLISHED_AT}> ?ts ;
             <${DKG_ROOT_ENTITY}> ?root .
         FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)
       }
-      GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
-      FILTER(sameTerm(?s, ?root) || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))
-  `;
+    }
+  `);
+  if (res.type !== 'bindings') return new Set();
+  return new Set(res.bindings.map((row) => row['root']).filter(Boolean));
 }
 
-async function readDurableMetaRowsPage(
+async function readDurableMetaRows(
   store: TripleStore,
   contextGraphId: string,
   registeredSubGraphNames: readonly string[],
-  offset: number,
-  limit: number,
 ): Promise<SyncRow[]> {
-  const safeOffset = Math.max(0, Math.floor(offset));
-  const safeLimit = Math.max(0, Math.floor(limit));
-  if (safeLimit === 0) return [];
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const cgEntity = contextGraphDataGraphUri(contextGraphId);
-  const registeredSubGraphSubjects = dedupeStrings(registeredSubGraphNames)
+  const registeredSubGraphSubjects = new Set(dedupeStrings(registeredSubGraphNames)
     .filter((name) => validateSubGraphName(name).valid)
-    .map((name) => `<${assertSafeIri(`${cgEntity}/${name}`)}>`);
-  const registeredSubGraphSubjectClause = registeredSubGraphSubjects.length === 0
-    ? ''
-    : `${registeredSubGraphSubjects.length === 1
-      ? `sameTerm(?s, ${registeredSubGraphSubjects[0]})`
-      : `?s IN (${registeredSubGraphSubjects.join(', ')})`} ||`;
-  const workingMemory = sparqlString(MemoryLayer.WorkingMemory);
-  const res = await store.query(`
-    SELECT ?s ?p ?o WHERE {
-      GRAPH <${assertSafeIri(metaGraph)}> { ?s ?p ?o }
-      FILTER(
-        STR(?s) = ${sparqlString(cgEntity)} ||
-        ${registeredSubGraphSubjectClause}
-        STRSTARTS(STR(?s), "did:dkg:activity:") ||
-        STRSTARTS(STR(?s), "did:dkg:join-request:") ||
-        EXISTS {
-          GRAPH <${assertSafeIri(metaGraph)}> {
-            ?lc <${DKG_MEMORY_LAYER}> ?layer .
-            FILTER(STR(?layer) != ${workingMemory})
-            {
-              FILTER(sameTerm(?lc, ?s))
-            } UNION {
-              ?lc <${DKG_ASSERTION_GRAPH}> ?s .
-            } UNION {
-              ?lc <${DKG_ASSERTION_NAME}> ?aname .
-              FILTER(
-                CONTAINS(STR(?s), "/assertion/") &&
-                STRENDS(STR(?s), CONCAT("/", STR(?aname)))
-              )
-            }
-          }
-        } ||
-        EXISTS {
-          GRAPH <${assertSafeIri(metaGraph)}> {
-            { ?evt <http://www.w3.org/ns/prov#generated> ?parent }
-            UNION
-            { ?evt <http://www.w3.org/ns/prov#used> ?parent }
-            FILTER(sameTerm(?evt, ?s))
-            ?parent <${DKG_MEMORY_LAYER}> ?eventLayer .
-            FILTER(STR(?eventLayer) != ${workingMemory})
-          }
-        }
-      )
+    .map((name) => `${cgEntity}/${name}`));
+  const rows = await readRowsAcrossGraphs(store, [metaGraph]);
+  const nonWorkingLifecycles = new Set<string>();
+  for (const row of rows) {
+    if (row.p === DKG_MEMORY_LAYER && stripLiteral(row.o) !== MemoryLayer.WorkingMemory) {
+      nonWorkingLifecycles.add(row.s);
     }
-    ORDER BY ?s ?p ?o
-    OFFSET ${safeOffset}
-    LIMIT ${safeLimit}
-  `);
-  if (res.type !== 'bindings') return [];
-  return res.bindings
-    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: metaGraph }))
-    .filter((row) => row.s && row.p && row.o);
+  }
+
+  const assertionGraphs = new Set<string>();
+  const assertionNames = new Set<string>();
+  const eventSubjects = new Set<string>();
+  for (const row of rows) {
+    if (nonWorkingLifecycles.has(row.s) && row.p === DKG_ASSERTION_GRAPH) {
+      assertionGraphs.add(row.o);
+    }
+    if (nonWorkingLifecycles.has(row.s) && row.p === DKG_ASSERTION_NAME) {
+      const name = stripLiteral(row.o);
+      if (name) assertionNames.add(name);
+    }
+    if ((row.p === PROV_GENERATED || row.p === PROV_USED) && nonWorkingLifecycles.has(row.o)) {
+      eventSubjects.add(row.s);
+    }
+  }
+
+  return rows.filter((row) =>
+    row.s === cgEntity ||
+    registeredSubGraphSubjects.has(row.s) ||
+    row.s.startsWith('did:dkg:activity:') ||
+    row.s.startsWith('did:dkg:join-request:') ||
+    nonWorkingLifecycles.has(row.s) ||
+    assertionGraphs.has(row.s) ||
+    eventSubjects.has(row.s) ||
+    (
+      row.s.includes('/assertion/') &&
+      [...assertionNames].some((name) => row.s.endsWith(`/${name}`))
+    ),
+  );
 }
 
 async function readDurableDeltaRowsPageAcrossGraphs(
@@ -971,16 +1011,6 @@ function stripLiteral(value: string | undefined): string {
   if (!value) return '';
   const match = value.match(/^"((?:[^"\\]|\\.)*)"(?:@[\w-]+|\^\^<[^>]+>)?$/);
   return match ? match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\') : value;
-}
-
-function parseIntegerLiteral(value: string | undefined): bigint | null {
-  const stripped = stripLiteral(value);
-  if (!/^-?\d+$/.test(stripped)) return null;
-  try {
-    return BigInt(stripped);
-  } catch {
-    return null;
-  }
 }
 
 function formatTerm(term: string): string {

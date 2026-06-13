@@ -24,6 +24,9 @@ const META_GRAPH = `${CG_PREFIX}/_meta`;
 const SWM_GRAPH = `${CG_PREFIX}/_shared_memory`;
 const SWM_META_GRAPH = `${CG_PREFIX}/_shared_memory_meta`;
 const DURABLE_SESSION_ID = `perf-durable-data-${PERF_RUN_ID}`;
+const DURABLE_META_SESSION_ID = `perf-durable-meta-${PERF_RUN_ID}`;
+const SWM_DATA_SESSION_ID = `perf-swm-data-${PERF_RUN_ID}`;
+const SWM_META_SESSION_ID = `perf-swm-meta-${PERF_RUN_ID}`;
 const PAGE_SIZE = 500;
 const DATA_ROWS = 150_000;
 const META_LIFECYCLES = 1_000;
@@ -184,6 +187,7 @@ describePerf('sync responder perf guard', () => {
         phase: 'meta',
         offset: 0,
         limit: PAGE_SIZE,
+        syncSessionId: DURABLE_META_SESSION_ID,
       }),
     );
     expect(linesFromNquads(first)).toHaveLength(PAGE_SIZE);
@@ -195,6 +199,7 @@ describePerf('sync responder perf guard', () => {
         phase: 'meta',
         offset: 4_500,
         limit: PAGE_SIZE,
+        syncSessionId: DURABLE_META_SESSION_ID,
       }),
     );
     expect(linesFromNquads(deepest)).toHaveLength(PAGE_SIZE);
@@ -208,6 +213,7 @@ describePerf('sync responder perf guard', () => {
         phase: 'data',
         offset: 0,
         limit: PAGE_SIZE,
+        syncSessionId: SWM_DATA_SESSION_ID,
       }),
     );
     expect(linesFromNquads(dataFirst)).toHaveLength(PAGE_SIZE);
@@ -219,6 +225,7 @@ describePerf('sync responder perf guard', () => {
         phase: 'data',
         offset: SWM_OPS * SWM_ROWS_PER_OP - PAGE_SIZE,
         limit: PAGE_SIZE,
+        syncSessionId: SWM_DATA_SESSION_ID,
       }),
     );
     expect(linesFromNquads(dataDeep)).toHaveLength(PAGE_SIZE);
@@ -230,6 +237,7 @@ describePerf('sync responder perf guard', () => {
         phase: 'meta',
         offset: 0,
         limit: PAGE_SIZE,
+        syncSessionId: SWM_META_SESSION_ID,
       }),
     );
     expect(linesFromNquads(metaFirst)).toHaveLength(PAGE_SIZE);
@@ -241,6 +249,7 @@ describePerf('sync responder perf guard', () => {
         phase: 'meta',
         offset: PAGE_SIZE,
         limit: PAGE_SIZE,
+        syncSessionId: SWM_META_SESSION_ID,
       }),
     );
     expect(linesFromNquads(metaDeep)).toHaveLength(SWM_OPS * 5 - PAGE_SIZE);

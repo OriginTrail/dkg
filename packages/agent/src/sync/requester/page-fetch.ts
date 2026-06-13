@@ -5,39 +5,50 @@ import type { SyncPhase } from '../auth/request-build.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from '../checkpoint/state.js';
 import {
   createDurableDataSyncSessionId,
+  createSyncResponderSessionId,
   DURABLE_DATA_SYNC_SESSION_TTL_MS,
 } from '../durable-session.js';
 
-const MAX_UNFINISHED_DURABLE_DATA_SESSIONS = 4096;
-type UnfinishedDurableDataSession = {
+const MAX_UNFINISHED_SYNC_RESPONDER_SESSIONS = 4096;
+type UnfinishedSyncResponderSession = {
   syncSessionId: string;
   expiresAt: number;
 };
 
-const unfinishedDurableDataSessions = new Map<string, UnfinishedDurableDataSession>();
+const unfinishedSyncResponderSessions = new Map<string, UnfinishedSyncResponderSession>();
 
-function getUnfinishedDurableDataSession(checkpointKey: string, now = Date.now()): UnfinishedDurableDataSession | undefined {
-  const session = unfinishedDurableDataSessions.get(checkpointKey);
+function getUnfinishedSyncResponderSession(checkpointKey: string, now = Date.now()): UnfinishedSyncResponderSession | undefined {
+  const session = unfinishedSyncResponderSessions.get(checkpointKey);
   if (!session) return undefined;
   if (session.expiresAt > now) return session;
-  unfinishedDurableDataSessions.delete(checkpointKey);
+  unfinishedSyncResponderSessions.delete(checkpointKey);
   return undefined;
 }
 
-function rememberUnfinishedDurableDataSession(checkpointKey: string, session: UnfinishedDurableDataSession, now = Date.now()): void {
+function rememberUnfinishedSyncResponderSession(checkpointKey: string, session: UnfinishedSyncResponderSession, now = Date.now()): void {
   if (session.expiresAt <= now) {
-    unfinishedDurableDataSessions.delete(checkpointKey);
+    unfinishedSyncResponderSessions.delete(checkpointKey);
     return;
   }
-  if (!unfinishedDurableDataSessions.has(checkpointKey) && unfinishedDurableDataSessions.size >= MAX_UNFINISHED_DURABLE_DATA_SESSIONS) {
-    const oldest = unfinishedDurableDataSessions.keys().next().value;
-    if (oldest) unfinishedDurableDataSessions.delete(oldest);
+  if (!unfinishedSyncResponderSessions.has(checkpointKey) && unfinishedSyncResponderSessions.size >= MAX_UNFINISHED_SYNC_RESPONDER_SESSIONS) {
+    const oldest = unfinishedSyncResponderSessions.keys().next().value;
+    if (oldest) unfinishedSyncResponderSessions.delete(oldest);
   }
-  unfinishedDurableDataSessions.set(checkpointKey, session);
+  unfinishedSyncResponderSessions.set(checkpointKey, session);
 }
 
-function isDurableDataSessionSupersededError(err: unknown): boolean {
-  return err instanceof Error && err.message.includes('Durable data sync session was superseded');
+function isSyncResponderSessionSupersededError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes('sync session was superseded');
+}
+
+function usesResponderSession(includeSharedMemory: boolean, phase: SyncPhase): boolean {
+  void includeSharedMemory;
+  return phase !== 'snapshot';
+}
+
+function createResponderSessionId(includeSharedMemory: boolean, phase: SyncPhase): string {
+  if (!includeSharedMemory && phase === 'data') return createDurableDataSyncSessionId();
+  return createSyncResponderSessionId(`${includeSharedMemory ? 'swm' : 'durable'}-${phase}`);
 }
 
 export interface SyncPageResult {
@@ -143,25 +154,25 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   const allQuads: Quad[] = [];
   const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId);
   let offset = checkpointStore.get(checkpointKey) ?? 0;
-  const usesDurableDataSession = !includeSharedMemory && phase === 'data';
-  const durableSessionStartedAt = Date.now();
-  const savedDurableDataSession = usesDurableDataSession
-    ? getUnfinishedDurableDataSession(checkpointKey, durableSessionStartedAt)
+  const usesPageSession = usesResponderSession(includeSharedMemory, phase);
+  const sessionStartedAt = Date.now();
+  const savedResponderSession = usesPageSession
+    ? getUnfinishedSyncResponderSession(checkpointKey, sessionStartedAt)
     : undefined;
-  if (usesDurableDataSession && offset > 0 && !savedDurableDataSession) {
+  if (usesPageSession && offset > 0 && !savedResponderSession) {
     checkpointStore.delete(checkpointKey);
     offset = 0;
   }
   const resumedFromOffset = offset;
   let bytesReceived = 0;
   let timedOut = false;
-  const syncSessionId = usesDurableDataSession
-    ? (savedDurableDataSession?.syncSessionId ?? createDurableDataSyncSessionId())
+  const syncSessionId = usesPageSession
+    ? (savedResponderSession?.syncSessionId ?? createResponderSessionId(includeSharedMemory, phase))
     : undefined;
-  const durableDataSession = usesDurableDataSession && syncSessionId
+  const responderSession = usesPageSession && syncSessionId
     ? {
       syncSessionId,
-      expiresAt: savedDurableDataSession?.expiresAt ?? durableSessionStartedAt + DURABLE_DATA_SYNC_SESSION_TTL_MS,
+      expiresAt: savedResponderSession?.expiresAt ?? sessionStartedAt + DURABLE_DATA_SYNC_SESSION_TTL_MS,
     }
     : undefined;
 
@@ -245,18 +256,18 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       if (parsed.totalQuads < syncPageSize) break;
     }
   } catch (err) {
-    if (usesDurableDataSession && isDurableDataSessionSupersededError(err)) {
-      unfinishedDurableDataSessions.delete(checkpointKey);
+    if (usesPageSession && isSyncResponderSessionSupersededError(err)) {
+      unfinishedSyncResponderSessions.delete(checkpointKey);
       checkpointStore.delete(checkpointKey);
-    } else if (usesDurableDataSession && durableDataSession && !(err as Error & { syncDenied?: boolean }).syncDenied) {
-      rememberUnfinishedDurableDataSession(checkpointKey, durableDataSession);
+    } else if (usesPageSession && responderSession && !(err as Error & { syncDenied?: boolean }).syncDenied) {
+      rememberUnfinishedSyncResponderSession(checkpointKey, responderSession);
     }
     throw err;
   }
 
-  if (usesDurableDataSession && durableDataSession) {
-    if (timedOut) rememberUnfinishedDurableDataSession(checkpointKey, durableDataSession);
-    else unfinishedDurableDataSessions.delete(checkpointKey);
+  if (usesPageSession && responderSession) {
+    if (timedOut) rememberUnfinishedSyncResponderSession(checkpointKey, responderSession);
+    else unfinishedSyncResponderSessions.delete(checkpointKey);
   }
 
   if (timedOut) {

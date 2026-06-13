@@ -636,7 +636,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       // is gap-safe only when it comes from a CONTIGUOUS watermark, so it is
       // supplied explicitly by callers, never auto-derived from local MAX().
       sinceBatchId: phase === 'data' && !includeSharedMemory ? sinceBatchId : undefined,
-      syncSessionId: phase === 'data' && !includeSharedMemory ? syncSessionId : undefined,
+      syncSessionId: phase === 'snapshot' ? undefined : syncSessionId,
       needsAuth,
       computeSyncDigest: this.computeSyncDigest.bind(this),
       getIdentityId: () => this.chain.getIdentityId(),

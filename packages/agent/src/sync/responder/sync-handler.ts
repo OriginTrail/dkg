@@ -18,11 +18,16 @@ import {
   serializeResponderRows,
 } from './graph-plan.js';
 
-const MAX_DURABLE_DATA_SESSION_TOKENS = 64;
+const MAX_SYNC_SESSION_TOKENS = 256;
 
-type DurableDataSessionTokenEntry = {
+type SyncSessionTokenEntry = {
   token: string;
   expiresAt: number;
+};
+
+type PreparedResponderSession = {
+  rowListCacheKey: string;
+  refreshRowList: boolean;
 };
 
 interface RegisterSyncHandlerParams {
@@ -68,31 +73,54 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
   } = params;
   const graphListMemo = createResponderGraphListMemo(store);
   const durableDataRowsMemo = createResponderSyncRowListMemo(DURABLE_DATA_SYNC_SESSION_TTL_MS);
-  const durableDataSessionTokens = new Map<string, DurableDataSessionTokenEntry>();
+  const durableMetaRowsMemo = createResponderSyncRowListMemo(DURABLE_DATA_SYNC_SESSION_TTL_MS);
+  const swmRowsMemo = createResponderSyncRowListMemo(DURABLE_DATA_SYNC_SESSION_TTL_MS);
+  const syncSessionTokens = new Map<string, SyncSessionTokenEntry>();
   const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
   const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
 
-  const pruneDurableDataSessionTokens = (now = Date.now()) => {
-    for (const [key, entry] of durableDataSessionTokens) {
-      if (entry.expiresAt <= now) durableDataSessionTokens.delete(key);
+  const pruneSyncSessionTokens = (now = Date.now()) => {
+    for (const [key, entry] of syncSessionTokens) {
+      if (entry.expiresAt <= now) syncSessionTokens.delete(key);
     }
-    while (durableDataSessionTokens.size > MAX_DURABLE_DATA_SESSION_TOKENS) {
-      const oldest = durableDataSessionTokens.keys().next().value;
+    while (syncSessionTokens.size > MAX_SYNC_SESSION_TOKENS) {
+      const oldest = syncSessionTokens.keys().next().value;
       if (!oldest) break;
-      durableDataSessionTokens.delete(oldest);
+      syncSessionTokens.delete(oldest);
     }
   };
 
-  const rememberDurableDataSessionToken = (key: string, token: string, now = Date.now()) => {
-    pruneDurableDataSessionTokens(now);
-    if (!durableDataSessionTokens.has(key) && durableDataSessionTokens.size >= MAX_DURABLE_DATA_SESSION_TOKENS) {
-      const oldest = durableDataSessionTokens.keys().next().value;
-      if (oldest) durableDataSessionTokens.delete(oldest);
+  const rememberSyncSessionToken = (key: string, token: string, now = Date.now()) => {
+    pruneSyncSessionTokens(now);
+    if (!syncSessionTokens.has(key) && syncSessionTokens.size >= MAX_SYNC_SESSION_TOKENS) {
+      const oldest = syncSessionTokens.keys().next().value;
+      if (oldest) syncSessionTokens.delete(oldest);
     }
-    durableDataSessionTokens.set(key, {
+    syncSessionTokens.set(key, {
       token,
       expiresAt: now + DURABLE_DATA_SYNC_SESSION_TTL_MS,
     });
+  };
+
+  const prepareResponderSession = (
+    label: string,
+    key: string,
+    token: string | undefined,
+    offset: number,
+    now = Date.now(),
+  ): PreparedResponderSession | undefined => {
+    if (!token) return undefined;
+    pruneSyncSessionTokens(now);
+    const activeToken = syncSessionTokens.get(key)?.token;
+    if (offset > 0 && activeToken !== token) {
+      throw new Error(`${label} sync session was superseded before page completion`);
+    }
+    const refreshRowList = offset === 0 && activeToken !== token;
+    rememberSyncSessionToken(key, token, now);
+    return {
+      rowListCacheKey: key,
+      refreshRowList,
+    };
   };
 
   register(protocolSync, async (data, peerId) => {
@@ -147,6 +175,12 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         logDebug(createOperationContext('sync'), `Sync responder SWM snapshot for "${contextGraphId}" ref=${snapshotRef}: auth=${authDurationMs}ms quads=${page.length}`);
       } else if (phase === 'meta') {
         const queryStartedAt = Date.now();
+        const session = prepareResponderSession(
+          'Shared memory meta',
+          `${peerId}:swm-meta:${contextGraphId}`,
+          request.syncSessionId,
+          offset,
+        );
         const rows = await readSwmMetaPage({
           store,
           graphList: await graphListMemo.get({ refresh: offset === 0 }),
@@ -155,6 +189,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           cutoffIso: cutoff,
           offset,
           limit,
+          rowListMemo: session ? swmRowsMemo : undefined,
+          rowListCacheKey: session?.rowListCacheKey,
+          refreshRowList: session?.refreshRowList,
         });
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();
@@ -164,6 +201,12 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         logDebug(createOperationContext('sync'), `Sync responder SWM meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
       } else {
         const queryStartedAt = Date.now();
+        const session = prepareResponderSession(
+          'Shared memory data',
+          `${peerId}:swm-data:${contextGraphId}`,
+          request.syncSessionId,
+          offset,
+        );
         const rows = await readSwmDataPage({
           store,
           graphList: await graphListMemo.get({ refresh: offset === 0 }),
@@ -172,6 +215,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           cutoffIso: cutoff,
           offset,
           limit,
+          rowListMemo: session ? swmRowsMemo : undefined,
+          rowListCacheKey: session?.rowListCacheKey,
+          refreshRowList: session?.refreshRowList,
         });
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();
@@ -184,12 +230,21 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       if (nquads.length === 0) return new TextEncoder().encode('');
     } else if (phase === 'meta') {
       const queryStartedAt = Date.now();
+      const session = prepareResponderSession(
+        'Durable meta',
+        `${peerId}:durable-meta:${contextGraphId}`,
+        request.syncSessionId,
+        offset,
+      );
       const rows = await readDurableMetaPage({
         store,
         contextGraphId,
         registeredSubGraphNames: await subGraphRegistrationMemo.get(contextGraphId, { refresh: offset === 0 }),
         offset,
         limit,
+        rowListMemo: session ? durableMetaRowsMemo : undefined,
+        rowListCacheKey: session?.rowListCacheKey,
+        refreshRowList: session?.refreshRowList,
       });
       const queryDurationMs = Date.now() - queryStartedAt;
       const serializeStartedAt = Date.now();
@@ -199,31 +254,12 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       logDebug(createOperationContext('sync'), `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
     } else {
       const queryStartedAt = Date.now();
-      const durableSessionTokenKey = request.syncSessionId
-        ? `${peerId}:${contextGraphId}:${sinceBatchId == null ? 'full' : sinceBatchId.toString()}`
-        : undefined;
-      const durableSessionTokenNow = Date.now();
-      if (durableSessionTokenKey) pruneDurableDataSessionTokens(durableSessionTokenNow);
-      const activeDurableSessionToken = durableSessionTokenKey
-        ? durableDataSessionTokens.get(durableSessionTokenKey)?.token
-        : undefined;
-      if (
-        durableSessionTokenKey &&
-        offset > 0 &&
-        activeDurableSessionToken !== request.syncSessionId
-      ) {
-        throw new Error('Durable data sync session was superseded before page completion');
-      }
-      const refreshDurableSessionRows = Boolean(
-        durableSessionTokenKey &&
-        offset === 0 &&
-        activeDurableSessionToken !== request.syncSessionId,
+      const session = prepareResponderSession(
+        'Durable data',
+        `${peerId}:durable-data:${contextGraphId}:${sinceBatchId == null ? 'full' : sinceBatchId.toString()}`,
+        request.syncSessionId,
+        offset,
       );
-      if (durableSessionTokenKey && offset === 0) {
-        rememberDurableDataSessionToken(durableSessionTokenKey, request.syncSessionId!, durableSessionTokenNow);
-      } else if (durableSessionTokenKey) {
-        rememberDurableDataSessionToken(durableSessionTokenKey, request.syncSessionId!, durableSessionTokenNow);
-      }
       const rows = sinceBatchId == null
         ? await readDurableDataPage({
           store,
@@ -232,9 +268,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           sinceBatchId,
           offset,
           limit,
-          rowListMemo: request.syncSessionId ? durableDataRowsMemo : undefined,
-          rowListCacheScope: request.syncSessionId ? peerId : undefined,
-          refreshRowList: refreshDurableSessionRows,
+          rowListMemo: session ? durableDataRowsMemo : undefined,
+          rowListCacheScope: session ? peerId : undefined,
+          refreshRowList: session?.refreshRowList,
         })
         : await readDurableDataPage({
           store,
@@ -243,9 +279,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           sinceBatchId,
           offset,
           limit,
-          rowListMemo: request.syncSessionId ? durableDataRowsMemo : undefined,
-          rowListCacheScope: request.syncSessionId ? peerId : undefined,
-          refreshRowList: refreshDurableSessionRows,
+          rowListMemo: session ? durableDataRowsMemo : undefined,
+          rowListCacheScope: session ? peerId : undefined,
+          refreshRowList: session?.refreshRowList,
         });
       const queryDurationMs = Date.now() - queryStartedAt;
       const serializeStartedAt = Date.now();
