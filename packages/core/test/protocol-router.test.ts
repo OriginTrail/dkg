@@ -356,6 +356,51 @@ describe('ProtocolRouter', () => {
       expect(dialCalls).toBe(1);
     });
 
+    it('passes caller signals through close/dial work and does not retry caller aborts', async () => {
+      const callerController = new AbortController();
+      let dialCalls = 0;
+      let closeSignal: AbortSignal | undefined;
+      const node = {
+        libp2p: {
+          getConnections: () => [],
+          dialProtocol: async () => {
+            dialCalls += 1;
+            return {
+              writeStatus: 'open' as const,
+              send: () => undefined,
+              close: async (opts?: { signal?: AbortSignal }) => {
+                closeSignal = opts?.signal;
+                const err = new Error('request cancelled');
+                err.name = 'AbortError';
+                callerController.abort(err);
+                throw err;
+              },
+              abort: () => undefined,
+              async *[Symbol.asyncIterator]() {
+                /* never reached */
+              },
+            };
+          },
+          handle: () => undefined,
+          unhandle: () => undefined,
+          peerStore: { get: async () => { throw new Error('NotFound'); } },
+        },
+      } as unknown as DKGNode;
+      const peerResolver = { resolve: async () => [] } as unknown as PeerResolver;
+      const router = new ProtocolRouter(node, { peerResolver });
+
+      await expect(
+        router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), {
+          timeoutMs: 5000,
+          signal: callerController.signal,
+        }),
+      ).rejects.toThrow('request cancelled');
+
+      expect(closeSignal).toBeDefined();
+      expect(closeSignal?.aborted).toBe(true);
+      expect(dialCalls).toBe(1);
+    });
+
     it('does not fall through from pooled send into one-shot work after node stop aborts', async () => {
       const stopController = new AbortController();
       let dialCalls = 0;

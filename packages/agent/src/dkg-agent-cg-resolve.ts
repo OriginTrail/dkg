@@ -1455,7 +1455,18 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
 
     try {
       const deadline = Date.now() + 10_000;
-      const metaResult = await this.fetchSyncPages(ctx, curatorPeerId, contextGraphId, false, 'meta', cgMetaGraph, deadline);
+      const metaResult = await this.fetchSyncPages(
+        ctx,
+        curatorPeerId,
+        contextGraphId,
+        false,
+        'meta',
+        cgMetaGraph,
+        deadline,
+        undefined,
+        undefined,
+        options.signal,
+      );
       throwIfSyncAuthAborted(options.signal);
       if (metaResult.quads.length > 0) {
         await this.store.insert(metaResult.quads);

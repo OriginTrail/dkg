@@ -2759,6 +2759,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     deadline: number,
     snapshotRef?: string,
     sinceBatchId?: string,
+    signal?: AbortSignal,
   ): Promise<SyncPageResult> {
     return fetchSyncPages({
       ctx,
@@ -2775,6 +2776,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncPageRetryAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
       syncPageSize: SYNC_PAGE_SIZE,
       syncDeniedResponse: SYNC_DENIED_RESPONSE,
+      signal,
       // Legacy sentinel that older (pre-v10-rc) responders still emit on ACL
       // denial. Recognising it in the requester is what keeps mixed-version
       // catch-up correct: without the second sentinel, a curated-CG denial
@@ -2806,8 +2808,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // `messageId` minted by sync-transport.ts is now unused by this
       // adapter — harmless, left in place to keep the transport surface
       // stable (reverts rc.9 PR-E for sync only).
-      send: async (peerId, protocolId, data, sendTimeoutMs, _messageId) =>
-        this.messenger.sendToPeer(peerId, protocolId, data, { timeoutMs: sendTimeoutMs }),
+      send: async (peerId, protocolId, data, sendTimeoutMs, _messageId, sendSignal) =>
+        this.messenger.sendToPeer(peerId, protocolId, data, { timeoutMs: sendTimeoutMs, signal: sendSignal }),
       logWarn: (opCtx, message) => this.log.warn(opCtx, message),
       logInfo: (opCtx, message) => this.log.info(opCtx, message),
       logDebug: (opCtx, message) => this.log.debug(opCtx, message),

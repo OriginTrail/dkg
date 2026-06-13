@@ -89,6 +89,8 @@ export interface SendOptions {
    * there's just one path available, single-path runs.
    */
   parallelPaths?: number;
+  /** Optional caller cancellation signal composed with timeout and node stop. */
+  signal?: AbortSignal;
 }
 
 export interface ProtocolRouterOptions {
@@ -520,7 +522,9 @@ export class ProtocolRouter {
     const overallStartedAt = Date.now();
     const overallDeadline = AbortSignal.timeout(timeoutMs);
     const stopSignal = this.node.stopSignal;
-    const overallSignal = composeAbortSignals(overallDeadline, stopSignal) ?? overallDeadline;
+    const budgetSignal = composeAbortSignals(overallDeadline, opts.signal) ?? overallDeadline;
+    const overallSignal = composeAbortSignals(budgetSignal, stopSignal) ?? budgetSignal;
+    if (overallSignal.aborted) throw asAbortError(overallSignal.reason);
 
     const overlay = this.pooledByLogical.get(protocolId);
     const memoizedVariant = this.peerWireVariantFor(peerIdStr, protocolId);
@@ -597,8 +601,7 @@ export class ProtocolRouter {
     if (parallelPaths > 1) {
       // Reuse the overall budget rather than starting a fresh one
       // — see comment above. Codex PR #560 round 4.
-      const multipathSignal = overallDeadline;
-      const multipathSignalWithStop = composeAbortSignals(multipathSignal, stopSignal) ?? multipathSignal;
+      const multipathSignalWithStop = overallSignal;
       // Multi-path pre-attempt — race up to N live connections.
       // Returns the response on a winning path, or null if there
       // weren't enough live candidates (or all candidates failed).
@@ -672,7 +675,8 @@ export class ProtocolRouter {
         throw lastErr;
       }
       const attemptDeadline = AbortSignal.timeout(remaining);
-      const attemptSignal = composeAbortSignals(attemptDeadline, stopSignal) ?? attemptDeadline;
+      const attemptSignal = composeAbortSignals(attemptDeadline, overallSignal) ?? attemptDeadline;
+      if (attemptSignal.aborted) throw asAbortError(attemptSignal.reason);
       // Track which connection (if any) the fast path picked this
       // attempt so the catch block can blacklist it on failure
       // without needing to inspect stream/connection internals from
@@ -850,7 +854,7 @@ export class ProtocolRouter {
         if (pickedConnection) {
           triedConnections.add(pickedConnection);
         }
-        if (stopSignal?.aborted || attemptDeadline.aborted || overallDeadline.aborted) throw err;
+        if (attemptSignal.aborted || overallSignal.aborted) throw err;
         if (!isRecoverableSendError(err) || attempt >= 2) throw err;
         const backoff = (attempt + 1) * 500;
         // Make the backoff abortable so the overall deadline is
@@ -866,6 +870,10 @@ export class ProtocolRouter {
             clearTimeout(t);
             if (stopSignal?.aborted) {
               reject(asAbortError(stopSignal.reason));
+              return;
+            }
+            if (!overallDeadline.aborted) {
+              reject(asAbortError(overallSignal.reason));
               return;
             }
             reject(new Error(`send timeout: backoff aborted by overall deadline (${timeoutMs}ms)`));

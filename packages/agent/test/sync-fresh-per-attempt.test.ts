@@ -1010,4 +1010,65 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(sendCalls).toBe(2);
     expect(warnings.some((message) => message.includes('Legacy sync responder busy'))).toBe(true);
   });
+
+  it('passes caller abort signal to sync transport and does not retry aborts', async () => {
+    const controller = new AbortController();
+    let releaseSendStarted: () => void = () => {};
+    const sendStarted = new Promise<void>((resolve) => {
+      releaseSendStarted = resolve;
+    });
+    let observedSignal: AbortSignal | undefined;
+    let sendCalls = 0;
+    let retryWarnings = 0;
+
+    const fetchPromise = fetchSyncPages({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId: CG_ID,
+      includeSharedMemory: false,
+      phase: 'meta',
+      graphUri: GRAPH_URI,
+      deadline: Date.now() + 60_000,
+      syncPageTimeoutMs: 10_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 3,
+      syncPageSize: 100,
+      syncDeniedResponse: '#DENIED',
+      signal: controller.signal,
+      debugSyncProgress: false,
+      protocolSync: PROTOCOL_ID,
+      checkpointStore: {
+        get: () => 0,
+        set: () => {},
+        delete: () => {},
+      },
+      buildSyncRequest: async () => new TextEncoder().encode('request'),
+      parseAndFilter: singleQuadParser,
+      send: async (_peerId, _protocolId, _data, _timeoutMs, _messageId, signal) => {
+        sendCalls++;
+        observedSignal = signal;
+        releaseSendStarted();
+        return new Promise<Uint8Array>((_resolve, reject) => {
+          if (signal?.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      },
+      logWarn: () => { retryWarnings++; },
+      logInfo: noopLog,
+      logDebug: noopLog,
+    });
+
+    await sendStarted;
+    const abortReason = new Error('request closed');
+    abortReason.name = 'AbortError';
+    controller.abort(abortReason);
+
+    await expect(fetchPromise).rejects.toThrow('request closed');
+    expect(observedSignal).toBe(controller.signal);
+    expect(sendCalls).toBe(1);
+    expect(retryWarnings).toBe(0);
+  });
 });
