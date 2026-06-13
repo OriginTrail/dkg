@@ -237,7 +237,38 @@ describe('sync responder protection', () => {
     expect(authStarted).toBe(2);
   });
 
-  it('races graph-list memo waits against stream abort and releases capacity', async () => {
+  it('keeps non-abortable authorization work counted until it settles', async () => {
+    const authGate = deferred<boolean>();
+    let authStarted = 0;
+    const cap = captureHandler(baseStore(), {
+      authorizeSyncRequest: async () => {
+        authStarted += 1;
+        if (authStarted === 1) {
+          return authGate.promise;
+        }
+        return false;
+      },
+    });
+    const controller = new AbortController();
+    const envelope = makeEnvelope();
+
+    const first = cap.invoke(envelope, REMOTE_A, controller.signal);
+    while (authStarted < 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort(new Error('stream closed'));
+
+    const later = cap.invoke(envelope, REMOTE_A);
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(authStarted).toBe(1);
+
+    authGate.resolve(false);
+    await expect(first).rejects.toThrow(/stream closed/);
+
+    const denied = await later;
+    expect(new TextDecoder().decode(denied)).toBe('sync-denied');
+    expect(authStarted).toBe(2);
+  });
+
+  it('keeps graph-list cache-miss owners counted until the shared load settles', async () => {
     const listGate = deferred<readonly string[]>();
     let listSignal: AbortSignal | undefined;
     let listCalls = 0;
@@ -262,17 +293,18 @@ describe('sync responder protection', () => {
     expect(listSignal).toBeUndefined();
     controller.abort(new Error('memo wait aborted'));
 
-    await expect(first).rejects.toThrow(/memo wait aborted/);
-
     const later = cap.invoke(envelope, REMOTE_A);
-    while (authStarted < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(authStarted).toBe(1);
+
     listGate.resolve([]);
 
+    await expect(first).rejects.toThrow(/memo wait aborted/);
     await later;
     expect(authStarted).toBe(2);
   });
 
-  it('keeps subgraph-name memo loads independent while aborted waiters release capacity', async () => {
+  it('keeps subgraph-name cache-miss owners counted until the shared load settles', async () => {
     const queryGate = deferred<QueryResult>();
     let querySignal: AbortSignal | undefined;
     let queryCalls = 0;
@@ -297,17 +329,18 @@ describe('sync responder protection', () => {
     expect(querySignal).toBeUndefined();
     controller.abort(new Error('subgraph memo aborted'));
 
-    await expect(first).rejects.toThrow(/subgraph memo aborted/);
-
     const later = cap.invoke(makeEnvelope(), REMOTE_A);
-    while (authStarted < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(authStarted).toBe(1);
+
     queryGate.resolve({ type: 'bindings', bindings: [] });
 
+    await expect(first).rejects.toThrow(/subgraph memo aborted/);
     await later;
     expect(authStarted).toBe(2);
   });
 
-  it('races row-list memo waits against stream abort and releases capacity', async () => {
+  it('keeps row-list cache-miss owners counted until the shared snapshot settles', async () => {
     const rowGate = deferred<QueryResult>();
     let querySignal: AbortSignal | undefined;
     let queryCalls = 0;
@@ -333,24 +366,27 @@ describe('sync responder protection', () => {
     expect(querySignal).toBeUndefined();
     firstController.abort(new Error('row snapshot aborted'));
 
-    await expect(first).rejects.toThrow(/row snapshot aborted/);
-
-    const secondController = new AbortController();
-    const second = cap.invoke(envelope, REMOTE_A, secondController.signal);
-    while (authStarted < 2) await new Promise((resolve) => setTimeout(resolve, 0));
-    for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(queryCalls).toBe(1);
-    secondController.abort(new Error('row memo wait aborted'));
-
-    await expect(second).rejects.toThrow(/row memo wait aborted/);
-
     const later = cap.invoke(envelope, REMOTE_A);
-    while (authStarted < 3) await new Promise((resolve) => setTimeout(resolve, 0));
-    rowGate.resolve({ type: 'bindings', bindings: [] });
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(authStarted).toBe(1);
+    expect(queryCalls).toBe(1);
+
+    rowGate.resolve({
+      type: 'bindings',
+      bindings: [{
+        g: SYNC_PROTECTION_DATA_GRAPH,
+        s: '<urn:test:s>',
+        p: 'http://schema.org/name',
+        o: '"name"',
+      }],
+    });
+
+    await expect(first).rejects.toThrow(/row snapshot aborted/);
+    while (authStarted < 2) await new Promise((resolve) => setTimeout(resolve, 0));
 
     await later;
     expect(queryCalls).toBe(1);
-    expect(authStarted).toBe(3);
+    expect(authStarted).toBe(2);
   });
 
   it('races public snapshot loads against stream abort and releases capacity', async () => {

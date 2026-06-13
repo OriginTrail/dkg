@@ -424,7 +424,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     return null;
   }
 
-  async getContextGraphAgentGateAddresses(this: DKGAgent, contextGraphId: string): Promise<string[] | null> {
+  async getContextGraphAgentGateAddresses(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<string[] | null> {
     const seen = new Set<string>();
     const agents: string[] = [];
     let sawAgentGate = false;
@@ -453,6 +457,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
           { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent }
         }
       }`,
+      { signal: options.signal },
     );
     if (result.type === 'bindings') {
       if (result.bindings.length > 0) sawAgentGate = true;
@@ -481,7 +486,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * granted to agent A's node doesn't accidentally let traffic
    * "on behalf of agent B" through that same node.
    */
-  async getContextGraphAllowedDelegateePeers(this: DKGAgent, contextGraphId: string): Promise<Map<string, string[]>> {
+  async getContextGraphAllowedDelegateePeers(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<Map<string, string[]>> {
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     // SELECT also returns `expiresAtMs` so we can filter expired rows in
     // JS — pushing the FILTER into SPARQL would force a string→long
@@ -499,6 +508,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
           OPTIONAL { ?d <${DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT}> ?expiresAt }
         }
       }`,
+      { signal: options.signal },
     );
     const out = new Map<string, string[]>();
     if (result.type !== 'bindings') return out;
@@ -531,7 +541,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * Expired rows are filtered out — see the peer-lookup helper for the
    * rationale (PR #448 review round 4).
    */
-  async getContextGraphAllowedDelegateeKeys(this: DKGAgent, contextGraphId: string): Promise<Map<string, string[]>> {
+  async getContextGraphAllowedDelegateeKeys(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<Map<string, string[]>> {
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const result = await this.store.query(
       `SELECT ?agent ?key ?expiresAt WHERE {
@@ -541,6 +555,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
           OPTIONAL { ?d <${DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT}> ?expiresAt }
         }
       }`,
+      { signal: options.signal },
     );
     const out = new Map<string, string[]>();
     if (result.type !== 'bindings') return out;

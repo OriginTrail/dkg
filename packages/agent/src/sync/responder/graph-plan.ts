@@ -36,7 +36,7 @@ export interface SyncRowListMemo {
   get(
     key: string,
     loadRows: () => Promise<readonly SyncRow[]>,
-    options?: { refresh?: boolean; requireExisting?: boolean },
+    options?: { refresh?: boolean; requireExisting?: boolean; signal?: AbortSignal },
   ): Promise<readonly SyncRow[] | null>;
 }
 
@@ -60,7 +60,7 @@ export function createResponderGraphListMemo(
       const now = Date.now();
       if (inflight) return [...(await raceAgainstAbort(inflight, options?.signal))];
       if (!options?.refresh && cached && now - cachedAt < ttlMs) return [...cached];
-      inflight = store.listGraphs()
+      const load = store.listGraphs()
         .then((graphs) => {
           const sorted = [...new Set(graphs)].sort(compareCodePoint);
           cached = sorted;
@@ -70,7 +70,10 @@ export function createResponderGraphListMemo(
         .finally(() => {
           inflight = null;
         });
-      return [...(await raceAgainstAbort(inflight, options?.signal))];
+      inflight = load;
+      const graphs = await load;
+      throwIfAborted(options?.signal);
+      return [...graphs];
     },
   };
 }
@@ -142,11 +145,12 @@ export function createResponderSyncRowListMemo(
   };
 
   return {
-    async get(key, loadRows, options?: { refresh?: boolean; requireExisting?: boolean }) {
+    async get(key, loadRows, options?: { refresh?: boolean; requireExisting?: boolean; signal?: AbortSignal }) {
+      throwIfAborted(options?.signal);
       const now = Date.now();
       pruneExpired(now);
       const pending = inflight.get(key);
-      if (pending) return [...(await pending)];
+      if (pending) return [...(await raceAgainstAbort(pending, options?.signal))];
       if (expired.has(key)) {
         if (options?.refresh) {
           deleteExpired(key);
@@ -181,7 +185,9 @@ export function createResponderSyncRowListMemo(
           if (inflight.get(key) === load) inflight.delete(key);
         });
       inflight.set(key, load);
-      return [...(await load)];
+      const rows = await load;
+      throwIfAborted(options?.signal);
+      return [...rows];
     },
   };
 }
@@ -229,7 +235,9 @@ function createSubGraphNameMemo(
           inflight.delete(contextGraphId);
         });
       inflight.set(contextGraphId, load);
-      return [...(await raceAgainstAbort(load, options?.signal))];
+      const names = await load;
+      throwIfAborted(options?.signal);
+      return [...names];
     },
   };
 }
@@ -561,13 +569,11 @@ async function readCachedRowsPage(
   const safeOffset = Math.max(0, Math.floor(offset));
   const safeLimit = Math.max(0, Math.floor(limit));
   if (safeLimit === 0) return [];
-  const rows = await raceAgainstAbort(
-    cache.memo.get(cache.key, loadRows, {
-      refresh: cache.refresh,
-      requireExisting: safeOffset > 0,
-    }),
+  const rows = await cache.memo.get(cache.key, loadRows, {
+    refresh: cache.refresh,
+    requireExisting: safeOffset > 0,
     signal,
-  );
+  });
   if (rows == null) {
     throw new Error(cache.expiredMessage ?? 'Sync session snapshot expired before page completion');
   }
