@@ -41,6 +41,7 @@ const SCHEMA = 'https://schema.org/';
 const DKG  = 'https://dkg.network/ontology#';
 const ERC8004 = 'https://eips.ethereum.org/erc-8004#';
 const PROV = 'http://www.w3.org/ns/prov#';
+const DCT  = 'http://purl.org/dc/terms/';
 
 function q(graph: string, s: string, p: string, o: string): GenesisQuad {
   return { subject: s, predicate: p, object: o, graph };
@@ -233,6 +234,21 @@ export const DKG_ONTOLOGY = {
   DKG_FACT_RESOLVER_VERSION: `${DKG}factResolverVersion`,
   DKG_FACT_RESOLUTION_MODE: `${DKG}factResolutionMode`,
   DKG_SCOPE_UAL: `${DKG}scopeUal`,
+  // OT-RFC-49 §5.9 — verifiable public projection of a private CG.
+  // The mandatory floor: a public, signed RDF node that binds a private
+  // CG into the public graph as a verifiable, addressable node while
+  // disclosing nothing beyond on-chain state. Floor predicates only;
+  // opt-in tiers (domain/blinded-anchors/aggregates/samples) are added
+  // explicitly by the curator, never by default (the disclosure invariant).
+  DKG_PRIVATE_CONTEXT_GRAPH: `${DKG}PrivateContextGraph`, // rdf:type of the projection node
+  DKG_PRIVATE_ACCESS_RIGHTS: `${DKG}Private`,             // dct:accessRights object
+  DKG_COMMITTED_ROOT: `${DKG}committedRoot`,              // = latest on-chain VM merkleRoot (verifiability edge)
+  DKG_ACCESS_SERVICE: `${DKG}accessService`,             // recommended: grant-request endpoint
+  DKG_BLINDED_ANCHOR: `${DKG}blindedAnchor`,             // opt-in T2: HMAC(cgSecret, entityId) join key
+  DCT_IDENTIFIER: `${DCT}identifier`,                     // floor: the CG's UAL
+  DCT_ACCESS_RIGHTS: `${DCT}accessRights`,                // floor: -> DKG_PRIVATE_ACCESS_RIGHTS
+  DCT_PUBLISHER: `${DCT}publisher`,                       // recommended: controlling identity (MAY be per-CG pseudonym)
+  DCT_CONFORMS_TO: `${DCT}conformsTo`,                    // opt-in T1: ontology/domain
   DKG_VIEW: `${DKG}view`,
   DKG_SNAPSHOT_ID: `${DKG}snapshotId`,
   DKG_RESULT_KIND: `${DKG}resultKind`,
