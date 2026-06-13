@@ -8,6 +8,7 @@ const REMOTE_A = '12D3KooWResponderCapPeerA';
 const REMOTE_B = '12D3KooWResponderCapPeerB';
 const REMOTE_C = '12D3KooWResponderCapPeerC';
 const REMOTE_D = '12D3KooWResponderCapPeerD';
+const SYNC_PROTECTION_DATA_GRAPH = 'did:dkg:context-graph:sync-protection';
 
 const noopLog = (_ctx: OperationContext, _message: string) => {};
 
@@ -112,7 +113,8 @@ describe('sync responder protection', () => {
     let completed = 0;
     let inFlight = 0;
     let maxInFlight = 0;
-    const store = {
+    const store = baseStore({
+      listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
       query: async () => {
         inFlight += 1;
         maxInFlight = Math.max(maxInFlight, inFlight);
@@ -124,7 +126,7 @@ describe('sync responder protection', () => {
         await gate.promise;
         return { type: 'bindings', bindings: [] } satisfies QueryResult;
       },
-    } as unknown as TripleStore;
+    });
     const cap = captureHandler(store);
     const envelope = makeEnvelope();
 
@@ -199,14 +201,15 @@ describe('sync responder protection', () => {
 
   it('removes queued requests that abort while registering the abort listener', async () => {
     const releases: Array<() => void> = [];
-    const store = {
+    const store = baseStore({
+      listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
       query: async () => {
         const gate = deferred<void>();
         releases.push(() => gate.resolve());
         await gate.promise;
         return { type: 'bindings', bindings: [] } satisfies QueryResult;
       },
-    } as unknown as TripleStore;
+    });
     const cap = captureHandler(store);
     const envelope = makeEnvelope();
 
@@ -226,14 +229,15 @@ describe('sync responder protection', () => {
 
   it('rejects requests beyond the per-peer responder queue as transport failures', async () => {
     const releases: Array<() => void> = [];
-    const store = {
+    const store = baseStore({
+      listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
       query: async () => {
         const gate = deferred<void>();
         releases.push(() => gate.resolve());
         await gate.promise;
         return { type: 'bindings', bindings: [] } satisfies QueryResult;
       },
-    } as unknown as TripleStore;
+    });
     const cap = captureHandler(store);
     const envelope = makeEnvelope();
 
@@ -255,14 +259,15 @@ describe('sync responder protection', () => {
 
   it('keeps a noisy peer from consuming every shared queue slot', async () => {
     const releases: Array<() => void> = [];
-    const store = {
+    const store = baseStore({
+      listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
       query: async () => {
         const gate = deferred<void>();
         releases.push(() => gate.resolve());
         await gate.promise;
         return { type: 'bindings', bindings: [] } satisfies QueryResult;
       },
-    } as unknown as TripleStore;
+    });
     const cap = captureHandler(store);
     const envelope = makeEnvelope();
 
@@ -289,14 +294,15 @@ describe('sync responder protection', () => {
 
   it('removes aborted queued requests and lets later work proceed', async () => {
     const releases: Array<() => void> = [];
-    const store = {
+    const store = baseStore({
+      listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
       query: async () => {
         const gate = deferred<void>();
         releases.push(() => gate.resolve());
         await gate.promise;
         return { type: 'bindings', bindings: [] } satisfies QueryResult;
       },
-    } as unknown as TripleStore;
+    });
     const cap = captureHandler(store);
     const envelope = makeEnvelope();
     const queuedController = new AbortController();
@@ -319,7 +325,8 @@ describe('sync responder protection', () => {
   it('passes the stream abort signal to store queries and releases capacity on abort', async () => {
     const controller = new AbortController();
     let querySignal: AbortSignal | undefined;
-    const store = {
+    const store = baseStore({
+      listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
       query: async (_sparql: string, options?: QueryOptions) => {
         querySignal = options?.signal;
         await new Promise((_resolve, reject) => {
@@ -327,7 +334,7 @@ describe('sync responder protection', () => {
         });
         return { type: 'bindings', bindings: [] } satisfies QueryResult;
       },
-    } as unknown as TripleStore;
+    });
     const cap = captureHandler(store);
 
     const request = cap.invoke(makeEnvelope(), REMOTE_A, controller.signal);

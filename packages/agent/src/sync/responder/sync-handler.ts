@@ -313,40 +313,95 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         );
       }
       if (isWorkspace) {
-      const cutoff = sharedMemoryTtlMs > 0 ? new Date(Date.now() - sharedMemoryTtlMs).toISOString() : null;
-      if (phase === 'snapshot') {
-        const snapshotRef = request.snapshotRef?.trim();
-        if (!snapshotRef || !publicSnapshotStore) {
-          return new TextEncoder().encode('');
+        const cutoff = sharedMemoryTtlMs > 0 ? new Date(Date.now() - sharedMemoryTtlMs).toISOString() : null;
+        if (phase === 'snapshot') {
+          const snapshotRef = request.snapshotRef?.trim();
+          if (!snapshotRef || !publicSnapshotStore) {
+            return new TextEncoder().encode('');
+          }
+          const snapshot = await publicSnapshotStore.getSnapshot(snapshotRef);
+          if (!snapshot) {
+            return new TextEncoder().encode('');
+          }
+          const page = snapshot.slice(offset, offset + limit);
+          if (page.length === 0) {
+            return new TextEncoder().encode('');
+          }
+          nquads.push(serializeWorkspacePublicSnapshotQuads(page).trimEnd());
+          logDebug(createOperationContext('sync'), `Sync responder SWM snapshot for "${contextGraphId}" ref=${snapshotRef}: auth=${authDurationMs}ms quads=${page.length}`);
+        } else if (phase === 'meta') {
+          const queryStartedAt = Date.now();
+          const session = prepareResponderSession(
+            'Shared memory meta',
+            `${peerId}:swm-meta:${contextGraphId}`,
+            request.syncSessionId,
+            offset,
+          );
+          const rows = await readSwmMetaPage({
+            store,
+            graphList: await graphListMemo.get({ refresh: offset === 0 }),
+            registeredSubGraphNames: await swmAdmissionMemo.get(contextGraphId, { refresh: offset === 0 }),
+            contextGraphId,
+            cutoffIso: cutoff,
+            offset,
+            limit,
+            signal,
+            rowListMemo: session ? swmRowsMemo : undefined,
+            rowListCacheKey: session?.rowListCacheKey,
+            refreshRowList: session?.refreshRowList,
+          });
+          const queryDurationMs = Date.now() - queryStartedAt;
+          const serializeStartedAt = Date.now();
+          const serialized = serializeResponderRows(rows);
+          if (serialized) nquads.push(serialized);
+          const serializeDurationMs = Date.now() - serializeStartedAt;
+          logDebug(createOperationContext('sync'), `Sync responder SWM meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
+        } else {
+          const queryStartedAt = Date.now();
+          const session = prepareResponderSession(
+            'Shared memory data',
+            `${peerId}:swm-data:${contextGraphId}`,
+            request.syncSessionId,
+            offset,
+          );
+          const rows = await readSwmDataPage({
+            store,
+            graphList: await graphListMemo.get({ refresh: offset === 0 }),
+            registeredSubGraphNames: await swmAdmissionMemo.get(contextGraphId, { refresh: offset === 0 }),
+            contextGraphId,
+            cutoffIso: cutoff,
+            offset,
+            limit,
+            signal,
+            rowListMemo: session ? swmRowsMemo : undefined,
+            rowListCacheKey: session?.rowListCacheKey,
+            refreshRowList: session?.refreshRowList,
+          });
+          const queryDurationMs = Date.now() - queryStartedAt;
+          const serializeStartedAt = Date.now();
+          const serialized = serializeResponderRows(rows);
+          if (serialized) nquads.push(serialized);
+          const serializeDurationMs = Date.now() - serializeStartedAt;
+          logDebug(createOperationContext('sync'), `Sync responder SWM data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
         }
-        const snapshot = await publicSnapshotStore.getSnapshot(snapshotRef);
-        if (!snapshot) {
-          return new TextEncoder().encode('');
-        }
-        const page = snapshot.slice(offset, offset + limit);
-        if (page.length === 0) {
-          return new TextEncoder().encode('');
-        }
-        nquads.push(serializeWorkspacePublicSnapshotQuads(page).trimEnd());
-        logDebug(createOperationContext('sync'), `Sync responder SWM snapshot for "${contextGraphId}" ref=${snapshotRef}: auth=${authDurationMs}ms quads=${page.length}`);
+
+        if (nquads.length === 0) return new TextEncoder().encode('');
       } else if (phase === 'meta') {
         const queryStartedAt = Date.now();
         const session = prepareResponderSession(
-          'Shared memory meta',
-          `${peerId}:swm-meta:${contextGraphId}`,
+          'Durable meta',
+          `${peerId}:durable-meta:${contextGraphId}`,
           request.syncSessionId,
           offset,
         );
-        const rows = await readSwmMetaPage({
+        const rows = await readDurableMetaPage({
           store,
-          graphList: await graphListMemo.get({ refresh: offset === 0 }),
-          registeredSubGraphNames: await swmAdmissionMemo.get(contextGraphId, { refresh: offset === 0 }),
           contextGraphId,
-          cutoffIso: cutoff,
+          registeredSubGraphNames: await subGraphRegistrationMemo.get(contextGraphId, { refresh: offset === 0 }),
           offset,
           limit,
           signal,
-          rowListMemo: session ? swmRowsMemo : undefined,
+          rowListMemo: session ? durableMetaRowsMemo : undefined,
           rowListCacheKey: session?.rowListCacheKey,
           refreshRowList: session?.refreshRowList,
         });
@@ -355,26 +410,25 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         const serialized = serializeResponderRows(rows);
         if (serialized) nquads.push(serialized);
         const serializeDurationMs = Date.now() - serializeStartedAt;
-        logDebug(createOperationContext('sync'), `Sync responder SWM meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
+        logDebug(createOperationContext('sync'), `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
       } else {
         const queryStartedAt = Date.now();
         const session = prepareResponderSession(
-          'Shared memory data',
-          `${peerId}:swm-data:${contextGraphId}`,
+          'Durable data',
+          `${peerId}:durable-data:${contextGraphId}:${sinceBatchId == null ? 'full' : sinceBatchId.toString()}`,
           request.syncSessionId,
           offset,
         );
-        const rows = await readSwmDataPage({
+        const rows = await readDurableDataPage({
           store,
           graphList: await graphListMemo.get({ refresh: offset === 0 }),
-          registeredSubGraphNames: await swmAdmissionMemo.get(contextGraphId, { refresh: offset === 0 }),
           contextGraphId,
-          cutoffIso: cutoff,
+          sinceBatchId,
           offset,
           limit,
           signal,
-          rowListMemo: session ? swmRowsMemo : undefined,
-          rowListCacheKey: session?.rowListCacheKey,
+          rowListMemo: session ? durableDataRowsMemo : undefined,
+          rowListCacheScope: session ? peerId : undefined,
           refreshRowList: session?.refreshRowList,
         });
         const queryDurationMs = Date.now() - queryStartedAt;
@@ -382,74 +436,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         const serialized = serializeResponderRows(rows);
         if (serialized) nquads.push(serialized);
         const serializeDurationMs = Date.now() - serializeStartedAt;
-        logDebug(createOperationContext('sync'), `Sync responder SWM data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
-      }
-
-      if (nquads.length === 0) return new TextEncoder().encode('');
-    } else if (phase === 'meta') {
-      const queryStartedAt = Date.now();
-      const session = prepareResponderSession(
-        'Durable meta',
-        `${peerId}:durable-meta:${contextGraphId}`,
-        request.syncSessionId,
-        offset,
-      );
-      const rows = await readDurableMetaPage({
-        store,
-        contextGraphId,
-        registeredSubGraphNames: await subGraphRegistrationMemo.get(contextGraphId, { refresh: offset === 0 }),
-        offset,
-        limit,
-        signal,
-        rowListMemo: session ? durableMetaRowsMemo : undefined,
-        rowListCacheKey: session?.rowListCacheKey,
-        refreshRowList: session?.refreshRowList,
-      });
-      const queryDurationMs = Date.now() - queryStartedAt;
-      const serializeStartedAt = Date.now();
-      const serialized = serializeResponderRows(rows);
-      if (serialized) nquads.push(serialized);
-      const serializeDurationMs = Date.now() - serializeStartedAt;
-      logDebug(createOperationContext('sync'), `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
-    } else {
-      const queryStartedAt = Date.now();
-      const session = prepareResponderSession(
-        'Durable data',
-        `${peerId}:durable-data:${contextGraphId}:${sinceBatchId == null ? 'full' : sinceBatchId.toString()}`,
-        request.syncSessionId,
-        offset,
-      );
-      const rows = sinceBatchId == null
-        ? await readDurableDataPage({
-          store,
-          graphList: await graphListMemo.get({ refresh: offset === 0 }),
-          contextGraphId,
-          sinceBatchId,
-          offset,
-          limit,
-          signal,
-          rowListMemo: session ? durableDataRowsMemo : undefined,
-          rowListCacheScope: session ? peerId : undefined,
-          refreshRowList: session?.refreshRowList,
-        })
-        : await readDurableDataPage({
-          store,
-          graphList: await graphListMemo.get({ refresh: offset === 0 }),
-          contextGraphId,
-          sinceBatchId,
-          offset,
-          limit,
-          signal,
-          rowListMemo: session ? durableDataRowsMemo : undefined,
-          rowListCacheScope: session ? peerId : undefined,
-          refreshRowList: session?.refreshRowList,
-        });
-      const queryDurationMs = Date.now() - queryStartedAt;
-      const serializeStartedAt = Date.now();
-      const serialized = serializeResponderRows(rows);
-      if (serialized) nquads.push(serialized);
-      const serializeDurationMs = Date.now() - serializeStartedAt;
-      logDebug(createOperationContext('sync'), `Sync responder durable data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
+        logDebug(createOperationContext('sync'), `Sync responder durable data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
       }
 
       const totalDurationMs = Date.now() - handlerStartedAt;
