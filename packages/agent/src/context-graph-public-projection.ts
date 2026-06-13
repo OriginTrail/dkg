@@ -154,6 +154,64 @@ export const PUBLIC_PROJECTION_FLOOR_PREDICATES: readonly string[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Combined-model partition (§5.9 / §4): separate the public catalog entry from
+// everything else at publish time. The catalog quads ride in the CG's own
+// merkle root (verifiability) but are routed PLAINTEXT to the public sink and
+// EXCLUDED from the ciphertext fed to the curated encryption emitter; the rest
+// follows the existing (curated ⇒ encrypted) path. Pure + unit-testable; the
+// publish-path wiring calls it at reload time in publishFromSharedMemory.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every predicate a catalog entry may carry (floor + recommended + opt-in
+ * tiers). The partition treats a quad as catalog only if its predicate is in
+ * this set AND its subject is the CG's own UAL — fail-safe: a stray quad on the
+ * CG UAL with any other predicate stays on the encrypted path, never leaked.
+ */
+export const CATALOG_PREDICATES: ReadonlySet<string> = new Set<string>([
+  DKG_ONTOLOGY.RDF_TYPE,            // → dcat:Dataset / dkg:PrivateContextGraph
+  DKG_ONTOLOGY.DCT_IDENTIFIER,
+  DKG_ONTOLOGY.DCT_ACCESS_RIGHTS,
+  DKG_ONTOLOGY.DCT_PUBLISHER,
+  DKG_ONTOLOGY.DCAT_ACCESS_SERVICE,
+  DKG_ONTOLOGY.DCT_CONFORMS_TO,
+  DKG_ONTOLOGY.DKG_BLINDED_ANCHOR,
+  DKG_ONTOLOGY.DKG_COMMITTED_ROOT, // separate-KA variant only; harmless to recognize
+]);
+
+/**
+ * A quad belongs to the CG's public catalog entry iff its subject is the CG's
+ * own UAL and its predicate is a catalog predicate. Both conditions are
+ * required (fail-safe toward privacy): an `rdf:type` quad on a *user* entity,
+ * or a user-authored quad on the CG UAL with a non-catalog predicate, is NOT
+ * catalog and stays on the (curated: encrypted) path.
+ */
+export function isCatalogQuad(quad: Quad, cgUal: string): boolean {
+  return quad.subject === cgUal && CATALOG_PREDICATES.has(quad.predicate);
+}
+
+export interface CatalogPartition {
+  /** Public, plaintext, core-servable — excluded from ciphertext, kept in the merkle root. */
+  catalogQuads: Quad[];
+  /** Everything else — the existing path (encrypted for a curated CG). */
+  otherQuads: Quad[];
+}
+
+/**
+ * Split reloaded publish quads into the public catalog entry and the rest.
+ * Order-preserving and total (`catalogQuads.length + otherQuads.length ===
+ * quads.length`), so nothing is dropped or duplicated.
+ */
+export function partitionCatalogQuads(quads: readonly Quad[], cgUal: string): CatalogPartition {
+  const catalogQuads: Quad[] = [];
+  const otherQuads: Quad[] = [];
+  for (const q of quads) {
+    (isCatalogQuad(q, cgUal) ? catalogQuads : otherQuads).push(q);
+  }
+  return { catalogQuads, otherQuads };
+}
+
+// ---------------------------------------------------------------------------
 // Orchestration: emit a private CG's projection on VM publish (§5.9.3).
 //
 // The capabilities the agent supplies are injected, so the orchestration —
