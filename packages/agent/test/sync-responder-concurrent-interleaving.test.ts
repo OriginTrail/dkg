@@ -41,7 +41,7 @@ function watchBoundedPageQuery(
     const normalized = sparql.replace(/\s+/g, ' ').trim();
     const isTargetPageQuery = /^SELECT (?:DISTINCT )?\?s \?p \?o WHERE \{/.test(normalized) &&
       normalized.includes(`GRAPH <${graph}>`);
-    const isTargetMultiGraphPageQuery = /^SELECT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
+    const isTargetMultiGraphPageQuery = /^SELECT (?:DISTINCT )?\?g \?s \?p \?o WHERE \{/.test(normalized) &&
       normalized.includes(`VALUES ?g { <${graph}>`);
     if (isTargetPageQuery || isTargetMultiGraphPageQuery) {
       observedPageQueries++;

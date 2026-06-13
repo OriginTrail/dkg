@@ -73,6 +73,12 @@ describe('Genesis Knowledge', () => {
           object: 'did:dkg:agent:12D3KooWForeignCreatorPeer111111111111111111111111',
         },
       ]);
+      // The raw store.insert/deleteByPattern above forge a foreign-created CG
+      // out-of-band, bypassing the write path that would normally invalidate the
+      // ContextGraphMetaProjection (real sync calls markDirtyFromQuads after
+      // store.insert — see dkg-agent-lifecycle.ts). Invalidate it here so the
+      // projection re-reads the forged creator instead of the stale self-stamp.
+      (agent as any).contextGraphMetaProjection.markDirty('register-foreign-peer-only');
 
       await expect(agent.registerContextGraph('register-foreign-peer-only'))
         .rejects.toThrow(/has no address-scoped curator/);
