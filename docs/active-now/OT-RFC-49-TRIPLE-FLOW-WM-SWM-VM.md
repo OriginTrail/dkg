@@ -35,7 +35,7 @@ This document is for OriginTrail engineers working on the DKG V10 publish/sync s
 
 ## 4. The combined public facet
 
-**The combined model.** The facet floor is unioned into the publish's `publicQuads` **before** the split, at the async attach point in `publishAsync` (`dkg-agent-publish.ts:889`, just before `partitionPublishAsyncQuads`) and the corresponding sync `publish()` entry. The floor is the set `buildPublicProjection` produces minus its bridging triple: `(ual a dkg:PrivateContextGraph)`, `(ual dct:identifier UAL)`, `(ual dct:accessRights dkg:Private)` (`context-graph-public-projection.ts:96-98`), plus optional disclosure-priced tiers (`dct:publisher` `:104`, `dkg:accessService` `:107`, `dct:conformsTo` `:112`, `dkg:blindedAnchor` `:115`); IRIs in `packages/core/src/genesis.ts:243-251`. Because the facet now rides inside the CG's own committed root, the builder no longer emits a `dkg:committedRoot` floor triple — that triple existed only to bridge two separate roots, and under the combined model there is exactly one root, so it is redundant (see below).
+**The combined model.** The catalog entry is unioned into the publish's `publicQuads` **before** the split, at the async attach point in `publishAsync` (`dkg-agent-publish.ts:889`, just before `partitionPublishAsyncQuads`) and the corresponding sync `publish()` entry. The floor is the DCAT dataset record `buildPublicProjection` produces (`context-graph-public-projection.ts`): `(ual a dcat:Dataset, dkg:PrivateContextGraph)` — dual-typed, DCAT for interop and dkg: for native consumers — `(ual dct:identifier UAL)`, `(ual dct:accessRights …/RESTRICTED)` (the standard EU access-right value), plus optional disclosure-priced tiers (`dct:publisher`, `dcat:accessService` → a `dcat:DataService` grant endpoint, `dct:conformsTo`/`dcat:theme`/`dcat:keyword`, `dkg:blindedAnchor`); IRIs and the `dcat:` namespace in `packages/core/src/genesis.ts`. Because the entry now rides inside the CG's own committed root, the builder omits the `dkg:committedRoot` triple (it is `committedRoot`-optional) — that triple existed only to bridge two separate roots, and under the combined model there is exactly one root, so it is redundant (see below).
 
 **Same root, intrinsic verifiability.** Once the facet rides in `publicQuads`, `canonicalPublishPayload` commits it inside `kcMerkleRoot = computeFlatKCRootV10(skolemizedPublicQuads, privateRoots)` (`canonical-publish-payload.ts:51`) — the **same** merkle root that folds in the per-entity private hashes (`computePrivateRootV10`). The facet sits alongside the existing plaintext `PRIVATE_DATA_ANCHOR` markers (`packages/agent/src/dkg-agent-constants.ts:13`, inserted at `dkg-agent-helpers.ts:86-95`) that `partitionPublishAsyncQuads` already places for every gated root. Because the facet is in the CG's **own** committed root, the on-chain publish record *is* the facet's verifiability edge: there is no second KA, no separate root, and therefore **no `dkg:committedRoot` self-reference and no registry/discovery CG** are required. Verifiability of the public facet is intrinsic — it lives in the CG's own on-chain root.
 
@@ -73,7 +73,7 @@ sequenceDiagram
 
     Note over Outsider,Chain: Outsider discovers and verifies the public facet
     Outsider->>Cores: facet-only request, PLAINTEXT, no allowlist
-    Cores-->>Outsider: public facet quads PLAINTEXT<br/>a dkg PrivateContextGraph, UAL, accessRights Private
+    Cores-->>Outsider: public catalog entry PLAINTEXT<br/>a dcat Dataset and dkg PrivateContextGraph, accessRights RESTRICTED
     Outsider->>Chain: read committed merkleRoot
     Note over Outsider: verify facet quads in the CG own on-chain root<br/>verifiability INTRINSIC, no committedRoot triple needed
 ```
@@ -86,9 +86,9 @@ sequenceDiagram
 | **SWM** | Outer `GossipEnvelope` fields: version, type, cleartext `contextGraphId`, sender `agentAddress`, timestamp, signature; sender-key message metadata (epochId, membershipHash, messageIndex, nonce, aadHash). For a **public CG**, the N-Quads payload too. | For a **private CG**, the `WorkspacePublishRequest` payload (AEAD under ratcheting chain key); the chain key (ECIES-style sealed per recipient). | Members decrypt & apply; **member anchors** hold the durable ciphertext + see envelope metadata only. Cores see nothing of a private CG's SWM. |
 | **VM** | Public quads incl. `PRIVATE_DATA_ANCHOR` markers and the public facet floor → `publicSnapshotStore` on cores, committed plaintext in `kcMerkleRoot`. The on-chain `merkleRoot` itself. | `privateQuads` as opaque `computePrivateRootV10` hashes in the root + AEAD ciphertext custodied by **member anchors**. | Anyone reads the on-chain root + public facet (cores serve it openly); private payload gated to members and held by anchors. |
 
-## 7. Cores serve the public facet openly
+## 7. Cores serve the public catalog entry openly
 
-Under the target, the only part of a private CG that a core touches is its public facet, and cores **serve the public-facet subgraph of a private CG openly to outsiders**, even though the rest of the CG is access-gated and never reaches a core at all. This is the facet-scoped open-serve path.
+Under the target, the only part of a private CG that a core touches is its public catalog entry, and cores **serve the `_catalog` subgraph of a private CG openly to outsiders**, even though the rest of the CG is access-gated and never reaches a core at all. This is the facet-scoped open-serve path (the catalog entry is a standard `dcat:Dataset`, so serving it is publishing a discoverable catalog record).
 
 The serve gate distinguishes the facet from gated content. On the responder side, `authorizeSyncRequest` (`packages/agent/src/dkg-agent-cg-resolve.ts:779`) returns `true` for a public CG (`!isPrivateContextGraph`, `:781-782`) and, for a private CG, takes a **facet-scoped open-serve path** — it serves the bounded public-projection subgraph (the facet floor + `PRIVATE_DATA_ANCHOR` markers) without allowlist auth, while routing any request that reaches beyond the facet through `authorizePrivateSyncRequest` (`packages/agent/src/sync/auth/request-authorize.ts:46`, called at `:785`), which validates envelope/replay/signature and returns a CG-wide allow/deny boolean (`:195`). On a core, the private payload is not present to serve regardless — only the facet is hostable. On the requester side, `buildSyncRequest` (`cg-resolve.ts:701`) frames an unauthenticated **facet-only** request shape so an outsider can fetch the plaintext facet of a private CG. The classifier feeding both gates is `isPrivateContextGraph` (`:1211`). The `SyncPhase` set carries a facet-scoped phase/scope alongside `meta | snapshot | data` (`request-build.ts:3`) so the open path cannot be used to exfiltrate gated quads.
 
@@ -138,11 +138,11 @@ ex:shipment/SH-42   ex:product       ex:product/P-9 .
 ex:shipment/SH-42   ex:quantity      "500" .
 ex:shipment/SH-42   ex:destination   ex:facility/Lyon .
 ```
-*Public facet — generated at publish, describes the CG itself (the floor, `buildPublicProjection`):*
+*Public catalog entry — a DCAT dataset record generated at publish, describing the CG itself (the floor, `buildPublicProjection`). Prefixes: `dcat: = http://www.w3.org/ns/dcat#`:*
 ```
-<did:dkg:context-graph:acme-trace>  rdf:type          dkg:PrivateContextGraph .
+<did:dkg:context-graph:acme-trace>  rdf:type          dcat:Dataset , dkg:PrivateContextGraph .
 <did:dkg:context-graph:acme-trace>  dct:identifier    "did:dkg:context-graph:acme-trace" .
-<did:dkg:context-graph:acme-trace>  dct:accessRights  dkg:Private .
+<did:dkg:context-graph:acme-trace>  dct:accessRights  <http://publications.europa.eu/resource/authority/access-right/RESTRICTED> .
 ```
 *Public marker — auto-inserted by `partitionPublishAsyncQuads` for the private root:*
 ```
@@ -176,7 +176,7 @@ ex:shipment/SH-42   <http://dkg.io/ontology/privateDataAnchor>   "true" .
 
 | Bucket | Contents |
 |---|---|
-| **Cores** (public facet graph `…/acme-trace/_facet`, plaintext, served openly) | `<…/acme-trace> a dkg:PrivateContextGraph ; dct:identifier "…" ; dct:accessRights dkg:Private .`<br/>`ex:shipment/SH-42 <…/privateDataAnchor> "true" .` |
+| **Cores** (public catalog graph `…/acme-trace/_catalog`, plaintext, served openly) | `<…/acme-trace> a dcat:Dataset , dkg:PrivateContextGraph ; dct:identifier "…" ; dct:accessRights <…/RESTRICTED> .`<br/>`ex:shipment/SH-42 <…/privateDataAnchor> "true" .` |
 | **Anchors** (`…/_private` / `PrivateContentStore`, AEAD ciphertext) | the 3 shipment triples, **encrypted**; folded into the root as opaque `computePrivateRootV10` hashes |
 | **Chain** | one `merkleRoot` (covers facet + marker + private hashes), `kaId`, `txHash` |
 | **Members** | full plaintext (they are members) |
@@ -200,6 +200,6 @@ ex:shipment/SH-42   <http://dkg.io/ontology/privateDataAnchor>   "true" .
 | `…/acme-trace/_shared_memory` | SWM live state | members |
 | `…/acme-trace/_private` | encrypted VM payload | members (decrypt), anchors (custody) |
 | `…/acme-trace/_meta` | registration (curator, accessPolicy) | members / cores |
-| **`…/acme-trace/_facet`** *(proposed)* | **the public projection floor + private-data markers** | **anyone — served openly by cores** |
+| **`…/acme-trace/_catalog`** *(proposed)* | **the DCAT dataset record (catalog entry) + private-data markers** | **anyone — served openly by cores** |
 
-The facet being its **own bounded named graph** is what makes the §7 facet-scoped open-serve safe: the gate releases exactly `…/_facet` and nothing else, so it cannot leak a gated triple. (Today's code instead emits the facet as a separate KA in a discovery CG; the `_facet` subgraph is the combined-model replacement and is not yet in code — the other `_meta`/`_private`/`_shared_memory` graphs already exist.)
+The catalog entry being its **own bounded named graph** is what makes the §7 facet-scoped open-serve safe: the gate releases exactly `…/_catalog` and nothing else, so it cannot leak a gated triple. The entry is a standard `dcat:Dataset` (dual-typed with `dkg:PrivateContextGraph`), so the network's aggregate public graph is, in DCAT terms, a `dcat:Catalog` an outsider can harvest with off-the-shelf tooling. (Today's code instead emits the entry as a separate KA in a discovery CG; the `_catalog` subgraph is the combined-model replacement and is not yet in code — the other `_meta`/`_private`/`_shared_memory` graphs already exist.)
