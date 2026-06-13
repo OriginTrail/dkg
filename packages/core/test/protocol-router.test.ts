@@ -167,6 +167,34 @@ describe('ProtocolRouter', () => {
       expect(stream.aborted).toBeNull();
     });
 
+    it('removes the node stop listener after successful raw inbound handling', async () => {
+      const stopController = new AbortController();
+      let adds = 0;
+      let removes = 0;
+      const originalAdd = stopController.signal.addEventListener.bind(stopController.signal);
+      const originalRemove = stopController.signal.removeEventListener.bind(stopController.signal);
+      stopController.signal.addEventListener = ((type, listener, options) => {
+        if (type === 'abort') adds += 1;
+        return originalAdd(type, listener, options);
+      }) as AbortSignal['addEventListener'];
+      stopController.signal.removeEventListener = ((type, listener, options) => {
+        if (type === 'abort') removes += 1;
+        return originalRemove(type, listener, options);
+      }) as AbortSignal['removeEventListener'];
+
+      try {
+        const fixture = makeInboundFixture(stopController.signal);
+        fixture.router.register(PROTOCOL, async () => new Uint8Array([0xaa]));
+        await fixture.invoke(new FakeInboundStream([new Uint8Array([0x01])]));
+
+        expect(adds).toBeGreaterThan(0);
+        expect(removes).toBe(adds);
+      } finally {
+        stopController.signal.addEventListener = originalAdd as AbortSignal['addEventListener'];
+        stopController.signal.removeEventListener = originalRemove as AbortSignal['removeEventListener'];
+      }
+    });
+
     it('aborts the handler signal when the inbound stream closes while work is pending', async () => {
       let seenSignal: AbortSignal | undefined;
       const fixture = makeInboundFixture();

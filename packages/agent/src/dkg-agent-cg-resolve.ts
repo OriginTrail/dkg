@@ -718,6 +718,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       computeSyncDigest: this.computeSyncDigest.bind(this),
       verifyIdentity: typeof verifyIdentity === 'function'
         ? async (recoveredAddress, claimedIdentityId, lookupOptions) => {
+            // Chain/RPC verifiers are not actually abortable in ethers. Do not
+            // race them against request aborts: that would free responder
+            // capacity while the RPC keeps running in the background.
             const valid = await verifyIdentity.call(this.chain, recoveredAddress, claimedIdentityId);
             throwIfSyncAuthAborted(lookupOptions?.signal);
             return valid;

@@ -312,11 +312,16 @@ export class ProtocolRouter {
           throw new Error('peerId.toBytes not available on pooled handler');
         },
       };
-      const handlerSignal = composeAbortSignals(options?.signal, this.node.stopSignal);
-      if (handlerSignal?.aborted) throw asAbortError(handlerSignal.reason);
-      const responseData = await handler(requestData, wrappedPeerId, { signal: handlerSignal });
-      if (handlerSignal?.aborted) throw asAbortError(handlerSignal.reason);
-      return responseData;
+      const handlerSignalScope = composeAbortSignalsScoped(options?.signal, this.node.stopSignal);
+      const handlerSignal = handlerSignalScope.signal;
+      try {
+        if (handlerSignal?.aborted) throw asAbortError(handlerSignal.reason);
+        const responseData = await handler(requestData, wrappedPeerId, { signal: handlerSignal });
+        if (handlerSignal?.aborted) throw asAbortError(handlerSignal.reason);
+        return responseData;
+      } finally {
+        handlerSignalScope.dispose();
+      }
     });
   }
 
@@ -381,7 +386,8 @@ export class ProtocolRouter {
         }
       };
       stream.addEventListener('close', onStreamClose as EventListener, { once: true });
-      const handlerSignal = composeAbortSignals(streamController.signal, stopSignal);
+      const handlerSignalScope = composeAbortSignalsScoped(streamController.signal, stopSignal);
+      const handlerSignal = handlerSignalScope.signal;
       try {
         const requestData = await readAllWithSignal(stream, limit, handlerSignal);
         const peerId = {
@@ -426,6 +432,7 @@ export class ProtocolRouter {
           // stream already closed
         }
       } finally {
+        handlerSignalScope.dispose();
         stream.removeEventListener('close', onStreamClose as EventListener);
       }
     }, { runOnLimitedConnection: true });
@@ -1340,6 +1347,40 @@ export function composeAbortSignals(
     secondary.addEventListener('abort', forwardSecondary, { once: true });
   }
   return combined.signal;
+}
+
+function composeAbortSignalsScoped(
+  primary: AbortSignal | undefined,
+  secondary: AbortSignal | undefined,
+): { signal: AbortSignal | undefined; dispose: () => void } {
+  if (!primary || !secondary || primary === secondary) {
+    return { signal: primary ?? secondary, dispose: () => undefined };
+  }
+  const combined = new AbortController();
+  let disposed = false;
+  const cleanup = () => {
+    if (disposed) return;
+    disposed = true;
+    primary.removeEventListener('abort', forwardPrimary);
+    secondary.removeEventListener('abort', forwardSecondary);
+  };
+  const forwardPrimary = () => {
+    if (!combined.signal.aborted) combined.abort(primary.reason);
+    cleanup();
+  };
+  const forwardSecondary = () => {
+    if (!combined.signal.aborted) combined.abort(secondary.reason);
+    cleanup();
+  };
+  if (primary.aborted) {
+    combined.abort(primary.reason);
+  } else if (secondary.aborted) {
+    combined.abort(secondary.reason);
+  } else {
+    primary.addEventListener('abort', forwardPrimary, { once: true });
+    secondary.addEventListener('abort', forwardSecondary, { once: true });
+  }
+  return { signal: combined.signal, dispose: cleanup };
 }
 
 function abortStream(stream: AbortableByteStream, reason: unknown): void {
