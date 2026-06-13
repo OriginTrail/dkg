@@ -1317,6 +1317,28 @@ export async function runDaemonInner(
     },
   });
 
+  // Shared curator AI-model access (MVP): wire node config -> agent so the
+  // curator's node can serve member invokes. Reuses `config.llm` for provider
+  // credentials when `config.sharedModel` doesn't override them. Inert unless
+  // `sharedModel.enabled` is set, so default deployments are unaffected.
+  {
+    const sm = config.sharedModel;
+    const llm = config.llm;
+    if (sm?.enabled) {
+      const provider = sm.provider ?? ((sm.model ?? llm?.model) ? 'openai-compatible' : 'mock');
+      const apiKey = sm.apiKeyEnv ? process.env[sm.apiKeyEnv] : llm?.apiKey;
+      agent.configureSharedModel({
+        enabled: true,
+        provider,
+        model: sm.model ?? llm?.model ?? 'mock-model',
+        baseUrl: sm.baseUrl ?? llm?.baseURL,
+        apiKey,
+        dailyRequestQuotaPerAgent: sm.dailyRequestQuotaPerAgent ?? 200,
+        maxPromptChars: sm.maxPromptChars ?? 8000,
+      });
+    }
+  }
+
   let publisherRuntime: PublisherRuntime | null = null;
   // Holds the running async-promote worker lifecycle (PR #3 of the
   // async-promote-queue series). Initialised in `startPostApiPublishing`

@@ -321,6 +321,7 @@ import { handleHermesRoutes } from './routes/hermes.js';
 import { handleMemoryRoutes } from './routes/memory.js';
 import { handlePublisherRoutes } from './routes/publisher.js';
 import { handleContextGraphRoutes } from './routes/context-graph.js';
+import { handleSharedModelRoutes } from './routes/shared-model.js';
 import { handleKnowledgeAssetsRoutes } from './routes/knowledge-assets.js';
 import { handleKcChainMetadataRoutes } from './routes/kc-chain-metadata.js';
 import { handleFileServingRoutes } from './routes/file-serving.js';
@@ -429,6 +430,9 @@ export async function handleRequest(
   if (res.writableEnded) return;
 
   await handleContextGraphRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleSharedModelRoutes(ctx);
   if (res.writableEnded) return;
 
   await handleKnowledgeAssetsRoutes(ctx);
