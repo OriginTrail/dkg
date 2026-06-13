@@ -579,9 +579,16 @@ function contextGraphValidationUnavailable(
   return null;
 }
 
-function hasSyncedSubscription(probe: ContextGraphWritePreflightProbe): boolean {
+function hasActiveSyncedSubscription(probe: ContextGraphWritePreflightProbe): boolean {
   return (
-    (probe.inMemorySubscription?.subscribed === true && probe.inMemorySubscription.synced === true) ||
+    probe.inMemorySubscription?.subscribed === true &&
+    probe.inMemorySubscription.synced === true
+  );
+}
+
+function hasAnySyncedSubscription(probe: ContextGraphWritePreflightProbe): boolean {
+  return (
+    hasActiveSyncedSubscription(probe) ||
     (probe.persistedSubscription?.subscribed === true && probe.persistedSubscription.synced === true)
   );
 }
@@ -592,9 +599,9 @@ function exactProbeIsLocallyWritable(
 ): boolean {
   if (!probe.exists) return false;
   if (!requireLocalWritable) {
-    return hasSyncedSubscription(probe) || probe.hasLocalContent || probe.declarationFound;
+    return hasActiveSyncedSubscription(probe) || probe.hasLocalContent || probe.declarationFound;
   }
-  return hasSyncedSubscription(probe) || (probe.hasLocalContent && probe.exists);
+  return hasActiveSyncedSubscription(probe) || (probe.hasLocalContent && probe.exists);
 }
 
 function exactProbeCanFastAccept(
@@ -603,6 +610,7 @@ function exactProbeCanFastAccept(
   callerAgentAddress: string | null,
 ): boolean {
   if (!exactProbeIsLocallyWritable(probe, requireLocalWritable)) return false;
+  if (!callerAgentAddress && probe.accessPolicy === "private") return false;
   if (!callerAgentAddress) return true;
   return probe.callerAuthorized === true;
 }
@@ -621,7 +629,7 @@ function exactProbeIsAuthoritativeBearerDeny(
 }
 
 function exactProbeIsStaleSubscription(probe: ContextGraphWritePreflightProbe): boolean {
-  return hasSyncedSubscription(probe) && !probe.exists && !probe.hasLocalContent;
+  return hasAnySyncedSubscription(probe) && !probe.exists && !probe.hasLocalContent;
 }
 
 function rejectUnknownContextGraph(

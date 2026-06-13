@@ -737,6 +737,30 @@ describe('context graph write-path validation', () => {
     expect(agent.calls.create).toHaveBeenCalledWith('fast-owner-cg', 'draft', { subGraphName: undefined });
   });
 
+  it('does not fast-accept persisted-only subscriptions when list validation is down', async () => {
+    const agent = makeAgent([
+      {
+        id: 'dormant-cg',
+        uri: 'did:dkg:context-graph:dormant-cg',
+        persistedSubscribed: true,
+        persistedSynced: true,
+        declarationFound: true,
+      },
+    ], { exactPreflight: true });
+    agent.listContextGraphs.mockRejectedValueOnce(new Error('list timeout'));
+    await startRoutes(agent);
+
+    const result = await post('/api/knowledge-assets', {
+      contextGraphId: 'dormant-cg',
+      name: 'draft',
+    });
+
+    expect(result.status).toBe(503);
+    expect(result.body).toMatchObject({ code: 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE' });
+    expect(agent.listContextGraphs).toHaveBeenCalledTimes(1);
+    expect(agent.calls.create).not.toHaveBeenCalled();
+  });
+
   it('denies stale subscribed rows instead of creating shadow context graphs', async () => {
     const agent = makeAgent([
       {
@@ -816,6 +840,31 @@ describe('context graph write-path validation', () => {
       [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
       expect.objectContaining({ callerAgentAddress: CALLER }),
     );
+  });
+
+  it('does not fast-accept tokenless writes to exact private targets', async () => {
+    const agent = makeAgent([
+      {
+        id: 'tokenless-private-cg',
+        uri: 'did:dkg:context-graph:tokenless-private-cg',
+        subscribed: true,
+        synced: true,
+        accessPolicy: 'private',
+        declarationFound: true,
+      },
+    ], { exactPreflight: true });
+    agent.listContextGraphs.mockRejectedValueOnce(new Error('list timeout'));
+    await startRoutes(agent);
+
+    const result = await post('/api/shared-memory/write', {
+      contextGraphId: 'tokenless-private-cg',
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
+    });
+
+    expect(result.status).toBe(503);
+    expect(result.body).toMatchObject({ code: 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE' });
+    expect(agent.listContextGraphs).toHaveBeenCalledTimes(1);
+    expect(agent.calls.share).not.toHaveBeenCalled();
   });
 
   it('does not bearer-fast-accept exact declarations without explicit access policy', async () => {
