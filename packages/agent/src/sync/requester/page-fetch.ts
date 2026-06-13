@@ -1,5 +1,6 @@
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { randomUUID } from 'node:crypto';
 import { sendSyncRequest } from '../../p2p/sync-transport.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from '../checkpoint/state.js';
@@ -41,7 +42,7 @@ interface FetchSyncPagesParams {
   debugSyncProgress: boolean;
   protocolSync: string;
   checkpointStore: SyncCheckpointStore;
-  buildSyncRequest: (contextGraphId: string, offset: number, limit: number, includeSharedMemory: boolean, remotePeerId: string, phase?: SyncPhase, snapshotRef?: string, sinceBatchId?: string) => Promise<Uint8Array>;
+  buildSyncRequest: (contextGraphId: string, offset: number, limit: number, includeSharedMemory: boolean, remotePeerId: string, phase?: SyncPhase, snapshotRef?: string, sinceBatchId?: string, syncSessionId?: string) => Promise<Uint8Array>;
   /**
    * Phase C — optional, gap-safe delta-sync high-water mark. Forwarded to the
    * responder for the durable DATA phase so it returns only KAs with
@@ -110,6 +111,9 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   const resumedFromOffset = offset;
   let bytesReceived = 0;
   let timedOut = false;
+  const syncSessionId = offset === 0 && !includeSharedMemory && phase === 'data' && !sinceBatchId
+    ? randomUUID()
+    : undefined;
 
   while (true) {
     if (Date.now() > deadline) {
@@ -139,7 +143,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       // fresh-messageId-per-attempt is generated inside
       // `sendSyncRequest`. See `sendSyncRequest`'s jsdoc for the
       // full rationale (codex review on #569 follow-ups #1, #4-#8).
-      requestFactory: () => buildSyncRequest(contextGraphId, curOffset, syncPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId),
+      requestFactory: () => buildSyncRequest(contextGraphId, curOffset, syncPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId),
       send,
       onRetry: (attempt, delay, err) => {
         logWarn(ctx, `Sync page retry ${attempt}/${syncPageRetryAttempts} for offset ${offset} (delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`);

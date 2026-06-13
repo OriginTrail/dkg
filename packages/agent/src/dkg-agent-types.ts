@@ -148,6 +148,7 @@ export interface SyncRequestEnvelope {
   requesterPeerId?: string;
   requestId?: string;
   issuedAtMs?: number;
+  syncSessionId?: string;
   requesterIdentityId?: string;
   requesterAgentAddress?: string;
   requesterSignatureR?: string;

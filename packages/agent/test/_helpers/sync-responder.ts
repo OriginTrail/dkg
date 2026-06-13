@@ -17,7 +17,7 @@ export interface CapturedSyncHandler {
     proto: string,
     handler: (data: Uint8Array, peerId: string) => Promise<Uint8Array>,
   ) => void;
-  invoke: (envelope: SyncRequestEnvelope) => Promise<string>;
+  invoke: (envelope: SyncRequestEnvelope, remotePeerId?: string) => Promise<string>;
 }
 
 export function captureSyncHandler(): CapturedSyncHandler {
@@ -26,10 +26,10 @@ export function captureSyncHandler(): CapturedSyncHandler {
     register: (_proto, handler) => {
       captured = handler;
     },
-    invoke: async (envelope) => {
+    invoke: async (envelope, remotePeerId = TEST_REMOTE_PEER) => {
       if (!captured) throw new Error('handler not registered');
       const bytes = new TextEncoder().encode(JSON.stringify(envelope));
-      const out = await captured(bytes, TEST_REMOTE_PEER);
+      const out = await captured(bytes, remotePeerId);
       return new TextDecoder().decode(out);
     },
   };

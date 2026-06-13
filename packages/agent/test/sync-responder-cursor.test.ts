@@ -162,6 +162,22 @@ describe('sync responder — Phase C sinceBatchId delta filter', () => {
     expect(excluded).not.toContain('"data-K"');
   });
 
+  it('honors collapsed single-root KA metadata without dkg:partOf', async () => {
+    const ual = 'did:dkg:evm:31337/0xcollapsed';
+    const root = 'urn:root:collapsed';
+    await store.insert([
+      { graph: PER_CG_META, subject: ual, predicate: `${DKG_NS}rootEntity`, object: root },
+      { graph: PER_CG_META, subject: ual, predicate: `${DKG_NS}batchId`, object: intLit(14) },
+      { graph: PER_CG_DATA, subject: root, predicate: `${DKG_NS}label`, object: '"data-collapsed"' },
+    ]);
+
+    const included = await cap.invoke({ contextGraphId: CG_ID, offset: 0, limit: 5000, includeSharedMemory: false, phase: 'data', sinceBatchId: '13' });
+    expect(included).toContain('"data-collapsed"');
+
+    const excluded = await cap.invoke({ contextGraphId: CG_ID, offset: 0, limit: 5000, includeSharedMemory: false, phase: 'data', sinceBatchId: '14' });
+    expect(excluded).not.toContain('"data-collapsed"');
+  });
+
   it('does not let another CG reusing the same rootEntity IRI leak into the delta', async () => {
     // Regression: the KA→KC→batchId join must be scoped to THIS CG's meta
     // graphs. Pollute a DIFFERENT CG's per-cgId meta with the SAME rootEntity

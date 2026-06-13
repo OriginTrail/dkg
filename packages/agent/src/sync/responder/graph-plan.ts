@@ -30,6 +30,14 @@ export interface SubGraphNameMemo {
   get(contextGraphId: string, options?: { refresh?: boolean }): Promise<readonly string[]>;
 }
 
+export interface SyncRowListMemo {
+  get(
+    key: string,
+    loadRows: () => Promise<readonly SyncRow[]>,
+    options?: { refresh?: boolean; requireExisting?: boolean },
+  ): Promise<readonly SyncRow[] | null>;
+}
+
 export function createResponderGraphListMemo(
   store: TripleStore,
   ttlMs = 10_000,
@@ -53,6 +61,91 @@ export function createResponderGraphListMemo(
           inflight = null;
         });
       return [...(await inflight)];
+    },
+  };
+}
+
+export function createResponderSyncRowListMemo(
+  ttlMs = 10_000,
+  maxEntries = 8,
+): SyncRowListMemo {
+  const cached = new Map<string, {
+    value: readonly SyncRow[];
+    cachedAt: number;
+    cleanupTimer: ReturnType<typeof setTimeout>;
+  }>();
+  const inflight = new Map<string, Promise<readonly SyncRow[]>>();
+
+  const deleteCached = (key: string) => {
+    const existing = cached.get(key);
+    if (existing) clearTimeout(existing.cleanupTimer);
+    cached.delete(key);
+  };
+
+  const pruneExpired = (now = Date.now()) => {
+    for (const [key, entry] of cached) {
+      if (now - entry.cachedAt >= ttlMs) deleteCached(key);
+    }
+  };
+
+  const scheduleCleanup = (key: string, cachedAt: number) => {
+    const timer = setTimeout(() => {
+      const existing = cached.get(key);
+      if (existing?.cachedAt === cachedAt) cached.delete(key);
+    }, ttlMs);
+    (timer as { unref?: () => void }).unref?.();
+    return timer;
+  };
+
+  const storeCached = (key: string, value: readonly SyncRow[]) => {
+    const now = Date.now();
+    pruneExpired(now);
+    const replacingExisting = cached.has(key);
+    if (!replacingExisting && cached.size >= maxEntries) {
+      throw new Error('Too many active durable data sync session snapshots');
+    }
+    deleteCached(key);
+    cached.set(key, {
+      value,
+      cachedAt: now,
+      cleanupTimer: scheduleCleanup(key, now),
+    });
+  };
+
+  return {
+    async get(key, loadRows, options?: { refresh?: boolean; requireExisting?: boolean }) {
+      const now = Date.now();
+      pruneExpired(now);
+      const pending = inflight.get(key);
+      if (pending) return [...(await pending)];
+
+      const existing = cached.get(key);
+      if (!options?.refresh && existing && now - existing.cachedAt < ttlMs) {
+        const refreshed = {
+          value: existing.value,
+          cachedAt: now,
+          cleanupTimer: scheduleCleanup(key, now),
+        };
+        deleteCached(key);
+        cached.set(key, refreshed);
+        return [...existing.value];
+      }
+      if (options?.requireExisting) return null;
+      if (!cached.has(key) && cached.size + inflight.size >= maxEntries) {
+        throw new Error('Too many active durable data sync session snapshots');
+      }
+
+      const load = loadRows()
+        .then((rows) => {
+          const value = [...rows];
+          storeCached(key, value);
+          return value;
+        })
+        .finally(() => {
+          if (inflight.get(key) === load) inflight.delete(key);
+        });
+      inflight.set(key, load);
+      return [...(await load)];
     },
   };
 }
@@ -162,7 +255,7 @@ export async function readSwmDataPage(params: {
 
   if (!params.cutoffIso) {
     const candidateGraphs = dedupeStrings(dataGraphs.flatMap(candidateGraphsFor)).sort(compareCodePoint);
-    return readPagedRowsAcrossGraphs(params.store, candidateGraphs, params.offset, params.limit, async () => true);
+    return readPagedRowsAcrossGraphsStoreBounded(params.store, candidateGraphs, params.offset, params.limit, async () => true);
   }
 
   const rows: SyncRow[] = [];
@@ -207,20 +300,6 @@ export async function readDurableMetaPage(params: {
   );
 }
 
-export async function readDurableCanonicalDataPage(params: {
-  store: TripleStore;
-  contextGraphId: string;
-  offset: number;
-  limit: number;
-}): Promise<SyncRow[]> {
-  return readGraphRowsPage(
-    params.store,
-    contextGraphDataGraphUri(params.contextGraphId),
-    params.offset,
-    params.limit,
-  );
-}
-
 export async function readDurableDataPage(params: {
   store: TripleStore;
   graphList: readonly string[];
@@ -228,6 +307,9 @@ export async function readDurableDataPage(params: {
   sinceBatchId: bigint | null;
   offset: number;
   limit: number;
+  rowListMemo?: SyncRowListMemo;
+  rowListCacheScope?: string;
+  refreshRowList?: boolean;
 }): Promise<SyncRow[]> {
   const cgPrefix = contextGraphDataGraphUri(params.contextGraphId);
   const topMetaGraph = contextGraphMetaGraphUri(params.contextGraphId);
@@ -248,7 +330,20 @@ export async function readDurableDataPage(params: {
   };
 
   if (params.sinceBatchId == null) {
-    return readPagedRowsAcrossGraphs(params.store, candidateGraphs, params.offset, params.limit, isAdmitted);
+    return readPagedRowsAcrossGraphs(
+      params.store,
+      candidateGraphs,
+      params.offset,
+      params.limit,
+      isAdmitted,
+      params.rowListMemo
+        ? {
+          memo: params.rowListMemo,
+          key: durableDataRowListCacheKey(params.rowListCacheScope ?? 'default', params.contextGraphId),
+          refresh: params.refreshRowList,
+        }
+        : undefined,
+    );
   }
 
   const graphs: string[] = [];
@@ -273,6 +368,41 @@ export async function readDurableDataPage(params: {
 }
 
 async function readPagedRowsAcrossGraphs(
+  store: TripleStore,
+  graphs: readonly string[],
+  offset: number,
+  limit: number,
+  isAdmitted: (graph: string) => Promise<boolean>,
+  cache?: { memo: SyncRowListMemo; key: string; refresh?: boolean },
+): Promise<SyncRow[]> {
+  if (!cache) {
+    return readPagedRowsAcrossGraphsStoreBounded(store, graphs, offset, limit, isAdmitted);
+  }
+
+  const safeOffset = Math.max(0, Math.floor(offset));
+  const safeLimit = Math.max(0, Math.floor(limit));
+  if (safeLimit === 0) return [];
+
+  const loadRows = async (): Promise<SyncRow[]> => {
+    const admittedGraphs: string[] = [];
+    for (const graph of graphs) {
+      if (!(await isAdmitted(graph))) continue;
+      admittedGraphs.push(graph);
+    }
+    return readRowsAcrossGraphs(store, admittedGraphs);
+  };
+
+  const rows = await cache.memo.get(cache.key, loadRows, {
+    refresh: cache.refresh,
+    requireExisting: safeOffset > 0,
+  });
+  if (rows == null) {
+    throw new Error('Durable data sync session snapshot expired before page completion');
+  }
+  return [...rows].slice(safeOffset, safeOffset + safeLimit);
+}
+
+async function readPagedRowsAcrossGraphsStoreBounded(
   store: TripleStore,
   graphs: readonly string[],
   offset: number,
@@ -444,27 +574,23 @@ async function countGraphRows(store: TripleStore, graph: string): Promise<number
   return Number(value > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : value);
 }
 
-async function readGraphRowsPage(
+async function readRowsAcrossGraphs(
   store: TripleStore,
-  graph: string,
-  offset: number,
-  limit: number,
+  graphs: readonly string[],
 ): Promise<SyncRow[]> {
-  const safeOffset = Math.max(0, Math.floor(offset));
-  const safeLimit = Math.max(0, Math.floor(limit));
-  if (safeLimit === 0) return [];
+  const values = graphValues(graphs);
+  if (!values) return [];
   const res = await store.query(`
-    SELECT ?s ?p ?o WHERE {
-      GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+    SELECT ?g ?s ?p ?o WHERE {
+      VALUES ?g { ${values} }
+      GRAPH ?g { ?s ?p ?o }
     }
-    ORDER BY ?s ?p ?o
-    OFFSET ${safeOffset}
-    LIMIT ${safeLimit}
   `);
   if (res.type !== 'bindings') return [];
   return res.bindings
-    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: graph }))
-    .filter((row) => row.s && row.p && row.o);
+    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
+    .filter((row) => row.s && row.p && row.o && row.g)
+    .sort(compareRows);
 }
 
 async function readRowsPageAcrossGraphs(
@@ -705,11 +831,18 @@ function durableDeltaWhereClauseForGraphs(
           SELECT ?deltaRoot ?deltaBid WHERE {
             VALUES ?deltaMg { ${values} }
             GRAPH ?deltaMg {
-              ?deltaKa <${DKG_PART_OF}> ?deltaUal ;
-                       <${DKG_ROOT_ENTITY}> ?deltaRoot .
-              { ?deltaUal <${DKG_BATCH_ID}> ?deltaBid }
+              {
+                ?deltaKa <${DKG_PART_OF}> ?deltaUal ;
+                         <${DKG_ROOT_ENTITY}> ?deltaRoot .
+                { ?deltaUal <${DKG_BATCH_ID}> ?deltaBid }
+                UNION
+                { ?deltaKa <${DKG_BATCH_ID}> ?deltaBid }
+              }
               UNION
-              { ?deltaKa <${DKG_BATCH_ID}> ?deltaBid }
+              {
+                ?deltaKa <${DKG_ROOT_ENTITY}> ?deltaRoot ;
+                         <${DKG_BATCH_ID}> ?deltaBid .
+              }
               FILTER(REGEX(STR(?deltaBid), "^-?\\\\d+$"))
             }
           }
@@ -734,6 +867,10 @@ function durableDeltaGroupClause(
 
 function graphValues(graphs: readonly string[]): string {
   return dedupeStrings(graphs).map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
+}
+
+function durableDataRowListCacheKey(scope: string, contextGraphId: string): string {
+  return `durable-data:${scope}:${contextGraphId}`;
 }
 
 function dedupeStrings(values: readonly string[]): string[] {

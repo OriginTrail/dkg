@@ -1,6 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { createResponderGraphListMemo } from '../src/sync/responder/graph-plan.js';
+import {
+  createResponderGraphListMemo,
+  createResponderSyncRowListMemo,
+} from '../src/sync/responder/graph-plan.js';
 import {
   DKG_NS,
   lineGraphsFromNquads,
@@ -29,6 +32,10 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 function watchBoundedPageQuery(
   store: OxigraphStore,
   graph: string,
@@ -41,7 +48,7 @@ function watchBoundedPageQuery(
     const normalized = sparql.replace(/\s+/g, ' ').trim();
     const isTargetPageQuery = /^SELECT (?:DISTINCT )?\?s \?p \?o WHERE \{/.test(normalized) &&
       normalized.includes(`GRAPH <${graph}>`);
-    const isTargetMultiGraphPageQuery = /^SELECT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
+    const isTargetMultiGraphPageQuery = /^SELECT (?:DISTINCT )?\?g \?s \?p \?o WHERE \{/.test(normalized) &&
       normalized.includes(`VALUES ?g { <${graph}>`);
     if (isTargetPageQuery || isTargetMultiGraphPageQuery) {
       observedPageQueries++;
@@ -266,7 +273,7 @@ describe('sync responder pagination interleaving', () => {
     expect(lineGraphsFromNquads(out)).toEqual(new Set([cgPrefix, fallbackGraph]));
   });
 
-  it('durable fallback pages admitted graphs with one global store query', async () => {
+  it('caches sorted durable-data rows instead of issuing ordered offset page queries', async () => {
     const store = new OxigraphStore();
     const cgId = 'single-query-durable-fallback';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
@@ -277,7 +284,7 @@ describe('sync responder pagination interleaving', () => {
     ]);
 
     const originalQuery = store.query.bind(store);
-    let globalPageQueries = 0;
+    let globalRowLoads = 0;
     store.query = (async (sparql: string) => {
       const normalized = sparql.replace(/\s+/g, ' ').trim();
       if (normalized.includes('COUNT(*)')) {
@@ -285,26 +292,146 @@ describe('sync responder pagination interleaving', () => {
       }
       if (
         /^SELECT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
-        normalized.includes(`VALUES ?g { <${cgPrefix}> <${fallbackGraph}>`) &&
-        normalized.includes('ORDER BY ?g ?s ?p ?o')
+        normalized.includes(`VALUES ?g { <${cgPrefix}> <${fallbackGraph}>`)
       ) {
-        globalPageQueries++;
+        globalRowLoads++;
+        expect(normalized).not.toContain('ORDER BY');
+        expect(normalized).not.toContain('OFFSET');
+        expect(normalized).not.toContain('LIMIT');
       }
       return originalQuery(sparql);
     }) as OxigraphStore['query'];
 
     const cap = registerTestSyncHandler(store, { syncPageSize: 1 });
-    const out = await cap.invoke({
+    const first = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'cache-session',
+    });
+    const second = await cap.invoke({
       contextGraphId: cgId,
       includeSharedMemory: false,
       phase: 'data',
       offset: 1,
       limit: 1,
+      syncSessionId: 'cache-session',
     });
 
-    expect(globalPageQueries).toBe(1);
-    expect(out).toContain('"row-001"');
-    expect(out).not.toContain('"row-000"');
+    expect(globalRowLoads).toBe(1);
+    expect(first).toContain('"row-000"');
+    expect(first).not.toContain('"row-001"');
+    expect(second).toContain('"row-001"');
+    expect(second).not.toContain('"row-000"');
+  });
+
+  it('refreshes full durable-data snapshots on page zero for the same peer', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'fresh-page-zero-durable';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    await store.insert([q(cgPrefix, 1)]);
+
+    const cap = registerTestSyncHandler(store, { syncPageSize: 1 });
+    const first = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+    }, 'peer-a');
+    expect(first).toContain('"row-001"');
+
+    await store.insert([q(cgPrefix, 0)]);
+    const refreshed = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+    }, 'peer-a');
+
+    expect(refreshed).toContain('"row-000"');
+    expect(refreshed).not.toContain('"row-001"');
+  });
+
+  it('isolates active durable-data row snapshots per remote peer', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'peer-isolated-durable';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    await store.insert([q(cgPrefix, 1)]);
+
+    const cap = registerTestSyncHandler(store, { syncPageSize: 1 });
+    const peerAFirst = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'peer-a-session',
+    }, 'peer-a');
+    expect(peerAFirst).toContain('"row-001"');
+
+    await store.insert([q(cgPrefix, 0)]);
+    const peerBFresh = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'peer-b-session',
+    }, 'peer-b');
+    expect(peerBFresh).toContain('"row-000"');
+
+    const peerASecond = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 1,
+      limit: 1,
+      syncSessionId: 'peer-a-session',
+    }, 'peer-a');
+    expect(peerASecond).toBe('');
+  });
+
+  it('isolates overlapping durable-data row snapshots from the same peer by sync session', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'session-isolated-durable';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    await store.insert([q(cgPrefix, 1)]);
+
+    const cap = registerTestSyncHandler(store, { syncPageSize: 1 });
+    const firstSessionPage = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'session-old',
+    }, 'peer-a');
+    expect(firstSessionPage).toContain('"row-001"');
+
+    await store.insert([q(cgPrefix, 0)]);
+    const secondSessionPage = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'session-new',
+    }, 'peer-a');
+    expect(secondSessionPage).toContain('"row-000"');
+
+    const firstSessionNextPage = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 1,
+      limit: 1,
+      syncSessionId: 'session-old',
+    }, 'peer-a');
+    expect(firstSessionNextPage).toBe('');
   });
 
   it('reuses the responder graph-list memo across nearby page requests', async () => {
@@ -405,5 +532,113 @@ describe('sync responder pagination interleaving', () => {
     await expect(overlappingRefresh).resolves.toEqual(['new']);
     await expect(deepPage).resolves.toEqual(['new']);
     expect(calls).toBe(2);
+  });
+
+  it('keeps active durable row snapshots alive while pages are still being read', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const memo = createResponderSyncRowListMemo(10);
+    let loads = 0;
+    const loadRows = async () => {
+      loads++;
+      return [{
+        s: 'urn:memo:row',
+        p: `${DKG_NS}label`,
+        o: `"snapshot-${loads}"`,
+        g: 'urn:memo:graph',
+      }];
+    };
+
+    await expect(memo.get('durable', loadRows)).resolves.toMatchObject([
+      { o: '"snapshot-1"' },
+    ]);
+
+    vi.setSystemTime(9);
+    await expect(memo.get('durable', loadRows)).resolves.toMatchObject([
+      { o: '"snapshot-1"' },
+    ]);
+
+    vi.setSystemTime(18);
+    await expect(memo.get('durable', loadRows)).resolves.toMatchObject([
+      { o: '"snapshot-1"' },
+    ]);
+    expect(loads).toBe(1);
+  });
+
+  it('does not rebuild an expired durable row snapshot for deep session pages', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const memo = createResponderSyncRowListMemo(10);
+    let loads = 0;
+    const loadRows = async () => {
+      loads++;
+      return [{
+        s: 'urn:memo:row',
+        p: `${DKG_NS}label`,
+        o: `"snapshot-${loads}"`,
+        g: 'urn:memo:graph',
+      }];
+    };
+
+    await expect(memo.get('durable', loadRows)).resolves.toHaveLength(1);
+
+    vi.setSystemTime(11);
+    await expect(memo.get('durable', loadRows, { requireExisting: true })).resolves.toBeNull();
+    expect(loads).toBe(1);
+  });
+
+  it('rejects new durable row snapshots at the active cap without evicting existing sessions', async () => {
+    const memo = createResponderSyncRowListMemo(10_000, 2);
+    let loads = 0;
+    const loadRows = async () => {
+      loads++;
+      return [{
+        s: 'urn:memo:row',
+        p: `${DKG_NS}label`,
+        o: `"snapshot-${loads}"`,
+        g: 'urn:memo:graph',
+      }];
+    };
+
+    await expect(memo.get('durable:session-1', loadRows)).resolves.toHaveLength(1);
+    await expect(memo.get('durable:session-2', loadRows)).resolves.toHaveLength(1);
+    await expect(memo.get('durable:session-3', loadRows)).rejects.toThrow(
+      'Too many active durable data sync session snapshots',
+    );
+
+    await expect(
+      memo.get('durable:session-1', loadRows, { requireExisting: true }),
+    ).resolves.toMatchObject([{ o: '"snapshot-1"' }]);
+    expect(loads).toBe(2);
+  });
+
+  it('coalesces concurrent durable row snapshot refreshes', async () => {
+    const memo = createResponderSyncRowListMemo();
+    const snapshot = deferred<readonly {
+      s: string;
+      p: string;
+      o: string;
+      g: string;
+    }[]>();
+    let loads = 0;
+    const loadRows = () => {
+      loads++;
+      return snapshot.promise;
+    };
+
+    const first = memo.get('durable', loadRows, { refresh: true });
+    const second = memo.get('durable', loadRows, { refresh: true });
+    snapshot.resolve([{
+      s: 'urn:memo:row',
+      p: `${DKG_NS}label`,
+      o: '"snapshot"',
+      g: 'urn:memo:graph',
+    }]);
+
+    await expect(first).resolves.toHaveLength(1);
+    await expect(second).resolves.toHaveLength(1);
+    expect(loads).toBe(1);
   });
 });

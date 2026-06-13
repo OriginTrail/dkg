@@ -489,6 +489,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         requesterAgentAddress: parsed.requesterAgentAddress,
         requesterSignatureR: parsed.requesterSignatureR,
         requesterSignatureVS: parsed.requesterSignatureVS,
+        syncSessionId: typeof parsed.syncSessionId === 'string' ? parsed.syncSessionId : undefined,
         // Phase C: unsigned delta hint. Validated/normalised in the responder.
         sinceBatchId: typeof parsed.sinceBatchId === 'string' ? parsed.sinceBatchId : undefined,
       };
@@ -503,19 +504,27 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const includeSharedMemory = ctxGraphPart.startsWith('workspace:');
     const contextGraphId = includeSharedMemory ? ctxGraphPart.slice('workspace:'.length) : (ctxGraphPart || SYSTEM_CONTEXT_GRAPHS.AGENTS);
     const phase = normalizeSyncPhase(parts[3]);
-    // Phase C: the `|since|<n>` keyed token is ALWAYS the final two segments
-    // emitted by `buildSyncRequestEnvelope` (after the optional phase/snapshot
-    // suffix). Match only that trailing position — scanning every segment would
-    // misparse an ordinary segment literally equal to "since" (e.g. a CG or
-    // snapshotRef named "since") as a delta marker and turn a full sync into a
-    // partial response. Old encoders never emit the suffix.
+    // Phase C: parse only the trailing keyed tokens emitted by
+    // `buildSyncRequestEnvelope` (after the optional phase/snapshot suffix).
+    // Scanning every segment would misparse ordinary values literally equal to
+    // "since" or "session" as control tokens. Old encoders never emit them.
     let sinceBatchId: string | undefined;
+    let syncSessionId: string | undefined;
+    let tail = parts.length;
     if (
-      parts.length >= 2 &&
-      parts[parts.length - 2] === 'since' &&
-      /^\d+$/.test(parts[parts.length - 1])
+      tail >= 2 &&
+      parts[tail - 2] === 'since' &&
+      /^\d+$/.test(parts[tail - 1])
     ) {
-      sinceBatchId = parts[parts.length - 1];
+      sinceBatchId = parts[tail - 1];
+      tail -= 2;
+    }
+    if (
+      tail >= 2 &&
+      parts[tail - 2] === 'session' &&
+      parts[tail - 1].length > 0
+    ) {
+      syncSessionId = parts[tail - 1];
     }
     return {
       contextGraphId,
@@ -524,6 +533,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       includeSharedMemory,
       phase,
       snapshotRef: phase === 'snapshot' ? parts[4] : undefined,
+      syncSessionId,
       sinceBatchId,
     };
   }
@@ -600,6 +610,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     phase: SyncPhase = 'data',
     snapshotRef?: string,
     sinceBatchId?: string,
+    syncSessionId?: string,
   ): Promise<Uint8Array> {
     const isPrivate = await this.isPrivateContextGraph(contextGraphId);
 
@@ -625,6 +636,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       // is gap-safe only when it comes from a CONTIGUOUS watermark, so it is
       // supplied explicitly by callers, never auto-derived from local MAX().
       sinceBatchId: phase === 'data' && !includeSharedMemory ? sinceBatchId : undefined,
+      syncSessionId: phase === 'data' && !includeSharedMemory ? syncSessionId : undefined,
       needsAuth,
       computeSyncDigest: this.computeSyncDigest.bind(this),
       getIdentityId: () => this.chain.getIdentityId(),

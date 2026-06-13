@@ -7,9 +7,9 @@ import {
 import type { SyncRequestEnvelope } from '../auth/request-build.js';
 import {
   createResponderGraphListMemo,
+  createResponderSyncRowListMemo,
   createResponderSubGraphRegistrationMemo,
   createResponderSwmAdmissionMemo,
-  readDurableCanonicalDataPage,
   readDurableDataPage,
   readDurableMetaPage,
   readSwmDataPage,
@@ -59,6 +59,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     logDebug,
   } = params;
   const graphListMemo = createResponderGraphListMemo(store);
+  const durableDataRowsMemo = createResponderSyncRowListMemo();
   const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
   const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
 
@@ -167,24 +168,17 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     } else {
       const queryStartedAt = Date.now();
       const rows = sinceBatchId == null
-        ? await (async () => {
-          const graphList = await graphListMemo.get({ refresh: offset === 0 });
-          const canonicalRows = await readDurableCanonicalDataPage({
-            store,
-            contextGraphId,
-            offset,
-            limit,
-          });
-          if (canonicalRows.length === limit) return canonicalRows;
-          return readDurableDataPage({
-            store,
-            graphList,
-            contextGraphId,
-            sinceBatchId,
-            offset,
-            limit,
-          });
-        })()
+        ? await readDurableDataPage({
+          store,
+          graphList: await graphListMemo.get({ refresh: offset === 0 }),
+          contextGraphId,
+          sinceBatchId,
+          offset,
+          limit,
+          rowListMemo: request.syncSessionId ? durableDataRowsMemo : undefined,
+          rowListCacheScope: request.syncSessionId ? `${peerId}:${request.syncSessionId}` : undefined,
+          refreshRowList: offset === 0,
+        })
         : await readDurableDataPage({
           store,
           graphList: await graphListMemo.get({ refresh: offset === 0 }),

@@ -114,6 +114,130 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(result.completed).toBe(true);
   });
 
+  it('uses one stable sync session id across pages for full durable data sync', async () => {
+    const observedBuilds: Array<{
+      offset: number;
+      includeSharedMemory: boolean;
+      phase: string | undefined;
+      sinceBatchId: string | undefined;
+      syncSessionId: string | undefined;
+    }> = [];
+    let sendCalls = 0;
+
+    await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: CG_ID,
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 1,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => 0,
+          set: () => {},
+          delete: () => {},
+        },
+        buildSyncRequest: async (
+          _contextGraphId,
+          offset,
+          _limit,
+          includeSharedMemory,
+          _remotePeerId,
+          phase,
+          _snapshotRef,
+          sinceBatchId,
+          syncSessionId,
+        ) => {
+          observedBuilds.push({
+            offset,
+            includeSharedMemory,
+            phase,
+            sinceBatchId,
+            syncSessionId,
+          });
+          return new TextEncoder().encode(`request-${offset}`);
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => {
+          sendCalls++;
+          return new TextEncoder().encode(sendCalls === 1 ? 'one-quad-line' : '');
+        },
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    expect(observedBuilds).toHaveLength(2);
+    expect(observedBuilds.map((build) => build.offset)).toEqual([0, 1]);
+    expect(observedBuilds.every((build) => build.includeSharedMemory === false)).toBe(true);
+    expect(observedBuilds.every((build) => build.phase === 'data')).toBe(true);
+    expect(observedBuilds.every((build) => build.sinceBatchId === undefined)).toBe(true);
+    expect(typeof observedBuilds[0].syncSessionId).toBe('string');
+    expect(observedBuilds[0].syncSessionId?.length).toBeGreaterThan(0);
+    expect(observedBuilds[1].syncSessionId).toBe(observedBuilds[0].syncSessionId);
+  });
+
+  it('does not mint a new sync session id when resuming a durable data checkpoint', async () => {
+    const observedBuilds: Array<{
+      offset: number;
+      syncSessionId: string | undefined;
+    }> = [];
+
+    await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: CG_ID,
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 100,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => 250,
+          set: () => {},
+          delete: () => {},
+        },
+        buildSyncRequest: async (
+          _contextGraphId,
+          offset,
+          _limit,
+          _includeSharedMemory,
+          _remotePeerId,
+          _phase,
+          _snapshotRef,
+          _sinceBatchId,
+          syncSessionId,
+        ) => {
+          observedBuilds.push({ offset, syncSessionId });
+          return new TextEncoder().encode(`request-${offset}`);
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => new TextEncoder().encode(''),
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    expect(observedBuilds).toEqual([{ offset: 250, syncSessionId: undefined }]);
+  });
+
   /**
    * Codex review #569 follow-up #1: original PR called
    * `sendReliable` without any `messageId` plumbing. Final design

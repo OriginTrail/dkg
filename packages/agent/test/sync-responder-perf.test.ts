@@ -1,7 +1,7 @@
 import { performance } from 'node:perf_hooks';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { MemoryLayer } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { SparqlHttpStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   DKG_NS,
   linesFromNquads,
@@ -26,6 +26,24 @@ const SWM_DATA_BUDGET_MS = 500;
 const SWM_META_BUDGET_MS = 300;
 const describePerf = process.env.DKG_SYNC_RESPONDER_PERF === '1' ? describe : describe.skip;
 
+function createPerfStore(): TripleStore {
+  const queryEndpoint = process.env.DKG_SYNC_RESPONDER_PERF_QUERY_ENDPOINT?.trim();
+  if (!queryEndpoint) {
+    throw new Error(
+      'DKG_SYNC_RESPONDER_PERF=1 requires DKG_SYNC_RESPONDER_PERF_QUERY_ENDPOINT ' +
+      'pointing at an oxigraph-server /query endpoint. Set ' +
+      'DKG_SYNC_RESPONDER_PERF_UPDATE_ENDPOINT as well when /update differs.',
+    );
+  }
+  const timeout = Number(process.env.DKG_SYNC_RESPONDER_PERF_TIMEOUT_MS ?? 180_000);
+  return new SparqlHttpStore({
+    queryEndpoint,
+    updateEndpoint: process.env.DKG_SYNC_RESPONDER_PERF_UPDATE_ENDPOINT?.trim() || queryEndpoint.replace(/\/query\/?$/, '/update'),
+    timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : 180_000,
+    managedByDkg: true,
+  });
+}
+
 function q(graph: string, subject: string, predicate: string, object: string): Quad {
   return { graph, subject, predicate, object };
 }
@@ -43,15 +61,15 @@ async function expectWithinBudget(
 }
 
 describePerf('sync responder perf guard', () => {
-  let store: OxigraphStore;
+  let store: TripleStore | null = null;
   let cap: CapturedSyncHandler;
 
   beforeAll(async () => {
-    store = new OxigraphStore();
+    store = createPerfStore();
     let batch: Quad[] = [];
     const flush = async () => {
       if (batch.length === 0) return;
-      await store.insert(batch);
+      await store!.insert(batch);
       batch = [];
     };
     const push = async (quad: Quad) => {
@@ -110,7 +128,11 @@ describePerf('sync responder perf guard', () => {
       offset: 0,
       limit: 1,
     });
-  }, 120_000);
+  }, 300_000);
+
+  afterAll(async () => {
+    await store?.close();
+  });
 
   it('serves durable-data offset 0 and deepest page under budget', async () => {
     const first = await expectWithinBudget('durable-data offset 0', DURABLE_BUDGET_MS, () =>
