@@ -18,6 +18,13 @@ import {
   serializeResponderRows,
 } from './graph-plan.js';
 
+const MAX_DURABLE_DATA_SESSION_TOKENS = 64;
+
+type DurableDataSessionTokenEntry = {
+  token: string;
+  expiresAt: number;
+};
+
 interface RegisterSyncHandlerParams {
   /**
    * `register` callable. In production this is bound to the RAW
@@ -61,9 +68,32 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
   } = params;
   const graphListMemo = createResponderGraphListMemo(store);
   const durableDataRowsMemo = createResponderSyncRowListMemo(DURABLE_DATA_SYNC_SESSION_TTL_MS);
-  const durableDataSessionTokens = new Map<string, string>();
+  const durableDataSessionTokens = new Map<string, DurableDataSessionTokenEntry>();
   const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
   const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
+
+  const pruneDurableDataSessionTokens = (now = Date.now()) => {
+    for (const [key, entry] of durableDataSessionTokens) {
+      if (entry.expiresAt <= now) durableDataSessionTokens.delete(key);
+    }
+    while (durableDataSessionTokens.size > MAX_DURABLE_DATA_SESSION_TOKENS) {
+      const oldest = durableDataSessionTokens.keys().next().value;
+      if (!oldest) break;
+      durableDataSessionTokens.delete(oldest);
+    }
+  };
+
+  const rememberDurableDataSessionToken = (key: string, token: string, now = Date.now()) => {
+    pruneDurableDataSessionTokens(now);
+    if (!durableDataSessionTokens.has(key) && durableDataSessionTokens.size >= MAX_DURABLE_DATA_SESSION_TOKENS) {
+      const oldest = durableDataSessionTokens.keys().next().value;
+      if (oldest) durableDataSessionTokens.delete(oldest);
+    }
+    durableDataSessionTokens.set(key, {
+      token,
+      expiresAt: now + DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    });
+  };
 
   register(protocolSync, async (data, peerId) => {
     const handlerStartedAt = Date.now();
@@ -172,13 +202,27 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       const durableSessionTokenKey = request.syncSessionId
         ? `${peerId}:${contextGraphId}:${sinceBatchId == null ? 'full' : sinceBatchId.toString()}`
         : undefined;
+      const durableSessionTokenNow = Date.now();
+      if (durableSessionTokenKey) pruneDurableDataSessionTokens(durableSessionTokenNow);
+      const activeDurableSessionToken = durableSessionTokenKey
+        ? durableDataSessionTokens.get(durableSessionTokenKey)?.token
+        : undefined;
+      if (
+        durableSessionTokenKey &&
+        offset > 0 &&
+        activeDurableSessionToken !== request.syncSessionId
+      ) {
+        throw new Error('Durable data sync session was superseded before page completion');
+      }
       const refreshDurableSessionRows = Boolean(
         durableSessionTokenKey &&
         offset === 0 &&
-        durableDataSessionTokens.get(durableSessionTokenKey) !== request.syncSessionId,
+        activeDurableSessionToken !== request.syncSessionId,
       );
       if (durableSessionTokenKey && offset === 0) {
-        durableDataSessionTokens.set(durableSessionTokenKey, request.syncSessionId!);
+        rememberDurableDataSessionToken(durableSessionTokenKey, request.syncSessionId!, durableSessionTokenNow);
+      } else if (durableSessionTokenKey) {
+        rememberDurableDataSessionToken(durableSessionTokenKey, request.syncSessionId!, durableSessionTokenNow);
       }
       const rows = sinceBatchId == null
         ? await readDurableDataPage({

@@ -138,7 +138,11 @@ export function createResponderSyncRowListMemo(
       const pending = inflight.get(key);
       if (pending) return [...(await pending)];
       if (expired.has(key)) {
-        throw new Error('Durable data sync session snapshot expired before page completion');
+        if (options?.refresh) {
+          deleteExpired(key);
+        } else {
+          throw new Error('Durable data sync session snapshot expired before page completion');
+        }
       }
 
       const existing = cached.get(key);

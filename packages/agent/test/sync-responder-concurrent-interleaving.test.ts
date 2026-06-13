@@ -423,15 +423,14 @@ describe('sync responder pagination interleaving', () => {
     }, 'peer-a');
     expect(secondSessionPage).toContain('"row-000"');
 
-    const oldSessionNextPage = await cap.invoke({
+    await expect(cap.invoke({
       contextGraphId: cgId,
       includeSharedMemory: false,
       phase: 'data',
       offset: 1,
       limit: 1,
       syncSessionId: 'session-old',
-    }, 'peer-a');
-    expect(oldSessionNextPage).toContain('"row-001"');
+    }, 'peer-a')).rejects.toThrow('Durable data sync session was superseded before page completion');
   });
 
   it('derives durable-data cache keys server-side instead of from arbitrary session ids', async () => {
