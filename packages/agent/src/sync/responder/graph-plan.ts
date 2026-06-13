@@ -60,7 +60,7 @@ export function createResponderGraphListMemo(
       const now = Date.now();
       if (inflight) return [...(await raceAgainstAbort(inflight, options?.signal))];
       if (!options?.refresh && cached && now - cachedAt < ttlMs) return [...cached];
-      inflight = store.listGraphs({ signal: options?.signal })
+      inflight = store.listGraphs()
         .then((graphs) => {
           const sorted = [...new Set(graphs)].sort(compareCodePoint);
           cached = sorted;
@@ -191,7 +191,7 @@ export function createResponderSwmAdmissionMemo(
   ttlMs = 10_000,
 ): SubGraphNameMemo {
   return createSubGraphNameMemo(
-    (contextGraphId, options) => readAdmittedSwmSubGraphNames(store, contextGraphId, options?.signal),
+    (contextGraphId) => readAdmittedSwmSubGraphNames(store, contextGraphId),
     ttlMs,
   );
 }
@@ -201,13 +201,13 @@ export function createResponderSubGraphRegistrationMemo(
   ttlMs = 10_000,
 ): SubGraphNameMemo {
   return createSubGraphNameMemo(
-    (contextGraphId, options) => readRegisteredSubGraphNames(store, contextGraphId, options?.signal),
+    (contextGraphId) => readRegisteredSubGraphNames(store, contextGraphId),
     ttlMs,
   );
 }
 
 function createSubGraphNameMemo(
-  loadNames: (contextGraphId: string, options?: { signal?: AbortSignal }) => Promise<string[]>,
+  loadNames: (contextGraphId: string) => Promise<string[]>,
   ttlMs: number,
 ): SubGraphNameMemo {
   const cached = new Map<string, { value: readonly string[]; cachedAt: number }>();
@@ -220,7 +220,7 @@ function createSubGraphNameMemo(
       if (!options?.refresh && existing && now - existing.cachedAt < ttlMs) return [...existing.value];
       const pending = inflight.get(contextGraphId);
       if (pending) return [...(await raceAgainstAbort(pending, options?.signal))];
-      const load = loadNames(contextGraphId, { signal: options?.signal })
+      const load = loadNames(contextGraphId)
         .then((names) => {
           cached.set(contextGraphId, { value: names, cachedAt: Date.now() });
           return names;
@@ -284,7 +284,7 @@ export async function readSwmMetaPage(params: {
         refresh: params.refreshRowList,
         expiredMessage: 'Shared-memory meta sync session snapshot expired before page completion',
       },
-      () => readSwmMetaRows(params.store, candidateGraphs, params.cutoffIso, params.signal),
+      () => readSwmMetaRows(params.store, candidateGraphs, params.cutoffIso),
       params.offset,
       params.limit,
       params.signal,
@@ -340,18 +340,18 @@ export async function readSwmDataPage(params: {
     );
   }
 
-  const loadRows = () => readFreshSwmDataRows(
+  const loadRows = (signal?: AbortSignal) => readFreshSwmDataRows(
     params.store,
     dataGraphs,
     graphSet,
     candidateGraphsFor,
     params.cutoffIso!,
-    params.signal,
+    signal,
   );
   if (cache) {
-    return readCachedRowsPage(cache, loadRows, params.offset, params.limit, params.signal);
+    return readCachedRowsPage(cache, () => loadRows(), params.offset, params.limit, params.signal);
   }
-  const rows = await loadRows();
+  const rows = await loadRows(params.signal);
   return rows.slice(Math.max(0, Math.floor(params.offset)), Math.max(0, Math.floor(params.offset)) + Math.max(0, Math.floor(params.limit)));
 }
 
@@ -366,7 +366,8 @@ export async function readDurableMetaPage(params: {
   rowListCacheKey?: string;
   refreshRowList?: boolean;
 }): Promise<SyncRow[]> {
-  const loadRows = () => readDurableMetaRows(params.store, params.contextGraphId, params.registeredSubGraphNames, params.signal);
+  const loadRows = (signal?: AbortSignal) =>
+    readDurableMetaRows(params.store, params.contextGraphId, params.registeredSubGraphNames, signal);
   if (params.rowListMemo && params.rowListCacheKey) {
     return readCachedRowsPage(
       {
@@ -375,13 +376,13 @@ export async function readDurableMetaPage(params: {
         refresh: params.refreshRowList,
         expiredMessage: 'Durable meta sync session snapshot expired before page completion',
       },
-      loadRows,
+      () => loadRows(),
       params.offset,
       params.limit,
       params.signal,
     );
   }
-  const rows = await loadRows();
+  const rows = await loadRows(params.signal);
   const safeOffset = Math.max(0, Math.floor(params.offset));
   const safeLimit = Math.max(0, Math.floor(params.limit));
   return rows.slice(safeOffset, safeOffset + safeLimit);
@@ -408,13 +409,13 @@ export async function readDurableDataPage(params: {
   }).sort(compareCodePoint);
 
   let assertionGraphs: Set<string> | null = null;
-  const isAdmitted = async (graph: string): Promise<boolean> => {
+  const isAdmitted = (signal?: AbortSignal) => async (graph: string): Promise<boolean> => {
     if (graph.includes('/assertion/')) {
-      assertionGraphs ??= await readAdmittedAssertionGraphs(params.store, params.contextGraphId, params.signal);
+      assertionGraphs ??= await readAdmittedAssertionGraphs(params.store, params.contextGraphId, signal);
       const assertionGraph = graph.endsWith('/_meta') ? graph.slice(0, -'/_meta'.length) : graph;
       if (!assertionGraphs.has(assertionGraph)) return false;
     }
-    return !(await isDescendantOfKnownChildContextGraph(params.store, cgPrefix, graph, params.signal));
+    return !(await isDescendantOfKnownChildContextGraph(params.store, cgPrefix, graph, signal));
   };
 
   if (params.sinceBatchId == null) {
@@ -423,7 +424,7 @@ export async function readDurableDataPage(params: {
       candidateGraphs,
       params.offset,
       params.limit,
-      isAdmitted,
+      isAdmitted(params.rowListMemo ? undefined : params.signal),
       params.rowListMemo
         ? {
           memo: params.rowListMemo,
@@ -436,8 +437,9 @@ export async function readDurableDataPage(params: {
   }
 
   const graphs: string[] = [];
+  const isAdmittedForRequest = isAdmitted(params.signal);
   for (const graph of candidateGraphs) {
-    if (await isAdmitted(graph)) graphs.push(graph);
+    if (await isAdmittedForRequest(graph)) graphs.push(graph);
   }
 
   const metaGraphs = [
@@ -487,7 +489,7 @@ async function readPagedRowsAcrossGraphs(
       if (!(await isAdmitted(graph))) continue;
       admittedGraphs.push(graph);
     }
-    return readRowsAcrossGraphs(store, admittedGraphs, signal);
+    return readRowsAcrossGraphs(store, admittedGraphs);
   };
 
   return readCachedRowsPage(
@@ -542,7 +544,7 @@ async function readPagedDurableDeltaRowsAcrossGraphs(
       ...cache,
       expiredMessage: cache.expiredMessage ?? 'Durable data sync session snapshot expired before page completion',
     },
-    () => readDurableDeltaRowsAcrossGraphs(store, graphs, metaGraphs, sinceBatchId, signal),
+    () => readDurableDeltaRowsAcrossGraphs(store, graphs, metaGraphs, sinceBatchId),
     safeOffset,
     safeLimit,
     signal,

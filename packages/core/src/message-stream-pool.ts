@@ -1133,8 +1133,6 @@ function isAbortRelatedError(err: unknown, signal: AbortSignal | undefined): boo
   if (!signal?.aborted) return false;
   if (err === signal?.reason) return true;
   const error = err instanceof Error ? err : undefined;
-  const reason = signal.reason instanceof Error ? signal.reason : undefined;
-  if (error?.name === 'AbortError' && reason && error.message === reason.message) return true;
-  if (error?.name === 'AbortError' && typeof signal.reason === 'string' && error.message === signal.reason) return true;
+  if (error?.name === 'AbortError') return true;
   return false;
 }

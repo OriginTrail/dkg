@@ -991,6 +991,75 @@ describe('ProtocolRouter pooled inbound handler', () => {
     await router.closePooling();
   });
 
+  it('treats generic AbortErrors as cancellation when the request signal is aborted', async () => {
+    type HandlerFn = (
+      stream: import('@libp2p/interface').Stream,
+      connection: { remotePeer: { toString: () => string; toMultihash: () => { bytes: Uint8Array } } },
+    ) => void | Promise<void>;
+    let inboundHandler: HandlerFn | null = null;
+    const stopController = new AbortController();
+    const node = {
+      get stopSignal() {
+        return stopController.signal;
+      },
+      libp2p: {
+        dialProtocol: async () => {
+          throw new Error('not used');
+        },
+        handle: (_protocolId: string, handler: HandlerFn) => {
+          if (_protocolId === POOLED_MESSAGE_PROTOCOL) {
+            inboundHandler = handler;
+          }
+        },
+        unhandle: () => undefined,
+        getConnections: () => [],
+        peerStore: { get: async () => ({ addresses: [] }) },
+      },
+    } as unknown as DKGNode;
+
+    const router = new ProtocolRouter(node);
+    router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+
+    let handlerStarted = false;
+    let releaseHandler!: () => void;
+    router.register('/dkg/10.0.1/message', async () => {
+      handlerStarted = true;
+      await new Promise<void>((resolve) => {
+        releaseHandler = resolve;
+      });
+      const err = new Error('The operation was aborted.');
+      err.name = 'AbortError';
+      throw err;
+    });
+
+    expect(inboundHandler).toBeDefined();
+    const inboundStream = new FakeStream();
+    const inboundRun = inboundHandler!(inboundStream as unknown as import('@libp2p/interface').Stream, {
+      remotePeer: {
+        toString: () => PEER_NEW,
+        toMultihash: () => ({ bytes: new Uint8Array() }),
+      },
+    });
+    await flush();
+    inboundStream.feed(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('hi')));
+    while (!handlerStarted) await flush();
+
+    stopController.abort(new Error('node stopping'));
+    releaseHandler();
+
+    await inboundRun;
+    for (let i = 0; i < 20 && inboundStream.writeStatus !== 'closed'; i++) {
+      await flush();
+    }
+    expect(inboundStream.sent).toHaveLength(0);
+    expect(inboundStream.writeStatus).toBe('closed');
+    await router.closePooling();
+  });
+
   it('keeps handler-owned AbortErrors as application error frames when the request is live', async () => {
     type HandlerFn = (
       stream: import('@libp2p/interface').Stream,

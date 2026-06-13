@@ -259,7 +259,7 @@ describe('sync responder protection', () => {
 
     const first = cap.invoke(envelope, REMOTE_A, controller.signal);
     while (listCalls < 1) await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(listSignal).toBe(controller.signal);
+    expect(listSignal).toBeUndefined();
     controller.abort(new Error('memo wait aborted'));
 
     await expect(first).rejects.toThrow(/memo wait aborted/);
@@ -272,7 +272,7 @@ describe('sync responder protection', () => {
     expect(authStarted).toBe(2);
   });
 
-  it('passes the stream abort signal to subgraph-name memo queries and releases capacity', async () => {
+  it('keeps subgraph-name memo loads independent while aborted waiters release capacity', async () => {
     const queryGate = deferred<QueryResult>();
     let querySignal: AbortSignal | undefined;
     let queryCalls = 0;
@@ -294,7 +294,7 @@ describe('sync responder protection', () => {
 
     const first = cap.invoke(envelope, REMOTE_A, controller.signal);
     while (queryCalls < 1) await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(querySignal).toBe(controller.signal);
+    expect(querySignal).toBeUndefined();
     controller.abort(new Error('subgraph memo aborted'));
 
     await expect(first).rejects.toThrow(/subgraph memo aborted/);
@@ -309,11 +309,13 @@ describe('sync responder protection', () => {
 
   it('races row-list memo waits against stream abort and releases capacity', async () => {
     const rowGate = deferred<QueryResult>();
+    let querySignal: AbortSignal | undefined;
     let queryCalls = 0;
     let authStarted = 0;
     const cap = captureHandler(baseStore({
       listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
-      query: async () => {
+      query: async (_sparql: string, options?: QueryOptions) => {
+        querySignal = options?.signal;
         queryCalls += 1;
         return rowGate.promise;
       },
@@ -328,6 +330,7 @@ describe('sync responder protection', () => {
 
     const first = cap.invoke(envelope, REMOTE_A, firstController.signal);
     while (queryCalls < 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(querySignal).toBeUndefined();
     firstController.abort(new Error('row snapshot aborted'));
 
     await expect(first).rejects.toThrow(/row snapshot aborted/);
