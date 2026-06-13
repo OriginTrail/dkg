@@ -56,7 +56,11 @@ interface RegisterSyncHandlerParams {
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   peerId: string;
   parseSyncRequest: (data: Uint8Array) => SyncRequestEnvelope;
-  authorizeSyncRequest: (request: SyncRequestEnvelope, remotePeerId: string) => Promise<boolean>;
+  authorizeSyncRequest: (
+    request: SyncRequestEnvelope,
+    remotePeerId: string,
+    options?: { signal?: AbortSignal },
+  ) => Promise<boolean>;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
 }
@@ -297,7 +301,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     return limiter.run(peerId, signal, async () => {
       throwIfAborted(signal);
       const authStartedAt = Date.now();
-      const authorized = await authorizeSyncRequest(request, peerId);
+      const authorized = await authorizeSyncRequest(request, peerId, { signal });
       const authDurationMs = Date.now() - authStartedAt;
       throwIfAborted(signal);
       if (!authorized) {

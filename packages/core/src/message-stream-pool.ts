@@ -978,6 +978,16 @@ export class MessageStreamPool {
         try {
           response = await handler(frame.payload, remotePeer, { signal: requestController.signal });
         } catch (err) {
+          if (isAbortRelatedError(err, requestController.signal)) {
+            cleanEof = false;
+            abortInboundSignal(err instanceof Error ? err : new Error('pooled handler aborted'));
+            try {
+              stream.abort(err instanceof Error ? err : new Error('pooled handler aborted'));
+            } catch {
+              // Stream gone; bail quietly.
+            }
+            return;
+          }
           const msg = err instanceof Error ? err.message : String(err);
           try {
             stream.send(encodeFrame(FrameType.ERROR, new TextEncoder().encode(msg)));
@@ -1104,4 +1114,12 @@ export class MessageStreamPool {
     if (err instanceof Error) return new PooledStreamResetError(err.message);
     return new PooledStreamResetError(fallback);
   }
+}
+
+function isAbortRelatedError(err: unknown, signal: AbortSignal | undefined): boolean {
+  if (err === signal?.reason) return true;
+  const error = err instanceof Error ? err : undefined;
+  if (error?.name === 'AbortError') return true;
+  const message = (error?.message ?? String(err)).toLowerCase();
+  return message.includes('aborted') || message.includes('aborterror');
 }

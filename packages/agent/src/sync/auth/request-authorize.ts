@@ -39,8 +39,35 @@ interface AuthorizeSyncRequestParams {
   getAllowedDelegateePeers: (contextGraphId: string) => Promise<Map<string, string[]>>;
   getAllowedDelegateeKeys: (contextGraphId: string) => Promise<Map<string, string[]>>;
   refreshMetaFromCurator: (contextGraphId: string) => Promise<boolean>;
+  signal?: AbortSignal;
   logWarn: (ctx: OperationContext, message: string) => void;
   logInfo: (ctx: OperationContext, message: string) => void;
+}
+
+function asAbortError(reason: unknown): Error {
+  if (reason instanceof Error) {
+    reason.name = 'AbortError';
+    return reason;
+  }
+  const err = new Error(typeof reason === 'string' ? reason : 'aborted');
+  err.name = 'AbortError';
+  return err;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw asAbortError(signal.reason);
+}
+
+function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work;
+  throwIfAborted(signal);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(asAbortError(signal.reason));
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(resolve, reject).finally(() => {
+      signal.removeEventListener('abort', onAbort);
+    });
+  });
 }
 
 export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestParams): Promise<boolean> {
@@ -59,9 +86,12 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
     getAllowedDelegateePeers,
     getAllowedDelegateeKeys,
     refreshMetaFromCurator,
+    signal,
     logWarn,
     logInfo,
   } = params;
+
+  throwIfAborted(signal);
 
   const now = Date.now();
   for (const [requestId, seenAt] of seenRequestIds) {
@@ -123,7 +153,7 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
       logWarn(ctx, `Denied sync request for "${request.contextGraphId}": identity verification unavailable (identityId=${requesterIdentityId.toString()} signer=${recoveredAddress})`);
       return false;
     }
-    const validIdentity = await verifyIdentity(recoveredAddress, requesterIdentityId);
+    const validIdentity = await raceAgainstAbort(verifyIdentity(recoveredAddress, requesterIdentityId), signal);
     if (!validIdentity) {
       logWarn(ctx, `Denied sync request for "${request.contextGraphId}": signer ${recoveredAddress} does not verify for identityId=${requesterIdentityId.toString()}`);
       return false;
@@ -133,11 +163,11 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
     return false;
   }
 
-  let participants = await getParticipants(request.contextGraphId);
-  let agentGateAddresses = await getAgentGateAddresses(request.contextGraphId);
-  let allowedPeers = await getAllowedPeers(request.contextGraphId);
-  let allowedDelegateePeers = await getAllowedDelegateePeers(request.contextGraphId);
-  let allowedDelegateeKeys = await getAllowedDelegateeKeys(request.contextGraphId);
+  let participants = await raceAgainstAbort(getParticipants(request.contextGraphId), signal);
+  let agentGateAddresses = await raceAgainstAbort(getAgentGateAddresses(request.contextGraphId), signal);
+  let allowedPeers = await raceAgainstAbort(getAllowedPeers(request.contextGraphId), signal);
+  let allowedDelegateePeers = await raceAgainstAbort(getAllowedDelegateePeers(request.contextGraphId), signal);
+  let allowedDelegateeKeys = await raceAgainstAbort(getAllowedDelegateeKeys(request.contextGraphId), signal);
   const isParticipantAllowed = () => participants?.some((p) =>
     p.toLowerCase() === recoveredAddress.toLowerCase() ||
     (requesterIdentityId > 0n && p === String(requesterIdentityId)),
@@ -171,13 +201,13 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
   let allowed = resolveAllowed();
 
   if (!allowed) {
-    const refreshed = await refreshMetaFromCurator(request.contextGraphId);
+    const refreshed = await raceAgainstAbort(refreshMetaFromCurator(request.contextGraphId), signal);
     if (refreshed) {
-      participants = await getParticipants(request.contextGraphId);
-      agentGateAddresses = await getAgentGateAddresses(request.contextGraphId);
-      allowedPeers = await getAllowedPeers(request.contextGraphId);
-      allowedDelegateePeers = await getAllowedDelegateePeers(request.contextGraphId);
-      allowedDelegateeKeys = await getAllowedDelegateeKeys(request.contextGraphId);
+      participants = await raceAgainstAbort(getParticipants(request.contextGraphId), signal);
+      agentGateAddresses = await raceAgainstAbort(getAgentGateAddresses(request.contextGraphId), signal);
+      allowedPeers = await raceAgainstAbort(getAllowedPeers(request.contextGraphId), signal);
+      allowedDelegateePeers = await raceAgainstAbort(getAllowedDelegateePeers(request.contextGraphId), signal);
+      allowedDelegateeKeys = await raceAgainstAbort(getAllowedDelegateeKeys(request.contextGraphId), signal);
       allowed = resolveAllowed();
     }
   }
@@ -190,6 +220,7 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
   );
 
   if (allowed) {
+    throwIfAborted(signal);
     seenRequestIds.set(request.requestId, now);
   }
   return allowed;

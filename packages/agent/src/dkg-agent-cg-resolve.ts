@@ -380,6 +380,28 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 
+function syncAuthAbortError(reason: unknown): Error {
+  if (reason instanceof Error) {
+    reason.name = 'AbortError';
+    return reason;
+  }
+  const err = new Error(typeof reason === 'string' ? reason : 'aborted');
+  err.name = 'AbortError';
+  return err;
+}
+
+function raceSyncAuthAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) return Promise.reject(syncAuthAbortError(signal.reason));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(syncAuthAbortError(signal.reason));
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(resolve, reject).finally(() => {
+      signal.removeEventListener('abort', onAbort);
+    });
+  });
+}
+
 export class ContextGraphResolveMethods extends DKGAgentBase {
   /**
    * Check whether a context graph exists in local storage. Definition triples in
@@ -681,8 +703,16 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     );
   }
 
-  public async authorizeSyncRequest(this: DKGAgent, request: SyncRequestEnvelope, remotePeerId: string): Promise<boolean> {
-    const isPrivate = await this.isPrivateContextGraph(request.contextGraphId);
+  public async authorizeSyncRequest(
+    this: DKGAgent,
+    request: SyncRequestEnvelope,
+    remotePeerId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<boolean> {
+    const isPrivate = await raceSyncAuthAgainstAbort(
+      this.isPrivateContextGraph(request.contextGraphId),
+      options.signal,
+    );
     if (!isPrivate) {
       return true;
     }
@@ -702,6 +732,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       getAllowedDelegateePeers: (contextGraphId) => this.getContextGraphAllowedDelegateePeers(contextGraphId),
       getAllowedDelegateeKeys: (contextGraphId) => this.getContextGraphAllowedDelegateeKeys(contextGraphId),
       refreshMetaFromCurator: (contextGraphId) => this.refreshMetaFromCurator(contextGraphId),
+      signal: options.signal,
       logWarn: (ctx, message) => this.log.warn(ctx, message),
       logInfo: (ctx, message) => this.log.info(ctx, message),
     });

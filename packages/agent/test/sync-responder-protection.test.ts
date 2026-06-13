@@ -75,7 +75,11 @@ function abortDuringListenerRegistration(message: string): AbortSignal {
 function captureHandler(
   store: TripleStore,
   options: {
-    authorizeSyncRequest?: (request: SyncRequestEnvelope, remotePeerId: string) => Promise<boolean>;
+    authorizeSyncRequest?: (
+      request: SyncRequestEnvelope,
+      remotePeerId: string,
+      options?: { signal?: AbortSignal },
+    ) => Promise<boolean>;
     logWarn?: (ctx: OperationContext, message: string) => void;
   } = {},
 ) {
@@ -197,6 +201,37 @@ describe('sync responder protection', () => {
 
     authGates.shift()?.resolve(false);
     await second;
+  });
+
+  it('passes the stream abort signal to authorization and releases capacity on abort', async () => {
+    let authStarted = 0;
+    let firstAuthSignal: AbortSignal | undefined;
+    const cap = captureHandler(baseStore(), {
+      authorizeSyncRequest: async (_request, _peerId, options) => {
+        authStarted += 1;
+        if (authStarted === 1) {
+          if (!options?.signal) throw new Error('missing auth signal');
+          firstAuthSignal = options.signal;
+          await new Promise<never>((_resolve, reject) => {
+            options.signal?.addEventListener('abort', () => reject(new Error('auth aborted by test')), { once: true });
+          });
+        }
+        return false;
+      },
+    });
+    const controller = new AbortController();
+    const envelope = makeEnvelope();
+
+    const first = cap.invoke(envelope, REMOTE_A, controller.signal);
+    while (authStarted < 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort(new Error('stream closed'));
+
+    await expect(first).rejects.toThrow(/auth aborted by test/);
+    expect(firstAuthSignal?.aborted).toBe(true);
+
+    const later = await cap.invoke(envelope, REMOTE_A);
+    expect(new TextDecoder().decode(later)).toBe('sync-denied');
+    expect(authStarted).toBe(2);
   });
 
   it('removes queued requests that abort while registering the abort listener', async () => {
