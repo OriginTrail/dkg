@@ -248,6 +248,21 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(registry.queryFilter).not.toHaveBeenCalled();
   });
 
+  it('keeps degraded non-archive genesis fallback complete beyond the page budget', async () => {
+    const registry = makeRegistry();
+    const defaultPageSize = 2_000;
+    const defaultBlockBudget = CG_REGISTRY_MAX_SCAN_PAGES * defaultPageSize;
+    const { adapter, provider } = makeAdapter(registry, defaultBlockBudget);
+    provider.getCode = vi.fn(async () => {
+      throw new Error('missing trie node (pruned node)');
+    });
+    registry.queryFilter.mockResolvedValue([]);
+
+    await expect(adapter.listContextGraphsFromChain()).resolves.toEqual([]);
+
+    expect(registry.queryFilter).toHaveBeenCalledTimes(CG_REGISTRY_MAX_SCAN_PAGES + 1);
+  });
+
   it('honors cgRegistryScanPageSize and defaults invalid values', () => {
     const tuned = new EVMChainAdapter(minimalConfig({ cgRegistryScanPageSize: 10_000.5 }));
     expect((tuned as any).cgRegistryScanPageSize).toBe(10_000);

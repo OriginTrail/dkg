@@ -1749,6 +1749,7 @@ export class EVMChainAdapterBase {
     fromBlock: number;
     head: number;
     scanProviders: ReadonlyArray<ScanProvider>;
+    degradedFromGenesis?: boolean;
   }> {
     // 1. Probe every reachable backend for its head; order freshest-first. A
     //    head-probe failure on an UNREACHABLE backend is kept separate — it only
@@ -1854,7 +1855,7 @@ export class EVMChainAdapterBase {
     // surfaced by the scan (page-1 throw with cause). The degraded `0` is not cached.
     const scanProviders = reachable.filter((r) => !throttledProviders.has(r.provider));
     if (scanProviders.length === 0) throw throttle;
-    return { fromBlock: 0, head, scanProviders };
+    return { fromBlock: 0, head, scanProviders, degradedFromGenesis: true };
   }
 
   /**

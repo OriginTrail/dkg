@@ -123,7 +123,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
               'ContextGraphNameRegistry',
             )
         : { fromBlock, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) };
-    const { fromBlock: deployBlock, head, scanProviders } = scan;
+    const { fromBlock: deployBlock, head, scanProviders, degradedFromGenesis = false } = scan;
     const start = fromBlock ?? (
       incremental && watermark !== undefined
         ? Math.max(0, watermark - CG_REGISTRY_REORG_BUFFER_BLOCKS)
@@ -134,7 +134,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const pageSize = this.cgRegistryScanPageSize;
     const pages = Math.ceil((head - start + 1) / pageSize);
     const blockBudget = CG_REGISTRY_MAX_SCAN_PAGES * pageSize;
-    if (pages > CG_REGISTRY_MAX_SCAN_PAGES) {
+    if (!degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
       throw new Error(
         `listContextGraphsFromChain: ContextGraphNameRegistry scan would need ` +
           `${pages} eth_getLogs calls over blocks [${start}, ${head}] at a ` +
