@@ -26,6 +26,17 @@
 
 8. **Sizing is the optimistic end of plausible.** M3+M4 (the §5.7 ratchet/catch-up work) is more likely **8–12 weeks** than 6–8; M5–M7 carries **two sequential external audits** (the `_verifySignature` change, then the token-moving escrow/bond/slash), so 4–5 months is a floor, not an expected value.
 
+## M1 path-confirmation result (resolved — supersedes the M1 body's attach point)
+
+The review made "confirm the publish path" a hard predecessor to M1. **Done — and it materially changes M1.** Traced in code:
+
+- **The product path is the finalized-assertion path, not `_publish`.** The daemon HTTP API publishes a KA to VM via `agent.publishFromFinalizedAssertion` — `POST …/vm/publish` (`knowledge-assets.ts:923`) and the atomic create+publish (`:622`), each after `agent.assertion.finalize`. The plan body's attach point `_publish:1214` is the **SDK/programmatic** path only (`agent.publish()`), not what the daemon runs.
+- **Two genuinely distinct seal points.** `assertion.finalize` (`assertionFinalize:1616`) seals at `merkleRoot = computeFlatKCRoot(allSkolemizedQuads, [])` (`:1733`); `publishFromFinalizedAssertion` (`:2881`) reloads the sealed SWM slice and calls `publisher.publish` **directly** (not `_publish`) with the seal as `precomputedAttestation.expectedMerkleRoot` (`~:3088`). The SDK `_publish` path computes its **own** seal via `_buildPrecomputedAttestationForSelection` (`~:1214`). So M1 has **two attach points** (`assertionFinalize` for the product path, `_publish` for the SDK path), each needing its own root-consistency proof; `publishAsync` is a third path only if async captures must carry the floor.
+- **Primary attach point is `assertionFinalize`.** The catalog quads must be injected into the finalized-assertion content **before** the seal at `:1733` **and** persisted into the slice `publishFromFinalizedAssertion` reloads — otherwise the seal and the reload disagree and the `expectedMerkleRoot` compare fires.
+- **NEW open blocker for the product path (was not in the plan):** the finalize path handles private content **differently** from `_publish`. `assertionFinalize` seals everything as one set (`computeFlatKCRoot(…, [])`, empty private-roots arg), and `publishFromFinalizedAssertion`'s `publisher.publish` call site (`:3079-3099`) does **not** pass the `encryptInlinePayload`/`encryptInlineChunked` emitters that `_publish` resolves for curated CGs (the comment says encryption is "wired through … via `publishFromSharedMemory`"). **Before M1 can inject a *public* catalog entry on the product path, the finalize→`publishFromSharedMemory`→`publisher.publish` private-content flow (where the public/private split and curated encryption actually happen) must be traced end-to-end.** This is M1's true first task and is not yet done.
+
+**Net:** M1 is confirmed as **larger than "M"** — two attach points + a per-path root-consistency proof + the finalize-path private-content trace + the migration/backfill tail. It is still the right first slice, but "ships today" is wrong; the next concrete step is the finalize-path private-content trace.
+
 ---
 
 ## OT-RFC-49 Implementation Plan (full body) — Ciphertext Strip + Member-Anchor Tier + Combined Catalog Entry
