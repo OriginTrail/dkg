@@ -32,6 +32,14 @@ const GRAPH_URI = `urn:test:cg/graph`;
 const PROTOCOL_ID = '/dkg/10.0.2/sync';
 const LEGACY_SYNC_BUSY_RESPONSE = '__DKG_SYNC_BUSY__';
 
+function freshCheckpoint(offset: number, nowMs = Date.now()) {
+  return {
+    offset,
+    updatedAtMs: nowMs,
+    expiresAtMs: nowMs + DURABLE_DATA_SYNC_SESSION_TTL_MS,
+  };
+}
+
 function noopLog(): void {}
 function makeCtx(): OperationContext {
   return { kind: 'system', id: 'test', startedAt: Date.now() } as never;
@@ -62,7 +70,7 @@ describe('sync checkpoint freshness', () => {
   it('resumes only from fresh checkpoint entries', async () => {
     let now = 1_000;
     const store = new MemorySyncCheckpointStore({ clock: () => now, ttlMs: 100 });
-    const key = getSyncCheckpointKey(REMOTE_PEER_ID, CG_ID, false, 'data');
+    const key = getSyncCheckpointKey(REMOTE_PEER_ID, CG_ID, false, 'snapshot');
     store.set(key, 500);
 
     const fetchOffset = async (): Promise<number> => {
@@ -72,7 +80,7 @@ describe('sync checkpoint freshness', () => {
         remotePeerId: REMOTE_PEER_ID,
         contextGraphId: CG_ID,
         includeSharedMemory: false,
-        phase: 'data',
+        phase: 'snapshot',
         graphUri: GRAPH_URI,
         deadline: Date.now() + 60_000,
         syncPageTimeoutMs: 5_000,
@@ -237,7 +245,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => freshCheckpoint(0),
           set: () => {},
           delete: () => {},
         },
@@ -291,7 +299,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => freshCheckpoint(0),
           set: () => {},
           delete: () => {},
         },
@@ -336,7 +344,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => freshCheckpoint(0),
           set: () => {},
           delete: () => {},
         },
@@ -415,7 +423,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => freshCheckpoint(0),
           set: () => {},
           delete: () => {},
         },
@@ -470,7 +478,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 1,
+          get: () => freshCheckpoint(1),
           set: () => {},
           delete: () => {},
         },
@@ -529,7 +537,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => freshCheckpoint(0),
           set: () => {},
           delete: () => {},
         },
@@ -578,7 +586,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 1,
+          get: () => freshCheckpoint(1),
           set: () => {},
           delete: (key) => {
             deletedCheckpoints.push(key);
@@ -620,7 +628,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
       offset: number;
       syncSessionId: string | undefined;
     }> = [];
-    const checkpointValues = new Map<string, number>();
+    const checkpointValues = new Map<string, ReturnType<typeof freshCheckpoint>>();
     const deletedCheckpoints: string[] = [];
     const checkpointKey = `${REMOTE_PEER_ID}|superseded-incomplete-session-cg|durable|data`;
     let sendMode: 'timeout' | 'superseded' | 'complete' = 'timeout';
@@ -628,7 +636,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     const checkpointStore = {
       get: (key: string) => checkpointValues.get(key),
       set: (key: string, value: number) => {
-        checkpointValues.set(key, value);
+        checkpointValues.set(key, freshCheckpoint(value));
       },
       delete: (key: string) => {
         deletedCheckpoints.push(key);
@@ -686,7 +694,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
 
     const first = await runSupersededFetch();
     expect(first.completed).toBe(false);
-    checkpointValues.set(checkpointKey, first.nextOffset);
+    checkpointValues.set(checkpointKey, freshCheckpoint(first.nextOffset));
     const supersededSessionId = observedBuilds[0].syncSessionId;
 
     sendMode = 'superseded';
@@ -724,7 +732,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 250,
+          get: () => freshCheckpoint(250),
           set: () => {},
           delete: (key) => {
             deletedCheckpoints.push(key);
@@ -784,7 +792,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => freshCheckpoint(0),
           set: () => {},
           delete: () => {},
         },
@@ -1085,7 +1093,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => freshCheckpoint(0),
           set: () => {},
           delete: () => {},
         },
@@ -1127,7 +1135,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => freshCheckpoint(0),
           set: () => {},
           delete: () => {},
         },
@@ -1170,7 +1178,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => freshCheckpoint(0),
           set: () => {},
           delete: () => {},
         },
@@ -1223,7 +1231,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
       debugSyncProgress: false,
       protocolSync: PROTOCOL_ID,
       checkpointStore: {
-        get: () => 0,
+        get: () => freshCheckpoint(0),
         set: () => {},
         delete: () => {},
       },
@@ -1282,7 +1290,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => freshCheckpoint(0),
           set: () => {},
           delete: () => {},
         },
