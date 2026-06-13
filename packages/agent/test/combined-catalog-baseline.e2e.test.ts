@@ -89,5 +89,21 @@ describe('OT-RFC-49 baseline — curated CG product-path publish (pre-catalog)',
     expect(pub.kaManifest.length).toBe(2);
     const roots = pub.kaManifest.map((m: any) => String(m.rootEntity ?? m.entity ?? m.subject ?? ''));
     expect(roots.some((r: string) => r.includes(CG))).toBe(true); // the catalog KA, keyed on the CG UAL
+
+    // The catalog entry persists PLAINTEXT in the public _catalog graph — a
+    // queryable, standards-compliant DCAT dataset record (NOT encrypted, unlike
+    // the private data which only exists as ciphertext chunks).
+    const cgUal = `did:dkg:context-graph:${CG}`;
+    const catalogGraph = `${cgUal}/_catalog`;
+    const res: any = await (publisher as any).store.query(
+      `SELECT ?p ?o WHERE { GRAPH <${catalogGraph}> { <${cgUal}> ?p ?o } }`,
+    );
+    expect(res.type).toBe('bindings');
+    const triples = res.bindings.map((b: any) => ({ p: b.p, o: b.o }));
+    const types = triples.filter((t: any) => t.p === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type').map((t: any) => t.o);
+    expect(types).toContain('http://www.w3.org/ns/dcat#Dataset');             // standards-compliant DCAT
+    expect(types).toContain('https://dkg.network/ontology#PrivateContextGraph'); // dual-typed
+    const accessRights = triples.find((t: any) => t.p === 'http://purl.org/dc/terms/accessRights');
+    expect(accessRights?.o).toBe('http://publications.europa.eu/resource/authority/access-right/RESTRICTED');
   });
 });

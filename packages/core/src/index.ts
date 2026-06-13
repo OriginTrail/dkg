@@ -1,5 +1,6 @@
 export * from './types.js';
 export * from './constants.js';
+export * from './catalog.js';
 export { parseDotenvValue } from './dotenv.js';
 export * from './memory-model.js';
 export * from './trust.js';

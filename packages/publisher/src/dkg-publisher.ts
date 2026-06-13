@@ -7,6 +7,7 @@ import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-sto
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
 import { canonicalPublishPayload } from './canonical-publish-payload.js';
+import { partitionCatalogQuads, contextGraphCatalogUri } from '@origintrail-official/dkg-core';
 import { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 import { skolemize } from './skolemize.js';
 import {
@@ -1941,6 +1942,31 @@ export class DKGPublisher implements Publisher {
       )
       .join('\n');
     const publicByteSize = BigInt(new TextEncoder().encode(nquadsStr).length);
+
+    // OT-RFC-49 §4 — the public DCAT catalog entry rides in the merkle root
+    // (kcMerkleRoot, above, covers it) but MUST NOT be encrypted: feed only the
+    // non-catalog (private data) quads to the curated encryptor, so
+    // ciphertextChunksRoot commits the private payload only. No-op for public
+    // CGs and any private CG without a catalog entry (catalogQuads empty ⇒
+    // encryptableNquadsStr === nquadsStr).
+    const { catalogQuads, otherQuads } = partitionCatalogQuads(allSkolemizedQuads);
+    const encryptableNquadsStr = catalogQuads.length === 0
+      ? nquadsStr
+      : otherQuads
+          .map(
+            (q) =>
+              `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`,
+          )
+          .join('\n');
+    // Persist the catalog entry plaintext into the public `_catalog` graph so it
+    // survives the post-publish SWM clear and is queryable/servable (the data
+    // stays encrypted-only). Bounded named graph ⇒ the §7 facet open-serve can
+    // release exactly this and nothing gated.
+    if (catalogQuads.length > 0) {
+      const catalogGraph = contextGraphCatalogUri(contextGraphId);
+      await this.store.insert(catalogQuads.map((q) => ({ ...q, graph: catalogGraph })));
+    }
+
     const merkleRootHex = ethers.hexlify(kcMerkleRoot);
     let publishOperationId = '';
     let ual = '';
@@ -1987,7 +2013,7 @@ export class DKGPublisher implements Publisher {
       ciphertextChunkCount: number;
     } | undefined;
     if (useChunkedInline) {
-      const plaintextBytes = new TextEncoder().encode(nquadsStr);
+      const plaintextBytes = new TextEncoder().encode(encryptableNquadsStr);
       ensurePublishOperationIdentity();
       // batchId = V10 KC merkleRoot. It remains the core-side
       // persistence/sampling key, while publishOperationId is the
@@ -2007,7 +2033,7 @@ export class DKGPublisher implements Publisher {
         ciphertextChunkCount: chunked.ciphertextChunkCount,
       };
     } else if (useEncryptedInline) {
-      const plaintextBytes = new TextEncoder().encode(nquadsStr);
+      const plaintextBytes = new TextEncoder().encode(encryptableNquadsStr);
       const ciphertext = await options.encryptInlinePayload!(plaintextBytes);
       stagingQuads = ciphertext instanceof Uint8Array ? ciphertext : new Uint8Array(ciphertext);
       // For curated CGs the publisher PAYS for ciphertext bytes (cores

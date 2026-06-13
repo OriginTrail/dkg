@@ -4,7 +4,6 @@ import {
   buildPublicProjection,
   blindedAnchor,
   emitPublicProjection,
-  isCatalogQuad,
   partitionCatalogQuads,
   CATALOG_PREDICATES,
   PUBLIC_PROJECTION_FLOOR_PREDICATES,
@@ -180,42 +179,41 @@ describe('OT-RFC-49 §5.9.3 emit orchestration — on VM publish', () => {
   });
 });
 
-describe('OT-RFC-49 §4/§5.9 combined-model partition — catalog vs everything else', () => {
+describe('OT-RFC-49 §4/§5.9 combined-model partition — catalog vs everything else (by-type, self-contained)', () => {
   const CG_UAL = 'did:dkg:otp:2043/0x5cad/142';
 
-  it('isCatalogQuad: subject==CG UAL AND a catalog predicate', () => {
-    expect(isCatalogQuad(q(CG_UAL, DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DCAT_DATASET), CG_UAL)).toBe(true);
-    expect(isCatalogQuad(q(CG_UAL, DKG_ONTOLOGY.DCT_ACCESS_RIGHTS, DKG_ONTOLOGY.ACCESS_RIGHT_RESTRICTED), CG_UAL)).toBe(true);
-    // user entity (wrong subject) — not catalog
-    expect(isCatalogQuad(q('urn:acme:shipment/SH-42', DKG_ONTOLOGY.RDF_TYPE, 'urn:acme:Shipment'), CG_UAL)).toBe(false);
-    // fail-safe: CG UAL subject but a non-catalog predicate stays off the public path
-    expect(isCatalogQuad(q(CG_UAL, 'urn:acme:secret', '"leak"'), CG_UAL)).toBe(false);
-  });
-
-  it('partitionCatalogQuads: separates the catalog entry from data, total + order-preserving', () => {
+  it('separates the catalog entry from data via the dkg:PrivateContextGraph marker; total + order-preserving', () => {
     const data = [
+      q('urn:acme:shipment/SH-42', DKG_ONTOLOGY.RDF_TYPE, 'urn:acme:Shipment'), // a data rdf:type — must NOT be catalog
       q('urn:acme:shipment/SH-42', 'urn:acme:product', '"P-9"'),
       q('urn:acme:shipment/SH-42', 'urn:acme:quantity', '"500"'),
     ];
-    const catalog = buildPublicProjection({ ual: CG_UAL, accessPolicy: 'private', graph: 'g' }); // 4 floor quads
-    const mixed = [data[0], catalog[0], data[1], catalog[1], catalog[2], catalog[3]];
+    const catalog = buildPublicProjection({ ual: CG_UAL, accessPolicy: 'private', graph: 'g' }); // dual-typed floor
+    const mixed = [data[0], catalog[0], data[1], catalog[1], data[2], catalog[2], catalog[3]];
 
-    const { catalogQuads, otherQuads } = partitionCatalogQuads(mixed, CG_UAL);
+    const { catalogQuads, otherQuads } = partitionCatalogQuads(mixed);
 
     expect(catalogQuads).toHaveLength(catalog.length);
     expect(otherQuads).toHaveLength(data.length);
-    // totality: nothing dropped or duplicated
-    expect(catalogQuads.length + otherQuads.length).toBe(mixed.length);
-    // exactly the buildPublicProjection output is recovered as the catalog set
-    expect(new Set(catalogQuads)).toEqual(new Set(catalog));
-    // every catalog quad is about the CG UAL; no data quad leaked into it
-    expect(catalogQuads.every(c => c.subject === CG_UAL)).toBe(true);
-    expect(otherQuads.some(o => o.subject === CG_UAL)).toBe(false);
+    expect(catalogQuads.length + otherQuads.length).toBe(mixed.length); // total
+    expect(new Set(catalogQuads)).toEqual(new Set(catalog));             // exactly the catalog set
+    expect(catalogQuads.every(c => c.subject === CG_UAL)).toBe(true);    // all about the CG UAL
+    expect(otherQuads.some(o => o.subject === CG_UAL)).toBe(false);      // no data quad leaked in
+    // fail-safe: the data entity's rdf:type stays on the data side
+    expect(otherQuads).toContainEqual(data[0]);
+  });
+
+  it('fail-safe: a non-catalog predicate on the catalog subject stays on the encrypted path', () => {
+    const catalog = buildPublicProjection({ ual: CG_UAL, accessPolicy: 'private', graph: 'g' });
+    const leaky = q(CG_UAL, 'urn:acme:secret', '"do-not-leak"'); // CG UAL subject, non-catalog predicate
+    const { catalogQuads, otherQuads } = partitionCatalogQuads([...catalog, leaky]);
+    expect(catalogQuads).toHaveLength(catalog.length);
+    expect(otherQuads).toEqual([leaky]);
   });
 
   it('a private CG with no catalog entry yields all otherQuads (no accidental public leak)', () => {
     const data = [q('urn:acme:x', 'urn:acme:p', '"v"')];
-    const { catalogQuads, otherQuads } = partitionCatalogQuads(data, CG_UAL);
+    const { catalogQuads, otherQuads } = partitionCatalogQuads(data);
     expect(catalogQuads).toHaveLength(0);
     expect(otherQuads).toEqual(data);
   });
