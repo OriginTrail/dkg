@@ -17,34 +17,36 @@ const GRAPH = `${UAL}/_projection`;
 const floorInput = (over: Partial<PublicProjectionInput> = {}): PublicProjectionInput => ({
   ual: UAL,
   accessPolicy: 'private',
-  committedRoot: ROOT,
   graph: GRAPH,
   ...over,
 });
 
-describe('OT-RFC-49 §5.9 public projection — mandatory floor', () => {
-  it('emits exactly the four floor triples for a bare private CG', () => {
+describe('OT-RFC-49 §5.9 public catalog entry — mandatory floor (DCAT)', () => {
+  it('emits a dual-typed DCAT dataset record as the bare floor', () => {
     const quads = buildPublicProjection(floorInput());
-    expect(quads).toHaveLength(4);
+    expect(quads).toHaveLength(4); // rdf:type x2 (dcat:Dataset + dkg:PrivateContextGraph) + identifier + accessRights
 
-    const byPredicate = new Map(quads.map(q => [q.predicate, q]));
-    expect([...byPredicate.keys()].sort()).toEqual([...PUBLIC_PROJECTION_FLOOR_PREDICATES].sort());
-
-    // every floor triple is about the CG's UAL, in the projection graph
+    // every floor triple is about the CG's UAL, in the catalog graph
     for (const q of quads) {
       expect(q.subject).toBe(UAL);
       expect(q.graph).toBe(GRAPH);
     }
-    expect(byPredicate.get(DKG_ONTOLOGY.RDF_TYPE)!.object).toBe(DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH);
-    expect(byPredicate.get(DKG_ONTOLOGY.DCT_ACCESS_RIGHTS)!.object).toBe(DKG_ONTOLOGY.DKG_PRIVATE_ACCESS_RIGHTS);
-    expect(byPredicate.get(DKG_ONTOLOGY.DCT_IDENTIFIER)!.object).toBe(`"${UAL}"`);
-    expect(byPredicate.get(DKG_ONTOLOGY.DKG_COMMITTED_ROOT)!.object).toBe(`"${ROOT}"`);
+    const types = quads.filter(q => q.predicate === DKG_ONTOLOGY.RDF_TYPE).map(q => q.object);
+    expect(types).toContain(DKG_ONTOLOGY.DCAT_DATASET);            // interop type
+    expect(types).toContain(DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH); // dkg-native type
+    const accessRights = quads.find(q => q.predicate === DKG_ONTOLOGY.DCT_ACCESS_RIGHTS);
+    expect(accessRights?.object).toBe(DKG_ONTOLOGY.ACCESS_RIGHT_RESTRICTED); // standard EU vocab IRI, bare
+    expect(quads.find(q => q.predicate === DKG_ONTOLOGY.DCT_IDENTIFIER)?.object).toBe(`"${UAL}"`);
+
+    // floor predicate set matches the exported invariant
+    expect([...new Set(quads.map(q => q.predicate))].sort()).toEqual([...PUBLIC_PROJECTION_FLOOR_PREDICATES].sort());
   });
 
-  it('the committed root is the verifiability edge — present and literal', () => {
-    const quads = buildPublicProjection(floorInput());
-    const root = quads.find(q => q.predicate === DKG_ONTOLOGY.DKG_COMMITTED_ROOT);
-    expect(root?.object).toBe(`"${ROOT}"`);
+  it('committedRoot is optional — omitted in the combined model, present + validated in the separate-KA model', () => {
+    expect(buildPublicProjection(floorInput()).some(q => q.predicate === DKG_ONTOLOGY.DKG_COMMITTED_ROOT)).toBe(false);
+    const withRoot = buildPublicProjection(floorInput({ committedRoot: ROOT }));
+    expect(withRoot).toHaveLength(5);
+    expect(withRoot.find(q => q.predicate === DKG_ONTOLOGY.DKG_COMMITTED_ROOT)?.object).toBe(`"${ROOT}"`);
   });
 });
 
@@ -64,7 +66,7 @@ describe('OT-RFC-49 §5.9.1 disclosure invariant — nothing leaks by default', 
     expect(() => buildPublicProjection(floorInput({ accessPolicy: 'public' }))).toThrow(/private-CG concept/);
   });
 
-  it('refuses a malformed committed root (must be 0x + 64 hex)', () => {
+  it('refuses a malformed committed root when one is supplied (must be 0x + 64 hex)', () => {
     expect(() => buildPublicProjection(floorInput({ committedRoot: '0xdead' }))).toThrow(/committedRoot/);
     expect(() => buildPublicProjection(floorInput({ committedRoot: 'deadbeef' }))).toThrow(/committedRoot/);
   });
@@ -81,11 +83,11 @@ describe('OT-RFC-49 §5.9.2 recommended fields — opt-in, pseudonymizable', () 
       publisher: 'did:dkg:identity:0x7bcgkey',
       accessService: 'https://grants.example/dkg',
     }));
-    expect(quads).toHaveLength(6);
+    expect(quads).toHaveLength(6); // 4 floor + publisher + accessService
     const pub = quads.find(q => q.predicate === DKG_ONTOLOGY.DCT_PUBLISHER);
     expect(pub?.object).toBe('did:dkg:identity:0x7bcgkey'); // IRI, bare
-    const svc = quads.find(q => q.predicate === DKG_ONTOLOGY.DKG_ACCESS_SERVICE);
-    expect(svc?.object).toBe('"https://grants.example/dkg"'); // literal, quoted
+    const svc = quads.find(q => q.predicate === DKG_ONTOLOGY.DCAT_ACCESS_SERVICE);
+    expect(svc?.object).toBe('https://grants.example/dkg'); // dcat:accessService -> service IRI, bare
   });
 });
 
@@ -132,15 +134,16 @@ describe('OT-RFC-49 §5.9.3 emit orchestration — on VM publish', () => {
     return { deps, published, logs };
   };
 
-  it('publishes the floor for a private CG and reports emitted', async () => {
+  it('publishes the catalog entry for a private CG and reports emitted', async () => {
     const { deps, published } = makeDeps();
     const res = await emitPublicProjection(deps, 'cg-1', ROOT);
     expect(res.emitted).toBe(true);
     expect(published).toHaveLength(1);
     expect(published[0].graph).toBe(GRAPH);
-    expect(published[0].quads).toHaveLength(4); // floor only (no publisher/accessService dep)
+    const types = published[0].quads.filter(q => q.predicate === DKG_ONTOLOGY.RDF_TYPE).map(q => q.object);
+    expect(types).toContain(DKG_ONTOLOGY.DCAT_DATASET); // DCAT dataset record
     const root = published[0].quads.find(q => q.predicate === DKG_ONTOLOGY.DKG_COMMITTED_ROOT);
-    expect(root?.object).toBe(`"${ROOT}"`); // committedRoot threaded through
+    expect(root?.object).toBe(`"${ROOT}"`); // separate-KA model threads committedRoot through
   });
 
   it('is a no-op for a public CG (a public CG is its own public face)', async () => {
@@ -158,7 +161,7 @@ describe('OT-RFC-49 §5.9.3 emit orchestration — on VM publish', () => {
     await emitPublicProjection(deps, 'cg-1', ROOT);
     const preds = published[0].quads.map(q => q.predicate);
     expect(preds).toContain(DKG_ONTOLOGY.DCT_PUBLISHER);
-    expect(preds).toContain(DKG_ONTOLOGY.DKG_ACCESS_SERVICE);
+    expect(preds).toContain(DKG_ONTOLOGY.DCAT_ACCESS_SERVICE);
   });
 
   it('isolates errors — a publish failure never throws, just logs and reports', async () => {

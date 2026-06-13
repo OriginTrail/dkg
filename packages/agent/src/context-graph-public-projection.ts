@@ -31,19 +31,25 @@ export interface PublicProjectionInput {
   /** The CG's UAL / DID — the subject of every projection triple (floor). */
   ual: string;
   /**
-   * The CG's access class. A projection is a *private*-CG concept; this
+   * The CG's access class. A catalog entry is a *private*-CG concept; this
    * builder refuses any other value (a public CG IS its own public face).
    */
   accessPolicy: string;
-  /** Latest on-chain VM merkleRoot, `0x`+64 hex — the verifiability edge (floor). */
-  committedRoot: string;
-  /** Target graph URI: the public projection KA this node is published into (floor). */
+  /**
+   * Optional. The on-chain VM merkleRoot, `0x`+64 hex. Used only by the
+   * separate-KA model, where the catalog entry has its own root and needs an
+   * explicit `dkg:committedRoot` back-reference. The combined model commits
+   * the entry inside the CG's own root, so verifiability is intrinsic and this
+   * is omitted.
+   */
+  committedRoot?: string;
+  /** Target graph URI: the public `_catalog` subgraph this entry is written into (floor). */
   graph: string;
 
   // ---- Recommended (§5.9.2). Omit for the bare floor. ----
-  /** Controlling identity IRI. MAY be a per-CG pseudonymous key (§9 Q5). */
+  /** Controlling identity IRI for `dct:publisher`. MAY be a per-CG pseudonymous key (§9 Q5). */
   publisher?: string;
-  /** Endpoint to request a scoped access grant. */
+  /** Grant endpoint IRI for `dcat:accessService` — how a consumer requests scoped access. */
   accessService?: string;
 
   // ---- Opt-in, disclosure-priced (§5.9.4). Each is a deliberate curator choice. ----
@@ -67,44 +73,53 @@ function quad(subject: string, predicate: string, object: string, graph: string)
 }
 
 /**
- * Build the public-projection quads for a private CG.
+ * Build the public catalog-entry quads for a private CG — a DCAT dataset
+ * record (§5.9), the CG's standards-compliant public face.
  *
- * Returns the mandatory floor — `a dkg:PrivateContextGraph`, `dct:identifier`
- * (UAL), `dct:accessRights dkg:Private`, `dkg:committedRoot` — plus any
- * recommended/opt-in fields the caller explicitly supplied, and nothing else.
+ * Returns the mandatory floor — `a dcat:Dataset, dkg:PrivateContextGraph`
+ * (dual-typed: DCAT for interop, dkg: for native consumers), `dct:identifier`
+ * (UAL), `dct:accessRights …/RESTRICTED` — plus any recommended/opt-in fields
+ * the caller explicitly supplied (including `dkg:committedRoot` iff a
+ * `committedRoot` is passed, for the separate-KA model), and nothing else.
  *
- * @throws if `accessPolicy` is not `'private'`, or the UAL / root / graph are
- *         missing or malformed. The throw is the disclosure-invariant guard:
- *         a malformed floor must never be published as if authoritative.
+ * @throws if `accessPolicy` is not `'private'`, the UAL / graph are missing,
+ *         or a supplied `committedRoot` is malformed. The throw is the
+ *         disclosure-invariant guard: a malformed entry must never be
+ *         published as if authoritative.
  */
 export function buildPublicProjection(input: PublicProjectionInput): Quad[] {
   if (input.accessPolicy !== 'private') {
     throw new Error(
-      `public projection is a private-CG concept; refusing accessPolicy='${input.accessPolicy}'`,
+      `public catalog entry is a private-CG concept; refusing accessPolicy='${input.accessPolicy}'`,
     );
   }
   const ual = input.ual?.trim();
-  if (!ual) throw new Error('public projection requires a non-empty UAL');
-  if (!ROOT_RE.test(input.committedRoot)) {
-    throw new Error(`committedRoot must be 0x + 64 hex; got '${input.committedRoot}'`);
-  }
+  if (!ual) throw new Error('public catalog entry requires a non-empty UAL');
   const graph = input.graph?.trim();
-  if (!graph) throw new Error('public projection requires a target graph URI');
+  if (!graph) throw new Error('public catalog entry requires a target graph URI');
 
-  // --- Mandatory floor (§5.9.3) ---
+  // --- Mandatory floor (§5.9.3) — a DCAT dataset record ---
   const quads: Quad[] = [
-    quad(ual, DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH, graph),
+    quad(ual, DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DCAT_DATASET, graph),            // interop
+    quad(ual, DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH, graph), // dkg-native
     quad(ual, DKG_ONTOLOGY.DCT_IDENTIFIER, literal(ual), graph),
-    quad(ual, DKG_ONTOLOGY.DCT_ACCESS_RIGHTS, DKG_ONTOLOGY.DKG_PRIVATE_ACCESS_RIGHTS, graph),
-    quad(ual, DKG_ONTOLOGY.DKG_COMMITTED_ROOT, literal(input.committedRoot), graph),
+    quad(ual, DKG_ONTOLOGY.DCT_ACCESS_RIGHTS, DKG_ONTOLOGY.ACCESS_RIGHT_RESTRICTED, graph),
   ];
+
+  // --- Separate-KA back-reference (combined model omits it) ---
+  if (input.committedRoot !== undefined) {
+    if (!ROOT_RE.test(input.committedRoot)) {
+      throw new Error(`committedRoot, when given, must be 0x + 64 hex; got '${input.committedRoot}'`);
+    }
+    quads.push(quad(ual, DKG_ONTOLOGY.DKG_COMMITTED_ROOT, literal(input.committedRoot), graph));
+  }
 
   // --- Recommended (§5.9.2) ---
   if (input.publisher?.trim()) {
     quads.push(quad(ual, DKG_ONTOLOGY.DCT_PUBLISHER, input.publisher.trim(), graph));
   }
   if (input.accessService?.trim()) {
-    quads.push(quad(ual, DKG_ONTOLOGY.DKG_ACCESS_SERVICE, literal(input.accessService.trim()), graph));
+    quads.push(quad(ual, DKG_ONTOLOGY.DCAT_ACCESS_SERVICE, input.accessService.trim(), graph));
   }
 
   // --- Opt-in, disclosure-priced (§5.9.4) ---
@@ -133,10 +148,9 @@ export function blindedAnchor(cgSecret: Buffer | string, canonicalEntityId: stri
 
 /** Floor predicates, exported so tests / auditors can assert the disclosure invariant. */
 export const PUBLIC_PROJECTION_FLOOR_PREDICATES: readonly string[] = [
-  DKG_ONTOLOGY.RDF_TYPE,
+  DKG_ONTOLOGY.RDF_TYPE,        // dcat:Dataset + dkg:PrivateContextGraph (two quads, one predicate)
   DKG_ONTOLOGY.DCT_IDENTIFIER,
   DKG_ONTOLOGY.DCT_ACCESS_RIGHTS,
-  DKG_ONTOLOGY.DKG_COMMITTED_ROOT,
 ];
 
 // ---------------------------------------------------------------------------
