@@ -265,15 +265,20 @@ function contextGraphIdFromGraphUriForMetricsWithCandidates(
 export function countContextGraphsFromGraphUris(
   graphUris: readonly string[],
   knownContextGraphIds?: Iterable<string>,
+  excludedContextGraphIds?: Iterable<string>,
 ): number {
-  const knownCandidates = normalizeMetricContextGraphCandidates(knownContextGraphIds);
+  const excludedContextGraphIdSet = new Set(excludedContextGraphIds ?? []);
+  const knownCandidates = normalizeMetricContextGraphCandidates(knownContextGraphIds)
+    .filter((contextGraphId) => !excludedContextGraphIdSet.has(contextGraphId));
   const contextGraphIds = new Set<string>(knownCandidates);
   for (const graphUri of graphUris) {
     const contextGraphId = contextGraphIdFromGraphUriForMetricsWithCandidates(
       graphUri,
       knownCandidates,
     );
-    if (contextGraphId) contextGraphIds.add(contextGraphId);
+    if (contextGraphId && !excludedContextGraphIdSet.has(contextGraphId)) {
+      contextGraphIds.add(contextGraphId);
+    }
   }
   return contextGraphIds.size;
 }

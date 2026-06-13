@@ -1894,7 +1894,7 @@ export async function runDaemonInner(
           if (!shadowContextGraphIds.has(contextGraphId)) knownContextGraphIds.add(contextGraphId);
         }
       }
-      return countContextGraphsFromGraphUris(graphUris, knownContextGraphIds);
+      return countContextGraphsFromGraphUris(graphUris, knownContextGraphIds, shadowContextGraphIds);
     },
     // The count getters below each issue a data-proportional full-scan COUNT,
     // but the only caller is the 30 s metrics tick (metricsSource is consumed

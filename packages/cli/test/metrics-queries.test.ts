@@ -124,6 +124,14 @@ describe('countContextGraphsFromGraphUris', () => {
     ], ['tuesday-cg', walletScoped])).toBe(2);
   });
 
+  it('skips graph-derived ids that are proven subscription shadows', () => {
+    const hashKey = `0x${'a'.repeat(64)}`;
+    expect(countContextGraphsFromGraphUris([
+      `did:dkg:context-graph:${hashKey}/_meta`,
+      'did:dkg:context-graph:cleartext-cg/_meta',
+    ], ['cleartext-cg'], [hashKey])).toBe(1);
+  });
+
   it('uses exact local root meta graphs to back subscribed slash ids', () => {
     expect(contextGraphIdsFromLocalRootMetaGraphs([
       'did:dkg:context-graph:team/context/alpha/_meta',
