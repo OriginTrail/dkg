@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  buildContextGraphDeclarationsSparql,
   contextGraphIdsFromDeclarationBindings,
   contextGraphIdsFromMetricSubscriptionCandidates,
   contextGraphIdFromGraphUriForMetrics,
@@ -111,5 +112,31 @@ describe('countContextGraphsFromGraphUris', () => {
       ['local-sync/slash-id', { metaSynced: true }],
       ['core-hosted', { coreHosted: true }],
     ])).toEqual(['chain-backed', 'pending-meta', 'local-sync/slash-id', 'core-hosted']);
+  });
+
+  it('dedupes subscription candidates by stable chain or wire identity', () => {
+    const hashKey = `0x${'a'.repeat(64)}`;
+    const wireOnlyHash = `0x${'b'.repeat(64)}`;
+    expect(contextGraphIdsFromMetricSubscriptionCandidates([
+      [hashKey, { onChainId: '7', onChainHash: hashKey, coreHosted: true }],
+      ['cleartext-cg', { onChainId: '7', onChainHash: hashKey, synced: true }],
+      [wireOnlyHash, { onChainHash: wireOnlyHash, coreHosted: true }],
+      ['wire-only-clear', { onChainHash: wireOnlyHash, synced: true }],
+    ])).toEqual(['cleartext-cg', 'wire-only-clear']);
+  });
+
+  it('builds declaration queries from known declaration graphs only', () => {
+    const query = buildContextGraphDeclarationsSparql([
+      'did:dkg:context-graph:team/context/alpha/_meta',
+      'did:dkg:context-graph:agents/_shared_memory',
+      'did:dkg:context-graph:plain-cg',
+    ]);
+
+    expect(query).toContain('VALUES ?g');
+    expect(query).toContain('<did:dkg:context-graph:team/context/alpha/_meta>');
+    expect(query).toContain('<did:dkg:context-graph:ontology>');
+    expect(query).toContain('<did:dkg:context-graph:agents>');
+    expect(query).not.toContain('<did:dkg:context-graph:plain-cg>');
+    expect(query).not.toContain('<did:dkg:context-graph:agents/_shared_memory>');
   });
 });

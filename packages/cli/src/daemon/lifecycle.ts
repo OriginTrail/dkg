@@ -15,10 +15,10 @@ import {
 } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  buildContextGraphDeclarationsSparql,
   contextGraphIdsFromDeclarationBindings,
   contextGraphIdsFromMetricSubscriptionCandidates,
   countContextGraphsFromGraphUris,
-  GET_CONTEXT_GRAPH_DECLARATIONS_SPARQL,
   GET_TOTAL_TRIPLES_SPARQL,
   parseRdfInt,
 } from "./metrics-queries.js";
@@ -1856,10 +1856,9 @@ export async function runDaemonInner(
       }
     },
     getContextGraphCount: async () => {
-      const [graphUris, contextGraphs, declarationResult] = await Promise.all([
+      const [graphUris, contextGraphs] = await Promise.all([
         agent.store.listGraphs(),
         agent.listContextGraphs(),
-        agent.store.query(GET_CONTEXT_GRAPH_DECLARATIONS_SPARQL),
       ]);
       const knownContextGraphIds = new Set<string>();
       for (const contextGraph of contextGraphs) {
@@ -1870,7 +1869,11 @@ export async function runDaemonInner(
       )) {
         knownContextGraphIds.add(contextGraphId);
       }
-      if (declarationResult.type === "bindings") {
+      const declarationQuery = buildContextGraphDeclarationsSparql(graphUris);
+      const declarationResult = declarationQuery
+        ? await agent.store.query(declarationQuery)
+        : null;
+      if (declarationResult?.type === "bindings") {
         for (const contextGraphId of contextGraphIdsFromDeclarationBindings(
           declarationResult.bindings as Record<string, string>[],
         )) {

@@ -1,4 +1,4 @@
-import { DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
+import { DKG_ONTOLOGY, sparqlIri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 
 // Canonical SPARQL + result parsing for the daemon's metrics reads.
 //
@@ -32,23 +32,17 @@ const WALLET_SCOPED_CONTEXT_GRAPH_RE = /^0x[a-fA-F0-9]{40}\/[^/]+$/;
 export const GET_TOTAL_TRIPLES_SPARQL =
   'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }';
 
-export const GET_CONTEXT_GRAPH_DECLARATIONS_SPARQL = `
-  SELECT DISTINCT ?ctxGraph WHERE {
-    GRAPH ?g {
-      ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
-    }
-    FILTER(STRSTARTS(STR(?ctxGraph), "${CONTEXT_GRAPH_URI_PREFIX}"))
-  }
-`;
-
 type MetricSubscriptionCandidate = {
   onChainId?: string;
+  onChainHash?: string;
   pendingMeta?: boolean;
   synced?: boolean;
   metaSynced?: boolean;
   sharedMemorySynced?: boolean;
   coreHosted?: boolean;
 };
+
+const HASH_CONTEXT_GRAPH_ID_RE = /^0x[a-fA-F0-9]{64}$/;
 
 /**
  * Parse a SPARQL `COUNT` binding into a number. The value arrives as an RDF
@@ -76,6 +70,33 @@ function unambiguousMetricContextGraphId(candidate: string): string | null {
   return WALLET_SCOPED_CONTEXT_GRAPH_RE.test(candidate) ? candidate : null;
 }
 
+function declarationGraphUrisFromGraphUris(graphUris: readonly string[]): string[] {
+  const declarationGraphs = new Set<string>([
+    `${CONTEXT_GRAPH_URI_PREFIX}${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}`,
+    `${CONTEXT_GRAPH_URI_PREFIX}${SYSTEM_CONTEXT_GRAPHS.AGENTS}`,
+  ]);
+  for (const graphUri of graphUris) {
+    if (!graphUri.startsWith(CONTEXT_GRAPH_URI_PREFIX)) continue;
+    if (graphUri.endsWith('/_meta')) declarationGraphs.add(graphUri);
+  }
+  return [...declarationGraphs].sort();
+}
+
+export function buildContextGraphDeclarationsSparql(graphUris: readonly string[]): string | null {
+  const declarationGraphs = declarationGraphUrisFromGraphUris(graphUris);
+  if (declarationGraphs.length === 0) return null;
+  const values = declarationGraphs.map((graphUri) => sparqlIri(graphUri)).join(' ');
+  return `
+    SELECT DISTINCT ?ctxGraph WHERE {
+      VALUES ?g { ${values} }
+      GRAPH ?g {
+        ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+      }
+      FILTER(STRSTARTS(STR(?ctxGraph), "${CONTEXT_GRAPH_URI_PREFIX}"))
+    }
+  `;
+}
+
 export function contextGraphIdsFromDeclarationBindings(
   bindings: readonly Record<string, string>[] | undefined,
 ): string[] {
@@ -93,7 +114,7 @@ export function contextGraphIdsFromDeclarationBindings(
 export function contextGraphIdsFromMetricSubscriptionCandidates(
   subscriptions: Iterable<readonly [string, MetricSubscriptionCandidate]>,
 ): string[] {
-  const contextGraphIds = new Set<string>();
+  const contextGraphIdsByIdentity = new Map<string, string>();
   for (const [id, sub] of subscriptions) {
     if (!id) continue;
     if (
@@ -104,10 +125,25 @@ export function contextGraphIdsFromMetricSubscriptionCandidates(
       || sub.sharedMemorySynced === true
       || sub.coreHosted === true
     ) {
-      contextGraphIds.add(id);
+      const identity = sub.onChainId
+        ? `chain:${sub.onChainId}`
+        : sub.onChainHash
+          ? `wire:${sub.onChainHash.toLowerCase()}`
+          : `local:${id}`;
+      const existingId = contextGraphIdsByIdentity.get(identity);
+      if (!existingId || shouldPreferMetricContextGraphId(id, existingId)) {
+        contextGraphIdsByIdentity.set(identity, id);
+      }
     }
   }
-  return [...contextGraphIds];
+  return [...contextGraphIdsByIdentity.values()];
+}
+
+function shouldPreferMetricContextGraphId(candidateId: string, existingId: string): boolean {
+  const candidateIsHash = HASH_CONTEXT_GRAPH_ID_RE.test(candidateId);
+  const existingIsHash = HASH_CONTEXT_GRAPH_ID_RE.test(existingId);
+  if (candidateIsHash !== existingIsHash) return !candidateIsHash;
+  return candidateId.length < existingId.length;
 }
 
 export function contextGraphIdFromGraphUriForMetrics(
