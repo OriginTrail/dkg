@@ -115,6 +115,14 @@ describe('countContextGraphsFromGraphUris', () => {
     ], declared)).toBe(1);
   });
 
+  it('collapses bare shadow aliases when a wallet-scoped canonical id is present', () => {
+    const walletScoped = '0xE5B8896800000000000000000000000000000000/tuesday-cg';
+    expect(countContextGraphsFromGraphUris([
+      'did:dkg:context-graph:tuesday-cg/_meta',
+      `did:dkg:context-graph:${walletScoped}/_meta`,
+    ], ['tuesday-cg', walletScoped])).toBe(1);
+  });
+
   it('uses exact local root meta graphs to back subscribed slash ids', () => {
     expect(contextGraphIdsFromLocalRootMetaGraphs([
       'did:dkg:context-graph:team/context/alpha/_meta',
@@ -163,8 +171,8 @@ describe('countContextGraphsFromGraphUris', () => {
     expect(query).toContain('<did:dkg:context-graph:ontology>');
     expect(query).toContain('<did:dkg:context-graph:agents>');
     expect(query).toContain('<did:dkg:context-graph:plain-cg/_meta>');
-    expect(query).not.toContain('<did:dkg:context-graph:team/context/beta/_meta>');
-    expect(query).not.toContain('<did:dkg:context-graph:plain-cg/code/_meta>');
+    expect(query).toContain('<did:dkg:context-graph:team/context/beta/_meta>');
+    expect(query).toContain('<did:dkg:context-graph:plain-cg/code/_meta>');
     expect(query).not.toContain('<did:dkg:context-graph:plain-cg/_verifiable_memory/1/_meta>');
     expect(query).not.toContain('<did:dkg:context-graph:plain-cg>');
     expect(query).not.toContain('<did:dkg:context-graph:agents/_shared_memory>');

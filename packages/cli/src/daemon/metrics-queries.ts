@@ -47,6 +47,11 @@ const SYSTEM_CONTEXT_GRAPH_IDS = new Set<string>([
   SYSTEM_CONTEXT_GRAPHS.AGENTS,
   SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
 ]);
+const NON_ROOT_DECLARATION_META_SEGMENTS = [
+  '/_verifiable_memory/',
+  '/_shared_memory_snapshots/',
+  '/assertion/',
+] as const;
 
 /**
  * Parse a SPARQL `COUNT` binding into a number. The value arrives as an RDF
@@ -87,8 +92,12 @@ function declarationGraphUrisFromGraphUris(
   for (const graphUri of graphUris) {
     if (!graphUri.startsWith(CONTEXT_GRAPH_URI_PREFIX)) continue;
     if (!graphUri.endsWith('/_meta')) continue;
-    const id = graphUri.slice(CONTEXT_GRAPH_URI_PREFIX.length, -'/_meta'.length);
-    if (unambiguousMetricContextGraphId(id) === id || knownCandidates.has(id)) {
+    const rest = graphUri.slice(CONTEXT_GRAPH_URI_PREFIX.length);
+    const id = rest.slice(0, -'/_meta'.length);
+    if (
+      knownCandidates.has(id)
+      || !NON_ROOT_DECLARATION_META_SEGMENTS.some((segment) => rest.includes(segment))
+    ) {
       declarationGraphs.add(graphUri);
     }
   }
@@ -181,6 +190,17 @@ function shouldPreferMetricContextGraphId(candidateId: string, existingId: strin
   return candidateId.length < existingId.length;
 }
 
+function canonicalizeMetricContextGraphIds(contextGraphIds: Iterable<string>): string[] {
+  const ids = [...new Set(contextGraphIds)].filter((id) => !SYSTEM_CONTEXT_GRAPH_IDS.has(id));
+  const walletScopedIds = ids.filter((id) => WALLET_SCOPED_CONTEXT_GRAPH_RE.test(id));
+  const shadowAliases = new Set<string>();
+  for (const id of walletScopedIds) {
+    const suffix = id.slice(id.indexOf('/') + 1);
+    if (suffix) shadowAliases.add(suffix);
+  }
+  return ids.filter((id) => !shadowAliases.has(id) || WALLET_SCOPED_CONTEXT_GRAPH_RE.test(id));
+}
+
 export function contextGraphIdFromGraphUriForMetrics(
   graphUri: string,
   knownContextGraphIds?: Iterable<string>,
@@ -232,5 +252,5 @@ export function countContextGraphsFromGraphUris(
     );
     if (contextGraphId) contextGraphIds.add(contextGraphId);
   }
-  return contextGraphIds.size;
+  return canonicalizeMetricContextGraphIds(contextGraphIds).length;
 }
