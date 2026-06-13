@@ -434,6 +434,36 @@ describe('sync responder pagination interleaving', () => {
     expect(firstSessionNextPage).toBe('');
   });
 
+  it('reuses a durable-data session snapshot on page-zero retry', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'retry-session-durable';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    await store.insert([q(cgPrefix, 1)]);
+
+    const cap = registerTestSyncHandler(store, { syncPageSize: 1 });
+    const firstAttempt = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'retry-session',
+    }, 'peer-a');
+    expect(firstAttempt).toContain('"row-001"');
+
+    await store.insert([q(cgPrefix, 0)]);
+    const retryAttempt = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'retry-session',
+    }, 'peer-a');
+    expect(retryAttempt).toBe(firstAttempt);
+    expect(retryAttempt).not.toContain('"row-000"');
+  });
+
   it('reuses the responder graph-list memo across nearby page requests', async () => {
     const store = new OxigraphStore();
     const cgId = 'memo-swm';
@@ -566,7 +596,7 @@ describe('sync responder pagination interleaving', () => {
     expect(loads).toBe(1);
   });
 
-  it('does not rebuild an expired durable row snapshot for deep session pages', async () => {
+  it('does not rebuild an expired durable row snapshot for the same session', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
 
@@ -585,8 +615,34 @@ describe('sync responder pagination interleaving', () => {
     await expect(memo.get('durable', loadRows)).resolves.toHaveLength(1);
 
     vi.setSystemTime(11);
-    await expect(memo.get('durable', loadRows, { requireExisting: true })).resolves.toBeNull();
+    await expect(memo.get('durable', loadRows)).rejects.toThrow(
+      'Durable data sync session snapshot expired before page completion',
+    );
     expect(loads).toBe(1);
+  });
+
+  it('does not retain empty durable row snapshots against the active cap', async () => {
+    const memo = createResponderSyncRowListMemo(10_000, 1);
+    let emptyLoads = 0;
+    let nonEmptyLoads = 0;
+
+    await expect(memo.get('durable:empty', async () => {
+      emptyLoads++;
+      return [];
+    })).resolves.toHaveLength(0);
+
+    await expect(memo.get('durable:non-empty', async () => {
+      nonEmptyLoads++;
+      return [{
+        s: 'urn:memo:row',
+        p: `${DKG_NS}label`,
+        o: '"snapshot"',
+        g: 'urn:memo:graph',
+      }];
+    })).resolves.toHaveLength(1);
+
+    expect(emptyLoads).toBe(1);
+    expect(nonEmptyLoads).toBe(1);
   });
 
   it('rejects new durable row snapshots at the active cap without evicting existing sessions', async () => {

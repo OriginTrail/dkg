@@ -177,7 +177,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           limit,
           rowListMemo: request.syncSessionId ? durableDataRowsMemo : undefined,
           rowListCacheScope: request.syncSessionId ? `${peerId}:${request.syncSessionId}` : undefined,
-          refreshRowList: offset === 0,
+          refreshRowList: false,
         })
         : await readDurableDataPage({
           store,
@@ -186,6 +186,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           sinceBatchId,
           offset,
           limit,
+          rowListMemo: request.syncSessionId ? durableDataRowsMemo : undefined,
+          rowListCacheScope: request.syncSessionId ? `${peerId}:${request.syncSessionId}` : undefined,
+          refreshRowList: false,
         });
       const queryDurationMs = Date.now() - queryStartedAt;
       const serializeStartedAt = Date.now();

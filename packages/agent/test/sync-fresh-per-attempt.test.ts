@@ -186,11 +186,12 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(observedBuilds[1].syncSessionId).toBe(observedBuilds[0].syncSessionId);
   });
 
-  it('does not mint a new sync session id when resuming a durable data checkpoint', async () => {
+  it('restarts durable data checkpoints at offset zero with a fresh sync session', async () => {
     const observedBuilds: Array<{
       offset: number;
       syncSessionId: string | undefined;
     }> = [];
+    const deletedCheckpoints: string[] = [];
 
     await runFetchWithFakeTimers(
       fetchSyncPages({
@@ -211,7 +212,9 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         checkpointStore: {
           get: () => 250,
           set: () => {},
-          delete: () => {},
+          delete: (key) => {
+            deletedCheckpoints.push(key);
+          },
         },
         buildSyncRequest: async (
           _contextGraphId,
@@ -235,7 +238,74 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
       }),
     );
 
-    expect(observedBuilds).toEqual([{ offset: 250, syncSessionId: undefined }]);
+    expect(observedBuilds).toHaveLength(1);
+    expect(observedBuilds[0].offset).toBe(0);
+    expect(typeof observedBuilds[0].syncSessionId).toBe('string');
+    expect(observedBuilds[0].syncSessionId?.length).toBeGreaterThan(0);
+    expect(deletedCheckpoints).toEqual([`${REMOTE_PEER_ID}|${CG_ID}|durable|data`]);
+  });
+
+  it('uses one stable sync session id across pages for durable delta sync', async () => {
+    const observedBuilds: Array<{
+      offset: number;
+      sinceBatchId: string | undefined;
+      syncSessionId: string | undefined;
+    }> = [];
+    let sendCalls = 0;
+
+    await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: CG_ID,
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 1,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => 0,
+          set: () => {},
+          delete: () => {},
+        },
+        sinceBatchId: '42',
+        buildSyncRequest: async (
+          _contextGraphId,
+          offset,
+          _limit,
+          _includeSharedMemory,
+          _remotePeerId,
+          _phase,
+          _snapshotRef,
+          sinceBatchId,
+          syncSessionId,
+        ) => {
+          observedBuilds.push({ offset, sinceBatchId, syncSessionId });
+          return new TextEncoder().encode(`request-${offset}`);
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => {
+          sendCalls++;
+          return new TextEncoder().encode(sendCalls === 1 ? 'one-quad-line' : '');
+        },
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    expect(observedBuilds).toHaveLength(2);
+    expect(observedBuilds.map((build) => build.offset)).toEqual([0, 1]);
+    expect(observedBuilds.every((build) => build.sinceBatchId === '42')).toBe(true);
+    expect(typeof observedBuilds[0].syncSessionId).toBe('string');
+    expect(observedBuilds[0].syncSessionId?.length).toBeGreaterThan(0);
+    expect(observedBuilds[1].syncSessionId).toBe(observedBuilds[0].syncSessionId);
   });
 
   /**

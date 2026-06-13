@@ -108,10 +108,15 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   const allQuads: Quad[] = [];
   const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId);
   let offset = checkpointStore.get(checkpointKey) ?? 0;
+  const usesDurableDataSession = !includeSharedMemory && phase === 'data';
+  if (usesDurableDataSession && offset > 0) {
+    checkpointStore.delete(checkpointKey);
+    offset = 0;
+  }
   const resumedFromOffset = offset;
   let bytesReceived = 0;
   let timedOut = false;
-  const syncSessionId = offset === 0 && !includeSharedMemory && phase === 'data' && !sinceBatchId
+  const syncSessionId = usesDurableDataSession
     ? randomUUID()
     : undefined;
 
