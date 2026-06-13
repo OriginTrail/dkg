@@ -203,6 +203,18 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw asAbortError(signal.reason);
 }
 
+function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work;
+  throwIfAborted(signal);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(asAbortError(signal.reason));
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(resolve, reject).finally(() => {
+      signal.removeEventListener('abort', onAbort);
+    });
+  });
+}
+
 export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
   const {
     register,
@@ -343,8 +355,11 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           );
           const rows = await readSwmMetaPage({
             store,
-            graphList: await graphListMemo.get({ refresh: offset === 0 }),
-            registeredSubGraphNames: await swmAdmissionMemo.get(contextGraphId, { refresh: offset === 0 }),
+            graphList: await raceAgainstAbort(graphListMemo.get({ refresh: offset === 0 }), signal),
+            registeredSubGraphNames: await raceAgainstAbort(
+              swmAdmissionMemo.get(contextGraphId, { refresh: offset === 0 }),
+              signal,
+            ),
             contextGraphId,
             cutoffIso: cutoff,
             offset,
@@ -370,8 +385,11 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           );
           const rows = await readSwmDataPage({
             store,
-            graphList: await graphListMemo.get({ refresh: offset === 0 }),
-            registeredSubGraphNames: await swmAdmissionMemo.get(contextGraphId, { refresh: offset === 0 }),
+            graphList: await raceAgainstAbort(graphListMemo.get({ refresh: offset === 0 }), signal),
+            registeredSubGraphNames: await raceAgainstAbort(
+              swmAdmissionMemo.get(contextGraphId, { refresh: offset === 0 }),
+              signal,
+            ),
             contextGraphId,
             cutoffIso: cutoff,
             offset,
@@ -401,7 +419,10 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         const rows = await readDurableMetaPage({
           store,
           contextGraphId,
-          registeredSubGraphNames: await subGraphRegistrationMemo.get(contextGraphId, { refresh: offset === 0 }),
+          registeredSubGraphNames: await raceAgainstAbort(
+            subGraphRegistrationMemo.get(contextGraphId, { refresh: offset === 0 }),
+            signal,
+          ),
           offset,
           limit,
           signal,
@@ -425,7 +446,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         );
         const rows = await readDurableDataPage({
           store,
-          graphList: await graphListMemo.get({ refresh: offset === 0 }),
+          graphList: await raceAgainstAbort(graphListMemo.get({ refresh: offset === 0 }), signal),
           contextGraphId,
           sinceBatchId,
           offset,

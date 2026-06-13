@@ -99,6 +99,7 @@ export const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
  * surface.
  */
 export interface PoolNode {
+  stopSignal?: AbortSignal;
   libp2p: {
     dialProtocol: (
       peerId: unknown,
@@ -965,15 +966,26 @@ export class MessageStreamPool {
         // requests on this same peer).
         let response: Uint8Array;
         const requestController = new AbortController();
-        const forwardStreamAbort = () => {
+        const abortRequest = (reason: unknown) => {
           if (!requestController.signal.aborted) {
-            requestController.abort(streamController.signal.reason);
+            requestController.abort(reason);
           }
+        };
+        const forwardStreamAbort = () => {
+          abortRequest(streamController.signal.reason);
+        };
+        const forwardNodeStop = () => {
+          abortRequest(this.node.stopSignal?.reason);
         };
         if (streamController.signal.aborted) {
           forwardStreamAbort();
         } else {
           streamController.signal.addEventListener('abort', forwardStreamAbort, { once: true });
+        }
+        if (this.node.stopSignal?.aborted) {
+          forwardNodeStop();
+        } else {
+          this.node.stopSignal?.addEventListener('abort', forwardNodeStop, { once: true });
         }
         try {
           response = await handler(frame.payload, remotePeer, { signal: requestController.signal });
@@ -998,6 +1010,7 @@ export class MessageStreamPool {
           continue;
         } finally {
           streamController.signal.removeEventListener('abort', forwardStreamAbort);
+          this.node.stopSignal?.removeEventListener('abort', forwardNodeStop);
         }
         try {
           stream.send(encodeFrame(FrameType.RESPONSE, response));
@@ -1117,9 +1130,11 @@ export class MessageStreamPool {
 }
 
 function isAbortRelatedError(err: unknown, signal: AbortSignal | undefined): boolean {
+  if (!signal?.aborted) return false;
   if (err === signal?.reason) return true;
   const error = err instanceof Error ? err : undefined;
-  if (error?.name === 'AbortError') return true;
-  const message = (error?.message ?? String(err)).toLowerCase();
-  return message.includes('aborted') || message.includes('aborterror');
+  const reason = signal.reason instanceof Error ? signal.reason : undefined;
+  if (error?.name === 'AbortError' && reason && error.message === reason.message) return true;
+  if (error?.name === 'AbortError' && typeof signal.reason === 'string' && error.message === signal.reason) return true;
+  return false;
 }

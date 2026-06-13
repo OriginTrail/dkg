@@ -234,6 +234,38 @@ describe('sync responder protection', () => {
     expect(authStarted).toBe(2);
   });
 
+  it('races graph-list memo waits against stream abort and releases capacity', async () => {
+    const listGate = deferred<readonly string[]>();
+    let listCalls = 0;
+    let authStarted = 0;
+    const cap = captureHandler(baseStore({
+      listGraphs: async () => {
+        listCalls += 1;
+        return listGate.promise;
+      },
+    }), {
+      authorizeSyncRequest: async () => {
+        authStarted += 1;
+        return true;
+      },
+    });
+    const controller = new AbortController();
+    const envelope = makeEnvelope();
+
+    const first = cap.invoke(envelope, REMOTE_A, controller.signal);
+    while (listCalls < 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort(new Error('memo wait aborted'));
+
+    await expect(first).rejects.toThrow(/memo wait aborted/);
+
+    const later = cap.invoke(envelope, REMOTE_A);
+    while (authStarted < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+    listGate.resolve([]);
+
+    await later;
+    expect(authStarted).toBe(2);
+  });
+
   it('removes queued requests that abort while registering the abort listener', async () => {
     const releases: Array<() => void> = [];
     const store = baseStore({
