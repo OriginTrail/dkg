@@ -71,6 +71,49 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     return promise;
   }
 
+  it('keeps parsed quads even when they do not advance the page cursor', async () => {
+    const parsedQuad = {
+      graph: `${CG_ID}/_meta`,
+      subject: `${CG_ID}/registered`,
+      predicate: 'http://schema.org/name',
+      object: '"registered"',
+    } as never;
+
+    const result = await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: CG_ID,
+        includeSharedMemory: true,
+        phase: 'meta',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 100,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => 0,
+          set: () => {},
+          delete: () => {},
+        },
+        buildSyncRequest: async () => new TextEncoder().encode('request'),
+        parseAndFilter: async () => ({ quads: [parsedQuad], totalQuads: 0 }),
+        send: async () => new TextEncoder().encode('zero-count-page'),
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    expect(result.quads).toEqual([parsedQuad]);
+    expect(result.nextOffset).toBe(0);
+    expect(result.completed).toBe(true);
+  });
+
   /**
    * Codex review #569 follow-up #1: original PR called
    * `sendReliable` without any `messageId` plumbing. Final design

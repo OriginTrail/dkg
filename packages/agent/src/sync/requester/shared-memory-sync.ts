@@ -3,6 +3,7 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import type { SyncPhase } from '../auth/request-build.js';
+import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncPageResult } from './page-fetch.js';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -36,7 +37,13 @@ interface SharedMemorySyncContext {
     deadline: number,
     snapshotRef?: string,
   ) => Promise<SyncPageResult>;
-  processSharedMemoryBatch: (wsDataQuads: Quad[], wsMetaQuads: Quad[]) => Promise<{
+  processSharedMemoryBatch: (
+    wsDataQuads: Quad[],
+    wsMetaQuads: Quad[],
+    contextGraphId: string,
+    registeredSubGraphNames?: readonly string[],
+    excludedSubGraphNames?: readonly string[],
+  ) => Promise<{
     verifiedData: Quad[];
     verifiedMeta: Quad[];
     totalFetchedDataQuads: number;
@@ -48,6 +55,8 @@ interface SharedMemorySyncContext {
   ensureContextGraph: (contextGraphId: string) => Promise<void>;
   storeInsert: (quads: Quad[]) => Promise<void>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
+  getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
   ensureOwnedMap: (ownershipKey: string) => Map<string, string>;
@@ -67,6 +76,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     ensureContextGraph,
     storeInsert,
     publicSnapshotStore,
+    getRegisteredSubGraphNames,
+    getExcludedSubGraphNames,
     deleteCheckpoint,
     setCheckpoint,
     ensureOwnedMap,
@@ -103,7 +114,19 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const fetchDurationMs = Date.now() - fetchStartedAt;
 
       const verifyStartedAt = Date.now();
-      const processed = await processSharedMemoryBatch(wsDataResult.quads, wsMetaResult.quads);
+      const registeredSubGraphNames = getRegisteredSubGraphNames
+        ? await getRegisteredSubGraphNames(pid)
+        : undefined;
+      const excludedSubGraphNames = getExcludedSubGraphNames
+        ? await getExcludedSubGraphNames(pid)
+        : undefined;
+      const processed = await processSharedMemoryBatch(
+        wsDataResult.quads,
+        wsMetaResult.quads,
+        pid,
+        registeredSubGraphNames,
+        excludedSubGraphNames,
+      );
       const verifyDurationMs = Date.now() - verifyStartedAt;
       logInfo(ctx, `  shared memory: ${processed.totalFetchedDataQuads} data + ${processed.totalFetchedMetaQuads} meta triples fetched`);
       summary.bytesReceived += wsMetaResult.bytesReceived + wsDataResult.bytesReceived;
@@ -194,13 +217,21 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
 
 function sharedMemoryOwnershipKeyFromGraph(contextGraphId: string, dataGraph: string): string | undefined {
   const rootGraph = contextGraphWorkspaceGraphUri(contextGraphId);
-  if (dataGraph === rootGraph) return contextGraphId;
+  if (dataGraph === rootGraph || isSharedMemoryBucketDescendantDataGraph(dataGraph, rootGraph)) return contextGraphId;
 
   const prefix = `did:dkg:context-graph:${contextGraphId}/`;
   const suffix = '/_shared_memory';
-  if (!dataGraph.startsWith(prefix) || !dataGraph.endsWith(suffix)) return undefined;
+  if (!dataGraph.startsWith(prefix)) return undefined;
 
-  const subGraphName = dataGraph.slice(prefix.length, -suffix.length);
+  const remainder = dataGraph.slice(prefix.length);
+  const suffixAt = remainder.indexOf(suffix);
+  if (suffixAt <= 0) return undefined;
+  const bucketGraph = dataGraph.slice(0, prefix.length + suffixAt + suffix.length);
+  const subGraphName = remainder.slice(0, suffixAt);
+  const tail = remainder.slice(suffixAt + suffix.length);
+  if (tail && (!tail.startsWith('/') || !isSharedMemoryBucketDescendantDataGraph(dataGraph, bucketGraph))) {
+    return undefined;
+  }
   if (!subGraphName || subGraphName.includes('/')) return undefined;
   if (!validateSubGraphName(subGraphName).valid) return undefined;
 

@@ -2875,13 +2875,32 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         deniedPhases: 0,
       };
     }
+    const subGraphAdmissionByContextGraph = new Map<string, Promise<{ registered: string[]; excluded: string[] }>>();
+    const getSubGraphAdmission = (contextGraphId: string) => {
+      let admission = subGraphAdmissionByContextGraph.get(contextGraphId);
+      if (!admission) {
+        admission = getSharedMemorySubGraphAdmission(this.store, contextGraphId, this.listSubGraphs(contextGraphId));
+        subGraphAdmissionByContextGraph.set(contextGraphId, admission);
+      }
+      return admission;
+    };
+
     return runSharedMemorySync({
       ctx,
       remotePeerId,
       contextGraphIds: allowedContextGraphIds,
       createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
       fetchSyncPages: this.fetchSyncPages.bind(this),
-      processSharedMemoryBatch: (wsDataQuads, wsMetaQuads) => this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(wsDataQuads, wsMetaQuads),
+      processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames) =>
+        this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(
+          wsDataQuads,
+          wsMetaQuads,
+          contextGraphId,
+          registeredSubGraphNames,
+          excludedSubGraphNames,
+        ),
+      getRegisteredSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).registered,
+      getExcludedSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).excluded,
       ensureContextGraph: async (contextGraphId) => {
         const graphManager = new GraphManager(this.store);
         await graphManager.ensureContextGraph(contextGraphId);
@@ -3879,4 +3898,39 @@ async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<s
   return store.listGraphsByPrefix
     ? store.listGraphsByPrefix(prefix)
     : (await store.listGraphs()).filter((graph) => graph.startsWith(prefix));
+}
+
+async function getSharedMemorySubGraphAdmission(
+  store: TripleStore,
+  contextGraphId: string,
+  subGraphsPromise: Promise<Array<{ name: string; uri?: string }>>,
+): Promise<{ registered: string[]; excluded: string[] }> {
+  const registered: string[] = [];
+  const excluded: string[] = [];
+  for (const subGraph of await subGraphsPromise) {
+    const childContextGraphUri = `${contextGraphDataGraphUri(contextGraphId)}/${subGraph.name}`;
+    if (subGraph.uri && subGraph.uri !== childContextGraphUri) continue;
+    if (await isKnownContextGraphUri(store, childContextGraphUri)) {
+      excluded.push(subGraph.name);
+    } else {
+      registered.push(subGraph.name);
+    }
+  }
+  return { registered, excluded };
+}
+
+async function isKnownContextGraphUri(store: TripleStore, contextGraphUri: string): Promise<boolean> {
+  const metaGraph = `${contextGraphUri}/_meta`;
+  const result = await store.query(`
+    ASK {
+      GRAPH <${assertSafeIri(metaGraph)}> {
+        {
+          <${assertSafeIri(contextGraphUri)}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+        } UNION {
+          <${assertSafeIri(contextGraphUri)}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status .
+        }
+      }
+    }
+  `);
+  return result.type === 'boolean' && result.value;
 }

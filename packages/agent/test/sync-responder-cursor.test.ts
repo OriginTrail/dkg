@@ -179,4 +179,40 @@ describe('sync responder — Phase C sinceBatchId delta filter', () => {
     expect(out).toContain('"data-9"');
     expect(out).toContain('"data-10"');
   });
+
+  it('uses bounded store queries for caught-up delta pages', async () => {
+    const extra = [] as { graph: string; subject: string; predicate: string; object: string }[];
+    for (let i = 0; i < 80; i++) {
+      const kc = `did:dkg:evm:31337/0xextra${i}`;
+      const ka = `${kc}/1`;
+      const root = `urn:extra:${i}`;
+      extra.push(
+        { graph: PER_CG_META, subject: kc, predicate: RDF_TYPE, object: `${DKG_NS}KnowledgeCollection` },
+        { graph: PER_CG_META, subject: kc, predicate: `${DKG_NS}batchId`, object: intLit(i + 1) },
+        { graph: PER_CG_META, subject: ka, predicate: `${DKG_NS}partOf`, object: kc },
+        { graph: PER_CG_META, subject: ka, predicate: `${DKG_NS}rootEntity`, object: root },
+        { graph: PER_CG_DATA, subject: root, predicate: `${DKG_NS}label`, object: `"extra-${i}"` },
+      );
+    }
+    await store.insert(extra);
+
+    const query = store.query.bind(store);
+    let queryCount = 0;
+    store.query = (async (...args: Parameters<typeof store.query>) => {
+      queryCount += 1;
+      return query(...args);
+    }) as typeof store.query;
+
+    const out = await cap.invoke({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: 5000,
+      includeSharedMemory: false,
+      phase: 'data',
+      sinceBatchId: '999',
+    });
+
+    expect(out).not.toContain('"extra-');
+    expect(queryCount).toBeLessThan(20);
+  });
 });

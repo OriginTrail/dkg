@@ -1,9 +1,12 @@
 import { parentPort } from 'node:worker_threads';
+import { validateSubGraphName } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncVerifyResult, SyncVerifyLogEntry, SyncParseResult, SharedMemoryProcessResult, DurableBatchProcessResult, SharedMemoryBatchProcessResult } from './sync-verify-worker.js';
+import { isSharedMemoryBucketDescendantDataGraph } from './sync/shared-memory-graphs.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
 parentPort!.on('message', async (message: { id: number; method: string; args: unknown[] }) => {
   try {
@@ -32,8 +35,15 @@ parentPort!.on('message', async (message: { id: number; method: string; args: un
       return;
     }
     if (message.method === 'processSharedMemoryBatch') {
-      const [wsDataQuads, wsMetaQuads] = message.args as [Quad[], Quad[]];
-      const result = processSharedMemoryBatch(wsDataQuads, wsMetaQuads);
+      const [wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames] =
+        message.args as [Quad[], Quad[], string, readonly string[] | undefined, readonly string[] | undefined];
+      const result = processSharedMemoryBatch(
+        wsDataQuads,
+        wsMetaQuads,
+        contextGraphId,
+        registeredSubGraphNames,
+        excludedSubGraphNames,
+      );
       parentPort!.postMessage({ id: message.id, result });
       return;
     }
@@ -199,9 +209,14 @@ function parseAndFilterNQuads(text: string, graphUri: string, contextGraphId: st
   };
 }
 
-function processSharedMemory(wsDataQuads: Quad[], wsMetaQuads: Quad[]): SharedMemoryProcessResult {
+function processSharedMemory(
+  wsDataQuads: Quad[],
+  wsMetaQuads: Quad[],
+  contextGraphId?: string,
+  registeredSubGraphNames?: readonly string[],
+  excludedSubGraphNames?: readonly string[],
+): SharedMemoryProcessResult {
   const DKG_ROOT_ENTITY = 'http://dkg.io/ontology/rootEntity';
-  const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
   const DKG_WORKSPACE_OP = 'http://dkg.io/ontology/WorkspaceOperation';
   const DKG_PUBLISHED_AT = 'http://dkg.io/ontology/publishedAt';
   const DKG_PUBLISHER_PEER_ID = 'http://dkg.io/ontology/publisherPeerId';
@@ -213,6 +228,10 @@ function processSharedMemory(wsDataQuads: Quad[], wsMetaQuads: Quad[]): SharedMe
   //   <cgPrefix>/<sub>/_shared_memory <-> <cgPrefix>/<sub>/_shared_memory_meta
   // Stripping the suffix yields the matching data graph URI.
   const META_SUFFIX = '_meta';
+  const effectiveRegisteredSubGraphNames = combineRegisteredSubGraphNames(
+    registeredSubGraphNames,
+    excludedSubGraphNames,
+  );
 
   // Codex review on #885 — keep validity scoped per (meta graph, op
   // subject). Pre-fix the Sets were global, so an op subject that
@@ -263,8 +282,8 @@ function processSharedMemory(wsDataQuads: Quad[], wsMetaQuads: Quad[]): SharedMe
     if (q.predicate !== DKG_ROOT_ENTITY) continue;
     const validForGraph = validOpsByMeta.get(q.graph);
     if (!validForGraph || !validForGraph.has(q.subject)) continue;
-    if (!q.graph.endsWith(META_SUFFIX)) continue;
-    const dataGraph = q.graph.slice(0, -META_SUFFIX.length);
+    const dataGraph = swmDataGraphFromMetaGraph(q.graph, contextGraphId, META_SUFFIX, effectiveRegisteredSubGraphNames);
+    if (!dataGraph) continue;
     const entity = q.object.startsWith('"') ? stripLiteral(q.object) : q.object;
     let s = allowedRootsByDataGraph.get(dataGraph);
     if (!s) { s = new Set(); allowedRootsByDataGraph.set(dataGraph, s); }
@@ -272,7 +291,7 @@ function processSharedMemory(wsDataQuads: Quad[], wsMetaQuads: Quad[]): SharedMe
   }
 
   const validQuads = wsDataQuads.filter((q) => {
-    const allowed = allowedRootsByDataGraph.get(q.graph);
+    const allowed = allowedRootsForSwmDataGraph(allowedRootsByDataGraph, q.graph);
     if (!allowed) return false;
     if (allowed.has(q.subject)) return true;
     for (const root of allowed) {
@@ -308,8 +327,8 @@ function processSharedMemory(wsDataQuads: Quad[], wsMetaQuads: Quad[]): SharedMe
   for (const q of wsMetaQuads) {
     const validForGraph = validOpsByMeta.get(q.graph);
     if (q.predicate === DKG_ROOT_ENTITY && validForGraph?.has(q.subject)) {
-      if (!q.graph.endsWith(META_SUFFIX)) continue;
-      const dataGraph = q.graph.slice(0, -META_SUFFIX.length);
+      const dataGraph = swmDataGraphFromMetaGraph(q.graph, contextGraphId, META_SUFFIX, effectiveRegisteredSubGraphNames);
+      if (!dataGraph) continue;
       const entity = q.object.startsWith('"') ? stripLiteral(q.object) : q.object;
       const creator = opCreators.get(q.subject);
       const key = `${dataGraph}\0${entity}`;
@@ -324,6 +343,52 @@ function processSharedMemory(wsDataQuads: Quad[], wsMetaQuads: Quad[]): SharedMe
     dropped: wsDataQuads.length - validQuads.length,
     entityCreators: [...entityCreators.values()],
   };
+}
+
+function swmDataGraphFromMetaGraph(
+  metaGraph: string,
+  contextGraphId: string | undefined,
+  metaSuffix: string,
+  registeredSubGraphNames?: readonly string[],
+): string | undefined {
+  if (!metaGraph.endsWith('/_shared_memory_meta')) return undefined;
+  if (contextGraphId === undefined) return metaGraph.slice(0, -metaSuffix.length);
+  const rootMetaGraph = `did:dkg:context-graph:${contextGraphId}/_shared_memory_meta`;
+  if (metaGraph === rootMetaGraph) return metaGraph.slice(0, -metaSuffix.length);
+
+  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
+  const suffix = '/_shared_memory_meta';
+  if (!metaGraph.startsWith(prefix) || !metaGraph.endsWith(suffix)) return undefined;
+  const subGraphName = metaGraph.slice(prefix.length, -suffix.length);
+  if (!validateSubGraphName(subGraphName).valid) return undefined;
+  if (!registeredSubGraphNames?.includes(subGraphName)) return undefined;
+  return metaGraph.slice(0, -metaSuffix.length);
+}
+
+function allowedRootsForSwmDataGraph(
+  allowedRootsByDataGraph: Map<string, Set<string>>,
+  graph: string,
+): Set<string> | undefined {
+  const exact = allowedRootsByDataGraph.get(graph);
+  if (exact) return exact;
+  for (const [bucketGraph, allowed] of allowedRootsByDataGraph) {
+    if (isSharedMemoryBucketDescendantDataGraph(graph, bucketGraph)) {
+      return allowed;
+    }
+  }
+  return undefined;
+}
+
+function combineRegisteredSubGraphNames(
+  localNames: readonly string[] | undefined,
+  excludedNames: readonly string[] | undefined,
+): string[] {
+  const out = new Set<string>();
+  const excluded = new Set((excludedNames ?? []).filter((name) => validateSubGraphName(name).valid));
+  for (const name of localNames ?? []) {
+    if (validateSubGraphName(name).valid && !excluded.has(name)) out.add(name);
+  }
+  return [...out];
 }
 
 function processDurableBatch(
@@ -392,6 +457,9 @@ function processDurableBatch(
 function processSharedMemoryBatch(
   wsDataQuads: Quad[],
   wsMetaQuads: Quad[],
+  contextGraphId?: string,
+  registeredSubGraphNames?: readonly string[],
+  excludedSubGraphNames?: readonly string[],
 ): SharedMemoryBatchProcessResult {
   const totalFetchedDataQuads = wsDataQuads.length;
   const totalFetchedMetaQuads = wsMetaQuads.length;
@@ -407,16 +475,36 @@ function processSharedMemoryBatch(
     };
   }
 
-  const processed = processSharedMemory(wsDataQuads, wsMetaQuads);
+  const processed = processSharedMemory(
+    wsDataQuads,
+    wsMetaQuads,
+    contextGraphId,
+    registeredSubGraphNames,
+    excludedSubGraphNames,
+  );
+  const effectiveRegisteredSubGraphNames = combineRegisteredSubGraphNames(
+    registeredSubGraphNames,
+    excludedSubGraphNames,
+  );
   return {
     verifiedData: processed.validQuads,
-    verifiedMeta: wsMetaQuads,
+    verifiedMeta: filterSharedMemoryMetaQuads(wsMetaQuads, contextGraphId, effectiveRegisteredSubGraphNames),
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
     droppedDataTriples: processed.dropped,
     emptyResponses: 0,
     entityCreators: processed.entityCreators,
   };
+}
+
+function filterSharedMemoryMetaQuads(
+  wsMetaQuads: readonly Quad[],
+  contextGraphId: string | undefined,
+  registeredSubGraphNames: readonly string[],
+): Quad[] {
+  return wsMetaQuads.filter((q) =>
+    swmDataGraphFromMetaGraph(q.graph, contextGraphId, '_meta', registeredSubGraphNames) !== undefined,
+  );
 }
 
 function parseNQuads(text: string): Quad[] {
