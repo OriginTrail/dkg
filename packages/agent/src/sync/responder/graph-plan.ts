@@ -279,6 +279,7 @@ export async function readSwmMetaPage(params: {
       () => readSwmMetaRows(params.store, candidateGraphs, params.cutoffIso, params.signal),
       params.offset,
       params.limit,
+      params.signal,
     );
   }
   return readSwmMetaRowsPage(
@@ -340,7 +341,7 @@ export async function readSwmDataPage(params: {
     params.signal,
   );
   if (cache) {
-    return readCachedRowsPage(cache, loadRows, params.offset, params.limit);
+    return readCachedRowsPage(cache, loadRows, params.offset, params.limit, params.signal);
   }
   const rows = await loadRows();
   return rows.slice(Math.max(0, Math.floor(params.offset)), Math.max(0, Math.floor(params.offset)) + Math.max(0, Math.floor(params.limit)));
@@ -369,6 +370,7 @@ export async function readDurableMetaPage(params: {
       loadRows,
       params.offset,
       params.limit,
+      params.signal,
     );
   }
   const rows = await loadRows();
@@ -488,6 +490,7 @@ async function readPagedRowsAcrossGraphs(
     loadRows,
     safeOffset,
     safeLimit,
+    signal,
   );
 }
 
@@ -534,6 +537,7 @@ async function readPagedDurableDeltaRowsAcrossGraphs(
     () => readDurableDeltaRowsAcrossGraphs(store, graphs, metaGraphs, sinceBatchId, signal),
     safeOffset,
     safeLimit,
+    signal,
   );
 }
 
@@ -542,18 +546,42 @@ async function readCachedRowsPage(
   loadRows: () => Promise<readonly SyncRow[]>,
   offset: number,
   limit: number,
+  signal?: AbortSignal,
 ): Promise<SyncRow[]> {
   const safeOffset = Math.max(0, Math.floor(offset));
   const safeLimit = Math.max(0, Math.floor(limit));
   if (safeLimit === 0) return [];
-  const rows = await cache.memo.get(cache.key, loadRows, {
-    refresh: cache.refresh,
-    requireExisting: safeOffset > 0,
-  });
+  const rows = await raceAgainstAbort(
+    cache.memo.get(cache.key, loadRows, {
+      refresh: cache.refresh,
+      requireExisting: safeOffset > 0,
+    }),
+    signal,
+  );
   if (rows == null) {
     throw new Error(cache.expiredMessage ?? 'Sync session snapshot expired before page completion');
   }
   return [...rows].slice(safeOffset, safeOffset + safeLimit);
+}
+
+function asAbortError(reason: unknown): Error {
+  return reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw asAbortError(signal.reason);
+}
+
+function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work;
+  throwIfAborted(signal);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(asAbortError(signal.reason));
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(resolve, reject).finally(() => {
+      signal.removeEventListener('abort', onAbort);
+    });
+  });
 }
 
 async function readAdmittedSwmSubGraphNames(

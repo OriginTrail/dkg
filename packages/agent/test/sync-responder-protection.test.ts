@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
-import type { QueryOptions, QueryResult, TripleStore } from '@origintrail-official/dkg-storage';
+import type { QueryOptions, QueryResult, Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 
 const REMOTE_A = '12D3KooWResponderCapPeerA';
@@ -81,6 +82,7 @@ function captureHandler(
       options?: { signal?: AbortSignal },
     ) => Promise<boolean>;
     logWarn?: (ctx: OperationContext, message: string) => void;
+    publicSnapshotStore?: WorkspacePublicSnapshotStore;
   } = {},
 ) {
   let captured: ((
@@ -96,6 +98,7 @@ function captureHandler(
     syncPageSize: 500,
     sharedMemoryTtlMs: 0,
     store,
+    publicSnapshotStore: options.publicSnapshotStore,
     peerId: 'self-peer',
     parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,
     authorizeSyncRequest: options.authorizeSyncRequest ?? (async () => true),
@@ -264,6 +267,89 @@ describe('sync responder protection', () => {
 
     await later;
     expect(authStarted).toBe(2);
+  });
+
+  it('races row-list memo waits against stream abort and releases capacity', async () => {
+    const rowGate = deferred<QueryResult>();
+    let queryCalls = 0;
+    let authStarted = 0;
+    const cap = captureHandler(baseStore({
+      listGraphs: async () => [SYNC_PROTECTION_DATA_GRAPH],
+      query: async () => {
+        queryCalls += 1;
+        return rowGate.promise;
+      },
+    }), {
+      authorizeSyncRequest: async () => {
+        authStarted += 1;
+        return true;
+      },
+    });
+    const envelope = { ...makeEnvelope(), syncSessionId: 'row-list-session' };
+    const firstController = new AbortController();
+
+    const first = cap.invoke(envelope, REMOTE_A, firstController.signal);
+    while (queryCalls < 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    firstController.abort(new Error('row snapshot aborted'));
+
+    await expect(first).rejects.toThrow(/row snapshot aborted/);
+
+    const secondController = new AbortController();
+    const second = cap.invoke(envelope, REMOTE_A, secondController.signal);
+    while (authStarted < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(queryCalls).toBe(1);
+    secondController.abort(new Error('row memo wait aborted'));
+
+    await expect(second).rejects.toThrow(/row memo wait aborted/);
+
+    const later = cap.invoke(envelope, REMOTE_A);
+    while (authStarted < 3) await new Promise((resolve) => setTimeout(resolve, 0));
+    rowGate.resolve({ type: 'bindings', bindings: [] });
+
+    await later;
+    expect(queryCalls).toBe(1);
+    expect(authStarted).toBe(3);
+  });
+
+  it('races public snapshot loads against stream abort and releases capacity', async () => {
+    const snapshotGate = deferred<Quad[] | null>();
+    let snapshotCalls = 0;
+    let authStarted = 0;
+    const publicSnapshotStore: WorkspacePublicSnapshotStore = {
+      putSnapshot: async () => ({ ref: 'unused', byteLength: 0 }),
+      getSnapshot: async () => {
+        snapshotCalls += 1;
+        return snapshotGate.promise;
+      },
+    };
+    const cap = captureHandler(baseStore(), {
+      publicSnapshotStore,
+      authorizeSyncRequest: async () => {
+        authStarted += 1;
+        return true;
+      },
+    });
+    const controller = new AbortController();
+    const snapshotEnvelope: SyncRequestEnvelope = {
+      contextGraphId: 'sync-protection',
+      includeSharedMemory: true,
+      phase: 'snapshot',
+      snapshotRef: 'snapshot-ref',
+      offset: 0,
+      limit: 1,
+    };
+
+    const first = cap.invoke(snapshotEnvelope, REMOTE_A, controller.signal);
+    while (snapshotCalls < 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort(new Error('snapshot load aborted'));
+
+    await expect(first).rejects.toThrow(/snapshot load aborted/);
+
+    const later = await cap.invoke(makeEnvelope(), REMOTE_A);
+    expect(new TextDecoder().decode(later)).toBe('');
+    expect(authStarted).toBe(2);
+    snapshotGate.resolve([]);
   });
 
   it('removes queued requests that abort while registering the abort listener', async () => {

@@ -335,7 +335,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           if (!snapshotRef || !publicSnapshotStore) {
             return new TextEncoder().encode('');
           }
-          const snapshot = await publicSnapshotStore.getSnapshot(snapshotRef);
+          const snapshot = await raceAgainstAbort(publicSnapshotStore.getSnapshot(snapshotRef), signal);
           if (!snapshot) {
             return new TextEncoder().encode('');
           }

@@ -112,23 +112,16 @@ describe('sync responder pagination interleaving', () => {
     await store.insert(rows);
 
     const cap = registerTestSyncHandler(store, { syncPageSize: 3 });
-    const requestPage = (offset: number) =>
+    const requestPage = (offset: number, index: number) =>
       cap.invoke({
         contextGraphId: cgId,
         includeSharedMemory: false,
         phase: 'data',
         offset,
         limit: 3,
-      });
+      }, `12D3KooWInterleavePeer${index}`);
 
-    const outputs = await Promise.all([
-      requestPage(0),
-      requestPage(6),
-      requestPage(3),
-      requestPage(12),
-      requestPage(9),
-      requestPage(15),
-    ]);
+    const outputs = await Promise.all([0, 6, 3, 12, 9, 15].map(requestPage));
 
     const lines = outputs.flatMap(linesFromNquads);
     expect(lines).toHaveLength(rows.length);
