@@ -178,6 +178,9 @@ PY
 ensure_curator_config() {
   if [ "${SKIP_CONFIG:-}" = "1" ] || [ "$REAL" = "1" ]; then
     note "skipping auto-config — assuming node1 already has sharedModel enabled (REAL/SKIP_CONFIG)"
+    # You likely just restarted node1 to point it at the provider; make sure its
+    # libp2p has re-meshed with the member before the join handshake.
+    wait_curator_peered
     return 0
   fi
   hr "Configure curator (node1) for sharing — provider=$([ "$TEST_B2" = "1" ] && echo openai-compatible || echo mock)"
