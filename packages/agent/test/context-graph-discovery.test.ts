@@ -749,6 +749,26 @@ describe('discoverContextGraphsFromChain', () => {
     )).toBe(true);
   }, 15000);
 
+  it('can surface chain scan failures for daemon seed retries without changing the default contract', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const failure = new Error('seed scan failed');
+    (chain as any).listContextGraphsFromChain = async () => {
+      throw failure;
+    };
+
+    const result = await createTestAgent({ chainAdapter: chain });
+    agent = result.agent;
+    await agent.start();
+
+    expect(await agent.discoverContextGraphsFromChain()).toBe(0);
+    await expect(
+      agent.discoverContextGraphsFromChain({
+        seedIncrementalWatermark: true,
+        throwOnChainScanFailure: true,
+      }),
+    ).rejects.toThrow('seed scan failed');
+  }, 15000);
+
   it('processes partial chain scan prefixes without marking the scan recovered', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     let calls = 0;

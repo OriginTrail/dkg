@@ -448,6 +448,7 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
 export interface DiscoverContextGraphsFromChainOptions {
   incremental?: boolean;
   seedIncrementalWatermark?: boolean;
+  throwOnChainScanFailure?: boolean;
 }
 
 /**
@@ -1059,6 +1060,7 @@ export class DKGAgent extends DKGAgentBase {
       } else {
         this.chainContextGraphScanFailure.count += 1;
       }
+      if (options.throwOnChainScanFailure) throw err;
       if (!isContextGraphChainScanPartialError(err)) return 0;
       partialChainScan = true;
       onChainContextGraphs = err.partialResults;

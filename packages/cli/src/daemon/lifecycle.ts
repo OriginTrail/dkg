@@ -594,6 +594,14 @@ export function shouldUseIncrementalChainDiscoveryScan(input: {
   );
 }
 
+export function chainDiscoveryScanOptions(incremental: boolean):
+  | { incremental: true }
+  | { seedIncrementalWatermark: true; throwOnChainScanFailure: true } {
+  return incremental
+    ? { incremental: true }
+    : { seedIncrementalWatermark: true, throwOnChainScanFailure: true };
+}
+
 export interface PromoteWorkerDaemonLifecycle {
   waitForStartup(): Promise<void>;
   stop(reason?: string | null): Promise<void>;
@@ -1754,7 +1762,7 @@ export async function runDaemonInner(
         fullScanEvery: CHAIN_FULL_SCAN_EVERY,
       });
       const found = await agent.discoverContextGraphsFromChain(
-        incremental ? { incremental: true } : { seedIncrementalWatermark: true },
+        chainDiscoveryScanOptions(incremental),
       );
       if (!incremental) chainScanWatermarkSeeded = true;
       if (found > 0)

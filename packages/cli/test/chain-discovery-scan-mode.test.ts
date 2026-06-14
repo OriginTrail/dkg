@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { shouldUseIncrementalChainDiscoveryScan } from '../src/daemon/lifecycle.js';
+import {
+  chainDiscoveryScanOptions,
+  shouldUseIncrementalChainDiscoveryScan,
+} from '../src/daemon/lifecycle.js';
 
 describe('shouldUseIncrementalChainDiscoveryScan', () => {
   it('starts with a full scan before any watermark seed exists', () => {
@@ -40,5 +43,18 @@ describe('shouldUseIncrementalChainDiscoveryScan', () => {
         fullScanEvery: 48,
       }),
     ).toBe(false);
+  });
+});
+
+describe('chainDiscoveryScanOptions', () => {
+  it('uses failure-throwing watermark seeding for full daemon scans', () => {
+    expect(chainDiscoveryScanOptions(false)).toEqual({
+      seedIncrementalWatermark: true,
+      throwOnChainScanFailure: true,
+    });
+  });
+
+  it('keeps steady-state daemon scans incremental-only', () => {
+    expect(chainDiscoveryScanOptions(true)).toEqual({ incremental: true });
   });
 });
