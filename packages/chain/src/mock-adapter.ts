@@ -470,6 +470,10 @@ export class MockChainAdapter implements ChainAdapter {
     return [];
   }
 
+  async hasContextGraphRegistryScanWatermark(): Promise<boolean> {
+    return false;
+  }
+
   // --- V10 Publishing Conviction NFT (DKGPublishingConvictionNFT) ---
   // In-memory parity: account map + agent reverse map + owner-gating.
 

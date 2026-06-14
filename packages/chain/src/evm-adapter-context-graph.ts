@@ -100,6 +100,14 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     return { hash: receipt.hash, blockNumber: receipt.blockNumber, txIndex: receipt.index, success: true };
   }
 
+  async hasContextGraphRegistryScanWatermark(): Promise<boolean> {
+    await this.init();
+    const registry = this.contracts.contextGraphNameRegistry;
+    if (!registry) return false;
+    const registryAddress = (await registry.getAddress()).toLowerCase();
+    return this.contextGraphRegistryScanWatermarks.has(registryAddress);
+  }
+
   async listContextGraphsFromChain(
     fromBlock?: number,
     options?: ContextGraphChainScanOptions,

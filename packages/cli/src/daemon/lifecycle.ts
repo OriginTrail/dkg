@@ -1752,19 +1752,17 @@ export async function runDaemonInner(
   const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
   const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
   let chainScanRuns = 0;
-  let chainScanWatermarkSeeded = false;
   const runChainDiscoveryScan = async () => {
     try {
       const run = chainScanRuns++;
       const incremental = shouldUseIncrementalChainDiscoveryScan({
         run,
-        watermarkSeeded: chainScanWatermarkSeeded,
+        watermarkSeeded: await agent.hasContextGraphRegistryScanWatermark(),
         fullScanEvery: CHAIN_FULL_SCAN_EVERY,
       });
       const found = await agent.discoverContextGraphsFromChain(
         chainDiscoveryScanOptions(incremental),
       );
-      if (!incremental) chainScanWatermarkSeeded = true;
       if (found > 0)
         log(`Chain scan: discovered ${found} new context graph(s)`);
     } catch {

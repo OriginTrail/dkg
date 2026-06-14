@@ -176,9 +176,12 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     const { adapter, provider } = makeAdapter(registry, 4_000);
     registry.queryFilter.mockResolvedValue([]);
 
+    await expect(adapter.hasContextGraphRegistryScanWatermark()).resolves.toBe(false);
+
     await adapter.listContextGraphsFromChain(undefined, { seedIncrementalWatermark: true });
 
     expect((adapter as any).contextGraphRegistryScanWatermarks.get(REGISTRY.toLowerCase())).toBe(4_001);
+    await expect(adapter.hasContextGraphRegistryScanWatermark()).resolves.toBe(true);
 
     provider.getCode = vi.fn(async () => {
       throw new Error('eth_getCode should not be called after watermark seeding');
@@ -191,6 +194,19 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(registry.queryFilter.mock.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
       [4_001 - CG_REGISTRY_REORG_BUFFER_BLOCKS, 4_000],
     ]);
+  });
+
+  it('reports no registry scan watermark after preflight cache invalidation', async () => {
+    const registry = makeRegistry();
+    const { adapter } = makeAdapter(registry, 4_000);
+    registry.queryFilter.mockResolvedValue([]);
+
+    await adapter.listContextGraphsFromChain(undefined, { seedIncrementalWatermark: true });
+    await expect(adapter.hasContextGraphRegistryScanWatermark()).resolves.toBe(true);
+
+    adapter.invalidatePublishPreflightCache();
+
+    await expect(adapter.hasContextGraphRegistryScanWatermark()).resolves.toBe(false);
   });
 
   it('rethrows later page failures for public list-all scans', async () => {

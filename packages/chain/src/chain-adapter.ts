@@ -811,6 +811,8 @@ export interface ChainAdapter {
   revealContextGraphMetadata?(contextGraphId: string, name: string, description: string): Promise<TxResult>;
   /** List context graphs from chain via `NameClaimed` events. Optional; not supported on no-chain/mock. */
   listContextGraphsFromChain?(fromBlock?: number, options?: ContextGraphChainScanOptions): Promise<ContextGraphOnChain[]>;
+  /** True when the adapter has a registry scan watermark for its currently bound ContextGraphNameRegistry. */
+  hasContextGraphRegistryScanWatermark?(): Promise<boolean>;
 
   /**
    * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.

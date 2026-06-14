@@ -1020,6 +1020,10 @@ export class DKGAgent extends DKGAgentBase {
     return discovered;
   }
 
+  async hasContextGraphRegistryScanWatermark(): Promise<boolean> {
+    return await this.chain.hasContextGraphRegistryScanWatermark?.() ?? false;
+  }
+
   /**
    * Query the on-chain registry for all registered context graphs and
    * auto-subscribe to any not yet in the subscription registry.
@@ -1060,8 +1064,9 @@ export class DKGAgent extends DKGAgentBase {
       } else {
         this.chainContextGraphScanFailure.count += 1;
       }
-      if (options.throwOnChainScanFailure) throw err;
-      if (!isContextGraphChainScanPartialError(err)) return 0;
+      const partialError = isContextGraphChainScanPartialError(err);
+      if (options.throwOnChainScanFailure && !partialError) throw err;
+      if (!partialError) return 0;
       partialChainScan = true;
       onChainContextGraphs = err.partialResults;
     }
