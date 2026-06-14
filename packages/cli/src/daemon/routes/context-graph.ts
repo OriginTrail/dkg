@@ -1424,6 +1424,34 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     }
   }
 
+  // POST /api/context-graph/recover-shared-memory
+  // Explicit member recovery: re-fetch a context graph's shared memory to the
+  // current state from ONE chosen authoritative peer and apply via per-KA-graph
+  // REPLACE (not the corrupting union). Used to repair a stale or corrupt local
+  // SWM copy. Pulls only from the peer the caller names — never a blanket sweep.
+  if (req.method === "POST" && path === "/api/context-graph/recover-shared-memory") {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = JSON.parse(body);
+    const contextGraphId = parsed.contextGraphId;
+    const remotePeerId = parsed.remotePeerId ?? parsed.peerId;
+    if (!contextGraphId)
+      return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
+    if (!remotePeerId)
+      return jsonResponse(res, 400, { error: 'Missing "remotePeerId"' });
+    try {
+      const result = await agent.recoverContextGraphSwmFromPeer(remotePeerId, contextGraphId);
+      return jsonResponse(res, 200, {
+        recovered: contextGraphId,
+        fromPeer: remotePeerId,
+        ...result,
+      });
+    } catch (err) {
+      return jsonResponse(res, 500, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   // POST /api/context-graph/subscribe (V10) or /api/subscribe (legacy)
   if (
     req.method === "POST" &&
