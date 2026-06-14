@@ -952,17 +952,23 @@ describe('Phase D - VM reconcile damping', () => {
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(2);
   });
 
-  it('keeps an unreadable negative-cache generation damped until backoff expires', async () => {
+  it('does not negative-cache an unreadable SWM generation and retries before backoff', async () => {
     const internals = await boot();
     const onChainCgId = 45n;
-    registerUnmatchedKC(internals.chain, 9005n, onChainCgId);
+    const entity = 'urn:fact:after-unreadable';
+    const value = 'Visible right after a probe failure';
+    const root = computeFlatKCRootV10(
+      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
+      [],
+    );
+    registerUnmatchedKC(internals.chain, 9005n, onChainCgId, bytesToHex(root));
 
     const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
     const originalQuery = internals.store.query.bind(internals.store);
     let expensiveScans = 0;
     let generationReads = 0;
     vi.spyOn(internals.store, 'query').mockImplementation(async (sparql: string) => {
-      if (sparql.includes('COUNT(?root) AS ?rootCount')) {
+      if (sparql.includes('SELECT ?op ?root ?ts WHERE')) {
         generationReads++;
         if (generationReads <= 2) throw new Error('transient generation read failure');
       }
@@ -973,12 +979,37 @@ describe('Phase D - VM reconcile damping', () => {
     await expect(internals.reconcileChainOrdinal('45', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(expensiveScans).toBeGreaterThan(0);
+    expect(generationReads).toBe(2);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+
+    await seedSwmSnapshot(internals.store, '45', entity, value);
 
     expensiveScans = 0;
-    await expect(internals.reconcileChainOrdinal('45', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    await expect(internals.reconcileChainOrdinal('45', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
     expect(fetch).toHaveBeenCalledTimes(1);
-    expect(expensiveScans).toBe(0);
-    expect(generationReads).toBe(2);
+    expect(expensiveScans).toBeGreaterThan(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+  });
+
+  it('invalidates a negative cache entry when same-count SWM data changes', async () => {
+    const internals = await boot();
+    const storageAddr = await internals.chain.getDKGKnowledgeAssetsAddress();
+    const ual = buildKnowledgeAssetUal(internals.chain.chainId, storageAddr, 9023n);
+    const root = new Uint8Array(32);
+    root[31] = 23;
+    const cacheKey = (internals as any).vmReconcileCacheKey('63', ual, root);
+
+    await insertWorkspaceDataTriple(internals.store, '63', 'urn:fact:same-count', 'old');
+    const stateBefore = await (internals as any).collectVmReconcileSwmCandidateState('63');
+    expect(stateBefore.swmGen).toContain('dataTriples:1');
+
+    (internals as any).recordVmReconcileNegativeCache(cacheKey, '63', stateBefore);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
+
+    await replaceWorkspaceDataTriple(internals.store, '63', 'urn:fact:same-count', 'new');
+
+    await expect((internals as any).shouldDeferVmReconcileByNegativeCache(cacheKey, '63')).resolves.toBe(false);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
   it('does not negative-cache misses once candidate SWM operation metadata exists', async () => {

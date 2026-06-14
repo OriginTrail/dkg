@@ -675,6 +675,8 @@ export class DKGAgentBase {
     Number(process.env['DKG_VM_RECONCILE_BACKOFF_MAX_MS']) || 10 * 60_000;
   static readonly VM_RECONCILE_CACHE_MAX_ENTRIES =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_CACHE_MAX_ENTRIES']) || 1_000);
+  static readonly VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS =
+    Math.max(1, Number(process.env['DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS']) || 2_000);
   static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES']) || 1_000);
   static readonly VM_RECONCILE_ACTIVE_FETCH_MAX_ATTEMPTS =

@@ -8,7 +8,7 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -247,6 +247,11 @@ type JoinApprovalRetryEntry = {
 };
 type VmReconcileSwmNamespace = { metaGraph: string; dataGraph: string };
 type VmReconcileSwmCandidateNamespaces = { namespaces: VmReconcileSwmNamespace[]; complete: boolean };
+type VmReconcileSwmCandidateState = {
+  swmGen: string | null;
+  candidateNamespaces: VmReconcileSwmNamespace[];
+  peerTopologyKey: string;
+};
 import { multiaddr } from '@multiformats/multiaddr';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
@@ -2228,15 +2233,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
   }
 
-  async collectVmReconcileSwmCandidateState(this: DKGAgent, localCgId: string): Promise<{
-    swmGen: string;
-    candidateNamespaces: VmReconcileSwmNamespace[];
-    peerTopologyKey: string;
-  }> {
+  async collectVmReconcileSwmCandidateState(this: DKGAgent, localCgId: string): Promise<VmReconcileSwmCandidateState> {
     const candidateNamespaces = await this.collectVmReconcileSwmCandidateNamespacesBestEffort(localCgId);
     return {
       candidateNamespaces: candidateNamespaces.namespaces,
-      swmGen: await this.readVmReconcileSwmGen(candidateNamespaces.namespaces) ?? 'unreadable',
+      swmGen: await this.readVmReconcileSwmGen(candidateNamespaces.namespaces),
       peerTopologyKey: await this.vmReconcilePeerTopologyKey(localCgId),
     };
   }
@@ -2318,44 +2319,69 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (candidateNamespaces.length === 0) return 'empty:0';
     try {
       const parts: string[] = [];
+      const digestRows = (rows: string[]) =>
+        createHash('sha256').update(rows.join('\n'), 'utf8').digest('hex');
+      const maxRows = DKGAgentBase.VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS;
+      const isTooLarge = (rows: unknown[]) => rows.length > maxRows;
       for (const namespace of candidateNamespaces) {
         const metaGraph = assertSafeIri(namespace.metaGraph);
         const dataGraph = assertSafeIri(namespace.dataGraph);
-        const result = await this.store.query(`SELECT
-          (COUNT(DISTINCT ?op) AS ?opCount)
-          (COUNT(?root) AS ?rootCount)
-          (MAX(?ts) AS ?maxTs)
-          (COUNT(?dataS) AS ?dataTripleCount)
-          (COUNT(?privateRoot) AS ?privateRootCount)
-        WHERE {
-          { GRAPH <${metaGraph}> {
+        const operationRows = await this.store.query(`SELECT ?op ?root ?ts WHERE {
+          GRAPH <${metaGraph}> {
             ?op <http://dkg.io/ontology/rootEntity> ?root .
             OPTIONAL { ?op <http://dkg.io/ontology/publishedAt> ?ts . }
-          } }
-          UNION { GRAPH <${dataGraph}> { ?dataS ?dataP ?dataO . } }
-          UNION { GRAPH <${metaGraph}> { ?privateEntity <http://dkg.io/ontology/privateMerkleRoot> ?privateRoot . } }
-        }`);
-        if (result.type !== 'bindings' || result.bindings.length === 0) return null;
-        const row = result.bindings[0];
-        const opCount = typeof row['opCount'] === 'string' ? stripLiteral(row['opCount']) : '0';
-        const rootCount = typeof row['rootCount'] === 'string' ? stripLiteral(row['rootCount']) : '0';
-        const maxTs = typeof row['maxTs'] === 'string' ? stripLiteral(row['maxTs']) : '';
-        const dataTripleCount = typeof row['dataTripleCount'] === 'string' ? stripLiteral(row['dataTripleCount']) : '0';
-        const privateRootCount = typeof row['privateRootCount'] === 'string' ? stripLiteral(row['privateRootCount']) : '0';
+          }
+        } ORDER BY ?op ?root ?ts LIMIT ${maxRows + 1}`);
+        if (operationRows.type !== 'bindings') return null;
+        if (isTooLarge(operationRows.bindings)) return null;
+        const operations = operationRows.bindings
+          .map((row) => [
+            String(row['op'] ?? ''),
+            String(row['root'] ?? ''),
+            String(row['ts'] ?? ''),
+          ].join('\0'))
+          .sort();
+
+        const dataRows = await this.store.query(`SELECT ?s ?p ?o WHERE {
+          GRAPH <${dataGraph}> { ?s ?p ?o . }
+        } ORDER BY ?s ?p ?o LIMIT ${maxRows + 1}`);
+        if (dataRows.type !== 'bindings') return null;
+        if (isTooLarge(dataRows.bindings)) return null;
+        const dataTriples = dataRows.bindings
+          .map((row) => [
+            String(row['s'] ?? ''),
+            String(row['p'] ?? ''),
+            String(row['o'] ?? ''),
+          ].join('\0'))
+          .sort();
+
+        const privateRootRows = await this.store.query(`SELECT ?privateEntity ?privateRoot WHERE {
+          GRAPH <${metaGraph}> { ?privateEntity <http://dkg.io/ontology/privateMerkleRoot> ?privateRoot . }
+        } ORDER BY ?privateEntity ?privateRoot LIMIT ${maxRows + 1}`);
+        if (privateRootRows.type !== 'bindings') return null;
+        if (isTooLarge(privateRootRows.bindings)) return null;
+        const privateRoots = privateRootRows.bindings
+          .map((row) => [
+            String(row['privateEntity'] ?? ''),
+            String(row['privateRoot'] ?? ''),
+          ].join('\0'))
+          .sort();
+
         parts.push([
           `meta:${namespace.metaGraph}`,
           `data:${namespace.dataGraph}`,
-          `ops:${opCount}`,
-          `roots:${rootCount}`,
-          `maxTs:${maxTs}`,
-          `dataTriples:${dataTripleCount}`,
-          `privateRoots:${privateRootCount}`,
+          `ops:${operations.length}`,
+          `opHash:${digestRows(operations)}`,
+          `dataTriples:${dataTriples.length}`,
+          `dataHash:${digestRows(dataTriples)}`,
+          `privateRoots:${privateRoots.length}`,
+          `privateRootHash:${digestRows(privateRoots)}`,
         ].join(';'));
       }
       return parts.join('|');
     } catch {
-      // A failed cheap probe is not evidence that the expensive merkle scan
-      // should run again immediately.
+      // Probe failures are not a stable SWM generation. Callers must not cache
+      // or preserve a negative-cache gate from this result.
     }
     return null;
   }
@@ -2431,16 +2457,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
       const pattern = this.vmReconcileWorkspaceOperationPattern(currentNamespaces.namespaces.map((namespace) => namespace.metaGraph));
       if (!pattern) return true;
-      if (cached.swmGen === 'unreadable') return true;
       const currentSwmGen = await this.readVmReconcileSwmGen(currentNamespaces.namespaces);
-      if (currentSwmGen === null) return true;
+      if (currentSwmGen === null) {
+        this.deleteVmReconcileNegativeCacheEntry(cacheKey);
+        return false;
+      }
       if (currentSwmGen !== cached.swmGen) {
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         return false;
       }
     } catch {
-      // Stay damped until the backoff expires; a failed cheap probe is not
-      // evidence that the expensive merkle scan should run again immediately.
+      // Unexpected validation failures leave the existing backoff in place;
+      // expected generation probe failures return null and clear the gate above.
     }
     return true;
   }
@@ -2448,8 +2476,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
   recordVmReconcileNegativeCache(this: DKGAgent,
     cacheKey: string,
     localCgId: string,
-    state: { swmGen: string; candidateNamespaces: VmReconcileSwmNamespace[]; peerTopologyKey: string },
+    state: VmReconcileSwmCandidateState,
   ): void {
+    if (state.swmGen === null) {
+      this.deleteVmReconcileNegativeCacheEntry(cacheKey);
+      return;
+    }
     // Existing SWM operations can be missing payload/private-root pieces; keep
     // that retry path uncached instead of probing full data graphs here.
     if (this.vmReconcileSwmGenHasOperations(state.swmGen)) {
@@ -2665,7 +2697,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       versionBlock,
     };
 
-    let swmState: { swmGen: string; candidateNamespaces: VmReconcileSwmNamespace[]; peerTopologyKey: string } | undefined;
+    let swmState: VmReconcileSwmCandidateState | undefined;
     let activeFetchRan = false;
     let activeFetchHadUsableResponse = false;
     let outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
