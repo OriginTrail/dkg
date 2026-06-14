@@ -718,6 +718,7 @@ describe('context graph write-path validation', () => {
         uri: 'did:dkg:context-graph:fast-owner-cg',
         subscribed: true,
         synced: true,
+        accessPolicy: 'public',
         declarationFound: true,
       },
     ], { exactPreflight: true });
@@ -858,6 +859,30 @@ describe('context graph write-path validation', () => {
 
     const result = await post('/api/shared-memory/write', {
       contextGraphId: 'tokenless-private-cg',
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
+    });
+
+    expect(result.status).toBe(503);
+    expect(result.body).toMatchObject({ code: 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE' });
+    expect(agent.listContextGraphs).toHaveBeenCalledTimes(1);
+    expect(agent.calls.share).not.toHaveBeenCalled();
+  });
+
+  it('does not fast-accept tokenless exact declarations without explicit public policy', async () => {
+    const agent = makeAgent([
+      {
+        id: 'tokenless-unknown-policy-cg',
+        uri: 'did:dkg:context-graph:tokenless-unknown-policy-cg',
+        subscribed: true,
+        synced: true,
+        declarationFound: true,
+      },
+    ], { exactPreflight: true });
+    agent.listContextGraphs.mockRejectedValueOnce(new Error('list timeout'));
+    await startRoutes(agent);
+
+    const result = await post('/api/shared-memory/write', {
+      contextGraphId: 'tokenless-unknown-policy-cg',
       quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
     });
 

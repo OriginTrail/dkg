@@ -610,8 +610,7 @@ function exactProbeCanFastAccept(
   callerAgentAddress: string | null,
 ): boolean {
   if (!exactProbeIsLocallyWritable(probe, requireLocalWritable)) return false;
-  if (!callerAgentAddress && probe.accessPolicy === "private") return false;
-  if (!callerAgentAddress) return true;
+  if (!callerAgentAddress) return probe.accessPolicy === "public";
   return probe.callerAuthorized === true;
 }
 
