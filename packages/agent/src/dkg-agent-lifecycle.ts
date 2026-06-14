@@ -2985,10 +2985,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     options?: { includeSharedMemory?: boolean; maxPeers?: number; peerRotationKey?: string },
   ): Promise<{
-    /** Peers selected and evaluated after optional maxPeers windowing. */
+    /** Ordered connected peers before optional maxPeers windowing. */
     connectedPeers: number;
     /** Ordered connected peers before optional maxPeers windowing. */
     totalPeers: number;
+    /** Peers selected and evaluated after optional maxPeers windowing. */
     selectedPeers: number;
     syncCapablePeers: number;
     peersTried: number;
@@ -3146,10 +3147,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     peers: Array<{ toString(): string }>,
     stats?: { totalPeers?: number },
   ): Promise<{
-    /** Peers selected and evaluated after optional caller windowing. */
+    /** Ordered connected peers before optional caller windowing. */
     connectedPeers: number;
     /** Ordered connected peers before optional caller windowing. */
     totalPeers: number;
+    /** Peers selected and evaluated after optional caller windowing. */
     selectedPeers: number;
     syncCapablePeers: number;
     peersTried: number;
@@ -3385,7 +3387,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     return {
-      connectedPeers: peers.length,
+      connectedPeers: stats?.totalPeers ?? peers.length,
       totalPeers: stats?.totalPeers ?? peers.length,
       selectedPeers: peers.length,
       syncCapablePeers,

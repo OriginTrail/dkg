@@ -336,9 +336,12 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(saved.find((r) => r.id === 'late-after-timeout')).toBeUndefined();
   });
 
-  it('uses cached public access policy when the live policy read flakes', async () => {
+  it('uses cached public access policy when liveness fails and the fallback policy read flakes', async () => {
     const internals = await boot();
     ((internals as any).onChainAccessPolicyCache as Map<string, 0 | 1>).set('50', 0);
+    internals.chain.isContextGraphActiveOnChain = vi.fn(async () => {
+      throw new Error('liveness rpc unavailable');
+    });
     internals.chain.getContextGraphAccessPolicy = vi.fn(async () => {
       throw new Error('rpc unavailable');
     });
@@ -348,6 +351,19 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(internals.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
     expect(internals.subscribedContextGraphs.get('cached-public')?.coreHosted).toBe(true);
     expect(saved.find((r) => r.id === 'cached-public')?.coreHosted).toBe(true);
+  });
+
+  it('forces a fresh policy read after liveness proves the slot is live', async () => {
+    const internals = await boot();
+    ((internals as any).onChainAccessPolicyCache as Map<string, 0 | 1>).set('51', 0);
+    internals.chain.isContextGraphActiveOnChain = vi.fn(async () => true);
+    internals.chain.getContextGraphAccessPolicy = vi.fn(async () => 1);
+
+    await internals.recordCoreHostedPublicCg('51', 'stale-cache-curated');
+
+    expect(internals.chain.getContextGraphAccessPolicy).toHaveBeenCalledWith(51n);
+    expect(internals.subscribedContextGraphs.get('stale-cache-curated')).toBeUndefined();
+    expect(saved.find((r) => r.id === 'stale-cache-curated')).toBeUndefined();
   });
 
   it('falls back to ACK-backed policy read when the liveness probe rejects', async () => {
@@ -615,6 +631,42 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(peerCursor.has(localCgId)).toBe(false);
     expect(peerOrder.has(localCgId)).toBe(false);
     expect(reconcileCursors.has(localCgId)).toBe(false);
+  });
+
+  it('does not re-register an existing on-chain id when liveness is unknown', async () => {
+    const internals = await boot();
+    const localCgId = 'unknown-live-register';
+    const ownerAddr = (internals.chain as unknown as { signerAddress: string }).signerAddress;
+
+    await internals.createContextGraph({
+      id: localCgId,
+      name: 'Unknown Live Register',
+      private: true,
+      callerAgentAddress: ownerAddr,
+    });
+    await internals.store.insert([{
+      subject: `did:dkg:context-graph:${localCgId}`,
+      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+      object: '"5"',
+      graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+    }]);
+    internals.subscribedContextGraphs.set(localCgId, {
+      subscribed: true, onChainId: '5', lastReconciledOrdinal: 4,
+    });
+    internals.chain.isContextGraphActiveOnChain = vi.fn(async () => {
+      throw new Error('rpc unavailable');
+    });
+    const registerOnChain = vi.spyOn(internals as any, 'registerContextGraphOnChain');
+
+    await expect(internals.registerContextGraph(localCgId, { callerAgentAddress: ownerAddr }))
+      .rejects.toThrow(/liveness could not be verified/);
+
+    expect(registerOnChain).not.toHaveBeenCalled();
+    expect(internals.subscribedContextGraphs.get(localCgId)).toMatchObject({
+      subscribed: true,
+      onChainId: '5',
+      lastReconciledOrdinal: 4,
+    });
   });
 });
 
@@ -1280,7 +1332,7 @@ describe('Phase D - VM reconcile damping', () => {
       }
       return {
         ...emptyCatchupStats(),
-        connectedPeers: 1,
+        connectedPeers: connectedPeers.length,
         totalPeers: connectedPeers.length,
         selectedPeers: 1,
       };
@@ -1298,7 +1350,7 @@ describe('Phase D - VM reconcile damping', () => {
 
     const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue({
       ...emptyCatchupStats(),
-      connectedPeers: 1,
+      connectedPeers: 33,
       totalPeers: 33,
       selectedPeers: 1,
     });

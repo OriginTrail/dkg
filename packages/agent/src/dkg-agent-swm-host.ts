@@ -2000,7 +2000,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (typeof isActive !== 'function') return readAccessPolicy(true);
     try {
       const live = await raceChainRead(() => isActive.call(this.chain, numericId));
-      if (live === true) return readAccessPolicy(true);
+      if (live === true) return readAccessPolicy(false);
       if (live !== TIMEOUT_SENTINEL) return null;
       this.log.warn(
         createOperationContext('system'),

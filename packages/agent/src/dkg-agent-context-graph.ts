@@ -1106,8 +1106,16 @@ export class ContextGraphMethods extends DKGAgentBase {
       if (typeof this.chain.isContextGraphActiveOnChain === 'function') {
         try {
           onChainLive = await this.chain.isContextGraphActiveOnChain(BigInt(existingOnChainId));
-        } catch {
-          onChainLive = false;
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          this.log.warn(
+            ctx,
+            `Context graph "${id}" has local on-chain id ${existingOnChainId}, but liveness could not be verified: ${reason}`,
+          );
+          throw new Error(
+            `Context graph "${id}" has local on-chain id ${existingOnChainId}, but liveness could not be verified. ` +
+            `Refusing to re-register until the existing slot can be checked: ${reason}`,
+          );
         }
       }
       if (onChainLive) {

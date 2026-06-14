@@ -720,7 +720,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           peerRotationKey: 'runtime-contextGraph',
         });
 
-        expect(firstResult.connectedPeers).toBe(1);
+        expect(firstResult.connectedPeers).toBe(3);
         expect(firstResult.totalPeers).toBe(3);
         expect(firstResult.selectedPeers).toBe(1);
         expect(firstResult.syncCapablePeers).toBe(1);
@@ -731,7 +731,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       }
     });
 
-    it('keeps connectedPeers scoped to the selected catchup window', async () => {
+    it('reports full connectedPeers while selectedPeers tracks the catchup window', async () => {
       const agent = await DKGAgent.create({
         name: 'RuntimeCatchupSelectedPeerCounts',
         listenHost: '127.0.0.1',
@@ -757,7 +757,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           peerRotationKey: 'runtime-contextGraph',
         });
 
-        expect(result.connectedPeers).toBe(1);
+        expect(result.connectedPeers).toBe(2);
         expect(result.selectedPeers).toBe(1);
         expect(result.totalPeers).toBe(2);
         expect(result.syncCapablePeers).toBe(0);
