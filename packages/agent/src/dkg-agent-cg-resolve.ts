@@ -1661,7 +1661,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     if (cacheTtlMs > 0) {
       const cached = this.listContextGraphsCache.get(cacheKey);
       if (cached) {
-        if (cached.expiresAt > Date.now()) {
+        if (cached.expiresAt > this.listContextGraphsCacheNow()) {
           this.listContextGraphsCache.delete(cacheKey);
           this.listContextGraphsCache.set(cacheKey, cached);
           return cloneRows(cached.rows as ListContextGraphsRow[]);
@@ -1681,7 +1681,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       const rows = result.rows;
       if (cacheTtlMs > 0 && result.cacheable && this.listContextGraphsCacheGeneration === generation) {
         this.listContextGraphsCache.set(cacheKey, {
-          expiresAt: Date.now() + cacheTtlMs,
+          expiresAt: this.listContextGraphsCacheNow() + cacheTtlMs,
           rows: cloneRows(rows) as Array<Record<string, unknown>>,
         });
         while (this.listContextGraphsCache.size > DKGAgentBase.LIST_CONTEXT_GRAPHS_CACHE_MAX) {

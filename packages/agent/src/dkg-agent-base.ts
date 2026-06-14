@@ -10,6 +10,7 @@
  * be declared; external construction still goes through `DKGAgent.create`.
  */
 import { createHash, randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -386,6 +387,14 @@ function readNonNegativeNumberEnv(name: string, fallback: number): number {
   if (raw === undefined || raw.trim() === '') return fallback;
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
+}
+
+function isSparqlUpdateStatement(sparql: string): boolean {
+  const withoutPrologue = sparql.replace(
+    /^\s*(?:(?:PREFIX\s+[\w-]*:\s*<[^>]+>|BASE\s+<[^>]+>)\s*)*/i,
+    '',
+  );
+  return /^(?:WITH\s+<[^>]+>\s*)?(?:INSERT|DELETE|DROP|CLEAR|CREATE|LOAD|COPY|MOVE|ADD)\b/i.test(withoutPrologue);
 }
 
 export class DKGAgentBase {
@@ -788,11 +797,65 @@ export class DKGAgentBase {
   }>();
   protected readonly listContextGraphsInFlight = new Map<string, Promise<Array<Record<string, unknown>>>>();
   protected listContextGraphsCacheGeneration = 0;
+  protected listContextGraphsCacheNow(): number {
+    return performance.now();
+  }
+
   protected invalidateListContextGraphsCache(): void {
     this.listContextGraphsCacheGeneration += 1;
     this.listContextGraphsCache.clear();
     this.listContextGraphsInFlight.clear();
   }
+
+  protected bindListContextGraphsCacheInvalidatingStore(): void {
+    const store = this.store;
+
+    const originalInsert = store.insert.bind(store);
+    store.insert = async (quads: Quad[]): Promise<void> => {
+      await originalInsert(quads);
+      if (quads.length > 0) this.invalidateListContextGraphsCache();
+    };
+
+    const originalDelete = store.delete.bind(store);
+    store.delete = async (quads: Quad[]): Promise<void> => {
+      await originalDelete(quads);
+      if (quads.length > 0) this.invalidateListContextGraphsCache();
+    };
+
+    const originalDeleteByPattern = store.deleteByPattern.bind(store);
+    store.deleteByPattern = async (pattern: Partial<Quad>): Promise<number> => {
+      const removed = await originalDeleteByPattern(pattern);
+      if (removed > 0) this.invalidateListContextGraphsCache();
+      return removed;
+    };
+
+    const originalDeleteBySubjectPrefix = store.deleteBySubjectPrefix.bind(store);
+    store.deleteBySubjectPrefix = async (graphUri: string, prefix: string): Promise<number> => {
+      const removed = await originalDeleteBySubjectPrefix(graphUri, prefix);
+      if (removed > 0) this.invalidateListContextGraphsCache();
+      return removed;
+    };
+
+    const originalCreateGraph = store.createGraph.bind(store);
+    store.createGraph = async (graphUri: string): Promise<void> => {
+      await originalCreateGraph(graphUri);
+      this.invalidateListContextGraphsCache();
+    };
+
+    const originalDropGraph = store.dropGraph.bind(store);
+    store.dropGraph = async (graphUri: string): Promise<void> => {
+      await originalDropGraph(graphUri);
+      this.invalidateListContextGraphsCache();
+    };
+
+    const originalQuery = store.query.bind(store);
+    store.query = async (...args: Parameters<TripleStore['query']>): ReturnType<TripleStore['query']> => {
+      const result = await originalQuery(...args);
+      if (isSparqlUpdateStatement(args[0])) this.invalidateListContextGraphsCache();
+      return result;
+    };
+  }
+
   protected async insertSyncedQuadsAndInvalidateListCache(quads: Quad[]): Promise<void> {
     await this.store.insert(quads);
     if (quads.length > 0) this.invalidateListContextGraphsCache();
@@ -1219,6 +1282,7 @@ export class DKGAgentBase {
     this.wallet = wallet;
     this.node = node;
     this.store = store;
+    this.bindListContextGraphsCacheInvalidatingStore();
     this.publisher = publisher;
     this.queryEngine = queryEngine;
     this.workspaceOwnedEntities = workspaceOwnedEntities;

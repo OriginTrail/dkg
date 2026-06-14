@@ -1034,6 +1034,125 @@ describe('listContextGraphs merge', () => {
     }
   }, 15000);
 
+  it('invalidates cached list rows after delete and drop graph writes', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const renamedId = 'delete-invalidates-list-cache-cg';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const renamedUri = contextGraphDataGraphUri(renamedId);
+    await result.store.insert([
+      {
+        subject: renamedUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: renamedUri,
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Delete Invalidates List Cache"',
+        graph: ontologyGraph,
+      },
+      {
+        subject: renamedUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: ontologyGraph,
+      },
+    ]);
+
+    const first = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(first.find(p => p.id === renamedId)?.name).toBe('Delete Invalidates List Cache');
+
+    await result.store.deleteByPattern({
+      graph: ontologyGraph,
+      subject: renamedUri,
+      predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+    });
+
+    const second = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(second.find(p => p.id === renamedId)?.name).toBe(renamedId);
+
+    const droppedId = 'drop-invalidates-list-cache-cg';
+    const droppedGraph = contextGraphDataGraphUri(droppedId);
+    await result.store.insert([{
+      subject: `${droppedGraph}#seed`,
+      predicate: DKG_ONTOLOGY.RDF_TYPE,
+      object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+      graph: droppedGraph,
+    }]);
+
+    expect((await agent.listContextGraphs()).find(p => p.id === droppedId)).toBeDefined();
+
+    await result.store.dropGraph(droppedGraph);
+
+    expect((await agent.listContextGraphs()).find(p => p.id === droppedId)).toBeUndefined();
+  }, 15000);
+
+  it('expires cached list rows using monotonic time when wall clock moves backwards', async () => {
+    const originalTtl = DKGAgentBase.LIST_CONTEXT_GRAPHS_CACHE_TTL_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_CACHE_TTL_MS', {
+      value: 50,
+      configurable: true,
+    });
+    const dateNow = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    try {
+      const store = new OxigraphStore();
+      const result = await createTestAgent({ store });
+      agent = result.agent;
+      await agent.start();
+
+      const id = 'monotonic-list-cache-cg';
+      const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      const uri = contextGraphDataGraphUri(id);
+      await store.insert([
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.RDF_TYPE,
+          object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+          graph: ontologyGraph,
+        },
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+          object: '"Monotonic List Cache"',
+          graph: ontologyGraph,
+        },
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+          object: '"public"',
+          graph: ontologyGraph,
+        },
+      ]);
+
+      let monotonicNow = 1_000;
+      vi.spyOn(agent as any, 'listContextGraphsCacheNow').mockImplementation(() => monotonicNow);
+      const originalQuery = store.query.bind(store);
+      let definitionScans = 0;
+      vi.spyOn(store, 'query').mockImplementation(async (query: string, options?: any) => {
+        if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access')) {
+          definitionScans += 1;
+        }
+        return originalQuery(query, options);
+      });
+
+      expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === id)).toBeDefined();
+      dateNow.mockReturnValue(1);
+      monotonicNow += 51;
+      expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === id)).toBeDefined();
+      expect(definitionScans).toBe(2);
+    } finally {
+      dateNow.mockRestore();
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_CACHE_TTL_MS', {
+        value: originalTtl,
+        configurable: true,
+      });
+    }
+  }, 15000);
+
   it('uses a catalog scan budget that is independent from the per-row enrichment budget', async () => {
     const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
     const originalScanBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS;
