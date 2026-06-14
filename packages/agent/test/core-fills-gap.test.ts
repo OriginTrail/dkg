@@ -1131,6 +1131,22 @@ describe('Phase D - VM reconcile damping', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it('attempts every connected peer before recording a miss', async () => {
+    const internals = await boot();
+    const onChainCgId = 64n;
+    registerUnmatchedKC(internals.chain, 9024n, onChainCgId);
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue({
+      ...emptyCatchupStats(),
+      connectedPeers: 33,
+      selectedPeers: 1,
+    });
+
+    await expect(internals.reconcileChainOrdinal('64', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+
+    expect(fetch).toHaveBeenCalledTimes(33);
+  });
+
   it('does not negative-cache no-swm when active fetch reaches no sync-capable peer', async () => {
     const internals = await boot();
     const onChainCgId = 50n;

@@ -2719,10 +2719,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
               maxPeers: 1,
               peerRotationKey: localCgId,
             });
-            maxAttempts = Math.min(
-              DKGAgentBase.VM_RECONCILE_ACTIVE_FETCH_MAX_ATTEMPTS,
-              Math.max(maxAttempts, fetchResult.connectedPeers ?? 0, this.vmReconcileConnectedPeerCount()),
-            );
+            maxAttempts = Math.max(maxAttempts, fetchResult.connectedPeers ?? 0, this.vmReconcileConnectedPeerCount());
             if ((fetchResult.peersTried ?? 0) === 0 && (fetchResult.syncCapablePeers ?? 0) === 0) {
               continue;
             }
@@ -2732,10 +2729,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
             activeFetchHadUsableResponse = true;
           } catch (err) {
             this.log.info(ctx, `Phase B: active fetch for "${localCgId}" (ordinal ${ordinal}) failed: ${err instanceof Error ? err.message : String(err)}`);
-            maxAttempts = Math.min(
-              DKGAgentBase.VM_RECONCILE_ACTIVE_FETCH_MAX_ATTEMPTS,
-              Math.max(maxAttempts, this.vmReconcileConnectedPeerCount()),
-            );
+            maxAttempts = Math.max(maxAttempts, this.vmReconcileConnectedPeerCount());
             continue;
           }
           outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);

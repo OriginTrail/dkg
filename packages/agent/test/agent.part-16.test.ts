@@ -753,6 +753,30 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       }
     });
 
+    it('seeds VM reconcile catchup rotation when all current peers fit the window', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupRotationSinglePeerSeed',
+        chainAdapter: new MockChainAdapter(),
+      });
+      const peer = (peerId: string) => ({ toString: () => peerId });
+      const select = (peerIds: string[], peerRotationKey = 'runtime-contextGraph') => (agent as any)
+        .selectCatchupPeerWindow(peerIds.map(peer), {
+          maxPeers: 1,
+          peerRotationKey,
+        })
+        .map((selected: { toString(): string }) => selected.toString());
+
+      try {
+        expect(select(['peer-a'])).toEqual(['peer-a']);
+        expect(select(['peer-a', 'peer-b'])).toEqual(['peer-b']);
+        expect(select(['peer-a', 'peer-b'])).toEqual(['peer-a']);
+        expect(select(['peer-b'], 'runtime-contextGraph-prepend')).toEqual(['peer-b']);
+        expect(select(['peer-a', 'peer-b'], 'runtime-contextGraph-prepend')).toEqual(['peer-a']);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
     it('resets VM reconcile catchup rotation when an existing peer gains priority before the cursor', async () => {
       const agent = await DKGAgent.create({
         name: 'RuntimeCatchupRotationPriorityGain',

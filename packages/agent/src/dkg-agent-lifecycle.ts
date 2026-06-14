@@ -3060,18 +3060,45 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return peers;
     }
 
+    let start = 0;
+    const rotationKey = options?.peerRotationKey;
+    const currentPriorityRank = (peerId: string): number => options?.peerPriorityRanks?.get(peerId) ?? 0;
+    const rememberRotation = (peerIds: string[], selectedCount: number): void => {
+      if (!rotationKey) return;
+      if (peerIds.length === 0) {
+        this.vmReconcileCatchupPeerCursor.delete(rotationKey);
+        this.vmReconcileCatchupPeerOrder.delete(rotationKey);
+        return;
+      }
+      const nextCursor = start + selectedCount;
+      const selectedAll = selectedCount >= peerIds.length;
+      this.vmReconcileCatchupPeerCursor.delete(rotationKey);
+      this.vmReconcileCatchupPeerCursor.set(rotationKey, nextCursor);
+      this.vmReconcileCatchupPeerOrder.delete(rotationKey);
+      this.vmReconcileCatchupPeerOrder.set(rotationKey, {
+        orderedPeers: peerIds,
+        nextPeerId: selectedAll ? undefined : peerIds[nextCursor % peerIds.length],
+        priorityRanks: Object.fromEntries(
+          peerIds
+            .map((peerId) => [peerId, currentPriorityRank(peerId)] as const)
+            .filter(([, rank]) => rank > 0),
+        ),
+      });
+    };
+
     if (peers.length <= maxPeers) {
+      if (rotationKey) {
+        this.pruneVmReconcileState();
+        rememberRotation(peers.map((peer) => peer.toString()), peers.length);
+      }
       return peers;
     }
 
-    let start = 0;
-    const rotationKey = options?.peerRotationKey;
     if (rotationKey) {
       this.pruneVmReconcileState();
       const peerIds = peers.map((peer) => peer.toString());
       const previousOrder = this.vmReconcileCatchupPeerOrder.get(rotationKey);
       const nextPeerId = previousOrder?.nextPeerId;
-      const currentPriorityRank = (peerId: string): number => options?.peerPriorityRanks?.get(peerId) ?? 0;
       const previousPriorityRank = (peerId: string): number => previousOrder?.priorityRanks?.[peerId] ?? 0;
       const gainedPriority = (peerId: string): boolean => currentPriorityRank(peerId) > previousPriorityRank(peerId);
       if (nextPeerId) {
@@ -3092,21 +3119,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             : (this.vmReconcileCatchupPeerCursor.get(rotationKey) ?? 0) % peers.length;
         }
       } else {
-        start = (this.vmReconcileCatchupPeerCursor.get(rotationKey) ?? 0) % peers.length;
+        const previousPeers = new Set(previousOrder?.orderedPeers ?? []);
+        const firstInvalidatingPeerIndex = peerIds.findIndex((peerId) =>
+          !previousPeers.has(peerId) || gainedPriority(peerId),
+        );
+        start = firstInvalidatingPeerIndex >= 0
+          ? firstInvalidatingPeerIndex
+          : (this.vmReconcileCatchupPeerCursor.get(rotationKey) ?? 0) % peers.length;
       }
-      const nextIndex = (start + maxPeers) % peers.length;
-      this.vmReconcileCatchupPeerCursor.delete(rotationKey);
-      this.vmReconcileCatchupPeerCursor.set(rotationKey, nextIndex);
-      this.vmReconcileCatchupPeerOrder.delete(rotationKey);
-      this.vmReconcileCatchupPeerOrder.set(rotationKey, {
-        orderedPeers: peerIds,
-        nextPeerId: peerIds[nextIndex],
-        priorityRanks: Object.fromEntries(
-          peerIds
-            .map((peerId) => [peerId, currentPriorityRank(peerId)] as const)
-            .filter(([, rank]) => rank > 0),
-        ),
-      });
+      rememberRotation(peerIds, maxPeers);
     }
 
     return [...peers.slice(start), ...peers.slice(0, start)].slice(0, maxPeers);
