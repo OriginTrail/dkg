@@ -265,6 +265,12 @@ type ListContextGraphsUncachedResult = {
   rows: ListContextGraphsRow[];
   cacheable: boolean;
 };
+class ListContextGraphsBudgetExceeded extends Error {
+  constructor(label: string) {
+    super(`${label} exceeded listContextGraphs budget`);
+    this.name = 'ListContextGraphsBudgetExceeded';
+  }
+}
 import { multiaddr } from '@multiformats/multiaddr';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
@@ -1603,7 +1609,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       );
       throwIfSyncAuthAborted(options.signal);
       if (metaResult.quads.length > 0) {
-        await this.store.insert(metaResult.quads);
+        await this.insertSyncedQuadsAndInvalidateListCache(metaResult.quads);
         this.syncCheckpoints.delete(metaResult.checkpointKey);
         this.log.info(ctx, `Meta refresh for "${contextGraphId}": ${metaResult.quads.length} triples from curator ${curatorPeerId.slice(-8)}`);
         return true;
@@ -1707,7 +1713,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(
-          () => reject(new Error(`${label} exceeded listContextGraphs row budget`)),
+          () => reject(new ListContextGraphsBudgetExceeded(label)),
           budgetMs,
         );
         const unref = (timer as { unref?: () => void } | undefined)?.unref;
@@ -1717,6 +1723,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         const value = await Promise.race([Promise.resolve().then(work), timeout]);
         return { ok: true, value };
       } catch (error) {
+        if (!(error instanceof ListContextGraphsBudgetExceeded)) {
+          throw error;
+        }
         return { ok: false, error };
       } finally {
         if (timer) clearTimeout(timer);
@@ -1783,7 +1792,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         byUri.set(uri, row);
       }
       // Parallel lookups — sequential await per ontology row multiplied list latency noticeably.
-      await Promise.allSettled([...byUri.values()].map(async (row) => {
+      const definitionSettled = await Promise.allSettled([...byUri.values()].map(async (row) => {
         const uri = row['ctxGraph'] ?? '';
         if (seen.has(uri)) return;
         const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri;
@@ -1816,6 +1825,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           ...(onChainId ? { onChainId } : {}),
         }, hasExplicitPolicy(row['access']));
       }));
+      for (const entry of definitionSettled) {
+        if (entry.status === 'rejected') throw entry.reason;
+      }
     }
 
     // Curated CGs store their definition in their own _meta graph, not in
@@ -1976,8 +1988,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     }));
     rows = curatorBackfills.map((entry, index) => {
       if (entry.status === 'fulfilled') return entry.value;
-      cacheable = false;
-      return rows[index];
+      throw entry.reason;
     });
 
     // Privacy filter: curated/private CGs must never leak past the daemon to a non-member
@@ -2014,8 +2025,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     }));
     const annotated = annotatedSettled.map((entry, index) => {
       if (entry.status === 'fulfilled') return entry.value;
-      cacheable = false;
-      return { ...rows[index], callerInvolved: false };
+      throw entry.reason;
     });
 
     return {

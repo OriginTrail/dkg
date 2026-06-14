@@ -623,7 +623,7 @@ describe('listContextGraphs merge', () => {
     ]);
 
     vi.spyOn(agent as any, 'getContextGraphOnChainId').mockImplementation(async (id: string) => {
-      if (id === 'broken-enrichment-row') throw new Error('simulated enrichment failure');
+      if (id === 'broken-enrichment-row') return new Promise<undefined>(() => {});
       return undefined;
     });
 
@@ -632,7 +632,7 @@ describe('listContextGraphs merge', () => {
     expect(contextGraphs.find(p => p.id === 'broken-enrichment-row')).toBeDefined();
   }, 15000);
 
-  it('drops subscribed rows from scoped output when policy enrichment fails', async () => {
+  it('drops subscribed rows from scoped output when policy enrichment times out', async () => {
     const store = new OxigraphStore();
     const result = await createTestAgent({ store });
     agent = result.agent;
@@ -671,7 +671,7 @@ describe('listContextGraphs merge', () => {
     const originalQuery = store.query.bind(store);
     vi.spyOn(store, 'query').mockImplementation(async (query: string) => {
       if (query.includes(`<${metaGraph}>`) && query.includes('SELECT ?name ?desc ?creator ?created ?curator ?access')) {
-        throw new Error('simulated policy read failure');
+        return new Promise<any>(() => {});
       }
       return originalQuery(query);
     });
@@ -682,6 +682,43 @@ describe('listContextGraphs merge', () => {
 
     const noWallet = await agent.listContextGraphs({ callerAgentAddress: null });
     expect(noWallet.find(p => p.id === id)).toBeUndefined();
+  }, 15000);
+
+  it('invalidates cached scoped results when remote meta sync writes policy metadata', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'remote-meta-cache-cg';
+    (agent as any).subscribedContextGraphs.set(id, {
+      name: 'Remote Meta Cache',
+      subscribed: true,
+      synced: false,
+      pendingMeta: true,
+    } satisfies ContextGraphSub);
+
+    const first = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(first.find(p => p.id === id)).toBeUndefined();
+
+    const uri = contextGraphDataGraphUri(id);
+    const metaGraph = contextGraphMetaGraphUri(id);
+    await (agent as any).insertSyncedQuadsAndInvalidateListCache([
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: metaGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: metaGraph,
+      },
+    ]);
+
+    const second = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(second.find(p => p.id === id)).toBeDefined();
   }, 15000);
 
   it('drops map-state tail rows from scoped output when no policy literal was read', async () => {
@@ -707,7 +744,7 @@ describe('listContextGraphs merge', () => {
     expect(ownerLocal.find(p => p.id === id)).toBeDefined();
   }, 15000);
 
-  it('drops storage-only rows from scoped output when policy enrichment fails', async () => {
+  it('drops storage-only rows from scoped output when policy enrichment times out', async () => {
     const store = new OxigraphStore();
     const result = await createTestAgent({ store });
     agent = result.agent;
@@ -725,7 +762,7 @@ describe('listContextGraphs merge', () => {
     const originalQuery = store.query.bind(store);
     vi.spyOn(store, 'query').mockImplementation(async (query: string) => {
       if (query.includes('SELECT ?policy WHERE') && query.includes(DKG_ONTOLOGY.DKG_ACCESS_POLICY)) {
-        throw new Error('simulated storage-tail policy read failure');
+        return new Promise<any>(() => {});
       }
       return originalQuery(query);
     });
@@ -778,7 +815,7 @@ describe('listContextGraphs merge', () => {
     vi.spyOn(agent, 'callerIsAllowlistedAgentParticipant').mockImplementation(async (contextGraphId, caller) => {
       if (contextGraphId === id && ethers.getAddress(caller) === ethers.getAddress(member)) {
         targetCalls += 1;
-        if (targetCalls === 1) throw new Error('simulated allowlist timeout');
+        if (targetCalls === 1) return new Promise<boolean>(() => {});
         return true;
       }
       return originalAllowlist(contextGraphId, caller);
@@ -792,6 +829,31 @@ describe('listContextGraphs merge', () => {
     expect(entry).toBeDefined();
     expect(entry!.callerInvolved).toBe(true);
     expect(targetCalls).toBe(2);
+  }, 15000);
+
+  it('rejects scoped list calls when allowlist lookup fails with a real error', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'allowlist-real-error-cg';
+    const stranger = ethers.Wallet.createRandom().address;
+    await agent.createContextGraph({
+      id,
+      name: 'Allowlist Real Error',
+      accessPolicy: 1,
+      allowedAgents: [agent.getDefaultAgentAddress()!],
+    });
+
+    vi.spyOn(agent, 'callerIsAllowlistedAgentParticipant').mockImplementation(async (contextGraphId, caller) => {
+      if (contextGraphId === id && ethers.getAddress(caller) === ethers.getAddress(stranger)) {
+        throw new Error('simulated store failure');
+      }
+      return false;
+    });
+
+    await expect(agent.listContextGraphs({ callerAgentAddress: stranger }))
+      .rejects.toThrow('simulated store failure');
   }, 15000);
 
   it('invalidates wallet-scoped cached list results after agent revocation', async () => {

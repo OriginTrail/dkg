@@ -782,6 +782,10 @@ export class DKGAgentBase {
     this.listContextGraphsCache.clear();
     this.listContextGraphsInFlight.clear();
   }
+  protected async insertSyncedQuadsAndInvalidateListCache(quads: Quad[]): Promise<void> {
+    await this.store.insert(quads);
+    if (quads.length > 0) this.invalidateListContextGraphsCache();
+  }
   protected readonly gossipRegistered = new Set<string>();
   protected readonly sharedMemoryGossipRegistered = new Set<string>();
   protected readonly seenOnChainIds = new Set<string>();
