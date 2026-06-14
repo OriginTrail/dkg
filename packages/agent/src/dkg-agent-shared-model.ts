@@ -39,6 +39,15 @@ export interface InvokeOpts {
   temperature?: number;
 }
 
+/**
+ * Fallback transport budget (ms) for the remote invoke when this node has no
+ * shared-model runtime config (a pure member node never calls
+ * `configureSharedModel`, so STATE is unset there). Matches the daemon's
+ * `invokeTimeoutMs` default and comfortably exceeds real LLM latency, unlike
+ * the router default (`DEFAULT_SEND_TIMEOUT_MS`, 20s).
+ */
+const DEFAULT_INVOKE_TIMEOUT_MS = 120_000;
+
 export class SharedModelMethods {
   /**
    * Attach/replace this node's shared-model runtime config. Called by the
@@ -134,6 +143,7 @@ export class SharedModelMethods {
       const completion = await st!.client.complete(st!.config, req.messages, {
         maxTokens: req.maxTokens,
         temperature: req.temperature,
+        providerTimeoutMs: st!.config.providerTimeoutMs,
       });
       return encodeInvokeResponse({ ok: true, content: completion.content, model: completion.model });
     } catch (err) {
@@ -166,7 +176,10 @@ export class SharedModelMethods {
       });
       if (!decision.ok) return { ok: false, denied: decision.denied };
       try {
-        const completion = await st!.client.complete(st!.config, messages, opts);
+        const completion = await st!.client.complete(st!.config, messages, {
+          ...opts,
+          providerTimeoutMs: st!.config.providerTimeoutMs,
+        });
         return { ok: true, content: completion.content, model: completion.model };
       } catch (err) {
         return { ok: false, denied: `provider error: ${err instanceof Error ? err.message : String(err)}` };
@@ -177,7 +190,13 @@ export class SharedModelMethods {
     const peerId = await this.resolveCuratorPeerId(contextGraphId);
     if (!peerId) return { ok: false, denied: 'could not resolve curator peer for this context graph' };
     const reqBytes = encodeInvokeRequest({ contextGraphId, messages, maxTokens: opts.maxTokens, temperature: opts.temperature });
-    const sendResult = await this.messenger.sendReliable(peerId, PROTOCOL_SHARED_MODEL_INVOKE, reqBytes);
+    // The whole remote round trip (resolver + dial + write + LLM completion +
+    // read) must fit the transport budget. The router default (20s) is shorter
+    // than real LLM latency and would surface a false "node unreachable" on a
+    // normal completion, so use the configured invoke timeout (member nodes
+    // without shared-model config fall back to the matching default).
+    const invokeTimeoutMs = STATE.get(this)?.config.invokeTimeoutMs ?? DEFAULT_INVOKE_TIMEOUT_MS;
+    const sendResult = await this.messenger.sendReliable(peerId, PROTOCOL_SHARED_MODEL_INVOKE, reqBytes, { timeoutMs: invokeTimeoutMs });
     if (!sendResult.delivered) {
       const reason = 'error' in sendResult ? sendResult.error : 'undelivered';
       return { ok: false, denied: `curator node unreachable: ${reason}` };
@@ -198,27 +217,26 @@ export class SharedModelMethods {
   }
 
   /**
-   * Membership for the remote path is verified by the delegatee-peer binding
-   * established at invite/join time (DKG `allowedDelegateePeer` /
-   * `delegationDelegateePeer` in `_meta`). The libp2p `fromPeerId` is
-   * cryptographically authenticated by the transport, so matching it against
-   * the recorded delegatee peer authorises the request without a separate
-   * signature.
+   * Membership for the remote path is verified against the set of APPROVED,
+   * UNEXPIRED delegatee peers for the CG — exactly the set used by the sync
+   * auth path. We reuse the canonical {@link getContextGraphAllowedDelegateePeers}
+   * helper (WorkspaceCryptoMethods mixin) so the gate reads ONLY the
+   * curator-approved `allowedDelegateePeer` bindings and never the
+   * self-asserted, pre-approval `delegationDelegateePeer` value written at
+   * join-request time. A pending, rejected, or removed peer is therefore
+   * correctly denied (a removed peer's `did:dkg:agent-delegation:*` subject is
+   * deleted by `removeAgentFromContextGraph`, so it drops out of this set).
+   *
+   * The libp2p `fromPeerId` is cryptographically authenticated by the
+   * transport, so matching it against an approved delegatee peer authorises
+   * the request without a separate signature.
    */
   private async isPeerContextGraphMember(this: DKGAgent, contextGraphId: string, peerId: string): Promise<boolean> {
-    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const result = await this.store.query(
-      `SELECT ?peer WHERE { GRAPH <${metaGraph}> {
-        { ?s <https://dkg.network/ontology#allowedDelegateePeer> ?peer }
-        UNION
-        { ?s <https://dkg.network/ontology#delegationDelegateePeer> ?peer }
-      } }`,
-    );
-    if (result.type === 'bindings') {
-      for (const row of result.bindings as Array<Record<string, string>>) {
-        const p = (row['peer'] ?? '').replace(/^"|"$/g, '');
-        if (p === peerId) return true;
-      }
+    // Map<agentLower, peerId[]> — flatten to the union of all approved peers;
+    // any approved delegatee node may invoke on the model the curator bills.
+    const byAgent = await this.getContextGraphAllowedDelegateePeers(contextGraphId);
+    for (const peers of byAgent.values()) {
+      if (peers.includes(peerId)) return true;
     }
     return false;
   }

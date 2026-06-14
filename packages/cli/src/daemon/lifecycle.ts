@@ -1335,6 +1335,8 @@ export async function runDaemonInner(
         apiKey,
         dailyRequestQuotaPerAgent: sm.dailyRequestQuotaPerAgent ?? 200,
         maxPromptChars: sm.maxPromptChars ?? 8000,
+        invokeTimeoutMs: sm.invokeTimeoutMs ?? 120_000,
+        providerTimeoutMs: sm.providerTimeoutMs ?? 110_000,
       });
     }
   }

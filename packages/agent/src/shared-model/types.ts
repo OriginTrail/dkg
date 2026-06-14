@@ -33,6 +33,19 @@ export interface SharedModelRuntimeConfig extends SharedModelProviderConfig {
   dailyRequestQuotaPerAgent: number;
   /** Hard cap on total prompt size accepted from a member (chars). */
   maxPromptChars: number;
+  /**
+   * Member-side transport budget (ms) for the WHOLE remote invoke round
+   * trip (`sendReliable`). Must comfortably exceed real LLM latency, which
+   * the router default ({@link DEFAULT_SEND_TIMEOUT_MS}, 20s) does not.
+   */
+  invokeTimeoutMs: number;
+  /**
+   * Curator-side provider deadline (ms) applied to the upstream LLM
+   * `fetch`. Kept slightly TIGHTER than `invokeTimeoutMs` so the curator
+   * returns a structured `{ok:false}` error before the member's transport
+   * aborts the round trip.
+   */
+  providerTimeoutMs: number;
 }
 
 export interface SharedModelInvokeRequest {

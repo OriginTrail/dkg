@@ -259,6 +259,10 @@ export interface SharedModelConfig {
   dailyRequestQuotaPerAgent?: number;
   /** Max prompt chars accepted from a member. Default 8000. */
   maxPromptChars?: number;
+  /** Member-side transport budget (ms) for the whole remote invoke. Default 120000. */
+  invokeTimeoutMs?: number;
+  /** Curator-side provider fetch deadline (ms); kept below invokeTimeoutMs. Default 110000. */
+  providerTimeoutMs?: number;
 }
 
 export type LocalAgentIntegrationStatus =
