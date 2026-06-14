@@ -1657,8 +1657,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const cacheKey = checksum
       ? `wallet:${checksum.toLowerCase()}`
       : scopedListing ? 'no-wallet' : 'owner-unscoped';
-    const cacheTtlMs = DKGAgentBase.LIST_CONTEXT_GRAPHS_CACHE_TTL_MS;
-    if (cacheTtlMs > 0) {
+    const cacheEnabled = this.listContextGraphsCacheAllowed()
+      && DKGAgentBase.LIST_CONTEXT_GRAPHS_CACHE_TTL_MS > 0;
+    const cacheTtlMs = cacheEnabled ? DKGAgentBase.LIST_CONTEXT_GRAPHS_CACHE_TTL_MS : 0;
+    if (cacheEnabled) {
       const cached = this.listContextGraphsCache.get(cacheKey);
       if (cached) {
         if (cached.expiresAt > this.listContextGraphsCacheNow()) {
@@ -1670,16 +1672,18 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       }
     }
 
-    const inFlight = this.listContextGraphsInFlight.get(cacheKey);
-    if (inFlight) {
-      return cloneRows((await inFlight) as ListContextGraphsRow[]);
+    if (cacheEnabled) {
+      const inFlight = this.listContextGraphsInFlight.get(cacheKey);
+      if (inFlight) {
+        return cloneRows((await inFlight) as ListContextGraphsRow[]);
+      }
     }
 
     const generation = this.listContextGraphsCacheGeneration;
     const task = (async () => {
       const result = await this.listContextGraphsUncached(checksum, scopedListing);
       const rows = result.rows;
-      if (cacheTtlMs > 0 && result.cacheable && this.listContextGraphsCacheGeneration === generation) {
+      if (cacheEnabled && result.cacheable && this.listContextGraphsCacheGeneration === generation) {
         this.listContextGraphsCache.set(cacheKey, {
           expiresAt: this.listContextGraphsCacheNow() + cacheTtlMs,
           rows: cloneRows(rows) as Array<Record<string, unknown>>,
@@ -1693,11 +1697,13 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       return rows;
     })();
 
-    this.listContextGraphsInFlight.set(cacheKey, task as Promise<Array<Record<string, unknown>>>);
+    if (cacheEnabled) {
+      this.listContextGraphsInFlight.set(cacheKey, task as Promise<Array<Record<string, unknown>>>);
+    }
     try {
       return cloneRows(await task);
     } finally {
-      if (this.listContextGraphsInFlight.get(cacheKey) === task) {
+      if (cacheEnabled && this.listContextGraphsInFlight.get(cacheKey) === task) {
         this.listContextGraphsInFlight.delete(cacheKey);
       }
     }
@@ -1784,8 +1790,12 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       'ontology/agents definition scan',
       scanBudgetMs,
     );
-    if (!initialRead.ok) cacheable = false;
-    const result = initialRead.ok ? initialRead.value : undefined;
+    if (!initialRead.ok) {
+      throw initialRead.error instanceof Error
+        ? initialRead.error
+        : new Error(`listContextGraphs primary definition scan failed: ${String(initialRead.error)}`);
+    }
+    const result = initialRead.value;
 
     const prefix = 'did:dkg:context-graph:';
     const seen = new Map<string, ListContextGraphsRow>();

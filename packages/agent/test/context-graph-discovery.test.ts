@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent, type ContextGraphSub, type ContextGraphSubscriptionStore } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
 import { SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphSharedMemoryUri, contextGraphMetaGraphUri, Logger } from '@origintrail-official/dkg-core';
 import { type ChainAdapter, type ContextGraphOnChain } from '@origintrail-official/dkg-chain';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
@@ -24,6 +24,7 @@ afterAll(async () => {
 async function createTestAgent(opts?: {
   chainAdapter?: ChainAdapter;
   store?: OxigraphStore;
+  storeConfig?: TripleStoreConfig;
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
 }) {
   const store = opts?.store ?? new OxigraphStore();
@@ -33,6 +34,7 @@ async function createTestAgent(opts?: {
     listenPort: 0,
     listenHost: '127.0.0.1',
     store,
+    storeConfig: opts?.storeConfig,
     chainAdapter: opts?.chainAdapter ?? createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     contextGraphSubscriptionStore: opts?.contextGraphSubscriptionStore,
   });
@@ -1034,6 +1036,57 @@ describe('listContextGraphs merge', () => {
     }
   }, 15000);
 
+  it('bypasses list cache for unmanaged external store configurations', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({
+      store,
+      storeConfig: {
+        backend: 'sparql-http',
+        options: { queryEndpoint: 'http://127.0.0.1:9999/sparql' },
+      },
+    });
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'external-store-no-cache-cg';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const uri = contextGraphDataGraphUri(id);
+    await store.insert([
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"External Store No Cache"',
+        graph: ontologyGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: ontologyGraph,
+      },
+    ]);
+
+    const originalQuery = store.query.bind(store);
+    let definitionScans = 0;
+    vi.spyOn(store, 'query').mockImplementation(async (query: string, options?: any) => {
+      if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access')) {
+        definitionScans += 1;
+      }
+      return originalQuery(query, options);
+    });
+
+    expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === id)).toBeDefined();
+    expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === id)).toBeDefined();
+    expect(definitionScans).toBe(2);
+    expect((agent as any).listContextGraphsCache.size).toBe(0);
+  }, 15000);
+
   it('invalidates cached list rows after delete and drop graph writes', async () => {
     const result = await createTestAgent();
     agent = result.agent;
@@ -1256,7 +1309,8 @@ describe('listContextGraphs merge', () => {
         return originalQuery(query, options);
       });
 
-      await agent.listContextGraphs({ callerAgentAddress: null });
+      await expect(agent.listContextGraphs({ callerAgentAddress: null }))
+        .rejects.toThrow('ontology/agents definition scan');
       expect(sawAbort).toBe(true);
     } finally {
       Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {

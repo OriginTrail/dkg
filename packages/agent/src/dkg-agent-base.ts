@@ -95,7 +95,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -799,6 +799,12 @@ export class DKGAgentBase {
   protected listContextGraphsCacheGeneration = 0;
   protected listContextGraphsCacheNow(): number {
     return performance.now();
+  }
+
+  protected listContextGraphsCacheAllowed(): boolean {
+    const storeConfig = this.config.storeConfig;
+    if (!storeConfig || !isExternalBackend(storeConfig.backend)) return true;
+    return storeConfig.options?.managedByDkg === true;
   }
 
   protected invalidateListContextGraphsCache(): void {
