@@ -1463,7 +1463,7 @@ describe('listContextGraphs merge', () => {
     }
   }, 15000);
 
-  it('does not downgrade budgeted reads for pre-dispatch stores', async () => {
+  it('does not downgrade synchronous pre-dispatch store reads', async () => {
     const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
     const originalScanBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS;
     Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
@@ -1485,7 +1485,10 @@ describe('listContextGraphs merge', () => {
       const originalQuery = store.query.bind(store);
       vi.spyOn(store, 'query').mockImplementation(async (query: string, options?: any) => {
         if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access ?isSystem')) {
-          await new Promise(resolve => setTimeout(resolve, 20));
+          const startedAt = performance.now();
+          while (performance.now() - startedAt < 8) {
+            // Simulate the default native Oxigraph path blocking the event loop.
+          }
           expect(options?.signal?.aborted).toBe(false);
           return {
             type: 'bindings',
@@ -1508,6 +1511,66 @@ describe('listContextGraphs merge', () => {
       });
       Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS', {
         value: originalScanBudget,
+        configurable: true,
+      });
+    }
+  }, 15000);
+
+  it('still applies auth budget to async membership work on pre-dispatch stores', async () => {
+    const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
+    const originalAuthBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    try {
+      const result = await createTestAgent({ store: new OxigraphStore() });
+      agent = result.agent;
+      await agent.start();
+
+      const id = 'pre-dispatch-auth-budget-cg';
+      const member = ethers.Wallet.createRandom().address;
+      await agent.createContextGraph({
+        id,
+        name: 'Pre Dispatch Auth Budget',
+        accessPolicy: 1,
+        allowedAgents: [agent.getDefaultAgentAddress()!],
+      });
+
+      const originalAllowlist = agent.callerIsAllowlistedAgentParticipant.bind(agent);
+      let targetCalls = 0;
+      let signalSeen: AbortSignal | undefined;
+      vi.spyOn(agent, 'callerIsAllowlistedAgentParticipant').mockImplementation(async (contextGraphId, caller, options) => {
+        if (contextGraphId === id && ethers.getAddress(caller) === ethers.getAddress(member)) {
+          targetCalls += 1;
+          signalSeen = options?.signal;
+          return new Promise<boolean>(() => {});
+        }
+        return originalAllowlist(contextGraphId, caller, options);
+      });
+
+      const timeout = { timedOut: true as const };
+      const rows = await Promise.race([
+        agent.listContextGraphs({ callerAgentAddress: member }),
+        new Promise<typeof timeout>(resolve => setTimeout(() => resolve(timeout), 100)),
+      ]);
+
+      expect(rows).not.toBe(timeout);
+      if (rows === timeout) return;
+      expect(rows.find(p => p.id === id)).toBeUndefined();
+      expect(targetCalls).toBe(1);
+      expect(signalSeen?.aborted).toBe(true);
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+        value: originalRowBudget,
+        configurable: true,
+      });
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS', {
+        value: originalAuthBudget,
         configurable: true,
       });
     }
