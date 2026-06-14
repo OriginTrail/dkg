@@ -464,7 +464,11 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    * content is the normal state for any non-trivial project so the root
    * data graph is routinely empty.
    */
-  async contextGraphHasLocalContent(this: DKGAgent, contextGraphId: string): Promise<boolean> {
+  async contextGraphHasLocalContent(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<boolean> {
     const prefix = `did:dkg:context-graph:${contextGraphId}`;
     // ASK is cheap on Oxigraph; the FILTER keeps us inside this CG's
     // namespace and excludes `_meta` / `_shared_memory_meta` bookkeeping
@@ -475,7 +479,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       FILTER(!STRENDS(STR(?g), "/_meta"))
       FILTER(!STRENDS(STR(?g), "/_shared_memory_meta"))
     }`;
-    const result = await this.store.query(sparql);
+    const result = await this.store.query(sparql, { signal: options.signal });
     if (result.type === 'boolean') return result.value;
     return result.type === 'bindings' && result.bindings.length > 0;
   }
@@ -1708,21 +1712,29 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     let cacheable = true;
 
     const withBudget = async <T>(
-      work: () => Promise<T>,
+      work: (signal: AbortSignal) => Promise<T>,
       label: string,
       budgetMs = rowBudgetMs,
     ): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> => {
       let timer: ReturnType<typeof setTimeout> | undefined;
+      const controller = new AbortController();
+      const timeoutError = new ListContextGraphsBudgetExceeded(label);
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(
-          () => reject(new ListContextGraphsBudgetExceeded(label)),
+          () => {
+            controller.abort(timeoutError);
+            reject(timeoutError);
+          },
           budgetMs,
         );
         const unref = (timer as { unref?: () => void } | undefined)?.unref;
         if (typeof unref === 'function') unref.call(timer);
       });
       try {
-        const value = await Promise.race([Promise.resolve().then(work), timeout]);
+        const value = await Promise.race([
+          Promise.resolve().then(() => work(controller.signal)),
+          timeout,
+        ]);
         return { ok: true, value };
       } catch (error) {
         if (!(error instanceof ListContextGraphsBudgetExceeded)) {
@@ -1734,7 +1746,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       }
     };
 
-    const optional = async <T>(work: () => Promise<T>, label: string): Promise<T | undefined> => {
+    const optional = async <T>(work: (signal: AbortSignal) => Promise<T>, label: string): Promise<T | undefined> => {
       const result = await withBudget(work, label);
       if (result.ok) return result.value;
       cacheable = false;
@@ -1742,7 +1754,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     };
 
     const initialRead = await withBudget(
-      () => this.store.query(`
+      (signal) => this.store.query(`
       SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access ?isSystem WHERE {
         {
           GRAPH <${ontologyGraph}> {
@@ -1768,7 +1780,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           }
         }
       }
-    `),
+    `, { signal }),
       'ontology/agents definition scan',
       scanBudgetMs,
     );
@@ -1804,7 +1816,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri;
         const sub = this.subscribedContextGraphs.get(id);
         const onChainId = sub?.onChainId ?? (await optional(
-          () => this.getContextGraphOnChainId(id),
+          (signal) => this.getContextGraphOnChainId(id, { signal }),
           `on-chain id lookup for ${id}`,
         )) ?? undefined;
         const accessPolicy = row['access'] ? stripLiteral(row['access']) : undefined;
@@ -1847,7 +1859,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       const metaGraph = contextGraphMetaGraphUri(id);
       const pUri = contextGraphDataGraphUri(id);
       const metaRead = await withBudget(
-        () => this.store.query(`
+        (signal) => this.store.query(`
         SELECT ?name ?desc ?creator ?created ?curator ?access WHERE {
           GRAPH <${metaGraph}> {
             <${pUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
@@ -1859,7 +1871,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
             OPTIONAL { <${pUri}> <${DKG_ONTOLOGY.DKG_CREATED_AT}> ?created }
           }
         } LIMIT 1
-      `),
+      `, { signal }),
         `meta declaration lookup for ${id}`,
       );
       if (!metaRead.ok) cacheable = false;
@@ -1868,7 +1880,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       if (metaResult?.type === 'bindings' && metaResult.bindings.length > 0) {
         const row = metaResult.bindings[0] as Record<string, string>;
         const onChainId = sub.onChainId ?? (await optional(
-          () => this.getContextGraphOnChainId(id),
+          (signal) => this.getContextGraphOnChainId(id, { signal }),
           `on-chain id lookup for ${id}`,
         )) ?? undefined;
         const accessPolicy = row['access'] ? stripLiteral(row['access']) : undefined;
@@ -1925,11 +1937,12 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         // only the root caused legitimate synced projects to be
         // hidden as phantoms here (Codex tier-4m follow-up to N29,
         // same issue in a separate call site).
-        const hasContent = await optional(
-          () => this.contextGraphHasLocalContent(id),
+        const contentRead = await withBudget(
+          (signal) => this.contextGraphHasLocalContent(id, { signal }),
           `local content probe for ${id}`,
         );
-        if (!hasContent) continue;
+        if (!contentRead.ok) cacheable = false;
+        if (contentRead.ok && !contentRead.value) continue;
       }
 
       rememberRow({
@@ -1943,9 +1956,26 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       }, 'unknown');
     }
 
-    const graphManager = new GraphManager(this.store);
     const storedRead = await withBudget(
-      () => graphManager.listContextGraphs(),
+      async (signal) => {
+        const graphs = await this.store.listGraphs({ signal });
+        const contextGraphs = new Set<string>();
+        for (const graph of graphs) {
+          if (!graph.startsWith(prefix)) continue;
+          const rest = graph.slice(prefix.length);
+          const id = rest.endsWith('/_meta')
+            ? rest.slice(0, -6)
+            : rest.endsWith('/_private')
+              ? rest.slice(0, -9)
+              : rest.endsWith('/_shared_memory_meta')
+                ? rest.slice(0, -20)
+                : rest.endsWith('/_shared_memory')
+                  ? rest.slice(0, -15)
+                  : rest;
+          if (!id.includes('/')) contextGraphs.add(id);
+        }
+        return [...contextGraphs];
+      },
       'storage context graph scan',
       scanBudgetMs,
     );
@@ -1958,11 +1988,11 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
 
       const sub = this.subscribedContextGraphs.get(id);
       const onChainId = sub?.onChainId ?? (await optional(
-        () => this.getContextGraphOnChainId(id),
+        (signal) => this.getContextGraphOnChainId(id, { signal }),
         `on-chain id lookup for ${id}`,
       )) ?? undefined;
       const policyRead = await withBudget(
-        () => this.getExplicitAccessPolicy(id),
+        (signal) => this.getExplicitAccessPolicy(id, { signal }),
         `access policy lookup for storage row ${id}`,
       );
       if (!policyRead.ok) cacheable = false;
@@ -1989,7 +2019,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const curatorBackfills = await Promise.allSettled(rows.map(async (r) => {
       if (r.curator?.trim()) return r;
       const c = await optional(
-        () => this.getContextGraphCurator(r.id),
+        (signal) => this.getContextGraphCurator(r.id, { signal }),
         `curator lookup for ${r.id}`,
       );
       return c ? { ...r, curator: c } : r;
@@ -2003,7 +2033,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       const explicitPrivacy = privacyByUri.get(row.uri) ?? 'unknown';
       if (explicitPrivacy !== 'unknown') return explicitPrivacy;
       const legacyRead = await withBudget(
-        () => this.isPrivateContextGraph(row.id),
+        (signal) => this.isPrivateContextGraph(row.id, { signal }),
         `legacy privacy lookup for ${row.id}`,
       );
       if (!legacyRead.ok) {
@@ -2052,8 +2082,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       }
       let usedLiveChainAuth = false;
       const allowlistRead = await withBudget(
-        () => this.callerIsAllowlistedAgentParticipant(r.id, checksum, {
+        (signal) => this.callerIsAllowlistedAgentParticipant(r.id, checksum, {
           onChainLookup: () => { usedLiveChainAuth = true; },
+          signal,
         }),
         `allowlist lookup for ${r.id}`,
         authBudgetMs,

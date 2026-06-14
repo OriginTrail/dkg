@@ -486,6 +486,29 @@ describe('listContextGraphs merge', () => {
     expect(contextGraphs.find(p => p.id === 'phantom-cg')).toBeUndefined();
   }, 15000);
 
+  it('keeps phantom-candidate subscriptions when local content probe times out', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    (agent as any).setContextGraphSubscription('slow-local-content-cg', {
+      name: 'Slow Local Content',
+      subscribed: true,
+      synced: false,
+    } satisfies ContextGraphSub, { persist: false });
+    vi.spyOn(agent, 'contextGraphHasLocalContent').mockImplementation(async (contextGraphId) => {
+      if (contextGraphId === 'slow-local-content-cg') {
+        return new Promise<boolean>(() => {});
+      }
+      return false;
+    });
+
+    const contextGraphs = await agent.listContextGraphs();
+    const entry = contextGraphs.find(p => p.id === 'slow-local-content-cg');
+    expect(entry).toBeDefined();
+    expect(entry!.name).toBe('Slow Local Content');
+  }, 15000);
+
   it('marks SPARQL-only contextGraphs (not in registry) as subscribed=false', async () => {
     const store = new OxigraphStore();
     const result = await createTestAgent({ store });
@@ -731,6 +754,57 @@ describe('listContextGraphs merge', () => {
     const secondEntry = second.find(p => p.id === id);
     expect(secondEntry).toBeDefined();
     expect(secondEntry!.name).toBe('Remote Meta Cache Synced');
+    expect(secondEntry!.accessPolicy).toBe('public');
+  }, 15000);
+
+  it('invalidates pending-meta cached rows when meta sync flags refresh', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'pending-meta-refresh-cache-cg';
+    (agent as any).setContextGraphSubscription(id, {
+      name: 'Pending Meta Cache',
+      subscribed: true,
+      synced: false,
+      pendingMeta: true,
+      metaSynced: false,
+    } satisfies ContextGraphSub, { persist: false });
+
+    const first = await agent.listContextGraphs({ callerAgentAddress: null });
+    const firstEntry = first.find(p => p.id === id);
+    expect(firstEntry).toBeDefined();
+    expect(firstEntry!.name).toBe('Pending Meta Cache');
+
+    const uri = contextGraphDataGraphUri(id);
+    const metaGraph = contextGraphMetaGraphUri(id);
+    await result.store.insert([
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: metaGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Pending Meta Cache Synced"',
+        graph: metaGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: metaGraph,
+      },
+    ]);
+
+    await (agent as any).refreshMetaSyncedFlags([id]);
+
+    const second = await agent.listContextGraphs({ callerAgentAddress: null });
+    const secondEntry = second.find(p => p.id === id);
+    expect(secondEntry).toBeDefined();
+    expect(secondEntry!.name).toBe('Pending Meta Cache Synced');
     expect(secondEntry!.accessPolicy).toBe('public');
   }, 15000);
 
@@ -997,6 +1071,51 @@ describe('listContextGraphs merge', () => {
 
       const rows = await agent.listContextGraphs({ callerAgentAddress: null });
       expect(rows.find(p => p.id === id)).toBeDefined();
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+        value: originalRowBudget,
+        configurable: true,
+      });
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS', {
+        value: originalScanBudget,
+        configurable: true,
+      });
+    }
+  }, 15000);
+
+  it('aborts budgeted catalog scans after timeout', async () => {
+    const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
+    const originalScanBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    try {
+      const store = new OxigraphStore();
+      const result = await createTestAgent({ store });
+      agent = result.agent;
+      await agent.start();
+
+      const originalQuery = store.query.bind(store);
+      let sawAbort = false;
+      vi.spyOn(store, 'query').mockImplementation(async (query: string, options?: any) => {
+        if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access ?isSystem')) {
+          return new Promise<any>((_resolve, reject) => {
+            options?.signal?.addEventListener('abort', () => {
+              sawAbort = true;
+              reject(options.signal.reason);
+            }, { once: true });
+          });
+        }
+        return originalQuery(query, options);
+      });
+
+      await agent.listContextGraphs({ callerAgentAddress: null });
+      expect(sawAbort).toBe(true);
     } finally {
       Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
         value: originalRowBudget,

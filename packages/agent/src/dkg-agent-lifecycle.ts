@@ -3529,15 +3529,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (!sub) continue;
       if (await this.hasConfirmedMetaState(contextGraphId)) {
         if (sub.metaSynced !== true) {
-          sub.metaSynced = true;
-          this.persistContextGraphSubscription(contextGraphId);
+          this.setContextGraphSubscription(contextGraphId, { ...sub, metaSynced: true });
         }
         if (sub.pendingMeta) {
           // Meta arrived; the freshly-joined "waiting for sync" state
           // (set by the join-approved handler) no longer applies — the
           // CG will now surface via the normal `_meta` branch in
           // `listContextGraphs`.
-          sub.pendingMeta = false;
+          const current = this.subscribedContextGraphs.get(contextGraphId) ?? sub;
+          this.setContextGraphSubscription(contextGraphId, {
+            ...current,
+            metaSynced: true,
+            pendingMeta: false,
+          });
         }
         this.queueSharedMemoryGossipSubscription(contextGraphId);
       }

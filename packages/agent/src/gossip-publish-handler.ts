@@ -213,7 +213,7 @@ export class GossipPublishHandler {
         // confirmable from the local store (system contextGraph, populated
         // `_meta`, or `<cg> rdf:type dkg:ContextGraph` in ontology — the same
         // check Viktor introduced in `hasConfirmedMetaState`). If yes,
-        // flip the flag in place and proceed; if no, keep the strict
+        // update the flag through the agent subscription setter and proceed; if no, keep the strict
         // deny behavior so curated CGs without a synced allowlist can't
         // leak through.
         if (allowedPeers === null
@@ -225,8 +225,7 @@ export class GossipPublishHandler {
               ? await this.callbacks.hasConfirmedMetaState(request.contextGraphId)
               : false;
             if (confirmed) {
-              sub.metaSynced = true;
-              this.callbacks.persistContextGraphSubscription?.(request.contextGraphId);
+              this.callbacks.setContextGraphSubscription(request.contextGraphId, { ...sub, metaSynced: true });
             } else {
               this.log.warn(ctx, `Gossip publish deferred: context graph "${request.contextGraphId}" _meta not yet synced — defaulting to deny`);
               return;

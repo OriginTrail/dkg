@@ -416,7 +416,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     return owned !== undefined && owned.size > 0;
   }
 
-  async getContextGraphOnChainId(this: DKGAgent, contextGraphId: string): Promise<string | null> {
+  async getContextGraphOnChainId(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<string | null> {
     const subscribed = this.subscribedContextGraphs.get(contextGraphId)?.onChainId;
     if (subscribed) return subscribed;
 
@@ -424,6 +428,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
       `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?id } } LIMIT 1`,
+      { signal: options.signal },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return null;
     const value = result.bindings[0]?.['id'];

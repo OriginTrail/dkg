@@ -699,7 +699,11 @@ export class OwnershipMethods extends DKGAgentBase {
     return deriveCuratorDidFromCgId(contextGraphId);
   }
 
-  async getContextGraphCurator(this: DKGAgent, contextGraphId: string): Promise<string | null> {
+  async getContextGraphCurator(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<string | null> {
     const cgMetaGraph = contextGraphMetaUri(contextGraphId);
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     // Multi-curator scenario: peer-to-peer sync of CG `_meta` triples
@@ -725,7 +729,7 @@ export class OwnershipMethods extends DKGAgentBase {
           <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?owner .
         }
       }
-    `);
+    `, { signal: options.signal });
     if (curatorResult.type !== 'bindings' || curatorResult.bindings.length === 0) {
       return null;
     }
@@ -783,9 +787,9 @@ export class OwnershipMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     checksumAddress: string,
-    options: { onChainLookup?: () => void } = {},
+    options: { onChainLookup?: () => void; signal?: AbortSignal } = {},
   ): Promise<boolean> {
-    const participants = await this.getPrivateContextGraphParticipants(contextGraphId);
+    const participants = await this.getPrivateContextGraphParticipants(contextGraphId, { signal: options.signal });
     if (!participants?.length) return false;
 
     for (const raw of participants) {
