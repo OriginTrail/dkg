@@ -691,6 +691,7 @@ export async function resolveRequiredWriteContextGraphId(
   );
   const isBareCandidateId = !candidateId.includes("/");
   let deferredExactProbeReject = false;
+  let exactProbeErrorMessage: string | null = null;
   if (agent.probeContextGraphWritePreflight) {
     try {
       const probe = await agent.probeContextGraphWritePreflight(candidateId, {
@@ -713,7 +714,8 @@ export async function resolveRequiredWriteContextGraphId(
           return rejectUnknownContextGraph(res, raw);
         }
       }
-    } catch {
+    } catch (err) {
+      exactProbeErrorMessage = err instanceof Error ? err.message : String(err);
       // Fall back to the composite list path. If that is also unavailable,
       // the caller receives the bounded validation-unavailable response below.
     }
@@ -725,7 +727,10 @@ export async function resolveRequiredWriteContextGraphId(
       ? await agent.listContextGraphs({ callerAgentAddress })
       : await agent.listContextGraphs();
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const listMessage = err instanceof Error ? err.message : String(err);
+    const message = exactProbeErrorMessage
+      ? `exact preflight failed: ${exactProbeErrorMessage}; list validation failed: ${listMessage}`
+      : listMessage;
     return contextGraphValidationUnavailable(res, message);
   }
 

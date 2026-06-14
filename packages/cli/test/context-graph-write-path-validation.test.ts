@@ -932,6 +932,24 @@ describe('context graph write-path validation', () => {
     expect(agent.calls.create).not.toHaveBeenCalled();
   });
 
+  it('includes exact preflight failure when list validation is also unavailable', async () => {
+    const agent = makeAgent([], { exactPreflight: true });
+    agent.probeContextGraphWritePreflight.mockRejectedValueOnce(new Error('probe timeout'));
+    agent.listContextGraphs.mockRejectedValueOnce(new Error('list timeout'));
+    await startRoutes(agent);
+
+    const result = await post('/api/knowledge-assets', {
+      contextGraphId: 'missing-cg',
+      name: 'draft',
+    });
+
+    expect(result.status).toBe(503);
+    expect(result.body).toMatchObject({ code: 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE' });
+    expect(result.body.error).toContain('exact preflight failed: probe timeout');
+    expect(result.body.error).toContain('list validation failed: list timeout');
+    expect(agent.calls.create).not.toHaveBeenCalled();
+  });
+
   it('rejects sub-graph creation for unknown context graphs before mutation', async () => {
     const agent = makeAgent();
     await startRoutes(agent);

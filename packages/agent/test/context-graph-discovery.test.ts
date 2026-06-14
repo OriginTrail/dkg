@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
-import { DKGAgent, type ContextGraphSub } from '../src/index.js';
+import { DKGAgent, type ContextGraphSub, type ContextGraphSubscriptionStore } from '../src/index.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphSharedMemoryUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import { type ChainAdapter, type ContextGraphOnChain } from '@origintrail-official/dkg-chain';
@@ -23,6 +23,7 @@ afterAll(async () => {
 async function createTestAgent(opts?: {
   chainAdapter?: ChainAdapter;
   store?: OxigraphStore;
+  contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
 }) {
   const store = opts?.store ?? new OxigraphStore();
   const agent = await DKGAgent.create({
@@ -32,6 +33,7 @@ async function createTestAgent(opts?: {
     listenHost: '127.0.0.1',
     store,
     chainAdapter: opts?.chainAdapter ?? createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+    contextGraphSubscriptionStore: opts?.contextGraphSubscriptionStore,
   });
   return { agent, store };
 }
@@ -187,6 +189,25 @@ describe('ensureContextGraphLocal', () => {
       callerAuthorized: true,
     });
     expect(allowlistSpy).not.toHaveBeenCalled();
+  }, 15000);
+
+  it('does not scan loadAll during exact write preflight when indexed subscription load is unavailable', async () => {
+    const loadAll = vi.fn(async () => {
+      throw new Error('loadAll scan should not run in write preflight');
+    });
+    const result = await createTestAgent({
+      contextGraphSubscriptionStore: {
+        loadAll,
+        save: async () => {},
+        delete: async () => {},
+      },
+    });
+    agent = result.agent;
+
+    const probe = await agent.probeContextGraphWritePreflight('loadless-cg');
+
+    expect(loadAll).not.toHaveBeenCalled();
+    expect(probe.persistedSubscription).toBeUndefined();
   }, 15000);
 });
 

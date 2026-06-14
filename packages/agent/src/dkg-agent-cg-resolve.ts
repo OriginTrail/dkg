@@ -466,10 +466,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const metaSubjectUri = contextGraphDataGraphUri(contextGraphId);
     const subscriptionStore = this.config.contextGraphSubscriptionStore;
 
-    const persistedSubscriptionPromise = subscriptionStore
-      ? (subscriptionStore.load
-          ? subscriptionStore.load(contextGraphId)
-          : subscriptionStore.loadAll().then((rows) => rows.find((row) => row.id === contextGraphId) ?? null))
+    const persistedSubscriptionPromise = subscriptionStore?.load
+      ? subscriptionStore.load(contextGraphId)
       : Promise.resolve(null);
     const declarationPromise = this.store.query(`
       SELECT ?access ?curator WHERE {
