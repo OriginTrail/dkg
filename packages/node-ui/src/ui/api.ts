@@ -520,6 +520,55 @@ export const setModelShare = (contextGraphId: string, enabled: boolean, modelId?
     modelId ? { enabled, modelId } : { enabled },
   );
 
+/** One OpenAI-style chat turn. `content` is plain text (no tool-calls). */
+export interface SharedModelChatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+/**
+ * Invoke a curator's shared AI model as a MEMBER of the context graph, via the
+ * member node's OpenAI-compatible surface
+ *   POST /api/context-graph/:id/model/v1/chat/completions
+ * (daemon: packages/cli/src/daemon/routes/shared-model.ts). The completion runs
+ * ON THE CURATOR'S node — this node merely proxies the member's request.
+ *
+ * Non-streaming, single buffered completion. Returns the assistant message
+ * content (`choices[0].message.content`).
+ *
+ * NOTE: this can't go through the shared `post()` helper. On a denial the
+ * daemon returns the OpenAI-shaped error body `{ error: { message, type, code } }`
+ * — an OBJECT, not a string — whereas `post()` reads `errBody.error` as a
+ * string and would surface `[object Object]`. We unwrap `error.message` here so
+ * the UI can render the human-readable denial (e.g. "requester is not a
+ * member…", quota) in an inline error bubble.
+ */
+export async function invokeSharedModelChat(
+  contextGraphId: string,
+  messages: SharedModelChatMessage[],
+  opts: { model?: string } = {},
+): Promise<string> {
+  const res = await fetch(
+    `${BASE}/api/context-graph/${encodeURIComponent(contextGraphId)}/model/v1/chat/completions`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(opts.model ? { model: opts.model, messages } : { messages }),
+    },
+  );
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    const message =
+      (errBody as { error?: { message?: string } })?.error?.message
+      ?? `HTTP ${res.status}`;
+    throw new Error(message);
+  }
+  const data = (await res.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  return data.choices?.[0]?.message?.content ?? '';
+}
+
 // --- Catch-up sync jobs ---
 export interface CatchupStatusResponse {
   jobId: string;

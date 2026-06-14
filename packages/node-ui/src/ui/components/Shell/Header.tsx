@@ -1,9 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useAgentsStore } from '../../stores/agents.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useCurrentAgent } from '../../hooks/useCurrentAgent.js';
 import { NotificationsBell } from './NotificationsBell.js';
+import { CuratorModelChatModal } from '../Modals/CuratorModelChatModal.js';
 import { formatPeerStatusTooltip } from '../../lib/formatPeerStatus.js';
 
 /** OriginTrail wordmark — same paths as `v9-stable` packages/node-ui App.tsx sidebar. */
@@ -66,6 +67,14 @@ const OBSERVABILITY_ICON = (
   </svg>
 );
 
+// Chat-bubble + spark — "Curator Model": chat with a curator's shared AI model.
+const CURATOR_MODEL_ICON = (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+    <path d="M12 8.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z" />
+  </svg>
+);
+
 export function Header() {
   const { theme, setTheme, leftCollapsed, toggleLeft, rightCollapsed, toggleRight } = useLayoutStore();
   const nodeStatus = useAgentsStore((s) => s.nodeStatus);
@@ -78,6 +87,11 @@ export function Header() {
   // second to one.
   const currentAgent = useCurrentAgent().data;
   const { openTab } = useTabsStore();
+  // Curator Model chat is a global, cross-CG surface (it self-discovers every
+  // CG this node is a member of), so it's launched here from the global header
+  // rather than from a per-project view. The modal owns its own discovery +
+  // in-memory chat session.
+  const [showCuratorModel, setShowCuratorModel] = useState(false);
 
   const connectedPeers = nodeStatus?.connectedPeers ?? nodeStatus?.peerCount ?? 0;
   const directConns = nodeStatus?.connections?.direct ?? 0;
@@ -88,6 +102,7 @@ export function Header() {
   const peerStatusLabel = formatPeerStatusTooltip(synced, connectedPeers, directConns, relayedConns, uptimeMs);
 
   return (
+    <>
     <header className="v10-header">
       <div className="v10-header-logo">
         <span className="v10-header-logo-text">DKG <span className="v10-header-logo-version">v10</span></span>
@@ -133,6 +148,14 @@ export function Header() {
 
         <button
           className="v10-header-icon-btn"
+          onClick={() => setShowCuratorModel(true)}
+          title="Curator Model — chat with a curator's shared AI model"
+        >
+          {CURATOR_MODEL_ICON}
+        </button>
+
+        <button
+          className="v10-header-icon-btn"
           onClick={() => openTab({ id: 'operations', label: 'Observability', closable: true })}
           title="Observability"
         >
@@ -164,5 +187,11 @@ export function Header() {
         </button>
       </div>
     </header>
+    {/* Mount only while open so the modal's discovery hook (useMyContextGraphs
+        → fetchContextGraphs poll) doesn't run on every Header mount. */}
+    {showCuratorModel && (
+      <CuratorModelChatModal open onClose={() => setShowCuratorModel(false)} />
+    )}
+    </>
   );
 }
