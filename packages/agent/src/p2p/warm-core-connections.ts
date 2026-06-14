@@ -201,18 +201,27 @@ export async function reconcileWarmCoreConnections(
   // Prune: drop the keep-alive tag from Cores warmed last pass but not this
   // one, so the pinned set tracks the live selection and never exceeds the cap.
   let unpinned = 0;
+  let unpinFailed = 0;
   if (deps.previouslyWarmed) {
     for (const peerId of deps.previouslyWarmed) {
       if (!warmed.has(peerId)) {
-        await deps.unpin(peerId, ctx).catch(() => {});
-        unpinned += 1;
+        let unpinOk = true;
+        await deps.unpin(peerId, ctx).catch(() => {
+          unpinOk = false;
+        });
+        if (unpinOk) {
+          unpinned += 1;
+        } else {
+          unpinFailed += 1;
+          warmed.add(peerId);
+        }
       }
     }
   }
 
   deps.log(
     ctx,
-    `warm-core reconcile: candidates=${candidates.length} pinned=${warmed.size} dialed=${dialed} skippedGate=${skippedGate} unpinned=${unpinned} (cap=${deps.maxCores})`,
+    `warm-core reconcile: candidates=${candidates.length} pinned=${warmed.size} dialed=${dialed} skippedGate=${skippedGate} unpinned=${unpinned} unpinFailed=${unpinFailed} (cap=${deps.maxCores})`,
   );
 
   return { candidates: candidates.length, pinned: warmed.size, dialed, skippedGate, unpinned, warmed };

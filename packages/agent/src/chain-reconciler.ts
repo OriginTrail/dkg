@@ -96,12 +96,24 @@ export async function reconcileContextGraph(
   onChainCgId: bigint,
 ): Promise<ReconcileResult> {
   const head = await deps.getKCCount(onChainCgId);
-  const headBlock = await deps.getHeadBlock();
   const before = state.watermark;
+
+  // Keep transient head-fetch failures distinct from truly head-less chains.
+  // We may still promote ordinals while the head is unavailable, but cannot
+  // safely advance/persist the contiguous watermark until a later real-head
+  // sweep can apply the confirmation-depth gate.
+  let headBlock: number | undefined;
+  let headUnavailable = false;
+  try {
+    headBlock = await deps.getHeadBlock();
+  } catch (err) {
+    headUnavailable = true;
+    deps.log(`reconcile ${localCgId}: getHeadBlock failed, holding watermark (${err instanceof Error ? err.message : String(err)})`);
+  }
 
   // Re-absorb any depth-held ordinals as the head advances — a long-running
   // node makes progress on confirmation-depth-blocked ordinals even with no
-  // new completions this pass.
+  // new completions this pass. Skipped when the head is unobservable.
   if (headBlock !== undefined) absorbConfirmed(state, headBlock, deps.confirmationDepth);
 
   let reconciled = 0;
@@ -110,15 +122,17 @@ export async function reconcileContextGraph(
     const outcome = await deps.reconcileOrdinal(localCgId, onChainCgId, ordinal, headBlock);
     if (outcome.status === 'reconciled' || outcome.status === 'already') {
       reconciled += 1;
-      // With a known head, apply the reorg-depth gate; otherwise (no chain head)
-      // absorb as soon as contiguous (depth 0) using the registration block as
-      // a self-consistent head.
-      recordCompletion(
-        state,
-        { ordinal, blockNumber: outcome.blockNumber },
-        headBlock ?? outcome.blockNumber,
-        headBlock !== undefined ? deps.confirmationDepth : 0,
-      );
+      if (!headUnavailable) {
+        // With a known head, apply the reorg-depth gate; otherwise (no chain
+        // head) absorb as soon as contiguous (depth 0) using the registration
+        // block as a self-consistent head.
+        recordCompletion(
+          state,
+          { ordinal, blockNumber: outcome.blockNumber },
+          headBlock ?? outcome.blockNumber,
+          headBlock !== undefined ? deps.confirmationDepth : 0,
+        );
+      }
     } else {
       pending += 1;
     }
@@ -128,7 +142,7 @@ export async function reconcileContextGraph(
     deps.persistWatermark(localCgId, state.watermark);
     deps.log(`reconcile ${localCgId}: watermark ${before} -> ${state.watermark} (head=${head}, reconciled=${reconciled}, pending=${pending})`);
   } else if (reconciled > 0 || pending > 0) {
-    deps.log(`reconcile ${localCgId}: watermark held at ${state.watermark} (head=${head}, reconciled=${reconciled}, pending=${pending})`);
+    deps.log(`reconcile ${localCgId}: watermark held at ${state.watermark} (head=${head}, reconciled=${reconciled}, pending=${pending}${headUnavailable ? ', headUnavailable' : ''})`);
   }
 
   return { head, watermark: state.watermark, reconciled, pending };

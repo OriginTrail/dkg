@@ -39,7 +39,10 @@ interface AgentInternals {
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string; lastReconciledOrdinal?: number }>;
   reconcileCoalescer: { trigger: (cg: string) => void } | null;
   store: TripleStore;
-  chain: MockChainAdapter & { getContextGraphAccessPolicy?: (id: bigint) => Promise<number> };
+  chain: MockChainAdapter & {
+    getContextGraphAccessPolicy?: (id: bigint) => Promise<number>;
+    isContextGraphActiveOnChain?: (id: bigint) => Promise<boolean>;
+  };
 }
 
 /**
@@ -222,6 +225,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
       },
     });
     stubNode(agent);
+    chain.isContextGraphActiveOnChain = async () => true;
     return agent as unknown as AgentInternals;
   }
 
@@ -282,6 +286,17 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
 
     expect(internals.subscribedContextGraphs.get('99')?.coreHosted).toBeUndefined();
     expect(saved.find((r) => r.id === '99')).toBeUndefined();
+  });
+
+  it('does NOT mark an UNKNOWN CG even when the policy getter defaults to public', async () => {
+    const internals = await boot();
+    internals.chain.getContextGraphAccessPolicy = async () => 0;
+    internals.chain.isContextGraphActiveOnChain = async () => false;
+
+    await internals.recordCoreHostedPublicCg('123456');
+
+    expect(internals.subscribedContextGraphs.get('123456')).toBeUndefined();
+    expect(saved.find((r) => r.id === '123456')).toBeUndefined();
   });
 
   it('ignores a non-numeric id (cannot index the on-chain ordinal list)', async () => {
@@ -1021,33 +1036,36 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     });
     stubNode(agent);
     const internals = agent as unknown as AgentInternals;
-    internals.chain.getContextGraphAccessPolicy = async () => 0;
 
-    const ON_CHAIN_CG = 42n;
+    const { contextGraphId: ON_CHAIN_CG } = await chain.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+    });
+    const localCgId = ON_CHAIN_CG.toString();
     // The Core already has the SWM snapshot locally (simulating a pull from
     // another Core), but never member-subscribed — it only hosts the CG.
-    const root = await seedSwmSnapshot(internals.store, '42', 'urn:fact:monday', 'Monday fun fact');
+    const root = await seedSwmSnapshot(internals.store, localCgId, 'urn:fact:monday', 'Monday fun fact');
     const { ethers } = await import('ethers');
     chain.__registerKC({ kaId: 4242n, contextGraphId: ON_CHAIN_CG, merkleRootHex: ethers.hexlify(root), chunks: [] });
 
-    await internals.recordCoreHostedPublicCg('42');
-    await internals.runVmReconcileForCg('42');
+    await internals.recordCoreHostedPublicCg(localCgId);
+    await internals.runVmReconcileForCg(localCgId);
 
     // Promoted into the per-CG VM graph.
     const storageAddr = await chain.getDKGKnowledgeAssetsAddress();
     const ual = buildKnowledgeAssetUal(chain.chainId, storageAddr, 4242n);
     expect(ual).toContain('4242');
-    const vmGraph = `did:dkg:context-graph:42/context/${ON_CHAIN_CG}`;
+    const vmGraph = `did:dkg:context-graph:${localCgId}/context/${ON_CHAIN_CG}`;
     const res = await internals.store.query(
       `ASK { GRAPH <${vmGraph}> { <urn:fact:monday> <http://schema.org/name> "Monday fun fact" } }`,
     );
     expect(res.type === 'boolean' && res.value).toBe(true);
 
     // Watermark advanced + distinct core-fill telemetry emitted.
-    expect(internals.subscribedContextGraphs.get('42')?.lastReconciledOrdinal).toBe(1);
+    expect(internals.subscribedContextGraphs.get(localCgId)?.lastReconciledOrdinal).toBe(1);
     const coreFill = captured.find((e) => e.action === 'core-fill');
     expect(coreFill).toBeDefined();
     expect(coreFill?.reconciled).toBe(1);
-    expect(coreFill?.contextGraphId).toBe('42');
+    expect(coreFill?.contextGraphId).toBe(localCgId);
   });
 });

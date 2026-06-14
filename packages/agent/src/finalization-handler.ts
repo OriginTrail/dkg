@@ -787,7 +787,10 @@ export class FinalizationHandler {
 
     if (rootsByOp.size === 0) return null;
 
-    for (const roots of rootsByOp.values()) {
+    const opsSorted = [...rootsByOp.entries()].sort(
+      ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0),
+    );
+    for (const [, roots] of opsSorted) {
       const sharedMemoryQuads = await this.getSharedMemoryQuadsForRoots(contextGraphId, roots, subGraphName);
       if (sharedMemoryQuads.length === 0) continue;
       const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, roots, subGraphName);

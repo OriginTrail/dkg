@@ -1949,27 +1949,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
-   * Phase D — resolve the on-chain access policy for a numeric CG id, public(0)
-   * / curated(1) / unknown(null). Cache-first (the StorageACK `isCgCurated`
-   * oracle seeds the same cache), single lazy chain read on miss. Never throws.
-   */
-  async resolveAccessPolicy(this: DKGAgent, numericCgId: bigint): Promise<0 | 1 | null> {
-    const key = numericCgId.toString();
-    const cached = this.onChainAccessPolicyCache.get(key);
-    if (cached === 0 || cached === 1) return cached;
-    const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
-    if (typeof getAccessPolicy !== 'function') return null;
-    try {
-      const policy = await getAccessPolicy.call(this.chain, numericCgId);
-      if (policy === 0 || policy === 1) {
-        this.onChainAccessPolicyCache.set(key, policy);
-        return policy;
-      }
-    } catch { /* unknown — fall through */ }
-    return null;
-  }
-
-  /**
    * Phase D (Cores fill their own gaps) — invoked from the StorageACK
    * pre-sign hook. When this Core signs an ACK for a PUBLIC CG it becomes a
    * storage node for it; mark the CG `coreHosted` (persisted) so the
@@ -1991,10 +1970,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     if (numeric <= 0n) return;
 
-    const policy = await this.resolveAccessPolicy(numeric);
-    if (policy !== 0) return; // curated / unknown — not the public VM-promote path
-
     const numericStr = numeric.toString();
+    // Existence-gated read. `getContextGraphAccessPolicy` can return Solidity's
+    // default public(0) for unknown ids, so prove the slot is live before
+    // trusting the policy; fail closed for curated, unknown, or not-live CGs.
+    const policy = await this.readLiveOnChainAccessPolicy(numericStr);
+    if (policy !== 0) return; // curated / unknown / not-live — not the public VM-promote path
+
     // Pick the local CG id to key the host-only record under. Prefer an
     // existing local mapping; otherwise use the publisher-supplied cleartext
     // `swmGraphId` (the local CG name for a public/cleartext publish). On the
@@ -2038,6 +2020,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Nudge a reconcile now so the first hosted publish lands promptly; the
     // periodic sweep is the safety net.
     if (this.reconcileCoalescer) void this.reconcileCoalescer.trigger(localCgId);
+  }
+
+  trackCoreHostRecording(this: DKGAgent, p: Promise<void>): void {
+    const tracked = p.catch((err) => {
+      this.log.warn(
+        createOperationContext('system'),
+        `Phase D: recordCoreHostedPublicCg failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }).finally(() => {
+      this.coreHostRecordings.delete(tracked);
+    });
+    this.coreHostRecordings.add(tracked);
   }
 
   // ===== Phase B — chain-driven VM reconciliation (B.4 agent wiring) =========
@@ -2124,12 +2118,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const deps: ChainReconcilerDeps = {
       getKCCount: async (cg) => Number(await this.chain.getContextGraphKCCount!(cg)),
       getHeadBlock: async () => {
+        // Capability-absent chains return undefined and disable the reorg gate;
+        // transient RPC failures must throw so the reconciler holds the
+        // watermark instead of advancing on an unobserved head.
         if (typeof this.chain.getBlockNumber !== 'function') return undefined;
-        try {
-          return await this.chain.getBlockNumber();
-        } catch {
-          return undefined;
-        }
+        return await this.chain.getBlockNumber();
       },
       reconcileOrdinal: (lcg, ocg, ordinal, headBlock) =>
         this.reconcileChainOrdinal(lcg, ocg, ordinal, headBlock),

@@ -700,6 +700,12 @@ export class DKGAgentBase {
   protected readonly reconcileCursors = new Map<string, CursorState>();
   /** Phase B — bounded dedupe of recently-reconciled UALs (live-burst guard). */
   protected readonly recentReconciledUals = new RecentUalSet();
+  /**
+   * In-flight core-hosted recordings launched from the synchronous StorageACK
+   * pre-sign hook. Tracked so rejections are logged and graceful stop() can
+   * flush the host-only `coreHosted` flag before teardown.
+   */
+  protected readonly coreHostRecordings = new Set<Promise<void>>();
   /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
   protected readonly vmReconcileNegativeCache = new Map<string, {
     localCgId: string;

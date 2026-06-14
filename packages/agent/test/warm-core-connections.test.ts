@@ -198,4 +198,21 @@ describe('reconcileWarmCoreConnections', () => {
     expect(res).toMatchObject({ pinned: 1, skippedGate: 1, unpinned: 1 });
     expect(unpinned).toEqual(['core2']);
   });
+
+  it('does not count a failed unpin and retains the peer for retry', async () => {
+    let calls = 0;
+    const { deps } = makeDeps({
+      previouslyWarmed: new Set(['core1', 'core2', 'flaky', 'gone']),
+      unpin: async (peerId) => {
+        calls += 1;
+        if (peerId === 'flaky') throw new Error('peerStore busy');
+      },
+    });
+
+    const res = await reconcileWarmCoreConnections(deps);
+
+    expect(calls).toBe(2);
+    expect(res.unpinned).toBe(1);
+    expect([...res.warmed].sort()).toEqual(['core1', 'core2', 'flaky']);
+  });
 });

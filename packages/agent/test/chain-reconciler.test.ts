@@ -119,6 +119,34 @@ describe('reconcileContextGraph — sweep', () => {
     const r2 = await reconcileContextGraph(deps, state, 'cg', 1n);
     expect(r2.watermark).toBe(1);
   });
+
+  it('promotes during transient head fetch failure but does not advance or persist the watermark', async () => {
+    let headThrows = true;
+    const attempted: number[] = [];
+    const { deps, persisted } = makeDeps({
+      getKCCount: async () => 2,
+      confirmationDepth: 5,
+      getHeadBlock: async () => {
+        if (headThrows) throw new Error('RPC down');
+        return 100;
+      },
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempted.push(ordinal);
+        return { status: 'reconciled', blockNumber: 90 };
+      },
+    });
+    const state = createCursorState(0);
+
+    const r1 = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(r1.reconciled).toBe(2);
+    expect(r1.watermark).toBe(0);
+    expect(persisted).toEqual([]);
+
+    headThrows = false;
+    const r2 = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(r2.watermark).toBe(2);
+    expect(persisted).toEqual([{ cg: 'cg', watermark: 2 }]);
+  });
 });
 
 describe('ReconcileCoalescer', () => {
