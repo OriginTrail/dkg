@@ -1355,17 +1355,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // would no-op on this without a pre-existing record, so
             // upsert a minimal stub first.
             if (!this.subscribedContextGraphs.has(hashLower)) {
-              this.subscribedContextGraphs.set(hashLower, {
+              this.setContextGraphSubscription(hashLower, {
                 subscribed: false,
                 synced: false,
                 onChainId: contextGraphId,
                 onChainHash: hashLower,
                 pendingMeta: true,
-              });
+              }, { persist: false });
             } else {
-              const existing = this.subscribedContextGraphs.get(hashLower)!;
-              this.bindSubscriptionOnChainId(hashLower, existing, contextGraphId);
-              existing.onChainHash = hashLower;
+              const next = { ...this.subscribedContextGraphs.get(hashLower)! };
+              this.bindSubscriptionOnChainId(hashLower, next, contextGraphId);
+              next.onChainHash = hashLower;
+              this.setContextGraphSubscription(hashLower, next, { persist: false });
             }
             this.recordCgWireId(hashLower, hashLower);
 
@@ -3570,6 +3571,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.setContextGraphSubscription(contextGraphId, { ...existing, ...patch });
   }
 
+  deleteContextGraphSubscription(this: DKGAgent, contextGraphId: string): boolean {
+    this.invalidateListContextGraphsCache();
+    this.forceClearVmReconcileStateForContextGraph(contextGraphId);
+    return this.subscribedContextGraphs.delete(contextGraphId);
+  }
+
   persistContextGraphSubscriptionState(this: DKGAgent, contextGraphId: string): void {
     this.persistContextGraphSubscription(contextGraphId);
   }
@@ -3851,8 +3858,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       } catch {
         /* best-effort teardown */
       }
-      this.forceClearVmReconcileStateForContextGraph(id);
-      this.subscribedContextGraphs.delete(id);
+      this.deleteContextGraphSubscription(id);
     }
 
     // Delete the persisted USER rows (active + dormant). Selective — never the

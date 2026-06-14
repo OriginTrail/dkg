@@ -2012,7 +2012,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         cacheable = false;
         return 'unknown';
       }
-      return legacyRead.value ? 'private' : 'unknown';
+      return legacyRead.value ? 'private' : 'public';
     };
     const privacySettled = await Promise.allSettled(rows.map(async (row) => ({
       uri: row.uri,

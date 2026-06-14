@@ -30,18 +30,25 @@ function makePublishMessage(opts: {
   });
 }
 
-function createHandler(store?: OxigraphStore, callbacks?: Partial<{ contextGraphExists: (id: string) => Promise<boolean>; getContextGraphOwner: (id: string) => Promise<string | null>; subscribeToContextGraph: (id: string) => void }>) {
+function createHandler(store?: OxigraphStore, callbacks?: Partial<{
+  contextGraphExists: (id: string) => Promise<boolean>;
+  getContextGraphOwner: (id: string) => Promise<string | null>;
+  subscribeToContextGraph: (id: string) => void;
+  setContextGraphSubscription: (id: string, next: any) => void;
+}>) {
   const s = store ?? new OxigraphStore();
+  const subscriptions = new Map<string, any>();
   return {
     store: s,
     handler: new GossipPublishHandler(
       s,
       undefined,
-      new Map<string, any>(),
+      subscriptions,
       {
         contextGraphExists: callbacks?.contextGraphExists ?? (async () => false),
         getContextGraphOwner: callbacks?.getContextGraphOwner ?? (async () => null),
         subscribeToContextGraph: callbacks?.subscribeToContextGraph ?? (() => {}),
+        setContextGraphSubscription: callbacks?.setContextGraphSubscription ?? ((id, next) => { subscriptions.set(id, next); }),
       },
     ),
   };

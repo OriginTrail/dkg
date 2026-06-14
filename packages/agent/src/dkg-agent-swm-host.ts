@@ -1378,15 +1378,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // the CG, so `recordCgWireId(wireId, wireId)` is the right
     // identity-translation entry.
     if (!this.subscribedContextGraphs.has(wireId)) {
-      this.subscribedContextGraphs.set(wireId, {
+      this.setContextGraphSubscription(wireId, {
         subscribed: false,
         synced: false,
         onChainHash: wireId,
         pendingMeta: true,
-      });
+      }, { persist: false });
     } else {
       const existing = this.subscribedContextGraphs.get(wireId)!;
-      existing.onChainHash = wireId;
+      this.setContextGraphSubscription(wireId, { ...existing, onChainHash: wireId }, { persist: false });
     }
     this.recordCgWireId(wireId, wireId);
 

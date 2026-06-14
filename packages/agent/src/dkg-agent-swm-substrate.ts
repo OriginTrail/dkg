@@ -811,6 +811,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           // `dkg:curator` (wallet DID) is for local authorization only.
           getContextGraphOwner: (id) => this.getContextGraphCreator(id),
           subscribeToContextGraph: (id, options) => this.subscribeToContextGraph(id, options),
+          setContextGraphSubscription: (id, next, options) => this.setContextGraphSubscription(id, next, options),
           hasConfirmedMetaState: (id) => this.hasConfirmedMetaState(id),
           persistContextGraphSubscription: (id) => this.persistContextGraphSubscriptionState(id),
         },

@@ -699,7 +699,10 @@ describe('listContextGraphs merge', () => {
     } satisfies ContextGraphSub);
 
     const first = await agent.listContextGraphs({ callerAgentAddress: null });
-    expect(first.find(p => p.id === id)).toBeUndefined();
+    const firstEntry = first.find(p => p.id === id);
+    expect(firstEntry).toBeDefined();
+    expect(firstEntry!.name).toBe('Remote Meta Cache');
+    expect(firstEntry!.accessPolicy).toBeUndefined();
 
     const uri = contextGraphDataGraphUri(id);
     const metaGraph = contextGraphMetaGraphUri(id);
@@ -712,6 +715,12 @@ describe('listContextGraphs merge', () => {
       },
       {
         subject: uri,
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Remote Meta Cache Synced"',
+        graph: metaGraph,
+      },
+      {
+        subject: uri,
         predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
         object: '"public"',
         graph: metaGraph,
@@ -719,10 +728,13 @@ describe('listContextGraphs merge', () => {
     ]);
 
     const second = await agent.listContextGraphs({ callerAgentAddress: null });
-    expect(second.find(p => p.id === id)).toBeDefined();
+    const secondEntry = second.find(p => p.id === id);
+    expect(secondEntry).toBeDefined();
+    expect(secondEntry!.name).toBe('Remote Meta Cache Synced');
+    expect(secondEntry!.accessPolicy).toBe('public');
   }, 15000);
 
-  it('drops map-state tail rows from scoped output when no policy literal was read', async () => {
+  it('keeps map-state tail rows in scoped output when legacy privacy lookup confirms public', async () => {
     const result = await createTestAgent();
     agent = result.agent;
     await agent.start();
@@ -736,10 +748,10 @@ describe('listContextGraphs merge', () => {
     } satisfies ContextGraphSub);
 
     const scoped = await agent.listContextGraphs({ callerAgentAddress: ethers.Wallet.createRandom().address });
-    expect(scoped.find(p => p.id === id)).toBeUndefined();
+    expect(scoped.find(p => p.id === id)).toBeDefined();
 
     const explicitNoWallet = await agent.listContextGraphs({ callerAgentAddress: null });
-    expect(explicitNoWallet.find(p => p.id === id)).toBeUndefined();
+    expect(explicitNoWallet.find(p => p.id === id)).toBeDefined();
 
     const ownerLocal = await agent.listContextGraphs();
     expect(ownerLocal.find(p => p.id === id)).toBeDefined();
@@ -775,7 +787,7 @@ describe('listContextGraphs merge', () => {
     expect(ownerLocal.find(p => p.id === 'policy-unknown-storage')).toBeDefined();
   }, 15000);
 
-  it('drops storage-only rows from scoped output when no explicit policy exists', async () => {
+  it('keeps storage-only rows in scoped output when legacy privacy lookup confirms public', async () => {
     const store = new OxigraphStore();
     const result = await createTestAgent({ store });
     agent = result.agent;
@@ -791,7 +803,7 @@ describe('listContextGraphs merge', () => {
     ]);
 
     const explicitNoWallet = await agent.listContextGraphs({ callerAgentAddress: null });
-    expect(explicitNoWallet.find(p => p.id === 'policy-absent-storage')).toBeUndefined();
+    expect(explicitNoWallet.find(p => p.id === 'policy-absent-storage')).toBeDefined();
 
     const ownerLocal = await agent.listContextGraphs();
     expect(ownerLocal.find(p => p.id === 'policy-absent-storage')).toBeDefined();

@@ -22,6 +22,7 @@ export interface GossipPublishHandlerCallbacks {
   contextGraphExists: (id: string) => Promise<boolean>;
   getContextGraphOwner: (id: string) => Promise<string | null>;
   subscribeToContextGraph: (id: string, options?: { trackSyncScope?: boolean; persist?: boolean }) => void;
+  setContextGraphSubscription: (id: string, next: any, options?: { persist?: boolean }) => void;
   /**
    * Same semantics as `DKGAgent#hasConfirmedMetaState`: returns true when the
    * local store already has a trustworthy public announcement for this CG
@@ -166,7 +167,7 @@ export class GossipPublishHandler {
               q.subject === `${contextGraphPrefix}${newId}` && q.predicate === DKG_ONTOLOGY.SCHEMA_NAME,
             );
             const name = nameQuad ? stripLiteral(nameQuad.object) : newId;
-            this.subscribedContextGraphs.set(newId, {
+            const next = {
               name,
               subscribed: true,
               // `synced: false` — we just got the definition triple via
@@ -177,7 +178,8 @@ export class GossipPublishHandler {
               synced: false,
               metaSynced: false,
               onChainId: this.subscribedContextGraphs.get(newId)?.onChainId,
-            });
+            };
+            this.callbacks.setContextGraphSubscription(newId, next, { persist: false });
             this.callbacks.subscribeToContextGraph(newId, { trackSyncScope: true });
             this.log.info(ctx, `Discovered context graph "${name}" (${newId}) via gossip — auto-subscribed (sync-enabled)`);
           }
