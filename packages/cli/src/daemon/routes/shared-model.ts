@@ -9,6 +9,43 @@ import {
 
 const SMALL_BODY_BYTES = 256 * 1024;
 
+const SHARED_MODEL_ROLES = new Set(["system", "user", "assistant"]);
+
+/** Coerce a body field to a finite number, or undefined if it isn't one. */
+function numOrUndefined(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+/**
+ * Validate the native `/model/invoke` `messages` payload BEFORE it reaches the
+ * agent, so a structurally-broken element (e.g. `[{"role":"user"}]` with no
+ * `content`, or `{"content":1}`) returns a clear 400 instead of throwing deep
+ * in the provider call and surfacing as a 500. Mirrors the wire decoder's
+ * element contract: `role` ∈ {system,user,assistant} and `content` is a string.
+ */
+function validateSharedModelMessages(
+  raw: unknown,
+): { ok: true; messages: SharedModelMessage[] } | { ok: false; error: string } {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return { ok: false, error: "messages (non-empty array) is required" };
+  }
+  const messages: SharedModelMessage[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const m = raw[i] as { role?: unknown; content?: unknown } | null;
+    if (!m || typeof m !== "object") {
+      return { ok: false, error: `messages[${i}] must be an object` };
+    }
+    if (typeof m.role !== "string" || !SHARED_MODEL_ROLES.has(m.role)) {
+      return { ok: false, error: `messages[${i}].role must be one of system|user|assistant` };
+    }
+    if (typeof m.content !== "string") {
+      return { ok: false, error: `messages[${i}].content must be a string` };
+    }
+    messages.push({ role: m.role as SharedModelMessage["role"], content: m.content });
+  }
+  return { ok: true, messages };
+}
+
 /**
  * Shared curator AI-model access (MVP).
  *
@@ -48,15 +85,21 @@ export async function handleSharedModelRoutes(ctx: RequestContext): Promise<void
   const invokeMatch = path.match(/^\/api\/context-graph\/([^/]+)\/model\/invoke$/);
   if (req.method === "POST" && invokeMatch) {
     const id = decodeURIComponent(invokeMatch[1]);
-    const body = JSON.parse(await readBody(req, SMALL_BODY_BYTES));
-    const messages = body.messages as SharedModelMessage[];
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return jsonResponse(res, 400, { error: "messages (non-empty array) is required" });
+    let body: { messages?: unknown; maxTokens?: unknown; temperature?: unknown };
+    try {
+      body = JSON.parse(await readBody(req, SMALL_BODY_BYTES));
+    } catch {
+      return jsonResponse(res, 400, { error: "request body must be valid JSON" });
     }
+    const validation = validateSharedModelMessages(body.messages);
+    if (!validation.ok) {
+      return jsonResponse(res, 400, { error: validation.error });
+    }
+    const messages = validation.messages;
     const result = await agent.invokeContextGraphModel(
       id,
       messages,
-      { maxTokens: body.maxTokens, temperature: body.temperature },
+      { maxTokens: numOrUndefined(body.maxTokens), temperature: numOrUndefined(body.temperature) },
       requestAgentAddress,
     );
     return jsonResponse(res, result.ok ? 200 : 403, result);
@@ -70,7 +113,16 @@ export async function handleSharedModelRoutes(ctx: RequestContext): Promise<void
   const openaiMatch = path.match(/^\/api\/context-graph\/([^/]+)\/model\/v1\/chat\/completions$/);
   if (req.method === "POST" && openaiMatch) {
     const id = decodeURIComponent(openaiMatch[1]);
-    const body = JSON.parse(await readBody(req, SMALL_BODY_BYTES));
+    let body: { messages?: unknown; max_tokens?: unknown; temperature?: unknown; model?: unknown };
+    try {
+      body = JSON.parse(await readBody(req, SMALL_BODY_BYTES));
+    } catch {
+      // A malformed body must surface as an OpenAI-shaped 400, never a 500.
+      return jsonResponse(res, 400, openAiErrorBody("request body must be valid JSON"));
+    }
+    // `openAiMessagesToShared` already validates element shapes (drops non-string
+    // content, coerces unsupported roles to `user`); an empty result means the
+    // caller sent nothing usable.
     const messages = openAiMessagesToShared(body.messages);
     if (messages.length === 0) {
       return jsonResponse(res, 400, openAiErrorBody("messages (non-empty array) is required"));
@@ -78,7 +130,7 @@ export async function handleSharedModelRoutes(ctx: RequestContext): Promise<void
     const result = await agent.invokeContextGraphModel(
       id,
       messages,
-      { maxTokens: body.max_tokens, temperature: body.temperature },
+      { maxTokens: numOrUndefined(body.max_tokens), temperature: numOrUndefined(body.temperature) },
       requestAgentAddress,
     );
     if (!result.ok) {
@@ -95,20 +147,45 @@ export async function handleSharedModelRoutes(ctx: RequestContext): Promise<void
   const inviteMatch = path.match(/^\/api\/context-graph\/([^/]+)\/invite-with-model$/);
   if (req.method === "POST" && inviteMatch) {
     const id = decodeURIComponent(inviteMatch[1]);
-    const { agentAddress, shareModel, modelId } = JSON.parse(await readBody(req, SMALL_BODY_BYTES));
+    let parsed: { agentAddress?: unknown; shareModel?: unknown; modelId?: unknown };
+    try {
+      parsed = JSON.parse(await readBody(req, SMALL_BODY_BYTES));
+    } catch {
+      return jsonResponse(res, 400, { error: "request body must be valid JSON" });
+    }
+    const { agentAddress, shareModel, modelId } = parsed;
     if (!agentAddress || typeof agentAddress !== "string") {
       return jsonResponse(res, 400, { error: "agentAddress is required" });
     }
+    // The invite is the membership-granting step. If it throws, nothing was
+    // applied → 400 and the caller may safely retry.
     try {
       await agent.inviteAgentToContextGraph(id, agentAddress, requestAgentAddress);
-      let modelShared = false;
-      if (shareModel === true) {
-        await agent.setContextGraphModelSharing(id, true, { callerAgentAddress: requestAgentAddress, modelId });
-        modelShared = true;
-      }
-      return jsonResponse(res, 200, { ok: true, contextGraphId: id, agentAddress, modelShared });
     } catch (err) {
       return jsonResponse(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    }
+    // Invite succeeded — membership is now granted and DURABLE. If the optional
+    // model-share step fails, do NOT report a 400 (the caller would retry the
+    // whole call against partially-applied state, double-applying the invite).
+    // Instead return 200 with an explicit partial-success body so the caller
+    // sees the invite landed and only the share needs attention.
+    if (shareModel !== true) {
+      return jsonResponse(res, 200, { ok: true, contextGraphId: id, agentAddress, modelShared: false });
+    }
+    try {
+      await agent.setContextGraphModelSharing(id, true, {
+        callerAgentAddress: requestAgentAddress,
+        modelId: typeof modelId === "string" ? modelId : undefined,
+      });
+      return jsonResponse(res, 200, { ok: true, contextGraphId: id, agentAddress, modelShared: true });
+    } catch (err) {
+      return jsonResponse(res, 200, {
+        ok: true,
+        contextGraphId: id,
+        agentAddress,
+        modelShared: false,
+        modelShareError: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 }
