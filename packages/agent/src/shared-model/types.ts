@@ -33,6 +33,19 @@ export interface SharedModelRuntimeConfig extends SharedModelProviderConfig {
   dailyRequestQuotaPerAgent: number;
   /** Hard cap on total prompt size accepted from a member (chars). */
   maxPromptChars: number;
+  /**
+   * Member-side transport budget (ms) for the WHOLE remote invoke round
+   * trip (`sendReliable`). Must comfortably exceed real LLM latency, which
+   * the router default ({@link DEFAULT_SEND_TIMEOUT_MS}, 20s) does not.
+   */
+  invokeTimeoutMs: number;
+  /**
+   * Curator-side provider deadline (ms) applied to the upstream LLM
+   * `fetch`. Kept slightly TIGHTER than `invokeTimeoutMs` so the curator
+   * returns a structured `{ok:false}` error before the member's transport
+   * aborts the round trip.
+   */
+  providerTimeoutMs: number;
 }
 
 export interface SharedModelInvokeRequest {
@@ -40,6 +53,15 @@ export interface SharedModelInvokeRequest {
   messages: SharedModelMessage[];
   maxTokens?: number;
   temperature?: number;
+  /**
+   * The agent address the member's node claims to invoke ON BEHALF OF. This is
+   * an UNTRUSTED claim carried in the request body; the curator authorizes it
+   * only if the cryptographically-authenticated transport `fromPeerId` matches
+   * the delegatee peer THAT specific agent recorded with the curator (mirrors
+   * the sync auth path's `requesterAgentAddress` binding). A request that omits
+   * it is denied on the remote path — there is no union fallback.
+   */
+  agentAddress?: string;
 }
 
 export interface SharedModelInvokeResponse {

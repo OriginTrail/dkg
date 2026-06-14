@@ -8,6 +8,13 @@ export interface SharedModelCompletion {
 export interface SharedModelCompleteOpts {
   maxTokens?: number;
   temperature?: number;
+  /**
+   * Curator-side deadline (ms) for the upstream provider `fetch`. When the
+   * request exceeds this, the call rejects with a clear `provider timeout
+   * after <n>ms` Error so the curator returns a structured denial before the
+   * member's transport aborts the round trip. Unset = no deadline.
+   */
+  providerTimeoutMs?: number;
 }
 
 /**
@@ -44,14 +51,25 @@ export class SharedModelClient {
     if (opts.maxTokens != null) body.max_tokens = opts.maxTokens;
     if (opts.temperature != null) body.temperature = opts.temperature;
 
-    const resp = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
-      },
-      body: JSON.stringify(body),
-    });
+    let resp: Response;
+    try {
+      resp = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
+        },
+        body: JSON.stringify(body),
+        ...(opts.providerTimeoutMs != null ? { signal: AbortSignal.timeout(opts.providerTimeoutMs) } : {}),
+      });
+    } catch (err) {
+      // AbortSignal.timeout(...) aborts with a TimeoutError; surface it as a
+      // clear, deterministic message the caller's catch can relay.
+      if (err instanceof DOMException && err.name === 'TimeoutError') {
+        throw new Error(`provider timeout after ${opts.providerTimeoutMs}ms`);
+      }
+      throw err;
+    }
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
       throw new Error(`shared-model provider error: ${resp.status} ${resp.statusText} ${text.slice(0, 200)}`);
