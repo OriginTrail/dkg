@@ -156,6 +156,30 @@ describe('Phase B e2e — chain registration -> VM via the sweep', () => {
     expect(await isInVm(store, 'urn:fact:b', 'Octopuses have three hearts')).toBe(true);
   });
 
+  it('does not materialize a chain-backed reconcile when the head block read fails', async () => {
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter();
+    const fh = new FinalizationHandler(store, chain);
+
+    const root = await seedSwmSnapshot(store, 'urn:fact:headfail', 'Chain heads matter');
+    chain.__registerKC({ kaId: 103n, contextGraphId: ON_CHAIN_CG, merkleRootHex: ethers.hexlify(root), chunks: [] });
+
+    const persisted: number[] = [];
+    const deps = {
+      ...makeDeps(store, chain, fh, persisted),
+      getHeadBlock: async () => {
+        throw new Error('RPC down');
+      },
+    };
+    const cursor = createCursorState(0);
+
+    const res = await reconcileContextGraph(deps, cursor, LOCAL_CG, ON_CHAIN_CG);
+
+    expect(res).toMatchObject({ head: 1, watermark: 0, reconciled: 0, pending: 1 });
+    expect(persisted).toEqual([]);
+    expect(await isInVm(store, 'urn:fact:headfail', 'Chain heads matter')).toBe(false);
+  });
+
   it('holds the watermark at a gap and fills it on a later sweep (late SWM arrival)', async () => {
     const store = new OxigraphStore();
     const chain = new MockChainAdapter();

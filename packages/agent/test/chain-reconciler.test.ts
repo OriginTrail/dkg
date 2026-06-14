@@ -120,7 +120,7 @@ describe('reconcileContextGraph — sweep', () => {
     expect(r2.watermark).toBe(1);
   });
 
-  it('promotes during transient head fetch failure but does not advance or persist the watermark', async () => {
+  it('skips promotion during transient head fetch failure and retries when the head recovers', async () => {
     let headThrows = true;
     const attempted: number[] = [];
     const { deps, persisted } = makeDeps({
@@ -138,13 +138,16 @@ describe('reconcileContextGraph — sweep', () => {
     const state = createCursorState(0);
 
     const r1 = await reconcileContextGraph(deps, state, 'cg', 1n);
-    expect(r1.reconciled).toBe(2);
+    expect(r1.reconciled).toBe(0);
+    expect(r1.pending).toBe(2);
     expect(r1.watermark).toBe(0);
+    expect(attempted).toEqual([]);
     expect(persisted).toEqual([]);
 
     headThrows = false;
     const r2 = await reconcileContextGraph(deps, state, 'cg', 1n);
     expect(r2.watermark).toBe(2);
+    expect(attempted).toEqual([0, 1]);
     expect(persisted).toEqual([{ cg: 'cg', watermark: 2 }]);
   });
 });

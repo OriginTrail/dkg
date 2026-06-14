@@ -99,9 +99,9 @@ export async function reconcileContextGraph(
   const before = state.watermark;
 
   // Keep transient head-fetch failures distinct from truly head-less chains.
-  // We may still promote ordinals while the head is unavailable, but cannot
-  // safely advance/persist the contiguous watermark until a later real-head
-  // sweep can apply the confirmation-depth gate.
+  // A thrown head read means the chain is temporarily unavailable; skip
+  // materialization for this pass so reconcileOrdinal never falls back to a
+  // synthetic version block for chain-backed data.
   let headBlock: number | undefined;
   let headUnavailable = false;
   try {
@@ -118,11 +118,14 @@ export async function reconcileContextGraph(
 
   let reconciled = 0;
   let pending = 0;
-  for (const ordinal of ordinalsToReconcile(state, head)) {
-    const outcome = await deps.reconcileOrdinal(localCgId, onChainCgId, ordinal, headBlock);
-    if (outcome.status === 'reconciled' || outcome.status === 'already') {
-      reconciled += 1;
-      if (!headUnavailable) {
+  const ordinals = ordinalsToReconcile(state, head);
+  if (headUnavailable) {
+    pending = ordinals.length;
+  } else {
+    for (const ordinal of ordinals) {
+      const outcome = await deps.reconcileOrdinal(localCgId, onChainCgId, ordinal, headBlock);
+      if (outcome.status === 'reconciled' || outcome.status === 'already') {
+        reconciled += 1;
         // With a known head, apply the reorg-depth gate; otherwise (no chain
         // head) absorb as soon as contiguous (depth 0) using the registration
         // block as a self-consistent head.
@@ -132,9 +135,9 @@ export async function reconcileContextGraph(
           headBlock ?? outcome.blockNumber,
           headBlock !== undefined ? deps.confirmationDepth : 0,
         );
+      } else {
+        pending += 1;
       }
-    } else {
-      pending += 1;
     }
   }
 

@@ -169,7 +169,6 @@ export async function reconcileWarmCoreConnections(
   });
 
   const warmed = new Set<string>();
-  const selectedThisPass: string[] = [];
   let dialed = 0;
   let skippedGate = 0;
 
@@ -193,7 +192,6 @@ export async function reconcileWarmCoreConnections(
     });
     if (!pinOk) continue;
     warmed.add(core.peerId);
-    selectedThisPass.push(core.peerId);
 
     if (deps.isConnected(core.peerId)) continue;
     const ok = await deps.dial(core.peerId, ctx).catch(() => false);
@@ -221,22 +219,9 @@ export async function reconcileWarmCoreConnections(
     }
   }
 
-  // Failed unpins still represent live keep-alive tags in the peerStore. Count
-  // them against the warm budget by dropping the lowest-priority fresh picks.
-  while (warmed.size > deps.maxCores && selectedThisPass.length > 0) {
-    const peerId = selectedThisPass.pop()!;
-    if (!warmed.has(peerId)) continue;
-    let unpinOk = true;
-    await deps.unpin(peerId, ctx).catch(() => {
-      unpinOk = false;
-    });
-    if (unpinOk) {
-      warmed.delete(peerId);
-      unpinned += 1;
-    } else {
-      unpinFailed += 1;
-    }
-  }
+  // If stale unpins fail, keep those peers in `warmed` so the next pass
+  // retries them. This may temporarily exceed the cap, but preserves the
+  // current winning selection instead of evicting a healthy Core.
 
   deps.log(
     ctx,

@@ -212,9 +212,31 @@ describe('reconcileWarmCoreConnections', () => {
 
     const res = await reconcileWarmCoreConnections(deps);
 
-    expect(calls).toEqual(['flaky', 'gone', 'core2']);
-    expect(res.unpinned).toBe(2);
+    expect(calls).toEqual(['flaky', 'gone']);
+    expect(res.unpinned).toBe(1);
+    expect(res.pinned).toBe(3);
+    expect([...res.warmed].sort()).toEqual(['core1', 'core2', 'flaky']);
+  });
+
+  it('keeps the current best peer when a stale unpin fails at the cap', async () => {
+    const calls: string[] = [];
+    const { deps } = makeDeps({
+      maxCores: 1,
+      previouslyWarmed: new Set(['stale']),
+      findCoreAgents: async () => [
+        { peerId: 'core1', nodeRole: 'core', agentAddress: '0x1' },
+      ],
+      unpin: async (peerId) => {
+        calls.push(peerId);
+        if (peerId === 'stale') throw new Error('peerStore busy');
+      },
+    });
+
+    const res = await reconcileWarmCoreConnections(deps);
+
+    expect(calls).toEqual(['stale']);
+    expect(res.unpinned).toBe(0);
     expect(res.pinned).toBe(2);
-    expect([...res.warmed].sort()).toEqual(['core1', 'flaky']);
+    expect([...res.warmed].sort()).toEqual(['core1', 'stale']);
   });
 });
