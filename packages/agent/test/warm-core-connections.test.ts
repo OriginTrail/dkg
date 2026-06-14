@@ -200,19 +200,21 @@ describe('reconcileWarmCoreConnections', () => {
   });
 
   it('does not count a failed unpin and retains the peer for retry', async () => {
-    let calls = 0;
+    const calls: string[] = [];
     const { deps } = makeDeps({
+      maxCores: 2,
       previouslyWarmed: new Set(['core1', 'core2', 'flaky', 'gone']),
       unpin: async (peerId) => {
-        calls += 1;
+        calls.push(peerId);
         if (peerId === 'flaky') throw new Error('peerStore busy');
       },
     });
 
     const res = await reconcileWarmCoreConnections(deps);
 
-    expect(calls).toBe(2);
-    expect(res.unpinned).toBe(1);
-    expect([...res.warmed].sort()).toEqual(['core1', 'core2', 'flaky']);
+    expect(calls).toEqual(['flaky', 'gone', 'core2']);
+    expect(res.unpinned).toBe(2);
+    expect(res.pinned).toBe(2);
+    expect([...res.warmed].sort()).toEqual(['core1', 'flaky']);
   });
 });

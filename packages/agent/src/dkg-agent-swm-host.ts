@@ -2234,22 +2234,31 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const libp2p = (this.node as any)?.libp2p;
       const getConnections = libp2p?.getConnections;
       if (typeof getConnections !== 'function') return 'unreadable';
-      const peers = [...new Map(
+      const peerIds = [...new Map(
         (getConnections.call(libp2p) as Array<{ remotePeer?: { toString(): string } }>)
           .map((connection) => [connection.remotePeer?.toString(), connection.remotePeer] as const)
           .filter((entry): entry is readonly [string, { toString(): string }] =>
             typeof entry[0] === 'string' && entry[0].length > 0 && !!entry[1],
           ),
-      ).values()];
-      const orderedPeers = this.selectCatchupPeers(peers, preferredPeerId, isPrivateContextGraph);
-      return JSON.stringify(orderedPeers.map((peer) => {
-        const peerId = peer.toString();
-        return {
-          peerId,
-          preferred: peerId === preferredPeerId,
-          core: this.knownCorePeerIds.has(peerId),
-        };
-      }));
+      ).keys()].sort();
+      const orderedPeers = this.selectCatchupPeers(
+        peerIds.map((peerId) => ({ toString: () => peerId })),
+        preferredPeerId,
+        isPrivateContextGraph,
+      );
+      return JSON.stringify({
+        preferredPeerId: preferredPeerId ?? null,
+        privateOnly: isPrivateContextGraph,
+        peers: orderedPeers.map((peer, rank) => {
+          const peerId = peer.toString();
+          return {
+            rank,
+            peerId,
+            preferred: peerId === preferredPeerId,
+            core: this.knownCorePeerIds.has(peerId),
+          };
+        }),
+      });
     } catch {
       return 'unreadable';
     }
