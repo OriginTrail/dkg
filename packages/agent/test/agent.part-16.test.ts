@@ -720,7 +720,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           peerRotationKey: 'runtime-contextGraph',
         });
 
-        expect(firstResult.connectedPeers).toBe(1);
+        expect(firstResult.connectedPeers).toBe(3);
         expect(firstResult.totalPeers).toBe(3);
         expect(firstResult.selectedPeers).toBe(1);
         expect(firstResult.syncCapablePeers).toBe(1);

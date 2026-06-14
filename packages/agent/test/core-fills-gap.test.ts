@@ -299,7 +299,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(internals.subscribedContextGraphs.get('45')?.coreHosted).toBe(true);
   });
 
-  it('ignores late core-host recording completions after recordings are closed', async () => {
+  it('lets in-flight core-host recordings finish while shutdown is draining', async () => {
     const internals = await boot();
     let resolvePolicy!: (value: number) => void;
     internals.chain.getContextGraphAccessPolicy = vi.fn(() => new Promise<number>((resolve) => {
@@ -312,8 +312,39 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     resolvePolicy(0);
     await recording;
 
-    expect(internals.subscribedContextGraphs.get('late-hosted')).toBeUndefined();
-    expect(saved.find((r) => r.id === 'late-hosted')).toBeUndefined();
+    expect(internals.subscribedContextGraphs.get('late-hosted')?.coreHosted).toBe(true);
+    expect(saved.find((r) => r.id === 'late-hosted')?.coreHosted).toBe(true);
+  });
+
+  it('ignores late core-host recording completions after drain gives up', async () => {
+    const internals = await boot();
+    let resolvePolicy!: (value: number) => void;
+    internals.chain.getContextGraphAccessPolicy = vi.fn(() => new Promise<number>((resolve) => {
+      resolvePolicy = resolve;
+    }));
+    (internals.chain as { isContextGraphActiveOnChain?: unknown }).isContextGraphActiveOnChain = undefined;
+
+    const recording = internals.recordCoreHostedPublicCg('49', 'late-after-timeout');
+    (internals as any).coreHostRecordingsAborted = true;
+    resolvePolicy(0);
+    await recording;
+
+    expect(internals.subscribedContextGraphs.get('late-after-timeout')).toBeUndefined();
+    expect(saved.find((r) => r.id === 'late-after-timeout')).toBeUndefined();
+  });
+
+  it('uses cached public access policy when the live policy read flakes', async () => {
+    const internals = await boot();
+    ((internals as any).onChainAccessPolicyCache as Map<string, 0 | 1>).set('50', 0);
+    internals.chain.getContextGraphAccessPolicy = vi.fn(async () => {
+      throw new Error('rpc unavailable');
+    });
+
+    await internals.recordCoreHostedPublicCg('50', 'cached-public');
+
+    expect(internals.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
+    expect(internals.subscribedContextGraphs.get('cached-public')?.coreHosted).toBe(true);
+    expect(saved.find((r) => r.id === 'cached-public')?.coreHosted).toBe(true);
   });
 
   it('falls back to ACK-backed policy read when the liveness probe rejects', async () => {
@@ -1207,7 +1238,7 @@ describe('Phase D - VM reconcile damping', () => {
       }
       return {
         ...emptyCatchupStats(),
-        connectedPeers: 1,
+        connectedPeers: connectedPeers.length,
         totalPeers: connectedPeers.length,
         selectedPeers: 1,
       };
@@ -1225,7 +1256,7 @@ describe('Phase D - VM reconcile damping', () => {
 
     const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue({
       ...emptyCatchupStats(),
-      connectedPeers: 1,
+      connectedPeers: 33,
       totalPeers: 33,
       selectedPeers: 1,
     });

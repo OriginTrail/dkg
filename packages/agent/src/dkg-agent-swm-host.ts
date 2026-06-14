@@ -2000,7 +2000,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (typeof isActive !== 'function') return readAccessPolicy(true);
     try {
       const live = await raceChainRead(() => isActive.call(this.chain, numericId));
-      if (live === true) return readAccessPolicy(false);
+      if (live === true) return readAccessPolicy(true);
       if (live !== TIMEOUT_SENTINEL) return null;
       this.log.warn(
         createOperationContext('system'),
@@ -2019,7 +2019,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // StorageACK signing proves this specific registration was live enough
       // to host. If the optional liveness probe itself flakes, preserve the
       // host-tracking path and only fail closed when the policy read is unknown.
-      return await readAccessPolicy(false);
+      return await readAccessPolicy(true);
     } catch {
       return null;
     }
@@ -2053,7 +2053,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // the ACK-backed compatibility path because signing a StorageACK proves
     // this specific CG registration is live enough for host tracking.
     const policy = await this.readCoreHostedPublicCgAccessPolicy(numericStr);
-    if (this.coreHostRecordingsClosed) return;
+    if (this.coreHostRecordingsAborted) return;
     if (policy !== 0) return; // curated / unknown / not-live — not the public VM-promote path
 
     // Pick the local CG id to key the host-only record under. Prefer an
@@ -2146,9 +2146,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
           `${DKGAgentBase.CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS}ms; continuing shutdown`,
         );
         this.coreHostRecordings.clear();
+        this.coreHostRecordingsAborted = true;
         return;
       }
     }
+    if (this.coreHostRecordingsClosed) this.coreHostRecordingsAborted = true;
   }
 
   // ===== Phase B — chain-driven VM reconciliation (B.4 agent wiring) =========
