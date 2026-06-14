@@ -31,6 +31,11 @@
 #   TEST_B2=1       also run the slow-upstream timeout check (B2)
 #   B2_SLEEP=25     seconds the slow stub waits before responding (>20, <110)
 #   STUB_PORT=9777  port for the local slow openai-compatible stub
+#   REAL=1          happy-path smoke against a REAL provider you configured on
+#                   node1 yourself (implies SKIP_CONFIG: the script never bakes a
+#                   key). Relaxes the mock-echo assertion to "ok + non-empty",
+#                   prints the real completion, and SKIPS the B1 removal so the
+#                   member stays joined for further manual curl calls.
 #   DEVNET_TOKEN / DKG_AUTH   override the auth token (else read from devnet)
 
 set -u
@@ -44,10 +49,11 @@ N2=http://127.0.0.1:9202
 N1_ADDR=""; N2_ADDR=""; N1_PEER_ID=""
 
 TEST_B2="${TEST_B2:-}"
+REAL="${REAL:-}"
 B2_SLEEP="${B2_SLEEP:-25}"
 STUB_PORT="${STUB_PORT:-9777}"
 STUB_PID=""
-MODE="mock"; [ "$TEST_B2" = "1" ] && MODE="b2-slow-provider"
+MODE="mock"; [ "$TEST_B2" = "1" ] && MODE="b2-slow-provider"; [ "$REAL" = "1" ] && MODE="real-provider"
 
 CG_ID="shared-model-test-$(date +%s)"
 
@@ -170,8 +176,8 @@ PY
 # (Re)configure node1 as a sharing curator and restart it so config regenerates
 # WITH the sharedModel block (restart-node re-runs create_node_config).
 ensure_curator_config() {
-  if [ "${SKIP_CONFIG:-}" = "1" ]; then
-    note "SKIP_CONFIG=1 — assuming node1 already has sharedModel enabled"
+  if [ "${SKIP_CONFIG:-}" = "1" ] || [ "$REAL" = "1" ]; then
+    note "skipping auto-config — assuming node1 already has sharedModel enabled (REAL/SKIP_CONFIG)"
     return 0
   fi
   hr "Configure curator (node1) for sharing — provider=$([ "$TEST_B2" = "1" ] && echo openai-compatible || echo mock)"
@@ -250,10 +256,14 @@ gr=$(api "$N1" GET "/api/context-graph/$enc/model/grant")
 establish_membership
 
 hr "Member invokes the curator's model over P2P (the real gate)"
-inv=$(api "$N2" POST "/api/context-graph/$enc/model/invoke" '{"messages":[{"role":"user","content":"ping-from-member-42"}]}')
+prompt="ping-from-member-42"; [ "$REAL" = "1" ] && prompt="In one short sentence, introduce yourself and name the model you are."
+inv=$(api "$N2" POST "/api/context-graph/$enc/model/invoke" "{\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}]}")
 [ "$(echo "$inv" | jget ok)" = "True" ] || fail "invoke denied unexpectedly: $inv"
 content=$(echo "$inv" | jget content)
-if [ "$TEST_B2" = "1" ]; then
+if [ "$REAL" = "1" ]; then
+  [ -n "$content" ] && { ok "REAL provider returned a completion over the full P2P pipe:"; printf '    \033[0;36m%s\033[0m\n' "$content"; } \
+    || fail "real provider returned empty content: $inv"
+elif [ "$TEST_B2" = "1" ]; then
   echo "$content" | grep -q "slow-pong" && ok "B2: slow provider returned a completion: \"$content\"" \
     || fail "B2: expected slow-pong, got: $inv"
 else
@@ -264,33 +274,44 @@ fi
 # OpenAI-compatible surface (mock mode only — keeps the B2 path to one slow call)
 if [ "$TEST_B2" != "1" ]; then
   hr "Member invokes via the OpenAI-compatible endpoint"
+  oprompt="openai-path-check"; [ "$REAL" = "1" ] && oprompt="In one short sentence, what is the OriginTrail DKG?"
   oai=$(api "$N2" POST "/api/context-graph/$enc/model/v1/chat/completions" \
-    '{"model":"probe","messages":[{"role":"user","content":"openai-path-check"}]}')
+    "{\"model\":\"probe\",\"messages\":[{\"role\":\"user\",\"content\":\"$oprompt\"}]}")
   [ "$(echo "$oai" | jget object)" = "chat.completion" ] || fail "OpenAI endpoint shape wrong: $oai"
   oc=$(echo "$oai" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('choices',[{}])[0].get('message',{}).get('content',''))")
-  echo "$oc" | grep -q "openai-path-check" && ok "OpenAI-compatible completion: \"$oc\"" || fail "OpenAI content wrong: $oai"
+  if [ "$REAL" = "1" ]; then
+    [ -n "$oc" ] && { ok "REAL OpenAI-compatible completion:"; printf '    \033[0;36m%s\033[0m\n' "$oc"; } || fail "real OpenAI content empty: $oai"
+  else
+    echo "$oc" | grep -q "openai-path-check" && ok "OpenAI-compatible completion: \"$oc\"" || fail "OpenAI content wrong: $oai"
+  fi
 fi
 
 # ---- B1 regression: a removed member must now be DENIED ----
-hr "B1 — curator removes the member, then member re-invokes (must be DENIED)"
-rm=$(api "$N1" POST "/api/context-graph/$enc/remove-participant" "{\"agentAddress\":\"$N2_ADDR\"}")
-[ "$(echo "$rm" | jget ok)" = "True" ] && ok "remove-participant: $rm" || fail "remove-participant failed: $rm"
+if [ "$REAL" = "1" ]; then
+  hr "B1 — skipped in REAL mode (member kept joined so you can keep poking the real model)"
+  note "member $N2_ADDR remains in CG $CG_ID; e.g. curl -XPOST $N2/api/context-graph/$enc/model/invoke ..."
+else
+  hr "B1 — curator removes the member, then member re-invokes (must be DENIED)"
+  rm=$(api "$N1" POST "/api/context-graph/$enc/remove-participant" "{\"agentAddress\":\"$N2_ADDR\"}")
+  [ "$(echo "$rm" | jget ok)" = "True" ] && ok "remove-participant: $rm" || fail "remove-participant failed: $rm"
 
-start=$(date +%s)
-while :; do
-  inv2=$(api "$N2" POST "/api/context-graph/$enc/model/invoke" '{"messages":[{"role":"user","content":"after-removal"}]}')
-  okf=$(echo "$inv2" | jget ok); denied=$(echo "$inv2" | jget denied)
-  if [ "$okf" = "False" ] && echo "$denied" | grep -qi "not a member"; then
-    ok "B1 PASS: removed member denied — \"$denied\""
-    break
-  fi
-  if [ "$okf" = "True" ]; then
-    fail "B1 FAIL: removed member STILL got a completion (this is the pre-patch auth bypass): $inv2"
-  fi
-  [ $(( $(date +%s) - start )) -ge 15 ] && fail "B1: unexpected response after removal: $inv2"
-  sleep 1.5
-done
+  start=$(date +%s)
+  while :; do
+    inv2=$(api "$N2" POST "/api/context-graph/$enc/model/invoke" '{"messages":[{"role":"user","content":"after-removal"}]}')
+    okf=$(echo "$inv2" | jget ok); denied=$(echo "$inv2" | jget denied)
+    if [ "$okf" = "False" ] && echo "$denied" | grep -qi "not a member"; then
+      ok "B1 PASS: removed member denied — \"$denied\""
+      break
+    fi
+    if [ "$okf" = "True" ]; then
+      fail "B1 FAIL: removed member STILL got a completion (this is the pre-patch auth bypass): $inv2"
+    fi
+    [ $(( $(date +%s) - start )) -ge 15 ] && fail "B1: unexpected response after removal: $inv2"
+    sleep 1.5
+  done
+fi
 
 hr "Done — shared-model e2e passed (mode: $MODE)"
 echo "CG id used: $CG_ID"
 [ "$TEST_B2" = "1" ] && note "B2 proved the invoke survived a ${B2_SLEEP}s upstream; on the unpatched build this returns 'curator node unreachable' at ~20s."
+[ "$REAL" = "1" ] && note "REAL run: a real model's completion flowed over the full member→curator P2P pipe. Member kept in CG $CG_ID."

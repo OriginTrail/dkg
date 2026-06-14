@@ -486,6 +486,9 @@ create_node_config() {
     local sm_fields="\"enabled\": true, \"provider\": \"${DEVNET_SHARED_MODEL_PROVIDER:-mock}\""
     [ -n "${DEVNET_SHARED_MODEL_MODEL:-}" ] && sm_fields="${sm_fields}, \"model\": \"${DEVNET_SHARED_MODEL_MODEL}\""
     [ -n "${DEVNET_SHARED_MODEL_BASEURL:-}" ] && sm_fields="${sm_fields}, \"baseUrl\": \"${DEVNET_SHARED_MODEL_BASEURL}\""
+    # Names an env var the daemon reads at boot for the provider API key (the key
+    # itself is NEVER written to config). Required for a real openai-compatible run.
+    [ -n "${DEVNET_SHARED_MODEL_API_KEY_ENV:-}" ] && sm_fields="${sm_fields}, \"apiKeyEnv\": \"${DEVNET_SHARED_MODEL_API_KEY_ENV}\""
     [ -n "${DEVNET_SHARED_MODEL_INVOKE_TIMEOUT_MS:-}" ] && sm_fields="${sm_fields}, \"invokeTimeoutMs\": ${DEVNET_SHARED_MODEL_INVOKE_TIMEOUT_MS}"
     [ -n "${DEVNET_SHARED_MODEL_PROVIDER_TIMEOUT_MS:-}" ] && sm_fields="${sm_fields}, \"providerTimeoutMs\": ${DEVNET_SHARED_MODEL_PROVIDER_TIMEOUT_MS}"
     shared_model_block="\"sharedModel\": { ${sm_fields} },"
