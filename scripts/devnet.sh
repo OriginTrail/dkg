@@ -1664,6 +1664,11 @@ cmd_restart_node() {
     rm -f "$pidf"
   fi
   cd "$REPO_ROOT" || exit 1
+  # Regenerate config.json so env-driven blocks (e.g. DEVNET_SHARED_MODEL) take
+  # effect on restart — start_node only reads the existing config and patches
+  # relay/bootstrapPeers, it does NOT re-run create_node_config. Persisted store
+  # state, identity and the auth.token file live elsewhere and are untouched.
+  create_node_config "$node_num"
   start_node "$node_num"
   log "Node $node_num restarted."
 }

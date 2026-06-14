@@ -116,6 +116,36 @@ wait_node_ready() {
   done
 }
 
+# After the curator (node1) is restarted, its API answers (wait_node_ready) well
+# before its libp2p stack has finished re-dialing the member and RE-ADVERTISING
+# the /dkg sync protocol. If the join handshake runs inside that window, the
+# curator's one-shot post-approval _meta sync lands while the member still sees
+# the curator as "does not support sync protocol", the targeted sync fails, and
+# the member's self-heal retry runs a broad catch-up that SKIPS the brand-new CG
+# ("unauthorized or unconfirmed") — so the grant/_meta never reaches the member
+# and every invoke is denied ("could not resolve curator peer"). Block until the
+# member actually sees the curator peer CONNECTED again, then add a short settle
+# margin for the identify-push that re-advertises the sync protocol.
+wait_curator_peered() {
+  local start; start=$(date +%s)
+  while :; do
+    local seen; seen=$(api "$N2" GET /api/agents | python3 -c "
+import sys,json
+try: d=json.load(sys.stdin)
+except Exception: print('no'); sys.exit(0)
+print('yes' if any(
+    a.get('peerId')=='$N1_PEER_ID' and a.get('connectionStatus')=='connected'
+    for a in d.get('agents',[])) else 'no')")
+    if [ "$seen" = "yes" ]; then
+      sleep 4   # settle margin for libp2p identify to re-advertise /dkg sync proto
+      ok "member re-peered with curator (post-restart P2P settled)"
+      return 0
+    fi
+    [ $(( $(date +%s) - start )) -ge 60 ] && fail "member did not re-peer with curator within 60s of restart"
+    sleep 2
+  done
+}
+
 start_slow_stub() {
   hr "B2 — starting slow openai-compatible stub on :$STUB_PORT (sleeps ${B2_SLEEP}s)"
   python3 - "$STUB_PORT" "$B2_SLEEP" >/dev/null 2>&1 <<'PY' &
@@ -156,6 +186,7 @@ ensure_curator_config() {
   fi
   "$SCRIPT_DIR/devnet.sh" restart-node 1 >/dev/null 2>&1 || fail "restart-node 1 failed"
   wait_node_ready "$N1"
+  wait_curator_peered
 }
 
 # Genuine sign-join -> request-join(pending) -> approve-join, then poll the
