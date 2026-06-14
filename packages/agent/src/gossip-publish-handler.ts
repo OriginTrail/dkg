@@ -41,6 +41,16 @@ export interface GossipPublishHandlerCallbacks {
   onPhase?: GossipPhaseCallback;
 }
 
+export interface GossipPublishHandlerOptions {
+  /**
+   * Agent-backed handlers require the invalidating subscription setter so
+   * gossip state changes keep listContextGraphs cache and durable subscription
+   * bookkeeping coherent. Standalone/legacy handlers can omit the callback and
+   * keep the historical in-memory map fallback.
+   */
+  requireContextGraphSubscriptionSetter?: boolean;
+}
+
 export class GossipPublishHandler {
   private readonly store: TripleStore;
   private readonly chain: ChainAdapter | undefined;
@@ -53,7 +63,11 @@ export class GossipPublishHandler {
     chain: ChainAdapter | undefined,
     subscribedContextGraphs: Map<string, ContextGraphSub>,
     callbacks: GossipPublishHandlerCallbacks,
+    options: GossipPublishHandlerOptions = {},
   ) {
+    if (options.requireContextGraphSubscriptionSetter && !callbacks.setContextGraphSubscription) {
+      throw new Error('GossipPublishHandler requires setContextGraphSubscription for agent-backed subscription state');
+    }
     this.store = store;
     this.chain = chain;
     this.subscribedContextGraphs = subscribedContextGraphs;

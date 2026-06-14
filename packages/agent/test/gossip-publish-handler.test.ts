@@ -209,6 +209,23 @@ describe('GossipPublishHandler', () => {
     });
   });
 
+  it('requires the invalidating subscription setter for agent-backed handlers', () => {
+    const store = new OxigraphStore();
+    const subscriptions = new Map<string, ContextGraphSub>();
+
+    expect(() => new GossipPublishHandler(
+      store,
+      undefined,
+      subscriptions,
+      {
+        contextGraphExists: async () => false,
+        getContextGraphOwner: async () => null,
+        subscribeToContextGraph: () => {},
+      },
+      { requireContextGraphSubscriptionSetter: true },
+    )).toThrow('requires setContextGraphSubscription');
+  });
+
   it('rejects forged ontology policy approvals from non-owners', async () => {
     const { store, handler } = createHandler(undefined, {
       getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:0x1111111111111111111111111111111111111111' : null,

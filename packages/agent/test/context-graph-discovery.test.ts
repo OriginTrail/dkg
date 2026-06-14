@@ -55,18 +55,17 @@ async function createTestAgent(opts?: {
   storeConfig?: TripleStoreConfig;
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
 }) {
-  const store = opts?.store ?? new OxigraphStore();
   const agent = await DKGAgent.create({
-      kaNumberAllocator: makeTestKaNumberAllocator(),
+    kaNumberAllocator: makeTestKaNumberAllocator(),
     name: 'ContextGraphTestAgent',
     listenPort: 0,
     listenHost: '127.0.0.1',
-    store,
-    storeConfig: opts?.storeConfig,
+    ...(opts?.store ? { store: opts.store } : {}),
+    ...(opts?.storeConfig ? { storeConfig: opts.storeConfig } : {}),
     chainAdapter: opts?.chainAdapter ?? createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     contextGraphSubscriptionStore: opts?.contextGraphSubscriptionStore,
   });
-  return { agent, store };
+  return { agent, store: opts?.store ?? agent.store };
 }
 
 describe('ensureContextGraphLocal', () => {
@@ -1033,10 +1032,10 @@ describe('listContextGraphs merge', () => {
       configurable: true,
     });
     try {
-      const store = sparqlHttpStoreBackedBy(new OxigraphStore());
-      const result = await createTestAgent({ store });
+      const result = await createTestAgent();
       agent = result.agent;
       await agent.start();
+      const store = result.store;
 
       const id = 'zero-cache-ttl-cg';
       const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
@@ -1187,19 +1186,19 @@ describe('listContextGraphs merge', () => {
     expect((agent as any).listContextGraphsCache.size).toBe(0);
   }, 15000);
 
-  it('allows list cache for injected large-literal wrappers around local stores', async () => {
+  it('bypasses list cache for injected local wrapper stores', async () => {
     const blobDir = await mkdtemp(join(tmpdir(), 'dkg-list-cache-'));
     try {
       const store = new SharedMemoryLiteralBlobStore(new OxigraphStore(), { blobDir, thresholdBytes: 1 });
       const result = await createTestAgent({ store });
       agent = result.agent;
       await agent.start();
-      expect((agent as any).listContextGraphsCacheAllowed()).toBe(true);
+      expect((agent as any).listContextGraphsCacheAllowed()).toBe(false);
 
       const id = 'wrapped-local-cache-cg';
       const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
       const uri = contextGraphDataGraphUri(id);
-      await agent.store.insert([
+      await store.insert([
         {
           subject: uri,
           predicate: DKG_ONTOLOGY.RDF_TYPE,
@@ -1220,7 +1219,19 @@ describe('listContextGraphs merge', () => {
         },
       ]);
 
+      const originalQuery = store.query.bind(store);
+      let definitionScans = 0;
+      vi.spyOn(store, 'query').mockImplementation(async (query: string, options?: any) => {
+        if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access')) {
+          definitionScans += 1;
+        }
+        return originalQuery(query, options);
+      });
+
       expect((await agent.listContextGraphs()).find(p => p.id === id)).toBeDefined();
+      expect((await agent.listContextGraphs()).find(p => p.id === id)).toBeDefined();
+      expect(definitionScans).toBe(2);
+      expect((agent as any).listContextGraphsCache.size).toBe(0);
     } finally {
       await rm(blobDir, { recursive: true, force: true });
     }
@@ -1315,10 +1326,10 @@ describe('listContextGraphs merge', () => {
     });
     const dateNow = vi.spyOn(Date, 'now').mockReturnValue(10_000);
     try {
-      const store = sparqlHttpStoreBackedBy(new OxigraphStore());
-      const result = await createTestAgent({ store });
+      const result = await createTestAgent();
       agent = result.agent;
       await agent.start();
+      const store = result.store;
 
       const id = 'monotonic-list-cache-cg';
       const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
@@ -1788,25 +1799,24 @@ describe('listContextGraphs merge', () => {
   }, 15000);
 
   it('single-flights same-scope list calls, caches results, and invalidates on subscription changes', async () => {
-    const store = new OxigraphStore();
-    const result = await createTestAgent({ store });
+    const result = await createTestAgent();
     agent = result.agent;
     await agent.start();
 
-    const originalQuery = store.query.bind(store);
+    const originalQuery = result.store.query.bind(result.store);
     let releaseDefinitionScan: (() => void) | undefined;
     const definitionScanGate = new Promise<void>((resolve) => {
       releaseDefinitionScan = resolve;
     });
     let definitionScans = 0;
-    vi.spyOn(store, 'query').mockImplementation(async (query: string) => {
+    vi.spyOn(result.store, 'query').mockImplementation(async (query: string, options?: any) => {
       if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access ?isSystem')) {
         definitionScans += 1;
         if (definitionScans === 1) {
           await definitionScanGate;
         }
       }
-      return originalQuery(query);
+      return originalQuery(query, options);
     });
 
     const first = agent.listContextGraphs({ callerAgentAddress: null });
@@ -1821,7 +1831,7 @@ describe('listContextGraphs merge', () => {
 
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const invalidatedUri = contextGraphDataGraphUri('cache-invalidated-cg');
-    await store.insert([
+    await result.store.insert([
       {
         subject: invalidatedUri,
         predicate: DKG_ONTOLOGY.RDF_TYPE,

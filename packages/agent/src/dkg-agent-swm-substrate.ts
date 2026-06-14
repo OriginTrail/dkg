@@ -815,6 +815,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           hasConfirmedMetaState: (id) => this.hasConfirmedMetaState(id),
           persistContextGraphSubscription: (id) => this.persistContextGraphSubscriptionState(id),
         },
+        { requireContextGraphSubscriptionSetter: true },
       );
     }
     return this.gossipPublishHandler;

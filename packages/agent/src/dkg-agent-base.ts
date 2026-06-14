@@ -95,7 +95,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { BlazegraphStore, GraphManager, OxigraphStore, OxigraphWorkerStore, PrivateContentStore, SparqlHttpStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -395,33 +395,6 @@ function isSparqlUpdateStatement(sparql: string): boolean {
     '',
   );
   return /^(?:WITH\s+<[^>]+>\s*)?(?:INSERT|DELETE|DROP|CLEAR|CREATE|LOAD|COPY|MOVE|ADD)\b/i.test(withoutPrologue);
-}
-
-function isTripleStoreLike(value: unknown): value is TripleStore {
-  return !!value
-    && typeof (value as TripleStore).query === 'function'
-    && typeof (value as TripleStore).insert === 'function'
-    && typeof (value as TripleStore).listGraphs === 'function';
-}
-
-function unwrapListCacheStore(store: TripleStore, seen = new Set<TripleStore>()): TripleStore {
-  if (seen.has(store)) return store;
-  seen.add(store);
-  const wrapped = store as { innerStore?: unknown; inner?: unknown };
-  const innerStore = wrapped.innerStore ?? wrapped.inner;
-  if (isTripleStoreLike(innerStore)) {
-    return unwrapListCacheStore(innerStore, seen);
-  }
-  return store;
-}
-
-function injectedStoreListCacheAllowed(store: TripleStore, storeConfig?: TripleStoreConfig): boolean {
-  const effectiveStore = unwrapListCacheStore(store);
-  if (effectiveStore instanceof BlazegraphStore || effectiveStore instanceof SparqlHttpStore) {
-    return !!storeConfig && isExternalBackend(storeConfig.backend) && storeConfig.options?.managedByDkg === true;
-  }
-  if (effectiveStore instanceof OxigraphStore || effectiveStore instanceof OxigraphWorkerStore) return true;
-  return false;
 }
 
 export function createListContextGraphsCacheInvalidatingStore(
@@ -900,7 +873,7 @@ export class DKGAgentBase {
 
   protected listContextGraphsCacheAllowed(): boolean {
     if (this.config.store) {
-      return injectedStoreListCacheAllowed(this.store, this.config.storeConfig);
+      return false;
     }
     const storeConfig = this.config.storeConfig;
     if (!storeConfig) return true;
