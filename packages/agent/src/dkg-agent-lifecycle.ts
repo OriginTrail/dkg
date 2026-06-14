@@ -398,8 +398,8 @@ import type { DKGAgent } from './dkg-agent.js';
 export class LifecycleSyncMethods extends DKGAgentBase {
   async start(this: DKGAgent): Promise<void> {
     if (this.started) return;
+    this.coreHostRecordingGeneration += 1;
     this.coreHostRecordingsClosed = false;
-    this.coreHostRecordingsAborted = false;
     const ctx = createOperationContext('connect');
     this.log.info(ctx, `Starting DKG node`);
 

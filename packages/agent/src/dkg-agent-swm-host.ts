@@ -2040,6 +2040,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
   async recordCoreHostedPublicCg(this: DKGAgent, cgId: string, swmGraphId?: string): Promise<void> {
     if (this.coreHostRecordingsClosed) return;
     if (!this.vmReconcileEnabled()) return;
+    const recordingGeneration = this.coreHostRecordingGeneration;
     let numeric: bigint;
     try {
       numeric = BigInt(cgId);
@@ -2053,7 +2054,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // the ACK-backed compatibility path because signing a StorageACK proves
     // this specific CG registration is live enough for host tracking.
     const policy = await this.readCoreHostedPublicCgAccessPolicy(numericStr);
-    if (this.coreHostRecordingsAborted) return;
+    if (this.coreHostRecordingGeneration !== recordingGeneration) return;
     if (policy !== 0) return; // curated / unknown / not-live — not the public VM-promote path
 
     // Pick the local CG id to key the host-only record under. Prefer an
@@ -2146,11 +2147,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
           `${DKGAgentBase.CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS}ms; continuing shutdown`,
         );
         this.coreHostRecordings.clear();
-        this.coreHostRecordingsAborted = true;
+        this.coreHostRecordingGeneration += 1;
         return;
       }
     }
-    if (this.coreHostRecordingsClosed) this.coreHostRecordingsAborted = true;
   }
 
   // ===== Phase B — chain-driven VM reconciliation (B.4 agent wiring) =========
@@ -2457,6 +2457,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     });
   }
 
+  vmReconcileSwmGenContainsSnapshot(this: DKGAgent, cachedSwmGen: string, currentSwmGen: string): boolean {
+    return cachedSwmGen === currentSwmGen || cachedSwmGen.split('|').includes(currentSwmGen);
+  }
+
   vmReconcileWorkspaceOperationPattern(this: DKGAgent, candidateMetaGraphs: string[]): string {
     const branches: string[] = [];
     for (const graph of candidateMetaGraphs) {
@@ -2515,7 +2519,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const currentNamespaceKey = this.vmReconcileSwmNamespaceKey(currentNamespaces.namespaces);
       const cachedNamespaceKey = this.vmReconcileSwmNamespaceKey(cached.candidateNamespaces);
       if (currentNamespaceKey !== cachedNamespaceKey) {
-        if (!currentNamespaces.complete) return true;
+        if (!currentNamespaces.complete) {
+          const currentSwmGen = await this.readVmReconcileSwmGen(currentNamespaces.namespaces);
+          if (currentSwmGen === null) {
+            this.deleteVmReconcileNegativeCacheEntry(cacheKey);
+            return false;
+          }
+          if (!this.vmReconcileSwmGenContainsSnapshot(cached.swmGen, currentSwmGen)) {
+            this.deleteVmReconcileNegativeCacheEntry(cacheKey);
+            return false;
+          }
+          return true;
+        }
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         return false;
       }

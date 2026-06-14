@@ -710,8 +710,8 @@ export class DKGAgentBase {
   protected readonly coreHostRecordings = new Set<Promise<void>>();
   /** Stop-time gate: once true, ACK hooks must not start new core-host writes. */
   protected coreHostRecordingsClosed = false;
-  /** Stop-time cancellation guard: late continuations must not persist after drain gives up. */
-  protected coreHostRecordingsAborted = false;
+  /** Monotonic guard: continuations from abandoned drain generations must not persist after restart. */
+  protected coreHostRecordingGeneration = 0;
   /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
   protected readonly vmReconcileNegativeCache = new Map<string, {
     localCgId: string;

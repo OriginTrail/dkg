@@ -316,7 +316,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(saved.find((r) => r.id === 'late-hosted')?.coreHosted).toBe(true);
   });
 
-  it('ignores late core-host recording completions after drain gives up', async () => {
+  it('ignores late core-host recording completions from abandoned drain generations after restart', async () => {
     const internals = await boot();
     let resolvePolicy!: (value: number) => void;
     internals.chain.getContextGraphAccessPolicy = vi.fn(() => new Promise<number>((resolve) => {
@@ -325,7 +325,10 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     (internals.chain as { isContextGraphActiveOnChain?: unknown }).isContextGraphActiveOnChain = undefined;
 
     const recording = internals.recordCoreHostedPublicCg('49', 'late-after-timeout');
-    (internals as any).coreHostRecordingsAborted = true;
+    (internals as any).coreHostRecordingGeneration += 1;
+    // Simulate a later restart opening new recordings; the abandoned
+    // continuation captured the previous generation and must still be ignored.
+    (internals as any).coreHostRecordingsClosed = false;
     resolvePolicy(0);
     await recording;
 
@@ -410,6 +413,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     const recordings = (internals as any).coreHostRecordings as Set<Promise<void>>;
     recordings.add(new Promise<void>(() => undefined));
     const warn = vi.spyOn((internals as any).log, 'warn');
+    const generationBeforeDrain = (internals as any).coreHostRecordingGeneration;
 
     vi.useFakeTimers();
     try {
@@ -418,6 +422,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
       await expect(drained).resolves.toBeUndefined();
 
       expect(recordings.size).toBe(0);
+      expect((internals as any).coreHostRecordingGeneration).toBe(generationBeforeDrain + 1);
       expect(warn).toHaveBeenCalledWith(
         expect.anything(),
         expect.stringContaining('timed out draining 1 core-host recording'),
@@ -1040,6 +1045,41 @@ describe('Phase D - VM reconcile damping', () => {
     expect(fetch).toHaveBeenCalledTimes(fetchesAfterFirstMiss);
     expect(expensiveScans).toBe(0);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
+  });
+
+  it('invalidates a negative cache entry when root SWM changes while subgraph enumeration fails', async () => {
+    const internals = await boot();
+    const onChainCgId = 65n;
+    const entity = 'urn:fact:root-arrival-after-subgraph-cache';
+    const value = 'Root SWM arrived after subgraph cache';
+    const root = computeFlatKCRootV10(
+      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
+      [],
+    );
+    registerUnmatchedKC(internals.chain, 9025n, onChainCgId, bytesToHex(root));
+
+    const graphManager = new GraphManager(internals.store);
+    await internals.store.insert([{
+      subject: 'urn:test:subgraph-marker:code',
+      predicate: 'http://schema.org/name',
+      object: '"marker"',
+      graph: graphManager.subGraphUri('65', 'code'),
+    }]);
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+
+    await expect(internals.reconcileChainOrdinal('65', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    const fetchesAfterFirstMiss = fetch.mock.calls.length;
+    expect(fetchesAfterFirstMiss).toBeGreaterThan(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
+
+    vi.spyOn(GraphManager.prototype, 'listSubGraphs').mockRejectedValue(new Error('transient subgraph listing failure'));
+    const seededRoot = await seedSwmSnapshot(internals.store, '65', entity, value);
+    expect(bytesToHex(seededRoot)).toBe(bytesToHex(root));
+
+    await expect(internals.reconcileChainOrdinal('65', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    expect(fetch).toHaveBeenCalledTimes(fetchesAfterFirstMiss);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
   it('does not reuse a negative cache entry across local CGs for the same KA root', async () => {
