@@ -265,7 +265,7 @@ describe('reconcileWarmCoreConnections', () => {
     expect([...res.failedUnpins]).toEqual(['flaky']);
   });
 
-  it('bounds the failed-unpin retry set by maxCores', async () => {
+  it('keeps all failed unpins out of the bounded warmed set', async () => {
     const { deps } = makeDeps({
       maxCores: 1,
       previouslyWarmed: new Set(['stale-a', 'stale-b']),
@@ -280,6 +280,6 @@ describe('reconcileWarmCoreConnections', () => {
     expect(res.unpinFailed).toBe(2);
     expect(res.pinned).toBe(0);
     expect([...res.warmed]).toEqual([]);
-    expect(res.failedUnpins.size).toBe(1);
+    expect([...res.failedUnpins].sort()).toEqual(['stale-a', 'stale-b']);
   });
 });

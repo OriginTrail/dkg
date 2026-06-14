@@ -2038,6 +2038,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * host-mode reconciler + LU-11 chunk-backfill path. Best-effort + idempotent.
    */
   async recordCoreHostedPublicCg(this: DKGAgent, cgId: string, swmGraphId?: string): Promise<void> {
+    if (this.coreHostRecordingsClosed) return;
     if (!this.vmReconcileEnabled()) return;
     let numeric: bigint;
     try {
@@ -2052,6 +2053,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // the ACK-backed compatibility path because signing a StorageACK proves
     // this specific CG registration is live enough for host tracking.
     const policy = await this.readCoreHostedPublicCgAccessPolicy(numericStr);
+    if (this.coreHostRecordingsClosed) return;
     if (policy !== 0) return; // curated / unknown / not-live — not the public VM-promote path
 
     // Pick the local CG id to key the host-only record under. Prefer an
@@ -2779,7 +2781,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
               maxPeers: 1,
               peerRotationKey: localCgId,
             });
-            maxAttempts = Math.max(maxAttempts, fetchResult.connectedPeers ?? 0, this.vmReconcileConnectedPeerCount());
+            maxAttempts = Math.max(
+              maxAttempts,
+              fetchResult.totalPeers ?? fetchResult.connectedPeers ?? 0,
+              this.vmReconcileConnectedPeerCount(),
+            );
             if ((fetchResult.peersTried ?? 0) === 0 && (fetchResult.syncCapablePeers ?? 0) === 0) {
               continue;
             }

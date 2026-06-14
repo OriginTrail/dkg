@@ -2984,7 +2984,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     options?: { includeSharedMemory?: boolean; maxPeers?: number; peerRotationKey?: string },
   ): Promise<{
+    /** Peers selected and processed after optional maxPeers windowing. */
     connectedPeers: number;
+    /** Ordered connected peers before optional maxPeers windowing. */
+    totalPeers: number;
     selectedPeers: number;
     syncCapablePeers: number;
     peersTried: number;
@@ -3050,7 +3053,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       `catchup peer order for "${contextGraphId}": preferred=${preferredPeerId ?? 'none'} cores=${coreCount} total=${orderedPeers.length} selected=${peers.length}`,
     );
     return this.runCatchupOverPeers(contextGraphId, includeSharedMemory, peers, {
-      connectedPeers: orderedPeers.length,
+      totalPeers: orderedPeers.length,
     });
   }
 
@@ -3140,9 +3143,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     includeSharedMemory: boolean,
     peers: Array<{ toString(): string }>,
-    stats?: { connectedPeers?: number },
+    stats?: { totalPeers?: number },
   ): Promise<{
+    /** Peers selected and processed by this catch-up run. */
     connectedPeers: number;
+    /** Ordered connected peers before optional caller windowing. */
+    totalPeers: number;
     selectedPeers: number;
     syncCapablePeers: number;
     peersTried: number;
@@ -3378,7 +3384,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     return {
-      connectedPeers: stats?.connectedPeers ?? peers.length,
+      connectedPeers: peers.length,
+      totalPeers: stats?.totalPeers ?? peers.length,
       selectedPeers: peers.length,
       syncCapablePeers,
       peersTried,

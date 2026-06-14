@@ -66,6 +66,7 @@ function stubNode(agent: DKGAgent): void {
 function emptyCatchupStats() {
   return {
     connectedPeers: 1,
+    totalPeers: 1,
     syncCapablePeers: 1,
     peersTried: 1,
     peersSucceeded: 1,
@@ -296,6 +297,23 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
 
     expect(getContextGraphAccessPolicy).toHaveBeenCalledWith(45n);
     expect(internals.subscribedContextGraphs.get('45')?.coreHosted).toBe(true);
+  });
+
+  it('ignores late core-host recording completions after recordings are closed', async () => {
+    const internals = await boot();
+    let resolvePolicy!: (value: number) => void;
+    internals.chain.getContextGraphAccessPolicy = vi.fn(() => new Promise<number>((resolve) => {
+      resolvePolicy = resolve;
+    }));
+    (internals.chain as { isContextGraphActiveOnChain?: unknown }).isContextGraphActiveOnChain = undefined;
+
+    const recording = internals.recordCoreHostedPublicCg('48', 'late-hosted');
+    (internals as any).coreHostRecordingsClosed = true;
+    resolvePolicy(0);
+    await recording;
+
+    expect(internals.subscribedContextGraphs.get('late-hosted')).toBeUndefined();
+    expect(saved.find((r) => r.id === 'late-hosted')).toBeUndefined();
   });
 
   it('falls back to ACK-backed policy read when the liveness probe rejects', async () => {
@@ -1189,7 +1207,8 @@ describe('Phase D - VM reconcile damping', () => {
       }
       return {
         ...emptyCatchupStats(),
-        connectedPeers: connectedPeers.length,
+        connectedPeers: 1,
+        totalPeers: connectedPeers.length,
         selectedPeers: 1,
       };
     });
@@ -1206,7 +1225,8 @@ describe('Phase D - VM reconcile damping', () => {
 
     const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue({
       ...emptyCatchupStats(),
-      connectedPeers: 33,
+      connectedPeers: 1,
+      totalPeers: 33,
       selectedPeers: 1,
     });
 

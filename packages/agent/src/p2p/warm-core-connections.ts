@@ -156,7 +156,7 @@ export interface WarmCoreReconcileResult {
   unpinFailed: number;
   /** Cores pinned this pass — feed back as `previouslyWarmed` next tick. */
   warmed: Set<string>;
-  /** Failed stale unpins to retry next tick, bounded by `maxCores`. */
+  /** Failed stale unpins to retry next tick, independent of the warm-set cap. */
   failedUnpins: Set<string>;
 }
 
@@ -227,7 +227,7 @@ export async function reconcileWarmCoreConnections(
           unpinned += 1;
         } else {
           unpinFailed += 1;
-          if (failedUnpins.size < deps.maxCores) failedUnpins.add(peerId);
+          failedUnpins.add(peerId);
         }
       }
     }
@@ -240,7 +240,7 @@ export async function reconcileWarmCoreConnections(
     ctx,
     `warm-core reconcile: candidates=${candidates.length} pinned=${warmed.size} dialed=${dialed} ` +
     `skippedGate=${skippedGate} unpinned=${unpinned} unpinFailed=${unpinFailed} ` +
-    `unpinRetry=${failedUnpins.size} (cap=${deps.maxCores})`,
+    `unpinRetry=${failedUnpins.size} warmCap=${deps.maxCores}`,
   );
 
   return {
