@@ -104,6 +104,26 @@ The endpoint maps the OpenAI request → `invokeContextGraphModel` (which routes
 P2P to the curator) → an OpenAI `chat.completion` response. Errors come back in
 OpenAI shape (`{ error: { message, type, code } }`). See `shared-model/openai.ts`.
 
+## Member-usage spectrum & roadmap
+
+How a member can *use* the curator's shared model, from simplest to most
+involved. This PR ships **#1 and #2**; **#3** follows once the feature is
+e2e-verified; **#4** is already covered by #2; **#5** is intentionally deferred
+and tracked here so it can be picked up later.
+
+| # | Member-usage model | Status | Notes |
+|---|---|---|---|
+| 1 | **Raw invoke** — `POST …/model/invoke` (native `{ messages }` shape) | ✅ Shipped | Lowest-level surface; what the P2P verb returns directly. |
+| 2 | **OpenAI-compatible endpoint** — `POST …/model/v1/chat/completions` | ✅ Shipped | Point any OpenAI client (hermes, Cursor, OpenAI SDK, node-UI chat) at the curator's model via `OPENAI_BASE_URL`. |
+| 3 | **Node-UI model picker** — select the curator's shared model in the UI | ⏳ Next | UI-only addition (curator model appears in the model dropdown for member CGs). Land after the cross-device e2e test passes. |
+| 4 | **Tool / skill** — member's agent calls the curator model as a tool | ✅ Via #2 | No separate surface needed: any agent that speaks OpenAI consumes #2 as its model/tool backend. Documented, not separately built. |
+| 5 | **Metered / paid** — usage accounting → payment | 🔜 Deferred | Needs a real settlement mechanism (x402 reserved-not-built; PCA is publish-only). Today's quota is node-local & in-memory only. **Pick up here next.** See "Known limitations". |
+
+> **#5 (metering/payment) is out of scope for this PR by design.** It requires a
+> new mechanism beyond the MVP's in-memory per-member quota — e.g. an x402
+> payment channel or a PCA allowance — and should be its own RFC + PR. This is
+> the explicit hand-off note so the work isn't lost.
+
 ## P2P protocol
 
 `/dkg/10.0.2/shared-model-invoke` — request/response over the reliable
@@ -132,6 +152,12 @@ temperature? }`, response `{ ok, denied?, content?, model? }`. JSON-over-bytes
 - No streaming; single completion per request. No tool-calls forwarded.
 - Prompt/response content is end-to-end over the substrate but not separately
   encrypted at rest by this feature.
+- **Cross-NAT first-sync of the grant** depends on the upstream curated-CG
+  `_meta` sync (the grant triples ride along with it). A NAT'd member that
+  idles out before approval — or whose post-approval sync stream resets over a
+  public relay — won't see the grant until it reconnects over a stable link;
+  there is no periodic re-pull. See "Cross-device test findings" for the
+  reliable procedure and two upstream `_meta`-sync issues this surfaced.
 
 ## Testing
 
@@ -162,3 +188,59 @@ curl -s -XPOST localhost:9202/api/context-graph/demo/model/invoke \
 ```
 
 Swap `provider: "mock"` for `"openai-compatible"` + a real key to use a live model.
+
+## Cross-device test findings (live testnet)
+
+Validated end-to-end against a live testnet curator (CG `demo`, private,
+sharing on, `mock` provider):
+
+- **Unit** — `shared-model` suite (mock provider, authorize gate, daily quota,
+  wire round-trip, OpenAI request/response mapping): 10/10.
+- **Build** — `pnpm --filter @origintrail-official/dkg-agent build` green;
+  `build:runtime` produces a `dist-ui` that carries the curator share toggle.
+- **Live single-node** — curator-local `invoke` returns a completion.
+- **Live two-node (stable link)** — a *separate* member node (its own peer id +
+  agent) joins `demo`, the curator approves, the authenticated post-approval
+  `_meta` sync lands the grant on the first poll, and
+  `POST …/model/invoke` returns
+  `{"ok":true,"content":"[shared-model:mock-model] …","model":"mock-model"}`.
+  This exercises the full P2P path (resolve curator peer →
+  `/dkg/10.0.2/shared-model-invoke` → membership gate → model → completion).
+
+### Two upstream `_meta`-sync issues this surfaced (NOT introduced by this feature)
+
+The grant is just two triples in the curated CG's `_meta`; it can only reach a
+member through the existing curated-CG sync. Cross-NAT first-sync exposed:
+
+1. **Bootstrap auth deadlock.** Building an *authenticated* private meta-sync
+   request needs the curator's peer id as `targetPeerId`, which a member
+   resolves from its **local `_meta`** — the very thing it is trying to fetch.
+   Only the `join-approved`-triggered `runImmediatePostApprovalSync` breaks the
+   cycle, because it is *handed* the curator peer id by the inbound
+   notification. Background- and `subscribe`-driven catchup cannot, so they
+   send an unauthenticated request that a private CG rejects (`phase=meta`,
+   `request-authorize.ts`).
+2. **`synced`-flag poison.** `POST /api/context-graph/:id/subscribe` marks the
+   CG `synced:true` even when `_meta` was denied; `buildSyncRequest`
+   (`dkg-agent-cg-resolve.ts`) then derives `needsAuth` from **`synced`**, not
+   `metaSynced`, so every later meta-sync — including the authenticated
+   post-approval one — is sent *unauthenticated* and permanently denied.
+   `subscribedContextGraphs` is in-memory, so it clears on restart.
+   *Suggested upstream fix:* gate `needsAuth` on `metaSynced` for private CGs,
+   and/or don't set `synced` until `_meta` actually lands.
+
+A third, related sharp edge: a re-fired `already-member` `join-approved` is
+dropped by the requester's trusted-sender guard after a restart (no local
+`_meta` curator triple, no in-memory pending-request record), so re-joining an
+*existing* membership does not re-trigger the sync — a **fresh, genuine**
+`pending` join does.
+
+### Reliable procedure for a NAT'd member (until the above are fixed upstream)
+
+1. Establish a **stable** connection to the curator (a direct address, or a
+   relay connection that DCUtR-upgrades to direct).
+2. Submit a **genuine** join request (a member that is not yet on the allowlist
+   → status `pending`, not `already-member`); have the curator approve it.
+3. **Do not** call `/subscribe` before the grant lands — that poisons the
+   `synced` flag and wedges the member out (restart to recover).
+4. Poll `GET …/model/grant` until `enabled:true`, then `invoke`.
