@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent, type ContextGraphSub, type ContextGraphSubscriptionStore } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
-import { OxigraphStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, SparqlHttpStore, type TripleStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
 import { SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphSharedMemoryUri, contextGraphMetaGraphUri, Logger } from '@origintrail-official/dkg-core';
 import { type ChainAdapter, type ContextGraphOnChain } from '@origintrail-official/dkg-chain';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
@@ -21,9 +21,30 @@ afterAll(async () => {
   await revertSnapshot(_fileSnapshot);
 });
 
+function sparqlHttpStoreBackedBy(backing: OxigraphStore): TripleStore {
+  const store = new SparqlHttpStore({ queryEndpoint: 'http://127.0.0.1:9999/sparql' }) as TripleStore;
+  const methods: Array<keyof TripleStore> = [
+    'insert',
+    'delete',
+    'deleteByPattern',
+    'query',
+    'hasGraph',
+    'createGraph',
+    'dropGraph',
+    'listGraphs',
+    'deleteBySubjectPrefix',
+    'countQuads',
+    'close',
+  ];
+  for (const method of methods) {
+    (store as any)[method] = (backing as any)[method].bind(backing);
+  }
+  return store;
+}
+
 async function createTestAgent(opts?: {
   chainAdapter?: ChainAdapter;
-  store?: OxigraphStore;
+  store?: TripleStore;
   storeConfig?: TripleStoreConfig;
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
 }) {
@@ -1036,13 +1057,13 @@ describe('listContextGraphs merge', () => {
     }
   }, 15000);
 
-  it('bypasses list cache for unmanaged external store configurations', async () => {
-    const store = new OxigraphStore();
+  it('bypasses list cache for injected unmanaged external stores', async () => {
+    const backing = new OxigraphStore();
+    const store = sparqlHttpStoreBackedBy(backing);
     const result = await createTestAgent({
       store,
       storeConfig: {
-        backend: 'sparql-http',
-        options: { queryEndpoint: 'http://127.0.0.1:9999/sparql' },
+        backend: 'oxigraph',
       },
     });
     agent = result.agent;

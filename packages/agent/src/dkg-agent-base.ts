@@ -95,7 +95,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { BlazegraphStore, GraphManager, OxigraphStore, OxigraphWorkerStore, PrivateContentStore, SparqlHttpStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -395,6 +395,14 @@ function isSparqlUpdateStatement(sparql: string): boolean {
     '',
   );
   return /^(?:WITH\s+<[^>]+>\s*)?(?:INSERT|DELETE|DROP|CLEAR|CREATE|LOAD|COPY|MOVE|ADD)\b/i.test(withoutPrologue);
+}
+
+function injectedStoreListCacheAllowed(store: TripleStore, storeConfig?: TripleStoreConfig): boolean {
+  if (store instanceof BlazegraphStore || store instanceof SparqlHttpStore) {
+    return !!storeConfig && isExternalBackend(storeConfig.backend) && storeConfig.options?.managedByDkg === true;
+  }
+  if (store instanceof OxigraphStore || store instanceof OxigraphWorkerStore) return true;
+  return false;
 }
 
 export class DKGAgentBase {
@@ -802,6 +810,9 @@ export class DKGAgentBase {
   }
 
   protected listContextGraphsCacheAllowed(): boolean {
+    if (this.config.store) {
+      return injectedStoreListCacheAllowed(this.store, this.config.storeConfig);
+    }
     const storeConfig = this.config.storeConfig;
     if (!storeConfig || !isExternalBackend(storeConfig.backend)) return true;
     return storeConfig.options?.managedByDkg === true;
