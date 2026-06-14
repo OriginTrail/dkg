@@ -261,6 +261,10 @@ type ListContextGraphsRow = {
   onChainId?: string;
   callerInvolved?: boolean;
 };
+type ListContextGraphsUncachedResult = {
+  rows: ListContextGraphsRow[];
+  cacheable: boolean;
+};
 import { multiaddr } from '@multiformats/multiaddr';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
@@ -1659,8 +1663,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
 
     const generation = this.listContextGraphsCacheGeneration;
     const task = (async () => {
-      const rows = await this.listContextGraphsUncached(checksum, scopedListing);
-      if (this.listContextGraphsCacheGeneration === generation) {
+      const result = await this.listContextGraphsUncached(checksum, scopedListing);
+      const rows = result.rows;
+      if (result.cacheable && this.listContextGraphsCacheGeneration === generation) {
         this.listContextGraphsCache.set(cacheKey, {
           expiresAt: Date.now() + DKGAgentBase.LIST_CONTEXT_GRAPHS_CACHE_TTL_MS,
           rows: cloneRows(rows) as Array<Record<string, unknown>>,
@@ -1684,30 +1689,26 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     }
   }
 
-  protected async listContextGraphsUncached(this: DKGAgent, checksum: string | null, scopedListing: boolean): Promise<ListContextGraphsRow[]> {
+  protected async listContextGraphsUncached(this: DKGAgent, checksum: string | null, scopedListing: boolean): Promise<ListContextGraphsUncachedResult> {
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
     const rowBudgetMs = Math.max(1, DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS);
-    const globalBudgetMs = Math.max(
+    const scanBudgetMs = Math.max(
       rowBudgetMs,
       Math.min(5_000, rowBudgetMs * Math.max(1, this.subscribedContextGraphs.size + 4)),
     );
-    const deadlineAt = Date.now() + globalBudgetMs;
+    let cacheable = true;
 
     const withBudget = async <T>(
       work: () => Promise<T>,
       label: string,
       budgetMs = rowBudgetMs,
     ): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> => {
-      const remaining = deadlineAt - Date.now();
-      if (remaining <= 0) {
-        return { ok: false, error: new Error(`${label} exceeded listContextGraphs deadline`) };
-      }
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(
           () => reject(new Error(`${label} exceeded listContextGraphs row budget`)),
-          Math.min(budgetMs, remaining),
+          budgetMs,
         );
         const unref = (timer as { unref?: () => void } | undefined)?.unref;
         if (typeof unref === 'function') unref.call(timer);
@@ -1724,7 +1725,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
 
     const optional = async <T>(work: () => Promise<T>, label: string): Promise<T | undefined> => {
       const result = await withBudget(work, label);
-      return result.ok ? result.value : undefined;
+      if (result.ok) return result.value;
+      cacheable = false;
+      return undefined;
     };
 
     const initialRead = await withBudget(
@@ -1756,13 +1759,16 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       }
     `),
       'ontology/agents definition scan',
-      globalBudgetMs,
+      scanBudgetMs,
     );
+    if (!initialRead.ok) cacheable = false;
     const result = initialRead.ok ? initialRead.value : undefined;
 
     const prefix = 'did:dkg:context-graph:';
     const seen = new Map<string, ListContextGraphsRow>();
     const policyKnownByUri = new Map<string, boolean>();
+    const hasExplicitPolicy = (value: unknown): value is string =>
+      typeof value === 'string' && stripLiteral(value).trim().length > 0;
     const rememberRow = (row: ListContextGraphsRow, policyKnown: boolean): void => {
       if (seen.has(row.uri)) return;
       seen.set(row.uri, row);
@@ -1808,7 +1814,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           // `markContextGraphSubscriptionState` at routes/context-graph.ts:1301).
           synced: sub?.synced ?? false,
           ...(onChainId ? { onChainId } : {}),
-        }, true);
+        }, hasExplicitPolicy(row['access']));
       }));
     }
 
@@ -1837,6 +1843,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       `),
         `meta declaration lookup for ${id}`,
       );
+      if (!metaRead.ok) cacheable = false;
       const metaResult = metaRead.ok ? metaRead.value : undefined;
 
       if (metaResult?.type === 'bindings' && metaResult.bindings.length > 0) {
@@ -1858,7 +1865,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           subscribed: sub.subscribed,
           synced: sub.synced,
           ...(onChainId ? { onChainId } : {}),
-        }, true);
+        }, hasExplicitPolicy(row['access']));
         continue;
       }
 
@@ -1913,15 +1920,16 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         subscribed: sub.subscribed,
         synced: sub.synced,
         ...(sub.onChainId ? { onChainId: sub.onChainId } : {}),
-      }, metaRead.ok);
+      }, false);
     }
 
     const graphManager = new GraphManager(this.store);
     const storedRead = await withBudget(
       () => graphManager.listContextGraphs(),
       'storage context graph scan',
-      globalBudgetMs,
+      scanBudgetMs,
     );
+    if (!storedRead.ok) cacheable = false;
     const storedContextGraphs = storedRead.ok ? storedRead.value : [];
     for (const id of storedContextGraphs) {
       const uri = `${prefix}${id}`;
@@ -1937,6 +1945,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         () => this.getExplicitAccessPolicy(id),
         `access policy lookup for storage row ${id}`,
       );
+      if (!policyRead.ok) cacheable = false;
       const accessPolicy = policyRead.ok && policyRead.value ? policyRead.value : undefined;
       rememberRow({
         id,
@@ -1965,7 +1974,11 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       );
       return c ? { ...r, curator: c } : r;
     }));
-    rows = curatorBackfills.map((entry, index) => entry.status === 'fulfilled' ? entry.value : rows[index]);
+    rows = curatorBackfills.map((entry, index) => {
+      if (entry.status === 'fulfilled') return entry.value;
+      cacheable = false;
+      return rows[index];
+    });
 
     // Privacy filter: curated/private CGs must never leak past the daemon to a non-member
     // caller. With no caller wallet (Bearer absent), drop all private rows; with a caller,
@@ -1975,30 +1988,40 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       const t = ap.trim().replace(/^["']|["']$/g, '').toLowerCase();
       return t === 'private';
     };
-    const policyKnown = (row: ListContextGraphsRow): boolean => policyKnownByUri.get(row.uri) !== false;
+    const policyKnown = (row: ListContextGraphsRow): boolean => policyKnownByUri.get(row.uri) === true;
 
     if (!checksum) {
       // Without a caller wallet we still leave `callerInvolved` unset so the UI can use the
       // curator-vs-identity fallback for OPEN graphs.
-      return rows.filter((r) => (!scopedListing || policyKnown(r)) && !isPrivateRow(r.accessPolicy));
+      return {
+        rows: rows.filter((r) => (!scopedListing || policyKnown(r)) && !isPrivateRow(r.accessPolicy)),
+        cacheable,
+      };
     }
 
-    const annotatedSettled = await Promise.allSettled(rows.map(async (r) => {
+    const annotatedSettled = await Promise.allSettled(rows.map(async (r): Promise<ListContextGraphsRow> => {
       const curatorMatch = this.curatorDidMatchesChecksumAgent(r.curator, checksum);
-      const allowlisted = await optional(
+      const allowlistRead = await withBudget(
         () => this.callerIsAllowlistedAgentParticipant(r.id, checksum),
         `allowlist lookup for ${r.id}`,
-      ) ?? false;
+      );
+      if (!allowlistRead.ok) cacheable = false;
+      const allowlisted = allowlistRead.ok ? allowlistRead.value : false;
       // `callerInvolved` must reflect ONLY the provided caller wallet.
       // Using local node identity (`creatorIsSelf`) leaks curated rows to unrelated callers.
       const involved = curatorMatch || allowlisted;
       return { ...r, callerInvolved: involved };
     }));
-    const annotated = annotatedSettled.map(
-      (entry, index) => entry.status === 'fulfilled' ? entry.value : { ...rows[index], callerInvolved: false },
-    );
+    const annotated = annotatedSettled.map((entry, index) => {
+      if (entry.status === 'fulfilled') return entry.value;
+      cacheable = false;
+      return { ...rows[index], callerInvolved: false };
+    });
 
-    return annotated.filter((r) => policyKnown(r) && (!isPrivateRow(r.accessPolicy) || r.callerInvolved === true));
+    return {
+      rows: annotated.filter((r) => policyKnown(r) && (!isPrivateRow(r.accessPolicy) || r.callerInvolved === true)),
+      cacheable,
+    };
   }
 
 }

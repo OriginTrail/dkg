@@ -597,6 +597,12 @@ describe('listContextGraphs merge', () => {
         graph: ontologyGraph,
       },
       {
+        subject: contextGraphDataGraphUri('healthy-enrichment-row'),
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: ontologyGraph,
+      },
+      {
         subject: contextGraphDataGraphUri('broken-enrichment-row'),
         predicate: DKG_ONTOLOGY.RDF_TYPE,
         object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
@@ -606,6 +612,12 @@ describe('listContextGraphs merge', () => {
         subject: contextGraphDataGraphUri('broken-enrichment-row'),
         predicate: DKG_ONTOLOGY.SCHEMA_NAME,
         object: '"Broken Row"',
+        graph: ontologyGraph,
+      },
+      {
+        subject: contextGraphDataGraphUri('broken-enrichment-row'),
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
         graph: ontologyGraph,
       },
     ]);
@@ -672,6 +684,29 @@ describe('listContextGraphs merge', () => {
     expect(noWallet.find(p => p.id === id)).toBeUndefined();
   }, 15000);
 
+  it('drops map-state tail rows from scoped output when no policy literal was read', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'policy-unknown-tail-cg';
+    (agent as any).subscribedContextGraphs.set(id, {
+      name: 'Policy Unknown Tail',
+      subscribed: true,
+      synced: false,
+      onChainId: '0xabc123',
+    } satisfies ContextGraphSub);
+
+    const scoped = await agent.listContextGraphs({ callerAgentAddress: ethers.Wallet.createRandom().address });
+    expect(scoped.find(p => p.id === id)).toBeUndefined();
+
+    const explicitNoWallet = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(explicitNoWallet.find(p => p.id === id)).toBeUndefined();
+
+    const ownerLocal = await agent.listContextGraphs();
+    expect(ownerLocal.find(p => p.id === id)).toBeDefined();
+  }, 15000);
+
   it('drops storage-only rows from scoped output when policy enrichment fails', async () => {
     const store = new OxigraphStore();
     const result = await createTestAgent({ store });
@@ -722,6 +757,41 @@ describe('listContextGraphs merge', () => {
 
     const ownerLocal = await agent.listContextGraphs();
     expect(ownerLocal.find(p => p.id === 'policy-absent-storage')).toBeDefined();
+  }, 15000);
+
+  it('does not cache private membership misses when allowlist lookup degrades', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'allowlist-unknown-cache-cg';
+    const member = ethers.Wallet.createRandom().address;
+    await agent.createContextGraph({
+      id,
+      name: 'Allowlist Unknown Cache',
+      accessPolicy: 1,
+      allowedAgents: [member],
+    });
+
+    const originalAllowlist = agent.callerIsAllowlistedAgentParticipant.bind(agent);
+    let targetCalls = 0;
+    vi.spyOn(agent, 'callerIsAllowlistedAgentParticipant').mockImplementation(async (contextGraphId, caller) => {
+      if (contextGraphId === id && ethers.getAddress(caller) === ethers.getAddress(member)) {
+        targetCalls += 1;
+        if (targetCalls === 1) throw new Error('simulated allowlist timeout');
+        return true;
+      }
+      return originalAllowlist(contextGraphId, caller);
+    });
+
+    const first = await agent.listContextGraphs({ callerAgentAddress: member });
+    expect(first.find(p => p.id === id)).toBeUndefined();
+
+    const second = await agent.listContextGraphs({ callerAgentAddress: member });
+    const entry = second.find(p => p.id === id);
+    expect(entry).toBeDefined();
+    expect(entry!.callerInvolved).toBe(true);
+    expect(targetCalls).toBe(2);
   }, 15000);
 
   it('invalidates wallet-scoped cached list results after agent revocation', async () => {
@@ -801,6 +871,22 @@ describe('listContextGraphs merge', () => {
     await agent.listContextGraphs({ callerAgentAddress: null });
     expect(definitionScans).toBe(1);
 
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const invalidatedUri = contextGraphDataGraphUri('cache-invalidated-cg');
+    await store.insert([
+      {
+        subject: invalidatedUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: invalidatedUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: ontologyGraph,
+      },
+    ]);
     (agent as any).setContextGraphSubscription('cache-invalidated-cg', {
       name: 'Cache Invalidated',
       subscribed: true,
