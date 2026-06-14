@@ -23,6 +23,9 @@ import { afterEach, describe, it, expect, vi } from 'vitest';
 import { MockChainAdapter, buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import {
+  DKG_ONTOLOGY,
+  SYSTEM_CONTEXT_GRAPHS,
+  contextGraphDataGraphUri,
   contextGraphWorkspaceGraphUri,
   contextGraphWorkspaceMetaGraphUri,
 } from '@origintrail-official/dkg-core';
@@ -31,6 +34,8 @@ import type { ReplicationEvent, ContextGraphSubscriptionRecord } from '../src/dk
 import { DKGAgent } from '../src/index.js';
 
 interface AgentInternals {
+  createContextGraph(opts: { id: string; name: string; description?: string; private?: boolean; callerAgentAddress?: string }): Promise<void>;
+  registerContextGraph(id: string, opts?: { callerAgentAddress?: string }): Promise<{ onChainId: string; txHash?: string }>;
   recordCoreHostedPublicCg(cgId: string, swmGraphId?: string): Promise<void>;
   reconcileChainOrdinal(localCgId: string, onChainCgId: bigint, ordinal: number, headBlock: number | undefined): Promise<{ status: string }>;
   syncContextGraphFromConnectedPeers(contextGraphId: string, options?: { includeSharedMemory?: boolean; maxPeers?: number; peerRotationKey?: string }): Promise<unknown>;
@@ -247,6 +252,19 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(persisted?.subscribed).toBe(false);
   });
 
+  it('records a public hosted CG for ACK-backed adapters without a liveness probe', async () => {
+    const internals = await boot();
+    internals.chain.getContextGraphAccessPolicy = async () => 0; // public
+    (internals.chain as { isContextGraphActiveOnChain?: unknown }).isContextGraphActiveOnChain = undefined;
+
+    await internals.recordCoreHostedPublicCg('43');
+
+    const sub = internals.subscribedContextGraphs.get('43');
+    expect(sub?.coreHosted).toBe(true);
+    expect(sub?.onChainId).toBe('43');
+    expect(saved.find((r) => r.id === '43')?.coreHosted).toBe(true);
+  });
+
   it('keys the host row under the cleartext swmGraphId (not the numeric id) on first ACK', async () => {
     // Regression: on the first ACK for a CG we only host, there is no local
     // mapping yet, so without the cleartext hint the row would land under the
@@ -347,6 +365,12 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     internals.subscribedContextGraphs.set('devnet-test', {
       subscribed: true, onChainId: '5', lastReconciledOrdinal: 3,
     });
+    const storageAddr = await internals.chain.getDKGKnowledgeAssetsAddress();
+    const ual = buildKnowledgeAssetUal(internals.chain.chainId, storageAddr, 777n);
+    const root = new Uint8Array(32);
+    root[31] = 3;
+    const recentKey = (internals as any).vmReconcileCacheKey('devnet-test', ual, root);
+    ((internals as any).recentReconciledUals as { add(key: string): void }).add(recentKey);
 
     // Same local id ("devnet-test"), but now hosting a DIFFERENT chain graph (9).
     await internals.recordCoreHostedPublicCg('9', 'devnet-test');
@@ -356,6 +380,44 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(sub!.coreHosted).toBe(true);
     expect(sub!.onChainId).toBe('9');              // rebound to the new graph
     expect(sub!.lastReconciledOrdinal).toBe(0);    // stale watermark dropped
+    expect(((internals as any).recentReconciledUals as { has(key: string): boolean }).has(recentKey)).toBe(false);
+  });
+
+  it('clears recent VM reconcile dedupe when stale inactive on-chain ids are re-registered', async () => {
+    const internals = await boot();
+    const localCgId = 'stale-register';
+    const ownerAddr = (internals.chain as unknown as { signerAddress: string }).signerAddress;
+
+    await internals.createContextGraph({
+      id: localCgId,
+      name: 'Stale Register',
+      private: true,
+      callerAgentAddress: ownerAddr,
+    });
+    await internals.store.insert([{
+      subject: `did:dkg:context-graph:${localCgId}`,
+      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+      object: '"5"',
+      graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+    }]);
+    internals.subscribedContextGraphs.set(localCgId, {
+      subscribed: true, onChainId: '5', lastReconciledOrdinal: 4,
+    });
+    internals.chain.isContextGraphActiveOnChain = async (id) => id !== 5n;
+
+    const storageAddr = await internals.chain.getDKGKnowledgeAssetsAddress();
+    const ual = buildKnowledgeAssetUal(internals.chain.chainId, storageAddr, 778n);
+    const root = new Uint8Array(32);
+    root[31] = 4;
+    const recentKey = (internals as any).vmReconcileCacheKey(localCgId, ual, root);
+    const recent = (internals as any).recentReconciledUals as { add(key: string): void; has(key: string): boolean };
+    recent.add(recentKey);
+
+    await expect(internals.registerContextGraph(localCgId, { callerAgentAddress: ownerAddr }))
+      .resolves.toMatchObject({ onChainId: expect.any(String) });
+
+    expect(internals.subscribedContextGraphs.get(localCgId)?.onChainId).not.toBe('5');
+    expect(recent.has(recentKey)).toBe(false);
   });
 });
 
@@ -1082,6 +1144,7 @@ describe('Phase D - VM reconcile damping', () => {
     const fetchCooldown = (internals as any).vmReconcileFetchCooldownAt as Map<string, number>;
     const peerCursor = (internals as any).vmReconcileCatchupPeerCursor as Map<string, number>;
     const peerOrder = (internals as any).vmReconcileCatchupPeerOrder as Map<string, { orderedPeers: string[]; nextPeerId?: string }>;
+    const recent = (internals as any).recentReconciledUals as { add(key: string): void; has(key: string): boolean };
     const now = Date.now();
 
     for (let i = 0; i < DKGAgent.VM_RECONCILE_CACHE_MAX_ENTRIES + 2; i += 1) {
@@ -1122,11 +1185,13 @@ describe('Phase D - VM reconcile damping', () => {
     fetchCooldown.set('cleanup-cg', now);
     peerCursor.set('cleanup-cg', 7);
     peerOrder.set('cleanup-cg', { orderedPeers: ['peer-a'], nextPeerId: 'peer-a' });
+    recent.add('cleanup-cg\0did:dkg:mock:31337/0x000000000000000000000000000000000000c10a/1#01');
     (agent as any).unsubscribeFromContextGraph('cleanup-cg');
     expect(negativeCache.has('cleanup-cache')).toBe(false);
     expect(fetchCooldown.has('cleanup-cg')).toBe(false);
     expect(peerCursor.has('cleanup-cg')).toBe(false);
     expect(peerOrder.has('cleanup-cg')).toBe(false);
+    expect(recent.has('cleanup-cg\0did:dkg:mock:31337/0x000000000000000000000000000000000000c10a/1#01')).toBe(false);
 
     internals.subscribedContextGraphs.set('hosted-cg', { subscribed: true, coreHosted: true });
     negativeCache.set('hosted-cache', {
@@ -1141,11 +1206,13 @@ describe('Phase D - VM reconcile damping', () => {
     fetchCooldown.set('hosted-cg', now);
     peerCursor.set('hosted-cg', 3);
     peerOrder.set('hosted-cg', { orderedPeers: ['peer-b'], nextPeerId: 'peer-b' });
+    recent.add('hosted-cg\0did:dkg:mock:31337/0x000000000000000000000000000000000000c10a/2#02');
     (agent as any).unsubscribeFromContextGraph('hosted-cg');
     expect(negativeCache.has('hosted-cache')).toBe(true);
     expect(fetchCooldown.has('hosted-cg')).toBe(true);
     expect(peerCursor.has('hosted-cg')).toBe(true);
     expect(peerOrder.has('hosted-cg')).toBe(true);
+    expect(recent.has('hosted-cg\0did:dkg:mock:31337/0x000000000000000000000000000000000000c10a/2#02')).toBe(true);
   });
 });
 

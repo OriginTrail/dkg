@@ -3814,6 +3814,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       } catch {
         /* best-effort teardown */
       }
+      this.clearRecentVmReconcileStateForContextGraph(id);
       this.subscribedContextGraphs.delete(id);
     }
 

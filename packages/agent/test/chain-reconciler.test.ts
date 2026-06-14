@@ -201,4 +201,17 @@ describe('RecentUalSet', () => {
     expect(set.has('b')).toBe(true);
     expect(set.has('c')).toBe(true);
   });
+
+  it('deletes all entries for one local CG prefix without touching others', () => {
+    const set = new RecentUalSet(10);
+    set.add('cg-a\0ual#01');
+    set.add('cg-a\0ual#02');
+    set.add('cg-b\0ual#01');
+
+    set.deleteByPrefix('cg-a\0');
+
+    expect(set.has('cg-a\0ual#01')).toBe(false);
+    expect(set.has('cg-a\0ual#02')).toBe(false);
+    expect(set.has('cg-b\0ual#01')).toBe(true);
+  });
 });

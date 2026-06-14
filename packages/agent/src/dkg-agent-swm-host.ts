@@ -1941,11 +1941,26 @@ export class SwmHostModeMethods extends DKGAgentBase {
       (sub.lastReconciledOrdinal ?? 0) > 0 || this.reconcileCursors.has(localCgId);
     sub.lastReconciledOrdinal = 0;
     this.reconcileCursors.delete(localCgId);
+    this.clearRecentVmReconcileStateForContextGraph(localCgId);
     if (hadProgress) {
       this.log.info(
         createOperationContext('system'),
         `VM reconcile: on-chain id for "${localCgId}" changed ${prev}->${newOnChainId}; reset reconcile watermark + cursor to 0`,
       );
+    }
+  }
+
+  async readCoreHostedPublicCgAccessPolicy(this: DKGAgent, onChainId: string): Promise<0 | 1 | null> {
+    if (typeof this.chain.isContextGraphActiveOnChain === 'function') {
+      return this.readLiveOnChainAccessPolicy(onChainId);
+    }
+    const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
+    if (typeof getAccessPolicy !== 'function') return null;
+    try {
+      const policy = await getAccessPolicy.call(this.chain, BigInt(onChainId));
+      return policy === 0 || policy === 1 ? policy : null;
+    } catch {
+      return null;
     }
   }
 
@@ -1972,10 +1987,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (numeric <= 0n) return;
 
     const numericStr = numeric.toString();
-    // Existence-gated read. `getContextGraphAccessPolicy` can return Solidity's
-    // default public(0) for unknown ids, so prove the slot is live before
-    // trusting the policy; fail closed for curated, unknown, or not-live CGs.
-    const policy = await this.readLiveOnChainAccessPolicy(numericStr);
+    // Existence-gated read when the adapter exposes liveness; otherwise use
+    // the ACK-backed compatibility path because signing a StorageACK proves
+    // this specific CG registration is live enough for host tracking.
+    const policy = await this.readCoreHostedPublicCgAccessPolicy(numericStr);
     if (policy !== 0) return; // curated / unknown / not-live — not the public VM-promote path
 
     // Pick the local CG id to key the host-only record under. Prefer an
@@ -2497,6 +2512,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmReconcileFetchCooldownAt.delete(localCgId);
     this.vmReconcileCatchupPeerCursor.delete(localCgId);
     this.vmReconcileCatchupPeerOrder.delete(localCgId);
+    this.clearRecentVmReconcileStateForContextGraph(localCgId);
+  }
+
+  clearRecentVmReconcileStateForContextGraph(this: DKGAgent, localCgId: string): void {
+    this.recentReconciledUals.deleteByPrefix(`${localCgId}\0`);
   }
 
   vmReconcileCacheKey(this: DKGAgent, localCgId: string, ual: string, merkleRoot: Uint8Array): string {

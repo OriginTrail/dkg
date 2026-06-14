@@ -1134,6 +1134,7 @@ export class ContextGraphMethods extends DKGAgentBase {
       });
       const sub = this.subscribedContextGraphs.get(id);
       if (sub) {
+        this.clearRecentVmReconcileStateForContextGraph(id);
         this.setContextGraphSubscription(id, { ...sub, onChainId: undefined });
       }
     }
