@@ -607,6 +607,39 @@ describe('Phase D - VM reconcile damping', () => {
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
+  it('retries finalization after shared-memory fetch progress even when peer success is zero', async () => {
+    const internals = await boot();
+    const onChainCgId = 61n;
+    const entity = 'urn:fact:shared-progress';
+    const value = 'Shared memory fetched despite durable failure';
+    const root = computeFlatKCRootV10(
+      [{ subject: entity, predicate: 'http://schema.org/name', object: `"${value}"`, graph: '' }],
+      [],
+    );
+    registerUnmatchedKC(internals.chain, 9022n, onChainCgId, bytesToHex(root));
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockImplementation(async () => {
+      await seedSwmSnapshot(internals.store, '61', entity, value);
+      return {
+        ...emptyCatchupStats(),
+        peersSucceeded: 0,
+        sharedMemorySynced: 2,
+        diagnostics: {
+          ...emptyCatchupStats().diagnostics,
+          sharedMemory: {
+            ...emptyCatchupStats().diagnostics.sharedMemory,
+            insertedDataTriples: 1,
+            insertedMetaTriples: 1,
+          },
+        },
+      };
+    });
+
+    await expect(internals.reconcileChainOrdinal('61', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+  });
+
   it('retries an incomplete SWM operation when data changes without triple-count changes', async () => {
     const internals = await boot();
     const onChainCgId = 52n;

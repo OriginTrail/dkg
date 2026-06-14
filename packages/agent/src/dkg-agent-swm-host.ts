@@ -2438,6 +2438,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return true;
   }
 
+  vmReconcileActiveFetchHadUsableResponse(this: DKGAgent, result: {
+    peersSucceeded?: number;
+    sharedMemorySynced?: number;
+    diagnostics?: { sharedMemory?: Partial<SharedMemorySyncDiagnostics> };
+  }): boolean {
+    if ((result.peersSucceeded ?? 0) > 0) return true;
+    if ((result.sharedMemorySynced ?? 0) > 0) return true;
+    const shared = result.diagnostics?.sharedMemory;
+    if (!shared) return false;
+    return (shared.insertedDataTriples ?? 0) > 0
+      || (shared.insertedMetaTriples ?? 0) > 0
+      || (shared.checkpointAdvances ?? 0) > 0
+      || ((shared.completedPhases ?? 0) > 0 && (shared.resumedPhases ?? 0) > 0);
+  }
+
   pruneVmReconcileState(this: DKGAgent, now = Date.now()): void {
     while (this.vmReconcileNegativeCache.size > DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES) {
       const oldestKey = this.vmReconcileNegativeCache.keys().next().value;
@@ -2620,7 +2635,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
             if ((fetchResult.peersTried ?? 0) === 0 && (fetchResult.syncCapablePeers ?? 0) === 0) {
               continue;
             }
-            if ((fetchResult.peersSucceeded ?? 0) === 0) {
+            if (!this.vmReconcileActiveFetchHadUsableResponse(fetchResult)) {
               continue;
             }
             activeFetchHadUsableResponse = true;
