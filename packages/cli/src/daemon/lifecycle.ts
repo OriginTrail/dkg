@@ -582,6 +582,18 @@ export function mergePreferredRelays(input: {
   };
 }
 
+export function shouldUseIncrementalChainDiscoveryScan(input: {
+  run: number;
+  watermarkSeeded: boolean;
+  fullScanEvery: number;
+}): boolean {
+  return (
+    input.watermarkSeeded &&
+    input.run !== 0 &&
+    input.run % input.fullScanEvery !== 0
+  );
+}
+
 export interface PromoteWorkerDaemonLifecycle {
   waitForStartup(): Promise<void>;
   stop(reason?: string | null): Promise<void>;
@@ -1732,13 +1744,19 @@ export async function runDaemonInner(
   const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
   const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
   let chainScanRuns = 0;
+  let chainScanWatermarkSeeded = false;
   const runChainDiscoveryScan = async () => {
     try {
       const run = chainScanRuns++;
-      const incremental = run !== 0 && run % CHAIN_FULL_SCAN_EVERY !== 0;
+      const incremental = shouldUseIncrementalChainDiscoveryScan({
+        run,
+        watermarkSeeded: chainScanWatermarkSeeded,
+        fullScanEvery: CHAIN_FULL_SCAN_EVERY,
+      });
       const found = await agent.discoverContextGraphsFromChain(
         incremental ? { incremental: true } : { seedIncrementalWatermark: true },
       );
+      if (!incremental) chainScanWatermarkSeeded = true;
       if (found > 0)
         log(`Chain scan: discovered ${found} new context graph(s)`);
     } catch {
