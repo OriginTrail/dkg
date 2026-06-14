@@ -8,6 +8,7 @@ export {
   type AskResult,
   type TripleStoreConfig,
   type TripleStoreBackend,
+  type TripleStoreQueryOptions,
   type LargeLiteralStorageConfig,
   registerTripleStoreAdapter,
   createTripleStore,
@@ -22,6 +23,13 @@ export {
   SharedMemoryLiteralBlobStore,
   type SharedMemoryLiteralBlobStoreOptions,
 } from './shared-memory-literal-blob-store.js';
+export {
+  DEFAULT_GRAPH_SET_REVALIDATE_MS,
+  GraphSetIndexStore,
+  type GraphSetIndexStoreOptions,
+  type GraphSetMutationEvent,
+  type GraphSetMutationSource,
+} from './graph-set-index-store.js';
 
 export { OxigraphStore } from './adapters/oxigraph.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';

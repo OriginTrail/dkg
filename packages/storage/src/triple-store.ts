@@ -9,6 +9,10 @@ import {
   DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES,
   SharedMemoryLiteralBlobStore,
 } from './shared-memory-literal-blob-store.js';
+import {
+  GraphSetIndexStore,
+  type GraphSetIndexStoreOptions,
+} from './graph-set-index-store.js';
 
 export interface Quad {
   subject: string;
@@ -44,6 +48,13 @@ export interface QueryOptions {
   signal?: AbortSignal;
 }
 
+export interface TripleStoreQueryOptions {
+  /** Human-readable caller tag used by adapters for diagnostics/telemetry. */
+  source?: string;
+  /** Optional caller cancellation signal. Adapters that cannot cancel may ignore it. */
+  signal?: AbortSignal;
+}
+
 export interface TripleStore {
   /**
    * Whether `query(..., { signal })` can reject while a query is already in
@@ -55,12 +66,13 @@ export interface TripleStore {
   insert(quads: Quad[]): Promise<void>;
   delete(quads: Quad[]): Promise<void>;
   deleteByPattern(pattern: Partial<Quad>): Promise<number>;
-  query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
+  query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult>;
 
   hasGraph(graphUri: string): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;
   dropGraph(graphUri: string): Promise<void>;
   listGraphs(options?: QueryOptions): Promise<string[]>;
+  listGraphsByPrefix?(prefix: string): Promise<string[]>;
 
   deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number>;
 
@@ -159,6 +171,7 @@ export interface TripleStoreConfig {
   backend: TripleStoreBackend;
   options?: Record<string, unknown>;
   largeLiteralStorage?: LargeLiteralStorageConfig;
+  graphSetIndex?: boolean | GraphSetIndexStoreOptions;
 }
 
 type AdapterFactory = (
@@ -186,8 +199,34 @@ export async function createTripleStore(
   }
   const store = await factory(config.options);
   const largeLiteralStorage = resolveLargeLiteralStorageOptions(config);
-  if (!largeLiteralStorage) return store;
-  return new SharedMemoryLiteralBlobStore(store, largeLiteralStorage);
+  const withLargeLiteralStorage = largeLiteralStorage
+    ? new SharedMemoryLiteralBlobStore(store, largeLiteralStorage)
+    : store;
+  return wrapGraphSetIndex(withLargeLiteralStorage, config);
+}
+
+function wrapGraphSetIndex(
+  store: TripleStore,
+  config: TripleStoreConfig,
+): TripleStore {
+  const graphSetIndex = config.graphSetIndex;
+  if (graphSetIndex === false) return store;
+  if (typeof graphSetIndex === 'object' && graphSetIndex.enabled === false) return store;
+  if (!shouldEnableGraphSetIndex(config)) return store;
+  const options = typeof graphSetIndex === 'object' ? graphSetIndex : undefined;
+  return new GraphSetIndexStore(store, options);
+}
+
+function shouldEnableGraphSetIndex(config: TripleStoreConfig): boolean {
+  if (config.graphSetIndex === true || typeof config.graphSetIndex === 'object') return true;
+  if (isDefaultLocalGraphSetIndexBackend(config.backend)) return true;
+  return config.options?.managedByDkg === true;
+}
+
+function isDefaultLocalGraphSetIndexBackend(backend: TripleStoreBackend): boolean {
+  return backend === 'oxigraph'
+    || backend === 'oxigraph-persistent'
+    || backend === 'oxigraph-worker';
 }
 
 function resolveLargeLiteralStorageOptions(

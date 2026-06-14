@@ -106,6 +106,12 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     return this.inner.listGraphs(options);
   }
 
+  async listGraphsByPrefix(prefix: string): Promise<string[]> {
+    return this.inner.listGraphsByPrefix
+      ? this.inner.listGraphsByPrefix(prefix)
+      : (await this.inner.listGraphs()).filter((graph) => graph.startsWith(prefix));
+  }
+
   async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> {
     return this.inner.deleteBySubjectPrefix(graphUri, prefix);
   }
