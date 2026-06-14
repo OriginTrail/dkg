@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent, type ContextGraphSub, type ContextGraphSubscriptionStore } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
-import { OxigraphStore, SparqlHttpStore, type TripleStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, SparqlHttpStore, registerTripleStoreAdapter, type TripleStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
 import { SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphSharedMemoryUri, contextGraphMetaGraphUri, Logger } from '@origintrail-official/dkg-core';
 import { type ChainAdapter, type ContextGraphOnChain } from '@origintrail-official/dkg-chain';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
@@ -23,6 +23,10 @@ afterAll(async () => {
 
 function sparqlHttpStoreBackedBy(backing: OxigraphStore): TripleStore {
   const store = new SparqlHttpStore({ queryEndpoint: 'http://127.0.0.1:9999/sparql' }) as TripleStore;
+  Object.defineProperty(store, 'queryCancellation', {
+    value: 'interruptible',
+    configurable: true,
+  });
   const methods: Array<keyof TripleStore> = [
     'insert',
     'delete',
@@ -510,7 +514,7 @@ describe('listContextGraphs merge', () => {
   }, 15000);
 
   it('keeps phantom-candidate subscriptions when local content probe times out', async () => {
-    const result = await createTestAgent();
+    const result = await createTestAgent({ store: sparqlHttpStoreBackedBy(new OxigraphStore()) });
     agent = result.agent;
     await agent.start();
 
@@ -624,7 +628,7 @@ describe('listContextGraphs merge', () => {
   }, 15000);
 
   it('does not reject the whole list when one row enrichment fails', async () => {
-    const store = new OxigraphStore();
+    const store = sparqlHttpStoreBackedBy(new OxigraphStore());
     const result = await createTestAgent({ store });
     agent = result.agent;
     await agent.start();
@@ -680,7 +684,7 @@ describe('listContextGraphs merge', () => {
   }, 15000);
 
   it('drops subscribed rows from scoped output when policy enrichment times out', async () => {
-    const store = new OxigraphStore();
+    const store = sparqlHttpStoreBackedBy(new OxigraphStore());
     const result = await createTestAgent({ store });
     agent = result.agent;
     await agent.start();
@@ -855,7 +859,7 @@ describe('listContextGraphs merge', () => {
   }, 15000);
 
   it('drops storage-only rows from scoped output when policy enrichment times out', async () => {
-    const store = new OxigraphStore();
+    const store = sparqlHttpStoreBackedBy(new OxigraphStore());
     const result = await createTestAgent({ store });
     agent = result.agent;
     await agent.start();
@@ -956,7 +960,7 @@ describe('listContextGraphs merge', () => {
   }, 15000);
 
   it('omits callerInvolved instead of reporting false when public allowlist lookup times out', async () => {
-    const store = new OxigraphStore();
+    const store = sparqlHttpStoreBackedBy(new OxigraphStore());
     const result = await createTestAgent({ store });
     agent = result.agent;
     await agent.start();
@@ -1007,7 +1011,7 @@ describe('listContextGraphs merge', () => {
       configurable: true,
     });
     try {
-      const store = new OxigraphStore();
+      const store = sparqlHttpStoreBackedBy(new OxigraphStore());
       const result = await createTestAgent({ store });
       agent = result.agent;
       await agent.start();
@@ -1108,6 +1112,59 @@ describe('listContextGraphs merge', () => {
     expect((agent as any).listContextGraphsCache.size).toBe(0);
   }, 15000);
 
+  it('bypasses list cache for unknown configured store backends', async () => {
+    const backend = 'test-remote-list-cache-backend';
+    registerTripleStoreAdapter(backend, async () => new OxigraphStore());
+    const created = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'ContextGraphTestAgent',
+      listenPort: 0,
+      listenHost: '127.0.0.1',
+      storeConfig: { backend },
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+    });
+    agent = created;
+    await agent.start();
+
+    const id = 'unknown-backend-no-cache-cg';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const uri = contextGraphDataGraphUri(id);
+    await agent.store.insert([
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Unknown Backend No Cache"',
+        graph: ontologyGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: ontologyGraph,
+      },
+    ]);
+
+    const originalQuery = agent.store.query.bind(agent.store);
+    let definitionScans = 0;
+    vi.spyOn(agent.store, 'query').mockImplementation(async (query: string, options?: any) => {
+      if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access')) {
+        definitionScans += 1;
+      }
+      return originalQuery(query, options);
+    });
+
+    expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === id)).toBeDefined();
+    expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === id)).toBeDefined();
+    expect(definitionScans).toBe(2);
+    expect((agent as any).listContextGraphsCache.size).toBe(0);
+  }, 15000);
+
   it('invalidates cached list rows after delete and drop graph writes', async () => {
     const result = await createTestAgent();
     agent = result.agent;
@@ -1196,7 +1253,7 @@ describe('listContextGraphs merge', () => {
     });
     const dateNow = vi.spyOn(Date, 'now').mockReturnValue(10_000);
     try {
-      const store = new OxigraphStore();
+      const store = sparqlHttpStoreBackedBy(new OxigraphStore());
       const result = await createTestAgent({ store });
       agent = result.agent;
       await agent.start();
@@ -1311,27 +1368,27 @@ describe('listContextGraphs merge', () => {
       configurable: true,
     });
     try {
-      const store = new OxigraphStore();
+      const store = sparqlHttpStoreBackedBy(new OxigraphStore());
       const result = await createTestAgent({ store });
       agent = result.agent;
       await agent.start();
 
       const originalQuery = store.query.bind(store);
       let sawAbort = false;
+      let scanSettled: Promise<void> | undefined;
       vi.spyOn(store, 'query').mockImplementation(async (query: string, options?: any) => {
         if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access ?isSystem')) {
-          return new Promise<any>((_resolve, reject) => {
-            options?.signal?.addEventListener('abort', () => {
-              sawAbort = true;
-              reject(options.signal.reason);
-            }, { once: true });
-          });
+          scanSettled = new Promise(resolve => setTimeout(resolve, 20));
+          await scanSettled;
+          sawAbort = options?.signal?.aborted === true;
+          return { type: 'bindings', bindings: [] } as any;
         }
         return originalQuery(query, options);
       });
 
       await expect(agent.listContextGraphs({ callerAgentAddress: null }))
         .rejects.toThrow('ontology/agents definition scan');
+      await scanSettled;
       expect(sawAbort).toBe(true);
     } finally {
       Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
@@ -1345,8 +1402,58 @@ describe('listContextGraphs merge', () => {
     }
   }, 15000);
 
+  it('does not downgrade budgeted reads for pre-dispatch stores', async () => {
+    const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
+    const originalScanBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    try {
+      const store = new OxigraphStore();
+      const result = await createTestAgent({ store });
+      agent = result.agent;
+      await agent.start();
+
+      const id = 'pre-dispatch-budget-cg';
+      const uri = contextGraphDataGraphUri(id);
+      const originalQuery = store.query.bind(store);
+      vi.spyOn(store, 'query').mockImplementation(async (query: string, options?: any) => {
+        if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access ?isSystem')) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+          expect(options?.signal?.aborted).toBe(false);
+          return {
+            type: 'bindings',
+            bindings: [{
+              ctxGraph: uri,
+              name: '"Pre Dispatch Budget"',
+              access: '"public"',
+            }],
+          } as any;
+        }
+        return originalQuery(query, options);
+      });
+
+      const rows = await agent.listContextGraphs({ callerAgentAddress: null });
+      expect(rows.find(p => p.id === id)).toBeDefined();
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+        value: originalRowBudget,
+        configurable: true,
+      });
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS', {
+        value: originalScanBudget,
+        configurable: true,
+      });
+    }
+  }, 15000);
+
   it('does not cache private membership misses when allowlist lookup degrades', async () => {
-    const result = await createTestAgent();
+    const result = await createTestAgent({ store: sparqlHttpStoreBackedBy(new OxigraphStore()) });
     agent = result.agent;
     await agent.start();
 

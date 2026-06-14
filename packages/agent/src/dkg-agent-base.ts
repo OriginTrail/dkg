@@ -814,8 +814,9 @@ export class DKGAgentBase {
       return injectedStoreListCacheAllowed(this.store, this.config.storeConfig);
     }
     const storeConfig = this.config.storeConfig;
-    if (!storeConfig || !isExternalBackend(storeConfig.backend)) return true;
-    return storeConfig.options?.managedByDkg === true;
+    if (!storeConfig) return true;
+    if (isExternalBackend(storeConfig.backend)) return storeConfig.options?.managedByDkg === true;
+    return isLocalOxigraphConfig(storeConfig);
   }
 
   protected invalidateListContextGraphsCache(): void {

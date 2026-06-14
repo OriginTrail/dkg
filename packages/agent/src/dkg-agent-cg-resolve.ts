@@ -1715,6 +1715,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const rowBudgetMs = Math.max(1, DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS);
     const scanBudgetMs = Math.max(rowBudgetMs, DKGAgentBase.LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS);
     const authBudgetMs = Math.max(rowBudgetMs, DKGAgentBase.LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS);
+    const budgetedReadsInterruptible = this.store.queryCancellation === 'interruptible';
     let cacheable = true;
 
     const withBudget = async <T>(
@@ -1722,6 +1723,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       label: string,
       budgetMs = rowBudgetMs,
     ): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> => {
+      if (!budgetedReadsInterruptible) {
+        const controller = new AbortController();
+        return { ok: true, value: await work(controller.signal) };
+      }
       let timer: ReturnType<typeof setTimeout> | undefined;
       const controller = new AbortController();
       const timeoutError = new ListContextGraphsBudgetExceeded(label);
@@ -1733,8 +1738,6 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           },
           budgetMs,
         );
-        const unref = (timer as { unref?: () => void } | undefined)?.unref;
-        if (typeof unref === 'function') unref.call(timer);
       });
       try {
         const value = await Promise.race([
