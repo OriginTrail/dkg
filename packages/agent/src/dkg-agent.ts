@@ -1045,6 +1045,7 @@ export class DKGAgent extends DKGAgentBase {
 
     let onChainContextGraphs;
     let partialChainScan = false;
+    let partialChainScanError: unknown;
     try {
       const scanOptions = options.incremental
         ? { incremental: true }
@@ -1068,6 +1069,7 @@ export class DKGAgent extends DKGAgentBase {
       if (options.throwOnChainScanFailure && !partialError) throw err;
       if (!partialError) return 0;
       partialChainScan = true;
+      partialChainScanError = err;
       onChainContextGraphs = err.partialResults;
     }
     if (!partialChainScan && this.chainContextGraphScanFailure) {
@@ -1142,6 +1144,7 @@ export class DKGAgent extends DKGAgentBase {
     if (discovered > 0) {
       this.log.info(ctx, `Discovered ${discovered} new context graph(s) from chain`);
     }
+    if (options.throwOnChainScanFailure && partialChainScanError) throw partialChainScanError;
     return discovered;
   }
 

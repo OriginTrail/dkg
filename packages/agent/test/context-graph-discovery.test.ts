@@ -809,10 +809,10 @@ describe('discoverContextGraphsFromChain', () => {
       agent = result.agent;
       await agent.start();
 
-      expect(await agent.discoverContextGraphsFromChain({
+      await expect(agent.discoverContextGraphsFromChain({
         incremental: true,
         throwOnChainScanFailure: true,
-      })).toBe(1);
+      })).rejects.toThrow('partial ContextGraphNameRegistry scan');
       expect(await agent.discoverContextGraphsFromChain({ incremental: true })).toBe(0);
     } finally {
       Logger.setSink(null);
