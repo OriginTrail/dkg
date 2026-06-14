@@ -265,6 +265,19 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(saved.find((r) => r.id === '43')?.coreHosted).toBe(true);
   });
 
+  it('bounds ACK-backed access-policy reads when the adapter has no liveness probe', async () => {
+    const internals = await boot();
+    internals.chain.getContextGraphAccessPolicy = async () => new Promise<number>(() => undefined);
+    (internals.chain as { isContextGraphActiveOnChain?: unknown }).isContextGraphActiveOnChain = undefined;
+
+    const startedAt = Date.now();
+    await internals.recordCoreHostedPublicCg('44');
+
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(internals.subscribedContextGraphs.get('44')).toBeUndefined();
+    expect(saved.find((r) => r.id === '44')).toBeUndefined();
+  });
+
   it('keys the host row under the cleartext swmGraphId (not the numeric id) on first ACK', async () => {
     // Regression: on the first ACK for a CG we only host, there is no local
     // mapping yet, so without the cleartext hint the row would land under the
@@ -383,7 +396,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(((internals as any).recentReconciledUals as { has(key: string): boolean }).has(recentKey)).toBe(false);
   });
 
-  it('clears recent VM reconcile dedupe when stale inactive on-chain ids are re-registered', async () => {
+  it('clears VM reconcile state when stale inactive on-chain ids are re-registered', async () => {
     const internals = await boot();
     const localCgId = 'stale-register';
     const ownerAddr = (internals.chain as unknown as { signerAddress: string }).signerAddress;
@@ -411,13 +424,40 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     root[31] = 4;
     const recentKey = (internals as any).vmReconcileCacheKey(localCgId, ual, root);
     const recent = (internals as any).recentReconciledUals as { add(key: string): void; has(key: string): boolean };
+    const negativeCache = (internals as any).vmReconcileNegativeCache as Map<string, unknown>;
+    const negativeKeysByCg = (internals as any).vmReconcileNegativeCacheKeysByCg as Map<string, Set<string>>;
+    const fetchCooldown = (internals as any).vmReconcileFetchCooldownAt as Map<string, number>;
+    const peerCursor = (internals as any).vmReconcileCatchupPeerCursor as Map<string, number>;
+    const peerOrder = (internals as any).vmReconcileCatchupPeerOrder as Map<string, unknown>;
+    const reconcileCursors = (internals as any).reconcileCursors as Map<string, unknown>;
     recent.add(recentKey);
+    negativeCache.set(recentKey, {
+      localCgId,
+      failures: 1,
+      nextRetryAt: Date.now() + 60_000,
+      swmGen: 'empty:0',
+      candidateNamespaces: [],
+      peerTopologyKey: '',
+    });
+    negativeKeysByCg.set(localCgId, new Set([recentKey]));
+    fetchCooldown.set(localCgId, Date.now());
+    peerCursor.set(localCgId, 2);
+    peerOrder.set(localCgId, { orderedPeers: ['peer-a'], nextPeerId: 'peer-a' });
+    reconcileCursors.set(localCgId, { pending: new Set([0]) });
 
     await expect(internals.registerContextGraph(localCgId, { callerAgentAddress: ownerAddr }))
       .resolves.toMatchObject({ onChainId: expect.any(String) });
 
-    expect(internals.subscribedContextGraphs.get(localCgId)?.onChainId).not.toBe('5');
+    const sub = internals.subscribedContextGraphs.get(localCgId);
+    expect(sub?.onChainId).not.toBe('5');
+    expect(sub?.lastReconciledOrdinal).toBe(0);
     expect(recent.has(recentKey)).toBe(false);
+    expect(negativeCache.has(recentKey)).toBe(false);
+    expect(negativeKeysByCg.has(localCgId)).toBe(false);
+    expect(fetchCooldown.has(localCgId)).toBe(false);
+    expect(peerCursor.has(localCgId)).toBe(false);
+    expect(peerOrder.has(localCgId)).toBe(false);
+    expect(reconcileCursors.has(localCgId)).toBe(false);
   });
 });
 

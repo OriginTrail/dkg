@@ -1940,8 +1940,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const hadProgress =
       (sub.lastReconciledOrdinal ?? 0) > 0 || this.reconcileCursors.has(localCgId);
     sub.lastReconciledOrdinal = 0;
-    this.reconcileCursors.delete(localCgId);
-    this.clearRecentVmReconcileStateForContextGraph(localCgId);
+    this.forceClearVmReconcileStateForContextGraph(localCgId);
     if (hadProgress) {
       this.log.info(
         createOperationContext('system'),
@@ -1956,8 +1955,26 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
     if (typeof getAccessPolicy !== 'function') return null;
+    const numericId = BigInt(onChainId);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<typeof TIMEOUT_SENTINEL>((resolve) => {
+      timer = setTimeout(() => resolve(TIMEOUT_SENTINEL), CHAIN_POLICY_READ_TIMEOUT_MS);
+      timer.unref?.();
+    });
     try {
-      const policy = await getAccessPolicy.call(this.chain, BigInt(onChainId));
+      const policy = await Promise.race([
+        Promise.resolve(getAccessPolicy.call(this.chain, numericId))
+          .finally(() => { if (timer) clearTimeout(timer); }),
+        timeout,
+      ]);
+      if (policy === TIMEOUT_SENTINEL) {
+        this.log.warn(
+          createOperationContext('system'),
+          `recordCoreHostedPublicCg(${onChainId}): getContextGraphAccessPolicy timed out after ` +
+          `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — treating hosted CG access policy as UNKNOWN`,
+        );
+        return null;
+      }
       return policy === 0 || policy === 1 ? policy : null;
     } catch {
       return null;
@@ -2503,12 +2520,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
   clearVmReconcileStateForContextGraph(this: DKGAgent, localCgId: string): void {
     const sub = this.subscribedContextGraphs.get(localCgId);
     if (sub?.subscribed || sub?.coreHosted) return;
+    this.forceClearVmReconcileStateForContextGraph(localCgId);
+  }
+
+  forceClearVmReconcileStateForContextGraph(this: DKGAgent, localCgId: string): void {
     const negativeCacheKeys = this.vmReconcileNegativeCacheKeysByCg.get(localCgId);
     if (negativeCacheKeys) {
       for (const cacheKey of Array.from(negativeCacheKeys)) {
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
       }
     }
+    this.reconcileCursors.delete(localCgId);
     this.vmReconcileFetchCooldownAt.delete(localCgId);
     this.vmReconcileCatchupPeerCursor.delete(localCgId);
     this.vmReconcileCatchupPeerOrder.delete(localCgId);
