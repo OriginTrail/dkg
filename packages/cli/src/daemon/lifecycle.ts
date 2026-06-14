@@ -1737,7 +1737,7 @@ export async function runDaemonInner(
       const run = chainScanRuns++;
       const incremental = run !== 0 && run % CHAIN_FULL_SCAN_EVERY !== 0;
       const found = await agent.discoverContextGraphsFromChain(
-        incremental ? { incremental: true } : undefined,
+        incremental ? { incremental: true } : { seedIncrementalWatermark: true },
       );
       if (found > 0)
         log(`Chain scan: discovered ${found} new context graph(s)`);

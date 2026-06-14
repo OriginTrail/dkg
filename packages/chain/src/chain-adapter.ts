@@ -297,6 +297,12 @@ export interface ContextGraphChainScanOptions {
    * list-all semantics for SDK callers.
    */
   incremental?: boolean;
+  /**
+   * When true on a successful full scan, adapters may seed the in-memory
+   * incremental watermark for later daemon background scans. This is opt-in so
+   * public SDK list-all calls remain side-effect free by default.
+   */
+  seedIncrementalWatermark?: boolean;
 }
 
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----

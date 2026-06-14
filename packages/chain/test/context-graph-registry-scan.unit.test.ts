@@ -171,6 +171,28 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect((adapter as any).contextGraphRegistryScanWatermarks.get(REGISTRY.toLowerCase())).toBeUndefined();
   });
 
+  it('can seed the incremental watermark from an explicit successful full scan', async () => {
+    const registry = makeRegistry();
+    const { adapter, provider } = makeAdapter(registry, 4_000);
+    registry.queryFilter.mockResolvedValue([]);
+
+    await adapter.listContextGraphsFromChain(undefined, { seedIncrementalWatermark: true });
+
+    expect((adapter as any).contextGraphRegistryScanWatermarks.get(REGISTRY.toLowerCase())).toBe(4_001);
+
+    provider.getCode = vi.fn(async () => {
+      throw new Error('eth_getCode should not be called after watermark seeding');
+    });
+    registry.queryFilter.mockClear();
+
+    await adapter.listContextGraphsFromChain(undefined, { incremental: true });
+
+    expect(provider.getCode).not.toHaveBeenCalled();
+    expect(registry.queryFilter.mock.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+      [4_001 - CG_REGISTRY_REORG_BUFFER_BLOCKS, 4_000],
+    ]);
+  });
+
   it('rethrows later page failures for public list-all scans', async () => {
     const registry = makeRegistry();
     const { adapter, provider } = makeAdapter(registry, 2_100);

@@ -447,6 +447,7 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
 
 export interface DiscoverContextGraphsFromChainOptions {
   incremental?: boolean;
+  seedIncrementalWatermark?: boolean;
 }
 
 /**
@@ -1040,7 +1041,11 @@ export class DKGAgent extends DKGAgentBase {
     let onChainContextGraphs;
     let partialChainScan = false;
     try {
-      const scanOptions = options.incremental ? { incremental: true } : undefined;
+      const scanOptions = options.incremental
+        ? { incremental: true }
+        : options.seedIncrementalWatermark
+          ? { seedIncrementalWatermark: true }
+          : undefined;
       onChainContextGraphs = await this.chain.listContextGraphsFromChain(undefined, scanOptions);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

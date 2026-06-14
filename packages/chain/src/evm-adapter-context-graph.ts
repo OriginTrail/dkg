@@ -110,6 +110,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const eventFilter = registry.filters.NameClaimed();
     const registryAddress = (await registry.getAddress()).toLowerCase();
     const incremental = options?.incremental === true && fromBlock === undefined;
+    const seedIncrementalWatermark =
+      options?.seedIncrementalWatermark === true && !incremental && fromBlock === undefined;
     const watermark = incremental
       ? this.contextGraphRegistryScanWatermarks.get(registryAddress)
       : undefined;
@@ -129,7 +131,12 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         ? Math.max(0, watermark - CG_REGISTRY_REORG_BUFFER_BLOCKS)
         : deployBlock
     );
-    if (start > head) return [];
+    if (start > head) {
+      if (seedIncrementalWatermark) {
+        this.contextGraphRegistryScanWatermarks.set(registryAddress, head + 1);
+      }
+      return [];
+    }
 
     const pageSize = this.cgRegistryScanPageSize;
     const pages = Math.ceil((head - start + 1) / pageSize);
@@ -201,6 +208,10 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         }
         throw err;
       }
+    }
+
+    if (seedIncrementalWatermark) {
+      this.contextGraphRegistryScanWatermarks.set(registryAddress, head + 1);
     }
 
     return results;
