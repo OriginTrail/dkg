@@ -1,8 +1,11 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent, type ContextGraphSub, type ContextGraphSubscriptionStore } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
-import { OxigraphStore, SparqlHttpStore, registerTripleStoreAdapter, type TripleStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, SharedMemoryLiteralBlobStore, SparqlHttpStore, registerTripleStoreAdapter, type TripleStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
 import { SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphSharedMemoryUri, contextGraphMetaGraphUri, Logger } from '@origintrail-official/dkg-core';
 import { type ChainAdapter, type ContextGraphOnChain } from '@origintrail-official/dkg-chain';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
@@ -858,6 +861,25 @@ describe('listContextGraphs merge', () => {
     expect(ownerLocal.find(p => p.id === id)).toBeDefined();
   }, 15000);
 
+  it('skips legacy privacy fallback for unscoped owner list rows', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'unscoped-no-legacy-fallback';
+    (agent as any).setContextGraphSubscription(id, {
+      name: 'Unscoped No Legacy Fallback',
+      subscribed: true,
+      synced: false,
+      onChainId: '0xabc123',
+    } satisfies ContextGraphSub, { persist: false });
+
+    const legacyPrivacy = vi.spyOn(agent, 'isPrivateContextGraph');
+    const rows = await agent.listContextGraphs();
+    expect(rows.find(p => p.id === id)).toBeDefined();
+    expect(legacyPrivacy.mock.calls.filter(([contextGraphId]) => contextGraphId === id)).toHaveLength(0);
+  }, 15000);
+
   it('drops storage-only rows from scoped output when policy enrichment times out', async () => {
     const store = sparqlHttpStoreBackedBy(new OxigraphStore());
     const result = await createTestAgent({ store });
@@ -1163,6 +1185,45 @@ describe('listContextGraphs merge', () => {
     expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === id)).toBeDefined();
     expect(definitionScans).toBe(2);
     expect((agent as any).listContextGraphsCache.size).toBe(0);
+  }, 15000);
+
+  it('allows list cache for injected large-literal wrappers around local stores', async () => {
+    const blobDir = await mkdtemp(join(tmpdir(), 'dkg-list-cache-'));
+    try {
+      const store = new SharedMemoryLiteralBlobStore(new OxigraphStore(), { blobDir, thresholdBytes: 1 });
+      const result = await createTestAgent({ store });
+      agent = result.agent;
+      await agent.start();
+      expect((agent as any).listContextGraphsCacheAllowed()).toBe(true);
+
+      const id = 'wrapped-local-cache-cg';
+      const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      const uri = contextGraphDataGraphUri(id);
+      await agent.store.insert([
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.RDF_TYPE,
+          object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+          graph: ontologyGraph,
+        },
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+          object: '"Wrapped Local Cache"',
+          graph: ontologyGraph,
+        },
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+          object: '"public"',
+          graph: ontologyGraph,
+        },
+      ]);
+
+      expect((await agent.listContextGraphs()).find(p => p.id === id)).toBeDefined();
+    } finally {
+      await rm(blobDir, { recursive: true, force: true });
+    }
   }, 15000);
 
   it('invalidates cached list rows after delete and drop graph writes', async () => {

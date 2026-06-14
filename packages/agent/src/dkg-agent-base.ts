@@ -397,11 +397,30 @@ function isSparqlUpdateStatement(sparql: string): boolean {
   return /^(?:WITH\s+<[^>]+>\s*)?(?:INSERT|DELETE|DROP|CLEAR|CREATE|LOAD|COPY|MOVE|ADD)\b/i.test(withoutPrologue);
 }
 
+function isTripleStoreLike(value: unknown): value is TripleStore {
+  return !!value
+    && typeof (value as TripleStore).query === 'function'
+    && typeof (value as TripleStore).insert === 'function'
+    && typeof (value as TripleStore).listGraphs === 'function';
+}
+
+function unwrapListCacheStore(store: TripleStore, seen = new Set<TripleStore>()): TripleStore {
+  if (seen.has(store)) return store;
+  seen.add(store);
+  const wrapped = store as { innerStore?: unknown; inner?: unknown };
+  const innerStore = wrapped.innerStore ?? wrapped.inner;
+  if (isTripleStoreLike(innerStore)) {
+    return unwrapListCacheStore(innerStore, seen);
+  }
+  return store;
+}
+
 function injectedStoreListCacheAllowed(store: TripleStore, storeConfig?: TripleStoreConfig): boolean {
-  if (store instanceof BlazegraphStore || store instanceof SparqlHttpStore) {
+  const effectiveStore = unwrapListCacheStore(store);
+  if (effectiveStore instanceof BlazegraphStore || effectiveStore instanceof SparqlHttpStore) {
     return !!storeConfig && isExternalBackend(storeConfig.backend) && storeConfig.options?.managedByDkg === true;
   }
-  if (store instanceof OxigraphStore || store instanceof OxigraphWorkerStore) return true;
+  if (effectiveStore instanceof OxigraphStore || effectiveStore instanceof OxigraphWorkerStore) return true;
   return false;
 }
 

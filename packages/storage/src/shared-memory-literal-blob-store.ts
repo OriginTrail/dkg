@@ -33,6 +33,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     return this.inner.queryCancellation;
   }
 
+  readonly innerStore: TripleStore;
   private readonly inner: TripleStore;
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
@@ -46,6 +47,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
       throw new Error('SharedMemoryLiteralBlobStore requires a non-negative integer thresholdBytes');
     }
     this.inner = inner;
+    this.innerStore = inner;
     this.blobDir = options.blobDir;
     this.thresholdBytes = options.thresholdBytes;
   }

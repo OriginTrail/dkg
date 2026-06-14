@@ -2052,6 +2052,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const resolveRowPrivacy = async (row: ListContextGraphsRow): Promise<ListContextGraphsPrivacy> => {
       const explicitPrivacy = privacyByUri.get(row.uri) ?? 'unknown';
       if (explicitPrivacy !== 'unknown') return explicitPrivacy;
+      if (!scopedListing) return 'unknown';
       const legacyRead = await withBudget(
         (signal) => this.isPrivateContextGraph(row.id, { signal }),
         `legacy privacy lookup for ${row.id}`,
