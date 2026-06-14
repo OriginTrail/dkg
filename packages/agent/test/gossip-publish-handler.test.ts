@@ -6,6 +6,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { GossipPublishHandler } from '../src/gossip-publish-handler.js';
+import type { ContextGraphSub } from '../src/index.js';
 
 const CONTEXT_GRAPH = 'test-gossip-handler';
 
@@ -34,10 +35,10 @@ function createHandler(store?: OxigraphStore, callbacks?: Partial<{
   contextGraphExists: (id: string) => Promise<boolean>;
   getContextGraphOwner: (id: string) => Promise<string | null>;
   subscribeToContextGraph: (id: string) => void;
-  setContextGraphSubscription: (id: string, next: any) => void;
+  setContextGraphSubscription: (id: string, next: ContextGraphSub) => void;
 }>) {
   const s = store ?? new OxigraphStore();
-  const subscriptions = new Map<string, any>();
+  const subscriptions = new Map<string, ContextGraphSub>();
   return {
     store: s,
     handler: new GossipPublishHandler(

@@ -15,6 +15,7 @@ import {
   type KAMetadata,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
+import type { ContextGraphSub } from './dkg-agent-types.js';
 
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
 
@@ -22,7 +23,7 @@ export interface GossipPublishHandlerCallbacks {
   contextGraphExists: (id: string) => Promise<boolean>;
   getContextGraphOwner: (id: string) => Promise<string | null>;
   subscribeToContextGraph: (id: string, options?: { trackSyncScope?: boolean; persist?: boolean }) => void;
-  setContextGraphSubscription: (id: string, next: any, options?: { persist?: boolean }) => void;
+  setContextGraphSubscription: (id: string, next: ContextGraphSub, options?: { persist?: boolean }) => void;
   /**
    * Same semantics as `DKGAgent#hasConfirmedMetaState`: returns true when the
    * local store already has a trustworthy public announcement for this CG
@@ -43,14 +44,14 @@ export interface GossipPublishHandlerCallbacks {
 export class GossipPublishHandler {
   private readonly store: TripleStore;
   private readonly chain: ChainAdapter | undefined;
-  private readonly subscribedContextGraphs: Map<string, any>;
+  private readonly subscribedContextGraphs: Map<string, ContextGraphSub>;
   private readonly callbacks: GossipPublishHandlerCallbacks;
   private readonly log = new Logger('GossipPublishHandler');
 
   constructor(
     store: TripleStore,
     chain: ChainAdapter | undefined,
-    subscribedContextGraphs: Map<string, any>,
+    subscribedContextGraphs: Map<string, ContextGraphSub>,
     callbacks: GossipPublishHandlerCallbacks,
   ) {
     this.store = store;

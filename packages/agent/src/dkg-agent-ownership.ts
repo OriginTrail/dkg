@@ -779,7 +779,12 @@ export class OwnershipMethods extends DKGAgentBase {
    * Whether the wallet is on the CG allowlist (participant / allowed-agent) or tied to a
    * listed on-chain identity ID. Does not consult curator — compose with curator checks separately.
    */
-  public async callerIsAllowlistedAgentParticipant(this: DKGAgent, contextGraphId: string, checksumAddress: string): Promise<boolean> {
+  public async callerIsAllowlistedAgentParticipant(
+    this: DKGAgent,
+    contextGraphId: string,
+    checksumAddress: string,
+    options: { onChainLookup?: () => void } = {},
+  ): Promise<boolean> {
     const participants = await this.getPrivateContextGraphParticipants(contextGraphId);
     if (!participants?.length) return false;
 
@@ -791,6 +796,7 @@ export class OwnershipMethods extends DKGAgentBase {
       }
       if (/^\d+$/.test(p) && this.chain.isOperationalWalletRegistered) {
         try {
+          options.onChainLookup?.();
           if (await this.chain.isOperationalWalletRegistered(BigInt(p), checksumAddress)) return true;
         } catch {
           // ignore chain read errors — treat as non-participant

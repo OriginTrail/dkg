@@ -2052,10 +2052,14 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       if (curatorMatch) {
         return { row: { ...r, callerInvolved: true }, privacy };
       }
+      let usedLiveChainAuth = false;
       const allowlistRead = await withBudget(
-        () => this.callerIsAllowlistedAgentParticipant(r.id, checksum),
+        () => this.callerIsAllowlistedAgentParticipant(r.id, checksum, {
+          onChainLookup: () => { usedLiveChainAuth = true; },
+        }),
         `allowlist lookup for ${r.id}`,
       );
+      if (usedLiveChainAuth) cacheable = false;
       if (!allowlistRead.ok) cacheable = false;
       // `callerInvolved` must reflect ONLY the provided caller wallet.
       // Using local node identity (`creatorIsSelf`) leaks curated rows to unrelated callers.

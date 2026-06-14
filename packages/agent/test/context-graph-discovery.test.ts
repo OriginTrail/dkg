@@ -995,6 +995,47 @@ describe('listContextGraphs merge', () => {
     expect(targetCalls).toBe(2);
   }, 15000);
 
+  it('does not cache wallet-scoped visibility when membership comes from live chain identity state', async () => {
+    const chainAdapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const result = await createTestAgent({ chainAdapter });
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'chain-auth-cache-cg';
+    const member = ethers.Wallet.createRandom().address;
+    const identityId = 424242n;
+    let registered = true;
+    let registrationCalls = 0;
+    vi.spyOn(chainAdapter, 'isOperationalWalletRegistered').mockImplementation(async (actualIdentityId, actualAddress) => {
+      registrationCalls += 1;
+      expect(actualIdentityId).toBe(identityId);
+      expect(ethers.getAddress(actualAddress)).toBe(ethers.getAddress(member));
+      return registered;
+    });
+
+    await agent.createContextGraph({
+      id,
+      name: 'Chain Auth Cache',
+      accessPolicy: 1,
+      allowedAgents: [agent.getDefaultAgentAddress()!],
+    });
+    await result.store.insert([{
+      subject: contextGraphDataGraphUri(id),
+      predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID,
+      object: `"${identityId.toString()}"`,
+      graph: contextGraphMetaGraphUri(id),
+    }]);
+
+    const before = await agent.listContextGraphs({ callerAgentAddress: member });
+    expect(before.find(p => p.id === id)).toBeDefined();
+    expect(registrationCalls).toBe(1);
+
+    registered = false;
+    const after = await agent.listContextGraphs({ callerAgentAddress: member });
+    expect(after.find(p => p.id === id)).toBeUndefined();
+    expect(registrationCalls).toBe(2);
+  }, 15000);
+
   it('rejects scoped list calls when allowlist lookup fails with a real error', async () => {
     const result = await createTestAgent();
     agent = result.agent;
