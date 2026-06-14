@@ -265,6 +265,7 @@ type ListContextGraphsUncachedResult = {
   rows: ListContextGraphsRow[];
   cacheable: boolean;
 };
+type ListContextGraphsPrivacy = 'public' | 'private' | 'unknown';
 class ListContextGraphsBudgetExceeded extends Error {
   constructor(label: string) {
     super(`${label} exceeded listContextGraphs budget`);
@@ -1652,14 +1653,17 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const cacheKey = checksum
       ? `wallet:${checksum.toLowerCase()}`
       : scopedListing ? 'no-wallet' : 'owner-unscoped';
-    const cached = this.listContextGraphsCache.get(cacheKey);
-    if (cached) {
-      if (cached.expiresAt > Date.now()) {
+    const cacheTtlMs = DKGAgentBase.LIST_CONTEXT_GRAPHS_CACHE_TTL_MS;
+    if (cacheTtlMs > 0) {
+      const cached = this.listContextGraphsCache.get(cacheKey);
+      if (cached) {
+        if (cached.expiresAt > Date.now()) {
+          this.listContextGraphsCache.delete(cacheKey);
+          this.listContextGraphsCache.set(cacheKey, cached);
+          return cloneRows(cached.rows as ListContextGraphsRow[]);
+        }
         this.listContextGraphsCache.delete(cacheKey);
-        this.listContextGraphsCache.set(cacheKey, cached);
-        return cloneRows(cached.rows as ListContextGraphsRow[]);
       }
-      this.listContextGraphsCache.delete(cacheKey);
     }
 
     const inFlight = this.listContextGraphsInFlight.get(cacheKey);
@@ -1671,9 +1675,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const task = (async () => {
       const result = await this.listContextGraphsUncached(checksum, scopedListing);
       const rows = result.rows;
-      if (result.cacheable && this.listContextGraphsCacheGeneration === generation) {
+      if (cacheTtlMs > 0 && result.cacheable && this.listContextGraphsCacheGeneration === generation) {
         this.listContextGraphsCache.set(cacheKey, {
-          expiresAt: Date.now() + DKGAgentBase.LIST_CONTEXT_GRAPHS_CACHE_TTL_MS,
+          expiresAt: Date.now() + cacheTtlMs,
           rows: cloneRows(rows) as Array<Record<string, unknown>>,
         });
         while (this.listContextGraphsCache.size > DKGAgentBase.LIST_CONTEXT_GRAPHS_CACHE_MAX) {
@@ -1775,13 +1779,17 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
 
     const prefix = 'did:dkg:context-graph:';
     const seen = new Map<string, ListContextGraphsRow>();
-    const policyKnownByUri = new Map<string, boolean>();
-    const hasExplicitPolicy = (value: unknown): value is string =>
-      typeof value === 'string' && stripLiteral(value).trim().length > 0;
-    const rememberRow = (row: ListContextGraphsRow, policyKnown: boolean): void => {
+    const privacyByUri = new Map<string, ListContextGraphsPrivacy>();
+    const policyPrivacy = (value: unknown): ListContextGraphsPrivacy => {
+      if (typeof value !== 'string') return 'unknown';
+      const normalized = stripLiteral(value).trim().replace(/^["']|["']$/g, '').toLowerCase();
+      if (normalized === 'public' || normalized === 'private') return normalized;
+      return 'unknown';
+    };
+    const rememberRow = (row: ListContextGraphsRow, privacy: ListContextGraphsPrivacy): void => {
       if (seen.has(row.uri)) return;
       seen.set(row.uri, row);
-      policyKnownByUri.set(row.uri, policyKnown);
+      privacyByUri.set(row.uri, privacy);
     };
 
     if (result?.type === 'bindings') {
@@ -1801,6 +1809,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           () => this.getContextGraphOnChainId(id),
           `on-chain id lookup for ${id}`,
         )) ?? undefined;
+        const accessPolicy = row['access'] ? stripLiteral(row['access']) : undefined;
         rememberRow({
           id,
           uri,
@@ -1808,7 +1817,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           description: row['desc'] ? stripLiteral(row['desc']) : undefined,
           creator: row['creator'],
           ...(row['curator'] ? { curator: row['curator'] } : {}),
-          ...(row['access'] ? { accessPolicy: stripLiteral(row['access']) } : {}),
+          ...(accessPolicy ? { accessPolicy } : {}),
           createdAt: row['created'] ? stripLiteral(row['created']) : undefined,
           isSystem: !!row['isSystem'],
           subscribed: sub?.subscribed ?? false,
@@ -1823,7 +1832,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           // `markContextGraphSubscriptionState` at routes/context-graph.ts:1301).
           synced: sub?.synced ?? false,
           ...(onChainId ? { onChainId } : {}),
-        }, hasExplicitPolicy(row['access']));
+        }, policyPrivacy(row['access']));
       }));
       for (const entry of definitionSettled) {
         if (entry.status === 'rejected') throw entry.reason;
@@ -1864,6 +1873,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           () => this.getContextGraphOnChainId(id),
           `on-chain id lookup for ${id}`,
         )) ?? undefined;
+        const accessPolicy = row['access'] ? stripLiteral(row['access']) : undefined;
         rememberRow({
           id,
           uri,
@@ -1871,13 +1881,13 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           description: row['desc'] ? stripLiteral(row['desc']) : undefined,
           creator: row['creator'],
           ...(row['curator'] ? { curator: row['curator'] } : {}),
-          ...(row['access'] ? { accessPolicy: stripLiteral(row['access']) } : {}),
+          ...(accessPolicy ? { accessPolicy } : {}),
           createdAt: row['created'] ? stripLiteral(row['created']) : undefined,
           isSystem: false,
           subscribed: sub.subscribed,
           synced: sub.synced,
           ...(onChainId ? { onChainId } : {}),
-        }, hasExplicitPolicy(row['access']));
+        }, policyPrivacy(row['access']));
         continue;
       }
 
@@ -1932,7 +1942,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         subscribed: sub.subscribed,
         synced: sub.synced,
         ...(sub.onChainId ? { onChainId: sub.onChainId } : {}),
-      }, false);
+      }, 'unknown');
     }
 
     const graphManager = new GraphManager(this.store);
@@ -1968,7 +1978,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         synced: sub?.synced ?? false,
         ...(accessPolicy ? { accessPolicy } : {}),
         ...(onChainId ? { onChainId } : {}),
-      }, accessPolicy !== undefined);
+      }, accessPolicy ?? 'unknown');
     }
 
     let rows = Array.from(seen.values());
@@ -1991,37 +2001,66 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       throw entry.reason;
     });
 
-    // Privacy filter: curated/private CGs must never leak past the daemon to a non-member
-    // caller. With no caller wallet (Bearer absent), drop all private rows; with a caller,
-    // keep private rows only when they are curator or allowlisted participant.
-    const isPrivateRow = (ap?: string): boolean => {
-      if (!ap?.trim()) return false;
-      const t = ap.trim().replace(/^["']|["']$/g, '').toLowerCase();
-      return t === 'private';
+    const resolveRowPrivacy = async (row: ListContextGraphsRow): Promise<ListContextGraphsPrivacy> => {
+      const explicitPrivacy = privacyByUri.get(row.uri) ?? 'unknown';
+      if (explicitPrivacy !== 'unknown') return explicitPrivacy;
+      const legacyRead = await withBudget(
+        () => this.isPrivateContextGraph(row.id),
+        `legacy privacy lookup for ${row.id}`,
+      );
+      if (!legacyRead.ok) {
+        cacheable = false;
+        return 'unknown';
+      }
+      return legacyRead.value ? 'private' : 'unknown';
     };
-    const policyKnown = (row: ListContextGraphsRow): boolean => policyKnownByUri.get(row.uri) === true;
+    const privacySettled = await Promise.allSettled(rows.map(async (row) => ({
+      uri: row.uri,
+      privacy: await resolveRowPrivacy(row),
+    })));
+    const resolvedPrivacyByUri = new Map<string, ListContextGraphsPrivacy>();
+    for (const entry of privacySettled) {
+      if (entry.status === 'fulfilled') {
+        resolvedPrivacyByUri.set(entry.value.uri, entry.value.privacy);
+      } else {
+        throw entry.reason;
+      }
+    }
+    const rowPrivacy = (row: ListContextGraphsRow): ListContextGraphsPrivacy =>
+      resolvedPrivacyByUri.get(row.uri) ?? 'unknown';
 
     if (!checksum) {
       // Without a caller wallet we still leave `callerInvolved` unset so the UI can use the
       // curator-vs-identity fallback for OPEN graphs.
       return {
-        rows: rows.filter((r) => (!scopedListing || policyKnown(r)) && !isPrivateRow(r.accessPolicy)),
+        rows: rows.filter((r) => {
+          const privacy = rowPrivacy(r);
+          if (privacy === 'private') return false;
+          if (privacy === 'unknown') return !scopedListing;
+          return true;
+        }),
         cacheable,
       };
     }
 
-    const annotatedSettled = await Promise.allSettled(rows.map(async (r): Promise<ListContextGraphsRow> => {
+    const annotatedSettled = await Promise.allSettled(rows.map(async (r): Promise<{
+      row: ListContextGraphsRow;
+      privacy: ListContextGraphsPrivacy;
+    }> => {
+      const privacy = rowPrivacy(r);
       const curatorMatch = this.curatorDidMatchesChecksumAgent(r.curator, checksum);
+      if (curatorMatch) {
+        return { row: { ...r, callerInvolved: true }, privacy };
+      }
       const allowlistRead = await withBudget(
         () => this.callerIsAllowlistedAgentParticipant(r.id, checksum),
         `allowlist lookup for ${r.id}`,
       );
       if (!allowlistRead.ok) cacheable = false;
-      const allowlisted = allowlistRead.ok ? allowlistRead.value : false;
       // `callerInvolved` must reflect ONLY the provided caller wallet.
       // Using local node identity (`creatorIsSelf`) leaks curated rows to unrelated callers.
-      const involved = curatorMatch || allowlisted;
-      return { ...r, callerInvolved: involved };
+      if (!allowlistRead.ok) return { row: r, privacy };
+      return { row: { ...r, callerInvolved: allowlistRead.value }, privacy };
     }));
     const annotated = annotatedSettled.map((entry, index) => {
       if (entry.status === 'fulfilled') return entry.value;
@@ -2029,7 +2068,14 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     });
 
     return {
-      rows: annotated.filter((r) => policyKnown(r) && (!isPrivateRow(r.accessPolicy) || r.callerInvolved === true)),
+      rows: annotated
+        .filter(({ row, privacy }) => {
+          if (row.callerInvolved === true) return true;
+          if (privacy === 'unknown') return false;
+          if (privacy === 'private') return false;
+          return true;
+        })
+        .map(({ row }) => row),
       cacheable,
     };
   }

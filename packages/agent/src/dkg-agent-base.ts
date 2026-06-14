@@ -381,6 +381,13 @@ import {
 } from './dkg-agent-swm-state.js';
 import type { DKGAgent } from './dkg-agent.js';
 
+function readNonNegativeNumberEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
+}
+
 export class DKGAgentBase {
   readonly wallet: AgentWallet;
   readonly node: DKGNode;
@@ -692,7 +699,7 @@ export class DKGAgentBase {
     Number(process.env['DKG_VM_RECONCILE_CONFIRMATION_DEPTH']) || 5;
 
   static readonly LIST_CONTEXT_GRAPHS_CACHE_TTL_MS =
-    Math.max(0, Number(process.env['DKG_LIST_CONTEXT_GRAPHS_CACHE_TTL_MS']) || 5_000);
+    readNonNegativeNumberEnv('DKG_LIST_CONTEXT_GRAPHS_CACHE_TTL_MS', 5_000);
   static readonly LIST_CONTEXT_GRAPHS_CACHE_MAX =
     Math.max(1, Number(process.env['DKG_LIST_CONTEXT_GRAPHS_CACHE_MAX']) || 32);
   static readonly LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS =

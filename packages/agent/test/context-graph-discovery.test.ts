@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent, type ContextGraphSub, type ContextGraphSubscriptionStore } from '../src/index.js';
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphSharedMemoryUri, contextGraphMetaGraphUri, Logger } from '@origintrail-official/dkg-core';
 import { type ChainAdapter, type ContextGraphOnChain } from '@origintrail-official/dkg-chain';
@@ -794,6 +795,157 @@ describe('listContextGraphs merge', () => {
 
     const ownerLocal = await agent.listContextGraphs();
     expect(ownerLocal.find(p => p.id === 'policy-absent-storage')).toBeDefined();
+  }, 15000);
+
+  it('preserves legacy allowlist privacy for scoped list callers without explicit policy', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'legacy-allowlist-no-policy';
+    const member = ethers.Wallet.createRandom().address;
+    const stranger = ethers.Wallet.createRandom().address;
+    const uri = contextGraphDataGraphUri(id);
+    const metaGraph = contextGraphMetaGraphUri(id);
+    await store.insert([
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: metaGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Legacy Allowlist"',
+        graph: metaGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+        object: `"${member}"`,
+        graph: metaGraph,
+      },
+    ]);
+    (agent as any).subscribedContextGraphs.set(id, {
+      name: 'Legacy Allowlist',
+      subscribed: true,
+      synced: true,
+    } satisfies ContextGraphSub);
+
+    const memberRows = await agent.listContextGraphs({ callerAgentAddress: member });
+    const memberEntry = memberRows.find(p => p.id === id);
+    expect(memberEntry).toBeDefined();
+    expect(memberEntry!.callerInvolved).toBe(true);
+
+    const strangerRows = await agent.listContextGraphs({ callerAgentAddress: stranger });
+    expect(strangerRows.find(p => p.id === id)).toBeUndefined();
+
+    const noWalletRows = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(noWalletRows.find(p => p.id === id)).toBeUndefined();
+  }, 15000);
+
+  it('omits callerInvolved instead of reporting false when public allowlist lookup times out', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'public-allowlist-timeout';
+    const caller = ethers.Wallet.createRandom().address;
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const uri = contextGraphDataGraphUri(id);
+    await store.insert([
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Public Allowlist Timeout"',
+        graph: ontologyGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: ontologyGraph,
+      },
+    ]);
+
+    const originalAllowlist = agent.callerIsAllowlistedAgentParticipant.bind(agent);
+    vi.spyOn(agent, 'callerIsAllowlistedAgentParticipant').mockImplementation(async (contextGraphId, wallet) => {
+      if (contextGraphId === id && ethers.getAddress(wallet) === ethers.getAddress(caller)) {
+        return new Promise<boolean>(() => {});
+      }
+      return originalAllowlist(contextGraphId, wallet);
+    });
+
+    const rows = await agent.listContextGraphs({ callerAgentAddress: caller });
+    const entry = rows.find(p => p.id === id);
+    expect(entry).toBeDefined();
+    expect(entry!.callerInvolved).toBeUndefined();
+  }, 15000);
+
+  it('bypasses list cache when the configured TTL is zero', async () => {
+    const originalTtl = DKGAgentBase.LIST_CONTEXT_GRAPHS_CACHE_TTL_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_CACHE_TTL_MS', {
+      value: 0,
+      configurable: true,
+    });
+    try {
+      const store = new OxigraphStore();
+      const result = await createTestAgent({ store });
+      agent = result.agent;
+      await agent.start();
+
+      const id = 'zero-cache-ttl-cg';
+      const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      const uri = contextGraphDataGraphUri(id);
+      await store.insert([
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.RDF_TYPE,
+          object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+          graph: ontologyGraph,
+        },
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+          object: '"Zero Cache TTL"',
+          graph: ontologyGraph,
+        },
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+          object: '"public"',
+          graph: ontologyGraph,
+        },
+      ]);
+
+      const originalQuery = store.query.bind(store);
+      let definitionScans = 0;
+      vi.spyOn(store, 'query').mockImplementation(async (query: string) => {
+        if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access')) {
+          definitionScans += 1;
+        }
+        return originalQuery(query);
+      });
+
+      expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === id)).toBeDefined();
+      expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === id)).toBeDefined();
+      expect(definitionScans).toBe(2);
+      expect((agent as any).listContextGraphsCache.size).toBe(0);
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_CACHE_TTL_MS', {
+        value: originalTtl,
+        configurable: true,
+      });
+    }
   }, 15000);
 
   it('does not cache private membership misses when allowlist lookup degrades', async () => {
