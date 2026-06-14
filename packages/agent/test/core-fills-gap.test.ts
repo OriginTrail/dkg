@@ -721,6 +721,42 @@ describe('Phase D - VM reconcile damping', () => {
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
+  it('keeps a negative cache entry when subgraph enumeration fails during namespace validation', async () => {
+    const internals = await boot();
+    const onChainCgId = 60n;
+    registerUnmatchedKC(internals.chain, 9020n, onChainCgId);
+
+    const graphManager = new GraphManager(internals.store);
+    await internals.store.insert([{
+      subject: 'urn:test:subgraph-marker:code',
+      predicate: 'http://schema.org/name',
+      object: '"marker"',
+      graph: graphManager.subGraphUri('60', 'code'),
+    }]);
+
+    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const originalQuery = internals.store.query.bind(internals.store);
+    let expensiveScans = 0;
+    vi.spyOn(internals.store, 'query').mockImplementation(async (sparql: string) => {
+      if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
+      return originalQuery(sparql);
+    });
+
+    await expect(internals.reconcileChainOrdinal('60', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    const fetchesAfterFirstMiss = fetch.mock.calls.length;
+    expect(fetchesAfterFirstMiss).toBeGreaterThan(0);
+    expect(expensiveScans).toBeGreaterThan(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
+
+    vi.spyOn(GraphManager.prototype, 'listSubGraphs').mockRejectedValue(new Error('transient subgraph listing failure'));
+    expensiveScans = 0;
+
+    await expect(internals.reconcileChainOrdinal('60', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    expect(fetch).toHaveBeenCalledTimes(fetchesAfterFirstMiss);
+    expect(expensiveScans).toBe(0);
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
+  });
+
   it('keeps an unreadable negative-cache generation damped until backoff expires', async () => {
     const internals = await boot();
     const onChainCgId = 45n;
@@ -939,7 +975,42 @@ describe('Phase D - VM reconcile damping', () => {
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).has(freshKey)).toBe(true);
   });
 
-  it('prunes expired and oversized VM reconcile state and clears non-hosted CG state on unsubscribe', async () => {
+  it('keeps expired negative-cache entries as bounded retry history', async () => {
+    const internals = await boot();
+    const negativeCache = (internals as any).vmReconcileNegativeCache as Map<string, {
+      failures: number;
+      nextRetryAt: number;
+      swmGen: string;
+      candidateNamespaces: unknown[];
+      peerTopologyKey: string;
+    }>;
+    const now = Date.now();
+    const cacheKey = 'retry-history-key';
+
+    negativeCache.set(cacheKey, {
+      localCgId: 'retry-cg',
+      failures: 1,
+      nextRetryAt: now - 1,
+      swmGen: 'empty:0',
+      candidateNamespaces: [],
+      peerTopologyKey: '',
+    } as any);
+
+    (internals as any).pruneVmReconcileState(now);
+    expect(negativeCache.has(cacheKey)).toBe(true);
+    await expect((internals as any).shouldDeferVmReconcileByNegativeCache(cacheKey, 'retry-cg')).resolves.toBe(false);
+
+    (internals as any).recordVmReconcileNegativeCache(cacheKey, 'retry-cg', {
+      swmGen: 'empty:0',
+      candidateNamespaces: [],
+      peerTopologyKey: '',
+    });
+
+    expect(negativeCache.get(cacheKey)?.failures).toBe(2);
+    expect(negativeCache.get(cacheKey)?.nextRetryAt).toBeGreaterThan(now);
+  });
+
+  it('prunes oversized VM reconcile state and clears non-hosted CG state on unsubscribe', async () => {
     const internals = await boot();
     const negativeCache = (internals as any).vmReconcileNegativeCache as Map<string, {
       failures: number;
@@ -953,14 +1024,6 @@ describe('Phase D - VM reconcile damping', () => {
     const peerOrder = (internals as any).vmReconcileCatchupPeerOrder as Map<string, { orderedPeers: string[]; nextPeerId?: string }>;
     const now = Date.now();
 
-    negativeCache.set('expired', {
-      localCgId: 'expired-cg',
-      failures: 1,
-      nextRetryAt: now - 1,
-      swmGen: 'empty:0',
-      candidateNamespaces: [],
-      peerTopologyKey: '',
-    });
     for (let i = 0; i < DKGAgent.VM_RECONCILE_CACHE_MAX_ENTRIES + 2; i += 1) {
       negativeCache.set(`future-${i}`, {
         localCgId: `future-cg-${i}`,
@@ -980,7 +1043,6 @@ describe('Phase D - VM reconcile damping', () => {
 
     (internals as any).pruneVmReconcileState(now);
 
-    expect(negativeCache.has('expired')).toBe(false);
     expect(negativeCache.size).toBeLessThanOrEqual(DKGAgent.VM_RECONCILE_CACHE_MAX_ENTRIES);
     expect(fetchCooldown.has('expired-cg')).toBe(false);
     expect(fetchCooldown.size).toBeLessThanOrEqual(DKGAgent.VM_RECONCILE_CG_STATE_MAX_ENTRIES);

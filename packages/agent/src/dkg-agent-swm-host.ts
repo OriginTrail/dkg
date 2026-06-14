@@ -246,6 +246,7 @@ type JoinApprovalRetryEntry = {
   lastError: string;
 };
 type VmReconcileSwmNamespace = { metaGraph: string; dataGraph: string };
+type VmReconcileSwmCandidateNamespaces = { namespaces: VmReconcileSwmNamespace[]; complete: boolean };
 import { multiaddr } from '@multiformats/multiaddr';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
@@ -2185,8 +2186,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }> {
     const candidateNamespaces = await this.collectVmReconcileSwmCandidateNamespacesBestEffort(localCgId);
     return {
-      candidateNamespaces,
-      swmGen: await this.readVmReconcileSwmGen(candidateNamespaces) ?? 'unreadable',
+      candidateNamespaces: candidateNamespaces.namespaces,
+      swmGen: await this.readVmReconcileSwmGen(candidateNamespaces.namespaces) ?? 'unreadable',
       peerTopologyKey: await this.vmReconcilePeerTopologyKey(localCgId),
     };
   }
@@ -2212,11 +2213,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     ];
   }
 
-  async collectVmReconcileSwmCandidateNamespacesBestEffort(this: DKGAgent, localCgId: string): Promise<VmReconcileSwmNamespace[]> {
+  async collectVmReconcileSwmCandidateNamespacesBestEffort(this: DKGAgent, localCgId: string): Promise<VmReconcileSwmCandidateNamespaces> {
     try {
-      return await this.collectVmReconcileSwmCandidateNamespaces(localCgId);
+      return { namespaces: await this.collectVmReconcileSwmCandidateNamespaces(localCgId), complete: true };
     } catch {
-      return this.vmReconcileRootSwmCandidateNamespaces(localCgId);
+      return { namespaces: this.vmReconcileRootSwmCandidateNamespaces(localCgId), complete: false };
     }
   }
 
@@ -2372,14 +2373,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
         return false;
       }
       const currentNamespaces = await this.collectVmReconcileSwmCandidateNamespacesBestEffort(localCgId);
-      if (this.vmReconcileSwmNamespaceKey(currentNamespaces) !== this.vmReconcileSwmNamespaceKey(cached.candidateNamespaces)) {
+      const currentNamespaceKey = this.vmReconcileSwmNamespaceKey(currentNamespaces.namespaces);
+      const cachedNamespaceKey = this.vmReconcileSwmNamespaceKey(cached.candidateNamespaces);
+      if (currentNamespaceKey !== cachedNamespaceKey) {
+        if (!currentNamespaces.complete) return true;
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
         return false;
       }
-      const pattern = this.vmReconcileWorkspaceOperationPattern(currentNamespaces.map((namespace) => namespace.metaGraph));
+      const pattern = this.vmReconcileWorkspaceOperationPattern(currentNamespaces.namespaces.map((namespace) => namespace.metaGraph));
       if (!pattern) return true;
       if (cached.swmGen === 'unreadable') return true;
-      const currentSwmGen = await this.readVmReconcileSwmGen(currentNamespaces);
+      const currentSwmGen = await this.readVmReconcileSwmGen(currentNamespaces.namespaces);
       if (currentSwmGen === null) return true;
       if (currentSwmGen !== cached.swmGen) {
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
@@ -2435,11 +2439,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   pruneVmReconcileState(this: DKGAgent, now = Date.now()): void {
-    for (const [key, entry] of this.vmReconcileNegativeCache) {
-      if (now >= entry.nextRetryAt) {
-        this.deleteVmReconcileNegativeCacheEntry(key);
-      }
-    }
     while (this.vmReconcileNegativeCache.size > DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES) {
       const oldestKey = this.vmReconcileNegativeCache.keys().next().value;
       if (oldestKey === undefined) break;
