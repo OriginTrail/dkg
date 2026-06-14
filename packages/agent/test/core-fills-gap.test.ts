@@ -210,6 +210,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
   const saved: ContextGraphSubscriptionRecord[] = [];
 
   afterEach(async () => {
+    vi.useRealTimers();
     if (agent) {
       await agent.stop().catch(() => undefined);
       agent = null;
@@ -265,6 +266,19 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(saved.find((r) => r.id === '43')?.coreHosted).toBe(true);
   });
 
+  it('memoizes ACK-backed access-policy reads when the adapter has no liveness probe', async () => {
+    const internals = await boot();
+    const getContextGraphAccessPolicy = vi.fn(async () => 0);
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
+    (internals.chain as { isContextGraphActiveOnChain?: unknown }).isContextGraphActiveOnChain = undefined;
+
+    await internals.recordCoreHostedPublicCg('43');
+    await internals.recordCoreHostedPublicCg('43');
+
+    expect(getContextGraphAccessPolicy).toHaveBeenCalledTimes(1);
+    expect((internals as any).onChainAccessPolicyCache.get('43')).toBe(0);
+  });
+
   it('bounds ACK-backed access-policy reads when the adapter has no liveness probe', async () => {
     const internals = await boot();
     internals.chain.getContextGraphAccessPolicy = async () => new Promise<number>(() => undefined);
@@ -309,6 +323,29 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     await drained;
 
     expect(recordings.size).toBe(0);
+  });
+
+  it('bounds core-host recording drain during shutdown', async () => {
+    const internals = await boot();
+    const recordings = (internals as any).coreHostRecordings as Set<Promise<void>>;
+    recordings.add(new Promise<void>(() => undefined));
+    const warn = vi.spyOn((internals as any).log, 'warn');
+
+    vi.useFakeTimers();
+    try {
+      const drained = (internals as any).drainCoreHostRecordings();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(drained).resolves.toBeUndefined();
+
+      expect(recordings.size).toBe(0);
+      expect(warn).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining('timed out draining 1 core-host recording'),
+      );
+    } finally {
+      recordings.clear();
+      vi.useRealTimers();
+    }
   });
 
   it('keys the host row under the cleartext swmGraphId (not the numeric id) on first ACK', async () => {

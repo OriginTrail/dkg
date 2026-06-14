@@ -679,6 +679,8 @@ export class DKGAgentBase {
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS']) || 2_000);
   static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES']) || 1_000);
+  static readonly CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS =
+    Math.max(1, Number(process.env['DKG_CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS']) || 5_000);
   /**
    * Blocks a completed ordinal must be buried by before its watermark advance
    * commits (reorg gate). The data is promoted to VM eagerly; only the cursor

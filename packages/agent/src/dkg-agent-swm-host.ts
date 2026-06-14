@@ -1961,6 +1961,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
     if (typeof getAccessPolicy !== 'function') return null;
     const numericId = BigInt(onChainId);
+    const cached = this.onChainAccessPolicyCache.get(onChainId);
+    if (cached === 0 || cached === 1) return cached;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<typeof TIMEOUT_SENTINEL>((resolve) => {
       timer = setTimeout(() => resolve(TIMEOUT_SENTINEL), CHAIN_POLICY_READ_TIMEOUT_MS);
@@ -1980,7 +1982,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
         );
         return null;
       }
-      return policy === 0 || policy === 1 ? policy : null;
+      if (policy === 0 || policy === 1) {
+        this.onChainAccessPolicyCache.set(onChainId, policy);
+        return policy;
+      }
+      return null;
     } catch {
       return null;
     }
@@ -2084,8 +2090,29 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   async drainCoreHostRecordings(this: DKGAgent): Promise<void> {
+    const ctx = createOperationContext('system');
     while (this.coreHostRecordings.size > 0) {
-      await Promise.allSettled([...this.coreHostRecordings]);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), DKGAgentBase.CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS);
+        timer.unref?.();
+      });
+      const outcome = await Promise.race([
+        Promise.allSettled([...this.coreHostRecordings])
+          .then(() => 'drained' as const)
+          .finally(() => { if (timer) clearTimeout(timer); }),
+        timeout,
+      ]);
+      if (outcome === 'timeout') {
+        const pending = this.coreHostRecordings.size;
+        this.log.warn(
+          ctx,
+          `Phase D: timed out draining ${pending} core-host recording(s) after ` +
+          `${DKGAgentBase.CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS}ms; continuing shutdown`,
+        );
+        this.coreHostRecordings.clear();
+        return;
+      }
     }
   }
 
