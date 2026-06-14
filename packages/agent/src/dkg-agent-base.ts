@@ -836,12 +836,6 @@ export class DKGAgentBase {
       return removed;
     };
 
-    const originalCreateGraph = store.createGraph.bind(store);
-    store.createGraph = async (graphUri: string): Promise<void> => {
-      await originalCreateGraph(graphUri);
-      this.invalidateListContextGraphsCache();
-    };
-
     const originalDropGraph = store.dropGraph.bind(store);
     store.dropGraph = async (graphUri: string): Promise<void> => {
       await originalDropGraph(graphUri);
