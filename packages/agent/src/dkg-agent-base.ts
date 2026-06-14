@@ -704,6 +704,10 @@ export class DKGAgentBase {
     Math.max(1, Number(process.env['DKG_LIST_CONTEXT_GRAPHS_CACHE_MAX']) || 32);
   static readonly LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS =
     Math.max(1, Number(process.env['DKG_LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS']) || 200);
+  static readonly LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS =
+    Math.max(1, Number(process.env['DKG_LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS']) || 5_000);
+  static readonly LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS =
+    Math.max(1, Number(process.env['DKG_LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS']) || 5_000);
 
   protected messageHandler: MessageHandler | null = null;
   protected chainPoller: ChainEventPoller | null = null;

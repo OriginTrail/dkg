@@ -1703,10 +1703,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
     const rowBudgetMs = Math.max(1, DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS);
-    const scanBudgetMs = Math.max(
-      rowBudgetMs,
-      Math.min(5_000, rowBudgetMs * Math.max(1, this.subscribedContextGraphs.size + 4)),
-    );
+    const scanBudgetMs = Math.max(rowBudgetMs, DKGAgentBase.LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS);
+    const authBudgetMs = Math.max(rowBudgetMs, DKGAgentBase.LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS);
     let cacheable = true;
 
     const withBudget = async <T>(
@@ -2058,6 +2056,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           onChainLookup: () => { usedLiveChainAuth = true; },
         }),
         `allowlist lookup for ${r.id}`,
+        authBudgetMs,
       );
       if (usedLiveChainAuth) cacheable = false;
       if (!allowlistRead.ok) cacheable = false;

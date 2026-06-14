@@ -960,6 +960,55 @@ describe('listContextGraphs merge', () => {
     }
   }, 15000);
 
+  it('uses a catalog scan budget that is independent from the per-row enrichment budget', async () => {
+    const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
+    const originalScanBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS', {
+      value: 80,
+      configurable: true,
+    });
+    try {
+      const store = new OxigraphStore();
+      const result = await createTestAgent({ store });
+      agent = result.agent;
+      await agent.start();
+
+      const id = 'slow-catalog-scan-cg';
+      const uri = contextGraphDataGraphUri(id);
+      const originalQuery = store.query.bind(store);
+      vi.spyOn(store, 'query').mockImplementation(async (query: string, options?: any) => {
+        if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access ?isSystem')) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+          return {
+            type: 'bindings',
+            bindings: [{
+              ctxGraph: uri,
+              name: '"Slow Catalog Scan"',
+              access: '"public"',
+            }],
+          } as any;
+        }
+        return originalQuery(query, options);
+      });
+
+      const rows = await agent.listContextGraphs({ callerAgentAddress: null });
+      expect(rows.find(p => p.id === id)).toBeDefined();
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+        value: originalRowBudget,
+        configurable: true,
+      });
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS', {
+        value: originalScanBudget,
+        configurable: true,
+      });
+    }
+  }, 15000);
+
   it('does not cache private membership misses when allowlist lookup degrades', async () => {
     const result = await createTestAgent();
     agent = result.agent;
@@ -1010,6 +1059,7 @@ describe('listContextGraphs merge', () => {
       registrationCalls += 1;
       expect(actualIdentityId).toBe(identityId);
       expect(ethers.getAddress(actualAddress)).toBe(ethers.getAddress(member));
+      await new Promise(resolve => setTimeout(resolve, 20));
       return registered;
     });
 
@@ -1026,14 +1076,35 @@ describe('listContextGraphs merge', () => {
       graph: contextGraphMetaGraphUri(id),
     }]);
 
-    const before = await agent.listContextGraphs({ callerAgentAddress: member });
-    expect(before.find(p => p.id === id)).toBeDefined();
-    expect(registrationCalls).toBe(1);
+    const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
+    const originalAuthBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS', {
+      value: 80,
+      configurable: true,
+    });
+    try {
+      const before = await agent.listContextGraphs({ callerAgentAddress: member });
+      expect(before.find(p => p.id === id)).toBeDefined();
+      expect(registrationCalls).toBe(1);
 
-    registered = false;
-    const after = await agent.listContextGraphs({ callerAgentAddress: member });
-    expect(after.find(p => p.id === id)).toBeUndefined();
-    expect(registrationCalls).toBe(2);
+      registered = false;
+      const after = await agent.listContextGraphs({ callerAgentAddress: member });
+      expect(after.find(p => p.id === id)).toBeUndefined();
+      expect(registrationCalls).toBe(2);
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+        value: originalRowBudget,
+        configurable: true,
+      });
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS', {
+        value: originalAuthBudget,
+        configurable: true,
+      });
+    }
   }, 15000);
 
   it('rejects scoped list calls when allowlist lookup fails with a real error', async () => {
