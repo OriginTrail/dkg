@@ -120,6 +120,14 @@ describe('countContextGraphsFromGraphUris', () => {
     ], declared)).toBe(1);
   });
 
+  it('includes private context graphs when they are backed by known local state', () => {
+    expect(countContextGraphsFromGraphUris([
+      'did:dkg:context-graph:curated-private/_meta',
+      'did:dkg:context-graph:curated-private/_private',
+      'did:dkg:context-graph:curated-private/_shared_memory',
+    ], ['curated-private'])).toBe(1);
+  });
+
   it('does not collapse suffix-matching ids without proven shared identity', () => {
     const walletScoped = '0xE5B8896800000000000000000000000000000000/tuesday-cg';
     expect(countContextGraphsFromGraphUris([
@@ -159,6 +167,7 @@ describe('countContextGraphsFromGraphUris', () => {
     const wireOnlyHash = `0x${'b'.repeat(64)}`;
     const walletScoped = '0xE5B8896800000000000000000000000000000000/tuesday-cg';
     const reusedSlotHash = `0x${'d'.repeat(64)}`;
+    const sharedIdentityHash = `0x${'f'.repeat(64)}`;
     expect(contextGraphIdsFromMetricSubscriptionCandidates([
       [hashKey, { onChainId: '7', onChainHash: hashKey, coreHosted: true }],
       ['cleartext-cg', { onChainId: '7', onChainHash: hashKey, synced: true }],
@@ -168,11 +177,34 @@ describe('countContextGraphsFromGraphUris', () => {
       [walletScoped, { onChainId: '9', onChainHash: `0x${'c'.repeat(64)}`, synced: true }],
       ['reused-slot-old', { onChainId: '11', onChainHash: reusedSlotHash, synced: true }],
       ['reused-slot-new', { onChainId: '11', onChainHash: `0x${'e'.repeat(64)}`, synced: true }],
-    ])).toEqual(['cleartext-cg', 'wire-only-clear', walletScoped, 'reused-slot-old', 'reused-slot-new']);
+      ['13', { onChainId: '13', synced: true }],
+      ['bare-wallet-cg', { onChainId: '13', onChainHash: sharedIdentityHash, synced: true }],
+      ['0xE5B8896800000000000000000000000000000000/bare-wallet-cg', {
+        onChainId: '13',
+        onChainHash: sharedIdentityHash,
+        synced: true,
+      }],
+    ])).toEqual([
+      'cleartext-cg',
+      'wire-only-clear',
+      walletScoped,
+      'reused-slot-old',
+      'reused-slot-new',
+      '0xE5B8896800000000000000000000000000000000/bare-wallet-cg',
+    ]);
     expect(shadowContextGraphIdsFromMetricSubscriptionCandidates([
       ['tuesday-cg', { onChainId: '9', onChainHash: `0x${'c'.repeat(64)}`, synced: true }],
       [walletScoped, { onChainId: '9', onChainHash: `0x${'c'.repeat(64)}`, synced: true }],
     ])).toEqual(['tuesday-cg']);
+    expect(shadowContextGraphIdsFromMetricSubscriptionCandidates([
+      ['13', { onChainId: '13', synced: true }],
+      ['bare-wallet-cg', { onChainId: '13', onChainHash: sharedIdentityHash, synced: true }],
+      ['0xE5B8896800000000000000000000000000000000/bare-wallet-cg', {
+        onChainId: '13',
+        onChainHash: sharedIdentityHash,
+        synced: true,
+      }],
+    ])).toEqual(['bare-wallet-cg', '13']);
   });
 
   it('builds declaration queries from known declaration graphs only', () => {
@@ -191,11 +223,23 @@ describe('countContextGraphsFromGraphUris', () => {
     expect(query).toContain('<did:dkg:context-graph:team/context/alpha/_meta>');
     expect(query).toContain('<did:dkg:context-graph:ontology>');
     expect(query).toContain('<did:dkg:context-graph:agents>');
-    expect(query).toContain('<did:dkg:context-graph:plain-cg/_meta>');
-    expect(query).toContain('<did:dkg:context-graph:team/context/beta/_meta>');
-    expect(query).toContain('<did:dkg:context-graph:plain-cg/code/_meta>');
+    expect(query).not.toContain('<did:dkg:context-graph:plain-cg/_meta>');
+    expect(query).not.toContain('<did:dkg:context-graph:team/context/beta/_meta>');
+    expect(query).not.toContain('<did:dkg:context-graph:plain-cg/code/_meta>');
     expect(query).not.toContain('<did:dkg:context-graph:plain-cg/_verifiable_memory/1/_meta>');
     expect(query).not.toContain('<did:dkg:context-graph:plain-cg>');
     expect(query).not.toContain('<did:dkg:context-graph:agents/_shared_memory>');
+  });
+
+  it('does not add foreign curated metadata graphs to the declaration query', () => {
+    const query = buildContextGraphDeclarationsSparql([
+      'did:dkg:context-graph:joined/slash-cg/_meta',
+      'did:dkg:context-graph:foreign/slash-cg/_meta',
+      'did:dkg:context-graph:foreign-plain/_meta',
+    ], ['joined/slash-cg']);
+
+    expect(query).toContain('<did:dkg:context-graph:joined/slash-cg/_meta>');
+    expect(query).not.toContain('<did:dkg:context-graph:foreign/slash-cg/_meta>');
+    expect(query).not.toContain('<did:dkg:context-graph:foreign-plain/_meta>');
   });
 });

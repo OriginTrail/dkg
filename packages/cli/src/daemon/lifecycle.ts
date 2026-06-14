@@ -1858,20 +1858,12 @@ export async function runDaemonInner(
       }
     },
     getContextGraphCount: async () => {
-      const [graphUris, contextGraphs] = await Promise.all([
-        agent.store.listGraphs(),
-        agent.listContextGraphs(),
-      ]);
+      const graphUris = await agent.store.listGraphs();
       const knownContextGraphIds = new Set<string>();
       const subscribedContextGraphs = agent.getSubscribedContextGraphs();
       const shadowContextGraphIds = new Set(
         shadowContextGraphIdsFromMetricSubscriptionCandidates(subscribedContextGraphs.entries()),
       );
-      for (const contextGraph of contextGraphs) {
-        if (contextGraph.id && !shadowContextGraphIds.has(contextGraph.id)) {
-          knownContextGraphIds.add(contextGraph.id);
-        }
-      }
       for (const contextGraphId of contextGraphIdsFromMetricSubscriptionCandidates(
         subscribedContextGraphs.entries(),
       )) {
@@ -1902,9 +1894,10 @@ export async function runDaemonInner(
     // already re-reads the store fresh and there is nothing concurrent to
     // coalesce. They are intentionally left uncached so a snapshot never serves
     // a stale count and can't mask a store outage. The context-graph count
-    // merges filtered listContextGraphs() rows, locally declared CG metadata,
-    // and backed subscription rows with the store graph inventory, then dedupes
-    // local layer graphs. It intentionally includes private CG graphs.
+    // avoids the composite context-graph listing enrichment path. It uses the
+    // cached store graph inventory plus backed subscription/declaration evidence,
+    // then dedupes local layer graphs. It intentionally includes private CG graphs
+    // that are backed by local subscription/declaration state.
     // These COUNTs are cheap (~0.015 CPU-s/tick on a 75k-triple store).
     getTotalTriples: async () => {
       const r = await agent.query(GET_TOTAL_TRIPLES_SPARQL);

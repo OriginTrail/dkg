@@ -41,6 +41,11 @@ type MetricSubscriptionCandidate = {
   sharedMemorySynced?: boolean;
   coreHosted?: boolean;
 };
+type MetricSubscriptionRecord = {
+  id: string;
+  onChainId?: string;
+  onChainHash?: string;
+};
 
 const HASH_CONTEXT_GRAPH_ID_RE = /^0x[a-fA-F0-9]{64}$/;
 const SYSTEM_CONTEXT_GRAPH_IDS = new Set<string>([
@@ -95,7 +100,7 @@ function declarationGraphUrisFromGraphUris(
     const id = rest.slice(0, -'/_meta'.length);
     if (
       knownCandidates.has(id)
-      || !NON_ROOT_DECLARATION_META_SEGMENTS.some((segment) => rest.includes(segment))
+      && !NON_ROOT_DECLARATION_META_SEGMENTS.some((segment) => rest.includes(segment))
     ) {
       declarationGraphs.add(graphUri);
     }
@@ -172,8 +177,9 @@ export function shadowContextGraphIdsFromMetricSubscriptionCandidates(
 function selectMetricSubscriptionCandidateIds(
   subscriptions: Iterable<readonly [string, MetricSubscriptionCandidate]>,
 ): { selected: string[]; shadows: string[] } {
-  const contextGraphIdsByIdentity = new Map<string, string>();
-  const contextGraphIdsByStableIdentity = new Map<string, Set<string>>();
+  const groupsByIdentity = new Map<string, Set<string>>();
+  const groups: Set<string>[] = [];
+  const recordsById = new Map<string, MetricSubscriptionRecord>();
   for (const [id, sub] of subscriptions) {
     if (!id) continue;
     if (SYSTEM_CONTEXT_GRAPH_IDS.has(id)) continue;
@@ -185,31 +191,112 @@ function selectMetricSubscriptionCandidateIds(
       || sub.sharedMemorySynced === true
       || sub.coreHosted === true
     ) {
-      const identity = sub.onChainHash
-        ? `wire:${sub.onChainHash.toLowerCase()}`
-        : sub.onChainId
-          ? `chain:${sub.onChainId}`
-          : `local:${id}`;
-      let idsForIdentity = contextGraphIdsByStableIdentity.get(identity);
-      if (!idsForIdentity) {
-        idsForIdentity = new Set<string>();
-        contextGraphIdsByStableIdentity.set(identity, idsForIdentity);
-      }
-      idsForIdentity.add(id);
-      const existingId = contextGraphIdsByIdentity.get(identity);
-      if (!existingId || shouldPreferMetricContextGraphId(id, existingId)) {
-        contextGraphIdsByIdentity.set(identity, id);
-      }
+      recordsById.set(id, {
+        id,
+        ...(sub.onChainId ? { onChainId: sub.onChainId } : {}),
+        ...(sub.onChainHash ? { onChainHash: sub.onChainHash.toLowerCase() } : {}),
+      });
+      const identities = metricSubscriptionStableIdentities(id, sub);
+      mergeMetricSubscriptionIdIntoGroup(id, identities, groups, groupsByIdentity);
     }
   }
+  foldChainOnlyAliasesIntoWireGroups(groups, groupsByIdentity, recordsById);
+  const selected: string[] = [];
   const shadows: string[] = [];
-  for (const [identity, ids] of contextGraphIdsByStableIdentity) {
-    const selected = contextGraphIdsByIdentity.get(identity);
+  for (const ids of groups) {
+    const preferred = [...ids].reduce((current, candidate) =>
+      shouldPreferMetricContextGraphId(candidate, current) ? candidate : current,
+    );
+    selected.push(preferred);
     for (const id of ids) {
-      if (id !== selected) shadows.push(id);
+      if (id !== preferred) shadows.push(id);
     }
   }
-  return { selected: [...contextGraphIdsByIdentity.values()], shadows };
+  return { selected, shadows };
+}
+
+function mergeMetricSubscriptionIdIntoGroup(
+  id: string,
+  identities: readonly string[],
+  groups: Set<string>[],
+  groupsByIdentity: Map<string, Set<string>>,
+): Set<string> {
+  const matchingGroups = [...new Set(
+    identities
+      .map((identity) => groupsByIdentity.get(identity))
+      .filter((group): group is Set<string> => Boolean(group)),
+  )];
+  let group = matchingGroups[0];
+  if (!group) {
+    group = new Set<string>();
+    groups.push(group);
+  }
+  for (const otherGroup of matchingGroups.slice(1)) {
+    mergeMetricSubscriptionGroups(group, otherGroup, groups, groupsByIdentity);
+  }
+  group.add(id);
+  for (const identity of identities) groupsByIdentity.set(identity, group);
+  return group;
+}
+
+function mergeMetricSubscriptionGroups(
+  target: Set<string>,
+  source: Set<string>,
+  groups: Set<string>[],
+  groupsByIdentity: Map<string, Set<string>>,
+): void {
+  if (target === source) return;
+  for (const otherId of source) target.add(otherId);
+  const sourceIndex = groups.indexOf(source);
+  if (sourceIndex >= 0) groups.splice(sourceIndex, 1);
+  for (const [identity, group] of groupsByIdentity) {
+    if (group === source) groupsByIdentity.set(identity, target);
+  }
+}
+
+function foldChainOnlyAliasesIntoWireGroups(
+  groups: Set<string>[],
+  groupsByIdentity: Map<string, Set<string>>,
+  recordsById: ReadonlyMap<string, MetricSubscriptionRecord>,
+): void {
+  const wireGroupsByChainId = new Map<string, Set<Set<string>>>();
+  for (const group of groups) {
+    for (const id of group) {
+      const record = recordsById.get(id);
+      if (!record?.onChainId || !record.onChainHash) continue;
+      let chainGroups = wireGroupsByChainId.get(record.onChainId);
+      if (!chainGroups) {
+        chainGroups = new Set<Set<string>>();
+        wireGroupsByChainId.set(record.onChainId, chainGroups);
+      }
+      chainGroups.add(group);
+    }
+  }
+
+  for (const group of [...groups]) {
+    if (![...group].every((id) => !recordsById.get(id)?.onChainHash)) continue;
+    const chainIds = [...new Set(
+      [...group]
+        .map((id) => recordsById.get(id)?.onChainId)
+        .filter((chainId): chainId is string => Boolean(chainId)),
+    )];
+    if (chainIds.length !== 1) continue;
+    const wireGroups = wireGroupsByChainId.get(chainIds[0]);
+    if (wireGroups?.size !== 1) continue;
+    mergeMetricSubscriptionGroups([...wireGroups][0], group, groups, groupsByIdentity);
+  }
+}
+
+function metricSubscriptionStableIdentities(
+  id: string,
+  sub: MetricSubscriptionCandidate,
+): string[] {
+  const identities: string[] = [];
+  if (sub.onChainHash) identities.push(`wire:${sub.onChainHash.toLowerCase()}`);
+  if (!sub.onChainHash && sub.onChainId) identities.push(`chain:${sub.onChainId}`);
+  if (!sub.onChainHash && /^\d+$/.test(id)) identities.push(`chain:${id}`);
+  if (identities.length === 0) identities.push(`local:${id}`);
+  return identities;
 }
 
 function shouldPreferMetricContextGraphId(candidateId: string, existingId: string): boolean {
