@@ -372,7 +372,7 @@ import {
   deserializeSwmSenderReceiveState,
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
-import { DKGAgentBase } from './dkg-agent-base.js';
+import { DKGAgentBase, createListContextGraphsCacheInvalidatingStore } from './dkg-agent-base.js';
 import { reconcileAndAllocateKaNumber } from './allocator.js';
 import { applyMixins } from './dkg-agent-apply-mixins.js';
 import { OwnershipMethods } from './dkg-agent-ownership.js';
@@ -571,8 +571,13 @@ export class DKGAgent extends DKGAgentBase {
       !adapterCanPublishFromAdvertisedSigner &&
       (!configuredPublisherAddress || publisherAddressMatchesLegacyKey),
     );
+    let agentRef: DKGAgent | undefined;
+    const agentStore = createListContextGraphsCacheInvalidatingStore(store, () => {
+      agentRef?.invalidateListContextGraphsCache();
+    });
+
     const publisher = new DKGPublisher({
-      store,
+      store: agentStore,
       chain,
       eventBus,
       keypair,
@@ -618,12 +623,14 @@ export class DKGAgent extends DKGAgentBase {
       log.warn(createOperationContext('init'), `Failed to migrate SWM attribution to agent DID, continuing without: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    const queryEngine = new DKGQueryEngine(store);
+    const queryEngine = new DKGQueryEngine(agentStore);
 
-    return new DKGAgent(
-      config, wallet, node, store, publisher, queryEngine, eventBus, chain,
+    const agent = new DKGAgent(
+      config, wallet, node, agentStore, publisher, queryEngine, eventBus, chain,
       workspaceOwnedEntities, writeLocks, publicSnapshotStore,
     );
+    agentRef = agent;
+    return agent;
   }
 
   public getACKSignerCandidateWallets(ctx: OperationContext): ethers.Wallet[] {

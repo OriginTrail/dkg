@@ -23,7 +23,7 @@ export interface GossipPublishHandlerCallbacks {
   contextGraphExists: (id: string) => Promise<boolean>;
   getContextGraphOwner: (id: string) => Promise<string | null>;
   subscribeToContextGraph: (id: string, options?: { trackSyncScope?: boolean; persist?: boolean }) => void;
-  setContextGraphSubscription: (id: string, next: ContextGraphSub, options?: { persist?: boolean }) => void;
+  setContextGraphSubscription?: (id: string, next: ContextGraphSub, options?: { persist?: boolean }) => void;
   /**
    * Same semantics as `DKGAgent#hasConfirmedMetaState`: returns true when the
    * local store already has a trustworthy public announcement for this CG
@@ -58,6 +58,19 @@ export class GossipPublishHandler {
     this.chain = chain;
     this.subscribedContextGraphs = subscribedContextGraphs;
     this.callbacks = callbacks;
+  }
+
+  private setContextGraphSubscription(
+    id: string,
+    next: ContextGraphSub,
+    options?: { persist?: boolean },
+  ): void {
+    const setter = this.callbacks.setContextGraphSubscription;
+    if (setter) {
+      setter(id, next, options);
+      return;
+    }
+    this.subscribedContextGraphs.set(id, next);
   }
 
   async handlePublishMessage(data: Uint8Array, contextGraphId: string, onPhase?: GossipPhaseCallback, fromPeerId?: string): Promise<void> {
@@ -180,7 +193,7 @@ export class GossipPublishHandler {
               metaSynced: false,
               onChainId: this.subscribedContextGraphs.get(newId)?.onChainId,
             };
-            this.callbacks.setContextGraphSubscription(newId, next, { persist: false });
+            this.setContextGraphSubscription(newId, next, { persist: false });
             this.callbacks.subscribeToContextGraph(newId, { trackSyncScope: true });
             this.log.info(ctx, `Discovered context graph "${name}" (${newId}) via gossip — auto-subscribed (sync-enabled)`);
           }
@@ -225,7 +238,7 @@ export class GossipPublishHandler {
               ? await this.callbacks.hasConfirmedMetaState(request.contextGraphId)
               : false;
             if (confirmed) {
-              this.callbacks.setContextGraphSubscription(request.contextGraphId, { ...sub, metaSynced: true });
+              this.setContextGraphSubscription(request.contextGraphId, { ...sub, metaSynced: true });
             } else {
               this.log.warn(ctx, `Gossip publish deferred: context graph "${request.contextGraphId}" _meta not yet synced — defaulting to deny`);
               return;

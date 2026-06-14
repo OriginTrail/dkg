@@ -1990,8 +1990,12 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       'storage context graph scan',
       scanBudgetMs,
     );
-    if (!storedRead.ok) cacheable = false;
-    const storedContextGraphs = storedRead.ok ? storedRead.value : [];
+    if (!storedRead.ok) {
+      throw storedRead.error instanceof Error
+        ? storedRead.error
+        : new Error(`listContextGraphs storage graph scan failed: ${String(storedRead.error)}`);
+    }
+    const storedContextGraphs = storedRead.value;
     for (const id of storedContextGraphs) {
       const uri = `${prefix}${id}`;
       if (seen.has(uri)) continue;

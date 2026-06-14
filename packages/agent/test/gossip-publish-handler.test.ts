@@ -176,6 +176,39 @@ describe('GossipPublishHandler', () => {
     expect(bindings.length).toBeGreaterThan(0);
   });
 
+  it('keeps legacy subscription-map fallback when setContextGraphSubscription is omitted', async () => {
+    const store = new OxigraphStore();
+    const subscriptions = new Map<string, ContextGraphSub>();
+    const handler = new GossipPublishHandler(
+      store,
+      undefined,
+      subscriptions,
+      {
+        contextGraphExists: async () => false,
+        getContextGraphOwner: async () => null,
+        subscribeToContextGraph: () => {},
+      },
+    );
+
+    const id = 'legacy-callback-discovery';
+    const data = makePublishMessage({
+      contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      nquads: [
+        `<did:dkg:context-graph:${id}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> <did:dkg:context-graph:${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}> .`,
+        `<did:dkg:context-graph:${id}> <${DKG_ONTOLOGY.SCHEMA_NAME}> "Legacy Callback Discovery" <did:dkg:context-graph:${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}> .`,
+      ].join('\n'),
+    });
+
+    await handler.handlePublishMessage(data, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+
+    expect(subscriptions.get(id)).toMatchObject({
+      name: 'Legacy Callback Discovery',
+      subscribed: true,
+      synced: false,
+      metaSynced: false,
+    });
+  });
+
   it('rejects forged ontology policy approvals from non-owners', async () => {
     const { store, handler } = createHandler(undefined, {
       getContextGraphOwner: async (id) => id === 'ops-policy' ? 'did:dkg:agent:0x1111111111111111111111111111111111111111' : null,

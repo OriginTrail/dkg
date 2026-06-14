@@ -424,6 +424,76 @@ function injectedStoreListCacheAllowed(store: TripleStore, storeConfig?: TripleS
   return false;
 }
 
+export function createListContextGraphsCacheInvalidatingStore(
+  innerStore: TripleStore,
+  invalidate: () => void,
+): TripleStore {
+  const invalidateAfterMutation = async <T>(work: () => Promise<T>, changed: (result: T) => boolean): Promise<T> => {
+    const result = await work();
+    if (changed(result)) invalidate();
+    return result;
+  };
+  const wrapper: TripleStore & { readonly innerStore: TripleStore } = {
+    innerStore,
+    get queryCancellation() {
+      return innerStore.queryCancellation;
+    },
+    insert(quads) {
+      return invalidateAfterMutation(
+        () => innerStore.insert(quads),
+        () => quads.length > 0,
+      );
+    },
+    delete(quads) {
+      return invalidateAfterMutation(
+        () => innerStore.delete(quads),
+        () => quads.length > 0,
+      );
+    },
+    deleteByPattern(pattern) {
+      return invalidateAfterMutation(
+        () => innerStore.deleteByPattern(pattern),
+        removed => removed > 0,
+      );
+    },
+    query(sparql, options) {
+      return invalidateAfterMutation(
+        () => innerStore.query(sparql, options),
+        () => isSparqlUpdateStatement(sparql),
+      );
+    },
+    hasGraph(graphUri) {
+      return innerStore.hasGraph(graphUri);
+    },
+    createGraph(graphUri) {
+      return innerStore.createGraph(graphUri);
+    },
+    dropGraph(graphUri) {
+      return invalidateAfterMutation(
+        () => innerStore.dropGraph(graphUri),
+        () => true,
+      );
+    },
+    listGraphs(options) {
+      return innerStore.listGraphs(options);
+    },
+    deleteBySubjectPrefix(graphUri, prefix) {
+      return invalidateAfterMutation(
+        () => innerStore.deleteBySubjectPrefix(graphUri, prefix),
+        removed => removed > 0,
+      );
+    },
+    countQuads(graphUri) {
+      return innerStore.countQuads(graphUri);
+    },
+    flush: innerStore.flush ? () => innerStore.flush!() : undefined,
+    close() {
+      return innerStore.close();
+    },
+  };
+  return wrapper;
+}
+
 export class DKGAgentBase {
   readonly wallet: AgentWallet;
   readonly node: DKGNode;
@@ -842,49 +912,6 @@ export class DKGAgentBase {
     this.listContextGraphsCacheGeneration += 1;
     this.listContextGraphsCache.clear();
     this.listContextGraphsInFlight.clear();
-  }
-
-  protected bindListContextGraphsCacheInvalidatingStore(): void {
-    const store = this.store;
-
-    const originalInsert = store.insert.bind(store);
-    store.insert = async (quads: Quad[]): Promise<void> => {
-      await originalInsert(quads);
-      if (quads.length > 0) this.invalidateListContextGraphsCache();
-    };
-
-    const originalDelete = store.delete.bind(store);
-    store.delete = async (quads: Quad[]): Promise<void> => {
-      await originalDelete(quads);
-      if (quads.length > 0) this.invalidateListContextGraphsCache();
-    };
-
-    const originalDeleteByPattern = store.deleteByPattern.bind(store);
-    store.deleteByPattern = async (pattern: Partial<Quad>): Promise<number> => {
-      const removed = await originalDeleteByPattern(pattern);
-      if (removed > 0) this.invalidateListContextGraphsCache();
-      return removed;
-    };
-
-    const originalDeleteBySubjectPrefix = store.deleteBySubjectPrefix.bind(store);
-    store.deleteBySubjectPrefix = async (graphUri: string, prefix: string): Promise<number> => {
-      const removed = await originalDeleteBySubjectPrefix(graphUri, prefix);
-      if (removed > 0) this.invalidateListContextGraphsCache();
-      return removed;
-    };
-
-    const originalDropGraph = store.dropGraph.bind(store);
-    store.dropGraph = async (graphUri: string): Promise<void> => {
-      await originalDropGraph(graphUri);
-      this.invalidateListContextGraphsCache();
-    };
-
-    const originalQuery = store.query.bind(store);
-    store.query = async (...args: Parameters<TripleStore['query']>): ReturnType<TripleStore['query']> => {
-      const result = await originalQuery(...args);
-      if (isSparqlUpdateStatement(args[0])) this.invalidateListContextGraphsCache();
-      return result;
-    };
   }
 
   protected async insertSyncedQuadsAndInvalidateListCache(quads: Quad[]): Promise<void> {
@@ -1313,7 +1340,6 @@ export class DKGAgentBase {
     this.wallet = wallet;
     this.node = node;
     this.store = store;
-    this.bindListContextGraphsCacheInvalidatingStore();
     this.publisher = publisher;
     this.queryEngine = queryEngine;
     this.workspaceOwnedEntities = workspaceOwnedEntities;

@@ -1230,6 +1230,7 @@ describe('listContextGraphs merge', () => {
     const result = await createTestAgent();
     agent = result.agent;
     await agent.start();
+    const agentStore = (agent as any).store as TripleStore;
 
     const renamedId = 'delete-invalidates-list-cache-cg';
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
@@ -1258,7 +1259,7 @@ describe('listContextGraphs merge', () => {
     const first = await agent.listContextGraphs({ callerAgentAddress: null });
     expect(first.find(p => p.id === renamedId)?.name).toBe('Delete Invalidates List Cache');
 
-    await result.store.deleteByPattern({
+    await agentStore.deleteByPattern({
       graph: ontologyGraph,
       subject: renamedUri,
       predicate: DKG_ONTOLOGY.SCHEMA_NAME,
@@ -1278,7 +1279,7 @@ describe('listContextGraphs merge', () => {
 
     expect((await agent.listContextGraphs()).find(p => p.id === droppedId)).toBeDefined();
 
-    await result.store.dropGraph(droppedGraph);
+    await agentStore.dropGraph(droppedGraph);
 
     expect((await agent.listContextGraphs()).find(p => p.id === droppedId)).toBeUndefined();
   }, 15000);
@@ -1449,6 +1450,48 @@ describe('listContextGraphs merge', () => {
 
       await expect(agent.listContextGraphs({ callerAgentAddress: null }))
         .rejects.toThrow('ontology/agents definition scan');
+      await scanSettled;
+      expect(sawAbort).toBe(true);
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+        value: originalRowBudget,
+        configurable: true,
+      });
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS', {
+        value: originalScanBudget,
+        configurable: true,
+      });
+    }
+  }, 15000);
+
+  it('rejects when the budgeted storage graph scan times out', async () => {
+    const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
+    const originalScanBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    try {
+      const store = sparqlHttpStoreBackedBy(new OxigraphStore());
+      const result = await createTestAgent({ store });
+      agent = result.agent;
+      await agent.start();
+
+      let sawAbort = false;
+      let scanSettled: Promise<void> | undefined;
+      vi.spyOn(store, 'listGraphs').mockImplementation(async (options?: any) => {
+        scanSettled = new Promise(resolve => setTimeout(resolve, 20));
+        await scanSettled;
+        sawAbort = options?.signal?.aborted === true;
+        return [];
+      });
+
+      await expect(agent.listContextGraphs({ callerAgentAddress: null }))
+        .rejects.toThrow('storage context graph scan');
       await scanSettled;
       expect(sawAbort).toBe(true);
     } finally {
@@ -1802,6 +1845,23 @@ describe('listContextGraphs merge', () => {
     const afterInvalidation = await agent.listContextGraphs({ callerAgentAddress: null });
     expect(definitionScans).toBe(2);
     expect(afterInvalidation.find(p => p.id === 'cache-invalidated-cg')).toBeDefined();
+  }, 15000);
+
+  it('does not rewrite the caller-provided store when binding list cache invalidation', async () => {
+    const store = new OxigraphStore();
+    const originalInsert = store.insert;
+    const originalDelete = store.delete;
+    const originalQuery = store.query;
+
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    expect(store.insert).toBe(originalInsert);
+    expect(store.delete).toBe(originalDelete);
+    expect(store.query).toBe(originalQuery);
+    expect((agent as any).store).not.toBe(store);
+    expect((agent as any).store.innerStore).toBe(store);
   }, 15000);
 });
 
