@@ -379,6 +379,7 @@ import {
   deserializeSwmSenderReceiveState,
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
+import { ContextGraphMetaProjection } from './context-graph-meta-projection.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 export class DKGAgentBase {
@@ -416,6 +417,7 @@ export class DKGAgentBase {
   protected readonly chain: ChainAdapter;
   /** Shared memory-owned root entities per context graph: entity → creatorPeerId. Used by publisher and shared memory handler. */
   protected readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
+  protected readonly contextGraphMetaProjection: ContextGraphMetaProjection;
   /**
    * OT-RFC-38 / LU-6 Phase B (Codex PR #610 round-2 #2) — highest
    * `nextSeqno` already consumed per (contextGraphId, hostPeerId)
@@ -495,6 +497,8 @@ export class DKGAgentBase {
   protected readonly swmHostModeHandlers = new Map<string, (topic: string, data: Uint8Array, from: string) => void>();
   /** Async lock for the host-mode reconciler so simultaneous calls don't double-subscribe. */
   protected hostModeReconcileInflight?: Promise<void>;
+  /** Rotating cursor for bounded host-mode reconcile sweeps over known context graphs. */
+  protected hostModeReconcileCursor = 0;
   /**
    * OT-RFC-43 A2 — the KA-number allocator, retained on the agent (also
    * forwarded to the publisher as `kaAllocator`). Held here so
@@ -1186,6 +1190,7 @@ export class DKGAgentBase {
     this.wallet = wallet;
     this.node = node;
     this.store = store;
+    this.contextGraphMetaProjection = new ContextGraphMetaProjection(store);
     this.publisher = publisher;
     this.queryEngine = queryEngine;
     this.workspaceOwnedEntities = workspaceOwnedEntities;

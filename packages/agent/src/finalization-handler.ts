@@ -43,11 +43,14 @@ export type ResolveContextGraphOnChainId = (
   contextGraphId: string,
 ) => Promise<string | null | undefined>;
 
+export type MarkContextGraphMetaDirtyFromQuads = (quads: readonly Quad[]) => void;
+
 export class FinalizationHandler {
   private readonly store: TripleStore;
   private readonly chain: ChainAdapter | undefined;
   private readonly eventBus: EventBus | undefined;
   private readonly resolveContextGraphOnChainId: ResolveContextGraphOnChainId | undefined;
+  private readonly markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads | undefined;
   private readonly log = new Logger('FinalizationHandler');
   private readonly processedUals = new Set<string>();
 
@@ -56,11 +59,13 @@ export class FinalizationHandler {
     chain: ChainAdapter | undefined,
     eventBus?: EventBus,
     resolveContextGraphOnChainId?: ResolveContextGraphOnChainId,
+    markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads,
   ) {
     this.store = store;
     this.chain = chain;
     this.eventBus = eventBus;
     this.resolveContextGraphOnChainId = resolveContextGraphOnChainId;
+    this.markContextGraphMetaDirtyFromQuads = markContextGraphMetaDirtyFromQuads;
   }
 
   async handleFinalizationMessage(data: Uint8Array, contextGraphId: string): Promise<void> {
@@ -314,7 +319,7 @@ export class FinalizationHandler {
       }
     }`;
 
-    const result = await this.store.query(sparql);
+    const result = await this.store.query(sparql, { source: 'agent.finalization.sharedMemorySlice' });
     return result.type === 'quads' ? result.quads : [];
   }
 
@@ -341,7 +346,7 @@ export class FinalizationHandler {
 
     const roots: Uint8Array[] = [];
     try {
-      const result = await this.store.query(sparql);
+      const result = await this.store.query(sparql, { source: 'agent.finalization.privateRoots' });
       if (result.type === 'bindings') {
         for (const row of result.bindings) {
           const hex = (row['root'] as string).replace(/^"(.*)".*$/, '$1').replace(/^0x/, '');
@@ -389,7 +394,7 @@ export class FinalizationHandler {
       }
     }`;
     try {
-      const result = await this.store.query(sparql);
+      const result = await this.store.query(sparql, { source: 'agent.finalization.keepRootCopySignal' });
       if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
       let sawFalse = false;
       for (const row of result.bindings) {
@@ -435,7 +440,7 @@ export class FinalizationHandler {
     } LIMIT 1`;
 
     try {
-      const result = await this.store.query(sparql);
+      const result = await this.store.query(sparql, { source: 'agent.finalization.publisherPeerId' });
       if (result.type === 'bindings' && result.bindings.length > 0) {
         const raw = result.bindings[0]['peerId'] as string;
         const peerId = raw.replace(/^"(.*)".*$/, '$1');
@@ -952,12 +957,14 @@ export class FinalizationHandler {
         } }`,
       );
       if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
-        await this.store.insert(generateSubGraphRegistration({
+        const regQuads = generateSubGraphRegistration({
           contextGraphId,
           subGraphName,
           createdBy: publisherAddress || 'finalization-discovery',
           timestamp: new Date(),
-        }));
+        });
+        await this.store.insert(regQuads);
+        this.markContextGraphMetaDirtyFromQuads?.(regQuads);
         this.log.info(ctx, `Finalization: auto-registered sub-graph "${subGraphName}" in context graph "${contextGraphId}"`);
       }
     }

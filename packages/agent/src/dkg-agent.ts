@@ -1137,6 +1137,7 @@ export class DKGAgent extends DKGAgentBase {
         graph: ontoGraph,
       }]);
 
+      this.contextGraphMetaProjection.markDirty(p.name);
       this.log.info(ctx, `Discovered on-chain context graph "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
       discovered++;
     }

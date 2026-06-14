@@ -781,6 +781,16 @@ export type ReplicationEventSink = (event: ReplicationEvent) => void;
 
 export interface DKGAgentConfig {
   name: string;
+  /**
+   * OT-RFC-49 §5.9 — public-projection target. When set, a private CG's
+   * confirmed VM publishes emit/refresh a verifiable public projection (the
+   * floor: existence, UAL, access class, committed root) into this PUBLIC
+   * context graph, binding the private CG into the public graph as a
+   * discoverable, verifiable node without disclosing its contents. The target
+   * MUST be a public CG (a curated target would encrypt the projection and
+   * also self-recurse). Unset → projections are off.
+   */
+  publicProjectionContextGraphId?: string;
   framework?: string;
   description?: string;
   listenPort?: number;
@@ -965,6 +975,8 @@ export interface DKGAgentConfig {
    *  - `registered`: TTL/byte-cap for on-chain registered CGs (typically larger).
    *  - `pruneIntervalMs`: how often the TTL/cap sweep runs.
    *  - `reconcileIntervalMs`: how often the host-mode subscription reconciler ensures cores are subscribed to all known curated CGs.
+   *  - `reconcileBatchSize`: max known CGs reconciled per tick. Default 32.
+   *  - `reconcileJitterRatio`: startup interval jitter ratio in [0, 1]. Default 0.15.
    */
   swmHostMode?: {
     enabled?: boolean;
@@ -972,6 +984,8 @@ export interface DKGAgentConfig {
     registered?: SwmHostModeStoreLimits;
     pruneIntervalMs?: number;
     reconcileIntervalMs?: number;
+    reconcileBatchSize?: number;
+    reconcileJitterRatio?: number;
     /**
      * OT-RFC-38 / LU-6 Phase B — discovery-beacon rate limits for
      * pre-registration (freemium-tier) ciphertext writes. All three

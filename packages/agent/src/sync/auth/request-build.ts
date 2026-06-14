@@ -1,6 +1,10 @@
 import { ethers } from 'ethers';
 
-export type SyncPhase = 'data' | 'meta' | 'snapshot';
+// 'catalog' (OT-RFC-49 §7) — the public facet open-serve: served to ANYONE
+// without the allowlist gate, bounded to exactly the `_catalog` named graph.
+// Backward-compatible: `phase` is not part of the signed digest and only
+// narrows results, so old responders ignore it and new ones honor it.
+export type SyncPhase = 'data' | 'meta' | 'snapshot' | 'catalog';
 
 export interface SyncRequestEnvelope {
   contextGraphId: string;

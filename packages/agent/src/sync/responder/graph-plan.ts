@@ -4,6 +4,7 @@ import {
   assertSafeIri,
   sparqlString,
   validateSubGraphName,
+  contextGraphCatalogUri,
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
@@ -471,6 +472,28 @@ export async function readDurableDataPage(params: {
       }
       : undefined,
     params.signal,
+  );
+}
+
+/**
+ * OT-RFC-49 §7 — read the public catalog facet. STRICTLY bounded to exactly the
+ * `_catalog` named graph (`did:dkg:context-graph:{cg}/_catalog`): it reads that
+ * one graph and nothing else, so the open-serve path cannot leak any gated
+ * quad. This is the only graph the §7 facet open-serve releases without auth.
+ */
+export async function readCatalogPage(params: {
+  store: TripleStore;
+  contextGraphId: string;
+  offset: number;
+  limit: number;
+}): Promise<SyncRow[]> {
+  const catalogGraph = contextGraphCatalogUri(params.contextGraphId);
+  return readPagedRowsAcrossGraphs(
+    params.store,
+    [catalogGraph],
+    params.offset,
+    params.limit,
+    async () => true, // the single graph is already the bound; admit it
   );
 }
 

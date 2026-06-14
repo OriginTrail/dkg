@@ -575,6 +575,112 @@ describe('listContextGraphs merge', () => {
     const unauthenticated = await agent.listContextGraphs();
     expect(unauthenticated.find(p => p.id === 'my-curated')).toBeUndefined();
   }, 15000);
+
+  it('listContextGraphs applies the same privacy rules to AGENTS-declared private CGs', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'agents-declared-private';
+    const myWallet = agent.getDefaultAgentAddress()!;
+    const uri = contextGraphDataGraphUri(id);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    const metaGraph = contextGraphMetaGraphUri(id);
+    await result.store.insert([
+      { subject: uri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: ontologyGraph },
+      { subject: uri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"public"', graph: ontologyGraph },
+      { subject: uri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: agentsGraph },
+      { subject: uri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Agents Declared Private"', graph: agentsGraph },
+      { subject: uri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"private"', graph: agentsGraph },
+      { subject: uri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${myWallet}`, graph: agentsGraph },
+      { subject: uri, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: `"${myWallet}"`, graph: metaGraph },
+    ]);
+
+    const otherWallet = ethers.Wallet.createRandom().address;
+    expect((await agent.listContextGraphs()).find(p => p.id === id)).toBeUndefined();
+    expect((await agent.listContextGraphs({ callerAgentAddress: otherWallet })).find(p => p.id === id)).toBeUndefined();
+    const visible = (await agent.listContextGraphs({ callerAgentAddress: myWallet })).find(p => p.id === id);
+    expect(visible).toBeDefined();
+    expect(visible?.accessPolicy).toBe('private');
+  }, 15000);
+
+  it('listContextGraphs projection mode preserves AGENTS privacy and root _meta discovery', async () => {
+    const previous = process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION;
+    process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION = '1';
+    try {
+      const result = await createTestAgent();
+      agent = result.agent;
+      await agent.start();
+
+      const privateId = 'projection-list-agents-private';
+      const gateOnlyId = 'projection-list-gate-only-private';
+      const metaOnlyId = 'projection-list-meta-only';
+      const policyUnknownId = 'projection-list-policy-unknown';
+      const implicitPublicId = 'projection-list-implicit-public';
+      const myWallet = agent.getDefaultAgentAddress()!;
+      const privateUri = contextGraphDataGraphUri(privateId);
+      const gateOnlyUri = contextGraphDataGraphUri(gateOnlyId);
+      const metaOnlyUri = contextGraphDataGraphUri(metaOnlyId);
+      const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+      const privateMetaGraph = contextGraphMetaGraphUri(privateId);
+      const gateOnlyMetaGraph = contextGraphMetaGraphUri(gateOnlyId);
+      await result.store.insert([
+        { subject: privateUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: ontologyGraph },
+        { subject: privateUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"public"', graph: ontologyGraph },
+        { subject: privateUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: agentsGraph },
+        { subject: privateUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Projection Agents Private"', graph: agentsGraph },
+        { subject: privateUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"private"', graph: agentsGraph },
+        { subject: privateUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${myWallet}`, graph: agentsGraph },
+        { subject: privateUri, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: `"${myWallet}"`, graph: privateMetaGraph },
+        { subject: gateOnlyUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: agentsGraph },
+        { subject: gateOnlyUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Projection Gate Only Private"', graph: agentsGraph },
+        { subject: gateOnlyUri, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: `"${myWallet}"`, graph: gateOnlyMetaGraph },
+        { subject: metaOnlyUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: contextGraphMetaGraphUri(metaOnlyId) },
+        { subject: metaOnlyUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Projection Meta Only"', graph: contextGraphMetaGraphUri(metaOnlyId) },
+        { subject: 'urn:projection-list-policy-unknown:root', predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Policy Unknown"', graph: contextGraphSharedMemoryUri(policyUnknownId) },
+      ]);
+      await agent.share(implicitPublicId, [
+        {
+          subject: 'urn:projection-list-implicit-public:root',
+          predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+          object: '"Projection Implicit Public"',
+          graph: '',
+        },
+      ], { callerAgentAddress: myWallet });
+
+      const unscoped = await agent.listContextGraphs();
+      expect(unscoped.find(p => p.id === privateId)).toBeUndefined();
+      expect(unscoped.find(p => p.id === gateOnlyId)).toBeUndefined();
+      expect(unscoped.find(p => p.id === metaOnlyId)?.name).toBe('Projection Meta Only');
+      expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === policyUnknownId)).toBeUndefined();
+
+      const otherWallet = ethers.Wallet.createRandom().address;
+      expect((await agent.listContextGraphs({ callerAgentAddress: otherWallet })).find(p => p.id === privateId)).toBeUndefined();
+      expect((await agent.listContextGraphs({ callerAgentAddress: otherWallet })).find(p => p.id === gateOnlyId)).toBeUndefined();
+      expect((await agent.listContextGraphs({ callerAgentAddress: otherWallet })).find(p => p.id === policyUnknownId)).toBeUndefined();
+
+      const visible = (await agent.listContextGraphs({ callerAgentAddress: myWallet })).find(p => p.id === privateId);
+      expect(visible).toBeDefined();
+      expect(visible?.accessPolicy).toBe('private');
+      expect(visible?.callerInvolved).toBe(true);
+      const gateVisible = (await agent.listContextGraphs({ callerAgentAddress: myWallet })).find(p => p.id === gateOnlyId);
+      expect(gateVisible).toBeDefined();
+      expect(gateVisible?.accessPolicy).toBe('private');
+      expect(gateVisible?.callerInvolved).toBe(true);
+      const implicitPublic = (await agent.listContextGraphs({ callerAgentAddress: myWallet })).find(p => p.id === implicitPublicId);
+      expect(implicitPublic).toBeDefined();
+      expect(implicitPublic?.accessPolicy).toBe('public');
+      expect(implicitPublic?.callerInvolved).toBe(true);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION;
+      } else {
+        process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION = previous;
+      }
+    }
+  }, 15000);
 });
 
 describe('discoverContextGraphsFromChain', () => {

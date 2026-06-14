@@ -652,6 +652,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     );
 
     await this.store.insert(quads);
+    this.contextGraphMetaProjection.markDirtyFromQuads(quads);
     await gm.ensureContextGraph(opts.id);
 
     // Force the triple-store flush BEFORE the SQLite caches are written.
@@ -911,6 +912,7 @@ export class ContextGraphMethods extends DKGAgentBase {
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR, object: creatorPeerDid, graph: defGraph },
         { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: curatorDid, graph: cgMetaGraph },
       ]);
+      this.contextGraphMetaProjection.markDirty(id);
       this.log.info(ctx, `Stamped local node as creator contact and address curator for "${id}" (registration-time lazy stamp)`);
       return curatorDid;
     };
@@ -1128,6 +1130,7 @@ export class ContextGraphMethods extends DKGAgentBase {
         await this.store.insert([
           { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"registered"`, graph: cgMetaGraph },
         ]);
+        this.contextGraphMetaProjection.markDirty(id);
         return { onChainId: existingOnChainId, txHash: undefined };
       }
       this.log.warn(
@@ -1300,6 +1303,7 @@ export class ContextGraphMethods extends DKGAgentBase {
             graph: cgMetaGraph,
           },
         ]);
+        this.contextGraphMetaProjection.markDirty(id);
         // Re-fetch participantAgents so the on-chain
         // registration also lists the calling agent (matches
         // what the local agent gate now enforces).
@@ -1400,6 +1404,7 @@ export class ContextGraphMethods extends DKGAgentBase {
       // topic without re-reading the chain event.
       { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`, object: `"${nameHash}"`, graph: cgMetaGraph },
     ]);
+    this.contextGraphMetaProjection.markDirty(id);
     // We no longer persist `publishAuthorityAccountId` locally even on
     // success (Codex PR #502 round-6 follow-through): with the
     // stored-value fallback gone, nothing reads it. A CG can only
@@ -1526,6 +1531,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     });
 
     await this.store.insert(quadsToInsert);
+    this.contextGraphMetaProjection.markDirtyFromQuads(quadsToInsert);
 
     // Issue #865 — log a clear warning AFTER the allowlist quad has
     // landed on a CG with an explicit `accessPolicy="public"` triple.
@@ -1689,6 +1695,8 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     await this.store.insert(quadsToInsert);
 
+    this.contextGraphMetaProjection.markDirtyFromQuads(quadsToInsert);
+
     // Issue #865 — companion warning to the peer-invite path above.
     // Allowlist writes on explicit-public CGs are allowed (the
     // publishPolicy=curated + accessPolicy=public combination is a
@@ -1778,6 +1786,7 @@ export class ContextGraphMethods extends DKGAgentBase {
       predicate: DKG_ONTOLOGY.DKG_REVOKED_AGENT,
       object: `"${agentAddress}"`,
     }]);
+    this.contextGraphMetaProjection.markDirty(contextGraphId);
     this.deleteContextGraphMember(contextGraphId, 'agent', agentAddress);
     this.queueSharedMemoryGossipSubscription(contextGraphId);
     // Drop any cached sender-key send state for this CG so the next
@@ -1855,6 +1864,7 @@ export class ContextGraphMethods extends DKGAgentBase {
       { subject: contextGraphUri, predicate: schemaName, object: escaped, graph: ontologyGraph },
       { subject: contextGraphUri, predicate: schemaName, object: escaped, graph: cgMetaGraph },
     ]);
+    this.contextGraphMetaProjection.markDirty(contextGraphId);
 
     this.log.info(ctx, `Renamed context graph "${contextGraphId}" to "${trimmed}"`);
   }
@@ -1863,8 +1873,6 @@ export class ContextGraphMethods extends DKGAgentBase {
    * List allowed agents for a context graph.
    */
   async getContextGraphAllowedAgents(this: DKGAgent, contextGraphId: string): Promise<string[]> {
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
     // Subtract `dkg:revokedAgent` tombstones from the allowlist union
     // so a curator who has called `removeAgentFromContextGraph` sees
     // their authoritative view, not the union with peer-sync-replicated
@@ -1873,32 +1881,9 @@ export class ContextGraphMethods extends DKGAgentBase {
     // silently re-include a revoked agent the moment another node's
     // local CG metadata gossiped back (see C1 devnet harness for the
     // reproducer + `removeAgentFromContextGraph` for the write side).
-    const result = await this.store.query(
-      `SELECT ?agent ?revoked WHERE {
-        {
-          GRAPH <${cgMetaGraph}> {
-            <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent
-          }
-        } UNION {
-          GRAPH <${cgMetaGraph}> {
-            <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?revoked
-          }
-        }
-      }`,
-    );
-    if (result.type !== 'bindings') return [];
-    const allowed: string[] = [];
-    const revoked = new Set<string>();
-    for (const row of result.bindings) {
-      const a = (row as Record<string, string>)['agent'];
-      const r = (row as Record<string, string>)['revoked'];
-      if (typeof a === 'string') {
-        allowed.push(a.replace(/^"|"$/g, ''));
-      }
-      if (typeof r === 'string') {
-        revoked.add(r.replace(/^"|"$/g, '').toLowerCase());
-      }
-    }
+    const meta = await this.getCgMeta(contextGraphId);
+    const allowed = meta.allowedAgents;
+    const revoked = new Set(meta.revokedAgents.map((addr) => addr.toLowerCase()));
     if (revoked.size === 0) return allowed;
     return allowed.filter((addr) => !revoked.has(addr.toLowerCase()));
   }
