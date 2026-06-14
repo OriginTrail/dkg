@@ -9,6 +9,7 @@ import {
   createResponderGraphListMemo,
   createResponderSubGraphRegistrationMemo,
   createResponderSwmAdmissionMemo,
+  readCatalogPage,
   readDurableCanonicalDataPage,
   readDurableDataPage,
   readDurableMetaPage,
@@ -86,6 +87,17 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       }
     }
     const nquads: string[] = [];
+
+    // OT-RFC-49 §7 — facet open-serve. The public `_catalog` subgraph (a DCAT
+    // dataset record) is served to ANYONE, with NO allowlist auth, BEFORE the
+    // gate below. Bounded to exactly that one named graph (readCatalogPage), so
+    // no gated quad can leak. This is how outsiders discover a private CG.
+    if (phase === 'catalog') {
+      const rows = await readCatalogPage({ store, contextGraphId, offset, limit });
+      const serialized = serializeResponderRows(rows);
+      logDebug(createOperationContext('sync'), `Sync responder catalog facet for "${contextGraphId}": rows=${rows.length}`);
+      return new TextEncoder().encode(serialized ?? '');
+    }
 
     const authStartedAt = Date.now();
     const authorized = await authorizeSyncRequest(request, peerId);

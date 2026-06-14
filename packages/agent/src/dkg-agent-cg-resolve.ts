@@ -19,7 +19,7 @@ import {
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
   contextGraphSharedMemoryUri,
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
-  contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
+  contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri, contextGraphCatalogUri,
   deriveCuratorDidFromCgId,
   MemoryLayer,
   computeACKDigest,
@@ -715,7 +715,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     // authenticated request so the remote peer can verify our identity
     // against its allowlist.
     const hasLocalData = this.subscribedContextGraphs.get(contextGraphId)?.synced === true;
-    const needsAuth = isPrivate || !hasLocalData;
+    // OT-RFC-49 §7 — the catalog facet is public and served without the
+    // allowlist gate, so an outsider (no CG identity) requests it unauthenticated.
+    const needsAuth = phase !== 'catalog' && (isPrivate || !hasLocalData);
     const claimedAgentAddress = await this.findLocalAgentForContextGraph(contextGraphId);
     const claimedAgent = claimedAgentAddress ? this.localAgents.get(claimedAgentAddress) : undefined;
     return buildSyncRequestEnvelope({
@@ -739,6 +741,26 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       claimedAgentAddress: claimedAgentAddress,
       claimedAgentPrivateKey: claimedAgent?.privateKey,
     });
+  }
+
+  /**
+   * OT-RFC-49 §7 — fetch a (private) CG's PUBLIC catalog entry from a peer
+   * WITHOUT membership. The responder serves the bounded `_catalog` facet
+   * openly (no allowlist gate); the fetched DCAT dataset record is written to
+   * the local store's `_catalog` graph. Returns the catalog quads received.
+   * The peer serves ONLY `_catalog` — gated content is never returned.
+   */
+  public async fetchPublicCatalog(this: DKGAgent,
+    contextGraphId: string,
+    responderPeerId: string,
+    deadlineMs = 30_000,
+  ): Promise<Quad[]> {
+    const ctx = createOperationContext('sync');
+    const catalogGraph = contextGraphCatalogUri(contextGraphId);
+    const result = await this.fetchSyncPages(
+      ctx, responderPeerId, contextGraphId, false, 'catalog', catalogGraph, Date.now() + deadlineMs,
+    );
+    return result.quads;
   }
 
   computeSyncDigest(this: DKGAgent,
