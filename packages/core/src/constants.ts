@@ -335,6 +335,18 @@ export function contextGraphSubGraphPrivateUri(contextGraphId: string, subGraphN
   return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/_private`;
 }
 
+/**
+ * OT-RFC-49 §5.9 — the public `_catalog` subgraph of a (private) CG: the
+ * bounded, plaintext, core-servable named graph holding the CG's DCAT catalog
+ * entry. `_`-prefixed, so it cannot collide with a user sub-graph name
+ * (`validateSubGraphName` reserves the prefix). This is the serving / open-serve
+ * boundary; the catalog quads are committed inside the CG's own VM merkle root
+ * (combined model), and the partition routing them here happens at publish time.
+ */
+export function contextGraphCatalogUri(contextGraphId: string): string {
+  return `did:dkg:context-graph:${contextGraphId}/_catalog`;
+}
+
 export function validateContextGraphId(id: string): { valid: boolean; reason?: string } {
   if (!id || id.length === 0) return { valid: false, reason: 'Context graph ID cannot be empty' };
   if (id.length > 256) return { valid: false, reason: 'Context graph ID exceeds 256 characters' };

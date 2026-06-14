@@ -74,6 +74,7 @@ async function getWorkspaceAccessMetadata(
   const cgData = contextGraphDataUri(contextGraphId);
   const cgMeta = contextGraphMetaUri(contextGraphId);
   const ontologyGraph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+  const agentsGraph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
   const swmGraph = contextGraphSharedMemoryUri(contextGraphId);
   // Flattened UNION: Blazegraph rejects nested UnionNode inside a
   // GRAPH block that is itself a UNION branch. Semantically identical
@@ -90,6 +91,14 @@ async function getWorkspaceAccessMetadata(
         GRAPH <${cgMeta}> { <${cgData}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy }
       } UNION {
         GRAPH <${ontologyGraph}> { <${cgData}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy }
+      } UNION {
+        GRAPH <${agentsGraph}> { <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent }
+      } UNION {
+        GRAPH <${agentsGraph}> { <${cgData}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent }
+      } UNION {
+        GRAPH <${agentsGraph}> { <${cgData}> <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}> ?revoked }
+      } UNION {
+        GRAPH <${agentsGraph}> { <${cgData}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy }
       } UNION {
         GRAPH <${swmGraph}> { <${cgData}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy }
       }
