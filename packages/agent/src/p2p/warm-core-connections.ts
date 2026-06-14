@@ -138,6 +138,12 @@ export interface WarmCoreDeps {
    * carry into the next pass.
    */
   previouslyWarmed?: ReadonlySet<string>;
+  /**
+   * Cores whose keep-alive tag failed to remove on an earlier pass. Retried
+   * separately from `previouslyWarmed` so failed unpins do not inflate the
+   * selected warm set beyond `maxCores`.
+   */
+  previouslyFailedUnpins?: ReadonlySet<string>;
   log: (ctx: OperationContext, msg: string) => void;
 }
 
@@ -147,8 +153,11 @@ export interface WarmCoreReconcileResult {
   dialed: number;
   skippedGate: number;
   unpinned: number;
+  unpinFailed: number;
   /** Cores pinned this pass — feed back as `previouslyWarmed` next tick. */
   warmed: Set<string>;
+  /** Failed stale unpins to retry next tick, bounded by `maxCores`. */
+  failedUnpins: Set<string>;
 }
 
 /**
@@ -202,8 +211,13 @@ export async function reconcileWarmCoreConnections(
   // one, so the pinned set tracks the live selection and never exceeds the cap.
   let unpinned = 0;
   let unpinFailed = 0;
-  if (deps.previouslyWarmed) {
-    for (const peerId of deps.previouslyWarmed) {
+  const failedUnpins = new Set<string>();
+  const pruneCandidates = new Set([
+    ...(deps.previouslyWarmed ?? []),
+    ...(deps.previouslyFailedUnpins ?? []),
+  ]);
+  if (pruneCandidates.size > 0) {
+    for (const peerId of pruneCandidates) {
       if (!warmed.has(peerId)) {
         let unpinOk = true;
         await deps.unpin(peerId, ctx).catch(() => {
@@ -213,20 +227,30 @@ export async function reconcileWarmCoreConnections(
           unpinned += 1;
         } else {
           unpinFailed += 1;
-          warmed.add(peerId);
+          if (failedUnpins.size < deps.maxCores) failedUnpins.add(peerId);
         }
       }
     }
   }
 
-  // If stale unpins fail, keep those peers in `warmed` so the next pass
-  // retries them. This may temporarily exceed the cap, but preserves the
-  // current winning selection instead of evicting a healthy Core.
+  // Failed stale unpins are retried out-of-band so the returned warm set stays
+  // the current selected/pinned set and remains bounded by `maxCores`.
 
   deps.log(
     ctx,
-    `warm-core reconcile: candidates=${candidates.length} pinned=${warmed.size} dialed=${dialed} skippedGate=${skippedGate} unpinned=${unpinned} unpinFailed=${unpinFailed} (cap=${deps.maxCores})`,
+    `warm-core reconcile: candidates=${candidates.length} pinned=${warmed.size} dialed=${dialed} ` +
+    `skippedGate=${skippedGate} unpinned=${unpinned} unpinFailed=${unpinFailed} ` +
+    `unpinRetry=${failedUnpins.size} (cap=${deps.maxCores})`,
   );
 
-  return { candidates: candidates.length, pinned: warmed.size, dialed, skippedGate, unpinned, warmed };
+  return {
+    candidates: candidates.length,
+    pinned: warmed.size,
+    dialed,
+    skippedGate,
+    unpinned,
+    unpinFailed,
+    warmed,
+    failedUnpins,
+  };
 }

@@ -1955,38 +1955,71 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   async readCoreHostedPublicCgAccessPolicy(this: DKGAgent, onChainId: string): Promise<0 | 1 | null> {
-    if (typeof this.chain.isContextGraphActiveOnChain === 'function') {
-      return this.readLiveOnChainAccessPolicy(onChainId);
-    }
-    const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
-    if (typeof getAccessPolicy !== 'function') return null;
     const numericId = BigInt(onChainId);
-    const cached = this.onChainAccessPolicyCache.get(onChainId);
-    if (cached === 0 || cached === 1) return cached;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<typeof TIMEOUT_SENTINEL>((resolve) => {
-      timer = setTimeout(() => resolve(TIMEOUT_SENTINEL), CHAIN_POLICY_READ_TIMEOUT_MS);
-      timer.unref?.();
-    });
-    try {
-      const policy = await Promise.race([
-        Promise.resolve(getAccessPolicy.call(this.chain, numericId))
-          .finally(() => { if (timer) clearTimeout(timer); }),
-        timeout,
-      ]);
-      if (policy === TIMEOUT_SENTINEL) {
-        this.log.warn(
-          createOperationContext('system'),
-          `recordCoreHostedPublicCg(${onChainId}): getContextGraphAccessPolicy timed out after ` +
-          `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — treating hosted CG access policy as UNKNOWN`,
-        );
+    const raceChainRead = async <T>(start: () => T | Promise<T>): Promise<T | typeof TIMEOUT_SENTINEL> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<typeof TIMEOUT_SENTINEL>((resolve) => {
+        timer = setTimeout(() => resolve(TIMEOUT_SENTINEL), CHAIN_POLICY_READ_TIMEOUT_MS);
+        timer.unref?.();
+      });
+      let work: Promise<T>;
+      try {
+        work = Promise.resolve(start()).finally(() => { if (timer) clearTimeout(timer); });
+      } catch (err) {
+        if (timer) clearTimeout(timer);
+        throw err;
+      }
+      return Promise.race([work, timeout]);
+    };
+    const readAccessPolicy = async (useCache: boolean): Promise<0 | 1 | null> => {
+      const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
+      if (typeof getAccessPolicy !== 'function') return null;
+      const cached = this.onChainAccessPolicyCache.get(onChainId);
+      if (useCache && (cached === 0 || cached === 1)) return cached;
+      try {
+        const policy = await raceChainRead(() => getAccessPolicy.call(this.chain, numericId));
+        if (policy === TIMEOUT_SENTINEL) {
+          this.log.warn(
+            createOperationContext('system'),
+            `recordCoreHostedPublicCg(${onChainId}): getContextGraphAccessPolicy timed out after ` +
+            `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — treating hosted CG access policy as UNKNOWN`,
+          );
+          return null;
+        }
+        if (policy === 0 || policy === 1) {
+          this.onChainAccessPolicyCache.set(onChainId, policy);
+          return policy;
+        }
+        return null;
+      } catch {
         return null;
       }
-      if (policy === 0 || policy === 1) {
-        this.onChainAccessPolicyCache.set(onChainId, policy);
-        return policy;
-      }
-      return null;
+    };
+
+    const isActive = this.chain.isContextGraphActiveOnChain;
+    if (typeof isActive !== 'function') return readAccessPolicy(true);
+    try {
+      const live = await raceChainRead(() => isActive.call(this.chain, numericId));
+      if (live === true) return readAccessPolicy(false);
+      if (live !== TIMEOUT_SENTINEL) return null;
+      this.log.warn(
+        createOperationContext('system'),
+        `recordCoreHostedPublicCg(${onChainId}): isContextGraphActiveOnChain timed out after ` +
+        `${CHAIN_POLICY_READ_TIMEOUT_MS}ms — falling back to ACK-backed access policy read`,
+      );
+    } catch (err) {
+      this.log.warn(
+        createOperationContext('system'),
+        `recordCoreHostedPublicCg(${onChainId}): isContextGraphActiveOnChain failed: ` +
+        `${err instanceof Error ? err.message : String(err)} — falling back to ACK-backed access policy read`,
+      );
+    }
+
+    try {
+      // StorageACK signing proves this specific registration was live enough
+      // to host. If the optional liveness probe itself flakes, preserve the
+      // host-tracking path and only fail closed when the policy read is unknown.
+      return await readAccessPolicy(false);
     } catch {
       return null;
     }

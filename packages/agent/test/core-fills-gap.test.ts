@@ -279,6 +279,37 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect((internals as any).onChainAccessPolicyCache.get('43')).toBe(0);
   });
 
+  it('falls back to ACK-backed policy read when the liveness probe times out', async () => {
+    const internals = await boot();
+    const getContextGraphAccessPolicy = vi.fn(async () => 0);
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
+    internals.chain.isContextGraphActiveOnChain = vi.fn(() => new Promise<boolean>(() => undefined));
+
+    vi.useFakeTimers();
+    try {
+      const recorded = internals.recordCoreHostedPublicCg('45');
+      await vi.advanceTimersByTimeAsync(2_500);
+      await recorded;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(getContextGraphAccessPolicy).toHaveBeenCalledWith(45n);
+    expect(internals.subscribedContextGraphs.get('45')?.coreHosted).toBe(true);
+  });
+
+  it('falls back to ACK-backed policy read when the liveness probe rejects', async () => {
+    const internals = await boot();
+    internals.chain.getContextGraphAccessPolicy = vi.fn(async () => 0);
+    internals.chain.isContextGraphActiveOnChain = vi.fn(async () => {
+      throw new Error('rpc unavailable');
+    });
+
+    await internals.recordCoreHostedPublicCg('46');
+
+    expect(internals.subscribedContextGraphs.get('46')?.coreHosted).toBe(true);
+  });
+
   it('bounds ACK-backed access-policy reads when the adapter has no liveness probe', async () => {
     const internals = await boot();
     internals.chain.getContextGraphAccessPolicy = async () => new Promise<number>(() => undefined);

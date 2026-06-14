@@ -1120,6 +1120,8 @@ export class DKGAgentBase {
   /** Cores keep-alive-pinned on the last warm-core pass, so the next pass can
    *  unpin Cores that fell out of the selection (stale-pin / cap-drift guard). */
   protected warmedCores: Set<string> = new Set();
+  /** Stale warm-core keep-alive removals that failed and should be retried. */
+  protected warmCoreFailedUnpins: Set<string> = new Set();
   /**
    * v10-rc sync-refactor: per-(peer+CG) checkpoint offsets so the paged
    * sync requester in `sync/requester/page-fetch.ts` can resume where it

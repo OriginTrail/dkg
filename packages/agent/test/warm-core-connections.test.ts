@@ -199,7 +199,7 @@ describe('reconcileWarmCoreConnections', () => {
     expect(unpinned).toEqual(['core2']);
   });
 
-  it('does not count a failed unpin and retains the peer for retry', async () => {
+  it('does not count a failed unpin or inflate the warmed set', async () => {
     const calls: string[] = [];
     const { deps } = makeDeps({
       maxCores: 2,
@@ -214,8 +214,10 @@ describe('reconcileWarmCoreConnections', () => {
 
     expect(calls).toEqual(['flaky', 'gone']);
     expect(res.unpinned).toBe(1);
-    expect(res.pinned).toBe(3);
-    expect([...res.warmed].sort()).toEqual(['core1', 'core2', 'flaky']);
+    expect(res.unpinFailed).toBe(1);
+    expect(res.pinned).toBe(2);
+    expect([...res.warmed].sort()).toEqual(['core1', 'core2']);
+    expect([...res.failedUnpins]).toEqual(['flaky']);
   });
 
   it('keeps the current best peer when a stale unpin fails at the cap', async () => {
@@ -236,7 +238,48 @@ describe('reconcileWarmCoreConnections', () => {
 
     expect(calls).toEqual(['stale']);
     expect(res.unpinned).toBe(0);
+    expect(res.unpinFailed).toBe(1);
+    expect(res.pinned).toBe(1);
+    expect([...res.warmed]).toEqual(['core1']);
+    expect([...res.failedUnpins]).toEqual(['stale']);
+  });
+
+  it('retries failed unpins separately from the bounded warmed set', async () => {
+    const calls: string[] = [];
+    const { deps } = makeDeps({
+      maxCores: 2,
+      previouslyFailedUnpins: new Set(['flaky']),
+      unpin: async (peerId) => {
+        calls.push(peerId);
+        if (peerId === 'flaky') throw new Error('peerStore busy');
+      },
+    });
+
+    const res = await reconcileWarmCoreConnections(deps);
+
+    expect(calls).toEqual(['flaky']);
+    expect(res.unpinned).toBe(0);
+    expect(res.unpinFailed).toBe(1);
     expect(res.pinned).toBe(2);
-    expect([...res.warmed].sort()).toEqual(['core1', 'stale']);
+    expect([...res.warmed].sort()).toEqual(['core1', 'core2']);
+    expect([...res.failedUnpins]).toEqual(['flaky']);
+  });
+
+  it('bounds the failed-unpin retry set by maxCores', async () => {
+    const { deps } = makeDeps({
+      maxCores: 1,
+      previouslyWarmed: new Set(['stale-a', 'stale-b']),
+      findCoreAgents: async () => [],
+      unpin: async () => {
+        throw new Error('peerStore busy');
+      },
+    });
+
+    const res = await reconcileWarmCoreConnections(deps);
+
+    expect(res.unpinFailed).toBe(2);
+    expect(res.pinned).toBe(0);
+    expect([...res.warmed]).toEqual([]);
+    expect(res.failedUnpins.size).toBe(1);
   });
 });

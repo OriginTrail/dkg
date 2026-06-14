@@ -2603,10 +2603,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       unpin: (peerId, ctx) => this.unpinWarmCore(peerId, ctx),
       dial: (peerId, ctx) => this.dialWarmCore(peerId, ctx),
       previouslyWarmed: this.warmedCores,
+      previouslyFailedUnpins: this.warmCoreFailedUnpins,
       log: (ctx, msg) => this.log.info(ctx, msg),
     });
     // Carry the pinned set into the next tick so stale Cores get unpinned.
     this.warmedCores = result.warmed;
+    this.warmCoreFailedUnpins = result.failedUnpins;
   }
 
   /**
@@ -2666,6 +2668,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.log.info(ctx, `warm-core: unpin ${shortPeer} failed: ${message}`);
+      throw err;
     }
   }
 
