@@ -9,6 +9,8 @@ const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
 
 export interface CatchupJobResult {
   connectedPeers: number;
+  totalPeers?: number;
+  selectedPeers?: number;
   syncCapablePeers: number;
   peersTried: number;
   /**

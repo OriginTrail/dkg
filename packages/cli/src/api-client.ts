@@ -1176,6 +1176,8 @@ export class ApiClient {
     catchup?:
       | {
         connectedPeers: number;
+        totalPeers?: number;
+        selectedPeers?: number;
         syncCapablePeers: number;
         peersTried: number;
         peersResponded: number;
@@ -1235,6 +1237,8 @@ export class ApiClient {
     catchup?:
       | {
         connectedPeers: number;
+        totalPeers?: number;
+        selectedPeers?: number;
         syncCapablePeers: number;
         peersTried: number;
         peersResponded: number;
@@ -1298,6 +1302,8 @@ export class ApiClient {
     finishedAt?: number;
     result?: {
       connectedPeers: number;
+      totalPeers?: number;
+      selectedPeers?: number;
       syncCapablePeers: number;
       peersTried: number;
       peersResponded: number;

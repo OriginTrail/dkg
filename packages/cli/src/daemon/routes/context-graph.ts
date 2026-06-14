@@ -1550,6 +1550,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         const servedUsableData =
           result.dataSynced > 0 ||
           result.sharedMemorySynced > 0;
+        const totalConnectedPeers = result.totalPeers ?? result.connectedPeers;
+        const selectedConnectedPeers = result.selectedPeers ?? result.connectedPeers;
         const cleanResponse =
           servedUsableData ||
           (d?.emptyResponses ?? 0) > 0 ||
@@ -1583,7 +1585,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           } else if (result.peersTried > 0) {
             job.status = "failed";
             job.error = "Sync did not complete — all reachable peers failed (timeouts or transport errors). Retry once the network is healthier.";
-          } else if (result.connectedPeers > 0 && result.syncCapablePeers === 0) {
+          } else if (totalConnectedPeers > 0 && selectedConnectedPeers >= totalConnectedPeers && result.syncCapablePeers === 0) {
             // Connected to peers, but none speak the sync protocol —
             // i.e. all our connections are non-DKG / mismatched
             // versions. From the joiner's perspective this is the same
@@ -1591,7 +1593,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             // reuse the dedicated terminal status.
             job.status = "unreachable";
             job.error = "No sync-capable peers found for catch-up — the curator may be offline.";
-          } else if (result.connectedPeers === 0) {
+          } else if (totalConnectedPeers === 0) {
             // No peers connected at all → definitionally unreachable.
             job.status = "unreachable";
             job.error = "No peers connected — couldn't reach the curator. They may be offline, or your node hasn't bootstrapped to the network yet.";
@@ -1600,7 +1602,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           if (DEBUG_SYNC_TRACE) {
             console.log(
               `[catchup] job=${jobId} contextGraph=${contextGraphId} status=${job.status} ` +
-                `peers=${result.peersTried}/${result.syncCapablePeers} connected=${result.connectedPeers} ` +
+                `peers=${result.peersTried}/${result.syncCapablePeers} connected=${totalConnectedPeers} ` +
                 `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
             );
           }

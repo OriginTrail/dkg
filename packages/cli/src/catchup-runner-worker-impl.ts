@@ -225,6 +225,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
 
   return {
     connectedPeers: prepared.connectedPeers,
+    totalPeers: prepared.connectedPeers,
+    selectedPeers: prepared.peerIds.length,
     syncCapablePeers,
     peersTried,
     peersResponded,

@@ -359,7 +359,9 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
 
     await internals.recordCoreHostedPublicCg('46');
 
+    expect(internals.chain.getContextGraphAccessPolicy).toHaveBeenCalledWith(46n);
     expect(internals.subscribedContextGraphs.get('46')?.coreHosted).toBe(true);
+    expect(saved.find((r) => r.id === '46')?.coreHosted).toBe(true);
   });
 
   it('bounds ACK-backed access-policy reads when the adapter has no liveness probe', async () => {
@@ -1278,7 +1280,7 @@ describe('Phase D - VM reconcile damping', () => {
       }
       return {
         ...emptyCatchupStats(),
-        connectedPeers: connectedPeers.length,
+        connectedPeers: 1,
         totalPeers: connectedPeers.length,
         selectedPeers: 1,
       };
@@ -1296,7 +1298,7 @@ describe('Phase D - VM reconcile damping', () => {
 
     const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue({
       ...emptyCatchupStats(),
-      connectedPeers: 33,
+      connectedPeers: 1,
       totalPeers: 33,
       selectedPeers: 1,
     });

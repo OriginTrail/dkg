@@ -137,12 +137,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   /** True when `contextGraphId` is an active minted CG in ContextGraphStorage. */
   async isContextGraphActiveOnChain(contextGraphId: bigint): Promise<boolean> {
     await this.init();
-    if (!this.contracts.contextGraphStorage) return false;
-    try {
-      return Boolean(await this.contracts.contextGraphStorage.isContextGraphActive(contextGraphId));
-    } catch {
-      return false;
-    }
+    const cgs = this.requireContextGraphStorage();
+    return Boolean(await cgs.isContextGraphActive(contextGraphId));
   }
 
   async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {

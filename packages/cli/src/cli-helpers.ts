@@ -249,8 +249,9 @@ function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus'
   if (status.startedAt) console.log(`Started:       ${new Date(status.startedAt).toISOString()}`);
   if (status.finishedAt) console.log(`Finished:      ${new Date(status.finishedAt).toISOString()}`);
   if (status.result) {
+    const totalConnectedPeers = status.result.totalPeers ?? status.result.connectedPeers;
     console.log(
-      `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${status.result.connectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
+      `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${totalConnectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
     );
     if (status.result.diagnostics) {
       console.log(
@@ -269,7 +270,8 @@ function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus'
   }
   if (
     status.result &&
-    status.result.connectedPeers > 0 &&
+    (status.result.selectedPeers ?? status.result.connectedPeers) >= (status.result.totalPeers ?? status.result.connectedPeers) &&
+    (status.result.totalPeers ?? status.result.connectedPeers) > 0 &&
     status.result.syncCapablePeers === 0 &&
     status.result.dataSynced === 0 &&
     status.result.sharedMemorySynced === 0

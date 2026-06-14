@@ -720,12 +720,50 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           peerRotationKey: 'runtime-contextGraph',
         });
 
-        expect(firstResult.connectedPeers).toBe(3);
+        expect(firstResult.connectedPeers).toBe(1);
         expect(firstResult.totalPeers).toBe(3);
         expect(firstResult.selectedPeers).toBe(1);
         expect(firstResult.syncCapablePeers).toBe(1);
         expect(firstResult.peersTried).toBe(1);
         expect(triedPeers).toEqual(['peer-preferred', 'peer-core', 'peer-edge']);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it('keeps connectedPeers scoped to the selected catchup window', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupSelectedPeerCounts',
+        listenHost: '127.0.0.1',
+        chainAdapter: new MockChainAdapter(),
+      });
+
+      try {
+        await agent.start();
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const peerNoProtocol = { toString: () => 'peer-no-protocol' };
+        const peerUnselected = { toString: () => 'peer-unselected' };
+        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+          { remotePeer: peerNoProtocol } as any,
+          { remotePeer: peerUnselected } as any,
+        ]);
+        vi.spyOn((agent as any).discovery, 'findAgents').mockResolvedValue([]);
+        vi.spyOn(agent as any, 'waitForSyncProtocol').mockResolvedValue(false);
+        const syncFromPeerDetailed = vi.spyOn(agent as any, 'syncFromPeerDetailed');
+
+        const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          maxPeers: 1,
+          peerRotationKey: 'runtime-contextGraph',
+        });
+
+        expect(result.connectedPeers).toBe(1);
+        expect(result.selectedPeers).toBe(1);
+        expect(result.totalPeers).toBe(2);
+        expect(result.syncCapablePeers).toBe(0);
+        expect(result.peersTried).toBe(0);
+        expect(result.diagnostics.noProtocolPeers).toBe(1);
+        expect(syncFromPeerDetailed).not.toHaveBeenCalled();
       } finally {
         await agent.stop().catch(() => {});
       }

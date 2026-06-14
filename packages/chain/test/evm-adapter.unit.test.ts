@@ -261,6 +261,37 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     await expect(a.getContextGraphAccessPolicy(7n)).resolves.toBe(0);
   });
 
+  it('surfaces context graph liveness RPC failures instead of reporting inactive', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const rpcError = new Error('rpc unavailable');
+    (a as any).init = async () => undefined;
+    (a as any).contracts.contextGraphStorage = {
+      isContextGraphActive: vi.fn(async () => {
+        throw rpcError;
+      }),
+    };
+
+    await expect(a.isContextGraphActiveOnChain(8n)).rejects.toThrow('rpc unavailable');
+  });
+
+  it('returns false for a successful inactive context graph liveness read', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const isContextGraphActive = vi.fn(async () => false);
+    (a as any).init = async () => undefined;
+    (a as any).contracts.contextGraphStorage = { isContextGraphActive };
+
+    await expect(a.isContextGraphActiveOnChain(9n)).resolves.toBe(false);
+    expect(isContextGraphActive).toHaveBeenCalledWith(9n);
+  });
+
+  it('surfaces missing ContextGraphStorage as unknown instead of reporting inactive', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    (a as any).init = async () => undefined;
+    (a as any).contracts.contextGraphStorage = undefined;
+
+    await expect(a.isContextGraphActiveOnChain(10n)).rejects.toThrow('ContextGraphStorage not deployed');
+  });
+
   it('uses configured tokenAddress without resolving Hub.Token during init', async () => {
     const tokenAddress = ethers.getAddress(`0x${'22'.repeat(20)}`);
     const contractAddress = ethers.getAddress(`0x${'11'.repeat(20)}`);

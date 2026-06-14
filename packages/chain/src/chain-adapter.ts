@@ -1323,6 +1323,9 @@ export interface ChainAdapter {
    * so the protected/encrypted path is kept). Adapters that implement
    * `getContextGraphAccessPolicy` SHOULD also implement this so they don't
    * silently strand on-chain-public CGs on the encrypted path.
+   * A resolved `false` must mean the chain successfully proved the slot is
+   * inactive; transient RPC/read failures should reject so callers can choose
+   * their own fail-closed or ACK-backed fallback behavior.
    */
   isContextGraphActiveOnChain?(contextGraphId: bigint): Promise<boolean>;
 
