@@ -25,11 +25,18 @@ export function decodeInvokeRequest(bytes: Uint8Array): SharedModelInvokeRequest
     }
     return { role: mm.role as SharedModelRole, content: mm.content };
   });
+  // `agentAddress` is OPTIONAL on the wire but, when present, must be a string;
+  // a non-string claim is a malformed request (reject rather than coerce, so a
+  // bogus type can never be silently dropped and then default to the union).
+  if (o.agentAddress !== undefined && typeof o.agentAddress !== 'string') {
+    throw new Error('invalid agentAddress in SharedModelInvokeRequest');
+  }
   return {
     contextGraphId: o.contextGraphId,
     messages,
     maxTokens: typeof o.maxTokens === 'number' ? o.maxTokens : undefined,
     temperature: typeof o.temperature === 'number' ? o.temperature : undefined,
+    agentAddress: o.agentAddress,
   };
 }
 

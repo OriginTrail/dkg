@@ -53,6 +53,15 @@ export interface SharedModelInvokeRequest {
   messages: SharedModelMessage[];
   maxTokens?: number;
   temperature?: number;
+  /**
+   * The agent address the member's node claims to invoke ON BEHALF OF. This is
+   * an UNTRUSTED claim carried in the request body; the curator authorizes it
+   * only if the cryptographically-authenticated transport `fromPeerId` matches
+   * the delegatee peer THAT specific agent recorded with the curator (mirrors
+   * the sync auth path's `requesterAgentAddress` binding). A request that omits
+   * it is denied on the remote path — there is no union fallback.
+   */
+  agentAddress?: string;
 }
 
 export interface SharedModelInvokeResponse {
