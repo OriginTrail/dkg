@@ -476,6 +476,21 @@ create_node_config() {
     rs_block="\"randomSampling\": { \"walPath\": \"${node_dir}/random-sampling.wal\", \"tickIntervalMs\": 5000 },"
   fi
 
+  # Shared curator AI-model access (PR #1157). Opt-in via DEVNET_SHARED_MODEL=1
+  # so scripts/devnet-test-shared-model.sh can stand up a curator node that
+  # serves member invokes. Defaults to the offline 'mock' provider (no key);
+  # override provider/model/baseUrl/timeouts via env for openai-compatible
+  # runs (e.g. the slow-upstream check for the invoke-timeout fix).
+  local shared_model_block=""
+  if [ "${DEVNET_SHARED_MODEL:-}" = "1" ]; then
+    local sm_fields="\"enabled\": true, \"provider\": \"${DEVNET_SHARED_MODEL_PROVIDER:-mock}\""
+    [ -n "${DEVNET_SHARED_MODEL_MODEL:-}" ] && sm_fields="${sm_fields}, \"model\": \"${DEVNET_SHARED_MODEL_MODEL}\""
+    [ -n "${DEVNET_SHARED_MODEL_BASEURL:-}" ] && sm_fields="${sm_fields}, \"baseUrl\": \"${DEVNET_SHARED_MODEL_BASEURL}\""
+    [ -n "${DEVNET_SHARED_MODEL_INVOKE_TIMEOUT_MS:-}" ] && sm_fields="${sm_fields}, \"invokeTimeoutMs\": ${DEVNET_SHARED_MODEL_INVOKE_TIMEOUT_MS}"
+    [ -n "${DEVNET_SHARED_MODEL_PROVIDER_TIMEOUT_MS:-}" ] && sm_fields="${sm_fields}, \"providerTimeoutMs\": ${DEVNET_SHARED_MODEL_PROVIDER_TIMEOUT_MS}"
+    shared_model_block="\"sharedModel\": { ${sm_fields} },"
+  fi
+
   cat > "$node_dir/config.json" <<EOCONF
 {
   "name": "devnet-node-${node_num}",
@@ -495,6 +510,7 @@ create_node_config() {
   ${rs_block}
   ${publisher_block}
   ${epcis_block}
+  ${shared_model_block}
   "chain": {
     "type": "evm",
     "rpcUrl": "http://127.0.0.1:${HARDHAT_PORT}",
