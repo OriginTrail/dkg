@@ -1986,6 +1986,13 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       if (seen.has(uri)) continue;
       if (id === SYSTEM_CONTEXT_GRAPHS.AGENTS || id === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) continue;
 
+      const contentRead = await withBudget(
+        (signal) => this.contextGraphHasLocalContent(id, { signal }),
+        `storage content probe for ${id}`,
+      );
+      if (!contentRead.ok) cacheable = false;
+      if (contentRead.ok && !contentRead.value) continue;
+
       const sub = this.subscribedContextGraphs.get(id);
       const onChainId = sub?.onChainId ?? (await optional(
         (signal) => this.getContextGraphOnChainId(id, { signal }),

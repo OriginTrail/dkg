@@ -1091,6 +1091,29 @@ describe('listContextGraphs merge', () => {
     expect((await agent.listContextGraphs()).find(p => p.id === droppedId)).toBeUndefined();
   }, 15000);
 
+  it('does not list empty named graphs created by graph ensure calls', async () => {
+    const originalTtl = DKGAgentBase.LIST_CONTEXT_GRAPHS_CACHE_TTL_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_CACHE_TTL_MS', {
+      value: 0,
+      configurable: true,
+    });
+    try {
+      const result = await createTestAgent();
+      agent = result.agent;
+      await agent.start();
+
+      const id = 'empty-created-graph-cg';
+      await result.store.createGraph(contextGraphDataGraphUri(id));
+
+      expect((await agent.listContextGraphs()).find(p => p.id === id)).toBeUndefined();
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_CACHE_TTL_MS', {
+        value: originalTtl,
+        configurable: true,
+      });
+    }
+  }, 15000);
+
   it('expires cached list rows using monotonic time when wall clock moves backwards', async () => {
     const originalTtl = DKGAgentBase.LIST_CONTEXT_GRAPHS_CACHE_TTL_MS;
     Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_CACHE_TTL_MS', {
