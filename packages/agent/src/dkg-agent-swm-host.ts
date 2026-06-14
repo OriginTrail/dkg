@@ -2055,8 +2055,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (this.reconcileCoalescer) void this.reconcileCoalescer.trigger(localCgId);
   }
 
-  trackCoreHostRecording(this: DKGAgent, p: Promise<void>): void {
-    const tracked = p.catch((err) => {
+  trackCoreHostRecording(this: DKGAgent, start: () => Promise<void>): void {
+    if (this.coreHostRecordingsClosed) return;
+    let recording: Promise<void>;
+    try {
+      recording = start();
+    } catch (err) {
+      this.log.warn(
+        createOperationContext('system'),
+        `Phase D: recordCoreHostedPublicCg failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+    const tracked = recording.catch((err) => {
       this.log.warn(
         createOperationContext('system'),
         `Phase D: recordCoreHostedPublicCg failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -2065,6 +2076,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
       this.coreHostRecordings.delete(tracked);
     });
     this.coreHostRecordings.add(tracked);
+  }
+
+  async drainCoreHostRecordings(this: DKGAgent): Promise<void> {
+    while (this.coreHostRecordings.size > 0) {
+      await Promise.allSettled([...this.coreHostRecordings]);
+    }
   }
 
   // ===== Phase B — chain-driven VM reconciliation (B.4 agent wiring) =========

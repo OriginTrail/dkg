@@ -398,6 +398,7 @@ import type { DKGAgent } from './dkg-agent.js';
 export class LifecycleSyncMethods extends DKGAgentBase {
   async start(this: DKGAgent): Promise<void> {
     if (this.started) return;
+    this.coreHostRecordingsClosed = false;
     const ctx = createOperationContext('connect');
     this.log.info(ctx, `Starting DKG node`);
 
@@ -1104,7 +1105,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 // hosts the CG so the chain-driven VM reconciler fills its gaps
                 // across restarts. Best-effort + public-CG-gated inside the
                 // helper; never blocks or affects the (sync) provenance return.
-                this.trackCoreHostRecording(this.recordCoreHostedPublicCg(cgId, swmGraphId));
+                this.trackCoreHostRecording(() => this.recordCoreHostedPublicCg(cgId, swmGraphId));
                 const wireFromCgId = cgId ? this.gossipWireIdFor(cgId) : undefined;
                 const wireFromSwmGraphId = swmGraphId && swmGraphId !== cgId
                   ? this.gossipWireIdFor(swmGraphId)

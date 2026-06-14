@@ -1154,9 +1154,8 @@ export class DKGAgent extends DKGAgentBase {
       clearInterval(this.vmReconcileTimer);
       this.vmReconcileTimer = null;
     }
-    if (this.coreHostRecordings.size > 0) {
-      await Promise.allSettled([...this.coreHostRecordings]);
-    }
+    this.coreHostRecordingsClosed = true;
+    await this.drainCoreHostRecordings();
     if (this.messengerOutboxTimer) {
       clearInterval(this.messengerOutboxTimer);
       this.messengerOutboxTimer = null;

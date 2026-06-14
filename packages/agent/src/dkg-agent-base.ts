@@ -706,6 +706,8 @@ export class DKGAgentBase {
    * flush the host-only `coreHosted` flag before teardown.
    */
   protected readonly coreHostRecordings = new Set<Promise<void>>();
+  /** Stop-time gate: once true, ACK hooks must not start new core-host writes. */
+  protected coreHostRecordingsClosed = false;
   /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
   protected readonly vmReconcileNegativeCache = new Map<string, {
     localCgId: string;

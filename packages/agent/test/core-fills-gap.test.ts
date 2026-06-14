@@ -278,6 +278,39 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(saved.find((r) => r.id === '44')).toBeUndefined();
   });
 
+  it('stops accepting and drains core-host recordings deterministically', async () => {
+    const internals = await boot();
+    let startedAfterClose = false;
+    (internals as any).coreHostRecordingsClosed = true;
+    (internals as any).trackCoreHostRecording(async () => { startedAfterClose = true; });
+    expect(startedAfterClose).toBe(false);
+
+    (internals as any).coreHostRecordingsClosed = false;
+    const recordings = (internals as any).coreHostRecordings as Set<Promise<void>>;
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstBase = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let firstTracked!: Promise<void>;
+    firstTracked = firstBase.finally(() => {
+      recordings.delete(firstTracked);
+      let secondTracked!: Promise<void>;
+      secondTracked = new Promise<void>((resolve) => { releaseSecond = resolve; })
+        .finally(() => { recordings.delete(secondTracked); });
+      recordings.add(secondTracked);
+    });
+    recordings.add(firstTracked);
+
+    const drained = (internals as any).drainCoreHostRecordings();
+    releaseFirst();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(recordings.size).toBe(1);
+    releaseSecond();
+    await drained;
+
+    expect(recordings.size).toBe(0);
+  });
+
   it('keys the host row under the cleartext swmGraphId (not the numeric id) on first ACK', async () => {
     // Regression: on the first ACK for a CG we only host, there is no local
     // mapping yet, so without the cleartext hint the row would land under the
