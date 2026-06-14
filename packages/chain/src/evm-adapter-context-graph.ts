@@ -134,9 +134,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const pageSize = this.cgRegistryScanPageSize;
     const pages = Math.ceil((head - start + 1) / pageSize);
     const blockBudget = CG_REGISTRY_MAX_SCAN_PAGES * pageSize;
-    if (!degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
+    if (incremental && !degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
       throw new Error(
-        `listContextGraphsFromChain: ContextGraphNameRegistry scan would need ` +
+        `listContextGraphsFromChain: incremental ContextGraphNameRegistry scan would need ` +
           `${pages} eth_getLogs calls over blocks [${start}, ${head}] at a ` +
           `${pageSize}-block window (budget ${CG_REGISTRY_MAX_SCAN_PAGES} pages / ` +
           `${blockBudget} blocks). ` +

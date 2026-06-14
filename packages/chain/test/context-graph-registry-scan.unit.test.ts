@@ -236,14 +236,26 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(registry.queryFilter).toHaveBeenCalledTimes(Math.ceil((head + 1) / pageSize));
   });
 
-  it('throws before queryFilter when the bounded registry scan would exceed the page budget', async () => {
+  it('keeps public list-all scans complete beyond the incremental page budget', async () => {
+    const registry = makeRegistry();
+    const defaultPageSize = 2_000;
+    const defaultBlockBudget = CG_REGISTRY_MAX_SCAN_PAGES * defaultPageSize;
+    const { adapter } = makeAdapter(registry, defaultBlockBudget);
+    registry.queryFilter.mockResolvedValue([]);
+
+    await expect(adapter.listContextGraphsFromChain()).resolves.toEqual([]);
+
+    expect(registry.queryFilter).toHaveBeenCalledTimes(CG_REGISTRY_MAX_SCAN_PAGES + 1);
+  });
+
+  it('throws before queryFilter when an incremental registry scan would exceed the page budget', async () => {
     const registry = makeRegistry();
     const defaultPageSize = 2_000;
     const defaultBlockBudget = CG_REGISTRY_MAX_SCAN_PAGES * defaultPageSize;
     const { adapter } = makeAdapter(registry, defaultBlockBudget);
 
-    await expect(adapter.listContextGraphsFromChain()).rejects.toThrow(
-      new RegExp(`ContextGraphNameRegistry scan would need.*budget ${CG_REGISTRY_MAX_SCAN_PAGES} pages`),
+    await expect(adapter.listContextGraphsFromChain(undefined, { incremental: true })).rejects.toThrow(
+      new RegExp(`incremental ContextGraphNameRegistry scan would need.*budget ${CG_REGISTRY_MAX_SCAN_PAGES} pages`),
     );
     expect(registry.queryFilter).not.toHaveBeenCalled();
   });
