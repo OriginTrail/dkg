@@ -209,6 +209,7 @@ import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
+import { recoverContextGraphSwm, type RecoverContextGraphSwmResult } from './sync/requester/swm-recovery.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
@@ -2921,6 +2922,60 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       logInfo: (opCtx, message) => this.log.info(opCtx, message),
       logWarn: (opCtx, message) => this.log.warn(opCtx, message),
       logDebug: (opCtx, message) => this.log.debug(opCtx, message),
+    });
+  }
+
+  /**
+   * OT-RFC-49 WS-0.0 — recover ONE context graph's `_shared_memory` to current
+   * state from a single authoritative peer (member / anchor), applying via
+   * REPLACE rather than the shared incremental union path (which corrupts a
+   * non-empty store). Invoked by the member-recovery driver after the frontier
+   * detects a full / cross-epoch gap; isolated from `runSharedMemorySync` so the
+   * incremental path is untouched.
+   */
+  async recoverContextGraphSwmFromPeer(this: DKGAgent,
+    remotePeerId: string,
+    contextGraphId: string,
+  ): Promise<RecoverContextGraphSwmResult> {
+    const ctx = createOperationContext('sync');
+    const admission = await getSharedMemorySubGraphAdmission(
+      this.store, contextGraphId, this.listSubGraphs(contextGraphId),
+    );
+    return recoverContextGraphSwm({
+      ctx,
+      remotePeerId,
+      contextGraphId,
+      deadline: this.createContextGraphSyncDeadline(1),
+      fetchSyncPages: this.fetchSyncPages.bind(this),
+      processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, cgId, registered, excluded) =>
+        this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(wsDataQuads, wsMetaQuads, cgId, registered, excluded),
+      // SwmRecoveryStore: mark the meta projection dirty on insert (parity with
+      // runSharedMemorySync's storeInsert); deletes pass through to the store.
+      store: {
+        insert: async (quads) => {
+          await this.store.insert(quads);
+          this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+        },
+        deleteByPattern: (pattern) => this.store.deleteByPattern(pattern),
+        deleteBySubjectPrefix: (graph, prefix) => this.store.deleteBySubjectPrefix(graph, prefix),
+      },
+      ensureContextGraph: async (cgId) => {
+        const graphManager = new GraphManager(this.store);
+        await graphManager.ensureContextGraph(cgId);
+      },
+      setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
+      deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
+      getRegisteredSubGraphNames: async () => admission.registered,
+      getExcludedSubGraphNames: async () => admission.excluded,
+      // R2 — hydrate the Rule-4 ownership cache (same map runSharedMemorySync uses).
+      ensureOwnedMap: (ownershipKey) => {
+        if (!this.workspaceOwnedEntities.has(ownershipKey)) {
+          this.workspaceOwnedEntities.set(ownershipKey, new Map());
+        }
+        return this.workspaceOwnedEntities.get(ownershipKey)!;
+      },
+      logInfo: (opCtx, message) => this.log.info(opCtx, message),
+      logWarn: (opCtx, message) => this.log.warn(opCtx, message),
     });
   }
 

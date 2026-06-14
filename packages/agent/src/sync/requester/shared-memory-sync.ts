@@ -215,7 +215,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
   return summary;
 }
 
-function sharedMemoryOwnershipKeyFromGraph(contextGraphId: string, dataGraph: string): string | undefined {
+export function sharedMemoryOwnershipKeyFromGraph(contextGraphId: string, dataGraph: string): string | undefined {
   const rootGraph = contextGraphWorkspaceGraphUri(contextGraphId);
   if (dataGraph === rootGraph || isSharedMemoryBucketDescendantDataGraph(dataGraph, rootGraph)) return contextGraphId;
 
