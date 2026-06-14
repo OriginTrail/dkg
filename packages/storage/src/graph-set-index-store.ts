@@ -1,5 +1,5 @@
 import { performance } from 'node:perf_hooks';
-import type { Quad, QueryResult, TripleStore } from './triple-store.js';
+import type { Quad, QueryOptions, QueryResult, TripleStore } from './triple-store.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 
@@ -94,8 +94,8 @@ export class GraphSetIndexStore implements TripleStore {
     return removed;
   }
 
-  async query(sparql: string): Promise<QueryResult> {
-    const result = await this.inner.query(sparql);
+  async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    const result = await this.inner.query(sparql, options);
     if (isSparqlUpdate(sparql)) {
       this.bumpMutation();
       if (this.graphs || this.refreshInFlight) {
@@ -126,8 +126,8 @@ export class GraphSetIndexStore implements TripleStore {
     this.removeGraphs([graphUri], 'dropGraph');
   }
 
-  async listGraphs(): Promise<string[]> {
-    const graphs = await this.ensureGraphSet();
+  async listGraphs(options?: QueryOptions): Promise<string[]> {
+    const graphs = await this.ensureGraphSet(options);
     return [...graphs];
   }
 
@@ -156,7 +156,7 @@ export class GraphSetIndexStore implements TripleStore {
     await this.inner.close();
   }
 
-  private async ensureGraphSet(): Promise<Set<string>> {
+  private async ensureGraphSet(options?: QueryOptions): Promise<Set<string>> {
     if (
       this.graphs &&
       this.revalidateMs > 0 &&
@@ -164,12 +164,15 @@ export class GraphSetIndexStore implements TripleStore {
     ) {
       return this.graphs;
     }
-    return this.refreshIndex(this.graphs ? 'revalidate' : 'seed');
+    return this.refreshIndex(this.graphs ? 'revalidate' : 'seed', options);
   }
 
-  private async refreshIndex(source: GraphSetRefreshSource): Promise<Set<string>> {
+  private async refreshIndex(
+    source: GraphSetRefreshSource,
+    options?: QueryOptions,
+  ): Promise<Set<string>> {
     if (this.refreshInFlight) return this.refreshInFlight;
-    const task = this.refreshIndexLoop(source);
+    const task = this.refreshIndexLoop(source, options);
     this.refreshInFlight = task;
     try {
       return await task;
@@ -178,10 +181,13 @@ export class GraphSetIndexStore implements TripleStore {
     }
   }
 
-  private async refreshIndexLoop(source: GraphSetRefreshSource): Promise<Set<string>> {
+  private async refreshIndexLoop(
+    source: GraphSetRefreshSource,
+    options?: QueryOptions,
+  ): Promise<Set<string>> {
     for (;;) {
       const generation = this.mutationGeneration;
-      const next = new Set((await this.inner.listGraphs()).filter(Boolean));
+      const next = new Set((await this.inner.listGraphs(options)).filter(Boolean));
       if (generation !== this.mutationGeneration) continue;
       this.replaceGraphSet(next, source);
       return this.graphs!;

@@ -1,5 +1,5 @@
 /**
- * OT-RFC-49 §7 — facet open-serve, end-to-end over P2P (no chain/devnet).
+ * facet open-serve, end-to-end over P2P (no chain/devnet).
  * An OUTSIDER (non-member) fetches a private CG's public _catalog facet from a
  * peer and receives the DCAT catalog entry — but never any gated data.
  */
@@ -20,7 +20,7 @@ async function mkAgent(name: string, addr: string) {
   return agent;
 }
 
-describe('OT-RFC-49 §7 — outsider fetches the _catalog facet over P2P (no membership)', () => {
+describe('outsider fetches the _catalog facet over P2P (no membership)', () => {
   it('serves the catalog to a non-member and never the gated data', async () => {
     const publisher = await mkAgent('PublisherNode', '0x70997970C51812dc3A010C7d01b50e0d17dc79C8');
     const outsider = await mkAgent('OutsiderNode', '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC');

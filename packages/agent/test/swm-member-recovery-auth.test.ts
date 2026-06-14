@@ -7,10 +7,10 @@ const B = ethers.getAddress('0x' + 'b'.repeat(40));
 const C = ethers.getAddress('0x' + 'c'.repeat(40));
 
 /**
- * WS-0.3 — the #1 security item. The member-recovery gate HARD-DENIES on a
+ * The members-only ACL gate — the #1 security item. The member-recovery gate HARD-DENIES on a
  * null/empty gate (the inversion of the fail-open) and never widens.
  */
-describe('OT-RFC-49 WS-0.3 — isMemberRecoveryAuthorized', () => {
+describe('isMemberRecoveryAuthorized', () => {
   it('HARD-DENIES on a null gate (the #1 fix — no widening to a weaker check)', () => {
     expect(isMemberRecoveryAuthorized(A, null)).toBe(false);
   });

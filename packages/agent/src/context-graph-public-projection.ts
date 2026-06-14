@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// OT-RFC-49 §5.9 — the verifiable public projection of a private CG.
+// the verifiable public projection of a private CG.
 //
 // A private CG holds its data off the network, but it is not invisible to
 // it. Every private CG maintains a small, public, signed RDF *projection*

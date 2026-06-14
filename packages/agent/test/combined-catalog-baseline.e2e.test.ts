@@ -1,5 +1,5 @@
 /**
- * OT-RFC-49 combined-model BASELINE (pre-catalog-injection) — curated e2e.
+ * combined-model BASELINE (pre-catalog-injection) — curated e2e.
  *
  * The first end-to-end curated/private-CG VM publish on the devnet, via the
  * PRODUCT path (write -> promote -> publishFromFinalizedAssertion). Uses the
@@ -31,7 +31,7 @@ function chainConfig(opKey: string, adminKey: string) {
 // store the curated ciphertext chunks and declines the ACK (MISSING_CIPHERTEXT_CHUNKS).
 const mkDataDir = (name: string) => mkdtempSync(join(tmpdir(), `rfc49-${name}-`));
 
-describe('OT-RFC-49 baseline — curated CG product-path publish (pre-catalog)', () => {
+describe('baseline — curated CG product-path publish (pre-catalog)', () => {
   let publisher: DKGAgent;
   let curator: string;
 
@@ -83,7 +83,7 @@ describe('OT-RFC-49 baseline — curated CG product-path publish (pre-catalog)',
     const pub: any = await publisher.publishFromFinalizedAssertion(CG, name);
 
     expect(pub.status).toBe('confirmed');
-    // OT-RFC-49 combined model: the private publish now carries the data KA AND
+    // combined model: the private publish now carries the data KA AND
     // the public DCAT catalog KA (subject = the CG's own UAL), committed in the
     // CG's own merkle root.
     expect(pub.kaManifest.length).toBe(2);

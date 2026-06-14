@@ -20,6 +20,7 @@ import {
   contextGraphSharedMemoryUri,
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
+  contextGraphCatalogUri,
   contextGraphLayerUri,
   deriveCuratorDidFromCgId,
   MemoryLayer,
@@ -1289,7 +1290,7 @@ export class PublishMethods extends DKGAgentBase {
     onPhase?.('broadcast', 'end');
     this.log.info(ctx, `Publish complete — status=${result.status} kaId=${result.kaId}`);
 
-    // OT-RFC-49 §5.9 — refresh the private CG's public projection now the root
+    // refresh the private CG's public projection now the root
     // is committed. No-op unless configured; best-effort and error-isolated so
     // it can never affect the publish just completed.
     await this.emitPublicProjectionAfterPublish(contextGraphId, result, ctx);
@@ -1298,7 +1299,7 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   /**
-   * OT-RFC-49 §5.9.3 — emit/refresh the public projection of a private CG once
+   * emit/refresh the public projection of a private CG once
    * its VM publish is confirmed on chain. Binds the private CG into the public
    * graph as a discoverable, verifiable node (floor: `a dkg:PrivateContextGraph`,
    * UAL, `dct:accessRights dkg:Private`, `dkg:committedRoot`) while disclosing
@@ -1326,11 +1327,22 @@ export class PublishMethods extends DKGAgentBase {
       await emitPublicProjection(
         {
           isPrivateContextGraph: (id) => this.isPrivateContextGraph(id),
-          resolveUal: async () => result.ual,
-          projectionGraph: () => contextGraphDataGraphUri(target),
-          // The projection is PUBLIC content; the target is a public CG, so
-          // this.publish keeps it plaintext and emit no-ops on the inner call.
-          publishProjection: async (_id, quads) => { await this.publish(target, quads); },
+          // B7 — the catalog subject is the context-graph DID
+          // (`did:dkg:context-graph:<id>`), NOT the knowledge-asset UAL
+          // (`result.ual`). Resolving from the CG id makes every publish refresh
+          // the SAME catalog entry (one stable subject per CG) that open-serve
+          // and the in-finalize injection also key off.
+          resolveUal: async (id) => contextGraphDataUri(id),
+          // B8 — persist the projection under the SOURCE CG's `_catalog` graph
+          // (`<source-cg>/_catalog`), the exact graph open-serve reads via
+          // `contextGraphCatalogUri`. The previous TARGET-CG data graph left
+          // outsiders with an empty `<source-cg>/_catalog`.
+          projectionGraph: (id) => contextGraphCatalogUri(id),
+          // buildPublicProjection already stamps each quad's graph from
+          // `projectionGraph` (the source `_catalog`), so a plain store insert
+          // lands them in the right named graph — matching the canonical
+          // publisher catalog persist (dkg-publisher.ts store.insert).
+          publishProjection: async (_id, quads) => { await this.store.insert(quads); },
           log: (level, message) =>
             level === 'warn' ? this.log.warn(ctx, message) : this.log.info(ctx, message),
         },
@@ -1650,23 +1662,11 @@ export class PublishMethods extends DKGAgentBase {
     );
     const metaGraph = contextGraphMetaUri(contextGraphId);
 
-    // OT-RFC-49 §5.9 — for a PRIVATE CG, write the public DCAT catalog entry
-    // into this same assertion via the NORMAL write path (so it lands in the
-    // correct wmGraphUri) BEFORE the seal reads it below. It becomes a public
-    // KA (subject = the CG UAL) committed in the CG's OWN merkle root; the
-    // publish-path partition keeps it out of the ciphertext and routes it to
-    // the public sink. Idempotent: identical quads dedupe in the store, so the
-    // double-finalize (explicit + promote) does not duplicate it.
-    if (await this.isPrivateContextGraph(contextGraphId)) {
-      const cgUal = contextGraphDataUri(contextGraphId);
-      // graph is a non-empty placeholder only (buildPublicProjection requires
-      // one); assertionWrite re-stamps it with the correct wmGraphUri.
-      const catalogQuads = buildPublicProjection({ ual: cgUal, accessPolicy: 'private', graph: assertionUri });
-      await this.publisher.assertionWrite(contextGraphId, name, agentAddress, catalogQuads, opts?.subGraphName);
-    }
-
     // 2. Pull the assertion's quads. Refuse to finalize an empty
-    //    assertion — there's nothing to commit.
+    //    assertion — there's nothing to commit. The public DCAT catalog entry
+    //    for a private CG is injected ONLY AFTER this validation (below), so a
+    //    catalog-only assertion (zero user-authored quads) is correctly
+    //    rejected here rather than slipping through on the catalog quad alone.
     const rawQuads = await this.publisher.assertionQuery(
       contextGraphId,
       name,
@@ -1689,8 +1689,8 @@ export class PublishMethods extends DKGAgentBase {
     //     the post-strip set or it commits to a root the publish path
     //     can never recompute. (Round 4 review §8 — "assertionFinalize
     //     hashes WM-only urn:dkg:file: rows".)
-    const quads = rawQuads.filter((q) => !isReservedSubject(q.subject) && !isTrustLevelQuad(q));
-    if (quads.length === 0) {
+    const userQuads = rawQuads.filter((q) => !isReservedSubject(q.subject) && !isTrustLevelQuad(q));
+    if (userQuads.length === 0) {
       throw new Error(
         `Cannot finalize assertion <${assertionUri}>: every quad has a ` +
           `reserved-namespace subject (urn:dkg:file:* / urn:dkg:extraction:*) ` +
@@ -1699,12 +1699,30 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    // OT-RFC-49 §5.9 — inject the public DCAT catalog entry for a PRIVATE CG
-    // so it rides in the CG's OWN merkle root as a public KA (subject = the CG
-    // UAL). Persisted to the same WM graph so promote/reload carry it; the
-    // publish-path partition keeps it out of the ciphertext and routes it to
-    // the public sink. Idempotent across re-finalize (fresh filter + the seal
-    // already contains it on the second pass).
+    // B6 — inject the public DCAT catalog entry for a PRIVATE CG ONLY AFTER the
+    // "≥1 real user-authored quad" contract has been validated against
+    // `userQuads` above, so a catalog-only assertion can never finalize.
+    // The entry rides in the CG's OWN merkle root as a public KA whose subject
+    // is the context-graph DID (`contextGraphDataUri(contextGraphId)` ===
+    // `did:dkg:context-graph:<contextGraphId>`), the SAME subject open-serve
+    // reads from `<source-cg>/_catalog`. Persisted to the WM graph so
+    // promote/reload carry it; the publish-path partition keeps it out of the
+    // ciphertext and routes it to the public `_catalog` sink. The catalog quads
+    // are appended to `quads` (the merkle input) so the root the seal commits
+    // matches the root the publisher recomputes after reloading WM (which then
+    // includes the catalog) — the leaf hash is over (subject, predicate, object)
+    // only, so the placeholder `graph` here does not affect the root.
+    // Idempotent across re-finalize: identical quads dedupe in the WM store.
+    const quads = [...userQuads];
+    if (await this.isPrivateContextGraph(contextGraphId)) {
+      const cgDid = contextGraphDataUri(contextGraphId);
+      // `graph` is a non-empty placeholder only (buildPublicProjection requires
+      // one); assertionWrite re-stamps it with the correct wmGraphUri.
+      const catalogQuads = buildPublicProjection({ ual: cgDid, accessPolicy: 'private', graph: assertionUri });
+      await this.publisher.assertionWrite(contextGraphId, name, agentAddress, catalogQuads, opts?.subGraphName);
+      quads.push(...catalogQuads);
+    }
+
     // 3. Compute merkleRoot using the SAME algorithm the publisher
     //    uses at publish-time (V10: keccak256-based merkle, sort+dedupe
     //    leaves). Drift between these two compute paths is the silent

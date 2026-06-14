@@ -3,7 +3,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { applySwmRecovery } from '../src/sync/requester/swm-recovery-apply.js';
 
 /**
- * OT-RFC-49 strip — WS-0.0. Recovery must REPLACE per root, not blind-union.
+ * Recovery must REPLACE per root, not blind-union.
  * Pins the corruption (a blind insert leaves `{v1, v2}`) and proves the fix
  * (per-root replace leaves only the source's `v2`), while never deleting roots
  * the source did not provide.
@@ -19,7 +19,7 @@ async function values(store: OxigraphStore, subject: string, predicate: string):
   return r.type === 'bindings' ? r.bindings.map((b) => b['o']) : [];
 }
 
-describe('OT-RFC-49 WS-0.0 — applySwmRecovery (per-root replace, not union)', () => {
+describe('applySwmRecovery (per-root replace, not union)', () => {
   const stores: OxigraphStore[] = [];
   afterEach(async () => { await Promise.all(stores.splice(0).map((s) => s.close().catch(() => {}))); });
 

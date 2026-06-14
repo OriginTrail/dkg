@@ -10,7 +10,7 @@ import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
 
 /**
- * OT-RFC-49 strip — WS-0.0 integration. `recoverContextGraphSwm` fetches a CG's
+ * integration. `recoverContextGraphSwm` fetches a CG's
  * full current state from a peer and applies it via REPLACE (not the shared
  * incremental path's blind union), so a stale local store converges to the
  * source's value rather than accumulating a corrupt `{v1,v2}` superset.
@@ -31,7 +31,7 @@ async function statusValues(store: OxigraphStore): Promise<string[]> {
   return r.type === 'bindings' ? r.bindings.map((b) => b['o']) : [];
 }
 
-describe('OT-RFC-49 WS-0.0 — recoverContextGraphSwm (fetch → verify → replace)', () => {
+describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
   const stores: OxigraphStore[] = [];
   afterEach(async () => { await Promise.all(stores.splice(0).map((s) => s.close().catch(() => {}))); });
 
@@ -96,7 +96,11 @@ describe('OT-RFC-49 WS-0.0 — recoverContextGraphSwm (fetch → verify → repl
     expect(r.type === 'bindings' && r.bindings.length).toBe(1);
   });
 
-  it('reports partial (not completed) when a phase never completes, but still applies via replace', async () => {
+  it('does NOT apply when a phase never completes — leaves the store untouched for a clean retry', async () => {
+    // Row-based pagination can cut a root mid-stream. Applying a REPLACE over an
+    // incomplete fetch would clear the root and reinsert only the fetched prefix,
+    // truncating the entity until a later retry. So an incomplete fetch must mutate
+    // NOTHING: the pre-existing state stays intact and the caller retries from scratch.
     const store = new OxigraphStore();
     stores.push(store);
     await store.insert([{ subject: SUBJ, predicate: STATUS, object: '"v1"', graph: WS }]);
@@ -113,7 +117,8 @@ describe('OT-RFC-49 WS-0.0 — recoverContextGraphSwm (fetch → verify → repl
     };
     const result = await recoverContextGraphSwm(partialDeps);
     expect(result.completed).toBe(false);
-    // even partial recovery is a replace, never a union
-    expect(await statusValues(store)).toEqual(['"v2"']);
+    expect(result.replacedRoots).toBe(0);
+    // incomplete fetch → no mutation at all; the prior v1 is untouched (no truncation, no partial replace)
+    expect(await statusValues(store)).toEqual(['"v1"']);
   });
 });

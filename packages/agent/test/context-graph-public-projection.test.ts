@@ -25,7 +25,7 @@ const floorInput = (over: Partial<PublicProjectionInput> = {}): PublicProjection
   ...over,
 });
 
-describe('OT-RFC-49 §5.9 public catalog entry — mandatory floor (DCAT)', () => {
+describe('public catalog entry — mandatory floor (DCAT)', () => {
   it('emits a dual-typed DCAT dataset record as the bare floor', () => {
     const quads = buildPublicProjection(floorInput());
     expect(quads).toHaveLength(4); // rdf:type x2 (dcat:Dataset + dkg:PrivateContextGraph) + identifier + accessRights
@@ -54,7 +54,7 @@ describe('OT-RFC-49 §5.9 public catalog entry — mandatory floor (DCAT)', () =
   });
 });
 
-describe('OT-RFC-49 §5.9.1 disclosure invariant — nothing leaks by default', () => {
+describe('disclosure invariant — nothing leaks by default', () => {
   it('the bare floor discloses no domain/schema/scale/entity predicate', () => {
     const quads = buildPublicProjection(floorInput());
     const leaky = [
@@ -81,7 +81,7 @@ describe('OT-RFC-49 §5.9.1 disclosure invariant — nothing leaks by default', 
   });
 });
 
-describe('OT-RFC-49 §5.9.2 recommended fields — opt-in, pseudonymizable', () => {
+describe('recommended fields — opt-in, pseudonymizable', () => {
   it('adds publisher + access service only when supplied', () => {
     const quads = buildPublicProjection(floorInput({
       publisher: 'did:dkg:identity:0x7bcgkey',
@@ -95,7 +95,7 @@ describe('OT-RFC-49 §5.9.2 recommended fields — opt-in, pseudonymizable', () 
   });
 });
 
-describe('OT-RFC-49 §5.9.4 opt-in tiers — each a deliberate addition', () => {
+describe('opt-in tiers — each a deliberate addition', () => {
   it('T1 conformsTo and T2 blinded anchors appear only when supplied', () => {
     const quads = buildPublicProjection(floorInput({
       conformsTo: ['https://gs1.org/voc/EPCIS'],
@@ -106,7 +106,7 @@ describe('OT-RFC-49 §5.9.4 opt-in tiers — each a deliberate addition', () => 
   });
 });
 
-describe('OT-RFC-49 §5.9.4 T2 — blinded anchor primitive', () => {
+describe('T2 — blinded anchor primitive', () => {
   it('is deterministic for the same secret + entity, and hides the entity', () => {
     const a1 = blindedAnchor('consortium-secret', 'gtin:09506000134352');
     const a2 = blindedAnchor('consortium-secret', 'gtin:09506000134352');
@@ -121,7 +121,7 @@ describe('OT-RFC-49 §5.9.4 T2 — blinded anchor primitive', () => {
   });
 });
 
-describe('OT-RFC-49 §5.9.3 emit orchestration — on VM publish', () => {
+describe('emit orchestration — on VM publish', () => {
   interface Published { contextGraphId: string; quads: Quad[]; graph: string; }
 
   const makeDeps = (over: Partial<ProjectionEmitDeps> & { isPrivate?: boolean } = {}) => {
@@ -179,7 +179,7 @@ describe('OT-RFC-49 §5.9.3 emit orchestration — on VM publish', () => {
   });
 });
 
-describe('OT-RFC-49 §4/§5.9 combined-model partition — catalog vs everything else (by-type, self-contained)', () => {
+describe('combined-model partition — catalog vs everything else (by-type, self-contained)', () => {
   const CG_UAL = 'did:dkg:otp:2043/0x5cad/142';
 
   it('separates the catalog entry from data via the dkg:PrivateContextGraph marker; total + order-preserving', () => {

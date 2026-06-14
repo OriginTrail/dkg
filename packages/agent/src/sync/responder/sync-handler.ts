@@ -314,7 +314,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     return limiter.run(peerId, signal, async () => {
       throwIfAborted(signal);
 
-      // OT-RFC-49 §7 — facet open-serve. The public `_catalog` subgraph (a DCAT
+      // facet open-serve. The public `_catalog` subgraph (a DCAT
       // dataset record) is served to ANYONE, with NO allowlist auth, BEFORE the
       // gate below. Bounded to exactly that one named graph (readCatalogPage), so
       // no gated quad can leak. This is how outsiders discover a private CG.

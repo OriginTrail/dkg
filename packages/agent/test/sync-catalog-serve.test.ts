@@ -1,5 +1,5 @@
 /**
- * OT-RFC-49 §7 — facet open-serve bounding. readCatalogPage MUST release only
+ * facet open-serve bounding. readCatalogPage MUST release only
  * the public `_catalog` named graph and never any gated quad (private payload,
  * VM data, or _meta). This is the safety boundary of the open-serve path.
  */
@@ -14,7 +14,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { readCatalogPage } from '../src/sync/responder/graph-plan.js';
 
-describe('OT-RFC-49 §7 — readCatalogPage releases ONLY the _catalog graph', () => {
+describe('readCatalogPage releases ONLY the _catalog graph', () => {
   it('serves the public DCAT catalog entry and leaks nothing gated', async () => {
     const store = new OxigraphStore();
     const CG = 'cat-serve-test';

@@ -9,19 +9,32 @@ import { applySwmRecovery, type SwmRecoveryStore } from './swm-recovery-apply.js
 import { sharedMemoryOwnershipKeyFromGraph } from './shared-memory-sync.js';
 
 /**
- * OT-RFC-49 strip — WS-0.0 recovery entry point. Recovers a CG's
+ * recovery entry point. Recovers a CG's
  * `_shared_memory` current state from a single authoritative peer (a member or
  * a designated anchor), applying via REPLACE rather than the shared incremental
  * sync path's blind union (which corrupts a non-empty store — see
  * {@link applySwmRecovery}).
  *
  * It fetches the COMPLETE state across pages (each `fetchSyncPages` call loops
- * internally to completion-or-deadline; we resume across calls via the
- * checkpoint), verifies it, then replaces each root exactly once. A partial
- * fetch (deadline) is safe: the roots fetched are replaced; the rest keep their
- * local value until a retry — no union corruption either way. This is
- * deliberately separate from `runSharedMemorySync` so the shared incremental
- * path (cold-start / public / top-up, where union is correct) is untouched.
+ * internally to completion-or-deadline), verifies it, then replaces each root
+ * exactly once.
+ *
+ * A partial fetch (deadline) is NOT safe to apply, and is deliberately NOT
+ * applied. Pagination is row-based, so a single root's rows (the root + its
+ * skolemized children + every predicate) can straddle the last fetched page: a
+ * deadline can cut a root mid-stream. REPLACE-ing such a root would clear it and
+ * reinsert only the fetched prefix, truncating the entity until a later retry —
+ * the same corruption the per-root REPLACE exists to prevent. So recovery is
+ * all-or-nothing: we apply ONLY when BOTH phases fetched to completion; on a
+ * partial fetch we mutate the store not at all, drop the mid-stream checkpoint
+ * so the retry re-accumulates from offset 0, and return `completed: false` for
+ * the caller to retry. (Per-root completeness is not cheaply recoverable here —
+ * `entityCreators` is a set derived from possibly-truncated rows, so the
+ * truncated tail root can't be singled out; all-or-nothing is the correct gate.)
+ *
+ * This is deliberately separate from `runSharedMemorySync` so the shared
+ * incremental path (cold-start / public / top-up, where union is correct) is
+ * untouched.
  */
 
 type RecoverableSyncPhase = 'data' | 'meta';
@@ -91,11 +104,13 @@ async function fetchPhaseFully(
 ): Promise<{ quads: Quad[]; completed: boolean }> {
   const maxPages = deps.maxPagesPerPhase ?? DEFAULT_MAX_PAGES_PER_PHASE;
   const all: Quad[] = [];
+  let lastCheckpointKey: string | undefined;
   for (let i = 0; i < maxPages; i++) {
     const page = await deps.fetchSyncPages(
       deps.ctx, deps.remotePeerId, deps.contextGraphId, true, phase, graphUri, deps.deadline,
     );
     all.push(...page.quads);
+    lastCheckpointKey = page.checkpointKey;
     if (page.completed) {
       deps.deleteCheckpoint(page.checkpointKey);
       return { quads: all, completed: true };
@@ -104,6 +119,13 @@ async function fetchPhaseFully(
     if (page.nextOffset <= page.resumedFromOffset) break;
     deps.setCheckpoint(page.checkpointKey, page.nextOffset);
   }
+  // Incomplete: the accumulated `all` is a prefix that the caller MUST NOT
+  // apply (a tail root may be truncated mid-stream). `all` is local to this
+  // call and never reused, so drop any persisted mid-stream cursor — recovery
+  // has no cross-invocation accumulator, so the retry must restart from
+  // offset 0 (which makes the responder re-read from the start of its row
+  // list) and rebuild the COMPLETE state before the apply gate can pass.
+  if (lastCheckpointKey !== undefined) deps.deleteCheckpoint(lastCheckpointKey);
   return { quads: all, completed: false };
 }
 
@@ -116,6 +138,28 @@ export async function recoverContextGraphSwm(
   // Meta first (its rootEntity list is what validates the data subjects), then data.
   const meta = await fetchPhaseFully(deps, 'meta', wsMetaGraph);
   const data = await fetchPhaseFully(deps, 'data', wsGraph);
+
+  // All-or-nothing gate (B10): a partial fetch may have cut a root mid-stream,
+  // so applying REPLACE over a prefix would truncate that root. If EITHER phase
+  // is incomplete, mutate nothing — not the data REPLACE, not the additive meta
+  // insert, not the ownership-cache hydration (hydrating roots we didn't write
+  // would desync the ownership map from the store) — and report `completed:
+  // false` so the caller retries. The checkpoint was already dropped above, so
+  // the retry re-accumulates the complete state from offset 0.
+  if (!meta.completed || !data.completed) {
+    deps.logInfo?.(
+      deps.ctx,
+      `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: partial fetch ` +
+      `(meta ${meta.completed ? 'complete' : 'incomplete'}, data ${data.completed ? 'complete' : 'incomplete'}) — skipped, will retry`,
+    );
+    return {
+      replacedRoots: 0,
+      insertedDataQuads: 0,
+      insertedMetaQuads: 0,
+      droppedDataTriples: 0,
+      completed: false,
+    };
+  }
 
   const registered = deps.getRegisteredSubGraphNames
     ? await deps.getRegisteredSubGraphNames(deps.contextGraphId)
@@ -130,7 +174,7 @@ export async function recoverContextGraphSwm(
 
   await deps.ensureContextGraph(deps.contextGraphId);
 
-  // REPLACE per root (the WS-0.0 fix), applied over the COMPLETE fetched state.
+  // REPLACE per root (the recovery fix), applied over the COMPLETE fetched state.
   const applied = await applySwmRecovery({
     store: deps.store,
     verifiedData: processed.verifiedData,
@@ -155,11 +199,11 @@ export async function recoverContextGraphSwm(
   if (processed.droppedDataTriples > 0) {
     deps.logWarn?.(deps.ctx, `SWM recovery for "${deps.contextGraphId}" dropped ${processed.droppedDataTriples} triples with invalid subjects`);
   }
+  // Reaching here means both phases completed (the partial path returned above).
   deps.logInfo?.(
     deps.ctx,
     `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: replaced ${applied.replacedRoots} roots, ` +
-    `${applied.insertedQuads} data + ${processed.verifiedMeta.length} meta triples` +
-    `${meta.completed && data.completed ? '' : ' (partial — will retry)'}`,
+    `${applied.insertedQuads} data + ${processed.verifiedMeta.length} meta triples`,
   );
 
   return {
@@ -167,6 +211,6 @@ export async function recoverContextGraphSwm(
     insertedDataQuads: applied.insertedQuads,
     insertedMetaQuads: processed.verifiedMeta.length,
     droppedDataTriples: processed.droppedDataTriples,
-    completed: meta.completed && data.completed,
+    completed: true,
   };
 }

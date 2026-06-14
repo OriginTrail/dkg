@@ -1,7 +1,7 @@
 import { ethers } from 'ethers';
 
 /**
- * OT-RFC-49 strip — WS-0.3 ACL hard-deny gate (the #1 security item).
+ * ACL hard-deny gate (the #1 security item).
  *
  * Once recovery serves PLAINTEXT member-to-member, the ACL is the ONLY barrier
  * between a non-member and a private CG's cleartext. The existing
@@ -17,7 +17,7 @@ import { ethers } from 'ethers';
  * CG `_meta` (`allowedAgents ∪ participantAgents` minus revoked) — NOT the
  * network-influenced subscription cache (poisonable; see the adversarial review).
  * This function only decides membership; sourcing the gate safely is the
- * caller's responsibility and the other half of the WS-0.3 fix.
+ * caller's responsibility and the other half of the ACL-gate fix.
  */
 export function isMemberRecoveryAuthorized(
   requesterAgentAddress: string,

@@ -867,7 +867,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     // authenticated request so the remote peer can verify our identity
     // against its allowlist.
     const hasLocalData = this.subscribedContextGraphs.get(contextGraphId)?.synced === true;
-    // OT-RFC-49 §7 — the catalog facet is public and served without the
+    // the catalog facet is public and served without the
     // allowlist gate, so an outsider (no CG identity) requests it unauthenticated.
     const needsAuth = phase !== 'catalog' && (isPrivate || !hasLocalData);
     const claimedAgentAddress = await this.findLocalAgentForContextGraph(contextGraphId);
@@ -897,7 +897,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   }
 
   /**
-   * OT-RFC-49 §7 — fetch a (private) CG's PUBLIC catalog entry from a peer
+   * fetch a (private) CG's PUBLIC catalog entry from a peer
    * WITHOUT membership. The responder serves the bounded `_catalog` facet
    * openly (no allowlist gate); the fetched DCAT dataset record is written to
    * the local store's `_catalog` graph. Returns the catalog quads received.
@@ -1488,7 +1488,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<string[] | null> {
-    // RFC-49: the participant set is read from the in-memory meta projection
+    // the participant set is read from the in-memory meta projection
     // (getCgMeta), NOT a direct store query — the projection is the only place
     // that applies revokedAgents filtering, so a store-only read (main's A2
     // form) would silently re-authorize revoked agents. `options.signal` is

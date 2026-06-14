@@ -235,7 +235,7 @@ export const DKG_ONTOLOGY = {
   DKG_FACT_RESOLVER_VERSION: `${DKG}factResolverVersion`,
   DKG_FACT_RESOLUTION_MODE: `${DKG}factResolutionMode`,
   DKG_SCOPE_UAL: `${DKG}scopeUal`,
-  // OT-RFC-49 §5.9 — verifiable public catalog entry for a private CG.
+  // verifiable public catalog entry for a private CG.
   // The private CG's public face is modeled as a DCAT dataset record (the
   // "_catalog" subgraph): a standards-compliant catalog entry any DCAT-aware
   // tool can discover, dual-typed with the dkg: class for native consumers.

@@ -336,7 +336,7 @@ export function contextGraphSubGraphPrivateUri(contextGraphId: string, subGraphN
 }
 
 /**
- * OT-RFC-49 §5.9 — the public `_catalog` subgraph of a (private) CG: the
+ * the public `_catalog` subgraph of a (private) CG: the
  * bounded, plaintext, core-servable named graph holding the CG's DCAT catalog
  * entry. `_`-prefixed, so it cannot collide with a user sub-graph name
  * (`validateSubGraphName` reserves the prefix). This is the serving / open-serve

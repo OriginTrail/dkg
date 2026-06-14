@@ -476,7 +476,7 @@ export async function readDurableDataPage(params: {
 }
 
 /**
- * OT-RFC-49 §7 — read the public catalog facet. STRICTLY bounded to exactly the
+ * read the public catalog facet. STRICTLY bounded to exactly the
  * `_catalog` named graph (`did:dkg:context-graph:{cg}/_catalog`): it reads that
  * one graph and nothing else, so the open-serve path cannot leak any gated
  * quad. This is the only graph the §7 facet open-serve releases without auth.

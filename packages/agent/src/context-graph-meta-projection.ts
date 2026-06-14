@@ -4,6 +4,7 @@ import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
   assertSafeIri,
+  contextGraphCatalogUri,
   contextGraphDataGraphUri,
   contextGraphDataUri,
   contextGraphMetaGraphUri,
@@ -81,6 +82,22 @@ const DIRECT_META_PREDICATES = new Set([
   DKG_ONTOLOGY.DKG_PUBLISH_AUTHORITY_ACCOUNT_ID,
   `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
   `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`,
+]);
+
+// Predicates carried by the public `_catalog` entry (OT-RFC-49 §5.9) that the
+// read projection maps onto the record. The catalog subject is the CG DID
+// (`contextGraphDataUri(id)`), the same subject the `_meta`/ontology/agents
+// facts use, so the catalog graph is loaded by the same `loadContextGraphFacts`
+// path. Only the disclosure-floor predicates that have an authz-free home in the
+// record are mapped: `rdf:type dkg:PrivateContextGraph` (existence + private
+// class) and `dct:accessRights` (RESTRICTED ⇒ private). Recommended/opt-in
+// predicates (`dct:publisher`, `dcat:accessService`, `dct:conformsTo`,
+// `dkg:blindedAnchor`) are intentionally NOT mapped: a `_catalog` graph can be
+// remote-fetched from an untrusted peer, so they must never feed the
+// authorization-bearing creator/curator/allowlist fields.
+const CATALOG_META_PREDICATES = new Set<string>([
+  DKG_ONTOLOGY.RDF_TYPE,
+  DKG_ONTOLOGY.DCT_ACCESS_RIGHTS,
 ]);
 
 const SUB_GRAPH_META_PREDICATES = new Set([
@@ -187,6 +204,12 @@ export class ContextGraphMetaProjection {
             FILTER(STRSTARTS(STR(?ctxGraph), "${CONTEXT_GRAPH_PREFIX}"))
             FILTER(STR(?g) = CONCAT(STR(?ctxGraph), "/_meta"))
           }
+        } UNION {
+          GRAPH ?g {
+            ?ctxGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH}> .
+            FILTER(STRSTARTS(STR(?ctxGraph), "${CONTEXT_GRAPH_PREFIX}"))
+            FILTER(STR(?g) = CONCAT(STR(?ctxGraph), "/_catalog"))
+          }
         }
       }
     `);
@@ -206,11 +229,17 @@ export class ContextGraphMetaProjection {
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
     const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    // OT-RFC-49 §5.9: a private CG's public face is its `_catalog` graph (DCAT
+    // dataset record, subject = the CG DID = `uri`). Load it so a CG known only
+    // through its catalog (e.g. fetched from a peer with no local `_meta`) is
+    // visible to getCgMeta()/listContextGraphsFromProjection().
+    const catalogGraph = contextGraphCatalogUri(contextGraphId);
 
     assertSafeIri(uri);
     assertSafeIri(ontologyGraph);
     assertSafeIri(agentsGraph);
     assertSafeIri(metaGraph);
+    assertSafeIri(catalogGraph);
 
     const record: ContextGraphMetaRecord = {
       id: contextGraphId,
@@ -230,7 +259,7 @@ export class ContextGraphMetaProjection {
       hasLegacyParticipantGate: false,
     };
 
-    const graphUris = [ontologyGraph, agentsGraph, metaGraph];
+    const graphUris = [ontologyGraph, agentsGraph, metaGraph, catalogGraph];
     for (const graphUri of graphUris) {
       await this.loadContextGraphFacts(graphUri, uri, record);
     }
@@ -265,6 +294,21 @@ export class ContextGraphMetaProjection {
       case DKG_ONTOLOGY.RDF_TYPE:
         if (object === DKG_ONTOLOGY.DKG_CONTEXT_GRAPH) record.declared = true;
         if (object === DKG_ONTOLOGY.DKG_SYSTEM_CONTEXT_GRAPH) record.isSystem = true;
+        // OT-RFC-49 §5.9: the `_catalog` entry's native floor type marks the CG
+        // as an existing, discoverable private CG even when no `_meta`/agents
+        // facts are present locally.
+        if (object === DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH) {
+          record.declared = true;
+          applyAccessPolicy(record, 'private');
+        }
+        break;
+      case DKG_ONTOLOGY.DCT_ACCESS_RIGHTS:
+        // The catalog floor value is the RESTRICTED authority IRI (members /
+        // grant), the access class of a private CG. Map it onto the private
+        // policy, preserving the private-wins precedence in applyAccessPolicy.
+        if (object === DKG_ONTOLOGY.ACCESS_RIGHT_RESTRICTED) {
+          applyAccessPolicy(record, 'private');
+        }
         break;
       case DKG_ONTOLOGY.SCHEMA_NAME:
       case `${LEGACY_SCHEMA_NS}name`:
@@ -363,6 +407,19 @@ export class ContextGraphMetaProjection {
     const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
     const metaContextGraphId = contextGraphIdFromMetaGraphUri(graph);
 
+    // OT-RFC-49 §5.9: a write into a CG's `_catalog` graph (e.g. publish-time
+    // partition or a peer-fetched catalog) must dirty the projection so a cached
+    // record picks up the new public facts. The catalog subject is the CG DID;
+    // only the predicates the read side maps are invalidation-relevant.
+    const catalogContextGraphId = contextGraphIdFromCatalogGraphUri(graph);
+    if (catalogContextGraphId) {
+      const contextGraphUri = contextGraphDataUri(catalogContextGraphId);
+      if (subject === contextGraphUri && CATALOG_META_PREDICATES.has(predicate)) {
+        return catalogContextGraphId;
+      }
+      return null;
+    }
+
     if (metaContextGraphId) {
       const contextGraphUri = contextGraphDataUri(metaContextGraphId);
       if (subject === contextGraphUri && DIRECT_META_PREDICATES.has(predicate)) {
@@ -416,6 +473,13 @@ function contextGraphIdFromContextGraphUri(uri: string): string | null {
 function contextGraphIdFromMetaGraphUri(uri: string): string | null {
   if (!uri.startsWith(CONTEXT_GRAPH_PREFIX) || !uri.endsWith('/_meta')) return null;
   const tail = uri.slice(CONTEXT_GRAPH_PREFIX.length, -'/_meta'.length);
+  if (!tail) return null;
+  return tail;
+}
+
+function contextGraphIdFromCatalogGraphUri(uri: string): string | null {
+  if (!uri.startsWith(CONTEXT_GRAPH_PREFIX) || !uri.endsWith('/_catalog')) return null;
+  const tail = uri.slice(CONTEXT_GRAPH_PREFIX.length, -'/_catalog'.length);
   if (!tail) return null;
   return tail;
 }

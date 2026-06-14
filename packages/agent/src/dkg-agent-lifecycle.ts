@@ -208,7 +208,7 @@ import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-cor
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
-import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
+import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
 import { recoverContextGraphSwm, type RecoverContextGraphSwmResult } from './sync/requester/swm-recovery.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
@@ -2994,7 +2994,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /**
-   * OT-RFC-49 WS-0.0 — recover ONE context graph's `_shared_memory` to current
+   * recover ONE context graph's `_shared_memory` to current
    * state from a single authoritative peer (member / anchor), applying via
    * REPLACE rather than the shared incremental union path (which corrupts a
    * non-empty store). Invoked by the member-recovery driver after the frontier
@@ -4154,8 +4154,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             graphDeleted += ownerDeleted;
           }
 
-          const ownedSet = this.workspaceOwnedEntities.get(pid);
-          if (ownedSet) {
+          // Evict every per-subgraph ownership key for the expired roots.
+          // SWM data now spans the root workspace graph plus the per-KA /
+          // subgraph `…/_shared_memory/{addr}/{number}` graphs (wsGraphs), and
+          // ownership is cached under one key per graph family:
+          // `pid` for the root/bucket and `${pid}\0${subGraph}` for per-subgraph
+          // graphs (see sharedMemoryOwnershipKeyFromGraph). Only clearing the
+          // `pid`-keyed map would leave the per-subgraph entries behind, so an
+          // expired root could still look owned and mis-arbitrate later writes.
+          const ownershipKeys = new Set<string>();
+          for (const g of wsGraphs) {
+            const ownershipKey = sharedMemoryOwnershipKeyFromGraph(pid, g);
+            if (ownershipKey) ownershipKeys.add(ownershipKey);
+          }
+          for (const ownershipKey of ownershipKeys) {
+            const ownedSet = this.workspaceOwnedEntities.get(ownershipKey);
+            if (!ownedSet) continue;
             for (const re of rootEntities) {
               ownedSet.delete(re);
             }
