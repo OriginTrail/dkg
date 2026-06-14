@@ -757,6 +757,33 @@ describe('Phase D - VM reconcile damping', () => {
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
   });
 
+  it('does not reuse a negative cache entry across local CGs for the same KA root', async () => {
+    const internals = await boot();
+    const storageAddr = await internals.chain.getDKGKnowledgeAssetsAddress();
+    const ual = buildKnowledgeAssetUal(internals.chain.chainId, storageAddr, 9021n);
+    const root = new Uint8Array(32);
+    root[31] = 21;
+    const keyA = (internals as any).vmReconcileCacheKey('61', ual, root);
+    const keyB = (internals as any).vmReconcileCacheKey('62', ual, root);
+    expect(keyA).not.toBe(keyB);
+
+    (internals as any).recordVmReconcileNegativeCache(keyA, '61', {
+      swmGen: 'empty:0',
+      candidateNamespaces: [],
+      peerTopologyKey: 'unreadable',
+    });
+
+    await expect((internals as any).shouldDeferVmReconcileByNegativeCache(keyB, '62')).resolves.toBe(false);
+
+    (internals as any).recordVmReconcileNegativeCache(keyB, '62', {
+      swmGen: 'empty:0',
+      candidateNamespaces: [],
+      peerTopologyKey: 'unreadable',
+    });
+
+    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(2);
+  });
+
   it('keeps an unreadable negative-cache generation damped until backoff expires', async () => {
     const internals = await boot();
     const onChainCgId = 45n;
@@ -953,8 +980,8 @@ describe('Phase D - VM reconcile damping', () => {
 
     const storageAddr = await internals.chain.getDKGKnowledgeAssetsAddress();
     const ual = buildKnowledgeAssetUal(internals.chain.chainId, storageAddr, kaId);
-    const staleKey = (internals as any).vmReconcileCacheKey(ual, staleRoot);
-    const freshKey = (internals as any).vmReconcileCacheKey(ual, freshRoot);
+    const staleKey = (internals as any).vmReconcileCacheKey('55', ual, staleRoot);
+    const freshKey = (internals as any).vmReconcileCacheKey('55', ual, freshRoot);
     ((internals as any).recentReconciledUals as { add(key: string): void }).add(freshKey);
     ((internals as any).vmReconcileNegativeCache as Map<string, unknown>).set(freshKey, {
       localCgId: '55',

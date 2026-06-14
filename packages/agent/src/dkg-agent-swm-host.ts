@@ -2484,9 +2484,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmReconcileCatchupPeerOrder.delete(localCgId);
   }
 
-  vmReconcileCacheKey(this: DKGAgent, ual: string, merkleRoot: Uint8Array): string {
+  vmReconcileCacheKey(this: DKGAgent, localCgId: string, ual: string, merkleRoot: Uint8Array): string {
     const rootHex = Array.from(merkleRoot, (byte) => byte.toString(16).padStart(2, '0')).join('');
-    return `${ual}#${rootHex}`;
+    return `${localCgId}\0${ual}#${rootHex}`;
   }
 
   vmReconcileCacheKeyPrefix(this: DKGAgent, cacheKey: string): string {
@@ -2552,7 +2552,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (!storageAddr) return { status: 'skip' };
       ual = buildKnowledgeAssetUal(this.chain.chainId, storageAddr, kaId);
       merkleRoot = await this.chain.getLatestMerkleRoot!(kaId);
-      cacheKey = this.vmReconcileCacheKey(ual, merkleRoot);
+      cacheKey = this.vmReconcileCacheKey(localCgId, ual, merkleRoot);
 
       // Recently reconciled (live-burst guard): treat as already-done so the
       // cursor advances without redoing chain reads + an SWM scan.
