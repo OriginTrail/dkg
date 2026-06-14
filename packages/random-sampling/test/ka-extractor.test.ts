@@ -965,9 +965,10 @@ describe('GH#842 / PR #845 — Codex review fixes', () => {
       }),
     ).toBe(true);
 
-    // RFC ka-metadata-trim P3.1 (collapsed shape): the token→root binding is
-    // gone — ALL new roots land on the UAL subject as an unordered member
-    // set, and every legacy `<ual>/N` token row is removed.
+    // RFC ka-metadata-trim P3.1 conditional collapse: a MULTI-root update
+    // re-emits the per-token `<ual>/N` rows ALONGSIDE the collapsed UAL-subject
+    // member set (see packages/publisher/test/multi-root-token-rows.test.ts).
+    // The collapsed aggregate carries every new root as an unordered set.
     const rootsRes = await store.query(
       `SELECT ?root WHERE { GRAPH <${labelMeta}> { <${UAL}> <${DKG}rootEntity> ?root } }`,
     );
@@ -976,10 +977,20 @@ describe('GH#842 / PR #845 — Codex review fixes', () => {
       const roots = new Set(rootsRes.bindings.map((b) => b['root']));
       expect(roots).toEqual(new Set(Array.from({ length: N }, (_, i) => `urn:new:${i + 1}`)));
     }
-    const tokensGone = await store.query(
-      `ASK { GRAPH <${labelMeta}> { ?ka <${DKG}partOf> <${UAL}> } }`,
-    );
-    expect(tokensGone.type === 'boolean' && tokensGone.value).toBe(false);
+    // Codex bug 2 regression lock: EVERY re-emitted token `<ual>/N` MUST bind
+    // `urn:new:N` in MANIFEST order. With a lex-sort regression we'd see
+    // `<ual>/10` bound to `urn:new:2` (or vice-versa) because `"urn:new:10"`
+    // lex-sorts before `"urn:new:2"`.
+    for (let i = 1; i <= N; i++) {
+      const res = await store.query(
+        `SELECT ?root WHERE { GRAPH <${labelMeta}> { <${UAL}/${i}> <${DKG}rootEntity> ?root . <${UAL}/${i}> <${DKG}partOf> <${UAL}> } }`,
+      );
+      expect(res.type).toBe('bindings');
+      if (res.type === 'bindings') {
+        expect(res.bindings).toHaveLength(1);
+        expect(res.bindings[0]['root']).toBe(`urn:new:${i}`);
+      }
+    }
   });
 
   it('deletes surplus kaSubjects when an update shrinks the root count (Codex bug 3)', async () => {
@@ -1012,17 +1023,39 @@ describe('GH#842 / PR #845 — Codex review fixes', () => {
       }),
     ).toBe(true);
 
-    // RFC ka-metadata-trim P3.1 (collapsed shape): EVERY legacy `<ual>/N`
-    // token row must be FULLY gone — no rdf:type, no partOf, nothing — and
-    // the UAL subject carries exactly the 2 new member roots. The original
-    // Codex-bug-3 phantom (surplus tokens surviving a shrink) cannot recur
-    // because no token subjects are minted at all.
+    // RFC ka-metadata-trim P3.1 (CONDITIONAL collapse): a MULTI-root update
+    // re-emits exactly `newRoots.length` per-token rows in manifest order
+    // alongside the UAL-subject member set. The Codex-bug-3 invariant is that
+    // NO SURPLUS token survives the shrink: after 5→2, only `<ual>/1` and
+    // `<ual>/2` exist; `<ual>/3..5` (and their roots) are gone.
     const enumRes = await store.query(
       `SELECT DISTINCT ?ka WHERE { GRAPH <${labelMeta}> { ?ka <${DKG}partOf> <${UAL}> } }`,
     );
     expect(enumRes.type).toBe('bindings');
     if (enumRes.type === 'bindings') {
-      expect(enumRes.bindings).toHaveLength(0);
+      expect(new Set(enumRes.bindings.map((b) => b['ka']))).toEqual(
+        new Set([`${UAL}/1`, `${UAL}/2`]),
+      );
+    }
+    // Surplus prior tokens deleted: none of <ual>/3..5 survive.
+    const surplusGone = await store.query(
+      `ASK { GRAPH <${labelMeta}> {
+         VALUES ?ka { <${UAL}/3> <${UAL}/4> <${UAL}/5> }
+         ?ka ?p ?o .
+       } }`,
+    );
+    expect(surplusGone.type === 'boolean' && surplusGone.value).toBe(false);
+    // Re-emitted tokens carry the new roots in manifest order.
+    const tokenRootRes = await store.query(
+      `SELECT ?ka ?root WHERE { GRAPH <${labelMeta}> {
+         ?ka <${DKG}partOf> <${UAL}> ; <${DKG}rootEntity> ?root .
+       } }`,
+    );
+    expect(tokenRootRes.type).toBe('bindings');
+    if (tokenRootRes.type === 'bindings') {
+      const byToken = new Map(tokenRootRes.bindings.map((b) => [b['ka'], b['root']]));
+      expect(byToken.get(`${UAL}/1`)).toBe('urn:new:a');
+      expect(byToken.get(`${UAL}/2`)).toBe('urn:new:b');
     }
     const rootsRes = await store.query(
       `SELECT ?root WHERE { GRAPH <${labelMeta}> { <${UAL}> <${DKG}rootEntity> ?root } }`,

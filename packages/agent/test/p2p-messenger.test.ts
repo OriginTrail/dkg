@@ -40,23 +40,25 @@ describe('Messenger.sendToPeer', () => {
       PEER_B,
       '/dkg/test/1.0.0',
       expect.any(Uint8Array),
-      undefined,
+      {},
     );
     expect(out).toEqual(new Uint8Array([0x01, 0x02]));
   });
 
-  it('forwards timeoutMs to router.send', async () => {
+  it('forwards timeoutMs and signal to router.send', async () => {
     const { messenger, mocks } = makeMessenger();
+    const controller = new AbortController();
 
     await messenger.sendToPeer(PEER_A, '/dkg/test/1.0.0', new Uint8Array([0xff]), {
       timeoutMs: 5000,
+      signal: controller.signal,
     });
 
     expect(mocks.routerSendMock).toHaveBeenCalledWith(
       PEER_A,
       '/dkg/test/1.0.0',
       expect.any(Uint8Array),
-      5000,
+      { timeoutMs: 5000, signal: controller.signal },
     );
   });
 

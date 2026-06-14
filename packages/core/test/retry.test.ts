@@ -161,4 +161,34 @@ describe('withRetry', () => {
 
     expect(errors[0]).toBe(specificError);
   });
+
+  it('does not mutate default AbortController reasons while aborting backoff', async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    let releaseRetryStarted: () => void = () => {};
+    const retryStarted = new Promise<void>((resolve) => {
+      releaseRetryStarted = resolve;
+    });
+    const fn = async () => {
+      calls++;
+      throw new Error('transient');
+    };
+
+    const promise = withRetry(fn, {
+      maxAttempts: 3,
+      baseDelayMs: 30_000,
+      jitter: 0,
+      signal: controller.signal,
+      onRetry: () => {
+        releaseRetryStarted();
+      },
+    });
+
+    await retryStarted;
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(() => controller.abort()).not.toThrow();
+    await expect(promise).rejects.toMatchObject({ name: 'AbortError' });
+    expect(calls).toBe(1);
+  });
 });

@@ -1176,8 +1176,12 @@ export class ApiClient {
     catchup?:
       | {
         connectedPeers: number;
+        totalPeers?: number;
+        selectedPeers?: number;
         syncCapablePeers: number;
         peersTried: number;
+        peersResponded: number;
+        peersSucceeded: number;
         dataSynced: number;
         sharedMemorySynced: number;
         denied: boolean;
@@ -1191,11 +1195,15 @@ export class ApiClient {
             insertedDataTriples: number;
             bytesReceived: number;
             resumedPhases: number;
+            timedOutPhases: number;
+            completedPhases: number;
+            checkpointAdvances: number;
             emptyResponses: number;
             metaOnlyResponses: number;
             dataRejectedMissingMeta: number;
             rejectedKcs: number;
             failedPeers: number;
+            failedPhases: number;
           };
           sharedMemory: {
             fetchedMetaTriples: number;
@@ -1204,9 +1212,13 @@ export class ApiClient {
             insertedDataTriples: number;
             bytesReceived: number;
             resumedPhases: number;
+            timedOutPhases: number;
+            completedPhases: number;
+            checkpointAdvances: number;
             emptyResponses: number;
             droppedDataTriples: number;
             failedPeers: number;
+            failedPhases: number;
           };
         };
       }
@@ -1225,8 +1237,12 @@ export class ApiClient {
     catchup?:
       | {
         connectedPeers: number;
+        totalPeers?: number;
+        selectedPeers?: number;
         syncCapablePeers: number;
         peersTried: number;
+        peersResponded: number;
+        peersSucceeded: number;
         dataSynced: number;
         sharedMemorySynced: number;
         denied: boolean;
@@ -1240,11 +1256,15 @@ export class ApiClient {
             insertedDataTriples: number;
             bytesReceived: number;
             resumedPhases: number;
+            timedOutPhases: number;
+            completedPhases: number;
+            checkpointAdvances: number;
             emptyResponses: number;
             metaOnlyResponses: number;
             dataRejectedMissingMeta: number;
             rejectedKcs: number;
             failedPeers: number;
+            failedPhases: number;
           };
           sharedMemory: {
             fetchedMetaTriples: number;
@@ -1253,9 +1273,13 @@ export class ApiClient {
             insertedDataTriples: number;
             bytesReceived: number;
             resumedPhases: number;
+            timedOutPhases: number;
+            completedPhases: number;
+            checkpointAdvances: number;
             emptyResponses: number;
             droppedDataTriples: number;
             failedPeers: number;
+            failedPhases: number;
           };
         };
       }
@@ -1278,8 +1302,11 @@ export class ApiClient {
     finishedAt?: number;
     result?: {
       connectedPeers: number;
+      totalPeers?: number;
+      selectedPeers?: number;
       syncCapablePeers: number;
       peersTried: number;
+      peersResponded: number;
       peersSucceeded: number;
       dataSynced: number;
       sharedMemorySynced: number;
@@ -1294,11 +1321,15 @@ export class ApiClient {
           insertedDataTriples: number;
           bytesReceived: number;
           resumedPhases: number;
+          timedOutPhases: number;
+          completedPhases: number;
+          checkpointAdvances: number;
           emptyResponses: number;
           metaOnlyResponses: number;
           dataRejectedMissingMeta: number;
           rejectedKcs: number;
           failedPeers: number;
+          failedPhases: number;
         };
         sharedMemory: {
           fetchedMetaTriples: number;
@@ -1307,9 +1338,13 @@ export class ApiClient {
           insertedDataTriples: number;
           bytesReceived: number;
           resumedPhases: number;
+          timedOutPhases: number;
+          completedPhases: number;
+          checkpointAdvances: number;
           emptyResponses: number;
           droppedDataTriples: number;
           failedPeers: number;
+          failedPhases: number;
         };
       };
     };

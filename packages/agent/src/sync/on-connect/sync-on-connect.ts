@@ -1,15 +1,35 @@
 import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
 
+interface SyncProgressSummary {
+  insertedTriples: number;
+  insertedDataTriples?: number;
+  insertedMetaTriples?: number;
+  metaOnlyResponses?: number;
+  completedPhases?: number;
+  checkpointAdvances?: number;
+  timedOutPhases?: number;
+  failedPeers?: number;
+  failedPhases?: number;
+  deniedPhases?: number;
+}
+
+type SyncFromPeerResult = number | SyncProgressSummary;
+
+export interface SyncOnConnectPeerOutcome {
+  fresh: boolean;
+  progress?: boolean;
+}
+
 interface SyncOnConnectContext {
   remotePeer: string;
   syncingPeers: Set<string>;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
   knownCorePeerIds: Set<string>;
   getSyncContextGraphs: () => string[];
-  syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<number>;
+  syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<SyncFromPeerResult>;
   refreshMetaSyncedFlags: (contextGraphIds: Iterable<string>) => Promise<void>;
   discoverContextGraphsFromStore: () => Promise<number>;
-  syncSharedMemoryFromPeer: (peerId: string, contextGraphIds: string[]) => Promise<number>;
+  syncSharedMemoryFromPeer: (peerId: string, contextGraphIds: string[]) => Promise<SyncFromPeerResult>;
   syncSharedMemoryOnConnect?: boolean;
   logInfo: (ctx: OperationContext, message: string) => void;
   /**
@@ -27,12 +47,12 @@ interface SyncOnConnectContext {
    */
   onPeerSkippedNoSync?: (peerId: string, protocols: string[]) => void;
   /**
-   * Optional. Called after a successful sync (durable + SWM, including
-   * the newly-discovered-CGs second pass). The orchestrator stamps the
-   * peer's `lastSuccessfulSyncAt` so the periodic reconciler can decide
-   * whether the peer is overdue for another retry.
+   * Optional. Called after sync accounting shows either real progress or a
+   * denial-only clean response. `fresh=false` clears peer backoff without
+   * marking the peer as cleanly fresh for reconnect suppression; `progress`
+   * controls whether the periodic reconciler may write its long cooldown.
    */
-  onPeerSynced?: (peerId: string) => void;
+  onPeerSynced?: (peerId: string, outcome?: SyncOnConnectPeerOutcome) => void;
 }
 
 export type SyncOnConnectOutcome = 'synced' | 'skipped-no-sync' | 'already-syncing';
@@ -48,6 +68,59 @@ export class SyncOnConnectPostSyncError extends Error {
     this.originalError = originalError;
     this.backoffEligible = options.backoffEligible;
   }
+}
+
+function insertedTriples(result: SyncFromPeerResult): number {
+  return typeof result === 'number' ? result : result.insertedTriples;
+}
+
+function madeSyncProgress(result: SyncFromPeerResult): boolean {
+  if (typeof result === 'number') return true;
+  const phaseProgress = !metadataOnlySync(result) && (
+    (result.completedPhases ?? 0) > 0 ||
+    (result.checkpointAdvances ?? 0) > 0
+  );
+  return insertedDataTriplesForProgress(result) > 0
+    || phaseProgress;
+}
+
+function hadBackoffWorthyFailure(result: SyncFromPeerResult): boolean {
+  if (typeof result === 'number') return false;
+  return (result.failedPeers ?? 0) > 0 || (result.timedOutPhases ?? 0) > 0;
+}
+
+function hadDeniedPhase(result: SyncFromPeerResult): boolean {
+  if (typeof result === 'number') return false;
+  return (result.deniedPhases ?? 0) > 0;
+}
+
+function hadFailedPhase(result: SyncFromPeerResult): boolean {
+  if (typeof result === 'number') return false;
+  return (result.failedPhases ?? 0) > 0;
+}
+
+function cleanDetailedSync(result: SyncFromPeerResult): boolean {
+  if (typeof result === 'number') return true;
+  return (
+    (result.failedPeers ?? 0) === 0 &&
+    (result.failedPhases ?? 0) === 0 &&
+    (result.timedOutPhases ?? 0) === 0 &&
+    (result.deniedPhases ?? 0) === 0 &&
+    !metadataOnlySync(result)
+  );
+}
+
+function insertedDataTriplesForProgress(result: SyncProgressSummary): number {
+  if (result.insertedDataTriples !== undefined) return result.insertedDataTriples;
+  return metadataOnlySync(result) ? 0 : result.insertedTriples;
+}
+
+function metadataOnlySync(result: SyncProgressSummary): boolean {
+  const insertedDataTriples = result.insertedDataTriples ?? 0;
+  return insertedDataTriples === 0 && (
+    (result.metaOnlyResponses ?? 0) > 0 ||
+    ((result.insertedMetaTriples ?? 0) > 0 && result.insertedTriples > 0)
+  );
 }
 
 export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<SyncOnConnectOutcome> {
@@ -72,6 +145,22 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
   syncingPeers.add(remotePeer);
 
   let durableSyncCompleted = false;
+  let madeProgress = false;
+  let sawDeniedPhase = false;
+  let sawFailedPhase = false;
+  let sawBackoffWorthyFailure = false;
+  let sawDurableMetadataOnlyDetailedSync = false;
+  let cleanDurableDetailedRound = false;
+  const recordSyncAccounting = (result: SyncFromPeerResult, phase: 'durable' | 'shared'): void => {
+    madeProgress = madeProgress || madeSyncProgress(result);
+    sawDeniedPhase = sawDeniedPhase || hadDeniedPhase(result);
+    sawFailedPhase = sawFailedPhase || hadFailedPhase(result);
+    sawBackoffWorthyFailure = sawBackoffWorthyFailure || hadBackoffWorthyFailure(result);
+    if (phase === 'durable') {
+      sawDurableMetadataOnlyDetailedSync = sawDurableMetadataOnlyDetailedSync || (typeof result !== 'number' && metadataOnlySync(result));
+      cleanDurableDetailedRound = cleanDurableDetailedRound || cleanDetailedSync(result);
+    }
+  };
   const runNonTransportStep = async <T>(step: () => Promise<T>): Promise<T> => {
     try {
       return await step();
@@ -99,7 +188,8 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     logInfo(ctx, `Syncing from peer ${shortPeer}...`);
     const knownCgsBefore = new Set(getSyncContextGraphs() ?? []);
     const synced = await syncFromPeer(remotePeer);
-    logInfo(ctx, `Synced ${synced} data triples from peer ${shortPeer}`);
+    recordSyncAccounting(synced, 'durable');
+    logInfo(ctx, `Synced ${insertedTriples(synced)} data triples from peer ${shortPeer}`);
 
     const syncScope = new Set<string>([
       SYSTEM_CONTEXT_GRAPHS.AGENTS,
@@ -115,7 +205,8 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     if (newlyDiscovered.length > 0) {
       logInfo(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — syncing durable data from ${shortPeer}`);
       const discoverSynced = await syncFromPeer(remotePeer, newlyDiscovered);
-      logInfo(ctx, `Synced ${discoverSynced} durable triples for newly discovered CG(s) from ${shortPeer}`);
+      recordSyncAccounting(discoverSynced, 'durable');
+      logInfo(ctx, `Synced ${insertedTriples(discoverSynced)} durable triples for newly discovered CG(s) from ${shortPeer}`);
       await runNonTransportStep(() => refreshMetaSyncedFlags(newlyDiscovered));
     }
 
@@ -123,12 +214,20 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     const wsContextGraphIds = getSyncContextGraphs() ?? [];
     if (syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
       const wsSynced = await syncSharedMemoryFromPeer(remotePeer, wsContextGraphIds);
-      logInfo(ctx, `Synced ${wsSynced} shared memory triples from peer ${shortPeer}`);
+      recordSyncAccounting(wsSynced, 'shared');
+      logInfo(ctx, `Synced ${insertedTriples(wsSynced)} shared memory triples from peer ${shortPeer}`);
     } else if (!syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
       logInfo(ctx, `Skipping shared memory sync from peer ${shortPeer} (syncSharedMemoryOnConnect=false)`);
     }
 
-    context.onPeerSynced?.(remotePeer);
+    const cleanDurableRound = cleanDurableDetailedRound && !sawDurableMetadataOnlyDetailedSync;
+    const clearsPeerBackoff = madeProgress || (!sawBackoffWorthyFailure && (cleanDurableRound || sawDeniedPhase));
+    if (clearsPeerBackoff) {
+      context.onPeerSynced?.(remotePeer, {
+        fresh: !sawBackoffWorthyFailure && !sawDeniedPhase && !sawFailedPhase && cleanDurableRound,
+        progress: madeProgress,
+      });
+    }
     return 'synced';
   } catch (err) {
     if (err instanceof SyncOnConnectPostSyncError) {

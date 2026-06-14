@@ -463,8 +463,15 @@ export class MockChainAdapter implements ChainAdapter {
     return this.txResult(true);
   }
 
-  async listContextGraphsFromChain(): Promise<import('./chain-adapter.js').ContextGraphOnChain[]> {
+  async listContextGraphsFromChain(
+    _fromBlock?: number,
+    _options?: import('./chain-adapter.js').ContextGraphChainScanOptions,
+  ): Promise<import('./chain-adapter.js').ContextGraphOnChain[]> {
     return [];
+  }
+
+  async hasContextGraphRegistryScanWatermark(): Promise<boolean> {
+    return false;
   }
 
   // --- V10 Publishing Conviction NFT (DKGPublishingConvictionNFT) ---

@@ -24,41 +24,89 @@
 import type {
   TripleStore,
   Quad as DKGQuad,
+  QueryOptions,
   QueryResult,
   SelectResult,
   ConstructResult,
   AskResult,
-  TripleStoreQueryOptions,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
-import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 
 /**
- * Monotonic clock for slow-query elapsed timing. Unlike `Date.now()`,
+ * Monotonic clock for the listGraphs cache TTL. Unlike `Date.now()`,
  * `performance.now()` never moves backwards on an NTP step / VM resume / manual
- * clock change, so an elapsed measurement can't go negative or be skewed by a
- * wall-clock adjustment. (Graph-list caching now lives in GraphSetIndexStore.)
+ * clock change, so the TTL can't be silently extended past its window (which
+ * would defeat the outage re-validation guarantee).
  */
 const monotonicNow = (): number => performance.now();
 
-const DEFAULT_SLOW_QUERY_THRESHOLD_MS = 10_000;
-const DEFAULT_SLOW_QUERY_SAMPLE_RATE = 1;
-
-export interface SparqlHttpQueryOptions extends TripleStoreQueryOptions {
-  /** Caller tag used in slow-query telemetry, e.g. `agent.listContextGraphs`. */
-  source?: string;
+function composeAbortSignals(
+  primary: AbortSignal | undefined,
+  secondary: AbortSignal | undefined,
+): AbortSignal | undefined {
+  if (!primary) return secondary;
+  if (!secondary) return primary;
+  const AnyImpl = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+  if (AnyImpl) return AnyImpl([primary, secondary]);
+  const combined = new AbortController();
+  let settled = false;
+  const cleanup = () => {
+    primary.removeEventListener('abort', forwardPrimary);
+    secondary.removeEventListener('abort', forwardSecondary);
+  };
+  const forwardPrimary = () => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    combined.abort(primary.reason);
+  };
+  const forwardSecondary = () => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    combined.abort(secondary.reason);
+  };
+  if (primary.aborted) combined.abort(primary.reason);
+  else if (secondary.aborted) combined.abort(secondary.reason);
+  else {
+    primary.addEventListener('abort', forwardPrimary, { once: true });
+    secondary.addEventListener('abort', forwardSecondary, { once: true });
+  }
+  return combined.signal;
 }
 
-export interface SparqlHttpSlowQueryEvent {
-  source: string;
-  operation: 'select' | 'ask' | 'construct' | 'describe' | 'unknown';
-  elapsedMs: number;
-  thresholdMs: number;
-  endpoint: string;
-  queryHash: string;
-  queryBytes: number;
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  const reason = signal.reason;
+  throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
 }
+
+function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return work;
+  throwIfAborted(signal);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      const reason = signal.reason;
+      reject(reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(resolve, reject).finally(() => {
+      signal.removeEventListener('abort', onAbort);
+    });
+  });
+}
+
+/**
+ * R6-A: how long a managed-endpoint `listGraphs()` result may be served from
+ * cache before it is re-validated against the store. The cache is also cleared
+ * eagerly on every local write, so this TTL only bounds *non-write* staleness:
+ * it collapses the peer-churn-driven burst of reconcile enumerations to at most
+ * one scan per window (the actual CPU win) while guaranteeing the graph set is
+ * re-read at least this often — so a managed-store outage/restart surfaces
+ * within the window instead of being masked indefinitely (review round 1).
+ */
+export const LIST_GRAPHS_CACHE_TTL_MS = 30_000;
 
 export interface SparqlHttpStoreOptions {
   /** SPARQL query endpoint URL (required). */
@@ -70,35 +118,67 @@ export interface SparqlHttpStoreOptions {
   /** Optional Authorization header value (e.g. "Bearer <token>" or "Basic <base64>"). */
   auth?: string;
   /**
-   * Marker used by higher-level daemon flows to distinguish daemon-owned
-   * endpoints from operator-provided URLs. Graph-list indexing is handled by
-   * GraphSetIndexStore rather than this adapter.
+   * True when the daemon owns this endpoint end-to-end (a CLI-managed local
+   * `oxigraph-server`, signalled by `oxigraph-managed.ts`). When set, no
+   * external writer can mutate the store behind our back, so `listGraphs()`
+   * is served from an in-memory cache that is invalidated on every local
+   * write AND expires after {@link LIST_GRAPHS_CACHE_TTL_MS}. This kills the
+   * data-proportional `SELECT DISTINCT ?g` full scan that the 30 s host-mode
+   * reconcile (and on-demand CG enumeration) would otherwise re-run every
+   * cycle on an idle, data-rich node (R6-A).
+   *
+   * Leave false/undefined for operator-provided endpoints: a shared/external
+   * SPARQL server can gain graphs we did not write, which the cache would
+   * miss — so caching is unsafe there and `listGraphs()` always queries.
    */
   managedByDkg?: boolean;
-  /** Emit sampled slow-query events after this duration. Default 10_000 ms; set 0 to disable. */
-  slowQueryThresholdMs?: number;
-  /** Sampling rate for slow-query events, from 0 to 1. Default 1. */
-  slowQuerySampleRate?: number;
-  /** Optional sink for sampled slow-query events; defaults to a compact console warning. */
-  onSlowQuery?: (event: SparqlHttpSlowQueryEvent) => void;
   /**
-   * Deprecated compatibility option. Graph-list revalidation clocks are owned
-   * by GraphSetIndexStore.
+   * Clock for the `listGraphs()` cache TTL. Test seam only; defaults to the
+   * monotonic {@link monotonicNow} (`performance.now`), never `Date.now`, so a
+   * backwards wall-clock jump can't extend the cache past its TTL.
    */
   now?: () => number;
 }
 
 export class SparqlHttpStore implements TripleStore {
+  readonly queryCancellation = 'interruptible' as const;
+
   private readonly queryEndpoint: string;
   private readonly updateEndpoint: string;
   private readonly timeout: number;
   private readonly headers: Record<string, string>;
 
-  /** Monotonic clock for slow-query elapsed timing (defaults to performance.now). */
+  /** R6-A: cache `listGraphs()` only for daemon-owned (managed) endpoints. */
+  private readonly cacheGraphList: boolean;
+  /** Monotonic clock for the cache TTL (defaults to performance.now). */
   private readonly now: () => number;
-  private readonly slowQueryThresholdMs: number;
-  private readonly slowQuerySampleRate: number;
-  private readonly onSlowQuery?: (event: SparqlHttpSlowQueryEvent) => void;
+  /** Cached graph-name list; null = not built / invalidated by a write. */
+  private graphListCache: string[] | null = null;
+  /** Wall-clock (via {@link now}) when {@link graphListCache} was last built. */
+  private graphListCacheAt = 0;
+  /**
+   * Bumped on every local write. `listGraphs()` captures it before its
+   * async query and only stores the result if it is unchanged on return —
+   * so a write that lands while a rebuild is in flight discards the
+   * possibly-stale result instead of caching it.
+   */
+  private graphListCacheGen = 0;
+  /**
+   * In-flight rebuild promise (managed endpoints). Concurrent callers on a
+   * cold/expired cache share this single scan instead of each issuing their
+   * own `SELECT DISTINCT ?g` — without it, a burst of overlapping enumerations
+   * (reconcile + metrics CG-count + status) at startup or each TTL boundary
+   * would still run duplicate full scans, the exact load this fix targets.
+   */
+  private graphListInflight: Promise<string[]> | null = null;
+  /**
+   * The generation {@link graphListInflight} was started at. A caller may only
+   * join the in-flight scan when this still equals {@link graphListCacheGen};
+   * a write that bumps the generation mid-scan means the in-flight result is
+   * pre-write, so a later caller must start a fresh scan rather than observe a
+   * stale graph set (read-your-writes).
+   */
+  private graphListInflightGen = -1;
 
   constructor(options: SparqlHttpStoreOptions) {
     if (!options.queryEndpoint?.trim()) {
@@ -107,16 +187,8 @@ export class SparqlHttpStore implements TripleStore {
     this.queryEndpoint = options.queryEndpoint.replace(/\/$/, '');
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? 30_000;
+    this.cacheGraphList = options.managedByDkg === true;
     this.now = options.now ?? monotonicNow;
-    this.slowQueryThresholdMs = normalizeNonNegativeNumber(
-      options.slowQueryThresholdMs,
-      DEFAULT_SLOW_QUERY_THRESHOLD_MS,
-    );
-    this.slowQuerySampleRate = normalizeSampleRate(
-      options.slowQuerySampleRate,
-      DEFAULT_SLOW_QUERY_SAMPLE_RATE,
-    );
-    this.onSlowQuery = options.onSlowQuery;
     // Content-Type is set per-request in postQuery/postUpdate (direct POST:
     // application/sparql-query | application/sparql-update). Only shared
     // headers (e.g. Authorization) belong here.
@@ -126,7 +198,19 @@ export class SparqlHttpStore implements TripleStore {
     }
   }
 
-  private async postQuery(sparql: string, accept: string, options?: SparqlHttpQueryOptions): Promise<Response> {
+  /**
+   * Invalidate the cached graph list after a local write. A no-op when
+   * caching is disabled (external endpoints). Bumping the generation also
+   * causes any concurrently in-flight `listGraphs()` rebuild to drop its
+   * result rather than cache a pre-write snapshot.
+   */
+  private invalidateGraphListCache(): void {
+    if (!this.cacheGraphList) return;
+    this.graphListCache = null;
+    this.graphListCacheGen++;
+  }
+
+  private async postQuery(sparql: string, accept: string, options?: QueryOptions): Promise<Response> {
     // Direct POST (W3C SPARQL 1.1 Protocol §2.1.3): the query is the raw
     // request body with `application/sparql-query`, not URL-encoded form
     // data. Form-encoded bodies (`query=...`) are parsed by the server's
@@ -134,11 +218,13 @@ export class SparqlHttpStore implements TripleStore {
     // `maxFormContentSize` (~200 KB) and rejects larger payloads with
     // HTTP 400 "Unable to parse form content". The direct-POST body is not
     // form parsed, so large queries are not capped.
+    const timeoutSignal = AbortSignal.timeout(this.timeout);
+    const signal = composeAbortSignals(options?.signal, timeoutSignal) ?? timeoutSignal;
     const res = await fetch(this.queryEndpoint, {
       method: 'POST',
       headers: { ...this.headers, 'Content-Type': 'application/sparql-query', Accept: accept },
       body: sparql,
-      signal: combineAbortSignals(AbortSignal.timeout(this.timeout), options?.signal),
+      signal,
     });
     return res;
   }
@@ -179,6 +265,7 @@ export class SparqlHttpStore implements TripleStore {
       const text = await res.text().catch(() => '');
       throw new Error(`SPARQL HTTP insert failed (${res.status}): ${text.slice(0, 300)}`);
     }
+    this.invalidateGraphListCache(); // a new graph may have appeared
   }
 
   async delete(quads: DKGQuad[]): Promise<void> {
@@ -197,6 +284,7 @@ export class SparqlHttpStore implements TripleStore {
       const text = await res.text().catch(() => '');
       throw new Error(`SPARQL HTTP delete failed (${res.status}): ${text.slice(0, 300)}`);
     }
+    this.invalidateGraphListCache(); // a graph may now be empty (gone from listGraphs)
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>): Promise<number> {
@@ -219,6 +307,7 @@ export class SparqlHttpStore implements TripleStore {
       const text = await res.text().catch(() => '');
       throw new Error(`SPARQL HTTP deleteByPattern failed (${res.status}): ${text.slice(0, 300)}`);
     }
+    this.invalidateGraphListCache(); // a graph may now be empty (gone from listGraphs)
     const after = await this.countQuads(graphUri);
     return Math.max(0, before - after);
   }
@@ -232,57 +321,48 @@ export class SparqlHttpStore implements TripleStore {
       const text = await res.text().catch(() => '');
       throw new Error(`SPARQL HTTP deleteBySubjectPrefix failed (${res.status}): ${text.slice(0, 300)}`);
     }
+    this.invalidateGraphListCache(); // the graph may now be empty (gone from listGraphs)
     const after = await this.countQuads(graphUri);
     return Math.max(0, before - after);
   }
 
-  async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
-    const startedAt = this.now();
+  async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    throwIfAborted(options?.signal);
     const trimmed = sparql.trim();
     const upper = trimmed.toUpperCase();
     const isAsk = upper.startsWith('ASK');
     const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
-    const operation = inferQueryOperation(trimmed);
 
-    try {
-      if (isConstruct) {
-        return await this.queryConstruct(trimmed, options);
-      }
-
-      const res = await this.postQuery(trimmed, 'application/sparql-results+json', options);
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
-      }
-
-      const json = (await res.json()) as W3CSelectResponse | W3CAskResponse;
-
-      if (isAsk || 'boolean' in json) {
-        return { type: 'boolean', value: (json as W3CAskResponse).boolean } satisfies AskResult;
-      }
-
-      const sr = json as W3CSelectResponse;
-      const vars = sr.head?.vars ?? [];
-      const bindings: Array<Record<string, string>> = (sr.results?.bindings ?? []).map((row) => {
-        const obj: Record<string, string> = {};
-        for (const v of vars) {
-          const cell = row[v];
-          if (cell) obj[v] = w3cTermToString(cell);
-        }
-        return obj;
-      });
-      return { type: 'bindings', bindings } satisfies SelectResult;
-    } finally {
-      this.maybeEmitSlowQuery({
-        sparql: trimmed,
-        source: options?.source,
-        operation,
-        startedAt,
-      });
+    if (isConstruct) {
+      return this.queryConstruct(trimmed, options);
     }
+
+    const res = await this.postQuery(trimmed, 'application/sparql-results+json', options);
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`SPARQL HTTP query failed (${res.status}): ${text.slice(0, 300)}`);
+    }
+
+    const json = (await res.json()) as W3CSelectResponse | W3CAskResponse;
+
+    if (isAsk || 'boolean' in json) {
+      return { type: 'boolean', value: (json as W3CAskResponse).boolean } satisfies AskResult;
+    }
+
+    const sr = json as W3CSelectResponse;
+    const vars = sr.head?.vars ?? [];
+    const bindings: Array<Record<string, string>> = (sr.results?.bindings ?? []).map((row) => {
+      const obj: Record<string, string> = {};
+      for (const v of vars) {
+        const cell = row[v];
+        if (cell) obj[v] = w3cTermToString(cell);
+      }
+      return obj;
+    });
+    return { type: 'bindings', bindings } satisfies SelectResult;
   }
 
-  private async queryConstruct(sparql: string, options?: SparqlHttpQueryOptions): Promise<ConstructResult> {
+  private async queryConstruct(sparql: string, options?: QueryOptions): Promise<ConstructResult> {
     const res = await this.postQuery(sparql, 'application/n-quads, text/n-quads', options);
     if (!res.ok) {
       const text = await res.text().catch(() => '');
@@ -294,10 +374,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async hasGraph(graphUri: string): Promise<boolean> {
-    const r = await this.query(
-      `ASK { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`,
-      { source: 'sparql-http.hasGraph' },
-    );
+    const r = await this.query(`ASK { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`);
     return r.type === 'boolean' && r.value;
   }
 
@@ -312,23 +389,77 @@ export class SparqlHttpStore implements TripleStore {
       const text = await res.text().catch(() => '');
       throw new Error(`SPARQL HTTP dropGraph failed (${res.status}): ${text.slice(0, 300)}`);
     }
+    this.invalidateGraphListCache(); // the graph is gone from listGraphs
   }
 
-  async listGraphs(): Promise<string[]> {
-    // Direct `SELECT DISTINCT ?g` scan. Graph-list caching/indexing is owned by
-    // GraphSetIndexStore (C1 #1150), which decorates this adapter; the `source`
-    // tag keeps the underlying scan visible in slow-query telemetry.
-    const r = await this.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }', {
-      source: 'sparql-http.listGraphs',
+  async listGraphs(options?: QueryOptions): Promise<string[]> {
+    throwIfAborted(options?.signal);
+    // R6-A: on a managed (daemon-owned) endpoint the graph set only changes
+    // when *we* write, so serve a warm cache and skip the full
+    // `SELECT DISTINCT ?g` quad-store scan — the dominant idle-node CPU cost
+    // on a data-rich node (re-run by the 30 s host-mode reconcile and every
+    // on-demand CG enumeration). The cache is cleared on every write and also
+    // expires after LIST_GRAPHS_CACHE_TTL_MS, so the burst of churn-driven
+    // re-enumerations collapses to one scan per window while a store
+    // outage/restart still surfaces within the TTL. Returns a copy so callers
+    // can't mutate it.
+    if (
+      this.cacheGraphList &&
+      this.graphListCache !== null &&
+      this.now() - this.graphListCacheAt < LIST_GRAPHS_CACHE_TTL_MS
+    ) {
+      return [...this.graphListCache];
+    }
+    // External (non-managed) endpoint: never cache (an outside writer could
+    // add a graph we'd miss), so just scan.
+    if (!this.cacheGraphList) {
+      return [...(await this.scanGraphs(this.graphListCacheGen, options))];
+    }
+    // Managed, cold/expired cache: coalesce concurrent callers onto one
+    // in-flight scan so a startup or TTL-boundary burst doesn't fan out into
+    // duplicate full scans (the very load this fix removes) — but only while no
+    // write has invalidated the cache since that scan started. A caller
+    // arriving after a write must not join the pre-write scan (it would observe
+    // a stale graph set); it starts a fresh one instead.
+    if (this.graphListInflight && this.graphListInflightGen === this.graphListCacheGen) {
+      return [...(await raceAgainstAbort(this.graphListInflight, options?.signal))];
+    }
+    const startGen = this.graphListCacheGen;
+    let scan!: Promise<string[]>;
+    scan = this.scanGraphs(startGen).finally(() => {
+      // Clear only if a newer scan hasn't already replaced this one, so a
+      // post-write rebuild started while this scan was resolving isn't lost.
+      if (this.graphListInflight === scan) {
+        this.graphListInflight = null;
+        this.graphListInflightGen = -1;
+      }
     });
-    return r.type === 'bindings' ? r.bindings.map((b) => b.g).filter(Boolean) : [];
+    this.graphListInflight = scan;
+    this.graphListInflightGen = startGen;
+    return [...(await raceAgainstAbort(scan, options?.signal))];
+  }
+
+  /**
+   * Run the `SELECT DISTINCT ?g` enumeration and (for managed endpoints) cache
+   * the result, unless a write landed during the scan — the generation guard
+   * (`startGen` vs the current generation) discards a snapshot that may predate
+   * that write so the next call rebuilds.
+   */
+  private async scanGraphs(startGen: number, options?: QueryOptions): Promise<string[]> {
+    const r = await this.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }', options);
+    const graphs = r.type === 'bindings' ? r.bindings.map((b) => b.g).filter(Boolean) : [];
+    if (this.cacheGraphList && startGen === this.graphListCacheGen) {
+      this.graphListCache = graphs;
+      this.graphListCacheAt = this.now();
+    }
+    return graphs;
   }
 
   async countQuads(graphUri?: string): Promise<number> {
     const sparql = graphUri
       ? `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`
       : `SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }`;
-    const r = await this.query(sparql, { source: 'sparql-http.countQuads' });
+    const r = await this.query(sparql);
     if (r.type === 'bindings' && r.bindings.length > 0) {
       const c = String(r.bindings[0].c ?? '');
       const stripped = c.replace(/^"|"$/g, '');
@@ -337,107 +468,9 @@ export class SparqlHttpStore implements TripleStore {
     return 0;
   }
 
-  private maybeEmitSlowQuery(input: {
-    sparql: string;
-    source?: string;
-    operation: SparqlHttpSlowQueryEvent['operation'];
-    startedAt: number;
-  }): void {
-    if (this.slowQueryThresholdMs <= 0 || this.slowQuerySampleRate <= 0) return;
-    const elapsedMs = this.now() - input.startedAt;
-    if (elapsedMs < this.slowQueryThresholdMs) return;
-    if (this.slowQuerySampleRate < 1 && Math.random() >= this.slowQuerySampleRate) return;
-
-    const event: SparqlHttpSlowQueryEvent = {
-      source: normalizeQuerySource(input.source),
-      operation: input.operation,
-      elapsedMs,
-      thresholdMs: this.slowQueryThresholdMs,
-      endpoint: sanitizeEndpointForTelemetry(this.queryEndpoint),
-      queryHash: hashQuery(input.sparql),
-      queryBytes: Buffer.byteLength(input.sparql, 'utf8'),
-    };
-
-    if (this.onSlowQuery) {
-      try {
-        this.onSlowQuery(event);
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        console.warn(`SPARQL HTTP slow query hook failed: ${reason}`);
-      }
-      return;
-    }
-    console.warn(
-      `SPARQL HTTP slow query source=${event.source} operation=${event.operation} ` +
-      `elapsedMs=${Math.round(event.elapsedMs)} thresholdMs=${event.thresholdMs} ` +
-      `queryHash=${event.queryHash} queryBytes=${event.queryBytes} endpoint=${event.endpoint}`,
-    );
-  }
-
   async close(): Promise<void> {
     // Remote service — nothing to close.
   }
-}
-
-function normalizeNonNegativeNumber(value: number | undefined, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0
-    ? value
-    : fallback;
-}
-
-function normalizeSampleRate(value: number | undefined, fallback: number): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
-  return Math.min(1, Math.max(0, value));
-}
-
-function normalizeQuerySource(source: string | undefined): string {
-  const trimmed = source?.trim();
-  if (!trimmed) return 'unknown';
-  return trimmed.replace(/[^\w:./-]/g, '_').slice(0, 120) || 'unknown';
-}
-
-function inferQueryOperation(sparql: string): SparqlHttpSlowQueryEvent['operation'] {
-  const upper = sparql.trimStart().toUpperCase();
-  if (upper.startsWith('SELECT')) return 'select';
-  if (upper.startsWith('ASK')) return 'ask';
-  if (upper.startsWith('CONSTRUCT')) return 'construct';
-  if (upper.startsWith('DESCRIBE')) return 'describe';
-  return 'unknown';
-}
-
-function hashQuery(sparql: string): string {
-  return createHash('sha256').update(sparql).digest('hex').slice(0, 16);
-}
-
-function sanitizeEndpointForTelemetry(endpoint: string): string {
-  try {
-    const url = new URL(endpoint);
-    url.username = '';
-    url.password = '';
-    url.search = '';
-    url.hash = '';
-    return url.toString();
-  } catch {
-    return endpoint.split(/[?#]/, 1)[0];
-  }
-}
-
-function combineAbortSignals(timeoutSignal: AbortSignal, callerSignal?: AbortSignal): AbortSignal {
-  if (!callerSignal) return timeoutSignal;
-  if (timeoutSignal.aborted) return timeoutSignal;
-  if (callerSignal.aborted) return callerSignal;
-  if (typeof AbortSignal.any === 'function') {
-    return AbortSignal.any([timeoutSignal, callerSignal]);
-  }
-  const controller = new AbortController();
-  const abort = (signal: AbortSignal) => {
-    if (!controller.signal.aborted) {
-      controller.abort(signal.reason);
-    }
-  };
-  timeoutSignal.addEventListener('abort', () => abort(timeoutSignal), { once: true });
-  callerSignal.addEventListener('abort', () => abort(callerSignal), { once: true });
-  return controller.signal;
 }
 
 // ---------------------------------------------------------------------------

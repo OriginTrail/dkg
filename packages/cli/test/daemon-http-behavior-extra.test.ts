@@ -55,6 +55,7 @@ import { ethers } from 'ethers';
 import { getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { ApiClient } from '../src/api-client.js';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
+import { daemonState } from '../src/daemon/state.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
@@ -971,6 +972,152 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       });
       expect(body.error).toMatch(/receipt lookup/i);
     } finally {
+      if (routeServer) {
+        await new Promise<void>((resolve, reject) => {
+          routeServer!.close((err) => (err ? reject(err) : resolve()));
+        });
+      }
+    }
+  });
+
+  it('marks timeout-after-response catchup as failed rather than unreachable', async () => {
+    const contextGraphId = 'catchup-timeout-response-' + Math.random().toString(36).slice(2, 8);
+    const catchupTracker = { jobs: new Map<string, any>(), latestByContextGraph: new Map<string, string>() };
+    const previousCatchupRunner = daemonState.catchupRunner;
+    daemonState.catchupRunner = {
+      run: async () => ({
+        connectedPeers: 1,
+        syncCapablePeers: 1,
+        peersTried: 1,
+        peersResponded: 1,
+        peersSucceeded: 0,
+        dataSynced: 0,
+        sharedMemorySynced: 0,
+        denied: false,
+        deniedPeers: 0,
+        diagnostics: {
+          noProtocolPeers: 0,
+          durable: {
+            fetchedMetaTriples: 0,
+            fetchedDataTriples: 0,
+            insertedMetaTriples: 0,
+            insertedDataTriples: 0,
+            bytesReceived: 0,
+            resumedPhases: 0,
+            timedOutPhases: 1,
+            completedPhases: 0,
+            checkpointAdvances: 0,
+            emptyResponses: 0,
+            metaOnlyResponses: 0,
+            dataRejectedMissingMeta: 0,
+            rejectedKcs: 0,
+            failedPeers: 0,
+          },
+          sharedMemory: {
+            fetchedMetaTriples: 0,
+            fetchedDataTriples: 0,
+            insertedMetaTriples: 0,
+            insertedDataTriples: 0,
+            bytesReceived: 0,
+            resumedPhases: 0,
+            timedOutPhases: 0,
+            completedPhases: 0,
+            checkpointAdvances: 0,
+            emptyResponses: 0,
+            droppedDataTriples: 0,
+            failedPeers: 0,
+          },
+        },
+      }),
+      close: async () => {},
+    };
+
+    let routeServer: Server | null = null;
+    try {
+      routeServer = createServer(async (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        const agent = {
+          getContextGraphAllowedAgents: async () => [],
+          getSubscribedContextGraphs: () => new Map(),
+          subscribeToContextGraph: () => {},
+          contextGraphHasLocalContent: async () => false,
+          markContextGraphSubscriptionState: () => {
+            throw new Error('timeout-only catchup must not mark subscription synced');
+          },
+          resolveAgentByToken: () => undefined,
+          getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
+        };
+        await handleContextGraphRoutes({
+          req,
+          res,
+          agent,
+          publisherControl: {},
+          publisherRuntime: null,
+          config: {},
+          startedAt: Date.now(),
+          dashDb: {},
+          opWallets: {},
+          network: {},
+          tracker: {},
+          memoryManager: {},
+          bridgeAuthToken: undefined,
+          nodeVersion: 'test',
+          nodeCommit: 'test',
+          catchupTracker,
+          extractionRegistry: {},
+          fileStore: {},
+          extractionStatus: new Map(),
+          assertionImportLocks: new Map(),
+          vectorStore: {},
+          embeddingProvider: null,
+          validTokens: new Set(),
+          apiHost: '127.0.0.1',
+          apiPortRef: { value: 0 },
+          routePlugins: [],
+          url,
+          path: url.pathname,
+          requestToken: undefined,
+          requestAgentAddress: '0x0000000000000000000000000000000000000001',
+        } as any);
+        if (!res.writableEnded) {
+          res.statusCode = 404;
+          res.end();
+        }
+      });
+      await new Promise<void>((resolve) => routeServer!.listen(0, '127.0.0.1', resolve));
+      const address = routeServer.address();
+      if (!address || typeof address === 'string') {
+        throw new Error('context graph route test server did not bind to a TCP port');
+      }
+
+      const subscribe = await fetch(`http://127.0.0.1:${address.port}/api/context-graph/subscribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contextGraphId, includeSharedMemory: true }),
+      });
+      expect(subscribe.status).toBe(200);
+      const queued = await subscribe.json() as { catchup: { jobId: string } };
+      const jobId = queued.catchup.jobId;
+
+      for (let i = 0; i < 20; i++) {
+        const job = catchupTracker.jobs.get(jobId);
+        if (job?.finishedAt) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      const job = catchupTracker.jobs.get(jobId);
+      expect(job).toMatchObject({
+        status: 'failed',
+        error: 'Sync did not complete — all reachable peers failed (timeouts or transport errors). Retry once the network is healthier.',
+      });
+      expect(job?.status).not.toBe('unreachable');
+      expect(job?.result).toMatchObject({
+        peersResponded: 1,
+        peersSucceeded: 0,
+        denied: false,
+      });
+    } finally {
+      daemonState.catchupRunner = previousCatchupRunner;
       if (routeServer) {
         await new Promise<void>((resolve, reject) => {
           routeServer!.close((err) => (err ? reject(err) : resolve()));

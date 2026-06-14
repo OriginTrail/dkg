@@ -26,6 +26,7 @@ function page(quads: Quad[], phase: SyncPhase): SyncPageResult {
     nextOffset: quads.length,
     checkpointKey: `${phase}-checkpoint`,
     completed: true,
+    timedOut: false,
   };
 }
 

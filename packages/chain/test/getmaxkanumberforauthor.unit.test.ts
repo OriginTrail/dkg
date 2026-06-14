@@ -425,7 +425,7 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
     await a.getMaxKaNumberForAuthor(AUTHOR);
     const searchCalls1 = getCode.mock.calls.filter((c) => c.length === 2).length;
     expect(searchCalls1).toBeGreaterThan(0); // first call binary-searches
-    expect((a as any).cachedKaStorageDeployBlock).toEqual({ address: storage.target, value: deployBlock });
+    expect((a as any).cachedContractDeployBlocks.get(storage.target.toLowerCase())).toBe(deployBlock);
 
     getCode.mockClear();
     await a.getMaxKaNumberForAuthor(AUTHOR);
@@ -469,7 +469,7 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
 
     expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(-1n); // still scans — pruned RPCs serve queryFilter
     expect((queryFilter.mock.calls[0] as unknown as [unknown, number, number])[1]).toBe(0); // genesis (safe lower bound, never above deploy)
-    expect((a as any).cachedKaStorageDeployBlock).toBeUndefined(); // degraded anchor not cached
+    expect((a as any).cachedContractDeployBlocks.get(storage.target.toLowerCase())).toBeUndefined(); // degraded anchor not cached
   });
 
   it('rethrows a transient throttle during the deploy-block search immediately (no degrade that would worsen the throttle)', async () => {
@@ -487,7 +487,7 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
     // access/plan/archive denial would instead degrade — see the degrade cases.)
     await expect(a.getMaxKaNumberForAuthor(AUTHOR)).rejects.toThrow('Too Many Requests');
     expect(queryFilter).not.toHaveBeenCalled(); // not degraded into a log crawl
-    expect((a as any).cachedKaStorageDeployBlock).toBeUndefined();
+    expect((a as any).cachedContractDeployBlocks.get(storage.target.toLowerCase())).toBeUndefined();
   });
 
   it('surfaces a DEEPLY-NESTED 429 status even when the message text looks like pruned state (#1111 review)', async () => {
@@ -509,7 +509,7 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
     });
     await expect(a.getMaxKaNumberForAuthor(AUTHOR)).rejects.toThrow(); // surfaced, not degraded
     expect(queryFilter).not.toHaveBeenCalled(); // NOT degraded into a log sweep despite the "missing trie node" text
-    expect((a as any).cachedKaStorageDeployBlock).toBeUndefined();
+    expect((a as any).cachedContractDeployBlocks.get(storage.target.toLowerCase())).toBeUndefined();
   });
 
   it('does NOT silently mask a BARE "header not found" — it is not historical-state, so it surfaces via the scan (#1111 review)', async () => {
@@ -531,7 +531,7 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
     });
     await expect(a.getMaxKaNumberForAuthor(AUTHOR)).rejects.toThrow('header not found'); // surfaced by the scan
     expect(queryFilter).toHaveBeenCalledTimes(1); // fails on page 1, no large sweep
-    expect((a as any).cachedKaStorageDeployBlock).toBeUndefined();
+    expect((a as any).cachedContractDeployBlocks.get(storage.target.toLowerCase())).toBeUndefined();
   });
 
   it('still degrades when "header not found" is accompanied by a genuine pruned-state phrase (#1111 review)', async () => {
@@ -547,7 +547,7 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
     });
     expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(-1n); // degraded to a genesis-anchored scan
     expect((queryFilter.mock.calls[0] as unknown as [unknown, number, number])[1]).toBe(0); // safe genesis lower bound
-    expect((a as any).cachedKaStorageDeployBlock).toBeUndefined();
+    expect((a as any).cachedContractDeployBlocks.get(storage.target.toLowerCase())).toBeUndefined();
   });
 
   it('degrades to genesis (never caches a stale head as the deploy block) when a backend head is behind the deploy block', async () => {
@@ -559,7 +559,7 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
       block === undefined ? '0x6000' : '0x',
     );
     expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(-1n);
-    expect((a as any).cachedKaStorageDeployBlock).toBeUndefined(); // stale head NOT cached as deploy block
+    expect((a as any).cachedContractDeployBlocks.get(storage.target.toLowerCase())).toBeUndefined(); // stale head NOT cached as deploy block
     expect((queryFilter.mock.calls[0] as unknown as [unknown, number, number])[1]).toBe(0); // safe genesis lower bound
   });
 
@@ -659,7 +659,7 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
 
     expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(7n); // degraded + scanned, not aborted
     expect((queryFilter.mock.calls[0] as unknown as [unknown, number, number])[1]).toBe(0); // genesis lower bound
-    expect((a as any).cachedKaStorageDeployBlock).toBeUndefined(); // degraded anchor not cached
+    expect((a as any).cachedContractDeployBlocks.get(storage.target.toLowerCase())).toBeUndefined(); // degraded anchor not cached
   });
 
   it('does not abort on a denied freshest backend — a healthy archive secondary still pins the deploy block (#1111 review)', async () => {

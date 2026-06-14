@@ -1523,7 +1523,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
     peerId: string,
     protocolId: string,
     data: Uint8Array,
-    opts?: { timeoutMs?: number },
+    opts?: { timeoutMs?: number; signal?: AbortSignal },
   ): Promise<Uint8Array> {
     return this.messenger.sendToPeer(peerId, protocolId, data, opts);
   }

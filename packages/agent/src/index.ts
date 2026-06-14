@@ -106,6 +106,7 @@ export {
   type ContextGraphMembershipStore,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionStore,
+  type ContextGraphWritePreflightProbe,
   type PeerHealth,
   type CclPublishedEvaluationRecord,
   type CclPublishedResultEntry,

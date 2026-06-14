@@ -2,7 +2,7 @@ import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { TripleStore, Quad, QueryResult, TripleStoreQueryOptions } from '../triple-store.js';
+import type { TripleStore, Quad, QueryOptions, QueryResult } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 
 /**
@@ -55,6 +55,10 @@ function normalizeNonNegativeInt(value: number | undefined, fallback: number): n
     : fallback;
 }
 
+function asAbortError(reason: unknown): Error {
+  return reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
+}
+
 /**
  * Side-effect-free read methods. ONLY these are bounded by the per-op timeout:
  * rejecting a read after the bound is a clean, determinate failure (nothing was
@@ -77,6 +81,8 @@ export interface OxigraphWorkerTimeoutError extends Error {
 }
 
 export class OxigraphWorkerStore implements TripleStore {
+  readonly queryCancellation = 'interruptible' as const;
+
   private worker: Worker;
   private nextId = 0;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
@@ -156,19 +162,24 @@ export class OxigraphWorkerStore implements TripleStore {
     // Only read-only ops are bounded; mutations run unbounded (timeoutMs 0) so a
     // timed-out write is never reported as a clean failure while still in flight.
     const timeoutMs = READ_ONLY_METHODS.has(method) ? this.operationTimeoutMs : 0;
-    return this.callWithTimeout<T>(timeoutMs, method, ...args);
+    return this.callWithTimeout<T>(timeoutMs, undefined, method, ...args);
   }
 
   /**
    * Post one op to the worker and await its reply, bounding the caller's wait by
-   * `timeoutMs` (0 = wait indefinitely). The bound is per-CALLER: on timeout we
-   * reject and drop the pending entry, but the single-threaded worker is STILL
+   * `timeoutMs` (0 = wait indefinitely). The bound is per-CALLER: on timeout or
+   * caller abort we reject and drop the pending entry, but the single-threaded worker is STILL
    * running the op — the late reply is then ignored (the message handler no-ops
    * on a missing id) rather than double-settling this promise. Only read-only
    * ops are ever given a non-zero timeout (see `call`), so a fired timeout is
    * always a determinate, side-effect-free failure.
    */
-  private callWithTimeout<T>(timeoutMs: number, method: string, ...args: unknown[]): Promise<T> {
+  private callWithTimeout<T>(
+    timeoutMs: number,
+    signal: AbortSignal | undefined,
+    method: string,
+    ...args: unknown[]
+  ): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
       // The worker is gone — a posted message would never be answered, so fail
@@ -177,10 +188,20 @@ export class OxigraphWorkerStore implements TripleStore {
         reject(new Error(`oxigraph-worker: cannot run "${method}" — the store is closed.`));
         return;
       }
+      if (signal?.aborted) {
+        reject(asAbortError(signal.reason));
+        return;
+      }
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let onAbort: (() => void) | undefined;
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+      };
       if (timeoutMs > 0) {
         timer = setTimeout(() => {
           if (this.pending.delete(id)) {
+            cleanup();
             const err = new Error(
               `oxigraph-worker: "${method}" timed out after ${timeoutMs}ms. ` +
               `The embedded store runs on a single worker thread, so a long-running or ` +
@@ -198,10 +219,30 @@ export class OxigraphWorkerStore implements TripleStore {
         if (typeof timer.unref === 'function') timer.unref();
       }
       this.pending.set(id, {
-        resolve: (v) => { if (timer) clearTimeout(timer); resolve(v as T); },
-        reject: (e) => { if (timer) clearTimeout(timer); reject(e); },
+        resolve: (v) => { cleanup(); resolve(v as T); },
+        reject: (e) => { cleanup(); reject(e); },
       });
-      this.worker.postMessage({ id, method, args });
+      if (signal) {
+        onAbort = () => {
+          if (this.pending.delete(id)) {
+            cleanup();
+            reject(asAbortError(signal.reason));
+          }
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+      }
+      try {
+        this.worker.postMessage({ id, method, args });
+      } catch (err) {
+        if (this.pending.delete(id)) {
+          cleanup();
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      }
     });
   }
 
@@ -214,11 +255,15 @@ export class OxigraphWorkerStore implements TripleStore {
   async insert(quads: Quad[]): Promise<void> { return this.call('insert', quads); }
   async delete(quads: Quad[]): Promise<void> { return this.call('delete', quads); }
   async deleteByPattern(pattern: Partial<Quad>): Promise<number> { return this.call('deleteByPattern', pattern); }
-  async query(sparql: string, _options?: TripleStoreQueryOptions): Promise<QueryResult> { return this.call('query', sparql); }
+  async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);
+  }
   async hasGraph(graphUri: string): Promise<boolean> { return this.call('hasGraph', graphUri); }
   async createGraph(graphUri: string): Promise<void> { return this.call('createGraph', graphUri); }
   async dropGraph(graphUri: string): Promise<void> { return this.call('dropGraph', graphUri); }
-  async listGraphs(): Promise<string[]> { return this.call('listGraphs'); }
+  async listGraphs(options?: QueryOptions): Promise<string[]> {
+    return this.callWithTimeout<string[]>(this.operationTimeoutMs, options?.signal, 'listGraphs');
+  }
   async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> { return this.call('deleteBySubjectPrefix', graphUri, prefix); }
   async countQuads(graphUri?: string): Promise<number> { return this.call('countQuads', graphUri); }
   async flush(): Promise<void> { return this.call('flush'); }
@@ -247,7 +292,7 @@ export class OxigraphWorkerStore implements TripleStore {
     // terminate() always runs in `finally`; the worker's 'exit' handler then
     // rejects anything still pending, so nothing leaks or hangs.
     try {
-      await this.callWithTimeout<void>(0, 'close');
+      await this.callWithTimeout<void>(0, undefined, 'close');
     } finally {
       await this.worker.terminate();
     }

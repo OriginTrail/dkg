@@ -162,6 +162,7 @@ export interface MessengerDeps {
 
 export interface SendOpts {
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export interface SendReliableOpts {
@@ -551,7 +552,7 @@ export class Messenger {
     data: Uint8Array,
     opts: SendOpts = {},
   ): Promise<Uint8Array> {
-    return this.router.send(peerId, protocolId, data, opts.timeoutMs);
+    return this.router.send(peerId, protocolId, data, opts);
   }
 
   /**

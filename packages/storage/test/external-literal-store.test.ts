@@ -8,7 +8,10 @@ import {
   OxigraphStore,
   SharedMemoryLiteralBlobStore,
   createTripleStore,
+  type QueryOptions,
+  type QueryResult,
   type Quad,
+  type TripleStore,
 } from '../src/index.js';
 
 const SWM_GRAPH = 'did:dkg:context-graph:test/_shared_memory';
@@ -96,6 +99,28 @@ describe('SharedMemoryLiteralBlobStore', () => {
     if (nonSwm.type === 'bindings') {
       expect(nonSwm.bindings[0].o).toBe(largeNonSwmLiteral);
     }
+  });
+
+  it('forwards query options to original and rewritten literal queries', async () => {
+    const blobDir = await tempBlobDir();
+    const seenOptions: Array<QueryOptions | undefined> = [];
+    const inner = {
+      query: async (_sparql: string, options?: QueryOptions): Promise<QueryResult> => {
+        seenOptions.push(options);
+        return { type: 'bindings', bindings: [] };
+      },
+    } as unknown as TripleStore;
+    const store = new SharedMemoryLiteralBlobStore(inner, { blobDir, thresholdBytes: 10 });
+    const signalController = new AbortController();
+    const largeLiteral = `"${'option-forward'.repeat(8)}"`;
+
+    await store.query(
+      `SELECT ?s WHERE { GRAPH <${SWM_GRAPH}> { ?s <http://schema.org/value> ${largeLiteral} } }`,
+      { signal: signalController.signal },
+    );
+
+    expect(seenOptions).toHaveLength(2);
+    expect(seenOptions.every((options) => options?.signal === signalController.signal)).toBe(true);
   });
 
   it('matches exact large literal constants through SELECT, ASK, and FILTER equality', async () => {

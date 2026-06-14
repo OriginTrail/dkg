@@ -9,7 +9,7 @@ import type {
   SelectResult,
   ConstructResult,
   AskResult,
-  TripleStoreQueryOptions,
+  QueryOptions,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 
@@ -18,6 +18,8 @@ type OxTerm = oxigraph.Term;
 type OxQuad = oxigraph.Quad;
 
 export class OxigraphStore implements TripleStore {
+  readonly queryCancellation = 'pre-dispatch' as const;
+
   private store: OxStore;
   private persistPath: string | undefined;
 
@@ -213,8 +215,13 @@ export class OxigraphStore implements TripleStore {
     return matches.length;
   }
 
-  async query(sparql: string, _options?: TripleStoreQueryOptions): Promise<QueryResult> {
+  async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    throwIfAborted(options?.signal);
+    // The embedded Oxigraph binding executes synchronously, so a caller abort
+    // cannot interrupt this native call mid-flight. Use oxigraph-worker or an
+    // HTTP backend when long sync queries need prompt cancellation.
     const result = this.store.query(sparql);
+    throwIfAborted(options?.signal);
 
     if (typeof result === 'boolean') {
       return { type: 'boolean', value: result } satisfies AskResult;
@@ -264,10 +271,12 @@ export class OxigraphStore implements TripleStore {
     this.scheduleFlush();
   }
 
-  async listGraphs(): Promise<string[]> {
+  async listGraphs(options?: QueryOptions): Promise<string[]> {
+    throwIfAborted(options?.signal);
     const result = this.store.query(
       'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
     );
+    throwIfAborted(options?.signal);
     if (typeof result === 'boolean' || typeof result === 'string') return [];
     if (!Array.isArray(result)) return [];
     return (result as Map<string, OxTerm>[])
@@ -355,6 +364,12 @@ export class OxigraphStore implements TripleStore {
     }
     await this.flushNow();
   }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  const reason = signal.reason;
+  throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
 }
 
 function quadToNQuad(q: DKGQuad): string {

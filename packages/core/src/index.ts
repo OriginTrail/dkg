@@ -76,6 +76,7 @@ export {
 } from './network/index.js';
 export {
   ProtocolRouter,
+  QuietRetryableHandlerError,
   type ProtocolRouterOptions,
   type SendOptions,
   DEFAULT_MAX_READ_BYTES,

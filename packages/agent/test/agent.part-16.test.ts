@@ -59,6 +59,11 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           fetchedDataTriples: 0,
           insertedMetaTriples: 0,
           insertedDataTriples: 5,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 2,
+          checkpointAdvances: 0,
           emptyResponses: 0,
           metaOnlyResponses: 0,
           dataRejectedMissingMeta: 0,
@@ -71,6 +76,11 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           fetchedDataTriples: 0,
           insertedMetaTriples: 0,
           insertedDataTriples: 2,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 2,
+          checkpointAdvances: 0,
           emptyResponses: 0,
           droppedDataTriples: 0,
           failedPeers: 0,
@@ -97,6 +107,412 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     });
 
 
+    it('does not count no-progress catchup timeouts as peer success', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupTimeoutProgressAccounting',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const remotePeer = agent.node.peerId;
+        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+          { remotePeer } as any,
+        ]);
+        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+
+        const durableResult = (overrides: Partial<{
+          timedOutPhases: number;
+          completedPhases: number;
+          checkpointAdvances: number;
+          failedPeers: number;
+          failedPhases: number;
+        }> = {}) => ({
+          insertedTriples: 0,
+          fetchedMetaTriples: 0,
+          fetchedDataTriples: 0,
+          insertedMetaTriples: 0,
+          insertedDataTriples: 0,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          emptyResponses: 0,
+          metaOnlyResponses: 0,
+          dataRejectedMissingMeta: 0,
+          rejectedKcs: 0,
+          failedPeers: 0,
+          failedPhases: 0,
+          deniedPhases: 0,
+          ...overrides,
+        });
+
+        const syncFromPeerDetailed = vi.spyOn(agent as any, 'syncFromPeerDetailed');
+        syncFromPeerDetailed.mockResolvedValueOnce(durableResult({ timedOutPhases: 1 }));
+
+        const timeoutOnly = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+
+        expect(timeoutOnly.peersTried).toBe(1);
+        expect(timeoutOnly.peersResponded).toBe(1);
+        expect(timeoutOnly.peersSucceeded).toBe(0);
+        expect(timeoutOnly.diagnostics.durable.timedOutPhases).toBe(1);
+        expect(timeoutOnly.diagnostics.durable.failedPeers).toBe(0);
+
+        syncFromPeerDetailed.mockResolvedValueOnce(durableResult({
+          timedOutPhases: 1,
+          completedPhases: 1,
+        }));
+
+        const zeroOffsetCompletionWithTimeout = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+
+        expect(zeroOffsetCompletionWithTimeout.peersTried).toBe(1);
+        expect(zeroOffsetCompletionWithTimeout.peersResponded).toBe(1);
+        expect(zeroOffsetCompletionWithTimeout.peersSucceeded).toBe(0);
+        expect(zeroOffsetCompletionWithTimeout.diagnostics.durable.timedOutPhases).toBe(1);
+        expect(zeroOffsetCompletionWithTimeout.diagnostics.durable.completedPhases).toBe(1);
+
+        syncFromPeerDetailed.mockResolvedValueOnce(durableResult({
+          timedOutPhases: 1,
+          completedPhases: 1,
+          checkpointAdvances: 1,
+        }));
+
+        const progressWithTimeout = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+
+        expect(progressWithTimeout.peersTried).toBe(1);
+        expect(progressWithTimeout.peersResponded).toBe(1);
+        expect(progressWithTimeout.peersSucceeded).toBe(1);
+        expect(progressWithTimeout.diagnostics.durable.timedOutPhases).toBe(1);
+        expect(progressWithTimeout.diagnostics.durable.completedPhases).toBe(1);
+        expect(progressWithTimeout.diagnostics.durable.checkpointAdvances).toBe(1);
+
+        syncFromPeerDetailed.mockResolvedValueOnce(durableResult({
+          failedPhases: 1,
+        }));
+
+        const phaseFailure = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+
+        expect(phaseFailure.peersTried).toBe(1);
+        expect(phaseFailure.peersResponded).toBe(1);
+        expect(phaseFailure.peersSucceeded).toBe(0);
+        expect(phaseFailure.diagnostics.durable.failedPeers).toBe(0);
+        expect(phaseFailure.diagnostics.durable.failedPhases).toBe(1);
+
+        const syncSharedMemoryFromPeerDetailed = vi.spyOn(agent as any, 'syncSharedMemoryFromPeerDetailed').mockResolvedValue({
+          insertedTriples: 0,
+          fetchedMetaTriples: 0,
+          fetchedDataTriples: 0,
+          insertedMetaTriples: 0,
+          insertedDataTriples: 0,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          emptyResponses: 0,
+          droppedDataTriples: 0,
+          failedPeers: 1,
+          failedPhases: 0,
+          deniedPhases: 0,
+        });
+        syncFromPeerDetailed.mockResolvedValueOnce(durableResult({
+          completedPhases: 1,
+        }));
+
+        const durableOnlyResponse = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          includeSharedMemory: true,
+        });
+
+        expect(durableOnlyResponse.peersTried).toBe(1);
+        expect(durableOnlyResponse.peersResponded).toBe(1);
+        expect(durableOnlyResponse.peersSucceeded).toBe(0);
+        expect(durableOnlyResponse.diagnostics.durable.failedPeers).toBe(0);
+        expect(durableOnlyResponse.diagnostics.sharedMemory.failedPeers).toBe(1);
+        syncSharedMemoryFromPeerDetailed.mockRestore();
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it('reports raw denied peers even when another peer serves data', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupDeniedButServed',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const deniedPeer = { toString: () => 'peer-denied' };
+        const servingPeer = { toString: () => 'peer-serving' };
+        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+          { remotePeer: deniedPeer } as any,
+          { remotePeer: servingPeer } as any,
+        ]);
+        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+
+        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockImplementation(async (peerId: string) => {
+          if (peerId === 'peer-denied') {
+            return {
+              insertedTriples: 0,
+              fetchedMetaTriples: 0,
+              fetchedDataTriples: 0,
+              insertedMetaTriples: 0,
+              insertedDataTriples: 0,
+              bytesReceived: 0,
+              resumedPhases: 0,
+              timedOutPhases: 0,
+              completedPhases: 0,
+              checkpointAdvances: 0,
+              emptyResponses: 0,
+              metaOnlyResponses: 0,
+              dataRejectedMissingMeta: 0,
+              rejectedKcs: 0,
+              failedPeers: 0,
+              deniedPhases: 1,
+            };
+          }
+          return {
+            insertedTriples: 1,
+            fetchedMetaTriples: 0,
+            fetchedDataTriples: 1,
+            insertedMetaTriples: 0,
+            insertedDataTriples: 1,
+            bytesReceived: 0,
+            resumedPhases: 0,
+            timedOutPhases: 0,
+            completedPhases: 0,
+            checkpointAdvances: 0,
+            emptyResponses: 0,
+            metaOnlyResponses: 0,
+            dataRejectedMissingMeta: 0,
+            rejectedKcs: 0,
+            failedPeers: 0,
+            deniedPhases: 0,
+          };
+        });
+
+        const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+
+        expect(result.deniedPeers).toBe(1);
+        expect(result.denied).toBe(true);
+        expect(result.peersResponded).toBe(2);
+        expect(result.peersSucceeded).toBe(1);
+        expect(result.dataSynced).toBe(1);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+
+    it('keeps raw denied when another peer cleanly serves nothing new', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupDeniedButCleanEmpty',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const deniedPeer = { toString: () => 'peer-denied-empty' };
+        const cleanPeer = { toString: () => 'peer-clean-empty' };
+        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+          { remotePeer: deniedPeer } as any,
+          { remotePeer: cleanPeer } as any,
+        ]);
+        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+
+        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockImplementation(async (peerId: string) => ({
+          insertedTriples: 0,
+          fetchedMetaTriples: 0,
+          fetchedDataTriples: 0,
+          insertedMetaTriples: 0,
+          insertedDataTriples: 0,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          emptyResponses: peerId === 'peer-clean-empty' ? 1 : 0,
+          metaOnlyResponses: 0,
+          dataRejectedMissingMeta: 0,
+          rejectedKcs: 0,
+          failedPeers: 0,
+          deniedPhases: peerId === 'peer-denied-empty' ? 1 : 0,
+        }));
+
+        const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
+
+        expect(result.deniedPeers).toBe(1);
+        expect(result.denied).toBe(true);
+        expect(result.peersResponded).toBe(2);
+        expect(result.peersSucceeded).toBe(1);
+        expect(result.dataSynced).toBe(0);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+
+    it('keeps inline catchup denied when peers only serve metadata', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupDeniedWithMetadataOnly',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const remotePeer = { toString: () => 'peer-meta-only' };
+        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+          { remotePeer } as any,
+        ]);
+        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+
+        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockResolvedValue({
+          insertedTriples: 1,
+          fetchedMetaTriples: 1,
+          fetchedDataTriples: 0,
+          insertedMetaTriples: 1,
+          insertedDataTriples: 0,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          emptyResponses: 0,
+          metaOnlyResponses: 1,
+          dataRejectedMissingMeta: 0,
+          rejectedKcs: 0,
+          failedPeers: 0,
+          deniedPhases: 1,
+        });
+        vi.spyOn(agent as any, 'syncSharedMemoryFromPeerDetailed').mockResolvedValue({
+          insertedTriples: 1,
+          fetchedMetaTriples: 1,
+          fetchedDataTriples: 0,
+          insertedMetaTriples: 1,
+          insertedDataTriples: 0,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          emptyResponses: 0,
+          droppedDataTriples: 0,
+          failedPeers: 0,
+          deniedPhases: 1,
+        });
+
+        const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          includeSharedMemory: true,
+        });
+
+        expect(result.deniedPeers).toBe(1);
+        expect(result.denied).toBe(true);
+        expect(result.peersResponded).toBe(1);
+        expect(result.peersSucceeded).toBe(0);
+        expect(result.dataSynced).toBe(0);
+        expect(result.sharedMemorySynced).toBe(0);
+        expect(result.diagnostics.durable.insertedMetaTriples).toBe(1);
+        expect(result.diagnostics.sharedMemory.insertedMetaTriples).toBe(1);
+        expect(result.diagnostics.durable.metaOnlyResponses).toBe(1);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it('does not count metadata-only inline catchup as synced data or peer success', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupMetadataOnlyNoDenial',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const remotePeer = { toString: () => 'peer-meta-only-clean' };
+        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+          { remotePeer } as any,
+        ]);
+        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+          protocols: [PROTOCOL_SYNC],
+        } as any);
+
+        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockResolvedValue({
+          insertedTriples: 1,
+          fetchedMetaTriples: 1,
+          fetchedDataTriples: 0,
+          insertedMetaTriples: 1,
+          insertedDataTriples: 0,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          emptyResponses: 0,
+          metaOnlyResponses: 1,
+          dataRejectedMissingMeta: 0,
+          rejectedKcs: 0,
+          failedPeers: 0,
+          deniedPhases: 0,
+        });
+        vi.spyOn(agent as any, 'syncSharedMemoryFromPeerDetailed').mockResolvedValue({
+          insertedTriples: 1,
+          fetchedMetaTriples: 1,
+          fetchedDataTriples: 0,
+          insertedMetaTriples: 1,
+          insertedDataTriples: 0,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          emptyResponses: 0,
+          droppedDataTriples: 0,
+          failedPeers: 0,
+          deniedPhases: 0,
+        });
+
+        const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          includeSharedMemory: true,
+        });
+
+        expect(result.denied).toBe(false);
+        expect(result.deniedPeers).toBe(0);
+        expect(result.peersResponded).toBe(1);
+        expect(result.peersSucceeded).toBe(0);
+        expect(result.dataSynced).toBe(0);
+        expect(result.sharedMemorySynced).toBe(0);
+        expect(result.diagnostics.durable.insertedMetaTriples).toBe(1);
+        expect(result.diagnostics.sharedMemory.insertedMetaTriples).toBe(1);
+        expect(result.diagnostics.durable.metaOnlyResponses).toBe(1);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+
     it('sync-on-connect re-reads sync scope after discovery for a second durable pass', async () => {
       const agent = await DKGAgent.create({
         name: 'SyncOnConnectDiscoveryRefresh',
@@ -110,16 +526,48 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         const seenCalls: string[][] = [];
 
         (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
-        (agent as any).syncFromPeer = async (_peerId: string, contextGraphIds?: string[]) => {
+        (agent as any).syncFromPeerDetailed = async (_peerId: string, contextGraphIds?: string[]) => {
           seenCalls.push([...(contextGraphIds ?? [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, ...((agent as any).config.syncContextGraphs ?? [])])]);
-          return 0;
+          return {
+            fetchedMetaTriples: 0,
+            fetchedDataTriples: 0,
+            insertedTriples: 0,
+            insertedMetaTriples: 0,
+            insertedDataTriples: 0,
+            bytesReceived: 0,
+            resumedPhases: 0,
+            timedOutPhases: 0,
+            completedPhases: 1,
+            checkpointAdvances: 0,
+            emptyResponses: 0,
+            metaOnlyResponses: 0,
+            dataRejectedMissingMeta: 0,
+            rejectedKcs: 0,
+            failedPeers: 0,
+            deniedPhases: 0,
+          };
         };
         (agent as any).refreshMetaSyncedFlags = async () => undefined;
         (agent as any).discoverContextGraphsFromStore = async () => {
           (agent as any).config.syncContextGraphs = ['new-private-cg'];
           return 1;
         };
-        (agent as any).syncSharedMemoryFromPeer = async () => 0;
+        (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
+          fetchedMetaTriples: 0,
+          fetchedDataTriples: 0,
+          insertedTriples: 0,
+          insertedMetaTriples: 0,
+          insertedDataTriples: 0,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          emptyResponses: 0,
+          droppedDataTriples: 0,
+          failedPeers: 0,
+          deniedPhases: 0,
+        });
 
         await (agent as any).trySyncFromPeer(remotePeer);
 
@@ -193,6 +641,11 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
             fetchedDataTriples: 0,
             insertedMetaTriples: 0,
             insertedDataTriples: 0,
+            bytesReceived: 0,
+            resumedPhases: 0,
+            timedOutPhases: 0,
+            completedPhases: 2,
+            checkpointAdvances: 0,
             emptyResponses: 1,
             metaOnlyResponses: 0,
             dataRejectedMissingMeta: 0,
@@ -204,6 +657,259 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
 
         expect(triedPeers).toEqual(['peer-preferred', 'peer-other']);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it('can limit VM reconcile catchup to one ordered peer and rotate on later attempts', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupSinglePeerRotation',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        agent.subscribeToContextGraph('runtime-contextGraph');
+        (agent as any).preferredSyncPeers.set('runtime-contextGraph', 'peer-preferred');
+        (agent as any).knownCorePeerIds.add('peer-core');
+
+        const peerEdge = { toString: () => 'peer-edge' };
+        const peerCore = { toString: () => 'peer-core' };
+        const peerPreferred = { toString: () => 'peer-preferred' };
+        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+          { remotePeer: peerEdge } as any,
+          { remotePeer: peerCore } as any,
+          { remotePeer: peerPreferred } as any,
+        ]);
+        vi.spyOn((agent as any).discovery, 'findAgents').mockResolvedValue([]);
+        vi.spyOn(agent as any, 'ensurePeerConnected').mockResolvedValue(undefined);
+        vi.spyOn(agent as any, 'waitForSyncProtocol').mockResolvedValue(true);
+
+        const triedPeers: string[] = [];
+        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockImplementation(async (...args: unknown[]) => {
+          triedPeers.push(String(args[0]));
+          return {
+            insertedTriples: 0,
+            fetchedMetaTriples: 0,
+            fetchedDataTriples: 0,
+            insertedMetaTriples: 0,
+            insertedDataTriples: 0,
+            bytesReceived: 0,
+            resumedPhases: 0,
+            emptyResponses: 1,
+            metaOnlyResponses: 0,
+            dataRejectedMissingMeta: 0,
+            rejectedKcs: 0,
+            failedPeers: 0,
+            deniedPhases: 0,
+          };
+        });
+
+        const firstResult = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          maxPeers: 1,
+          peerRotationKey: 'runtime-contextGraph',
+        });
+        await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          maxPeers: 1,
+          peerRotationKey: 'runtime-contextGraph',
+        });
+        await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          maxPeers: 1,
+          peerRotationKey: 'runtime-contextGraph',
+        });
+
+        expect(firstResult.connectedPeers).toBe(3);
+        expect(firstResult.totalPeers).toBe(3);
+        expect(firstResult.selectedPeers).toBe(1);
+        expect(firstResult.syncCapablePeers).toBe(1);
+        expect(firstResult.peersTried).toBe(1);
+        expect(triedPeers).toEqual(['peer-preferred', 'peer-core', 'peer-edge']);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it('reports full connectedPeers while selectedPeers tracks the catchup window', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupSelectedPeerCounts',
+        listenHost: '127.0.0.1',
+        chainAdapter: new MockChainAdapter(),
+      });
+
+      try {
+        await agent.start();
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const peerNoProtocol = { toString: () => 'peer-no-protocol' };
+        const peerUnselected = { toString: () => 'peer-unselected' };
+        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+          { remotePeer: peerNoProtocol } as any,
+          { remotePeer: peerUnselected } as any,
+        ]);
+        vi.spyOn((agent as any).discovery, 'findAgents').mockResolvedValue([]);
+        vi.spyOn(agent as any, 'waitForSyncProtocol').mockResolvedValue(false);
+        const syncFromPeerDetailed = vi.spyOn(agent as any, 'syncFromPeerDetailed');
+
+        const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          maxPeers: 1,
+          peerRotationKey: 'runtime-contextGraph',
+        });
+
+        expect(result.connectedPeers).toBe(2);
+        expect(result.selectedPeers).toBe(1);
+        expect(result.totalPeers).toBe(2);
+        expect(result.syncCapablePeers).toBe(0);
+        expect(result.peersTried).toBe(0);
+        expect(result.diagnostics.noProtocolPeers).toBe(1);
+        expect(syncFromPeerDetailed).not.toHaveBeenCalled();
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it('keeps VM reconcile catchup rotation anchored by peer id across connection order churn', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupRotationOrderChurn',
+        chainAdapter: new MockChainAdapter(),
+      });
+      const peer = (peerId: string) => ({ toString: () => peerId });
+      const select = (peerIds: string[]) => (agent as any)
+        .selectCatchupPeerWindow(peerIds.map(peer), {
+          maxPeers: 1,
+          peerRotationKey: 'runtime-contextGraph',
+        })
+        .map((selected: { toString(): string }) => selected.toString());
+
+      try {
+        expect(select(['peer-a', 'peer-b', 'peer-c'])).toEqual(['peer-a']);
+        expect(select(['peer-c', 'peer-a', 'peer-b'])).toEqual(['peer-b']);
+        expect(select(['peer-a', 'peer-c', 'peer-b'])).toEqual(['peer-c']);
+        expect((agent as any).vmReconcileCatchupPeerOrder.size).toBe(1);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it('seeds VM reconcile catchup rotation when all current peers fit the window', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupRotationSinglePeerSeed',
+        chainAdapter: new MockChainAdapter(),
+      });
+      const peer = (peerId: string) => ({ toString: () => peerId });
+      const select = (peerIds: string[], peerRotationKey = 'runtime-contextGraph') => (agent as any)
+        .selectCatchupPeerWindow(peerIds.map(peer), {
+          maxPeers: 1,
+          peerRotationKey,
+        })
+        .map((selected: { toString(): string }) => selected.toString());
+
+      try {
+        expect(select(['peer-a'])).toEqual(['peer-a']);
+        expect(select(['peer-a', 'peer-b'])).toEqual(['peer-b']);
+        expect(select(['peer-a', 'peer-b'])).toEqual(['peer-a']);
+        expect(select(['peer-b'], 'runtime-contextGraph-prepend')).toEqual(['peer-b']);
+        expect(select(['peer-a', 'peer-b'], 'runtime-contextGraph-prepend')).toEqual(['peer-a']);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it('resets VM reconcile catchup rotation when an existing peer gains priority before the cursor', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupRotationPriorityGain',
+        chainAdapter: new MockChainAdapter(),
+      });
+      const peer = (peerId: string) => ({ toString: () => peerId });
+      const select = (peerIds: string[], priorityRanks: Record<string, number> = {}, peerRotationKey = 'runtime-contextGraph') => (agent as any)
+        .selectCatchupPeerWindow(peerIds.map(peer), {
+          maxPeers: 1,
+          peerRotationKey,
+          peerPriorityRanks: new Map(Object.entries(priorityRanks)),
+        })
+        .map((selected: { toString(): string }) => selected.toString());
+
+      try {
+        expect(select(['peer-a', 'peer-b', 'peer-c'])).toEqual(['peer-a']);
+        expect(select(['peer-a', 'peer-b', 'peer-c'], { 'peer-a': 1 })).toEqual(['peer-a']);
+        expect(select(['peer-c', 'peer-a', 'peer-b'], { 'peer-c': 2 })).toEqual(['peer-c']);
+        expect(select(
+          ['peer-preferred', 'peer-edge', 'peer-reclassified'],
+          { 'peer-preferred': 2 },
+          'runtime-contextGraph-masked-core',
+        )).toEqual(['peer-preferred']);
+        expect(select(
+          ['peer-preferred', 'peer-reclassified', 'peer-edge'],
+          { 'peer-preferred': 2, 'peer-reclassified': 1 },
+          'runtime-contextGraph-masked-core',
+        )).toEqual(['peer-reclassified']);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+    it('resets VM reconcile catchup rotation when a core peer joins before the cursor', async () => {
+      const agent = await DKGAgent.create({
+        name: 'RuntimeCatchupRotationCoreJoin',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+
+      try {
+        await agent.start();
+        agent.subscribeToContextGraph('runtime-contextGraph');
+
+        const peerEdgeA = { toString: () => 'peer-edge-a' };
+        const peerEdgeB = { toString: () => 'peer-edge-b' };
+        const peerCore = { toString: () => 'peer-core-new' };
+        let connections = [
+          { remotePeer: peerEdgeA } as any,
+          { remotePeer: peerEdgeB } as any,
+        ];
+        vi.spyOn(agent.node.libp2p, 'getConnections').mockImplementation(() => connections);
+        vi.spyOn((agent as any).discovery, 'findAgents').mockResolvedValue([]);
+        vi.spyOn(agent as any, 'ensurePeerConnected').mockResolvedValue(undefined);
+        vi.spyOn(agent as any, 'waitForSyncProtocol').mockResolvedValue(true);
+
+        const triedPeers: string[] = [];
+        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockImplementation(async (...args: unknown[]) => {
+          triedPeers.push(String(args[0]));
+          return {
+            insertedTriples: 0,
+            fetchedMetaTriples: 0,
+            fetchedDataTriples: 0,
+            insertedMetaTriples: 0,
+            insertedDataTriples: 0,
+            bytesReceived: 0,
+            resumedPhases: 0,
+            emptyResponses: 1,
+            metaOnlyResponses: 0,
+            dataRejectedMissingMeta: 0,
+            rejectedKcs: 0,
+            failedPeers: 0,
+            deniedPhases: 0,
+          };
+        });
+
+        await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          maxPeers: 1,
+          peerRotationKey: 'runtime-contextGraph',
+        });
+
+        (agent as any).knownCorePeerIds.add('peer-core-new');
+        connections = [
+          { remotePeer: peerEdgeA } as any,
+          { remotePeer: peerCore } as any,
+          { remotePeer: peerEdgeB } as any,
+        ];
+
+        await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
+          maxPeers: 1,
+          peerRotationKey: 'runtime-contextGraph',
+        });
+
+        expect(triedPeers).toEqual(['peer-edge-a', 'peer-core-new']);
       } finally {
         await agent.stop().catch(() => {});
       }
@@ -312,16 +1018,48 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         const syncFromPeer = async () => {
           syncCallCount++;
           await syncGate;
-          return 7;
+          return {
+            fetchedMetaTriples: 0,
+            fetchedDataTriples: 7,
+            insertedTriples: 7,
+            insertedMetaTriples: 0,
+            insertedDataTriples: 7,
+            bytesReceived: 0,
+            resumedPhases: 0,
+            timedOutPhases: 0,
+            completedPhases: 1,
+            checkpointAdvances: 0,
+            emptyResponses: 0,
+            metaOnlyResponses: 0,
+            dataRejectedMissingMeta: 0,
+            rejectedKcs: 0,
+            failedPeers: 0,
+            deniedPhases: 0,
+          };
         };
 
         const origGet = agent.node.libp2p.peerStore.get.bind(agent.node.libp2p.peerStore);
         (agent.node.libp2p.peerStore as any).get = async (peerId: any) => {
           try { return await origGet(peerId); } catch { return { protocols: [PROTOCOL_SYNC] }; }
         };
-        (agent as any).syncFromPeer = syncFromPeer;
+        (agent as any).syncFromPeerDetailed = syncFromPeer;
         (agent as any).discoverContextGraphsFromStore = async () => {};
-        (agent as any).syncSharedMemoryFromPeer = async () => 0;
+        (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
+          fetchedMetaTriples: 0,
+          fetchedDataTriples: 0,
+          insertedTriples: 0,
+          insertedMetaTriples: 0,
+          insertedDataTriples: 0,
+          bytesReceived: 0,
+          resumedPhases: 0,
+          timedOutPhases: 0,
+          completedPhases: 0,
+          checkpointAdvances: 0,
+          emptyResponses: 0,
+          droppedDataTriples: 0,
+          failedPeers: 0,
+          deniedPhases: 0,
+        });
 
         const first = (agent as any).trySyncFromPeer(remotePeer);
         const second = (agent as any).trySyncFromPeer(remotePeer);

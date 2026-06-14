@@ -1,6 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { createResponderGraphListMemo } from '../src/sync/responder/graph-plan.js';
+import {
+  createResponderGraphListMemo,
+  createResponderSyncRowListMemo,
+} from '../src/sync/responder/graph-plan.js';
 import {
   DKG_NS,
   lineGraphsFromNquads,
@@ -28,6 +31,10 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 function watchBoundedPageQuery(
   store: OxigraphStore,
@@ -63,6 +70,33 @@ function watchBoundedPageQuery(
   };
 }
 
+function watchUnorderedSnapshotRead(
+  store: OxigraphStore,
+  graph: string,
+) {
+  const originalQuery = store.query.bind(store);
+  let observedSnapshotReads = 0;
+  store.query = (async (sparql: string) => {
+    const normalized = sparql.replace(/\s+/g, ' ').trim();
+    const isTargetSnapshotRead = /^SELECT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
+      normalized.includes(`VALUES ?g { <${graph}>`) &&
+      normalized.includes('GRAPH ?g { ?s ?p ?o }');
+    if (isTargetSnapshotRead) {
+      observedSnapshotReads++;
+      expect(normalized).not.toContain('ORDER BY');
+      expect(normalized).not.toContain('OFFSET ');
+      expect(normalized).not.toContain('LIMIT ');
+    }
+    return originalQuery(sparql);
+  }) as OxigraphStore['query'];
+
+  return {
+    assertObserved() {
+      expect(observedSnapshotReads).toBeGreaterThan(0);
+    },
+  };
+}
+
 describe('sync responder pagination interleaving', () => {
   it('returns an exact no-gap/no-duplicate union across overlapping durable-data page loops', async () => {
     const store = new OxigraphStore();
@@ -78,23 +112,16 @@ describe('sync responder pagination interleaving', () => {
     await store.insert(rows);
 
     const cap = registerTestSyncHandler(store, { syncPageSize: 3 });
-    const requestPage = (offset: number) =>
+    const requestPage = (offset: number, index: number) =>
       cap.invoke({
         contextGraphId: cgId,
         includeSharedMemory: false,
         phase: 'data',
         offset,
         limit: 3,
-      });
+      }, `12D3KooWInterleavePeer${index}`);
 
-    const outputs = await Promise.all([
-      requestPage(0),
-      requestPage(6),
-      requestPage(3),
-      requestPage(12),
-      requestPage(9),
-      requestPage(15),
-    ]);
+    const outputs = await Promise.all([0, 6, 3, 12, 9, 15].map(requestPage));
 
     const lines = outputs.flatMap(linesFromNquads);
     expect(lines).toHaveLength(rows.length);
@@ -156,7 +183,7 @@ describe('sync responder pagination interleaving', () => {
     expect(out).not.toContain('"row-095"');
   });
 
-  it('uses bounded store-side paging for deep SWM data pages with TTL filtering', async () => {
+  it('uses unordered snapshot reads for deep SWM data pages with TTL filtering', async () => {
     const store = new OxigraphStore();
     const cgId = 'bounded-swm-ttl';
     const swmGraph = `did:dkg:context-graph:${cgId}/_shared_memory`;
@@ -171,7 +198,7 @@ describe('sync responder pagination interleaving', () => {
     }
     await store.insert(rows);
 
-    const probe = watchBoundedPageQuery(store, dataGraph, 90, 5);
+    const probe = watchUnorderedSnapshotRead(store, dataGraph);
     const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: 60_000, syncPageSize: 5 });
     const out = await cap.invoke({
       contextGraphId: cgId,
@@ -191,7 +218,7 @@ describe('sync responder pagination interleaving', () => {
     expect(out).not.toContain('"row-095"');
   });
 
-  it('uses bounded store-side paging for deep durable meta pages', async () => {
+  it('uses unordered snapshot reads for deep durable meta pages', async () => {
     const store = new OxigraphStore();
     const cgId = 'bounded-meta';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
@@ -214,7 +241,7 @@ describe('sync responder pagination interleaving', () => {
     });
     await store.insert(rows);
 
-    const probe = watchBoundedPageQuery(store, metaGraph, 90, 5);
+    const probe = watchUnorderedSnapshotRead(store, metaGraph);
     const cap = registerTestSyncHandler(store, { syncPageSize: 5 });
     const out = await cap.invoke({
       contextGraphId: cgId,
@@ -266,7 +293,7 @@ describe('sync responder pagination interleaving', () => {
     expect(lineGraphsFromNquads(out)).toEqual(new Set([cgPrefix, fallbackGraph]));
   });
 
-  it('durable fallback pages admitted graphs with one global store query', async () => {
+  it('caches sorted durable-data rows instead of issuing ordered offset page queries', async () => {
     const store = new OxigraphStore();
     const cgId = 'single-query-durable-fallback';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
@@ -277,7 +304,7 @@ describe('sync responder pagination interleaving', () => {
     ]);
 
     const originalQuery = store.query.bind(store);
-    let globalPageQueries = 0;
+    let globalRowLoads = 0;
     store.query = (async (sparql: string) => {
       const normalized = sparql.replace(/\s+/g, ' ').trim();
       if (normalized.includes('COUNT(*)')) {
@@ -285,26 +312,305 @@ describe('sync responder pagination interleaving', () => {
       }
       if (
         /^SELECT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
-        normalized.includes(`VALUES ?g { <${cgPrefix}> <${fallbackGraph}>`) &&
-        normalized.includes('ORDER BY ?g ?s ?p ?o')
+        normalized.includes(`VALUES ?g { <${cgPrefix}> <${fallbackGraph}>`)
       ) {
-        globalPageQueries++;
+        globalRowLoads++;
+        expect(normalized).not.toContain('ORDER BY');
+        expect(normalized).not.toContain('OFFSET');
+        expect(normalized).not.toContain('LIMIT');
       }
       return originalQuery(sparql);
     }) as OxigraphStore['query'];
 
     const cap = registerTestSyncHandler(store, { syncPageSize: 1 });
-    const out = await cap.invoke({
+    const first = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'cache-session',
+    });
+    const second = await cap.invoke({
       contextGraphId: cgId,
       includeSharedMemory: false,
       phase: 'data',
       offset: 1,
       limit: 1,
+      syncSessionId: 'cache-session',
     });
 
-    expect(globalPageQueries).toBe(1);
-    expect(out).toContain('"row-001"');
-    expect(out).not.toContain('"row-000"');
+    expect(globalRowLoads).toBe(1);
+    expect(first).toContain('"row-000"');
+    expect(first).not.toContain('"row-001"');
+    expect(second).toContain('"row-001"');
+    expect(second).not.toContain('"row-000"');
+  });
+
+  it('refreshes full durable-data snapshots on page zero for the same peer', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'fresh-page-zero-durable';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    await store.insert([q(cgPrefix, 1)]);
+
+    const cap = registerTestSyncHandler(store, { syncPageSize: 1 });
+    const first = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+    }, 'peer-a');
+    expect(first).toContain('"row-001"');
+
+    await store.insert([q(cgPrefix, 0)]);
+    const refreshed = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+    }, 'peer-a');
+
+    expect(refreshed).toContain('"row-000"');
+    expect(refreshed).not.toContain('"row-001"');
+  });
+
+  it('isolates active durable-data row snapshots per remote peer', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'peer-isolated-durable';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    await store.insert([q(cgPrefix, 1)]);
+
+    const cap = registerTestSyncHandler(store, { syncPageSize: 1 });
+    const peerAFirst = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'peer-a-session',
+    }, 'peer-a');
+    expect(peerAFirst).toContain('"row-001"');
+
+    await store.insert([q(cgPrefix, 0)]);
+    const peerBFresh = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'peer-b-session',
+    }, 'peer-b');
+    expect(peerBFresh).toContain('"row-000"');
+
+    const peerASecond = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 1,
+      limit: 1,
+      syncSessionId: 'peer-a-session',
+    }, 'peer-a');
+    expect(peerASecond).toBe('');
+  });
+
+  it('refreshes same-peer durable-data snapshots when the page-zero session token changes', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'session-refresh-durable';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    await store.insert([q(cgPrefix, 1)]);
+
+    const cap = registerTestSyncHandler(store, { syncPageSize: 1 });
+    const firstSessionPage = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'session-old',
+    }, 'peer-a');
+    expect(firstSessionPage).toContain('"row-001"');
+
+    await store.insert([q(cgPrefix, 0)]);
+    const secondSessionPage = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'session-new',
+    }, 'peer-a');
+    expect(secondSessionPage).toContain('"row-000"');
+
+    await expect(cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 1,
+      limit: 1,
+      syncSessionId: 'session-old',
+    }, 'peer-a')).rejects.toThrow('Durable data sync session was superseded before page completion');
+  });
+
+  it('derives durable-data cache keys server-side instead of from arbitrary session ids', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'server-keyed-session-durable';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    await store.insert([q(cgPrefix, 1)]);
+
+    const cap = registerTestSyncHandler(store, { syncPageSize: 1 });
+    for (let i = 0; i < 40; i++) {
+      const page = await cap.invoke({
+        contextGraphId: cgId,
+        includeSharedMemory: false,
+        phase: 'data',
+        offset: 0,
+        limit: 1,
+        syncSessionId: `attacker-controlled-${i}`,
+      }, 'peer-a');
+      expect(page).toContain('"row-001"');
+    }
+  });
+
+  it('reuses a durable-data session snapshot on page-zero retry', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'retry-session-durable';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    await store.insert([q(cgPrefix, 1)]);
+
+    const cap = registerTestSyncHandler(store, { syncPageSize: 1 });
+    const firstAttempt = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'retry-session',
+    }, 'peer-a');
+    expect(firstAttempt).toContain('"row-001"');
+
+    await store.insert([q(cgPrefix, 0)]);
+    const retryAttempt = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'retry-session',
+    }, 'peer-a');
+    expect(retryAttempt).toBe(firstAttempt);
+    expect(retryAttempt).not.toContain('"row-000"');
+  });
+
+  it('reuses a durable-meta session snapshot on page-zero retry', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'retry-session-durable-meta';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    const metaGraph = `${cgPrefix}/_meta`;
+    await store.insert([{
+      graph: metaGraph,
+      subject: cgPrefix,
+      predicate: 'http://schema.org/p001',
+      object: '"meta-001"',
+    }]);
+
+    const cap = registerTestSyncHandler(store, { syncPageSize: 1 });
+    const firstAttempt = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'meta',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'retry-session-meta',
+    }, 'peer-a');
+    expect(firstAttempt).toContain('"meta-001"');
+
+    await store.insert([{
+      graph: metaGraph,
+      subject: cgPrefix,
+      predicate: 'http://schema.org/p000',
+      object: '"meta-000"',
+    }]);
+    const retryAttempt = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'meta',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'retry-session-meta',
+    }, 'peer-a');
+    expect(retryAttempt).toBe(firstAttempt);
+    expect(retryAttempt).not.toContain('"meta-000"');
+  });
+
+  it('reuses a SWM data session snapshot on page-zero retry', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'retry-session-swm-data';
+    const swmGraph = `did:dkg:context-graph:${cgId}/_shared_memory`;
+    const swmMetaGraph = `${swmGraph}_meta`;
+    const now = new Date().toISOString();
+    await store.insert([
+      q(swmGraph, 1),
+      ...workspaceOpQuads(cgId, 'op-001', 'urn:interleave:001', swmMetaGraph, now),
+    ]);
+
+    const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: 60_000, syncPageSize: 1 });
+    const firstAttempt = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'retry-session-swm-data',
+    }, 'peer-a');
+    expect(firstAttempt).toContain('"row-001"');
+
+    await store.insert([
+      q(swmGraph, 0),
+      ...workspaceOpQuads(cgId, 'op-000', 'urn:interleave:000', swmMetaGraph, now),
+    ]);
+    const retryAttempt = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'data',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'retry-session-swm-data',
+    }, 'peer-a');
+    expect(retryAttempt).toBe(firstAttempt);
+    expect(retryAttempt).not.toContain('"row-000"');
+  });
+
+  it('reuses a SWM meta session snapshot on page-zero retry', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'retry-session-swm-meta';
+    const swmMetaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
+    const now = new Date().toISOString();
+    await store.insert(workspaceOpQuads(cgId, 'op-001', 'urn:interleave:001', swmMetaGraph, now));
+
+    const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: 60_000, syncPageSize: 1 });
+    const firstAttempt = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'meta',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'retry-session-swm-meta',
+    }, 'peer-a');
+    expect(firstAttempt).toContain('op-001');
+
+    await store.insert(workspaceOpQuads(cgId, 'op-000', 'urn:interleave:000', swmMetaGraph, now));
+    const retryAttempt = await cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'meta',
+      offset: 0,
+      limit: 1,
+      syncSessionId: 'retry-session-swm-meta',
+    }, 'peer-a');
+    expect(retryAttempt).toBe(firstAttempt);
+    expect(retryAttempt).not.toContain('op-000');
   });
 
   it('reuses the responder graph-list memo across nearby page requests', async () => {
@@ -405,5 +711,139 @@ describe('sync responder pagination interleaving', () => {
     await expect(overlappingRefresh).resolves.toEqual(['new']);
     await expect(deepPage).resolves.toEqual(['new']);
     expect(calls).toBe(2);
+  });
+
+  it('keeps active durable row snapshots alive while pages are still being read', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const memo = createResponderSyncRowListMemo(10);
+    let loads = 0;
+    const loadRows = async () => {
+      loads++;
+      return [{
+        s: 'urn:memo:row',
+        p: `${DKG_NS}label`,
+        o: `"snapshot-${loads}"`,
+        g: 'urn:memo:graph',
+      }];
+    };
+
+    await expect(memo.get('durable', loadRows)).resolves.toMatchObject([
+      { o: '"snapshot-1"' },
+    ]);
+
+    vi.setSystemTime(9);
+    await expect(memo.get('durable', loadRows)).resolves.toMatchObject([
+      { o: '"snapshot-1"' },
+    ]);
+
+    vi.setSystemTime(18);
+    await expect(memo.get('durable', loadRows)).resolves.toMatchObject([
+      { o: '"snapshot-1"' },
+    ]);
+    expect(loads).toBe(1);
+  });
+
+  it('does not rebuild an expired durable row snapshot for the same session', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const memo = createResponderSyncRowListMemo(10);
+    let loads = 0;
+    const loadRows = async () => {
+      loads++;
+      return [{
+        s: 'urn:memo:row',
+        p: `${DKG_NS}label`,
+        o: `"snapshot-${loads}"`,
+        g: 'urn:memo:graph',
+      }];
+    };
+
+    await expect(memo.get('durable', loadRows)).resolves.toHaveLength(1);
+
+    vi.setSystemTime(11);
+    await expect(memo.get('durable', loadRows)).rejects.toThrow(
+      'Durable data sync session snapshot expired before page completion',
+    );
+    expect(loads).toBe(1);
+  });
+
+  it('does not retain empty durable row snapshots against the active cap', async () => {
+    const memo = createResponderSyncRowListMemo(10_000, 1);
+    let emptyLoads = 0;
+    let nonEmptyLoads = 0;
+
+    await expect(memo.get('durable:empty', async () => {
+      emptyLoads++;
+      return [];
+    })).resolves.toHaveLength(0);
+
+    await expect(memo.get('durable:non-empty', async () => {
+      nonEmptyLoads++;
+      return [{
+        s: 'urn:memo:row',
+        p: `${DKG_NS}label`,
+        o: '"snapshot"',
+        g: 'urn:memo:graph',
+      }];
+    })).resolves.toHaveLength(1);
+
+    expect(emptyLoads).toBe(1);
+    expect(nonEmptyLoads).toBe(1);
+  });
+
+  it('rejects new durable row snapshots at the active cap without evicting existing sessions', async () => {
+    const memo = createResponderSyncRowListMemo(10_000, 2);
+    let loads = 0;
+    const loadRows = async () => {
+      loads++;
+      return [{
+        s: 'urn:memo:row',
+        p: `${DKG_NS}label`,
+        o: `"snapshot-${loads}"`,
+        g: 'urn:memo:graph',
+      }];
+    };
+
+    await expect(memo.get('durable:session-1', loadRows)).resolves.toHaveLength(1);
+    await expect(memo.get('durable:session-2', loadRows)).resolves.toHaveLength(1);
+    await expect(memo.get('durable:session-3', loadRows)).rejects.toThrow(
+      'Too many active durable data sync session snapshots',
+    );
+
+    await expect(
+      memo.get('durable:session-1', loadRows, { requireExisting: true }),
+    ).resolves.toMatchObject([{ o: '"snapshot-1"' }]);
+    expect(loads).toBe(2);
+  });
+
+  it('coalesces concurrent durable row snapshot refreshes', async () => {
+    const memo = createResponderSyncRowListMemo();
+    const snapshot = deferred<readonly {
+      s: string;
+      p: string;
+      o: string;
+      g: string;
+    }[]>();
+    let loads = 0;
+    const loadRows = () => {
+      loads++;
+      return snapshot.promise;
+    };
+
+    const first = memo.get('durable', loadRows, { refresh: true });
+    const second = memo.get('durable', loadRows, { refresh: true });
+    snapshot.resolve([{
+      s: 'urn:memo:row',
+      p: `${DKG_NS}label`,
+      o: '"snapshot"',
+      g: 'urn:memo:graph',
+    }]);
+
+    await expect(first).resolves.toHaveLength(1);
+    await expect(second).resolves.toHaveLength(1);
+    expect(loads).toBe(1);
   });
 });

@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
+import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
+import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
+import { didSyncPeerRespond, isSyncTransportFailure } from '../src/sync/error-tags.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
 /**
@@ -27,6 +30,15 @@ const REMOTE_PEER_ID = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const CG_ID = 'urn:test:cg';
 const GRAPH_URI = `urn:test:cg/graph`;
 const PROTOCOL_ID = '/dkg/10.0.2/sync';
+const LEGACY_SYNC_BUSY_RESPONSE = '__DKG_SYNC_BUSY__';
+
+function freshCheckpoint(offset: number, nowMs = Date.now()) {
+  return {
+    offset,
+    updatedAtMs: nowMs,
+    expiresAtMs: nowMs + DURABLE_DATA_SYNC_SESSION_TTL_MS,
+  };
+}
 
 function noopLog(): void {}
 function makeCtx(): OperationContext {
@@ -37,6 +49,66 @@ async function singleQuadParser(nquadsText: string): Promise<{ quads: never[]; t
   if (!nquadsText) return { quads: [], totalQuads: 0 };
   return { quads: [], totalQuads: 1 };
 }
+
+describe('sync checkpoint freshness', () => {
+  it('expires in-memory checkpoints on read', () => {
+    let now = 1_000;
+    const store = new MemorySyncCheckpointStore({ clock: () => now, ttlMs: 100 });
+
+    store.set('peer|cg|durable|data', 500);
+    expect(store.get('peer|cg|durable|data')).toEqual({
+      offset: 500,
+      updatedAtMs: 1_000,
+      expiresAtMs: 1_100,
+    });
+
+    now = 1_101;
+    expect(store.get('peer|cg|durable|data')).toBeUndefined();
+    expect(store.pruneExpired()).toBe(0);
+  });
+
+  it('resumes only from fresh checkpoint entries', async () => {
+    let now = 1_000;
+    const store = new MemorySyncCheckpointStore({ clock: () => now, ttlMs: 100 });
+    const key = getSyncCheckpointKey(REMOTE_PEER_ID, CG_ID, false, 'snapshot');
+    store.set(key, 500);
+
+    const fetchOffset = async (): Promise<number> => {
+      let observedOffset = -1;
+      await fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: CG_ID,
+        includeSharedMemory: false,
+        phase: 'snapshot',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 100,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: store,
+        buildSyncRequest: async (_contextGraphId, offset) => {
+          observedOffset = offset;
+          return new TextEncoder().encode('request');
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => new Uint8Array(),
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      });
+      return observedOffset;
+    };
+
+    expect(await fetchOffset()).toBe(500);
+    now = 1_101;
+    expect(await fetchOffset()).toBe(0);
+  });
+});
 
 describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', () => {
   // Fake timers eliminate the real `withRetry` exponential backoff
@@ -62,13 +134,144 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
    */
   async function runFetchWithFakeTimers<T>(promise: Promise<T>): Promise<T> {
     let done = false;
-    promise.finally(() => {
-      done = true;
-    });
+    promise.then(
+      () => {
+        done = true;
+      },
+      () => {
+        done = true;
+      },
+    );
     while (!done) {
       await vi.runAllTimersAsync();
     }
     return promise;
+  }
+
+  it('tags exhausted send failures as transport failures without a peer response', async () => {
+    const transportError = new Error('dial failed');
+    const promise = fetchSyncPages({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId: CG_ID,
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: GRAPH_URI,
+      deadline: Date.now() + 60_000,
+      syncPageTimeoutMs: 5_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 1,
+      syncPageSize: 100,
+      syncDeniedResponse: '#DENIED',
+      debugSyncProgress: false,
+      protocolSync: PROTOCOL_ID,
+      checkpointStore: {
+        get: () => undefined,
+        set: () => {},
+        delete: () => {},
+      },
+      buildSyncRequest: async () => new TextEncoder().encode('request'),
+      parseAndFilter: singleQuadParser,
+      send: async () => {
+        throw transportError;
+      },
+      logWarn: noopLog,
+      logInfo: noopLog,
+      logDebug: noopLog,
+    });
+
+    await expect(promise).rejects.toBe(transportError);
+    expect(isSyncTransportFailure(transportError)).toBe(true);
+    expect(didSyncPeerRespond(transportError)).toBe(false);
+  });
+
+  it('tags parser failures after response bytes as peer responses', async () => {
+    const parseError = new Error('bad N-Quads');
+    const promise = fetchSyncPages({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId: CG_ID,
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: GRAPH_URI,
+      deadline: Date.now() + 60_000,
+      syncPageTimeoutMs: 5_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 1,
+      syncPageSize: 100,
+      syncDeniedResponse: '#DENIED',
+      debugSyncProgress: false,
+      protocolSync: PROTOCOL_ID,
+      checkpointStore: {
+        get: () => undefined,
+        set: () => {},
+        delete: () => {},
+      },
+      buildSyncRequest: async () => new TextEncoder().encode('request'),
+      parseAndFilter: async () => {
+        throw parseError;
+      },
+      send: async () => new TextEncoder().encode('one-quad-line'),
+      logWarn: noopLog,
+      logInfo: noopLog,
+      logDebug: noopLog,
+    });
+
+    await expect(promise).rejects.toBe(parseError);
+    expect(didSyncPeerRespond(parseError)).toBe(true);
+    expect(isSyncTransportFailure(parseError)).toBe(false);
+  });
+
+  async function captureDurableSyncSessionId(options: {
+    remotePeerId?: string;
+    contextGraphId?: string;
+    sinceBatchId?: string;
+  } = {}): Promise<string | undefined> {
+    let observed: string | undefined;
+    await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: options.remotePeerId ?? REMOTE_PEER_ID,
+        contextGraphId: options.contextGraphId ?? CG_ID,
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 100,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => freshCheckpoint(0),
+          set: () => {},
+          delete: () => {},
+        },
+        sinceBatchId: options.sinceBatchId,
+        buildSyncRequest: async (
+          _contextGraphId,
+          _offset,
+          _limit,
+          _includeSharedMemory,
+          _remotePeerId,
+          _phase,
+          _snapshotRef,
+          _sinceBatchId,
+          syncSessionId,
+        ) => {
+          observed = syncSessionId;
+          return new TextEncoder().encode('request');
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => new TextEncoder().encode(''),
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+    return observed;
   }
 
   it('keeps parsed quads even when they do not advance the page cursor', async () => {
@@ -96,7 +299,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => freshCheckpoint(0),
           set: () => {},
           delete: () => {},
         },
@@ -112,6 +315,519 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(result.quads).toEqual([parsedQuad]);
     expect(result.nextOffset).toBe(0);
     expect(result.completed).toBe(true);
+  });
+
+  it('uses one stable sync session id across pages for full durable data sync', async () => {
+    const observedBuilds: Array<{
+      offset: number;
+      includeSharedMemory: boolean;
+      phase: string | undefined;
+      sinceBatchId: string | undefined;
+      syncSessionId: string | undefined;
+    }> = [];
+    let sendCalls = 0;
+
+    await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: CG_ID,
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 1,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => freshCheckpoint(0),
+          set: () => {},
+          delete: () => {},
+        },
+        buildSyncRequest: async (
+          _contextGraphId,
+          offset,
+          _limit,
+          includeSharedMemory,
+          _remotePeerId,
+          phase,
+          _snapshotRef,
+          sinceBatchId,
+          syncSessionId,
+        ) => {
+          observedBuilds.push({
+            offset,
+            includeSharedMemory,
+            phase,
+            sinceBatchId,
+            syncSessionId,
+          });
+          return new TextEncoder().encode(`request-${offset}`);
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => {
+          sendCalls++;
+          return new TextEncoder().encode(sendCalls === 1 ? 'one-quad-line' : '');
+        },
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    expect(observedBuilds).toHaveLength(2);
+    expect(observedBuilds.map((build) => build.offset)).toEqual([0, 1]);
+    expect(observedBuilds.every((build) => build.includeSharedMemory === false)).toBe(true);
+    expect(observedBuilds.every((build) => build.phase === 'data')).toBe(true);
+    expect(observedBuilds.every((build) => build.sinceBatchId === undefined)).toBe(true);
+    expect(typeof observedBuilds[0].syncSessionId).toBe('string');
+    expect(observedBuilds[0].syncSessionId?.length).toBeGreaterThan(0);
+    expect(observedBuilds[1].syncSessionId).toBe(observedBuilds[0].syncSessionId);
+  });
+
+  it('uses a fresh durable sync session id for each completed fetch round', async () => {
+    const first = await captureDurableSyncSessionId();
+    const second = await captureDurableSyncSessionId();
+
+    expect(typeof first).toBe('string');
+    expect(first?.length).toBeGreaterThan(0);
+    expect(second).not.toBe(first);
+  });
+
+  it('reuses the durable sync session id after an incomplete fetch round', async () => {
+    vi.setSystemTime(1_700_000_000_000);
+    const observedBuilds: Array<{
+      offset: number;
+      syncSessionId: string | undefined;
+    }> = [];
+    let sendCalls = 0;
+
+    const first = await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: 'incomplete-session-cg',
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 1,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => freshCheckpoint(0),
+          set: () => {},
+          delete: () => {},
+        },
+        buildSyncRequest: async (
+          _contextGraphId,
+          offset,
+          _limit,
+          _includeSharedMemory,
+          _remotePeerId,
+          _phase,
+          _snapshotRef,
+          _sinceBatchId,
+          syncSessionId,
+        ) => {
+          observedBuilds.push({ offset, syncSessionId });
+          return new TextEncoder().encode(`request-${offset}`);
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => {
+          sendCalls++;
+          if (sendCalls === 1) {
+            vi.setSystemTime(1_700_000_060_001);
+            return new TextEncoder().encode('one-quad-line');
+          }
+          return new TextEncoder().encode('');
+        },
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    expect(first.completed).toBe(false);
+    expect(first.nextOffset).toBe(1);
+    const unfinishedSessionId = observedBuilds[0].syncSessionId;
+    expect(typeof unfinishedSessionId).toBe('string');
+
+    await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: 'incomplete-session-cg',
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 1,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => freshCheckpoint(1),
+          set: () => {},
+          delete: () => {},
+        },
+        buildSyncRequest: async (
+          _contextGraphId,
+          offset,
+          _limit,
+          _includeSharedMemory,
+          _remotePeerId,
+          _phase,
+          _snapshotRef,
+          _sinceBatchId,
+          syncSessionId,
+        ) => {
+          observedBuilds.push({ offset, syncSessionId });
+          return new TextEncoder().encode(`request-${offset}`);
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => new TextEncoder().encode(''),
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    expect(observedBuilds[observedBuilds.length - 1]).toEqual({
+      offset: 1,
+      syncSessionId: unfinishedSessionId,
+    });
+  });
+
+  it('restarts durable data checkpoints when the saved unfinished session expires', async () => {
+    vi.setSystemTime(1_700_000_000_000);
+    const observedBuilds: Array<{
+      contextGraphId: string;
+      offset: number;
+      syncSessionId: string | undefined;
+    }> = [];
+    const deletedCheckpoints: string[] = [];
+    const checkpointKey = `${REMOTE_PEER_ID}|expired-incomplete-session-cg|durable|data`;
+
+    await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: 'expired-incomplete-session-cg',
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 1,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => freshCheckpoint(0),
+          set: () => {},
+          delete: () => {},
+        },
+        buildSyncRequest: async (
+          contextGraphId,
+          offset,
+          _limit,
+          _includeSharedMemory,
+          _remotePeerId,
+          _phase,
+          _snapshotRef,
+          _sinceBatchId,
+          syncSessionId,
+        ) => {
+          observedBuilds.push({ contextGraphId, offset, syncSessionId });
+          return new TextEncoder().encode(`request-${offset}`);
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => {
+          vi.setSystemTime(1_700_000_060_001);
+          return new TextEncoder().encode('one-quad-line');
+        },
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    const expiredSessionId = observedBuilds[0].syncSessionId;
+    vi.setSystemTime(1_700_000_000_000 + DURABLE_DATA_SYNC_SESSION_TTL_MS + 1);
+
+    await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: 'expired-incomplete-session-cg',
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 1,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => freshCheckpoint(1),
+          set: () => {},
+          delete: (key) => {
+            deletedCheckpoints.push(key);
+          },
+        },
+        buildSyncRequest: async (
+          contextGraphId,
+          offset,
+          _limit,
+          _includeSharedMemory,
+          _remotePeerId,
+          _phase,
+          _snapshotRef,
+          _sinceBatchId,
+          syncSessionId,
+        ) => {
+          observedBuilds.push({ contextGraphId, offset, syncSessionId });
+          return new TextEncoder().encode(`request-${offset}`);
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => new TextEncoder().encode(''),
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    expect(observedBuilds[observedBuilds.length - 1]).toMatchObject({
+      contextGraphId: 'expired-incomplete-session-cg',
+      offset: 0,
+    });
+    expect(observedBuilds[observedBuilds.length - 1].syncSessionId).not.toBe(expiredSessionId);
+    expect(deletedCheckpoints).toEqual([checkpointKey]);
+  });
+
+  it('clears durable data checkpoints when the saved unfinished session is superseded', async () => {
+    vi.setSystemTime(1_700_100_000_000);
+    const observedBuilds: Array<{
+      offset: number;
+      syncSessionId: string | undefined;
+    }> = [];
+    const checkpointValues = new Map<string, ReturnType<typeof freshCheckpoint>>();
+    const deletedCheckpoints: string[] = [];
+    const checkpointKey = `${REMOTE_PEER_ID}|superseded-incomplete-session-cg|durable|data`;
+    let sendMode: 'timeout' | 'superseded' | 'complete' = 'timeout';
+
+    const checkpointStore = {
+      get: (key: string) => checkpointValues.get(key),
+      set: (key: string, value: number) => {
+        checkpointValues.set(key, freshCheckpoint(value));
+      },
+      delete: (key: string) => {
+        deletedCheckpoints.push(key);
+        checkpointValues.delete(key);
+      },
+    };
+
+    const runSupersededFetch = () => runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: 'superseded-incomplete-session-cg',
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 1,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore,
+        buildSyncRequest: async (
+          _contextGraphId,
+          offset,
+          _limit,
+          _includeSharedMemory,
+          _remotePeerId,
+          _phase,
+          _snapshotRef,
+          _sinceBatchId,
+          syncSessionId,
+        ) => {
+          observedBuilds.push({ offset, syncSessionId });
+          return new TextEncoder().encode(`request-${offset}`);
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => {
+          if (sendMode === 'timeout') {
+            vi.setSystemTime(1_700_100_060_001);
+            return new TextEncoder().encode('one-quad-line');
+          }
+          if (sendMode === 'superseded') {
+            throw new Error('Durable data sync session was superseded before page completion');
+          }
+          return new TextEncoder().encode('');
+        },
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    const first = await runSupersededFetch();
+    expect(first.completed).toBe(false);
+    checkpointValues.set(checkpointKey, freshCheckpoint(first.nextOffset));
+    const supersededSessionId = observedBuilds[0].syncSessionId;
+
+    sendMode = 'superseded';
+    await expect(runSupersededFetch()).rejects.toThrow('Durable data sync session was superseded');
+    expect(deletedCheckpoints).toEqual([checkpointKey]);
+
+    sendMode = 'complete';
+    const resumed = await runSupersededFetch();
+    expect(resumed.resumedFromOffset).toBe(0);
+    expect(observedBuilds[observedBuilds.length - 1]).toMatchObject({ offset: 0 });
+    expect(observedBuilds[observedBuilds.length - 1].syncSessionId).not.toBe(supersededSessionId);
+  });
+
+  it('restarts durable data checkpoints at offset zero with a stable sync session', async () => {
+    const observedBuilds: Array<{
+      offset: number;
+      syncSessionId: string | undefined;
+    }> = [];
+    const deletedCheckpoints: string[] = [];
+
+    await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: CG_ID,
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 100,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => freshCheckpoint(250),
+          set: () => {},
+          delete: (key) => {
+            deletedCheckpoints.push(key);
+          },
+        },
+        buildSyncRequest: async (
+          _contextGraphId,
+          offset,
+          _limit,
+          _includeSharedMemory,
+          _remotePeerId,
+          _phase,
+          _snapshotRef,
+          _sinceBatchId,
+          syncSessionId,
+        ) => {
+          observedBuilds.push({ offset, syncSessionId });
+          return new TextEncoder().encode(`request-${offset}`);
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => new TextEncoder().encode(''),
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    expect(observedBuilds).toHaveLength(1);
+    expect(observedBuilds[0].offset).toBe(0);
+    expect(typeof observedBuilds[0].syncSessionId).toBe('string');
+    expect(observedBuilds[0].syncSessionId?.length).toBeGreaterThan(0);
+    expect(deletedCheckpoints).toEqual([`${REMOTE_PEER_ID}|${CG_ID}|durable|data`]);
+  });
+
+  it('uses one stable sync session id across pages for durable delta sync', async () => {
+    const observedBuilds: Array<{
+      offset: number;
+      sinceBatchId: string | undefined;
+      syncSessionId: string | undefined;
+    }> = [];
+    let sendCalls = 0;
+
+    await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: CG_ID,
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 1,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => freshCheckpoint(0),
+          set: () => {},
+          delete: () => {},
+        },
+        sinceBatchId: '42',
+        buildSyncRequest: async (
+          _contextGraphId,
+          offset,
+          _limit,
+          _includeSharedMemory,
+          _remotePeerId,
+          _phase,
+          _snapshotRef,
+          sinceBatchId,
+          syncSessionId,
+        ) => {
+          observedBuilds.push({ offset, sinceBatchId, syncSessionId });
+          return new TextEncoder().encode(`request-${offset}`);
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => {
+          sendCalls++;
+          return new TextEncoder().encode(sendCalls === 1 ? 'one-quad-line' : '');
+        },
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    expect(observedBuilds).toHaveLength(2);
+    expect(observedBuilds.map((build) => build.offset)).toEqual([0, 1]);
+    expect(observedBuilds.every((build) => build.sinceBatchId === '42')).toBe(true);
+    expect(typeof observedBuilds[0].syncSessionId).toBe('string');
+    expect(observedBuilds[0].syncSessionId?.length).toBeGreaterThan(0);
+    expect(observedBuilds[1].syncSessionId).toBe(observedBuilds[0].syncSessionId);
   });
 
   /**
@@ -143,7 +859,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => undefined,
           set: () => {},
           delete: () => {},
         },
@@ -202,7 +918,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => undefined,
           set: () => {},
           delete: () => {},
         },
@@ -263,7 +979,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => undefined,
           set: () => {},
           delete: () => {},
         },
@@ -327,7 +1043,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
         checkpointStore: {
-          get: () => 0,
+          get: () => undefined,
           set: () => {},
           delete: () => {},
         },
@@ -354,5 +1070,246 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     // failure should not bypass to a send).
     expect(buildCalls).toBe(3);
     expect(sendCalls).toBe(1);
+  });
+
+  it('retries responder overload transport failures before parsing a page', async () => {
+    const warnings: string[] = [];
+    let sendCalls = 0;
+
+    await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: CG_ID,
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 3,
+        syncPageSize: 100,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => freshCheckpoint(0),
+          set: () => {},
+          delete: () => {},
+        },
+        buildSyncRequest: async () => new TextEncoder().encode('request'),
+        parseAndFilter: singleQuadParser,
+        send: async () => {
+          sendCalls++;
+          if (sendCalls === 1) throw new Error('sync responder queue full');
+          return new TextEncoder().encode('one-quad-line');
+        },
+        logWarn: (_ctx, message) => { warnings.push(message); },
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    expect(sendCalls).toBe(2);
+    expect(warnings.some((message) => message.includes('sync responder queue full'))).toBe(true);
+  });
+
+  it('retries legacy responder busy bodies before parsing a page', async () => {
+    const warnings: string[] = [];
+    let sendCalls = 0;
+
+    await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: CG_ID,
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 3,
+        syncPageSize: 100,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => freshCheckpoint(0),
+          set: () => {},
+          delete: () => {},
+        },
+        buildSyncRequest: async () => new TextEncoder().encode('request'),
+        parseAndFilter: singleQuadParser,
+        send: async () => {
+          sendCalls++;
+          return new TextEncoder().encode(sendCalls === 1 ? LEGACY_SYNC_BUSY_RESPONSE : 'one-quad-line');
+        },
+        logWarn: (_ctx, message) => { warnings.push(message); },
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    expect(sendCalls).toBe(2);
+    expect(warnings.some((message) => message.includes('Legacy sync responder busy'))).toBe(true);
+  });
+
+  it('retries transport AbortErrors while the caller signal is still live', async () => {
+    const warnings: string[] = [];
+    const controller = new AbortController();
+    let sendCalls = 0;
+
+    await runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: CG_ID,
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 3,
+        syncPageSize: 100,
+        syncDeniedResponse: '#DENIED',
+        signal: controller.signal,
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => freshCheckpoint(0),
+          set: () => {},
+          delete: () => {},
+        },
+        buildSyncRequest: async () => new TextEncoder().encode('request'),
+        parseAndFilter: singleQuadParser,
+        send: async () => {
+          sendCalls++;
+          if (sendCalls === 1) {
+            const err = new Error('remote stream aborted');
+            err.name = 'AbortError';
+            throw err;
+          }
+          return new TextEncoder().encode('one-quad-line');
+        },
+        logWarn: (_ctx, message) => { warnings.push(message); },
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    expect(controller.signal.aborted).toBe(false);
+    expect(sendCalls).toBe(2);
+    expect(warnings.some((message) => message.includes('remote stream aborted'))).toBe(true);
+  });
+
+  it('passes caller abort signal to sync transport and does not retry aborts', async () => {
+    const controller = new AbortController();
+    let releaseSendStarted: () => void = () => {};
+    const sendStarted = new Promise<void>((resolve) => {
+      releaseSendStarted = resolve;
+    });
+    let observedSignal: AbortSignal | undefined;
+    let sendCalls = 0;
+    let retryWarnings = 0;
+
+    const fetchPromise = fetchSyncPages({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId: CG_ID,
+      includeSharedMemory: false,
+      phase: 'meta',
+      graphUri: GRAPH_URI,
+      deadline: Date.now() + 60_000,
+      syncPageTimeoutMs: 10_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 3,
+      syncPageSize: 100,
+      syncDeniedResponse: '#DENIED',
+      signal: controller.signal,
+      debugSyncProgress: false,
+      protocolSync: PROTOCOL_ID,
+      checkpointStore: {
+        get: () => freshCheckpoint(0),
+        set: () => {},
+        delete: () => {},
+      },
+      buildSyncRequest: async () => new TextEncoder().encode('request'),
+      parseAndFilter: singleQuadParser,
+      send: async (_peerId, _protocolId, _data, _timeoutMs, _messageId, signal) => {
+        sendCalls++;
+        observedSignal = signal;
+        releaseSendStarted();
+        return new Promise<Uint8Array>((_resolve, reject) => {
+          if (signal?.aborted) {
+            reject(signal.reason);
+            return;
+          }
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      },
+      logWarn: () => { retryWarnings++; },
+      logInfo: noopLog,
+      logDebug: noopLog,
+    });
+
+    await sendStarted;
+    const abortReason = new Error('request closed');
+    abortReason.name = 'AbortError';
+    controller.abort(abortReason);
+
+    await expect(fetchPromise).rejects.toThrow('request closed');
+    expect(observedSignal).toBe(controller.signal);
+    expect(sendCalls).toBe(1);
+    expect(retryWarnings).toBe(0);
+  });
+
+  it('rejects pre-aborted DOMException signals without mutating the reason', async () => {
+    const controller = new AbortController();
+    let buildCalls = 0;
+    let sendCalls = 0;
+
+    controller.abort();
+
+    await expect(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: CG_ID,
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 100,
+        syncDeniedResponse: '#DENIED',
+        signal: controller.signal,
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore: {
+          get: () => freshCheckpoint(0),
+          set: () => {},
+          delete: () => {},
+        },
+        buildSyncRequest: async () => {
+          buildCalls++;
+          return new TextEncoder().encode('request');
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => {
+          sendCalls++;
+          return new TextEncoder().encode('');
+        },
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(buildCalls).toBe(0);
+    expect(sendCalls).toBe(0);
   });
 });

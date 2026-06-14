@@ -3,6 +3,7 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import type { SyncPhase } from '../auth/request-build.js';
+import { didSyncPeerRespond, isSyncTransportFailure } from '../error-tags.js';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncPageResult } from './page-fetch.js';
 
@@ -16,10 +17,14 @@ export interface SharedMemorySyncSummary {
   insertedDataTriples: number;
   bytesReceived: number;
   resumedPhases: number;
+  timedOutPhases: number;
+  completedPhases: number;
+  checkpointAdvances: number;
   deniedPhases: number;
   emptyResponses: number;
   droppedDataTriples: number;
   failedPeers: number;
+  failedPhases: number;
 }
 
 interface SharedMemorySyncContext {
@@ -94,14 +99,35 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     insertedDataTriples: 0,
     bytesReceived: 0,
     resumedPhases: 0,
+    timedOutPhases: 0,
+    completedPhases: 0,
+    checkpointAdvances: 0,
     deniedPhases: 0,
     emptyResponses: 0,
     droppedDataTriples: 0,
     failedPeers: 0,
+    failedPhases: 0,
   };
 
-  try {
-    for (const [index, pid] of contextGraphIds.entries()) {
+  const recordPhaseOutcome = (result: SyncPageResult) => {
+    summary.resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
+    summary.timedOutPhases += result.timedOut ? 1 : 0;
+    if (result.completed && (result.resumedFromOffset > 0 || result.nextOffset > result.resumedFromOffset)) {
+      summary.completedPhases += 1;
+    }
+    if (result.nextOffset > result.resumedFromOffset) {
+      summary.checkpointAdvances += 1;
+    }
+    if (result.completed) deleteCheckpoint(result.checkpointKey);
+    else if (result.nextOffset > 0 || result.resumedFromOffset > 0) {
+      setCheckpoint(result.checkpointKey, result.nextOffset);
+    }
+  };
+
+  let peerFailed = false;
+  for (const [index, pid] of contextGraphIds.entries()) {
+    let peerRespondedForContextGraph = false;
+    try {
       const wsGraph = contextGraphWorkspaceGraphUri(pid);
       const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(pid);
       const deadline = createContextGraphSyncDeadline(contextGraphIds.length - index);
@@ -110,7 +136,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
 
       const fetchStartedAt = Date.now();
       const wsMetaResult = await fetchSyncPages(ctx, remotePeerId, pid, true, 'meta', wsMetaGraph, deadline);
+      peerRespondedForContextGraph = true;
       const wsDataResult = await fetchSyncPages(ctx, remotePeerId, pid, true, 'data', wsGraph, deadline);
+      peerRespondedForContextGraph = true;
       const fetchDurationMs = Date.now() - fetchStartedAt;
 
       const verifyStartedAt = Date.now();
@@ -130,17 +158,31 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const verifyDurationMs = Date.now() - verifyStartedAt;
       logInfo(ctx, `  shared memory: ${processed.totalFetchedDataQuads} data + ${processed.totalFetchedMetaQuads} meta triples fetched`);
       summary.bytesReceived += wsMetaResult.bytesReceived + wsDataResult.bytesReceived;
-      summary.resumedPhases += (wsMetaResult.resumedFromOffset > 0 ? 1 : 0) + (wsDataResult.resumedFromOffset > 0 ? 1 : 0);
       summary.fetchedMetaTriples += processed.totalFetchedMetaQuads;
       summary.fetchedDataTriples += processed.totalFetchedDataQuads;
       summary.emptyResponses += processed.emptyResponses;
 
       if (processed.emptyResponses > 0) {
+        recordPhaseOutcome(wsMetaResult);
+        recordPhaseOutcome(wsDataResult);
         continue;
       }
 
       const validWsQuads = processed.verifiedData;
       const dropped = processed.droppedDataTriples;
+      const hydrateOwnership = () => {
+        for (const { dataGraph, entity, creator } of processed.entityCreators) {
+          const ownershipKey = sharedMemoryOwnershipKeyFromGraph(pid, dataGraph);
+          if (!ownershipKey) {
+            logWarn(ctx, `SWM sync skipped ownership cache hydration for "${entity}" from unexpected graph "${dataGraph}"`);
+            continue;
+          }
+          const ownedMap = ensureOwnedMap(ownershipKey);
+          if (!ownedMap.has(entity)) {
+            ownedMap.set(entity, creator);
+          }
+        }
+      };
       if (dropped > 0) {
         logWarn(ctx, `SWM sync dropped ${dropped} triples with invalid subjects (not in meta rootEntity or skolemized child)`);
         summary.droppedDataTriples += dropped;
@@ -160,7 +202,21 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       });
       summary.bytesReceived += snapshotSync.bytesReceived;
       summary.resumedPhases += snapshotSync.resumedPhases;
+      summary.timedOutPhases += snapshotSync.timedOutPhases;
+      summary.completedPhases += snapshotSync.completedPhases;
+      summary.checkpointAdvances += snapshotSync.checkpointAdvances;
       const snapshotDurationMs = Date.now() - snapshotStartedAt;
+      if (!snapshotSync.completed) {
+        if (validWsQuads.length > 0) {
+          await ensureContextGraph(pid);
+          await storeInsert(validWsQuads);
+          summary.insertedTriples += validWsQuads.length;
+          summary.insertedDataTriples += validWsQuads.length;
+          recordPhaseOutcome(wsDataResult);
+          hydrateOwnership();
+        }
+        continue;
+      }
 
       const storeStartedAt = Date.now();
       await ensureContextGraph(pid);
@@ -175,22 +231,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         summary.insertedTriples += processed.verifiedMeta.length;
         summary.insertedMetaTriples += processed.verifiedMeta.length;
       }
-      if (wsMetaResult.completed) deleteCheckpoint(wsMetaResult.checkpointKey);
-      else setCheckpoint(wsMetaResult.checkpointKey, wsMetaResult.nextOffset);
-      if (wsDataResult.completed) deleteCheckpoint(wsDataResult.checkpointKey);
-      else setCheckpoint(wsDataResult.checkpointKey, wsDataResult.nextOffset);
+      recordPhaseOutcome(wsMetaResult);
+      recordPhaseOutcome(wsDataResult);
 
-      for (const { dataGraph, entity, creator } of processed.entityCreators) {
-        const ownershipKey = sharedMemoryOwnershipKeyFromGraph(pid, dataGraph);
-        if (!ownershipKey) {
-          logWarn(ctx, `SWM sync skipped ownership cache hydration for "${entity}" from unexpected graph "${dataGraph}"`);
-          continue;
-        }
-        const ownedMap = ensureOwnedMap(ownershipKey);
-        if (!ownedMap.has(entity)) {
-          ownedMap.set(entity, creator);
-        }
-      }
+      hydrateOwnership();
       const storeDurationMs = Date.now() - storeStartedAt;
 
       logInfo(ctx, `SWM sync for "${pid}": ${validWsQuads.length} data + ${processed.verifiedMeta.length} meta triples`);
@@ -200,16 +244,26 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           `Requester SWM timing for "${pid}": fetch=${fetchDurationMs}ms verify=${verifyDurationMs}ms snapshots=${snapshotDurationMs}ms store+ownership=${storeDurationMs}ms`,
         );
       }
+    } catch (err) {
+      logWarn(ctx, `SWM sync for context graph "${pid}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
+      if ((err as Error & { syncDenied?: boolean }).syncDenied) {
+        summary.deniedPhases += 1;
+      } else if (
+        peerRespondedForContextGraph ||
+        didSyncPeerRespond(err) ||
+        !isSyncTransportFailure(err)
+      ) {
+        summary.failedPhases += 1;
+      } else {
+        peerFailed = true;
+      }
     }
-    if (summary.insertedTriples > 0) {
-      logInfo(ctx, `SWM sync complete: ${summary.insertedTriples} triples from ${remotePeerId}`);
-    }
-  } catch (err) {
-    logWarn(ctx, `SWM sync from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
-    if ((err as Error & { syncDenied?: boolean }).syncDenied) {
-      summary.deniedPhases += 1;
-    }
-    summary.failedPeers += 1;
+  }
+  if (peerFailed) {
+    summary.failedPeers = 1;
+  }
+  if (summary.insertedTriples > 0) {
+    logInfo(ctx, `SWM sync complete: ${summary.insertedTriples} triples from ${remotePeerId}`);
   }
 
   return summary;
@@ -254,10 +308,24 @@ async function syncPublicSnapshotsForMeta(params: {
   fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
-}): Promise<{ bytesReceived: number; resumedPhases: number }> {
+}): Promise<{
+  bytesReceived: number;
+  resumedPhases: number;
+  timedOutPhases: number;
+  completedPhases: number;
+  checkpointAdvances: number;
+  completed: boolean;
+}> {
   const snapshots = collectPublicSnapshotMetadata(params.metaQuads);
   if (snapshots.length === 0) {
-    return { bytesReceived: 0, resumedPhases: 0 };
+    return {
+      bytesReceived: 0,
+      resumedPhases: 0,
+      timedOutPhases: 0,
+      completedPhases: 0,
+      checkpointAdvances: 0,
+      completed: true,
+    };
   }
   if (!params.publicSnapshotStore) {
     throw new Error(
@@ -267,6 +335,9 @@ async function syncPublicSnapshotsForMeta(params: {
 
   let bytesReceived = 0;
   let resumedPhases = 0;
+  let timedOutPhases = 0;
+  let completedPhases = 0;
+  let checkpointAdvances = 0;
   for (const snapshot of snapshots) {
     if (await hasValidSnapshot(params.publicSnapshotStore, snapshot)) {
       continue;
@@ -284,11 +355,25 @@ async function syncPublicSnapshotsForMeta(params: {
     );
     bytesReceived += result.bytesReceived;
     resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
+    timedOutPhases += result.timedOut ? 1 : 0;
+    if (result.completed && (result.resumedFromOffset > 0 || result.nextOffset > result.resumedFromOffset)) {
+      completedPhases += 1;
+    }
+    if (result.nextOffset > result.resumedFromOffset) {
+      checkpointAdvances += 1;
+    }
 
     if (result.completed) params.deleteCheckpoint(result.checkpointKey);
     else {
       params.setCheckpoint(result.checkpointKey, result.nextOffset);
-      throw new Error(`Timed out while syncing shared-memory public snapshot ${snapshot.ref}`);
+      return {
+        bytesReceived,
+        resumedPhases,
+        timedOutPhases,
+        completedPhases,
+        checkpointAdvances,
+        completed: false,
+      };
     }
 
     const snapshotQuads = result.quads.map((quad) => ({ ...quad, graph: '' }));
@@ -302,7 +387,14 @@ async function syncPublicSnapshotsForMeta(params: {
     await params.publicSnapshotStore.putSnapshot({ digest: snapshot.digest, quads: snapshotQuads });
   }
 
-  return { bytesReceived, resumedPhases };
+  return {
+    bytesReceived,
+    resumedPhases,
+    timedOutPhases,
+    completedPhases,
+    checkpointAdvances,
+    completed: true,
+  };
 }
 
 function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): PublicSnapshotMetadata[] {

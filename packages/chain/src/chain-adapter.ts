@@ -248,6 +248,63 @@ export interface ContextGraphOnChain {
   description?: string;
 }
 
+export class ContextGraphChainScanPartialError extends Error {
+  readonly partialResults: ContextGraphOnChain[];
+  readonly scannedToBlock: number;
+  readonly failedFromBlock: number;
+  readonly failedToBlock: number;
+
+  constructor(
+    message: string,
+    opts: {
+      partialResults: ContextGraphOnChain[];
+      scannedToBlock: number;
+      failedFromBlock: number;
+      failedToBlock: number;
+      cause?: unknown;
+    },
+  ) {
+    super(message);
+    this.name = 'ContextGraphChainScanPartialError';
+    this.partialResults = opts.partialResults;
+    this.scannedToBlock = opts.scannedToBlock;
+    this.failedFromBlock = opts.failedFromBlock;
+    this.failedToBlock = opts.failedToBlock;
+    if (opts.cause !== undefined) {
+      (this as Error & { cause?: unknown }).cause = opts.cause;
+    }
+  }
+}
+
+export function isContextGraphChainScanPartialError(
+  err: unknown,
+): err is ContextGraphChainScanPartialError {
+  return (
+    err instanceof ContextGraphChainScanPartialError ||
+    (
+      typeof err === 'object' &&
+      err !== null &&
+      (err as { name?: unknown }).name === 'ContextGraphChainScanPartialError' &&
+      Array.isArray((err as { partialResults?: unknown }).partialResults)
+    )
+  );
+}
+
+export interface ContextGraphChainScanOptions {
+  /**
+   * When true and `fromBlock` is omitted, adapters may resume from an
+   * in-memory watermark with a reorg buffer. The default preserves public
+   * list-all semantics for SDK callers.
+   */
+  incremental?: boolean;
+  /**
+   * When true on a successful full scan, adapters may seed the in-memory
+   * incremental watermark for later daemon background scans. This is opt-in so
+   * public SDK list-all calls remain side-effect free by default.
+   */
+  seedIncrementalWatermark?: boolean;
+}
+
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----
 
 /**
@@ -753,7 +810,9 @@ export interface ChainAdapter {
   /** Reveal cleartext name+description on-chain for a context graph you created. Optional. */
   revealContextGraphMetadata?(contextGraphId: string, name: string, description: string): Promise<TxResult>;
   /** List context graphs from chain via `NameClaimed` events. Optional; not supported on no-chain/mock. */
-  listContextGraphsFromChain?(fromBlock?: number): Promise<ContextGraphOnChain[]>;
+  listContextGraphsFromChain?(fromBlock?: number, options?: ContextGraphChainScanOptions): Promise<ContextGraphOnChain[]>;
+  /** True when the adapter has a registry scan watermark for its currently bound ContextGraphNameRegistry. */
+  hasContextGraphRegistryScanWatermark?(): Promise<boolean>;
 
   /**
    * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.
@@ -1323,6 +1382,9 @@ export interface ChainAdapter {
    * so the protected/encrypted path is kept). Adapters that implement
    * `getContextGraphAccessPolicy` SHOULD also implement this so they don't
    * silently strand on-chain-public CGs on the encrypted path.
+   * A resolved `false` must mean the chain successfully proved the slot is
+   * inactive; transient RPC/read failures should reject so callers can choose
+   * their own fail-closed or ACK-backed fallback behavior.
    */
   isContextGraphActiveOnChain?(contextGraphId: bigint): Promise<boolean>;
 

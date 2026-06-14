@@ -20,11 +20,15 @@
  *                     assertion URI itself)
  *        <lifecycle>  dkg:reservedUal "did:dkg:evm:<chain>/<addr>/<n>" ;
  *                     prov:wasAttributedTo <did:dkg:agent:0x…> .
- *     The lifecycle URN is pinned to the assertion URI structurally:
+ *     The lifecycle URN is pinned to the assertion URI structurally over the
+ *     FULL scope (cg + optional subGraphName), not just {addr,name}:
  *     lifecycle = urn:dkg:assertion:{cg}[:{sub}]:{addr}:{name} while the
- *     assertion URI ends with /assertion/{addr}/{name} (constants.ts), and
- *     names cannot contain "/" — so replacing "/"→":" in the assertion-URI
- *     tail yields the URN tail unambiguously.
+ *     assertion URI is did:dkg:context-graph:{cg}[/{sub}]/assertion/{addr}/{name}
+ *     (constants.ts), and names cannot contain "/" — so taking the assertion
+ *     URI's {cg}[/{sub}] (before "/assertion/") plus {addr}/{name} (after) and
+ *     replacing "/"→":" yields the URN tail unambiguously. Pinning on
+ *     {addr,name} ALONE would let a same-named assertion in a DIFFERENT
+ *     sub-graph match and leak the wrong reservedUal/agent/batchId.
  *
  * The clicked node is an *entity*, not the KA.
  *
@@ -150,9 +154,12 @@ function sparqlIri(value: string): string {
  *     URN (current + old stores). Codex review "node-ui-receipt": the URN
  *     never carries `dkg:rootEntity <assertionUri>` — its rootEntity rows
  *     stamp MEMBER entities — so the lifecycle join goes through the CLICKED
- *     entity and is pinned to ?asrt by the structural (addr,name)
- *     correspondence (URN tail `:{addr}:{name}` ⟷ URI tail
- *     `/assertion/{addr}/{name}`, names cannot contain "/").
+ *     entity and is pinned to ?asrt by the structural FULL-SCOPE
+ *     correspondence (URN tail `:{cg}[:{sub}]:{addr}:{name}` ⟷ URI
+ *     `did:dkg:context-graph:{cg}[/{sub}]/assertion/{addr}/{name}`, names
+ *     cannot contain "/"). A clicked member entity can be stamped by the
+ *     same-named assertion in MORE THAN ONE sub-graph, so pinning on
+ *     `{addr,name}` alone would bind the wrong sub-graph's reservedUal.
  * `entityIri` MUST already be validated via `sparqlIri`.
  */
 export function buildSealReceiptQuery(cgId: string, entityIri: string): string {
@@ -180,7 +187,20 @@ SELECT ?asrt ?tx ?block ?kaId ?batchId ?finalizedAt ?ual ?agentLc ?ualSelf ?agen
     OPTIONAL {
       ?lc dkg:rootEntity <${entityIri}> ;
           dkg:reservedUal ?ual .
-      FILTER(STRENDS(STR(?lc), CONCAT(":", REPLACE(STRAFTER(STR(?asrt), "/assertion/"), "/", ":"))))
+      # Pin the lifecycle URN to the FULL assertion scope (cg + optional
+      # subGraphName), not just {addr}:{name} — otherwise a same-named
+      # assertion in a sibling sub-graph (urn:dkg:assertion:{cg}:{other}:{addr}:{name})
+      # also STRENDS-matches and leaks the wrong reservedUal/agent/batchId.
+      # cgId is a build-time constant, so anchor on it as a literal and keep its
+      # slashes intact (wallet-scoped cgIds like "<addr>/<name>" embed RAW in the
+      # URN via assertionLifecycleUri); only the [/sub]/{addr}/{name} tail derived
+      # from ?asrt is "/"->":" converted (sub/addr/name cannot contain "/").
+      FILTER(STRENDS(STR(?lc), CONCAT(
+        ":${sparqlStr(cgId)}",
+        REPLACE(STRBEFORE(STRAFTER(STR(?asrt), "did:dkg:context-graph:${sparqlStr(cgId)}"), "/assertion/"), "/", ":"),
+        ":",
+        REPLACE(STRAFTER(STR(?asrt), "/assertion/"), "/", ":")
+      )))
       OPTIONAL { ?lc prov:wasAttributedTo ?agentLc . }
     }
     OPTIONAL { ?asrt dkg:reservedUal ?ualSelf . }

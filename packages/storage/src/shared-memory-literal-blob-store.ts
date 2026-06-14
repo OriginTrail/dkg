@@ -4,10 +4,10 @@ import { join } from 'node:path';
 import type {
   ConstructResult,
   Quad,
+  QueryOptions,
   QueryResult,
   SelectResult,
   TripleStore,
-  TripleStoreQueryOptions,
 } from './triple-store.js';
 
 export const EXTERNAL_LITERAL_REF_DATATYPE = 'http://dkg.io/ontology/externalLiteralRef';
@@ -29,6 +29,10 @@ export interface SharedMemoryLiteralBlobStoreOptions {
 }
 
 export class SharedMemoryLiteralBlobStore implements TripleStore {
+  get queryCancellation() {
+    return this.inner.queryCancellation;
+  }
+
   private readonly inner: TripleStore;
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
@@ -72,7 +76,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     return removed;
   }
 
-  async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
+  async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
     const rewritten = this.rewriteLargeLiteralConstants(sparql);
     if (!rewritten) {
       const result = await this.inner.query(sparql, options);
@@ -98,8 +102,8 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     return this.inner.dropGraph(graphUri);
   }
 
-  async listGraphs(): Promise<string[]> {
-    return this.inner.listGraphs();
+  async listGraphs(options?: QueryOptions): Promise<string[]> {
+    return this.inner.listGraphs(options);
   }
 
   async listGraphsByPrefix(prefix: string): Promise<string[]> {

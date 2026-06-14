@@ -1,7 +1,7 @@
 import { performance } from 'node:perf_hooks';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { MemoryLayer } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { SparqlHttpStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   DKG_NS,
   linesFromNquads,
@@ -10,21 +10,53 @@ import {
   type CapturedSyncHandler,
 } from './_helpers/sync-responder.js';
 
-const CG_ID = 'perf-cg';
+function perfBudget(name: string, fallbackMs: number): number {
+  const value = Number(process.env[`DKG_SYNC_RESPONDER_PERF_${name}_BUDGET_MS`]);
+  return Number.isFinite(value) && value > 0 ? value : fallbackMs;
+}
+
+const PERF_RUN_ID = (process.env.DKG_SYNC_RESPONDER_PERF_RUN_ID?.trim() || `${process.pid}-${Date.now().toString(36)}`)
+  .replace(/[^A-Za-z0-9_-]/g, '-');
+const CG_ID = `perf-cg-${PERF_RUN_ID}`;
 const CG_PREFIX = `did:dkg:context-graph:${CG_ID}`;
 const DATA_GRAPH = CG_PREFIX;
 const META_GRAPH = `${CG_PREFIX}/_meta`;
 const SWM_GRAPH = `${CG_PREFIX}/_shared_memory`;
 const SWM_META_GRAPH = `${CG_PREFIX}/_shared_memory_meta`;
+const DURABLE_SESSION_ID = `perf-durable-data-${PERF_RUN_ID}`;
+const DURABLE_META_SESSION_ID = `perf-durable-meta-${PERF_RUN_ID}`;
+const SWM_DATA_SESSION_ID = `perf-swm-data-${PERF_RUN_ID}`;
+const SWM_META_SESSION_ID = `perf-swm-meta-${PERF_RUN_ID}`;
 const PAGE_SIZE = 500;
 const DATA_ROWS = 150_000;
 const META_LIFECYCLES = 1_000;
 const SWM_OPS = 120;
 const SWM_ROWS_PER_OP = 50;
-const DURABLE_BUDGET_MS = 500;
-const SWM_DATA_BUDGET_MS = 500;
-const SWM_META_BUDGET_MS = 300;
+const DURABLE_COLD_BUDGET_MS = perfBudget('DURABLE_COLD', 45_000);
+const DURABLE_WARM_BUDGET_MS = perfBudget('DURABLE_WARM', 500);
+const DURABLE_META_BUDGET_MS = perfBudget('DURABLE_META', 500);
+const SWM_COLD_BUDGET_MS = perfBudget('SWM_COLD', 5_000);
+const SWM_DATA_BUDGET_MS = perfBudget('SWM_DATA', 500);
+const SWM_META_BUDGET_MS = perfBudget('SWM_META', 300);
 const describePerf = process.env.DKG_SYNC_RESPONDER_PERF === '1' ? describe : describe.skip;
+
+function createPerfStore(): TripleStore {
+  const queryEndpoint = process.env.DKG_SYNC_RESPONDER_PERF_QUERY_ENDPOINT?.trim();
+  if (!queryEndpoint) {
+    throw new Error(
+      'DKG_SYNC_RESPONDER_PERF=1 requires DKG_SYNC_RESPONDER_PERF_QUERY_ENDPOINT ' +
+      'pointing at an oxigraph-server /query endpoint. Set ' +
+      'DKG_SYNC_RESPONDER_PERF_UPDATE_ENDPOINT as well when /update differs.',
+    );
+  }
+  const timeout = Number(process.env.DKG_SYNC_RESPONDER_PERF_TIMEOUT_MS ?? 180_000);
+  return new SparqlHttpStore({
+    queryEndpoint,
+    updateEndpoint: process.env.DKG_SYNC_RESPONDER_PERF_UPDATE_ENDPOINT?.trim() || queryEndpoint.replace(/\/query\/?$/, '/update'),
+    timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : 180_000,
+    managedByDkg: true,
+  });
+}
 
 function q(graph: string, subject: string, predicate: string, object: string): Quad {
   return { graph, subject, predicate, object };
@@ -43,15 +75,15 @@ async function expectWithinBudget(
 }
 
 describePerf('sync responder perf guard', () => {
-  let store: OxigraphStore;
+  let store: TripleStore | null = null;
   let cap: CapturedSyncHandler;
 
   beforeAll(async () => {
-    store = new OxigraphStore();
+    store = createPerfStore();
     let batch: Quad[] = [];
     const flush = async () => {
       if (batch.length === 0) return;
-      await store.insert(batch);
+      await store!.insert(batch);
       batch = [];
     };
     const push = async (quad: Quad) => {
@@ -103,34 +135,45 @@ describePerf('sync responder perf guard', () => {
       syncPageSize: PAGE_SIZE,
       sharedMemoryTtlMs: 60 * 60 * 1000,
     });
-    await cap.invoke({
-      contextGraphId: CG_ID,
-      includeSharedMemory: false,
-      phase: 'data',
-      offset: 0,
-      limit: 1,
-    });
-  }, 120_000);
+  }, 300_000);
 
-  it('serves durable-data offset 0 and deepest page under budget', async () => {
-    const first = await expectWithinBudget('durable-data offset 0', DURABLE_BUDGET_MS, () =>
+  afterAll(async () => {
+    await store?.close();
+  });
+
+  it('builds durable-data snapshot once and serves warm pages under budget', async () => {
+    const cold = await expectWithinBudget('durable-data cold snapshot', DURABLE_COLD_BUDGET_MS, () =>
       cap.invoke({
         contextGraphId: CG_ID,
         includeSharedMemory: false,
         phase: 'data',
         offset: 0,
         limit: PAGE_SIZE,
+        syncSessionId: DURABLE_SESSION_ID,
       }),
     );
-    expect(linesFromNquads(first)).toHaveLength(PAGE_SIZE);
+    expect(linesFromNquads(cold)).toHaveLength(PAGE_SIZE);
 
-    const deepest = await expectWithinBudget('durable-data deepest page', DURABLE_BUDGET_MS, () =>
+    const warmRetry = await expectWithinBudget('durable-data warm offset 0 retry', DURABLE_WARM_BUDGET_MS, () =>
+      cap.invoke({
+        contextGraphId: CG_ID,
+        includeSharedMemory: false,
+        phase: 'data',
+        offset: 0,
+        limit: PAGE_SIZE,
+        syncSessionId: DURABLE_SESSION_ID,
+      }),
+    );
+    expect(warmRetry).toBe(cold);
+
+    const deepest = await expectWithinBudget('durable-data warm deepest page', DURABLE_WARM_BUDGET_MS, () =>
       cap.invoke({
         contextGraphId: CG_ID,
         includeSharedMemory: false,
         phase: 'data',
         offset: DATA_ROWS - PAGE_SIZE,
         limit: PAGE_SIZE,
+        syncSessionId: DURABLE_SESSION_ID,
       }),
     );
     expect(linesFromNquads(deepest)).toHaveLength(PAGE_SIZE);
@@ -138,40 +181,55 @@ describePerf('sync responder perf guard', () => {
   }, 120_000);
 
   it('serves durable-meta offset 0 and deepest page under budget', async () => {
-    const first = await expectWithinBudget('durable-meta offset 0', DURABLE_BUDGET_MS, () =>
+    const first = await expectWithinBudget('durable-meta offset 0', DURABLE_META_BUDGET_MS, () =>
       cap.invoke({
         contextGraphId: CG_ID,
         includeSharedMemory: false,
         phase: 'meta',
         offset: 0,
         limit: PAGE_SIZE,
+        syncSessionId: DURABLE_META_SESSION_ID,
       }),
     );
     expect(linesFromNquads(first)).toHaveLength(PAGE_SIZE);
 
-    const deepest = await expectWithinBudget('durable-meta deepest page', DURABLE_BUDGET_MS, () =>
+    const deepest = await expectWithinBudget('durable-meta deepest page', DURABLE_META_BUDGET_MS, () =>
       cap.invoke({
         contextGraphId: CG_ID,
         includeSharedMemory: false,
         phase: 'meta',
         offset: 4_500,
         limit: PAGE_SIZE,
+        syncSessionId: DURABLE_META_SESSION_ID,
       }),
     );
     expect(linesFromNquads(deepest)).toHaveLength(PAGE_SIZE);
   }, 60_000);
 
-  it('serves SWM TTL data and meta pages under budget', async () => {
-    const dataFirst = await expectWithinBudget('SWM data offset 0', SWM_DATA_BUDGET_MS, () =>
+  it('builds SWM TTL snapshots once and serves warm data/meta pages under budget', async () => {
+    const dataFirst = await expectWithinBudget('SWM data cold snapshot', SWM_COLD_BUDGET_MS, () =>
       cap.invoke({
         contextGraphId: CG_ID,
         includeSharedMemory: true,
         phase: 'data',
         offset: 0,
         limit: PAGE_SIZE,
+        syncSessionId: SWM_DATA_SESSION_ID,
       }),
     );
     expect(linesFromNquads(dataFirst)).toHaveLength(PAGE_SIZE);
+
+    const dataWarmRetry = await expectWithinBudget('SWM data warm offset 0 retry', SWM_DATA_BUDGET_MS, () =>
+      cap.invoke({
+        contextGraphId: CG_ID,
+        includeSharedMemory: true,
+        phase: 'data',
+        offset: 0,
+        limit: PAGE_SIZE,
+        syncSessionId: SWM_DATA_SESSION_ID,
+      }),
+    );
+    expect(dataWarmRetry).toBe(dataFirst);
 
     const dataDeep = await expectWithinBudget('SWM data deepest page', SWM_DATA_BUDGET_MS, () =>
       cap.invoke({
@@ -180,20 +238,34 @@ describePerf('sync responder perf guard', () => {
         phase: 'data',
         offset: SWM_OPS * SWM_ROWS_PER_OP - PAGE_SIZE,
         limit: PAGE_SIZE,
+        syncSessionId: SWM_DATA_SESSION_ID,
       }),
     );
     expect(linesFromNquads(dataDeep)).toHaveLength(PAGE_SIZE);
 
-    const metaFirst = await expectWithinBudget('SWM meta offset 0', SWM_META_BUDGET_MS, () =>
+    const metaFirst = await expectWithinBudget('SWM meta cold snapshot', SWM_COLD_BUDGET_MS, () =>
       cap.invoke({
         contextGraphId: CG_ID,
         includeSharedMemory: true,
         phase: 'meta',
         offset: 0,
         limit: PAGE_SIZE,
+        syncSessionId: SWM_META_SESSION_ID,
       }),
     );
     expect(linesFromNquads(metaFirst)).toHaveLength(PAGE_SIZE);
+
+    const metaWarmRetry = await expectWithinBudget('SWM meta warm offset 0 retry', SWM_META_BUDGET_MS, () =>
+      cap.invoke({
+        contextGraphId: CG_ID,
+        includeSharedMemory: true,
+        phase: 'meta',
+        offset: 0,
+        limit: PAGE_SIZE,
+        syncSessionId: SWM_META_SESSION_ID,
+      }),
+    );
+    expect(metaWarmRetry).toBe(metaFirst);
 
     const metaDeep = await expectWithinBudget('SWM meta deepest page', SWM_META_BUDGET_MS, () =>
       cap.invoke({
@@ -202,6 +274,7 @@ describePerf('sync responder perf guard', () => {
         phase: 'meta',
         offset: PAGE_SIZE,
         limit: PAGE_SIZE,
+        syncSessionId: SWM_META_SESSION_ID,
       }),
     );
     expect(linesFromNquads(metaDeep)).toHaveLength(SWM_OPS * 5 - PAGE_SIZE);

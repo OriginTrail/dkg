@@ -173,7 +173,13 @@ export function buildSingleByUalQuery({ contextGraphId, subGraphName, ual }: Sin
   const meta = metaUri(contextGraphId);
   const data = dataUri(contextGraphId, subGraphName);
   const privateGraph = privateUri(contextGraphId, subGraphName);
-  return `SELECT ?root ?p ?o WHERE {
+  // SELECT DISTINCT (mirrors buildListQuery's inner SELECT DISTINCT): on a
+  // pre-trim / mixed-version store the bare UAL carries the collapsed
+  // `dkg:rootEntity` aggregate row AND the legacy `<ual>/<n>` token carries
+  // `dkg:partOf` + `dkg:rootEntity`, so BOTH meta-block UNION arms bind the
+  // same ?root and every `?root ?p ?o` data triple would otherwise be returned
+  // twice — turning scalar properties into duplicate arrays in bindingsToKa.
+  return `SELECT DISTINCT ?root ?p ?o WHERE {
   GRAPH <${meta}> {
     { ?ka <${PART_OF}> <${ual}> . ?ka <${ROOT_ENTITY}> ?root . }
     UNION

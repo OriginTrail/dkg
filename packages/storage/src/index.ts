@@ -2,6 +2,7 @@ export {
   type Quad,
   type TripleStore,
   type QueryResult,
+  type QueryOptions,
   type SelectResult,
   type ConstructResult,
   type AskResult,
@@ -33,12 +34,7 @@ export {
 export { OxigraphStore } from './adapters/oxigraph.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';
 export { BlazegraphStore } from './adapters/blazegraph.js';
-export {
-  SparqlHttpStore,
-  type SparqlHttpStoreOptions,
-  type SparqlHttpQueryOptions,
-  type SparqlHttpSlowQueryEvent,
-} from './adapters/sparql-http.js';
+export { SparqlHttpStore, type SparqlHttpStoreOptions } from './adapters/sparql-http.js';
 export { ContextGraphManager, GraphManager } from './graph-manager.js';
 export { PrivateContentStore } from './private-store.js';
 

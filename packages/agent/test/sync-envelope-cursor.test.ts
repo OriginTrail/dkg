@@ -10,7 +10,7 @@ import { buildSyncRequestEnvelope, type SyncRequestEnvelope } from '../src/sync/
  * or negotiation. These tests pin that invariant.
  */
 
-const baseParams = (sinceBatchId?: string) => {
+const baseParams = (sinceBatchId?: string, syncSessionId?: string) => {
   const digestCalls: unknown[][] = [];
   return {
     digestCalls,
@@ -23,6 +23,7 @@ const baseParams = (sinceBatchId?: string) => {
       requesterPeerId: 'peer-requester',
       phase: 'data' as const,
       sinceBatchId,
+      syncSessionId,
       needsAuth: true,
       computeSyncDigest: (...args: unknown[]) => {
         digestCalls.push(args);
@@ -36,9 +37,9 @@ const baseParams = (sinceBatchId?: string) => {
 };
 
 describe('Phase C sync envelope — sinceBatchId is unsigned', () => {
-  it('does not feed sinceBatchId into the signed digest', async () => {
+  it('does not feed sinceBatchId or syncSessionId into the signed digest', async () => {
     const without = baseParams(undefined);
-    const withHint = baseParams('42');
+    const withHint = baseParams('42', 'session-1');
 
     await buildSyncRequestEnvelope(without.params);
     await buildSyncRequestEnvelope(withHint.params);
@@ -55,8 +56,9 @@ describe('Phase C sync envelope — sinceBatchId is unsigned', () => {
     expect(a).toHaveLength(9);
     expect(b).toHaveLength(9);
     for (const idx of [0, 1, 2, 3, 4, 5, 8]) expect(b[idx]).toEqual(a[idx]);
-    // The hint value never appears anywhere in the digest inputs.
+    // The additive hint values never appear anywhere in the digest inputs.
     expect(b.some((arg) => String(arg) === '42')).toBe(false);
+    expect(b.some((arg) => String(arg) === 'session-1')).toBe(false);
   });
 
   it('carries sinceBatchId in the authenticated JSON envelope when set', async () => {
@@ -65,6 +67,14 @@ describe('Phase C sync envelope — sinceBatchId is unsigned', () => {
     const parsed = JSON.parse(new TextDecoder().decode(bytes)) as SyncRequestEnvelope;
     expect(parsed.sinceBatchId).toBe('42');
     // Sanity: it's still a signed envelope.
+    expect(parsed.requesterSignatureR).toBeTruthy();
+  });
+
+  it('carries syncSessionId in the authenticated JSON envelope when set', async () => {
+    const { params } = baseParams(undefined, 'session-1');
+    const bytes = await buildSyncRequestEnvelope(params);
+    const parsed = JSON.parse(new TextDecoder().decode(bytes)) as SyncRequestEnvelope;
+    expect(parsed.syncSessionId).toBe('session-1');
     expect(parsed.requesterSignatureR).toBeTruthy();
   });
 
@@ -80,6 +90,13 @@ describe('Phase C sync envelope — sinceBatchId is unsigned', () => {
     const bytes = await buildSyncRequestEnvelope({ ...params, needsAuth: false });
     const text = new TextDecoder().decode(bytes);
     expect(text).toBe('mfacts|0|100|since|42');
+  });
+
+  it('appends unauthenticated session and since tokens for the pipe encoding', async () => {
+    const { params } = baseParams('42', 'session-1');
+    const bytes = await buildSyncRequestEnvelope({ ...params, needsAuth: false });
+    const text = new TextDecoder().decode(bytes);
+    expect(text).toBe('mfacts|0|100|session|session-1|since|42');
   });
 
   it('omits the pipe |since| token when the hint is unset', async () => {

@@ -85,7 +85,7 @@ import {
   ENTITY_PRED_ALT,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -325,6 +325,7 @@ import {
   type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionStore,
+  type ContextGraphWritePreflightProbe,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
@@ -410,6 +411,7 @@ export type {
   ContextGraphSub,
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionStore,
+  ContextGraphWritePreflightProbe,
   ContextGraphMemberPrincipalType,
   ContextGraphMemberStatus,
   ContextGraphMembershipRecord,
@@ -443,6 +445,12 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
   reservedUal?: string;
 }
 
+export interface DiscoverContextGraphsFromChainOptions {
+  incremental?: boolean;
+  seedIncrementalWatermark?: boolean;
+  throwOnChainScanFailure?: boolean;
+}
+
 /**
  * High-level facade that ties together all DKG agent capabilities:
  * identity, networking, publishing, querying, discovery, and messaging.
@@ -455,6 +463,9 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
  *   await agent.stop();
  */
 export class DKGAgent extends DKGAgentBase {
+  private chainContextGraphScanFailure:
+    | { signature: string; count: number }
+    | undefined;
 
   static async create(config: DKGAgentConfig): Promise<DKGAgent> {
     let wallet: DKGAgentWallet;
@@ -508,6 +519,7 @@ export class DKGAgent extends DKGAgentBase {
         tokenAddress: config.chainConfig.tokenAddress,
         chainId: config.chainConfig.chainId,
         approvalPolicy: config.chainConfig.approvalPolicy,
+        cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
       };
       if (config.chainConfig.adminPrivateKey) {
         chain = new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey });
@@ -1008,12 +1020,23 @@ export class DKGAgent extends DKGAgentBase {
     return discovered;
   }
 
+  async hasContextGraphRegistryScanWatermark(): Promise<boolean> {
+    return await this.chain.hasContextGraphRegistryScanWatermark?.() ?? false;
+  }
+
   /**
    * Query the on-chain registry for all registered context graphs and
    * auto-subscribe to any not yet in the subscription registry.
+   *
+   * Defaults to a full scan so SDK callers can rebuild missing local state.
+   * Background daemon loops may opt into incremental scans to reuse the
+   * in-memory chain adapter watermark.
+   *
    * Returns the number of newly discovered context graphs.
    */
-  async discoverContextGraphsFromChain(): Promise<number> {
+  async discoverContextGraphsFromChain(
+    options: DiscoverContextGraphsFromChainOptions = {},
+  ): Promise<number> {
     const ctx = createOperationContext('system');
     if (!this.chain.listContextGraphsFromChain) {
       this.log.info(ctx, 'Chain adapter does not support listContextGraphsFromChain — skipping');
@@ -1021,11 +1044,40 @@ export class DKGAgent extends DKGAgentBase {
     }
 
     let onChainContextGraphs;
+    let partialChainScan = false;
+    let partialChainScanError: unknown;
     try {
-      onChainContextGraphs = await this.chain.listContextGraphsFromChain();
+      const scanOptions = options.incremental
+        ? { incremental: true }
+        : options.seedIncrementalWatermark
+          ? { seedIncrementalWatermark: true }
+          : undefined;
+      onChainContextGraphs = await this.chain.listContextGraphsFromChain(undefined, scanOptions);
     } catch (err) {
-      this.log.warn(ctx, `Chain context graph scan failed: ${err instanceof Error ? err.message : String(err)}`);
-      return 0;
+      const message = err instanceof Error ? err.message : String(err);
+      const signature = message
+        .replace(/stopped after block \d+/g, 'stopped after block N')
+        .replace(/\[\d+,\s*\d+\]/g, '[range]')
+        .replace(/\b\d+\s+eth_getLogs calls/g, 'N eth_getLogs calls');
+      if (this.chainContextGraphScanFailure?.signature !== signature) {
+        this.log.warn(ctx, `Chain context graph scan failed: ${message}`);
+        this.chainContextGraphScanFailure = { signature, count: 1 };
+      } else {
+        this.chainContextGraphScanFailure.count += 1;
+      }
+      const partialError = isContextGraphChainScanPartialError(err);
+      if (options.throwOnChainScanFailure && !partialError) throw err;
+      if (!partialError) return 0;
+      partialChainScan = true;
+      partialChainScanError = err;
+      onChainContextGraphs = err.partialResults;
+    }
+    if (!partialChainScan && this.chainContextGraphScanFailure) {
+      this.log.info(
+        ctx,
+        `Chain context graph scan recovered after ${this.chainContextGraphScanFailure.count} failed attempt(s)`,
+      );
+      this.chainContextGraphScanFailure = undefined;
     }
 
     // Build a set of all known on-chain IDs (stored and computed) for fast dedup
@@ -1093,6 +1145,7 @@ export class DKGAgent extends DKGAgentBase {
     if (discovered > 0) {
       this.log.info(ctx, `Discovered ${discovered} new context graph(s) from chain`);
     }
+    if (options.throwOnChainScanFailure && partialChainScanError) throw partialChainScanError;
     return discovered;
   }
 
@@ -1155,6 +1208,8 @@ export class DKGAgent extends DKGAgentBase {
       clearInterval(this.vmReconcileTimer);
       this.vmReconcileTimer = null;
     }
+    this.coreHostRecordingsClosed = true;
+    await this.drainCoreHostRecordings();
     if (this.messengerOutboxTimer) {
       clearInterval(this.messengerOutboxTimer);
       this.messengerOutboxTimer = null;

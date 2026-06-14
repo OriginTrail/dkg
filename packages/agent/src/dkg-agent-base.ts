@@ -207,7 +207,7 @@ import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
-import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
+import { getSyncCheckpointKey, MemorySyncCheckpointStore } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
@@ -344,6 +344,7 @@ import {
   type ReplicationEvent,
   type SyncReconcilerBackoff,
 } from './dkg-agent-types.js';
+import type { SyncCheckpointStore } from './sync/checkpoint/state.js';
 import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
@@ -672,6 +673,18 @@ export class DKGAgentBase {
    */
   static readonly VM_RECONCILE_SWEEP_INTERVAL_MS =
     Number(process.env['DKG_VM_RECONCILE_INTERVAL_MS']) || 60_000;
+  static readonly VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS =
+    Math.max(5_000, DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS);
+  static readonly VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS =
+    Number(process.env['DKG_VM_RECONCILE_BACKOFF_MAX_MS']) || 10 * 60_000;
+  static readonly VM_RECONCILE_CACHE_MAX_ENTRIES =
+    Math.max(1, Number(process.env['DKG_VM_RECONCILE_CACHE_MAX_ENTRIES']) || 1_000);
+  static readonly VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS =
+    Math.max(1, Number(process.env['DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS']) || 2_000);
+  static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES =
+    Math.max(1, Number(process.env['DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES']) || 1_000);
+  static readonly CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS =
+    Math.max(1, Number(process.env['DKG_CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS']) || 5_000);
   /**
    * Blocks a completed ordinal must be buried by before its watermark advance
    * commits (reorg gate). The data is promoted to VM eagerly; only the cursor
@@ -693,6 +706,35 @@ export class DKGAgentBase {
   protected readonly reconcileCursors = new Map<string, CursorState>();
   /** Phase B — bounded dedupe of recently-reconciled UALs (live-burst guard). */
   protected readonly recentReconciledUals = new RecentUalSet();
+  /**
+   * In-flight core-hosted recordings launched from the synchronous StorageACK
+   * pre-sign hook. Tracked so rejections are logged and graceful stop() can
+   * flush the host-only `coreHosted` flag before teardown.
+   */
+  protected readonly coreHostRecordings = new Set<Promise<void>>();
+  /** Stop-time gate: once true, ACK hooks must not start new core-host writes. */
+  protected coreHostRecordingsClosed = false;
+  /** Monotonic guard: continuations from abandoned drain generations must not persist after restart. */
+  protected coreHostRecordingGeneration = 0;
+  /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
+  protected readonly vmReconcileNegativeCache = new Map<string, {
+    localCgId: string;
+    failures: number;
+    nextRetryAt: number;
+    swmGen: string;
+    candidateNamespaces: Array<{ metaGraph: string; dataGraph: string }>;
+    peerTopologyKey: string;
+  }>();
+  protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
+  /** Phase D/A4 — per-CG active-fetch cooldown so one sweep cannot fan out repeated fetches. */
+  protected readonly vmReconcileFetchCooldownAt = new Map<string, number>();
+  /** Phase D/A4 — round-robin cursor over the already ordered catch-up peer list. */
+  protected readonly vmReconcileCatchupPeerCursor = new Map<string, number>();
+  protected readonly vmReconcileCatchupPeerOrder = new Map<string, {
+    orderedPeers: string[];
+    nextPeerId?: string;
+    priorityRanks?: Record<string, number>;
+  }>();
   protected hostModeReconcilerTimer: ReturnType<typeof setInterval> | null = null;
   protected hostModePruneTimer: ReturnType<typeof setInterval> | null = null;
   // rc.9 PR-10: joinApprovalRetryQueue + joinApprovalRetryTimer
@@ -1033,6 +1075,12 @@ export class DKGAgentBase {
    */
   protected readonly catchupOnConnectAt = new Map<string, number>();
   /**
+   * Per-peer timestamp of the last time all live connections to that peer
+   * were gone. Used to avoid suppressing reconnect catch-up with a
+   * `lastSuccessfulSyncAt` value from before an offline gap.
+   */
+  protected readonly lastSyncDisconnectedAt = new Map<string, number>();
+  /**
    * Peers whose most recent sync attempt found that their advertised
    * protocol list did NOT include `PROTOCOL_SYNC` — almost always a
    * libp2p identify race on the inbound side of `connection:open`,
@@ -1041,9 +1089,8 @@ export class DKGAgentBase {
    * an updated protocol list that contains `PROTOCOL_SYNC`, and the
    * periodic reconciler treats membership as a strong hint to retry.
    *
-   * Entries are also cleared on `connection:close` (no path to the peer
-   * anyway — the next `connection:open` will re-trigger sync-on-connect)
-   * and after a successful sync (see `lastSuccessfulSyncAt`).
+   * Entries are cleared on `connection:close` and after sync progress or a
+   * clean denial-only response.
    */
   protected readonly skippedNoSyncPeers = new Set<string>();
   /**
@@ -1056,12 +1103,21 @@ export class DKGAgentBase {
    */
   protected readonly lastSuccessfulSyncAt = new Map<string, number>();
   /**
+   * Per-peer timestamp of the most recent sync-on-connect attempt that made
+   * useful progress. This is split from `lastSuccessfulSyncAt` so partial
+   * progress with a timeout clears peer-level backoff without marking the
+   * peer fresh for reconnect suppression. Denial-only rounds intentionally do
+   * not write this long-lived marker; ACL approval has no peer-update event,
+   * so denied peers must remain eligible on the next reconciler cadence.
+   */
+  protected readonly lastSyncProgressAt = new Map<string, number>();
+  /**
    * Per-peer sync-reconciler backoff. `failures` is the count of
    * consecutive reconciler attempts that did NOT produce a successful
    * sync; `nextRetryAt` is the epoch-ms before which the reconciler
-   * skips this peer. Reset on a successful sync (`onPeerSynced`) and on
-   * `connection:close`. Bounded by the connected-peer set (one entry per
-   * peer, cleared on disconnect). See `SYNC_BACKOFF_BASE_MS`.
+   * skips this peer. Reset on useful progress or a clean denial-only response
+   * (`onPeerSynced`) and pruned after stale disconnects. See
+   * `SYNC_BACKOFF_BASE_MS`.
    */
   protected readonly syncReconcilerBackoff = new Map<string, SyncReconcilerBackoff>();
   protected syncReconcilerTimer: ReturnType<typeof setInterval> | null = null;
@@ -1070,6 +1126,8 @@ export class DKGAgentBase {
   /** Cores keep-alive-pinned on the last warm-core pass, so the next pass can
    *  unpin Cores that fell out of the selection (stale-pin / cap-drift guard). */
   protected warmedCores: Set<string> = new Set();
+  /** Stale warm-core keep-alive removals that failed and should be retried. */
+  protected warmCoreFailedUnpins: Set<string> = new Set();
   /**
    * v10-rc sync-refactor: per-(peer+CG) checkpoint offsets so the paged
    * sync requester in `sync/requester/page-fetch.ts` can resume where it
@@ -1077,7 +1135,7 @@ export class DKGAgentBase {
    * can run CPU-bound hash checks off the main thread. Both introduced
    * by PR #237 (sync-refactor-rebased).
    */
-  protected readonly syncCheckpoints = new Map<string, number>();
+  protected syncCheckpoints: SyncCheckpointStore = new MemorySyncCheckpointStore();
   protected syncVerifyWorker?: SyncVerifyWorker;
 
   /** Registered agents on this node: agentAddress → AgentKeyRecord */
@@ -1147,5 +1205,6 @@ export class DKGAgentBase {
     this.profileManager = new ProfileManager(publisher, store);
     this.publisher.setWorkspaceAgentRecipientResolver((input) => (this as unknown as DKGAgent).resolveWorkspaceRecipientsGated(input));
     this.publisher.setWorkspaceSenderKeyEncryptor((input) => (this as unknown as DKGAgent).encryptWorkspacePayloadWithSenderKey(input));
+    this.syncCheckpoints = config.syncCheckpointStore ?? this.syncCheckpoints;
   }
 }

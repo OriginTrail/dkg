@@ -131,6 +131,11 @@ export interface NetworkConfig {
     hubAddress: string;
     tokenAddress?: string;
     chainId: string;
+    /**
+     * ContextGraphNameRegistry discovery scan `eth_getLogs` block-window.
+     * Defaults to the EVM adapter's 2,000-block common provider cap.
+     */
+    cgRegistryScanPageSize?: number;
   };
   faucet?: {
     url: string;
@@ -220,6 +225,11 @@ export interface ChainConfig {
    * `packages/cli/skills/dkg-node/SKILL.md` §8 for the operator guide.
    */
   approvalPolicy?: ApprovalPolicyConfig;
+  /**
+   * ContextGraphNameRegistry discovery scan `eth_getLogs` block-window.
+   * Defaults to the EVM adapter's 2,000-block common provider cap.
+   */
+  cgRegistryScanPageSize?: number;
 }
 
 export interface LargeLiteralStorageConfig {
@@ -968,6 +978,8 @@ export function resolveChainConfig(
   if (tokenAddress !== undefined) merged.tokenAddress = tokenAddress;
   const chainId = cfg?.chainId ?? net?.chainId;
   if (chainId !== undefined) merged.chainId = chainId;
+  const cgRegistryScanPageSize = cfg?.cgRegistryScanPageSize ?? net?.cgRegistryScanPageSize;
+  if (cgRegistryScanPageSize !== undefined) merged.cgRegistryScanPageSize = cgRegistryScanPageSize;
   if (cfg?.mockIdentityId !== undefined) merged.mockIdentityId = cfg.mockIdentityId;
   return merged;
 }

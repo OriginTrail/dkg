@@ -755,7 +755,12 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
    * Get the peer allowlist for a context graph (if curated).
    * Returns null if no allowlist is set (open CG).
    */
-  async getContextGraphAllowedPeers(this: DKGAgent, contextGraphId: string): Promise<string[] | null> {
+  async getContextGraphAllowedPeers(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<string[] | null> {
+    void options;
     const peers = (await this.getCgMeta(contextGraphId)).allowedPeers;
     return peers.length > 0 ? peers : null;
   }

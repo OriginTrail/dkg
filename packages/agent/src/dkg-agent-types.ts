@@ -38,6 +38,7 @@ import type { ApprovalPolicy, ChainAdapter } from '@origintrail-official/dkg-cha
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
 import type { CclFactResolutionMode } from './ccl-fact-resolution.js';
+import type { SyncCheckpointStore } from './sync/checkpoint/state.js';
 import type { JsonLdContent } from './dkg-agent-utils.js';
 import type { SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import type { KaNumberAllocator } from './allocator.js';
@@ -148,6 +149,7 @@ export interface SyncRequestEnvelope {
   requesterPeerId?: string;
   requestId?: string;
   issuedAtMs?: number;
+  syncSessionId?: string;
   requesterIdentityId?: string;
   requesterAgentAddress?: string;
   requesterSignatureR?: string;
@@ -648,8 +650,20 @@ export interface ContextGraphSubscriptionRecord {
 
 export interface ContextGraphSubscriptionStore {
   loadAll(): Promise<ContextGraphSubscriptionRecord[]>;
+  load?(contextGraphId: string): Promise<ContextGraphSubscriptionRecord | null>;
   save(record: ContextGraphSubscriptionRecord): Promise<void>;
   delete(contextGraphId: string): Promise<void>;
+}
+
+export interface ContextGraphWritePreflightProbe {
+  exists: boolean;
+  hasLocalContent: boolean;
+  inMemorySubscription?: Pick<ContextGraphSub, 'subscribed' | 'synced'>;
+  persistedSubscription?: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'synced'>;
+  declarationFound: boolean;
+  accessPolicy?: 'public' | 'private';
+  curator?: string;
+  callerAuthorized?: boolean;
 }
 
 export type ContextGraphMemberPrincipalType = 'node' | 'agent' | 'identity';
@@ -680,11 +694,15 @@ export interface DurableSyncDiagnostics {
   insertedDataTriples: number;
   bytesReceived: number;
   resumedPhases: number;
+  timedOutPhases: number;
+  completedPhases: number;
+  checkpointAdvances: number;
   emptyResponses: number;
   metaOnlyResponses: number;
   dataRejectedMissingMeta: number;
   rejectedKcs: number;
   failedPeers: number;
+  failedPhases: number;
 }
 
 export interface SharedMemorySyncDiagnostics {
@@ -694,9 +712,13 @@ export interface SharedMemorySyncDiagnostics {
   insertedDataTriples: number;
   bytesReceived: number;
   resumedPhases: number;
+  timedOutPhases: number;
+  completedPhases: number;
+  checkpointAdvances: number;
   emptyResponses: number;
   droppedDataTriples: number;
   failedPeers: number;
+  failedPhases: number;
 }
 
 export interface CatchupSyncDiagnostics {
@@ -933,6 +955,8 @@ export interface DKGAgentConfig {
      * (`'per-publish'`, bounded-per-publish with on-chain 1n floor).
      */
     approvalPolicy?: ApprovalPolicy;
+    /** Optional ContextGraphNameRegistry `eth_getLogs` block-window tuning. */
+    cgRegistryScanPageSize?: number;
   };
   /** Cross-agent query access configuration. */
   queryAccess?: QueryAccessConfig;
@@ -979,6 +1003,8 @@ export interface DKGAgentConfig {
   };
   /** Durable local store for subscribed context-graph runtime state. */
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
+  /** Durable local store for paged sync checkpoints. Defaults to in-memory. */
+  syncCheckpointStore?: SyncCheckpointStore;
   /**
    * Cap on how many persisted context-graph subscriptions are *activated*
    * (gossip-subscribed + sync-tracked) when rehydrating at startup. A large

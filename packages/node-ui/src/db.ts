@@ -10,7 +10,7 @@ import {
   type ProtocolOutboxStore,
 } from '@origintrail-official/dkg-core';
 
-const SCHEMA_VERSION = 20;
+const SCHEMA_VERSION = 21;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -751,6 +751,19 @@ export class DashboardDB {
       `);
     }
 
+    if (version < 21) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS sync_checkpoints (
+          key TEXT PRIMARY KEY,
+          offset INTEGER NOT NULL CHECK (offset >= 0),
+          updated_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sync_checkpoints_expires_at
+          ON sync_checkpoints(expires_at);
+      `);
+    }
+
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
       this.retentionDays = LEGACY_IMPLICIT_RETENTION_DAYS;
@@ -787,6 +800,7 @@ export class DashboardDB {
     this.db.exec(`DELETE FROM chat_persistence_jobs WHERE updated_at < ${cutoff} AND status IN ('stored', 'failed')`);
     this.db.exec(`DELETE FROM notifications WHERE ts < ${cutoff}`);
     this.db.exec(`DELETE FROM replication_events WHERE ts < ${cutoff}`);
+    this.db.prepare(`DELETE FROM sync_checkpoints WHERE expires_at < ?`).run(Date.now());
     // Universal Messenger idempotency table. Shorter TTL than the
     // operator retention: no realistic dedup window extends beyond
     // a day. The protocol_outbox table is intentionally not pruned
@@ -941,6 +955,13 @@ export class DashboardDB {
     return this.db.prepare(
       'SELECT * FROM context_graph_subscriptions ORDER BY context_graph_id ASC',
     ).all() as ContextGraphSubscriptionRow[];
+  }
+
+  getContextGraphSubscription(contextGraphId: string): ContextGraphSubscriptionRow | undefined {
+    return this.stmt(
+      'getContextGraphSubscription',
+      'SELECT * FROM context_graph_subscriptions WHERE context_graph_id = ?',
+    ).get(contextGraphId) as ContextGraphSubscriptionRow | undefined;
   }
 
   deleteContextGraphSubscription(contextGraphId: string): void {
@@ -2201,6 +2222,64 @@ export class DashboardDB {
 
   close(): void {
     this.db.close();
+  }
+}
+
+// --- Sync requester checkpoints (issue #1138 A3) ---
+
+const DEFAULT_SYNC_CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
+
+export class SqliteSyncCheckpointStore {
+  private readonly db: Database.Database;
+  private readonly clock: () => number;
+  private readonly ttlMs: number;
+
+  constructor(
+    dashboard: DashboardDB,
+    options: { clock?: () => number; ttlMs?: number } = {},
+  ) {
+    this.db = dashboard.db;
+    this.clock = options.clock ?? (() => Date.now());
+    this.ttlMs = options.ttlMs ?? DEFAULT_SYNC_CHECKPOINT_TTL_MS;
+  }
+
+  get(key: string): { offset: number; updatedAtMs: number; expiresAtMs: number } | undefined {
+    const now = this.clock();
+    const row = this.db.prepare(
+      `SELECT offset, updated_at, expires_at FROM sync_checkpoints WHERE key = ?`,
+    ).get(key) as { offset: number; updated_at: number; expires_at: number } | undefined;
+    if (!row) return undefined;
+    if (row.expires_at < now) {
+      this.delete(key);
+      return undefined;
+    }
+    return {
+      offset: row.offset,
+      updatedAtMs: row.updated_at,
+      expiresAtMs: row.expires_at,
+    };
+  }
+
+  set(key: string, value: number, nowMs = this.clock()): void {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`Invalid sync checkpoint offset for ${key}: ${value}`);
+    }
+    this.db.prepare(`
+      INSERT INTO sync_checkpoints (key, offset, updated_at, expires_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET
+        offset = excluded.offset,
+        updated_at = excluded.updated_at,
+        expires_at = excluded.expires_at
+    `).run(key, value, nowMs, nowMs + this.ttlMs);
+  }
+
+  delete(key: string): void {
+    this.db.prepare(`DELETE FROM sync_checkpoints WHERE key = ?`).run(key);
+  }
+
+  pruneExpired(nowMs = this.clock()): number {
+    return this.db.prepare(`DELETE FROM sync_checkpoints WHERE expires_at < ?`).run(nowMs).changes;
   }
 }
 

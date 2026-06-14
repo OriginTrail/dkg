@@ -9,15 +9,22 @@ const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
 
 export interface CatchupJobResult {
   connectedPeers: number;
+  totalPeers?: number;
+  selectedPeers?: number;
   syncCapablePeers: number;
   peersTried: number;
   /**
+   * Subset of `peersTried` whose per-peer sync round reached a responder
+   * and did not collapse into a transport failure. A responder can still
+   * time out part-way through, deny access, or serve metadata-only rows; this
+   * counter exists so daemon status mapping can distinguish "curator offline"
+   * from "reachable peer answered but did not complete cleanly".
+   */
+  peersResponded: number;
+  /**
    * Subset of `peersTried` whose per-peer sync round finished without a
-   * transport failure AND without an explicit ACL denial. Used by the
-   * daemon subscribe job to map the terminal status: `peersTried > 0
-   * && peersSucceeded === 0 && !denied` → `unreachable` (curator
-   * offline / no peer holds this CG / network couldn't deliver),
-   * distinct from `denied` (curator actively refused).
+   * transport failure, without an explicit ACL denial, and with either real
+   * progress or a clean non-metadata-only empty completion.
    */
   peersSucceeded: number;
   dataSynced: number;
@@ -33,11 +40,15 @@ export interface CatchupJobResult {
       insertedDataTriples: number;
       bytesReceived: number;
       resumedPhases: number;
+      timedOutPhases: number;
+      completedPhases: number;
+      checkpointAdvances: number;
       emptyResponses: number;
       metaOnlyResponses: number;
       dataRejectedMissingMeta: number;
       rejectedKcs: number;
       failedPeers: number;
+      failedPhases: number;
     };
     sharedMemory: {
       fetchedMetaTriples: number;
@@ -46,9 +57,13 @@ export interface CatchupJobResult {
       insertedDataTriples: number;
       bytesReceived: number;
       resumedPhases: number;
+      timedOutPhases: number;
+      completedPhases: number;
+      checkpointAdvances: number;
       emptyResponses: number;
       droppedDataTriples: number;
       failedPeers: number;
+      failedPhases: number;
     };
   };
 }
@@ -56,6 +71,56 @@ export interface CatchupJobResult {
 export interface CatchupRunRequest {
   contextGraphId: string;
   includeSharedMemory: boolean;
+}
+
+export interface CatchupPhaseProgress {
+  timedOutPhases?: number;
+  resumedPhases?: number;
+  completedPhases?: number;
+  checkpointAdvances?: number;
+  failedPeers?: number;
+  failedPhases?: number;
+  insertedTriples?: number;
+  insertedDataTriples?: number;
+  insertedMetaTriples?: number;
+  metaOnlyResponses?: number;
+}
+
+export function catchupPeerSucceeded(
+  durable: CatchupPhaseProgress,
+  shared: CatchupPhaseProgress | null | undefined,
+  peerDenied: boolean,
+): boolean {
+  if (!catchupPeerResponded(durable, shared) || peerDenied) return false;
+  const peerTransportFailed = (durable.failedPeers ?? 0) > 0 || (shared ? (shared.failedPeers ?? 0) > 0 : false);
+  if (peerTransportFailed) return false;
+  const peerPhaseFailed = (durable.failedPhases ?? 0) > 0 || (shared ? (shared.failedPhases ?? 0) > 0 : false);
+  if (peerPhaseFailed) return false;
+  const durableProgress = (durable.insertedDataTriples ?? durable.insertedTriples ?? 0) > 0
+    || (durable.checkpointAdvances ?? 0) > 0
+    || ((durable.completedPhases ?? 0) > 0 && (durable.resumedPhases ?? 0) > 0);
+  const sharedProgress = shared
+    ? (shared.insertedDataTriples ?? shared.insertedTriples ?? 0) > 0
+      || (shared.checkpointAdvances ?? 0) > 0
+      || ((shared.completedPhases ?? 0) > 0 && (shared.resumedPhases ?? 0) > 0)
+    : false;
+  const peerMadeProgress = durableProgress || sharedProgress;
+  const peerMetadataOnly = !peerMadeProgress && (
+    (durable.insertedMetaTriples ?? 0) > 0
+    || (durable.metaOnlyResponses ?? 0) > 0
+    || (shared ? (shared.insertedMetaTriples ?? 0) > 0 : false)
+  );
+  const peerTimedOut = (durable.timedOutPhases ?? 0) > 0 || (shared ? (shared.timedOutPhases ?? 0) > 0 : false);
+  return peerMadeProgress || (!peerTimedOut && !peerMetadataOnly);
+}
+
+export function catchupPeerResponded(
+  durable: CatchupPhaseProgress,
+  shared: CatchupPhaseProgress | null | undefined,
+): boolean {
+  const durableFailed = (durable.failedPeers ?? 0) > 0;
+  const sharedFailed = shared ? (shared.failedPeers ?? 0) > 0 : false;
+  return shared ? !durableFailed || !sharedFailed : !durableFailed;
 }
 
 export interface CatchupRunner {

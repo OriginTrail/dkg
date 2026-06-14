@@ -1,6 +1,7 @@
 import { createServer, type Server } from 'node:http';
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
-import { SparqlHttpStore, createTripleStore, type Quad, type SparqlHttpSlowQueryEvent } from '../src/index.js';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { SparqlHttpStore, createTripleStore, type Quad } from '../src/index.js';
+import { LIST_GRAPHS_CACHE_TTL_MS } from '../src/adapters/sparql-http.js';
 
 let server: Server;
 let queryUrl: string;
@@ -8,6 +9,8 @@ let updateUrl: string;
 const insertedQuads: string[] = [];
 /** How many times the server received the `SELECT DISTINCT ?g` listGraphs scan. */
 let listGraphsHits = 0;
+/** When set, the server holds every listGraphs response until this resolves. */
+let listGraphsGate: Promise<void> | null = null;
 
 function startTestServer(): Promise<void> {
   return new Promise((resolve) => {
@@ -22,7 +25,7 @@ function startTestServer(): Promise<void> {
           res.end();
           return;
         }
-        if (req.url?.startsWith('/query')) {
+        if (req.url === '/query') {
           if (decoded.includes('ASK')) {
             res.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
             res.end(JSON.stringify({ boolean: true }));
@@ -45,7 +48,9 @@ function startTestServer(): Promise<void> {
                 results: { bindings: [{ g: { type: 'uri', value: 'http://ex.org/g1' } }] },
               }));
             };
-            respond();
+            // Optionally hold the response so a test can keep a scan in flight.
+            if (listGraphsGate) void listGraphsGate.then(respond);
+            else respond();
             return;
           }
           res.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
@@ -113,103 +118,57 @@ describe('SparqlHttpStore (test server)', () => {
     }
   });
 
-  it('emits sampled slow-query events with source tags and query fingerprints', async () => {
-    let clock = 0;
-    const events: SparqlHttpSlowQueryEvent[] = [];
-    const taggedStore = new SparqlHttpStore({
-      queryEndpoint: queryUrl,
-      updateEndpoint: updateUrl,
-      slowQueryThresholdMs: 10,
-      onSlowQuery: (event) => events.push(event),
-      now: () => clock,
-    });
-
-    const pending = taggedStore.query(
-      'SELECT ?name WHERE { GRAPH <http://ex.org/g1> { <http://ex.org/alice> <http://schema.org/name> ?name } }',
-      { source: 'unit test/source' },
-    );
-    clock = 25;
-    await pending;
-
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({
-      source: 'unit_test/source',
-      operation: 'select',
-      elapsedMs: 25,
-      thresholdMs: 10,
-      endpoint: queryUrl,
-    });
-    expect(events[0].queryHash).toMatch(/^[a-f0-9]{16}$/);
-    expect(events[0].queryBytes).toBeGreaterThan(0);
-    expect(events[0]).not.toHaveProperty('sparql');
-  });
-
-  it('honors slow-query sample rate zero', async () => {
-    let clock = 0;
-    const events: SparqlHttpSlowQueryEvent[] = [];
-    const sampledOutStore = new SparqlHttpStore({
-      queryEndpoint: queryUrl,
-      updateEndpoint: updateUrl,
-      slowQueryThresholdMs: 1,
-      slowQuerySampleRate: 0,
-      onSlowQuery: (event) => events.push(event),
-      now: () => clock,
-    });
-
-    const pending = sampledOutStore.query('ASK { GRAPH <http://ex.org/g> { ?s ?p ?o } }', {
-      source: 'sampled-out',
-    });
-    clock = 50;
-    await pending;
-
-    expect(events).toHaveLength(0);
-  });
-
-  it('does not let slow-query hook failures fail the query', async () => {
-    let clock = 0;
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const store = new SparqlHttpStore({
-      queryEndpoint: queryUrl,
-      updateEndpoint: updateUrl,
-      slowQueryThresholdMs: 1,
-      onSlowQuery: () => { throw new Error('sink down'); },
-      now: () => clock,
-    });
-
-    try {
-      const pending = store.query('ASK { GRAPH <http://ex.org/g> { ?s ?p ?o } }', {
-        source: 'throwing-hook',
+  it('composes caller abort signals into SELECT and CONSTRUCT fetches', async () => {
+    const originalFetch = globalThis.fetch;
+    const seenSignals: AbortSignal[] = [];
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      if (init?.signal instanceof AbortSignal) seenSignals.push(init.signal);
+      const accept = String((init?.headers as Record<string, string> | undefined)?.Accept ?? '');
+      if (accept.includes('n-quads')) {
+        return new Response('', { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        head: { vars: [] },
+        results: { bindings: [] },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/sparql-results+json' },
       });
-      clock = 50;
-      const result = await pending;
-      expect(result.type).toBe('boolean');
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('slow query hook failed'));
+    }) as typeof fetch;
+    try {
+      const signalController = new AbortController();
+      const signalStore = new SparqlHttpStore({ queryEndpoint: 'http://example.test/query', timeout: 30_000 });
+
+      await signalStore.query('SELECT ?s WHERE { ?s ?p ?o }', { signal: signalController.signal });
+      await signalStore.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }', { signal: signalController.signal });
+
+      expect(seenSignals).toHaveLength(2);
+      expect(seenSignals.every((signal) => !signal.aborted)).toBe(true);
+      signalController.abort(new Error('caller aborted'));
+      expect(seenSignals.every((signal) => signal.aborted)).toBe(true);
     } finally {
-      warn.mockRestore();
+      globalThis.fetch = originalFetch;
     }
   });
 
-  it('redacts endpoint query strings from slow-query telemetry', async () => {
-    let clock = 0;
-    const events: SparqlHttpSlowQueryEvent[] = [];
-    const store = new SparqlHttpStore({
-      queryEndpoint: `${queryUrl}?token=secret#fragment`,
-      updateEndpoint: updateUrl,
-      slowQueryThresholdMs: 1,
-      onSlowQuery: (event) => events.push(event),
-      now: () => clock,
-    });
+  it('rejects in-flight queries when the caller aborts', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      })) as typeof fetch;
+    try {
+      const signalController = new AbortController();
+      const signalStore = new SparqlHttpStore({ queryEndpoint: 'http://example.test/query', timeout: 30_000 });
+      const query = signalStore.query('SELECT ?s WHERE { ?s ?p ?o }', { signal: signalController.signal });
 
-    const pending = store.query('ASK { GRAPH <http://ex.org/g> { ?s ?p ?o } }', {
-      source: 'secret-endpoint',
-    });
-    clock = 50;
-    await pending;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      signalController.abort(new Error('caller aborted'));
 
-    expect(events).toHaveLength(1);
-    expect(events[0].endpoint).toBe(queryUrl);
-    expect(events[0].endpoint).not.toContain('secret');
-    expect(events[0].endpoint).not.toContain('#fragment');
+      await expect(query).rejects.toThrow(/caller aborted/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it('query ASK returns boolean', async () => {
@@ -304,19 +263,150 @@ describe('SparqlHttpStore (test server)', () => {
     expect(result.type).toBe('bindings');
   });
 
-  describe('listGraphs()', () => {
-    it('scans directly even when managedByDkg is set; GraphSetIndexStore owns caching', async () => {
+  // R6-A: on a daemon-owned (managed) endpoint, listGraphs() is served from an
+  // in-memory cache invalidated on writes — eliminating the data-proportional
+  // `SELECT DISTINCT ?g` full scan that the 30s host-mode reconcile (and
+  // on-demand CG enumeration) would otherwise re-run every cycle on an idle,
+  // data-rich node. External (non-managed) endpoints must NOT cache, since an
+  // outside writer could add a graph we never see.
+  describe('listGraphs() cache (R6-A)', () => {
+    const managedStore = () =>
+      new SparqlHttpStore({ queryEndpoint: queryUrl, updateEndpoint: updateUrl, managedByDkg: true });
+    const g = (graph: string) =>
+      [{ subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"v"', graph }];
+
+    it('managed endpoint serves repeated listGraphs() from cache (one scan)', async () => {
       listGraphsHits = 0;
-      const store = new SparqlHttpStore({
-        queryEndpoint: queryUrl,
-        updateEndpoint: updateUrl,
-        managedByDkg: true,
-      });
+      const store = managedStore();
       const a = await store.listGraphs();
       const b = await store.listGraphs();
       expect(a).toContain('http://ex.org/g1');
       expect(b).toContain('http://ex.org/g1');
-      expect(listGraphsHits).toBe(2);
+      expect(listGraphsHits).toBe(1); // second call hit the cache, not the server
+    });
+
+    it.each(['insert', 'delete', 'deleteByPattern', 'dropGraph', 'deleteBySubjectPrefix'] as const)(
+      'invalidates the cache on %s so the next listGraphs() re-scans',
+      async (method) => {
+        listGraphsHits = 0;
+        const store = managedStore();
+        await store.listGraphs();
+        await store.listGraphs();
+        expect(listGraphsHits).toBe(1); // warm
+
+        switch (method) {
+          case 'insert': await store.insert(g('http://ex.org/g2')); break;
+          case 'delete': await store.delete(g('http://ex.org/g')); break;
+          case 'deleteByPattern': await store.deleteByPattern({ graph: 'http://ex.org/g' }); break;
+          case 'dropGraph': await store.dropGraph('http://ex.org/g'); break;
+          case 'deleteBySubjectPrefix': await store.deleteBySubjectPrefix('http://ex.org/g', 'http://ex.org/'); break;
+        }
+
+        await store.listGraphs();
+        expect(listGraphsHits).toBe(2); // write invalidated the cache
+      },
+    );
+
+    it('does NOT cache for a non-managed (external) endpoint', async () => {
+      listGraphsHits = 0;
+      const store = new SparqlHttpStore({ queryEndpoint: queryUrl, updateEndpoint: updateUrl });
+      await store.listGraphs();
+      await store.listGraphs();
+      expect(listGraphsHits).toBe(2); // every call queries the server
+    });
+
+    it('re-scans after the cache TTL expires, so a store outage cannot be masked forever', async () => {
+      listGraphsHits = 0;
+      let clock = 1_000_000;
+      const store = new SparqlHttpStore({
+        queryEndpoint: queryUrl,
+        updateEndpoint: updateUrl,
+        managedByDkg: true,
+        now: () => clock,
+      });
+      await store.listGraphs();
+      await store.listGraphs();
+      expect(listGraphsHits).toBe(1); // within TTL: served from cache
+
+      clock += LIST_GRAPHS_CACHE_TTL_MS + 1; // advance past the TTL
+      await store.listGraphs();
+      expect(listGraphsHits).toBe(2); // expired: re-validated against the store
+    });
+
+    it('coalesces concurrent cold-cache callers onto a single scan', async () => {
+      // Without in-flight coalescing, simultaneous callers (reconcile + metrics
+      // CG-count + status) on a cold/expired cache each issue their own
+      // `SELECT DISTINCT ?g` — duplicate full scans, the load this fix removes.
+      listGraphsHits = 0;
+      const store = managedStore();
+      const [a, b, c] = await Promise.all([
+        store.listGraphs(),
+        store.listGraphs(),
+        store.listGraphs(),
+      ]);
+      expect(a).toContain('http://ex.org/g1');
+      expect(b).toContain('http://ex.org/g1');
+      expect(c).toContain('http://ex.org/g1');
+      expect(listGraphsHits).toBe(1); // all three shared one in-flight scan
+    });
+
+    it('lets aborted callers detach without cancelling the shared managed scan', async () => {
+      listGraphsHits = 0;
+      let release!: () => void;
+      listGraphsGate = new Promise<void>((r) => { release = r; });
+      const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+      const store = managedStore();
+      const firstController = new AbortController();
+      try {
+        const first = store.listGraphs({ signal: firstController.signal });
+        await delay(30);
+        expect(listGraphsHits).toBe(1);
+
+        firstController.abort(new Error('first caller left'));
+        await expect(first).rejects.toThrow(/first caller left/);
+
+        const second = store.listGraphs();
+        await delay(30);
+        expect(listGraphsHits).toBe(1);
+
+        release();
+        await expect(second).resolves.toContain('http://ex.org/g1');
+      } finally {
+        listGraphsGate = null;
+      }
+    });
+
+    it('a write during an in-flight scan forces the next caller to re-scan, not join stale work', async () => {
+      // Read-your-writes: if a scan is in flight and a write invalidates the
+      // cache before it resolves, a caller arriving after the write must start
+      // a fresh scan rather than join the pre-write in-flight one.
+      listGraphsHits = 0;
+      let release!: () => void;
+      listGraphsGate = new Promise<void>((r) => { release = r; });
+      const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+      const store = managedStore();
+      try {
+        const p1 = store.listGraphs();             // caller 1: scan in flight (held by gate)
+        await delay(30);                           // request reaches the server (hits=1)
+        await store.insert(g('http://ex.org/g2')); // write invalidates the cache (gen bump)
+        const p2 = store.listGraphs();             // caller 2: must NOT join the pre-write scan
+        await delay(30);                           // caller 2 issues its own request (hits=2)
+        release();
+        await Promise.all([p1, p2]);
+        expect(listGraphsHits).toBe(2);            // post-write caller ran a fresh scan
+      } finally {
+        listGraphsGate = null;
+      }
+    });
+
+    it('returns a defensive copy that cannot mutate the cached set', async () => {
+      listGraphsHits = 0;
+      const store = managedStore();
+      const first = await store.listGraphs();
+      first.push('http://ex.org/injected');
+      const second = await store.listGraphs();
+      expect(second).not.toContain('http://ex.org/injected');
+      expect(listGraphsHits).toBe(1); // second served from cache, copy was independent
     });
   });
 });

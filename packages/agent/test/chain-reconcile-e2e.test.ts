@@ -50,11 +50,19 @@ async function seedSwmSnapshot(store: OxigraphStore, entity: string, value: stri
  * of the gossip envelope flag). `FinalizationHandler.getKeepRootCopySignal`
  * reads it back to decide the same-graph dual-write during reconcile.
  */
-async function seedKeepRootSignal(store: OxigraphStore, entity: string, keep: boolean): Promise<void> {
+async function seedKeepRootSignal(
+  store: OxigraphStore,
+  entity: string,
+  keep: boolean,
+  form: 'plain' | 'typed' = 'plain',
+): Promise<void> {
+  const object = form === 'typed'
+    ? `"${keep}"^^<http://www.w3.org/2001/XMLSchema#boolean>`
+    : `"${keep}"`;
   await store.insert([{
     subject: entity,
     predicate: 'http://dkg.io/ontology/keepRootCopyOnLabel',
-    object: `"${keep}"`,
+    object,
     graph: contextGraphWorkspaceMetaGraphUri(LOCAL_CG),
   }]);
 }
@@ -148,6 +156,30 @@ describe('Phase B e2e — chain registration -> VM via the sweep', () => {
     expect(await isInVm(store, 'urn:fact:b', 'Octopuses have three hearts')).toBe(true);
   });
 
+  it('does not materialize a chain-backed reconcile when the head block read fails', async () => {
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter();
+    const fh = new FinalizationHandler(store, chain);
+
+    const root = await seedSwmSnapshot(store, 'urn:fact:headfail', 'Chain heads matter');
+    chain.__registerKC({ kaId: 103n, contextGraphId: ON_CHAIN_CG, merkleRootHex: ethers.hexlify(root), chunks: [] });
+
+    const persisted: number[] = [];
+    const deps = {
+      ...makeDeps(store, chain, fh, persisted),
+      getHeadBlock: async () => {
+        throw new Error('RPC down');
+      },
+    };
+    const cursor = createCursorState(0);
+
+    const res = await reconcileContextGraph(deps, cursor, LOCAL_CG, ON_CHAIN_CG);
+
+    expect(res).toMatchObject({ head: 1, watermark: 0, reconciled: 0, pending: 1 });
+    expect(persisted).toEqual([]);
+    expect(await isInVm(store, 'urn:fact:headfail', 'Chain heads matter')).toBe(false);
+  });
+
   it('holds the watermark at a gap and fills it on a later sweep (late SWM arrival)', async () => {
     const store = new OxigraphStore();
     const chain = new MockChainAdapter();
@@ -208,6 +240,27 @@ describe('Phase B e2e — chain registration -> VM via the sweep', () => {
     expect(res.reconciled).toBe(1);
     expect(await isInVm(store, 'urn:fact:dw', value)).toBe(true);
     expect(await isInRootLabel(store, 'urn:fact:dw', value)).toBe(true);
+  });
+
+  it('recovers a typed boolean keepRootCopyOnLabel literal and dual-writes', async () => {
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter();
+    const fh = new FinalizationHandler(store, chain);
+
+    const value = 'Honey never spoils';
+    const root = await seedSwmSnapshot(store, 'urn:fact:dwtyped', value);
+    await seedKeepRootSignal(store, 'urn:fact:dwtyped', true, 'typed');
+    chain.__registerKC({ kaId: 303n, contextGraphId: ON_CHAIN_CG, merkleRootHex: ethers.hexlify(root), chunks: [] });
+
+    const persisted: number[] = [];
+    const deps = makeDeps(store, chain, fh, persisted);
+    const cursor = createCursorState(0);
+
+    const res = await reconcileContextGraph(deps, cursor, LOCAL_CG, ON_CHAIN_CG);
+
+    expect(res.reconciled).toBe(1);
+    expect(await isInVm(store, 'urn:fact:dwtyped', value)).toBe(true);
+    expect(await isInRootLabel(store, 'urn:fact:dwtyped', value)).toBe(true);
   });
 
   it('does NOT dual-write to the root label graph when no keep-root signal is persisted', async () => {

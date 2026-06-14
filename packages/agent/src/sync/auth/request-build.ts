@@ -15,6 +15,7 @@ export interface SyncRequestEnvelope {
   requesterPeerId?: string;
   requestId?: string;
   issuedAtMs?: number;
+  syncSessionId?: string;
   requesterIdentityId?: string;
   requesterAgentAddress?: string;
   requesterSignatureR?: string;
@@ -46,6 +47,7 @@ interface BuildSyncRequestParams {
   phase?: SyncPhase;
   snapshotRef?: string;
   sinceBatchId?: string;
+  syncSessionId?: string;
   needsAuth: boolean;
   computeSyncDigest: (
     contextGraphId: string,
@@ -83,6 +85,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     phase,
     snapshotRef,
     sinceBatchId,
+    syncSessionId,
     needsAuth,
     computeSyncDigest,
     getIdentityId,
@@ -98,9 +101,10 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
       : phase === 'snapshot'
         ? `|snapshot|${snapshotRef ?? ''}`
         : '';
-    // Phase C: trailing keyed token; old responders ignore the extra parts.
+    // Trailing keyed tokens are additive; old responders ignore the extra parts.
+    const sessionSuffix = syncSessionId ? `|session|${syncSessionId}` : '';
     const sinceSuffix = sinceBatchId ? `|since|${sinceBatchId}` : '';
-    return new TextEncoder().encode(`${prefix}|${offset}|${limit}${phaseSuffix}${sinceSuffix}`);
+    return new TextEncoder().encode(`${prefix}|${offset}|${limit}${phaseSuffix}${sessionSuffix}${sinceSuffix}`);
   }
 
   const request: SyncRequestEnvelope = {
@@ -140,6 +144,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
 
   // Phase C: ride the envelope unsigned, after the digest (cannot influence
   // authorization; only narrows the responder's result set).
+  if (syncSessionId) request.syncSessionId = syncSessionId;
   if (sinceBatchId) request.sinceBatchId = sinceBatchId;
 
   const identityId = await getIdentityId();

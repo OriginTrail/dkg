@@ -2,6 +2,10 @@ import { ethers } from 'ethers';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { SyncRequestEnvelope } from './request-build.js';
 
+interface AuthLookupOptions {
+  signal?: AbortSignal;
+}
+
 interface AuthorizeSyncRequestParams {
   ctx: OperationContext;
   request: SyncRequestEnvelope;
@@ -20,10 +24,10 @@ interface AuthorizeSyncRequestParams {
     issuedAtMs: number,
     requesterAgentAddress: string | undefined,
   ) => Uint8Array;
-  verifyIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
-  getParticipants: (contextGraphId: string) => Promise<string[] | null>;
-  getAllowedPeers: (contextGraphId: string) => Promise<string[] | null>;
-  getAgentGateAddresses: (contextGraphId: string) => Promise<string[] | null>;
+  verifyIdentity?: (recoveredAddress: string, claimedIdentityId: bigint, options?: AuthLookupOptions) => Promise<boolean>;
+  getParticipants: (contextGraphId: string, options?: AuthLookupOptions) => Promise<string[] | null>;
+  getAllowedPeers: (contextGraphId: string, options?: AuthLookupOptions) => Promise<string[] | null>;
+  getAgentGateAddresses: (contextGraphId: string, options?: AuthLookupOptions) => Promise<string[] | null>;
   /**
    * Per-agent map of libp2p peer-ids / op-keys an agent has delegated
    * to act on its behalf for sync. Keyed by the lowercased agent
@@ -36,11 +40,29 @@ interface AuthorizeSyncRequestParams {
    * same op-key. This is the single most important property of the
    * delegation gate: graph-wide unions silently widen access.
    */
-  getAllowedDelegateePeers: (contextGraphId: string) => Promise<Map<string, string[]>>;
-  getAllowedDelegateeKeys: (contextGraphId: string) => Promise<Map<string, string[]>>;
-  refreshMetaFromCurator: (contextGraphId: string) => Promise<boolean>;
+  getAllowedDelegateePeers: (contextGraphId: string, options?: AuthLookupOptions) => Promise<Map<string, string[]>>;
+  getAllowedDelegateeKeys: (contextGraphId: string, options?: AuthLookupOptions) => Promise<Map<string, string[]>>;
+  refreshMetaFromCurator: (contextGraphId: string, options?: AuthLookupOptions) => Promise<boolean>;
+  signal?: AbortSignal;
   logWarn: (ctx: OperationContext, message: string) => void;
   logInfo: (ctx: OperationContext, message: string) => void;
+}
+
+function asAbortError(reason: unknown): Error {
+  if (reason instanceof Error) {
+    if (reason.name === 'AbortError') return reason;
+    const err = new Error(reason.message || 'aborted');
+    err.name = 'AbortError';
+    (err as Error & { cause?: unknown }).cause = reason;
+    return err;
+  }
+  const err = new Error(typeof reason === 'string' ? reason : 'aborted');
+  err.name = 'AbortError';
+  return err;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw asAbortError(signal.reason);
 }
 
 export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestParams): Promise<boolean> {
@@ -59,9 +81,13 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
     getAllowedDelegateePeers,
     getAllowedDelegateeKeys,
     refreshMetaFromCurator,
+    signal,
     logWarn,
     logInfo,
   } = params;
+
+  throwIfAborted(signal);
+  const lookupOptions = signal ? { signal } : undefined;
 
   const now = Date.now();
   for (const [requestId, seenAt] of seenRequestIds) {
@@ -123,7 +149,8 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
       logWarn(ctx, `Denied sync request for "${request.contextGraphId}": identity verification unavailable (identityId=${requesterIdentityId.toString()} signer=${recoveredAddress})`);
       return false;
     }
-    const validIdentity = await verifyIdentity(recoveredAddress, requesterIdentityId);
+    const validIdentity = await verifyIdentity(recoveredAddress, requesterIdentityId, lookupOptions);
+    throwIfAborted(signal);
     if (!validIdentity) {
       logWarn(ctx, `Denied sync request for "${request.contextGraphId}": signer ${recoveredAddress} does not verify for identityId=${requesterIdentityId.toString()}`);
       return false;
@@ -133,11 +160,16 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
     return false;
   }
 
-  let participants = await getParticipants(request.contextGraphId);
-  let agentGateAddresses = await getAgentGateAddresses(request.contextGraphId);
-  let allowedPeers = await getAllowedPeers(request.contextGraphId);
-  let allowedDelegateePeers = await getAllowedDelegateePeers(request.contextGraphId);
-  let allowedDelegateeKeys = await getAllowedDelegateeKeys(request.contextGraphId);
+  let participants = await getParticipants(request.contextGraphId, lookupOptions);
+  throwIfAborted(signal);
+  let agentGateAddresses = await getAgentGateAddresses(request.contextGraphId, lookupOptions);
+  throwIfAborted(signal);
+  let allowedPeers = await getAllowedPeers(request.contextGraphId, lookupOptions);
+  throwIfAborted(signal);
+  let allowedDelegateePeers = await getAllowedDelegateePeers(request.contextGraphId, lookupOptions);
+  throwIfAborted(signal);
+  let allowedDelegateeKeys = await getAllowedDelegateeKeys(request.contextGraphId, lookupOptions);
+  throwIfAborted(signal);
   const isParticipantAllowed = () => participants?.some((p) =>
     p.toLowerCase() === recoveredAddress.toLowerCase() ||
     (requesterIdentityId > 0n && p === String(requesterIdentityId)),
@@ -171,13 +203,19 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
   let allowed = resolveAllowed();
 
   if (!allowed) {
-    const refreshed = await refreshMetaFromCurator(request.contextGraphId);
+    const refreshed = await refreshMetaFromCurator(request.contextGraphId, lookupOptions);
+    throwIfAborted(signal);
     if (refreshed) {
-      participants = await getParticipants(request.contextGraphId);
-      agentGateAddresses = await getAgentGateAddresses(request.contextGraphId);
-      allowedPeers = await getAllowedPeers(request.contextGraphId);
-      allowedDelegateePeers = await getAllowedDelegateePeers(request.contextGraphId);
-      allowedDelegateeKeys = await getAllowedDelegateeKeys(request.contextGraphId);
+      participants = await getParticipants(request.contextGraphId, lookupOptions);
+      throwIfAborted(signal);
+      agentGateAddresses = await getAgentGateAddresses(request.contextGraphId, lookupOptions);
+      throwIfAborted(signal);
+      allowedPeers = await getAllowedPeers(request.contextGraphId, lookupOptions);
+      throwIfAborted(signal);
+      allowedDelegateePeers = await getAllowedDelegateePeers(request.contextGraphId, lookupOptions);
+      throwIfAborted(signal);
+      allowedDelegateeKeys = await getAllowedDelegateeKeys(request.contextGraphId, lookupOptions);
+      throwIfAborted(signal);
       allowed = resolveAllowed();
     }
   }
@@ -190,6 +228,7 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
   );
 
   if (allowed) {
+    throwIfAborted(signal);
     seenRequestIds.set(request.requestId, now);
   }
   return allowed;

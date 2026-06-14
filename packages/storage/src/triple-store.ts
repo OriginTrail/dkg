@@ -37,6 +37,16 @@ export interface AskResult {
 }
 
 export type QueryResult = SelectResult | ConstructResult | AskResult;
+export type QueryCancellationMode = 'interruptible' | 'pre-dispatch';
+
+export interface QueryOptions {
+  /**
+   * Best-effort caller cancellation. Async backends should reject promptly when
+   * aborted; synchronous embedded backends may only observe the signal before
+   * dispatching or after returning from their blocking native call.
+   */
+  signal?: AbortSignal;
+}
 
 export interface TripleStoreQueryOptions {
   /** Human-readable caller tag used by adapters for diagnostics/telemetry. */
@@ -46,6 +56,13 @@ export interface TripleStoreQueryOptions {
 }
 
 export interface TripleStore {
+  /**
+   * Whether `query(..., { signal })` can reject while a query is already in
+   * flight (`interruptible`) or can only observe cancellation before dispatch
+   * and after a blocking call returns (`pre-dispatch`).
+   */
+  readonly queryCancellation?: QueryCancellationMode;
+
   insert(quads: Quad[]): Promise<void>;
   delete(quads: Quad[]): Promise<void>;
   deleteByPattern(pattern: Partial<Quad>): Promise<number>;
@@ -54,7 +71,7 @@ export interface TripleStore {
   hasGraph(graphUri: string): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;
   dropGraph(graphUri: string): Promise<void>;
-  listGraphs(): Promise<string[]>;
+  listGraphs(options?: QueryOptions): Promise<string[]>;
   listGraphsByPrefix?(prefix: string): Promise<string[]>;
 
   deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number>;

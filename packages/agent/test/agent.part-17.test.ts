@@ -361,6 +361,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         const bytes = await (agent as any).buildSyncRequest('public-cg', 5, 100, false, 'peer-remote', 'meta');
         const text = new TextDecoder().decode(bytes);
         expect(text).toBe('public-cg|5|100|meta');
+
+        const sessionBytes = await (agent as any).buildSyncRequest('public-cg', 5, 100, false, 'peer-remote', 'meta', undefined, undefined, 'meta-session');
+        const sessionText = new TextDecoder().decode(sessionBytes);
+        expect(sessionText).toBe('public-cg|5|100|meta|session|meta-session');
       } finally {
         await agent.stop().catch(() => {});
       }
