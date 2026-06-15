@@ -4290,10 +4290,24 @@ export class DKGPublisher implements Publisher {
    */
   private async isContextGraphRegistered(contextGraphId: string): Promise<boolean> {
     const cgUri = contextGraphDataUri(contextGraphId);
+    // SECURITY (Codex #1171): registration's `<cgUri> a dkg:ContextGraph` triple is
+    // written ONLY into the system ONTOLOGY data graph (public CGs + every publish)
+    // or the CG's own `_meta` graph (curated CGs) — see createContextGraph `defGraph`
+    // (= isCurated ? cgMeta : ontology) and the publish ontology emitter. It is NEVER
+    // written into a user-authored data/sub-graph. The previous cross-graph
+    // `ASK { GRAPH ?g … }` matched ANY graph, so a publisher could author
+    // `<cgUri> a dkg:ContextGraph` in their own content graph (the rdf:type OBJECT is
+    // not a reserved IRI) and SPOOF registration — making reconstructSharedMemoryOwnership
+    // treat a sub-graph as a registered root and derive the wrong ownership key after
+    // restart. Scope the ASK to exactly the two authoritative graphs.
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const metaGraph = contextGraphMetaUri(contextGraphId);
     const registered = await this.store.query(
-      `ASK { GRAPH ?g {
-        <${assertSafeIri(cgUri)}> a <http://dkg.io/ontology/ContextGraph> .
-      } }`,
+      `ASK {
+        { GRAPH <${assertSafeIri(ontologyGraph)}> { <${assertSafeIri(cgUri)}> a <http://dkg.io/ontology/ContextGraph> . } }
+        UNION
+        { GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(cgUri)}> a <http://dkg.io/ontology/ContextGraph> . } }
+      }`,
     );
     return registered.type === 'boolean' && registered.value;
   }
