@@ -493,22 +493,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
           // authority check on every envelope ingest still catches
           // revocations even if curator state has changed since.
           try {
-            // Rung-1 SWM strip — a rolling upgrade can carry a PERSISTED host-mode
-            // subscription for a private CG this core hosted under the old "any
-            // core auto-hosts" behaviour. Don't restore it: a non-participant must
-            // not re-engage custody on restart. Shed the stale persisted record so
-            // it stops re-arming each boot. (This is the upgrade path the live
-            // subscribe gate can't reach, since restore wires the handler directly.)
-            const stripNonParticipants = this.config.swmHostMode?.stripNonParticipants ?? true;
-            if (stripNonParticipants && !(await this.isNodeParticipantOfCg(cgId))) {
-              this.log.info(
-                createOperationContext('system'),
-                `Not restoring host-mode for "${cgId}": node is not a participant ` +
-                `(rung-1 strip — shedding stale pre-strip custody)`,
-              );
-              this.enqueueHostModePersistence(cgId, false);
-              continue;
-            }
             this.wireSwmHostModeHandler(cgId);
             // Codex PR #620 R2: also re-probe registration state.
             // Without this, a host-only CG that was registered while
