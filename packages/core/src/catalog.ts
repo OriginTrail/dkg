@@ -71,27 +71,44 @@ export interface CatalogPartition<Q> {
 /**
  * Partition publish quads into the public catalog entry and everything else.
  *
- * Self-contained: a subject is a catalog subject iff it carries
- * `rdf:type dkg:PrivateContextGraph` in the set (the unambiguous system marker
- * the injection always emits); a quad is catalog iff its subject is a catalog
- * subject AND its predicate is a catalog predicate AND, for `rdf:type`, its
- * object is an allowed catalog class ({@link CATALOG_CLASSES}). No external UAL
- * needed, and fail-safe — a user `rdf:type` on a data entity, an arbitrary
- * `rdf:type` on the catalog subject itself, or a non-catalog predicate on the
- * catalog subject all stay on the encrypted path. Order-preserving and total.
+ * Identity-based, NOT type-marker-based (round-3 SECURITY). The catalog subject
+ * is supplied by the caller as `catalogSubject` — the canonical context-graph
+ * DID (`contextGraphDataUri(contextGraphId)` === `did:dkg:context-graph:<id>`),
+ * the ONLY subject the catalog injection writes to. A quad is catalog iff its
+ * subject IS that exact DID AND its predicate is a catalog predicate AND, for
+ * `rdf:type`, its object is an allowed catalog class ({@link CATALOG_CLASSES}).
+ *
+ * Why the subject is threaded in rather than discovered from a marker quad: the
+ * previous implementation treated ANY subject bearing `rdf:type
+ * dkg:PrivateContextGraph` as a catalog subject. That marker is user-forgeable
+ * and `validatePublishRequest` does not reserve it, so a user could author an
+ * ordinary entity with `rdf:type dkg:PrivateContextGraph` + `dct:*` quads and
+ * have them (a) routed PLAINTEXT into the public `_catalog` (a leak) and (b)
+ * stripped from the encrypted payload. Binding the catalog subject to the
+ * CG-identity the publisher already knows closes that — a forged marker on a
+ * data entity now has a non-matching subject and stays on the encrypted path.
+ *
+ * Fail-safe and defense-in-depth: even on the genuine CG DID, a non-catalog
+ * predicate, or an arbitrary `rdf:type` whose object is not a catalog class,
+ * stays on the encrypted path. Order-preserving and total.
+ *
+ * @param quads          publish quads to partition.
+ * @param catalogSubject the canonical CG DID; pass
+ *   `contextGraphDataUri(contextGraphId)`. When empty/undefined, nothing is
+ *   treated as catalog (every quad goes to `otherQuads` — fail-safe).
  */
-export function partitionCatalogQuads<Q extends CatalogQuadLike>(quads: readonly Q[]): CatalogPartition<Q> {
-  const catalogSubjects = new Set<string>();
-  for (const q of quads) {
-    if (q.predicate === DKG_ONTOLOGY.RDF_TYPE && q.object === DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH) {
-      catalogSubjects.add(q.subject);
-    }
-  }
+export function partitionCatalogQuads<Q extends CatalogQuadLike>(
+  quads: readonly Q[],
+  catalogSubject: string,
+): CatalogPartition<Q> {
   const catalogQuads: Q[] = [];
   const otherQuads: Q[] = [];
   for (const q of quads) {
     const isCatalog =
-      catalogSubjects.has(q.subject) &&
+      // Identity gate: ONLY the canonical CG DID is a catalog subject — never a
+      // forgeable type marker on a user-authored entity (round-3 SECURITY).
+      catalogSubject.length > 0 &&
+      q.subject === catalogSubject &&
       CATALOG_PREDICATES.has(q.predicate) &&
       // Object gate: an `rdf:type` is catalog only if it types the subject as an
       // allowed catalog class; any other type assertion is private data (B2).

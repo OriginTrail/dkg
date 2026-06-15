@@ -926,21 +926,36 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const result = await this.fetchSyncPages(
       ctx, responderPeerId, contextGraphId, false, 'catalog', catalogGraph, Date.now() + deadlineMs,
     );
-    // Persist the fetched DCAT dataset record into the local `<cg>/_catalog`
-    // graph and invalidate the meta projection so getCgMeta() /
-    // listContextGraphs() can see the remotely discovered private CG after
-    // this call. The parsed quads already carry `graph === catalogGraph`
-    // (see parseAndFilterNQuads), so they land in the catalog graph as-is.
-    // The projection read side is disclosure-floor only (rdf:type /
-    // dct:accessRights — CATALOG_META_PREDICATES), so persisting peer-fetched
-    // catalog quads cannot poison the authz-bearing creator/curator/allowlist
-    // fields. Mirrors refreshMetaFromCurator's persist+invalidate path.
-    if (result.quads.length > 0) {
-      await this.store.insert(result.quads);
-      this.contextGraphMetaProjection.markDirtyFromQuads(result.quads);
+    // SECURITY: this is the UNAUTHENTICATED catalog path — there is no
+    // membership/allowlist gate on what we persist. The generic requester
+    // filter (parseAndFilterNQuads) admits ANY graph under
+    // `did:dkg:context-graph:<cg>/…`, not just `_catalog`, so a malicious
+    // peer could ride the open catalog fetch to inject `_meta`/`_private`/VM
+    // quads into the local store. Re-filter to ONLY the `<cg>/_catalog` graph
+    // before insert and drop everything else.
+    const catalogQuads = result.quads.filter((q) => q.graph === catalogGraph);
+    // Treat partial fetches as NOT done: fetchSyncPages returns
+    // `completed: false` (timed out) with a possibly-truncated page. Inserting
+    // that would corrupt the local `_catalog`, and deleting the checkpoint
+    // would lose the resume cursor. Only persist + delete-checkpoint when the
+    // fetch ran to completion; on partial, keep the checkpoint and persist
+    // nothing.
+    if (result.completed) {
+      // Persist the fetched DCAT dataset record into the local `<cg>/_catalog`
+      // graph and invalidate the meta projection so getCgMeta() /
+      // listContextGraphs() can see the remotely discovered private CG after
+      // this call. The projection read side is disclosure-floor only (rdf:type
+      // / dct:accessRights — CATALOG_META_PREDICATES), so persisting
+      // peer-fetched catalog quads cannot poison the authz-bearing
+      // creator/curator/allowlist fields. Mirrors refreshMetaFromCurator's
+      // persist+invalidate path.
+      if (catalogQuads.length > 0) {
+        await this.store.insert(catalogQuads);
+        this.contextGraphMetaProjection.markDirtyFromQuads(catalogQuads);
+      }
       this.syncCheckpoints.delete(result.checkpointKey);
     }
-    return result.quads;
+    return catalogQuads;
   }
 
   computeSyncDigest(this: DKGAgent,

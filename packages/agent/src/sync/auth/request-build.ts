@@ -141,7 +141,14 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
       ? '|meta'
       : phase === 'snapshot'
         ? `|snapshot|${snapshotRef ?? ''}`
-        : '';
+        : phase === 'catalog'
+          // The public `_catalog` facet (§7) is open-served unauthenticated, so
+          // it rides THIS text form. Emit the phase token in parts[3] (same slot
+          // `parsePipeDelimitedSyncRequest` reads) so the phase survives on the
+          // wire and the responder routes to readCatalogPage instead of falling
+          // back to the DEFAULT data phase (which is gated and serves nothing).
+          ? '|catalog'
+          : '';
     // Trailing keyed tokens are additive; old responders ignore the extra parts.
     const sessionSuffix = syncSessionId ? `|session|${syncSessionId}` : '';
     const sinceSuffix = sinceBatchId ? `|since|${sinceBatchId}` : '';

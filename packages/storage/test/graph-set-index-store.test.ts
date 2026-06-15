@@ -88,6 +88,34 @@ describe('GraphSetIndexStore', () => {
     expect(counting.listGraphsCalls).toBe(1);
   });
 
+  it('degrades to a transparent pass-through when constructed with enabled:false', async () => {
+    const inner = new OxigraphStore();
+    const counting = new CountingStore(inner);
+    const store = new GraphSetIndexStore(counting, { enabled: false });
+
+    await store.insert([q('did:dkg:context-graph:alpha')]);
+    await store.insert([q('did:dkg:context-graph:beta')]);
+
+    // No index is maintained: every listGraphs/listGraphsByPrefix hits inner
+    // directly (one scan each), proving the wrapper is a pass-through and not
+    // serving a cached set.
+    await expect(store.listGraphs()).resolves.toEqual(
+      expect.arrayContaining(['did:dkg:context-graph:alpha', 'did:dkg:context-graph:beta']),
+    );
+    await expect(store.listGraphsByPrefix('did:dkg:context-graph:a')).resolves.toEqual([
+      'did:dkg:context-graph:alpha',
+    ]);
+    expect(counting.listGraphsCalls).toBe(2);
+
+    // An out-of-contract writer is observed immediately — there is no index
+    // shadowing inner's true state.
+    await inner.insert([q('did:dkg:context-graph:gamma')]);
+    await expect(store.listGraphs()).resolves.toHaveLength(3);
+    expect(counting.listGraphsCalls).toBe(3);
+
+    await store.close();
+  });
+
   it('maintains the graph set through local insert/delete/drop/deleteBySubjectPrefix mutators', async () => {
     const counting = new CountingStore(new OxigraphStore());
     const store = new GraphSetIndexStore(counting);
@@ -273,7 +301,7 @@ describe('GraphSetIndexStore', () => {
     }
   });
 
-  it('leaves operator-managed external stores uncached unless explicitly enabled', async () => {
+  it('leaves sparql-http stores unwrapped by default (native listGraphs cache covers it) unless explicitly enabled', async () => {
     const operatorStore = await createTripleStore({
       backend: 'sparql-http',
       options: { queryEndpoint: 'http://example.invalid/query' },
@@ -281,13 +309,21 @@ describe('GraphSetIndexStore', () => {
     expect(operatorStore.listGraphsByPrefix).toBeUndefined();
     await operatorStore.close();
 
+    // Managed sparql-http already owns a write-invalidated, TTL-bounded
+    // listGraphs() cache in SparqlHttpStore (cacheGraphList === managedByDkg).
+    // Wrapping it in the GraphSetIndexStore would stack a SECOND ~30 s TTL on
+    // top of that one, so an out-of-band graph-set change could stay invisible
+    // for up to ~60 s. The factory must therefore NOT default-enable the index
+    // for this store — its native cache already covers the idle-node scan cost.
     const managedStore = await createTripleStore({
       backend: 'sparql-http',
       options: { queryEndpoint: 'http://example.invalid/query', managedByDkg: true },
     });
-    expect(typeof managedStore.listGraphsByPrefix).toBe('function');
+    expect(managedStore.listGraphsByPrefix).toBeUndefined();
     await managedStore.close();
 
+    // An explicit opt-in is still honoured (operator override): it wraps even a
+    // store that has a native cache.
     const optedInStore = await createTripleStore({
       backend: 'sparql-http',
       options: { queryEndpoint: 'http://example.invalid/query' },
@@ -295,6 +331,19 @@ describe('GraphSetIndexStore', () => {
     });
     expect(typeof optedInStore.listGraphsByPrefix).toBe('function');
     await optedInStore.close();
+  });
+
+  it('still wraps a managed store that has no native listGraphs cache (managed blazegraph)', async () => {
+    // BlazegraphStore — unlike SparqlHttpStore — keeps no native listGraphs
+    // cache, so there is no double-TTL to avoid: a managed blazegraph store
+    // must still get the index by default. (Construction does not connect, so a
+    // dummy url is fine.)
+    const managedBlazegraph = await createTripleStore({
+      backend: 'blazegraph',
+      options: { url: 'http://example.invalid/sparql', managedByDkg: true },
+    });
+    expect(typeof managedBlazegraph.listGraphsByPrefix).toBe('function');
+    await managedBlazegraph.close();
   });
 
   it('leaves custom backends uncached unless explicitly enabled', async () => {

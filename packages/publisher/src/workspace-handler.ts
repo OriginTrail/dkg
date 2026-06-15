@@ -1534,9 +1534,6 @@ export class SharedMemoryHandler {
     // back to a *stale store allowlist with no revocation applied*.
     const projected = await this.contextGraphMetaOracle?.(contextGraphId);
 
-    const allowlistProjected =
-      projected?.allowedAgents !== undefined || projected?.participantAgents !== undefined;
-
     // Revoked tombstones: prefer the projection when it carried the
     // field, otherwise read `_meta`. Applied to whichever source the
     // allowlist comes from, so a projected revocation kicks a store-
@@ -1550,26 +1547,27 @@ export class SharedMemoryHandler {
         .map((v) => v.toLowerCase()),
     );
 
-    let allowlist: string[] | null = null;
-    if (allowlistProjected) {
-      allowlist = [...(projected?.allowedAgents ?? []), ...(projected?.participantAgents ?? [])];
-    } else {
-      const cgMeta = contextGraphMetaUri(contextGraphId);
-      const cgData = contextGraphDataUri(contextGraphId);
-      const result = await this.store.query(
-        `SELECT ?agent WHERE { GRAPH <${cgMeta}> {
-          { <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent }
-          UNION
-          { <${cgData}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent }
-        } }`,
-      );
-      if (result.type === 'bindings' && result.bindings.length > 0) {
-        allowlist = result.bindings
-          .map(row => row['agent'])
-          .filter((v): v is string => typeof v === 'string')
-          .map(stripRdfLiteral);
-      }
-    }
+    // Resolve EACH allowlist field (allowed, participant) INDEPENDENTLY:
+    // projection-if-that-specific-field-was-projected, else `_meta` store
+    // fallback for that one field. A partial projection that carried only
+    // `allowedAgents` must NOT suppress the store fallback for
+    // `participantAgents` (and vice versa) — otherwise the gate would be
+    // built from a half-empty allowlist and silently drop legitimate
+    // writers whose membership lives only in the field the oracle omitted.
+    const allowedResolved = projected?.allowedAgents !== undefined
+      ? projected.allowedAgents
+      : await this.queryMetaAgents(contextGraphId, DKG_ONTOLOGY.DKG_ALLOWED_AGENT);
+    const participantResolved = projected?.participantAgents !== undefined
+      ? projected.participantAgents
+      : await this.queryMetaAgents(contextGraphId, DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT);
+
+    // The CG is agent-gated iff EITHER field resolved to any member (from
+    // projection or store). `null` ⇒ not curated (caller falls through);
+    // an empty-but-non-null list ⇒ curated-then-fully-revoked (rejects all).
+    const allowlist: string[] | null =
+      allowedResolved.length > 0 || participantResolved.length > 0
+        ? [...allowedResolved, ...participantResolved]
+        : null;
 
     if (allowlist !== null) {
       const agents = allowlist

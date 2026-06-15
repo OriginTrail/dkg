@@ -34,6 +34,14 @@ export type GraphSetMutationEvent =
     };
 
 export interface GraphSetIndexStoreOptions {
+  /**
+   * When `false`, the store degrades to a transparent pass-through that just
+   * delegates to `inner` — no index is built or maintained, and `listGraphs`/
+   * `listGraphsByPrefix` reflect `inner` directly. Defaults to `true`. Honoured
+   * by the constructor so `new GraphSetIndexStore(inner, { enabled: false })`
+   * has the same effect as not wrapping at all, regardless of construction path
+   * (createTripleStore also short-circuits and skips the wrapper entirely).
+   */
   enabled?: boolean;
   /** Revalidate after this interval. Use 0 to revalidate on every read. */
   revalidateMs?: number;
@@ -53,6 +61,7 @@ export class GraphSetIndexStore implements TripleStore {
   }
 
   private readonly inner: TripleStore;
+  private readonly enabled: boolean;
   private readonly revalidateMs: number;
   private readonly now: () => number;
   private readonly onMutation?: (event: GraphSetMutationEvent) => void;
@@ -64,6 +73,7 @@ export class GraphSetIndexStore implements TripleStore {
 
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
+    this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
     this.now = options.now ?? (() => performance.now());
     this.onMutation = options.onMutation;
@@ -71,6 +81,7 @@ export class GraphSetIndexStore implements TripleStore {
 
   async insert(quads: Quad[]): Promise<void> {
     await this.inner.insert(quads);
+    if (!this.enabled) return;
     const touched = namedGraphsFromQuads(quads);
     if (touched.length === 0) return;
     this.bumpMutation();
@@ -79,6 +90,7 @@ export class GraphSetIndexStore implements TripleStore {
 
   async delete(quads: Quad[]): Promise<void> {
     await this.inner.delete(quads);
+    if (!this.enabled) return;
     const touched = namedGraphsFromQuads(quads);
     if (touched.length === 0) return;
     this.bumpMutation();
@@ -87,7 +99,7 @@ export class GraphSetIndexStore implements TripleStore {
 
   async deleteByPattern(pattern: Partial<Quad>): Promise<number> {
     const removed = await this.inner.deleteByPattern(pattern);
-    if (removed <= 0) return removed;
+    if (!this.enabled || removed <= 0) return removed;
     this.bumpMutation();
     const graph = pattern.graph;
     if (graph) {
@@ -100,7 +112,7 @@ export class GraphSetIndexStore implements TripleStore {
 
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     const result = await this.inner.query(sparql, options);
-    if (isSparqlUpdate(sparql)) {
+    if (this.enabled && isSparqlUpdate(sparql)) {
       this.bumpMutation();
       if (this.graphs || this.refreshInFlight) {
         await this.maintainIndex(() => this.refreshIndex('query'));
@@ -111,6 +123,7 @@ export class GraphSetIndexStore implements TripleStore {
 
   async hasGraph(graphUri: string): Promise<boolean> {
     const hasGraph = await this.inner.hasGraph(graphUri);
+    if (!this.enabled) return hasGraph;
     const indexed = this.graphs?.has(graphUri);
     if (this.graphs && indexed !== hasGraph) {
       this.bumpMutation();
@@ -126,23 +139,30 @@ export class GraphSetIndexStore implements TripleStore {
 
   async dropGraph(graphUri: string): Promise<void> {
     await this.inner.dropGraph(graphUri);
+    if (!this.enabled) return;
     this.bumpMutation();
     this.removeGraphs([graphUri], 'dropGraph');
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {
+    if (!this.enabled) return this.inner.listGraphs(options);
     const graphs = await this.ensureGraphSet(options);
     return [...graphs];
   }
 
   async listGraphsByPrefix(prefix: string): Promise<string[]> {
+    if (!this.enabled) {
+      return this.inner.listGraphsByPrefix
+        ? this.inner.listGraphsByPrefix(prefix)
+        : (await this.inner.listGraphs()).filter((graph) => graph.startsWith(prefix));
+    }
     const graphs = await this.ensureGraphSet();
     return [...graphs].filter((graph) => graph.startsWith(prefix));
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> {
     const removed = await this.inner.deleteBySubjectPrefix(graphUri, prefix);
-    if (removed <= 0) return removed;
+    if (!this.enabled || removed <= 0) return removed;
     this.bumpMutation();
     await this.maintainIndex(() => this.refreshTouchedGraphs([graphUri], 'deleteBySubjectPrefix'));
     return removed;

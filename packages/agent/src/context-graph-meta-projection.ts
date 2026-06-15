@@ -52,6 +52,26 @@ interface ProjectionEntry {
   invalidationVersion: number;
 }
 
+// Source precedence for the scalar "primary" fields (name/description/creator/
+// curator/createdAt/onChainId). A CG's own authoritative graphs override the
+// shared ONTOLOGY graph: a stale value written into ONTOLOGY must not win over a
+// later, authoritative `_meta`/AGENTS row. Higher rank wins; within the same
+// source the first row written stays (matching the previous `??=` behaviour).
+// The `_catalog` graph is the public, possibly peer-fetched face and never sets
+// these scalars, so its rank only matters as a floor below the authoritative
+// graphs.
+const SourceRank = {
+  Ontology: 0,
+  Catalog: 1,
+  Agents: 2,
+  Meta: 3,
+} as const;
+type SourceRank = (typeof SourceRank)[keyof typeof SourceRank];
+
+// Tracks, per scalar field, the rank of the source that last set it, so a
+// higher-precedence source can override and an equal/lower one cannot.
+type PrecedenceTracker = Partial<Record<'name' | 'description' | 'creator' | 'curator' | 'createdAt' | 'onChainId', SourceRank>>;
+
 const DKG_NS = 'https://dkg.network/ontology#';
 const LEGACY_DKG_NS = 'http://dkg.io/ontology/';
 const LEGACY_SCHEMA_NS = 'http://schema.org/';
@@ -259,9 +279,20 @@ export class ContextGraphMetaProjection {
       hasLegacyParticipantGate: false,
     };
 
-    const graphUris = [ontologyGraph, agentsGraph, metaGraph, catalogGraph];
-    for (const graphUri of graphUris) {
-      await this.loadContextGraphFacts(graphUri, uri, record);
+    // Explicit source precedence (authoritative last-wins). ONTOLOGY is the
+    // shared, lowest-trust source; the CG's own AGENTS/`_meta` graphs override
+    // it for the scalar "primary" fields. The load order is irrelevant now that
+    // `applyFact` gates scalar writes on `SourceRank`, but we keep ONTOLOGY
+    // first so its values seed any field the authoritative graphs omit.
+    const sources: Array<{ graphUri: string; rank: SourceRank }> = [
+      { graphUri: ontologyGraph, rank: SourceRank.Ontology },
+      { graphUri: agentsGraph, rank: SourceRank.Agents },
+      { graphUri: metaGraph, rank: SourceRank.Meta },
+      { graphUri: catalogGraph, rank: SourceRank.Catalog },
+    ];
+    const precedence: PrecedenceTracker = {};
+    for (const { graphUri, rank } of sources) {
+      await this.loadContextGraphFacts(graphUri, uri, record, rank, precedence);
     }
     record.subGraphs = await this.loadSubGraphs(contextGraphId);
 
@@ -271,7 +302,7 @@ export class ContextGraphMetaProjection {
     return record;
   }
 
-  private async loadContextGraphFacts(graphUri: string, contextGraphUri: string, record: ContextGraphMetaRecord): Promise<void> {
+  private async loadContextGraphFacts(graphUri: string, contextGraphUri: string, record: ContextGraphMetaRecord, sourceRank: SourceRank, precedence: PrecedenceTracker): Promise<void> {
     const result = await this.store.query(
       `SELECT ?p ?o WHERE {
         GRAPH <${graphUri}> {
@@ -285,11 +316,11 @@ export class ContextGraphMetaProjection {
       const predicate = typeof row['p'] === 'string' ? strip(row['p']) : undefined;
       const object = typeof row['o'] === 'string' ? stripTerm(row['o']) : undefined;
       if (!predicate || object === undefined) continue;
-      this.applyFact(record, predicate, object);
+      this.applyFact(record, predicate, object, sourceRank, precedence);
     }
   }
 
-  private applyFact(record: ContextGraphMetaRecord, predicate: string, object: string): void {
+  private applyFact(record: ContextGraphMetaRecord, predicate: string, object: string, sourceRank: SourceRank, precedence: PrecedenceTracker): void {
     switch (predicate) {
       case DKG_ONTOLOGY.RDF_TYPE:
         if (object === DKG_ONTOLOGY.DKG_CONTEXT_GRAPH) record.declared = true;
@@ -312,25 +343,25 @@ export class ContextGraphMetaProjection {
         break;
       case DKG_ONTOLOGY.SCHEMA_NAME:
       case `${LEGACY_SCHEMA_NS}name`:
-        record.name ??= object;
+        setWithPrecedence(record, precedence, 'name', object, sourceRank);
         break;
       case DKG_ONTOLOGY.SCHEMA_DESCRIPTION:
       case `${LEGACY_SCHEMA_NS}description`:
-        record.description ??= object;
+        setWithPrecedence(record, precedence, 'description', object, sourceRank);
         break;
       case DKG_ONTOLOGY.DKG_CREATOR:
         pushUnique(record.creators, object);
-        record.creator ??= object;
+        setWithPrecedence(record, precedence, 'creator', object, sourceRank);
         break;
       case DKG_ONTOLOGY.DKG_CURATOR:
         pushUnique(record.curators, object);
-        record.curator ??= object;
+        setWithPrecedence(record, precedence, 'curator', object, sourceRank);
         break;
       case DKG_ONTOLOGY.DKG_ACCESS_POLICY:
         applyAccessPolicy(record, object);
         break;
       case DKG_ONTOLOGY.DKG_CREATED_AT:
-        record.createdAt ??= object;
+        setWithPrecedence(record, precedence, 'createdAt', object, sourceRank);
         break;
       case DKG_ONTOLOGY.DKG_ALLOWED_PEER:
         pushUnique(record.allowedPeers, object);
@@ -348,7 +379,7 @@ export class ContextGraphMetaProjection {
         pushUnique(record.revokedAgents, object);
         break;
       case `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`:
-        record.onChainId ??= object;
+        setWithPrecedence(record, precedence, 'onChainId', object, sourceRank);
         break;
       default:
         break;
@@ -357,14 +388,23 @@ export class ContextGraphMetaProjection {
 
   private async loadSubGraphs(contextGraphId: string): Promise<ContextGraphSubGraphMeta[]> {
     const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    // The `_meta` graph is shared by the CG and its sub-graphs, so a SubGraph-
+    // shaped subject is not automatically owned by this CG. Bind it to the
+    // emitted `dkg:parentContextGraph <this CG DID>` triple (see
+    // generateSubGraphRegistration) so a stray or other-CG subject that happens
+    // to land in this graph is not surfaced as a member.
+    const parentUri = contextGraphDataUri(contextGraphId);
+    assertSafeIri(parentUri);
     const result = await this.store.query(
       `SELECT ?subGraph ?name ?createdBy ?createdAt ?description WHERE {
         GRAPH <${metaGraph}> {
           ?subGraph ?typePred ?subGraphType ;
+                    ?parentPred <${parentUri}> ;
                     ?namePred ?name ;
                     ?createdByPred ?createdBy .
           VALUES ?typePred { <${DKG_ONTOLOGY.RDF_TYPE}> }
           VALUES ?subGraphType { <${DKG_NS}SubGraph> <${LEGACY_DKG_NS}SubGraph> }
+          VALUES ?parentPred { <${DKG_NS}parentContextGraph> <${LEGACY_DKG_NS}parentContextGraph> }
           VALUES ?namePred { <${DKG_ONTOLOGY.SCHEMA_NAME}> <${LEGACY_SCHEMA_NS}name> }
           VALUES ?createdByPred { <${DKG_NS}createdBy> <${LEGACY_DKG_NS}createdBy> }
           OPTIONAL {
@@ -438,6 +478,22 @@ export class ContextGraphMetaProjection {
 
     return null;
   }
+}
+
+// Set a scalar "primary" field under explicit source precedence: a higher-rank
+// (more authoritative) source overrides whatever a lower-rank source wrote, and
+// within the same rank the first value written wins (mirroring the old `??=`).
+function setWithPrecedence(
+  record: ContextGraphMetaRecord,
+  precedence: PrecedenceTracker,
+  field: 'name' | 'description' | 'creator' | 'curator' | 'createdAt' | 'onChainId',
+  value: string,
+  sourceRank: SourceRank,
+): void {
+  const lastRank = precedence[field];
+  if (lastRank !== undefined && sourceRank <= lastRank) return;
+  record[field] = value;
+  precedence[field] = sourceRank;
 }
 
 function pushUnique(target: string[], value: string): void {

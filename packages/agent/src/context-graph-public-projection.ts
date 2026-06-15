@@ -21,7 +21,7 @@
 // it cannot emit a triple the caller did not explicitly supply.
 
 import { createHmac } from 'node:crypto';
-import { DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
+import { DKG_ONTOLOGY, assertSafeIri } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 /** A 32-byte hex string, `0x`-prefixed (an on-chain merkle root). */
@@ -83,7 +83,10 @@ function quad(subject: string, predicate: string, object: string, graph: string)
  * `committedRoot` is passed, for the separate-KA model), and nothing else.
  *
  * @throws if `accessPolicy` is not `'private'`, the UAL / graph are missing,
- *         or a supplied `committedRoot` is malformed. The throw is the
+ *         a supplied `committedRoot` is malformed, or any IRI-bearing input
+ *         (ual, graph, publisher, accessService, conformsTo) contains a
+ *         character that would break a SPARQL `<...>` IRI and let a malformed
+ *         value emit invalid RDF or inject extra triples. The throw is the
  *         disclosure-invariant guard: a malformed entry must never be
  *         published as if authoritative.
  */
@@ -97,6 +100,11 @@ export function buildPublicProjection(input: PublicProjectionInput): Quad[] {
   if (!ual) throw new Error('public catalog entry requires a non-empty UAL');
   const graph = input.graph?.trim();
   if (!graph) throw new Error('public catalog entry requires a target graph URI');
+  // These two are serialized as bare IRIs (<ual>, <graph>); a `>`/space/control
+  // char would break the RDF or inject triples. Reject — same guard the
+  // publisher uses before interpolating a value into `<...>`.
+  assertSafeIri(ual);
+  assertSafeIri(graph);
 
   // --- Mandatory floor (§5.9.3) — a DCAT dataset record ---
   const quads: Quad[] = [
@@ -115,16 +123,22 @@ export function buildPublicProjection(input: PublicProjectionInput): Quad[] {
   }
 
   // --- Recommended (§5.9.2) ---
+  // publisher / accessService are serialized as bare IRIs (<publisher>,
+  // <accessService>); validate before emit so a malformed value cannot inject
+  // triples or break the RDF (assertSafeIri throws on unsafe input).
   if (input.publisher?.trim()) {
-    quads.push(quad(ual, DKG_ONTOLOGY.DCT_PUBLISHER, input.publisher.trim(), graph));
+    const publisher = assertSafeIri(input.publisher.trim());
+    quads.push(quad(ual, DKG_ONTOLOGY.DCT_PUBLISHER, publisher, graph));
   }
   if (input.accessService?.trim()) {
-    quads.push(quad(ual, DKG_ONTOLOGY.DCAT_ACCESS_SERVICE, input.accessService.trim(), graph));
+    const accessService = assertSafeIri(input.accessService.trim());
+    quads.push(quad(ual, DKG_ONTOLOGY.DCAT_ACCESS_SERVICE, accessService, graph));
   }
 
   // --- Opt-in, disclosure-priced (§5.9.4) ---
+  // conformsTo entries are serialized as bare IRIs (<onto>); validate each.
   for (const onto of input.conformsTo ?? []) {
-    if (onto?.trim()) quads.push(quad(ual, DKG_ONTOLOGY.DCT_CONFORMS_TO, onto.trim(), graph));
+    if (onto?.trim()) quads.push(quad(ual, DKG_ONTOLOGY.DCT_CONFORMS_TO, assertSafeIri(onto.trim()), graph));
   }
   for (const anchor of input.blindedAnchors ?? []) {
     if (anchor?.trim()) quads.push(quad(ual, DKG_ONTOLOGY.DKG_BLINDED_ANCHOR, literal(anchor.trim()), graph));

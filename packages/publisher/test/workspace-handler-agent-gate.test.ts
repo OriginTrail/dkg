@@ -232,6 +232,38 @@ describe('SharedMemoryHandler agent-gated gossip', () => {
     expect(recipientLookups).toBe(0);
   });
 
+  it('accepts a store-only participant when the partial projection carried allowedAgents but omitted participantAgents', async () => {
+    // OT-RFC-49 partial-projection regression (round-3): the oracle
+    // record is intentionally partial — here it projected `allowedAgents`
+    // (a DIFFERENT, irrelevant agent) but OMITTED `participantAgents`. The
+    // legitimate writer is a participant whose membership lives ONLY in the
+    // local `_meta` store. Each allowlist field must resolve INDEPENDENTLY
+    // (projection-if-present-else-store), so a projected `allowedAgents`
+    // must NOT suppress the store fallback for `participantAgents`. Before
+    // the fix the gate was built from the projected arrays alone, the
+    // participant fell back to `[]`, and this legitimate writer was dropped.
+    const otherAllowed = ethers.Wallet.createRandom();
+    const participant = ethers.Wallet.createRandom();
+    const recipientKey = recipientKeyFor(participant.address);
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: workspaceOwned,
+      localAgentAddresses: () => [participant.address],
+      workspaceRecipientPrivateKeys: () => [recipientKey],
+      contextGraphMetaOracle: async () => ({
+        accessPolicy: 'private',
+        allowedAgents: [otherAllowed.address],
+        // participantAgents intentionally omitted (partial record)
+      }),
+    });
+    await insertAgentGate(DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT, participant.address);
+
+    const raw = workspaceMessage('Store-Only Participant', 'ws-agent-gate-store-only-participant');
+    const encrypted = await encryptWorkspaceMessage(participant.address, raw, recipientKey);
+    await handler.handle(await signWorkspaceMessage(participant, encrypted), PEER_ID);
+
+    await expectStoredName('Store-Only Participant');
+  });
+
   it.each([
     ['DKG_ALLOWED_AGENT', DKG_ONTOLOGY.DKG_ALLOWED_AGENT],
     ['DKG_PARTICIPANT_AGENT', DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT],

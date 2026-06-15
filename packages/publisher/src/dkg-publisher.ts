@@ -1949,7 +1949,10 @@ export class DKGPublisher implements Publisher {
     // ciphertextChunksRoot commits the private payload only. No-op for public
     // CGs and any private CG without a catalog entry (catalogQuads empty ⇒
     // encryptableNquadsStr === nquadsStr).
-    const { catalogQuads, otherQuads } = partitionCatalogQuads(allSkolemizedQuads);
+    // Identity-based partition: the ONLY catalog subject is this CG's canonical
+    // DID (round-3 SECURITY). A forged `rdf:type dkg:PrivateContextGraph` on a
+    // user entity no longer routes that entity into the plaintext `_catalog`.
+    const { catalogQuads, otherQuads } = partitionCatalogQuads(allSkolemizedQuads, contextGraphDataUri(contextGraphId));
     const encryptableNquadsStr = catalogQuads.length === 0
       ? nquadsStr
       : otherQuads

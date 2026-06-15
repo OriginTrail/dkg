@@ -179,48 +179,75 @@ describe('emit orchestration — on VM publish', () => {
   });
 });
 
-describe('combined-model partition — catalog vs everything else (by-type, self-contained)', () => {
-  const CG_UAL = 'did:dkg:otp:2043/0x5cad/142';
+describe('combined-model partition — catalog vs everything else (identity-based)', () => {
+  // The catalog subject is the canonical CG DID — the exact subject the
+  // injection writes and the publisher threads in (round-3 SECURITY). NOT a
+  // forgeable type marker.
+  const CG_DID = 'did:dkg:context-graph:acme-supply';
 
-  it('separates the catalog entry from data via the dkg:PrivateContextGraph marker; total + order-preserving', () => {
+  it('separates the catalog entry from data by CG-DID identity; total + order-preserving', () => {
     const data = [
       q('urn:acme:shipment/SH-42', DKG_ONTOLOGY.RDF_TYPE, 'urn:acme:Shipment'), // a data rdf:type — must NOT be catalog
       q('urn:acme:shipment/SH-42', 'urn:acme:product', '"P-9"'),
       q('urn:acme:shipment/SH-42', 'urn:acme:quantity', '"500"'),
     ];
-    const catalog = buildPublicProjection({ ual: CG_UAL, accessPolicy: 'private', graph: 'g' }); // dual-typed floor
+    const catalog = buildPublicProjection({ ual: CG_DID, accessPolicy: 'private', graph: 'g' }); // dual-typed floor
     const mixed = [data[0], catalog[0], data[1], catalog[1], data[2], catalog[2], catalog[3]];
 
-    const { catalogQuads, otherQuads } = partitionCatalogQuads(mixed);
+    const { catalogQuads, otherQuads } = partitionCatalogQuads(mixed, CG_DID);
 
     expect(catalogQuads).toHaveLength(catalog.length);
     expect(otherQuads).toHaveLength(data.length);
     expect(catalogQuads.length + otherQuads.length).toBe(mixed.length); // total
     expect(new Set(catalogQuads)).toEqual(new Set(catalog));             // exactly the catalog set
-    expect(catalogQuads.every(c => c.subject === CG_UAL)).toBe(true);    // all about the CG UAL
-    expect(otherQuads.some(o => o.subject === CG_UAL)).toBe(false);      // no data quad leaked in
+    expect(catalogQuads.every(c => c.subject === CG_DID)).toBe(true);    // all about the CG DID
+    expect(otherQuads.some(o => o.subject === CG_DID)).toBe(false);      // no data quad leaked in
     // fail-safe: the data entity's rdf:type stays on the data side
     expect(otherQuads).toContainEqual(data[0]);
   });
 
+  it('SECURITY: a forged dkg:PrivateContextGraph type marker on a USER entity never leaks into the public catalog', () => {
+    // Attack: author an ordinary entity that self-types as the CG marker and
+    // carries dct:* quads, hoping to be routed plaintext into `_catalog` and
+    // stripped from the ciphertext. Identity-based partitioning defeats it: the
+    // attacker's subject is not the CG DID, so every quad stays on the
+    // encrypted path.
+    const ATTACKER = 'urn:acme:evil/leak-me';
+    const forged = [
+      q(ATTACKER, DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH), // forged marker
+      q(ATTACKER, DKG_ONTOLOGY.DCT_IDENTIFIER, '"secret-id"'),
+      q(ATTACKER, DKG_ONTOLOGY.DCT_PUBLISHER, 'urn:acme:who'),
+    ];
+    const { catalogQuads, otherQuads } = partitionCatalogQuads(forged, CG_DID);
+    expect(catalogQuads).toHaveLength(0);       // nothing leaked to the public catalog
+    expect(otherQuads).toEqual(forged);         // all of it stays encrypted
+  });
+
   it('fail-safe: a non-catalog predicate on the catalog subject stays on the encrypted path', () => {
-    const catalog = buildPublicProjection({ ual: CG_UAL, accessPolicy: 'private', graph: 'g' });
-    const leaky = q(CG_UAL, 'urn:acme:secret', '"do-not-leak"'); // CG UAL subject, non-catalog predicate
-    const { catalogQuads, otherQuads } = partitionCatalogQuads([...catalog, leaky]);
+    const catalog = buildPublicProjection({ ual: CG_DID, accessPolicy: 'private', graph: 'g' });
+    const leaky = q(CG_DID, 'urn:acme:secret', '"do-not-leak"'); // CG DID subject, non-catalog predicate
+    const { catalogQuads, otherQuads } = partitionCatalogQuads([...catalog, leaky], CG_DID);
     expect(catalogQuads).toHaveLength(catalog.length);
     expect(otherQuads).toEqual([leaky]);
   });
 
+  it('fail-safe: an empty catalog subject treats everything as encrypted (no public leak)', () => {
+    const catalog = buildPublicProjection({ ual: CG_DID, accessPolicy: 'private', graph: 'g' });
+    const { catalogQuads, otherQuads } = partitionCatalogQuads(catalog, '');
+    expect(catalogQuads).toHaveLength(0);
+    expect(otherQuads).toEqual(catalog);
+  });
+
   it('a private CG with no catalog entry yields all otherQuads (no accidental public leak)', () => {
     const data = [q('urn:acme:x', 'urn:acme:p', '"v"')];
-    const { catalogQuads, otherQuads } = partitionCatalogQuads(data);
+    const { catalogQuads, otherQuads } = partitionCatalogQuads(data, CG_DID);
     expect(catalogQuads).toHaveLength(0);
     expect(otherQuads).toEqual(data);
   });
 
   it('CATALOG_PREDICATES covers every predicate buildPublicProjection can emit', () => {
     const full = buildPublicProjection({
-      ual: CG_UAL, accessPolicy: 'private', graph: 'g', committedRoot: '0x' + 'ab'.repeat(32),
+      ual: CG_DID, accessPolicy: 'private', graph: 'g', committedRoot: '0x' + 'ab'.repeat(32),
       publisher: 'did:dkg:identity:0xp', accessService: 'https://grants/x',
       conformsTo: ['https://gs1.org/voc/EPCIS'], blindedAnchors: ['hmac:9a'],
     });

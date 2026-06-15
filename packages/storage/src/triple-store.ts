@@ -220,13 +220,33 @@ function wrapGraphSetIndex(
 function shouldEnableGraphSetIndex(config: TripleStoreConfig): boolean {
   if (config.graphSetIndex === true || typeof config.graphSetIndex === 'object') return true;
   if (isDefaultLocalGraphSetIndexBackend(config.backend)) return true;
-  return config.options?.managedByDkg === true;
+  // A managed store would otherwise default-enable the index, but a store that
+  // already owns a native `listGraphs()` cache must not be wrapped: stacking the
+  // index's ~30 s revalidate TTL on top of the inner cache's ~30 s TTL lets an
+  // out-of-band graph-set change stay invisible for up to ~60 s (two serial
+  // windows). The only such store is the managed `sparql-http` adapter, whose
+  // `SparqlHttpStore` enables its own write-invalidated `listGraphs()` cache
+  // when `managedByDkg === true`; its native cache already covers the idle-node
+  // scan cost (R6-A) the index would otherwise address. Managed `blazegraph`
+  // has no native cache, so it still gets the index here.
+  return config.options?.managedByDkg === true && !hasNativeListGraphsCache(config);
 }
 
 function isDefaultLocalGraphSetIndexBackend(backend: TripleStoreBackend): boolean {
   return backend === 'oxigraph'
     || backend === 'oxigraph-persistent'
     || backend === 'oxigraph-worker';
+}
+
+/**
+ * True when the adapter for `config` keeps its own native `listGraphs()` cache,
+ * so wrapping it in a GraphSetIndexStore would stack a second cache/TTL. Today
+ * the only such adapter is the managed `sparql-http` store
+ * ({@link SparqlHttpStore}), which caches `listGraphs()` (write-invalidated,
+ * TTL-bounded) exactly when `managedByDkg === true`.
+ */
+function hasNativeListGraphsCache(config: TripleStoreConfig): boolean {
+  return config.backend === 'sparql-http' && config.options?.managedByDkg === true;
 }
 
 function resolveLargeLiteralStorageOptions(
