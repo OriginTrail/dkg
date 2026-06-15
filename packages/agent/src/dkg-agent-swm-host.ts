@@ -934,20 +934,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return;
     }
     const storageCgId = envelope.contextGraphId;
-    // Rung-1 SWM strip (defence in depth) — host-mode ingest is curated-only
-    // (the subscribe gate returns on non-curated), so reaching here means a
-    // private CG. A non-participant core must persist ZERO ciphertext even if a
-    // stray re-flood, a restored persisted subscription (initialize path), or a
-    // direct call wired this handler. The Path-2 subscribe decline is the
-    // primary gate; this closes the residual ingest surface.
-    const stripNonParticipants = this.config.swmHostMode?.stripNonParticipants ?? true;
-    if (stripNonParticipants && !(await this.isNodeParticipantOfCg(storageCgId))) {
-      this.log.debug(
-        ctx,
-        `Host-mode envelope dropped for "${storageCgId}" from=${fromPeerId}: node is not a participant (rung-1 strip)`,
-      );
-      return;
-    }
     // Keep the wire-id → cleartext reverse index in sync so the
     // chain-fallback resolver and the catchup-request path can
     // translate either direction without an extra RPC.
@@ -1144,21 +1130,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const subscriptionWireId = this.gossipWireIdFor(contextGraphId);
     if (envelopeWireId !== subscriptionWireId) return;
     const storageCgId = envelope.contextGraphId;
-
-    // Rung-1 SWM strip (defence in depth) — the LU-11 chunked-ciphertext surface.
-    // Chunked envelopes persist into `ciphertextChunkStoreGraph(cgId)`, a DIFFERENT
-    // custody surface from the host-mode `.meta` store. A non-participant core must
-    // hold ZERO here too. The Path-2 subscribe decline starves this handler (it is
-    // wired by the same `wireSwmHostModeHandler`), so this is the residual-surface
-    // guard for stray/restored wiring.
-    const stripNonParticipants = this.config.swmHostMode?.stripNonParticipants ?? true;
-    if (stripNonParticipants && !(await this.isNodeParticipantOfCg(storageCgId))) {
-      this.log.debug(
-        ctx,
-        `LU-11: chunk dropped for "${storageCgId}" from=${fromPeerId}: node is not a participant (rung-1 strip)`,
-      );
-      return;
-    }
 
     // Verify envelope signature against the curated CG's agent
     // allowlist — exactly the same authority check the host-mode
