@@ -937,9 +937,28 @@ export class DKGAgent extends DKGAgentBase {
       collectEntries(metaResult.bindings as Record<string, string>[], 'meta');
     }
 
+    this.log.debug(ctx, `Discovery scan found ${discoveredEntries.size} CG(s) in store`);
+
     for (const { id, name, source } of discoveredEntries.values()) {
       const existing = this.subscribedContextGraphs.get(id);
-      if (existing) continue;
+      if (existing) {
+        // A restart re-seeds `subscribedContextGraphs` from persisted state but
+        // does NOT re-add the CG to the SWM-sync scope (`config.syncContextGraphs`,
+        // what `getSyncContextGraphs()` and sync-on-connect's shared-memory pass
+        // iterate). For a PRIVATE CG the member is a participant in, that means a
+        // reconnecting member would data-sync the CG but its on-connect SWM pass
+        // would never cover it — the curator-leader REPLACE gate never sees it, so
+        // the member stays stale forever. Re-track the sync scope here for curated
+        // CGs so this same connect cycle's `newlyDiscovered` set picks it up
+        // (refreshing its meta-synced flag) and the shared-memory pass recovers it.
+        // `trackSyncContextGraph` is idempotent, so public/already-scoped CGs are
+        // unaffected.
+        if (await this.isPrivateContextGraph(id)) {
+          this.trackSyncContextGraph(id);
+          this.log.info(ctx, `Re-tracked already-subscribed private CG "${id.slice(0, 28)}" into the SWM-sync scope on discovery`);
+        }
+        continue;
+      }
 
       // Two kinds of discovered CG, two different opt-in semantics:
       //

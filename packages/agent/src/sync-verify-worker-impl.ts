@@ -233,8 +233,26 @@ export function verifySyncedData(
 function parseAndFilterNQuads(text: string, graphUri: string, contextGraphId: string): SyncParseResult {
   const quads = parseNQuads(text);
   const cgUriPrefix = `did:dkg:context-graph:${contextGraphId}/`;
+  // A request is a shared-memory/workspace request iff its OWN graphUri names a
+  // `_shared_memory` graph (base bucket, per-KA descendant, or `_shared_memory_meta`).
+  // When it is NOT (a durable data/meta sync), reject any quad whose graph names a
+  // `_shared_memory` graph: the responder over-serves the whole `_shared_memory`
+  // subtree under the CG prefix, and a blind `storeInsert` of those quads on the
+  // streaming durable-sync apply UNIONS a reconnecting private-CG member into
+  // {old,new} for single-valued roots. SWM must flow ONLY through the dedicated
+  // SWM-sync / all-or-nothing recovery path (which passes an SWM graphUri here, so
+  // `swmRequest` is true and the base bucket + per-KA subgraphs are kept exactly as
+  // before). This is an EXCLUDE (drops quads), never a per-page REPLACE, so it
+  // cannot truncate a root spanning a page boundary. The literal "/_shared_memory"
+  // matches every SWM URI form and only those (validateSubGraphName forbids a
+  // leading "_" on subgraph names, so no data/meta/context graph can collide).
+  const swmRequest = graphUri.includes('/_shared_memory');
   return {
-    quads: quads.filter((q) => q.graph === graphUri || q.graph.startsWith(cgUriPrefix)),
+    quads: quads.filter(
+      (q) =>
+        q.graph === graphUri ||
+        (q.graph.startsWith(cgUriPrefix) && (swmRequest || !q.graph.includes('/_shared_memory'))),
+    ),
     totalQuads: quads.length,
   };
 }
