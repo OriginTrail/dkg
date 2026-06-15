@@ -308,6 +308,44 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       // allocate moves no TRAC — the credit was already in CSS.
       expect(await TokenContract.balanceOf(await CSS.getAddress())).to.equal(cssAfterDrain);
     });
+
+    it('drains a pending V8 withdrawal (D8): credit + SS→CSS transfer include pending', async () => {
+      const d = accounts[2];
+      const id = await createProfile(1);
+      const base = hre.ethers.parseEther('5000');
+      const pending = hre.ethers.parseEther('1500');
+      await seedV8Stake(d, id, base); // active base: vault += base, stakeBase=base, node/total += base
+      // V8 pending withdrawal: the earmarked TRAC stays in the vault but is
+      // excluded from active node/total stake. Seed the vault top-up + the request.
+      const key = keyOf(d.address);
+      await TokenContract.mint(await SS.getAddress(), pending);
+      const block = await hre.ethers.provider.getBlock('latest');
+      await SS.connect(accounts[0]).createDelegatorWithdrawalRequest(
+        id,
+        key,
+        pending,
+        0,
+        BigInt(block!.timestamp) + 1n,
+      );
+      await armCredit([[id, d.address]]);
+
+      const ssBefore = await TokenContract.balanceOf(await SS.getAddress());
+      const cssBefore = await TokenContract.balanceOf(await CSS.getAddress());
+
+      // credited (and eligible, since registered) must include the pending amount.
+      await expect(NFT.connect(accounts[0]).adminMigrateToCredit(d.address, [id]))
+        .to.emit(NFT, 'MigrationStarted')
+        .withArgs(d.address, base + pending, base + pending, true);
+
+      expect(await NFT.migrationCredit(d.address)).to.equal(base + pending);
+      // SS→CSS vault moved base + pending (the collateralization invariant the
+      // deleted regression covered — guards against silent under-crediting).
+      expect(await TokenContract.balanceOf(await SS.getAddress())).to.equal(ssBefore - (base + pending));
+      expect(await TokenContract.balanceOf(await CSS.getAddress())).to.equal(cssBefore + base + pending);
+      // Both V8 slots cleared.
+      expect(await SS.getDelegatorStakeBase(id, key)).to.equal(0n);
+      expect(await SS.getDelegatorWithdrawalRequestAmount(id, key)).to.equal(0n);
+    });
   });
 
   // ===========================================================================
