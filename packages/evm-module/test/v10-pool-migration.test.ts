@@ -2,23 +2,21 @@
 // OT-RFC-50 — V8 → V10 "pool & allocate" migration
 // =============================================================================
 //
-// Admin-push (OT-RFC-50): the protocol drains every wallet's V8 stake across the
-// given source nodes into an in-protocol migration credit on CSS (Option B
-// ledger) — via adminMigrateToCredit (single delegator) / adminDrainBatch (bulk,
-// flattened (delegator,node) pairs, skip-zero) — tagging the registry-eligible
-// portion into eligibleCredit. There is NO self-service startMigration. allocate
-// then lets the USER spend that pre-populated credit into fresh V10 conviction
-// positions (node + amount + tier), applying the configurable
-// convictionCreditSeconds lock-shortening to tier-6/12 allocations fully covered
-// by eligible credit. A tier-0 allocation is immediately withdrawable, so
-// admin-drained funds are always recoverable to the wallet.
+// Admin-push (OT-RFC-50, rev 5): the protocol drains every wallet's V8 stake
+// across the given source nodes into ONE in-protocol migration credit on CSS
+// (Option B ledger) — via adminMigrateToCredit (single delegator) /
+// adminDrainBatch (bulk, flattened (delegator,node) pairs, skip-zero). There is
+// NO self-service startMigration and NO eligibility registry. allocate then lets
+// the USER spend that pre-populated credit into fresh V10 conviction positions
+// (node + amount + tier); ANY tier-6/12 allocation applies the configurable
+// convictionCreditSeconds lock-shortening (universal). A tier-0 allocation is
+// immediately withdrawable, so admin-drained funds are always recoverable.
 //
-// Covered: admin drain→credit accounting + eligible tagging; the eligibleCredit
-// "non-eligible-first" clamp; the credit gate (tier 6/12, fully-covered); the
-// collateralization invariant (SS→CSS exact; allocate moves no TRAC); the
-// freeze-gate at drain time; adminMigrateToCredit + adminDrainBatch (skip-zero,
-// idempotent re-run); the tier-0 recover-to-wallet round-trip;
-// setConvictionCreditSeconds (owner-settable until frozen, capped < tier-6).
+// Covered: admin drain→credit accounting; the credit gate (universal tier-6/12
+// lock-credit); the collateralization invariant (SS→CSS exact, incl. D8 pending;
+// allocate moves no TRAC); adminMigrateToCredit + adminDrainBatch (skip-zero,
+// idempotent re-run); the tier-0 recover-to-wallet round-trip (incl. after the
+// owner deactivates tier 0); setConvictionCreditSeconds (capped < tier-6).
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
@@ -35,7 +33,6 @@ import {
   StakingStorage,
   StakingV10,
   Token,
-  V8MigrationEligibility,
 } from '../typechain';
 
 const SCALE18 = 10n ** 18n;
@@ -55,16 +52,10 @@ type Fixture = {
   Profile: Profile;
   Token: Token;
   Chronos: Chronos;
-  V8MigrationEligibility: V8MigrationEligibility;
 };
 
 async function deployFixture(): Promise<Fixture> {
-  await hre.deployments.fixture([
-    'DKGStakingConvictionNFT',
-    'StakingV10',
-    'Profile',
-    'V8MigrationEligibility',
-  ]);
+  await hre.deployments.fixture(['DKGStakingConvictionNFT', 'StakingV10', 'Profile']);
 
   const accounts = await hre.ethers.getSigners();
   const Hub = await hre.ethers.getContract<Hub>('Hub');
@@ -83,9 +74,6 @@ async function deployFixture(): Promise<Fixture> {
     Profile: await hre.ethers.getContract<Profile>('Profile'),
     Token: await hre.ethers.getContract<Token>('Token'),
     Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    V8MigrationEligibility: await hre.ethers.getContract<V8MigrationEligibility>(
-      'V8MigrationEligibility',
-    ),
   };
 }
 
@@ -100,7 +88,6 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
   let CSS: ConvictionStakingStorage;
   let ProfileContract: Profile;
   let TokenContract: Token;
-  let Registry: V8MigrationEligibility;
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
@@ -111,7 +98,6 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       ConvictionStakingStorage: CSS,
       Profile: ProfileContract,
       Token: TokenContract,
-      V8MigrationEligibility: Registry,
     } = await loadFixture(deployFixture));
   });
 
@@ -146,23 +132,18 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
     return v8Key;
   };
 
-  // Set the credit (owner, pre-freeze), upload eligibility, then freeze.
-  const armCredit = async (eligible: Array<[number, string]>) => {
+  // Set the conviction credit (owner). rev 5: no eligibility registry / freeze —
+  // the lock-credit is universal on 6/12. The optional arg is ignored (call
+  // sites retained to keep the diff small).
+  const armCredit = async (_eligible?: Array<[number, string]>) => {
     await NFT.connect(accounts[0]).setConvictionCreditSeconds(CREDIT_SECONDS);
-    if (eligible.length) {
-      await Registry.connect(accounts[0]).setEligibleBatch(
-        eligible.map(([id]) => id),
-        eligible.map(([, a]) => a),
-      );
-    }
-    await Registry.connect(accounts[0]).freeze();
   };
 
   // ===========================================================================
   // admin drain → credit (adminMigrateToCredit) — accounting & invariants
   // ===========================================================================
   describe('admin drain (adminMigrateToCredit)', () => {
-    it('drains V8 stake across nodes into credit and tags the eligible portion', async () => {
+    it('drains V8 stake across nodes into credit', async () => {
       const d = accounts[2];
       const idA = await createProfile(1);
       const idB = await createProfile(3);
@@ -170,15 +151,13 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       const stakeB = hre.ethers.parseEther('3000');
       await seedV8Stake(d, idA, stakeA);
       await seedV8Stake(d, idB, stakeB);
-      // Eligible on A only.
-      await armCredit([[idA, d.address]]);
+      await armCredit();
 
       await expect(NFT.connect(accounts[0]).adminMigrateToCredit(d.address, [idA, idB]))
         .to.emit(NFT, 'MigrationStarted')
-        .withArgs(d.address, stakeA + stakeB, stakeA, true);
+        .withArgs(d.address, stakeA + stakeB);
 
       expect(await NFT.migrationCredit(d.address)).to.equal(stakeA + stakeB);
-      expect(await NFT.eligibleCredit(d.address)).to.equal(stakeA); // only A eligible
       // V8 slots drained.
       expect(await SS.getDelegatorStakeBase(idA, keyOf(d.address))).to.equal(0n);
       expect(await SS.getDelegatorStakeBase(idB, keyOf(d.address))).to.equal(0n);
@@ -186,20 +165,10 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
 
     it('reverts NothingToMigrate when the delegator has no V8 stake', async () => {
       const idA = await createProfile(1);
-      await armCredit([]);
+      await armCredit();
       await expect(
         NFT.connect(accounts[0]).adminMigrateToCredit(accounts[2].address, [idA]),
       ).to.be.revertedWithCustomError(NFT, 'NothingToMigrate');
-    });
-
-    it('reverts if the eligibility registry is not frozen', async () => {
-      const d = accounts[2];
-      const idA = await createProfile(1);
-      await seedV8Stake(d, idA, hre.ethers.parseEther('1000'));
-      // not frozen
-      await expect(NFT.connect(accounts[0]).adminMigrateToCredit(d.address, [idA])).to.be.revertedWith(
-        'V8 eligibility not frozen',
-      );
     });
 
     it('is idempotent — a re-drained node contributes 0 (no double count)', async () => {
@@ -224,18 +193,19 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
   // allocate — credit → position
   // ===========================================================================
   describe('allocate', () => {
-    it('tier 12 fully covered by eligible credit: applies the conviction credit', async () => {
+    it('tier 12 allocation gets the universal conviction credit', async () => {
       const d = accounts[2];
       const id = await createProfile(1);
       const stake = hre.ethers.parseEther('5000');
       await seedV8Stake(d, id, stake);
-      await armCredit([[id, d.address]]);
+      await armCredit();
       await NFT.connect(accounts[0]).adminMigrateToCredit(d.address, [id]);
 
       const tx = await NFT.connect(d).allocate(id, stake, 12);
       const rcpt = await tx.wait();
       const blockTs = BigInt((await hre.ethers.provider.getBlock(rcpt!.blockNumber))!.timestamp);
 
+      // creditApplied = true for any tier-12 migration allocation (rev 5: universal).
       await expect(tx).to.emit(NFT, 'Allocated').withArgs(d.address, 1n, id, stake, 12n, true);
 
       const pos = await CSS.getPosition(1);
@@ -244,9 +214,8 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       expect(pos.migrationEpoch).to.be.greaterThan(0n); // drives the "Migrated from V8" badge
       expect(pos.expiryTimestamp).to.equal(blockTs + TIER12_DURATION - CREDIT_SECONDS);
 
-      // Credit fully spent; eligible consumed.
+      // Credit fully spent.
       expect(await NFT.migrationCredit(d.address)).to.equal(0n);
-      expect(await NFT.eligibleCredit(d.address)).to.equal(0n);
       // Boost magnitude unchanged by the credit (6x on raw).
       expect(await CSS.getNodeRunningEffectiveStake(id)).to.equal((stake * SIX_X) / SCALE18);
     });
@@ -257,16 +226,14 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       const idB = await createProfile(3);
       const stake = hre.ethers.parseEther('10000');
       await seedV8Stake(d, idA, stake);
-      await armCredit([[idA, d.address]]);
+      await armCredit();
       await NFT.connect(accounts[0]).adminMigrateToCredit(d.address, [idA]);
 
       const part = hre.ethers.parseEther('4000');
-      await NFT.connect(d).allocate(idA, part, 0); // tier 0, no credit
+      await NFT.connect(d).allocate(idA, part, 0); // tier 0, no lock-credit
       expect(await NFT.migrationCredit(d.address)).to.equal(stake - part);
-      // Non-eligible-first clamp: a tier-0 spend leaves eligible capped at remaining credit.
-      expect(await NFT.eligibleCredit(d.address)).to.equal(stake - part);
 
-      // Allocate the rest to node B at tier 12 — fully covered by remaining eligible.
+      // Allocate the rest to node B at tier 12.
       await NFT.connect(d).allocate(idB, stake - part, 12);
       expect(await NFT.migrationCredit(d.address)).to.equal(0n);
     });
@@ -332,10 +299,10 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       const ssBefore = await TokenContract.balanceOf(await SS.getAddress());
       const cssBefore = await TokenContract.balanceOf(await CSS.getAddress());
 
-      // credited (and eligible, since registered) must include the pending amount.
+      // credited must include the pending amount.
       await expect(NFT.connect(accounts[0]).adminMigrateToCredit(d.address, [id]))
         .to.emit(NFT, 'MigrationStarted')
-        .withArgs(d.address, base + pending, base + pending, true);
+        .withArgs(d.address, base + pending);
 
       expect(await NFT.migrationCredit(d.address)).to.equal(base + pending);
       // SS→CSS vault moved base + pending (the collateralization invariant the
@@ -352,16 +319,16 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
   // adminMigrateToCredit — single-delegator drain (gating & no-mint)
   // ===========================================================================
   describe('adminMigrateToCredit (single delegator)', () => {
-    it('owner drains a delegator to THEIR credit, mints no position, byAdmin=true', async () => {
+    it('owner drains a delegator to THEIR credit, mints no position', async () => {
       const straggler = accounts[5];
       const id = await createProfile(1);
       const stake = hre.ethers.parseEther('2500');
       await seedV8Stake(straggler, id, stake);
-      await armCredit([[id, straggler.address]]);
+      await armCredit();
 
       await expect(NFT.connect(accounts[0]).adminMigrateToCredit(straggler.address, [id]))
         .to.emit(NFT, 'MigrationStarted')
-        .withArgs(straggler.address, stake, stake, true);
+        .withArgs(straggler.address, stake);
 
       expect(await NFT.migrationCredit(straggler.address)).to.equal(stake);
       expect(await NFT.totalSupply()).to.equal(0n); // no NFT minted by the sweep
@@ -398,7 +365,6 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       await NFT.connect(accounts[0]).adminDrainBatch([d1.address, d2.address], [idA, idB]);
 
       expect(await NFT.migrationCredit(d1.address)).to.equal(s1);
-      expect(await NFT.eligibleCredit(d1.address)).to.equal(s1);
       expect(await NFT.migrationCredit(d2.address)).to.equal(s2);
       expect(await NFT.totalSupply()).to.equal(0n); // pure drain, no mint
     });
@@ -439,15 +405,6 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       await expect(
         NFT.connect(accounts[0]).adminDrainBatch([accounts[2].address], [idA, idA]),
       ).to.be.revertedWith('length mismatch');
-    });
-
-    it('reverts if the eligibility registry is not frozen', async () => {
-      const idA = await createProfile(1);
-      await seedV8Stake(accounts[2], idA, hre.ethers.parseEther('100'));
-      // not frozen
-      await expect(
-        NFT.connect(accounts[0]).adminDrainBatch([accounts[2].address], [idA]),
-      ).to.be.revertedWith('V8 eligibility not frozen');
     });
 
     it('is gated to the owner/multisig', async () => {
@@ -506,16 +463,9 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
   // setConvictionCreditSeconds
   // ===========================================================================
   describe('setConvictionCreditSeconds', () => {
-    it('owner-settable before freeze; readable via the wrapper view', async () => {
+    it('owner-settable; readable via the wrapper view', async () => {
       await NFT.connect(accounts[0]).setConvictionCreditSeconds(CREDIT_SECONDS);
       expect(await NFT.convictionCreditSeconds()).to.equal(CREDIT_SECONDS);
-    });
-
-    it('reverts once the eligibility registry is frozen', async () => {
-      await Registry.connect(accounts[0]).freeze();
-      await expect(
-        NFT.connect(accounts[0]).setConvictionCreditSeconds(CREDIT_SECONDS),
-      ).to.be.revertedWith('eligibility already frozen');
     });
 
     it('caps the credit below the tier-6 lock duration', async () => {

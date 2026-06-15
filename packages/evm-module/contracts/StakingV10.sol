@@ -9,7 +9,6 @@ import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
 import {StakingStorage} from "./storage/StakingStorage.sol";
 import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
-import {V8MigrationEligibility} from "./storage/V8MigrationEligibility.sol";
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {RandomSamplingStorage} from "./storage/RandomSamplingStorage.sol";
 import {EpochStorage} from "./storage/EpochStorage.sol";
@@ -116,14 +115,10 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     //           * `stakingStorage` is retained ONLY for `_convertToNFT`'s
     //             V8→V10 drain at cutover.
     //   3.1.0 — V8→V10 migration conviction credit (CSS v4.1.0):
-    //           * `_convertToNFT` consults the new `V8MigrationEligibility`
-    //             registry and, for migrants picking lockTier 6 or 12 who
-    //             held continuous V8 stake on the destination node for the
-    //             60 days preceding V10 launch, shortens the V10 NFT's
-    //             default `expiryTimestamp` by 2 epochs (60 days).
-    //           * Eligibility set is fixed off-chain and frozen on-chain
-    //             before migration opens; no V10 hot-path code reconstructs
-    //             V8 history.
+    //           * `allocateFromCredit`, for migrants picking lockTier 6 or 12,
+    //             shortens the V10 NFT's default `expiryTimestamp` by
+    //             `convictionCreditSeconds` (rev 5: universal — no eligibility
+    //             registry; every 6/12 migration allocation earns it).
     //           * `convictionStorage.createPosition(...)` calls now pass the
     //             new `expiryShortenedBy` arg (CSS v4.1.0). `stake` always
     //             passes 0; `_convertToNFT` passes 0 except for eligible
@@ -158,11 +153,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         exclusively (v4.0.0 consolidation).
     StakingStorage public stakingStorage;
     ConvictionStakingStorage public convictionStorage;
-    /// @notice v3.1.0 — frozen registry of V8 delegators eligible for the
-    ///         60-day V10 conviction-lock credit. Read by `_convertToNFT`
-    ///         on every migration to decide whether the destination NFT's
-    ///         `expiryTimestamp` is shortened by 2 epochs.
-    V8MigrationEligibility public v8MigrationEligibility;
     Chronos public chronos;
     RandomSamplingStorage public randomSamplingStorage;
     ShardingTableStorage public shardingTableStorage;
@@ -227,7 +217,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     function initialize() external onlyHub {
         stakingStorage = StakingStorage(hub.getContractAddress("StakingStorage"));
         convictionStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
-        v8MigrationEligibility = V8MigrationEligibility(hub.getContractAddress("V8MigrationEligibility"));
         chronos = Chronos(hub.getContractAddress("Chronos"));
         randomSamplingStorage = RandomSamplingStorage(hub.getContractAddress("RandomSamplingStorage"));
         shardingTableStorage = ShardingTableStorage(hub.getContractAddress("ShardingTableStorage"));
@@ -885,21 +874,19 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         credit on CSS. Returns the drained `total` so the wrapper can
     ///         aggregate across nodes and revert if the grand total is zero;
     ///         a node with no V8 stake contributes 0 (no revert here).
-    /// @dev    Eligibility is captured NOW — the source slot is gone after the
-    ///         drain — so the full drained amount joins `eligibleCredit` iff the
-    ///         (node, delegator) pair is in the V8MigrationEligibility registry.
-    ///         The wrapper guarantees `frozen()` before any drain, so the read
-    ///         is against a finalised set.
+    /// @dev    rev 5 — no per-source eligibility: the full drained amount is
+    ///         credited to the delegator; the tier-6/12 lock-credit is decided
+    ///         later in `allocateFromCredit` from the chosen tier.
     function drainV8ToCredit(
         address delegator,
         uint72 identityId
-    ) external onlyConvictionNFT returns (uint96 total, uint96 eligible) {
+    ) external onlyConvictionNFT returns (uint96 total) {
         bytes32 v8Key = keccak256(abi.encodePacked(delegator));
         StakingStorage ss = stakingStorage;
         uint96 stakeBase = ss.getDelegatorStakeBase(identityId, v8Key);
         uint96 pending = ss.getDelegatorWithdrawalRequestAmount(identityId, v8Key);
         total = stakeBase + pending;
-        if (total == 0) return (0, 0);
+        if (total == 0) return 0;
 
         // V8 drain. Pending was already excluded from node/total stake at
         // request time, so only the active base is decremented.
@@ -914,16 +901,15 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         // Move the migrated TRAC SS -> CSS so the credit stays collateralized.
         ss.transferStake(address(convictionStorage), total);
 
-        eligible = v8MigrationEligibility.isEligible(identityId, delegator) ? total : 0;
-        convictionStorage.addMigrationCredit(delegator, total, eligible);
+        convictionStorage.addMigrationCredit(delegator, total);
     }
 
     /// @notice Spend `amount` of `staker`'s migration credit into a fresh V10
     ///         conviction position on `targetNode` at `lockTier`. Runs the full
     ///         stake tail (score-cursor baseline → createPosition → sharding
-    ///         insert → ask recalc). For a tier-6/12 allocation fully covered by
-    ///         eligible credit, applies the `convictionCreditSeconds`
-    ///         lock-shortening. The wrapper supplies `tokenId` and mints after.
+    ///         insert → ask recalc). Any tier-6/12 allocation applies the
+    ///         `convictionCreditSeconds` lock-shortening (universal, rev 5). The
+    ///         wrapper supplies `tokenId` and mints after.
     function allocateFromCredit(
         address staker,
         uint256 tokenId,
@@ -947,10 +933,11 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             revert MaxStakeExceeded();
         }
 
-        // Debit credit (reverts if amount == 0 or > migrationCredit). Consume
-        // eligible only for the lock-bearing tiers; CSS returns whether the
-        // eligible sub-balance fully covered `amount`.
-        creditApplied = cs.spendMigrationCredit(staker, amount, lockTier == 6 || lockTier == 12);
+        // Debit credit (reverts if amount == 0 or > migrationCredit). The
+        // tier-6/12 conviction lock-credit is universal under rev 5 — any 6/12
+        // migration allocation earns it (no per-staker eligibility).
+        cs.spendMigrationCredit(staker, amount);
+        creditApplied = lockTier == 6 || lockTier == 12;
         uint40 expiryShortenedBy = creditApplied ? cs.convictionCreditSeconds() : 0;
 
         uint256 currentEpoch = chronos.getCurrentEpoch();

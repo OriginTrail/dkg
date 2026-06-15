@@ -295,18 +295,6 @@
         "internalType": "uint96",
         "name": "credited",
         "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "eligibleCredited",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "bool",
-        "name": "byAdmin",
-        "type": "bool"
       }
     ],
     "name": "MigrationStarted",
@@ -669,25 +657,6 @@
       }
     ],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "user",
-        "type": "address"
-      }
-    ],
-    "name": "eligibleCredit",
-    "outputs": [
-      {
-        "internalType": "uint96",
-        "name": "",
-        "type": "uint96"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -1199,19 +1168,6 @@
     "name": "transferFrom",
     "outputs": [],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "v8MigrationEligibility",
-    "outputs": [
-      {
-        "internalType": "contract V8MigrationEligibility",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {

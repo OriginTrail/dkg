@@ -159,9 +159,8 @@ async function main() {
   const credited: bigint = await adminW.adminMigrateToCredit.staticCall(DELEGATOR, [SOURCE_NODE]);
   await (await adminW.adminMigrateToCredit(DELEGATOR, [SOURCE_NODE])).wait();
   const credBal: bigint = await (wrapper as any).migrationCredit(DELEGATOR);
-  const eligBal: bigint = await (wrapper as any).eligibleCredit(DELEGATOR);
   console.log(`adminMigrateToCredit(${DELEGATOR}, [${SOURCE_NODE}]) → credited ${fmt(credited)} TRAC`);
-  console.log(`  migrationCredit=${fmt(credBal)}  eligibleCredit=${fmt(eligBal)}`);
+  console.log(`  migrationCredit=${fmt(credBal)}`);
 
   // V8 must be drained; TRAC moved SS→CSS (collateralization invariant)
   const baseAfter: bigint = await ss.getDelegatorStakeBase(SOURCE_NODE, v8Key);
@@ -182,7 +181,6 @@ async function main() {
   const checks: [string, boolean][] = [
     ['V8 stake fully drained', baseAfter === 0n],
     ['credit == drained (base + pending)', credited === baseBefore + pendingBefore],
-    ['full credit eligible (tier-12, registered)', eligBal === credited],
     ['V8 total drops by active base (pending was already excluded from total)', totalBefore - totalAfter === baseBefore],
     ['NFT minted to delegator', nftOwner.toLowerCase() === DELEGATOR.toLowerCase()],
     ['credit fully spent', (await (wrapper as any).migrationCredit(DELEGATOR)) === 0n],

@@ -459,11 +459,6 @@
         "internalType": "uint96",
         "name": "total",
         "type": "uint96"
-      },
-      {
-        "internalType": "uint96",
-        "name": "eligible",
-        "type": "uint96"
       }
     ],
     "stateMutability": "nonpayable",
@@ -779,19 +774,6 @@
     "outputs": [
       {
         "internalType": "contract IERC20",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "v8MigrationEligibility",
-    "outputs": [
-      {
-        "internalType": "contract V8MigrationEligibility",
         "name": "",
         "type": "address"
       }

@@ -9,10 +9,10 @@ signs `allocate`. There is no self-service `startMigration`.
 
 | Layer | Where it's verified |
 |---|---|
-| Contract logic (drain → credit → allocate, eligibility tagging, collateralization, partial/clamp, freeze-gate) | ✅ 14 + 5 hardhat tests (`test/v10-pool-migration.test.ts`, `test/v10-migration-conviction-credit.test.ts`) |
+| Contract logic (drain → credit → allocate, universal 6/12 lock-credit, collateralization incl. D8 pending, tier-0 recovery) | ✅ 20 hardhat tests (`test/v10-pool-migration.test.ts`) |
 | Deployed V8 StakingStorage exposes the exact drain interface | ✅ selector probe vs Base-mainnet `0x57307C87…` (all 7 selectors present, no drift) |
-| All 13 `StakingV10.initialize()` deps exist on the freeze Hub | ✅ probe of Base freeze Hub `0x99Aa…` (only CSS + V8MigrationEligibility missing — the 2 we deploy) |
-| The migration **tooling** end-to-end: deploy → MINTER_ROLE vault funding → seed → eligibility+freeze → **admin drain** (`adminDrainBatch`) → wallet-signed `allocate` (target ≠ source) → NFT mint, plus the tier-0 recover-to-wallet path | ✅ local `hardhat node` run with a **real mainnet position** (`0x7D1E…`, 17.3754 TRAC) mirrored under a controlled wallet — see "Local end-to-end" below |
+| The 12 `StakingV10.initialize()` deps exist on the freeze Hub | ✅ probe of Base freeze Hub `0x99Aa…` (only CSS missing — the new storage we deploy) |
+| The migration **tooling** end-to-end: deploy → MINTER_ROLE vault funding → seed → set credit → **admin drain** (`adminDrainBatch`) → wallet-signed `allocate` (target ≠ source) → NFT mint, plus the tier-0 recover-to-wallet path | ✅ local `hardhat node` run with a **real mainnet position** (`0x7D1E…`, 17.3754 TRAC) mirrored under a controlled wallet — see "Local end-to-end" below |
 | **`allocate`'s tail against a REAL ~59-node active set** (sharding insert, `ask.recalculateActiveSet`) + registration on a live chain | ⬇️ **this Sepolia rehearsal** (or the anvil fork) — the one thing a fresh local/fixture deploy can't fake |
 
 > A local mainnet-**fork** pre-flight (`scripts/fork-rehearsal.ts`) would catch
@@ -45,8 +45,7 @@ pnpm deploy:testnet     # hardhat deploy --network base_sepolia_v10
 
 `base_sepolia_v10` sets `saveDeployments:false`, so **copy these addresses from
 the deploy output** (you'll pass them to the next steps):
-`Hub`, `StakingStorage`, `Token`, `V8MigrationEligibility`,
-`DKGStakingConvictionNFT`.
+`Hub`, `StakingStorage`, `Token`, `DKGStakingConvictionNFT`.
 
 ### 2. Make sure an allocate target profile exists
 
@@ -56,7 +55,7 @@ tests use in `test/helpers`, or reuse an existing Sepolia node id) and note its
 `identityId`. The migration *source* node (3) is just seeded storage and needs
 no profile; only the allocate *target* does.
 
-### 3. Mirror the real mainnet position under your wallet + arm eligibility
+### 3. Mirror the real mainnet position under your wallet + admin-drain
 
 ```bash
 DELEGATOR=0x7D1E9050f02044CBf200BC2B75d443D8e464A0d9 \
@@ -64,17 +63,17 @@ TARGET_DELEGATOR=0x<your-testnet-wallet> \
 SOURCE_RPC=https://<base-mainnet-rpc> \
 SOURCE_STAKING_STORAGE=0x57307C87E95a372C5D94BCC372bb7304505A739D \
 TARGET_HUB=0x<Hub> TARGET_SS=0x<StakingStorage> TARGET_TOKEN=0x<Token> \
-TARGET_REGISTRY=0x<V8MigrationEligibility> TARGET_NFT=0x<DKGStakingConvictionNFT> \
-CREDIT_SECONDS=6048000 FREEZE=1 \
+TARGET_NFT=0x<DKGStakingConvictionNFT> \
+CREDIT_SECONDS=6048000 \
 npx hardhat run scripts/mirror-mainnet-delegator.ts --network base_sepolia_v10
 ```
 
 This reads the delegator's real V8 stake from mainnet, seeds the same amounts
-under `TARGET_DELEGATOR` on Sepolia, marks `(node, TARGET_DELEGATOR)` eligible,
-sets `convictionCreditSeconds` (70d), freezes the registry, and then **admin-
-drains** (`adminDrainBatch`) the seeded stake into `TARGET_DELEGATOR`'s migration
-credit — so the wallet starts with credit ready to allocate. The script asserts
-`accounts[0] == Hub.owner()` up front.
+under `TARGET_DELEGATOR` on Sepolia, sets `convictionCreditSeconds` (70d, the
+universal tier-6/12 lock-credit), and then **admin-drains** (`adminDrainBatch`)
+the seeded stake into `TARGET_DELEGATOR`'s migration credit — so the wallet
+starts with credit ready to allocate. The script asserts `accounts[0] ==
+Hub.owner()` up front.
 
 ### 4. Allocate, signed by your wallet
 
@@ -94,9 +93,8 @@ immediately-withdrawable position — the recover-to-wallet path.)
 
 ### 5. Verify
 
-The script prints: credited == seeded base, `eligibleCredit == credit`
-(tier-12 eligible), a minted conviction NFT owned by your wallet, and remaining
-credit 0. Cross-check on a Base Sepolia explorer:
+The script prints: credited == seeded base, a minted conviction NFT owned by
+your wallet, and remaining credit 0. Cross-check on a Base Sepolia explorer:
 - `DKGStakingConvictionNFT.migrationCredit(you)` → 0
 - `ownerOf(tokenId)` → your wallet
 - `ConvictionStakingStorage.nodeStakeV10(targetNode)` increased by the amount
@@ -115,7 +113,7 @@ npx hardhat node --config hardhat.node.config.ts &        # serves 127.0.0.1:854
 
 # 2. deploy the migration stack to it (saveDeployments → scripts resolve via getContract)
 npx hardhat deploy --network localhost --config hardhat.node.config.ts \
-  --tags DKGStakingConvictionNFT,StakingV10,Profile,V8MigrationEligibility
+  --tags DKGStakingConvictionNFT,StakingV10,Profile
 
 # 3. create an allocate-target profile (≠ the source node)
 npx hardhat run scripts/create-profile.ts --network localhost --config hardhat.node.config.ts   # → IDENTITY_ID=1
@@ -125,7 +123,7 @@ DELEGATOR=0x7D1E9050f02044CBf200BC2B75d443D8e464A0d9 \
 TARGET_DELEGATOR=0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC \
 SOURCE_RPC=https://<base-mainnet-rpc> \
 SOURCE_STAKING_STORAGE=0x57307C87E95a372C5D94BCC372bb7304505A739D LAST_IDENTITY_ID=3 \
-CREDIT_SECONDS=6048000 FREEZE=1 \
+CREDIT_SECONDS=6048000 \
 npx hardhat run scripts/mirror-mainnet-delegator.ts --network localhost --config hardhat.node.config.ts
 # (getContract resolves addresses from deployments/localhost; TARGET_* overrides optional here)
 
@@ -136,8 +134,8 @@ TARGET_NODE=1 LOCK_TIER=12 \
 npx hardhat run scripts/migrate-as-wallet.ts --network localhost --config hardhat.node.config.ts
 ```
 
-Expected tail: `credited 17.3754… (eligible 17.3754…)` then `minted conviction
-NFT tokenId 1 → owner 0x3C44…`, `remaining credit 0.0`.
+Expected tail: `migrationCredit 17.3754…` then `minted conviction NFT tokenId 1
+→ owner 0x3C44…`, `remaining credit 0.0`.
 
 ## Optional: local mainnet-fork pre-flight (needs Foundry/anvil)
 

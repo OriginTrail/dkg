@@ -13,7 +13,6 @@ import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {RandomSamplingStorage} from "./storage/RandomSamplingStorage.sol";
-import {V8MigrationEligibility} from "./storage/V8MigrationEligibility.sol";
 import {Chronos} from "./storage/Chronos.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
@@ -113,7 +112,6 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     Ask public askContract;
     ParametersStorage public parametersStorage;
     ProfileStorage public profileStorage;
-    V8MigrationEligibility public v8MigrationEligibility;
     IERC20 public tokenContract;
 
     // ========================================================================
@@ -179,23 +177,15 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     ///         alone still see the exit.
     event PositionWithdrawn(uint256 indexed tokenId, uint96 amount);
 
-    /// @notice Emitted when a wallet's V8 stake is drained into migration
-    ///         credit (OT-RFC-50). `credited` is the total moved into credit
-    ///         by this event; `eligibleCredited` the portion that joined
-    ///         `eligibleCredit`. `byAdmin` is always `true` under the admin-push
-    ///         model (the self-service `startMigration` path was removed); the
-    ///         field is retained for event-ABI stability.
-    event MigrationStarted(
-        address indexed delegator,
-        uint96 credited,
-        uint96 eligibleCredited,
-        bool byAdmin
-    );
+    /// @notice Emitted when a delegator's V8 stake is drained into migration
+    ///         credit by the admin sweep (OT-RFC-50). `credited` is the total
+    ///         moved into that delegator's credit by this event.
+    event MigrationStarted(address indexed delegator, uint96 credited);
 
     /// @notice Emitted when migration credit is allocated into a fresh V10
-    ///         conviction position. `creditApplied` is true when the
-    ///         tier-6/12 conviction lock-credit was applied (eligible credit
-    ///         fully covered `amount`).
+    ///         conviction position. `creditApplied` is true when the tier-6/12
+    ///         conviction lock-credit was applied (any 6/12 migration allocation,
+    ///         rev 5: universal).
     event Allocated(
         address indexed delegator,
         uint256 indexed tokenId,
@@ -254,7 +244,6 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
         askContract = Ask(hub.getContractAddress("Ask"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
         profileStorage = ProfileStorage(hub.getContractAddress("ProfileStorage"));
-        v8MigrationEligibility = V8MigrationEligibility(hub.getContractAddress("V8MigrationEligibility"));
         tokenContract = IERC20(hub.getContractAddress("Token"));
     }
 
@@ -523,12 +512,14 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     // `adminDrainBatch` (bulk) / `adminMigrateToCredit` (single delegator) —
     // both onlyOwnerOrMultiSigOwner. Users never drain themselves; they only
     // call `allocate` to spend their pre-populated credit into V10 conviction
-    // positions (node + amount + tier), repeatably. Credit is non-withdrawable
-    // as credit; `allocate` is its only sink — but a tier-0 allocation carries
-    // no lock and is immediately withdrawable, so drained funds are always
-    // recoverable to the wallet in two txs. The credit ledger + drain/allocate
-    // workers live on CSS / StakingV10 (onlyConvictionNFT); this wrapper owns
-    // the tokenId counter + ERC-721 mint and the owner/frozen gating.
+    // positions (node + amount + tier), repeatably. A tier-6/12 allocation earns
+    // the conviction lock-credit (rev 5: universal — no eligibility registry).
+    // Credit is non-withdrawable as credit; `allocate` is its only sink — but a
+    // tier-0 allocation carries no lock and is immediately withdrawable, so
+    // drained funds are always recoverable to the wallet in two txs. The credit
+    // ledger + drain/allocate workers live on CSS / StakingV10
+    // (onlyConvictionNFT); this wrapper owns the tokenId counter + ERC-721 mint
+    // and the owner gating.
     //
     // There is intentionally NO self-service drain: the off-chain sweep is the
     // only path that empties V8, so its completeness (per-chain
@@ -538,19 +529,15 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     /// @notice Single-delegator admin drain — move `delegator`'s V8 stake across
     ///         `sourceNodes` into THEIR migration credit (no allocation). See
     ///         `adminDrainBatch` for the bulk sweep. Gate:
-    ///         `onlyOwnerOrMultiSigOwner`; requires the V8MigrationEligibility
-    ///         registry frozen so the eligible tag is final. Reverts
-    ///         `NothingToMigrate` if nothing was drained (caller-error guard on
-    ///         an intentional single call).
+    ///         `onlyOwnerOrMultiSigOwner`. Reverts `NothingToMigrate` if nothing
+    ///         was drained (caller-error guard on an intentional single call).
     function adminMigrateToCredit(
         address delegator,
         uint72[] calldata sourceNodes
     ) external onlyOwnerOrMultiSigOwner returns (uint96 credited) {
-        require(v8MigrationEligibility.frozen(), "V8 eligibility not frozen");
-        uint96 eligible;
-        (credited, eligible) = _drainAll(delegator, sourceNodes);
+        credited = _drainAll(delegator, sourceNodes);
         if (credited == 0) revert NothingToMigrate();
-        emit MigrationStarted(delegator, credited, eligible, true);
+        emit MigrationStarted(delegator, credited);
     }
 
     /// @notice Bulk admin-push drain. Each index `i` is ONE (delegator, node)
@@ -562,25 +549,24 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     ///         failure is safe (`drainV8ToCredit` is idempotent — a zeroed slot
     ///         yields 0). Amounts are NOT passed in — they are read on-chain from
     ///         V8 state, so the credit is exactly what was drained. Gate:
-    ///         `onlyOwnerOrMultiSigOwner`; requires the eligibility registry
-    ///         frozen. Emits one `MigrationStarted` per pair that moved credit.
+    ///         `onlyOwnerOrMultiSigOwner`. Emits one `MigrationStarted` per pair
+    ///         that moved credit.
     function adminDrainBatch(
         address[] calldata delegators,
         uint72[] calldata identityIds
     ) external onlyOwnerOrMultiSigOwner {
-        require(v8MigrationEligibility.frozen(), "V8 eligibility not frozen");
         uint256 n = delegators.length;
         require(n == identityIds.length, "length mismatch");
         for (uint256 i = 0; i < n; i++) {
-            (uint96 t, uint96 e) = stakingV10.drainV8ToCredit(delegators[i], identityIds[i]);
-            if (t > 0) emit MigrationStarted(delegators[i], t, e, true);
+            uint96 t = stakingV10.drainV8ToCredit(delegators[i], identityIds[i]);
+            if (t > 0) emit MigrationStarted(delegators[i], t);
         }
     }
 
     /// @notice Spend `amount` of the caller's migration credit into a fresh V10
     ///         conviction position on `targetNode` at `lockTier`. Repeatable
-    ///         until the credit is spent. A tier-6/12 allocation fully covered
-    ///         by eligible credit receives the conviction lock-credit.
+    ///         until the credit is spent. Any tier-6/12 allocation receives the
+    ///         conviction lock-credit (rev 5: universal).
     function allocate(
         uint72 targetNode,
         uint96 amount,
@@ -598,26 +584,22 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     }
 
     /// @dev Drain `delegator`'s V8 stake across `sourceNodes` into credit,
-    ///      summing total + eligible. A node with no V8 stake contributes 0;
+    ///      summing the total. A node with no V8 stake contributes 0;
     ///      idempotent (a re-drained node yields 0).
     function _drainAll(
         address delegator,
         uint72[] calldata sourceNodes
-    ) internal returns (uint96 total, uint96 eligible) {
+    ) internal returns (uint96 total) {
         uint256 n = sourceNodes.length;
         for (uint256 i = 0; i < n; i++) {
-            (uint96 t, uint96 e) = stakingV10.drainV8ToCredit(delegator, sourceNodes[i]);
-            total += t;
-            eligible += e;
+            total += stakingV10.drainV8ToCredit(delegator, sourceNodes[i]);
         }
     }
 
-    /// @notice Set the V8→V10 conviction lock-credit (seconds). Owner-settable
-    ///         only UNTIL the eligibility registry is frozen, then immutable
-    ///         (so it can't change under a migrant). CSS caps it below the
-    ///         tier-6 lock duration.
+    /// @notice Set the V8→V10 conviction lock-credit (seconds). Owner-settable;
+    ///         set it before running the admin sweep. CSS caps it below the
+    ///         tier-6 lock duration so a position's expiry cannot underflow.
     function setConvictionCreditSeconds(uint40 secondsValue) external onlyOwnerOrMultiSigOwner {
-        require(!v8MigrationEligibility.frozen(), "eligibility already frozen");
         stakingV10.setConvictionCreditSeconds(secondsValue);
     }
 
@@ -625,10 +607,6 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
 
     function migrationCredit(address user) external view returns (uint96) {
         return convictionStakingStorage.migrationCredit(user);
-    }
-
-    function eligibleCredit(address user) external view returns (uint96) {
-        return convictionStakingStorage.eligibleCredit(user);
     }
 
     function convictionCreditSeconds() external view returns (uint40) {

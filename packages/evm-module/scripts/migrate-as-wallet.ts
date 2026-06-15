@@ -39,8 +39,7 @@ async function main() {
 
   // ---- credit is pre-populated by the admin drain; the user only allocates ----
   const credit: bigint = await w.migrationCredit(me);
-  const eligible: bigint = await w.eligibleCredit(me);
-  console.log(`  migration credit ${fmt(credit)} TRAC (eligible ${fmt(eligible)})`);
+  console.log(`  migration credit ${fmt(credit)} TRAC`);
   const amount = AMOUNT ?? credit;
   if (amount === 0n) {
     throw new Error(
@@ -49,10 +48,24 @@ async function main() {
   }
 
   // ---- allocate: spend credit into a fresh conviction position ----
-  const tokenId: bigint = await w.allocate.staticCall(TARGET_NODE, amount, LOCK_TIER);
   const tx = await w.allocate(TARGET_NODE, amount, LOCK_TIER);
   console.log(`allocate(node ${TARGET_NODE}, ${fmt(amount)} TRAC, tier ${LOCK_TIER}) tx ${tx.hash} …`);
-  await tx.wait();
+  const rcpt = await tx.wait();
+  // Read the minted tokenId from the Allocated event — NOT a staticCall predict:
+  // a concurrent allocation could consume the next id before this tx mines.
+  let tokenId: bigint | undefined;
+  for (const log of rcpt.logs) {
+    try {
+      const parsed = w.interface.parseLog({ topics: [...log.topics], data: log.data });
+      if (parsed?.name === 'Allocated') {
+        tokenId = parsed.args.tokenId as bigint;
+        break;
+      }
+    } catch {
+      /* not a wrapper event */
+    }
+  }
+  if (tokenId === undefined) throw new Error('Allocated event not found in the receipt');
   const owner: string = await w.ownerOf(tokenId);
   console.log(`  minted conviction NFT tokenId ${tokenId} → owner ${owner}`);
   console.log(`  remaining credit ${fmt(await w.migrationCredit(me))}`);

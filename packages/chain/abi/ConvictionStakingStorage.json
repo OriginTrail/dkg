@@ -882,11 +882,6 @@
         "internalType": "uint96",
         "name": "total",
         "type": "uint96"
-      },
-      {
-        "internalType": "uint96",
-        "name": "eligible",
-        "type": "uint96"
       }
     ],
     "name": "addMigrationCredit",
@@ -1169,25 +1164,6 @@
     "name": "deletePosition",
     "outputs": [],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "name": "eligibleCredit",
-    "outputs": [
-      {
-        "internalType": "uint96",
-        "name": "",
-        "type": "uint96"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -2310,21 +2286,10 @@
         "internalType": "uint96",
         "name": "amount",
         "type": "uint96"
-      },
-      {
-        "internalType": "bool",
-        "name": "consumeEligible",
-        "type": "bool"
       }
     ],
     "name": "spendMigrationCredit",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "creditApplied",
-        "type": "bool"
-      }
-    ],
+    "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
   },
