@@ -2,19 +2,23 @@
 // OT-RFC-50 — V8 → V10 "pool & allocate" migration
 // =============================================================================
 //
-// startMigration drains ALL of a wallet's V8 stake across the given source
-// nodes into an in-protocol migration credit on CSS (Option B ledger), tagging
-// the registry-eligible portion into eligibleCredit. allocate then spends that
-// credit into fresh V10 conviction positions (node + amount + tier), applying
-// the configurable convictionCreditSeconds lock-shortening to tier-6/12
-// allocations fully covered by eligible credit. adminMigrateToCredit is the
-// owner-gated straggler sweep (drain → that delegator's credit, no allocation).
+// Admin-push (OT-RFC-50): the protocol drains every wallet's V8 stake across the
+// given source nodes into an in-protocol migration credit on CSS (Option B
+// ledger) — via adminMigrateToCredit (single delegator) / adminDrainBatch (bulk,
+// flattened (delegator,node) pairs, skip-zero) — tagging the registry-eligible
+// portion into eligibleCredit. There is NO self-service startMigration. allocate
+// then lets the USER spend that pre-populated credit into fresh V10 conviction
+// positions (node + amount + tier), applying the configurable
+// convictionCreditSeconds lock-shortening to tier-6/12 allocations fully covered
+// by eligible credit. A tier-0 allocation is immediately withdrawable, so
+// admin-drained funds are always recoverable to the wallet.
 //
-// Covered: drain→credit accounting + eligible tagging; the eligibleCredit
-// "non-eligible-first" clamp; the credit gate (tier 6/12, fully-covered);
-// the collateralization invariant (SS→CSS exact; allocate moves no TRAC);
-// the freeze-gate at drain time; adminMigrateToCredit; setConvictionCreditSeconds
-// (owner-settable until frozen, capped < tier-6 duration).
+// Covered: admin drain→credit accounting + eligible tagging; the eligibleCredit
+// "non-eligible-first" clamp; the credit gate (tier 6/12, fully-covered); the
+// collateralization invariant (SS→CSS exact; allocate moves no TRAC); the
+// freeze-gate at drain time; adminMigrateToCredit + adminDrainBatch (skip-zero,
+// idempotent re-run); the tier-0 recover-to-wallet round-trip;
+// setConvictionCreditSeconds (owner-settable until frozen, capped < tier-6).
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
@@ -86,6 +90,10 @@ async function deployFixture(): Promise<Fixture> {
 }
 
 describe('@integration OT-RFC-50 pool & allocate migration', function () {
+  // The first loadFixture deploy spins up the full stack and can exceed mocha's
+  // 40s default in this worktree; raise the ceiling so the cold deploy fits.
+  this.timeout(300_000);
+
   let accounts: SignerWithAddress[];
   let NFT: DKGStakingConvictionNFT;
   let SS: StakingStorage;
@@ -151,9 +159,9 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
   };
 
   // ===========================================================================
-  // startMigration — drain → credit
+  // admin drain → credit (adminMigrateToCredit) — accounting & invariants
   // ===========================================================================
-  describe('startMigration', () => {
+  describe('admin drain (adminMigrateToCredit)', () => {
     it('drains V8 stake across nodes into credit and tags the eligible portion', async () => {
       const d = accounts[2];
       const idA = await createProfile(1);
@@ -165,9 +173,9 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       // Eligible on A only.
       await armCredit([[idA, d.address]]);
 
-      await expect(NFT.connect(d).startMigration([idA, idB]))
+      await expect(NFT.connect(accounts[0]).adminMigrateToCredit(d.address, [idA, idB]))
         .to.emit(NFT, 'MigrationStarted')
-        .withArgs(d.address, stakeA + stakeB, stakeA, false);
+        .withArgs(d.address, stakeA + stakeB, stakeA, true);
 
       expect(await NFT.migrationCredit(d.address)).to.equal(stakeA + stakeB);
       expect(await NFT.eligibleCredit(d.address)).to.equal(stakeA); // only A eligible
@@ -176,13 +184,12 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       expect(await SS.getDelegatorStakeBase(idB, keyOf(d.address))).to.equal(0n);
     });
 
-    it('reverts NothingToMigrate when the caller has no V8 stake', async () => {
+    it('reverts NothingToMigrate when the delegator has no V8 stake', async () => {
       const idA = await createProfile(1);
       await armCredit([]);
-      await expect(NFT.connect(accounts[2]).startMigration([idA])).to.be.revertedWithCustomError(
-        NFT,
-        'NothingToMigrate',
-      );
+      await expect(
+        NFT.connect(accounts[0]).adminMigrateToCredit(accounts[2].address, [idA]),
+      ).to.be.revertedWithCustomError(NFT, 'NothingToMigrate');
     });
 
     it('reverts if the eligibility registry is not frozen', async () => {
@@ -190,7 +197,7 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       const idA = await createProfile(1);
       await seedV8Stake(d, idA, hre.ethers.parseEther('1000'));
       // not frozen
-      await expect(NFT.connect(d).startMigration([idA])).to.be.revertedWith(
+      await expect(NFT.connect(accounts[0]).adminMigrateToCredit(d.address, [idA])).to.be.revertedWith(
         'V8 eligibility not frozen',
       );
     });
@@ -202,10 +209,10 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       await seedV8Stake(d, idA, stakeA);
       await armCredit([[idA, d.address]]);
 
-      await NFT.connect(d).startMigration([idA]);
+      await NFT.connect(accounts[0]).adminMigrateToCredit(d.address, [idA]);
       expect(await NFT.migrationCredit(d.address)).to.equal(stakeA);
       // Second call: node already drained → reverts NothingToMigrate (sum == 0).
-      await expect(NFT.connect(d).startMigration([idA])).to.be.revertedWithCustomError(
+      await expect(NFT.connect(accounts[0]).adminMigrateToCredit(d.address, [idA])).to.be.revertedWithCustomError(
         NFT,
         'NothingToMigrate',
       );
@@ -223,7 +230,7 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       const stake = hre.ethers.parseEther('5000');
       await seedV8Stake(d, id, stake);
       await armCredit([[id, d.address]]);
-      await NFT.connect(d).startMigration([id]);
+      await NFT.connect(accounts[0]).adminMigrateToCredit(d.address, [id]);
 
       const tx = await NFT.connect(d).allocate(id, stake, 12);
       const rcpt = await tx.wait();
@@ -251,7 +258,7 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       const stake = hre.ethers.parseEther('10000');
       await seedV8Stake(d, idA, stake);
       await armCredit([[idA, d.address]]);
-      await NFT.connect(d).startMigration([idA]);
+      await NFT.connect(accounts[0]).adminMigrateToCredit(d.address, [idA]);
 
       const part = hre.ethers.parseEther('4000');
       await NFT.connect(d).allocate(idA, part, 0); // tier 0, no credit
@@ -270,7 +277,7 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       const stake = hre.ethers.parseEther('1000');
       await seedV8Stake(d, id, stake);
       await armCredit([[id, d.address]]);
-      await NFT.connect(d).startMigration([id]);
+      await NFT.connect(accounts[0]).adminMigrateToCredit(d.address, [id]);
 
       await expect(NFT.connect(d).allocate(id, stake + 1n, 0)).to.be.reverted; // exceeds credit
       await expect(NFT.connect(d).allocate(9_999_999, stake, 0)).to.be.reverted; // dead profile
@@ -282,7 +289,7 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
   // Collateralization invariant
   // ===========================================================================
   describe('collateralization', () => {
-    it('startMigration moves TRAC SS→CSS exactly; allocate moves no TRAC', async () => {
+    it('admin drain moves TRAC SS→CSS exactly; allocate moves no TRAC', async () => {
       const d = accounts[2];
       const id = await createProfile(1);
       const stake = hre.ethers.parseEther('5000');
@@ -292,7 +299,7 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       const ssBefore = await TokenContract.balanceOf(await SS.getAddress());
       const cssBefore = await TokenContract.balanceOf(await CSS.getAddress());
 
-      await NFT.connect(d).startMigration([id]);
+      await NFT.connect(accounts[0]).adminMigrateToCredit(d.address, [id]);
       expect(await TokenContract.balanceOf(await SS.getAddress())).to.equal(ssBefore - stake);
       expect(await TokenContract.balanceOf(await CSS.getAddress())).to.equal(cssBefore + stake);
 
@@ -304,9 +311,9 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
   });
 
   // ===========================================================================
-  // adminMigrateToCredit — straggler sweep (drain only)
+  // adminMigrateToCredit — single-delegator drain (gating & no-mint)
   // ===========================================================================
-  describe('adminMigrateToCredit', () => {
+  describe('adminMigrateToCredit (single delegator)', () => {
     it('owner drains a delegator to THEIR credit, mints no position, byAdmin=true', async () => {
       const straggler = accounts[5];
       const id = await createProfile(1);
@@ -329,6 +336,131 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       await expect(
         NFT.connect(accounts[5]).adminMigrateToCredit(accounts[5].address, [id]),
       ).to.be.reverted;
+    });
+  });
+
+  // ===========================================================================
+  // adminDrainBatch — bulk admin-push over flattened (delegator,node) pairs
+  // ===========================================================================
+  describe('adminDrainBatch', () => {
+    it('drains many (delegator,node) pairs in one call, crediting each delegator', async () => {
+      const d1 = accounts[2];
+      const d2 = accounts[3];
+      const idA = await createProfile(1);
+      const idB = await createProfile(4);
+      const s1 = hre.ethers.parseEther('5000');
+      const s2 = hre.ethers.parseEther('3000');
+      await seedV8Stake(d1, idA, s1);
+      await seedV8Stake(d2, idB, s2);
+      await armCredit([
+        [idA, d1.address],
+        [idB, d2.address],
+      ]);
+
+      await NFT.connect(accounts[0]).adminDrainBatch([d1.address, d2.address], [idA, idB]);
+
+      expect(await NFT.migrationCredit(d1.address)).to.equal(s1);
+      expect(await NFT.eligibleCredit(d1.address)).to.equal(s1);
+      expect(await NFT.migrationCredit(d2.address)).to.equal(s2);
+      expect(await NFT.totalSupply()).to.equal(0n); // pure drain, no mint
+    });
+
+    it('skips pairs with nothing to drain instead of reverting the batch', async () => {
+      const d = accounts[2];
+      const idA = await createProfile(1);
+      const idEmpty = await createProfile(4); // d holds no stake on idEmpty
+      const s = hre.ethers.parseEther('1000');
+      await seedV8Stake(d, idA, s);
+      await armCredit([[idA, d.address]]);
+
+      // The (d, idEmpty) pair drains 0 — must be skipped, not reverted.
+      await NFT.connect(accounts[0]).adminDrainBatch(
+        [d.address, d.address],
+        [idA, idEmpty],
+      );
+      expect(await NFT.migrationCredit(d.address)).to.equal(s);
+    });
+
+    it('is idempotent — re-running a chunk does not double-credit', async () => {
+      const d = accounts[2];
+      const idA = await createProfile(1);
+      const s = hre.ethers.parseEther('5000');
+      await seedV8Stake(d, idA, s);
+      await armCredit([[idA, d.address]]);
+
+      await NFT.connect(accounts[0]).adminDrainBatch([d.address], [idA]);
+      expect(await NFT.migrationCredit(d.address)).to.equal(s);
+      // Re-run the same chunk: V8 slot already zeroed → no-op, no double count.
+      await NFT.connect(accounts[0]).adminDrainBatch([d.address], [idA]);
+      expect(await NFT.migrationCredit(d.address)).to.equal(s);
+    });
+
+    it('reverts on delegators/identityIds length mismatch', async () => {
+      const idA = await createProfile(1);
+      await armCredit([]);
+      await expect(
+        NFT.connect(accounts[0]).adminDrainBatch([accounts[2].address], [idA, idA]),
+      ).to.be.revertedWith('length mismatch');
+    });
+
+    it('reverts if the eligibility registry is not frozen', async () => {
+      const idA = await createProfile(1);
+      await seedV8Stake(accounts[2], idA, hre.ethers.parseEther('100'));
+      // not frozen
+      await expect(
+        NFT.connect(accounts[0]).adminDrainBatch([accounts[2].address], [idA]),
+      ).to.be.revertedWith('V8 eligibility not frozen');
+    });
+
+    it('is gated to the owner/multisig', async () => {
+      const idA = await createProfile(1);
+      await seedV8Stake(accounts[2], idA, hre.ethers.parseEther('100'));
+      await armCredit([[idA, accounts[2].address]]);
+      await expect(
+        NFT.connect(accounts[2]).adminDrainBatch([accounts[2].address], [idA]),
+      ).to.be.reverted;
+    });
+  });
+
+  // ===========================================================================
+  // tier-0 recovery — admin-drained funds are always withdrawable
+  // ===========================================================================
+  describe('tier-0 recovery', () => {
+    it('admin drain → allocate tier 0 → withdraw returns the full principal to the wallet', async () => {
+      const d = accounts[2];
+      const id = await createProfile(1);
+      const stake = hre.ethers.parseEther('5000');
+      await seedV8Stake(d, id, stake);
+      await armCredit([[id, d.address]]);
+
+      // Protocol pushes the drain; the user never opted in.
+      await NFT.connect(accounts[0]).adminMigrateToCredit(d.address, [id]);
+      expect(await NFT.migrationCredit(d.address)).to.equal(stake);
+
+      const walletBefore = await TokenContract.balanceOf(d.address);
+      // Recovery: tier-0 allocation carries no lock, so withdraw succeeds at once.
+      await NFT.connect(d).allocate(id, stake, 0);
+      await NFT.connect(d).withdraw(1n);
+
+      expect(await TokenContract.balanceOf(d.address)).to.equal(walletBefore + stake);
+      expect(await NFT.migrationCredit(d.address)).to.equal(0n);
+    });
+
+    it('recovery still works after the owner deactivates tier 0 (safety net is owner-independent)', async () => {
+      const d = accounts[2];
+      const id = await createProfile(1);
+      const stake = hre.ethers.parseEther('1000');
+      await seedV8Stake(d, id, stake);
+      await armCredit([[id, d.address]]);
+      await NFT.connect(accounts[0]).adminMigrateToCredit(d.address, [id]);
+
+      // Owner retires the no-lock product — must NOT trap forcibly-drained credit.
+      await CSS.connect(accounts[0]).deactivateTier(0);
+
+      const walletBefore = await TokenContract.balanceOf(d.address);
+      await NFT.connect(d).allocate(id, stake, 0); // tier-0 exempt from the active-tier gate
+      await NFT.connect(d).withdraw(1n);
+      expect(await TokenContract.balanceOf(d.address)).to.equal(walletBefore + stake);
     });
   });
 

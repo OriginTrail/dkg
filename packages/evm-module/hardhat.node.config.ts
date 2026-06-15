@@ -36,7 +36,10 @@ const config: HardhatUserConfig = {
     localhost: {
       environment: 'development',
       url: rpc('localhost'),
-      saveDeployments: false,
+      // true so a `hardhat deploy --network localhost` persists addresses for
+      // standalone scripts (OT-RFC-50 rehearsal: mirror/migrate resolve via
+      // getContract across processes). Harmless for other localhost use.
+      saveDeployments: true,
     },
     hardhat: {
       environment: 'development',

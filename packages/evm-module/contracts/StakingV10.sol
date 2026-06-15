@@ -935,8 +935,12 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         ConvictionStakingStorage cs = convictionStorage;
         // Active-tier check: createPosition skips _requireActiveTier on the
         // migration path (migrationEpoch > 0), and this is a NEW tier choice
-        // (not honoring a prior V8 commitment), so reject deactivated tiers.
-        require(cs.getTier(lockTier).active, "Inactive tier");
+        // (not honoring a prior V8 commitment), so reject deactivated tiers —
+        // EXCEPT tier 0. Tier 0 is the no-lock recovery sink that guarantees
+        // admin-drained credit is always withdrawable in two txs (allocate
+        // tier-0 -> withdraw); exempting it keeps that safety net independent of
+        // whether the owner has retired the no-lock product.
+        require(lockTier == 0 || cs.getTier(lockTier).active, "Inactive tier");
 
         // maxStake cap on the destination node (post-allocation aggregate).
         if (cs.getNodeStakeV10(targetNode) + uint256(amount) > uint256(parametersStorage.maximumStake())) {

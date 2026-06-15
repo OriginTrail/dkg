@@ -459,6 +459,24 @@
   {
     "inputs": [
       {
+        "internalType": "address[]",
+        "name": "delegators",
+        "type": "address[]"
+      },
+      {
+        "internalType": "uint72[]",
+        "name": "identityIds",
+        "type": "uint72[]"
+      }
+    ],
+    "name": "adminDrainBatch",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "address",
         "name": "delegator",
         "type": "address"
@@ -1025,25 +1043,6 @@
       }
     ],
     "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint72[]",
-        "name": "sourceNodes",
-        "type": "uint72[]"
-      }
-    ],
-    "name": "startMigration",
-    "outputs": [
-      {
-        "internalType": "uint96",
-        "name": "credited",
-        "type": "uint96"
-      }
-    ],
-    "stateMutability": "nonpayable",
     "type": "function"
   },
   {

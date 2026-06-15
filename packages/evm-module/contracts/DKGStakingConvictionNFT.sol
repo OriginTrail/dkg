@@ -181,9 +181,10 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
 
     /// @notice Emitted when a wallet's V8 stake is drained into migration
     ///         credit (OT-RFC-50). `credited` is the total moved into credit
-    ///         this call; `eligibleCredited` the portion that joined
-    ///         `eligibleCredit`; `byAdmin` true for the `adminMigrateToCredit`
-    ///         straggler sweep, false for self-service `startMigration`.
+    ///         by this event; `eligibleCredited` the portion that joined
+    ///         `eligibleCredit`. `byAdmin` is always `true` under the admin-push
+    ///         model (the self-service `startMigration` path was removed); the
+    ///         field is retained for event-ABI stability.
     event MigrationStarted(
         address indexed delegator,
         uint96 credited,
@@ -223,9 +224,10 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     error InvalidLockTier();
     error NotPositionOwner();
     error ZeroAmount();
-    /// @notice OT-RFC-50 — thrown by `startMigration` / `adminMigrateToCredit`
-    ///         when the caller has no V8 stake across the given source nodes
-    ///         (nothing was drained, so no credit would be created).
+    /// @notice OT-RFC-50 — thrown by `adminMigrateToCredit` when the delegator
+    ///         has no V8 stake across the given source nodes (nothing drained,
+    ///         so no credit would be created). `adminDrainBatch` SKIPS such
+    ///         entries instead of reverting.
     error NothingToMigrate();
     /// @notice L8 — rejected at the wrapper layer when a mint-path or
     ///         redelegate call would otherwise forward a zero identity to
@@ -516,33 +518,30 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     // OT-RFC-50 — V8 → V10 "pool & allocate" migration
     // ========================================================================
     //
-    // Self-service: `startMigration` drains ALL of the caller's V8 stake across
-    // the given source nodes into their in-protocol migration credit; `allocate`
-    // then spends that credit into V10 conviction positions (node + amount +
-    // tier), repeatably. `adminMigrateToCredit` is the admin straggler sweep —
-    // it drains a delegator's V8 stake to THEIR credit only (never allocates),
-    // so V8 can be fully emptied while each user keeps their allocation choice.
-    // Credit is non-withdrawable to a wallet; `allocate` is its only sink.
-    // The credit ledger + drain/allocate workers live on CSS / StakingV10
-    // (onlyConvictionNFT); this wrapper owns the tokenId counter + ERC-721 mint
-    // and the owner/frozen gating.
+    // Admin-push (OT-RFC-50): the protocol drains EVERY wallet's V8 stake across
+    // its source nodes into that wallet's in-protocol migration credit, via
+    // `adminDrainBatch` (bulk) / `adminMigrateToCredit` (single delegator) —
+    // both onlyOwnerOrMultiSigOwner. Users never drain themselves; they only
+    // call `allocate` to spend their pre-populated credit into V10 conviction
+    // positions (node + amount + tier), repeatably. Credit is non-withdrawable
+    // as credit; `allocate` is its only sink — but a tier-0 allocation carries
+    // no lock and is immediately withdrawable, so drained funds are always
+    // recoverable to the wallet in two txs. The credit ledger + drain/allocate
+    // workers live on CSS / StakingV10 (onlyConvictionNFT); this wrapper owns
+    // the tokenId counter + ERC-721 mint and the owner/frozen gating.
+    //
+    // There is intentionally NO self-service drain: the off-chain sweep is the
+    // only path that empties V8, so its completeness (per-chain
+    // StakingStorage.getTotalStake() == 0) is a release gate before the V8
+    // `Staking` contract is unregistered.
 
-    /// @notice Drain ALL of the caller's V8 stake across `sourceNodes` into
-    ///         their migration credit. Requires the V8MigrationEligibility
-    ///         registry to be frozen (so the eligible tag is final). Reverts
-    ///         `NothingToMigrate` if nothing was drained.
-    function startMigration(uint72[] calldata sourceNodes) external returns (uint96 credited) {
-        require(v8MigrationEligibility.frozen(), "V8 eligibility not frozen");
-        uint96 eligible;
-        (credited, eligible) = _drainAll(msg.sender, sourceNodes);
-        if (credited == 0) revert NothingToMigrate();
-        emit MigrationStarted(msg.sender, credited, eligible, false);
-    }
-
-    /// @notice Admin straggler sweep — drain `delegator`'s V8 stake into THEIR
-    ///         migration credit (no allocation). Gate: `onlyOwnerOrMultiSigOwner`.
-    ///         Lets ops empty V8 of never-migrated stragglers after the window
-    ///         without choosing a node/tier for them.
+    /// @notice Single-delegator admin drain — move `delegator`'s V8 stake across
+    ///         `sourceNodes` into THEIR migration credit (no allocation). See
+    ///         `adminDrainBatch` for the bulk sweep. Gate:
+    ///         `onlyOwnerOrMultiSigOwner`; requires the V8MigrationEligibility
+    ///         registry frozen so the eligible tag is final. Reverts
+    ///         `NothingToMigrate` if nothing was drained (caller-error guard on
+    ///         an intentional single call).
     function adminMigrateToCredit(
         address delegator,
         uint72[] calldata sourceNodes
@@ -552,6 +551,30 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
         (credited, eligible) = _drainAll(delegator, sourceNodes);
         if (credited == 0) revert NothingToMigrate();
         emit MigrationStarted(delegator, credited, eligible, true);
+    }
+
+    /// @notice Bulk admin-push drain. Each index `i` is ONE (delegator, node)
+    ///         pair — the flattened form matches the V8 storage key and the
+    ///         off-chain DelegatorsInfo enumeration, giving even per-pair gas so
+    ///         the driver packs uniform chunks. Pairs with nothing to drain are
+    ///         SKIPPED (not reverted), so a chunk mixing already-drained and
+    ///         fresh pairs still lands and re-running a chunk after a partial
+    ///         failure is safe (`drainV8ToCredit` is idempotent — a zeroed slot
+    ///         yields 0). Amounts are NOT passed in — they are read on-chain from
+    ///         V8 state, so the credit is exactly what was drained. Gate:
+    ///         `onlyOwnerOrMultiSigOwner`; requires the eligibility registry
+    ///         frozen. Emits one `MigrationStarted` per pair that moved credit.
+    function adminDrainBatch(
+        address[] calldata delegators,
+        uint72[] calldata identityIds
+    ) external onlyOwnerOrMultiSigOwner {
+        require(v8MigrationEligibility.frozen(), "V8 eligibility not frozen");
+        uint256 n = delegators.length;
+        require(n == identityIds.length, "length mismatch");
+        for (uint256 i = 0; i < n; i++) {
+            (uint96 t, uint96 e) = stakingV10.drainV8ToCredit(delegators[i], identityIds[i]);
+            if (t > 0) emit MigrationStarted(delegators[i], t, e, true);
+        }
     }
 
     /// @notice Spend `amount` of the caller's migration credit into a fresh V10
@@ -614,9 +637,9 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
 
     /// @notice DAO closer — D11. Sets the `v10LaunchEpoch` marker on
     ///         `ConvictionStakingStorage` to formally close the V10
-    ///         migration window. After this, straggler rescue is still
-    ///         possible via `adminMigrateToCredit`, but the launch-epoch field
-    ///         is the canonical off-chain cut-off for retroactive
+    ///         migration window. After this, late drains are still possible via
+    ///         `adminDrainBatch` / `adminMigrateToCredit`, but the launch-epoch
+    ///         field is the canonical off-chain cut-off for retroactive
     ///         reward / analytics windows.
     function finalizeMigrationBatch(uint256 v10LaunchEpoch) external onlyOwnerOrMultiSigOwner {
         stakingV10.setV10LaunchEpoch(v10LaunchEpoch);
