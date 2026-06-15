@@ -88,17 +88,25 @@ async function main() {
   // ---- sanity: the delegator's real V8 position on the forked storage ----
   const ssAddr: string = await hub.getContractAddress('StakingStorage');
   const ss = await ethers.getContractAt(
-    ['function getDelegatorStakeBase(uint72,bytes32) view returns (uint96)', 'function getNodeStake(uint72) view returns (uint96)', 'function getTotalStake() view returns (uint96)'],
+    [
+      'function getDelegatorStakeBase(uint72,bytes32) view returns (uint96)',
+      'function getDelegatorWithdrawalRequestAmount(uint72,bytes32) view returns (uint96)',
+      'function getNodeStake(uint72) view returns (uint96)',
+      'function getTotalStake() view returns (uint96)',
+    ],
     ssAddr,
   );
   const v8Key = ethers.keccak256(ethers.solidityPacked(['address'], [DELEGATOR]));
   const baseBefore: bigint = await ss.getDelegatorStakeBase(SOURCE_NODE, v8Key);
+  // The drain absorbs stakeBase + any pending withdrawal (D8). totalStake already
+  // excludes pending, so credited == base + pending while total drops by base only.
+  const pendingBefore: bigint = await ss.getDelegatorWithdrawalRequestAmount(SOURCE_NODE, v8Key);
   const nodeBefore: bigint = await ss.getNodeStake(SOURCE_NODE);
   const totalBefore: bigint = await ss.getTotalStake();
   console.log(`\nReal V8 position (forked StakingStorage ${ssAddr}):`);
-  console.log(`  delegator stakeBase node ${SOURCE_NODE} = ${fmt(baseBefore)} TRAC`);
+  console.log(`  delegator stakeBase node ${SOURCE_NODE} = ${fmt(baseBefore)} (+ pending ${fmt(pendingBefore)}) TRAC`);
   console.log(`  node ${SOURCE_NODE} stake = ${fmt(nodeBefore)} | total = ${fmt(totalBefore)} TRAC`);
-  if (baseBefore === 0n) throw new Error('Delegator has no V8 stake on the fork — wrong block/address?');
+  if (baseBefore + pendingBefore === 0n) throw new Error('Delegator has no V8 stake on the fork — wrong block/address?');
 
   // ---- 2. deploy the 4 new contracts onto the REAL Hub ----
   console.log('\nDeploying migration contracts onto the forked Hub:');
@@ -173,9 +181,9 @@ async function main() {
   // ---- assertions ----
   const checks: [string, boolean][] = [
     ['V8 stake fully drained', baseAfter === 0n],
-    ['credit == drained base', credited === baseBefore],
+    ['credit == drained (base + pending)', credited === baseBefore + pendingBefore],
     ['full credit eligible (tier-12, registered)', eligBal === credited],
-    ['SS→CSS transfer == credited (collateralization)', totalBefore - totalAfter === credited],
+    ['V8 total drops by active base (pending was already excluded from total)', totalBefore - totalAfter === baseBefore],
     ['NFT minted to delegator', nftOwner.toLowerCase() === DELEGATOR.toLowerCase()],
     ['credit fully spent', (await (wrapper as any).migrationCredit(DELEGATOR)) === 0n],
   ];

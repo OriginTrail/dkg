@@ -17,7 +17,23 @@ async function main() {
     opFee,
   );
   const receipt = await tx.wait();
-  const identityId = Number(receipt.logs[0].topics[1]);
+  // Parse the ProfileCreated event by name (ProfileStorage emits it) rather than
+  // indexing raw logs — createProfile also emits identity/wallet events, so
+  // logs[0] is not reliably the profile-created event.
+  const ProfileStorage = (await hre.ethers.getContract('ProfileStorage')) as any;
+  let identityId: number | undefined;
+  for (const log of receipt.logs) {
+    try {
+      const parsed = ProfileStorage.interface.parseLog({ topics: [...log.topics], data: log.data });
+      if (parsed?.name === 'ProfileCreated') {
+        identityId = Number(parsed.args.identityId);
+        break;
+      }
+    } catch {
+      /* not a ProfileStorage event — skip */
+    }
+  }
+  if (identityId === undefined) throw new Error('ProfileCreated event not found in the receipt');
   console.log(`created profile identityId=${identityId} operator=${accounts[opIdx].address}`);
   console.log(`IDENTITY_ID=${identityId}`);
 }

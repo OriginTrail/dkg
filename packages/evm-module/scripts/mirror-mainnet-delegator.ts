@@ -113,18 +113,21 @@ async function main() {
     );
   }
 
-  // Fund the target StakingStorage vault with `activeBase` test-TRAC so the
-  // drain's `transferStake` (SS→CSS) has tokens to move (active base only —
-  // node/total stake exclude pending, matching V8 accounting). The deploy
-  // grants the deployer MINTER_ROLE + 10M TRAC only in `environment:
-  // 'development'`; on a `testnet`/`mainnet` deploy the Token pre-exists, so
-  // fall back to a transfer from the deployer's balance, else fail clearly.
+  // Fund the target StakingStorage vault with base + pending test-TRAC so the
+  // drain's `transferStake` (SS→CSS) has tokens to move (the vault physically
+  // holds the active base AND the pending-withdrawal TRAC; only base is in
+  // node/total stake, matching V8 accounting). The deploy grants the deployer
+  // MINTER_ROLE + 10M TRAC only in `environment: 'development'`; on a
+  // `testnet`/`mainnet` deploy the Token pre-exists, so fall back to a transfer
+  // from the deployer's balance, else fail clearly.
   const activeBase = positions.reduce((s, p) => s + p.base, 0n);
+  const activePending = positions.reduce((s, p) => s + p.pending, 0n);
+  const toBack = activeBase + activePending;
   const ssAddr = await SS.getAddress();
   const adminAddr = await admin.getAddress();
   const haveInVault: bigint = await (Token as any).balanceOf(ssAddr);
-  if (activeBase > haveInVault) {
-    const need = activeBase - haveInVault;
+  if (toBack > haveInVault) {
+    const need = toBack - haveInVault;
     const minterRole: string = await (Token as any).MINTER_ROLE();
     if (await (Token as any).hasRole(minterRole, adminAddr)) {
       await (await (Token as any).connect(admin).mint(ssAddr, need)).wait();
@@ -141,18 +144,27 @@ async function main() {
     }
   }
 
+  const nowTs = BigInt((await hre.ethers.provider.getBlock('latest'))!.timestamp);
   for (const p of positions) {
     if (p.base > 0n) {
       await (await (SS as any).connect(admin).increaseDelegatorStakeBase(p.id, tgtKey, p.base)).wait();
       await (await (SS as any).connect(admin).increaseNodeStake(p.id, p.base)).wait();
       await (await (SS as any).connect(admin).increaseTotalStake(p.base)).wait();
     }
-    // NOTE: pending V8 withdrawal requests are not replicated here (would need
-    // createDelegatorWithdrawalRequest + the matching vault top-up). The admin
-    // drain still moves base; extend this loop if a pending-heavy delegator must
-    // be tested.
+    if (p.pending > 0n) {
+      // Replicate the pending V8 withdrawal request faithfully (D8): the TRAC is
+      // already in the vault (funded above) but is excluded from node/total
+      // stake, exactly as V8 records it. The admin drain absorbs it into credit.
+      await (
+        await (SS as any).connect(admin).createDelegatorWithdrawalRequest(p.id, tgtKey, p.pending, 0, nowTs)
+      ).wait();
+    }
   }
-  console.log(`  seeded ${ethersLib.formatEther(activeBase)} TRAC of active base into the target StakingStorage`);
+  console.log(
+    `  seeded ${ethersLib.formatEther(activeBase)} TRAC active base` +
+      (activePending > 0n ? ` + ${ethersLib.formatEther(activePending)} TRAC pending withdrawal` : '') +
+      ` into the target StakingStorage`,
+  );
 
   // Mark eligible (real delegator qualifies for the tier-6/12 credit on the
   // target). Keyed by (identityId, TARGET_DELEGATOR) — the wallet that signs.
