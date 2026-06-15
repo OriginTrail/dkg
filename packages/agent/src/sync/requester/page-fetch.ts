@@ -326,14 +326,24 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     if (usesPageSession && isSyncResponderSessionSupersededError(err)) {
       unfinishedSyncResponderSessions.delete(checkpointKey);
       checkpointStore.delete(checkpointKey);
-    } else if (usesPageSession && responderSession && !(err as Error & { syncDenied?: boolean }).syncDenied) {
+    } else if (usesPageSession && responderSession && !recovery && !(err as Error & { syncDenied?: boolean }).syncDenied) {
+      // Recovery never persists a responder session to resume (see the timeout
+      // branch below + Codex #1173).
       rememberUnfinishedSyncResponderSession(checkpointKey, responderSession);
     }
     throw err;
   }
 
   if (usesPageSession && responderSession) {
-    if (timedOut) rememberUnfinishedSyncResponderSession(checkpointKey, responderSession);
+    // R10 recovery has its own responder-session scope and MUST rebuild the
+    // COMPLETE state from offset 0 on every (re)try (see swm-recovery
+    // `fetchPhaseFully`, which deletes the checkpoint on a partial abandon). It
+    // must therefore NEVER persist a responder session to resume: reusing the
+    // cached pre-timeout row list on a retry converges to a STALE snapshot (up to
+    // the session TTL old) instead of current state, because the responder's
+    // `refreshRowList` only fires on a NEW syncSessionId (Codex #1173). Drop the
+    // session so the retry mints a fresh id and the responder re-reads.
+    if (timedOut && !recovery) rememberUnfinishedSyncResponderSession(checkpointKey, responderSession);
     else unfinishedSyncResponderSessions.delete(checkpointKey);
   }
 
