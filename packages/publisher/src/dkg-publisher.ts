@@ -2028,6 +2028,21 @@ export class DKGPublisher implements Publisher {
     // without needing per-call flag plumbing. A future commit can drop
     // the LU-5 single-blob callback once chunked is the only path.
     const useChunkedInline = useEncryptedInline && typeof options.encryptInlineChunked === 'function';
+    // A curated publish (encryption enabled) must carry private payload beyond the
+    // public catalog entry. A catalog-only publish — every quad is a catalog entry
+    // on the context-graph's own DID, reachable because that DID namespace is not
+    // reserved — partitions to empty `otherQuads`, leaving `encryptableNquadsStr`
+    // empty. That would otherwise throw an opaque "rejects empty plaintext" deep in
+    // the chunked encryptor (sliceIntoCiphertextChunks). Reject early, with an
+    // actionable message: the catalog entry alone cannot satisfy the required
+    // ciphertext commitment. Public CGs never enter this branch (no encryptor).
+    if (useEncryptedInline && encryptableNquadsStr.length === 0) {
+      throw new Error(
+        `Curated publish for context graph "${contextGraphId}" has no private payload to encrypt — ` +
+        `every quad is a public catalog entry on the context-graph DID. A curated context graph must ` +
+        `publish private content; the catalog entry alone cannot satisfy the required ciphertext commitment.`,
+      );
+    }
     let stagingQuads: Uint8Array | undefined;
     let stagingByteSize = publicByteSize;
     let chunkedCommitment: {
