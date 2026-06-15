@@ -43,11 +43,6 @@
   },
   {
     "inputs": [],
-    "name": "NoV8StakeToConvert",
-    "type": "error"
-  },
-  {
-    "inputs": [],
     "name": "NotPositionOwner",
     "type": "error"
   },
@@ -197,55 +192,6 @@
     "inputs": [
       {
         "indexed": true,
-        "internalType": "address",
-        "name": "delegator",
-        "type": "address"
-      },
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      },
-      {
-        "indexed": true,
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "stakeBaseAbsorbed",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "pendingAbsorbed",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint40",
-        "name": "lockTier",
-        "type": "uint40"
-      },
-      {
-        "indexed": false,
-        "internalType": "bool",
-        "name": "isAdmin",
-        "type": "bool"
-      }
-    ],
-    "name": "ConvertedFromV8",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
         "internalType": "uint256",
         "name": "tokenId",
         "type": "uint256"
@@ -389,7 +335,7 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "delegator",
+        "name": "staker",
         "type": "address"
       },
       {
@@ -399,8 +345,13 @@
       },
       {
         "internalType": "uint72",
-        "name": "identityId",
+        "name": "targetNode",
         "type": "uint72"
+      },
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
       },
       {
         "internalType": "uint40",
@@ -408,8 +359,14 @@
         "type": "uint40"
       }
     ],
-    "name": "adminConvertToNFT",
-    "outputs": [],
+    "name": "allocateFromCredit",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "creditApplied",
+        "type": "bool"
+      }
+    ],
     "stateMutability": "nonpayable",
     "type": "function"
   },
@@ -481,6 +438,35 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "delegator",
+        "type": "address"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "drainV8ToCredit",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "total",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint96",
+        "name": "eligible",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -666,27 +652,12 @@
   {
     "inputs": [
       {
-        "internalType": "address",
-        "name": "staker",
-        "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      },
-      {
         "internalType": "uint40",
-        "name": "lockTier",
+        "name": "secondsValue",
         "type": "uint40"
       }
     ],
-    "name": "selfConvertToNFT",
+    "name": "setConvictionCreditSeconds",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

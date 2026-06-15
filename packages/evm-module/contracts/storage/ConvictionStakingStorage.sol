@@ -347,6 +347,28 @@ contract ConvictionStakingStorage is INamed, IVersioned, Guardian {
     uint256 public v10LaunchEpoch;
 
     // ============================================================
+    //   OT-RFC-50 — V8→V10 "pool & allocate" migration credit ledger
+    // ============================================================
+    // Migrated-but-unallocated TRAC, per delegator. Backed 1:1 by TRAC
+    // physically held in THIS contract (moved here by the drain worker via
+    // StakingStorage.transferStake). The only sink is `spendMigrationCredit`
+    // (driven by DKGStakingConvictionNFT.allocate) — credit is NEVER
+    // withdrawable to a wallet. Lives here (durable storage), not on the
+    // wrapper (logic), so a wrapper redeploy mid-migration cannot strand the
+    // already-moved TRAC (OT-RFC-50 §0 / Option B).
+    mapping(address => uint96) public migrationCredit;
+    // Subset of `migrationCredit` drained from registry-eligible
+    // (node, delegator) pairs. Invariant: eligibleCredit[a] <= migrationCredit[a].
+    // Only this portion can earn the conviction lock-credit, and only on a
+    // tier-6/12 allocation.
+    mapping(address => uint96) public eligibleCredit;
+    // Lock-shortening (seconds) applied to an eligible tier-6/12 allocation.
+    // Set once at cutover via `setConvictionCreditSeconds`, capped below the
+    // shortest eligible-tier (tier 6) duration so a position's expiry cannot
+    // underflow. 0 until set (no credit).
+    uint40 public convictionCreditSeconds;
+
+    // ============================================================
     //           D20 (v2.1.0) — Mutable tier-ladder storage
     // ============================================================
     mapping(uint40 => TierConfig) internal _tiers;
@@ -391,6 +413,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, Guardian {
     // ============================================================
     event TierAdded(uint40 indexed lockTier, uint256 duration, uint64 multiplier18);
     event TierDeactivated(uint40 indexed lockTier);
+    event ConvictionCreditSecondsSet(uint40 secondsValue);
 
     // ============================================================
     //   v4.0.0 — Vault + operator-fee events (absorbed from V8 SS)
@@ -1262,6 +1285,56 @@ contract ConvictionStakingStorage is INamed, IVersioned, Guardian {
         require(v10LaunchEpoch == 0, "V10 launch already set");
         v10LaunchEpoch = epoch;
         emit V10LaunchEpochSet(epoch);
+    }
+
+    // ============================================================
+    //   OT-RFC-50 — migration credit ledger mutators (onlyContracts)
+    // ============================================================
+
+    /// @notice Credit `delegator` with migrated TRAC. `eligible` (<= total) is
+    ///         the portion drained from registry-eligible source positions.
+    ///         Driven by StakingV10's drain worker after the TRAC has been
+    ///         physically moved into this contract.
+    function addMigrationCredit(address delegator, uint96 total, uint96 eligible) external onlyContracts {
+        require(eligible <= total, "eligible > total");
+        migrationCredit[delegator] += total;
+        eligibleCredit[delegator] += eligible;
+    }
+
+    /// @notice Spend `amount` of `staker`'s migration credit for one allocation.
+    ///         If `consumeEligible` and the eligible sub-balance fully covers
+    ///         `amount`, that portion is consumed and `creditApplied` is true
+    ///         (the caller then applies the lock-shortening). A position has a
+    ///         single expiry, so the credit is binary per position. The
+    ///         post-spend clamp keeps `eligibleCredit <= migrationCredit`,
+    ///         which implements "non-eligible credit is spent first" for
+    ///         non-applied spends. Driven by StakingV10's allocate worker.
+    function spendMigrationCredit(
+        address staker,
+        uint96 amount,
+        bool consumeEligible
+    ) external onlyContracts returns (bool creditApplied) {
+        require(amount > 0, "Zero amount");
+        require(amount <= migrationCredit[staker], "Amount exceeds credit");
+        creditApplied = consumeEligible && eligibleCredit[staker] >= amount;
+        if (creditApplied) {
+            eligibleCredit[staker] -= amount;
+        }
+        migrationCredit[staker] -= amount;
+        if (eligibleCredit[staker] > migrationCredit[staker]) {
+            eligibleCredit[staker] = migrationCredit[staker];
+        }
+    }
+
+    /// @notice Set the V8→V10 conviction lock-credit (seconds). Capped strictly
+    ///         below the tier-6 lock duration (the shortest eligible tier) so
+    ///         `expiryShortenedBy < duration` holds and a tier-6 allocation can
+    ///         never underflow its expiry. The owner gate + until-frozen policy
+    ///         live on the DKGStakingConvictionNFT entrypoint that drives this.
+    function setConvictionCreditSeconds(uint40 secondsValue) external onlyContracts {
+        require(uint256(secondsValue) < _tierDuration(6), "credit >= tier-6 lock");
+        convictionCreditSeconds = secondsValue;
+        emit ConvictionCreditSecondsSet(secondsValue);
     }
 
     function deletePosition(uint256 tokenId) external onlyContracts {
