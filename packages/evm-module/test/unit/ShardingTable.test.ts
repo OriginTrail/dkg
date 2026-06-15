@@ -197,7 +197,7 @@ describe('@unit ShardingTable contract', function () {
     const version = await ShardingTable.version();
 
     expect(name).to.equal('ShardingTable');
-    expect(version).to.equal('10.0.2');
+    expect(version).to.equal('10.0.3');
   });
 
   // v2.0.0 — `migrationPeriodEnd` (V8→V9 carry-over) was removed along
