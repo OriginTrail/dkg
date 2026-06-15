@@ -230,7 +230,7 @@ export function verifySyncedData(
   return { data: verifiedData, meta: verifiedMeta, rejected, logs };
 }
 
-function parseAndFilterNQuads(text: string, graphUri: string, contextGraphId: string): SyncParseResult {
+export function parseAndFilterNQuads(text: string, graphUri: string, contextGraphId: string): SyncParseResult {
   const quads = parseNQuads(text);
   const cgUriPrefix = `did:dkg:context-graph:${contextGraphId}/`;
   // A request is a shared-memory/workspace request iff its OWN graphUri names a
