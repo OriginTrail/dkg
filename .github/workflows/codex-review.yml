@@ -47,7 +47,7 @@ jobs:
 
     steps:
       - name: Checkout PR merge commit
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
           fetch-depth: 0
@@ -84,7 +84,7 @@ jobs:
       - name: Check if diff already handled (hash skip)
         id: hash_check
         if: steps.diff.outputs.diff_lines != '0'
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           DIFF_HASH: ${{ steps.diff.outputs.diff_hash }}
         with:
@@ -113,7 +113,7 @@ jobs:
           steps.diff.outputs.diff_lines != '0'
           && steps.diff.outputs.diff_lines > 5000
           && steps.hash_check.outputs.skipped == 'false'
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           DIFF_HASH: ${{ steps.diff.outputs.diff_hash }}
           DIFF_LINES: ${{ steps.diff.outputs.diff_lines }}
@@ -150,7 +150,7 @@ jobs:
           steps.diff.outputs.diff_lines != '0'
           && steps.diff.outputs.diff_lines <= 5000
           && steps.hash_check.outputs.skipped == 'false'
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           REVIEW_JSON: ${{ steps.codex.outputs.final-message }}
           DIFF_HASH: ${{ steps.diff.outputs.diff_hash }}
