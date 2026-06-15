@@ -139,7 +139,7 @@ describe('unmergeOpenClawConfig', () => {
     mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
     const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterMerge.plugins.slots.memory).toBe('adapter-openclaw');
-    expect(afterMerge.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBe('memory-core');
+    expect(afterMerge.plugins.entries['adapter-openclaw'].config.dkgSetupState.previousMemorySlotOwner).toBe('memory-core');
 
     // Unmerge → restores "memory-core" and removes the entry entirely.
     unmergeOpenClawConfig(configPath);
@@ -156,7 +156,7 @@ describe('unmergeOpenClawConfig', () => {
     mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
     const afterMerge = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterMerge.plugins.slots.memory).toBe('adapter-openclaw');
-    expect(afterMerge.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBeUndefined();
+    expect(afterMerge.plugins.entries['adapter-openclaw'].config.dkgSetupState?.previousMemorySlotOwner).toBeUndefined();
 
     unmergeOpenClawConfig(configPath);
     const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
@@ -329,6 +329,46 @@ describe('unmergeOpenClawConfig', () => {
     expect(result).toEqual({ previousMemorySlotOwner: 'memory-core' });
     const afterUnmerge = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterUnmerge.plugins.entries['adapter-openclaw']).toBeUndefined();
+  });
+
+  // Legacy layout: older adapter versions wrote bookkeeping at the entry ROOT
+  // (not under config.dkgSetupState). A user who upgrades and disconnects WITHOUT
+  // re-running setup must still restore correctly via the entry-root fallback.
+  it('restores slot/profile/channel from LEGACY entry-root bookkeeping (no dkgSetupState)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {
+        allow: ['adapter-openclaw'],
+        slots: { memory: 'adapter-openclaw' },
+        entries: {
+          'adapter-openclaw': {
+            enabled: true,
+            config: { daemonUrl: 'http://127.0.0.1:9200' },
+            // bookkeeping at the entry ROOT, as older versions wrote it:
+            previousMemorySlotOwner: 'memory-core',
+            previousToolsProfile: 'coding',
+            previousChannelsDkgUi: null,
+            mergedChannelsDkgUi: { enabled: true, port: 9201 },
+            mergedToolsShape: { profile: 'full', alsoAllow: ['group:plugins'] },
+          },
+        },
+      },
+      tools: { profile: 'full', alsoAllow: ['group:plugins'] },
+      channels: { 'dkg-ui': { enabled: true, port: 9201 } },
+    }, null, 2) + '\n');
+
+    const result = unmergeOpenClawConfig(configPath);
+    const after = JSON.parse(readFileSync(configPath, 'utf-8'));
+
+    // Slot owner read from the legacy root location and restored.
+    expect(result).toEqual({ previousMemorySlotOwner: 'memory-core' });
+    expect(after.plugins.slots.memory).toBe('memory-core');
+    // tools.profile reverted to the captured "coding" (mergedToolsShape matched).
+    expect(after.tools.profile).toBe('coding');
+    // channels.dkg-ui deleted (previousChannelsDkgUi === null + mergedChannelsDkgUi matched).
+    expect(after.channels?.['dkg-ui']).toBeUndefined();
+    // Entry fully removed, so the strict-rejected root keys are gone too.
+    expect(after.plugins.entries['adapter-openclaw']).toBeUndefined();
   });
 
   it('returns an empty object when openclaw.json is absent', () => {

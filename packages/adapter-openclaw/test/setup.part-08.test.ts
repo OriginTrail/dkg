@@ -292,9 +292,9 @@ describe('unmergeOpenClawConfig', () => {
     mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
     const afterFirst = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterFirst.tools.profile).toBe('full');
-    expect(afterFirst.plugins.entries['adapter-openclaw'].mergedToolsShape)
+    expect(afterFirst.plugins.entries['adapter-openclaw'].config.dkgSetupState.mergedToolsShape)
       .toEqual({ alsoAllow: ['group:plugins'], profile: 'full' });
-    expect(afterFirst.plugins.entries['adapter-openclaw'].previousToolsProfile).toBe('coding');
+    expect(afterFirst.plugins.entries['adapter-openclaw'].config.dkgSetupState.previousToolsProfile).toBe('coding');
 
     // User switches to "minimal" and adds a post-merge field.
     afterFirst.tools = { profile: 'minimal', alsoAllow: ['group:plugins'], web: { enabled: false } };
@@ -307,7 +307,7 @@ describe('unmergeOpenClawConfig', () => {
     const afterSecond = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterSecond.tools.profile).toBe('minimal');
     // Snapshot still reflects the FIRST merge's output, not the user's current shape.
-    expect(afterSecond.plugins.entries['adapter-openclaw'].mergedToolsShape)
+    expect(afterSecond.plugins.entries['adapter-openclaw'].config.dkgSetupState.mergedToolsShape)
       .toEqual({ alsoAllow: ['group:plugins'], profile: 'full' });
 
     // Unmerge: current tools (`minimal`, with `web` field) ≠ snapshot (`full`)
@@ -331,8 +331,11 @@ describe('unmergeOpenClawConfig', () => {
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.tools.profile).toBe('full');
-    // No mutation ⇒ no capture. previousToolsProfile also stays absent.
-    expect(config.plugins.entries['adapter-openclaw'].mergedToolsShape).toBeUndefined();
+    // No mutation ⇒ no capture. previousToolsProfile also stays absent — in
+    // dkgSetupState (whether or not the channel path created the container) AND
+    // never at the entry root.
+    expect(config.plugins.entries['adapter-openclaw'].config.dkgSetupState?.mergedToolsShape).toBeUndefined();
+    expect('previousToolsProfile' in (config.plugins.entries['adapter-openclaw'].config.dkgSetupState ?? {})).toBe(false);
     expect('previousToolsProfile' in config.plugins.entries['adapter-openclaw']).toBe(false);
   });
 

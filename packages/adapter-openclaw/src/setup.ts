@@ -860,6 +860,44 @@ export function mergeOpenClawConfig(
     log(`Set plugins.entries.${pluginId}.config.installedWorkspace = "${installedWorkspace}"`);
   }
 
+  // `dkgSetupState` holds the connect/disconnect bookkeeping (the pre-merge
+  // "previous" snapshots and the adapter-owned "merged" snapshots) that
+  // `unmergeOpenClawConfig` needs to reverse a merge. It lives INSIDE
+  // `entry.config` — the plugin-owned passthrough space — NOT at the entry root,
+  // where OpenClaw's gateway schema strict-rejects unknown keys (the same reason
+  // `installedWorkspace` lives in `entry.config`; see the comment above). The
+  // container is created lazily so a no-op merge that captures nothing leaves no
+  // empty object behind (preserving the `updated === raw` early return below).
+  const ensureSetupState = (): Record<string, any> => {
+    const existing = entryForConfig.config.dkgSetupState;
+    if (existing && typeof existing === 'object') return existing;
+    return (entryForConfig.config.dkgSetupState = {});
+  };
+
+  // Migrate bookkeeping written at the entry root by older adapter versions into
+  // `entry.config.dkgSetupState`. First-wins is preserved (a legacy value is
+  // adopted only when the container does not already own the key); the stale
+  // root key is always deleted so OpenClaw stops flagging it as an unknown
+  // config key on the next load. Runs before the capture sites below so their
+  // first-wins guards see the migrated values.
+  const SETUP_STATE_KEYS = [
+    'previousToolsProfile',
+    'previousChannelsDkgUi',
+    'mergedChannelsDkgUi',
+    'mergedToolsShape',
+    'previousMemorySlotOwner',
+  ] as const;
+  if (SETUP_STATE_KEYS.some((key) => key in entryForConfig)) {
+    const ss = ensureSetupState();
+    for (const key of SETUP_STATE_KEYS) {
+      if (key in entryForConfig) {
+        if (!(key in ss)) ss[key] = entryForConfig[key];
+        delete entryForConfig[key];
+      }
+    }
+    log(`Migrated adapter setup state from the entry root into config.dkgSetupState`);
+  }
+
   // Ensure plugin-registered tools are visible to the agent. Track whether THIS
   // merge pass actually mutates anything under `config.tools` so `mergedToolsShape`
   // can be refreshed only when we've genuinely written to the section. If the user
@@ -884,21 +922,23 @@ export function mergeOpenClawConfig(
   // plugin-registered tools out of the default `"coding"` profile, making
   // `dkg_*` invisible to the agent even when the plugin loads in full mode.
   //
-  // Capture the pre-merge profile onto the adapter entry so `unmergeOpenClawConfig`
-  // can restore it on disconnect. First-wins: once captured, re-running merge
-  // does not clobber the original (matches the `previousMemorySlotOwner` pattern).
-  // `null` sentinel = "absent before merge" → disconnect should delete the key.
-  const adapterEntryForCapture = config.plugins.entries[pluginId] as Record<string, any>;
+  // Capture the pre-merge profile into `config.dkgSetupState` so
+  // `unmergeOpenClawConfig` can restore it on disconnect. First-wins: once
+  // captured, re-running merge does not clobber the original (matches the
+  // `previousMemorySlotOwner` pattern). `null` sentinel = "absent before merge"
+  // → disconnect should delete the key.
   if (!config.tools.profile) {
-    if (adapterEntryForCapture && !('previousToolsProfile' in adapterEntryForCapture)) {
-      adapterEntryForCapture.previousToolsProfile = null;
+    const ss = ensureSetupState();
+    if (!('previousToolsProfile' in ss)) {
+      ss.previousToolsProfile = null;
     }
     config.tools.profile = 'full';
     mutatedTools = true;
     log('Set tools.profile = "full" to expose plugin tools');
   } else if (config.tools.profile === 'coding') {
-    if (adapterEntryForCapture && !('previousToolsProfile' in adapterEntryForCapture)) {
-      adapterEntryForCapture.previousToolsProfile = 'coding';
+    const ss = ensureSetupState();
+    if (!('previousToolsProfile' in ss)) {
+      ss.previousToolsProfile = 'coding';
     }
     config.tools.profile = 'full';
     mutatedTools = true;
@@ -945,17 +985,17 @@ export function mergeOpenClawConfig(
   // port) would otherwise leave a stale snapshot and break the deep-equal
   // ownership check on disconnect.
   const dkgUiChannel = config.channels['dkg-ui'];
-  const lastMergedChannel = adapterEntryForCapture?.mergedChannelsDkgUi as Record<string, unknown> | undefined;
+  const lastMergedChannel = (entryForConfig.config.dkgSetupState as Record<string, any> | undefined)
+    ?.mergedChannelsDkgUi as Record<string, unknown> | undefined;
   if (!dkgUiChannel || typeof dkgUiChannel !== 'object') {
     // Channel absent before merge → on disconnect, delete it (only if still
     // matches the shape we wrote).
     const created = { enabled: adapterChannelEnabled, port: adapterChannelPort };
-    if (adapterEntryForCapture) {
-      if (!('previousChannelsDkgUi' in adapterEntryForCapture)) {
-        adapterEntryForCapture.previousChannelsDkgUi = null; // first-wins
-      }
-      adapterEntryForCapture.mergedChannelsDkgUi = { ...created }; // always refresh
+    const ss = ensureSetupState();
+    if (!('previousChannelsDkgUi' in ss)) {
+      ss.previousChannelsDkgUi = null; // first-wins
     }
+    ss.mergedChannelsDkgUi = { ...created }; // always refresh
     config.channels['dkg-ui'] = created;
     log(`Created channels.dkg-ui with port ${adapterChannelPort} to keep plugin in full runtime mode`);
   } else {
@@ -964,12 +1004,11 @@ export function mergeOpenClawConfig(
     if (!hasNonEnabledKey) {
       // Degenerate shape → upgrade.
       const upgraded = { ...dkgUiChannel, port: adapterChannelPort };
-      if (adapterEntryForCapture) {
-        if (!('previousChannelsDkgUi' in adapterEntryForCapture)) {
-          adapterEntryForCapture.previousChannelsDkgUi = { ...dkgUiChannel }; // first-wins
-        }
-        adapterEntryForCapture.mergedChannelsDkgUi = { ...upgraded }; // always refresh
+      const ss = ensureSetupState();
+      if (!('previousChannelsDkgUi' in ss)) {
+        ss.previousChannelsDkgUi = { ...dkgUiChannel }; // first-wins
       }
+      ss.mergedChannelsDkgUi = { ...upgraded }; // always refresh
       config.channels['dkg-ui'] = upgraded;
       log(`Added port ${adapterChannelPort} to channels.dkg-ui to keep plugin in full runtime mode`);
     } else if (lastMergedChannel && isDeepStrictEqual(dkgUiChannel, lastMergedChannel)) {
@@ -980,9 +1019,7 @@ export function mergeOpenClawConfig(
       // channel instead of leaving the old adapter-written port in place.
       const refreshed: Record<string, unknown> = { ...dkgUiChannel, port: adapterChannelPort };
       if (!isDeepStrictEqual(refreshed, lastMergedChannel)) {
-        if (adapterEntryForCapture) {
-          adapterEntryForCapture.mergedChannelsDkgUi = { ...refreshed };
-        }
+        ensureSetupState().mergedChannelsDkgUi = { ...refreshed };
         config.channels['dkg-ui'] = refreshed;
         log(`Refreshed channels.dkg-ui.port to ${adapterChannelPort} (last merge output preserved)`);
       }
@@ -1011,8 +1048,8 @@ export function mergeOpenClawConfig(
   // skipped. On the no-op first merge (tools.profile already "full" + alsoAllow
   // already present), no snapshot is captured at all — also correct, because we
   // never took ownership of the section.
-  if (mutatedTools && adapterEntryForCapture) {
-    adapterEntryForCapture.mergedToolsShape = structuredClone(config.tools);
+  if (mutatedTools) {
+    ensureSetupState().mergedToolsShape = structuredClone(config.tools);
   }
 
   // Elect the adapter into OpenClaw's memory slot. Combined with
@@ -1038,12 +1075,12 @@ export function mergeOpenClawConfig(
     // losing the original owner if the slot gets manipulated between merges.
     const currentOwner = config.plugins.slots.memory;
     if (currentOwner && currentOwner !== pluginId) {
-      const adapterEntry = config.plugins.entries[pluginId];
-      if (adapterEntry && typeof adapterEntry === 'object' && !adapterEntry.previousMemorySlotOwner) {
-        adapterEntry.previousMemorySlotOwner = currentOwner;
+      const ss = ensureSetupState();
+      if (!ss.previousMemorySlotOwner) {
+        ss.previousMemorySlotOwner = currentOwner;
         log(`plugins.slots.memory was "${currentOwner}" — saved as previousMemorySlotOwner for restoration on disconnect`);
-      } else if (adapterEntry && typeof adapterEntry === 'object') {
-        log(`plugins.slots.memory was "${currentOwner}" — existing previousMemorySlotOwner="${adapterEntry.previousMemorySlotOwner}" preserved (first-wins)`);
+      } else {
+        log(`plugins.slots.memory was "${currentOwner}" — existing previousMemorySlotOwner="${ss.previousMemorySlotOwner}" preserved (first-wins)`);
       }
     }
     config.plugins.slots.memory = pluginId;
@@ -1166,28 +1203,44 @@ export function unmergeOpenClawConfig(openclawConfigPath: string): UnmergeResult
   let mergedToolsShape: Record<string, unknown> | undefined;
   const entry = config.plugins?.entries?.[pluginId];
   if (entry && typeof entry === 'object') {
-    if (typeof entry.previousMemorySlotOwner === 'string') {
-      previousMemorySlotOwner = entry.previousMemorySlotOwner;
+    // Bookkeeping now lives in `entry.config.dkgSetupState` (current layout).
+    // Fall back to the entry root for configs written by older adapter versions
+    // that were never re-merged after upgrading — those carry the keys at the
+    // root. Either way the whole entry is deleted below, so both locations get
+    // cleaned up regardless of where the values were read from.
+    const setupState = (entry.config && typeof entry.config === 'object'
+      && entry.config.dkgSetupState && typeof entry.config.dkgSetupState === 'object')
+      ? entry.config.dkgSetupState as Record<string, any>
+      : undefined;
+    const hasKey = (key: string): boolean =>
+      (!!setupState && key in setupState) || (key in entry);
+    const readKey = (key: string): any =>
+      (setupState && key in setupState) ? setupState[key] : entry[key];
+
+    if (typeof readKey('previousMemorySlotOwner') === 'string') {
+      previousMemorySlotOwner = readKey('previousMemorySlotOwner');
     }
-    if ('previousToolsProfile' in entry) {
-      previousToolsProfile = entry.previousToolsProfile;
+    if (hasKey('previousToolsProfile')) {
+      previousToolsProfile = readKey('previousToolsProfile');
     }
-    if ('previousChannelsDkgUi' in entry) {
-      previousChannelsDkgUi = entry.previousChannelsDkgUi;
+    if (hasKey('previousChannelsDkgUi')) {
+      previousChannelsDkgUi = readKey('previousChannelsDkgUi');
     }
-    if (entry.mergedChannelsDkgUi && typeof entry.mergedChannelsDkgUi === 'object') {
-      mergedChannelsDkgUi = entry.mergedChannelsDkgUi as Record<string, unknown>;
+    const mc = readKey('mergedChannelsDkgUi');
+    if (mc && typeof mc === 'object') {
+      mergedChannelsDkgUi = mc as Record<string, unknown>;
     }
-    if (entry.mergedToolsShape && typeof entry.mergedToolsShape === 'object') {
-      mergedToolsShape = entry.mergedToolsShape as Record<string, unknown>;
+    const mt = readKey('mergedToolsShape');
+    if (mt && typeof mt === 'object') {
+      mergedToolsShape = mt as Record<string, unknown>;
     }
   }
 
   // Delete the adapter entry entirely. The adapter owns this entry — all of
-  // its fields (enabled, config, previousMemorySlotOwner) are setup-written,
-  // so there's no user-customizable state to preserve. A fresh merge will
-  // rebuild everything from scratch, including re-capturing the current slot
-  // owner into previousMemorySlotOwner.
+  // its fields (enabled, config — including config.dkgSetupState — and any
+  // legacy root bookkeeping) are setup-written, so there's no user-customizable
+  // state to preserve. A fresh merge will rebuild everything from scratch,
+  // including re-capturing the current slot owner into config.dkgSetupState.
   if (config.plugins && config.plugins.entries && pluginId in config.plugins.entries) {
     delete config.plugins.entries[pluginId];
     log(`Removed ${pluginId} from plugins.entries`);

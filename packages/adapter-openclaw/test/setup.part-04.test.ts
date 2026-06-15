@@ -145,6 +145,16 @@ describe('mergeOpenClawConfig', () => {
       memory: { enabled: true },
       channel: { enabled: true },
       installedWorkspace: defaultInstalledWorkspace,
+      // Connect/disconnect bookkeeping now lives under config (not the entry
+      // root). A minimal merge sets the tools profile + creates the dkg-ui
+      // channel, so those snapshots are captured; the empty slot means no
+      // previousMemorySlotOwner.
+      dkgSetupState: {
+        previousToolsProfile: null,
+        previousChannelsDkgUi: null,
+        mergedChannelsDkgUi: { enabled: true, port: 9201 },
+        mergedToolsShape: { profile: 'full', alsoAllow: ['group:plugins'] },
+      },
     });
   });
 
@@ -310,7 +320,9 @@ describe('mergeOpenClawConfig', () => {
 
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(config.plugins.slots.memory).toBe('adapter-openclaw');
-    expect(config.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBe('memory-core');
+    expect(config.plugins.entries['adapter-openclaw'].config.dkgSetupState.previousMemorySlotOwner).toBe('memory-core');
+    // Bookkeeping must never leak back to the entry root (OpenClaw rejects it).
+    expect('previousMemorySlotOwner' in config.plugins.entries['adapter-openclaw']).toBe(false);
   });
 
   it('on a second merge, does NOT overwrite previousMemorySlotOwner with the adapter id (first-wins)', () => {
@@ -322,13 +334,83 @@ describe('mergeOpenClawConfig', () => {
     // First merge captures "memory-core" into the entry.
     mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
     const afterFirst = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(afterFirst.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBe('memory-core');
+    expect(afterFirst.plugins.entries['adapter-openclaw'].config.dkgSetupState.previousMemorySlotOwner).toBe('memory-core');
 
     // Second merge: slot is already the adapter, so the capture branch won't
     // fire — and even if it did, the first-wins guard keeps the original.
     mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
     const afterSecond = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(afterSecond.plugins.entries['adapter-openclaw'].previousMemorySlotOwner).toBe('memory-core');
+    expect(afterSecond.plugins.entries['adapter-openclaw'].config.dkgSetupState.previousMemorySlotOwner).toBe('memory-core');
+  });
+
+  // Core regression: OpenClaw strict-rejects unknown keys at the plugin-entry
+  // root. A merge that captures EVERY bookkeeping value must keep them all under
+  // config.dkgSetupState and leave only `enabled` + `config` at the entry root.
+  it('keeps all bookkeeping under config.dkgSetupState — entry root is only {enabled, config}', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: { slots: { memory: 'memory-core' } },
+      tools: { profile: 'coding' },
+      // no channels → channel is created (captures previous/merged channel)
+    }));
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const entry = JSON.parse(readFileSync(configPath, 'utf-8')).plugins.entries['adapter-openclaw'];
+    expect(Object.keys(entry).sort()).toEqual(['config', 'enabled']);
+    expect(entry.config.dkgSetupState).toEqual({
+      previousMemorySlotOwner: 'memory-core',
+      previousToolsProfile: 'coding',
+      previousChannelsDkgUi: null,
+      mergedChannelsDkgUi: { enabled: true, port: 9201 },
+      mergedToolsShape: { profile: 'full', alsoAllow: ['group:plugins'] },
+    });
+  });
+
+  // Migration: an older adapter wrote bookkeeping at the entry ROOT. The next
+  // merge must move it into config.dkgSetupState (first-wins — values are
+  // adopted verbatim, NOT re-captured from the already-merged current state) and
+  // delete the strict-rejected root keys so OpenClaw stops flagging them.
+  it('migrates legacy entry-root bookkeeping into config.dkgSetupState (first-wins preserved)', () => {
+    const configPath = join(testDir, 'openclaw.json');
+    writeFileSync(configPath, JSON.stringify({
+      plugins: {
+        allow: ['adapter-openclaw'],
+        slots: { memory: 'adapter-openclaw' },
+        entries: {
+          'adapter-openclaw': {
+            enabled: true,
+            config: { daemonUrl: 'http://127.0.0.1:9200', channel: { enabled: true, port: 9201 } },
+            // legacy bookkeeping at the entry root:
+            previousMemorySlotOwner: 'memory-core',
+            previousToolsProfile: 'coding',
+            previousChannelsDkgUi: null,
+            mergedChannelsDkgUi: { enabled: true, port: 9201 },
+            mergedToolsShape: { profile: 'full', alsoAllow: ['group:plugins'] },
+          },
+        },
+      },
+      tools: { profile: 'full', alsoAllow: ['group:plugins'] },
+      channels: { 'dkg-ui': { enabled: true, port: 9201 } },
+    }, null, 2) + '\n');
+
+    mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
+
+    const entry = JSON.parse(readFileSync(configPath, 'utf-8')).plugins.entries['adapter-openclaw'];
+    // No bookkeeping survives at the entry root.
+    for (const key of ['previousMemorySlotOwner', 'previousToolsProfile', 'previousChannelsDkgUi', 'mergedChannelsDkgUi', 'mergedToolsShape']) {
+      expect(key in entry).toBe(false);
+    }
+    // Values were adopted verbatim (NOT re-derived from the already-merged state:
+    // current profile is "full"/slot is the adapter, so a fresh capture would
+    // have produced different/absent values).
+    expect(entry.config.dkgSetupState).toEqual({
+      previousMemorySlotOwner: 'memory-core',
+      previousToolsProfile: 'coding',
+      previousChannelsDkgUi: null,
+      mergedChannelsDkgUi: { enabled: true, port: 9201 },
+      mergedToolsShape: { profile: 'full', alsoAllow: ['group:plugins'] },
+    });
   });
 
   // D2 — entry.config is the single source of truth for DkgNodePlugin runtime
