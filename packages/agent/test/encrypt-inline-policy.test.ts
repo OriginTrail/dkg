@@ -342,6 +342,14 @@ describe('DKGAgent._resolveEncryptInlineChunked nonce domain', () => {
       predicate: CIPHERTEXT_CHUNK_PREDICATE,
       graph: ciphertextChunkStoreGraph(canonicalSwmCgId),
     });
+    expect(agentLike.log.debug).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining(`graph=${ciphertextChunkStoreGraph(canonicalSwmCgId)}`),
+    );
+    expect(agentLike.log.debug).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining(`subject=${ciphertextChunkStoreSubject(batchId, 0)}`),
+    );
 
     const handler = new StorageACKHandler(
       store as any,

@@ -2740,6 +2740,13 @@ export class PublishMethods extends DKGAgentBase {
             object: literal,
             graph: chunksGraph,
           }]);
+          log.debug(
+            ctx,
+            `LU-11: persisted local ciphertext chunk before ACK collection ` +
+            `cgId=${contextGraphId} swmGraphId=${contextGraphId} ` +
+            `batchId=${batchIdHex.slice(0, 18)}... chunkIndex=${i} ` +
+            `graph=${chunksGraph} subject=${subject}`,
+          );
         } catch (err) {
           log.warn(
             ctx,
