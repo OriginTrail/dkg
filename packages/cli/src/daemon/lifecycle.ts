@@ -1240,6 +1240,11 @@ export async function runDaemonInner(
     agentProfileHeartbeatMs: config.network?.agentProfileHeartbeatMs,
     syncContextGraphs: syncContextGraphs,
     maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
+    // Plumb the host-mode block (rate limits, kill-switches) from config.json —
+    // without this the whole `swmHostMode` config is inert and only in-agent
+    // defaults apply, so e.g. `swmHostMode.stripNonParticipants` could not be
+    // toggled by an operator.
+    swmHostMode: config.swmHostMode,
     storeConfig: runtimeStore ? {
       backend: runtimeStore.backend,
       options: runtimeStore.options,

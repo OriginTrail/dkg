@@ -999,6 +999,15 @@ export interface DKGAgentConfig {
       perCuratorBytesPerHour?: number;
       coreAggregateBytes?: number;
     };
+    /**
+     * Rung-1 SWM strip — when `true` (default), a node only engages host-mode
+     * custody for a private CG it is a PARTICIPANT (curator/member) of; a
+     * third-party core declines auto-host so it custodies ZERO private SWM
+     * ciphertext (members backfill from the curator). Set `false` to restore
+     * the legacy "any core auto-hosts any curated CG" behaviour — the
+     * rolling-upgrade kill-switch and the A/B baseline control for the strip.
+     */
+    stripNonParticipants?: boolean;
   };
   /** Durable local store for subscribed context-graph runtime state. */
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;

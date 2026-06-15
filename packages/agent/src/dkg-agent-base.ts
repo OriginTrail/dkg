@@ -1128,6 +1128,17 @@ export class DKGAgentBase {
    * the RPC every envelope for an unknown id, opening a DoS lever.
    */
   protected readonly onChainParticipantAgentsCache = new Map<string, string[]>();
+  /**
+   * Rung-1 SWM strip — positive-only memo of CG ids this node is a
+   * participant (curator/member) of. Participation only ever grows within a
+   * session (a node joins/creates a CG, never silently de-participates on the
+   * hot path), so caching ONLY the `true` answer is safe and self-healing: a
+   * node that later joins re-evaluates until it resolves positive, then sticks.
+   * Negative answers are deliberately NOT cached so a freshly-joined member
+   * isn't wrongly kept out of its own custody. Keyed by whatever id form the
+   * caller passes (cleartext or wire-hash) — both can map to the same true.
+   */
+  protected readonly participantCgIds = new Set<string>();
   protected readonly peerHealth = new Map<string, PeerHealth>();
   protected readonly knownCorePeerIds = new Set<string>();
   protected readonly syncingPeers = new Set<string>();

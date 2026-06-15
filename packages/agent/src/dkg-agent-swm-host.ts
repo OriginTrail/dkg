@@ -593,6 +593,25 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     if (!curated) return;
 
+    // Rung-1 SWM strip — a node custodies a private CG's SWM ciphertext ONLY if
+    // it is a participant (curator/member) of that CG. A third-party core that
+    // learned of the CG via the chain-event / beacon auto-host path is NOT a
+    // participant and must hold ZERO of its ciphertext: members backfill from
+    // the curator (REPLACE-recovery), not from cores. This is the surgical
+    // close of the automatic-hosting leak; operator-forced host mode
+    // (`enableSwmHostModeFor`) remains an explicit override. The flag defaults
+    // ON; `stripNonParticipants:false` restores legacy auto-host (kill-switch /
+    // A/B baseline).
+    const stripNonParticipants = this.config.swmHostMode?.stripNonParticipants ?? true;
+    if (stripNonParticipants && !(await this.isNodeParticipantOfCg(contextGraphId))) {
+      this.log.info(
+        createOperationContext('system'),
+        `SWM host-mode subscription DECLINED for "${contextGraphId}": node is not a participant of this private CG ` +
+        `(rung-1 strip: non-participant nodes custody zero private SWM ciphertext)`,
+      );
+      return;
+    }
+
     this.wireSwmHostModeHandler(contextGraphId, source);
     await this.awaitHostModePersistence(contextGraphId);
 
@@ -600,7 +619,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     this.log.info(
       createOperationContext('system'),
-      `SWM host-mode subscription enabled for "${contextGraphId}" (role=core)`,
+      `SWM host-mode subscription enabled for "${contextGraphId}" (role=core, participant)`,
     );
   }
 

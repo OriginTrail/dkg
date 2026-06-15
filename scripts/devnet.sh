@@ -149,8 +149,8 @@ start_hardhat() {
   echo "$hh_pid" > "$pidfile"
   log "Hardhat node started (PID $hh_pid)"
 
-  # Wait for it to be ready
-  for i in $(seq 1 30); do
+  # Wait for it to be ready (timeout configurable; default 30, raise under load)
+  for i in $(seq 1 "${HARDHAT_READY_TIMEOUT_S:-30}"); do
     if curl -s "http://127.0.0.1:$HARDHAT_PORT" \
          -X POST -H "Content-Type: application/json" \
          -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
@@ -162,7 +162,7 @@ start_hardhat() {
     sleep 1
   done
 
-  log "ERROR: Hardhat node failed to start within 30s"
+  log "ERROR: Hardhat node failed to start within ${HARDHAT_READY_TIMEOUT_S:-30}s"
   return 1
 }
 

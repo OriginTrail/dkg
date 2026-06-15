@@ -1110,6 +1110,56 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   }
 
   /**
+   * Rung-1 SWM strip — is THIS node a participant (curator or member) of
+   * `contextGraphId`? Gates private-CG SWM ciphertext custody: a third-party
+   * core that merely learned of a private CG (chain-event / beacon) must hold
+   * ZERO of its ciphertext. Only the curator and members custody it, and
+   * members backfill from the curator (REPLACE-recovery), not from cores.
+   *
+   * Resolution is cheapest-first and robust to id form (cleartext vs wire-hash).
+   * A genuine participant resolves via the LOCAL checks — it created or joined
+   * with cleartext metadata — so it never over-blocks its own custody; the
+   * on-chain check is the form-robust backstop. A non-participant fails all
+   * three. Only the positive answer is memoized (see `participantCgIds`); the
+   * negative is re-evaluated so a freshly-joined member self-heals.
+   */
+  async isNodeParticipantOfCg(this: DKGAgent, contextGraphId: string): Promise<boolean> {
+    if (this.participantCgIds.has(contextGraphId)) return true;
+
+    const localAgentAddrs = new Set(
+      Array.from(this.localAgents.keys(), (a) => a.toLowerCase()),
+    );
+    const anyLocal = (addrs: readonly string[] | null | undefined): boolean =>
+      !!addrs && addrs.some((a) => localAgentAddrs.has(a.toLowerCase()));
+
+    // (1) curator — local owner triple (cheap, no chain).
+    try {
+      if (await this.isCuratorOf(contextGraphId)) {
+        this.participantCgIds.add(contextGraphId);
+        return true;
+      }
+    } catch { /* fall through to membership checks */ }
+
+    // (2) member — local `_meta` agent allowlist (cheap, no chain).
+    try {
+      if (anyLocal(await this.getContextGraphAgentGateAddresses(contextGraphId))) {
+        this.participantCgIds.add(contextGraphId);
+        return true;
+      }
+    } catch { /* fall through to the on-chain backstop */ }
+
+    // (3) on-chain participant set — form-robust + cached backstop.
+    try {
+      if (anyLocal(await this.resolveOnChainParticipantAgents(contextGraphId))) {
+        this.participantCgIds.add(contextGraphId);
+        return true;
+      }
+    } catch { /* unknown — treat as non-participant (fail closed on custody) */ }
+
+    return false;
+  }
+
+  /**
    * OT-RFC-38 / LU-6 Phase B — chain-race / pre-reg fallback for the
    * authority check on host-only cores. Returns the curator EOA the
    * local node pinned for `contextGraphId` from a previously-

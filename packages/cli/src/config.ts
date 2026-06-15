@@ -3,6 +3,7 @@ import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
+import type { DKGAgentConfig } from '@origintrail-official/dkg-agent';
 import {
   blueGreenSlotEntryPoint,
   blueGreenSlotReady,
@@ -483,6 +484,12 @@ export interface DkgConfig {
    * Ignored on core nodes, which always sync system graph metadata.
    */
   syncAgentsMeta?: boolean;
+  /**
+   * Host-mode (LU-6) custody config — rate limits, eviction tiers, and the
+   * rung-1 `stripNonParticipants` kill-switch. Forwarded through to
+   * `DKGAgentConfig.swmHostMode`; without this field the block is inert.
+   */
+  swmHostMode?: DKGAgentConfig['swmHostMode'];
   /**
    * Generic local agent integration registry used by node-owned connect/install
    * flows. Framework-specific bridges (OpenClaw now, Hermes next) should store
