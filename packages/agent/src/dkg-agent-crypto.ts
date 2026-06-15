@@ -458,6 +458,47 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   }
 
   /**
+   * R9 (SECURITY) — FRESH, `_meta`-only member-recovery gate.
+   *
+   * Resolves `allowedAgents ∪ participantAgents` minus `revokedAgents` from the
+   * CG `_meta` projection (store-backed, write-invalidated), with the
+   * network-influenced `subscribedContextGraphs` subscription cache
+   * DELIBERATELY OMITTED — that cache is poisonable, and folding it in is
+   * exactly what `member-recovery-auth.ts` forbids.
+   *
+   * Unlike {@link getContextGraphAgentGateAddresses} (which feeds the normal
+   * fail-open sync path and DOES fold in the subscription cache), this read is
+   * used ONLY for `request.recovery` and is passed straight to
+   * `isMemberRecoveryAuthorized`, which hard-denies on null/empty. Returns
+   * `null` when the CG has no `_meta` agent gate at all (⇒ hard-deny).
+   */
+  async getMemberRecoveryGate(
+    this: DKGAgent,
+    contextGraphId: string,
+    _options: { signal?: AbortSignal } = {},
+  ): Promise<string[] | null> {
+    const seen = new Set<string>();
+    const agents: string[] = [];
+    const meta = await this.getCgMeta(contextGraphId);
+    if (meta.allowedAgents.length === 0 && meta.participantAgents.length === 0) {
+      return null; // no _meta agent gate ⇒ hard-deny at the recovery gate
+    }
+    const revoked = new Set(meta.revokedAgents.map((addr) => addr.toLowerCase()));
+    const add = (value: string | undefined) => {
+      if (!value || !ethers.isAddress(value)) return;
+      const checksum = ethers.getAddress(value);
+      const key = checksum.toLowerCase();
+      if (revoked.has(key)) return;
+      if (seen.has(key)) return;
+      seen.add(key);
+      agents.push(checksum);
+    };
+    for (const agent of meta.allowedAgents) add(agent);
+    for (const agent of meta.participantAgents) add(agent);
+    return agents;
+  }
+
+  /**
    * Read libp2p peer-ids that approved agents have authorised, via
    * signed delegations, to act on their behalf for sync against this
    * CG. Used by the sync auth path so a sync request signed by the

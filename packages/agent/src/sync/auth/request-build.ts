@@ -6,6 +6,10 @@ import { ethers } from 'ethers';
 // narrows results, so old responders ignore it and new ones honor it.
 export type SyncPhase = 'data' | 'meta' | 'snapshot' | 'catalog';
 
+// NOTE: a structurally-identical `SyncRequestEnvelope` is also declared in
+// `dkg-agent-types.ts` (used by `parseSyncRequest`'s return type and the agent
+// modules). The two MUST be kept in lockstep — adding a field here without
+// mirroring it there silently drops it on the parse/responder path.
 export interface SyncRequestEnvelope {
   contextGraphId: string;
   offset: number;
@@ -35,6 +39,24 @@ export interface SyncRequestEnvelope {
    * full scan; new responders honor it and return a delta.
    */
   sinceBatchId?: string;
+  /**
+   * R9 (SECURITY) — member SWM recovery marker. When set, the recovery path
+   * serves PLAINTEXT member-to-member, so the responder MUST authorize it via
+   * the strict members-only `isMemberRecoveryAuthorized` hard-deny gate (a
+   * FRESH `_meta` agent-gate read, hard-deny on null/empty) and MUST NOT fall
+   * through to the weaker participant/peer fallback in
+   * `authorizePrivateSyncRequest`.
+   *
+   * Deliberately UNSIGNED (rides the envelope after `computeSyncDigest`, like
+   * `phase`/`sinceBatchId`). The rationale differs from those narrowing-only
+   * fields: `recovery` only ever ESCALATES strictness. An attacker who sets it
+   * faces the harder members-only gate; stripping it (MITM on a real member's
+   * request) just reverts to the normal private-sync path the member already
+   * passes. It is auth-safe precisely because the responder decides membership
+   * against the cryptographically RECOVERED signer address — never against this
+   * flag or the (forgeable) `requesterAgentAddress` claim alone.
+   */
+  recovery?: boolean;
 }
 
 interface BuildSyncRequestParams {
@@ -49,6 +71,16 @@ interface BuildSyncRequestParams {
   sinceBatchId?: string;
   syncSessionId?: string;
   needsAuth: boolean;
+  /**
+   * R9 (SECURITY) — member SWM recovery. Forces the JSON auth envelope (never
+   * the public text form) and, critically, forces the EDGE (agent-key) signing
+   * path so the responder-recovered signer == the member agent address. The
+   * responder's members-only gate decides on the RECOVERED signer, so the
+   * recovery request MUST be signed by the member agent's own key (NOT the node
+   * op-key, which would recover to a non-member and be hard-denied). No
+   * delegation is consulted on the recovery path.
+   */
+  recovery?: boolean;
   computeSyncDigest: (
     contextGraphId: string,
     offset: number,
@@ -87,12 +119,21 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     sinceBatchId,
     syncSessionId,
     needsAuth,
+    recovery,
     computeSyncDigest,
     getIdentityId,
     signMessage,
     claimedAgentAddress,
     claimedAgentPrivateKey,
   } = params;
+
+  // R9: recovery serves plaintext member-to-member and is authorized by the
+  // strict members-only gate — it can never ride the unauthenticated public
+  // text form. Private SWM already yields needsAuth=true; assert it rather than
+  // silently downgrade to an envelope no responder will gate as recovery.
+  if (recovery && !needsAuth) {
+    throw new Error(`Cannot build member-recovery sync request for "${contextGraphId}": recovery requires an authenticated envelope`);
+  }
 
   if (!needsAuth) {
     const prefix = includeSharedMemory ? `workspace:${contextGraphId}` : contextGraphId;
@@ -146,9 +187,29 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   // authorization; only narrows the responder's result set).
   if (syncSessionId) request.syncSessionId = syncSessionId;
   if (sinceBatchId) request.sinceBatchId = sinceBatchId;
+  // R9: unsigned recovery marker (only ever escalates strictness — see field
+  // docs). The responder authorizes against the recovered signer, not this flag.
+  if (recovery) request.recovery = true;
 
-  const identityId = await getIdentityId();
-  if (identityId > 0n && typeof signMessage === 'function') {
+  // R9: recovery is authorized against the RECOVERED signer address, which the
+  // responder matches against the members-only agent gate. So a recovery
+  // request MUST be signed by the member agent's OWN key (edge path) — the node
+  // identity op-key would recover to a non-member and be hard-denied. Force the
+  // edge path and require the agent key locally (the recovering node IS the
+  // member, so it holds the key).
+  const identityId = recovery ? 0n : await getIdentityId();
+  if (recovery) {
+    if (!claimedAgentAddress || !claimedAgentPrivateKey) {
+      throw new Error(`Cannot build member-recovery sync request for "${contextGraphId}": missing member agent signing key`);
+    }
+    const wallet = new ethers.Wallet(claimedAgentPrivateKey);
+    const sig = ethers.Signature.from(await wallet.signMessage(digest));
+    request.requesterIdentityId = '0';
+    // requesterAgentAddress was already set above (and bound into the digest);
+    // the responder enforces recoveredAddress === member gate entry.
+    request.requesterSignatureR = ethers.hexlify(sig.r);
+    request.requesterSignatureVS = ethers.hexlify(sig.yParityAndS);
+  } else if (identityId > 0n && typeof signMessage === 'function') {
     const signature = await signMessage(digest);
     request.requesterIdentityId = identityId.toString();
     request.requesterSignatureR = ethers.hexlify(signature.r);

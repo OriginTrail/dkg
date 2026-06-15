@@ -161,6 +161,18 @@ export interface SyncRequestEnvelope {
    * like `phase`/`snapshotRef`), so it's additive and backward-compatible.
    */
   sinceBatchId?: string;
+  /**
+   * R9 (SECURITY) — UNSIGNED member-recovery marker. When set, the responder
+   * authorizes via the strict members-only `isMemberRecoveryAuthorized`
+   * hard-deny gate (a FRESH `_meta` agent-gate read) and MUST NOT fall through
+   * to the weaker participant/peer fallback. Unsigned because it only ever
+   * ESCALATES strictness (an attacker setting it faces the harder gate;
+   * stripping it reverts to the normal path the member already passes), and the
+   * responder decides on the cryptographically RECOVERED signer — never on this
+   * flag or the (forgeable) `requesterAgentAddress` claim. Kept in lockstep with
+   * the duplicate `SyncRequestEnvelope` in `sync/auth/request-build.ts`.
+   */
+  recovery?: boolean;
 }
 
 // ── Public error classes ────────────────────────────────────────────

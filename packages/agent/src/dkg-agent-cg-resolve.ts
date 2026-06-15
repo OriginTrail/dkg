@@ -740,6 +740,13 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         syncSessionId: typeof parsed.syncSessionId === 'string' ? parsed.syncSessionId : undefined,
         // Phase C: unsigned delta hint. Validated/normalised in the responder.
         sinceBatchId: typeof parsed.sinceBatchId === 'string' ? parsed.sinceBatchId : undefined,
+        // R9 (SECURITY): the unsigned member-recovery marker. This is a STRICT
+        // FIELD ALLOWLIST — anything not copied here is dropped. If `recovery`
+        // were omitted, the responder would never see it, silently fall through
+        // to the fail-open participant/peer path, and the members-only gate
+        // would be dead code. Coerce to a real boolean so a truthy non-bool
+        // can't smuggle through.
+        recovery: parsed.recovery === true ? true : undefined,
       };
     }
 
@@ -859,6 +866,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     snapshotRef?: string,
     sinceBatchId?: string,
     syncSessionId?: string,
+    recovery?: boolean,
   ): Promise<Uint8Array> {
     const isPrivate = await this.isPrivateContextGraph(contextGraphId);
 
@@ -869,7 +877,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const hasLocalData = this.subscribedContextGraphs.get(contextGraphId)?.synced === true;
     // the catalog facet is public and served without the
     // allowlist gate, so an outsider (no CG identity) requests it unauthenticated.
-    const needsAuth = phase !== 'catalog' && (isPrivate || !hasLocalData);
+    // R9: recovery serves plaintext member-to-member and is gated by the strict
+    // members-only authorizer — it MUST be an authenticated (signed) envelope.
+    const needsAuth = recovery || (phase !== 'catalog' && (isPrivate || !hasLocalData));
     const claimedAgentAddress = await this.findLocalAgentForContextGraph(contextGraphId);
     const claimedAgent = claimedAgentAddress ? this.localAgents.get(claimedAgentAddress) : undefined;
     return buildSyncRequestEnvelope({
@@ -888,6 +898,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       sinceBatchId: phase === 'data' && !includeSharedMemory ? sinceBatchId : undefined,
       syncSessionId: phase === 'snapshot' ? undefined : syncSessionId,
       needsAuth,
+      // R9: forces the EDGE (member-agent-key) signing path so the responder
+      // recovers the member agent address and matches it against the gate.
+      recovery,
       computeSyncDigest: this.computeSyncDigest.bind(this),
       getIdentityId: () => this.chain.getIdentityId(),
       signMessage: typeof this.chain.signMessage === 'function' ? this.chain.signMessage.bind(this.chain) : undefined,
@@ -913,6 +926,20 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const result = await this.fetchSyncPages(
       ctx, responderPeerId, contextGraphId, false, 'catalog', catalogGraph, Date.now() + deadlineMs,
     );
+    // Persist the fetched DCAT dataset record into the local `<cg>/_catalog`
+    // graph and invalidate the meta projection so getCgMeta() /
+    // listContextGraphs() can see the remotely discovered private CG after
+    // this call. The parsed quads already carry `graph === catalogGraph`
+    // (see parseAndFilterNQuads), so they land in the catalog graph as-is.
+    // The projection read side is disclosure-floor only (rdf:type /
+    // dct:accessRights — CATALOG_META_PREDICATES), so persisting peer-fetched
+    // catalog quads cannot poison the authz-bearing creator/curator/allowlist
+    // fields. Mirrors refreshMetaFromCurator's persist+invalidate path.
+    if (result.quads.length > 0) {
+      await this.store.insert(result.quads);
+      this.contextGraphMetaProjection.markDirtyFromQuads(result.quads);
+      this.syncCheckpoints.delete(result.checkpointKey);
+    }
     return result.quads;
   }
 
@@ -988,6 +1015,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       getAgentGateAddresses: (contextGraphId, lookupOptions) => this.getContextGraphAgentGateAddresses(contextGraphId, lookupOptions),
       getAllowedDelegateePeers: (contextGraphId, lookupOptions) => this.getContextGraphAllowedDelegateePeers(contextGraphId, lookupOptions),
       getAllowedDelegateeKeys: (contextGraphId, lookupOptions) => this.getContextGraphAllowedDelegateeKeys(contextGraphId, lookupOptions),
+      // R9: FRESH `_meta`-only members-only gate for the recovery branch (no
+      // subscription cache). Consulted only when `request.recovery` is set.
+      getMemberRecoveryGate: (contextGraphId, lookupOptions) => this.getMemberRecoveryGate(contextGraphId, lookupOptions),
       refreshMetaFromCurator: (contextGraphId, lookupOptions) => this.refreshMetaFromCurator(contextGraphId, lookupOptions),
       signal: options.signal,
       logWarn: (ctx, message) => this.log.warn(ctx, message),

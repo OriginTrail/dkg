@@ -9,7 +9,7 @@ import type {
   SelectResult,
   ConstructResult,
   AskResult,
-  QueryOptions,
+  TripleStoreQueryOptions,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 
@@ -215,7 +215,7 @@ export class OxigraphStore implements TripleStore {
     return matches.length;
   }
 
-  async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+  async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     throwIfAborted(options?.signal);
     // The embedded Oxigraph binding executes synchronously, so a caller abort
     // cannot interrupt this native call mid-flight. Use oxigraph-worker or an
@@ -271,7 +271,7 @@ export class OxigraphStore implements TripleStore {
     this.scheduleFlush();
   }
 
-  async listGraphs(options?: QueryOptions): Promise<string[]> {
+  async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
     throwIfAborted(options?.signal);
     const result = this.store.query(
       'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',

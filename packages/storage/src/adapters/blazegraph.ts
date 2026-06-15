@@ -2,6 +2,7 @@ import type {
   TripleStore,
   Quad as DKGQuad,
   QueryOptions,
+  TripleStoreQueryOptions,
   QueryResult,
   SelectResult,
   ConstructResult,
@@ -90,7 +91,7 @@ export class BlazegraphStore implements TripleStore {
   // Queries
   // -------------------------------------------------------------------
 
-  async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+  async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     if (options?.signal?.aborted) {
       const reason = options.signal.reason;
       throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
@@ -182,7 +183,7 @@ export class BlazegraphStore implements TripleStore {
     await this.sparqlUpdate(`DROP SILENT GRAPH <${escapeUri(graphUri)}>`);
   }
 
-  async listGraphs(options?: QueryOptions): Promise<string[]> {
+  async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
     const r = await this.query(
       'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
       options,

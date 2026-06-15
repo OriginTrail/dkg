@@ -91,7 +91,15 @@ interface FetchSyncPagesParams {
   debugSyncProgress: boolean;
   protocolSync: string;
   checkpointStore: SyncCheckpointStore;
-  buildSyncRequest: (contextGraphId: string, offset: number, limit: number, includeSharedMemory: boolean, remotePeerId: string, phase?: SyncPhase, snapshotRef?: string, sinceBatchId?: string, syncSessionId?: string) => Promise<Uint8Array>;
+  /**
+   * R9/R10 — member SWM recovery marker. Forks BOTH the checkpoint namespace
+   * (R10: distinct `|recovery` cursor + responder-session scope so it never
+   * mutates the shared incremental-sync cursor) AND the request envelope (R9:
+   * forwarded to `buildSyncRequest` so the responder gates it via the strict
+   * members-only `isMemberRecoveryAuthorized`). Default false ⇒ normal sync.
+   */
+  recovery?: boolean;
+  buildSyncRequest: (contextGraphId: string, offset: number, limit: number, includeSharedMemory: boolean, remotePeerId: string, phase?: SyncPhase, snapshotRef?: string, sinceBatchId?: string, syncSessionId?: string, recovery?: boolean) => Promise<Uint8Array>;
   /**
    * Phase C — optional, gap-safe delta-sync high-water mark. Forwarded to the
    * responder for the durable DATA phase so it returns only KAs with
@@ -177,6 +185,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     debugSyncProgress,
     protocolSync,
     checkpointStore,
+    recovery,
     buildSyncRequest,
     sinceBatchId,
     parseAndFilter,
@@ -188,7 +197,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
 
   const allQuads: Quad[] = [];
   throwIfAborted(signal);
-  const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId);
+  const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId, recovery);
   let offset = checkpointStore.get(checkpointKey)?.offset ?? 0;
   const usesPageSession = usesResponderSession(includeSharedMemory, phase);
   const sessionStartedAt = Date.now();
@@ -245,7 +254,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         // full rationale (codex review on #569 follow-ups #1, #4-#8).
         requestFactory: async () => {
           throwIfAborted(signal);
-          const request = await buildSyncRequest(contextGraphId, curOffset, syncPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId);
+          const request = await buildSyncRequest(contextGraphId, curOffset, syncPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId, recovery);
           throwIfAborted(signal);
           return request;
         },

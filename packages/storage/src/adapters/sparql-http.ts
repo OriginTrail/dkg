@@ -25,6 +25,7 @@ import type {
   TripleStore,
   Quad as DKGQuad,
   QueryOptions,
+  TripleStoreQueryOptions,
   QueryResult,
   SelectResult,
   ConstructResult,
@@ -326,7 +327,7 @@ export class SparqlHttpStore implements TripleStore {
     return Math.max(0, before - after);
   }
 
-  async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+  async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     throwIfAborted(options?.signal);
     const trimmed = sparql.trim();
     const upper = trimmed.toUpperCase();
@@ -392,7 +393,7 @@ export class SparqlHttpStore implements TripleStore {
     this.invalidateGraphListCache(); // the graph is gone from listGraphs
   }
 
-  async listGraphs(options?: QueryOptions): Promise<string[]> {
+  async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
     throwIfAborted(options?.signal);
     // R6-A: on a managed (daemon-owned) endpoint the graph set only changes
     // when *we* write, so serve a warm cache and skip the full

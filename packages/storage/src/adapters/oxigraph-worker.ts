@@ -2,7 +2,7 @@ import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { TripleStore, Quad, QueryOptions, QueryResult } from '../triple-store.js';
+import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 
 /**
@@ -255,13 +255,13 @@ export class OxigraphWorkerStore implements TripleStore {
   async insert(quads: Quad[]): Promise<void> { return this.call('insert', quads); }
   async delete(quads: Quad[]): Promise<void> { return this.call('delete', quads); }
   async deleteByPattern(pattern: Partial<Quad>): Promise<number> { return this.call('deleteByPattern', pattern); }
-  async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+  async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);
   }
   async hasGraph(graphUri: string): Promise<boolean> { return this.call('hasGraph', graphUri); }
   async createGraph(graphUri: string): Promise<void> { return this.call('createGraph', graphUri); }
   async dropGraph(graphUri: string): Promise<void> { return this.call('dropGraph', graphUri); }
-  async listGraphs(options?: QueryOptions): Promise<string[]> {
+  async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
     return this.callWithTimeout<string[]>(this.operationTimeoutMs, options?.signal, 'listGraphs');
   }
   async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> { return this.call('deleteBySubjectPrefix', graphUri, prefix); }

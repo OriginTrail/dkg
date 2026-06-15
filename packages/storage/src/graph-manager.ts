@@ -11,6 +11,7 @@ import {
   contextGraphSubGraphUri,
   contextGraphSubGraphMetaUri,
   contextGraphSubGraphPrivateUri,
+  contextGraphCatalogUri,
 } from '@origintrail-official/dkg-core';
 
 const CG_PREFIX = 'did:dkg:context-graph:';
@@ -39,6 +40,10 @@ export class ContextGraphManager {
 
   privateGraphUri(contextGraphId: string): string {
     return contextGraphPrivateUri(contextGraphId);
+  }
+
+  catalogGraphUri(contextGraphId: string): string {
+    return contextGraphCatalogUri(contextGraphId);
   }
 
   sharedMemoryUri(contextGraphId: string, subGraphName?: string): string {
@@ -147,6 +152,11 @@ export class ContextGraphManager {
     await this.store.dropGraph(this.privateGraphUri(contextGraphId));
     await this.store.dropGraph(this.sharedMemoryUri(contextGraphId));
     await this.store.dropGraph(this.sharedMemoryMetaUri(contextGraphId));
+    // OT-RFC-49 §5.9: a private CG's public face is its `_catalog` graph (the
+    // bounded, plaintext DCAT entry served over open-serve / P2P without
+    // membership). Drop it too, or deleting a CG leaves stale discovery
+    // metadata that outsiders can still resolve.
+    await this.store.dropGraph(this.catalogGraphUri(contextGraphId));
   }
 
   // ── Deprecated V9 aliases ────────────────────────────────────────────

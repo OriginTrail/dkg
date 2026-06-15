@@ -1,5 +1,5 @@
 import { performance } from 'node:perf_hooks';
-import type { Quad, QueryOptions, QueryResult, TripleStore } from './triple-store.js';
+import type { Quad, QueryOptions, TripleStoreQueryOptions, QueryResult, TripleStore } from './triple-store.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 
@@ -48,6 +48,10 @@ export interface GraphSetIndexStoreOptions {
  * calls are not visible until data is inserted.
  */
 export class GraphSetIndexStore implements TripleStore {
+  get queryCancellation() {
+    return this.inner.queryCancellation;
+  }
+
   private readonly inner: TripleStore;
   private readonly revalidateMs: number;
   private readonly now: () => number;
@@ -94,7 +98,7 @@ export class GraphSetIndexStore implements TripleStore {
     return removed;
   }
 
-  async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+  async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     const result = await this.inner.query(sparql, options);
     if (isSparqlUpdate(sparql)) {
       this.bumpMutation();
@@ -162,17 +166,23 @@ export class GraphSetIndexStore implements TripleStore {
       this.revalidateMs > 0 &&
       this.now() - this.validatedAt < this.revalidateMs
     ) {
+      // A warm cache short-circuits the shared scan, so honour this caller's
+      // own cancellation before handing back the cached set.
+      throwIfAborted(options?.signal);
       return this.graphs;
     }
-    return this.refreshIndex(this.graphs ? 'revalidate' : 'seed', options);
+    // The shared index scan is signal-agnostic (see refreshIndex): one caller's
+    // abort must never reject siblings joined to the same refresh. Each caller
+    // races the shared scan against its own signal instead.
+    return raceWithSignal(
+      this.refreshIndex(this.graphs ? 'revalidate' : 'seed'),
+      options?.signal,
+    );
   }
 
-  private async refreshIndex(
-    source: GraphSetRefreshSource,
-    options?: QueryOptions,
-  ): Promise<Set<string>> {
+  private async refreshIndex(source: GraphSetRefreshSource): Promise<Set<string>> {
     if (this.refreshInFlight) return this.refreshInFlight;
-    const task = this.refreshIndexLoop(source, options);
+    const task = this.refreshIndexLoop(source);
     this.refreshInFlight = task;
     try {
       return await task;
@@ -181,13 +191,12 @@ export class GraphSetIndexStore implements TripleStore {
     }
   }
 
-  private async refreshIndexLoop(
-    source: GraphSetRefreshSource,
-    options?: QueryOptions,
-  ): Promise<Set<string>> {
+  private async refreshIndexLoop(source: GraphSetRefreshSource): Promise<Set<string>> {
     for (;;) {
       const generation = this.mutationGeneration;
-      const next = new Set((await this.inner.listGraphs(options)).filter(Boolean));
+      // No caller signal: the scan is shared across concurrent callers, so it
+      // runs to completion (or fails on its own) independent of any one caller.
+      const next = new Set((await this.inner.listGraphs()).filter(Boolean));
       if (generation !== this.mutationGeneration) continue;
       this.replaceGraphSet(next, source);
       return this.graphs!;
@@ -262,6 +271,42 @@ export class GraphSetIndexStore implements TripleStore {
 
 function namedGraphsFromQuads(quads: Quad[]): string[] {
   return [...new Set(quads.map((quad) => quad.graph).filter(Boolean))];
+}
+
+function abortError(reason: unknown): Error {
+  return reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw abortError(signal.reason);
+}
+
+/**
+ * Settle with `promise`'s result, but reject early if `signal` aborts first.
+ *
+ * The shared index refresh is deliberately signal-agnostic, so this is the only
+ * place a caller's cancellation is observed: it must not abort the underlying
+ * `promise` (other callers share it). We always attach a settle handler to
+ * `promise` even when the signal wins the race, so a later rejection of the
+ * shared scan stays handled here rather than surfacing as an unhandled rejection.
+ */
+function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return promise;
+  return new Promise<T>((resolve, reject) => {
+    let onAbort: (() => void) | undefined;
+    const cleanup = () => {
+      if (onAbort) signal.removeEventListener('abort', onAbort);
+    };
+    // Keep a handler on the shared promise regardless of who wins; settling
+    // after an abort is a harmless no-op for the Promise executor.
+    promise.then(
+      (value) => { cleanup(); resolve(value); },
+      (error) => { cleanup(); reject(error); },
+    );
+    onAbort = () => { cleanup(); reject(abortError(signal.reason)); };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function isSparqlUpdate(sparql: string): boolean {

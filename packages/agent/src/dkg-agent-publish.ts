@@ -1339,10 +1339,31 @@ export class PublishMethods extends DKGAgentBase {
           // outsiders with an empty `<source-cg>/_catalog`.
           projectionGraph: (id) => contextGraphCatalogUri(id),
           // buildPublicProjection already stamps each quad's graph from
-          // `projectionGraph` (the source `_catalog`), so a plain store insert
-          // lands them in the right named graph — matching the canonical
-          // publisher catalog persist (dkg-publisher.ts store.insert).
-          publishProjection: async (_id, quads) => { await this.store.insert(quads); },
+          // `projectionGraph` (the source `_catalog`), so the insert lands them
+          // in the right named graph — matching the canonical publisher catalog
+          // persist (dkg-publisher.ts persistCatalogEntry).
+          //
+          // R8 — CLEAR/REPLACE, not append. `committedRoot` changes every
+          // publish, so a bare insert accumulates multiple `dkg:committedRoot`
+          // (and floor) triples for the SAME catalog subject (the CG DID) in
+          // `<source-cg>/_catalog`, leaving open-serve unable to tell which root
+          // is current. Mirror `persistCatalogEntry`: purge the prior rows for
+          // each catalog subject in this graph before inserting the refreshed
+          // entry. `graph` is the callback's third arg (= `contextGraphCatalogUri(id)`,
+          // emitPublicProjection line 225), so delete-graph === insert-graph by
+          // construction; subjects derive from the quads (one stable CG DID),
+          // deleting exactly what we replace. Then invalidate the projection
+          // cache so a cached CG record picks up the new committed root — the
+          // floor predicates (rdf:type / dct:accessRights) are in
+          // CATALOG_META_PREDICATES, so this dirties the right entry.
+          publishProjection: async (_id, quads, graph) => {
+            const subjects = new Set(quads.map((q) => q.subject));
+            for (const subject of subjects) {
+              await this.store.deleteByPattern({ graph, subject });
+            }
+            await this.store.insert(quads);
+            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+          },
           log: (level, message) =>
             level === 'warn' ? this.log.warn(ctx, message) : this.log.info(ctx, message),
         },

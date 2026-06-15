@@ -2842,6 +2842,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     snapshotRef?: string,
     sinceBatchId?: string,
     signal?: AbortSignal,
+    // R9/R10 — member SWM recovery marker. Forks the checkpoint namespace (R10)
+    // and the request envelope auth mode (R9). Only the recovery driver sets it.
+    recovery?: boolean,
   ): Promise<SyncPageResult> {
     return fetchSyncPages({
       ctx,
@@ -2853,6 +2856,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       snapshotRef,
       sinceBatchId,
       deadline,
+      recovery,
       syncPageTimeoutMs: SYNC_PAGE_TIMEOUT_MS,
       syncRouterAttempts: SYNC_ROUTER_ATTEMPTS,
       syncPageRetryAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
@@ -3014,7 +3018,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       remotePeerId,
       contextGraphId,
       deadline: this.createContextGraphSyncDeadline(1),
-      fetchSyncPages: this.fetchSyncPages.bind(this),
+      // R9/R10 — pin recovery=true at the lifecycle boundary so swm-recovery's
+      // deps signature stays unchanged. This forks BOTH the checkpoint namespace
+      // (R10: a distinct `|recovery` cursor that never mutates the shared
+      // incremental-sync cursor) AND the request envelope auth mode (R9: the
+      // responder gates via the strict members-only `isMemberRecoveryAuthorized`).
+      fetchSyncPages: (ctx2, remotePeerId2, contextGraphId2, includeSharedMemory2, phase2, graphUri2, deadline2) =>
+        this.fetchSyncPages(ctx2, remotePeerId2, contextGraphId2, includeSharedMemory2, phase2, graphUri2, deadline2, undefined, undefined, undefined, true),
       processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, cgId, registered, excluded) =>
         this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(wsDataQuads, wsMetaQuads, cgId, registered, excluded),
       // SwmRecoveryStore: mark the meta projection dirty on insert (parity with

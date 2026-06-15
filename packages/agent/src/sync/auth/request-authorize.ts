@@ -1,6 +1,7 @@
 import { ethers } from 'ethers';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { SyncRequestEnvelope } from './request-build.js';
+import { isMemberRecoveryAuthorized } from '../../swm/member-recovery-auth.js';
 
 interface AuthLookupOptions {
   signal?: AbortSignal;
@@ -42,6 +43,17 @@ interface AuthorizeSyncRequestParams {
    */
   getAllowedDelegateePeers: (contextGraphId: string, options?: AuthLookupOptions) => Promise<Map<string, string[]>>;
   getAllowedDelegateeKeys: (contextGraphId: string, options?: AuthLookupOptions) => Promise<Map<string, string[]>>;
+  /**
+   * R9 (SECURITY) — FRESH, `_meta`-only member-recovery gate. MUST resolve
+   * `allowedAgents ∪ participantAgents` minus `revokedAgents` from a fresh read
+   * of the CG `_meta` projection, and MUST NOT fold in the network-influenced
+   * subscription cache (poisonable — see `member-recovery-auth.ts`). Used ONLY
+   * for `request.recovery`: the gate value is passed straight to
+   * `isMemberRecoveryAuthorized`, which hard-denies on null/empty and never
+   * widens. Distinct from `getAgentGateAddresses` (which DOES fold in the
+   * subscription cache and feeds the normal fail-open path).
+   */
+  getMemberRecoveryGate: (contextGraphId: string, options?: AuthLookupOptions) => Promise<string[] | null>;
   refreshMetaFromCurator: (contextGraphId: string, options?: AuthLookupOptions) => Promise<boolean>;
   signal?: AbortSignal;
   logWarn: (ctx: OperationContext, message: string) => void;
@@ -80,6 +92,7 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
     getAgentGateAddresses,
     getAllowedDelegateePeers,
     getAllowedDelegateeKeys,
+    getMemberRecoveryGate,
     refreshMetaFromCurator,
     signal,
     logWarn,
@@ -158,6 +171,33 @@ export async function authorizePrivateSyncRequest(params: AuthorizeSyncRequestPa
   } else if (!request.requesterAgentAddress || recoveredAddress.toLowerCase() !== request.requesterAgentAddress.toLowerCase()) {
     logWarn(ctx, `Denied sync request for "${request.contextGraphId}": edge signer mismatch (signer=${recoveredAddress} requesterAgentAddress=${request.requesterAgentAddress ?? 'n/a'})`);
     return false;
+  }
+
+  // R9 (SECURITY) — member-recovery branch. Recovery serves PLAINTEXT
+  // member-to-member, so once the crypto prologue above has authenticated the
+  // request (envelope shape, freshness, replay, signer recovery, identity/edge
+  // binding), the ACL is the ONLY barrier left. Swap the normal fail-open
+  // participant/peer resolution for the strict members-only hard-deny gate and
+  // do NOT fall through. The decision is on the cryptographically RECOVERED
+  // `recoveredAddress` — NOT `request.requesterAgentAddress` (a signed but
+  // self-asserted claim any valid signer can set; checking it on the identity
+  // path would be an auth bypass). The gate is a FRESH `_meta`-only read; null/
+  // empty hard-denies and we never widen via `refreshMetaFromCurator`.
+  if (request.recovery) {
+    const recoveryGate = await getMemberRecoveryGate(request.contextGraphId, lookupOptions);
+    throwIfAborted(signal);
+    const recoveryAllowed = isMemberRecoveryAuthorized(recoveredAddress, recoveryGate);
+    logInfo(
+      ctx,
+      `Member-recovery sync auth for "${request.contextGraphId}": signer=${recoveredAddress} identityId=${requesterIdentityId.toString()} gateCount=${recoveryGate?.length ?? 0} allowed=${recoveryAllowed}`,
+    );
+    if (recoveryAllowed) {
+      throwIfAborted(signal);
+      seenRequestIds.set(request.requestId, now);
+    } else {
+      logWarn(ctx, `Denied member-recovery sync request for "${request.contextGraphId}": signer ${recoveredAddress} not in members-only gate (gateCount=${recoveryGate?.length ?? 0})`);
+    }
+    return recoveryAllowed;
   }
 
   let participants = await getParticipants(request.contextGraphId, lookupOptions);
