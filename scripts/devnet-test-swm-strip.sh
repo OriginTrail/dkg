@@ -60,6 +60,20 @@ node_log()   { echo "$(node_dir "$1")/daemon.log"; }
 # Count host-mode store .meta files (one per curated CG this core custodies).
 swm_host_meta_count() { local d; d="$(node_dir "$1")/swm-host"; [ -d "$d" ] && find "$d" -maxdepth 1 -name '*.meta' 2>/dev/null | wc -l | tr -d ' ' || echo 0; }
 
+# The wire-id (keccak256 of the cleartext CG id) — the form host-mode logs/keys use.
+cg_wire_id() { CGW="$1" node -e 'const {ethers}=require("ethers");process.stdout.write(ethers.keccak256(ethers.toUtf8Bytes(process.env.CGW)).toLowerCase())' 2>/dev/null; }
+
+# Count LU-11 ciphertext-chunk quads this node holds (ANY graph). Global query
+# (no contextGraphId scope) so the urn:dkg:swm:ciphertext-chunks/* graphs are
+# visible. SWM direct writes (agent.share) do NOT chunk — chunking is a VM-publish
+# surface (M6) — so this should read 0 on every node here; asserting node4==0 is a
+# cheap corroboration that the strip leaves no ciphertext on the chunk surface either.
+chunk_count() {
+  local node="$1"
+  api_call "$node" POST /api/query '{"sparql":"SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s <urn:dkg:swm:v10-publish-ciphertext-chunk-bytes> ?o } }"}' \
+    | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const j=JSON.parse(d);const b=j?.result?.bindings??j?.bindings??[];const v=b[0]&&((b[0].c&&b[0].c.value)??b[0].c);console.log(v==null?"0":String(v))}catch{console.log("0")}})'
+}
+
 require_node() {
   [ -d "$(node_dir "$1")" ] || fail "node $1 home missing; run ./scripts/devnet.sh start 4 first"
   [ -n "$(node_token "$1")" ] || fail "node $1 auth token missing"
@@ -185,12 +199,33 @@ log "baseline node hosted the private CG (Δ=$B3_DELTA) ✓ — a non-participan
 
 act "G-strip — node$STRIP_NODE (strip ON) custodies ZERO ciphertext for the private CG"
 [ "$B4_DELTA" -eq 0 ] || fail "STRIP node hosted the private CG (Δ=$B4_DELTA) — strip FAILED, ciphertext leaked to a non-participant core"
-if grep -q "DECLINED for \"$CG_ID\"" "$(node_log "$STRIP_NODE")" 2>/dev/null; then
-  log "strip node logged the DECLINE for this CG ✓ (it discovered the CG and the gate fired)"
+# Corroboration: the DECLINE log keys on the WIRE id (keccak of the cleartext cg).
+WIRE_ID="$(cg_wire_id "$CG_ID")"
+if [ -n "$WIRE_ID" ] && grep -q "DECLINED for \"$WIRE_ID\"" "$(node_log "$STRIP_NODE")" 2>/dev/null; then
+  log "strip node logged the DECLINE for wireId=$WIRE_ID ✓ (it discovered the CG and the gate fired)"
 else
-  log "note: no explicit DECLINE log line matched for this CG on node$STRIP_NODE (Δ=0 still proves zero custody)"
+  log "note: no DECLINE log matched wireId=$WIRE_ID on node$STRIP_NODE (Δ=0 still proves zero custody)"
 fi
-log "strip node holds ZERO private SWM ciphertext ✓"
+# Second custody surface: the LU-11 chunk store. SWM writes don't chunk (VM-only,
+# M6), so this is 0 everywhere here — assert node$STRIP_NODE==0 regardless so a
+# future change that routed SWM through the chunk path can't silently leak.
+C3="$(chunk_count "$BASELINE_NODE")"; C4="$(chunk_count "$STRIP_NODE")"
+log "chunk-store quads: node$BASELINE_NODE=$C3  node$STRIP_NODE=$C4 (SWM doesn't chunk → both 0 expected)"
+[ "$C4" = "0" ] || fail "STRIP node holds $C4 ciphertext-chunk quads — chunk-surface leak"
+log "strip node holds ZERO private SWM ciphertext on BOTH surfaces (host-mode store + chunk store) ✓"
+
+act "G-public — a bystander core is UNAFFECTED for a PUBLIC CG (no-op delta)"
+# The gate sits AFTER the `if (!curated) return` in the subscribe path, so a
+# public CG must never reach it. Register a public CG and assert node$STRIP_NODE
+# never logs a strip DECLINE for it.
+PUB_CG="${CURATOR_AGENT}/strip-pub-${STAMP}"
+api_call "$CURATOR_NODE" POST /api/context-graph/create "{ \"id\": \"$PUB_CG\", \"name\": \"strip-pub $STAMP\", \"accessPolicy\": 0, \"publishPolicy\": 0, \"register\": true }" >/dev/null || fail "public CG create failed"
+PUB_WIRE="$(cg_wire_id "$PUB_CG")"
+sleep 15  # let the chain-event poller + reconcile run on the bystander
+if grep -q "DECLINED for \"$PUB_WIRE\"" "$(node_log "$STRIP_NODE")" 2>/dev/null; then
+  fail "strip gate fired for a PUBLIC CG (wireId=$PUB_WIRE) — public no-op delta VIOLATED"
+fi
+log "no strip DECLINE for the public CG on node$STRIP_NODE ✓ (gate is curated-only; public unaffected)"
 
 act "G-absent — member still converges with BOTH bystander cores stopped"
 stop_node "$BASELINE_NODE"; stop_node "$STRIP_NODE"
