@@ -36,7 +36,7 @@ signs `allocate`. There is no self-service `startMigration`.
 
 ## Steps
 
-### 1. Deploy the V10 stack (incl. the 4 migration contracts) to Base Sepolia
+### 1. Deploy the V10 stack (incl. the 3 migration contracts) to Base Sepolia
 
 ```bash
 cd packages/evm-module
@@ -148,7 +148,7 @@ anvil --fork-url https://<base-mainnet-rpc> --port 8545 &
 npx hardhat run scripts/fork-rehearsal.ts --network localhost
 ```
 
-`fork-rehearsal.ts` deploys the 4 contracts onto the forked freeze Hub
+`fork-rehearsal.ts` deploys the 3 contracts onto the forked freeze Hub
 (`0x99Aa…`), wires them as the impersonated Hub owner, then has the Hub owner
 **admin-drain** real delegator `0x7D1E…` (`adminMigrateToCredit`) and the
 delegator `allocate(3, …, 12)` — asserting the drain/credit/collateralization/

@@ -864,7 +864,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     //
     // The NFT wrapper (DKGStakingConvictionNFT) is the only caller
     // (onlyConvictionNFT). It owns the tokenId counter + ERC-721 mint and the
-    // owner/frozen gating; these workers do the privileged StakingStorage/CSS
+    // owner gating; these workers do the privileged StakingStorage/CSS
     // mutations. `drainV8ToCredit` is the drain half of the old `_convertToNFT`
     // (now per-node, mints nothing, credits CSS); `allocateFromCredit` is the
     // V10-seed half (now funded from migration credit, not a fresh transfer).
@@ -957,14 +957,15 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     /// @notice Set the V8→V10 conviction lock-credit (seconds) on CSS. Driven
-    ///         by the owner-gated, until-frozen entrypoint on the NFT wrapper.
+    ///         by the owner-gated `setConvictionCreditSeconds` entrypoint on the
+    ///         NFT wrapper (rev 5: no freeze gate; settable any time pre-sweep).
     function setConvictionCreditSeconds(uint40 secondsValue) external onlyConvictionNFT {
         convictionStorage.setConvictionCreditSeconds(secondsValue);
     }
 
     /**
      * @notice Admin: set the V10 launch epoch marker on CSS. This is the
-     *         retroactive-attribution boundary used by `adminMigrateV8`
+     *         retroactive-attribution boundary used by the admin migration
      *         bookkeeping and off-chain analytics. Expected to be called
      *         exactly once, in the deploy-script migration cutover. Gate
      *         enforced at the NFT wrapper (`onlyOwnerOrMultiSigOwner`).
@@ -972,7 +973,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      * @dev D7 — the V10 launch epoch is the cutoff past which V8-era
      *      state should not continue to accrue rewards; anything the
      *      migration process hasn't swept by this epoch is treated as a
-     *      straggler and rescued via `adminConvertToNFT`.
+     *      straggler and drained via `adminDrainBatch` / `adminMigrateToCredit`.
      */
     function setV10LaunchEpoch(uint256 epoch) external onlyConvictionNFT {
         convictionStorage.setV10LaunchEpoch(epoch);

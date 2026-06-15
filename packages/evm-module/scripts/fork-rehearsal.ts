@@ -2,7 +2,7 @@
 // fork-rehearsal.ts — OT-RFC-50 high-fidelity pre-flight (Base mainnet fork)
 // =============================================================================
 //
-// Forks Base mainnet at the live freeze Hub (0x99Aa…), deploys ONLY the 4 new
+// Forks Base mainnet at the live freeze Hub (0x99Aa…), deploys ONLY the 3 new
 // migration contracts onto the REAL Hub, wires them by impersonating the Hub
 // owner. Then it exercises the admin-push flow against REAL deployed state:
 // the impersonated Hub owner ADMIN-DRAINS a REAL mainnet delegator's V8 stake
@@ -108,10 +108,9 @@ async function main() {
   console.log(`  node ${SOURCE_NODE} stake = ${fmt(nodeBefore)} | total = ${fmt(totalBefore)} TRAC`);
   if (baseBefore + pendingBefore === 0n) throw new Error('Delegator has no V8 stake on the fork — wrong block/address?');
 
-  // ---- 2. deploy the 4 new contracts onto the REAL Hub ----
+  // ---- 2. deploy the 3 new contracts onto the REAL Hub ----
   console.log('\nDeploying migration contracts onto the forked Hub:');
   const cssAddr = await deploy('ConvictionStakingStorage', funder);
-  const v8meAddr = await deploy('V8MigrationEligibility', funder);
   const stakingV10Addr = await deploy('StakingV10', funder);
   const wrapperAddr = await deploy('DKGStakingConvictionNFT', funder);
 
@@ -119,7 +118,6 @@ async function main() {
   console.log('\nRegistering in Hub (as owner):');
   for (const [n, a] of [
     ['ConvictionStakingStorage', cssAddr],
-    ['V8MigrationEligibility', v8meAddr],
     ['StakingV10', stakingV10Addr],
     ['DKGStakingConvictionNFT', wrapperAddr],
   ] as const) {
@@ -135,19 +133,14 @@ async function main() {
   await (await (css as any).connect(owner).initialize()).wait();
   console.log('  CSS.initialize ✓ (tiers seeded)');
   await (await (stakingV10 as any).connect(owner).initialize()).wait();
-  console.log('  StakingV10.initialize ✓ (13 deps resolved)');
+  console.log('  StakingV10.initialize ✓ (12 deps resolved)');
   await (await (wrapper as any).connect(owner).initialize()).wait();
   console.log('  wrapper.initialize ✓');
 
-  // ---- 5. arm eligibility + credit, then freeze (order matters) ----
-  console.log('\nArming migration window (as owner):');
-  const v8me = await ethers.getContractAt('V8MigrationEligibility', v8meAddr);
-  await (await (v8me as any).connect(owner).setEligibleBatch([SOURCE_NODE], [DELEGATOR])).wait();
-  console.log(`  setEligibleBatch([${SOURCE_NODE}], [delegator]) ✓`);
+  // ---- 5. set the conviction lock-credit (universal 6/12; no eligibility/freeze) ----
+  console.log('\nSetting the conviction lock-credit (as owner):');
   await (await (wrapper as any).connect(owner).setConvictionCreditSeconds(CREDIT_SECONDS)).wait();
   console.log(`  convictionCreditSeconds = ${CREDIT_SECONDS} (${Number(CREDIT_SECONDS) / 86400}d) ✓`);
-  await (await (v8me as any).connect(owner).freeze()).wait();
-  console.log(`  freeze ✓ — frozen=${await (v8me as any).frozen()}`);
 
   // ---- 6. THE REHEARSAL: ADMIN drains the delegator → the delegator allocates ----
   console.log(`\n=== Rehearsal: Hub owner admin-drains ${DELEGATOR}, then it allocates ===`);
