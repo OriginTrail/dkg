@@ -11,7 +11,11 @@ import { DKGAgent } from '../src/dkg-agent.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 
 const contextGraphId = 'cg-artifact';
-const assertionUri = `did:dkg:context-graph:${contextGraphId}/assertion/did:dkg:agent:owner/imported`;
+const ownerWallet = ethers.Wallet.createRandom();
+const otherWallet = ethers.Wallet.createRandom();
+const ownerAgentAddress = ownerWallet.address;
+const otherAgentAddress = otherWallet.address;
+const assertionUri = `did:dkg:context-graph:${contextGraphId}/assertion/${ownerAgentAddress}/imported`;
 const hash = `keccak256:${'a'.repeat(64)}`;
 
 function keccakHash(bytes: Buffer): string {
@@ -22,7 +26,62 @@ function expectedSelector(payload: Record<string, unknown>): string {
   return `imported-artifact:v1:${ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(payload)))}`;
 }
 
-function request(overrides: Partial<ImportedArtifactRequest> = {}): ImportedArtifactRequest {
+function computeSyncDigest(
+  contextGraphId: string,
+  offset: number,
+  limit: number,
+  includeSharedMemory: boolean,
+  targetPeerId: string,
+  requesterPeerId: string | undefined,
+  requestId: string | undefined,
+  issuedAtMs: number | undefined,
+  requesterAgentAddress: string | undefined,
+  authPurpose?: string,
+  authSelector?: string,
+): Uint8Array {
+  const types = ['string', 'uint256', 'uint256', 'bool', 'string', 'string', 'string', 'uint256', 'string'];
+  const values: Array<string | bigint | boolean> = [
+    contextGraphId,
+    BigInt(offset),
+    BigInt(limit),
+    includeSharedMemory,
+    targetPeerId,
+    requesterPeerId ?? '',
+    requestId ?? '',
+    BigInt(issuedAtMs ?? 0),
+    (requesterAgentAddress ?? '').toLowerCase(),
+  ];
+  if (authPurpose || authSelector) {
+    types.push('string', 'string');
+    values.push(authPurpose ?? '', authSelector ?? '');
+  }
+  return ethers.getBytes(ethers.solidityPackedKeccak256(types, values));
+}
+
+async function signSyncRequest(syncReq: SyncRequestEnvelope, signer: ethers.Wallet): Promise<void> {
+  const digest = computeSyncDigest(
+    syncReq.contextGraphId,
+    syncReq.offset,
+    syncReq.limit,
+    syncReq.includeSharedMemory,
+    syncReq.targetPeerId,
+    syncReq.requesterPeerId,
+    syncReq.requestId,
+    syncReq.issuedAtMs,
+    syncReq.requesterAgentAddress,
+    syncReq.authPurpose,
+    syncReq.authSelector,
+  );
+  const sig = ethers.Signature.from(await signer.signMessage(digest));
+  syncReq.requesterIdentityId = '0';
+  syncReq.requesterSignatureR = sig.r;
+  syncReq.requesterSignatureVS = sig.yParityAndS;
+}
+
+async function request(overrides: Partial<ImportedArtifactRequest> = {}, opts: {
+  requesterAgentAddress?: string;
+  signer?: ethers.Wallet;
+} = {}): Promise<ImportedArtifactRequest> {
   const base = {
     version: 1 as const,
     contextGraphId,
@@ -42,10 +101,13 @@ function request(overrides: Partial<ImportedArtifactRequest> = {}): ImportedArti
     requesterPeerId: 'peer-remote',
     requestId: 'req-1',
     issuedAtMs: Date.now(),
-    requesterAgentAddress: 'did:dkg:agent:owner',
+    requesterAgentAddress: opts.requesterAgentAddress ?? ownerAgentAddress,
     authPurpose: IMPORTED_ARTIFACT_AUTH_PURPOSE,
     authSelector: selector,
   };
+  if (opts.signer) {
+    await signSyncRequest(syncReq, opts.signer);
+  }
   return {
     ...base,
     authB64: Buffer.from(JSON.stringify(syncReq)).toString('base64'),
@@ -90,6 +152,7 @@ function fakeAgent(args: {
       })),
     },
     parseSyncRequest: (data: Uint8Array) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,
+    computeSyncDigest,
     authorizeSyncRequest,
     getContextGraphOnChainPolicy: args.onChainPolicy
       ? vi.fn(async () => args.onChainPolicy)
@@ -150,7 +213,7 @@ describe('generic imported artifact peer handler', () => {
 
   it('reuses authorizeSyncRequest before serving bounded bytes', async () => {
     const agent = fakeAgent({ bytes: Buffer.from('abcdef') });
-    const res = await invoke(agent, request());
+    const res = await invoke(agent, await request({}, { signer: ownerWallet }));
 
     expect(agent.authorizeSyncRequest).toHaveBeenCalledTimes(1);
     expect(res).toMatchObject({
@@ -169,7 +232,7 @@ describe('generic imported artifact peer handler', () => {
 
   it('denies requesterPeerId/fromPeerId mismatches before artifact resolution', async () => {
     const agent = fakeAgent({ bytes: Buffer.from('abcdef') });
-    const res = await invoke(agent, request(), 'peer-other');
+    const res = await invoke(agent, await request({}, { signer: ownerWallet }), 'peer-other');
 
     expect(agent.authorizeSyncRequest).not.toHaveBeenCalled();
     expect(agent.store.query).not.toHaveBeenCalled();
@@ -178,7 +241,7 @@ describe('generic imported artifact peer handler', () => {
 
   it('denies targetPeerId mismatches before artifact resolution', async () => {
     const agent = fakeAgent({ bytes: Buffer.from('abcdef') });
-    const req = request();
+    const req = await request({}, { signer: ownerWallet });
     const syncReq = JSON.parse(Buffer.from(req.authB64, 'base64').toString('utf8')) as SyncRequestEnvelope;
     syncReq.targetPeerId = 'peer-other';
     req.authB64 = Buffer.from(JSON.stringify(syncReq)).toString('base64');
@@ -191,7 +254,7 @@ describe('generic imported artifact peer handler', () => {
 
   it('denies subGraphName tampering before artifact resolution', async () => {
     const agent = fakeAgent({ bytes: Buffer.from('abcdef') });
-    const tampered = request();
+    const tampered = await request({}, { signer: ownerWallet });
     tampered.subGraphName = 'other-subgraph';
     const res = await invoke(agent, tampered);
 
@@ -210,7 +273,7 @@ describe('generic imported artifact peer handler', () => {
         structuralTripleCount: '3',
       }],
     });
-    const res = await invoke(agent, request());
+    const res = await invoke(agent, await request({}, { signer: ownerWallet }));
 
     expect(agent.authorizeSyncRequest).toHaveBeenCalledTimes(1);
     expect(res.hashMismatch).toBe(true);
@@ -218,11 +281,21 @@ describe('generic imported artifact peer handler', () => {
 
   it('denies non-owner artifact reads even when context graph sync auth passes', async () => {
     const agent = fakeAgent({ bytes: Buffer.from('abcdef') });
-    const nonOwner = request();
-    const syncReq = JSON.parse(Buffer.from(nonOwner.authB64, 'base64').toString('utf8')) as SyncRequestEnvelope;
-    syncReq.requesterAgentAddress = 'did:dkg:agent:other';
-    nonOwner.authB64 = Buffer.from(JSON.stringify(syncReq)).toString('base64');
+    const nonOwner = await request({}, {
+      requesterAgentAddress: otherAgentAddress,
+      signer: otherWallet,
+    });
     const res = await invoke(agent, nonOwner);
+
+    expect(agent.authorizeSyncRequest).toHaveBeenCalledTimes(1);
+    expect(agent.store.query).not.toHaveBeenCalled();
+    expect(res.denied).toBe('denied');
+  });
+
+  it('denies forged owner claims on direct artifact reads without selector-bound owner proof', async () => {
+    const agent = fakeAgent({ bytes: Buffer.from('abcdef') });
+    const forgedOwner = await request();
+    const res = await invoke(agent, forgedOwner);
 
     expect(agent.authorizeSyncRequest).toHaveBeenCalledTimes(1);
     expect(agent.store.query).not.toHaveBeenCalled();
@@ -234,9 +307,9 @@ describe('generic imported artifact peer handler', () => {
       bytes: Buffer.from('abcdef'),
       onChainPolicy: { accessPolicy: 0, publishPolicy: 1 },
     });
-    const nonOwner = request();
+    const nonOwner = await request();
     const syncReq = JSON.parse(Buffer.from(nonOwner.authB64, 'base64').toString('utf8')) as SyncRequestEnvelope;
-    syncReq.requesterAgentAddress = 'did:dkg:agent:other';
+    syncReq.requesterAgentAddress = otherAgentAddress;
     nonOwner.authB64 = Buffer.from(JSON.stringify(syncReq)).toString('base64');
     const res = await invoke(agent, nonOwner);
 
@@ -256,7 +329,10 @@ describe('generic imported artifact peer handler', () => {
         structuralTripleCount: '3',
       }],
     });
-    const res = await invoke(agent, request({ kind: 'markdown', hash: markdownHash, maxBytes: 8 }));
+    const res = await invoke(agent, await request(
+      { kind: 'markdown', hash: markdownHash, maxBytes: 8 },
+      { signer: ownerWallet },
+    ));
 
     expect(res).toMatchObject({
       kind: 'markdown',

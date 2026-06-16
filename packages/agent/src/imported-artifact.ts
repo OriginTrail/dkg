@@ -209,11 +209,18 @@ function isSameAgentAddress(left: string, right: string): boolean {
   return left === right || comparableAgentAddress(left) === comparableAgentAddress(right);
 }
 
+type ParsedImportedAssertionUri = {
+  assertionAgentAddress: string;
+  assertionName: string;
+  subGraphName?: string;
+  legacy?: boolean;
+};
+
 function parseImportedAssertionUri(
   assertionUri: string,
   contextGraphId: string,
   legacyAssertionAgentAddress?: string,
-): { assertionAgentAddress: string; assertionName: string; subGraphName?: string; legacy?: boolean } | null {
+): ParsedImportedAssertionUri | null {
   const prefix = `did:dkg:context-graph:${contextGraphId}/`;
   if (!assertionUri.startsWith(prefix)) return null;
   const tail = assertionUri.slice(prefix.length);
@@ -245,6 +252,15 @@ function parseImportedAssertionUri(
   return { assertionAgentAddress, assertionName, subGraphName };
 }
 
+function canonicalImportedAssertionUri(
+  contextGraphId: string,
+  parsed: ParsedImportedAssertionUri,
+): string {
+  const base = `did:dkg:context-graph:${contextGraphId}`;
+  const scoped = parsed.subGraphName ? `${base}/${parsed.subGraphName}` : base;
+  return `${scoped}/assertion/${parsed.assertionAgentAddress}/${parsed.assertionName}`;
+}
+
 async function isPublicOpenContextGraph(
   agent: DKGAgent,
   contextGraphId: string,
@@ -258,26 +274,76 @@ async function isPublicOpenContextGraph(
   }
 }
 
-async function canReadImportedArtifactByOwnerPolicy(
+function hasSelectorBoundRequesterProof(
+  agent: DKGAgent,
+  syncReq: SyncRequestEnvelope,
+): boolean {
+  if (
+    !syncReq.requesterAgentAddress ||
+    !syncReq.targetPeerId ||
+    !syncReq.requesterPeerId ||
+    !syncReq.requestId ||
+    syncReq.issuedAtMs == null ||
+    !syncReq.requesterSignatureR ||
+    !syncReq.requesterSignatureVS
+  ) {
+    return false;
+  }
+
+  try {
+    const digest = agent.computeSyncDigest(
+      syncReq.contextGraphId,
+      syncReq.offset,
+      syncReq.limit,
+      syncReq.includeSharedMemory,
+      syncReq.targetPeerId,
+      syncReq.requesterPeerId,
+      syncReq.requestId,
+      syncReq.issuedAtMs,
+      syncReq.requesterAgentAddress,
+      syncReq.authPurpose,
+      syncReq.authSelector,
+    );
+    const recoveredAddress = ethers.recoverAddress(ethers.hashMessage(digest), {
+      r: syncReq.requesterSignatureR,
+      yParityAndS: syncReq.requesterSignatureVS,
+    });
+    return isSameAgentAddress(recoveredAddress, syncReq.requesterAgentAddress);
+  } catch {
+    return false;
+  }
+}
+
+async function resolveImportedArtifactReadSubject(
   agent: DKGAgent,
   req: ImportedArtifactRequest,
   syncReq: SyncRequestEnvelope,
-): Promise<boolean> {
+): Promise<{ assertionUri: string; subGraphName?: string } | null> {
   const parsedAssertion = parseImportedAssertionUri(
     req.assertionUri,
     req.contextGraphId,
     syncReq.requesterAgentAddress,
   );
-  if (!parsedAssertion) return false;
+  if (!parsedAssertion) return null;
+  if (req.subGraphName && req.subGraphName !== parsedAssertion.subGraphName) return null;
 
   if (!parsedAssertion.legacy && await isPublicOpenContextGraph(agent, req.contextGraphId)) {
-    return true;
+    return {
+      assertionUri: canonicalImportedAssertionUri(req.contextGraphId, parsedAssertion),
+      ...(parsedAssertion.subGraphName ? { subGraphName: parsedAssertion.subGraphName } : {}),
+    };
   }
 
-  return Boolean(
+  const ownerAllowed = Boolean(
     syncReq.requesterAgentAddress &&
-    isSameAgentAddress(parsedAssertion.assertionAgentAddress, syncReq.requesterAgentAddress),
+    isSameAgentAddress(parsedAssertion.assertionAgentAddress, syncReq.requesterAgentAddress) &&
+    hasSelectorBoundRequesterProof(agent, syncReq),
   );
+  if (!ownerAllowed) return null;
+  return {
+    assertionUri: canonicalImportedAssertionUri(req.contextGraphId, parsedAssertion),
+    ...(parsedAssertion.subGraphName ? { subGraphName: parsedAssertion.subGraphName } : {}),
+  };
 }
 
 async function resolveLinkedArtifact(agent: DKGAgent, args: {
@@ -393,9 +459,16 @@ export class ImportedArtifactMethods extends DKGAgentBase {
 
     const authorized = await this.authorizeSyncRequest(syncReq, fromPeerId);
     if (!authorized) return denied(req);
-    if (!await canReadImportedArtifactByOwnerPolicy(this, req, syncReq)) return denied(req);
+    const readSubject = await resolveImportedArtifactReadSubject(this, req, syncReq);
+    if (!readSubject) return denied(req);
 
-    const linked = await resolveLinkedArtifact(this, req);
+    const linked = await resolveLinkedArtifact(this, {
+      contextGraphId: req.contextGraphId,
+      assertionUri: readSubject.assertionUri,
+      kind: req.kind,
+      hash: req.hash,
+      subGraphName: readSubject.subGraphName,
+    });
     if (linked === 'hash_mismatch') {
       return encodeResponse({ ...responseBase(req), hashMismatch: true });
     }

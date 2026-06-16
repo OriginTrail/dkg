@@ -19,6 +19,8 @@ import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers } from 'ethers';
 
+const MAX_READ_RANGE_BYTES = 1024 * 1024;
+
 export interface FileStoreEntry {
   /**
    * sha256 hash of the file contents, formatted as `sha256:<hex>`.
@@ -138,7 +140,8 @@ export class FileStore {
     try {
       const info = await handle.stat();
       if (offset >= info.size) return Buffer.alloc(0);
-      const cappedLength = Math.min(length, info.size - offset);
+      const requestedLength = Math.min(length, MAX_READ_RANGE_BYTES);
+      const cappedLength = Math.min(requestedLength, info.size - offset);
       const buffer = Buffer.alloc(cappedLength);
       const { bytesRead } = await handle.read(buffer, 0, cappedLength, offset);
       return buffer.subarray(0, bytesRead);
