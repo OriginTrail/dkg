@@ -1623,6 +1623,7 @@ export class DKGAgent extends DKGAgentBase {
       newCatalogRoot?: Uint8Array;
       newCatalogLeafCount?: number;
       stagingQuads?: Uint8Array;
+      isEncryptedPayload?: boolean;
       swmGraphId?: string;
       subGraphName?: string;
     }): Promise<V10CoreNodeACK[]> => {
@@ -1690,6 +1691,9 @@ export class DKGAgent extends DKGAgentBase {
         swmGraphId: params.swmGraphId,
         subGraphName: params.subGraphName,
         stagingQuads: params.stagingQuads,
+        // OT-RFC-49 / WS-D — curated update: cores take the encrypted-payload
+        // branch (verify CG is curated, trust claimed root + catalog commitment).
+        isEncryptedPayload: params.isEncryptedPayload,
       });
       return result.acks;
     };

@@ -3092,6 +3092,40 @@ export class DKGPublisher implements Publisher {
     onPhase?.('prepare:merkle', 'end');
     onPhase?.('prepare', 'end');
 
+    // OT-RFC-49 / WS-D — CURATED UPDATE catalog (mirrors the publish path at
+    // `publishFromSharedMemory`). The reloaded `allSkolemizedQuads` already
+    // carries the public `_catalog` floor (finalize injects it before the seal
+    // — the SAME set `kcMerkleRoot` is computed over), so we partition exactly
+    // that set on the CG's canonical DID and recompute the catalog commitment
+    // from the committed leaf-set. For a curated CG with a prior catalog
+    // commitment the contract's update gate REVERTS `IncompleteCatalogCommitment`
+    // unless the update rotates `(catalogRoot, catalogLeafCount)` in lockstep —
+    // this is the missing piece (`newCatalogRoot=0` previously). Public CGs and
+    // curated CGs with no catalog entry leave `updateCatalogCommitment`
+    // undefined ⇒ `newCatalogRoot` stays bytes32(0) / 0 (unchanged behaviour).
+    //
+    // Curated detection mirrors publish: an `encryptInlinePayload` hook is wired
+    // ONLY for curated CGs (DKGAgent resolves it from the access policy). The
+    // committed leaves are serialized as PLAIN N-Triples (no graph term) so the
+    // core's curated ACK rebuild reproduces identical leaf hashes (`hashTripleV10`
+    // excludes the graph), exactly as the publish path does.
+    const useEncryptedInlineUpdate = typeof options.encryptInlinePayload === 'function';
+    const { catalogQuads: updateCatalogQuads } = partitionCatalogQuads(
+      allSkolemizedQuads,
+      contextGraphDataUri(contextGraphId),
+    );
+    const updateCommittedLeaves = catalogCommittedLeaves(updateCatalogQuads);
+    const updateCatalogCommitment = updateCommittedLeaves.length > 0
+      ? computeCatalogRoot(updateCommittedLeaves)
+      : undefined;
+    const useCuratedCatalogUpdate = useEncryptedInlineUpdate && updateCatalogCommitment !== undefined;
+    const updateCatalogNquadsStr = updateCommittedLeaves
+      .map(
+        (t) =>
+          `<${t.subject}> <${t.predicate}> ${t.object.startsWith('"') ? t.object : `<${t.object}>`} .`,
+      )
+      .join('\n');
+
     const updatePrivateRootByRoot = new Map<string, Uint8Array>();
     for (const m of manifestEntries) {
       if (m.privateMerkleRoot) updatePrivateRootByRoot.set(m.rootEntity, m.privateMerkleRoot);
@@ -3235,7 +3269,40 @@ export class DKGPublisher implements Publisher {
           `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph || ''}> .`,
       )
       .join('\n');
-    const updateByteSize = BigInt(new TextEncoder().encode(updateNquadsStr).length);
+    // OT-RFC-49 / WS-D — pricing + ACK byteSize follow the SAME source of truth
+    // as publish: for a curated update the chain/ACK byteSize is the PUBLIC
+    // `_catalog` footprint (derived from the SAME committed leaf-set as
+    // `updateCatalogCommitment`, so byteSize and the commitment cannot desync);
+    // for public CGs and non-curated updates it stays the full public N-Quads
+    // footprint. `effectiveUpdateByteSize` is what the digest, the ACK provider,
+    // and the on-chain `newByteSize` all bind.
+    const updatePublicByteSize = BigInt(new TextEncoder().encode(updateNquadsStr).length);
+    const updateCatalogByteSize = BigInt(new TextEncoder().encode(updateCatalogNquadsStr).length);
+    const effectiveUpdateByteSize = useCuratedCatalogUpdate ? updateCatalogByteSize : updatePublicByteSize;
+    // The ACK wire payload: for a curated update the cores can't see/recompute
+    // the private merkle root, so they take the curated branch (gated on
+    // `isEncryptedPayload === true`) and trust the claimed root + catalog
+    // commitment. Ship the PUBLIC catalog N-quads inline (plaintext — the
+    // catalog is public by design); the private data stays member-only. For a
+    // public update we ship the full public N-Quads as before (only when there
+    // are no private roots mixed into the root the peer can't recompute).
+    const updateStagingQuads = useCuratedCatalogUpdate
+      ? new TextEncoder().encode(updateCatalogNquadsStr)
+      : (updatePrivateRoots.length === 0
+          ? new TextEncoder().encode(updateNquadsStr)
+          : undefined);
+    // SCOPE NOTE (OT-RFC-49 / WS-D): this change makes the curated UPDATE land
+    // its on-chain catalog commitment in lockstep (the `IncompleteCatalogCommitment`
+    // fix). MEMBER-SIDE re-distribution of the updated private payload (running
+    // `encryptInlinePayload` / `encryptInlineChunked` on the non-catalog quads,
+    // as the PUBLISH path does) is intentionally NOT done here: the chunked AEAD
+    // nonce domain must rotate per attempt to avoid two-time-pad reuse, and that
+    // path is unverified on the update flow. The hook is consumed ONLY as the
+    // curated-CG SIGNAL (`useEncryptedInlineUpdate`); member update distribution
+    // is a separate, independently-tested follow-up. The private data the cores
+    // never see still stays member-only (the ACK ships the PUBLIC catalog only).
+    // Back-compat alias for the existing update flow below (chain tx + WAL).
+    const updateByteSize = effectiveUpdateByteSize;
 
     if (!options.precomputedUpdateAttestation) {
       throw new Error(
@@ -3363,7 +3430,7 @@ export class DKGPublisher implements Publisher {
         // params below), keeping the signed digest and the tx aligned.
         const digestFields = await getFields.call(this.chain, {
           kaId,
-          newByteSize: updateByteSize,
+          newByteSize: effectiveUpdateByteSize,
           mintAmount: 0n,
           burnTokenIds: [],
         });
@@ -3376,23 +3443,33 @@ export class DKGPublisher implements Publisher {
           contextGraphId: digestFields.contextGraphId.toString(),
           preUpdateMerkleRootCount: digestFields.preUpdateMerkleRootCount,
           newMerkleRoot: kcMerkleRoot,
-          newByteSize: updateByteSize,
+          // OT-RFC-49 / WS-D — pricing/ACK byteSize == catalog footprint for a
+          // curated update, full public footprint otherwise (single source of
+          // truth, set above).
+          newByteSize: effectiveUpdateByteSize,
           newTokenAmount: digestFields.newTokenAmount,
           mintAmount: digestFields.mintAmount,
           burnTokenIds: digestFields.burnTokenIds,
           newMerkleLeafCount: kcMerkleLeafCount,
-          // Peers recompute newMerkleRoot from the updated quads. Send the
-          // same serialized public N-Quads the byte-size was computed over
-          // so the peer's `computeFlatKCRoot(parsed, [])` matches the
-          // publisher's. Only valid when there are NO private merkle roots
-          // mixed into `kcMerkleRoot` — otherwise the peer (which can't see
-          // the private roots) would recompute a different root and decline.
-          // In that case we omit stagingQuads and the peer falls back to
-          // verifying against its SWM copy (same limitation as the publish
-          // plaintext-inline path).
-          stagingQuads: updatePrivateRoots.length === 0
-            ? new TextEncoder().encode(updateNquadsStr)
-            : undefined,
+          // OT-RFC-49 / WS-D — the curated catalog commitment the peers sign
+          // into the 13-field UPDATE ACK digest and the contract verifies.
+          // undefined for public CGs (digest then binds bytes32(0)/0).
+          newCatalogRoot: updateCatalogCommitment?.root,
+          newCatalogLeafCount: updateCatalogCommitment?.leafCount,
+          // Peers recompute newMerkleRoot from the updated quads (public path).
+          // For a curated update we instead ship the PUBLIC catalog N-quads and
+          // set `isEncryptedPayload` so the peer takes the curated branch
+          // (trusts the claimed root + catalog commitment, no recompute). For a
+          // public update we send the same serialized public N-Quads the
+          // byte-size was computed over so `computeFlatKCRoot(parsed, [])`
+          // matches — valid only when there are NO private merkle roots mixed
+          // into `kcMerkleRoot`; otherwise we omit stagingQuads and the peer
+          // falls back to SWM verification.
+          stagingQuads: updateStagingQuads,
+          // Curated updates carry an opaque (member-encrypted) payload; the
+          // core can't recompute the private root, so it verifies the PUBLIC
+          // catalog instead. Mirrors the publish curated ACK path.
+          isEncryptedPayload: useCuratedCatalogUpdate ? true : undefined,
           swmGraphId: contextGraphId,
         });
         this.log.info(
@@ -3412,6 +3489,15 @@ export class DKGPublisher implements Publisher {
             newMerkleRoot: kcMerkleRoot,
             newByteSize: updateByteSize,
             newMerkleLeafCount: kcMerkleLeafCount,
+            // OT-RFC-49 / WS-D — a curated KC with a prior catalog commitment
+            // MUST rotate `(catalogRoot, catalogLeafCount)` in lockstep on
+            // update or the contract reverts `IncompleteCatalogCommitment`.
+            // These MUST equal the values signed into the UPDATE ACK digest
+            // above (same `updateCatalogCommitment`), so the on-chain ECDSA
+            // recovery yields the operator address each core signed with.
+            // Undefined for public CGs ⇒ adapter submits bytes32(0)/0.
+            newCatalogRoot: updateCatalogCommitment?.root,
+            newCatalogLeafCount: updateCatalogCommitment?.leafCount,
             mintAmount: 0,
             // Pin the tx's newTokenAmount to the floored value the ACK
             // collector already had the peers sign (resolved via

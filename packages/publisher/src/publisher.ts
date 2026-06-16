@@ -129,6 +129,15 @@ export type V10UpdateACKProvider = (params: {
   newCatalogLeafCount?: number;
   /** Updated KC quads (N-Quads) so peers can recompute newMerkleRoot. */
   stagingQuads?: Uint8Array;
+  /**
+   * OT-RFC-49 / WS-D — when true, this is a CURATED update: `stagingQuads`
+   * carries the PUBLIC `_catalog` N-quads (not the full KC), the private data
+   * is member-encrypted, and the core takes the curated ACK branch (trusts the
+   * claimed `newMerkleRoot`, verifies the CG is curated, signs the digest with
+   * the `(newCatalogRoot, newCatalogLeafCount)` commitment). Public updates
+   * leave this `undefined`.
+   */
+  isEncryptedPayload?: boolean;
   /** Source SWM graph id (defaults to contextGraphId). */
   swmGraphId?: string;
   subGraphName?: string;

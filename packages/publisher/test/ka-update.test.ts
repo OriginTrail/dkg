@@ -7,6 +7,8 @@ import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { DKGPublisher, UpdateHandler, autoPartition, computePublicRootV10 as computePublicRoot, computeKARootV10 as computeKARoot, computeKCRootV10 as computeKCRoot, computeFlatKCRootV10 as computeFlatKCRoot, toHex, resolveUalByBatchId, updateMetaMerkleRoot } from '../src/index.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
 import { ethers } from 'ethers';
+import { DKG_ONTOLOGY, computeCatalogRoot, catalogCommittedLeaves, partitionCatalogQuads, contextGraphDataUri } from '@origintrail-official/dkg-core';
+import type { V10UpdateACKProvider } from '../src/publisher.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { wrapPublisherForTest } from './_helpers/seal.js';
@@ -1079,5 +1081,222 @@ describe('UpdateHandler', () => {
 
     const noMatch = await resolveUalByBatchId(store, META_GRAPH, 999999n);
     expect(noMatch).toBeUndefined();
+  });
+});
+
+// OT-RFC-49 / WS-D — CURATED KA UPDATE catalog rotation.
+//
+// A curated KC carries a SEPARATE on-chain catalog commitment
+// (`catalogRoot`/`catalogLeafCount`) over the PUBLIC `_catalog` floor. The
+// contract's update gate reverts `IncompleteCatalogCommitment` unless an
+// update rotates that commitment in lockstep. Before this fix the publisher's
+// `update()` always submitted `newCatalogRoot=0`, so a curated KA could be
+// published but never updated. These tests prove `update()` now (a) recomputes
+// the catalog commitment from the reloaded quads exactly as `publish()` does and
+// (b) threads `newCatalogRoot`/`newCatalogLeafCount` into BOTH the update ACK
+// provider (signed digest) and the on-chain `updateKnowledgeCollectionV10` tx.
+//
+// We spy on the chain's `updateKnowledgeCollectionV10` (and the ACK provider) so
+// the assertion targets the threaded params directly — the real contract would
+// only accept the curated tx if the prior publish had landed a catalog
+// commitment on-chain, which is the contract path already covered by
+// `evm-module/test/v10-pca-lifecycle.test.ts`.
+describe('curated KA update catalog rotation (OT-RFC-49 / WS-D)', () => {
+  let store: OxigraphStore;
+  let chain: EVMChainAdapter;
+  let publisher: DKGPublisher;
+  let CG: string;
+  let DG: string;
+  const author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+
+  let _fileSnapshot: string;
+  beforeAll(async () => {
+    _fileSnapshot = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    const provider = createProvider();
+    const coreOp = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    await mintTokens(provider, hubAddress, HARDHAT_KEYS.DEPLOYER, coreOp.address, ethers.parseEther('50000000'));
+    const setupChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    // Public CG (accessPolicy 0): the on-chain CG access policy is irrelevant
+    // here — we exercise the OFF-chain publisher catalog plumbing via a spy on
+    // the chain tx, not a real curated on-chain submit. A public CG lets the
+    // initial real publish (which mints the kaId we then update) land cleanly.
+    const cgId = await createTestContextGraph(setupChain, undefined, 0);
+    CG = String(cgId);
+    DG = `did:dkg:context-graph:${CG}`;
+    if (!_kav10Address) _kav10Address = await setupChain.getKnowledgeAssetsLifecycleAddress();
+  });
+  afterAll(async () => {
+    await revertSnapshot(_fileSnapshot);
+  });
+
+  let _testSnapshot: string;
+  beforeEach(async () => {
+    _testSnapshot = await takeSnapshot();
+    store = new OxigraphStore();
+    chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const keypair = await generateEd25519Keypair();
+    const eventBus = new TypedEventBus();
+    publisher = new DKGPublisher({
+      store,
+      chain,
+      eventBus,
+      keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+      kaAllocator: makeTestKaAllocator(),
+    });
+    publisher = wrapPublisherForTest(publisher, {
+      author,
+      ctx: { provider: createProvider(), kav10Address: _kav10Address },
+      v10ACKProvider: getAckProvider(),
+    });
+  });
+  afterEach(async () => {
+    await revertSnapshot(_testSnapshot);
+  });
+
+  // The catalog floor `partitionCatalogQuads` recognizes: subject MUST be the
+  // CG's canonical DID (`contextGraphDataUri(CG)`), dual-typed dcat:Dataset +
+  // dkg:PrivateContextGraph, plus dct:identifier + dct:accessRights. These four
+  // quads are the committed catalog leaf-set.
+  function catalogFloorQuads(graph: string): Quad[] {
+    const cgDid = contextGraphDataUri(CG);
+    return [
+      q(cgDid, DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DCAT_DATASET, graph),
+      q(cgDid, DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH, graph),
+      q(cgDid, DKG_ONTOLOGY.DCT_IDENTIFIER, `"${cgDid}"`, graph),
+      q(cgDid, DKG_ONTOLOGY.DCT_ACCESS_RIGHTS, DKG_ONTOLOGY.ACCESS_RIGHT_RESTRICTED, graph),
+    ];
+  }
+
+  it('curated update recomputes the catalog commitment and threads newCatalogRoot/newCatalogLeafCount into the ACK digest + chain tx', async () => {
+    // 1) Publish a public KA so we have a real on-chain kaId to update.
+    const original = await publisher.publish({
+      contextGraphId: CG,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
+    });
+    expect(original.status).toBe('confirmed');
+    expect(original.kaId).toBeGreaterThan(0n);
+
+    // 2) The curated update payload: the public catalog floor + private data.
+    //    (In production these ride in via finalize before the seal; here we pass
+    //    them directly to `update()` and the partition picks the floor out by
+    //    subject identity.)
+    const updateQuads: Quad[] = [
+      ...catalogFloorQuads(''),
+      q(ENTITY_A, 'http://schema.org/name', '"Updated curated"'),
+    ];
+
+    // Independently compute the catalog commitment the publisher MUST produce.
+    const { catalogQuads: expectedCatalogQuads } = partitionCatalogQuads(
+      updateQuads,
+      contextGraphDataUri(CG),
+    );
+    expect(expectedCatalogQuads.length).toBe(4); // the four floor quads
+    const expectedCommitment = computeCatalogRoot(catalogCommittedLeaves(expectedCatalogQuads));
+    expect(expectedCommitment.leafCount).toBe(4);
+    expect(expectedCommitment.root.some((b) => b !== 0)).toBe(true);
+
+    // 3) Spy on the chain update tx so we capture the threaded params WITHOUT
+    //    requiring the (public) on-chain CG to accept a curated catalog tx.
+    let capturedTxParams: { newCatalogRoot?: Uint8Array; newCatalogLeafCount?: number; newByteSize: bigint } | undefined;
+    const realUpdate = chain.updateKnowledgeCollectionV10!.bind(chain);
+    chain.updateKnowledgeCollectionV10 = async (params) => {
+      capturedTxParams = {
+        newCatalogRoot: params.newCatalogRoot,
+        newCatalogLeafCount: params.newCatalogLeafCount,
+        newByteSize: params.newByteSize,
+      };
+      // Synthetic success — we are asserting the publisher's threaded args, not
+      // the contract's acceptance of a curated tx on a public CG.
+      params.onBroadcast?.({ txHash: '0xspy' });
+      return { success: true, hash: '0xspy', blockNumber: 1, txIndex: 0, publisherAddress: author.address };
+    };
+
+    // 4) Capturing ACK provider — records what the publisher signs the curated
+    //    catalog into. Returns [] (no real quorum needed for the spy path).
+    let capturedAckParams: Parameters<V10UpdateACKProvider>[0] | undefined;
+    const ackProvider: V10UpdateACKProvider = async (p) => {
+      capturedAckParams = p;
+      return [];
+    };
+
+    // 5) The curated detection mirrors publish: an `encryptInlinePayload` hook is
+    //    wired ONLY for curated CGs (DKGAgent resolves it from the access
+    //    policy). The publisher consumes it as the curated SIGNAL — its presence
+    //    flips `useCuratedCatalogUpdate` true. (Member-side re-distribution of
+    //    the updated private payload is a separate follow-up, so the hook is not
+    //    invoked here.)
+    const updateResult = await publisher.update(original.kaId, {
+      contextGraphId: CG,
+      quads: updateQuads,
+      v10UpdateACKProvider: ackProvider,
+      encryptInlinePayload: (plaintext: Uint8Array) => plaintext,
+    });
+    expect(updateResult.onChainResult ?? updateResult.status).toBeDefined();
+    chain.updateKnowledgeCollectionV10 = realUpdate;
+
+    // The on-chain tx carried the rotated catalog commitment.
+    expect(capturedTxParams).toBeDefined();
+    expect(capturedTxParams!.newCatalogLeafCount).toBe(expectedCommitment.leafCount);
+    expect(capturedTxParams!.newCatalogRoot).toBeDefined();
+    expect(Array.from(capturedTxParams!.newCatalogRoot!))
+      .toEqual(Array.from(expectedCommitment.root));
+    // The byteSize the tx priced is the catalog footprint, NOT the full KC.
+    expect(capturedTxParams!.newByteSize).toBeGreaterThan(0n);
+
+    // The ACK digest bound the SAME catalog commitment + the curated flag.
+    expect(capturedAckParams).toBeDefined();
+    expect(capturedAckParams!.isEncryptedPayload).toBe(true);
+    expect(capturedAckParams!.newCatalogLeafCount).toBe(expectedCommitment.leafCount);
+    expect(Array.from(capturedAckParams!.newCatalogRoot!))
+      .toEqual(Array.from(expectedCommitment.root));
+    // The ACK byteSize == the chain byteSize (single source of truth).
+    expect(capturedAckParams!.newByteSize).toBe(capturedTxParams!.newByteSize);
+    // The curated ACK ships the PUBLIC catalog N-quads inline (parses to the
+    // SAME committed leaf-set), not the full KC payload.
+    expect(capturedAckParams!.stagingQuads).toBeDefined();
+    const shippedCatalog = parseSimpleNQuads(new TextDecoder().decode(capturedAckParams!.stagingQuads!));
+    const shippedCommitment = computeCatalogRoot(catalogCommittedLeaves(shippedCatalog));
+    expect(Array.from(shippedCommitment.root)).toEqual(Array.from(expectedCommitment.root));
+  });
+
+  it('public update keeps newCatalogRoot zero (no curated hook → no catalog rotation)', async () => {
+    const original = await publisher.publish({
+      contextGraphId: CG,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Original"')],
+    });
+    expect(original.status).toBe('confirmed');
+
+    let capturedTxParams: { newCatalogRoot?: Uint8Array; newCatalogLeafCount?: number } | undefined;
+    const realUpdate = chain.updateKnowledgeCollectionV10!.bind(chain);
+    chain.updateKnowledgeCollectionV10 = async (params) => {
+      capturedTxParams = { newCatalogRoot: params.newCatalogRoot, newCatalogLeafCount: params.newCatalogLeafCount };
+      params.onBroadcast?.({ txHash: '0xspy' });
+      return { success: true, hash: '0xspy', blockNumber: 1, txIndex: 0, publisherAddress: author.address };
+    };
+
+    let capturedAckParams: Parameters<V10UpdateACKProvider>[0] | undefined;
+    const ackProvider: V10UpdateACKProvider = async (p) => {
+      capturedAckParams = p;
+      return [];
+    };
+
+    // NO encryptInlinePayload hook → publisher's curated detection stays false.
+    await publisher.update(original.kaId, {
+      contextGraphId: CG,
+      quads: [q(ENTITY_A, 'http://schema.org/name', '"Updated public"')],
+      v10UpdateACKProvider: ackProvider,
+    });
+    chain.updateKnowledgeCollectionV10 = realUpdate;
+
+    expect(capturedTxParams).toBeDefined();
+    // Public update: catalog fields are left undefined (adapter submits bytes32(0)/0).
+    expect(capturedTxParams!.newCatalogRoot).toBeUndefined();
+    expect(capturedTxParams!.newCatalogLeafCount).toBeUndefined();
+    expect(capturedAckParams!.newCatalogRoot).toBeUndefined();
+    expect(capturedAckParams!.newCatalogLeafCount).toBeUndefined();
+    expect(capturedAckParams!.isEncryptedPayload).toBeUndefined();
   });
 });

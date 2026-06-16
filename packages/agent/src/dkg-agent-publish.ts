@@ -1423,6 +1423,24 @@ export class PublishMethods extends DKGAgentBase {
     // could not be resolved (the provider re-resolves the digest cgId from
     // the adapter regardless, so the digest TARGET stays chain-truth).
     const v10UpdateACKProvider = this.createV10UpdateACKProvider(updateOnChainId ?? contextGraphId);
+    // OT-RFC-49 / WS-D — resolve the curated-CG encryption hook so the publisher
+    // can DETECT a curated update (mirrors the publish path's curated detection,
+    // `typeof encryptInlinePayload === 'function'`). For a curated update the
+    // publisher then ships the PUBLIC `_catalog` inline as the ACK payload, sets
+    // `isEncryptedPayload`, and rotates the on-chain catalog commitment in
+    // lockstep (the `IncompleteCatalogCommitment` fix). Public CGs short-circuit
+    // this resolver to `undefined`, so the public update path is unchanged.
+    //
+    // SCOPE: the hook is consumed ONLY as the curated SIGNAL here — member-side
+    // re-encryption/distribution of the updated private payload (the chunked
+    // AEAD fan-out the publish path runs) is a separate, independently-tested
+    // follow-up, so `encryptInlineChunked` is intentionally NOT threaded.
+    const updateEncryptInlinePayload = await this._resolveEncryptInlinePayload(
+      contextGraphId,
+      undefined,
+      undefined,
+      updateOnChainId ?? undefined,
+    );
     const result = await this.publisher.update(kaId, {
       contextGraphId,
       quads,
@@ -1433,6 +1451,7 @@ export class PublishMethods extends DKGAgentBase {
       onPhase,
       precomputedUpdateAttestation: opts?.precomputedUpdateAttestation,
       v10UpdateACKProvider,
+      encryptInlinePayload: updateEncryptInlinePayload,
     });
     this.log.info(ctx, `Update complete — status=${result.status}`);
 
