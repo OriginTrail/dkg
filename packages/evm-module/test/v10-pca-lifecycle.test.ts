@@ -572,17 +572,17 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     );
   });
 
-  it('greenfield: curated publish requires a ciphertext commitment before value enters sampling', async () => {
+  it('greenfield: curated publish requires a catalog commitment before value enters sampling', async () => {
     const setup = await setupRegisteredAgentPublish();
     const curatedCgId = await createCuratedContextGraphFor(setup.creator);
-    const p = await buildBasePublishParams(setup, 'curated-missing-ct', {
+    const p = await buildBasePublishParams(setup, 'curated-missing-catalog', {
       contextGraphId: curatedCgId,
     });
 
     await expect(KAV10.connect(setup.creator).publish(p))
       .to.be.revertedWithCustomError(
         KAV10,
-        'CuratedCGRequiresCiphertextCommitment',
+        'CuratedCGRequiresCatalogCommitment',
       )
       .withArgs(curatedCgId);
 
@@ -594,31 +594,31 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     );
   });
 
-  it('greenfield: curated publish with a full ciphertext commitment persists the sampling proof anchor', async () => {
+  it('greenfield: curated publish with a full catalog commitment persists the sampling proof anchor', async () => {
     const setup = await setupRegisteredAgentPublish();
     const curatedCgId = await createCuratedContextGraphFor(setup.creator);
-    const ciphertextChunksRoot = ethers.keccak256(
-      ethers.toUtf8Bytes('curated-publish-ct-root'),
+    const catalogRoot = ethers.keccak256(
+      ethers.toUtf8Bytes('curated-publish-catalog-root'),
     );
-    const ciphertextChunkCount = 3n;
-    const p = await buildBasePublishParams(setup, 'curated-with-ct', {
+    const catalogLeafCount = 3n;
+    const p = await buildBasePublishParams(setup, 'curated-with-catalog', {
       contextGraphId: curatedCgId,
-      ciphertextChunksRoot,
-      ciphertextChunkCount,
+      catalogRoot,
+      catalogLeafCount,
     });
 
     await (await KAV10.connect(setup.creator).publish(p)).wait();
 
     const kaId = BigInt(p.reservedKaId);
     expect(await CGS.kaToContextGraph(kaId)).to.equal(curatedCgId);
-    expect(await DKGKnowledgeAssets.getLatestCiphertextChunksRoot(kaId)).to
-      .equal(ciphertextChunksRoot);
-    expect(await DKGKnowledgeAssets.getCiphertextChunkCount(kaId)).to.equal(
-      ciphertextChunkCount,
+    expect(await DKGKnowledgeAssets.getCatalogRoot(kaId)).to
+      .equal(catalogRoot);
+    expect(await DKGKnowledgeAssets.getCatalogLeafCount(kaId)).to.equal(
+      catalogLeafCount,
     );
   });
 
-  it('update: paid legacy curated top-up requires the first ciphertext commitment', async () => {
+  it('update: paid legacy curated top-up requires the first catalog commitment', async () => {
     const setup = await setupRegisteredAgentPublish();
     const curatedCgId = await createCuratedContextGraphFor(setup.creator);
     const storageOperator = accounts[19];
@@ -649,7 +649,7 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
       curatedCgId,
       kaId,
     );
-    expect(await DKGKnowledgeAssets.getLatestCiphertextChunksRoot(kaId)).to
+    expect(await DKGKnowledgeAssets.getCatalogRoot(kaId)).to
       .equal(ethers.ZeroHash);
 
     const up = await buildUpdateParams({
@@ -675,12 +675,12 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     await expect(KAV10.connect(setup.creator).update(up))
       .to.be.revertedWithCustomError(
         KAV10,
-        'CuratedCGRequiresCiphertextCommitment',
+        'CuratedCGRequiresCatalogCommitment',
       )
       .withArgs(curatedCgId);
   });
 
-  it('update: paid legacy curated top-up succeeds when it supplies the first ciphertext commitment', async () => {
+  it('update: paid legacy curated top-up succeeds when it supplies the first catalog commitment', async () => {
     const setup = await setupRegisteredAgentPublish();
     const curatedCgId = await createCuratedContextGraphFor(setup.creator);
     const storageOperator = accounts[19];
@@ -711,7 +711,7 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
       curatedCgId,
       kaId,
     );
-    expect(await DKGKnowledgeAssets.getLatestCiphertextChunksRoot(kaId)).to
+    expect(await DKGKnowledgeAssets.getCatalogRoot(kaId)).to
       .equal(ethers.ZeroHash);
 
     const firstCommitmentRoot = ethers.keccak256(
@@ -736,17 +736,17 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
       knowledgeAssetsToBurn: [],
       updateOperationId: 'legacy-curated-first-commit-op',
       author: setup.creator,
-      newCiphertextChunksRoot: firstCommitmentRoot,
-      newCiphertextChunkCount: firstCommitmentCount,
+      newCatalogRoot: firstCommitmentRoot,
+      newCatalogLeafCount: firstCommitmentCount,
     });
 
     await (await KAV10.connect(setup.creator).update(up)).wait();
 
     // The paid top-up supplied the first commitment, so the legacy KA can now
     // enter value-weighted sampling — the commitment anchor is persisted.
-    expect(await DKGKnowledgeAssets.getLatestCiphertextChunksRoot(kaId)).to
+    expect(await DKGKnowledgeAssets.getCatalogRoot(kaId)).to
       .equal(firstCommitmentRoot);
-    expect(await DKGKnowledgeAssets.getCiphertextChunkCount(kaId)).to.equal(
+    expect(await DKGKnowledgeAssets.getCatalogLeafCount(kaId)).to.equal(
       firstCommitmentCount,
     );
   });
@@ -783,7 +783,7 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
       kaId,
     );
 
-    // No paid top-up (newTokenAmount unchanged) and no ciphertext pair: this is
+    // No paid top-up (newTokenAmount unchanged) and no catalog pair: this is
     // metadata-only maintenance, which stays allowed for legacy uncommitted
     // curated KAs — the commitment gate only guards value-adding (paid) updates.
     const up = await buildUpdateParams({
@@ -810,7 +810,7 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
 
     // Still uncommitted and that is fine — metadata maintenance does not force
     // a commitment on a legacy curated KA.
-    expect(await DKGKnowledgeAssets.getLatestCiphertextChunksRoot(kaId)).to
+    expect(await DKGKnowledgeAssets.getCatalogRoot(kaId)).to
       .equal(ethers.ZeroHash);
   });
 

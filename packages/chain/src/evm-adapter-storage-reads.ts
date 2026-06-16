@@ -42,17 +42,17 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     return Number(count);
   }
 
-  async getLatestCiphertextChunksRoot(kaId: bigint): Promise<Uint8Array> {
+  async getCatalogRoot(kaId: bigint): Promise<Uint8Array> {
     await this.init();
     const kas = this.requireKCStorage();
-    const rootHex: string = await kas.getLatestCiphertextChunksRoot(kaId);
+    const rootHex: string = await kas.getCatalogRoot(kaId);
     return ethers.getBytes(rootHex);
   }
 
-  async getCiphertextChunkCount(kaId: bigint): Promise<number> {
+  async getCatalogLeafCount(kaId: bigint): Promise<number> {
     await this.init();
     const kas = this.requireKCStorage();
-    const count: bigint = BigInt(await kas.getCiphertextChunkCount(kaId));
+    const count: bigint = BigInt(await kas.getCatalogLeafCount(kaId));
     return Number(count);
   }
 

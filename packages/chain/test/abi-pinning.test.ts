@@ -141,7 +141,13 @@ const PINNED_DIGESTS: Record<string, string> = {
   // is only a fallback), so the error had to be added here for chain-side revert
   // decoding to name it instead of "unknown custom error". Digest now matches
   // the evm-module ABI surface.
-  KnowledgeAssetsLifecycle:     'e9c457c5208f0a2da42ec9ced785e1241da4c1a1c6e4ef05d28828b9022ad5d1',
+  // Re-pinned for OT-RFC-49 (catalog-sampling strip): the curated random-sampling
+  // commitment moved from the private ciphertext to the public `_catalog`. ABI
+  // surface changes: errors `PublicCGCannotHaveCatalogCommitment` /
+  // `CuratedCGRequiresCatalogCommitment` / `IncompleteCatalogCommitment` (renamed
+  // from the `*Ciphertext*` set), and `PublishParams`/`UpdateParams` now carry
+  // `catalogRoot`/`catalogLeafCount` (was `ciphertextChunksRoot`/`ciphertextChunkCount`).
+  KnowledgeAssetsLifecycle:     'fcfe8541052c25c31775e0e5b6a2923bba024e59dd3c03e829f330f8499191cb',
 
   // Re-pinned for OT-RFC-43 Option-1 (variant 1a, PR #975): deterministic
   // author-namespaced KA identity. `createKnowledgeAsset` now takes an explicit
@@ -153,7 +159,10 @@ const PINNED_DIGESTS: Record<string, string> = {
   // eth_call instead of an unbounded `KnowledgeAssetCreated` log scan. Pure
   // function-only ABI addition (events + errors unchanged); the chain-local
   // copy is refreshed in lockstep with the evm-module ABI in the same PR.
-  DKGKnowledgeAssets:           '60d8dc58619c25fd31df1da34d4944369edbc2d5d4031dcb14f6965152c718a9',
+  // Re-pinned for OT-RFC-49 (catalog-sampling strip): `setCatalogCommitment` /
+  // `getCatalogRoot` / `getCatalogLeafCount` + event `KnowledgeAssetCatalogCommitmentSet`
+  // (replacing the `*Ciphertext*` setter/getters/event, now removed from the ABI).
+  DKGKnowledgeAssets:           '4b0adb51db38c7e11de0692f77bd322e2f01ac3dc393d0ed9ca7a7bfcdd2d358',
   // V8 `KnowledgeCollection` ABI was moved to `abi/archive/` in
   // `archive-non-v10-contracts`; the pin entry is intentionally dropped.
   // Updated for SPEC_CG_MEMORY_MODEL: per-CG hosting committees and

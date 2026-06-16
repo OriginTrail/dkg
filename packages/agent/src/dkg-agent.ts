@@ -1447,13 +1447,12 @@ export class DKGAgent extends DKGAgentBase {
       subGraphName: string | undefined,
       merkleLeafCount: number,
       isEncryptedPayload?: boolean,
-      // OT-RFC-38 LU-11 — when present, the publisher's chunked
-      // emitter has already AEAD-encrypted + SWM-gossiped per-chunk
-      // ciphertexts. The collector routes through V2 ACK with empty
-      // stagingQuads and these fields populating PublishIntent.
-      chunkedCommitment?: {
-        ciphertextChunksRoot: Uint8Array;
-        ciphertextChunkCount: number;
+      // OT-RFC-49 / WS-D — when present, this is a curated publish: the
+      // committed PUBLIC `_catalog` commitment the core rebuilds + verifies
+      // over the inline catalog `stagingQuads` and that lands on-chain.
+      catalogCommitment?: {
+        catalogRoot: Uint8Array;
+        catalogLeafCount: number;
       },
     ) => {
       // Fail loud on non-numeric or non-positive CG ids: V10 publish requires
@@ -1542,7 +1541,7 @@ export class DKGAgent extends DKGAgentBase {
         subGraphName,
         merkleLeafCount,
         isEncryptedPayload,
-        chunkedCommitment,
+        catalogCommitment,
       });
       return result.acks;
     };
@@ -1621,8 +1620,8 @@ export class DKGAgent extends DKGAgentBase {
       mintAmount: bigint;
       burnTokenIds: bigint[];
       newMerkleLeafCount: number;
-      newCiphertextChunksRoot?: Uint8Array;
-      newCiphertextChunkCount?: number;
+      newCatalogRoot?: Uint8Array;
+      newCatalogLeafCount?: number;
       stagingQuads?: Uint8Array;
       swmGraphId?: string;
       subGraphName?: string;
@@ -1682,8 +1681,8 @@ export class DKGAgent extends DKGAgentBase {
         mintAmount: params.mintAmount,
         burnTokenIds: params.burnTokenIds,
         newMerkleLeafCount: params.newMerkleLeafCount,
-        newCiphertextChunksRoot: params.newCiphertextChunksRoot,
-        newCiphertextChunkCount: params.newCiphertextChunkCount,
+        newCatalogRoot: params.newCatalogRoot,
+        newCatalogLeafCount: params.newCatalogLeafCount,
         chainId: chainIdBig,
         kav10Address,
         publisherPeerId: this.peerId,

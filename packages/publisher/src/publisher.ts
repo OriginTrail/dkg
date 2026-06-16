@@ -74,34 +74,28 @@ export type V10ACKProvider = (
   /** V10 flat-KC Merkle leaf count (sorted + deduped); binds ACK + on-chain KC to RandomSampling. */
   merkleLeafCount: number,
   /**
-   * OT-RFC-38 / LU-5 — when `true`, `stagingQuads` is opaque AEAD
-   * ciphertext (curated CG payload) and cores skip merkle-root
-   * recompute. The publisher's claimed `merkleRoot`, `kaCount`, and
-   * `merkleLeafCount` are signed verbatim into the V10 digest; member
-   * post-decrypt verification (LU-8) is what catches lies. Cores
-   * still verify `stagingQuads.length === publicByteSize` to keep
-   * pricing honest. Defaults to `false` so existing public-CG callers
-   * are unchanged.
+   * OT-RFC-49 / WS-D — when `true`, this is a CURATED publish: `stagingQuads`
+   * carries the PUBLIC `_catalog` N-quads (plaintext — the catalog is public),
+   * and the private data is encrypted for MEMBERS only (off the ACK wire).
+   * Cores skip the flat-KC plaintext recompute (they don't hold the private
+   * data) and instead rebuild + verify the catalog root from `catalogCommitment`
+   * against the inline `stagingQuads`. Defaults to `false` so existing public-CG
+   * callers are unchanged.
    */
   isEncryptedPayload?: boolean,
   /**
-   * OT-RFC-38 LU-11 / OT-RFC-39. When present, the publisher has
-   * already chunked + AEAD-encrypted the curated payload + fanned
-   * per-chunk ciphertexts via SWM gossip. The ACK request is sent
-   * over `PROTOCOL_STORAGE_ACK_V2` with `stagingQuads` empty (chunks
-   * live on SWM, never on the ACK wire) and the PublishIntent
-   * carries `ciphertextChunksRoot` + `ciphertextChunkCount` +
-   * `ackProtocolVersion = 2`. Cores recompute the root from local
-   * per-chunk store and DECLINE on mismatch.
-   *
-   * Mutually exclusive with the LU-5 single-blob path:
-   * `isEncryptedPayload` must also be `true` when this is set, and
-   * `stagingQuads` MUST be empty/undefined. Pre-LU-11 cores never
-   * see this field and stay on V1 semantics.
+   * OT-RFC-49 / WS-D — the CURATED PUBLIC `_catalog` commitment for this
+   * publish (REPLACED the stripped ciphertext-chunks commitment). When present,
+   * the publisher computed `computeCatalogRoot(catalogCommittedLeaves(...))`
+   * over the committed catalog leaf-set; the same `(catalogRoot, catalogLeafCount)`
+   * is signed into the V10 ACK digest, lands on-chain, and is what the core
+   * rebuilds over the inline catalog `stagingQuads` (DECLINE `CATALOG_ROOT_MISMATCH`
+   * on disagreement). Required when `isEncryptedPayload === true` AND the curated
+   * CG has a catalog entry; absent for public CGs.
    */
-  chunkedCommitment?: {
-    ciphertextChunksRoot: Uint8Array;
-    ciphertextChunkCount: number;
+  catalogCommitment?: {
+    catalogRoot: Uint8Array;
+    catalogLeafCount: number;
   },
 ) => Promise<V10CoreNodeACK[]>;
 
@@ -131,8 +125,8 @@ export type V10UpdateACKProvider = (params: {
   mintAmount: bigint;
   burnTokenIds: bigint[];
   newMerkleLeafCount: number;
-  newCiphertextChunksRoot?: Uint8Array;
-  newCiphertextChunkCount?: number;
+  newCatalogRoot?: Uint8Array;
+  newCatalogLeafCount?: number;
   /** Updated KC quads (N-Quads) so peers can recompute newMerkleRoot. */
   stagingQuads?: Uint8Array;
   /** Source SWM graph id (defaults to contextGraphId). */

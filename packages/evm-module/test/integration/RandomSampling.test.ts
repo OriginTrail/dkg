@@ -747,6 +747,12 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
           challenge.proofingPeriodDurationInBlocks,
         solved: true,
         isCurated: challenge.isCurated,
+        // OT-RFC-49 / WS-B Trap 1 — Challenge gained two trailing fields
+        // (the pinned (leafCount, root) pair). Carry them through unchanged
+        // from the freshly-created challenge or ethers fails to encode the
+        // struct ("missing value for component challengeLeafCount").
+        challengeLeafCount: challenge.challengeLeafCount,
+        challengeRoot: challenge.challengeRoot,
       };
 
       // Store the mock challenge in the storage contract

@@ -1,4 +1,5 @@
 import { keccak256 } from './keccak.js';
+import { hashTripleV10 } from './canonicalize.js';
 
 function compareBytes(a: Uint8Array, b: Uint8Array): number {
   const len = Math.min(a.length, b.length);
@@ -153,4 +154,52 @@ export class V10MerkleTree {
   static computeKCRoot(kaRoots: Uint8Array[]): Uint8Array {
     return new V10MerkleTree(kaRoots).root;
   }
+}
+
+/** A catalog triple (graph is excluded from the V10 leaf hash by design). */
+export interface CatalogTriple {
+  subject: string;
+  predicate: string;
+  object: string;
+}
+
+/** Result of {@link computeCatalogRoot}. */
+export interface CatalogRootResult {
+  /**
+   * Root of the catalog-leaves-ONLY V10 Merkle tree — the curated random-
+   * sampling commitment (`DKGKnowledgeAssets.catalogRoots`). `bytes32(0)` (32
+   * zero bytes) when there are no catalog leaves.
+   */
+  root: Uint8Array;
+  /**
+   * Post sort+dedupe leaf count (`V10MerkleTree.leafCount`). This is BOTH the
+   * on-chain `catalogLeafCount` (the `chunkId = seed % count` draw modulus) AND
+   * the prover's proof index space — it MUST be the deduped count, never the raw
+   * `catalogTriples.length`, or a drawn `chunkId` could exceed the real tree and
+   * leave an honest prover unable to build a proof.
+   */
+  leafCount: number;
+  /** The tree, so a prover can call `tree.proof(chunkId)` / `tree.leafAt(chunkId)`. */
+  tree: V10MerkleTree;
+}
+
+/**
+ * OT-RFC-49 / WS-C: compute the curated PUBLIC `_catalog` commitment.
+ *
+ * A dedicated V10 Merkle tree over the catalog triples ONLY (NOT interleaved with
+ * private sub-roots — Trap 2: the flat-KC tree sorts+dedupes all leaves together,
+ * so a leaf-index draw over it could land on a private leaf an honest core cannot
+ * hold). Each leaf is `hashTripleV10(subject, predicate, object)` — the SAME leaf
+ * hash the public path uses, and the SAME the contract's `_verifyV10MerkleProof`
+ * expects — so the publisher (which calls this to set the commitment) and the
+ * prover (which calls this over its locally-served `_catalog` to build the proof)
+ * agree byte-for-byte by construction, and both agree with the on-chain verify.
+ *
+ * This is the SINGLE source of truth for the catalog tree shape; both off-chain
+ * sites MUST go through it.
+ */
+export function computeCatalogRoot(catalogTriples: ReadonlyArray<CatalogTriple>): CatalogRootResult {
+  const leaves = catalogTriples.map((t) => hashTripleV10(t.subject, t.predicate, t.object));
+  const tree = new V10MerkleTree(leaves);
+  return { root: tree.root, leafCount: tree.leafCount, tree };
 }

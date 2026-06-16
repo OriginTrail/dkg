@@ -2066,38 +2066,37 @@ export class EVMChainAdapterBase {
       tokenAmount: flooredTokenAmount,
       isImmutable: params.isImmutable,
       merkleLeafCount: params.merkleLeafCount,
-      // RFC-39 Phase A.5 / LU-11 — ciphertext-commitment pair.
+      // OT-RFC-49 — curated `_catalog` commitment pair (REPLACED the stripped
+      // ciphertext-chunks pair; same on-chain PublishParams struct slot).
       //
       // The two fields MUST be set together or omitted together.
-      // - Both omitted (or root=ZeroHash + count=0) = legacy /
-      //   public-KC path: picker skips this KC in the curated draw
-      //   today (commit 8 baseline) and RFC-39 random sampling never
-      //   indexes it; safe wire-compatible default for non-chunked
-      //   callers.
-      // - Both set = LU-11 chunked publish: cores already hold the
-      //   matching per-chunk ciphertexts under
-      //   urn:dkg:swm:v10-publish-ciphertext-chunk/<batchId>/<i> and
-      //   recomputed the same root before signing the V2 ACK.
-      // Anything else is a programmer error — fail loud instead of
-      // silently defaulting one side and producing an asymmetric
-      // commitment that on-chain `_pickWeightedChallenge` would
-      // skip (count=0) or that core-side V2 verifiers would never
-      // try to satisfy (root=ZeroHash but count>0).
-      ciphertextChunksRoot: (() => {
-        const haveRoot = !!params.ciphertextChunksRoot && params.ciphertextChunksRoot.length === 32;
-        const haveCount = typeof params.ciphertextChunkCount === 'number' && params.ciphertextChunkCount > 0;
+      // - Both omitted (or root=ZeroHash + count=0) = legacy / public-KC
+      //   path: picker skips this KC in the curated draw and RFC-39 random
+      //   sampling never indexes it; safe wire-compatible default for
+      //   public callers.
+      // - Both set = curated publish: the publisher committed
+      //   `computeCatalogRoot(catalogCommittedLeaves(...))` and the cores
+      //   recomputed the same root over their locally-served `<cg>/_catalog`
+      //   before signing the ACK; the prover proves the same tree.
+      // Anything else is a programmer error — fail loud instead of silently
+      // defaulting one side and producing an asymmetric commitment that
+      // on-chain `_pickWeightedChallenge` would skip (count=0) or that the
+      // prover could never satisfy (root=ZeroHash but count>0).
+      catalogRoot: (() => {
+        const haveRoot = !!params.catalogRoot && params.catalogRoot.length === 32;
+        const haveCount = typeof params.catalogLeafCount === 'number' && params.catalogLeafCount > 0;
         if (haveRoot !== haveCount) {
           throw new Error(
-            `evm-adapter.createKnowledgeAssets: ciphertextChunksRoot and ciphertextChunkCount ` +
+            `evm-adapter.createKnowledgeAssets: catalogRoot and catalogLeafCount ` +
             `must both be set or both omitted; got root=${haveRoot ? 'set' : 'unset'}, ` +
-            `count=${haveCount ? params.ciphertextChunkCount : 'unset'}. ` +
+            `count=${haveCount ? params.catalogLeafCount : 'unset'}. ` +
             `An asymmetric pair would leave RandomSampling._pickWeightedChallenge unable to ` +
-            `verify the curated draw against off-chain ciphertext storage.`,
+            `verify the curated draw against the off-chain catalog.`,
           );
         }
-        return haveRoot ? ethers.hexlify(params.ciphertextChunksRoot!) : ethers.ZeroHash;
+        return haveRoot ? ethers.hexlify(params.catalogRoot!) : ethers.ZeroHash;
       })(),
-      ciphertextChunkCount: params.ciphertextChunkCount ?? 0,
+      catalogLeafCount: params.catalogLeafCount ?? 0,
       publisherNodeIdentityId: params.publisherNodeIdentityId,
       authorAddress: params.author.address,
       authorR: ethers.hexlify(params.author.signature.r),

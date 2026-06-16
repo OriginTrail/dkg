@@ -31,12 +31,10 @@ export {
 } from './ka-extractor.js';
 
 export {
-  extractCiphertextChunksFromStore,
-  CiphertextChunksMissingError,
-  CiphertextChunksMalformedError,
-  type ExtractCiphertextChunksInput,
-  type CiphertextChunksExtractionResult,
-} from './ciphertext-chunks-extractor.js';
+  extractCatalogLeavesFromStore,
+  CatalogLeavesMissingError,
+  type ExtractCatalogLeavesInput,
+} from './catalog-extractor.js';
 
 export {
   type ProofBuilder,
@@ -55,9 +53,6 @@ export {
   type RandomSamplingProverDeps,
   type ProverLogger,
   type TickOutcome,
-  type CiphertextChunkBackfillFn,
-  type CiphertextChunkBackfillRequest,
-  type CiphertextChunkBackfillResult,
 } from './prover.js';
 
 export {

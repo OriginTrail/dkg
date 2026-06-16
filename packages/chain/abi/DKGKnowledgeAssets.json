@@ -355,12 +355,18 @@
       },
       {
         "indexed": false,
-        "internalType": "uint256",
-        "name": "chunksAmount",
-        "type": "uint256"
+        "internalType": "bytes32",
+        "name": "catalogRoot",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint32",
+        "name": "catalogLeafCount",
+        "type": "uint32"
       }
     ],
-    "name": "KnowledgeAssetChunksAmountUpdated",
+    "name": "KnowledgeAssetCatalogCommitmentSet",
     "type": "event"
   },
   {
@@ -374,18 +380,12 @@
       },
       {
         "indexed": false,
-        "internalType": "bytes32",
-        "name": "ciphertextChunksRoot",
-        "type": "bytes32"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint32",
-        "name": "ciphertextChunkCount",
-        "type": "uint32"
+        "internalType": "uint256",
+        "name": "chunksAmount",
+        "type": "uint256"
       }
     ],
-    "name": "KnowledgeAssetCiphertextCommitmentSet",
+    "name": "KnowledgeAssetChunksAmountUpdated",
     "type": "event"
   },
   {
@@ -899,7 +899,7 @@
         "type": "uint256"
       }
     ],
-    "name": "ciphertextChunkCounts",
+    "name": "catalogLeafCounts",
     "outputs": [
       {
         "internalType": "uint32",
@@ -918,7 +918,7 @@
         "type": "uint256"
       }
     ],
-    "name": "ciphertextChunksRoots",
+    "name": "catalogRoots",
     "outputs": [
       {
         "internalType": "bytes32",
@@ -1100,12 +1100,31 @@
         "type": "uint256"
       }
     ],
-    "name": "getCiphertextChunkCount",
+    "name": "getCatalogLeafCount",
     "outputs": [
       {
         "internalType": "uint32",
         "name": "",
         "type": "uint32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      }
+    ],
+    "name": "getCatalogRoot",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
       }
     ],
     "stateMutability": "view",
@@ -1395,25 +1414,6 @@
         "internalType": "uint256[]",
         "name": "",
         "type": "uint256[]"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "id",
-        "type": "uint256"
-      }
-    ],
-    "name": "getLatestCiphertextChunksRoot",
-    "outputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
       }
     ],
     "stateMutability": "view",
@@ -2227,16 +2227,16 @@
       },
       {
         "internalType": "bytes32",
-        "name": "ciphertextChunksRoot",
+        "name": "catalogRoot",
         "type": "bytes32"
       },
       {
         "internalType": "uint32",
-        "name": "ciphertextChunkCount",
+        "name": "catalogLeafCount",
         "type": "uint32"
       }
     ],
-    "name": "setCiphertextChunksCommitment",
+    "name": "setCatalogCommitment",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

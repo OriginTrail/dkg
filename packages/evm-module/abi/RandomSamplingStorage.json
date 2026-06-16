@@ -286,6 +286,19 @@
         "internalType": "uint72",
         "name": "identityId",
         "type": "uint72"
+      }
+    ],
+    "name": "NodeChallengeCleared",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
       },
       {
         "components": [
@@ -328,6 +341,16 @@
             "internalType": "bool",
             "name": "isCurated",
             "type": "bool"
+          },
+          {
+            "internalType": "uint32",
+            "name": "challengeLeafCount",
+            "type": "uint32"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "challengeRoot",
+            "type": "bytes32"
           }
         ],
         "indexed": false,
@@ -815,6 +838,19 @@
   {
     "inputs": [
       {
+        "internalType": "uint72[]",
+        "name": "identityIds",
+        "type": "uint72[]"
+      }
+    ],
+    "name": "clearOutstandingChallenges",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
@@ -1215,6 +1251,16 @@
             "internalType": "bool",
             "name": "isCurated",
             "type": "bool"
+          },
+          {
+            "internalType": "uint32",
+            "name": "challengeLeafCount",
+            "type": "uint32"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "challengeRoot",
+            "type": "bytes32"
           }
         ],
         "internalType": "struct RandomSamplingLib.Challenge",
@@ -1525,6 +1571,16 @@
         "internalType": "bool",
         "name": "isCurated",
         "type": "bool"
+      },
+      {
+        "internalType": "uint32",
+        "name": "challengeLeafCount",
+        "type": "uint32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "challengeRoot",
+        "type": "bytes32"
       }
     ],
     "stateMutability": "view",
@@ -1730,6 +1786,16 @@
             "internalType": "bool",
             "name": "isCurated",
             "type": "bool"
+          },
+          {
+            "internalType": "uint32",
+            "name": "challengeLeafCount",
+            "type": "uint32"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "challengeRoot",
+            "type": "bytes32"
           }
         ],
         "internalType": "struct RandomSamplingLib.Challenge",

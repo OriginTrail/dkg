@@ -487,8 +487,8 @@ export class PublishMethods extends EVMChainAdapterBase {
     newTokenAmount?: bigint;
     /** When set, skip live re-derivation (binds ACK digest to tx submission). */
     boundNewTokenAmount?: bigint;
-    newCiphertextChunksRoot?: Uint8Array;
-    newCiphertextChunkCount?: number;
+    newCatalogRoot?: Uint8Array;
+    newCatalogLeafCount?: number;
   }): Promise<Uint8Array> {
     await this.init();
     if (!this.contracts.knowledgeAssetsLifecycle) {
@@ -531,8 +531,8 @@ export class PublishMethods extends EVMChainAdapterBase {
     }
 
     const burnIds = params.burnTokenIds ?? [];
-    const ciphertextRoot = params.newCiphertextChunksRoot ?? new Uint8Array(32);
-    const ciphertextCount = BigInt(params.newCiphertextChunkCount ?? 0);
+    const catalogRoot = params.newCatalogRoot ?? new Uint8Array(32);
+    const catalogCount = BigInt(params.newCatalogLeafCount ?? 0);
 
     return computeUpdateACKDigest(
       evmChainId,
@@ -546,8 +546,8 @@ export class PublishMethods extends EVMChainAdapterBase {
       params.mintAmount ?? 0n,
       burnIds,
       BigInt(params.newMerkleLeafCount),
-      ciphertextRoot,
-      ciphertextCount,
+      catalogRoot,
+      catalogCount,
     );
   }
 
@@ -721,8 +721,8 @@ export class PublishMethods extends EVMChainAdapterBase {
         burnTokenIds: burnIds,
         newTokenAmount: params.newTokenAmount,
         boundNewTokenAmount: newTokenAmount,
-        newCiphertextChunksRoot: params.newCiphertextChunksRoot,
-        newCiphertextChunkCount: params.newCiphertextChunkCount,
+        newCatalogRoot: params.newCatalogRoot,
+        newCatalogLeafCount: params.newCatalogLeafCount,
       });
       const raw = ethers.Signature.from(await signer.signMessage(ackDigest));
       ackSigs = [{ identityId, r: ethers.getBytes(raw.r), vs: ethers.getBytes(raw.yParityAndS) }];
@@ -743,14 +743,14 @@ export class PublishMethods extends EVMChainAdapterBase {
       newMerkleLeafCount: params.newMerkleLeafCount,
       mintKnowledgeAssetsAmount: params.mintAmount ?? 0,
       knowledgeAssetsToBurn: burnIds,
-      // Codex PR #630 R1 #2 — RFC-39 Phase A.5 commitment refresh.
-      // Defaults to `bytes32(0)` / 0 (metadata-only update or
-      // public-CG path; KC's existing commitment stays in place).
-      // Callers refreshing curated ciphertext set BOTH non-zero.
-      newCiphertextChunksRoot: params.newCiphertextChunksRoot
-        ? ethers.hexlify(params.newCiphertextChunksRoot)
+      // OT-RFC-49 — curated `_catalog` commitment refresh (REPLACED the
+      // ciphertext-chunks pair). Defaults to `bytes32(0)` / 0 (metadata-only
+      // update or public-CG path; the KC's existing commitment stays in
+      // place). Callers rotating a curated catalog set BOTH non-zero.
+      newCatalogRoot: params.newCatalogRoot
+        ? ethers.hexlify(params.newCatalogRoot)
         : ethers.ZeroHash,
-      newCiphertextChunkCount: params.newCiphertextChunkCount ?? 0,
+      newCatalogLeafCount: params.newCatalogLeafCount ?? 0,
       publisherNodeIdentityId: identityId,
       identityIds: ackSigs.map(s => s.identityId),
       r: ackSigs.map(s => ethers.hexlify(s.r)),
