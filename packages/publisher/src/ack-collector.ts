@@ -1,10 +1,6 @@
 import {
   PROTOCOL_STORAGE_ACK,
-  PROTOCOL_STORAGE_ACK_V2,
   PROTOCOL_STORAGE_UPDATE_ACK,
-  ACK_PROTOCOL_VERSION_V1_LU5,
-  ACK_PROTOCOL_VERSION_V2_LU11,
-  DEFAULT_MAX_READ_BYTES,
   encodePublishIntent,
   encodeUpdateIntent,
   decodeStorageACK,
@@ -92,11 +88,6 @@ export interface ACKCollectionResult {
 const DEFAULT_REQUIRED_ACKS = 3;
 const ACK_TIMEOUT_MS = 120_000;
 const MAX_RETRIES = 3;
-// V2 chunked ACK fallback is intentionally bounded. The storage-ack
-// protocol reader buffers at most DEFAULT_MAX_READ_BYTES (10 MiB), so
-// keep direct-wire ciphertext comfortably below that and let large
-// publishes use the normal SWM/chunk-store path instead.
-const MAX_DIRECT_ACK_CIPHERTEXT_CHUNKS_BYTES = Math.floor(DEFAULT_MAX_READ_BYTES / 2);
 // #887: transient declines (the core's SWM replica is still catching up
 // via gossip — NO_DATA_IN_SWM / MERKLE_MISMATCH_IN_SWM /
 // MISSING_CIPHERTEXT_CHUNKS) get their own, larger retry budget than
@@ -206,10 +197,18 @@ export class ACKCollector {
      * issuing curated publishes. A per-peer capability probe + V1
      * downgrade is filed as a follow-up — see TODO(rc.12.1) below.
      */
-    chunkedCommitment?: {
-      ciphertextChunksRoot: Uint8Array;
-      ciphertextChunkCount: number;
-      ciphertextChunks?: Uint8Array[];
+    /**
+     * OT-RFC-49 / WS-D — the curated PUBLIC `_catalog` commitment (REPLACED
+     * the stripped ciphertext-chunks commitment). When present,
+     * `isEncryptedPayload` MUST be `true` and `stagingQuads` carries the
+     * catalog N-quads (plaintext, public). The collector packs
+     * `(catalogRoot, catalogLeafCount)` into the PublishIntent + the ACK
+     * digest; cores rebuild the same root over the inline catalog and DECLINE
+     * `CATALOG_ROOT_MISMATCH` on disagreement.
+     */
+    catalogCommitment?: {
+      catalogRoot: Uint8Array;
+      catalogLeafCount: number;
     };
   }): Promise<ACKCollectionResult> {
     const {
@@ -240,68 +239,37 @@ export class ACKCollector {
     // the ACK against. `swmGraphId` (optional) is the SOURCE graph where
     // data lives in SWM — only set when the publisher is remapping a named
     // SWM graph to a numeric on-chain id.
-    // OT-RFC-38 LU-11: chunked path requires V2 ACK protocol id and
-    // empty `stagingQuads` (chunks live on SWM, not on the ACK wire).
-    // Anything else is a programmer error in the publisher's branch
-    // selection — surface it loudly instead of silently shipping a
-    // V1 envelope that pre-LU-11 cores would still accept.
-    if (params.chunkedCommitment) {
+    // OT-RFC-49 / WS-D — a curated publish carries a non-zero catalog
+    // commitment AND the inline catalog N-quads (plaintext, public) so the
+    // core can rebuild + verify the catalog root self-contained. Surface a
+    // mis-wired branch loudly rather than ship a half-formed intent.
+    if (params.catalogCommitment) {
       if (!params.isEncryptedPayload) {
         throw new Error(
-          'ACKCollector: chunkedCommitment requires isEncryptedPayload=true (curated-CG-only path)',
+          'ACKCollector: catalogCommitment requires isEncryptedPayload=true (curated-CG-only path)',
         );
       }
-      if (params.stagingQuads && params.stagingQuads.length > 0) {
+      if (!params.stagingQuads || params.stagingQuads.length === 0) {
         throw new Error(
-          'ACKCollector: chunkedCommitment + non-empty stagingQuads is invalid — ' +
-          'on the LU-11 chunked path the ciphertext lives in SWM, not on the ACK wire',
+          'ACKCollector: catalogCommitment requires non-empty stagingQuads — ' +
+          'the curated ACK ships the public catalog N-quads inline so the core can ' +
+          'rebuild and verify the catalog root',
         );
       }
-      if (params.chunkedCommitment.ciphertextChunkCount <= 0) {
+      if (params.catalogCommitment.catalogLeafCount <= 0) {
         throw new Error(
-          `ACKCollector: chunkedCommitment.ciphertextChunkCount must be positive; got ${params.chunkedCommitment.ciphertextChunkCount}`,
+          `ACKCollector: catalogCommitment.catalogLeafCount must be positive; got ${params.catalogCommitment.catalogLeafCount}`,
         );
       }
-      if (params.chunkedCommitment.ciphertextChunksRoot.length !== 32) {
+      if (params.catalogCommitment.catalogRoot.length !== 32) {
         throw new Error(
-          `ACKCollector: chunkedCommitment.ciphertextChunksRoot must be 32 bytes; got ${params.chunkedCommitment.ciphertextChunksRoot.length}`,
-        );
-      }
-      if (
-        params.chunkedCommitment.ciphertextChunks
-        && params.chunkedCommitment.ciphertextChunks.length !== params.chunkedCommitment.ciphertextChunkCount
-      ) {
-        throw new Error(
-          `ACKCollector: chunkedCommitment.ciphertextChunks length must equal ciphertextChunkCount; ` +
-          `got ${params.chunkedCommitment.ciphertextChunks.length}/${params.chunkedCommitment.ciphertextChunkCount}`,
+          `ACKCollector: catalogCommitment.catalogRoot must be 32 bytes; got ${params.catalogCommitment.catalogRoot.length}`,
         );
       }
     }
-    const ackProtocolVersion = params.chunkedCommitment
-      ? ACK_PROTOCOL_VERSION_V2_LU11
-      : ACK_PROTOCOL_VERSION_V1_LU5;
-    // TODO(rc.12.1, Codex review on PR #715): add per-peer capability
-    // probe so chunked publishes can opportunistically downgrade to V1
-    // for cores that don't advertise V2. Until then, chunked publishes
-    // require every quorum-target core to support V2 — see the
-    // `chunkedCommitment` field doc for the cluster-wide requirement
-    // and the rc.12 release-runbook rationale.
-    const ackProtocolId = params.chunkedCommitment
-      ? PROTOCOL_STORAGE_ACK_V2
-      : PROTOCOL_STORAGE_ACK;
-    let directFallbackCiphertextChunks: Uint8Array[] | undefined;
-    if (params.chunkedCommitment?.ciphertextChunks) {
-      const directFallbackBytes = params.chunkedCommitment.ciphertextChunks
-        .reduce((acc, chunk) => acc + chunk.length, 0);
-      if (directFallbackBytes <= MAX_DIRECT_ACK_CIPHERTEXT_CHUNKS_BYTES) {
-        directFallbackCiphertextChunks = params.chunkedCommitment.ciphertextChunks;
-      } else {
-        log(
-          `[ACKCollector] Omitting ${directFallbackBytes} ciphertext chunk bytes from V2 PublishIntent ` +
-          `(direct fallback cap=${MAX_DIRECT_ACK_CIPHERTEXT_CHUNKS_BYTES}); peers will use local chunk-store/SWM lookup`,
-        );
-      }
-    }
+    // OT-RFC-49 collapsed the V2 chunked-ciphertext ACK path; the curated
+    // catalog ACK rides the V1 protocol with inline catalog stagingQuads.
+    const ackProtocolId = PROTOCOL_STORAGE_ACK;
     const p2pMsg: PublishIntentMsg = {
       merkleRoot,
       contextGraphId: contextGraphIdStr,
@@ -319,10 +287,8 @@ export class ACKCollector {
       subGraphName: params.subGraphName,
       merkleLeafCount: params.merkleLeafCount,
       isEncryptedPayload: params.isEncryptedPayload === true ? true : undefined,
-      ciphertextChunksRoot: params.chunkedCommitment?.ciphertextChunksRoot,
-      ciphertextChunkCount: params.chunkedCommitment?.ciphertextChunkCount,
-      ackProtocolVersion: params.chunkedCommitment ? ackProtocolVersion : undefined,
-      ciphertextChunks: directFallbackCiphertextChunks,
+      catalogRoot: params.catalogCommitment?.catalogRoot,
+      catalogLeafCount: params.catalogCommitment?.catalogLeafCount,
     };
     const intentBytes = encodePublishIntent(p2pMsg);
 
@@ -356,9 +322,9 @@ export class ACKCollector {
     }
     log(`[ACKCollector] Requesting ACKs from ${corePeers.length} core peers (need ${REQUIRED_ACKS})`);
 
-    const ciphertextRoot = params.chunkedCommitment?.ciphertextChunksRoot
+    const catalogRoot = params.catalogCommitment?.catalogRoot
       ?? new Uint8Array(32);
-    const ciphertextCount = BigInt(params.chunkedCommitment?.ciphertextChunkCount ?? 0);
+    const catalogLeafCount = BigInt(params.catalogCommitment?.catalogLeafCount ?? 0);
     const ackDigest = computePublishACKDigest(
       chainId,
       kav10Address,
@@ -369,8 +335,8 @@ export class ACKCollector {
       BigInt(params.epochs ?? 1),
       params.tokenAmount ?? 0n,
       BigInt(params.merkleLeafCount),
-      ciphertextRoot,
-      ciphertextCount,
+      catalogRoot,
+      catalogLeafCount,
       false,
     );
 
@@ -416,8 +382,8 @@ export class ACKCollector {
     mintAmount: bigint;
     burnTokenIds: bigint[];
     newMerkleLeafCount: number;
-    newCiphertextChunksRoot?: Uint8Array;
-    newCiphertextChunkCount?: number;
+    newCatalogRoot?: Uint8Array;
+    newCatalogLeafCount?: number;
     /** Numeric EVM chain id. Required by the H5 prefix in the UPDATE ACK digest. */
     chainId: bigint;
     /** Deployed `KnowledgeAssetsLifecycle` address. Required by the H5 prefix. */
@@ -452,8 +418,8 @@ export class ACKCollector {
     }
 
     const contextGraphIdStr = contextGraphId.toString();
-    const ciphertextRoot = params.newCiphertextChunksRoot ?? new Uint8Array(32);
-    const ciphertextCount = BigInt(params.newCiphertextChunkCount ?? 0);
+    const catalogRoot = params.newCatalogRoot ?? new Uint8Array(32);
+    const catalogCount = BigInt(params.newCatalogLeafCount ?? 0);
 
     const p2pMsg: UpdateIntentMsg = {
       kaId: kaId.toString(),
@@ -465,8 +431,8 @@ export class ACKCollector {
       mintAmount: Number(mintAmount),
       burnTokenIds: burnTokenIds.map((id) => id.toString()),
       newMerkleLeafCount,
-      newCiphertextChunksRoot: params.newCiphertextChunksRoot,
-      newCiphertextChunkCount: params.newCiphertextChunkCount,
+      newCatalogRoot: params.newCatalogRoot,
+      newCatalogLeafCount: params.newCatalogLeafCount,
       publisherPeerId,
       swmGraphId: params.swmGraphId && params.swmGraphId !== contextGraphIdStr
         ? params.swmGraphId
@@ -518,8 +484,8 @@ export class ACKCollector {
       mintAmount,
       burnTokenIds,
       BigInt(newMerkleLeafCount),
-      ciphertextRoot,
-      ciphertextCount,
+      catalogRoot,
+      catalogCount,
     );
 
     return this.runACKRound({

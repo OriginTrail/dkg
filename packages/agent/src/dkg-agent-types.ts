@@ -1053,6 +1053,30 @@ export interface DKGAgentConfig {
       perCuratorBytesPerHour?: number;
       coreAggregateBytes?: number;
     };
+    /**
+     * OT-RFC-49 WS-A — the irreversible private-ciphertext strip. When `true`
+     * (DEFAULT — `undefined` is treated as on), a core declines ALL
+     * private-ciphertext host-mode custody for CURATED context graphs:
+     * "hosting follows access". Concretely, for a curated CG the core
+     *
+     *   - DECLINES the auto-host subscribe (reconcile/beacon/chain-event +
+     *     the restart-restore path), starving both the `.meta` ingest and
+     *     the LU-11 chunk ingest at the single subscribe choke point;
+     *   - REFUSES the operator override (`enableSwmHostModeFor`) — unlike the
+     *     narrower rung-1 `stripNonParticipants`, WS-A CLOSES the operator
+     *     hatch, so there is no manual path back into private custody;
+     *   - RETIRES the private serve responders (`handleSwmHostCatchup`,
+     *     `handleGetCiphertextChunk`) so a stripped core serves nothing
+     *     private back over the wire.
+     *
+     * Random sampling now proves the PUBLIC `_catalog` subgraph, so cores no
+     * longer need the ciphertext; private data lives member-side and members
+     * backfill from the curator (REPLACE-recovery), not from cores. PUBLIC CGs
+     * are NEVER affected — the gate sits after the curated check on every path.
+     * Set `false` to restore legacy host-mode custody (the rolling-upgrade
+     * kill-switch / A/B baseline; backcompat is waived for V10 testnet).
+     */
+    stripCiphertext?: boolean;
   };
   /** Durable local store for subscribed context-graph runtime state. */
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;

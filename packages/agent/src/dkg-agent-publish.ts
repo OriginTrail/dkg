@@ -489,6 +489,12 @@ export class PublishMethods extends DKGAgentBase {
       plan = chooseFanOutTier({
         enumeration,
         maxSubstrateMembers: this.swmSubstrateMaxMembers,
+        // OT-RFC-49 WS-A — for a PRIVATE allowlist CG, this flips the gossip
+        // leg OFF so curated SWM ciphertext stays off the public mesh and
+        // reaches the roster over the reliable substrate only. Resolved on
+        // the same planning path that already runs `isPrivateContextGraph`
+        // for enumeration, so no extra store round-trip beyond its cache.
+        isPrivate: await this.isPrivateContextGraph(contextGraphId),
       });
     } catch (err) {
       const errClass = err instanceof Error
@@ -3577,6 +3583,54 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   /**
+   * OT-RFC-49 — ensure a curated CG's public `_catalog` floor projection is in
+   * the SWM before a from-SWM publish that bypassed `assertionFinalize`.
+   *
+   * Mirrors the finalize-path injection (`assertionFinalize`): the catalog
+   * subject is `contextGraphDataUri(contextGraphId)` — the EXACT subject the
+   * publisher's `partitionCatalogQuads` matches — and the floor quads are built
+   * by the SAME `buildPublicProjection`, so the committed catalog is byte-identical
+   * across both paths.
+   *
+   * IDEMPOTENT: if the catalog is already in the SWM read scope (finalize path, or
+   * a prior from-SWM publish), it does nothing. Re-injection would in any case
+   * dedupe in the V10 merkle (identical leaves) so `catalogLeafCount` is stable,
+   * but the guard avoids the redundant write entirely.
+   *
+   * Returns a possibly-extended `selection`: for a `{rootEntities}` publish the
+   * CG-DID catalog subject is appended so it is in scope for BOTH the author seal
+   * (`_loadSelectedSWMQuads`) and the publisher's reload — which scope identically.
+   * For `selection: 'all'` the selection is returned unchanged (both already read
+   * the whole SWM graph).
+   */
+  async _ensureCuratedCatalogInSwm(this: DKGAgent,
+    contextGraphId: string,
+    selection: 'all' | { rootEntities: string[] },
+    subGraphName: string | undefined,
+    ctx: OperationContext,
+  ): Promise<'all' | { rootEntities: string[] }> {
+    const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
+    const cgDid = contextGraphDataUri(contextGraphId);
+    const existing = await this.store.query(
+      `CONSTRUCT { <${cgDid}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DCAT_DATASET}> } ` +
+      `WHERE { GRAPH ?g { <${cgDid}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DCAT_DATASET}> } ${sharedMemoryReadBothFilter(swmGraph)} }`,
+    );
+    const alreadyPresent = existing.type === 'quads' && existing.quads.length > 0;
+    if (!alreadyPresent) {
+      const catalogQuads = buildPublicProjection({ ual: cgDid, accessPolicy: 'private', graph: swmGraph });
+      await this.store.insert(catalogQuads);
+      this.log.info(
+        ctx,
+        `OT-RFC-49: injected ${catalogQuads.length}-quad public _catalog floor into SWM for curated CG ${contextGraphId} (from-SWM publish without finalize)`,
+      );
+    }
+    if (selection !== 'all' && !selection.rootEntities.includes(cgDid)) {
+      return { rootEntities: [...selection.rootEntities, cgDid] };
+    }
+    return selection;
+  }
+
+  /**
    * Publish shared memory content: read from SWM graph and publish with full finality (data graph + chain).
    * After on-chain confirmation, broadcasts a lightweight FinalizationMessage so peers with matching
    * SWM state can promote it to canonical without re-downloading the full payload.
@@ -3667,6 +3721,22 @@ export class PublishMethods extends DKGAgentBase {
     const onChainId = ctxGraphIdStr ?? (await this.getContextGraphOnChainId(contextGraphId)) ?? undefined;
 
     const v10ACKProvider = this.createV10ACKProvider(contextGraphId);
+
+    // OT-RFC-49 — inject the public `_catalog` projection for a curated CG
+    // publishing from raw SWM (the `/api/shared-memory/write` + `/publish`
+    // shortcut) that did NOT go through `assertionFinalize` — which is what
+    // normally injects the catalog. Without it the reloaded payload carries no
+    // catalog, the on-chain catalog commitment stays zero, and the core ACK
+    // falls back to SWM-lookup and DECLINEs `NO_DATA_IN_SWM`. Run BEFORE the
+    // author seal below so the attestation's merkleRoot covers the catalog, and
+    // idempotent so a finalize-path publish (where the catalog is already in SWM)
+    // is unaffected. Gated on an on-chain id so a local-only publish gets nothing
+    // spurious. Returns a possibly-extended selection so the CG-DID catalog
+    // subject is in scope for a `{rootEntities}` publish too (the seal-read and
+    // the publisher reload scope identically).
+    if (onChainId != null && (await this.isPrivateContextGraph(contextGraphId))) {
+      selection = await this._ensureCuratedCatalogInSwm(contextGraphId, selection, options?.subGraphName, ctx);
+    }
 
     // RFC-001 §9.x — selection-based publish bridge. If the caller
     // already sealed the content (named-assertion lifecycle) they

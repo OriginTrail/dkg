@@ -488,6 +488,27 @@ describe('PublishIntent — LU-11 fields (ciphertextChunksRoot, ciphertextChunkC
     expect(decoded.kaCount).toBe(1);
   });
 
+  it('OT-RFC-49: catalogRoot/catalogLeafCount (fields 18/19) round-trip and default to zero', () => {
+    // Public-CG intents omit the catalog fields → proto3 zero defaults.
+    const pub = decodePublishIntent(encodePublishIntent(baseIntent()));
+    expect(pub.catalogRoot?.length ?? 0).toBe(0);
+    expect(pub.catalogLeafCount ?? 0).toBe(0);
+
+    // Curated intents carry the catalog commitment inline.
+    const catalogRoot = new Uint8Array(32).fill(0x49);
+    const curated: PublishIntentMsg = {
+      ...baseIntent(),
+      isEncryptedPayload: true,
+      catalogRoot,
+      catalogLeafCount: 3,
+    };
+    const decoded = decodePublishIntent(encodePublishIntent(curated));
+    expect(new Uint8Array(decoded.catalogRoot!)).toEqual(catalogRoot);
+    expect(decoded.catalogLeafCount).toBe(3);
+    // Additive: the legacy LU-11 fields still decode at their zero defaults.
+    expect(decoded.ciphertextChunkCount ?? 0).toBe(0);
+  });
+
   it('ackProtocolVersion constants are stable wire values', () => {
     expect(ACK_PROTOCOL_VERSION_V1_LU5).toBe(1);
     expect(ACK_PROTOCOL_VERSION_V2_LU11).toBe(2);

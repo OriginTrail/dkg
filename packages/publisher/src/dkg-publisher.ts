@@ -7,7 +7,7 @@ import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-sto
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
 import { canonicalPublishPayload } from './canonical-publish-payload.js';
-import { partitionCatalogQuads, contextGraphCatalogUri } from '@origintrail-official/dkg-core';
+import { partitionCatalogQuads, catalogCommittedLeaves, computeCatalogRoot, contextGraphCatalogUri } from '@origintrail-official/dkg-core';
 import { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 import { skolemize } from './skolemize.js';
 import {
@@ -2018,12 +2018,12 @@ export class DKGPublisher implements Publisher {
       .join('\n');
     const publicByteSize = BigInt(new TextEncoder().encode(nquadsStr).length);
 
-    // the public DCAT catalog entry rides in the merkle root
-    // (kcMerkleRoot, above, covers it) but MUST NOT be encrypted: feed only the
-    // non-catalog (private data) quads to the curated encryptor, so
-    // ciphertextChunksRoot commits the private payload only. No-op for public
-    // CGs and any private CG without a catalog entry (catalogQuads empty ⇒
-    // encryptableNquadsStr === nquadsStr).
+    // the public DCAT catalog entry rides in the KC merkle root
+    // (kcMerkleRoot, above, covers it) AND is the OT-RFC-49 curated random-
+    // sampling commitment (catalogRoot, below). It MUST NOT be encrypted: feed
+    // only the non-catalog (private data) quads to the MEMBER encryptor. No-op
+    // for public CGs and any private CG without a catalog entry (catalogQuads
+    // empty ⇒ encryptableNquadsStr === nquadsStr).
     // Identity-based partition: the ONLY catalog subject is this CG's canonical
     // DID (round-3 SECURITY). A forged `rdf:type dkg:PrivateContextGraph` on a
     // user entity no longer routes that entity into the plaintext `_catalog`.
@@ -2036,6 +2036,33 @@ export class DKGPublisher implements Publisher {
               `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`,
           )
           .join('\n');
+
+    // OT-RFC-49 / WS-D — the CURATED random-sampling commitment is the PUBLIC
+    // `_catalog` Merkle root (NOT the stripped ciphertext root). Compute it ONCE
+    // from the committed catalog leaf-set (`partitionCatalogQuads` output minus
+    // the post-publish stamps — see `catalogCommittedLeaves`) so the on-chain
+    // `catalogRoot`, the ACK digest, the curated ACK intent payload, and the
+    // pricing `byteSize` all derive from a SINGLE source and cannot desync. The
+    // prover's `catalog-extractor` rebuilds over the SAME committed set, so the
+    // committed root == the proven root by construction.
+    //
+    // `committedCatalogLeaves` are graph-less triples; serialize them as plain
+    // N-Triples (no graph term) so the curated ACK handler's
+    // `parseSimpleNQuads` → `computeCatalogRoot(catalogCommittedLeaves(...))`
+    // rebuild reproduces the identical leaf hashes (`hashTripleV10` excludes the
+    // graph by design). undefined for public CGs and any curated CG with no
+    // catalog entry (then catalog fields stay zero on chain).
+    const committedCatalogLeaves = catalogCommittedLeaves(catalogQuads);
+    const catalogCommitment = committedCatalogLeaves.length > 0
+      ? computeCatalogRoot(committedCatalogLeaves)
+      : undefined;
+    const catalogNquadsStr = committedCatalogLeaves
+      .map(
+        (t) =>
+          `<${t.subject}> <${t.predicate}> ${t.object.startsWith('"') ? t.object : `<${t.object}>`} .`,
+      )
+      .join('\n');
+    const catalogByteSize = BigInt(new TextEncoder().encode(catalogNquadsStr).length);
     // Persist the catalog entry plaintext into the public `_catalog` graph so it
     // survives the post-publish SWM clear and is queryable/servable (the data
     // stays encrypted-only). Bounded named graph ⇒ the §7 facet open-serve can
@@ -2096,65 +2123,50 @@ export class DKGPublisher implements Publisher {
     // the existing behaviour: `fromSharedMemory` → cores look up SWM
     // locally; otherwise plaintext inline.
     const useEncryptedInline = typeof options.encryptInlinePayload === 'function';
-    // OT-RFC-38 LU-11: chunked path takes precedence when wired. The
-    // agent always sets BOTH callbacks for curated CGs (see
-    // `_resolveEncryptInlinePayload` + `_resolveEncryptInlineChunked`
-    // on DKGAgent) so this branch picks the strictly-better path
-    // without needing per-call flag plumbing. A future commit can drop
-    // the LU-5 single-blob callback once chunked is the only path.
-    const useChunkedInline = useEncryptedInline && typeof options.encryptInlineChunked === 'function';
-    // A curated publish (encryption enabled) must carry private payload beyond the
-    // public catalog entry. A catalog-only publish — every quad is a catalog entry
-    // on the context-graph's own DID, reachable because that DID namespace is not
-    // reserved — partitions to empty `otherQuads`, leaving `encryptableNquadsStr`
-    // empty. That would otherwise throw an opaque "rejects empty plaintext" deep in
-    // the chunked encryptor (sliceIntoCiphertextChunks). Reject early, with an
-    // actionable message: the catalog entry alone cannot satisfy the required
-    // ciphertext commitment. Public CGs never enter this branch (no encryptor).
-    if (useEncryptedInline && encryptableNquadsStr.length === 0) {
-      throw new Error(
-        `Curated publish for context graph "${contextGraphId}" has no private payload to encrypt — ` +
-        `every quad is a public catalog entry on the context-graph DID. A curated context graph must ` +
-        `publish private content; the catalog entry alone cannot satisfy the required ciphertext commitment.`,
-      );
-    }
+    // OT-RFC-49 / WS-D — a curated publish is now identified by a non-zero
+    // catalog commitment. The on-chain commitment + the core ACK verify the
+    // PUBLIC `_catalog`; the PRIVATE data stays encrypted for MEMBERS only.
+    // `useCuratedCatalog` gates the inline-catalog ACK path (cores rebuild the
+    // catalog root from the inline plaintext and DECLINE on mismatch).
+    const useCuratedCatalog = useEncryptedInline && catalogCommitment !== undefined;
     let stagingQuads: Uint8Array | undefined;
     let stagingByteSize = publicByteSize;
-    let chunkedCommitment: {
-      ciphertextChunksRoot: Uint8Array;
-      ciphertextChunkCount: number;
-      ciphertextChunks?: Uint8Array[];
-    } | undefined;
-    if (useChunkedInline) {
+    if (useEncryptedInline) {
+      // MEMBER-SIDE ENCRYPTION STAYS. The private (non-catalog) data is still
+      // AEAD-encrypted and distributed to CG members — via the chunked SWM
+      // fan-out when wired (preferred), else the single-blob hook. This is
+      // member distribution ONLY; OT-RFC-49 stripped the ciphertext from the
+      // on-chain commitment, the core ACK, and pricing, so the returned
+      // ciphertext root/bytes are intentionally DISCARDED here.
       const plaintextBytes = new TextEncoder().encode(encryptableNquadsStr);
-      ensurePublishOperationIdentity();
-      // batchId = V10 KC merkleRoot. It remains the core-side
-      // persistence/sampling key, while publishOperationId is the
-      // distinct per-operation nonce domain for chunked AEAD.
-      const chunked = await options.encryptInlineChunked!({
-        plaintextNquads: plaintextBytes,
-        batchId: kcMerkleRoot,
-        publishOperationId,
-      });
-      // No stagingQuads on the chunked path — chunks travel via SWM
-      // gossip, never on the ACK wire. Cores recompute the root from
-      // local per-chunk store and DECLINE on mismatch.
-      stagingQuads = undefined;
-      stagingByteSize = BigInt(chunked.totalCiphertextBytes);
-      chunkedCommitment = {
-        ciphertextChunksRoot: chunked.ciphertextChunksRoot,
-        ciphertextChunkCount: chunked.ciphertextChunkCount,
-        ciphertextChunks: chunked.ciphertextChunks,
-      };
-    } else if (useEncryptedInline) {
-      const plaintextBytes = new TextEncoder().encode(encryptableNquadsStr);
-      const ciphertext = await options.encryptInlinePayload!(plaintextBytes);
-      stagingQuads = ciphertext instanceof Uint8Array ? ciphertext : new Uint8Array(ciphertext);
-      // For curated CGs the publisher PAYS for ciphertext bytes (cores
-      // sign that into the V10 digest). Override publicByteSize for the
-      // ACK collection branch below; the chain TX still uses the
-      // ciphertext byte size as `byteSize` since that's what's signed.
-      stagingByteSize = BigInt(stagingQuads.length);
+      if (typeof options.encryptInlineChunked === 'function') {
+        ensurePublishOperationIdentity();
+        // batchId = V10 KC merkleRoot (member-side per-chunk persistence key);
+        // publishOperationId is the per-operation AEAD nonce domain.
+        await options.encryptInlineChunked({
+          plaintextNquads: plaintextBytes,
+          batchId: kcMerkleRoot,
+          publishOperationId,
+        });
+      } else {
+        // Single-blob member encryption (no chunked emitter wired): run the
+        // hook so members still receive ciphertext; discard the bytes.
+        await options.encryptInlinePayload!(plaintextBytes);
+      }
+      // The ACK wire payload for a curated CG is the PUBLIC catalog N-quads
+      // (plaintext — the catalog is public by design). Cores rebuild the
+      // catalog root from these bytes, verify == the claimed `catalogRoot`,
+      // persist them to `<cg>/_catalog`, and sign. byteSize == the catalog
+      // footprint, derived from the SAME committed leaf-set as the root.
+      if (useCuratedCatalog) {
+        stagingQuads = new TextEncoder().encode(catalogNquadsStr);
+        stagingByteSize = catalogByteSize;
+      } else {
+        // Curated CG with no catalog entry — nothing public to commit/serve.
+        // Leave staging empty; this publish carries a zero catalog commitment.
+        stagingQuads = undefined;
+        stagingByteSize = publicByteSize;
+      }
     } else {
       stagingQuads = isPublishFromSharedMemory
         ? undefined
@@ -2176,12 +2188,14 @@ export class DKGPublisher implements Publisher {
     // `lockDurationEpochs` when one is found AND the caller did not
     // explicitly override the publish lifetime. Wallets without a PCA
     // (direct-spend branch) use the ordinary default lifetime.
-    // LU-5: pricing follows the byteSize that gets signed into the V10
-    // digest. For curated (encrypted-inline) publishes that's the
-    // ciphertext byte count; for public publishes it stays as plaintext
-    // bytes. Single source of truth so ACK pricing == chain tx pricing.
-    // Resolved BEFORE the PCA coercion below so the fundability probe can
-    // price the prospective lock-lifetime publish.
+    // OT-RFC-49 / WS-D: pricing follows the byteSize that gets signed into the
+    // V10 digest. For a curated CG that's the PUBLIC `_catalog` footprint
+    // (`catalogByteSize`, flowed in via `stagingByteSize` above — derived from
+    // the SAME committed leaf-set as `catalogRoot`, so byteSize and the
+    // commitment cannot desync across fundability, tokenAmount, ACK digest, and
+    // chain byteSize); for public CGs it stays plaintext bytes. Single source
+    // of truth so ACK pricing == chain tx pricing. Resolved BEFORE the PCA
+    // coercion below so the fundability probe can price the lock-lifetime publish.
     const effectiveByteSize = useEncryptedInline ? stagingByteSize : publicByteSize;
     let publishEpochs = explicitPublishEpochs ?? DEFAULT_PUBLISH_EPOCHS;
     if (
@@ -2346,17 +2360,20 @@ export class DKGPublisher implements Publisher {
       onPhase?.('collect_v10_acks', 'start');
       try {
         const rootEntities = manifestEntries.map(m => m.rootEntity);
-        // LU-5: for curated CGs the publisher pays / signs against the
-        // ciphertext byte size (`effectiveByteSize`). For public CGs
-        // nothing changed — `effectiveByteSize === publicByteSize`.
+        // OT-RFC-49 / WS-D: for curated CGs the publisher pays / signs against
+        // the catalog footprint (`effectiveByteSize` == `catalogByteSize`) and
+        // the curated commitment is `catalogCommitment`. For public CGs nothing
+        // changed — `effectiveByteSize === publicByteSize` and no catalog.
         v10ACKs = await v10ACKProvider(
           kcMerkleRoot, v10CgDomain, kaCount, rootEntities,
           effectiveByteSize, stagingQuads,
           publishEpochs, precomputedTokenAmount,
           swmGraphId, options.subGraphName,
           kcMerkleLeafCount,
-          useEncryptedInline,
-          chunkedCommitment,
+          useCuratedCatalog,
+          catalogCommitment
+            ? { catalogRoot: catalogCommitment.root, catalogLeafCount: catalogCommitment.leafCount }
+            : undefined,
         );
         // PR5 ACK-provenance summary — one line per publish that names
         // every ACKing core and the LU-6 Phase B discovery path that
@@ -2693,7 +2710,7 @@ export class DKGPublisher implements Publisher {
         signStarted = false;
         onPhase?.('chain:submit', 'start');
         submitStarted = true;
-        this.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, byteSize=${effectiveByteSize}${useEncryptedInline ? ' [ciphertext]' : ''}, tokenAmount=${tokenAmount})`);
+        this.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, byteSize=${effectiveByteSize}${useCuratedCatalog ? ' [catalog]' : ''}, tokenAmount=${tokenAmount})`);
 
         if (!v10ACKs || v10ACKs.length === 0) {
           throw new Error('V10 ACKs required for on-chain publish — no ACKs collected');
@@ -2812,40 +2829,28 @@ export class DKGPublisher implements Publisher {
           (options as PublishOptions).reservedKaId ?? options.precomputedAttestation?.reservedKaId,
         );
         try {
-          // OT-RFC-38 LU-11 / OT-RFC-39 — handshake hardening.
-          // When the publisher ran the chunked emit path, the chain
-          // submit MUST carry the same `(ciphertextChunksRoot,
-          // ciphertextChunkCount)` pair that was signed into the V2
-          // ACK digest. Anything else (e.g. silently submitting
-          // `bytes32(0)` / `0` on a curated KC) would leave the
-          // on-chain commitment empty — RFC-39 random sampling would
-          // then skip the KC because `_isCGEligible` filters zero-
-          // commitment curated CGs out of the picker. Fail loud
-          // here so the bug surfaces at the publisher instead of as
-          // missing reward proofs days later.
-          if (useChunkedInline) {
+          // OT-RFC-49 / WS-D — handshake hardening. When the publisher ran the
+          // curated catalog path, the chain submit MUST carry the same
+          // `(catalogRoot, catalogLeafCount)` pair that was signed into the ACK
+          // digest. Anything else (e.g. silently submitting `bytes32(0)` / `0`
+          // on a curated KC) would leave the on-chain catalog commitment empty
+          // — RFC-39 random sampling would then skip the KC because the picker
+          // filters zero-commitment curated CGs out of the curated draw, and
+          // curated proving would be inert. Fail loud here so the bug surfaces
+          // at the publisher instead of as missing reward proofs days later.
+          if (useCuratedCatalog) {
             if (
-              !chunkedCommitment
-              || chunkedCommitment.ciphertextChunksRoot.length !== 32
-              || chunkedCommitment.ciphertextChunkCount <= 0
+              !catalogCommitment
+              || catalogCommitment.root.length !== 32
+              || catalogCommitment.leafCount <= 0
+              || catalogCommitment.root.every((b) => b === 0)
             ) {
               throw new Error(
-                `LU-11: dkg-publisher refused to submit chunked publish with empty commitment ` +
-                `(root=${chunkedCommitment?.ciphertextChunksRoot.length ?? 0} bytes, ` +
-                `count=${chunkedCommitment?.ciphertextChunkCount ?? 0}). ` +
-                `Either the chunked emitter returned no chunks (publisher bug — see ` +
-                `_resolveEncryptInlineChunked) or the commitment was lost between encrypt ` +
-                `and submit (threading bug — chunkedCommitment is intentionally optional ` +
-                `on the chain adapter so non-chunked callers stay unchanged).`,
-              );
-            }
-            const zeroRoot = chunkedCommitment.ciphertextChunksRoot
-              .every((b) => b === 0);
-            if (zeroRoot) {
-              throw new Error(
-                `LU-11: dkg-publisher refused to submit chunked publish with zero ciphertextChunksRoot — ` +
-                `treat as a programmer error in the chunked emitter; the root MUST be the keccak256 ` +
-                `Merkle root over per-chunk leaves, never bytes32(0).`,
+                `OT-RFC-49: dkg-publisher refused to submit a curated publish with an empty ` +
+                `catalog commitment (root=${catalogCommitment?.root.length ?? 0} bytes, ` +
+                `count=${catalogCommitment?.leafCount ?? 0}). The catalog root MUST be the V10 ` +
+                `Merkle root over the committed catalog leaf-set, never bytes32(0) — without it ` +
+                `the prover cannot prove the curated CG and random sampling skips the KC.`,
               );
             }
           }
@@ -2857,8 +2862,8 @@ export class DKGPublisher implements Publisher {
             merkleRoot: kcMerkleRoot,
             knowledgeAssetsAmount: kaCount,
             byteSize: effectiveByteSize,
-            ciphertextChunksRoot: chunkedCommitment?.ciphertextChunksRoot,
-            ciphertextChunkCount: chunkedCommitment?.ciphertextChunkCount,
+            catalogRoot: catalogCommitment?.root,
+            catalogLeafCount: catalogCommitment?.leafCount,
             // PCA strict-equality: must match the value committed to the
             // ACK digest produced by the ACK collector
             // (`packages/publisher/src/ack-collector.ts:159` invokes

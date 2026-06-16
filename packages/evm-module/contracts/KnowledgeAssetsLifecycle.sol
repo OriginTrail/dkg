@@ -106,6 +106,14 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
     // 10.0.3 → 10.0.4: curated publishes and paid legacy curated updates
     // must carry a ciphertext commitment before entering value-weighted
     // random-sampling state.
+    // 10.0.5 → 10.1.0: OT-RFC-49 "hosting follows access" — the curated
+    // random-sampling commitment is the PUBLIC `_catalog` root, not the
+    // private ciphertext root (cores hold zero private bytes). PublishParams /
+    // UpdateParams ciphertext fields become `catalogRoot`/`catalogLeafCount`
+    // (same byte widths); the three commitment errors are renamed; the publish
+    // and update ACK preimages prepend `ACK_DIGEST_VERSION` (Trap 3 — raw
+    // abi.encodePacked, NOT the EIP-712 domain). Minor bump: new sampling
+    // semantics, but no inherited-slot growth in this contract.
     // 10.0.4 → 10.0.5: audit fix — the conviction (PCA discount) branch in
     // `publish`/`update` now FALLS THROUGH to direct spend instead of
     // reverting when `coverPublishingCost` fails for a payment reason
@@ -122,7 +130,18 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
     // out of the staker-bound net). Patch-level on purpose — the EIP-712
     // author-attestation domain version (`_EIP712_VERSION_HASH`) MUST stay
     // pinned at "2.0.0" so previously signed attestations keep verifying.
-    string private constant _VERSION = "10.0.5";
+    string private constant _VERSION = "10.1.0";
+
+    /// @notice OT-RFC-49 / WS-B Trap 3: domain-separation version prepended to the
+    ///         RAW publish/update ACK preimage (`abi.encodePacked`, later wrapped by
+    ///         `toEthSignedMessageHash` — this is NOT the EIP-712 author-attestation
+    ///         domain, which keys on `_EIP712_VERSION_HASH`). Bumping this makes an
+    ///         ACK signed under one field-set unusable against another, closing the
+    ///         cross-attest replay window across the ciphertext→catalog cutover.
+    ///         Off-chain ACK signers (`packages/core/src/crypto/ack.ts`) MUST prepend
+    ///         the SAME value as the first 32-byte member or every publish/update
+    ///         ACK fails `SignerIsNotNodeOperator`.
+    uint256 public constant ACK_DIGEST_VERSION = 1;
 
     // --- V10 publish input (grouped to bypass the 16-arg stack limit) ---
 
@@ -153,22 +172,24 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
         /// @notice V10 flat-KC Merkle leaf count (sorted + deduped), must match
         ///         off-chain `V10MerkleTree` built from the same publish payload.
         uint32 merkleLeafCount;
-        // ── RFC-39 Phase A.5: curated-CG ciphertext commitment ──
-        /// @notice RFC-39: Merkle root over `[keccak256(ct_i)]` in
-        ///         `swmMessageIndex` order for this publish batch's ciphertext
-        ///         chunks (one chunk per SWM message — LU-11 Option B).
-        ///         MUST be `bytes32(0)` for public CGs (rejected with
-        ///         `PublicCGCannotHaveCiphertextCommitment`). For curated CGs,
-        ///         MUST be non-zero AND paired with a non-zero
-        ///         `ciphertextChunkCount`; otherwise the publish reverts with
-        ///         `CuratedCGRequiresCiphertextCommitment`. Partial
-        ///         commitments (one zero, one non-zero) revert with
-        ///         `IncompleteCiphertextCommitment`.
-        bytes32 ciphertextChunksRoot;
-        /// @notice RFC-39: number of ciphertext chunks in this batch (==
-        ///         curated leaf count for random sampling). Same zero-or-paired
-        ///         constraints as `ciphertextChunksRoot`.
-        uint32 ciphertextChunkCount;
+        // ── OT-RFC-49 / WS-B: curated-CG PUBLIC `_catalog` commitment ──
+        /// @notice OT-RFC-49: Merkle root over the public `_catalog` leaves of this
+        ///         publish (a dedicated `V10MerkleTree` over the catalog quads only —
+        ///         `computeCatalogRoot`). This replaces the stripped ciphertext
+        ///         commitment: cores hold zero private bytes and prove the public
+        ///         catalog instead. MUST be `bytes32(0)` for public CGs (rejected
+        ///         with `PublicCGCannotHaveCatalogCommitment` — a public CG already
+        ///         commits its full set in `merkleRoot`). For curated CGs, MUST be
+        ///         non-zero AND paired with a non-zero `catalogLeafCount`; otherwise
+        ///         the publish reverts with `CuratedCGRequiresCatalogCommitment`.
+        ///         Partial commitments (one zero, one non-zero) revert with
+        ///         `IncompleteCatalogCommitment`.
+        bytes32 catalogRoot;
+        /// @notice OT-RFC-49: post sort+dedupe leaf count of the catalog tree
+        ///         (== off-chain `V10MerkleTree.leafCount`, the curated random-
+        ///         sampling draw modulus). Same zero-or-paired constraints as
+        ///         `catalogRoot`.
+        uint32 catalogLeafCount;
         /// @notice Self-claimed attribution: the core that gets publishing-factor
         ///         credit. `0` means "no attribution claimed". No on-chain
         ///         consent gate — see RFC-001 §3.6.
@@ -227,22 +248,16 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
         uint72[] identityIds;
         bytes32[] r;
         bytes32[] vs;
-        // Codex PR #630 R1 #2 — RFC-39 Phase A.5 commitment refresh.
-        // Update must rotate the ciphertext commitment in lockstep
-        // with the new merkle root; without these fields curated KCs
-        // left their commitment frozen to the initial publish and the
-        // random-sampling challenge surface would point at stale
-        // ciphertext after the first update. Same zero-or-paired
-        // contract as `PublishParams`: zero for public-CG updates or
-        // metadata-only legacy curated KCs without prior commitment;
-        // both non-zero for curated commitment rotation or paid
-        // legacy-curated growth. Appended at the END of the struct so the
-        // positional ABI for pre-existing 12-field callers stays
-        // intact — they encode the same prefix and ABI decoder
-        // zero-fills the trailing pair (Codex PR #630 R1 #1 on
-        // `PublishParams`, applied prospectively here).
-        bytes32 newCiphertextChunksRoot;
-        uint32 newCiphertextChunkCount;
+        // OT-RFC-49 / WS-B — catalog-commitment refresh. An update must rotate the
+        // PUBLIC `_catalog` commitment in lockstep with the new merkle root; without
+        // these fields a curated KC would leave its commitment frozen to the initial
+        // publish and the random-sampling challenge surface would point at a stale
+        // catalog after the first update. Same zero-or-paired contract as
+        // `PublishParams`: zero for public-CG updates; both non-zero for curated
+        // commitment rotation. Same byte widths as the prior ciphertext pair so the
+        // positional calldata shape is unchanged.
+        bytes32 newCatalogRoot;
+        uint32 newCatalogLeafCount;
         // Greenfield: KA owner attestation (binds kaId + new merkle root).
         address authorAddress;
         bytes32 authorR;
@@ -279,28 +294,30 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
     error ZeroContextGraphId();
     error ZeroEpochs();
 
-    // --- RFC-39 ciphertext-commitment errors ---
+    // --- OT-RFC-49 catalog-commitment errors ---
 
-    /// @dev RFC-39 Phase A.5: a public-CG publish carried a non-zero ciphertext
-    ///      commitment field. Catches client bugs early (a curated-only field
-    ///      leaking into a public publish would silently bloat storage and
-    ///      mislead off-chain indexers about which KCs are sampleable).
-    error PublicCGCannotHaveCiphertextCommitment(uint256 contextGraphId);
+    /// @dev OT-RFC-49: a public-CG publish carried a non-zero catalog commitment
+    ///      field. Public CGs already commit their full set in `merkleRoot`, so a
+    ///      separate catalog commitment is meaningless — catches client bugs early
+    ///      (a curated-only field leaking into a public publish would mislead
+    ///      off-chain indexers about which KCs are sampleable).
+    error PublicCGCannotHaveCatalogCommitment(uint256 contextGraphId);
 
-    /// @dev A curated-CG publish or paid update attempted to introduce
-    ///      sampling value without a full ciphertext commitment. Curated KCs
-    ///      without commitments are unchallengeable by design, so KAV10 must
-    ///      not let them enter the value-weighted challenge surface.
-    error CuratedCGRequiresCiphertextCommitment(uint256 contextGraphId);
+    /// @dev A curated-CG publish or paid update attempted to introduce sampling
+    ///      value without a full PUBLIC `_catalog` commitment. Post-RFC-49 cores
+    ///      prove the catalog, not the ciphertext, so a curated KC without a catalog
+    ///      commitment is unchallengeable by design — KAV10 must not let it enter
+    ///      the value-weighted challenge surface.
+    error CuratedCGRequiresCatalogCommitment(uint256 contextGraphId);
 
-    /// @dev RFC-39 Phase A.5: a curated-CG publish carried a partial ciphertext
-    ///      commitment (root without count, or vice versa). The two are
-    ///      meaningful only as a pair — committing a root without a count
-    ///      would zero-divide the picker; committing a count without a root
-    ///      would verify the proof against the empty-tree zero. KCS would
-    ///      reject the partial state anyway via its own `require`; KAV10's
-    ///      explicit error gives the caller a more diagnostic revert.
-    error IncompleteCiphertextCommitment();
+    /// @dev OT-RFC-49: a curated-CG publish carried a partial catalog commitment
+    ///      (root without count, or vice versa). The two are meaningful only as a
+    ///      pair — committing a root without a count would zero-divide the picker;
+    ///      committing a count without a root would verify the proof against the
+    ///      empty-tree zero. KCS would reject the partial state anyway via its own
+    ///      `require`; KAV10's explicit error gives the caller a more diagnostic
+    ///      revert.
+    error IncompleteCatalogCommitment();
 
     // --- RFC-001 author attestation errors ---
 
@@ -640,9 +657,20 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
         // Field set per PRD (V10 protocol core §9 "Publish Flow — Contract
         // Verification") and decision #25 Option B, extended with V10 flat-KC
         // Merkle metadata:
-        //   (chainid, address(this), contextGraphId, merkleRoot,
+        //   (ACK_DIGEST_VERSION, chainid, address(this), contextGraphId, merkleRoot,
         //    knowledgeAssetsAmount, byteSize, epochs, tokenAmount, merkleLeafCount,
-        //    ciphertextChunksRoot, ciphertextChunkCount, isImmutable)
+        //    catalogRoot, catalogLeafCount, isImmutable)
+        //
+        // OT-RFC-49 / WS-B Trap 3 (ACK cross-attest): `ACK_DIGEST_VERSION` is
+        // prepended as the FIRST packed member of the RAW `abi.encodePacked`
+        // preimage (this is what `toEthSignedMessageHash` then wraps — it is NOT
+        // EIP-712, so the `_EIP712_VERSION_HASH` domain bump does NOT cover this
+        // surface). Domain-separating the preimage by version makes an ACK signed
+        // for the OLD ciphertext field-set unusable against the NEW catalog
+        // field-set (and vice versa), closing the cross-attest replay window across
+        // the strip cutover. `catalogRoot`/`catalogLeafCount` replace the stripped
+        // `ciphertextChunksRoot`/`ciphertextChunkCount` at positions 10/11.
+        //
         // The publisher node identity is NOT part of the ACK digest — it lives
         // only in the publisher digest above. ACK signers attest to the
         // publication's economic + content shape; the publishing node is a
@@ -650,6 +678,7 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
         // off-chain spec-conformant signers.
         bytes32 ackDigest = keccak256(
             abi.encodePacked(
+                ACK_DIGEST_VERSION,
                 block.chainid,
                 address(this),
                 p.contextGraphId,
@@ -659,8 +688,8 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
                 uint256(p.epochs),
                 uint256(p.tokenAmount),
                 uint256(p.merkleLeafCount),
-                p.ciphertextChunksRoot,
-                uint256(p.ciphertextChunkCount),
+                p.catalogRoot,
+                uint256(p.catalogLeafCount),
                 p.isImmutable ? uint256(1) : uint256(0)
             )
         );
@@ -679,37 +708,37 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
         // the caller. Fail fast here with a KAV10-local diagnostic.
         if (p.epochs == 0) revert ZeroEpochs();
 
-        // RFC-39 Phase A.5: validate the curated ciphertext-commitment shape
-        // BEFORE any state mutation, so a mistyped client can't half-write a
-        // KC.
+        // OT-RFC-49 / WS-B: validate the curated PUBLIC `_catalog` commitment shape
+        // BEFORE any state mutation, so a mistyped client can't half-write a KC.
         //
         // Semantics:
-        //   - Public CG + any non-zero ciphertext field → revert
-        //     (catches client bugs; curated-only payload leaking to public).
+        //   - Public CG + any non-zero catalog field → revert
+        //     (catches client bugs; curated-only payload leaking to public — a
+        //     public CG already commits its full set in `merkleRoot`).
         //   - Curated CG + both fields non-zero → commitment
-        //     persisted; KC participates in curated draw.
+        //     persisted; KC participates in curated draw against its catalog.
         //   - Curated CG + both fields zero → revert
-        //     (unchallengeable encrypted KC must not enter value-weighted
-        //     sampling state).
+        //     (a curated KC with no catalog commitment is unprovable post-strip and
+        //     must not enter value-weighted sampling state).
         //   - Curated CG + exactly one field zero → revert
         //     (partial commitment would zero-divide the picker or verify
         //     against the empty-tree zero).
         //
-        // The cached `_hasCiphertextCommitment` carries the populate decision
+        // The cached `_hasCatalogCommitment` carries the populate decision
         // forward to the post-create persistence call below — avoids a
         // second pair of zero-checks that already gated this branch.
         bool _isCurated = contextGraphStorage.getIsCurated(p.contextGraphId);
-        bool _hasCiphertextCommitment =
-            p.ciphertextChunksRoot != bytes32(0) || p.ciphertextChunkCount != 0;
+        bool _hasCatalogCommitment =
+            p.catalogRoot != bytes32(0) || p.catalogLeafCount != 0;
         if (_isCurated) {
-            if (!_hasCiphertextCommitment) {
-                revert CuratedCGRequiresCiphertextCommitment(p.contextGraphId);
+            if (!_hasCatalogCommitment) {
+                revert CuratedCGRequiresCatalogCommitment(p.contextGraphId);
             }
-            if (p.ciphertextChunksRoot == bytes32(0) || p.ciphertextChunkCount == 0) {
-                revert IncompleteCiphertextCommitment();
+            if (p.catalogRoot == bytes32(0) || p.catalogLeafCount == 0) {
+                revert IncompleteCatalogCommitment();
             }
-        } else if (_hasCiphertextCommitment) {
-            revert PublicCGCannotHaveCiphertextCommitment(p.contextGraphId);
+        } else if (_hasCatalogCommitment) {
+            revert PublicCGCannotHaveCatalogCommitment(p.contextGraphId);
         }
 
         // H7: SafeCast guards the uint96 cast in _validateTokenAmount.
@@ -759,17 +788,16 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
             p.merkleLeafCount
         );
 
-        // --- 3b. RFC-39 Phase A.5: persist the curated ciphertext commitment ---
+        // --- 3b. OT-RFC-49 / WS-B: persist the curated PUBLIC `_catalog` commitment ---
         //
         // Only fires when the upfront validation above set
-        // `_hasCiphertextCommitment = true` (curated CG, both fields non-zero).
-        // Public CGs, legacy curated CGs publishing without LU-11 substrate,
-        // and partial-commitment attempts have already returned or reverted
-        // above — this branch is the "full commitment" path. KCS's
-        // `setCiphertextChunksCommitment` re-asserts the non-zero invariants
-        // as a defensive crosscheck against contract-pair drift.
-        if (_hasCiphertextCommitment) {
-            kcs.setCiphertextChunksCommitment(kaId, p.ciphertextChunksRoot, p.ciphertextChunkCount);
+        // `_hasCatalogCommitment = true` (curated CG, both fields non-zero).
+        // Public CGs and partial-commitment attempts have already returned or
+        // reverted above — this branch is the "full commitment" path. KCS's
+        // `setCatalogCommitment` re-asserts the non-zero invariants as a defensive
+        // crosscheck against contract-pair drift.
+        if (_hasCatalogCommitment) {
+            kcs.setCatalogCommitment(kaId, p.catalogRoot, p.catalogLeafCount);
         }
 
         // --- 4. N20: atomic CG↔KC binding + CG value diff ---
@@ -1409,8 +1437,11 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
         // comment); the update ACK mirrors the same separation and adds the
         // update-specific fields (`id`, pre-update merkle-root count, mint
         // amount, burn list hash).
+        // OT-RFC-49 / WS-B Trap 3: same `ACK_DIGEST_VERSION` prefix + catalog
+        // members as the publish ACK preimage (see `_executePublishCore`).
         bytes32 ackDigest = keccak256(
             abi.encodePacked(
+                ACK_DIGEST_VERSION,
                 block.chainid,
                 address(this),
                 contextGraphId,
@@ -1422,8 +1453,8 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
                 p.mintKnowledgeAssetsAmount,
                 keccak256(abi.encodePacked(p.knowledgeAssetsToBurn)),
                 uint256(p.newMerkleLeafCount),
-                p.newCiphertextChunksRoot,
-                uint256(p.newCiphertextChunkCount)
+                p.newCatalogRoot,
+                uint256(p.newCatalogLeafCount)
             )
         );
         _verifySignatures(p.identityIds, ECDSA.toEthSignedMessageHash(ackDigest), p.r, p.vs);
@@ -1514,61 +1545,53 @@ contract KnowledgeAssetsLifecycle is INamed, IVersioned, ContractStatus, IInitia
             p.newMerkleLeafCount
         );
 
-        // --- 6b. RFC-39 Phase A.5: refresh the curated ciphertext commitment ---
+        // --- 6b. OT-RFC-49 / WS-B: refresh the curated PUBLIC `_catalog` commitment ---
         //
-        // Codex PR #630 R1 #2 — without this, curated KCs kept the
-        // publish-time commitment forever and `RandomSampling`'s
-        // curated-proof check (which reads
-        // `getLatestCiphertextChunksRoot/Count`) would verify against
-        // stale ciphertext after the first update. Mirrors the same
-        // validation contract as the publish branch:
-        //   - Public CG + any non-zero ciphertext field → revert.
-        //   - Curated CG + KC has a prior commitment + zero pair → revert
-        //     (Codex PR #630 R2 #1307). Previously a zero-pair on an
-        //     already-committed curated KC silently fell through as a
-        //     "metadata-only" update and left the OLD ciphertext
-        //     commitment in storage. With the plaintext merkle root +
-        //     leaf count rotated to the new batch, `RandomSampling`'s
-        //     curated-proof check would then verify against stale
-        //     ciphertext that no longer corresponds to the published
-        //     leaves — sampling proofs against the post-update KC are
-        //     unprovable. Once a KC has been committed, every
-        //     subsequent update MUST rotate the commitment in lockstep
-        //     with the plaintext one.
+        // Without this, a curated KC would keep its publish-time catalog
+        // commitment forever and `RandomSampling`'s curated-proof check (which now
+        // reads the PINNED `challengeRoot`/`challengeLeafCount` snapshotted from
+        // `getCatalogRoot/Count`) would verify against a stale catalog after the
+        // first update. Same validation contract as the publish branch:
+        //   - Public CG + any non-zero catalog field → revert.
+        //   - Curated CG + KC has a prior commitment + zero pair → revert. A
+        //     zero-pair on an already-committed curated KC would strand the OLD
+        //     catalog commitment while the merkle root + leaf count rotate to the
+        //     new batch, so a future challenge would target a catalog the published
+        //     set no longer matches. Once committed, every update MUST rotate the
+        //     catalog commitment in lockstep with the plaintext one.
         //   - Curated CG + KC has no prior commitment + zero pair + delta 0
-        //     → no-op (legacy / pre-LU-11 metadata maintenance; picker still
-        //     skips this KC in the curated draw until the first commitment
-        //     lands).
+        //     → no-op (unreachable for KCs published post-RFC-49 — those always
+        //     carry a catalog commitment from publish; kept for legacy KCs that
+        //     have not yet re-published).
         //   - Curated CG + KC has no prior commitment + zero pair + delta > 0
         //     → revert. Value growth would otherwise add weight for a KC that
-        //     cannot satisfy a ciphertext proof when sampled.
-        //   - Curated CG + both fields non-zero → commitment rotated
-        //     (or set for the first time).
+        //     cannot satisfy a catalog proof when sampled.
+        //   - Curated CG + both fields non-zero → commitment rotated (or set).
         //   - Curated CG + exactly one field zero → revert
-        //     IncompleteCiphertextCommitment (partial commitment would
-        //     zero-divide the picker).
-        //   - Public CG + any non-zero ciphertext field → revert
-        //     PublicCGCannotHaveCiphertextCommitment.
+        //     IncompleteCatalogCommitment (partial commitment would zero-divide
+        //     the picker).
+        //   - Public CG + any non-zero catalog field → revert
+        //     PublicCGCannotHaveCatalogCommitment.
         bool _isCurated = contextGraphStorage.getIsCurated(contextGraphId);
-        bool _hasNewCiphertextCommitment =
-            p.newCiphertextChunksRoot != bytes32(0) || p.newCiphertextChunkCount != 0;
+        bool _hasNewCatalogCommitment =
+            p.newCatalogRoot != bytes32(0) || p.newCatalogLeafCount != 0;
         if (_isCurated) {
-            if (_hasNewCiphertextCommitment) {
-                if (p.newCiphertextChunksRoot == bytes32(0) || p.newCiphertextChunkCount == 0) {
-                    revert IncompleteCiphertextCommitment();
+            if (_hasNewCatalogCommitment) {
+                if (p.newCatalogRoot == bytes32(0) || p.newCatalogLeafCount == 0) {
+                    revert IncompleteCatalogCommitment();
                 }
-                kcs.setCiphertextChunksCommitment(p.id, p.newCiphertextChunksRoot, p.newCiphertextChunkCount);
-            } else if (kcs.getLatestCiphertextChunksRoot(p.id) != bytes32(0)) {
+                kcs.setCatalogCommitment(p.id, p.newCatalogRoot, p.newCatalogLeafCount);
+            } else if (kcs.getCatalogRoot(p.id) != bytes32(0)) {
                 // KC was previously committed; a zero-pair update would
                 // strand the stale commitment.
-                revert IncompleteCiphertextCommitment();
+                revert IncompleteCatalogCommitment();
             } else if (deltaTokenAmount > 0) {
-                revert CuratedCGRequiresCiphertextCommitment(contextGraphId);
+                revert CuratedCGRequiresCatalogCommitment(contextGraphId);
             }
-            // else: legacy / pre-LU-11 curated KC, no commitment yet —
+            // else: legacy curated KC not yet re-published, no commitment yet —
             // zero-pair metadata-only update is permitted.
-        } else if (_hasNewCiphertextCommitment) {
-            revert PublicCGCannotHaveCiphertextCommitment(contextGraphId);
+        } else if (_hasNewCatalogCommitment) {
+            revert PublicCGCannotHaveCatalogCommitment(contextGraphId);
         }
 
         // --- 7. CG value delta + per-node produced-value bookkeeping ---

@@ -479,20 +479,21 @@ export interface V10PublishParams {
    */
   reservedKaId?: bigint;
   /**
-   * RFC-39 Phase A.5 — OPTIONAL Merkle root over `[keccak256(ct_i)]` in
-   * `swmMessageIndex` order for this batch's ciphertext chunks. Required
-   * by the contract to be `bytes32(0)` for public CGs; for curated CGs
-   * either zero (legacy/transitional — picker skips this KC in the
-   * curated draw) OR paired with a non-zero `ciphertextChunkCount`.
-   * Defaults to `bytes32(0)` when omitted.
+   * OT-RFC-49 — OPTIONAL V10 Merkle root over the curated PUBLIC `_catalog`
+   * triples (each leaf `hashTripleV10(s,p,o)`; see `computeCatalogRoot`).
+   * This is the curated random-sampling commitment that REPLACED the stripped
+   * ciphertext commitment (same on-chain struct slot / byte width). Required
+   * by the contract to be `bytes32(0)` for public CGs; for curated CGs either
+   * zero (legacy/transitional — picker skips this KC in the curated draw) OR
+   * paired with a non-zero `catalogLeafCount`. Defaults to `bytes32(0)`.
    */
-  ciphertextChunksRoot?: Uint8Array;
+  catalogRoot?: Uint8Array;
   /**
-   * RFC-39 Phase A.5 — OPTIONAL number of ciphertext chunks in this
-   * batch (== curated leaf count for random sampling). Same zero-or-paired
-   * constraints as `ciphertextChunksRoot`. Defaults to `0` when omitted.
+   * OT-RFC-49 — OPTIONAL post sort+dedupe catalog leaf count (== the curated
+   * `chunkId` draw modulus for random sampling). Same zero-or-paired
+   * constraints as `catalogRoot`. Defaults to `0` when omitted.
    */
-  ciphertextChunkCount?: number;
+  catalogLeafCount?: number;
   /**
    * Write-ahead hook invoked by the adapter *immediately before the
    * concrete publish tx is broadcast* — i.e. after `approve()` and any
@@ -560,19 +561,18 @@ export interface V10UpdateKAParams {
   publisherNodeIdentityId?: bigint;
   ackSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
   /**
-   * RFC-39 Phase A.5 — OPTIONAL refreshed Merkle root over the new
-   * batch's ciphertext chunks. Same zero-or-paired contract as
-   * {@link V10PublishParams.ciphertextChunksRoot}: zero on metadata-only
-   * updates and public CGs; both non-zero on curated commitment
-   * rotation. Defaults to `bytes32(0)`.
+   * OT-RFC-49 — OPTIONAL refreshed V10 Merkle root over the new batch's
+   * curated `_catalog` triples. Same zero-or-paired contract as
+   * {@link V10PublishParams.catalogRoot}: zero on metadata-only updates and
+   * public CGs; both non-zero on curated commitment rotation. Defaults to
+   * `bytes32(0)`.
    */
-  newCiphertextChunksRoot?: Uint8Array;
+  newCatalogRoot?: Uint8Array;
   /**
-   * RFC-39 Phase A.5 — OPTIONAL refreshed ciphertext chunk count for the
-   * new batch. Defaults to `0`. Paired with
-   * {@link newCiphertextChunksRoot}.
+   * OT-RFC-49 — OPTIONAL refreshed catalog leaf count for the new batch.
+   * Defaults to `0`. Paired with {@link newCatalogRoot}.
    */
-  newCiphertextChunkCount?: number;
+  newCatalogLeafCount?: number;
   /**
    * Write-ahead hook fired just before the concrete update tx is
    * broadcast, carrying the signed tx hash. See
@@ -607,6 +607,26 @@ export interface NodeChallenge {
   activeProofPeriodStartBlock: bigint;
   proofingPeriodDurationInBlocks: bigint;
   solved: boolean;
+  /**
+   * OT-RFC-43 / R3 — curation branch PINNED at issuance. `true` selects the
+   * curated proof path (prove the public `_catalog`); `false` the public flat-KC
+   * path. Sourced from the challenge, not a live `getAccessPolicy` probe.
+   */
+  isCurated: boolean;
+  /**
+   * OT-RFC-49 / WS-B Trap 1 — leaf count PINNED at issuance (== on-chain
+   * `getCatalogLeafCount`/`getMerkleLeafCount` at draw time). This is the
+   * `chunkId` index space the prover must build its proof against; reading it
+   * live would diverge if the KA updated mid-period.
+   */
+  challengeLeafCount: bigint;
+  /**
+   * OT-RFC-49 / WS-B Trap 1 — the 32-byte Merkle root PINNED at issuance. The
+   * prover MUST rebuild a tree whose root equals THIS value (not a live
+   * `getCatalogRoot`/`getLatestMerkleRoot`), else a mid-period update makes an
+   * honest proof fail. `submitProof` verifies against this same pinned root.
+   */
+  challengeRoot: Uint8Array;
 }
 
 /** Result of `getActiveProofPeriodStatus()` (V10 RandomSampling.sol). */
@@ -1241,36 +1261,36 @@ export interface ChainAdapter {
   getMerkleLeafCount?(kaId: bigint): Promise<number>;
 
   /**
-   * OT-RFC-38 LU-11 / OT-RFC-39 — latest on-chain ciphertext-chunks
-   * Merkle root for `kaId`. Read from
-   * `KnowledgeCollectionStorage.getLatestCiphertextChunksRoot(uint256)`.
+   * OT-RFC-49 — on-chain curated `_catalog` Merkle root for `kaId`. Read
+   * from `DKGKnowledgeAssets.getCatalogRoot(uint256)`. This REPLACED the
+   * stripped `getLatestCiphertextChunksRoot` reader (same on-chain slot).
    *
-   * Returns 32 raw bytes. Returns `bytes32(0)` (all-zero) when the KC
-   * has no chunked-ciphertext commitment set — either because it is
-   * a public KC (legacy V10 plaintext path) or because it is a
-   * pre-LU-11 transitional curated KC that predates the chunked
-   * substrate. RFC-39 random-sampling treats both as unsampleable
-   * via the picker's per-KC commitment check.
+   * Returns 32 raw bytes. Returns `bytes32(0)` (all-zero) when the KC has
+   * no catalog commitment set — either because it is a public KC (legacy
+   * V10 plaintext path) or a transitional curated KC published before the
+   * catalog commitment existed. RFC-39 random-sampling treats both as
+   * unsampleable via the picker's per-KC commitment check. The off-chain
+   * prover rebuilds a tree whose root MUST equal this value (or the pinned
+   * `challenge.challengeRoot`, which is sourced from it at issuance).
    *
    * Optional so non-V10 / no-chain adapters can stub the surface.
    */
-  getLatestCiphertextChunksRoot?(kaId: bigint): Promise<Uint8Array>;
+  getCatalogRoot?(kaId: bigint): Promise<Uint8Array>;
 
   /**
-   * OT-RFC-38 LU-11 / OT-RFC-39 — number of ciphertext chunks
-   * committed on chain for `kaId`. Read from
-   * `KnowledgeCollectionStorage.getCiphertextChunkCount(uint256)`.
+   * OT-RFC-49 — post sort+dedupe catalog leaf count committed on chain for
+   * `kaId`. Read from `DKGKnowledgeAssets.getCatalogLeafCount(uint256)`.
+   * REPLACED the stripped `getCiphertextChunkCount` reader.
    *
-   * Returns `0` for KCs without a chunked commitment (see
-   * `getLatestCiphertextChunksRoot` for the bisection). Matches the
-   * Solidity default-zero mapping. The prover uses this as the
-   * curated counterpart of `getMerkleLeafCount` for the on-chain
-   * `chunkId = leafIndex` bounds check and for sanity-checking the
-   * local chunk-store extraction before building a proof.
+   * Returns `0` for KCs without a catalog commitment (see `getCatalogRoot`
+   * for the bisection). Matches the Solidity default-zero mapping. The
+   * prover uses this as the curated counterpart of `getMerkleLeafCount`
+   * for the on-chain `chunkId = leafIndex` bounds check and to sanity-check
+   * the local `_catalog` extraction before building a proof.
    *
    * Optional so non-V10 / no-chain adapters can stub the surface.
    */
-  getCiphertextChunkCount?(kaId: bigint): Promise<number>;
+  getCatalogLeafCount?(kaId: bigint): Promise<number>;
 
   /**
    * Address that signed the latest merkle root for `kaId` (the EOA that

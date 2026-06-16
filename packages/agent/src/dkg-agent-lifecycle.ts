@@ -2236,34 +2236,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         useWorkerThread: this.config.randomSamplingUseWorkerThread ?? true,
         tickIntervalMs: this.config.randomSamplingTickIntervalMs,
         log: this.randomSamplingLogger(ctx),
-        // OT-RFC-39 late-join sync — gives the prover an escape hatch
-        // when its tick fires on a curated KC whose ciphertext chunks
-        // never reached this core's local triple store (typically: the
-        // core was offline during the curator's publish, or joined the
-        // CG after the gossip envelopes rolled off the mesh). The hook
-        // pulls the missing chunks from authorized peers on demand via
-        // `PROTOCOL_GET_CIPHERTEXT_CHUNK` and persists them, after
-        // which the prover retries the extract exactly once. See
-        // `buildCiphertextChunkBackfill` for the discovery + fetch
-        // policy.
-        ciphertextChunkBackfill: this.buildCiphertextChunkBackfill(ctx),
-        // Codex review on PR #715 — let the prover's extractor pin
-        // the per-CG named graph instead of scanning `GRAPH ?g`. We
-        // chain `resolveLocalCgIdByOnChainId` (numeric → cleartext)
-        // then `gossipWireIdFor` (cleartext → curator nameHash, the
-        // wire form), matching what `ingestSwmCiphertextChunkEnvelope`
-        // and the V2 ACK loadChunk persist/look up under. Returns
-        // null when the local node doesn't have the CG metadata yet
-        // (chain replay still catching up); the extractor falls back
-        // to wildcard scanning for that tick, identical to pre-fix
-        // behaviour, so a missing local map degrades to "no
-        // cross-CG collision guard for this tick" rather than
-        // "extract fails outright".
-        canonicalCgIdForChunkStore: (cgId: bigint): string | null => {
-          const local = this.resolveLocalCgIdByOnChainId(cgId);
-          if (local === null) return null;
-          return this.gossipWireIdFor(local);
-        },
       });
       if (this.randomSamplingHandle && this.randomSamplingHandle !== handle) {
         try { await this.randomSamplingHandle.stop(); } catch { /* swallow bind replacement cleanup */ }

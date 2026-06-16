@@ -3,6 +3,7 @@ import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
+import type { DKGAgentConfig } from '@origintrail-official/dkg-agent';
 import {
   blueGreenSlotEntryPoint,
   blueGreenSlotReady,
@@ -664,6 +665,16 @@ export interface DkgConfig {
      */
     agentProfileHeartbeatMs?: number;
   };
+  /**
+   * OT-RFC-38 LU-6 host-mode custody config — eviction tiers, discovery-beacon
+   * rate limits, and the OT-RFC-49 WS-A `stripCiphertext` kill-switch.
+   * Forwarded through to `DKGAgentConfig.swmHostMode` by the daemon lifecycle;
+   * WITHOUT this field (and the matching forward in `lifecycle.ts`) the whole
+   * block is INERT — only the in-agent defaults apply, so an operator could not
+   * toggle `swmHostMode.stripCiphertext` (or any host-mode tunable) from
+   * config.json. (This is exactly the inert-flag bug the rung-1 strip hit.)
+   */
+  swmHostMode?: DKGAgentConfig['swmHostMode'];
 }
 
 /**

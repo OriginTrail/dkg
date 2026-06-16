@@ -79,12 +79,15 @@ export const PublishIntentSchema = new Type('PublishIntent')
   // Sent over `PROTOCOL_STORAGE_ACK_V2` so pre-LU-11 receivers never
   // see this field and stay on v1 semantics.
   .add(new Field('ackProtocolVersion', 17, 'uint32'))
-  // OT-RFC-38 LU-11: optional direct-ACK fallback carrying the already
-  // encrypted ciphertext chunks. This is additive and safe for old
-  // receivers: pre-field-18 decoders ignore it, while upgraded V2
-  // handlers still recompute and compare `ciphertextChunksRoot` before
-  // signing. Plaintext never travels here.
-  .add(new Field('ciphertextChunks', 18, 'bytes', 'repeated'));
+  // OT-RFC-49 — curated PUBLIC `_catalog` commitment the publisher claims
+  // for this curated batch. The core recomputes
+  // `computeCatalogRoot(catalogCommittedLeaves(<locally-served _catalog>))`
+  // and DECLINEs `CATALOG_ROOT_MISMATCH` if it differs; the same root lands
+  // on-chain via `KnowledgeAssetsLifecycle.PublishParams.catalogRoot` so
+  // RFC-39 random sampling and the prover verify against it. Additive
+  // fields (18/19) — empty / 32 zero bytes + 0 on public-CG traffic.
+  .add(new Field('catalogRoot', 18, 'bytes'))
+  .add(new Field('catalogLeafCount', 19, 'uint32'));
 
 type Long = { low: number; high: number; unsigned: boolean };
 
@@ -172,14 +175,20 @@ export interface PublishIntentMsg {
    */
   ackProtocolVersion?: number;
   /**
-   * OT-RFC-38 LU-11 direct-ACK fallback. Each entry is an encrypted
-   * ciphertext chunk in `swmMessageIndex` order. Cores may use these
-   * bytes only when local chunk-store lookup races SWM/gossip ingest;
-   * they MUST still recompute `ciphertextChunksRoot`, validate
-   * `ciphertextChunkCount` and `publicByteSize`, and decline on any
-   * mismatch before signing.
+   * OT-RFC-49 — the curated PUBLIC `_catalog` Merkle root the publisher
+   * claims for this batch. 32-byte V10 root over the committed catalog
+   * leaf-set (`computeCatalogRoot(catalogCommittedLeaves(...))`). The core
+   * rebuilds the same root over its locally-served `<cg>/_catalog` graph and
+   * DECLINEs `CATALOG_ROOT_MISMATCH` on disagreement; the same value is what
+   * lands on-chain. Omitted / 32 zero bytes on public-CG traffic.
    */
-  ciphertextChunks?: Uint8Array[];
+  catalogRoot?: Uint8Array;
+  /**
+   * OT-RFC-49 — post sort+dedupe count of the committed catalog leaf-set
+   * (== on-chain `getCatalogLeafCount` and the curated `chunkId` draw
+   * modulus). Defaults to `0` on public-CG traffic.
+   */
+  catalogLeafCount?: number;
 }
 
 /** Sent in `ackProtocolVersion` for LU-11 chunked ACKs. */

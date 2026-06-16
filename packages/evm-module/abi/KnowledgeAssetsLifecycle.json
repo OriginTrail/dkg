@@ -50,12 +50,12 @@
         "type": "uint256"
       }
     ],
-    "name": "CuratedCGRequiresCiphertextCommitment",
+    "name": "CuratedCGRequiresCatalogCommitment",
     "type": "error"
   },
   {
     "inputs": [],
-    "name": "IncompleteCiphertextCommitment",
+    "name": "IncompleteCatalogCommitment",
     "type": "error"
   },
   {
@@ -219,7 +219,7 @@
         "type": "uint256"
       }
     ],
-    "name": "PublicCGCannotHaveCiphertextCommitment",
+    "name": "PublicCGCannotHaveCatalogCommitment",
     "type": "error"
   },
   {
@@ -390,6 +390,19 @@
     "inputs": [],
     "name": "ZeroEpochs",
     "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ACK_DIGEST_VERSION",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
   },
   {
     "inputs": [],
@@ -628,12 +641,12 @@
           },
           {
             "internalType": "bytes32",
-            "name": "ciphertextChunksRoot",
+            "name": "catalogRoot",
             "type": "bytes32"
           },
           {
             "internalType": "uint32",
-            "name": "ciphertextChunkCount",
+            "name": "catalogLeafCount",
             "type": "uint32"
           },
           {
@@ -829,12 +842,12 @@
           },
           {
             "internalType": "bytes32",
-            "name": "newCiphertextChunksRoot",
+            "name": "newCatalogRoot",
             "type": "bytes32"
           },
           {
             "internalType": "uint32",
-            "name": "newCiphertextChunkCount",
+            "name": "newCatalogLeafCount",
             "type": "uint32"
           },
           {

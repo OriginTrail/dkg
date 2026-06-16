@@ -82,8 +82,21 @@ export const STORAGE_ACK_DECLINE_CODES = {
    * present locally but the recomputed `ciphertextChunksRoot` does
    * not match the publisher's claim. Permanent (a content-integrity
    * lie); the publisher MUST republish with a corrected commitment.
+   *
+   * @deprecated OT-RFC-49 stripped the ciphertext-chunk ACK path; the
+   * curated ACK now uses {@link CATALOG_ROOT_MISMATCH}. Kept for wire
+   * stability so a mixed-version publisher still decodes the string.
    */
   CIPHERTEXT_ROOT_MISMATCH: 'CIPHERTEXT_ROOT_MISMATCH',
+  /**
+   * OT-RFC-49 / WS-D — curated ACK: the core rebuilt the catalog root
+   * over the publisher's inline catalog `stagingQuads` (via
+   * `computeCatalogRoot(catalogCommittedLeaves(...))`) and it does NOT
+   * match the publisher's claimed `catalogRoot`/`catalogLeafCount`.
+   * Permanent (a content-integrity lie); the publisher MUST republish
+   * with a corrected commitment.
+   */
+  CATALOG_ROOT_MISMATCH: 'CATALOG_ROOT_MISMATCH',
 } as const;
 
 export type StorageACKDeclineCode =

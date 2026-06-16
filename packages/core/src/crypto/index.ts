@@ -12,7 +12,12 @@ export { keccak256, keccak256Hex } from './keccak.js';
 
 export { MerkleTree, compareBytes } from './merkle.js';
 
-export { V10MerkleTree } from './v10-merkle.js';
+export {
+  V10MerkleTree,
+  computeCatalogRoot,
+  type CatalogTriple,
+  type CatalogRootResult,
+} from './v10-merkle.js';
 
 export {
   V10CiphertextChunksMerkleTree,

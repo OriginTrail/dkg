@@ -18,19 +18,20 @@ import { KnowledgeAssetsLifecycle } from '../../typechain';
  * ACK digest prefix (H5 closure):
  *   (block.chainid, address(KnowledgeAssetsLifecycle), ...)
  *
- * ACK digest (publish) — PRD V10 "Publish Flow" + decision #25 Option B,
- * extended with `merkleLeafCount` (uint256 on wire). Wrapped in
- * `ECDSA.toEthSignedMessageHash` (EIP-191) before recovery:
- *   contextGraphId || merkleRoot || knowledgeAssetsAmount
- *   || uint256(byteSize) || uint256(epochs) || uint256(tokenAmount)
- *   || uint256(merkleLeafCount)
+ * ACK digest (publish) — OT-RFC-49 / WS-B Trap 3: `ACK_DIGEST_VERSION` is the
+ * FIRST packed member and the ciphertext pair became the catalog pair. Wrapped
+ * in `ECDSA.toEthSignedMessageHash` (EIP-191) before recovery:
+ *   ACK_DIGEST_VERSION || chainId || kav10Address || contextGraphId || merkleRoot
+ *   || knowledgeAssetsAmount || uint256(byteSize) || uint256(epochs)
+ *   || uint256(tokenAmount) || uint256(merkleLeafCount)
+ *   || catalogRoot || uint256(catalogLeafCount) || uint256(isImmutable)
  *
- * ACK digest (update) — same shape with update-specific fields:
- *   contextGraphId (from on-chain) || id || preUpdateMerkleRootCount
- *   || newMerkleRoot || uint256(newByteSize) || uint256(newTokenAmount)
- *   || mintKnowledgeAssetsAmount
+ * ACK digest (update) — same `ACK_DIGEST_VERSION` prefix + catalog pair:
+ *   ACK_DIGEST_VERSION || chainId || kav10Address || contextGraphId (from on-chain)
+ *   || id || preUpdateMerkleRootCount || newMerkleRoot || uint256(newByteSize)
+ *   || uint256(newTokenAmount) || mintKnowledgeAssetsAmount
  *   || keccak256(abi.encodePacked(knowledgeAssetsToBurn))
- *   || uint256(newMerkleLeafCount)
+ *   || uint256(newMerkleLeafCount) || newCatalogRoot || uint256(newCatalogLeafCount)
  *
  * Author attestation (RFC-001) — EIP-712 typed data:
  *   domain   = EIP712Domain(name="KnowledgeAssetsLifecycle", version="2.0.0",
@@ -47,6 +48,16 @@ import { KnowledgeAssetsLifecycle } from '../../typechain';
 export const DEFAULT_CHAIN_ID = 31337n;
 
 export const AUTHOR_SCHEME_VERSION_V1 = 1;
+
+/**
+ * OT-RFC-49 / WS-B Trap 3 — ACK-digest domain-separation version, prepended as
+ * the FIRST `abi.encodePacked` member of BOTH the publish and update ACK
+ * preimages. MUST equal `KnowledgeAssetsLifecycle.ACK_DIGEST_VERSION` (and the
+ * off-chain `@origintrail-official/dkg-core` `ACK_DIGEST_VERSION = 1n`), or
+ * every ACK signature recovers to the wrong address and the contract reverts
+ * `SignerIsNotNodeOperator`.
+ */
+export const ACK_DIGEST_VERSION = 1n;
 
 /**
  * OT-RFC-43 Option 1 (variant 1a) — pack a deterministic, author-namespaced
@@ -195,12 +206,18 @@ export function buildPublishAckDigest(
   epochs: number | bigint,
   tokenAmount: bigint,
   merkleLeafCount: number | bigint,
-  ciphertextChunksRoot: string = ethers.ZeroHash,
-  ciphertextChunkCount: number | bigint = 0,
+  catalogRoot: string = ethers.ZeroHash,
+  catalogLeafCount: number | bigint = 0,
   isImmutable: boolean = false,
 ): string {
+  // OT-RFC-49 / WS-B Trap 3: `ACK_DIGEST_VERSION` is the FIRST packed member,
+  // and the former ciphertext pair at positions 10/11 is now
+  // `catalogRoot`/`catalogLeafCount` (same bytes32/uint256 widths). Mirrors
+  // `KnowledgeAssetsLifecycle._executePublishCore` and the off-chain
+  // `computePublishACKDigest`.
   return ethers.solidityPackedKeccak256(
     [
+      'uint256', // ACK_DIGEST_VERSION
       'uint256', // chainId
       'address', // kav10Address
       'uint256', // contextGraphId
@@ -210,11 +227,12 @@ export function buildPublishAckDigest(
       'uint256', // epochs (cast to uint256 in contract)
       'uint256', // tokenAmount (cast to uint256 in contract)
       'uint256', // merkleLeafCount (cast to uint256 in contract)
-      'bytes32', // ciphertextChunksRoot
-      'uint256', // ciphertextChunkCount
+      'bytes32', // catalogRoot
+      'uint256', // catalogLeafCount
       'uint256', // isImmutable (0/1)
     ],
     [
+      ACK_DIGEST_VERSION,
       chainId,
       kav10Address,
       contextGraphId,
@@ -224,8 +242,8 @@ export function buildPublishAckDigest(
       epochs,
       tokenAmount,
       merkleLeafCount,
-      ciphertextChunksRoot,
-      ciphertextChunkCount,
+      catalogRoot,
+      catalogLeafCount,
       isImmutable ? 1 : 0,
     ],
   );
@@ -254,16 +272,22 @@ export function buildUpdateAckDigest(
   mintKnowledgeAssetsAmount: bigint,
   knowledgeAssetsToBurn: bigint[],
   newMerkleLeafCount: number | bigint,
-  newCiphertextChunksRoot: string = ethers.ZeroHash,
-  newCiphertextChunkCount: number | bigint = 0,
+  newCatalogRoot: string = ethers.ZeroHash,
+  newCatalogLeafCount: number | bigint = 0,
 ): string {
   // Inner burn-list keccak matches `keccak256(abi.encodePacked(knowledgeAssetsToBurn))`.
   const innerBurnHash = ethers.solidityPackedKeccak256(
     ['uint256[]'],
     [knowledgeAssetsToBurn],
   );
+  // OT-RFC-49 / WS-B Trap 3: `ACK_DIGEST_VERSION` prepended; the former
+  // ciphertext pair at positions 12/13 is now
+  // `newCatalogRoot`/`newCatalogLeafCount`. Mirrors
+  // `KnowledgeAssetsLifecycle._executeUpdateCore` and the off-chain
+  // `computeUpdateACKDigest`.
   return ethers.solidityPackedKeccak256(
     [
+      'uint256', // ACK_DIGEST_VERSION
       'uint256', // chainId
       'address', // kav10Address
       'uint256', // contextGraphId (from storage)
@@ -275,10 +299,11 @@ export function buildUpdateAckDigest(
       'uint256', // mintKnowledgeAssetsAmount
       'bytes32', // keccak(burn list)
       'uint256', // newMerkleLeafCount
-      'bytes32', // newCiphertextChunksRoot
-      'uint256', // newCiphertextChunkCount
+      'bytes32', // newCatalogRoot
+      'uint256', // newCatalogLeafCount
     ],
     [
+      ACK_DIGEST_VERSION,
       chainId,
       kav10Address,
       contextGraphId,
@@ -290,8 +315,8 @@ export function buildUpdateAckDigest(
       mintKnowledgeAssetsAmount,
       innerBurnHash,
       newMerkleLeafCount,
-      newCiphertextChunksRoot,
-      newCiphertextChunkCount,
+      newCatalogRoot,
+      newCatalogLeafCount,
     ],
   );
 }
@@ -355,27 +380,27 @@ export async function buildPublishParams(args: {
    */
   reservedKaId?: bigint;
   /**
-   * RFC-39 Phase A.5 curated-CG ciphertext commitment.
+   * OT-RFC-49 / WS-B curated-CG PUBLIC `_catalog` commitment.
    * Defaults to `bytes32(0)` + `0`, which is legal only on public CGs.
    * Curated-CG publishes MUST set both fields to non-zero values; otherwise
    * KAV10 reverts before the KA can enter value-weighted sampling.
    * The contract enforces both the required-curated and paired-or-zero
-   * invariants via `CuratedCGRequiresCiphertextCommitment` and
-   * `IncompleteCiphertextCommitment`.
+   * invariants via `CuratedCGRequiresCatalogCommitment` and
+   * `IncompleteCatalogCommitment`.
    *
    * Note: the on-chain ACK digest DOES include these fields plus `isImmutable`
    * (`KnowledgeAssetsLifecycle._executePublishCore` packs
-   * `ciphertextChunksRoot || uint256(ciphertextChunkCount) || uint256(isImmutable)`
+   * `catalogRoot || uint256(catalogLeafCount) || uint256(isImmutable)`
    * after `merkleLeafCount`). The `buildPublishAckDigest` call below MUST pass
    * the same values the struct carries or the ACK signatures fail recovery
    * with `SignerIsNotNodeOperator`.
    */
-  ciphertextChunksRoot?: string;
-  ciphertextChunkCount?: number | bigint;
+  catalogRoot?: string;
+  catalogLeafCount?: number | bigint;
 }): Promise<KnowledgeAssetsLifecycle.PublishParamsStruct> {
   const merkleLeafCount = args.merkleLeafCount ?? 1;
-  const ciphertextChunksRoot = args.ciphertextChunksRoot ?? ethers.ZeroHash;
-  const ciphertextChunkCount = args.ciphertextChunkCount ?? 0;
+  const catalogRoot = args.catalogRoot ?? ethers.ZeroHash;
+  const catalogLeafCount = args.catalogLeafCount ?? 0;
   const ackDigest = buildPublishAckDigest(
     args.chainId,
     args.kav10Address,
@@ -386,8 +411,8 @@ export async function buildPublishParams(args: {
     args.epochs,
     args.tokenAmount,
     merkleLeafCount,
-    ciphertextChunksRoot,
-    ciphertextChunkCount,
+    catalogRoot,
+    catalogLeafCount,
     args.isImmutable,
   );
   const sig = await signAckDigest(
@@ -427,8 +452,8 @@ export async function buildPublishParams(args: {
     tokenAmount: args.tokenAmount,
     isImmutable: args.isImmutable,
     merkleLeafCount,
-    ciphertextChunksRoot,
-    ciphertextChunkCount,
+    catalogRoot,
+    catalogLeafCount,
     publisherNodeIdentityId: args.publisherIdentityId,
     authorAddress: args.author.address,
     authorR: authorSig.authorR,
@@ -528,21 +553,21 @@ export async function buildUpdateParams(args: {
   /** Defaults to 1 for fixtures that only assert economics / signatures. */
   newMerkleLeafCount?: number;
   /**
-   * RFC-39 curated-CG ciphertext commitment for the update (optional).
-   * Defaults to `bytes32(0)` + `0`, which is legal on public-CG updates and
-   * metadata-only updates for legacy curated KAs that do not yet have a
-   * commitment. Curated paid updates MUST set both fields to non-zero values.
-   * The on-chain ACK digest binds BOTH fields
+   * OT-RFC-49 / WS-B curated-CG PUBLIC `_catalog` commitment for the update
+   * (optional). Defaults to `bytes32(0)` + `0`, which is legal on public-CG
+   * updates and metadata-only updates for legacy curated KAs that do not yet
+   * have a commitment. Curated paid updates MUST set both fields to non-zero
+   * values. The on-chain ACK digest binds BOTH fields
    * (`KnowledgeAssetsLifecycle._executeUpdateCore`), so they MUST be passed
    * here — not spread onto the returned struct after signing — or the receiver
    * quorum signatures fail recovery with `SignerIsNotNodeOperator`.
    */
-  newCiphertextChunksRoot?: string;
-  newCiphertextChunkCount?: number | bigint;
+  newCatalogRoot?: string;
+  newCatalogLeafCount?: number | bigint;
 }): Promise<KnowledgeAssetsLifecycle.UpdateParamsStruct> {
   const newMerkleLeafCount = args.newMerkleLeafCount ?? 1;
-  const newCiphertextChunksRoot = args.newCiphertextChunksRoot ?? ethers.ZeroHash;
-  const newCiphertextChunkCount = args.newCiphertextChunkCount ?? 0;
+  const newCatalogRoot = args.newCatalogRoot ?? ethers.ZeroHash;
+  const newCatalogLeafCount = args.newCatalogLeafCount ?? 0;
   const ackDigest = buildUpdateAckDigest(
     args.chainId,
     args.kav10Address,
@@ -555,8 +580,8 @@ export async function buildUpdateParams(args: {
     args.mintKnowledgeAssetsAmount,
     args.knowledgeAssetsToBurn,
     newMerkleLeafCount,
-    newCiphertextChunksRoot,
-    newCiphertextChunkCount,
+    newCatalogRoot,
+    newCatalogLeafCount,
   );
   const sig = await signAckDigest(args.receivingNodes, ackDigest);
   const updateAttPayload = buildUpdateAuthorAttestationPayload({
@@ -576,8 +601,8 @@ export async function buildUpdateParams(args: {
     newMerkleLeafCount,
     mintKnowledgeAssetsAmount: args.mintKnowledgeAssetsAmount,
     knowledgeAssetsToBurn: args.knowledgeAssetsToBurn,
-    newCiphertextChunksRoot,
-    newCiphertextChunkCount,
+    newCatalogRoot,
+    newCatalogLeafCount,
     publisherNodeIdentityId: args.publisherIdentityId,
     identityIds: args.receiverIdentityIds,
     r: sig.receiverRs,

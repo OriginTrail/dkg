@@ -379,7 +379,7 @@ function createV10ACKProviderForPublisher(
     subGraphName,
     merkleLeafCount,
     isEncryptedPayload,
-    chunkedCommitment,
+    catalogCommitment,
   ) => {
     // Fail loud on non-numeric or non-positive CG ids. V10 publish requires
     // a real on-chain context graph; `ZeroContextGraphId` at
@@ -457,7 +457,7 @@ function createV10ACKProviderForPublisher(
       subGraphName,
       merkleLeafCount,
       isEncryptedPayload,
-      chunkedCommitment,
+      catalogCommitment,
     });
     return result.acks;
   };

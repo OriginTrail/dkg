@@ -11,6 +11,7 @@
 // encryptor. This partition is the seam that separates them.
 
 import { DKG_ONTOLOGY } from './genesis.js';
+import type { CatalogTriple } from './crypto/v10-merkle.js';
 
 /** Structural quad — avoids a core→storage dependency. */
 export interface CatalogQuadLike {
@@ -120,4 +121,57 @@ export function partitionCatalogQuads<Q extends CatalogQuadLike>(
     }
   }
   return { catalogQuads, otherQuads };
+}
+
+/**
+ * OT-RFC-49 / WS-D — POST-PUBLISH catalog stamps that MUST be excluded from the
+ * committed/proven catalog leaf-set.
+ *
+ * `partitionCatalogQuads` recognizes these predicates (so the partition is total
+ * and a stamp that somehow rides the publish payload is still routed to the
+ * public `_catalog` rather than leaking onto the encrypted path), but they are
+ * written into `<cg>/_catalog` only AFTER the on-chain publish confirms — e.g.
+ * the agent's public projection back-references the on-chain VM merkleRoot via
+ * `dkg:committedRoot` (a leaf cannot hash the root of the very set it belongs
+ * to). Were they included in the producer's `computeCatalogRoot` input, the
+ * publisher's committed root would diverge from the prover's rebuilt root the
+ * instant the projection stamp lands, and curated proving would fail SILENTLY
+ * every period.
+ *
+ * THE PARITY CONTRACT: the producer (publisher) and the prover's
+ * `catalog-extractor` BOTH derive their leaf-set via {@link catalogCommittedLeaves}
+ * (which strips this set), so the two sets are byte-identical by construction.
+ *
+ * Empirically observed delta (combined model): the only post-publish stamp the
+ * projection path writes into `<cg>/_catalog` is `dkg:committedRoot`. In a
+ * harness without the public-projection wired the delta is empty and the filter
+ * is a no-op — but the shared-definition discipline still pins the two sides
+ * together for any deployment that DOES project.
+ */
+export const CATALOG_COMMITTED_PREDICATES_TO_SKIP: ReadonlySet<string> =
+  new Set<string>([
+    DKG_ONTOLOGY.DKG_COMMITTED_ROOT, // post-publish on-chain-root back-reference
+  ]);
+
+/**
+ * The catalog leaf-set the publisher COMMITS to and the prover PROVES, with the
+ * post-publish stamps ({@link CATALOG_COMMITTED_PREDICATES_TO_SKIP}) removed.
+ *
+ * This is the SINGLE definition of the committed catalog set. BOTH off-chain
+ * sites — the producer (`dkg-publisher` → `computeCatalogRoot`) and the prover's
+ * `catalog-extractor` (rebuild over the locally-served `_catalog`) — MUST route
+ * through it so the committed root and the proven root cannot drift.
+ *
+ * Returns `{subject,predicate,object}[]`; `computeCatalogRoot` / `V10MerkleTree`
+ * sorts + dedupes internally, so order is irrelevant.
+ */
+export function catalogCommittedLeaves<Q extends CatalogQuadLike>(
+  catalogQuads: readonly Q[],
+): CatalogTriple[] {
+  const leaves: CatalogTriple[] = [];
+  for (const q of catalogQuads) {
+    if (CATALOG_COMMITTED_PREDICATES_TO_SKIP.has(q.predicate)) continue;
+    leaves.push({ subject: q.subject, predicate: q.predicate, object: q.object });
+  }
+  return leaves;
 }
