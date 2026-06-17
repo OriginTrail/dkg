@@ -89,7 +89,10 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     //           points and events.
     //         * L8 — `identityId != 0` guard added on mint paths so
     //           ambiguous "zero-node" mints fail fast at the wrapper.
-    string private constant _VERSION = "10.0.2";
+    //         * 10.0.3 — OT-RFC-50 operator-fee migration: added
+    //           `adminDrainOperatorFeesBatch` + `OperatorFeeMigrated`; bumped so
+    //           the breaking migration ABI is detectable via `version()`.
+    string private constant _VERSION = "10.0.3";
 
     // ========================================================================
     // Constants
@@ -181,6 +184,16 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     ///         credit by the admin sweep (OT-RFC-50). `credited` is the total
     ///         moved into that delegator's credit by this event.
     event MigrationStarted(address indexed delegator, uint96 credited);
+
+    /// @notice Emitted when a node's V8 operator fee (resting balance + any open
+    ///         fee-withdrawal request) is drained into the operator's migration
+    ///         credit by the admin sweep (OT-RFC-50). Keyed by `identityId` so
+    ///         per-node fee migration reconciles against the V8 vault; `operator`
+    ///         is the validated current ADMIN_KEY holder that was credited.
+    /// @dev    Reconciliation: total migration credit issued = Σ `MigrationStarted`
+    ///         (delegator stake) + Σ `OperatorFeeMigrated` (operator fees). An
+    ///         indexer must sum BOTH events or it undercounts operators.
+    event OperatorFeeMigrated(uint72 indexed identityId, address indexed operator, uint96 credited);
 
     /// @notice Emitted when migration credit is allocated into a fresh V10
     ///         conviction position. `creditApplied` is true when the tier-6/12
@@ -560,6 +573,31 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
         for (uint256 i = 0; i < n; i++) {
             uint96 t = stakingV10.drainV8ToCredit(delegators[i], identityIds[i]);
             if (t > 0) emit MigrationStarted(delegators[i], t);
+        }
+    }
+
+    /// @notice Bulk operator-fee drain — companion to `adminDrainBatch` for the
+    ///         node side. Each index `i` is ONE (node, operator) pair: the V8
+    ///         operator fee on `identityIds[i]` (resting balance + open
+    ///         withdrawal request) is moved into `operators[i]`'s migration
+    ///         credit (OT-RFC-50 §0 Option B — the SAME bucket as delegator
+    ///         stake). `operators[i]` MUST currently hold ADMIN_KEY on the node
+    ///         (validated in `StakingV10.drainOperatorFeeToCredit`, which
+    ///         REVERTS a stale/wrong address) — so a mis-resolved operator
+    ///         reverts the whole batch rather than crediting wrongly; the
+    ///         off-chain sweep re-resolves and retries. Nodes with no fee are
+    ///         SKIPPED (idempotent: a re-drained node yields 0). Amounts are
+    ///         read on-chain, never passed in. Gate: `onlyOwnerOrMultiSigOwner`.
+    ///         Emits one `OperatorFeeMigrated` per node that moved credit.
+    function adminDrainOperatorFeesBatch(
+        uint72[] calldata identityIds,
+        address[] calldata operators
+    ) external onlyOwnerOrMultiSigOwner {
+        uint256 n = identityIds.length;
+        require(n == operators.length, "length mismatch");
+        for (uint256 i = 0; i < n; i++) {
+            uint96 t = stakingV10.drainOperatorFeeToCredit(identityIds[i], operators[i]);
+            if (t > 0) emit OperatorFeeMigrated(identityIds[i], operators[i], t);
         }
     }
 

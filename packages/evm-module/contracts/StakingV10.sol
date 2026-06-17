@@ -904,6 +904,61 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         convictionStorage.addMigrationCredit(delegator, total);
     }
 
+    /// @notice Drain node `identityId`'s V8 operator fee (the resting
+    ///         `operatorFeeBalance` PLUS any open fee-withdrawal request) into
+    ///         `operator`'s migration credit on CSS. Returns the drained
+    ///         `total`; a node with no fee contributes 0 (no revert here), so
+    ///         the wrapper can sweep in bulk.
+    /// @dev    OT-RFC-50 §0 Option B ("one credit"): the operator fee folds
+    ///         into the SAME `migrationCredit` bucket as delegator stake, so
+    ///         the operator recovers it exactly like a delegator — `allocate`
+    ///         at tier 0 (immediately withdrawable) or 6/12 (conviction).
+    ///
+    ///         Operator addresses are NOT recoverable on-chain — IdentityStorage
+    ///         holds key *hashes*, not addresses — so the off-chain sweep
+    ///         supplies `operator` and this function validates it currently
+    ///         holds ADMIN_KEY on the node (mirroring who V8
+    ///         `finalizeOperatorFeeWithdrawal` would have paid). A stale/wrong
+    ///         address REVERTS rather than crediting silently, so a
+    ///         mis-resolved operator can never be paid; the sweep hard-fails
+    ///         and re-resolves. The check is skipped only when there is nothing
+    ///         to drain (`total == 0`), keeping re-runs idempotent and cheap.
+    function drainOperatorFeeToCredit(
+        uint72 identityId,
+        address operator
+    ) external onlyConvictionNFT returns (uint96 total) {
+        StakingStorage ss = stakingStorage;
+        uint96 feeBalance = ss.getOperatorFeeBalance(identityId);
+        uint96 feeRequest = ss.getOperatorFeeWithdrawalRequestAmount(identityId);
+        total = feeBalance + feeRequest;
+        if (total == 0) return 0;
+
+        // Credit only an address that currently controls the node.
+        if (
+            !identityStorage.keyHasPurpose(
+                identityId,
+                keccak256(abi.encodePacked(operator)),
+                IdentityLib.ADMIN_KEY
+            )
+        ) {
+            revert Permissions.OnlyProfileAdminFunction(operator);
+        }
+
+        // Zero the V8 fee slots (idempotent: a re-drain reads 0, returns 0).
+        // The open-request amount stayed in the SS vault at request time (no
+        // token moved), so deleting it here releases it for the SS->CSS move.
+        if (feeBalance > 0) {
+            ss.setOperatorFeeBalance(identityId, 0);
+        }
+        if (feeRequest > 0) {
+            ss.deleteOperatorFeeWithdrawalRequest(identityId);
+        }
+        // Move the migrated TRAC SS -> CSS so the credit stays collateralized.
+        ss.transferStake(address(convictionStorage), total);
+
+        convictionStorage.addMigrationCredit(operator, total);
+    }
+
     /// @notice Spend `amount` of `staker`'s migration credit into a fresh V10
     ///         conviction position on `targetNode` at `lockTier`. Runs the full
     ///         stake tail (score-cursor baseline → createPosition → sharding

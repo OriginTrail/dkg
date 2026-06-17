@@ -443,6 +443,30 @@
   {
     "inputs": [
       {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "address",
+        "name": "operator",
+        "type": "address"
+      }
+    ],
+    "name": "drainOperatorFeeToCredit",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "total",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "address",
         "name": "delegator",
         "type": "address"

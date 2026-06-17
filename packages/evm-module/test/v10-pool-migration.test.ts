@@ -84,6 +84,7 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
 
   let accounts: SignerWithAddress[];
   let NFT: DKGStakingConvictionNFT;
+  let StakingV10Contract: StakingV10;
   let SS: StakingStorage;
   let CSS: ConvictionStakingStorage;
   let ProfileContract: Profile;
@@ -94,6 +95,7 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
     ({
       accounts,
       NFT,
+      StakingV10: StakingV10Contract,
       StakingStorage: SS,
       ConvictionStakingStorage: CSS,
       Profile: ProfileContract,
@@ -413,6 +415,152 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       await armCredit([[idA, accounts[2].address]]);
       await expect(
         NFT.connect(accounts[2]).adminDrainBatch([accounts[2].address], [idA]),
+      ).to.be.reverted;
+    });
+  });
+
+  // ===========================================================================
+  // adminDrainOperatorFeesBatch — node-side operator-fee drain. OT-RFC-50 §0
+  // Option B ("one credit"): the V8 operator fee (resting balance + any open
+  // fee-withdrawal request) folds into the operator's SAME migrationCredit
+  // bucket as delegator stake, recovered via allocate (tier 0 → liquid, or
+  // 6/12 → conviction) exactly like a delegator. The operator address is
+  // supplied off-chain and validated on-chain against ADMIN_KEY.
+  // ===========================================================================
+  describe('adminDrainOperatorFeesBatch', () => {
+    // The createProfile() helper sets accounts[0] as the node's adminWallet, so
+    // accounts[0] is the ADMIN_KEY holder (= the valid operator) for those nodes.
+    const seedOperatorFee = async (identityId: number, amount: bigint) => {
+      await TokenContract.mint(await SS.getAddress(), amount);
+      await SS.connect(accounts[0]).increaseOperatorFeeBalance(identityId, amount);
+    };
+    const seedOperatorFeeRequest = async (identityId: number, amount: bigint) => {
+      // Mirror an operator mid-withdrawal: TRAC stays in the SS vault (no token
+      // moved at request time), tracked only by the request slot.
+      await TokenContract.mint(await SS.getAddress(), amount);
+      const ts = BigInt((await hre.ethers.provider.getBlock('latest'))!.timestamp) + 1n;
+      await SS.connect(accounts[0]).createOperatorFeeWithdrawalRequest(identityId, amount, 0, ts);
+    };
+    const createProfileWithAdmin = async (opIdx: number, adminAddr: string) => {
+      const nodeId = hre.ethers.hexlify(hre.ethers.randomBytes(32));
+      const tx = await ProfileContract.connect(accounts[opIdx]).createProfile(
+        adminAddr,
+        [],
+        `Node-${Math.floor(Math.random() * 1_000_000)}`,
+        nodeId,
+        0,
+      );
+      const receipt = await tx.wait();
+      return Number(receipt!.logs[0].topics[1]);
+    };
+
+    it("drains a node operator fee into the operator's migration credit (same bucket)", async () => {
+      const op = accounts[0];
+      const id = await createProfile(1); // admin = accounts[0]
+      const fee = hre.ethers.parseEther('250');
+      await seedOperatorFee(id, fee);
+
+      await expect(NFT.connect(accounts[0]).adminDrainOperatorFeesBatch([id], [op.address]))
+        .to.emit(NFT, 'OperatorFeeMigrated')
+        .withArgs(id, op.address, fee);
+
+      expect(await NFT.migrationCredit(op.address)).to.equal(fee);
+      expect(await SS.getOperatorFeeBalance(id)).to.equal(0n);
+    });
+
+    it('folds an open operator-fee withdrawal request into the credit + moves it SS→CSS', async () => {
+      const op = accounts[0];
+      const id = await createProfile(1);
+      const resting = hre.ethers.parseEther('100');
+      const inFlight = hre.ethers.parseEther('60'); // operator mid-withdrawal
+      await seedOperatorFee(id, resting);
+      await seedOperatorFeeRequest(id, inFlight);
+
+      const ssBefore = await TokenContract.balanceOf(await SS.getAddress());
+      const cssBefore = await TokenContract.balanceOf(await CSS.getAddress());
+
+      await NFT.connect(accounts[0]).adminDrainOperatorFeesBatch([id], [op.address]);
+
+      // both the resting balance and the in-flight request are credited
+      expect(await NFT.migrationCredit(op.address)).to.equal(resting + inFlight);
+      expect(await SS.getOperatorFeeBalance(id)).to.equal(0n);
+      expect(await SS.getOperatorFeeWithdrawalRequestAmount(id)).to.equal(0n);
+      // collateral moved SS→CSS exactly (no fee left resting in the V8 vault)
+      expect(await TokenContract.balanceOf(await SS.getAddress())).to.equal(ssBefore - (resting + inFlight));
+      expect(await TokenContract.balanceOf(await CSS.getAddress())).to.equal(cssBefore + resting + inFlight);
+    });
+
+    it("drains many nodes in one call, crediting each node's operator", async () => {
+      const opA = accounts[0];
+      const opB = accounts[3];
+      const idA = await createProfile(1); // admin = accounts[0]
+      const idB = await createProfileWithAdmin(4, opB.address); // admin = accounts[3]
+      const feeA = hre.ethers.parseEther('300');
+      const feeB = hre.ethers.parseEther('700');
+      await seedOperatorFee(idA, feeA);
+      await seedOperatorFee(idB, feeB);
+
+      await NFT.connect(accounts[0]).adminDrainOperatorFeesBatch(
+        [idA, idB],
+        [opA.address, opB.address],
+      );
+
+      expect(await NFT.migrationCredit(opA.address)).to.equal(feeA);
+      expect(await NFT.migrationCredit(opB.address)).to.equal(feeB);
+      expect(await NFT.totalSupply()).to.equal(0n); // pure drain, no mint
+    });
+
+    it('skips nodes with no fee instead of reverting the batch', async () => {
+      const op = accounts[0];
+      const id = await createProfile(1);
+      const idEmpty = await createProfile(4); // no operator fee
+      const fee = hre.ethers.parseEther('120');
+      await seedOperatorFee(id, fee);
+
+      await NFT.connect(accounts[0]).adminDrainOperatorFeesBatch(
+        [id, idEmpty],
+        [op.address, op.address],
+      );
+      expect(await NFT.migrationCredit(op.address)).to.equal(fee);
+    });
+
+    it('is idempotent — re-running a drained node does not double-credit', async () => {
+      const op = accounts[0];
+      const id = await createProfile(1);
+      const fee = hre.ethers.parseEther('500');
+      await seedOperatorFee(id, fee);
+
+      await NFT.connect(accounts[0]).adminDrainOperatorFeesBatch([id], [op.address]);
+      expect(await NFT.migrationCredit(op.address)).to.equal(fee);
+      // re-run: V8 fee slot already zeroed → no-op, no double count
+      await NFT.connect(accounts[0]).adminDrainOperatorFeesBatch([id], [op.address]);
+      expect(await NFT.migrationCredit(op.address)).to.equal(fee);
+    });
+
+    it('reverts when the supplied operator is not a current node admin (mis-resolution guard)', async () => {
+      const id = await createProfile(1); // admin = accounts[0], NOT accounts[2]
+      await seedOperatorFee(id, hre.ethers.parseEther('80'));
+      // A wrong/stale address must revert — never silently credited.
+      await expect(
+        NFT.connect(accounts[0]).adminDrainOperatorFeesBatch([id], [accounts[2].address]),
+      ).to.be.revertedWithCustomError(StakingV10Contract, 'OnlyProfileAdminFunction');
+      // fee untouched, nothing credited
+      expect(await SS.getOperatorFeeBalance(id)).to.equal(hre.ethers.parseEther('80'));
+      expect(await NFT.migrationCredit(accounts[2].address)).to.equal(0n);
+    });
+
+    it('reverts on identityIds/operators length mismatch', async () => {
+      const id = await createProfile(1);
+      await expect(
+        NFT.connect(accounts[0]).adminDrainOperatorFeesBatch([id, id], [accounts[0].address]),
+      ).to.be.revertedWith('length mismatch');
+    });
+
+    it('is gated to the owner/multisig', async () => {
+      const id = await createProfile(1);
+      await seedOperatorFee(id, hre.ethers.parseEther('50'));
+      await expect(
+        NFT.connect(accounts[2]).adminDrainOperatorFeesBatch([id], [accounts[0].address]),
       ).to.be.reverted;
     });
   });

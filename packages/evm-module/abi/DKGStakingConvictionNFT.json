@@ -305,6 +305,31 @@
     "inputs": [
       {
         "indexed": true,
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "operator",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "credited",
+        "type": "uint96"
+      }
+    ],
+    "name": "OperatorFeeMigrated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
         "internalType": "address",
         "name": "owner",
         "type": "address"
@@ -458,6 +483,24 @@
       }
     ],
     "name": "adminDrainBatch",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72[]",
+        "name": "identityIds",
+        "type": "uint72[]"
+      },
+      {
+        "internalType": "address[]",
+        "name": "operators",
+        "type": "address[]"
+      }
+    ],
+    "name": "adminDrainOperatorFeesBatch",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

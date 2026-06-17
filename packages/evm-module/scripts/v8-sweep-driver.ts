@@ -2,12 +2,15 @@
 // v8-sweep-driver.ts — OT-RFC-50 admin-push migration: the off-chain sweep
 // =============================================================================
 //
-// Drains EVERY V8 delegator's stake (+ pending withdrawals) into their V10
-// migration credit, by enumerating (delegator, node) pairs and calling
-// DKGStakingConvictionNFT.adminDrainBatch in gas-sized chunks, signed by the Hub
-// owner. Since OT-RFC-50 rev 5 removed self-service startMigration, THIS is the
-// only path that empties V8 — so it must be provably complete. It is, by
-// construction:
+// Drains EVERY V8 position into V10 migration credit, signed by the Hub owner:
+//   * delegator stake (+ pending withdrawals) → delegator's credit, via
+//     DKGStakingConvictionNFT.adminDrainBatch over (delegator, node) pairs;
+//   * operator fees (resting balance + open fee-withdrawal request) → the
+//     operator's SAME credit bucket, via adminDrainOperatorFeesBatch over
+//     (node, operator) pairs.
+// Both run in gas-sized chunks. Since OT-RFC-50 removed self-service migration,
+// THIS is the only path that empties V8 — so it must be provably complete (the
+// vault must end EMPTY, ≤ dust). It is, by construction:
 //
 //   * Enumeration (fast path): DelegatorsInfo.getDelegators(id). The V8 Staking
 //     contract registers a delegator (addDelegator, lockstep with every
@@ -19,36 +22,49 @@
 //     recover those by scanning DelegatorsInfo `DelegatorAdded(id, address)`
 //     logs (the complete historical address universe) — but ONLY when the
 //     pre-sweep vault decomposition shows pending actually exists.
+//   * Operator fees: enumerated id-keyed over every node (getOperatorFeeBalance
+//     + open fee-withdrawal request) — COMPLETE by construction, no address
+//     needed to FIND a fee. To DRAIN one, migrationCredit is address-keyed but
+//     IdentityStorage holds only key *hashes*, so the operator address is
+//     supplied via OPERATOR_MAP and validated on-chain (keyHasPurpose ADMIN_KEY);
+//     a fee-bearing node with no resolvable current admin is a preflight BLOCKER.
 //   * Correctness gates (all required for COMPLETE — none can be falsely-green):
-//       1. getTotalStake() == 0          (all active stake drained — exact)
-//       2. getNodeStake(id) == 0 ∀ id    (localizes any active-stake gap)
-//       3. credited == totalStake + enumeratedPending  (drained exactly what we
-//          enumerated — reconciles the drain)
-//       4. unattributed <= DUST_TOLERANCE (pre-sweep: vault TRAC NOT explained by
-//          active stake + enumerated pending + operator-fee resting place is 0;
-//          any excess is a possible MISSED pending delegator or unclaimed
-//          rewards/dust — surfaced, not silently tolerated).
+//       1. getTotalStake() == 0              (all active stake drained — exact)
+//       2. getNodeStake(id) == 0 ∀ id        (localizes any active-stake gap)
+//       3. operator fee balance + request == 0 ∀ id  (all fees drained)
+//       4. credited == totalStake + enumeratedPending + operatorFees (reconcile)
+//       5. balanceOf(SS) <= DUST_TOLERANCE   (EMPTY-VAULT gate — the strongest:
+//          stake, pending AND fees all physically left the vault; any residual
+//          is a missed pending delegator, an unresolved operator, or rewards/dust
+//          — surfaced, not silently tolerated).
 //     The SS vault physically holds: active stake + delegator pending + operator
-//     fees (balance AND open fee-withdrawal requests, which leave
-//     getOperatorFeeBalance but stay in the vault until finalize) + maybe
-//     unclaimed rewards/dust. Stranded migrant TRAC is always inside
-//     balanceOf(SS), so the gates cannot falsely certify COMPLETE.
-//   * Idempotency: drainV8ToCredit zeroes the V8 slot and returns 0 on re-drain;
-//     adminDrainBatch skips zero pairs. So chunks are re-run-safe across
-//     crashes/reorgs — no progress file is needed for correctness.
+//     fees (balance AND open fee-withdrawal requests) + maybe unclaimed rewards/
+//     dust. Stranded migrant TRAC is always inside balanceOf(SS), so the empty-
+//     vault gate cannot falsely certify COMPLETE.
+//   * Idempotency: drainV8ToCredit / drainOperatorFeeToCredit zero the V8 slot
+//     and return 0 on re-drain; the batch fns skip zero. So chunks are re-run-
+//     safe across crashes/reorgs — no progress file is needed for correctness.
 //
 // Modes:  MODE=plan (default) — enumerate + decompose + report; no txs.
-//         MODE=execute        — also submit the chunks + verify.
+//         MODE=execute        — preflight-gate, then submit the chunks + verify.
 //
 // Run (per chain; signer accounts[0] MUST be the Hub owner / multisig owner):
 //   MODE=plan TARGET_HUB=0x<freezeHub> [CHUNK_SIZE=150] [EVENT_SCAN_FROM=<block>] \
 //   [EVENT_SCAN_STEP=50000] [DUST_TOLERANCE=<wei>] [RPC_RETRIES=4] \
+//   [OPERATOR_MAP='{"<id>":"0x<admin>",…}' | OPERATOR_MAP_FILE=<path>] \
 //   npx hardhat run scripts/v8-sweep-driver.ts --network <chain>
 //
-// PRECONDITION: V8 `Staking` must already be unregistered from the Hub (frozen),
-// else users can stake/withdraw mid-sweep — the driver asserts this and aborts.
-// For a production Custodian multisig, replace `submitChunk` with a propose-to-
-// safe adapter (calldata is built separately). NOT RUN AGAINST PRODUCTION here.
+// CUTOVER ORDERING (freeze-first): V8 `Staking` MUST already be unregistered from
+// the Hub before sweeping — else users/operators can stake/withdraw/finalize-fee
+// mid-sweep against balances we are draining. The driver asserts this and aborts.
+// MODE=execute also HARD-FAILS preflight (before any tx) on an active-stake gap,
+// unattributed vault TRAC, a degraded pending scan, or an unresolved operator —
+// so a red plan can never become a partial, manual-reconciliation sweep
+// (OVERRIDE_PREFLIGHT=1 forces, NOT recommended). For a production Custodian
+// multisig, replace the EOA submit with a propose-to-Safe adapter (calldata is
+// built separately). NOT RUN AGAINST PRODUCTION here.
+
+import * as fs from 'fs';
 
 import hre from 'hardhat';
 
@@ -58,9 +74,23 @@ const EVENT_SCAN_FROM = process.env.EVENT_SCAN_FROM ? Number(process.env.EVENT_S
 const EVENT_SCAN_STEP = Number(process.env.EVENT_SCAN_STEP ?? '50000');
 const DUST_TOLERANCE = BigInt(process.env.DUST_TOLERANCE ?? '0');
 const RPC_RETRIES = Number(process.env.RPC_RETRIES ?? '4');
+const OVERRIDE_PREFLIGHT = process.env.OVERRIDE_PREFLIGHT === '1';
+const ADMIN_KEY = 1n; // IdentityLib.ADMIN_KEY
 
 const fmt = (x: bigint) => hre.ethers.formatEther(x);
 const keyOf = (a: string) => hre.ethers.keccak256(hre.ethers.solidityPacked(['address'], [a]));
+
+// Curated identityId → operator (current ADMIN_KEY holder) address map. Operator
+// addresses are NOT recoverable on-chain (IdentityStorage holds key *hashes*),
+// so the operator-fee drain needs the address supplied here and validated on
+// chain. Source: OPERATOR_MAP (inline JSON) or OPERATOR_MAP_FILE (path). Keys
+// are identityId strings, values 0x addresses. Any fee-bearing node missing
+// here (or whose address is not a current admin) is a preflight blocker.
+function loadOperatorMap(): Record<string, string> {
+  if (process.env.OPERATOR_MAP) return JSON.parse(process.env.OPERATOR_MAP);
+  if (process.env.OPERATOR_MAP_FILE) return JSON.parse(fs.readFileSync(process.env.OPERATOR_MAP_FILE, 'utf8'));
+  return {};
+}
 
 // Bounded retry so a transient RPC blip doesn't abort a multi-thousand-call
 // enumeration; a persistent failure still throws loudly (never a silent skip).
@@ -123,18 +153,37 @@ async function main() {
   // ---- pre-sweep vault decomposition (the "measure first" step) ----
   const vaultBefore: bigint = await retry(() => Token.balanceOf(ssAddr));
   const totalStake: bigint = await retry(() => SS.getTotalStake());
-  // Operator-fee TRAC that stays physically in the vault and is NOT drained:
-  // the live balance PLUS any open fee-withdrawal request (which leaves
-  // getOperatorFeeBalance at request time but only leaves the vault at finalize).
-  let feeResting = 0n;
+  // Operator-fee TRAC: the live balance PLUS any open fee-withdrawal request
+  // (which leaves getOperatorFeeBalance at request time but only leaves the
+  // vault at finalize). Enumerated id-keyed (every node), so it is complete —
+  // no address needed to FIND a fee, only to drain it. We DO drain these now
+  // (OT-RFC-50: operator fee → operator's migration credit), so the vault must
+  // empty to ~0, not to Σ fees.
+  type FeeNode = { id: number; fee: bigint; operator: string | null };
+  const operatorMap = loadOperatorMap();
+  let feeDrainable = 0n;
+  const feeNodes: FeeNode[] = [];
   for (let id = 1; id <= lastId; id++) {
-    feeResting += (await retry(() => SS.getOperatorFeeBalance(id))) as bigint;
-    feeResting += (await retry(() => SS.getOperatorFeeWithdrawalRequestAmount(id))) as bigint;
+    const bal = (await retry(() => SS.getOperatorFeeBalance(id))) as bigint;
+    const req = (await retry(() => SS.getOperatorFeeWithdrawalRequestAmount(id))) as bigint;
+    const fee = bal + req;
+    if (fee === 0n) continue;
+    feeDrainable += fee;
+    // Resolve the operator (must currently hold ADMIN_KEY) from the curated map.
+    const candidate = operatorMap[String(id)];
+    const operator =
+      candidate && (await retry(() => ID.keyHasPurpose(id, keyOf(candidate), ADMIN_KEY))) ? candidate : null;
+    feeNodes.push({ id, fee, operator });
   }
+  const unresolvedFee = feeNodes.filter((n) => !n.operator);
+  let scanDegraded = false; // hoisted so the preflight can see a degraded pending scan
   console.log('\nPre-sweep vault decomposition:');
   console.log(`  vault balanceOf(SS) = ${fmt(vaultBefore)} TRAC`);
   console.log(`  active stake (getTotalStake) = ${fmt(totalStake)}`);
-  console.log(`  operator-fee resting (balance + open withdrawals, NOT drained) = ${fmt(feeResting)}`);
+  console.log(
+    `  operator fees (balance + open withdrawals, WILL be drained) = ${fmt(feeDrainable)} ` +
+      `across ${feeNodes.length} node(s); ${feeNodes.length - unresolvedFee.length} resolved, ${unresolvedFee.length} unresolved`,
+  );
 
   // ---- enumerate (delegator, node) pairs with drainable TRAC ----
   const readPair = async (id: number, addr: string): Promise<{ base: bigint; pend: bigint }> => {
@@ -168,7 +217,7 @@ async function main() {
   // The unaccounted non-fee, non-active vault TRAC. If >0 there ARE pending
   // amounts (or rewards/dust) the active sweep won't move, so scan for them.
   let enumeratedPending = pairs.reduce((s, p) => s + p.pend, 0n);
-  let unattributed = vaultBefore - totalStake - feeResting - enumeratedPending;
+  let unattributed = vaultBefore - totalStake - feeDrainable - enumeratedPending;
   if (unattributed > DUST_TOLERANCE) {
     console.log(
       `\nUnattributed vault TRAC ${fmt(unattributed)} beyond active+enumerated-pending+fees — scanning ` +
@@ -177,7 +226,6 @@ async function main() {
     const added = DI.filters.DelegatorAdded();
     const latest = await hre.ethers.provider.getBlockNumber();
     let extra = 0;
-    let scanDegraded = false;
     for (let from = EVENT_SCAN_FROM; from <= latest; from += EVENT_SCAN_STEP + 1) {
       const to = Math.min(from + EVENT_SCAN_STEP, latest);
       let logs: any[] = [];
@@ -207,7 +255,7 @@ async function main() {
     }
     console.log(`  +${extra} pending-only pairs recovered${scanDegraded ? ' (⚠️ scan was degraded — see above)' : ''}`);
     enumeratedPending = pairs.reduce((s, p) => s + p.pend, 0n);
-    unattributed = vaultBefore - totalStake - feeResting - enumeratedPending;
+    unattributed = vaultBefore - totalStake - feeDrainable - enumeratedPending;
   } else {
     console.log('\nNo unattributed vault TRAC — DelegatorsInfo.getDelegators is complete; skipping the event scan.');
   }
@@ -217,10 +265,13 @@ async function main() {
   const enumeratedActive = pairs.reduce((s, p) => s + p.base, 0n);
   const drainable = totalStake + enumeratedPending; // what we will move SS→CSS
   const chunks = Math.ceil(pairs.length / CHUNK_SIZE);
+  const feeChunks = Math.ceil(feeNodes.length / CHUNK_SIZE);
   console.log('\n=== PLAN ===');
   console.log(`  drainable pairs: ${pairs.length} across ${nodes.size} node(s)  (${chunks} × up to ${CHUNK_SIZE}/tx)`);
   console.log(`  enumerated: active ${fmt(enumeratedActive)} + pending ${fmt(enumeratedPending)} = ${fmt(enumeratedActive + enumeratedPending)} TRAC`);
-  console.log(`  will drain (totalStake + enumerated pending): ${fmt(drainable)} → migration credit`);
+  console.log(`  will drain delegator stake (totalStake + enumerated pending): ${fmt(drainable)} → migration credit`);
+  console.log(`  will drain operator fees: ${fmt(feeDrainable)} across ${feeNodes.length} node(s) (${feeChunks} × up to ${CHUNK_SIZE}/tx) → operator migration credit`);
+  console.log(`  total leaving vault (stake + pending + fees): ${fmt(drainable + feeDrainable)}`);
   console.log(`  unattributed vault TRAC (after fees + enumerated pending): ${fmt(unattributed)}`);
 
   // active-stake gap: getTotalStake is exact, so enumeratedActive < totalStake ⇒ a missing active delegator
@@ -236,6 +287,14 @@ async function main() {
       `\n  🔴 UNATTRIBUTED VAULT TRAC: ${fmt(unattributed)} is NOT explained by active stake + enumerated pending + ` +
         `operator fees. It is EITHER a missed pending delegator (widen the DelegatorAdded scan) OR unclaimed ` +
         `rewards/dust. Characterize it (and set DUST_TOLERANCE if benign) before certifying COMPLETE.`,
+    );
+  }
+  if (unresolvedFee.length > 0) {
+    console.log(
+      `\n  🔴 UNRESOLVED OPERATOR(S): ${unresolvedFee.length} fee-bearing node(s) have NO current ADMIN_KEY address ` +
+        `in OPERATOR_MAP — their fees (${fmt(unresolvedFee.reduce((s, n) => s + n.fee, 0n))} TRAC) CANNOT be drained, so ` +
+        `the vault will not empty and the cutover is blocked. Supply the current admin address for: ` +
+        `${unresolvedFee.map((n) => `id ${n.id} (${fmt(n.fee)})`).join(', ')}.`,
     );
   }
 
@@ -260,6 +319,26 @@ async function main() {
     return;
   }
 
+  // ---- preflight: hard-fail BEFORE sending any tx on an unresolved accounting
+  // gap (operational safety — a red plan must not become a partial sweep). ----
+  const blockers: string[] = [];
+  if (activeGap > 0n) blockers.push(`active-stake gap ${fmt(activeGap)} (a delegator missing from DelegatorsInfo)`);
+  if (unattributed > DUST_TOLERANCE) blockers.push(`unattributed vault ${fmt(unattributed)} > dust ${fmt(DUST_TOLERANCE)}`);
+  if (scanDegraded) blockers.push('the DelegatorAdded pending scan was degraded/incomplete (lower EVENT_SCAN_STEP)');
+  if (unresolvedFee.length > 0) blockers.push(`${unresolvedFee.length} fee-bearing node(s) with no current ADMIN_KEY address`);
+  if (blockers.length > 0) {
+    console.log('\n🛑 PREFLIGHT BLOCKED — no transaction sent:');
+    blockers.forEach((b) => console.log(`   • ${b}`));
+    if (!OVERRIDE_PREFLIGHT) {
+      console.log(
+        '\n   Resolve the above (the sweep cannot be COMPLETE while any persists), or set OVERRIDE_PREFLIGHT=1 to ' +
+          'force a partial sweep that WILL require manual reconciliation (NOT recommended).',
+      );
+      process.exit(1);
+    }
+    console.log('\n   OVERRIDE_PREFLIGHT=1 set — proceeding with a KNOWN-INCOMPLETE sweep.');
+  }
+
   // ---- execute: chunked adminDrainBatch (calldata built separately from submit) ----
   const buildCalldata = (chunk: Pair[]) =>
     NFT.interface.encodeFunctionData('adminDrainBatch', [chunk.map((p) => p.delegator), chunk.map((p) => BigInt(p.id))]);
@@ -269,46 +348,79 @@ async function main() {
     (await admin.sendTransaction({ to: await NFT.getAddress(), data: buildCalldata(chunk) })).wait();
 
   console.log('\n=== EXECUTE ===');
+  console.log('  -- delegator stake + pending --');
   for (let i = 0; i < pairs.length; i += CHUNK_SIZE) {
     const chunk = pairs.slice(i, i + CHUNK_SIZE);
     const rcpt = await submitChunk(chunk);
     console.log(`  chunk ${i / CHUNK_SIZE + 1}/${chunks} (${chunk.length} pairs) — tx ${rcpt?.hash} gas ${rcpt?.gasUsed}`);
   }
 
-  // ---- verify: per-node + total-stake + reconcile + unattributed gates ----
+  // ---- operator fees: resolved nodes only (unresolved blocked above unless
+  // overridden). Folds into the operator's SAME migration credit (OT-RFC-50). ----
+  const resolvedFee = feeNodes.filter((n) => n.operator);
+  const submitFeeChunk = async (chunk: FeeNode[]) =>
+    (
+      await admin.sendTransaction({
+        to: await NFT.getAddress(),
+        data: NFT.interface.encodeFunctionData('adminDrainOperatorFeesBatch', [
+          chunk.map((n) => BigInt(n.id)),
+          chunk.map((n) => n.operator),
+        ]),
+      })
+    ).wait();
+  console.log('  -- operator fees --');
+  for (let i = 0; i < resolvedFee.length; i += CHUNK_SIZE) {
+    const chunk = resolvedFee.slice(i, i + CHUNK_SIZE);
+    const rcpt = await submitFeeChunk(chunk);
+    console.log(`  fee chunk ${i / CHUNK_SIZE + 1}/${feeChunks} (${chunk.length} nodes) — tx ${rcpt?.hash} gas ${rcpt?.gasUsed}`);
+  }
+
+  // ---- verify: per-node stake + per-node fee + empty-vault + reconcile gates ----
   console.log('\n=== VERIFY ===');
   let badNodes = 0;
+  let badFeeNodes = 0;
   for (let id = 1; id <= lastId; id++) {
     const ns: bigint = await retry(() => SS.getNodeStake(id));
     if (ns !== 0n) {
       console.log(`  ❌ node ${id} still has ${fmt(ns)} active stake`);
       badNodes++;
     }
+    const feeLeft =
+      ((await retry(() => SS.getOperatorFeeBalance(id))) as bigint) +
+      ((await retry(() => SS.getOperatorFeeWithdrawalRequestAmount(id))) as bigint);
+    if (feeLeft !== 0n) {
+      console.log(`  ❌ node ${id} still has ${fmt(feeLeft)} operator fee`);
+      badFeeNodes++;
+    }
   }
   const totalStakeAfter: bigint = await retry(() => SS.getTotalStake());
   const vaultAfter: bigint = await retry(() => Token.balanceOf(ssAddr));
   const credited = vaultBefore - vaultAfter; // TRAC that left the vault → CSS
+  const expectedDrained = drainable + feeDrainable; // stake + pending + fees
   console.log(`  per-node active-stake oracle: ${badNodes === 0 ? 'all zero ✓' : `${badNodes} node(s) nonzero ✗`}`);
+  console.log(`  per-node operator-fee oracle: ${badFeeNodes === 0 ? 'all zero ✓' : `${badFeeNodes} node(s) nonzero ✗`}`);
   console.log(`  getTotalStake: ${fmt(totalStakeAfter)} (expect 0)`);
   console.log(`  vault: ${fmt(vaultBefore)} → ${fmt(vaultAfter)}  (drained ${fmt(credited)} → CSS)`);
-  console.log(`  reconcile: drained ${fmt(credited)} vs expected ${fmt(drainable)} (totalStake + enumerated pending)`);
-  console.log(`  unattributed (pre-sweep): ${fmt(unattributed)} (must be ≤ ${fmt(DUST_TOLERANCE)} dust tolerance)`);
+  console.log(`  reconcile: drained ${fmt(credited)} vs expected ${fmt(expectedDrained)} (stake + pending + operator fees)`);
+  console.log(`  empty-vault gate: ${fmt(vaultAfter)} residual (must be ≤ ${fmt(DUST_TOLERANCE)} dust tolerance)`);
 
   const complete =
     badNodes === 0 &&
+    badFeeNodes === 0 &&
     totalStakeAfter === 0n &&
-    credited === drainable &&
-    unattributed <= DUST_TOLERANCE;
+    unresolvedFee.length === 0 &&
+    credited === expectedDrained &&
+    vaultAfter <= DUST_TOLERANCE;
   if (complete) {
-    console.log('\n✅ SWEEP COMPLETE — all V8 active stake + pending drained into migration credit.');
-    console.log('   getTotalStake()==0, all enumerated pending cleared, no unattributed vault TRAC.');
-    console.log('   Safe to unregister V8 Staking on this chain (the vault now holds only operator fees / dust).');
+    console.log('\n✅ SWEEP COMPLETE — all V8 stake + pending + operator fees drained into migration credit.');
+    console.log('   getTotalStake()==0, all per-node stake & fee zero, vault emptied to ≤ dust.');
+    console.log('   Safe to unregister V8 Staking on this chain (the vault is now empty).');
   } else {
     console.log(
       `\n❌ INCOMPLETE — one or more gates failed. Re-run (idempotent). ` +
-        `If getTotalStake/per-node won't zero: a delegator is missing from DelegatorsInfo. ` +
-        `If unattributed > dust persists: a pending delegator was missed (widen/repair the DelegatorAdded scan) ` +
-        `or characterize it as rewards/dust and raise DUST_TOLERANCE.`,
+        `If getTotalStake/per-node stake won't zero: a delegator is missing from DelegatorsInfo. ` +
+        `If a per-node fee won't zero or the vault won't empty: an operator was unresolved/skipped (supply OPERATOR_MAP) ` +
+        `or there is unclaimed rewards/dust — characterize it and raise DUST_TOLERANCE.`,
     );
     process.exit(1);
   }
