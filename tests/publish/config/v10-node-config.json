@@ -1,0 +1,8 @@
+{
+  "name": "v10-test-node",
+  "nodeRole": "core",
+  "apiPort": 9302,
+  "auth": {
+    "enabled": true
+  }
+}

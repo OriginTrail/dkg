@@ -36,7 +36,17 @@
     "test:v9:gnosis:mainnet:stress": "cd tests/publish && BLOCKCHAIN_NAME=v9:gnosis:100 TEST_KA_BATCHES=20 npx mocha src/v9-publish-test.spec.js --timeout 7200000 --exit",
     "test:v9:insert-summary": "cd tests/publish && node scripts/insert_summary_to_db.js summary_*.json",
     "test:v9:insert-errors": "cd tests/publish && node scripts/insert_errors_to_db.js errors_*.json",
-    "test:v9:print-errors": "cd tests/publish && node scripts/print_aggregated_errors.js errors_*.json"
+    "test:v9:print-errors": "cd tests/publish && node scripts/print_aggregated_errors.js errors_*.json",
+    "test:v10:base:testnet": "cd tests/publish && BLOCKCHAIN_NAME=v10:base:84532 npx mocha src/v10-publish-test.spec.js --timeout 7200000 --exit",
+    "test:v10:base:testnet:small": "cd tests/publish && BLOCKCHAIN_NAME=v10:base:84532 TEST_KA_BATCHES=3 npx mocha src/v10-publish-test.spec.js --timeout 7200000 --exit",
+    "test:v10:base:testnet:stress": "cd tests/publish && BLOCKCHAIN_NAME=v10:base:84532 TEST_KA_BATCHES=20 npx mocha src/v10-publish-test.spec.js --timeout 7200000 --exit",
+    "test:v10:base:mainnet": "cd tests/publish && BLOCKCHAIN_NAME=v10:base:8453 npx mocha src/v10-publish-test.spec.js --timeout 7200000 --exit",
+    "test:v10:base:mainnet:small": "cd tests/publish && BLOCKCHAIN_NAME=v10:base:8453 TEST_KA_BATCHES=3 npx mocha src/v10-publish-test.spec.js --timeout 7200000 --exit",
+    "test:v10:base:mainnet:stress": "cd tests/publish && BLOCKCHAIN_NAME=v10:base:8453 TEST_KA_BATCHES=20 npx mocha src/v10-publish-test.spec.js --timeout 7200000 --exit",
+    "test:v10:local": "cd tests/publish && bash scripts/run_with_local_node.sh",
+    "test:v10:insert-summary": "cd tests/publish && node scripts/insert_summary_to_db.js summary_*.json",
+    "test:v10:insert-errors": "cd tests/publish && node scripts/insert_errors_to_db.js errors_*.json",
+    "test:v10:print-errors": "cd tests/publish && node scripts/print_aggregated_errors.js errors_*.json"
   },
   "devDependencies": {
     "@types/node": "^22",
