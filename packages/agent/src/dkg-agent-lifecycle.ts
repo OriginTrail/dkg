@@ -14,6 +14,7 @@ import {
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
+  PROTOCOL_SHARED_MODEL_INVOKE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
   ENTITY_PRED_ALT, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY,
@@ -693,6 +694,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Going through messenger.register opts into the substrate's
     // envelope versioning, idempotency cache, and `/api/slo` stats.
     this.messenger.register(PROTOCOL_SWM_HOST_CATCHUP, (data, fromPeerId) => this.handleSwmHostCatchup(data, fromPeerId));
+
+    // Shared curator AI-model access (MVP): serve member invokes of the
+    // model this node's curator shares. The handler enforces the per-CG
+    // grant, membership, and quota, and denies politely otherwise.
+    this.messenger.register(PROTOCOL_SHARED_MODEL_INVOKE, (data, fromPeerId) => this.handleSharedModelInvoke(data, fromPeerId));
 
     // OT-RFC-38 LU-11 / OT-RFC-39: per-chunk ciphertext sync verb.
     // Symmetric to PROTOCOL_SWM_HOST_CATCHUP but pulls one

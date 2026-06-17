@@ -254,6 +254,28 @@ export interface LlmConfig {
   baseURL?: string;
 }
 
+/** Shared curator AI-model access (MVP). Defaults reuse `llm` when omitted. */
+export interface SharedModelConfig {
+  /** Enable serving shared-model invokes from this node. */
+  enabled?: boolean;
+  /** 'mock' (offline, no key) or 'openai-compatible'. Defaults from `llm`. */
+  provider?: 'mock' | 'openai-compatible';
+  /** Model id to advertise/use. Defaults to `llm.model`. */
+  model?: string;
+  /** Base URL for openai-compatible. Defaults to `llm.baseURL`. */
+  baseUrl?: string;
+  /** Env var holding the API key. Defaults to reusing `llm.apiKey`. */
+  apiKeyEnv?: string;
+  /** Per-member daily request cap. Default 200. */
+  dailyRequestQuotaPerAgent?: number;
+  /** Max prompt chars accepted from a member. Default 8000. */
+  maxPromptChars?: number;
+  /** Member-side transport budget (ms) for the whole remote invoke. Default 120000. */
+  invokeTimeoutMs?: number;
+  /** Curator-side provider fetch deadline (ms); kept below invokeTimeoutMs. Default 110000. */
+  providerTimeoutMs?: number;
+}
+
 export type LocalAgentIntegrationStatus =
   | 'disconnected'
   | 'configured'
@@ -459,6 +481,8 @@ export interface DkgConfig {
   chain?: Partial<ChainConfig>;
   /** Optional LLM for the Node UI chatbot (natural language → SPARQL, answers). */
   llm?: LlmConfig;
+  /** Optional shared curator AI-model access for context-graph members (MVP). */
+  sharedModel?: SharedModelConfig;
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
   /** Triple store backend override (default: oxigraph-worker with file persistence). */
