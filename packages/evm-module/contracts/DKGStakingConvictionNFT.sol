@@ -548,6 +548,9 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
         address delegator,
         uint72[] calldata sourceNodes
     ) external onlyOwnerOrMultiSigOwner returns (uint96 credited) {
+        // Benign: _drainAll calls only the onlyConvictionNFT worker over trusted
+        // storage (no callback); the event after it carries no reentrancy risk.
+        // slither-disable-next-line reentrancy-events
         credited = _drainAll(delegator, sourceNodes);
         if (credited == 0) revert NothingToMigrate();
         emit MigrationStarted(delegator, credited);
@@ -571,6 +574,10 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
         uint256 n = delegators.length;
         require(n == identityIds.length, "length mismatch");
         for (uint256 i = 0; i < n; i++) {
+            // Benign: owner-only batch; the callee is onlyConvictionNFT over
+            // trusted protocol storage, moves plain ERC20 TRAC (no callback),
+            // and is idempotent — no value-reentrancy vector, event-after-call ok.
+            // slither-disable-next-line calls-loop,reentrancy-events
             uint96 t = stakingV10.drainV8ToCredit(delegators[i], identityIds[i]);
             if (t > 0) emit MigrationStarted(delegators[i], t);
         }
@@ -596,6 +603,10 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
         uint256 n = identityIds.length;
         require(n == operators.length, "length mismatch");
         for (uint256 i = 0; i < n; i++) {
+            // Benign: owner-only batch; the callee is onlyConvictionNFT over
+            // trusted protocol storage, moves plain ERC20 TRAC (no callback),
+            // and is idempotent — no value-reentrancy vector, event-after-call ok.
+            // slither-disable-next-line calls-loop,reentrancy-events
             uint96 t = stakingV10.drainOperatorFeeToCredit(identityIds[i], operators[i]);
             if (t > 0) emit OperatorFeeMigrated(identityIds[i], operators[i], t);
         }
@@ -630,6 +641,9 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     ) internal returns (uint96 total) {
         uint256 n = sourceNodes.length;
         for (uint256 i = 0; i < n; i++) {
+            // Benign: onlyConvictionNFT callee over trusted storage, plain ERC20,
+            // idempotent (see adminDrainBatch).
+            // slither-disable-next-line calls-loop
             total += stakingV10.drainV8ToCredit(delegator, sourceNodes[i]);
         }
     }
