@@ -1,11 +1,11 @@
 {
-  "name": "dkg-v9-publish-tests",
+  "name": "dkg-v10-publish-tests",
   "version": "1.0.0",
   "type": "module",
   "private": true,
-  "description": "DKG v9 publish/query lifecycle tests — mirrors dkg.js V8 test suite",
+  "description": "DKG v10 publish/query lifecycle tests — mirrors the dkg.js V8 test suite",
   "scripts": {
-    "test": "mocha src/v9-publish-test.spec.js --timeout 7200000 --exit",
+    "test": "mocha src/v10-publish-test.spec.js --timeout 7200000 --exit",
     "insert-summary": "node scripts/insert_summary_to_db.js",
     "insert-errors": "node scripts/insert_errors_to_db.js",
     "print-errors": "node scripts/print_aggregated_errors.js"
