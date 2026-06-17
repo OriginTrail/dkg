@@ -26,6 +26,20 @@
 import { describe, it, expect, vi } from 'vitest';
 import { DKGAgent } from '../src/dkg-agent.js';
 
+// Hand-rolled call recorder (replaces vitest spy factories): wraps an
+// implementation, records every argument tuple on `.calls`, and returns
+// the implementation's result. `vi` is retained ONLY for the
+// fake-timer clock control in the round-4 timeout test (legitimate
+// deterministic time, not a behavior mock).
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
+
 interface ChainStub {
   getContextGraphAccessPolicy?: (id: bigint) => Promise<number>;
   getContextGraphPublishPolicy?: (id: bigint) => Promise<{
@@ -64,12 +78,12 @@ function makeStub(overrides: Partial<AgentStub> = {}): AgentStub {
     onChainPublishPolicyCache: new Map(),
     onChainPublishPolicyCacheUpdatedAt: new Map(),
     subscribedContextGraphs: new Map(),
-    getContextGraphOnChainId: vi.fn(async () => null),
-    isContextGraphRegistered: vi.fn(async () => false),
-    getStoredContextGraphRegistrationOptions: vi.fn(async () => ({})),
-    readLocalAccessPolicyEnum: vi.fn(async () => undefined),
+    getContextGraphOnChainId: recorder(async () => null),
+    isContextGraphRegistered: recorder(async () => false),
+    getStoredContextGraphRegistrationOptions: recorder(async () => ({})),
+    readLocalAccessPolicyEnum: recorder(async () => undefined),
     chain: undefined,
-    log: { warn: vi.fn() },
+    log: { warn: recorder(() => undefined) },
     ...overrides,
   };
 }
@@ -94,9 +108,9 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
     expect(result).toEqual({ accessPolicy: 0, publishPolicy: 1 });
     // Cache hit short-circuits before registration status / local
     // fallback — neither stub should have been invoked.
-    expect(stub.isContextGraphRegistered).not.toHaveBeenCalled();
-    expect(stub.getStoredContextGraphRegistrationOptions).not.toHaveBeenCalled();
-    expect(stub.readLocalAccessPolicyEnum).not.toHaveBeenCalled();
+    expect((stub.isContextGraphRegistered as any).calls).toEqual([]);
+    expect((stub.getStoredContextGraphRegistrationOptions as any).calls).toEqual([]);
+    expect((stub.readLocalAccessPolicyEnum as any).calls).toEqual([]);
   });
 
   // Round 2, finding B: the regression test. A CG that exists
@@ -107,18 +121,18 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
   // hasn't actually committed to making public yet.
   it('returns {} when on-chain caches miss AND the CG is not registered (#872 Codex round 2 finding B)', async () => {
     const stub = makeStub({
-      isContextGraphRegistered: vi.fn(async () => false),
+      isContextGraphRegistered: recorder(async () => false),
       // These stubs would return public + open if the fallback ran —
-      // the gating must short-circuit BEFORE calling them. Use
-      // `.toHaveBeenCalled` to prove the gate fired.
-      getStoredContextGraphRegistrationOptions: vi.fn(async () => ({ publishPolicy: 1 })),
-      readLocalAccessPolicyEnum: vi.fn(async () => 0),
+      // the gating must short-circuit BEFORE calling them. Assert the
+      // recorded calls to prove the gate fired.
+      getStoredContextGraphRegistrationOptions: recorder(async () => ({ publishPolicy: 1 })),
+      readLocalAccessPolicyEnum: recorder(async () => 0),
     });
     const result = await callPolicy(stub, 'cg-unregistered');
     expect(result).toEqual({});
-    expect(stub.isContextGraphRegistered).toHaveBeenCalledWith('cg-unregistered');
-    expect(stub.getStoredContextGraphRegistrationOptions).not.toHaveBeenCalled();
-    expect(stub.readLocalAccessPolicyEnum).not.toHaveBeenCalled();
+    expect((stub.isContextGraphRegistered as any).calls.at(-1)).toEqual(['cg-unregistered']);
+    expect((stub.getStoredContextGraphRegistrationOptions as any).calls).toEqual([]);
+    expect((stub.readLocalAccessPolicyEnum as any).calls).toEqual([]);
   });
 
   // Companion: when the CG IS registered, the local fallback can
@@ -127,23 +141,23 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
   // ignored because `updatePublishPolicy` does not update that
   // local triple.
   it('uses local accessPolicy and chain publishPolicy when the CG is registered but caches are cold', async () => {
-    const getContextGraphPublishPolicy = vi.fn(async () => ({
+    const getContextGraphPublishPolicy = recorder(async () => ({
       publishPolicy: 1,
       publishAuthority: '0x0000000000000000000000000000000000000000',
     }));
     const stub = makeStub({
       subscribedContextGraphs: new Map([['cg-registered', { onChainId: '9' }]]),
-      isContextGraphRegistered: vi.fn(async () => true),
-      getStoredContextGraphRegistrationOptions: vi.fn(async () => ({ publishPolicy: 1 })),
-      readLocalAccessPolicyEnum: vi.fn(async () => 0),
+      isContextGraphRegistered: recorder(async () => true),
+      getStoredContextGraphRegistrationOptions: recorder(async () => ({ publishPolicy: 1 })),
+      readLocalAccessPolicyEnum: recorder(async () => 0),
       chain: { getContextGraphPublishPolicy },
     });
     const result = await callPolicy(stub, 'cg-registered');
     expect(result).toEqual({ accessPolicy: 0, publishPolicy: 1 });
-    expect(stub.isContextGraphRegistered).toHaveBeenCalledWith('cg-registered');
-    expect(stub.getStoredContextGraphRegistrationOptions).not.toHaveBeenCalled();
-    expect(stub.readLocalAccessPolicyEnum).toHaveBeenCalledWith('cg-registered');
-    expect(getContextGraphPublishPolicy).toHaveBeenCalledWith(9n);
+    expect((stub.isContextGraphRegistered as any).calls.at(-1)).toEqual(['cg-registered']);
+    expect((stub.getStoredContextGraphRegistrationOptions as any).calls).toEqual([]);
+    expect((stub.readLocalAccessPolicyEnum as any).calls.at(-1)).toEqual(['cg-registered']);
+    expect(getContextGraphPublishPolicy.calls.at(-1)).toEqual([9n]);
   });
 
   // Defensive: `isContextGraphRegistered` failing (e.g. SPARQL
@@ -152,21 +166,21 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
   // remains closed even when the registration probe itself errors.
   it('treats isContextGraphRegistered() rejections as not-registered', async () => {
     const stub = makeStub({
-      isContextGraphRegistered: vi.fn(async () => { throw new Error('store unavailable'); }),
-      getStoredContextGraphRegistrationOptions: vi.fn(async () => ({ publishPolicy: 1 })),
-      readLocalAccessPolicyEnum: vi.fn(async () => 0),
+      isContextGraphRegistered: recorder(async () => { throw new Error('store unavailable'); }),
+      getStoredContextGraphRegistrationOptions: recorder(async () => ({ publishPolicy: 1 })),
+      readLocalAccessPolicyEnum: recorder(async () => 0),
     });
     const result = await callPolicy(stub, 'cg-probe-failed');
     expect(result).toEqual({});
-    expect(stub.getStoredContextGraphRegistrationOptions).not.toHaveBeenCalled();
-    expect(stub.readLocalAccessPolicyEnum).not.toHaveBeenCalled();
+    expect((stub.getStoredContextGraphRegistrationOptions as any).calls).toEqual([]);
+    expect((stub.readLocalAccessPolicyEnum as any).calls).toEqual([]);
   });
 
   // Mixed cache hit: when only accessPolicy is cached AND the CG is
   // registered, the missing publishPolicy is still revalidated from
   // chain rather than filled from the creator's stored options.
   it('uses chain RPC for a missing publishPolicy even when accessPolicy is cached', async () => {
-    const getContextGraphPublishPolicy = vi.fn(async () => ({
+    const getContextGraphPublishPolicy = recorder(async () => ({
       publishPolicy: 1,
       publishAuthority: '0x0000000000000000000000000000000000000000',
     }));
@@ -174,15 +188,15 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
       subscribedContextGraphs: new Map([['cg-2', { onChainId: '10' }]]),
       onChainAccessPolicyCache: new Map([['cg-2', 0]]),
       onChainPublishPolicyCache: new Map(),
-      isContextGraphRegistered: vi.fn(async () => true),
-      getStoredContextGraphRegistrationOptions: vi.fn(async () => ({ publishPolicy: 1 })),
-      readLocalAccessPolicyEnum: vi.fn(async () => 0),
+      isContextGraphRegistered: recorder(async () => true),
+      getStoredContextGraphRegistrationOptions: recorder(async () => ({ publishPolicy: 1 })),
+      readLocalAccessPolicyEnum: recorder(async () => 0),
       chain: { getContextGraphPublishPolicy },
     });
     const result = await callPolicy(stub, 'cg-2');
     expect(result).toEqual({ accessPolicy: 0, publishPolicy: 1 });
-    expect(stub.getStoredContextGraphRegistrationOptions).not.toHaveBeenCalled();
-    expect(getContextGraphPublishPolicy).toHaveBeenCalledWith(10n);
+    expect((stub.getStoredContextGraphRegistrationOptions as any).calls).toEqual([]);
+    expect(getContextGraphPublishPolicy.calls.at(-1)).toEqual([10n]);
   });
 
   // Round 3, the regression test. Non-creator peers never receive
@@ -195,27 +209,27 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
   // confirmed registered, populates the cache, and returns the
   // chain values.
   it('falls back to chain RPC when a registered CG has no local publishPolicy (non-creator peer) (#872 Codex round 3)', async () => {
-    const getContextGraphPublishPolicy = vi.fn(async () => ({
+    const getContextGraphPublishPolicy = recorder(async () => ({
       publishPolicy: 1,
       publishAuthority: '0x0000000000000000000000000000000000000000',
     }));
-    const getContextGraphAccessPolicy = vi.fn(async () => 0);
+    const getContextGraphAccessPolicy = recorder(async () => 0);
     const stub = makeStub({
       // Subscribed CG — cleartext id maps to a numeric on-chain id.
       // The fallback must look up that mapping (creators get it
       // from `subscribedContextGraphs`; non-creator peers via the
       // local ontology triple read by `getContextGraphOnChainId`).
       subscribedContextGraphs: new Map([['cg-public-open', { onChainId: '42' }]]),
-      isContextGraphRegistered: vi.fn(async () => true),
+      isContextGraphRegistered: recorder(async () => true),
       // Non-creator peer: no creator-written local triples.
-      getStoredContextGraphRegistrationOptions: vi.fn(async () => ({})),
-      readLocalAccessPolicyEnum: vi.fn(async () => undefined),
+      getStoredContextGraphRegistrationOptions: recorder(async () => ({})),
+      readLocalAccessPolicyEnum: recorder(async () => undefined),
       chain: { getContextGraphPublishPolicy, getContextGraphAccessPolicy },
     });
     const result = await callPolicy(stub, 'cg-public-open');
     expect(result).toEqual({ accessPolicy: 0, publishPolicy: 1 });
-    expect(getContextGraphPublishPolicy).toHaveBeenCalledWith(42n);
-    expect(getContextGraphAccessPolicy).toHaveBeenCalledWith(42n);
+    expect(getContextGraphPublishPolicy.calls.at(-1)).toEqual([42n]);
+    expect(getContextGraphAccessPolicy.calls.at(-1)).toEqual([42n]);
     // Cache populated under the numeric on-chain id so subsequent
     // calls don't re-RPC.
     expect(stub.onChainPublishPolicyCache.get('42')).toBe(1);
@@ -227,22 +241,22 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
   // and leaves the field undefined; the daemon route then falls
   // back to the strict guard (fail-closed).
   it('treats chain.getContextGraphPublishPolicy() rejections as unknown and logs a warning', async () => {
-    const getContextGraphPublishPolicy = vi.fn(async () => { throw new Error('rpc unavailable'); });
+    const getContextGraphPublishPolicy = recorder(async () => { throw new Error('rpc unavailable'); });
     const stub = makeStub({
       subscribedContextGraphs: new Map([['cg-rpc-fail', { onChainId: '7' }]]),
-      isContextGraphRegistered: vi.fn(async () => true),
+      isContextGraphRegistered: recorder(async () => true),
       // accessPolicy IS available locally (open-CG ontology
       // triple); only publishPolicy needs the chain.
-      readLocalAccessPolicyEnum: vi.fn(async () => 0),
+      readLocalAccessPolicyEnum: recorder(async () => 0),
       chain: { getContextGraphPublishPolicy },
     });
     const result = await callPolicy(stub, 'cg-rpc-fail');
     expect(result).toEqual({ accessPolicy: 0 });
-    expect(getContextGraphPublishPolicy).toHaveBeenCalledWith(7n);
-    expect(stub.log.warn).toHaveBeenCalledWith(
+    expect(getContextGraphPublishPolicy.calls.at(-1)).toEqual([7n]);
+    expect((stub.log.warn as any).calls.at(-1)).toEqual([
       expect.objectContaining({ operationId: expect.any(String) }),
       expect.stringMatching(/chain\.getContextGraphPublishPolicy\(7\) failed/),
-    );
+    ]);
     // Cache MUST NOT be populated with an undefined value.
     expect(stub.onChainPublishPolicyCache.has('7')).toBe(false);
   });
@@ -254,24 +268,24 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
   // `registerContextGraph` has NOT yet been called, so neither the
   // status flag nor an on-chain id exists locally.
   it('does NOT make a chain RPC call when the CG is unregistered AND no on-chain id is known (round 2 gate still holds)', async () => {
-    const getContextGraphPublishPolicy = vi.fn(async () => ({
+    const getContextGraphPublishPolicy = recorder(async () => ({
       publishPolicy: 1,
       publishAuthority: '0x0000000000000000000000000000000000000000',
     }));
-    const getContextGraphAccessPolicy = vi.fn(async () => 0);
+    const getContextGraphAccessPolicy = recorder(async () => 0);
     const stub = makeStub({
       // No on-chain id — `createContextGraph` has run but
       // `registerContextGraph` has not, so the chain hasn't assigned
       // a numeric id yet.
       subscribedContextGraphs: new Map(),
-      isContextGraphRegistered: vi.fn(async () => false),
-      getContextGraphOnChainId: vi.fn(async () => null),
+      isContextGraphRegistered: recorder(async () => false),
+      getContextGraphOnChainId: recorder(async () => null),
       chain: { getContextGraphPublishPolicy, getContextGraphAccessPolicy },
     });
     const result = await callPolicy(stub, 'cg-unregistered');
     expect(result).toEqual({});
-    expect(getContextGraphPublishPolicy).not.toHaveBeenCalled();
-    expect(getContextGraphAccessPolicy).not.toHaveBeenCalled();
+    expect(getContextGraphPublishPolicy.calls).toEqual([]);
+    expect(getContextGraphAccessPolicy.calls).toEqual([]);
   });
 
   // Round 6 (Codex on #879, line 15487, 2026-06-01): the round-2
@@ -287,26 +301,26 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
   // proof of an on-chain commitment, so the chain-RPC fallback can
   // run for these peers.
   it('falls through to the chain RPC fallback when status is "unregistered" but onChainId is known (#879 Codex round 6)', async () => {
-    const getContextGraphPublishPolicy = vi.fn(async () => ({
+    const getContextGraphPublishPolicy = recorder(async () => ({
       publishPolicy: 1,
       publishAuthority: '0x0000000000000000000000000000000000000000',
     }));
-    const getContextGraphAccessPolicy = vi.fn(async () => 0);
+    const getContextGraphAccessPolicy = recorder(async () => 0);
     const stub = makeStub({
       // Replicated CG: subscribed via chain event, so we have the
       // on-chain id, but `registrationStatus` was never flipped to
       // "registered" because that flag is creator-only.
       subscribedContextGraphs: new Map([['cg-replicated', { onChainId: '77' }]]),
-      isContextGraphRegistered: vi.fn(async () => false),
+      isContextGraphRegistered: recorder(async () => false),
       // Non-creator peer: no local creator-written triples.
-      getStoredContextGraphRegistrationOptions: vi.fn(async () => ({})),
-      readLocalAccessPolicyEnum: vi.fn(async () => undefined),
+      getStoredContextGraphRegistrationOptions: recorder(async () => ({})),
+      readLocalAccessPolicyEnum: recorder(async () => undefined),
       chain: { getContextGraphPublishPolicy, getContextGraphAccessPolicy },
     });
     const result = await callPolicy(stub, 'cg-replicated');
     expect(result).toEqual({ accessPolicy: 0, publishPolicy: 1 });
-    expect(getContextGraphPublishPolicy).toHaveBeenCalledWith(77n);
-    expect(getContextGraphAccessPolicy).toHaveBeenCalledWith(77n);
+    expect(getContextGraphPublishPolicy.calls.at(-1)).toEqual([77n]);
+    expect(getContextGraphAccessPolicy.calls.at(-1)).toEqual([77n]);
   });
 
   // Round 6 negative: a CG with NEITHER status="registered" NOR a
@@ -318,16 +332,16 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
     const stub = makeStub({
       // No `subscribedContextGraphs` entry, no ontology triple.
       subscribedContextGraphs: new Map(),
-      getContextGraphOnChainId: vi.fn(async () => null),
-      isContextGraphRegistered: vi.fn(async () => false),
+      getContextGraphOnChainId: recorder(async () => null),
+      isContextGraphRegistered: recorder(async () => false),
       // These would return public+open if the gate let them run.
-      getStoredContextGraphRegistrationOptions: vi.fn(async () => ({ publishPolicy: 1 })),
-      readLocalAccessPolicyEnum: vi.fn(async () => 0),
+      getStoredContextGraphRegistrationOptions: recorder(async () => ({ publishPolicy: 1 })),
+      readLocalAccessPolicyEnum: recorder(async () => 0),
     });
     const result = await callPolicy(stub, 'cg-create-only');
     expect(result).toEqual({});
-    expect(stub.getStoredContextGraphRegistrationOptions).not.toHaveBeenCalled();
-    expect(stub.readLocalAccessPolicyEnum).not.toHaveBeenCalled();
+    expect((stub.getStoredContextGraphRegistrationOptions as any).calls).toEqual([]);
+    expect((stub.readLocalAccessPolicyEnum as any).calls).toEqual([]);
   });
 
   // Codex review on #879 — creator-written `publishPolicy` in
@@ -336,23 +350,23 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
   // value must not keep relaxing the import-artifact owner guard
   // after the curator flips the CG to curated on-chain.
   it('ignores stored publishPolicy and revalidates from chain even on the creator path', async () => {
-    const getContextGraphPublishPolicy = vi.fn(async () => ({
+    const getContextGraphPublishPolicy = recorder(async () => ({
       publishPolicy: 0,
       publishAuthority: '0x0000000000000000000000000000000000000000',
     }));
-    const getContextGraphAccessPolicy = vi.fn(async () => 0);
+    const getContextGraphAccessPolicy = recorder(async () => 0);
     const stub = makeStub({
       subscribedContextGraphs: new Map([['cg-creator', { onChainId: '11' }]]),
-      isContextGraphRegistered: vi.fn(async () => true),
-      getStoredContextGraphRegistrationOptions: vi.fn(async () => ({ publishPolicy: 1 })),
-      readLocalAccessPolicyEnum: vi.fn(async () => 0),
+      isContextGraphRegistered: recorder(async () => true),
+      getStoredContextGraphRegistrationOptions: recorder(async () => ({ publishPolicy: 1 })),
+      readLocalAccessPolicyEnum: recorder(async () => 0),
       chain: { getContextGraphPublishPolicy, getContextGraphAccessPolicy },
     });
     const result = await callPolicy(stub, 'cg-creator');
     expect(result).toEqual({ accessPolicy: 0, publishPolicy: 0 });
-    expect(stub.getStoredContextGraphRegistrationOptions).not.toHaveBeenCalled();
-    expect(getContextGraphPublishPolicy).toHaveBeenCalledWith(11n);
-    expect(getContextGraphAccessPolicy).not.toHaveBeenCalled();
+    expect((stub.getStoredContextGraphRegistrationOptions as any).calls).toEqual([]);
+    expect(getContextGraphPublishPolicy.calls.at(-1)).toEqual([11n]);
+    expect(getContextGraphAccessPolicy.calls).toEqual([]);
   });
 
   // Round 4 — the regression test for the daemon-ready hang. If
@@ -371,13 +385,13 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
       // Promise that never resolves — emulates an RPC stack that
       // hasn't given up yet because every endpoint is 429-ing.
       const neverResolves = new Promise<{ publishPolicy: number; publishAuthority: string }>(() => {});
-      const getContextGraphPublishPolicy = vi.fn(() => neverResolves);
+      const getContextGraphPublishPolicy = recorder(() => neverResolves);
       const stub = makeStub({
         subscribedContextGraphs: new Map([['cg-slow-rpc', { onChainId: '13' }]]),
-        isContextGraphRegistered: vi.fn(async () => true),
+        isContextGraphRegistered: recorder(async () => true),
         // accessPolicy answered locally so the test isolates the
         // publishPolicy timeout path.
-        readLocalAccessPolicyEnum: vi.fn(async () => 0),
+        readLocalAccessPolicyEnum: recorder(async () => 0),
         chain: { getContextGraphPublishPolicy },
       });
       const promise = callPolicy(stub, 'cg-slow-rpc');
@@ -386,11 +400,11 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
       await vi.advanceTimersByTimeAsync(3_000);
       const result = await promise;
       expect(result).toEqual({ accessPolicy: 0 });
-      expect(getContextGraphPublishPolicy).toHaveBeenCalledWith(13n);
-      expect(stub.log.warn).toHaveBeenCalledWith(
+      expect(getContextGraphPublishPolicy.calls.at(-1)).toEqual([13n]);
+      expect((stub.log.warn as any).calls.at(-1)).toEqual([
         expect.objectContaining({ operationId: expect.any(String) }),
         expect.stringMatching(/getContextGraphPublishPolicy\(13\) timed out after 2500ms/),
-      );
+      ]);
       // Cache MUST NOT be populated with an undefined / partial answer.
       expect(stub.onChainPublishPolicyCache.has('13')).toBe(false);
     } finally {
@@ -411,11 +425,11 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
   it('treats publishPolicy cache entries older than the TTL as stale and falls through to chain RPC', async () => {
     const TTL_MS = 60_000;
     const STALE_AGE_MS = TTL_MS + 1_000;
-    const getContextGraphPublishPolicy = vi.fn(async () => ({
+    const getContextGraphPublishPolicy = recorder(async () => ({
       publishPolicy: 0, // the curator just flipped open → curated
       publishAuthority: '0x0000000000000000000000000000000000000000',
     }));
-    const getContextGraphAccessPolicy = vi.fn(async () => 0);
+    const getContextGraphAccessPolicy = recorder(async () => 0);
     const stub = makeStub({
       subscribedContextGraphs: new Map([['cg-stale', { onChainId: '55' }]]),
       // Cached value says "1" (open), seeded by an old
@@ -423,15 +437,15 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
       onChainPublishPolicyCache: new Map([['cg-stale', 1]]),
       onChainPublishPolicyCacheUpdatedAt: new Map([['cg-stale', Date.now() - STALE_AGE_MS]]),
       onChainAccessPolicyCache: new Map([['cg-stale', 0]]),
-      isContextGraphRegistered: vi.fn(async () => true),
-      getStoredContextGraphRegistrationOptions: vi.fn(async () => ({ publishPolicy: 1 })),
+      isContextGraphRegistered: recorder(async () => true),
+      getStoredContextGraphRegistrationOptions: recorder(async () => ({ publishPolicy: 1 })),
       chain: { getContextGraphPublishPolicy, getContextGraphAccessPolicy },
     });
     const result = await callPolicy(stub, 'cg-stale');
     // Stale "1" was discarded; chain re-verify returned "0" (curated).
     expect(result).toEqual({ accessPolicy: 0, publishPolicy: 0 });
-    expect(stub.getStoredContextGraphRegistrationOptions).not.toHaveBeenCalled();
-    expect(getContextGraphPublishPolicy).toHaveBeenCalledWith(55n);
+    expect((stub.getStoredContextGraphRegistrationOptions as any).calls).toEqual([]);
+    expect(getContextGraphPublishPolicy.calls.at(-1)).toEqual([55n]);
     // Cache overwritten with the fresh chain answer keyed on
     // numericOnChainId; freshness timestamp also bumped so the
     // next read inside the TTL window is a fast cache-hit.
@@ -445,17 +459,22 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
   // RPC without a numeric id, so we return whatever local triples
   // gave us and let the caller fail-closed.
   it('returns whatever local triples gave us when registered but on-chain id cannot be resolved', async () => {
-    const getContextGraphPublishPolicy = vi.fn();
+    // Never invoked in this path (the gate returns before any RPC);
+    // the impl shape just satisfies the `chain` type contract.
+    const getContextGraphPublishPolicy = recorder(async () => ({
+      publishPolicy: 0,
+      publishAuthority: '0x0000000000000000000000000000000000000000',
+    }));
     const stub = makeStub({
       // No subscribed entry, and the SPARQL lookup returns null too.
       subscribedContextGraphs: new Map(),
-      getContextGraphOnChainId: vi.fn(async () => null),
-      isContextGraphRegistered: vi.fn(async () => true),
-      readLocalAccessPolicyEnum: vi.fn(async () => 0),
+      getContextGraphOnChainId: recorder(async () => null),
+      isContextGraphRegistered: recorder(async () => true),
+      readLocalAccessPolicyEnum: recorder(async () => 0),
       chain: { getContextGraphPublishPolicy },
     });
     const result = await callPolicy(stub, 'cg-no-onchain-id');
     expect(result).toEqual({ accessPolicy: 0 });
-    expect(getContextGraphPublishPolicy).not.toHaveBeenCalled();
+    expect(getContextGraphPublishPolicy.calls).toEqual([]);
   });
 });

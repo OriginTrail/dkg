@@ -4,6 +4,7 @@ import {
   assertSafeIri,
   sparqlString,
   validateSubGraphName,
+  contextGraphCatalogUri,
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
@@ -413,6 +414,15 @@ export async function readDurableDataPage(params: {
   const candidateGraphs = params.graphList.filter((graph) => {
     if (graph !== cgPrefix && !graph.startsWith(`${cgPrefix}/`)) return false;
     if (graph === topMetaGraph) return false;
+    // Shared-memory graphs (`/_shared_memory`, `/_shared_memory_meta`, including
+    // per-sub-graph buckets) are the EXCLUSIVE domain of the dedicated SWM phase
+    // (readSwmDataPage), which applies per-(graph,subject) REPLACE + the
+    // curator-skip. Serving them in the durable DATA phase makes the requester
+    // blind-UNION them, which (a) corrupts single-valued SWM into {v1,v2}, and
+    // (b) lets a curator reverse-sync its OWN CG's SWM from a member, polluting
+    // itself (devnet curator-converge Gate A) — and it leaks gated SWM to durable
+    // requesters. SWM is never served through the durable data phase.
+    if (graph.includes('/_shared_memory')) return false;
     return !graph.includes('/_private');
   }).sort(compareCodePoint);
 
@@ -471,6 +481,28 @@ export async function readDurableDataPage(params: {
       }
       : undefined,
     params.signal,
+  );
+}
+
+/**
+ * read the public catalog facet. STRICTLY bounded to exactly the
+ * `_catalog` named graph (`did:dkg:context-graph:{cg}/_catalog`): it reads that
+ * one graph and nothing else, so the open-serve path cannot leak any gated
+ * quad. This is the only graph the §7 facet open-serve releases without auth.
+ */
+export async function readCatalogPage(params: {
+  store: TripleStore;
+  contextGraphId: string;
+  offset: number;
+  limit: number;
+}): Promise<SyncRow[]> {
+  const catalogGraph = contextGraphCatalogUri(params.contextGraphId);
+  return readPagedRowsAcrossGraphs(
+    params.store,
+    [catalogGraph],
+    params.offset,
+    params.limit,
+    async () => true, // the single graph is already the bound; admit it
   );
 }
 

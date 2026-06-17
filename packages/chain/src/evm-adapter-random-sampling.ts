@@ -53,6 +53,10 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
     const kaId = BigInt(raw.knowledgeAssetId ?? raw[0]);
     const startBlock = BigInt(raw.activeProofPeriodStartBlock ?? raw[4]);
     if (kaId === 0n && startBlock === 0n) return null;
+    // OT-RFC-49 — tuple grew two pinned fields (challengeLeafCount @8,
+    // challengeRoot @9) after isCurated @7; ethers.getBytes normalises the
+    // bytes32 root to the Uint8Array the prover/proof-builder consume.
+    const rootRaw = raw.challengeRoot ?? raw[9] ?? ethers.ZeroHash;
     return {
       knowledgeAssetId: kaId,
       chunkId: BigInt(raw.chunkId ?? raw[1]),
@@ -61,6 +65,9 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
       activeProofPeriodStartBlock: startBlock,
       proofingPeriodDurationInBlocks: BigInt(raw.proofingPeriodDurationInBlocks ?? raw[5]),
       solved: Boolean(raw.solved ?? raw[6]),
+      isCurated: Boolean(raw.isCurated ?? raw[7]),
+      challengeLeafCount: BigInt(raw.challengeLeafCount ?? raw[8] ?? 0n),
+      challengeRoot: ethers.getBytes(rootRaw),
     };
   }
 

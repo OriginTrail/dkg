@@ -1424,6 +1424,34 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     }
   }
 
+  // POST /api/context-graph/recover-shared-memory
+  // Explicit member recovery: re-fetch a context graph's shared memory to the
+  // current state from ONE chosen authoritative peer and apply via per-KA-graph
+  // REPLACE (not the corrupting union). Used to repair a stale or corrupt local
+  // SWM copy. Pulls only from the peer the caller names — never a blanket sweep.
+  if (req.method === "POST" && path === "/api/context-graph/recover-shared-memory") {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = JSON.parse(body);
+    const contextGraphId = parsed.contextGraphId;
+    const remotePeerId = parsed.remotePeerId ?? parsed.peerId;
+    if (!contextGraphId)
+      return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
+    if (!remotePeerId)
+      return jsonResponse(res, 400, { error: 'Missing "remotePeerId"' });
+    try {
+      const result = await agent.recoverContextGraphSwmFromPeer(remotePeerId, contextGraphId);
+      return jsonResponse(res, 200, {
+        recovered: contextGraphId,
+        fromPeer: remotePeerId,
+        ...result,
+      });
+    } catch (err) {
+      return jsonResponse(res, 500, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   // POST /api/context-graph/subscribe (V10) or /api/subscribe (legacy)
   if (
     req.method === "POST" &&
@@ -1653,9 +1681,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   }
 
   // GET /api/context-graph/subscriptions — list the node's ACTIVE in-memory
-  // context-graph subscriptions (diagnostics for #997: see how many are live).
-  // The total PERSISTED backlog is reported in the boot log ("Rehydrated X of
-  // Y"); anything beyond the activation cap is dormant until pruned below.
+  // context-graph subscriptions plus startup rehydration diagnostics (#997/#1180).
+  // Rows beyond the activation cap are persisted/dormant, not gossip/sync active.
   if (req.method === "GET" && path === "/api/context-graph/subscriptions") {
     // Operator-only: this is a NODE-WIDE view, so an agent-scoped token would
     // otherwise be able to enumerate OTHER agents' subscribed/private CG IDs.
@@ -1670,20 +1697,24 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const map = agent.getSubscribedContextGraphs?.();
     const subscriptions = map
       ? [...map.entries()]
-          // ACTIVE USER subscriptions only. Exclude (a) discoverable-only /
-          // unsubscribed registry entries (`subscribed: false`) and (b) the
-          // always-on AGENTS/ONTOLOGY system CGs — which the startup cap/log also
-          // exclude — so `count` and the payload match the rehydrated
-          // user-subscription total rather than running ≥2 higher.
+          // ACTIVE USER subscriptions only. Exclude discoverable/host-only
+          // registry entries and the always-on AGENTS/ONTOLOGY system CGs.
+          // Host-only boot activations are exposed separately through
+          // `rehydration.hostedActivatedIds` so the legacy subscriptions
+          // contract stays subscribed-only.
           .filter(([id, s]) => s?.subscribed === true && !systemContextGraphs.has(id))
           .map(([id, s]) => ({
             contextGraphId: id,
-            subscribed: true,
+            subscribed: s?.subscribed === true,
             synced: s?.synced === true,
             coreHosted: s?.coreHosted === true,
           }))
       : [];
-    return jsonResponse(res, 200, { count: subscriptions.length, subscriptions });
+    return jsonResponse(res, 200, {
+      count: subscriptions.length,
+      subscriptions,
+      rehydration: agent.getContextGraphSubscriptionRehydrationStatus?.() ?? null,
+    });
   }
 
   // DELETE /api/context-graph/subscriptions — operator recovery for #997: tear

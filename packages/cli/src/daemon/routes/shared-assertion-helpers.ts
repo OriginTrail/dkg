@@ -14,23 +14,19 @@ import {
   assertSafeIri,
   assertSafeRdfTerm,
   escapeDkgRdfLiteral,
-  contextGraphSharedMemoryUri,
   contextGraphAssertionUri,
-  contextGraphMetaUri,
+  ImportedArtifactMetadataError,
+  isDkgContentHash,
+  resolveImportedArtifactMetadata,
 } from '@origintrail-official/dkg-core';
 import { type PromoteJob, type PromoteJobState } from '@origintrail-official/dkg-publisher';
 import { daemonState } from '../state.js';
-import { normalizeDetectedContentType } from '../manifest.js';
 import {
   jsonResponse,
   safeDecodeURIComponent,
   normalizeContextGraphIdOrUri,
   isValidContextGraphId,
 } from '../http-utils.js';
-import {
-  stripOpenClawAttachmentLiteral,
-  parseOpenClawAttachmentTripleCount,
-} from '../openclaw.js';
 import { getExtractionStatusRecord } from '../../extraction-status.js';
 import type { RequestContext } from './context.js';
 
@@ -83,58 +79,6 @@ export class ImportArtifactRouteError extends Error {
   ) {
     super(message);
   }
-}
-
-export function bindingCellValue(cell: unknown): string {
-  if (typeof cell === 'string') return cell;
-  if (cell && typeof cell === 'object' && 'value' in cell) {
-    const value = (cell as { value?: unknown }).value;
-    return typeof value === 'string' ? value : '';
-  }
-  return '';
-}
-
-export function normalizeLiteralBinding(cell: unknown): string {
-  return stripOpenClawAttachmentLiteral(bindingCellValue(cell)).trim();
-}
-
-export function normalizeIriBinding(cell: unknown): string {
-  return bindingCellValue(cell).replace(/^<|>$/g, '').trim();
-}
-
-export function singletonMetadataBinding(
-  bindings: Array<Record<string, unknown>>,
-  key: string,
-  normalize: (cell: unknown) => string,
-  label: string,
-): string {
-  const values = [...new Set(bindings.map((binding) => normalize(binding[key])).filter(Boolean))];
-  if (values.length > 1) {
-    throw new ImportArtifactRouteError(409, `Import metadata contains conflicting ${label} values`);
-  }
-  return values[0] ?? '';
-}
-
-export function optionalPositiveInteger(cell: unknown): number | undefined {
-  return parseOpenClawAttachmentTripleCount(bindingCellValue(cell));
-}
-
-export function optionalStrictPositiveInteger(cell: unknown): number | undefined {
-  const value = normalizeLiteralBinding(cell);
-  if (!/^\+?\d+$/.test(value)) return undefined;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
-}
-
-export function hashFromFileUrn(value: string | undefined): string | undefined {
-  const prefix = 'urn:dkg:file:';
-  if (!value?.startsWith(prefix)) return undefined;
-  const hash = value.slice(prefix.length);
-  return /^[a-z0-9]+:[0-9a-f]{64}$/i.test(hash) ? hash : undefined;
-}
-
-export function validateContentHash(hash: string): boolean {
-  return /^(?:sha256:|keccak256:)?[0-9a-f]{64}$/i.test(hash);
 }
 
 export function validatePromoteJobId(jobId: string): { valid: true } | { valid: false; reason: string } {
@@ -563,82 +507,6 @@ export function handleImportArtifactRouteError(res: ServerResponse, err: unknown
   return false;
 }
 
-export async function resolveImportedArtifactFromSharedMemory(
-  ctx: RequestContext,
-  args: {
-    contextGraphId: string;
-    assertionUri: string;
-    assertionName: string;
-    assertionAgentAddress: string;
-    subGraphName?: string;
-    requestedFileHash?: string;
-    ownerGuardRelaxed: boolean;
-  },
-): Promise<ImportedArtifactResolution | undefined> {
-  const swmGraph = contextGraphSharedMemoryUri(args.contextGraphId, args.subGraphName);
-  const result = await ctx.agent.store.query(`
-    SELECT ?sourceFile ?contentType ?rootEntity ?markdownForm WHERE {
-      GRAPH <${swmGraph}> {
-        <${args.assertionUri}> <${DKG_ONTOLOGY}sourceFile> ?sourceFile .
-        OPTIONAL { <${args.assertionUri}> <${DKG_ONTOLOGY}sourceContentType> ?contentType }
-        OPTIONAL { <${args.assertionUri}> <${DKG_ONTOLOGY}rootEntity> ?rootEntity }
-        OPTIONAL { <${args.assertionUri}> <${DKG_ONTOLOGY}markdownForm> ?markdownForm }
-      }
-    }
-  `) as { type?: string; bindings?: Array<Record<string, unknown>> };
-  const bindings = result.bindings ?? [];
-  if (bindings.length === 0) return undefined;
-
-  const sourceFile = singletonMetadataBinding(bindings, 'sourceFile', normalizeIriBinding, 'source file');
-  const sourceFileHash = hashFromFileUrn(sourceFile);
-  if (!sourceFileHash || !validateContentHash(sourceFileHash)) {
-    throw new ImportArtifactRouteError(409, 'Shared-memory import metadata is missing a valid source file hash');
-  }
-  if (args.requestedFileHash && args.requestedFileHash !== sourceFileHash) {
-    throw new ImportArtifactRouteError(400, 'fileHash does not match import metadata');
-  }
-
-  const durableSourceContentType = singletonMetadataBinding(
-    bindings,
-    'contentType',
-    normalizeLiteralBinding,
-    'source content type',
-  ) || undefined;
-  const sourceContentType = normalizeDetectedContentType(durableSourceContentType);
-  const rootEntity = singletonMetadataBinding(bindings, 'rootEntity', normalizeIriBinding, 'root entity') || undefined;
-  const markdownFormValue = singletonMetadataBinding(bindings, 'markdownForm', normalizeIriBinding, 'Markdown form') || undefined;
-  const markdownFormHash = hashFromFileUrn(markdownFormValue);
-  if (markdownFormValue && (!markdownFormHash || !validateContentHash(markdownFormHash))) {
-    throw new ImportArtifactRouteError(409, 'Import metadata is missing a valid Markdown intermediate hash');
-  }
-  const markdownHash = markdownFormHash
-    ?? (sourceContentType === 'text/markdown' ? sourceFileHash : undefined);
-  const markdownForm = markdownHash ? `urn:dkg:file:${markdownHash}` : undefined;
-  const markdownAvailableLocally = markdownHash
-    ? await ctx.fileStore.has(markdownHash).catch(() => false)
-    : false;
-
-  return {
-    contextGraphId: args.contextGraphId,
-    assertionUri: args.assertionUri,
-    assertionName: args.assertionName,
-    assertionAgentAddress: args.assertionAgentAddress,
-    ...(args.subGraphName ? { subGraphName: args.subGraphName } : {}),
-    fileHash: sourceFileHash,
-    sourceFileHash,
-    detectedContentType: sourceContentType,
-    sourceContentType,
-    extractionStatus: 'completed',
-    extractionMethod: 'structural',
-    ...(rootEntity ? { rootEntity } : {}),
-    ...(markdownHash && markdownHash !== sourceFileHash ? { mdIntermediateHash: markdownHash } : {}),
-    ...(markdownForm ? { markdownForm } : {}),
-    ...(markdownHash ? { markdownHash } : {}),
-    canReadMarkdown: markdownAvailableLocally,
-    ...(args.ownerGuardRelaxed ? { ownerGuardRelaxed: true } : {}),
-  };
-}
-
 export async function resolveImportedArtifact(
   ctx: RequestContext,
   raw: Record<string, unknown>,
@@ -656,6 +524,9 @@ export async function resolveImportedArtifact(
      * to mutate someone else's imported assertion.
      */
     relaxOnPublicOpenCg?: boolean;
+  },
+  opts?: {
+    allowSharedMemoryFallback?: boolean;
   },
 ): Promise<ImportedArtifactResolution> {
   const rawContextGraphId = typeof raw.contextGraphId === 'string' ? raw.contextGraphId.trim() : '';
@@ -779,7 +650,7 @@ export async function resolveImportedArtifact(
   const requestedFileHash = typeof raw.fileHash === 'string' && raw.fileHash.trim()
     ? raw.fileHash.trim()
     : undefined;
-  if (requestedFileHash && !validateContentHash(requestedFileHash)) {
+  if (requestedFileHash && !isDkgContentHash(requestedFileHash)) {
     throw new ImportArtifactRouteError(400, 'Invalid fileHash');
   }
 
@@ -791,91 +662,28 @@ export async function resolveImportedArtifact(
     );
   }
 
-  const metaGraph = contextGraphMetaUri(contextGraphId);
-  const metaResult = await ctx.agent.store.query(`
-    SELECT ?fileHash ?contentType ?rootEntity ?structuralTripleCount ?semanticTripleCount ?extractionMethod ?extractionStatus ?mdIntermediateHash ?sourceFileName WHERE {
-      GRAPH <${metaGraph}> {
-        <${assertionUri}> <${DKG_ONTOLOGY}sourceFileHash> ?fileHash .
-        OPTIONAL { <${assertionUri}> <${DKG_ONTOLOGY}sourceContentType> ?contentType }
-        OPTIONAL { <${assertionUri}> <${DKG_ONTOLOGY}rootEntity> ?rootEntity }
-        OPTIONAL { <${assertionUri}> <${DKG_ONTOLOGY}structuralTripleCount> ?structuralTripleCount }
-        OPTIONAL { <${assertionUri}> <${DKG_ONTOLOGY}semanticTripleCount> ?semanticTripleCount }
-        OPTIONAL { <${assertionUri}> <${DKG_ONTOLOGY}extractionMethod> ?extractionMethod }
-        OPTIONAL { <${assertionUri}> <${DKG_ONTOLOGY}extractionStatus> ?extractionStatus }
-        OPTIONAL { <${assertionUri}> <${DKG_ONTOLOGY}mdIntermediateHash> ?mdIntermediateHash }
-        OPTIONAL { <${assertionUri}> <${DKG_ONTOLOGY}sourceFileName> ?sourceFileName }
-      }
+  let metadata: Awaited<ReturnType<typeof resolveImportedArtifactMetadata>>;
+  try {
+    metadata = await resolveImportedArtifactMetadata({
+      contextGraphId,
+      assertionUri,
+      ...(parsedAssertion.subGraphName ? { subGraphName: parsedAssertion.subGraphName } : {}),
+      ...(requestedFileHash ? { requestedFileHash } : {}),
+      allowSharedMemoryFallback: ownerGuardRelaxed || opts?.allowSharedMemoryFallback,
+      fallbackDetectedContentType: extractionRecord?.detectedContentType,
+      query: (sparql: string) => ctx.agent.store.query(sparql) as Promise<{ type?: string; bindings?: Array<Record<string, unknown>> }>,
+    });
+  } catch (err) {
+    if (err instanceof ImportedArtifactMetadataError) {
+      const statusCode = err.code === 'not_found'
+        ? 404
+        : err.code === 'hash_mismatch'
+          ? 400
+          : 409;
+      throw new ImportArtifactRouteError(statusCode, err.message);
     }
-    LIMIT 1
-  `) as { type?: string; bindings?: Array<Record<string, unknown>> };
-  const metaBinding = metaResult.bindings?.[0];
-  if (!metaBinding) {
-    if (ownerGuardRelaxed) {
-      const swmArtifact = await resolveImportedArtifactFromSharedMemory(ctx, {
-        contextGraphId,
-        assertionUri,
-        assertionName: parsedAssertion.assertionName,
-        assertionAgentAddress: parsedAssertion.assertionAgentAddress,
-        ...(parsedAssertion.subGraphName ? { subGraphName: parsedAssertion.subGraphName } : {}),
-        ...(requestedFileHash ? { requestedFileHash } : {}),
-        ownerGuardRelaxed,
-      });
-      if (swmArtifact) return swmArtifact;
-    }
-    throw new ImportArtifactRouteError(404, 'No completed import metadata found for assertionUri');
+    throw err;
   }
-
-  const durableExtractionStatus = normalizeLiteralBinding(metaBinding.extractionStatus) || undefined;
-  const structuralTripleCount = optionalPositiveInteger(metaBinding.structuralTripleCount);
-  const legacyCompletedStructuralTripleCount = optionalStrictPositiveInteger(metaBinding.structuralTripleCount);
-  if (durableExtractionStatus && durableExtractionStatus !== 'completed') {
-    throw new ImportArtifactRouteError(
-      409,
-      `Import artifact is not a completed extraction (status: ${durableExtractionStatus})`,
-    );
-  }
-  if (!durableExtractionStatus && (legacyCompletedStructuralTripleCount ?? 0) <= 0) {
-    throw new ImportArtifactRouteError(409, 'Import metadata is missing completed extraction status');
-  }
-
-  const sourceFileHash = normalizeLiteralBinding(metaBinding.fileHash);
-  if (!sourceFileHash || !validateContentHash(sourceFileHash)) {
-    throw new ImportArtifactRouteError(409, 'Import metadata is missing a valid source file hash');
-  }
-  if (requestedFileHash && requestedFileHash !== sourceFileHash) {
-    throw new ImportArtifactRouteError(400, 'fileHash does not match import metadata');
-  }
-
-  const durableSourceContentType = normalizeLiteralBinding(metaBinding.contentType) || undefined;
-  const sourceContentType = normalizeDetectedContentType(
-    durableSourceContentType || extractionRecord?.detectedContentType,
-  );
-  const mdIntermediateHash = normalizeLiteralBinding(metaBinding.mdIntermediateHash) || undefined;
-  if (mdIntermediateHash && !validateContentHash(mdIntermediateHash)) {
-    throw new ImportArtifactRouteError(409, 'Import metadata is missing a valid Markdown intermediate hash');
-  }
-  const markdownFormResult = await ctx.agent.store.query(`
-    SELECT DISTINCT ?markdownForm WHERE {
-      GRAPH <${assertionUri}> {
-        ?document <${DKG_ONTOLOGY}markdownForm> ?markdownForm .
-      }
-    }
-  `) as { type?: string; bindings?: Array<Record<string, unknown>> };
-  const authoritativeMarkdownHash = mdIntermediateHash
-    ?? (durableSourceContentType && normalizeDetectedContentType(durableSourceContentType) === 'text/markdown'
-      ? sourceFileHash
-      : undefined);
-  const graphMarkdownForms = (markdownFormResult.bindings ?? [])
-    .map((binding) => normalizeIriBinding(binding.markdownForm))
-    .filter(Boolean);
-  for (const graphMarkdownForm of graphMarkdownForms) {
-    const markdownFormHash = hashFromFileUrn(graphMarkdownForm);
-    if (!markdownFormHash || !authoritativeMarkdownHash || markdownFormHash !== authoritativeMarkdownHash) {
-      throw new ImportArtifactRouteError(409, 'Import metadata markdown hash does not match assertion markdownForm');
-    }
-  }
-  const markdownHash = authoritativeMarkdownHash;
-  const markdownForm = markdownHash ? `urn:dkg:file:${markdownHash}` : undefined;
 
   // Codex review on #872 — when the owner guard is relaxed for a
   // public + open CG, replicated `_meta` may have a `markdownHash`
@@ -889,9 +697,9 @@ export async function resolveImportedArtifact(
   // self-reads (no relaxation) keep the existing fast-path —
   // `_meta` and bytes land together at import time on the importing
   // node, so a `markdownHash` there really does mean readable.
-  const markdownAvailableLocally = markdownHash
-    ? ownerGuardRelaxed
-      ? await ctx.fileStore.has(markdownHash).catch(() => false)
+  const markdownAvailableLocally = metadata.markdownHash
+    ? ownerGuardRelaxed || metadata.source === 'shared-memory'
+      ? await ctx.fileStore.has(metadata.markdownHash).catch(() => false)
       : true
     : false;
 
@@ -901,20 +709,20 @@ export async function resolveImportedArtifact(
     assertionName: parsedAssertion.assertionName,
     assertionAgentAddress: parsedAssertion.assertionAgentAddress,
     ...(parsedAssertion.subGraphName ? { subGraphName: parsedAssertion.subGraphName } : {}),
-    fileHash: sourceFileHash,
-    sourceFileHash,
-    detectedContentType: sourceContentType,
-    sourceContentType,
+    fileHash: metadata.sourceFileHash,
+    sourceFileHash: metadata.sourceFileHash,
+    detectedContentType: metadata.sourceContentType,
+    sourceContentType: metadata.sourceContentType,
     extractionStatus: 'completed',
-    extractionMethod: normalizeLiteralBinding(metaBinding.extractionMethod) || extractionRecord?.pipelineUsed || undefined,
-    rootEntity: normalizeIriBinding(metaBinding.rootEntity) || extractionRecord?.rootEntity || undefined,
-    sourceFileName: normalizeLiteralBinding(metaBinding.sourceFileName) || extractionRecord?.fileName || undefined,
-    tripleCount: structuralTripleCount ?? extractionRecord?.tripleCount,
-    structuralTripleCount: structuralTripleCount ?? extractionRecord?.tripleCount,
-    semanticTripleCount: optionalPositiveInteger(metaBinding.semanticTripleCount),
-    ...(mdIntermediateHash ? { mdIntermediateHash } : {}),
-    ...(markdownForm ? { markdownForm } : {}),
-    ...(markdownHash ? { markdownHash } : {}),
+    extractionMethod: metadata.extractionMethod || extractionRecord?.pipelineUsed || undefined,
+    rootEntity: metadata.rootEntity || extractionRecord?.rootEntity || undefined,
+    sourceFileName: metadata.sourceFileName || extractionRecord?.fileName || undefined,
+    tripleCount: metadata.structuralTripleCount ?? extractionRecord?.tripleCount,
+    structuralTripleCount: metadata.structuralTripleCount ?? extractionRecord?.tripleCount,
+    semanticTripleCount: metadata.semanticTripleCount,
+    ...(metadata.mdIntermediateHash ? { mdIntermediateHash: metadata.mdIntermediateHash } : {}),
+    ...(metadata.markdownForm ? { markdownForm: metadata.markdownForm } : {}),
+    ...(metadata.markdownHash ? { markdownHash: metadata.markdownHash } : {}),
     canReadMarkdown: markdownAvailableLocally,
     ...(ownerGuardRelaxed ? { ownerGuardRelaxed: true } : {}),
   };

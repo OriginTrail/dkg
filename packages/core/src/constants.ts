@@ -23,6 +23,7 @@ export const PROTOCOL_DISCOVER = '/dkg/10.0.0/discover';
 // (sync is a self-healing catch-up net, so the brief mixed-version
 // window during auto-update is no-data-loss).
 export const PROTOCOL_SYNC = '/dkg/10.0.2/sync';
+export const PROTOCOL_GET_ASSERTION_ARTIFACT = '/dkg/10.0.2/get-assertion-artifact';
 // Universal Messenger pilot protocol (rc.9 PR-3). Bumped from
 // /dkg/10.0.0/message to /dkg/10.0.1/message to opt into the
 // reliability substrate (ReliableEnvelope wrapper, sender +
@@ -333,6 +334,18 @@ export function contextGraphSubGraphMetaUri(contextGraphId: string, subGraphName
 
 export function contextGraphSubGraphPrivateUri(contextGraphId: string, subGraphName: string): string {
   return `did:dkg:context-graph:${contextGraphId}/${subGraphName}/_private`;
+}
+
+/**
+ * the public `_catalog` subgraph of a (private) CG: the
+ * bounded, plaintext, core-servable named graph holding the CG's DCAT catalog
+ * entry. `_`-prefixed, so it cannot collide with a user sub-graph name
+ * (`validateSubGraphName` reserves the prefix). This is the serving / open-serve
+ * boundary; the catalog quads are committed inside the CG's own VM merkle root
+ * (combined model), and the partition routing them here happens at publish time.
+ */
+export function contextGraphCatalogUri(contextGraphId: string): string {
+  return `did:dkg:context-graph:${contextGraphId}/_catalog`;
 }
 
 export function validateContextGraphId(id: string): { valid: boolean; reason?: string } {

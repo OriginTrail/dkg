@@ -15,6 +15,7 @@ import {
   type KAMetadata,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
+import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
 import type { ContextGraphSub } from './dkg-agent-types.js';
 
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
@@ -37,6 +38,8 @@ export interface GossipPublishHandlerCallbacks {
    * callback returned `false`).
    */
   hasConfirmedMetaState?: (id: string) => Promise<boolean>;
+  getCgMeta?: (id: string) => Promise<ContextGraphMetaRecord>;
+  markCgMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
   persistContextGraphSubscription?: (id: string) => void;
   onPhase?: GossipPhaseCallback;
 }
@@ -279,7 +282,7 @@ export class GossipPublishHandler {
           return;
         }
         const sparql = `SELECT DISTINCT ?s WHERE { GRAPH ?g { ?s ?p ?o } VALUES ?s { ${rootEntities.map(e => `<${e}>`).join(' ')} } FILTER(STRSTARTS(STR(?g), "${dataGraph}/_verifiable_memory/") || STR(?g) = "${dataGraph}") }`;
-        const result = await this.store.query(sparql);
+        const result = await this.store.query(sparql, { source: 'agent.gossipPublishValidation' });
         const existingEntities = new Set<string>(
           result.type === 'bindings' ? result.bindings.map(b => b['s']).filter(Boolean) : [],
         );
@@ -320,6 +323,7 @@ export class GossipPublishHandler {
             timestamp: new Date(),
           });
           await this.store.insert(regQuads);
+          this.callbacks.markCgMetaDirtyFromQuads?.(regQuads);
           this.log.info(ctx, `Auto-registered sub-graph "${subGraphName}" in context graph "${request.contextGraphId}" from gossip`);
         }
       }
@@ -327,6 +331,7 @@ export class GossipPublishHandler {
       phase?.('store', 'start');
       if (normalized.length > 0 && !isReplay) {
         await this.store.insert(normalized);
+        this.callbacks.markCgMetaDirtyFromQuads?.(normalized);
       }
 
       if (request.ual) {
@@ -375,6 +380,7 @@ export class GossipPublishHandler {
         // never trust self-reported on-chain status from gossip messages.
         const metaQuads = generateTentativeMetadata(kcMeta, kaMetadata);
         await this.store.insert(metaQuads);
+        this.callbacks.markCgMetaDirtyFromQuads?.(metaQuads);
         phase?.('store', 'end');
 
         // If the gossip message includes on-chain proof (txHash + blockNumber),
@@ -581,6 +587,11 @@ export class GossipPublishHandler {
   }
 
   private async getContextGraphAllowedPeers(contextGraphId: string): Promise<string[] | null> {
+    if (this.callbacks.getCgMeta) {
+      const peers = (await this.callbacks.getCgMeta(contextGraphId)).allowedPeers;
+      return peers.length > 0 ? peers : null;
+    }
+
     const cgMeta = contextGraphMetaGraphUri(contextGraphId);
     const cgData = contextGraphDataGraphUri(contextGraphId);
     const result = await this.store.query(

@@ -396,7 +396,7 @@ async function detectDevnet(maxNodes = 6): Promise<DevnetState | null> {
   const nft = new ethers.Contract(
     addrs.nftAddress,
     [
-      'function createAccount(uint96) external returns (uint256)',
+      'function createAccount(uint96, uint72) external returns (uint256)',
       'function registerAgent(uint256, address) external',
       'function agentToAccountId(address) view returns (uint256)',
       'function windowSpent(uint256, uint40) view returns (uint96)',
@@ -417,7 +417,7 @@ async function detectDevnet(maxNodes = 6): Promise<DevnetState | null> {
   const eps = new ethers.Contract(
     addrs.epsAddress,
     [
-      'function getNodeEpochProducedKnowledgeValue(uint72, uint256) view returns (uint96)',
+      'function getNodeEpochPublishingAllocation(uint72, uint256) view returns (uint96)',
     ],
     provider,
   );
@@ -930,9 +930,9 @@ describe('V10 chain — stress + scenario validation', () => {
 
     const epochAtStart: bigint = await s.chronos.getCurrentEpoch();
     const beforeEpsCore1: bigint =
-      await s.eps.getNodeEpochProducedKnowledgeValue(core1.identityId, epochAtStart);
+      await s.eps.getNodeEpochPublishingAllocation(core1.identityId, epochAtStart);
     const beforeEpsCore2: bigint =
-      await s.eps.getNodeEpochProducedKnowledgeValue(core2.identityId, epochAtStart);
+      await s.eps.getNodeEpochPublishingAllocation(core2.identityId, epochAtStart);
     // Lazy-settlement bookkeeping uses billing-window index, not chain
     // epoch. Sum the window at-snapshot plus the next 2 windows so a
     // long-running stress phase that walks past one or two boundaries
@@ -1141,10 +1141,14 @@ describe('V10 chain — stress + scenario validation', () => {
       }
     }
 
-    // Attribution to core2 must have grown.
+    // RFC-51: the original "attribution to core2 grew" invariant (core2's K_n
+    // grows per publish) has no new-model analog — a realized publish never
+    // credits K_n (that getter tracks committed PCA allocation only). The
+    // surviving proof for this VM-custodial batch is per-publish author ==
+    // agentC2 (asserted in the loop above). Eps must simply not move.
     const afterEpsCore2: bigint =
-      await s.eps.getNodeEpochProducedKnowledgeValue(core2.identityId, epochAtStart);
-    expect(afterEpsCore2).toBeGreaterThan(beforeEpsCore2);
+      await s.eps.getNodeEpochPublishingAllocation(core2.identityId, epochAtStart);
+    expect(afterEpsCore2).toBe(beforeEpsCore2);
 
     // ── 2g: WM → SWM → VM third-party publisher (25 via edge → core1 PCA) ──
     console.log(`phase 2: VM third-party (mode A) batch (${vmThirdParty} assertions via edge → core1 PCA)...`);
@@ -1193,12 +1197,13 @@ describe('V10 chain — stress + scenario validation', () => {
       }
     }
 
-    // Attribution to core1 grew + PCA windowSpent grew (billing-window
-    // bookkeeping; sum the same window range we sampled at-snapshot so
-    // window crossings during the stress phase are still counted).
+    // RFC-51: a realized publish no longer credits core1's K_n (committed-
+    // allocation getter only). The surviving proof for this VM third-party
+    // (mode A) batch is per-publish author == edge op-wallet (asserted in the
+    // loop above) + PCA windowSpent growth (below). Eps must simply not move.
     const afterEpsCore1: bigint =
-      await s.eps.getNodeEpochProducedKnowledgeValue(core1.identityId, epochAtStart);
-    expect(afterEpsCore1).toBeGreaterThan(beforeEpsCore1);
+      await s.eps.getNodeEpochPublishingAllocation(core1.identityId, epochAtStart);
+    expect(afterEpsCore1).toBe(beforeEpsCore1);
     const afterWindow: bigint = BigInt(
       await s.nft.getCurrentBillingWindow(pcaAccountId),
     );
@@ -1885,7 +1890,9 @@ async function ensurePcaAccountForOpWallets(
       nonce: await nextNonceFor(s.provider, nftAdmin.address),
     })
   ).wait();
-  const createTx = await nftAsAdmin.createAccount(committed, {
+  // primaryNode = 0n: no designated node → no committed K_n seeded. This PCA
+  // exercises discount-publishing (windowSpent), not committed allocation.
+  const createTx = await nftAsAdmin.createAccount(committed, 0n, {
     nonce: await nextNonceFor(s.provider, nftAdmin.address),
   });
   const createReceipt = await createTx.wait();

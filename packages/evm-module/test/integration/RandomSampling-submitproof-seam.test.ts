@@ -21,21 +21,33 @@ import { createProfile } from '../helpers/profile-helpers';
 // trivially on-chain (`h = leaf`; empty proof; `h == root`). This deliberately
 // avoids the kcTools merkle builder (which sorts pairs) vs the on-chain
 // `_verifyV10MerkleProof` (which pairs positionally) — they don't match, which
-// is orthogonal to what these tests cover (the store-routing of the read).
+// is orthogonal to what these tests cover (the store-routing of the read and,
+// in Test C2, the proof-race pinning of the catalog root).
 const merkleRoot = ethers.keccak256(
   ethers.toUtf8Bytes('r3-seam-single-leaf-root'),
 );
 
 // Decoy PUBLIC merkle root for the curated KA (Test C). The curated KA records
-// this as its plaintext `merkleRoot`, but its CIPHERTEXT commitment root is the
-// real proof target (`merkleRoot` above). A challenge MISclassified as public
-// would verify against THIS decoy and fail — that's the RED the pin prevents.
+// this as its plaintext `merkleRoot`, but its PUBLIC `_catalog` commitment root
+// is the real proof target (`merkleRoot` above). A challenge MISclassified as
+// public would verify against THIS decoy and fail — that's the RED the pin
+// prevents (OT-RFC-49: curated proofs target the catalog, not the plaintext
+// merkle root).
 const decoyMerkleRoot = ethers.keccak256(
   ethers.toUtf8Bytes('r3-seam-decoy-public-root'),
 );
 
+// OT-RFC-49 / WS-B Trap 1 (proof-race, Test C2): a NEW catalog root the curated
+// KA rotates to AFTER its challenge is issued. An honest proof built against the
+// PINNED issuance-time catalog root (`merkleRoot`) must still verify; a proof
+// against this rotated live root must fail, because `submitProof` reads the
+// pinned `challenge.challengeRoot`, never the live `getCatalogRoot`.
+const rotatedCatalogRoot = ethers.keccak256(
+  ethers.toUtf8Bytes('r3-seam-rotated-catalog-root'),
+);
+
 const OPEN_POLICY = 1; // public CG (accessPolicy=0 ⇒ getIsCurated()=false ⇒ merkle path)
-const CURATED_ACCESS = 1; // accessPolicy=1 ⇒ getIsCurated()=true ⇒ ciphertext path
+const CURATED_ACCESS = 1; // accessPolicy=1 ⇒ getIsCurated()=true ⇒ catalog path
 const TEST_KC_BYTE_SIZE = 128n;
 
 /**
@@ -206,10 +218,11 @@ describe('@integration RandomSampling submitProof + multi-store seam (R3)', () =
     return ContextGraphStorage.getLatestContextGraphId();
   }
 
-  // Seed a CURATED KA: its plaintext `merkleRoot` is a DECOY, but its ciphertext
-  // commitment (the curated proof substrate) carries the real `merkleRoot` with
-  // count=1. The curated picker needs `getCiphertextChunkCount != 0`; submitProof
-  // on the curated branch verifies against `getLatestCiphertextChunksRoot`.
+  // Seed a CURATED KA: its plaintext `merkleRoot` is a DECOY, but its PUBLIC
+  // `_catalog` commitment (the curated proof substrate, OT-RFC-49) carries the
+  // real `merkleRoot` with count=1. The curated picker needs
+  // `getCatalogLeafCount != 0`; the challenge pins `getCatalogRoot` at issuance
+  // and submitProof verifies against that pinned `challenge.challengeRoot`.
   async function seedCuratedKa(cgId: bigint): Promise<bigint> {
     const currentEpoch = await Chronos.getCurrentEpoch();
     const endEpoch = currentEpoch + 5n;
@@ -236,10 +249,10 @@ describe('@integration RandomSampling submitProof + multi-store seam (R3)', () =
       log as unknown as { topics: string[]; data: string },
     )!.args[0] as bigint;
 
-    // The real curated proof target: ciphertext-chunks root == `merkleRoot`,
-    // count=1 (single-leaf ⇒ chunkId 0, root == leaf, empty proof verifies).
+    // The real curated proof target: catalog root == `merkleRoot`, count=1
+    // (single-leaf ⇒ chunkId 0, root == leaf, empty proof verifies).
     await (
-      await DKGKnowledgeAssets.connect(opSigner).setCiphertextChunksCommitment(
+      await DKGKnowledgeAssets.connect(opSigner).setCatalogCommitment(
         kaId,
         merkleRoot,
         1,
@@ -361,7 +374,11 @@ describe('@integration RandomSampling submitProof + multi-store seam (R3)', () =
     expect(challenge.knowledgeAssetId).to.equal(kaId);
     // The classification is PINNED on the challenge at issuance.
     expect(challenge.isCurated).to.equal(true);
-    expect(challenge.chunkId).to.equal(0n); // ciphertextChunkCount=1 ⇒ chunkId 0
+    expect(challenge.chunkId).to.equal(0n); // catalogLeafCount=1 ⇒ chunkId 0
+    // The pinned catalog root is the curated proof target (decoy plaintext root
+    // is NOT) — the private-sub-root-as-decoy distinction OT-RFC-49 preserves.
+    expect(challenge.challengeRoot).to.equal(merkleRoot);
+    expect(challenge.challengeRoot).to.not.equal(decoyMerkleRoot);
 
     // Simulate a ContextGraphStorage generation cutover: re-point the Hub to an
     // EMPTY second ContextGraphStorage and re-initialize RandomSampling so its
@@ -386,8 +403,70 @@ describe('@integration RandomSampling submitProof + multi-store seam (R3)', () =
     expect(await RandomSampling.contextGraphStorage()).to.equal(cgStorB);
 
     // The KA store was NOT re-pointed, so the recorded store still holds the
-    // ciphertext commitment. Curated branch verifies against the ciphertext root
-    // (== merkleRoot); the now-empty CG singleton is never consulted.
+    // catalog commitment. Curated branch verifies against the pinned catalog
+    // root (== merkleRoot); the now-empty CG singleton is never consulted.
+    await RandomSampling.connect(node.operational).submitProof(merkleRoot, []);
+
+    const solved = await RandomSamplingStorage.getNodeChallenge(
+      node.identityId,
+    );
+    expect(solved.solved).to.equal(true);
+  });
+
+  it('Test C2 — proof-race immunity: an honest proof against the PINNED issuance-time catalog root survives a post-challenge catalog rotation; a proof against the new live root fails (OT-RFC-49 / WS-B Trap 1)', async () => {
+    const cgId = await createCuratedCG();
+    const kaId = await seedCuratedKa(cgId);
+    const node = await setupChallengingNode();
+
+    await RandomSampling.updateAndGetActiveProofPeriodStartBlock();
+    await RandomSampling.connect(node.operational).createChallenge();
+    const challenge = await RandomSamplingStorage.getNodeChallenge(
+      node.identityId,
+    );
+
+    // The challenge PINS (challengeLeafCount, challengeRoot) at issuance. For
+    // this curated KA the pinned root is the catalog root seeded above
+    // (== merkleRoot), and the pinned leaf count is 1.
+    expect(challenge.knowledgeAssetId).to.equal(kaId);
+    expect(challenge.isCurated).to.equal(true);
+    expect(challenge.challengeRoot).to.equal(merkleRoot);
+    expect(challenge.challengeLeafCount).to.equal(1n);
+    expect(challenge.chunkId).to.equal(0n); // catalogLeafCount=1 ⇒ chunkId 0
+
+    // A KA update lands BETWEEN createChallenge and submitProof: the curated KA
+    // rotates its PUBLIC `_catalog` commitment to a brand-new root. The live
+    // getter now returns the rotated root — but the challenge still carries the
+    // pinned issuance-time root.
+    await (
+      await DKGKnowledgeAssets.connect(opSigner).setCatalogCommitment(
+        kaId,
+        rotatedCatalogRoot,
+        1,
+      )
+    ).wait();
+    // Prove the live state actually moved out from under the challenge.
+    expect(await DKGKnowledgeAssets.getCatalogRoot(kaId)).to.equal(
+      rotatedCatalogRoot,
+    );
+    expect(await DKGKnowledgeAssets.getCatalogRoot(kaId)).to.not.equal(
+      challenge.challengeRoot,
+    );
+
+    // A proof built against the NEW live root must FAIL — submitProof verifies
+    // the leaf against the PINNED `challenge.challengeRoot`, not the live
+    // getter. (A reverted submitProof rolls back and leaves the challenge
+    // unsolved, so we can attempt the honest proof immediately after.)
+    await expect(
+      RandomSampling.connect(node.operational).submitProof(
+        rotatedCatalogRoot,
+        [],
+      ),
+    ).to.be.revertedWithCustomError(RandomSampling, 'MerkleRootMismatchError');
+
+    // The honest proof against the PINNED issuance-time root still verifies,
+    // even though the live catalog root has since rotated. This is the
+    // proof-race immunity: an update cannot retroactively invalidate an
+    // in-flight challenge and slash an honest prover.
     await RandomSampling.connect(node.operational).submitProof(merkleRoot, []);
 
     const solved = await RandomSamplingStorage.getNodeChallenge(

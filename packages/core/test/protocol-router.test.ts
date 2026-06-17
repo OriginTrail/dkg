@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   composeAbortSignals,
   isRecoverableSendError,
@@ -8,6 +8,12 @@ import {
 } from '../src/protocol-router.js';
 import type { DKGNode } from '../src/node.js';
 import type { PeerResolver } from '../src/network/peer-resolver.js';
+
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => { calls.push(args); return impl(...args); };
+  return Object.assign(fn, { calls });
+}
 
 describe('ProtocolRouter', () => {
   describe('isRecoverableSendError', () => {
@@ -260,7 +266,9 @@ describe('ProtocolRouter', () => {
     });
 
     it('aborts quietly for retryable handler backpressure', async () => {
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const originalError = console.error;
+      const errorSpy = recorder((..._args: unknown[]) => undefined);
+      console.error = errorSpy as unknown as typeof console.error;
       try {
         const fixture = makeInboundFixture();
         fixture.router.register(PROTOCOL, async () => {
@@ -272,14 +280,16 @@ describe('ProtocolRouter', () => {
 
         expect(stream.sent).toBeNull();
         expect(stream.aborted?.message).toBe('sync responder peer queue full');
-        expect(errorSpy).not.toHaveBeenCalled();
+        expect(errorSpy.calls).toEqual([]);
       } finally {
-        errorSpy.mockRestore();
+        console.error = originalError;
       }
     });
 
     it('does not mask non-abort handler failures just because the handler signal is aborted', async () => {
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const originalError = console.error;
+      const errorSpy = recorder((..._args: unknown[]) => undefined);
+      console.error = errorSpy as unknown as typeof console.error;
       try {
         let seenSignal: AbortSignal | undefined;
         const fixture = makeInboundFixture();
@@ -300,12 +310,12 @@ describe('ProtocolRouter', () => {
         expect(seenSignal?.aborted).toBe(true);
         expect(stream.sent).toBeNull();
         expect(stream.aborted?.message).toBe('handler error');
-        expect(errorSpy).toHaveBeenCalledWith(
+        expect(errorSpy.calls).toContainEqual([
           expect.stringContaining('[ProtocolRouter] handler error'),
           'store query failed',
-        );
+        ]);
       } finally {
-        errorSpy.mockRestore();
+        console.error = originalError;
       }
     });
   });

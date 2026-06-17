@@ -15,6 +15,7 @@ import {
   createResponderSyncRowListMemo,
   createResponderSubGraphRegistrationMemo,
   createResponderSwmAdmissionMemo,
+  readCatalogPage,
   readDurableDataPage,
   readDurableMetaPage,
   readSwmDataPage,
@@ -312,6 +313,18 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
 
     return limiter.run(peerId, signal, async () => {
       throwIfAborted(signal);
+
+      // facet open-serve. The public `_catalog` subgraph (a DCAT
+      // dataset record) is served to ANYONE, with NO allowlist auth, BEFORE the
+      // gate below. Bounded to exactly that one named graph (readCatalogPage), so
+      // no gated quad can leak. This is how outsiders discover a private CG.
+      if (phase === 'catalog') {
+        const rows = await raceAgainstAbort(readCatalogPage({ store, contextGraphId, offset, limit }), signal);
+        const serialized = serializeResponderRows(rows);
+        logDebug(createOperationContext('sync'), `Sync responder catalog facet for "${contextGraphId}": rows=${rows.length}`);
+        return new TextEncoder().encode(serialized ?? '');
+      }
+
       const authStartedAt = Date.now();
       const authorized = await authorizeSyncRequest(request, peerId, { signal });
       const authDurationMs = Date.now() - authStartedAt;

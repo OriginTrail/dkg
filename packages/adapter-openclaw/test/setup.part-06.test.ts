@@ -187,7 +187,7 @@ describe('mergeOpenClawConfig', () => {
     mergeOpenClawConfig(configPath, '/path/to/adapter', defaultEntryConfig, defaultInstalledWorkspace);
     const afterFirst = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterFirst.channels['dkg-ui']).toEqual({ enabled: true, port: 9201 });
-    expect(afterFirst.plugins.entries['adapter-openclaw'].mergedChannelsDkgUi).toEqual({ enabled: true, port: 9201 });
+    expect(afterFirst.plugins.entries['adapter-openclaw'].config.dkgSetupState.mergedChannelsDkgUi).toEqual({ enabled: true, port: 9201 });
 
     // Simulate the user (or a later setup run) updating the adapter entry's
     // channel port to 9300 directly on the entry config.
@@ -202,7 +202,7 @@ describe('mergeOpenClawConfig', () => {
     expect(afterSecond.plugins.entries['adapter-openclaw'].config.channel.port).toBe(9300);
     expect(afterSecond.channels['dkg-ui']).toEqual({ enabled: true, port: 9300 });
     // mergedChannelsDkgUi tracks the latest adapter output.
-    expect(afterSecond.plugins.entries['adapter-openclaw'].mergedChannelsDkgUi).toEqual({ enabled: true, port: 9300 });
+    expect(afterSecond.plugins.entries['adapter-openclaw'].config.dkgSetupState.mergedChannelsDkgUi).toEqual({ enabled: true, port: 9300 });
   });
 
   it('re-merge idempotency: unchanged adapter-owned channel produces byte-identical JSON', () => {
@@ -239,8 +239,8 @@ describe('mergeOpenClawConfig', () => {
     } as AdapterEntryConfig, defaultInstalledWorkspace);
 
     const afterFirst = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(afterFirst.plugins.entries['adapter-openclaw'].previousChannelsDkgUi).toBeNull();
-    expect(afterFirst.plugins.entries['adapter-openclaw'].mergedChannelsDkgUi).toEqual({ enabled: true, port: 9201 });
+    expect(afterFirst.plugins.entries['adapter-openclaw'].config.dkgSetupState.previousChannelsDkgUi).toBeNull();
+    expect(afterFirst.plugins.entries['adapter-openclaw'].config.dkgSetupState.mergedChannelsDkgUi).toEqual({ enabled: true, port: 9201 });
 
     // Simulate user deleting channels.dkg-ui. Also reset entry port so
     // post-merge resolution picks 9300.
@@ -254,9 +254,9 @@ describe('mergeOpenClawConfig', () => {
     const afterSecond = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterSecond.channels['dkg-ui']).toEqual({ enabled: true, port: 9300 });
     // `previousChannelsDkgUi` stays first-wins (original absent → `null`).
-    expect(afterSecond.plugins.entries['adapter-openclaw'].previousChannelsDkgUi).toBeNull();
+    expect(afterSecond.plugins.entries['adapter-openclaw'].config.dkgSetupState.previousChannelsDkgUi).toBeNull();
     // `mergedChannelsDkgUi` tracks the LATEST output (9300, not stale 9201).
-    expect(afterSecond.plugins.entries['adapter-openclaw'].mergedChannelsDkgUi).toEqual({ enabled: true, port: 9300 });
+    expect(afterSecond.plugins.entries['adapter-openclaw'].config.dkgSetupState.mergedChannelsDkgUi).toEqual({ enabled: true, port: 9300 });
   });
 
   it('re-upgrade degenerate channel: mergedChannelsDkgUi tracks the NEW port, previousChannelsDkgUi stays first-wins', () => {
@@ -275,8 +275,8 @@ describe('mergeOpenClawConfig', () => {
     } as AdapterEntryConfig, defaultInstalledWorkspace);
 
     const afterFirst = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(afterFirst.plugins.entries['adapter-openclaw'].previousChannelsDkgUi).toEqual({ enabled: true });
-    expect(afterFirst.plugins.entries['adapter-openclaw'].mergedChannelsDkgUi).toEqual({ enabled: true, port: 9201 });
+    expect(afterFirst.plugins.entries['adapter-openclaw'].config.dkgSetupState.previousChannelsDkgUi).toEqual({ enabled: true });
+    expect(afterFirst.plugins.entries['adapter-openclaw'].config.dkgSetupState.mergedChannelsDkgUi).toEqual({ enabled: true, port: 9201 });
 
     // Simulate user stripping channel back to degenerate + bumping entry port.
     afterFirst.channels['dkg-ui'] = { enabled: true };
@@ -288,9 +288,9 @@ describe('mergeOpenClawConfig', () => {
     const afterSecond = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(afterSecond.channels['dkg-ui']).toEqual({ enabled: true, port: 9300 });
     // first-wins preserves the original degenerate shape.
-    expect(afterSecond.plugins.entries['adapter-openclaw'].previousChannelsDkgUi).toEqual({ enabled: true });
+    expect(afterSecond.plugins.entries['adapter-openclaw'].config.dkgSetupState.previousChannelsDkgUi).toEqual({ enabled: true });
     // Latest-output snapshot follows the new port.
-    expect(afterSecond.plugins.entries['adapter-openclaw'].mergedChannelsDkgUi).toEqual({ enabled: true, port: 9300 });
+    expect(afterSecond.plugins.entries['adapter-openclaw'].config.dkgSetupState.mergedChannelsDkgUi).toEqual({ enabled: true, port: 9300 });
   });
 
 });

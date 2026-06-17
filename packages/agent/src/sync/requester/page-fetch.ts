@@ -91,7 +91,15 @@ interface FetchSyncPagesParams {
   debugSyncProgress: boolean;
   protocolSync: string;
   checkpointStore: SyncCheckpointStore;
-  buildSyncRequest: (contextGraphId: string, offset: number, limit: number, includeSharedMemory: boolean, remotePeerId: string, phase?: SyncPhase, snapshotRef?: string, sinceBatchId?: string, syncSessionId?: string) => Promise<Uint8Array>;
+  /**
+   * R9/R10 — member SWM recovery marker. Forks BOTH the checkpoint namespace
+   * (R10: distinct `|recovery` cursor + responder-session scope so it never
+   * mutates the shared incremental-sync cursor) AND the request envelope (R9:
+   * forwarded to `buildSyncRequest` so the responder gates it via the strict
+   * members-only `isMemberRecoveryAuthorized`). Default false ⇒ normal sync.
+   */
+  recovery?: boolean;
+  buildSyncRequest: (contextGraphId: string, offset: number, limit: number, includeSharedMemory: boolean, remotePeerId: string, phase?: SyncPhase, snapshotRef?: string, sinceBatchId?: string, syncSessionId?: string, recovery?: boolean) => Promise<Uint8Array>;
   /**
    * Phase C — optional, gap-safe delta-sync high-water mark. Forwarded to the
    * responder for the durable DATA phase so it returns only KAs with
@@ -177,6 +185,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     debugSyncProgress,
     protocolSync,
     checkpointStore,
+    recovery,
     buildSyncRequest,
     sinceBatchId,
     parseAndFilter,
@@ -188,7 +197,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
 
   const allQuads: Quad[] = [];
   throwIfAborted(signal);
-  const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId);
+  const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId, recovery);
   let offset = checkpointStore.get(checkpointKey)?.offset ?? 0;
   const usesPageSession = usesResponderSession(includeSharedMemory, phase);
   const sessionStartedAt = Date.now();
@@ -245,7 +254,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         // full rationale (codex review on #569 follow-ups #1, #4-#8).
         requestFactory: async () => {
           throwIfAborted(signal);
-          const request = await buildSyncRequest(contextGraphId, curOffset, syncPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId);
+          const request = await buildSyncRequest(contextGraphId, curOffset, syncPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId, recovery);
           throwIfAborted(signal);
           return request;
         },
@@ -317,14 +326,24 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     if (usesPageSession && isSyncResponderSessionSupersededError(err)) {
       unfinishedSyncResponderSessions.delete(checkpointKey);
       checkpointStore.delete(checkpointKey);
-    } else if (usesPageSession && responderSession && !(err as Error & { syncDenied?: boolean }).syncDenied) {
+    } else if (usesPageSession && responderSession && !recovery && !(err as Error & { syncDenied?: boolean }).syncDenied) {
+      // Recovery never persists a responder session to resume (see the timeout
+      // branch below + Codex #1173).
       rememberUnfinishedSyncResponderSession(checkpointKey, responderSession);
     }
     throw err;
   }
 
   if (usesPageSession && responderSession) {
-    if (timedOut) rememberUnfinishedSyncResponderSession(checkpointKey, responderSession);
+    // R10 recovery has its own responder-session scope and MUST rebuild the
+    // COMPLETE state from offset 0 on every (re)try (see swm-recovery
+    // `fetchPhaseFully`, which deletes the checkpoint on a partial abandon). It
+    // must therefore NEVER persist a responder session to resume: reusing the
+    // cached pre-timeout row list on a retry converges to a STALE snapshot (up to
+    // the session TTL old) instead of current state, because the responder's
+    // `refreshRowList` only fires on a NEW syncSessionId (Codex #1173). Drop the
+    // session so the retry mints a fresh id and the responder re-reads.
+    if (timedOut && !recovery) rememberUnfinishedSyncResponderSession(checkpointKey, responderSession);
     else unfinishedSyncResponderSessions.delete(checkpointKey);
   }
 

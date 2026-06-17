@@ -2775,10 +2775,9 @@ export class DkgNodePlugin {
       if (result.ual !== undefined) summary.ual = result.ual;
       if (registration) summary.registration = registration;
 
-      // FIX E — the dkg_publish path publishes via POST /api/shared-memory/publish
-      // {assertionName}, which (like vm/publish) returns HTTP 207 with
+      // Direct publish can return HTTP 207 with
       // `contextGraphError` set when the KA minted on-chain but the context-graph
-      // binding FAILED (memory.ts:1772). `this.post` treats 207 as success, so
+      // binding FAILED. `this.post` treats 207 as success, so
       // without this the partial reads as clean success. The UAL/kaId are valid and
       // the asset IS published on-chain — surface a PARTIAL/warning. The agent must
       // NOT re-run dkg_publish: each call mints a FRESH assertion, so a retry would

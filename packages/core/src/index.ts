@@ -1,9 +1,12 @@
 export * from './types.js';
 export * from './constants.js';
+export * from './catalog.js';
 export { parseDotenvValue } from './dotenv.js';
 export * from './memory-model.js';
 export * from './trust.js';
 export * from './publisher-extension.js';
+export * from './imported-artifact-bytes.js';
+export * from './imported-artifact-metadata.js';
 export * from './event-bus.js';
 export { Logger, createOperationContext, type OperationContext, type OperationName, type LogSink } from './logger.js';
 export * from './crypto/index.js';

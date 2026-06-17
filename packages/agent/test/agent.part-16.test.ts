@@ -1,4 +1,10 @@
-import { describe, it, expect, beforeAll, afterAll, vi, DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy, OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256, EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath, _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS, OperationalKeyOnlyPublishChainAdapter, ExternalOperationalKeyPublishChainAdapter, AddressOnlyExternalOperationalKeyPublishChainAdapter, AsyncAddressSignMessageAsPublishChainAdapter, GenericSignMessageExternalOperationalKeyPublishChainAdapter, MultiSignerGenericSignMessagePublishChainAdapter, SingleAddressMismatchedGenericSignMessagePublishChainAdapter, SingleSignerAdapterPublishChainAdapter, ReservingAuthorityContextGraphChainAdapter, type Quad, type ChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type OnChainPublishResult, type V10PublishDirectParams } from './agent.shared';
+import { describe, it, expect, beforeAll, afterAll, DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy, OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256, EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath, _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS, OperationalKeyOnlyPublishChainAdapter, ExternalOperationalKeyPublishChainAdapter, AddressOnlyExternalOperationalKeyPublishChainAdapter, AsyncAddressSignMessageAsPublishChainAdapter, GenericSignMessageExternalOperationalKeyPublishChainAdapter, MultiSignerGenericSignMessagePublishChainAdapter, SingleAddressMismatchedGenericSignMessagePublishChainAdapter, SingleSignerAdapterPublishChainAdapter, ReservingAuthorityContextGraphChainAdapter, type Quad, type ChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type OnChainPublishResult, type V10PublishDirectParams } from './agent.shared';
+
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => { calls.push(args); return impl(...args); };
+  return Object.assign(fn, { calls });
+}
 
 
 
@@ -34,12 +40,12 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         agent.subscribeToContextGraph('runtime-contextGraph');
 
         const remotePeer = agent.node.peerId;
-        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+        (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer } as any,
         ]);
 
         let peerStoreReads = 0;
-        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockImplementation(async () => {
+        (agent.node.libp2p.peerStore as any).get = recorder(async () => {
           peerStoreReads += 1;
           if (peerStoreReads < 3) {
             return { protocols: [] } as any;
@@ -51,9 +57,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         // `*Detailed` variants (see packages/agent/src/dkg-agent.ts #1441/1453)
         // because it consumes the per-phase diagnostics, not just the plain
         // `insertedTriples` count exposed by `syncFromPeer` / `syncSharedMemoryFromPeer`.
-        // Mock those so we can assert both the call shape and the reported totals
-        // without spinning up a remote peer.
-        const syncFromPeerDetailed = vi.spyOn(agent as any, 'syncFromPeerDetailed').mockResolvedValue({
+        // Replace those with recorders so we can assert both the call shape and
+        // the reported totals without spinning up a remote peer.
+        const syncFromPeerDetailed = recorder(async () => ({
           insertedTriples: 5,
           fetchedMetaTriples: 0,
           fetchedDataTriples: 0,
@@ -69,8 +75,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           dataRejectedMissingMeta: 0,
           rejectedKcs: 0,
           failedPeers: 0,
-        });
-        const syncSharedMemoryFromPeerDetailed = vi.spyOn(agent as any, 'syncSharedMemoryFromPeerDetailed').mockResolvedValue({
+        }));
+        (agent as any).syncFromPeerDetailed = syncFromPeerDetailed;
+        const syncSharedMemoryFromPeerDetailed = recorder(async () => ({
           insertedTriples: 2,
           fetchedMetaTriples: 0,
           fetchedDataTriples: 0,
@@ -84,15 +91,16 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           emptyResponses: 0,
           droppedDataTriples: 0,
           failedPeers: 0,
-        });
+        }));
+        (agent as any).syncSharedMemoryFromPeerDetailed = syncSharedMemoryFromPeerDetailed;
 
         const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
           includeSharedMemory: true,
         });
 
         expect(peerStoreReads).toBe(3);
-        expect(syncFromPeerDetailed).toHaveBeenCalledWith(remotePeer.toString(), ['runtime-contextGraph']);
-        expect(syncSharedMemoryFromPeerDetailed).toHaveBeenCalledWith(remotePeer.toString(), ['runtime-contextGraph']);
+        expect(syncFromPeerDetailed.calls.at(-1)).toEqual([remotePeer.toString(), ['runtime-contextGraph']]);
+        expect(syncSharedMemoryFromPeerDetailed.calls.at(-1)).toEqual([remotePeer.toString(), ['runtime-contextGraph']]);
         expect(result.connectedPeers).toBe(1);
         expect(result.syncCapablePeers).toBe(1);
         expect(result.peersTried).toBe(1);
@@ -119,12 +127,12 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         agent.subscribeToContextGraph('runtime-contextGraph');
 
         const remotePeer = agent.node.peerId;
-        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+        (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer } as any,
         ]);
-        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+        (agent.node.libp2p.peerStore as any).get = recorder(async () => ({
           protocols: [PROTOCOL_SYNC],
-        } as any);
+        } as any));
 
         const durableResult = (overrides: Partial<{
           timedOutPhases: number;
@@ -153,8 +161,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           ...overrides,
         });
 
-        const syncFromPeerDetailed = vi.spyOn(agent as any, 'syncFromPeerDetailed');
-        syncFromPeerDetailed.mockResolvedValueOnce(durableResult({ timedOutPhases: 1 }));
+        const syncFromPeerDetailedQueue: any[] = [];
+        const syncFromPeerDetailed = recorder(async () => syncFromPeerDetailedQueue.shift());
+        (agent as any).syncFromPeerDetailed = syncFromPeerDetailed;
+        syncFromPeerDetailedQueue.push(durableResult({ timedOutPhases: 1 }));
 
         const timeoutOnly = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
 
@@ -164,7 +174,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(timeoutOnly.diagnostics.durable.timedOutPhases).toBe(1);
         expect(timeoutOnly.diagnostics.durable.failedPeers).toBe(0);
 
-        syncFromPeerDetailed.mockResolvedValueOnce(durableResult({
+        syncFromPeerDetailedQueue.push(durableResult({
           timedOutPhases: 1,
           completedPhases: 1,
         }));
@@ -177,7 +187,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(zeroOffsetCompletionWithTimeout.diagnostics.durable.timedOutPhases).toBe(1);
         expect(zeroOffsetCompletionWithTimeout.diagnostics.durable.completedPhases).toBe(1);
 
-        syncFromPeerDetailed.mockResolvedValueOnce(durableResult({
+        syncFromPeerDetailedQueue.push(durableResult({
           timedOutPhases: 1,
           completedPhases: 1,
           checkpointAdvances: 1,
@@ -192,7 +202,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(progressWithTimeout.diagnostics.durable.completedPhases).toBe(1);
         expect(progressWithTimeout.diagnostics.durable.checkpointAdvances).toBe(1);
 
-        syncFromPeerDetailed.mockResolvedValueOnce(durableResult({
+        syncFromPeerDetailedQueue.push(durableResult({
           failedPhases: 1,
         }));
 
@@ -204,7 +214,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(phaseFailure.diagnostics.durable.failedPeers).toBe(0);
         expect(phaseFailure.diagnostics.durable.failedPhases).toBe(1);
 
-        const syncSharedMemoryFromPeerDetailed = vi.spyOn(agent as any, 'syncSharedMemoryFromPeerDetailed').mockResolvedValue({
+        const syncSharedMemoryFromPeerDetailed = recorder(async () => ({
           insertedTriples: 0,
           fetchedMetaTriples: 0,
           fetchedDataTriples: 0,
@@ -220,8 +230,9 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           failedPeers: 1,
           failedPhases: 0,
           deniedPhases: 0,
-        });
-        syncFromPeerDetailed.mockResolvedValueOnce(durableResult({
+        }));
+        (agent as any).syncSharedMemoryFromPeerDetailed = syncSharedMemoryFromPeerDetailed;
+        syncFromPeerDetailedQueue.push(durableResult({
           completedPhases: 1,
         }));
 
@@ -234,7 +245,6 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(durableOnlyResponse.peersSucceeded).toBe(0);
         expect(durableOnlyResponse.diagnostics.durable.failedPeers).toBe(0);
         expect(durableOnlyResponse.diagnostics.sharedMemory.failedPeers).toBe(1);
-        syncSharedMemoryFromPeerDetailed.mockRestore();
       } finally {
         await agent.stop().catch(() => {});
       }
@@ -253,15 +263,15 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
         const deniedPeer = { toString: () => 'peer-denied' };
         const servingPeer = { toString: () => 'peer-serving' };
-        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+        (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer: deniedPeer } as any,
           { remotePeer: servingPeer } as any,
         ]);
-        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+        (agent.node.libp2p.peerStore as any).get = recorder(async () => ({
           protocols: [PROTOCOL_SYNC],
-        } as any);
+        } as any));
 
-        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockImplementation(async (peerId: string) => {
+        (agent as any).syncFromPeerDetailed = recorder(async (peerId: string) => {
           if (peerId === 'peer-denied') {
             return {
               insertedTriples: 0,
@@ -328,15 +338,15 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
         const deniedPeer = { toString: () => 'peer-denied-empty' };
         const cleanPeer = { toString: () => 'peer-clean-empty' };
-        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+        (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer: deniedPeer } as any,
           { remotePeer: cleanPeer } as any,
         ]);
-        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+        (agent.node.libp2p.peerStore as any).get = recorder(async () => ({
           protocols: [PROTOCOL_SYNC],
-        } as any);
+        } as any));
 
-        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockImplementation(async (peerId: string) => ({
+        (agent as any).syncFromPeerDetailed = recorder(async (peerId: string) => ({
           insertedTriples: 0,
           fetchedMetaTriples: 0,
           fetchedDataTriples: 0,
@@ -380,14 +390,14 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         agent.subscribeToContextGraph('runtime-contextGraph');
 
         const remotePeer = { toString: () => 'peer-meta-only' };
-        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+        (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer } as any,
         ]);
-        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+        (agent.node.libp2p.peerStore as any).get = recorder(async () => ({
           protocols: [PROTOCOL_SYNC],
-        } as any);
+        } as any));
 
-        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockResolvedValue({
+        (agent as any).syncFromPeerDetailed = recorder(async () => ({
           insertedTriples: 1,
           fetchedMetaTriples: 1,
           fetchedDataTriples: 0,
@@ -404,8 +414,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           rejectedKcs: 0,
           failedPeers: 0,
           deniedPhases: 1,
-        });
-        vi.spyOn(agent as any, 'syncSharedMemoryFromPeerDetailed').mockResolvedValue({
+        }));
+        (agent as any).syncSharedMemoryFromPeerDetailed = recorder(async () => ({
           insertedTriples: 1,
           fetchedMetaTriples: 1,
           fetchedDataTriples: 0,
@@ -420,7 +430,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           droppedDataTriples: 0,
           failedPeers: 0,
           deniedPhases: 1,
-        });
+        }));
 
         const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
           includeSharedMemory: true,
@@ -452,14 +462,14 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         agent.subscribeToContextGraph('runtime-contextGraph');
 
         const remotePeer = { toString: () => 'peer-meta-only-clean' };
-        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+        (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer } as any,
         ]);
-        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+        (agent.node.libp2p.peerStore as any).get = recorder(async () => ({
           protocols: [PROTOCOL_SYNC],
-        } as any);
+        } as any));
 
-        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockResolvedValue({
+        (agent as any).syncFromPeerDetailed = recorder(async () => ({
           insertedTriples: 1,
           fetchedMetaTriples: 1,
           fetchedDataTriples: 0,
@@ -476,8 +486,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           rejectedKcs: 0,
           failedPeers: 0,
           deniedPhases: 0,
-        });
-        vi.spyOn(agent as any, 'syncSharedMemoryFromPeerDetailed').mockResolvedValue({
+        }));
+        (agent as any).syncSharedMemoryFromPeerDetailed = recorder(async () => ({
           insertedTriples: 1,
           fetchedMetaTriples: 1,
           fetchedDataTriples: 0,
@@ -492,7 +502,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           droppedDataTriples: 0,
           failedPeers: 0,
           deniedPhases: 0,
-        });
+        }));
 
         const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
           includeSharedMemory: true,
@@ -591,10 +601,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         agent.subscribeToContextGraph('runtime-contextGraph');
 
         const remotePeer = agent.node.peerId;
-        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+        (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer } as any,
         ]);
-        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({ protocols: [] } as any);
+        (agent.node.libp2p.peerStore as any).get = recorder(async () => ({ protocols: [] } as any));
 
         const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
           includeSharedMemory: true,
@@ -624,16 +634,16 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
         const peerOther = { toString: () => 'peer-other' };
         const peerPreferred = { toString: () => 'peer-preferred' };
-        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+        (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer: peerOther } as any,
           { remotePeer: peerPreferred } as any,
         ]);
-        vi.spyOn((agent as any).discovery, 'findAgents').mockResolvedValue([]);
-        vi.spyOn(agent as any, 'ensurePeerConnected').mockResolvedValue(undefined);
-        vi.spyOn(agent as any, 'waitForSyncProtocol').mockResolvedValue(true);
+        (agent as any).discovery.findAgents = recorder(async () => []);
+        (agent as any).ensurePeerConnected = recorder(async () => undefined);
+        (agent as any).waitForSyncProtocol = recorder(async () => true);
 
         const triedPeers: string[] = [];
-        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockImplementation(async (...args: unknown[]) => {
+        (agent as any).syncFromPeerDetailed = recorder(async (...args: unknown[]) => {
           triedPeers.push(String(args[0]));
           return {
             insertedTriples: 0,
@@ -678,17 +688,17 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         const peerEdge = { toString: () => 'peer-edge' };
         const peerCore = { toString: () => 'peer-core' };
         const peerPreferred = { toString: () => 'peer-preferred' };
-        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+        (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer: peerEdge } as any,
           { remotePeer: peerCore } as any,
           { remotePeer: peerPreferred } as any,
         ]);
-        vi.spyOn((agent as any).discovery, 'findAgents').mockResolvedValue([]);
-        vi.spyOn(agent as any, 'ensurePeerConnected').mockResolvedValue(undefined);
-        vi.spyOn(agent as any, 'waitForSyncProtocol').mockResolvedValue(true);
+        (agent as any).discovery.findAgents = recorder(async () => []);
+        (agent as any).ensurePeerConnected = recorder(async () => undefined);
+        (agent as any).waitForSyncProtocol = recorder(async () => true);
 
         const triedPeers: string[] = [];
-        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockImplementation(async (...args: unknown[]) => {
+        (agent as any).syncFromPeerDetailed = recorder(async (...args: unknown[]) => {
           triedPeers.push(String(args[0]));
           return {
             insertedTriples: 0,
@@ -744,13 +754,14 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
         const peerNoProtocol = { toString: () => 'peer-no-protocol' };
         const peerUnselected = { toString: () => 'peer-unselected' };
-        vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([
+        (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer: peerNoProtocol } as any,
           { remotePeer: peerUnselected } as any,
         ]);
-        vi.spyOn((agent as any).discovery, 'findAgents').mockResolvedValue([]);
-        vi.spyOn(agent as any, 'waitForSyncProtocol').mockResolvedValue(false);
-        const syncFromPeerDetailed = vi.spyOn(agent as any, 'syncFromPeerDetailed');
+        (agent as any).discovery.findAgents = recorder(async () => []);
+        (agent as any).waitForSyncProtocol = recorder(async () => false);
+        const syncFromPeerDetailed = recorder(async () => undefined);
+        (agent as any).syncFromPeerDetailed = syncFromPeerDetailed;
 
         const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
           maxPeers: 1,
@@ -763,7 +774,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(result.syncCapablePeers).toBe(0);
         expect(result.peersTried).toBe(0);
         expect(result.diagnostics.noProtocolPeers).toBe(1);
-        expect(syncFromPeerDetailed).not.toHaveBeenCalled();
+        expect(syncFromPeerDetailed.calls).toEqual([]);
       } finally {
         await agent.stop().catch(() => {});
       }
@@ -867,13 +878,13 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           { remotePeer: peerEdgeA } as any,
           { remotePeer: peerEdgeB } as any,
         ];
-        vi.spyOn(agent.node.libp2p, 'getConnections').mockImplementation(() => connections);
-        vi.spyOn((agent as any).discovery, 'findAgents').mockResolvedValue([]);
-        vi.spyOn(agent as any, 'ensurePeerConnected').mockResolvedValue(undefined);
-        vi.spyOn(agent as any, 'waitForSyncProtocol').mockResolvedValue(true);
+        (agent.node.libp2p as any).getConnections = recorder(() => connections);
+        (agent as any).discovery.findAgents = recorder(async () => []);
+        (agent as any).ensurePeerConnected = recorder(async () => undefined);
+        (agent as any).waitForSyncProtocol = recorder(async () => true);
 
         const triedPeers: string[] = [];
-        vi.spyOn(agent as any, 'syncFromPeerDetailed').mockImplementation(async (...args: unknown[]) => {
+        (agent as any).syncFromPeerDetailed = recorder(async (...args: unknown[]) => {
           triedPeers.push(String(args[0]));
           return {
             insertedTriples: 0,
@@ -940,12 +951,12 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         agent.subscribeToContextGraph('runtime-contextGraph');
 
         const remotePeer = agent.node.peerId;
-        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+        (agent.node.libp2p.peerStore as any).get = recorder(async () => ({
           protocols: [PROTOCOL_SYNC],
-        } as any);
-        vi.spyOn(agent, 'syncFromPeer').mockResolvedValue(0);
-        vi.spyOn(agent, 'discoverContextGraphsFromStore').mockResolvedValue(0);
-        vi.spyOn(agent, 'syncSharedMemoryFromPeer').mockResolvedValue(0);
+        } as any));
+        (agent as any).syncFromPeer = recorder(async () => 0);
+        (agent as any).discoverContextGraphsFromStore = recorder(async () => 0);
+        (agent as any).syncSharedMemoryFromPeer = recorder(async () => 0);
 
         await (agent as any).trySyncFromPeer(remotePeer.toString());
 
@@ -983,12 +994,12 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         ]);
 
         const remotePeer = agent.node.peerId;
-        vi.spyOn(agent.node.libp2p.peerStore, 'get').mockResolvedValue({
+        (agent.node.libp2p.peerStore as any).get = recorder(async () => ({
           protocols: [PROTOCOL_SYNC],
-        } as any);
-        vi.spyOn(agent, 'syncFromPeer').mockResolvedValue(0);
-        vi.spyOn(agent, 'discoverContextGraphsFromStore').mockResolvedValue(0);
-        vi.spyOn(agent, 'syncSharedMemoryFromPeer').mockResolvedValue(0);
+        } as any));
+        (agent as any).syncFromPeer = recorder(async () => 0);
+        (agent as any).discoverContextGraphsFromStore = recorder(async () => 0);
+        (agent as any).syncSharedMemoryFromPeer = recorder(async () => 0);
 
         await (agent as any).trySyncFromPeer(remotePeer.toString());
 

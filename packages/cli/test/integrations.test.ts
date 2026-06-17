@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -202,59 +203,74 @@ describe('isGithubHost', () => {
   });
 });
 
-describe('registry-client token scoping', () => {
+// ── Real local registry server ────────────────────────────────────────────
+// Replaces the retired globalThis.fetch stubs: the registry client now makes
+// REAL HTTP requests to a server the test controls. The per-test route table
+// is fixture DATA on a real wire; `seenAuth` records the Authorization header
+// the server REALLY received (the token-leak contract is proven on the
+// receiving end, not by inspecting an intercepted call).
+const registryRoutes = new Map<string, { status: number; body: string }>();
+const seenAuth: Array<string | null> = [];
+let registryServer: HttpServer;
+let registryBase = '';
+
+beforeAll(async () => {
+  registryServer = createHttpServer((req, res) => {
+    seenAuth.push(req.headers.authorization ?? null);
+    const route = registryRoutes.get(req.url ?? '');
+    if (!route) {
+      res.writeHead(500);
+      res.end('unconfigured route');
+      return;
+    }
+    res.writeHead(route.status, { 'Content-Type': 'application/json' });
+    res.end(route.body);
+  });
+  await new Promise<void>((resolve) => registryServer.listen(0, '127.0.0.1', resolve));
+  const addr = registryServer.address();
+  if (!addr || typeof addr === 'string') throw new Error('no addr');
+  registryBase = `http://127.0.0.1:${addr.port}`;
+});
+
+afterAll(async () => {
+  await new Promise<void>((resolve) => registryServer.close(() => resolve()));
+});
+
+beforeEach(() => {
+  registryRoutes.clear();
+  seenAuth.length = 0;
+});
+
+function localRegistryCfg(extraEnv: Record<string, string> = {}) {
+  return resolveRegistryConfig({
+    DKG_REGISTRY_INDEX_URL: `${registryBase}/index`,
+    DKG_REGISTRY_RAW_BASE: `${registryBase}/raw`,
+    ...extraEnv,
+  });
+}
+
+describe('registry-client token scoping (real wire)', () => {
   // The threat is a developer exporting GITHUB_TOKEN and then pointing
   // DKG_REGISTRY_INDEX_URL/RAW_BASE at a staging / third-party registry for
   // testing. Naively forwarding the Authorization header sends the GitHub
-  // PAT to whoever runs that endpoint.
-  const origFetch = globalThis.fetch;
-  afterEach(() => {
-    globalThis.fetch = origFetch;
+  // PAT to whoever runs that endpoint. The local server here IS such a
+  // non-GitHub host, and it reports what it really received.
+  // (The GitHub-host POSITIVE branch is held by the isGithubHost predicate
+  // tests above — observing the header on a genuine github.com host would
+  // require owning GitHub's server.)
+
+  it('does NOT send GITHUB_TOKEN to a non-GitHub registry host (proven at the receiving server)', async () => {
+    registryRoutes.set('/index', { status: 200, body: '[]' });
+    await listSlugs(localRegistryCfg({ GITHUB_TOKEN: 'ghp_secret' }));
+    expect(seenAuth).toEqual([null]);
   });
 
-  it('forwards GITHUB_TOKEN only to GitHub hosts', async () => {
-    let sentAuth: string | null = null;
-    globalThis.fetch = vi.fn(async (_url: string | URL, init?: RequestInit) => {
-      sentAuth = (init?.headers as Record<string, string>).Authorization ?? null;
-      return new Response('[]', { status: 200 });
-    }) as unknown as typeof fetch;
-
-    const cfg = resolveRegistryConfig({ GITHUB_TOKEN: 'ghp_secret' });
-    await listSlugs(cfg);
-    expect(sentAuth).toBe('Bearer ghp_secret');
-  });
-
-  it('does NOT forward GITHUB_TOKEN to a non-GitHub DKG_REGISTRY_INDEX_URL', async () => {
-    let sentAuth: string | null | undefined;
-    globalThis.fetch = vi.fn(async (_url: string | URL, init?: RequestInit) => {
-      sentAuth = (init?.headers as Record<string, string>).Authorization ?? null;
-      return new Response('[]', { status: 200 });
-    }) as unknown as typeof fetch;
-
-    const cfg = resolveRegistryConfig({
-      GITHUB_TOKEN: 'ghp_secret',
-      DKG_REGISTRY_INDEX_URL: 'https://staging.example.com/index',
-      DKG_REGISTRY_RAW_BASE: 'https://staging.example.com/raw',
-    });
-    await listSlugs(cfg);
-    expect(sentAuth).toBeNull();
-  });
-
-  it('forwards DKG_REGISTRY_TOKEN to a non-GitHub host', async () => {
-    let sentAuth: string | null = null;
-    globalThis.fetch = vi.fn(async (_url: string | URL, init?: RequestInit) => {
-      sentAuth = (init?.headers as Record<string, string>).Authorization ?? null;
-      return new Response('[]', { status: 200 });
-    }) as unknown as typeof fetch;
-
-    const cfg = resolveRegistryConfig({
-      GITHUB_TOKEN: 'ghp_should_not_leak',
-      DKG_REGISTRY_TOKEN: 'staging-token',
-      DKG_REGISTRY_INDEX_URL: 'https://staging.example.com/index',
-      DKG_REGISTRY_RAW_BASE: 'https://staging.example.com/raw',
-    });
-    await listSlugs(cfg);
-    expect(sentAuth).toBe('Bearer staging-token');
+  it('sends DKG_REGISTRY_TOKEN to the explicitly-trusted non-GitHub host (and not the PAT)', async () => {
+    registryRoutes.set('/index', { status: 200, body: '[]' });
+    await listSlugs(
+      localRegistryCfg({ GITHUB_TOKEN: 'ghp_should_not_leak', DKG_REGISTRY_TOKEN: 'staging-token' }),
+    );
+    expect(seenAuth).toEqual(['Bearer staging-token']);
   });
 });
 
@@ -281,109 +297,82 @@ describe('resolveRegistryConfig', () => {
   });
 });
 
-// ── listSlugs / fetchEntry via mocked fetch ───────────────────────────────
+// ── listSlugs / fetchEntry over the REAL local registry server ────────────
 
-describe('listSlugs', () => {
-  const origFetch = globalThis.fetch;
-  afterEach(() => {
-    globalThis.fetch = origFetch;
-  });
-
+describe('listSlugs (real wire)', () => {
   it('filters out TEMPLATE.json and non-json / directory entries', async () => {
-    globalThis.fetch = vi.fn(async () =>
-      new Response(
-        JSON.stringify([
-          { name: 'dkg-hello-world.json', type: 'file' },
-          { name: 'cursor-mcp-dkg.json', type: 'file' },
-          { name: 'TEMPLATE.json', type: 'file' },
-          { name: 'README.md', type: 'file' },
-          { name: 'subdir', type: 'dir' },
-        ]),
-        { status: 200 },
-      ),
-    ) as unknown as typeof fetch;
-
-    const slugs = await listSlugs(resolveRegistryConfig({}));
+    registryRoutes.set('/index', {
+      status: 200,
+      body: JSON.stringify([
+        { name: 'dkg-hello-world.json', type: 'file' },
+        { name: 'cursor-mcp-dkg.json', type: 'file' },
+        { name: 'TEMPLATE.json', type: 'file' },
+        { name: 'README.md', type: 'file' },
+        { name: 'subdir', type: 'dir' },
+      ]),
+    });
+    const slugs = await listSlugs(localRegistryCfg());
     expect(slugs).toEqual(['cursor-mcp-dkg', 'dkg-hello-world']);
   });
 
-  it('throws a useful error on rate limit / 403', async () => {
-    globalThis.fetch = vi.fn(async () => new Response('{"message":"forbidden"}', { status: 403, statusText: 'Forbidden' })) as unknown as typeof fetch;
-    await expect(listSlugs(resolveRegistryConfig({}))).rejects.toThrow(/Failed to list registry entries: 403/);
+  it('throws a useful error on a REAL 403', async () => {
+    registryRoutes.set('/index', { status: 403, body: '{"message":"forbidden"}' });
+    await expect(listSlugs(localRegistryCfg())).rejects.toThrow(/Failed to list registry entries: 403/);
   });
 });
 
-describe('fetchEntry', () => {
-  const origFetch = globalThis.fetch;
-  afterEach(() => {
-    globalThis.fetch = origFetch;
-  });
-
-  it('rejects directory-traversal-style slugs', async () => {
-    globalThis.fetch = vi.fn(async () => new Response('', { status: 200 })) as unknown as typeof fetch;
-    await expect(fetchEntry('../etc/passwd', resolveRegistryConfig({}))).rejects.toThrow(/Invalid slug/);
+describe('fetchEntry (real wire)', () => {
+  it('rejects directory-traversal-style slugs BEFORE any request reaches the server', async () => {
+    await expect(fetchEntry('../etc/passwd', localRegistryCfg())).rejects.toThrow(/Invalid slug/);
+    expect(seenAuth, 'traversal slug must be rejected client-side, before any HTTP').toHaveLength(0);
   });
 
   it('returns a well-shaped entry on success', async () => {
-    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(baseEntry), { status: 200 })) as unknown as typeof fetch;
-    const e = await fetchEntry('dkg-hello-world', resolveRegistryConfig({}));
+    registryRoutes.set('/raw/dkg-hello-world.json', { status: 200, body: JSON.stringify(baseEntry) });
+    const e = await fetchEntry('dkg-hello-world', localRegistryCfg());
     expect(e.slug).toBe('dkg-hello-world');
     expect(e.install.kind).toBe('cli');
   });
 
-  it('gives a specific message on 404', async () => {
-    globalThis.fetch = vi.fn(async () => new Response('', { status: 404, statusText: 'Not Found' })) as unknown as typeof fetch;
-    await expect(fetchEntry('ghost', resolveRegistryConfig({}))).rejects.toThrow(/not found in the registry/);
+  it('gives a specific message on a REAL 404', async () => {
+    registryRoutes.set('/raw/ghost.json', { status: 404, body: '' });
+    await expect(fetchEntry('ghost', localRegistryCfg())).rejects.toThrow(/not found in the registry/);
   });
 
   it('rejects payloads that do not match the schema', async () => {
-    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({ not: 'an entry' }), { status: 200 })) as unknown as typeof fetch;
-    await expect(fetchEntry('dkg-hello-world', resolveRegistryConfig({}))).rejects.toThrow(/does not match the expected shape/);
+    registryRoutes.set('/raw/dkg-hello-world.json', { status: 200, body: JSON.stringify({ not: 'an entry' }) });
+    await expect(fetchEntry('dkg-hello-world', localRegistryCfg())).rejects.toThrow(/does not match the expected shape/);
   });
 
   it('rejects payloads whose declared slug disagrees with the filename', async () => {
     // Registry entry file is dkg-hello-world.json but internal slug says something else —
     // probably a copy/rename artifact. Installing it would silently swap packages.
-    globalThis.fetch = vi.fn(async () =>
-      new Response(JSON.stringify({ ...baseEntry, slug: 'something-else' }), { status: 200 }),
-    ) as unknown as typeof fetch;
-    await expect(fetchEntry('dkg-hello-world', resolveRegistryConfig({}))).rejects.toThrow(
+    registryRoutes.set('/raw/dkg-hello-world.json', {
+      status: 200,
+      body: JSON.stringify({ ...baseEntry, slug: 'something-else' }),
+    });
+    await expect(fetchEntry('dkg-hello-world', localRegistryCfg())).rejects.toThrow(
       /declares slug "something-else"/,
     );
   });
 });
 
-// ── fetchAllEntries resilience ────────────────────────────────────────────
+// ── fetchAllEntries resilience (real wire) ────────────────────────────────
 
 describe('fetchAllEntries', () => {
-  const origFetch = globalThis.fetch;
-  afterEach(() => {
-    globalThis.fetch = origFetch;
-  });
-
   it('returns good entries and collects per-entry failures instead of aborting', async () => {
     // A broken community entry must not hide verified / featured entries.
-    globalThis.fetch = vi.fn(async (url: string | URL) => {
-      const u = url.toString();
-      if (u.includes('/contents/integrations')) {
-        return new Response(
-          JSON.stringify([
-            { name: 'dkg-hello-world.json', type: 'file' },
-            { name: 'broken.json', type: 'file' },
-          ]),
-          { status: 200 },
-        );
-      }
-      if (u.endsWith('/dkg-hello-world.json')) {
-        return new Response(JSON.stringify(baseEntry), { status: 200 });
-      }
-      if (u.endsWith('/broken.json')) {
-        return new Response(JSON.stringify({ definitely: 'not an entry' }), { status: 200 });
-      }
-      return new Response('', { status: 500 });
-    }) as unknown as typeof fetch;
+    registryRoutes.set('/index', {
+      status: 200,
+      body: JSON.stringify([
+        { name: 'dkg-hello-world.json', type: 'file' },
+        { name: 'broken.json', type: 'file' },
+      ]),
+    });
+    registryRoutes.set('/raw/dkg-hello-world.json', { status: 200, body: JSON.stringify(baseEntry) });
+    registryRoutes.set('/raw/broken.json', { status: 200, body: JSON.stringify({ definitely: 'not an entry' }) });
 
-    const { entries, failures } = await fetchAllEntries(resolveRegistryConfig({}));
+    const { entries, failures } = await fetchAllEntries(localRegistryCfg());
     expect(entries.map((e) => e.slug)).toEqual(['dkg-hello-world']);
     expect(failures).toHaveLength(1);
     expect(failures[0]?.slug).toBe('broken');
@@ -425,9 +414,9 @@ describe('installCli', () => {
   });
 
   it('dry-run does NOT invoke the provenance verifier (no side effects to guard)', async () => {
-    const verifier = vi.fn();
+    const verifier = recordVerifier(okProvenance);
     await installCli({ entry: baseEntry, dryRun: true, verifier, logger: () => {} });
-    expect(verifier).not.toHaveBeenCalled();
+    expect(verifier.calls).toEqual([]);
   });
 
   it('throws when called with a non-cli entry', async () => {
@@ -437,28 +426,47 @@ describe('installCli', () => {
 
 // ── installCli provenance gate ────────────────────────────────────────────
 
+// Hand-rolled DI-seam recorders (no vitest mock API): verifier/runner are
+// installCli's injection points; plain recording functions capture the calls.
+function recordVerifier(result: ProvenanceCheckResult) {
+  const calls: unknown[][] = [];
+  const fn = async (...args: unknown[]) => {
+    calls.push(args);
+    return result;
+  };
+  return Object.assign(fn, { calls });
+}
+function recordRunner(exitCode: number) {
+  const calls: Array<[string, string[]]> = [];
+  const fn = async (cmd: string, args: string[]) => {
+    calls.push([cmd, args]);
+    return exitCode;
+  };
+  return Object.assign(fn, { calls });
+}
+
 describe('installCli provenance gate', () => {
   // The provenance gate is what ties the registry-reviewed commit to the
   // tarball npm actually hands us. If the gate isn't enforced or the
   // escape hatch isn't respected, the whole "registry-audited integration"
   // claim falls apart on install.
   it('refuses to install when the verifier reports failure', async () => {
-    const verifier = vi.fn(async () => failedProvenance);
+    const verifier = recordVerifier(failedProvenance);
     const logs: string[] = [];
     await expect(
       installCli({ entry: baseEntry, verifier, logger: (m) => logs.push(m) }),
     ).rejects.toThrow(/not cryptographically bound/);
-    expect(verifier).toHaveBeenCalledWith(
+    expect(verifier.calls).toEqual([[
       '@origintrail/dkg-hello-world',
       '0.1.0',
       'https://github.com/OriginTrail/dkg-hello-world',
-    );
+    ]]);
     expect(logs.join('\n')).toContain('Provenance check FAILED');
   });
 
   it('honors skipProvenance and does not call the verifier', async () => {
-    const verifier = vi.fn(async () => failedProvenance);
-    const runner = vi.fn(async () => 0);
+    const verifier = recordVerifier(failedProvenance);
+    const runner = recordRunner(0);
     const result = await installCli({
       entry: baseEntry,
       skipProvenance: true,
@@ -466,14 +474,14 @@ describe('installCli provenance gate', () => {
       runner,
       logger: () => {},
     });
-    expect(verifier).not.toHaveBeenCalled();
-    expect(runner).toHaveBeenCalledWith('npm', ['install', '--global', '@origintrail/dkg-hello-world@0.1.0']);
+    expect(verifier.calls).toEqual([]);
+    expect(runner.calls).toEqual([['npm', ['install', '--global', '@origintrail/dkg-hello-world@0.1.0']]]);
     expect(result.provenance).toBeUndefined();
   });
 
   it('records the provenance result on the returned object when ok', async () => {
-    const verifier = vi.fn(async () => okProvenance);
-    const runner = vi.fn(async () => 0);
+    const verifier = recordVerifier(okProvenance);
+    const runner = recordRunner(0);
     const logs: string[] = [];
     const result = await installCli({
       entry: baseEntry,
@@ -481,15 +489,15 @@ describe('installCli provenance gate', () => {
       runner,
       logger: (m) => logs.push(m),
     });
-    expect(verifier).toHaveBeenCalledOnce();
-    expect(runner).toHaveBeenCalledOnce();
+    expect(verifier.calls).toHaveLength(1);
+    expect(runner.calls).toHaveLength(1);
     expect(result.provenance?.ok).toBe(true);
     expect(logs.join('\n')).toContain('ok — tarball is attested');
   });
 
   it('surfaces a non-zero npm exit code as a helpful error', async () => {
-    const verifier = vi.fn(async () => okProvenance);
-    const runner = vi.fn(async () => 13);
+    const verifier = recordVerifier(okProvenance);
+    const runner = recordRunner(13);
     await expect(
       installCli({ entry: baseEntry, verifier, runner, logger: () => {} }),
     ).rejects.toThrow(/npm install failed with exit code 13/);

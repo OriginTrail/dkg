@@ -19,7 +19,7 @@ import {
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
   contextGraphSharedMemoryUri,
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
-  contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
+  contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri, contextGraphCatalogUri,
   deriveCuratorDidFromCgId,
   MemoryLayer,
   computeACKDigest,
@@ -405,6 +405,7 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
+import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 function syncAuthAbortError(reason: unknown): Error {
@@ -424,7 +425,134 @@ function throwIfSyncAuthAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw syncAuthAbortError(signal.reason);
 }
 
+type InternalContextGraphListRow = ListContextGraphsRow & {
+  policyKnown?: boolean;
+};
+
+function listContextGraphsProjectionEnabled(): boolean {
+  // Before enabling this default-on: thread the caller signal into getCgMeta
+  // and wrap per-row reads in withBudget (per A1's LIST_CONTEXT_GRAPHS_*_BUDGET_MS);
+  // this projection path currently lacks the per-read budgets/abort-signal the
+  // legacy path has. (Track C security review.)
+  const raw = process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION?.trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
+function contextGraphListRowPrivacy(accessPolicy?: string): ListContextGraphsPrivacy {
+  if (!accessPolicy?.trim()) return 'unknown';
+  const t = accessPolicy.trim().replace(/^["']|["']$/g, '').toLowerCase();
+  if (t === 'private' || t === 'public') return t;
+  return 'unknown';
+}
+
+function isPrivateContextGraphListRow(accessPolicy?: string): boolean {
+  return contextGraphListRowPrivacy(accessPolicy) === 'private';
+}
+
+async function applyContextGraphListPrivacy(
+  agent: DKGAgent,
+  rows: InternalContextGraphListRow[],
+  opts?: { callerAgentAddress?: string | null },
+): Promise<ListContextGraphsRow[]> {
+  const scopedList = opts !== undefined;
+  const visibleRows = scopedList ? rows.filter((r) => r.policyKnown !== false) : rows;
+  let checksum: string | null = null;
+  const rawCaller = opts?.callerAgentAddress?.trim();
+  if (rawCaller && ethers.isAddress(rawCaller)) {
+    try {
+      checksum = ethers.getAddress(rawCaller);
+    } catch {
+      checksum = null;
+    }
+  }
+
+  if (!checksum) {
+    return visibleRows
+      .filter((r) => {
+        const privacy = contextGraphListRowPrivacy(r.accessPolicy);
+        if (privacy === 'private') return false;
+        if (privacy === 'unknown') return !scopedList;
+        return true;
+      })
+      .map(({ policyKnown: _policyKnown, ...row }) => row);
+  }
+
+  const annotated = await Promise.all(visibleRows.map(async (r) => {
+    const curatorMatch = agent.curatorDidMatchesChecksumAgent(r.curator, checksum);
+    const allowlisted = await agent.callerIsAllowlistedAgentParticipant(r.id, checksum);
+    return { ...r, callerInvolved: curatorMatch || allowlisted };
+  }));
+
+  return annotated
+    .filter((r) => {
+      if (r.callerInvolved === true) return true;
+      return contextGraphListRowPrivacy(r.accessPolicy) === 'public';
+    })
+    .map(({ policyKnown: _policyKnown, ...row }) => row);
+}
+
 export class ContextGraphResolveMethods extends DKGAgentBase {
+  async getCgMeta(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ContextGraphMetaRecord> {
+    return this.contextGraphMetaProjection.get(contextGraphId, { signal: options.signal });
+  }
+
+  async listContextGraphsFromProjection(this: DKGAgent, opts?: { callerAgentAddress?: string | null }): Promise<ListContextGraphsRow[]> {
+    // Before enabling this default-on: thread the caller signal into getCgMeta
+    // and wrap per-row reads in withBudget (per A1's LIST_CONTEXT_GRAPHS_*_BUDGET_MS);
+    // this projection path currently lacks the per-read budgets/abort-signal the
+    // legacy path has. (Track C security review.)
+    const candidateIds = new Set(await this.contextGraphMetaProjection.listDeclaredContextGraphIds());
+    for (const [id] of this.subscribedContextGraphs) {
+      candidateIds.add(id);
+    }
+
+    const graphManager = new GraphManager(this.store);
+    for (const id of await graphManager.listContextGraphs()) {
+      candidateIds.add(id);
+    }
+
+    const rows = await Promise.all([...candidateIds].sort().map(async (id): Promise<InternalContextGraphListRow | null> => {
+      if (!id) return null;
+      const sub = this.subscribedContextGraphs.get(id);
+      const meta = await this.getCgMeta(id);
+      const hasProjectionGate = meta.hasAgentGate || meta.hasPeerGate || meta.hasLegacyParticipantGate;
+      const projectedAccessPolicy = meta.accessPolicy ?? (hasProjectionGate ? 'private' : undefined);
+      const policyKnown = meta.declared || projectedAccessPolicy !== undefined;
+
+      if (!meta.declared && !sub?.onChainId && !sub?.pendingMeta) {
+        if (id === SYSTEM_CONTEXT_GRAPHS.AGENTS || id === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) return null;
+        const hasContent = await this.contextGraphHasLocalContent(id);
+        if (!hasContent) return null;
+      }
+
+      return {
+        id,
+        uri: meta.uri || contextGraphDataUri(id),
+        name: meta.name ?? sub?.name ?? id,
+        description: meta.description,
+        creator: meta.creator,
+        curator: meta.curator,
+        accessPolicy: projectedAccessPolicy,
+        createdAt: meta.createdAt,
+        isSystem: meta.isSystem,
+        subscribed: sub?.subscribed ?? false,
+        synced: sub?.synced ?? false,
+        onChainId: sub?.onChainId ?? meta.onChainId,
+        policyKnown,
+      };
+    }));
+
+    return applyContextGraphListPrivacy(
+      this,
+      rows.filter((row): row is InternalContextGraphListRow => row !== null),
+      opts,
+    );
+  }
+
   /**
    * Check whether a context graph exists in local storage. Definition triples in
    * ONTOLOGY/_meta count, and storage-backed graph presence also counts so local
@@ -479,7 +607,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       FILTER(!STRENDS(STR(?g), "/_meta"))
       FILTER(!STRENDS(STR(?g), "/_shared_memory_meta"))
     }`;
-    const result = await this.store.query(sparql, { signal: options.signal });
+    const result = await this.store.query(sparql, {
+      signal: options.signal,
+      source: 'agent.contextGraphHasLocalContent',
+    });
     if (result.type === 'boolean') return result.value;
     return result.type === 'bindings' && result.bindings.length > 0;
   }
@@ -604,20 +735,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    * optimistic denial inference, not access control decisions).
    */
   async contextGraphIsCurated(this: DKGAgent, contextGraphId: string): Promise<boolean> {
-    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     try {
-      const res = await this.store.query(
-        `SELECT ?ap WHERE {
-          { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
-          UNION
-          { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?ap } }
-        } LIMIT 1`,
-      );
-      if (res.type !== 'bindings' || res.bindings.length === 0) return false;
-      const ap = res.bindings[0]?.['ap']?.replace(/^"|"$/g, '');
-      return ap === 'private';
+      return (await this.getExplicitAccessPolicy(contextGraphId)) === 'private';
     } catch {
       return false;
     }
@@ -640,6 +759,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         includeSharedMemory: parsed.includeSharedMemory ?? false,
         phase: normalizeSyncPhase(parsed.phase),
         snapshotRef: typeof parsed.snapshotRef === 'string' ? parsed.snapshotRef : undefined,
+        authPurpose: typeof parsed.authPurpose === 'string' ? parsed.authPurpose : undefined,
+        authSelector: typeof parsed.authSelector === 'string' ? parsed.authSelector : undefined,
         targetPeerId: parsed.targetPeerId,
         requesterPeerId: parsed.requesterPeerId,
         requestId: parsed.requestId,
@@ -651,6 +772,13 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         syncSessionId: typeof parsed.syncSessionId === 'string' ? parsed.syncSessionId : undefined,
         // Phase C: unsigned delta hint. Validated/normalised in the responder.
         sinceBatchId: typeof parsed.sinceBatchId === 'string' ? parsed.sinceBatchId : undefined,
+        // R9 (SECURITY): the unsigned member-recovery marker. This is a STRICT
+        // FIELD ALLOWLIST — anything not copied here is dropped. If `recovery`
+        // were omitted, the responder would never see it, silently fall through
+        // to the fail-open participant/peer path, and the members-only gate
+        // would be dead code. Coerce to a real boolean so a truthy non-bool
+        // can't smuggle through.
+        recovery: parsed.recovery === true ? true : undefined,
       };
     }
 
@@ -770,6 +898,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     snapshotRef?: string,
     sinceBatchId?: string,
     syncSessionId?: string,
+    recovery?: boolean,
   ): Promise<Uint8Array> {
     const isPrivate = await this.isPrivateContextGraph(contextGraphId);
 
@@ -778,7 +907,11 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     // authenticated request so the remote peer can verify our identity
     // against its allowlist.
     const hasLocalData = this.subscribedContextGraphs.get(contextGraphId)?.synced === true;
-    const needsAuth = isPrivate || !hasLocalData;
+    // the catalog facet is public and served without the
+    // allowlist gate, so an outsider (no CG identity) requests it unauthenticated.
+    // R9: recovery serves plaintext member-to-member and is gated by the strict
+    // members-only authorizer — it MUST be an authenticated (signed) envelope.
+    const needsAuth = recovery || (phase !== 'catalog' && (isPrivate || !hasLocalData));
     const claimedAgentAddress = await this.findLocalAgentForContextGraph(contextGraphId);
     const claimedAgent = claimedAgentAddress ? this.localAgents.get(claimedAgentAddress) : undefined;
     return buildSyncRequestEnvelope({
@@ -797,12 +930,64 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       sinceBatchId: phase === 'data' && !includeSharedMemory ? sinceBatchId : undefined,
       syncSessionId: phase === 'snapshot' ? undefined : syncSessionId,
       needsAuth,
+      // R9: forces the EDGE (member-agent-key) signing path so the responder
+      // recovers the member agent address and matches it against the gate.
+      recovery,
       computeSyncDigest: this.computeSyncDigest.bind(this),
       getIdentityId: () => this.chain.getIdentityId(),
       signMessage: typeof this.chain.signMessage === 'function' ? this.chain.signMessage.bind(this.chain) : undefined,
       claimedAgentAddress: claimedAgentAddress,
       claimedAgentPrivateKey: claimedAgent?.privateKey,
     });
+  }
+
+  /**
+   * fetch a (private) CG's PUBLIC catalog entry from a peer
+   * WITHOUT membership. The responder serves the bounded `_catalog` facet
+   * openly (no allowlist gate); the fetched DCAT dataset record is written to
+   * the local store's `_catalog` graph. Returns the catalog quads received.
+   * The peer serves ONLY `_catalog` — gated content is never returned.
+   */
+  public async fetchPublicCatalog(this: DKGAgent,
+    contextGraphId: string,
+    responderPeerId: string,
+    deadlineMs = 30_000,
+  ): Promise<Quad[]> {
+    const ctx = createOperationContext('sync');
+    const catalogGraph = contextGraphCatalogUri(contextGraphId);
+    const result = await this.fetchSyncPages(
+      ctx, responderPeerId, contextGraphId, false, 'catalog', catalogGraph, Date.now() + deadlineMs,
+    );
+    // SECURITY: this is the UNAUTHENTICATED catalog path — there is no
+    // membership/allowlist gate on what we persist. The generic requester
+    // filter (parseAndFilterNQuads) admits ANY graph under
+    // `did:dkg:context-graph:<cg>/…`, not just `_catalog`, so a malicious
+    // peer could ride the open catalog fetch to inject `_meta`/`_private`/VM
+    // quads into the local store. Re-filter to ONLY the `<cg>/_catalog` graph
+    // before insert and drop everything else.
+    const catalogQuads = result.quads.filter((q) => q.graph === catalogGraph);
+    // Treat partial fetches as NOT done: fetchSyncPages returns
+    // `completed: false` (timed out) with a possibly-truncated page. Inserting
+    // that would corrupt the local `_catalog`, and deleting the checkpoint
+    // would lose the resume cursor. Only persist + delete-checkpoint when the
+    // fetch ran to completion; on partial, keep the checkpoint and persist
+    // nothing.
+    if (result.completed) {
+      // Persist the fetched DCAT dataset record into the local `<cg>/_catalog`
+      // graph and invalidate the meta projection so getCgMeta() /
+      // listContextGraphs() can see the remotely discovered private CG after
+      // this call. The projection read side is disclosure-floor only (rdf:type
+      // / dct:accessRights — CATALOG_META_PREDICATES), so persisting
+      // peer-fetched catalog quads cannot poison the authz-bearing
+      // creator/curator/allowlist fields. Mirrors refreshMetaFromCurator's
+      // persist+invalidate path.
+      if (catalogQuads.length > 0) {
+        await this.store.insert(catalogQuads);
+        this.contextGraphMetaProjection.markDirtyFromQuads(catalogQuads);
+      }
+      this.syncCheckpoints.delete(result.checkpointKey);
+    }
+    return catalogQuads;
   }
 
   computeSyncDigest(this: DKGAgent,
@@ -815,6 +1000,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     requestId: string | undefined,
     issuedAtMs: number | undefined,
     requesterAgentAddress: string | undefined,
+    authPurpose?: string,
+    authSelector?: string,
   ): Uint8Array {
     // `requesterAgentAddress` participates in the digest so the
     // "on behalf of" claim is signed, not free-form envelope data.
@@ -822,22 +1009,23 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     // tampering with `requesterAgentAddress` after the signature was
     // produced — which would be a way to bypass the per-agent
     // delegation binding in `request-authorize`.
-    return ethers.getBytes(
-      ethers.solidityPackedKeccak256(
-        ['string', 'uint256', 'uint256', 'bool', 'string', 'string', 'string', 'uint256', 'string'],
-        [
-          contextGraphId,
-          BigInt(offset),
-          BigInt(limit),
-          includeSharedMemory,
-          targetPeerId,
-          requesterPeerId ?? '',
-          requestId ?? '',
-          BigInt(issuedAtMs ?? 0),
-          (requesterAgentAddress ?? '').toLowerCase(),
-        ],
-      ),
-    );
+    const baseTypes = ['string', 'uint256', 'uint256', 'bool', 'string', 'string', 'string', 'uint256', 'string'];
+    const baseValues = [
+      contextGraphId,
+      BigInt(offset),
+      BigInt(limit),
+      includeSharedMemory,
+      targetPeerId,
+      requesterPeerId ?? '',
+      requestId ?? '',
+      BigInt(issuedAtMs ?? 0),
+      (requesterAgentAddress ?? '').toLowerCase(),
+    ];
+    if (authPurpose || authSelector) {
+      baseTypes.push('string', 'string');
+      baseValues.push(authPurpose ?? '', authSelector ?? '');
+    }
+    return ethers.getBytes(ethers.solidityPackedKeccak256(baseTypes, baseValues));
   }
 
   public async authorizeSyncRequest(
@@ -877,6 +1065,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       getAgentGateAddresses: (contextGraphId, lookupOptions) => this.getContextGraphAgentGateAddresses(contextGraphId, lookupOptions),
       getAllowedDelegateePeers: (contextGraphId, lookupOptions) => this.getContextGraphAllowedDelegateePeers(contextGraphId, lookupOptions),
       getAllowedDelegateeKeys: (contextGraphId, lookupOptions) => this.getContextGraphAllowedDelegateeKeys(contextGraphId, lookupOptions),
+      // R9: FRESH `_meta`-only members-only gate for the recovery branch (no
+      // subscription cache). Consulted only when `request.recovery` is set.
+      getMemberRecoveryGate: (contextGraphId, lookupOptions) => this.getMemberRecoveryGate(contextGraphId, lookupOptions),
       refreshMetaFromCurator: (contextGraphId, lookupOptions) => this.refreshMetaFromCurator(contextGraphId, lookupOptions),
       signal: options.signal,
       logWarn: (ctx, message) => this.log.warn(ctx, message),
@@ -1228,27 +1419,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return null;
     }
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
-    const result = await this.store.query(
-      `SELECT ?policy WHERE {
-        {
-          GRAPH <${ontologyGraph}> {
-            <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy
-          }
-        } UNION {
-          GRAPH <${cgMetaGraph}> {
-            <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?policy
-          }
-        }
-      } LIMIT 1`,
-      { signal: options.signal },
-    );
-    if (result.type !== 'bindings' || result.bindings.length === 0) return null;
-    const policyValue = result.bindings[0]?.['policy'];
-    if (policyValue === '"public"') return 'public';
-    if (policyValue === '"private"') return 'private';
+    const policyValue = (await this.getCgMeta(contextGraphId, { signal: options.signal })).accessPolicy?.trim().toLowerCase();
+    if (policyValue === 'public') return 'public';
+    if (policyValue === 'private') return 'private';
     // Defensive: any unknown literal (e.g. a future policy value the
     // older agent code doesn't recognize) is reported as `null` so
     // callers fall through to the legacy heuristic instead of
@@ -1317,9 +1490,6 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       return false;
     }
 
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
-
     // Issue #865 — explicit `accessPolicy` ALWAYS wins over the allowlist
     // heuristic below. The previous behavior fell through to the ASK
     // check whenever `policy` was anything other than `"private"`, which
@@ -1353,23 +1523,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     // the legacy peer-ID model need to be recognized here so the
     // store-discovery path doesn't misclassify a freshly-invited CG
     // as "open / discoverable only" and skip the same-connect catchup.
-    const allowlistResult = await this.store.query(
-      `ASK WHERE {
-        GRAPH <${cgMetaGraph}> {
-          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent }
-          UNION
-          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?participantAgent }
-          UNION
-          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}> ?peer }
-        }
-      }`,
-      { signal: options.signal },
-    );
-    if (allowlistResult.type === 'boolean' && allowlistResult.value === true) {
-      return true;
-    }
-
-    return false;
+    const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
+    return meta.hasAgentGate || meta.hasPeerGate;
   }
 
   async getPrivateContextGraphParticipants(
@@ -1377,6 +1532,13 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<string[] | null> {
+    // the participant set is read from the in-memory meta projection
+    // (getCgMeta), NOT a direct store query — the projection is the only place
+    // that applies revokedAgents filtering, so a store-only read (main's A2
+    // form) would silently re-authorize revoked agents. `options.signal` is
+    // accepted for caller parity with the abort-hardened siblings but the
+    // projection read is in-memory and has no I/O to cancel.
+    void options;
     const merged: string[] = [];
     const seen = new Set<string>();
     const add = (value: string | undefined) => {
@@ -1386,49 +1548,21 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       seen.add(key);
       merged.push(value);
     };
+    const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
+    const revoked = new Set(meta.revokedAgents.map((agent) => agent.toLowerCase()));
+    const addAgent = (value: string | undefined) => {
+      if (!value || revoked.has(value.toLowerCase())) return;
+      add(value);
+    };
 
     const localAgentParticipants = this.subscribedContextGraphs.get(contextGraphId)?.participantAgents;
     if (localAgentParticipants) {
-      for (const p of localAgentParticipants) add(p);
+      for (const p of localAgentParticipants) addAgent(p);
     }
 
-    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-
-    // V10 agent model: local allowedAgent entries plus explicit on-chain
-    // participantAgent entries both grant local curated access.
-    const agentResult = await this.store.query(
-      `SELECT ?agent WHERE {
-        GRAPH <${cgMetaGraph}> {
-          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent }
-          UNION
-          { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent }
-        }
-      }`,
-      { signal: options.signal },
-    );
-    if (agentResult.type === 'bindings') {
-      for (const row of agentResult.bindings) {
-        const raw = row['agent'];
-        if (typeof raw === 'string') add(raw.replace(/^"|"$/g, ''));
-      }
-    }
-
-    // Legacy identity model: participantIdentityIds (numeric IDs as strings)
-    const metaResult = await this.store.query(
-      `SELECT ?identityId WHERE {
-        GRAPH <${cgMetaGraph}> {
-          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}> ?identityId
-        }
-      }`,
-      { signal: options.signal },
-    );
-    if (metaResult.type === 'bindings') {
-      for (const row of metaResult.bindings) {
-        const raw = row['identityId'];
-        if (typeof raw === 'string') add(raw.replace(/^"|"$/g, ''));
-      }
-    }
+    for (const agent of meta.allowedAgents) addAgent(agent);
+    for (const agent of meta.participantAgents) addAgent(agent);
+    for (const identityId of meta.participantIdentityIds) add(identityId);
 
     if (merged.length > 0) return merged;
 
@@ -1448,21 +1582,11 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<string | undefined> {
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
-
-    const curatorResult = await this.store.query(
-      `SELECT ?curator WHERE {
-        GRAPH <${cgMetaGraph}> {
-          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CURATOR}> ?curator
-        }
-      } LIMIT 1`,
-      { signal: options.signal },
-    );
-    if (curatorResult.type !== 'bindings' || curatorResult.bindings.length === 0) {
+    const meta = await this.getCgMeta(contextGraphId, { signal: options.signal });
+    const curatorDid = meta.curator ?? meta.curators[0] ?? '';
+    if (!curatorDid) {
       return undefined;
     }
-    const curatorDid = (curatorResult.bindings[0] as Record<string, string>)['curator'] ?? '';
     const didPrefix = 'did:dkg:agent:';
     if (!curatorDid.startsWith(didPrefix)) {
       return undefined;
@@ -1478,31 +1602,20 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     if (curatorIdentifier.startsWith('0x')) {
       let resolved = false;
 
-      // Preferred: look up the creator peer ID from the ontology definition
-      // graph or the _meta graph. The dkg:creator triple uses the libp2p
-      // peer ID while dkg:curator uses the wallet address.
-      const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-      const creatorResult = await this.store.query(
-        `SELECT ?creator WHERE {
-          {
-            GRAPH <${ontologyGraph}> {
-              <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator
-            }
-          } UNION {
-            GRAPH <${cgMetaGraph}> {
-              <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CREATOR}> ?creator
-            }
-          }
-        } LIMIT 1`,
-        { signal: options.signal },
-      );
-      if (creatorResult.type === 'bindings' && creatorResult.bindings.length > 0) {
-        const creatorDid = (creatorResult.bindings[0] as Record<string, string>)['creator'] ?? '';
+      // Preferred: use the same projected metadata resolution as privacy and
+      // listing reads. AGENTS-only declarations can mark a graph private, so
+      // the refresh path must be able to discover their creator route too.
+      const creatorCandidates = [
+        meta.creator,
+        ...meta.creators,
+      ].filter((value): value is string => Boolean(value));
+      for (const creatorDid of creatorCandidates) {
         if (creatorDid.startsWith(didPrefix)) {
           const creatorId = creatorDid.slice(didPrefix.length);
           if (!creatorId.startsWith('0x')) {
             curatorPeerId = creatorId;
             resolved = true;
+            break;
           }
         }
       }
@@ -1642,6 +1755,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    * With no usable caller wallet, omit that field entirely so callers can infer membership from `curator`.
    */
   async listContextGraphs(this: DKGAgent, opts?: { callerAgentAddress?: string | null }): Promise<ListContextGraphsRow[]> {
+    if (listContextGraphsProjectionEnabled()) {
+      return this.listContextGraphsFromProjection(opts);
+    }
+
     const scopedListing = opts !== undefined;
     let checksum: string | null = null;
     const rawCaller = opts?.callerAgentAddress?.trim();
@@ -1969,10 +2086,11 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
 
     const storedRead = await withBudget(
       async (signal) => {
-        const graphs = await this.store.listGraphs({ signal });
+        const graphs = this.store.listGraphsByPrefix
+          ? await this.store.listGraphsByPrefix(prefix, { signal })
+          : (await this.store.listGraphs({ signal })).filter((graph) => graph.startsWith(prefix));
         const contextGraphs = new Set<string>();
         for (const graph of graphs) {
-          if (!graph.startsWith(prefix)) continue;
           const rest = graph.slice(prefix.length);
           const id = rest.endsWith('/_meta')
             ? rest.slice(0, -6)
@@ -2034,10 +2152,49 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     let rows = Array.from(seen.values());
 
     /**
-     * Open CGs replicate `DKG_CREATOR`/name/policy on ONTOLOGY but keep `DKG_CURATOR` in `_meta` only,
-     * so list rows lack `curator` and the sidebar cannot classify "mine" without a Bearer-scoped pass.
-     * Backfill once (parallelised) — also removes duplicate SPARQL in the involvement pass below.
+     * Normalize metadata through the keyed projection before privacy filtering.
+     * Raw discovery can see stale ONTOLOGY and authoritative AGENTS/_meta rows
+     * for the same CG; projection resolves policy with _meta-first source
+     * precedence, then AGENTS, then ONTOLOGY.
      */
+    const projectedRows = await Promise.allSettled(rows.map(async (r) => {
+      const metaRead = await withBudget(
+        (signal) => this.getCgMeta(r.id, { signal }),
+        `projection lookup for ${r.id}`,
+      );
+      if (!metaRead.ok) {
+        cacheable = false;
+        // Projection is the authoritative privacy source. The pre-projection
+        // seed in `privacyByUri` can come from possibly-stale ONTOLOGY discovery
+        // and may be stale-public for a CG that is authoritatively private
+        // (_meta/AGENTS). If projection times out, drop only stale-public seeds
+        // so resolveRowPrivacy() routes through the scoped legacy authoritative
+        // lookup / fail-closed path instead of serving it as explicit-public.
+        // Preserve existing private seeds as a conservative fail-closed signal.
+        if (privacyByUri.get(r.uri) === 'public') privacyByUri.delete(r.uri);
+        return r;
+      }
+      const meta = metaRead.value;
+      const accessPolicy = meta.accessPolicy ?? r.accessPolicy;
+      const privacy = policyPrivacy(accessPolicy);
+      if (privacy !== 'unknown') privacyByUri.set(r.uri, privacy);
+      return {
+        ...r,
+        name: meta.name ?? r.name,
+        description: meta.description ?? r.description,
+        creator: meta.creator ?? r.creator,
+        curator: meta.curator ?? r.curator,
+        ...(accessPolicy ? { accessPolicy } : {}),
+        createdAt: meta.createdAt ?? r.createdAt,
+        isSystem: meta.isSystem || r.isSystem,
+        onChainId: meta.onChainId ?? r.onChainId,
+      };
+    }));
+    rows = projectedRows.map((entry) => {
+      if (entry.status === 'fulfilled') return entry.value;
+      throw entry.reason;
+    });
+
     const curatorBackfills = await Promise.allSettled(rows.map(async (r) => {
       if (r.curator?.trim()) return r;
       const c = await optional(

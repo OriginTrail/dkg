@@ -27,6 +27,11 @@ interface ACKTransportFactory {
   log?: (message: string) => void;
 }
 
+type PublishEncryptionFactory = (publishOptions: PublishOptions) =>
+  | Promise<Pick<PublishOptions, 'encryptInlinePayload' | 'encryptInlineChunked'> | undefined>
+  | Pick<PublishOptions, 'encryptInlinePayload' | 'encryptInlineChunked'>
+  | undefined;
+
 export async function startPublisherRuntimeIfEnabled(args: {
   dataDir: string;
   config: DkgConfig;
@@ -41,6 +46,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
   };
   log: (message: string) => void;
   ackTransportFactory?: () => ACKTransportFactory;
+  publishEncryptionFactory?: PublishEncryptionFactory;
 }): Promise<PublisherRuntime | null> {
   if (!args.config.publisher?.enabled) {
     return null;
@@ -57,6 +63,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       maxRetries: args.config.publisher.maxRetries,
       config: args.config,
       ackTransportFactory: args.ackTransportFactory,
+      publishEncryptionFactory: args.publishEncryptionFactory,
     });
     await runtime.runner.start();
     args.log(`Async publisher runner started (${runtime.walletIds.length} wallet${runtime.walletIds.length === 1 ? '' : 's'})`);
@@ -88,6 +95,7 @@ interface PublisherRuntimeBaseArgs {
   maxRetries?: number;
   ackTransportFactory?: () => ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
+  publishEncryptionFactory?: PublishEncryptionFactory;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   closeStoreOnStop: boolean;
 }
@@ -177,6 +185,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   config?: Pick<DkgConfig, 'sharedMemoryPublicSnapshotStorage'>;
   ackTransportFactory?: () => ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
+  publishEncryptionFactory?: PublishEncryptionFactory;
 }): Promise<PublisherRuntime> {
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
@@ -188,6 +197,7 @@ export async function createPublisherRuntimeFromAgent(args: {
     maxRetries: args.maxRetries,
     ackTransportFactory: args.ackTransportFactory,
     v10ACKProviderFactory: args.v10ACKProviderFactory,
+    publishEncryptionFactory: args.publishEncryptionFactory,
     publicSnapshotStore: createPublicSnapshotStore(args.dataDir, args.config),
     closeStoreOnStop: false,
   });
@@ -263,12 +273,18 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       if (!publisher) {
         throw new Error(`No publisher configured for wallet ${walletId}`);
       }
-      const v10ACKProvider = publishOptions.v10ACKProvider
+      const encryption = await args.publishEncryptionFactory?.(publishOptions);
+      const publishOptionsWithEncryption: PublishOptions = {
+        ...publishOptions,
+        encryptInlinePayload: publishOptions.encryptInlinePayload ?? encryption?.encryptInlinePayload,
+        encryptInlineChunked: publishOptions.encryptInlineChunked ?? encryption?.encryptInlineChunked,
+      };
+      const v10ACKProvider = publishOptionsWithEncryption.v10ACKProvider
         ?? args.v10ACKProviderFactory?.()
         ?? createV10ACKProviderForPublisher(publisher, args.ackTransportFactory?.());
       const publishOptionsWithACKs = v10ACKProvider
-        ? { ...publishOptions, v10ACKProvider }
-        : publishOptions;
+        ? { ...publishOptionsWithEncryption, v10ACKProvider }
+        : publishOptionsWithEncryption;
       // Capability gate: use `isV10Ready()` (the authoritative V10 runtime
       // signal) rather than probing for `createKnowledgeAssets`. Since the
       // interface made the method required, `NoChainAdapter` now implements
@@ -363,6 +379,7 @@ function createV10ACKProviderForPublisher(
     subGraphName,
     merkleLeafCount,
     isEncryptedPayload,
+    catalogCommitment,
   ) => {
     // Fail loud on non-numeric or non-positive CG ids. V10 publish requires
     // a real on-chain context graph; `ZeroContextGraphId` at
@@ -440,6 +457,7 @@ function createV10ACKProviderForPublisher(
       subGraphName,
       merkleLeafCount,
       isEncryptedPayload,
+      catalogCommitment,
     });
     return result.acks;
   };

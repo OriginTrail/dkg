@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   TRUST_LEVEL_PREDICATE,
@@ -18,6 +18,15 @@ const SWM_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
 const SWM_META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
 const PER_KA_SWM_GRAPH = `${SWM_GRAPH}/0x1111111111111111111111111111111111111111/1`;
 const WORKSPACE_OWNER_PREDICATE = 'http://dkg.io/ontology/workspaceOwner';
+
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
 
 function q(subject: string, predicate = 'http://schema.org/name', object = '"value"', graph = SWM_GRAPH): Quad {
   return { subject, predicate, object, graph };
@@ -45,7 +54,8 @@ async function makePublisher() {
     status: 'tentative',
     publicQuads: [],
   };
-  const publishSpy = vi.spyOn(publisher, 'publish').mockResolvedValue(publishResult);
+  const publishSpy = recorder(async (..._args: Parameters<DKGPublisher['publish']>) => publishResult);
+  (publisher as unknown as { publish: typeof publishSpy }).publish = publishSpy;
   return { publisher, store, publishSpy };
 }
 
@@ -64,8 +74,8 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       status: 'tentative',
     });
 
-    expect(publishSpy).toHaveBeenCalledTimes(1);
-    const publishArgs = publishSpy.mock.calls[0][0];
+    expect(publishSpy.calls).toHaveLength(1);
+    const publishArgs = publishSpy.calls[0][0];
     expect(publishArgs.quads).toEqual([
       { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"value"', graph: '' },
     ]);
@@ -81,8 +91,8 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       status: 'tentative',
     });
 
-    expect(publishSpy).toHaveBeenCalledTimes(1);
-    expect(publishSpy.mock.calls[0][0].quads).toEqual([
+    expect(publishSpy.calls).toHaveLength(1);
+    expect(publishSpy.calls[0][0].quads).toEqual([
       { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"promoted"', graph: '' },
     ]);
   });
@@ -102,8 +112,8 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all'))
       .resolves.toMatchObject({ status: 'tentative' });
 
-    expect(publishSpy).toHaveBeenCalledTimes(1);
-    const subjects = new Set(publishSpy.mock.calls[0][0].quads.map((qq: any) => qq.subject));
+    expect(publishSpy.calls).toHaveLength(1);
+    const subjects = new Set(publishSpy.calls[0][0].quads.map((qq: any) => qq.subject));
     expect(subjects.has('urn:test:root:one')).toBe(true);
     expect(subjects.has('urn:test:root:two')).toBe(true);
   });
@@ -133,8 +143,8 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: ['urn:test:root:one'] }),
     ).resolves.toMatchObject({ status: 'tentative' });
 
-    expect(publishSpy).toHaveBeenCalledTimes(1);
-    const publishArgs = publishSpy.mock.calls[0][0];
+    expect(publishSpy.calls).toHaveLength(1);
+    const publishArgs = publishSpy.calls[0][0];
     // GREEDY: assert the EXACT payload, not just a count. Every quad must
     // belong to root:one and NONE may belong to the co-resident root:two.
     // (CONSTRUCT order isn't guaranteed, so match set-wise, not positionally.)
@@ -159,9 +169,51 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: ['urn:test:root:one'] }),
     ).resolves.toMatchObject({ status: 'tentative' });
 
-    expect(publishSpy).toHaveBeenCalledTimes(1);
-    expect(publishSpy.mock.calls[0][0].quads).toEqual([
+    expect(publishSpy.calls).toHaveLength(1);
+    expect(publishSpy.calls[0][0].quads).toEqual([
       { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"promoted"', graph: '' },
+    ]);
+  });
+
+  it('falls back to direct publish when SWM ACKs fail with NO_DATA_IN_SWM', async () => {
+    const { publisher, store } = await makePublisher();
+    const fallbackResult: PublishResult = {
+      kaId: 2n,
+      ual: 'did:dkg:0x0000000000000000000000000000000000000001/2',
+      merkleRoot: new Uint8Array(32),
+      kaManifest: [
+        {
+          tokenId: 2n,
+          rootEntity: 'urn:test:root:one',
+          privateTripleCount: 0,
+        },
+      ],
+      status: 'tentative',
+      publicQuads: [],
+    };
+    // First publish (from SWM) rejects with the SWM-ack failure; the direct-
+    // publish fallback then resolves. Drive both outcomes from a queue on a
+    // fresh recorder that replaces the default makePublisher() one.
+    const outcomes: Array<() => Promise<PublishResult>> = [
+      async () => {
+        throw new Error('storage_ack_insufficient: STORAGE_ACK_DECLINE:NO_DATA_IN_SWM');
+      },
+      async () => fallbackResult,
+    ];
+    const publishSpy = recorder(async (..._args: Parameters<DKGPublisher['publish']>) => outcomes.shift()!());
+    (publisher as unknown as { publish: typeof publishSpy }).publish = publishSpy;
+    await store.insert([
+      q('urn:test:root:one', 'http://schema.org/name', '"ready"'),
+    ]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all'))
+      .resolves.toMatchObject({ kaId: 2n, status: 'tentative' });
+
+    expect(publishSpy.calls).toHaveLength(2);
+    expect(publishSpy.calls[0][0]).toMatchObject({ fromSharedMemory: true });
+    expect(publishSpy.calls[1][0]).toMatchObject({ fromSharedMemory: false });
+    expect((publishSpy.calls[1][0] as any).quads).toEqual([
+      { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"ready"', graph: '' },
     ]);
   });
 
@@ -180,8 +232,8 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       }),
     ).resolves.toMatchObject({ status: 'tentative' });
 
-    expect(publishSpy).toHaveBeenCalledTimes(1);
-    const subjects = new Set(publishSpy.mock.calls[0][0].quads.map((qq: any) => qq.subject));
+    expect(publishSpy.calls).toHaveLength(1);
+    const subjects = new Set(publishSpy.calls[0][0].quads.map((qq: any) => qq.subject));
     expect(subjects.has('urn:test:root:one')).toBe(true);
     expect(subjects.has('urn:test:root:two')).toBe(true);
   });

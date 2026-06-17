@@ -23,6 +23,17 @@ import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/dkg-agent.js';
 
+// Hand-rolled call recorder: records every invocation's args and delegates to
+// the real impl, replacing the DI-seam spies on this file's agent-like stub.
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
+
 type Policy = 0 | 1;
 
 // Deterministic on-chain wire id (committed name-hash) for a cleartext CG id —
@@ -67,23 +78,28 @@ function makeAgentLike(opts: {
   // cleartext and must match keccak256(utf8(id)).
   wireKeyedLocalId?: string;
 } = {}) {
-  const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+  const log = {
+    info: recorder(() => undefined),
+    warn: recorder(() => undefined),
+    error: recorder(() => undefined),
+    debug: recorder(() => undefined),
+  };
   const chain: Record<string, unknown> = {};
   if (opts.exposeAccessPolicy !== false) {
-    chain.getContextGraphAccessPolicy = vi.fn(async (_id: bigint) => {
+    chain.getContextGraphAccessPolicy = recorder(async (_id: bigint) => {
       if (opts.accessPolicyError) throw opts.accessPolicyError;
       return opts.accessPolicy ?? 0;
     });
   }
   if (opts.activeOnChain !== 'absent') {
-    chain.isContextGraphActiveOnChain = vi.fn(async (_id: bigint) => {
+    chain.isContextGraphActiveOnChain = recorder(async (_id: bigint) => {
       if (opts.activeOnChain instanceof Error) throw opts.activeOnChain;
       // Default true: a registered, live slot. Tests opt out with `false`.
       return opts.activeOnChain ?? true;
     });
   }
   if ('onChainNameHash' in opts) {
-    chain.getContextGraphNameHash = vi.fn(async (_id: bigint) => {
+    chain.getContextGraphNameHash = recorder(async (_id: bigint) => {
       if (opts.onChainNameHash instanceof Error) throw opts.onChainNameHash;
       return opts.onChainNameHash ?? null;
     });
@@ -91,7 +107,7 @@ function makeAgentLike(opts: {
   // The store resolver (resolveWorkspaceAgentRecipients) is the only consumer
   // of store.query on these paths; an empty result → no allowlist → it returns
   // requiresEncryption=false while still proving it WAS consulted (delegation).
-  const storeQuery = vi.fn(async () => ({ type: 'bindings', bindings: [] as unknown[] }));
+  const storeQuery = recorder(async () => ({ type: 'bindings', bindings: [] as unknown[] }));
   const subscribedContextGraphs = new Map<string, { onChainHash?: string }>();
   const wireIdToLocalCgId = new Map<string, string>();
   if (opts.wireKeyedLocalId) {
@@ -106,16 +122,16 @@ function makeAgentLike(opts: {
     subscribedContextGraphs,
     wireIdToLocalCgId,
     onChainAccessPolicyCache: opts.cache ?? new Map<string, number>(),
-    getContextGraphOnChainId: vi.fn(async () => {
+    getContextGraphOnChainId: recorder(async () => {
       if (opts.onChainIdError) throw opts.onChainIdError;
       // `undefined` opt → default to a resolvable numeric id; explicit
       // `null` → unresolvable (no local CG with this id).
       return opts.onChainId === undefined ? '1' : opts.onChainId;
     }),
-    isPrivateContextGraph: vi.fn(async () => opts.isPrivate ?? false),
+    isPrivateContextGraph: recorder(async () => opts.isPrivate ?? false),
   };
   if ('localCgExists' in opts || opts.localCgExistsError) {
-    agentLike.contextGraphExists = vi.fn(async () => {
+    agentLike.contextGraphExists = recorder(async () => {
       if (opts.localCgExistsError) throw opts.localCgExistsError;
       return opts.localCgExists ?? false;
     });
@@ -139,8 +155,8 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
   it('returns true for a LIVE CG whose on-chain access policy is public (0)', async () => {
     const agentLike = makeAgentLike({ onChainId: '1', accessPolicy: 0 });
     await expect(isPublic(agentLike)).resolves.toBe(true);
-    expect(agentLike.chain.isContextGraphActiveOnChain).toHaveBeenCalledWith(1n);
-    expect(agentLike.chain.getContextGraphAccessPolicy).toHaveBeenCalledWith(1n);
+    expect((agentLike.chain.isContextGraphActiveOnChain as any).calls.at(-1)).toEqual([1n]);
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls.at(-1)).toEqual([1n]);
     expect(agentLike.onChainAccessPolicyCache.get('1')).toBe(0);
   });
 
@@ -158,8 +174,8 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     const cache = new Map<string, number>([['1', 0]]);
     const agentLike = makeAgentLike({ onChainId: '1', cache, accessPolicy: 1 });
     await expect(isPublic(agentLike)).resolves.toBe(false);
-    expect(agentLike.chain.isContextGraphActiveOnChain).toHaveBeenCalledWith(1n);
-    expect(agentLike.chain.getContextGraphAccessPolicy).toHaveBeenCalledWith(1n);
+    expect((agentLike.chain.isContextGraphActiveOnChain as any).calls.at(-1)).toEqual([1n]);
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls.at(-1)).toEqual([1n]);
     expect(agentLike.onChainAccessPolicyCache.get('1')).toBe(1);
   });
 
@@ -170,7 +186,7 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     const cgId = '0xCURATOR/experimental-music';
     const agentLike = makeAgentLike({ onChainId: '5', accessPolicy: 0, onChainNameHash: wireId(cgId) });
     await expect(isPublic(agentLike, cgId)).resolves.toBe(true);
-    expect(agentLike.chain.getContextGraphNameHash).toHaveBeenCalledWith(5n);
+    expect((agentLike.chain.getContextGraphNameHash as any).calls.at(-1)).toEqual([5n]);
   });
 
   it('fails closed when the locally-resolved slot commits a DIFFERENT name-hash (stale/reused slot) (#884 review GZEqF)', async () => {
@@ -180,11 +196,11 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     const cgId = '0xCURATOR/experimental-music';
     const agentLike = makeAgentLike({ onChainId: '5', accessPolicy: 0, onChainNameHash: wireId('0xOTHER/unrelated-cg') });
     await expect(isPublic(agentLike, cgId)).resolves.toBe(false);
-    expect(agentLike.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
-    expect(agentLike.log.warn).toHaveBeenCalledWith(
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls).toEqual([]);
+    expect(agentLike.log.warn.calls).toContainEqual([
       expect.anything(),
       expect.stringContaining('STALE'),
-    );
+    ]);
   });
 
   it('proceeds for a DIRECT NUMERIC SELF-ADDRESS even with NO committed name-hash (#884 review GaZk2)', async () => {
@@ -196,10 +212,10 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     // still win. (Regression for the e2e-chain real-blockchain publish path.)
     const agentLike = makeAgentLike({ onChainId: '7', accessPolicy: 0, onChainNameHash: null });
     await expect(isPublic(agentLike, '7')).resolves.toBe(true);
-    expect(agentLike.chain.getContextGraphAccessPolicy).toHaveBeenCalledWith(7n);
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls.at(-1)).toEqual([7n]);
     // The binding is skipped entirely for a self-address, so the name-hash getter
     // is never even consulted.
-    expect(agentLike.chain.getContextGraphNameHash).not.toHaveBeenCalled();
+    expect((agentLike.chain.getContextGraphNameHash as any).calls).toEqual([]);
   });
 
   it('fails closed when a CLEARTEXT-mapped slot has NO committed name-hash (#884 review GaZk2)', async () => {
@@ -211,7 +227,7 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     const cgId = '0xCURATOR/experimental-music';
     const agentLike = makeAgentLike({ onChainId: '5', accessPolicy: 0, onChainNameHash: null });
     await expect(isPublic(agentLike, cgId)).resolves.toBe(false);
-    expect(agentLike.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls).toEqual([]);
   });
 
   it('matches a HOST-MODE wire-id-keyed local CG whose committed hash IS the id itself (#884 review GaJf_/GaZky)', async () => {
@@ -228,7 +244,7 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
       wireKeyedLocalId: wireKeyedId,
     });
     await expect(isPublic(agentLike, wireKeyedId)).resolves.toBe(true);
-    expect(agentLike.chain.getContextGraphAccessPolicy).toHaveBeenCalledWith(5n);
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls.at(-1)).toEqual([5n]);
   });
 
   it('fails closed for a hash-shaped id with NO wire-keyed metadata whose slot commits the verbatim hash (#884 review GaZky)', async () => {
@@ -240,11 +256,11 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     const hexShaped = '0x' + 'ef'.repeat(32);
     const agentLike = makeAgentLike({ onChainId: '5', accessPolicy: 0, onChainNameHash: hexShaped });
     await expect(isPublic(agentLike, hexShaped)).resolves.toBe(false);
-    expect(agentLike.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
-    expect(agentLike.log.warn).toHaveBeenCalledWith(
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls).toEqual([]);
+    expect(agentLike.log.warn.calls).toContainEqual([
       expect.anything(),
       expect.stringContaining('STALE'),
-    );
+    ]);
   });
 
   it('matches a hex-SHAPED CLEARTEXT id committed as keccak256(utf8(id)) (#884 review GZumc)', async () => {
@@ -255,7 +271,7 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     const committed = ethers.keccak256(ethers.toUtf8Bytes(hexCleartext)).toLowerCase();
     const agentLike = makeAgentLike({ onChainId: '5', accessPolicy: 0, onChainNameHash: committed });
     await expect(isPublic(agentLike, hexCleartext)).resolves.toBe(true);
-    expect(agentLike.chain.getContextGraphAccessPolicy).toHaveBeenCalledWith(5n);
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls.at(-1)).toEqual([5n]);
   });
 
   it('fails closed when the name-hash getter is PRESENT but REJECTS — identity unverifiable (#884 review GZ8L_)', async () => {
@@ -266,7 +282,7 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     const cgId = '0xCURATOR/experimental-music';
     const agentLike = makeAgentLike({ onChainId: '5', accessPolicy: 0, onChainNameHash: new Error('name-hash rpc down') });
     await expect(isPublic(agentLike, cgId)).resolves.toBe(false);
-    expect(agentLike.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls).toEqual([]);
   });
 
   it('fails closed when the name-hash read TIMES OUT — identity unverifiable (#884 review GZ8L_)', async () => {
@@ -275,11 +291,11 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
       const cgId = '0xCURATOR/experimental-music';
       const agentLike = makeAgentLike({ onChainId: '5', accessPolicy: 0, onChainNameHash: '0x' + '00'.repeat(32) });
       // Override with a hung read so the bounded race trips the timeout path.
-      agentLike.chain.getContextGraphNameHash = vi.fn(() => new Promise(() => {}));
+      agentLike.chain.getContextGraphNameHash = recorder(() => new Promise(() => {}));
       const pending = isPublic(agentLike, cgId);
       await vi.advanceTimersByTimeAsync(3_000);
       await expect(pending).resolves.toBe(false);
-      expect(agentLike.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
+      expect((agentLike.chain.getContextGraphAccessPolicy as any).calls).toEqual([]);
     } finally {
       vi.useRealTimers();
     }
@@ -291,14 +307,14 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     // a (mismatching) commitment exists. Liveness + fresh policy still gate it.
     const agentLike = makeAgentLike({ onChainId: null, accessPolicy: 0, onChainNameHash: wireId('mismatch') });
     await expect(isPublic(agentLike, '42')).resolves.toBe(true);
-    expect(agentLike.chain.getContextGraphNameHash).not.toHaveBeenCalled();
+    expect((agentLike.chain.getContextGraphNameHash as any).calls).toEqual([]);
   });
 
   it('fails closed (false) when the on-chain id cannot be resolved', async () => {
     const agentLike = makeAgentLike({ onChainId: null });
     await expect(isPublic(agentLike)).resolves.toBe(false);
-    expect(agentLike.chain.isContextGraphActiveOnChain).not.toHaveBeenCalled();
-    expect(agentLike.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
+    expect((agentLike.chain.isContextGraphActiveOnChain as any).calls).toEqual([]);
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls).toEqual([]);
   });
 
   it('fails closed (false) when the chain access-policy getter is missing', async () => {
@@ -323,8 +339,8 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     // plaintext. Liveness fails → fail closed, no policy read.
     const agentLike = makeAgentLike({ onChainId: '1', accessPolicy: 0, activeOnChain: false });
     await expect(isPublic(agentLike)).resolves.toBe(false);
-    expect(agentLike.chain.isContextGraphActiveOnChain).toHaveBeenCalledWith(1n);
-    expect(agentLike.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
+    expect((agentLike.chain.isContextGraphActiveOnChain as any).calls.at(-1)).toEqual([1n]);
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls).toEqual([]);
   });
 
   it('fails closed when no liveness probe is available (older chain adapter) (#884 review)', async () => {
@@ -332,13 +348,13 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     // we never trust a (possibly default-zero / stale) access policy.
     const agentLike = makeAgentLike({ onChainId: '1', accessPolicy: 0, activeOnChain: 'absent' });
     await expect(isPublic(agentLike)).resolves.toBe(false);
-    expect(agentLike.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls).toEqual([]);
   });
 
   it('fails closed when the liveness probe throws (#884 review)', async () => {
     const agentLike = makeAgentLike({ onChainId: '1', accessPolicy: 0, activeOnChain: new Error('rpc flake') });
     await expect(isPublic(agentLike)).resolves.toBe(false);
-    expect(agentLike.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls).toEqual([]);
   });
 
   it('trusts a bare numeric on-chain id only after a LIVE proof — public CG stays plaintext (#884 numeric-id case)', async () => {
@@ -348,8 +364,8 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     // but ONLY because the chain confirms slot 42 is live & public.
     const agentLike = makeAgentLike({ onChainId: null, accessPolicy: 0, activeOnChain: true });
     await expect(isPublic(agentLike, '42')).resolves.toBe(true);
-    expect(agentLike.chain.isContextGraphActiveOnChain).toHaveBeenCalledWith(42n);
-    expect(agentLike.chain.getContextGraphAccessPolicy).toHaveBeenCalledWith(42n);
+    expect((agentLike.chain.isContextGraphActiveOnChain as any).calls.at(-1)).toEqual([42n]);
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls.at(-1)).toEqual([42n]);
     expect(agentLike.onChainAccessPolicyCache.get('42')).toBe(0);
   });
 
@@ -360,14 +376,14 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     // though the chain would default an unknown id to policy 0.
     const agentLike = makeAgentLike({ onChainId: null, accessPolicy: 0, activeOnChain: false });
     await expect(isPublic(agentLike, '42')).resolves.toBe(false);
-    expect(agentLike.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls).toEqual([]);
   });
 
   it('returns false for a LIVE numeric on-chain id whose policy is private (#884 fail-closed)', async () => {
     const agentLike = makeAgentLike({ onChainId: null, accessPolicy: 1, activeOnChain: true });
     await expect(isPublic(agentLike, '7')).resolves.toBe(false);
-    expect(agentLike.chain.isContextGraphActiveOnChain).toHaveBeenCalledWith(7n);
-    expect(agentLike.chain.getContextGraphAccessPolicy).toHaveBeenCalledWith(7n);
+    expect((agentLike.chain.isContextGraphActiveOnChain as any).calls.at(-1)).toEqual([7n]);
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls.at(-1)).toEqual([7n]);
   });
 
   it('resolves a REGISTERED numeric-named local CG to its mapped on-chain policy (#884 review)', async () => {
@@ -379,19 +395,19 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     // looks like a number, nor reads policy for the wrong (bare "42") slot.
     const agentLike = makeAgentLike({ onChainId: '99', accessPolicy: 0, activeOnChain: true });
     await expect(isPublic(agentLike, '42')).resolves.toBe(true);
-    expect(agentLike.getContextGraphOnChainId).toHaveBeenCalledWith('42');
-    expect(agentLike.chain.isContextGraphActiveOnChain).toHaveBeenCalledWith(99n);
-    expect(agentLike.chain.getContextGraphAccessPolicy).toHaveBeenCalledWith(99n);
+    expect(agentLike.getContextGraphOnChainId.calls.at(-1)).toEqual(['42']);
+    expect((agentLike.chain.isContextGraphActiveOnChain as any).calls.at(-1)).toEqual([99n]);
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls.at(-1)).toEqual([99n]);
   });
 
   it('logs a diagnostic (not silent) when a lookup flakes before failing closed (#884 review 🟡)', async () => {
     const agentLike = makeAgentLike({ accessPolicyError: new Error('rpc unavailable') });
     await expect(isPublic(agentLike)).resolves.toBe(false);
     // Operators get a signal explaining WHY the public override was skipped.
-    expect(agentLike.log.warn).toHaveBeenCalledWith(
+    expect(agentLike.log.warn.calls).toContainEqual([
       expect.anything(),
       expect.stringContaining('isContextGraphPublicOnChain'),
-    );
+    ]);
   });
 
   it('bounds the liveness read — a HUNG RPC fails closed instead of hanging (#884 review)', async () => {
@@ -399,16 +415,16 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     try {
       const agentLike = makeAgentLike({ onChainId: '1' });
       // Liveness probe hangs (never resolves / never rejects) instead of failing.
-      agentLike.chain.isContextGraphActiveOnChain = vi.fn(() => new Promise(() => {}));
+      agentLike.chain.isContextGraphActiveOnChain = recorder(() => new Promise(() => {}));
       const pending = isPublic(agentLike);
       await vi.advanceTimersByTimeAsync(3_000);
       await expect(pending).resolves.toBe(false);
-      expect(agentLike.log.warn).toHaveBeenCalledWith(
+      expect(agentLike.log.warn.calls).toContainEqual([
         expect.anything(),
         expect.stringContaining('timed out'),
-      );
+      ]);
       // A hung liveness read must never reach the policy read.
-      expect(agentLike.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
+      expect((agentLike.chain.getContextGraphAccessPolicy as any).calls).toEqual([]);
     } finally {
       vi.useRealTimers();
     }
@@ -419,14 +435,14 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
     try {
       const agentLike = makeAgentLike({ onChainId: '1' });
       // Liveness resolves (live), but the policy read hangs.
-      agentLike.chain.getContextGraphAccessPolicy = vi.fn(() => new Promise(() => {}));
+      agentLike.chain.getContextGraphAccessPolicy = recorder(() => new Promise(() => {}));
       const pending = isPublic(agentLike);
       await vi.advanceTimersByTimeAsync(3_000);
       await expect(pending).resolves.toBe(false);
-      expect(agentLike.log.warn).toHaveBeenCalledWith(
+      expect(agentLike.log.warn.calls).toContainEqual([
         expect.anything(),
         expect.stringContaining('timed out'),
-      );
+      ]);
     } finally {
       vi.useRealTimers();
     }
@@ -444,7 +460,7 @@ describe('DKGAgent.resolveWorkspaceRecipientsGated (gate-before)', () => {
     // The store resolver MUST be skipped — a public CG never resolves
     // recipient keys (which would otherwise throw "Missing public
     // encryption key" for an allowlisted agent whose key isn't local).
-    expect(agentLike.store.query).not.toHaveBeenCalled();
+    expect(agentLike.store.query.calls).toEqual([]);
   });
 
   it('delegates to the store resolver for a non-public (curated) CG', async () => {
@@ -456,7 +472,7 @@ describe('DKGAgent.resolveWorkspaceRecipientsGated (gate-before)', () => {
     // Empty store bindings → no allowedAgents → store resolver returns
     // requiresEncryption=false, but it WAS consulted (delegation path).
     expect(resolution.requiresEncryption).toBe(false);
-    expect(agentLike.store.query).toHaveBeenCalled();
+    expect(agentLike.store.query.calls.length).toBeGreaterThan(0);
   });
 
   it('delegates to the store resolver when the policy is unknown (fail-closed to encrypted path)', async () => {
@@ -465,7 +481,7 @@ describe('DKGAgent.resolveWorkspaceRecipientsGated (gate-before)', () => {
       agentLike,
       { contextGraphId: '0xCURATOR/unknown-cg' },
     );
-    expect(agentLike.store.query).toHaveBeenCalled();
+    expect(agentLike.store.query.calls.length).toBeGreaterThan(0);
   });
 
   it('delegates (encrypted path) when the on-chain probe cannot prove the CG is live — NO local-metadata bypass (#884 review)', async () => {
@@ -478,7 +494,7 @@ describe('DKGAgent.resolveWorkspaceRecipientsGated (gate-before)', () => {
       agentLike,
       { contextGraphId: '0xCURATOR/not-yet-live' },
     );
-    expect(agentLike.store.query).toHaveBeenCalled();
+    expect(agentLike.store.query.calls.length).toBeGreaterThan(0);
   });
 
   it('returns plaintext for a LIVE public CG addressed by its numeric on-chain id WITHOUT the store resolver (#884)', async () => {
@@ -493,7 +509,7 @@ describe('DKGAgent.resolveWorkspaceRecipientsGated (gate-before)', () => {
       { contextGraphId: '42' },
     );
     expect(resolution).toEqual({ requiresEncryption: false, recipients: [] });
-    expect(agentLike.store.query).not.toHaveBeenCalled();
+    expect(agentLike.store.query.calls).toEqual([]);
   });
 });
 
@@ -507,7 +523,7 @@ describe('DKGAgent publish-inline gating respects on-chain public policy', () =>
     // but the on-chain policy is public & live — the override must win.
     const agentLike = makeAgentLike({ onChainId: '1', accessPolicy: 0, isPrivate: true });
     await expect(resolveInline(agentLike, '0xCURATOR/experimental-music')).resolves.toBeUndefined();
-    expect(agentLike.isPrivateContextGraph).not.toHaveBeenCalled();
+    expect(agentLike.isPrivateContextGraph.calls).toEqual([]);
   });
 
   it('a REGISTERED local CG whose liveness cannot be proven fails CLOSED (throws) — not plaintext (#884 review GZh-c)', async () => {
@@ -540,7 +556,7 @@ describe('DKGAgent publish-inline gating respects on-chain public policy', () =>
     }
     expect(err).toBeDefined();
     expect((err as Error).message).not.toMatch(/publish access-policy is unknown/);
-    expect(agentLike.isPrivateContextGraph).toHaveBeenCalled();
+    expect(agentLike.isPrivateContextGraph.calls.length).toBeGreaterThan(0);
   });
 
   it('keeps a NUMERIC-named LOCAL CG that is not yet registered on the plaintext path — NOT a raw slot (#884 review GZumY)', async () => {
@@ -551,10 +567,10 @@ describe('DKGAgent publish-inline gating respects on-chain public policy', () =>
     // local CG → 'unregistered' → plaintext-inline (publish proceeds, no throw).
     const agentLike = makeAgentLike({ onChainId: null, activeOnChain: false, localCgExists: true });
     await expect(resolveInline(agentLike, '42')).resolves.toBeUndefined();
-    expect(agentLike.contextGraphExists).toHaveBeenCalledWith('42');
+    expect(agentLike.contextGraphExists.calls.at(-1)).toEqual(['42']);
     // It never reached the on-chain liveness/policy reads (no raw-slot probe).
-    expect(agentLike.chain.isContextGraphActiveOnChain).not.toHaveBeenCalled();
-    expect(agentLike.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
+    expect((agentLike.chain.isContextGraphActiveOnChain as any).calls).toEqual([]);
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls).toEqual([]);
   });
 
   it('still treats a bare numeric id with NO local CG as a raw on-chain slot (share(\'42\')) (#884 review GZumY)', async () => {
@@ -562,8 +578,8 @@ describe('DKGAgent publish-inline gating respects on-chain public policy', () =>
     // addressing on-chain slot 42 directly. A live public slot → plaintext.
     const agentLike = makeAgentLike({ onChainId: null, accessPolicy: 0, activeOnChain: true, localCgExists: false });
     await expect(resolveInline(agentLike, '42')).resolves.toBeUndefined();
-    expect(agentLike.chain.isContextGraphActiveOnChain).toHaveBeenCalledWith(42n);
-    expect(agentLike.chain.getContextGraphAccessPolicy).toHaveBeenCalledWith(42n);
+    expect((agentLike.chain.isContextGraphActiveOnChain as any).calls.at(-1)).toEqual([42n]);
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls.at(-1)).toEqual([42n]);
   });
 
   it('fails CLOSED when the local-existence check for a bare numeric id FLAKES — never the raw-slot guess (#884 review GZ8L5)', async () => {
@@ -573,7 +589,7 @@ describe('DKGAgent publish-inline gating respects on-chain public policy', () =>
     // guessing.
     const agentLike = makeAgentLike({ onChainId: null, accessPolicy: 0, activeOnChain: true, localCgExistsError: new Error('store offline') });
     await expect(resolveInline(agentLike, '42')).rejects.toThrow(/publish access-policy is unknown/);
-    expect(agentLike.chain.isContextGraphActiveOnChain).not.toHaveBeenCalled();
-    expect(agentLike.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
+    expect((agentLike.chain.isContextGraphActiveOnChain as any).calls).toEqual([]);
+    expect((agentLike.chain.getContextGraphAccessPolicy as any).calls).toEqual([]);
   });
 });

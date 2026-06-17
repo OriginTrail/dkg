@@ -386,6 +386,13 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 
+const DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE = 32;
+
+function normalizeHostModeReconcileBatchSize(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE;
+  return Math.max(1, Math.floor(value));
+}
+
 export class SwmHostModeMethods extends DKGAgentBase {
   /**
    * OT-RFC-38 LU-6 — initialize the on-disk opaque ciphertext store
@@ -475,6 +482,22 @@ export class SwmHostModeMethods extends DKGAgentBase {
     try {
       const previouslySubscribed = await this.swmHostModeStore.listHostModeSubscribedCgs();
       if (previouslySubscribed.length > 0) {
+        // OT-RFC-49 WS-A — persisted host-mode subscriptions are curated by
+        // construction (the curated check ran when each was first wired). With
+        // the private-ciphertext strip ON (default) the restore loop must NOT
+        // re-engage them: this path calls `wireSwmHostModeHandler` DIRECTLY and
+        // so bypasses the subscribe-decline gate in
+        // `reconcileSwmHostModeSubscription`. Skipping here closes the
+        // restart-reintroduces-custody hole for cores that persisted host-mode
+        // subs before the strip rolled out.
+        if (this.swmHostModeStripCiphertext()) {
+          this.log.info(
+            createOperationContext('system'),
+            `Skipping restore of ${previouslySubscribed.length} persisted host-mode subscription(s): ` +
+            `private-ciphertext strip is ON (OT-RFC-49 WS-A — cores custody zero private SWM ciphertext for curated CGs)`,
+          );
+          return;
+        }
         this.log.info(
           createOperationContext('system'),
           `Restoring ${previouslySubscribed.length} persisted host-mode subscription(s) from disk`,
@@ -570,21 +593,35 @@ export class SwmHostModeMethods extends DKGAgentBase {
     //       cleartext is unknown locally.
     //
     // Any of the three returning "curated" is sufficient. If all
-    // three return "not curated", we bail (same as before).
-    let curated = false;
-    const sub = this.subscribedContextGraphs.get(contextGraphId);
-    if (sub?.onChainHash) {
-      curated = true;
-    } else if (sub?.onChainId && this.onChainAccessPolicyCache.get(sub.onChainId) === 1) {
-      curated = true;
-    } else {
-      try {
-        curated = await this.isPrivateContextGraph(contextGraphId);
-      } catch {
-        return;
-      }
-    }
+    // three return "not curated", we bail (same as before). The
+    // probe is shared with `enableSwmHostModeFor` via
+    // {@link isCuratedForHostMode} so the operator-hatch close
+    // (OT-RFC-49 WS-A) sees the SAME curation answer as auto-host —
+    // critically, the host-only-core case where there's no local
+    // `_meta` and `isPrivateContextGraph` alone returns false.
+    const curated = await this.isCuratedForHostMode(contextGraphId);
     if (!curated) return;
+
+    // OT-RFC-49 WS-A — the private-ciphertext strip. With `stripCiphertext`
+    // ON (default), a core declines ALL host-mode custody for a curated CG:
+    // "hosting follows access". Random sampling now proves the public
+    // `_catalog`, so the core no longer needs the ciphertext — private data
+    // lives member-side and members backfill from the curator. Declining the
+    // subscribe HERE is the primary choke point: it starves both the legacy
+    // `.meta` host-mode ingest AND the LU-11 chunk ingest (both are wired by
+    // `wireSwmHostModeHandler`), regardless of how the CG was discovered
+    // (reconciler / beacon / chain-event all funnel through this method).
+    // Unlike rung-1's narrower `stripNonParticipants` gate, WS-A strips for
+    // EVERY curated CG regardless of participation. Set `false` to restore
+    // legacy auto-host (kill-switch / A/B baseline).
+    if (this.swmHostModeStripCiphertext()) {
+      this.log.info(
+        createOperationContext('system'),
+        `SWM host-mode subscription DECLINED for "${contextGraphId}": private-ciphertext strip is ON ` +
+        `(OT-RFC-49 WS-A — cores custody zero private SWM ciphertext for curated CGs; members backfill from the curator)`,
+      );
+      return;
+    }
 
     this.wireSwmHostModeHandler(contextGraphId, source);
     await this.awaitHostModePersistence(contextGraphId);
@@ -595,6 +632,50 @@ export class SwmHostModeMethods extends DKGAgentBase {
       createOperationContext('system'),
       `SWM host-mode subscription enabled for "${contextGraphId}" (role=core)`,
     );
+  }
+
+  /**
+   * OT-RFC-49 WS-A — resolve the private-ciphertext strip kill-switch.
+   * Default ON: `stripCiphertext === undefined` strips. Only an explicit
+   * `false` restores legacy host-mode custody. Centralised so every gated
+   * entry point (subscribe-decline, restart-restore skip, operator-hatch
+   * refusal, serve-responder retire) reads the same flag the same way.
+   */
+  swmHostModeStripCiphertext(this: DKGAgent): boolean {
+    return this.config.swmHostMode?.stripCiphertext ?? true;
+  }
+
+  /**
+   * OT-RFC-38 / LU-6 Phase B — the three-source curation probe used to decide
+   * whether a CG warrants host-mode custody, in cheapest-first order:
+   *
+   *   (a) `subscribedContextGraphs[id].onChainHash` — set ONLY by paths that
+   *       already proved curation (chain-event handler with accessPolicy==1,
+   *       beacon handler with BEACON_ACCESS_POLICY_CURATED, curator-side
+   *       register of a curated CG);
+   *   (b) `onChainId` + `onChainAccessPolicyCache===1` — populated by the
+   *       chain-event poller, keyed by numeric on-chain id;
+   *   (c) `isPrivateContextGraph` — the local `_meta` accessPolicy/allowlist
+   *       read (the original gate; the only one a host-only core CANNOT
+   *       satisfy, since it never holds the cleartext `_meta`).
+   *
+   * Any positive ⇒ curated. A probe throw is treated as NOT curated (the same
+   * bail-out `reconcileSwmHostModeSubscription` had inline). Extracted so the
+   * OT-RFC-49 WS-A operator-hatch close in {@link enableSwmHostModeFor} sees
+   * the EXACT same curation answer as the auto-host path — without this, a
+   * host-only core (no local `_meta`) would fail an `isPrivateContextGraph`-only
+   * check, leaving the operator override open for precisely the case WS-A
+   * exists to close.
+   */
+  async isCuratedForHostMode(this: DKGAgent, contextGraphId: string): Promise<boolean> {
+    const sub = this.subscribedContextGraphs.get(contextGraphId);
+    if (sub?.onChainHash) return true;
+    if (sub?.onChainId && this.onChainAccessPolicyCache.get(sub.onChainId) === 1) return true;
+    try {
+      return await this.isPrivateContextGraph(contextGraphId);
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -786,9 +867,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   /**
    * Periodic reconciler driven by `hostModeReconcilerTimer`. Sweeps
-   * every locally-known CG and ensures host-mode subscription is
-   * in sync. Cheap to call repeatedly because the per-CG
-   * reconciler is idempotent.
+   * a bounded slice of locally-known CGs and ensures host-mode
+   * subscription is in sync. The cursor rotates through the stable
+   * sorted set so large stores converge without each tick touching
+   * every known graph.
    *
    * Serialized via `hostModeReconcileInflight` so an overlap with
    * the cleanup timer (or a manual call from a test) doesn't
@@ -803,9 +885,22 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const inflight = (async () => {
       try {
         const graphManager = new GraphManager(this.store);
-        const knownCgs = await graphManager.listContextGraphs();
-        for (const cgId of knownCgs) {
-          await this.reconcileSwmHostModeSubscription(cgId);
+        const knownCgs = (await graphManager.listContextGraphs()).sort();
+        if (knownCgs.length === 0) {
+          this.hostModeReconcileCursor = 0;
+          return;
+        }
+        const batchSize = normalizeHostModeReconcileBatchSize(this.config.swmHostMode?.reconcileBatchSize);
+        const start = this.hostModeReconcileCursor % knownCgs.length;
+        const count = Math.min(batchSize, knownCgs.length);
+        for (let i = 0; i < count; i++) {
+          const index = (start + i) % knownCgs.length;
+          const cgId = knownCgs[index];
+          try {
+            await this.reconcileSwmHostModeSubscription(cgId);
+          } finally {
+            this.hostModeReconcileCursor = (index + 1) % knownCgs.length;
+          }
         }
       } finally {
         this.hostModeReconcileInflight = undefined;
@@ -1422,6 +1517,27 @@ export class SwmHostModeMethods extends DKGAgentBase {
         entries: [],
       });
     }
+    // OT-RFC-49 WS-A — RETIRE the host-mode catch-up egress. With the
+    // private-ciphertext strip ON (default), a stripped core serves nothing
+    // private: this responder only ever returns private SWM ciphertext, so
+    // we deny BEFORE decoding the request. Members backfill from the curator
+    // (REPLACE-recovery), never from a core. Set `stripCiphertext:false` to
+    // restore legacy serving (kill-switch / A/B baseline).
+    if (this.swmHostModeStripCiphertext()) {
+      this.log.debug(
+        ctx,
+        `host-catchup served NOTHING from=${fromPeerId}: private-ciphertext strip is ON ` +
+        `(OT-RFC-49 WS-A — cores serve zero private SWM ciphertext)`,
+      );
+      return encodeSwmHostCatchupResponse({
+        version: SWM_HOST_CATCHUP_WIRE_VERSION,
+        contextGraphId: '',
+        nextSeqno: 0,
+        truncated: false,
+        denied: 'private-ciphertext strip is on (OT-RFC-49 WS-A): host-mode custody retired',
+        entries: [],
+      });
+    }
     let req;
     try {
       req = decodeSwmHostCatchupRequest(data);
@@ -1558,6 +1674,27 @@ export class SwmHostModeMethods extends DKGAgentBase {
    */
   async handleGetCiphertextChunk(this: DKGAgent, data: Uint8Array, fromPeerId: string): Promise<Uint8Array> {
     const ctx = createOperationContext('share');
+    // OT-RFC-49 WS-A — RETIRE the LU-11 ciphertext-chunk peer-serve. With the
+    // private-ciphertext strip ON (default), a stripped core serves no private
+    // ciphertext — INCLUDING via the OT-RFC-39 node-operator authority branch
+    // below, which would otherwise admit any registered operator. We deny
+    // BEFORE decoding so the strip is a hard, unconditional cutoff regardless
+    // of requester authority. Set `stripCiphertext:false` to restore the
+    // legacy chunk-serve (kill-switch / A/B baseline).
+    if (this.swmHostModeStripCiphertext()) {
+      this.log.debug(
+        ctx,
+        `LU-11 chunk-catchup served NOTHING from=${fromPeerId}: private-ciphertext strip is ON ` +
+        `(OT-RFC-49 WS-A — cores serve zero private SWM ciphertext, incl. the RFC-39 node-operator branch)`,
+      );
+      return encodeCiphertextChunkCatchupResponse({
+        version: CIPHERTEXT_CHUNK_CATCHUP_WIRE_VERSION,
+        contextGraphId: '',
+        batchIdHex: '',
+        chunkIndex: -1,
+        denied: 'private-ciphertext strip is on (OT-RFC-49 WS-A): host-mode custody retired',
+      });
+    }
     let req: CiphertextChunkCatchupRequest;
     try {
       req = decodeCiphertextChunkCatchupRequest(data);
@@ -1739,7 +1876,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const sparql = `SELECT ?o WHERE { ${graphClause} { <${subject}> <${CIPHERTEXT_CHUNK_PREDICATE}> ?o } } LIMIT 1`;
     let result;
     try {
-      result = await this.store.query(sparql);
+      result = await this.store.query(sparql, { source: 'agent.ciphertextChunkCatchup' });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       this.log.warn(ctx, `LU-11 chunk-catchup store query failed cg=${req.contextGraphId} chunkIndex=${req.chunkIndex}: ${reason}`);
@@ -3547,6 +3684,26 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // host-mode ingest/persistence.
       await this.maybeMarkRegisteredForHostMode(contextGraphId);
       return { subscribed: false, alreadySubscribed: true, hostingEnabled: true };
+    }
+    // OT-RFC-49 WS-A — CLOSE the operator hatch. With the private-ciphertext
+    // strip ON (default), the operator override must NOT re-introduce private
+    // custody for a CURATED CG: WS-A diverges from rung-1 (which deliberately
+    // left this manual path open) precisely here — there is no supported way
+    // back into private host-mode for a curated CG while the strip is on.
+    // Scoped to curated CGs via the SAME three-source probe the auto-host
+    // path uses ({@link isCuratedForHostMode}), NOT `isPrivateContextGraph`
+    // alone — a host-only core has no local `_meta`, so an
+    // `isPrivateContextGraph`-only check would return false and leave the
+    // hatch open for exactly the case WS-A closes. PUBLIC / bare-uncurated CGs
+    // are never affected (all three sources return not-curated → hatch stays
+    // open).
+    if (this.swmHostModeStripCiphertext() && (await this.isCuratedForHostMode(contextGraphId))) {
+      this.log.info(
+        createOperationContext('system'),
+        `SWM host-mode subscribe REFUSED for "${contextGraphId}": private-ciphertext strip is ON ` +
+        `(OT-RFC-49 WS-A — the operator override is closed for curated CGs; cores custody zero private SWM ciphertext)`,
+      );
+      return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
     }
     this.wireSwmHostModeHandler(contextGraphId, SUBSCRIPTION_SOURCES.MANUAL);
     await this.awaitHostModePersistence(contextGraphId);

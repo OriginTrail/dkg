@@ -510,6 +510,83 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     });
   });
 
+  /**
+   * Codex #1173: the contrast to the test above. A RECOVERY fetch must NOT
+   * persist/resume the responder session across an incomplete round — recovery
+   * rebuilds the COMPLETE state from offset 0 every try, so reusing the responder's
+   * cached pre-timeout row list would converge to a STALE snapshot. On retry it
+   * must reset to offset 0 and mint a FRESH syncSessionId so the responder
+   * re-reads current state.
+   */
+  it('does NOT reuse the responder session across an incomplete RECOVERY round (mints fresh)', async () => {
+    vi.setSystemTime(1_700_000_000_000);
+    const observedBuilds: Array<{ offset: number; syncSessionId: string | undefined }> = [];
+    let sendCalls = 0;
+
+    const recoveryFetchOpts = (checkpointOffset: number, onSend: () => Uint8Array) => ({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId: 'recovery-incomplete-cg',
+      includeSharedMemory: true,
+      phase: 'data' as const,
+      graphUri: GRAPH_URI,
+      deadline: Date.now() + 60_000,
+      syncPageTimeoutMs: 5_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 1,
+      syncPageSize: 1,
+      syncDeniedResponse: '#DENIED',
+      debugSyncProgress: false,
+      protocolSync: PROTOCOL_ID,
+      recovery: true,
+      checkpointStore: { get: () => freshCheckpoint(checkpointOffset), set: () => {}, delete: () => {} },
+      buildSyncRequest: async (
+        _cg: string,
+        offset: number,
+        _l: number,
+        _ism: boolean,
+        _rp: string,
+        _ph: unknown,
+        _sr: unknown,
+        _sb: unknown,
+        syncSessionId?: string,
+      ) => {
+        observedBuilds.push({ offset, syncSessionId });
+        return new TextEncoder().encode(`request-${offset}`);
+      },
+      parseAndFilter: singleQuadParser,
+      send: async () => onSend(),
+      logWarn: noopLog,
+      logInfo: noopLog,
+      logDebug: noopLog,
+    });
+
+    // First recovery round: one page, then the deadline passes ⇒ incomplete.
+    const first = await runFetchWithFakeTimers(
+      fetchSyncPages(recoveryFetchOpts(0, () => {
+        sendCalls++;
+        if (sendCalls === 1) {
+          vi.setSystemTime(1_700_000_060_001);
+          return new TextEncoder().encode('one-quad-line');
+        }
+        return new TextEncoder().encode('');
+      })),
+    );
+    expect(first.completed).toBe(false);
+    const recoverySessionId = observedBuilds[0].syncSessionId;
+    expect(typeof recoverySessionId).toBe('string');
+
+    // Retry. With NO persisted recovery session, the requester resets to offset 0
+    // and mints a fresh syncSessionId (vs. the non-recovery test above, which reuses).
+    await runFetchWithFakeTimers(
+      fetchSyncPages(recoveryFetchOpts(1, () => new TextEncoder().encode(''))),
+    );
+
+    const last = observedBuilds[observedBuilds.length - 1];
+    expect(last.offset).toBe(0); // reset — no resumable session for recovery
+    expect(last.syncSessionId).not.toBe(recoverySessionId); // FRESH, not reused
+  });
+
   it('restarts durable data checkpoints when the saved unfinished session expires', async () => {
     vi.setSystemTime(1_700_000_000_000);
     const observedBuilds: Array<{

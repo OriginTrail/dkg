@@ -47,6 +47,7 @@ import {
   buildAuthorAttestationTypedData,
   buildUpdateAuthorAttestationTypedData,
   AUTHOR_SCHEME_VERSION_V1,
+  computePublishACKDigest,
 } from '@origintrail-official/dkg-core';
 
 let fileSnapshotId: string;
@@ -143,17 +144,28 @@ async function publishOneKCV10(opts: {
     await coreOp.signTypedData(authorTyped.domain, authorTyped.types, authorTyped.message),
   );
 
-  // PR #357: V10 ACK now binds merkleLeafCount (uint256). Mirrors
-  // helpers/v10-kc-helpers.ts:buildPublishAckDigest.
-  // #820 / RFC-39: the publish ACK digest additionally binds the trailing
-  // (ciphertextChunksRoot, ciphertextChunkCount, isImmutable) triple — see
-  // KnowledgeAssetsLifecycle._executePublishCore and computePublishACKDigest.
-  // This publish is plaintext + mutable, so all three are zero.
+  // OT-RFC-49 / WS-B Trap 3: the publish ACK digest is prefixed with
+  // `ACK_DIGEST_VERSION` and binds the trailing (catalogRoot, catalogLeafCount,
+  // isImmutable) triple — see KnowledgeAssetsLifecycle._executePublishCore. Use
+  // the canonical off-chain helper so the test digest is byte-identical to the
+  // contract's (hand-rolling it dropped the version prefix and reverted
+  // SignerIsNotNodeOperator). This publish is plaintext + mutable, so the
+  // catalog pair + isImmutable are zero.
   const merkleLeafCount = 1;
-  const ackDigest = ethers.getBytes(ethers.solidityPackedKeccak256(
-    ['uint256', 'address', 'uint256', 'bytes32', 'uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'bytes32', 'uint256', 'uint256'],
-    [evmChainId, kav10Address, contextGraphId, ethers.hexlify(merkleRoot), kaCount, byteSize, epochs, tokenAmount, merkleLeafCount, ethers.ZeroHash, 0, 0],
-  ));
+  const ackDigest = computePublishACKDigest(
+    evmChainId,
+    kav10Address,
+    contextGraphId,
+    merkleRoot,
+    BigInt(kaCount),
+    BigInt(byteSize),
+    BigInt(epochs),
+    BigInt(tokenAmount),
+    BigInt(merkleLeafCount),
+    new Uint8Array(32),
+    0n,
+    false,
+  );
   const ackRaw = ethers.Signature.from(await coreOp.signMessage(ackDigest));
 
   const result = await adapter.createKnowledgeAssets!({

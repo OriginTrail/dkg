@@ -1,5 +1,12 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { DKGAgent } from '../src/dkg-agent.js';
+
+// Hand-rolled recorder: records every call's args and runs the real impl.
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => { calls.push(args); return impl(...args); };
+  return Object.assign(fn, { calls });
+}
 
 // Peer IDs are real-shape v4 UUIDs in the canonical libp2p format
 // so `peerIdFromString` accepts them. These are NOT real keys —
@@ -8,15 +15,34 @@ const SELF_PEER = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
 const RELAY_PEER = '12D3KooWLb1bH9NfMSjJDmsZxufmw5UFD8wajVKnvD5HfL3VbqGq';
 const REMOTE_PEER = '12D3KooWGiQrwo1jXJsHaQK4kFYx3xVDp5tWHPEnpUUEUbygP4WL';
 
+// A hand-rolled peerStore.merge recorder. `failOnce` arms a single
+// rejection (replaces the former one-shot reject helper): when set,
+// the next call shifts the error off and throws it before resolving.
+type MergeRecorder = ReturnType<typeof recorder<[unknown, unknown], Promise<undefined>>> & {
+  failOnce(err: Error): void;
+};
+
+function makeMergeRecorder(): MergeRecorder {
+  const failures: Error[] = [];
+  const fn = recorder(async (..._args: [unknown, unknown]): Promise<undefined> => {
+    const err = failures.shift();
+    if (err) throw err;
+    return undefined;
+  });
+  return Object.assign(fn, {
+    failOnce(err: Error) { failures.push(err); },
+  });
+}
+
 // `enrichPeerStoreFromInboundCircuit` only needs `this.node.libp2p`
 // for the self-peer guard and the peerStore.merge call — build the
 // minimum that satisfies both so we don't pull the full DKGAgent
 // init path into the test.
 function makeAgent(): {
   agent: DKGAgent;
-  mergeMock: ReturnType<typeof vi.fn>;
+  mergeMock: MergeRecorder;
 } {
-  const mergeMock = vi.fn(async () => undefined);
+  const mergeMock = makeMergeRecorder();
   const fakeLibp2p = {
     peerId: { toString: () => SELF_PEER },
     peerStore: { merge: mergeMock },
@@ -31,7 +57,7 @@ function makeAgent(): {
 
 describe('DKGAgent.enrichPeerStoreFromInboundCircuit — reverse-path peerStore enrichment', () => {
   let agent: DKGAgent;
-  let mergeMock: ReturnType<typeof vi.fn>;
+  let mergeMock: MergeRecorder;
 
   beforeEach(() => {
     ({ agent, mergeMock } = makeAgent());
@@ -50,8 +76,8 @@ describe('DKGAgent.enrichPeerStoreFromInboundCircuit — reverse-path peerStore 
       remoteAddr: { toString: () => inboundAddr },
       remotePeer: { toString: () => REMOTE_PEER },
     });
-    expect(mergeMock).toHaveBeenCalledTimes(1);
-    const [calledPid, opts] = mergeMock.mock.calls[0];
+    expect(mergeMock.calls).toHaveLength(1);
+    const [calledPid, opts] = mergeMock.calls[0] as [{ toString(): string }, { multiaddrs: { toString(): string }[] }];
     expect(calledPid.toString()).toBe(REMOTE_PEER);
     expect(opts.multiaddrs).toHaveLength(1);
     expect(opts.multiaddrs[0].toString()).toBe(
@@ -74,8 +100,8 @@ describe('DKGAgent.enrichPeerStoreFromInboundCircuit — reverse-path peerStore 
       remoteAddr: { toString: () => inboundAddr },
       remotePeer: { toString: () => REMOTE_PEER },
     });
-    expect(mergeMock).toHaveBeenCalledTimes(1);
-    const [, opts] = mergeMock.mock.calls[0];
+    expect(mergeMock.calls).toHaveLength(1);
+    const [, opts] = mergeMock.calls[0] as [unknown, { multiaddrs: { toString(): string }[] }];
     expect(opts.multiaddrs[0].toString()).toBe(
       `/ip4/1.2.3.4/tcp/4001/p2p/${RELAY_PEER}/p2p-circuit/p2p/${REMOTE_PEER}`,
     );
@@ -95,7 +121,7 @@ describe('DKGAgent.enrichPeerStoreFromInboundCircuit — reverse-path peerStore 
       remoteAddr: { toString: () => outboundAddr },
       remotePeer: { toString: () => REMOTE_PEER },
     });
-    expect(mergeMock).not.toHaveBeenCalled();
+    expect(mergeMock.calls).toEqual([]);
   });
 
   // Direct (non-circuit) inbound connections have nothing to enrich
@@ -111,7 +137,7 @@ describe('DKGAgent.enrichPeerStoreFromInboundCircuit — reverse-path peerStore 
       remoteAddr: { toString: () => directAddr },
       remotePeer: { toString: () => REMOTE_PEER },
     });
-    expect(mergeMock).not.toHaveBeenCalled();
+    expect(mergeMock.calls).toEqual([]);
   });
 
   // The libp2p loopback case — a node briefly self-dials during
@@ -128,7 +154,7 @@ describe('DKGAgent.enrichPeerStoreFromInboundCircuit — reverse-path peerStore 
       remoteAddr: { toString: () => inboundAddr },
       remotePeer: { toString: () => SELF_PEER },
     });
-    expect(mergeMock).not.toHaveBeenCalled();
+    expect(mergeMock.calls).toEqual([]);
   });
 
   it('is a no-op when remoteAddr is missing or empty', async () => {
@@ -142,7 +168,7 @@ describe('DKGAgent.enrichPeerStoreFromInboundCircuit — reverse-path peerStore 
       remoteAddr: { toString: () => '' },
       remotePeer: { toString: () => REMOTE_PEER },
     });
-    expect(mergeMock).not.toHaveBeenCalled();
+    expect(mergeMock.calls).toEqual([]);
   });
 
   // Defensive: a peerStore.merge that throws (e.g. shutdown race,
@@ -153,7 +179,7 @@ describe('DKGAgent.enrichPeerStoreFromInboundCircuit — reverse-path peerStore 
   // assert the helper itself does NOT silently swallow.
   it('propagates peerStore.merge errors to the caller (listener does the swallow)', async () => {
     const failingAgent = makeAgent();
-    failingAgent.mergeMock.mockRejectedValueOnce(new Error('peerStore is down'));
+    failingAgent.mergeMock.failOnce(new Error('peerStore is down'));
     const inboundAddr = `/ip4/1.2.3.4/tcp/4001/p2p/${RELAY_PEER}/p2p-circuit`;
     await expect(
       failingAgent.agent.enrichPeerStoreFromInboundCircuit({

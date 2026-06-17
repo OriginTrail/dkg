@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { multiaddr } from '@multiformats/multiaddr';
 import { DKGNode } from '../src/node.js';
 import {
@@ -7,6 +7,15 @@ import {
   StubNetworkStateRegistry,
   LibP2PNetwork,
 } from '../src/index.js';
+
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
 
 /**
  * RFC 07 PR-3 — `ProtocolRouter.send` consults the resolver before
@@ -74,7 +83,7 @@ describe('ProtocolRouter.send + PeerResolver', () => {
 
     expect(await peerstoreAddrCount()).toBe(0);
 
-    const resolveSpy = vi.fn(async (_peerId, _opts) => {
+    const resolveSpy = recorder(async (_peerId: string, _opts: unknown) => {
       await networkA.addKnownAddresses(b.peerId, [b.multiaddrs[0]]);
       return [b.multiaddrs[0]];
     });
@@ -100,7 +109,7 @@ describe('ProtocolRouter.send + PeerResolver', () => {
       enc.encode('hi'),
     );
     expect(dec.decode(response)).toBe('echo:hi');
-    expect(resolveSpy).toHaveBeenCalledOnce();
+    expect(resolveSpy.calls).toHaveLength(1);
     expect(await peerstoreAddrCount()).toBeGreaterThan(0);
 
     // Brief settle so libp2p teardown doesn't race the next test.
@@ -122,7 +131,7 @@ describe('ProtocolRouter.send + PeerResolver', () => {
     await b.start();
 
     const networkA = new LibP2PNetwork(a);
-    const resolveSpy = vi.fn(async (_peerId, _opts) => {
+    const resolveSpy = recorder(async (_peerId: string, _opts: unknown) => {
       await networkA.addKnownAddresses(b.peerId, [b.multiaddrs[0]]);
       return [b.multiaddrs[0]];
     });
@@ -144,8 +153,8 @@ describe('ProtocolRouter.send + PeerResolver', () => {
 
     await routerA.send(b.peerId, '/test/resolver-args/1.0.0', enc.encode('hi'));
 
-    expect(resolveSpy).toHaveBeenCalledOnce();
-    const callArgs = resolveSpy.mock.calls[0];
+    expect(resolveSpy.calls).toHaveLength(1);
+    const callArgs = resolveSpy.calls[0];
     expect(callArgs[0]).toBe(b.peerId);
     const opts = callArgs[1] as { signal?: AbortSignal; perStepTimeoutMs?: number };
     expect(opts).toBeDefined();
@@ -177,7 +186,7 @@ describe('ProtocolRouter.send + PeerResolver', () => {
     await a.libp2p.dial(multiaddr(b.multiaddrs[0]));
     await new Promise((r) => setTimeout(r, 300));
 
-    const resolveSpy = vi.fn(async () => {
+    const resolveSpy = recorder(async () => {
       throw new Error('resolver boom');
     });
     const resolver = new PeerResolver({
@@ -207,7 +216,7 @@ describe('ProtocolRouter.send + PeerResolver', () => {
     // assertion (`toHaveBeenCalledOnce`) reflected the pre-PR-5
     // shape where every send always paid the resolver cost; with
     // PR 5 the resolver is only called on a fast-path miss.
-    expect(resolveSpy).not.toHaveBeenCalled();
+    expect(resolveSpy.calls).toEqual([]);
   }, 15000);
 
   it('omitting peerResolver preserves legacy behaviour (no consult, direct dial)', async () => {
@@ -247,27 +256,31 @@ describe('ProtocolRouter.send + PeerResolver', () => {
     await a.libp2p.dial(multiaddr(b.multiaddrs[0]));
     await new Promise((r) => setTimeout(r, 300));
 
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const originalWarn = console.warn;
+    const warnSpy = recorder((..._args: unknown[]) => {});
+    console.warn = warnSpy as unknown as typeof console.warn;
 
-    const routerA = new ProtocolRouter(a);
-    const routerB = new ProtocolRouter(b);
-    const enc = new TextEncoder();
-    const dec = new TextDecoder();
-    routerB.register('/test/warn-no-resolver/1.0.0', async (data) =>
-      enc.encode(`echo:${dec.decode(data)}`),
-    );
+    try {
+      const routerA = new ProtocolRouter(a);
+      const routerB = new ProtocolRouter(b);
+      const enc = new TextEncoder();
+      const dec = new TextDecoder();
+      routerB.register('/test/warn-no-resolver/1.0.0', async (data) =>
+        enc.encode(`echo:${dec.decode(data)}`),
+      );
 
-    await routerA.send(b.peerId, '/test/warn-no-resolver/1.0.0', enc.encode('1'));
-    await routerA.send(b.peerId, '/test/warn-no-resolver/1.0.0', enc.encode('2'));
-    await routerA.send(b.peerId, '/test/warn-no-resolver/1.0.0', enc.encode('3'));
+      await routerA.send(b.peerId, '/test/warn-no-resolver/1.0.0', enc.encode('1'));
+      await routerA.send(b.peerId, '/test/warn-no-resolver/1.0.0', enc.encode('2'));
+      await routerA.send(b.peerId, '/test/warn-no-resolver/1.0.0', enc.encode('3'));
 
-    const matches = warnSpy.mock.calls.filter((c) => {
-      const first = c[0];
-      return typeof first === 'string' && first.includes('peerResolver');
-    });
-    expect(matches.length).toBe(1);
-    expect(matches[0][0]).toMatch(/RFC 07/);
-
-    warnSpy.mockRestore();
+      const matches = warnSpy.calls.filter((c) => {
+        const first = c[0];
+        return typeof first === 'string' && first.includes('peerResolver');
+      });
+      expect(matches.length).toBe(1);
+      expect(matches[0][0]).toMatch(/RFC 07/);
+    } finally {
+      console.warn = originalWarn;
+    }
   }, 15000);
 });

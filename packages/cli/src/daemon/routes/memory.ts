@@ -1509,6 +1509,16 @@ WHERE {
     ) {
       return jsonResponse(res, 400, { error: '"localOnly" must be a boolean' });
     }
+    // Per-request override of the strict curator-ack gate (OT-RFC-49
+    // curator-leader). Omitted → the agent uses its config default
+    // (`swmAwaitCuratorAck`). Only meaningful for private, non-localOnly writes.
+    if (
+      parsed.awaitCuratorAck !== undefined &&
+      typeof parsed.awaitCuratorAck !== "boolean"
+    ) {
+      return jsonResponse(res, 400, { error: '"awaitCuratorAck" must be a boolean' });
+    }
+    const awaitCuratorAck: boolean | undefined = parsed.awaitCuratorAck;
     const contextGraphId = parsed.contextGraphId;
     if (!quads?.length)
       return jsonResponse(res, 400, { error: 'Missing "quads"' });
@@ -1535,6 +1545,7 @@ WHERE {
           localOnly,
           operationCtx: ctx,
           callerAgentAddress: requestAgentAddress,
+          awaitCuratorAck,
         }),
       );
       tracker.complete(ctx, { tripleCount: quads.length });
@@ -1559,6 +1570,25 @@ WHERE {
         err.message.includes("has not been registered")
       ) {
         return jsonResponse(res, 400, { error: err.message });
+      }
+      // Strict curator-ack gate (OT-RFC-49 curator-leader): the write was NOT
+      // persisted because the curator (the authoritative replica) did not
+      // confirm it. Surface a distinct, actionable status instead of a generic
+      // 500 — the client is TOLD, never silently led to believe it succeeded.
+      // Duck-type on `.code` (the publisher's wire contract).
+      if (err?.code === "CURATOR_UNCONFIRMED") {
+        return jsonResponse(res, 503, {
+          error: err.message,
+          code: "CURATOR_UNCONFIRMED",
+          curatorDelivery: "unconfirmed",
+        });
+      }
+      if (err?.code === "CURATOR_REJECTED") {
+        return jsonResponse(res, 409, {
+          error: err.message,
+          code: "CURATOR_REJECTED",
+          curatorDelivery: "rejected",
+        });
       }
       throw err;
     }

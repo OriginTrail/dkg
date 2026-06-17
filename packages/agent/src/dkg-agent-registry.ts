@@ -1111,7 +1111,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
     let markedDefaultAddr: string | undefined;
     const needsMigration: AgentKeyRecord[] = [];
     try {
-      const result = await this.store.query(sparql);
+      const result = await this.store.query(sparql, { source: 'agent.agentKeyMigration' });
       if (result.type !== 'bindings') return;
       const strip = (v?: string) => v?.replace(/^"|"$/g, '').replace(/"?\^\^.*$/, '') ?? '';
       for (const row of result.bindings) {
@@ -1473,11 +1473,17 @@ export class AgentRegistryMethods extends DKGAgentBase {
     return typeof this.chain.getPublishingConvictionAccountInfo === 'function';
   }
 
+  // OT-RFC-51: `primaryNode` (the node identityId this PCA's committed TRAC
+  // funds via the publishing factor) is REQUIRED — no silent `0n` default. A
+  // PCA created with node 0 seeds no allocation to anyone, and the SDK exposes
+  // no `setPrimaryNode`, so a defaulted-0 PCA would be silently inert. Forcing
+  // the caller to pass a node makes that outcome impossible by accident.
   async createPublishingConvictionAccount(this: DKGAgent,
     committedTRAC: bigint,
+    primaryNode: bigint,
   ): Promise<({ accountId: bigint } & TxResult) | null> {
     if (typeof this.chain.createPublishingConvictionAccount !== 'function') return null;
-    return this.chain.createPublishingConvictionAccount(committedTRAC);
+    return this.chain.createPublishingConvictionAccount(committedTRAC, primaryNode);
   }
 
   async topUpPublishingConvictionAccount(this: DKGAgent, accountId: bigint, amount: bigint): Promise<TxResult | null> {

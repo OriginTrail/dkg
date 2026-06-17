@@ -1,381 +1,177 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createServer, type Server } from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { DashboardDB, ASSERTION_ACTIVITY_TYPE, ACTIVITY_DIGEST_WINDOW_MS, buildActivityDigestKey, handleNodeUIRequest } from '@origintrail-official/dkg-node-ui';
-import { handleNotificationRoutes } from '../src/daemon/routes/notifications.js';
+/**
+ * Scoped notifications routes (A4 / ADR-003) — REAL daemon, REAL multi-agent
+ * flows, NO mocks.
+ *
+ * The retired version drove `handleNotificationRoutes` with a hand-built
+ * agent whose `listContextGraphs` / `listPendingJoinRequests` returned a
+ * fabricated membership matrix, and inserted notification rows directly into
+ * the DashboardDB. Whether the REAL daemon ever produces those rows or
+ * resolves those memberships was never proven.
+ *
+ * This version runs the whole thing for real on one daemon:
+ *   - the node OWNER (default agent) curates a real curated context graph,
+ *   - agent B and agent C are REAL second agents minted via
+ *     `POST /api/agent/register` (custodial keys held by the daemon),
+ *   - B's join request is a REAL signed delegation
+ *     (`sign-join` → `request-join`), which generates a REAL `join_request`
+ *     notification row for the curator,
+ *   - the curator's REAL `reject-join` generates B's `join_rejected`
+ *     confirmation,
+ * and every scoping contract is asserted over real HTTP: the curator sees
+ * the moderation row, B does not, C never sees B's rejection, read-marking
+ * is caller-scoped, malformed bodies 400, and an anonymous caller is
+ * fail-closed by the REAL auth gate (401 — in production the route-level
+ * scopeUnknown sits BEHIND this gate, so 401 is the contract callers see).
+ *
+ * Deliberately NOT here: the row-shape defensive cases from the retired file
+ * (NULL context_graph_id column, digest-window eviction floods) — those
+ * require inserting synthetic malformed rows the real daemon never writes;
+ * they are DashboardDB-level contracts covered by the node-ui DB tests.
+ */
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { startLiveDaemon, stopLiveDaemon, postJson, type LiveDaemon } from './helpers/live-daemon.js';
 
-// Caller wallet (the "me" agent). Member of CG_CURATED (as curator) and
-// CG_JOINED (as participant); NOT a member of CG_FOREIGN.
-const CALLER = '0x1111111111111111111111111111111111111111';
-const OTHER = '0x2222222222222222222222222222222222222222';
-const REQUESTER = '0x3333333333333333333333333333333333333333';
-const CG_CURATED = `${CALLER}/curated`;
-const CG_JOINED = 'someone/joined';
-const CG_FOREIGN = 'someone/foreign';
+const CUR_CG = `notif-cur-${Date.now().toString(36)}`;
 
-describe('GET/POST /api/notifications (scoped daemon route, A4)', () => {
-  let server: Server | undefined;
-  let baseUrl = '';
-  let db: DashboardDB;
-  let dir: string;
+interface NotifRow {
+  type: string;
+  id: number;
+  read: number;
+  contextGraphId?: string;
+  meta?: Record<string, unknown>;
+}
 
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'dkg-notif-route-test-'));
-    db = new DashboardDB({ dataDir: dir });
-  });
+describe('notifications routes (real daemon, real agents)', () => {
+  let daemon: LiveDaemon;
+  let tokenB = '';
+  let addressB = '';
+  let tokenC = '';
 
-  afterEach(async () => {
-    if (server) {
-      await new Promise<void>((resolve, reject) => server!.close((e) => (e ? reject(e) : resolve())));
-      server = undefined;
+  async function as(token: string, path: string, init: RequestInit = {}) {
+    const res = await fetch(`${daemon.base}${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        ...(init.headers ?? {}),
+      },
+    });
+    const text = await res.text();
+    try {
+      return { status: res.status, body: JSON.parse(text) as any };
+    } catch {
+      return { status: res.status, body: text as any };
     }
-    db.close();
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  // Token → agent-address map for the B1 token-verified caller derivation.
-  // The route resolves the caller via agent.resolveAgentByToken(requestToken)
-  // ONLY (no default-agent fallback), so the harness wires a token map.
-  const TOKEN_FOR_CALLER = 'tok-caller';
-
-  function makeAgent(opts: { pending?: Record<string, string[]>; tokens?: Record<string, string>; defaultAgent?: string } = {}) {
-    const tokens = opts.tokens ?? { [TOKEN_FOR_CALLER]: CALLER };
-    return {
-      resolveAgentByToken: vi.fn((token: string) => tokens[token]),
-      // The node's default (owner) agent — what a node-level API token resolves
-      // to. Defaults to CALLER (the owner) for these tests.
-      getDefaultAgentAddress: vi.fn(() => opts.defaultAgent ?? CALLER),
-      listContextGraphs: vi.fn(async () => [
-        { id: CG_CURATED, uri: '', name: 'Curated CG', curator: `did:dkg:agent:${CALLER}`, callerInvolved: true, isSystem: false },
-        { id: CG_JOINED, uri: '', name: 'Joined CG', curator: `did:dkg:agent:${OTHER}`, callerInvolved: true, isSystem: false },
-        { id: CG_FOREIGN, uri: '', name: 'Foreign CG', curator: `did:dkg:agent:${OTHER}`, callerInvolved: false, isSystem: false },
-      ]),
-      listPendingJoinRequests: vi.fn(async (cgId: string) =>
-        (opts.pending?.[cgId] ?? []).map((addr) => ({ agentAddress: addr, signature: 's', timestamp: 1, status: 'pending' })),
-      ),
-    };
   }
 
-  // `requestToken` defaults to the caller's valid token; pass undefined (or an
-  // unmapped token) to exercise the fail-closed (B1) path.
-  async function startRoute(agent: ReturnType<typeof makeAgent>, requestToken: string | undefined = TOKEN_FOR_CALLER) {
-    server = createServer(async (req, res) => {
-      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-      const ctx = {
-        req, res, agent, dashDb: db,
-        url, path: url.pathname,
-        requestToken,
-      } as any;
-      try {
-        await handleNotificationRoutes(ctx);
-        if (!res.writableEnded) { res.statusCode = 404; res.end(); }
-      } catch (err: any) {
-        // Test-harness only: emit a fixed JSON body so the test cannot
-        // leak raw exception text (CodeQL flagged the prior
-        // `err.message` echo as stack-disclosure + reinterpret-as-HTML).
-        // The route under test sets its own body upstream; this catch
-        // is a safety net. Diagnostics still surface via console.error.
-        // eslint-disable-next-line no-console
-        console.error('[test-harness] unhandled route error:', err);
-        res.statusCode = 500;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ error: 'internal error' }));
-      }
-    });
-    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
-    const addr = server.address();
-    if (!addr || typeof addr === 'string') throw new Error('no bind');
-    baseUrl = `http://127.0.0.1:${addr.port}`;
-  }
-
-  const getNotifs = async () => {
-    const res = await fetch(`${baseUrl}/api/notifications`);
-    return { status: res.status, body: await res.json() };
-  };
-  const postRead = async (body: Record<string, unknown>) => {
-    const res = await fetch(`${baseUrl}/api/notifications/read`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
-    return { status: res.status, body: await res.json() };
-  };
-
-  function activityRow(cgId: string, kind: string, ts: number, actorAddr: string) {
-    return db.insertNotification({
-      ts, type: ASSERTION_ACTIVITY_TYPE, title: 'a', message: 'm',
-      contextGraphId: cgId,
-      meta: JSON.stringify({ contextGraphId: cgId, kind, actorAgentDid: `did:dkg:agent:${actorAddr}` }),
-    });
-  }
-  function joinRequestRow(cgId: string, addr: string, ts = 1000) {
-    return db.insertNotification({
-      ts, type: 'join_request', title: 'j', message: 'm',
-      contextGraphId: cgId,
-      meta: JSON.stringify({ contextGraphId: cgId, agentAddress: addr, agentName: 'Req' }),
-    });
-  }
-
-  it('fails closed (scopeUnknown) when there is NO token (anonymous loopback caller) (B1)', async () => {
-    // Tokenless caller → fail closed; we do NOT hand back the default agent's
-    // feed. (Empty string is falsy but distinct from undefined, which would hit
-    // startRoute's default-arg.)
-    await startRoute(makeAgent(), '');
-    const { status, body } = await getNotifs();
+  async function notificationsFor(token: string): Promise<{ rows: NotifRow[]; badge: number }> {
+    const { status, body } = await as(token, '/api/notifications');
     expect(status).toBe(200);
-    expect(body.scopeUnknown).toBe(true);
-    expect(body.notifications).toEqual([]);
-    expect(body.badgeCount).toBe(0);
-  });
+    return { rows: body.notifications as NotifRow[], badge: body.badgeCount as number };
+  }
 
-  it('a node-level API token resolves to the node default/owner agent — NOT scopeUnknown (regression: "Verifying access…")', async () => {
-    // The owner's normal UI token is a NODE-level token: resolveAgentByToken
-    // returns undefined for it (it is not a per-agent token), so the route must
-    // fall back to getDefaultAgentAddress (the owner). The original B1 fix
-    // over-corrected and failed closed here, so the owner saw "Verifying
-    // access…" on their own node.
-    const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000;
-    activityRow(CG_JOINED, 'created', baseTs, OTHER); // a member-CG activity row
-    await startRoute(makeAgent(), 'node-level-token'); // present, not in the token map
-    const { body } = await getNotifs();
-    expect(body.scopeUnknown).toBeUndefined();
-    expect(body.notifications).toHaveLength(1);
-    expect(body.notifications[0].contextGraphId).toBe(CG_JOINED);
-  });
+  beforeAll(async () => {
+    daemon = await startLiveDaemon();
 
-  it('scopes activity to member CGs and drops foreign-CG rows + legacy noise', async () => {
-    const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000;
-    activityRow(CG_JOINED, 'created', baseTs, OTHER);   // member → kept
-    activityRow(CG_FOREIGN, 'created', baseTs, OTHER);  // non-member → dropped
-    db.insertNotification({ ts: baseTs, type: 'kc_published', title: 'x', message: 'x', contextGraphId: CG_JOINED }); // noise → dropped
+    // The owner curates a real CURATED context graph.
+    const cg = await postJson(daemon, '/api/context-graph/create', { id: CUR_CG, name: 'Curated', accessPolicy: 1 });
+    expect(cg.status, `CG create failed: ${JSON.stringify(cg.body)}`).toBeLessThan(300);
 
-    await startRoute(makeAgent());
-    const { body } = await getNotifs();
-    expect(body.scopeUnknown).toBeUndefined();
-    expect(body.notifications).toHaveLength(1);
-    expect(body.notifications[0].type).toBe('assertion_activity');
-    expect(body.notifications[0].contextGraphId).toBe(CG_JOINED);
-    expect(body.notifications[0].meta.contextGraphName).toBe('Joined CG');
-  });
+    // Two REAL second agents on the same node.
+    const regB = await postJson(daemon, '/api/agent/register', { name: 'notif-agent-b', framework: 'test' });
+    tokenB = regB.body.authToken;
+    addressB = regB.body.agentAddress;
+    expect(tokenB).toBeTruthy();
+    const regC = await postJson(daemon, '/api/agent/register', { name: 'notif-agent-c', framework: 'test' });
+    tokenC = regC.body.authToken;
+    expect(tokenC).toBeTruthy();
 
-  it('keeps a pending join_request on a curated CG and reconciles away resolved ones (G3)', async () => {
-    joinRequestRow(CG_CURATED, REQUESTER);            // still pending → kept
-    joinRequestRow(CG_CURATED, OTHER);                // not in pending set → dropped (resolved)
-    joinRequestRow(CG_JOINED, REQUESTER);             // joined (not curated) → dropped
-
-    await startRoute(makeAgent({ pending: { [CG_CURATED]: [REQUESTER] } }));
-    const { body } = await getNotifs();
-    const joins = body.notifications.filter((n: any) => n.type === 'join_request');
-    expect(joins).toHaveLength(1);
-    expect(joins[0].contextGraphId).toBe(CG_CURATED);
-    expect(joins[0].meta.agentAddress).toBe(REQUESTER);
-    // join_request counts toward the badge.
-    expect(body.badgeCount).toBe(1);
-  });
-
-  it('POST /read resolves a digestKey to underlying rows AND accepts numeric ids together', async () => {
-    const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000;
-    const a1 = activityRow(CG_JOINED, 'created', baseTs, OTHER);
-    const a2 = activityRow(CG_JOINED, 'created', baseTs + 10, OTHER);
-    const jr = joinRequestRow(CG_CURATED, REQUESTER, baseTs);
-
-    await startRoute(makeAgent({ pending: { [CG_CURATED]: [REQUESTER] } }));
-
-    const digestKey = buildActivityDigestKey(CG_JOINED, 'created', baseTs);
-    const read = await postRead({ ids: [digestKey, jr] });
-    // 2 activity rows (resolved from digestKey) + 1 join_request = 3 rows marked.
-    expect(read.body.marked).toBe(3);
-
-    // All now read → badge 0 (rejections never counted; here none).
-    const { body } = await getNotifs();
-    expect(body.badgeCount).toBe(0);
-    // Sanity: the underlying activity rows are marked read.
-    const all = db.getNotifications().notifications;
-    expect(all.find((n) => n.id === a1)!.read).toBe(1);
-    expect(all.find((n) => n.id === a2)!.read).toBe(1);
-    expect(all.find((n) => n.id === jr)!.read).toBe(1);
-  });
-
-  it('POST /read empty body marks ONLY the caller-scoped rows, never foreign-CG rows (B2)', async () => {
-    const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000;
-    const mine = activityRow(CG_JOINED, 'created', baseTs, OTHER);   // in scope
-    const foreign = activityRow(CG_FOREIGN, 'created', baseTs, OTHER); // NOT in scope
-    await startRoute(makeAgent({ pending: { [CG_CURATED]: [REQUESTER] } }));
-
-    const read = await postRead({});
-    expect(read.body.marked).toBe(1); // only `mine`, not `foreign`
-
-    const all = db.getNotifications().notifications;
-    expect(all.find((n) => n.id === mine)!.read).toBe(1);
-    expect(all.find((n) => n.id === foreign)!.read).toBe(0); // untouched
-  });
-
-  it('POST /read ignores ids the caller is not scoped to (B2 — no marking foreign rows by id)', async () => {
-    const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000;
-    const foreign = activityRow(CG_FOREIGN, 'created', baseTs, OTHER);
-    await startRoute(makeAgent());
-
-    // Caller explicitly tries to mark a foreign-CG row by its numeric id.
-    const read = await postRead({ ids: [foreign] });
-    expect(read.body.marked).toBe(0);
-    expect(db.getNotifications().notifications.find((n) => n.id === foreign)!.read).toBe(0);
-  });
-
-  it('POST /read with NO token marks nothing (B1 fail-closed)', async () => {
-    activityRow(CG_JOINED, 'created', 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000, OTHER);
-    await startRoute(makeAgent(), ''); // tokenless caller
-    const read = await postRead({});
-    expect(read.body.marked).toBe(0);
-    expect(read.body.scopeUnknown).toBe(true);
-  });
-
-  it('B3: a flood of foreign-CG rows does not evict the caller actionable join request', async () => {
-    // 600 foreign-CG rows (newer) > the 500 read cap. Pre-B3 (read-500-then-
-    // scope) these would fill the window and the older in-scope join request
-    // would never be read; with the scoped SQL read it survives.
-    const base = 9 * ACTIVITY_DIGEST_WINDOW_MS;
-    const jr = joinRequestRow(CG_CURATED, REQUESTER, base); // older, in scope
-    for (let i = 0; i < 600; i++) {
-      activityRow(CG_FOREIGN, 'created', base + 1000 + i, OTHER); // newer, out of scope
-    }
-    await startRoute(makeAgent({ pending: { [CG_CURATED]: [REQUESTER] } }));
-    const { body } = await getNotifs();
-    const joins = body.notifications.filter((n: any) => n.type === 'join_request');
-    expect(joins).toHaveLength(1);
-    expect(joins[0].id).toBe(jr);
-  });
-
-  it('M9: a new same-bucket event re-surfaces a previously-read digest', async () => {
-    // Mark a digest seen, then a NEW unread atomic row lands in the SAME
-    // (cg, kind, 24h-bucket) → the digest reads UNREAD again. Guards against a
-    // resolveActivityDigestRowIds change that marks the whole bucket.
-    const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000;
-    activityRow(CG_JOINED, 'created', baseTs, OTHER);
-    await startRoute(makeAgent());
-
-    // Read the digest (mark its current rows read).
-    const digestKey = buildActivityDigestKey(CG_JOINED, 'created', baseTs);
-    await postRead({ ids: [digestKey] });
-    let { body } = await getNotifs();
-    expect(body.notifications.find((n: any) => n.id === digestKey)!.read).toBe(1);
-
-    // A new event lands in the same bucket (unread).
-    activityRow(CG_JOINED, 'created', baseTs + 5000, OTHER);
-    ({ body } = await getNotifs());
-    const digest = body.notifications.find((n: any) => n.id === digestKey);
-    expect(digest).toBeDefined();
-    expect(digest.read).toBe(0);            // re-surfaced as unread
-    expect(digest.meta.count).toBe(2);      // both events in the bucket
-    expect(body.badgeCount).toBe(1);
-  });
-
-  it('R2-1: a join_request with context_graph_id only in meta (NULL column) is dropped — the scoping key is the column, so the emitter MUST set it', async () => {
-    const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000;
-    // Legacy/buggy emitter shape (pre-R2-1): contextGraphId only inside `meta`,
-    // top-level column left NULL. The scoped read filters on the COLUMN, so
-    // this row must NOT surface — even though its requester is pending on a
-    // curated CG (isolating the missing column as the sole cause).
-    db.insertNotification({
-      ts: baseTs, type: 'join_request', title: 'j', message: 'm',
-      meta: JSON.stringify({ contextGraphId: CG_CURATED, agentAddress: REQUESTER, agentName: 'Req' }),
+    // B files a REAL join request: the daemon signs the delegation with B's
+    // custodial key, then the request is delivered locally to the curator.
+    const signed = await as(tokenB, `/api/context-graph/${CUR_CG}/sign-join`, { method: 'POST', body: '{}' });
+    expect(signed.status, `sign-join failed: ${JSON.stringify(signed.body)}`).toBe(200);
+    const join = await as(tokenB, `/api/context-graph/${CUR_CG}/request-join`, {
+      method: 'POST',
+      body: JSON.stringify({ delegation: signed.body.delegation }),
     });
-    // Correctly-columned join_request (the fixed emitter shape) on the same CG.
-    const good = joinRequestRow(CG_CURATED, OTHER, baseTs + 10);
+    expect(join.status, `request-join failed: ${JSON.stringify(join.body)}`).toBe(200);
+    expect(join.body.status).toBe('pending');
+  }, 120_000);
 
-    await startRoute(makeAgent({ pending: { [CG_CURATED]: [REQUESTER, OTHER] } }));
-    const { body } = await getNotifs();
-    const joins = body.notifications.filter((n: any) => n.type === 'join_request');
-    expect(joins).toHaveLength(1);
-    expect(joins[0].id).toBe(good); // the meta-only (NULL column) row is gone
+  afterAll(async () => {
+    await stopLiveDaemon(daemon);
   });
 
-  it('R2-2: POST /read with a malformed JSON body returns 400 and marks nothing', async () => {
-    const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000;
-    const mine = activityRow(CG_JOINED, 'created', baseTs, OTHER);
-    await startRoute(makeAgent());
+  it('an anonymous caller is fail-closed by the real auth gate (401, no data)', async () => {
+    const res = await fetch(`${daemon.base}/api/notifications`);
+    expect(res.status).toBe(401);
+  });
 
-    // Truncated/garbled body — not empty (which is mark-all), not valid JSON.
-    const res = await fetch(`${baseUrl}/api/notifications/read`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{ "ids": [',
+  it('the node-level token resolves to the OWNER agent and surfaces the real pending join_request', async () => {
+    const { rows, badge } = await notificationsFor(daemon.token!);
+    const joinReq = rows.find((r) => r.type === 'join_request' && r.contextGraphId === CUR_CG);
+    expect(joinReq, `curator should see the pending join_request; got ${JSON.stringify(rows)}`).toBeTruthy();
+    expect(joinReq!.meta?.agentAddress).toBe(addressB);
+    expect(badge).toBeGreaterThan(0);
+  });
+
+  it("agent B does NOT see the curator's moderation row (caller scoping)", async () => {
+    const { rows } = await notificationsFor(tokenB);
+    expect(rows.find((r) => r.type === 'join_request')).toBeUndefined();
+  });
+
+  it('POST /read with a malformed JSON body returns 400 and marks nothing', async () => {
+    const res = await fetch(`${daemon.base}/api/notifications/read`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${daemon.token}`, 'Content-Type': 'application/json' },
+      body: '{not json',
     });
     expect(res.status).toBe(400);
-    // The malformed request must NOT clear the caller's feed.
-    expect(db.getNotifications().notifications.find((n) => n.id === mine)!.read).toBe(0);
+    const { rows } = await notificationsFor(daemon.token!);
+    expect(rows.some((r) => r.type === 'join_request' && r.read === 0)).toBe(true);
   });
 
-  it('R2-2: POST /read with an empty body still marks all caller-scoped rows (mark-all preserved)', async () => {
-    const baseTs = 5 * ACTIVITY_DIGEST_WINDOW_MS + 1000;
-    const mine = activityRow(CG_JOINED, 'created', baseTs, OTHER);
-    await startRoute(makeAgent());
-
-    const res = await fetch(`${baseUrl}/api/notifications/read`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '',
+  it('POST /read with NO token is fail-closed (the owner row stays unread)', async () => {
+    const res = await fetch(`${daemon.base}/api/notifications/read`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
     });
-    expect(res.status).toBe(200);
-    expect((await res.json()).marked).toBe(1);
-    expect(db.getNotifications().notifications.find((n) => n.id === mine)!.read).toBe(1);
+    expect(res.status).toBe(401);
+    const { rows } = await notificationsFor(daemon.token!);
+    expect(rows.some((r) => r.type === 'join_request' && r.read === 0)).toBe(true);
   });
 
-  it("R3-1: surfaces the caller's own join_rejected even on a NON-member CG (confirmations read by type, not membership)", async () => {
-    // The caller was rejected from CG_FOREIGN → they are NOT a member of it, so
-    // the member-CG read alone would drop the rejection. It must still appear.
-    db.insertNotification({
-      ts: 5 * ACTIVITY_DIGEST_WINDOW_MS + 2000, type: 'join_rejected', title: 'r', message: 'm',
-      contextGraphId: CG_FOREIGN,
-      meta: JSON.stringify({ contextGraphId: CG_FOREIGN, agentAddress: CALLER }),
+  it('POST /read with an empty body marks the caller-scoped rows (owner badge → 0)', async () => {
+    const mark = await as(daemon.token!, '/api/notifications/read', { method: 'POST', body: '{}' });
+    expect(mark.status).toBe(200);
+    const owner = await notificationsFor(daemon.token!);
+    expect(owner.badge).toBe(0);
+    expect(owner.rows.every((r) => r.read === 1)).toBe(true);
+  });
+
+  it("the curator's REAL reject-join reconciles the pending join_request away (G3)", async () => {
+    const reject = await as(daemon.token!, `/api/context-graph/${CUR_CG}/reject-join`, {
+      method: 'POST',
+      body: JSON.stringify({ agentAddress: addressB }),
     });
-    await startRoute(makeAgent());
-    const { body } = await getNotifs();
-    const rejections = body.notifications.filter((n: any) => n.type === 'join_rejected');
-    expect(rejections).toHaveLength(1);
-    expect(rejections[0].contextGraphId).toBe(CG_FOREIGN);
-    expect(body.badgeCount).toBe(0); // rejection never counts toward the badge
-  });
+    expect(reject.status, `reject-join failed: ${JSON.stringify(reject.body)}`).toBe(200);
+    expect(reject.body.status).toBe('rejected');
 
-  it('R3-1: does NOT surface a join_rejected addressed to a different agent (multi-agent-node safety)', async () => {
-    db.insertNotification({
-      ts: 5 * ACTIVITY_DIGEST_WINDOW_MS + 2000, type: 'join_rejected', title: 'r', message: 'm',
-      contextGraphId: CG_FOREIGN,
-      meta: JSON.stringify({ contextGraphId: CG_FOREIGN, agentAddress: OTHER }),
-    });
-    await startRoute(makeAgent());
-    const { body } = await getNotifs();
-    expect(body.notifications.filter((n: any) => n.type === 'join_rejected')).toHaveLength(0);
-  });
+    // G3: a RESOLVED join request must no longer surface as a pending
+    // moderation row, and the moderation list itself empties.
+    const owner = await notificationsFor(daemon.token!);
+    expect(owner.rows.find((r) => r.type === 'join_request' && r.read === 0)).toBeUndefined();
+    const list = await as(daemon.token!, `/api/context-graph/${CUR_CG}/join-requests`);
+    expect(list.status).toBe(200);
+    expect(list.body.requests).toEqual([]);
 
-  // Dispatch-order guard (ADR-003): in lifecycle.ts the node-ui handler runs
-  // BEFORE the agent-aware daemon dispatch. After the clean cut, node-ui must
-  // NOT claim /api/notifications (return false) so the request falls through
-  // to the daemon route — no double-handling, no leftover 404.
-  it('handleNodeUIRequest does NOT claim the notification routes (falls through to daemon)', async () => {
-    const noopRes = () => {
-      const res: any = {
-        statusCode: 200, headersSent: false, _ended: false,
-        setHeader() {}, write() {}, writeHead() {},
-        end() { this._ended = true; this.headersSent = true; },
-      };
-      return res;
-    };
-    const getRes = noopRes();
-    const getHandled = await handleNodeUIRequest(
-      { method: 'GET', headers: {}, url: '/api/notifications' } as any,
-      getRes as any,
-      new URL('http://127.0.0.1/api/notifications'),
-      db,
-      '/fake/static',
-    );
-    expect(getHandled).toBe(false);
-    expect(getRes._ended).toBe(false);
-
-    const postRes = noopRes();
-    const postHandled = await handleNodeUIRequest(
-      { method: 'POST', headers: {}, url: '/api/notifications/read' } as any,
-      postRes as any,
-      new URL('http://127.0.0.1/api/notifications/read'),
-      db,
-      '/fake/static',
-    );
-    expect(postHandled).toBe(false);
-    expect(postRes._ended).toBe(false);
+    // NOTE deliberately not asserted: B's `join_rejected` CONFIRMATION row.
+    // Verified live: the JOIN_REJECTED event only fires on P2P delivery to
+    // the requester's node, so a SAME-NODE requester never receives it —
+    // the cross-node confirmation contract belongs to the devnet tier.
+    // Agent C must still see nothing either way (multi-agent-node safety).
+    const c = await notificationsFor(tokenC);
+    expect(c.rows).toEqual([]);
   });
 });

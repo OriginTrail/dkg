@@ -20,7 +20,6 @@ import {
   FileProverWal,
   InMemoryProverWal,
   startProverLoop,
-  type CiphertextChunkBackfillFn,
   type ProofBuilder,
   type ProverLogger,
   type ProverLoopStatus,
@@ -66,23 +65,6 @@ export interface RandomSamplingBindOptions {
    * by the hook are caught and logged so the prover stays running.
    */
   onTick?: (outcome: TickOutcome) => void;
-  /**
-   * OT-RFC-39 — optional late-join auto-backfill hook for curated KCs.
-   * When supplied, the prover invokes it on `CiphertextChunksMissingError`
-   * to pull missing chunks from authorized peers via the V10
-   * `PROTOCOL_GET_CIPHERTEXT_CHUNK` sync verb, then retries the extract
-   * once. Wired in `dkg-agent` to `fetchCiphertextChunkFromPeer` against
-   * the workspace-topic subscribers — the natural authorized-host set.
-   */
-  ciphertextChunkBackfill?: CiphertextChunkBackfillFn;
-  /**
-   * Codex review on PR #715 — resolves a numeric on-chain `cgId` to
-   * the curator-committed `nameHash` (wire form) used to scope the
-   * ciphertext-chunks named graph. The prover forwards the result to
-   * the extractor so its SPARQL lookup pins the per-CG named graph.
-   * Wired in `dkg-agent` to `resolveLocalCgIdByOnChainId` + `gossipWireIdFor`.
-   */
-  canonicalCgIdForChunkStore?: (cgId: bigint) => string | null;
 }
 
 /**
@@ -128,10 +110,13 @@ export async function bindRandomSampling(
   // Validate the chain adapter has the methods the prover needs.
   // Surface the missing-method error here (with a clear message) instead
   // of letting the first tick fail mid-flight.
+  // OT-RFC-49 — the prover reads root/leafCount from the PINNED challenge
+  // (no live `getLatestMerkleRoot`/`getMerkleLeafCount`), so those are no
+  // longer required gates. The curated path proves the public `_catalog`
+  // from the local store (no `getLatestCiphertextChunksRoot`/count either).
   const required = [
     'getActiveProofPeriodStatus', 'createChallenge', 'submitProof',
-    'getNodeChallenge', 'getLatestMerkleRoot', 'getMerkleLeafCount',
-    'getKAContextGraphId',
+    'getNodeChallenge', 'getKAContextGraphId',
   ] as const;
   const missing = required.filter(
     (m) => typeof (opts.chain as unknown as Record<string, unknown>)[m] !== 'function',
@@ -163,8 +148,6 @@ export async function bindRandomSampling(
     builder,
     wal,
     log: opts.log,
-    ciphertextChunkBackfill: opts.ciphertextChunkBackfill,
-    canonicalCgIdForChunkStore: opts.canonicalCgIdForChunkStore,
   });
 
   const loop = startProverLoop({

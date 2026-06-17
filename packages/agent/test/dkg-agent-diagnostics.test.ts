@@ -16,9 +16,26 @@
  * focused on the diagnostic shape and don't drag in libp2p / chain /
  * storage initialisation.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { PROTOCOL_MESSAGE, PROTOCOL_SYNC, type ProtocolOutboxEntry } from '@origintrail-official/dkg-core';
+
+/**
+ * Hand-rolled call recorder used in place of behaviour mocks. Records
+ * every invocation's arguments on `.calls` and delegates to `impl`.
+ * These stubs are pure DI seams (the code under test — `DKGAgent`'s
+ * `getPeerDiagnostics` — stays real); none of the recorders are
+ * asserted on as spies, they just supply deterministic libp2p /
+ * messenger surfaces.
+ */
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
 
 interface StubOutboxEntry {
   peer: string;
@@ -44,7 +61,7 @@ interface StubOutboxEntry {
  */
 function makeOutboxStub(entries: StubOutboxEntry[]) {
   return {
-    listOutbox: vi.fn((): ProtocolOutboxEntry[] => entries.map((e) => ({ ...e }))),
+    listOutbox: recorder((): ProtocolOutboxEntry[] => entries.map((e) => ({ ...e }))),
   };
 }
 
@@ -115,14 +132,14 @@ function makeAgentLike({
   return {
     node: {
       libp2p: {
-        getConnections: vi.fn((arg?: unknown) => {
+        getConnections: recorder((arg?: unknown) => {
           if (arg == null) return rawConnections;
           const key = (arg as { toString: () => string }).toString();
           return keyedConnectionsByPeer?.get(key) ?? [];
         }),
-        getPeers: vi.fn(() => (peerIds ?? []).map((id) => ({ toString: () => id }))),
+        getPeers: recorder(() => (peerIds ?? []).map((id) => ({ toString: () => id }))),
         peerStore: {
-          get: vi.fn(async (pid: any) => {
+          get: recorder(async (pid: any) => {
             const key = pid.toString();
             const entry = peerStoreEntries?.get(key);
             if (!entry) throw new Error('NotFound');
@@ -311,7 +328,8 @@ describe('DKGAgent.getPeerDiagnostics', () => {
     });
 
     it('does not mark peers that lack the current sync protocol as stale', async () => {
-      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      const realDateNow = Date.now;
+      Date.now = recorder(() => 1_000_000) as typeof Date.now;
       try {
         const agentLike = makeAgentLike({
           rawConnections: [makeStubConn(PEER_A)],
@@ -337,12 +355,13 @@ describe('DKGAgent.getPeerDiagnostics', () => {
           backoff: null,
         });
       } finally {
-        nowSpy.mockRestore();
+        Date.now = realDateNow;
       }
     });
 
     it('surfaces raw sync status separately from substrate outbox state', async () => {
-      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      const realDateNow = Date.now;
+      Date.now = recorder(() => 1_000_000) as typeof Date.now;
       try {
         const agentLike = makeAgentLike({
           rawConnections: [makeStubConn(PEER_A)],
@@ -372,12 +391,13 @@ describe('DKGAgent.getPeerDiagnostics', () => {
         });
         expect(diag.outbox.byProtocol).toEqual({});
       } finally {
-        nowSpy.mockRestore();
+        Date.now = realDateNow;
       }
     });
 
     it('keeps connected cold-cache peers observable as unknown sync capability', async () => {
-      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      const realDateNow = Date.now;
+      Date.now = recorder(() => 1_000_000) as typeof Date.now;
       try {
         const agentLike = makeAgentLike({
           rawConnections: [makeStubConn(PEER_A)],
@@ -399,12 +419,13 @@ describe('DKGAgent.getPeerDiagnostics', () => {
           },
         });
       } finally {
-        nowSpy.mockRestore();
+        Date.now = realDateNow;
       }
     });
 
     it('keeps sync health observable when getPeers shows a live peer without raw connections', async () => {
-      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      const realDateNow = Date.now;
+      Date.now = recorder(() => 1_000_000) as typeof Date.now;
       try {
         const agentLike = makeAgentLike({
           rawConnections: [],
@@ -437,7 +458,7 @@ describe('DKGAgent.getPeerDiagnostics', () => {
           },
         });
       } finally {
-        nowSpy.mockRestore();
+        Date.now = realDateNow;
       }
     });
 
@@ -732,7 +753,7 @@ describe('DKGAgent.getPeerDiagnostics', () => {
 
     it('returns rawConnectionCount=0 when getConnections() throws', async () => {
       const agentLike = makeAgentLike({ rawConnections: [] });
-      agentLike.node.libp2p.getConnections = vi.fn(() => {
+      agentLike.node.libp2p.getConnections = recorder(() => {
         throw new Error('libp2p internal blew up');
       });
       const diag = await callDiagnostics(agentLike, PEER_A);
@@ -742,7 +763,7 @@ describe('DKGAgent.getPeerDiagnostics', () => {
 
     it('returns peerStore=null when peerStore.get throws', async () => {
       const agentLike = makeAgentLike({ rawConnections: [] });
-      agentLike.node.libp2p.peerStore.get = vi.fn(async () => {
+      agentLike.node.libp2p.peerStore.get = recorder(async () => {
         throw new Error('NotFound');
       });
       const diag = await callDiagnostics(agentLike, PEER_A);

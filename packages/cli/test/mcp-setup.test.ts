@@ -1,9 +1,70 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir, homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import TOML from '@iarna/toml';
 import { mcpSetupAction, type McpSetupActionDeps } from '../src/mcp-setup.js';
+import {
+  startLiveDaemon,
+  stopLiveDaemon,
+  type LiveDaemon,
+} from './helpers/live-daemon.js';
+
+/**
+ * NO MOCKS. `dkg mcp setup` is a pure CLI ORCHESTRATOR over (a) a real
+ * filesystem — every config/registration write below lands on a real
+ * temp HOME and is re-read from disk — and (b) a small set of injected
+ * collaborators it is *designed* to accept (`McpSetupActionDeps`): the
+ * daemon spawner, the testnet faucet primitive, the readline confirm
+ * hook, and the dkg-core/openclaw fs+env helpers. Those injection
+ * seams are wired with plain hand-rolled `recorder()` functions (no
+ * vitest mock API) — a recorder runs a real implementation and records
+ * its args, exactly the DI pattern the production call site uses with
+ * the real helpers.
+ *
+ * The two genuinely-external boundaries stay injected doubles, on
+ * purpose: `startDaemon` (would spawn a 30s daemon per test) and
+ * `requestFaucetFunding` (hits a live testnet faucet CI cannot reach —
+ * same class as the hermes/openclaw external adapters left mocked).
+ *
+ * The ONE piece of real daemon behaviour the action performs itself —
+ * the `/api/status` reachability probe gating wallet funding (F14/F26)
+ * — is exercised against a REAL edge daemon booted via
+ * `startLiveDaemon` (see the funding-gate tests): reachable cases point
+ * the probe at the live daemon's port; unreachable cases point it at a
+ * closed port for a real ECONNREFUSED. No `fetch` stub anywhere.
+ */
+
+/**
+ * Hand-rolled call recorder (replaces `vitest fn` DI stubs). Runs the
+ * real `impl` and records every arg tuple on `.calls` — the same
+ * surface the assertions read, with no vitest mock machinery.
+ */
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
+
+/**
+ * Hand-rolled write capture (replaces `vitest spyOn` on
+ * console/stdout/stderr). Swaps the target method for a recorder that
+ * collects arg tuples on `.calls`; `mockRestore()` puts the original
+ * back. Composes LIFO, so a per-test capture nested inside the
+ * describe-level stderr silencer restores correctly.
+ */
+function captureWrites(obj: any, key: string) {
+  const calls: any[][] = [];
+  const orig = obj[key];
+  obj[key] = (...args: any[]) => {
+    calls.push(args);
+    return true;
+  };
+  return { calls, mockRestore: () => { obj[key] = orig; } };
+}
 
 /**
  * Codex Round-4 + Round-9: canonical entry shape that production
@@ -43,10 +104,24 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
   let originalAppdata: string | undefined;
   let originalDkgHome: string | undefined;
   let originalXdgConfigHome: string | undefined;
-  let logSpy: ReturnType<typeof vi.spyOn>;
-  let warnSpy: ReturnType<typeof vi.spyOn>;
-  let errorSpy: ReturnType<typeof vi.spyOn>;
-  let stderrSilencer: ReturnType<typeof vi.spyOn>;
+  let logSpy: ReturnType<typeof captureWrites>;
+  let warnSpy: ReturnType<typeof captureWrites>;
+  let errorSpy: ReturnType<typeof captureWrites>;
+  let stderrSilencer: ReturnType<typeof captureWrites>;
+
+  // A REAL edge daemon, booted once for this describe. The funding-gate
+  // tests (F14/F26) that need the `/api/status` reachability probe to
+  // return ok point `opts.port` at this daemon's real API port — the
+  // production `fetch(.../api/status)` then does a true round-trip
+  // against it (no fetch stub). `requestFaucetFunding` stays an
+  // injected double (live testnet faucet, unreachable from CI).
+  let liveDaemon: LiveDaemon | undefined;
+  beforeAll(async () => {
+    liveDaemon = await startLiveDaemon({ authEnabled: false });
+  }, 90_000);
+  afterAll(async () => {
+    await stopLiveDaemon(liveDaemon);
+  });
 
   beforeEach(() => {
     tmpHome = mkdtempSync(join(tmpdir(), 'mcp-setup-test-'));
@@ -73,16 +148,17 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // path resolver lands inside the test sandbox on Win32. macOS
     // and Linux ignore APPDATA.
     process.env.APPDATA = join(tmpHome, 'AppData', 'Roaming');
-    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    logSpy = captureWrites(console, 'log');
+    warnSpy = captureWrites(console, 'warn');
+    errorSpy = captureWrites(console, 'error');
     // Codex Round-8 Fix 13: the "Registering CLI:" log + Round-2
     // Bug B's VSCode advisory + Round-8 Fix 15's per-client
     // failure warnings all go to stderr now. Silence them by
     // default so the test reporter stays readable. Tests that
-    // need to assert on stderr re-spy after entering the test body
-    // (the overlap is harmless — vi resolves the most-recent spy).
-    stderrSilencer = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    // need to assert on stderr re-capture after entering the test body
+    // (the overlap is harmless — captures compose LIFO, so the inner
+    // per-test capture restores back to this silencer).
+    stderrSilencer = captureWrites(process.stderr, 'write');
   });
 
   afterEach(() => {
@@ -116,8 +192,8 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
    * (set by the action) for the write target.
    */
   function makeDeps(overrides: Partial<McpSetupActionDeps> = {}): McpSetupActionDeps {
-    const startDaemon = vi.fn(async (_port: number) => {});
-    const ensureDkgNodeConfig = vi.fn((opts: {
+    const startDaemon = recorder(async (_port: number) => {});
+    const ensureDkgNodeConfig = recorder((opts: {
       agentName: string;
       network: any;
       apiPort: number;
@@ -141,23 +217,23 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
         JSON.stringify(merged, null, 2),
       );
     });
-    const loadNetworkConfig = vi.fn(() => ({
+    const loadNetworkConfig = recorder(() => ({
       networkName: 'test-net',
       relays: [],
       defaultContextGraphs: ['agent-context'],
       defaultNodeRole: 'edge',
       faucet: { url: 'http://faucet.test', mode: 'testnet' },
     }) as any);
-    const readWalletsWithRetry = vi.fn(async () => ['0xadmin', '0xtest1', '0xtest2', '0xtest3']);
-    const requestFaucetFunding = vi.fn(async () => ({
+    const readWalletsWithRetry = recorder(async () => ['0xadmin', '0xtest1', '0xtest2', '0xtest3']);
+    const requestFaucetFunding = recorder(async () => ({
       success: true,
       fundedWallets: ['0xadmin', '0xtest1', '0xtest2', '0xtest3'],
     }) as any);
-    const logManualFundingInstructions = vi.fn(() => {});
+    const logManualFundingInstructions = recorder(() => {});
     // Phase-2: detectContext defaults to "installed" by returning null
     // from findDkgMonorepoRoot. Tests that exercise the monorepo path
     // override this dep to return a mock repo root.
-    const findDkgMonorepoRoot = vi.fn((_startDir?: string) => null as string | null);
+    const findDkgMonorepoRoot = recorder((_startDir?: string) => null as string | null);
     // Codex Round-4: `resolveDkgBin` was removed from the deps
     // surface — both modes now register `process.execPath +
     // <cli.js path>`, so the `which dkg` resolution it provided is
@@ -168,7 +244,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // `<tmpHome>/.dkg`. Existing tests that don't exercise the
     // monorepo path keep landing in `<tmpHome>/.dkg` byte-aligned
     // with the pre-Bug-A behaviour.
-    const resolveDkgConfigHome = vi.fn(
+    const resolveDkgConfigHome = recorder(
       (opts: { isDkgMonorepo?: boolean } = {}): string => {
         if (opts.isDkgMonorepo) {
           const devDir = join(tmpHome, '.dkg-dev');
@@ -204,16 +280,16 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     await mcpSetupAction({ verify: false, fund: false }, deps);
 
     // (a) ensureDkgNodeConfig was called with port 9200 (default) + a fallback agent name.
-    expect(deps.ensureDkgNodeConfig).toHaveBeenCalledTimes(1);
-    const writeArgs = (deps.ensureDkgNodeConfig as any).mock.calls[0][0];
+    expect((deps.ensureDkgNodeConfig as any).calls).toHaveLength(1);
+    const writeArgs = (deps.ensureDkgNodeConfig as any).calls[0][0];
     expect(writeArgs.apiPort).toBe(9200);
     expect(typeof writeArgs.agentName).toBe('string');
     expect(writeArgs.agentName).toMatch(/^mcp-agent-/);
     expect(existsSync(join(tmpHome, '.dkg', 'config.json'))).toBe(true);
 
     // (b) startDaemon was called once with the effective port.
-    expect(deps.startDaemon).toHaveBeenCalledTimes(1);
-    expect((deps.startDaemon as any).mock.calls[0][0]).toBe(9200);
+    expect((deps.startDaemon as any).calls).toHaveLength(1);
+    expect((deps.startDaemon as any).calls[0][0]).toBe(9200);
 
     // (c) Cursor client config was written with the canonical entry.
     const cursorConfig = JSON.parse(readFileSync(join(tmpHome, '.cursor', 'mcp.json'), 'utf-8'));
@@ -230,9 +306,9 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const deps = makeDeps();
     await mcpSetupAction({ verify: false, fund: false }, deps);
 
-    expect(deps.ensureDkgNodeConfig).not.toHaveBeenCalled();
+    expect((deps.ensureDkgNodeConfig as any).calls).toEqual([]);
     // Daemon start still runs unless --no-start was passed.
-    expect(deps.startDaemon).toHaveBeenCalledTimes(1);
+    expect((deps.startDaemon as any).calls).toHaveLength(1);
   });
 
   // F6 (qa-review-round-1): when the existing-config skip-write branch
@@ -259,10 +335,10 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
     // writeDkgConfig MUST NOT have run — the existing-config branch
     // was taken (no overrides supplied).
-    expect(deps.ensureDkgNodeConfig).not.toHaveBeenCalled();
+    expect((deps.ensureDkgNodeConfig as any).calls).toEqual([]);
     // startDaemon MUST receive the persisted 9300, not the CLI default.
-    expect(deps.startDaemon).toHaveBeenCalledTimes(1);
-    expect((deps.startDaemon as any).mock.calls[0][0]).toBe(9300);
+    expect((deps.startDaemon as any).calls).toHaveLength(1);
+    expect((deps.startDaemon as any).calls[0][0]).toBe(9300);
   });
 
   it('F6: existing config with non-default port + --no-start — read-back still runs', async () => {
@@ -287,8 +363,8 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // is structural: the branch ran without throwing on the corrupt
     // configs / missing fields path the helper handles. Companion
     // assertion to the port-9300 case above.
-    expect(deps.ensureDkgNodeConfig).not.toHaveBeenCalled();
-    expect(deps.startDaemon).not.toHaveBeenCalled();
+    expect((deps.ensureDkgNodeConfig as any).calls).toEqual([]);
+    expect((deps.startDaemon as any).calls).toEqual([]);
   });
 
   it('honours --no-start: skips daemon start; faucet path is gated on daemon reachability (F14)', async () => {
@@ -302,22 +378,22 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // (NOT the silent omission that pre-F14 produced).
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
     const deps = makeDeps();
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
-      throw new Error('connection refused');
-    });
 
+    // No fetch stub: with no `--port`, effectivePort is the CLI default
+    // 9200 — nothing is listening there in CI (the shared Hardhat node
+    // is on 9548, live daemons on 21000+), so the production probe
+    // hits a real closed port and ECONNREFUSEs. That is the genuine
+    // "daemon not reachable" condition, exercised for real.
     await mcpSetupAction({ start: false, verify: false }, deps);
 
-    expect(deps.startDaemon).not.toHaveBeenCalled();
-    expect(deps.requestFaucetFunding).not.toHaveBeenCalled();
+    expect((deps.startDaemon as any).calls).toEqual([]);
+    expect((deps.requestFaucetFunding as any).calls).toEqual([]);
     // Registration still proceeds — orthogonal axis.
     expect(existsSync(join(tmpHome, '.cursor', 'mcp.json'))).toBe(true);
     // And the new explicit log line fired (replacing the pre-F14
     // silent omission).
-    const logged = (logSpy.mock.calls as any[]).map((c) => c.join(' ')).join('\n');
+    const logged = (logSpy.calls as any[]).map((c) => c.join(' ')).join('\n');
     expect(logged).toMatch(/Skipping wallet funding \(daemon not reachable on port 9200\)/);
-
-    fetchSpy.mockRestore();
   });
 
   // F14 (qa-review-round-2): the canonical decoupled-flow test.
@@ -328,21 +404,18 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
   it('F14: --no-start with daemon already reachable → funding proceeds', async () => {
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
     const deps = makeDeps();
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
-      // Daemon is up and healthy; probe returns ok.
-      return new Response('{}', { status: 200 }) as any;
-    });
 
-    await mcpSetupAction({ start: false, verify: false }, deps);
+    // Point the probe at the REAL live daemon's API port: the
+    // production `fetch(.../api/status)` does a true round-trip and
+    // gets a real 200, so funding proceeds. No fetch stub.
+    await mcpSetupAction({ start: false, verify: false, port: String(liveDaemon!.apiPort) }, deps);
 
-    expect(deps.startDaemon).not.toHaveBeenCalled();
+    expect((deps.startDaemon as any).calls).toEqual([]);
     // Funding MUST proceed — daemon is reachable, --no-fund was not
     // supplied. This is the bug F14 fixes.
-    expect(deps.requestFaucetFunding).toHaveBeenCalledTimes(1);
-    expect((deps.requestFaucetFunding as any).mock.calls[0][2])
+    expect((deps.requestFaucetFunding as any).calls).toHaveLength(1);
+    expect((deps.requestFaucetFunding as any).calls[0][2])
       .toEqual(['0xadmin', '0xtest1', '0xtest2', '0xtest3']);
-
-    fetchSpy.mockRestore();
   });
 
   it('F14: --no-fund + --no-start → explicit-skip log (not the unreachable log)', async () => {
@@ -352,20 +425,19 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // "Skipping wallet funding (--no-fund)" log line stays intact.
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
     const deps = makeDeps();
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
-      throw new Error('should not be called when --no-fund is set');
-    });
 
+    // No fetch stub: --no-fund returns before the reachability probe is
+    // ever reached, so no `/api/status` request fires at all. The
+    // assertions below prove that path directly — the funding double is
+    // never called and the --no-fund (not the unreachable) line logs.
     await mcpSetupAction({ start: false, fund: false, verify: false }, deps);
 
-    expect(deps.requestFaucetFunding).not.toHaveBeenCalled();
-    const logged = (logSpy.mock.calls as any[]).map((c) => c.join(' ')).join('\n');
+    expect((deps.requestFaucetFunding as any).calls).toEqual([]);
+    const logged = (logSpy.calls as any[]).map((c) => c.join(' ')).join('\n');
     expect(logged).toMatch(/Skipping wallet funding \(--no-fund\)/);
     // The unreachable-path log line MUST NOT fire when --no-fund
     // short-circuits the funding step.
     expect(logged).not.toMatch(/daemon not reachable/);
-
-    fetchSpy.mockRestore();
   });
 
   it('honours --no-fund: skips the faucet step but starts daemon + registers', async () => {
@@ -374,8 +446,8 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
     await mcpSetupAction({ fund: false, verify: false }, deps);
 
-    expect(deps.startDaemon).toHaveBeenCalledTimes(1);
-    expect(deps.requestFaucetFunding).not.toHaveBeenCalled();
+    expect((deps.startDaemon as any).calls).toHaveLength(1);
+    expect((deps.requestFaucetFunding as any).calls).toEqual([]);
     expect(existsSync(join(tmpHome, '.cursor', 'mcp.json'))).toBe(true);
   });
 
@@ -385,21 +457,21 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
     await mcpSetupAction({ dryRun: true }, deps);
 
-    expect(deps.ensureDkgNodeConfig).not.toHaveBeenCalled();
-    expect(deps.startDaemon).not.toHaveBeenCalled();
-    expect(deps.requestFaucetFunding).not.toHaveBeenCalled();
+    expect((deps.ensureDkgNodeConfig as any).calls).toEqual([]);
+    expect((deps.startDaemon as any).calls).toEqual([]);
+    expect((deps.requestFaucetFunding as any).calls).toEqual([]);
     expect(existsSync(join(tmpHome, '.dkg', 'config.json'))).toBe(false);
     expect(existsSync(join(tmpHome, '.cursor', 'mcp.json'))).toBe(false);
   });
 
   it('honours --print-only: short-circuits before any other step', async () => {
     const deps = makeDeps();
-    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const stdoutSpy = captureWrites(process.stdout, 'write');
 
     await mcpSetupAction({ printOnly: true }, deps);
 
-    expect(deps.ensureDkgNodeConfig).not.toHaveBeenCalled();
-    expect(deps.startDaemon).not.toHaveBeenCalled();
+    expect((deps.ensureDkgNodeConfig as any).calls).toEqual([]);
+    expect((deps.startDaemon as any).calls).toEqual([]);
     // Codex Issue 5: --print-only now emits TWO JSON blocks (the
     // canonical mcpServers.dkg shape PLUS a VSCode-shape note).
     // Use parseStdoutJson which walks the first balanced object.
@@ -424,89 +496,71 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
     await mcpSetupAction({ port: '9300', name: 'override-agent', verify: false, fund: false }, deps);
 
-    const writeArgs = (deps.ensureDkgNodeConfig as any).mock.calls[0][0];
+    const writeArgs = (deps.ensureDkgNodeConfig as any).calls[0][0];
     expect(writeArgs.agentName).toBe('override-agent');
     expect(writeArgs.apiPort).toBe(9300);
     expect(writeArgs.overrides).toEqual({ nameExplicit: true, portExplicit: true });
     // Daemon start uses the override port.
-    expect((deps.startDaemon as any).mock.calls[0][0]).toBe(9300);
+    expect((deps.startDaemon as any).calls[0][0]).toBe(9300);
   });
 
   it('faucet failure logs manual instructions; setup continues to register clients', async () => {
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
     const deps = makeDeps({
-      requestFaucetFunding: vi.fn(async () => {
+      requestFaucetFunding: recorder(async () => {
         throw new Error('faucet 503');
       }),
     });
-    // F14 + F26: the funding step now probes daemon reachability via
-    // `/api/status` before attempting the faucet call. Stub fetch to
-    // mark the daemon reachable so the throwing-faucet mock is
-    // actually reached. Without this stub the funding step would
-    // short-circuit on the unreachable-path log line and the
-    // throwing-faucet mock would never run.
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
-      return new Response('{}', { status: 200 }) as any;
-    });
+    // F14 + F26: the funding step probes daemon reachability via
+    // `/api/status` before attempting the faucet call. Point the probe
+    // at the REAL live daemon (a true 200 round-trip) so the funding
+    // step proceeds and the throwing-faucet double is actually reached.
+    await mcpSetupAction({ verify: false, port: String(liveDaemon!.apiPort) }, deps);
 
-    await mcpSetupAction({ verify: false }, deps);
-
-    expect(deps.logManualFundingInstructions).toHaveBeenCalledTimes(1);
+    expect((deps.logManualFundingInstructions as any).calls).toHaveLength(1);
     // Registration still proceeds.
     expect(existsSync(join(tmpHome, '.cursor', 'mcp.json'))).toBe(true);
-
-    fetchSpy.mockRestore();
   });
 
   it('faucet result failures log faucet-provided reasons', async () => {
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
     const deps = makeDeps({
-      requestFaucetFunding: vi.fn(async () => ({
+      requestFaucetFunding: recorder(async () => ({
         success: false,
         fundedWallets: [],
         failedWallets: ['0xadmin', '0xtest1', '0xtest2', '0xtest3'],
         error: 'Faucet did not fund all wallets: 0xadmin. Faucet reported: cooldown_active: Caller cooldown active until 2026-05-11T19:17:45.000Z',
       }) as any),
     });
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
-      return new Response('{}', { status: 200 }) as any;
-    });
+    // Reachable probe → real live daemon (true 200), no fetch stub.
+    await mcpSetupAction({ verify: false, port: String(liveDaemon!.apiPort) }, deps);
 
-    await mcpSetupAction({ verify: false }, deps);
-
-    expect(deps.logManualFundingInstructions).toHaveBeenCalledTimes(1);
-    const warned = (warnSpy.mock.calls as any[]).map((c) => c.join(' ')).join('\n');
+    expect((deps.logManualFundingInstructions as any).calls).toHaveLength(1);
+    const warned = (warnSpy.calls as any[]).map((c) => c.join(' ')).join('\n');
     expect(warned).toContain('cooldown_active');
     expect(warned).toContain('2026-05-11T19:17:45.000Z');
     expect(existsSync(join(tmpHome, '.cursor', 'mcp.json'))).toBe(true);
-
-    fetchSpy.mockRestore();
   });
 
   it('faucet partial success logs manual instructions for remaining wallets only', async () => {
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
     const deps = makeDeps({
-      requestFaucetFunding: vi.fn(async () => ({
+      requestFaucetFunding: recorder(async () => ({
         success: true,
         fundedWallets: ['0xadmin', '0xtest1'],
         failedWallets: ['0xtest2', '0xtest3'],
         error: 'Faucet did not fund all wallets: 0xtest2, 0xtest3',
       }) as any),
     });
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
-      return new Response('{}', { status: 200 }) as any;
-    });
+    // Reachable probe → real live daemon (true 200), no fetch stub.
+    await mcpSetupAction({ verify: false, port: String(liveDaemon!.apiPort) }, deps);
 
-    await mcpSetupAction({ verify: false }, deps);
-
-    expect(deps.logManualFundingInstructions).toHaveBeenCalledTimes(1);
-    expect((deps.logManualFundingInstructions as any).mock.calls[0][0])
+    expect((deps.logManualFundingInstructions as any).calls).toHaveLength(1);
+    expect((deps.logManualFundingInstructions as any).calls[0][0])
       .toEqual(['0xtest2', '0xtest3']);
-    const warned = (warnSpy.mock.calls as any[]).map((c) => c.join(' ')).join('\n');
+    const warned = (warnSpy.calls as any[]).map((c) => c.join(' ')).join('\n');
     expect(warned).toMatch(/Faucet partially completed/);
     expect(existsSync(join(tmpHome, '.cursor', 'mcp.json'))).toBe(true);
-
-    fetchSpy.mockRestore();
   });
 
   // ── Phase-2: monorepo context detection + --installed/--monorepo flags ──
@@ -518,9 +572,9 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
   // keep the brace-walking shape so leading/trailing whitespace
   // around the JSON body never trips the parser.
   const parseStdoutJson = (
-    spy: ReturnType<typeof vi.spyOn>,
+    spy: ReturnType<typeof captureWrites>,
   ): Record<string, any> => {
-    const all = (spy.mock.calls as any[]).map((c) => String(c[0])).join('');
+    const all = (spy.calls as any[]).map((c) => String(c[0])).join('');
     const start = all.indexOf('{');
     if (start < 0) throw new Error(`No JSON object in stdout: ${JSON.stringify(all)}`);
     let depth = 0;
@@ -560,9 +614,9 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
   it('phase-2: --print-only with monorepo auto-detect emits the local-CLI-dist absolute-path form', async () => {
     const fakeRepoRoot = makeFakeMonorepoRoot();
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => fakeRepoRoot),
+      findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
     });
-    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const stdoutSpy = captureWrites(process.stdout, 'write');
 
     await mcpSetupAction({ printOnly: true }, deps);
 
@@ -581,7 +635,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
   it('phase-2: --print-only with no monorepo detected emits the standard `dkg` installed form', async () => {
     const deps = makeDeps(); // findDkgMonorepoRoot defaults to returning null
-    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const stdoutSpy = captureWrites(process.stdout, 'write');
 
     await mcpSetupAction({ printOnly: true }, deps);
 
@@ -592,9 +646,9 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
   it('phase-2: --installed forces the standard form even from inside a monorepo', async () => {
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => makeFakeMonorepoRoot()),
+      findDkgMonorepoRoot: recorder(() => makeFakeMonorepoRoot()),
     });
-    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const stdoutSpy = captureWrites(process.stdout, 'write');
 
     await mcpSetupAction({ printOnly: true, installed: true }, deps);
 
@@ -637,12 +691,11 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     );
 
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => fakeRepoRoot),
+      findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
     });
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
-      throw new Error('connection refused');
-    });
-
+    // No fetch stub: with start+fund+verify all off the action never
+    // reaches a `/api/status` probe — this test is purely about
+    // client-entry reclassification on the real filesystem.
     await mcpSetupAction({ start: false, fund: false, verify: false }, deps);
 
     // Post-write, the config now carries the monorepo-form entry —
@@ -654,8 +707,6 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       join(fakeRepoRoot, 'packages', 'cli', 'dist', 'cli.js'),
     );
     expect(after.mcpServers.dkg.args.slice(1)).toEqual(['mcp', 'serve']);
-
-    fetchSpy.mockRestore();
   });
 
   // ── Phase-3: Claude Desktop + Windsurf detection + write ──────────
@@ -910,7 +961,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const fakeRepoRoot = makeFakeMonorepoRoot();
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => fakeRepoRoot),
+      findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
     });
 
     await mcpSetupAction({ start: false, fund: false, verify: false }, deps);
@@ -986,13 +1037,13 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // stub knows the operator opted into auto-confirm. The stub
     // returns the plan unchanged → all detected clients register.
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
-    const confirmPlan = vi.fn(async (planned: any) => [...planned]);
+    const confirmPlan = recorder(async (planned: any) => [...planned]);
     const deps = makeDeps({ confirmPlan });
 
     await mcpSetupAction({ start: false, fund: false, verify: false, yes: true }, deps);
 
-    expect(confirmPlan).toHaveBeenCalledTimes(1);
-    expect(confirmPlan.mock.calls[0][1]).toEqual({ yes: true });
+    expect((confirmPlan as any).calls).toHaveLength(1);
+    expect(confirmPlan.calls[0][1]).toEqual({ yes: true });
     expect(existsSync(join(tmpHome, '.cursor', 'mcp.json'))).toBe(true);
   });
 
@@ -1002,16 +1053,16 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // writes nothing. Asserts the decline path is non-fatal and
     // the file stays absent.
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
-    const confirmPlan = vi.fn(async (planned: any) =>
+    const confirmPlan = recorder(async (planned: any) =>
       planned.map((p: any) => ({ ...p, action: 'skip' })),
     );
     const deps = makeDeps({ confirmPlan });
 
     await mcpSetupAction({ start: false, fund: false, verify: false }, deps);
 
-    expect(confirmPlan).toHaveBeenCalledTimes(1);
+    expect((confirmPlan as any).calls).toHaveLength(1);
     expect(existsSync(join(tmpHome, '.cursor', 'mcp.json'))).toBe(false);
-    const logged = (logSpy.mock.calls as any[]).map((c) => c.join(' ')).join('\n');
+    const logged = (logSpy.calls as any[]).map((c) => c.join(' ')).join('\n');
     expect(logged).toMatch(/All pending registrations declined/);
     // Codex Round-5 Fix 7: the guidance recommends `--yes` (skips
     // prompts), not `--force` alone (which only refreshes
@@ -1030,7 +1081,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const claudePath = claudeDesktopPathUnder(tmpHome);
     mkdirSync(join(claudePath, '..'), { recursive: true });
 
-    const confirmPlan = vi.fn(async (planned: any) =>
+    const confirmPlan = recorder(async (planned: any) =>
       planned.map((p: any) =>
         p.s.target.name === 'Cursor' ? { ...p, action: 'skip' } : p,
       ),
@@ -1058,7 +1109,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const beforeCursor = (await import('node:fs')).statSync(join(cursorDir, 'mcp.json')).mtimeMs;
     const beforeClaude = (await import('node:fs')).statSync(join(tmpHome, '.claude.json')).mtimeMs;
 
-    const confirmPlan = vi.fn(async (planned: any) => [...planned]);
+    const confirmPlan = recorder(async (planned: any) => [...planned]);
     const deps = makeDeps({ confirmPlan });
 
     await mcpSetupAction({ start: false, fund: false, verify: false }, deps);
@@ -1071,19 +1122,19 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     expect(afterClaude).toBe(beforeClaude);
     // The "all up-to-date" log line fires (the original phrasing,
     // NOT the F31 declined-prompt phrasing).
-    const logged = (logSpy.mock.calls as any[]).map((c) => c.join(' ')).join('\n');
+    const logged = (logSpy.calls as any[]).map((c) => c.join(' ')).join('\n');
     expect(logged).toMatch(/Clients all up-to-date/);
     expect(logged).not.toMatch(/All pending registrations declined/);
   });
 
   it('F31: dry-run skips confirmPlan entirely (preview-only; no point asking about non-writes)', async () => {
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
-    const confirmPlan = vi.fn(async (planned: any) => [...planned]);
+    const confirmPlan = recorder(async (planned: any) => [...planned]);
     const deps = makeDeps({ confirmPlan });
 
     await mcpSetupAction({ dryRun: true }, deps);
 
-    expect(confirmPlan).not.toHaveBeenCalled();
+    expect((confirmPlan as any).calls).toEqual([]);
     expect(existsSync(join(tmpHome, '.cursor', 'mcp.json'))).toBe(false);
   });
 
@@ -1168,7 +1219,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // Post-fix: cwd is passed explicitly.
     const fakeRepoRoot = makeFakeMonorepoRoot();
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
-    const findStub = vi.fn((startDir?: string) => {
+    const findStub = recorder((startDir?: string) => {
       // Mimic the production semantic: only return monorepo root
       // when startDir is something inside the monorepo. Without the
       // Bug 1 fix, startDir would be undefined here (default arg).
@@ -1180,8 +1231,8 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
     // The stub was called with a defined startDir argument (the
     // production code now passes process.cwd() explicitly).
-    expect(findStub).toHaveBeenCalled();
-    const callArg = findStub.mock.calls[0][0];
+    expect((findStub as any).calls.length).toBeGreaterThan(0);
+    const callArg = findStub.calls[0][0];
     expect(callArg).toBeDefined();
     expect(typeof callArg).toBe('string');
     // Monorepo mode fired: the entry uses execPath + cli.js, not the
@@ -1197,7 +1248,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const fakeRepoRoot = makeFakeMonorepoRoot();
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => fakeRepoRoot),
+      findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
     });
 
     await mcpSetupAction({ start: false, fund: false, verify: false }, deps);
@@ -1225,7 +1276,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
 
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => fakeRepoRoot),
+      findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
     });
 
     await expect(
@@ -1247,15 +1298,15 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // document, parses cleanly with `jq`), and the VSCode-shape
     // note is emitted on stderr instead.
     const deps = makeDeps();
-    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stdoutSpy = captureWrites(process.stdout, 'write');
+    const stderrSpy = captureWrites(process.stderr, 'write');
 
     await mcpSetupAction({ printOnly: true }, deps);
 
     // STDOUT: a single JSON document, parseable as-is — no prose,
     // no second object. This is the `dkg mcp setup --print-only |
     // jq …` flag contract.
-    const stdoutText = (stdoutSpy.mock.calls as any[]).map((c) => String(c[0])).join('');
+    const stdoutText = (stdoutSpy.calls as any[]).map((c) => String(c[0])).join('');
     const stdoutParsed = JSON.parse(stdoutText);
     expect(stdoutParsed.mcpServers.dkg).toEqual(EXPECTED_INSTALLED_ENTRY());
     // No `servers.dkg` (the VSCode shape) on stdout — keeps it
@@ -1265,7 +1316,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // STDERR: the VSCode-shape disambiguation note + a second JSON
     // block under `servers.dkg`. Same entry contents as the canonical
     // block — pinning that the note isn't drift.
-    const stderrText = (stderrSpy.mock.calls as any[]).map((c) => String(c[0])).join('');
+    const stderrText = (stderrSpy.calls as any[]).map((c) => String(c[0])).join('');
     expect(stderrText).toMatch(/VSCode/i);
     expect(stderrText).toMatch(/servers\.dkg/);
     // The stderr note contains a parseable `{ servers: { dkg: ... } }`
@@ -1300,12 +1351,11 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     );
 
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => fakeRepoRoot),
+      findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
     });
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
-      throw new Error('connection refused');
-    });
-
+    // No fetch stub: with start+fund+verify all off the action never
+    // reaches a `/api/status` probe — this test is purely about
+    // client-entry reclassification on the real filesystem.
     await mcpSetupAction({ start: false, fund: false, verify: false }, deps);
 
     const written = JSON.parse(readFileSync(vscodePath, 'utf-8'));
@@ -1314,8 +1364,6 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     expect(written.servers.dkg.args[0]).toBe(
       join(fakeRepoRoot, 'packages', 'cli', 'dist', 'cli.js'),
     );
-
-    fetchSpy.mockRestore();
   });
 
   // ── Codex Round-2 review fixes ────────────────────────────────────
@@ -1337,14 +1385,14 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     let dkgHomeAtWriteCall: string | undefined;
     let dkgHomeAtStartDaemonCall: string | undefined;
 
-    const resolveDkgConfigHomeSpy = vi.fn((opts: { isDkgMonorepo?: boolean } = {}) => {
+    const resolveDkgConfigHomeSpy = recorder((opts: { isDkgMonorepo?: boolean } = {}) => {
       isDkgMonorepoArg = opts.isDkgMonorepo;
       const dir = opts.isDkgMonorepo ? join(tmpHome, '.dkg-dev') : join(tmpHome, '.dkg');
       mkdirSync(dir, { recursive: true });
       return dir;
     });
 
-    const ensureDkgNodeConfigSpy = vi.fn((opts: any) => {
+    const ensureDkgNodeConfigSpy = recorder((opts: any) => {
       // Capture the env at the moment ensureDkgNodeConfig is invoked
       // so we can assert that DKG_HOME was set BEFORE step 1's write.
       dkgHomeAtWriteCall = process.env.DKG_HOME;
@@ -1356,12 +1404,12 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       );
     });
 
-    const startDaemonSpy = vi.fn(async (_port: number) => {
+    const startDaemonSpy = recorder(async (_port: number) => {
       dkgHomeAtStartDaemonCall = process.env.DKG_HOME;
     });
 
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => fakeRepoRoot),
+      findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
       resolveDkgConfigHome: resolveDkgConfigHomeSpy,
       ensureDkgNodeConfig: ensureDkgNodeConfigSpy,
       startDaemon: startDaemonSpy,
@@ -1393,13 +1441,13 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
 
     let isDkgMonorepoArg: boolean | undefined;
-    const resolveDkgConfigHomeSpy = vi.fn((opts: { isDkgMonorepo?: boolean } = {}) => {
+    const resolveDkgConfigHomeSpy = recorder((opts: { isDkgMonorepo?: boolean } = {}) => {
       isDkgMonorepoArg = opts.isDkgMonorepo;
       return join(tmpHome, '.dkg');
     });
 
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => null),
+      findDkgMonorepoRoot: recorder(() => null),
       resolveDkgConfigHome: resolveDkgConfigHomeSpy,
     });
 
@@ -1409,7 +1457,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // action returns, so reading it post-`await` no longer reflects
     // the in-action value.
     let dkgHomeAtWriteCall: string | undefined;
-    const ensureDkgNodeConfigSpy = vi.fn((opts: any) => {
+    const ensureDkgNodeConfigSpy = recorder((opts: any) => {
       dkgHomeAtWriteCall = process.env.DKG_HOME;
       const dir = process.env.DKG_HOME ?? join(tmpHome, '.dkg');
       mkdirSync(dir, { recursive: true });
@@ -1460,7 +1508,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // Real production-shape resolveDkgConfigHome stub: respects
     // configExists. The Fix 6 bypass means this stub MUST NOT be
     // called when `--monorepo` is forced.
-    const resolveDkgConfigHomeSpy = vi.fn((opts: { isDkgMonorepo?: boolean; configExists?: boolean } = {}) => {
+    const resolveDkgConfigHomeSpy = recorder((opts: { isDkgMonorepo?: boolean; configExists?: boolean } = {}) => {
       // Mirror production: configExists wins over isDkgMonorepo.
       if (opts.configExists ?? existsSync(join(installedDkg, 'config.json'))) {
         return installedDkg;
@@ -1470,7 +1518,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     });
 
     let dkgHomeAtWriteCall: string | undefined;
-    const ensureDkgNodeConfigSpy = vi.fn((opts: any) => {
+    const ensureDkgNodeConfigSpy = recorder((opts: any) => {
       dkgHomeAtWriteCall = process.env.DKG_HOME;
       const dir = process.env.DKG_HOME ?? installedDkg;
       mkdirSync(dir, { recursive: true });
@@ -1481,7 +1529,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     });
 
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => fakeRepoRoot),
+      findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
       resolveDkgConfigHome: resolveDkgConfigHomeSpy,
       ensureDkgNodeConfig: ensureDkgNodeConfigSpy,
     });
@@ -1490,7 +1538,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
     // (1) The bypass kicked in: resolveDkgConfigHome was NOT called
     // for the dkgDirPath computation under forced --monorepo.
-    expect(resolveDkgConfigHomeSpy).not.toHaveBeenCalled();
+    expect((resolveDkgConfigHomeSpy as any).calls).toEqual([]);
     // (2) DKG_HOME was set to ~/.dkg-dev mid-action — bootstrap
     // state landed in the dev home, NOT the installed home.
     expect(dkgHomeAtWriteCall).toBe(join(tmpHome, '.dkg-dev'));
@@ -1512,9 +1560,9 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     mkdirSync(installedDkg, { recursive: true });
     writeFileSync(join(installedDkg, 'config.yaml'), 'name: persisted\napiPort: 9200\n');
 
-    const resolveDkgConfigHomeSpy = vi.fn(() => installedDkg);
+    const resolveDkgConfigHomeSpy = recorder(() => installedDkg);
     let dkgHomeAtWriteCall: string | undefined;
-    const ensureDkgNodeConfigSpy = vi.fn((opts: any) => {
+    const ensureDkgNodeConfigSpy = recorder((opts: any) => {
       dkgHomeAtWriteCall = process.env.DKG_HOME;
       const dir = process.env.DKG_HOME ?? installedDkg;
       mkdirSync(dir, { recursive: true });
@@ -1525,14 +1573,14 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     });
 
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => fakeRepoRoot),
+      findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
       resolveDkgConfigHome: resolveDkgConfigHomeSpy,
       ensureDkgNodeConfig: ensureDkgNodeConfigSpy,
     });
 
     await mcpSetupAction({ monorepo: true, fund: false, verify: false }, deps);
 
-    expect(resolveDkgConfigHomeSpy).not.toHaveBeenCalled();
+    expect((resolveDkgConfigHomeSpy as any).calls).toEqual([]);
     expect(dkgHomeAtWriteCall).toBe(join(tmpHome, '.dkg-dev'));
     // YAML preserved untouched.
     const yaml = readFileSync(join(installedDkg, 'config.yaml'), 'utf-8');
@@ -1559,7 +1607,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     );
 
     let resolveCallArgs: { isDkgMonorepo?: boolean } | undefined;
-    const resolveDkgConfigHomeSpy = vi.fn((opts: { isDkgMonorepo?: boolean } = {}) => {
+    const resolveDkgConfigHomeSpy = recorder((opts: { isDkgMonorepo?: boolean } = {}) => {
       resolveCallArgs = opts;
       // Mirror production semantics: configExists wins → ~/.dkg.
       return installedDkg;
@@ -1570,12 +1618,12 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // reconcile path), but startDaemon always runs and DKG_HOME is
     // already set by the time it does.
     let dkgHomeAtStartDaemon: string | undefined;
-    const startDaemonSpy = vi.fn(async (_port: number) => {
+    const startDaemonSpy = recorder(async (_port: number) => {
       dkgHomeAtStartDaemon = process.env.DKG_HOME;
     });
 
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => fakeRepoRoot),
+      findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
       resolveDkgConfigHome: resolveDkgConfigHomeSpy,
       startDaemon: startDaemonSpy,
     });
@@ -1585,7 +1633,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
     // (1) resolveDkgConfigHome WAS called (auto-detect doesn't
     // bypass), and isDkgMonorepo: true was passed to it.
-    expect(resolveDkgConfigHomeSpy).toHaveBeenCalledTimes(1);
+    expect((resolveDkgConfigHomeSpy as any).calls).toHaveLength(1);
     expect(resolveCallArgs?.isDkgMonorepo).toBe(true);
     // (2) Despite the monorepo signal, configExists short-circuit
     // returned ~/.dkg, and DKG_HOME mid-action reflects that.
@@ -1603,12 +1651,12 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // contract: `JSON.parse(allStdout)` succeeds, with no leftover
     // bytes after the canonical block.
     const deps = makeDeps();
-    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stdoutSpy = captureWrites(process.stdout, 'write');
+    const stderrSpy = captureWrites(process.stderr, 'write');
 
     await mcpSetupAction({ printOnly: true }, deps);
 
-    const stdoutText = (stdoutSpy.mock.calls as any[]).map((c) => String(c[0])).join('');
+    const stdoutText = (stdoutSpy.calls as any[]).map((c) => String(c[0])).join('');
     // jq-style strict parse: the entire stdout (after trimming
     // trailing newline) must round-trip through JSON.parse with
     // nothing left over.
@@ -1661,7 +1709,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // Force a throw mid-action: stub `startDaemon` to reject. By
     // then DKG_HOME has been mutated to `<tmpHome>/.dkg`.
     const deps = makeDeps({
-      startDaemon: vi.fn(async () => {
+      startDaemon: recorder(async () => {
         throw new Error('synthetic startDaemon failure for env-restore test');
       }),
     });
@@ -1706,7 +1754,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const fakeRepoRoot = makeFakeMonorepoRoot();
     const observedHomesAtWriteCall: string[] = [];
 
-    const ensureDkgNodeConfigSpy = vi.fn((opts: any) => {
+    const ensureDkgNodeConfigSpy = recorder((opts: any) => {
       observedHomesAtWriteCall.push(process.env.DKG_HOME ?? '<unset>');
       const dir = process.env.DKG_HOME ?? join(tmpHome, '.dkg');
       mkdirSync(dir, { recursive: true });
@@ -1719,7 +1767,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // Call 1: force monorepo. `findDkgMonorepoRoot` stub returns
     // the fake repo root; `resolveDkgConfigHome` returns dev dir.
     const depsMono = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => fakeRepoRoot),
+      findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
       ensureDkgNodeConfig: ensureDkgNodeConfigSpy,
     });
     await mcpSetupAction({ monorepo: true, fund: false, verify: false }, depsMono);
@@ -1937,12 +1985,12 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
 
     let dkgHomeAtStartDaemon: string | undefined;
-    const startDaemonSpy = vi.fn(async (_port: number) => {
+    const startDaemonSpy = recorder(async (_port: number) => {
       dkgHomeAtStartDaemon = process.env.DKG_HOME;
     });
 
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => fakeRepoRoot),
+      findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
       startDaemon: startDaemonSpy,
     });
 
@@ -1972,11 +2020,11 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // stdout stays a single canonical JSON document.
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
     const deps = makeDeps();
-    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stderrSpy = captureWrites(process.stderr, 'write');
 
     await mcpSetupAction({ start: false, fund: false, verify: false }, deps);
 
-    const stderrText = (stderrSpy.mock.calls as any[]).map((c) => String(c[0])).join('');
+    const stderrText = (stderrSpy.calls as any[]).map((c) => String(c[0])).join('');
     // Log line includes the literal "Registering CLI:" prefix.
     expect(stderrText).toMatch(/Registering CLI:/);
     // And the absolute Node binary path.
@@ -1986,7 +2034,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // Belt-and-braces: the line did NOT go to stdout (logSpy
     // captures console.log calls, which would be the pre-Round-8
     // path).
-    const stdoutLogged = (logSpy.mock.calls as any[]).map((c) => c.join(' ')).join('\n');
+    const stdoutLogged = (logSpy.calls as any[]).map((c) => c.join(' ')).join('\n');
     expect(stdoutLogged).not.toMatch(/Registering CLI:/);
 
     stderrSpy.mockRestore();
@@ -2014,12 +2062,12 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
     // (1) writeDkgConfig was NOT called — yaml-only configExists
     // fast path keeps the existing file untouched.
-    expect(deps.ensureDkgNodeConfig).not.toHaveBeenCalled();
+    expect((deps.ensureDkgNodeConfig as any).calls).toEqual([]);
     // (2) startDaemon got the YAML port (9001), NOT the CLI
     // default 9200. This is the load-bearing assertion: pre-fix
     // this would have been 9200.
-    expect(deps.startDaemon).toHaveBeenCalledTimes(1);
-    expect((deps.startDaemon as any).mock.calls[0][0]).toBe(9001);
+    expect((deps.startDaemon as any).calls).toHaveLength(1);
+    expect((deps.startDaemon as any).calls[0][0]).toBe(9001);
   });
 
   it('Codex Round-7 Fix 12: yaml-only with no fields → falls back to defaults gracefully (no crash)', async () => {
@@ -2038,9 +2086,9 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       mcpSetupAction({ fund: false, verify: false }, deps),
     ).resolves.not.toThrow();
 
-    expect(deps.ensureDkgNodeConfig).not.toHaveBeenCalled();
+    expect((deps.ensureDkgNodeConfig as any).calls).toEqual([]);
     // Default port 9200 used since YAML had no apiPort field.
-    expect((deps.startDaemon as any).mock.calls[0][0]).toBe(9200);
+    expect((deps.startDaemon as any).calls[0][0]).toBe(9200);
   });
 
   it('Codex Round-7 Fix 12: both config.json AND config.yaml exist → JSON wins (deterministic precedence)', async () => {
@@ -2064,7 +2112,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     await mcpSetupAction({ fund: false, verify: false }, deps);
 
     // JSON's port (9100) wins.
-    expect((deps.startDaemon as any).mock.calls[0][0]).toBe(9100);
+    expect((deps.startDaemon as any).calls[0][0]).toBe(9100);
   });
 
   // ── Codex Round-8 Fix 13: --print-only stdout-purity regression ──
@@ -2076,12 +2124,12 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // the stdout-purity invariant: `JSON.parse(stdout)` succeeds
     // and the parsed object has the canonical mcpServers.dkg shape.
     const deps = makeDeps();
-    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stdoutSpy = captureWrites(process.stdout, 'write');
+    const stderrSpy = captureWrites(process.stderr, 'write');
 
     await mcpSetupAction({ printOnly: true }, deps);
 
-    const stdoutText = (stdoutSpy.mock.calls as any[]).map((c) => String(c[0])).join('');
+    const stdoutText = (stdoutSpy.calls as any[]).map((c) => String(c[0])).join('');
     // No "Registering CLI:" prefix on stdout. Pre-fix this string
     // contaminated stdout.
     expect(stdoutText).not.toMatch(/Registering CLI:/);
@@ -2094,7 +2142,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
     // STDERR carries BOTH the "Registering CLI:" log AND the
     // VSCode-shape disambiguation note.
-    const stderrText = (stderrSpy.mock.calls as any[]).map((c) => String(c[0])).join('');
+    const stderrText = (stderrSpy.calls as any[]).map((c) => String(c[0])).join('');
     expect(stderrText).toMatch(/Registering CLI:/);
     expect(stderrText).toMatch(/VSCode/i);
 
@@ -2120,12 +2168,12 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
 
     let dkgHomeAtStartDaemon: string | undefined;
-    const startDaemonSpy = vi.fn(async (_port: number) => {
+    const startDaemonSpy = recorder(async (_port: number) => {
       dkgHomeAtStartDaemon = process.env.DKG_HOME;
     });
 
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => fakeRepoRoot),
+      findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
       startDaemon: startDaemonSpy,
     });
 
@@ -2154,12 +2202,12 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
 
     let dkgHomeAtStartDaemon: string | undefined;
-    const startDaemonSpy = vi.fn(async (_port: number) => {
+    const startDaemonSpy = recorder(async (_port: number) => {
       dkgHomeAtStartDaemon = process.env.DKG_HOME;
     });
 
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => fakeRepoRoot),
+      findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
       startDaemon: startDaemonSpy,
     });
 
@@ -2178,14 +2226,14 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
 
     let dkgHomeAtStartDaemon: string | undefined;
-    const startDaemonSpy = vi.fn(async (_port: number) => {
+    const startDaemonSpy = recorder(async (_port: number) => {
       dkgHomeAtStartDaemon = process.env.DKG_HOME;
     });
 
-    const resolveDkgConfigHomeSpy = vi.fn(() => join(tmpHome, '.dkg'));
+    const resolveDkgConfigHomeSpy = recorder(() => join(tmpHome, '.dkg'));
 
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => fakeRepoRoot),
+      findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
       resolveDkgConfigHome: resolveDkgConfigHomeSpy,
       startDaemon: startDaemonSpy,
     });
@@ -2195,7 +2243,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     expect(dkgHomeAtStartDaemon).toBe(join(tmpHome, '.dkg-dev'));
     // resolveDkgConfigHome was NOT called (--monorepo bypass took
     // over, since DKG_HOME wasn't set).
-    expect(resolveDkgConfigHomeSpy).not.toHaveBeenCalled();
+    expect((resolveDkgConfigHomeSpy as any).calls).toEqual([]);
   });
 
   it('Codex Round-8 Fix 14: DKG_HOME restored to its pre-action value after exit (Fix 3 invariant preserved)', async () => {
@@ -2243,14 +2291,14 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     mkdirSync(cursorDir, { recursive: true });
     writeFileSync(join(cursorDir, 'mcp.json'), '{"truncated":');
 
-    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stderrSpy = captureWrites(process.stderr, 'write');
     const deps = makeDeps();
 
     await expect(
       mcpSetupAction({ start: false, fund: false, verify: false }, deps),
     ).rejects.toThrow(/1 client\(s\) failed to register; 1 succeeded/);
 
-    const stderrText = (stderrSpy.mock.calls as any[]).map((c) => String(c[0])).join('');
+    const stderrText = (stderrSpy.calls as any[]).map((c) => String(c[0])).join('');
     // Stderr warning for the failing classify.
     expect(stderrText).toMatch(/WARNING: Cursor classify failed/);
     // Cursor's malformed file is NOT overwritten (failed-client
@@ -2275,14 +2323,14 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const cursorDir = join(tmpHome, '.cursor');
     writeFileSync(cursorDir, 'this is a file, not a directory');
 
-    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stderrSpy = captureWrites(process.stderr, 'write');
     const deps = makeDeps();
 
     await expect(
       mcpSetupAction({ start: false, fund: false, verify: false }, deps),
     ).rejects.toThrow(/1 client\(s\) failed/);
 
-    const stderrText = (stderrSpy.mock.calls as any[]).map((c) => String(c[0])).join('');
+    const stderrText = (stderrSpy.calls as any[]).map((c) => String(c[0])).join('');
     // Stderr warning for the failing client.
     expect(stderrText).toMatch(/WARNING: Cursor (classify|write) failed/);
     // Other client (Claude Code) was still written.
@@ -2303,14 +2351,14 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     writeFileSync(join(cursorDir, 'mcp.json'), '{"corrupt":');
     writeFileSync(join(tmpHome, '.claude.json'), '{"also-corrupt":');
 
-    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stderrSpy = captureWrites(process.stderr, 'write');
     const deps = makeDeps();
 
     await expect(
       mcpSetupAction({ start: false, fund: false, verify: false }, deps),
     ).rejects.toThrow(/No client configs updated\. 2 client\(s\) failed/);
 
-    const stderrText = (stderrSpy.mock.calls as any[]).map((c) => String(c[0])).join('');
+    const stderrText = (stderrSpy.calls as any[]).map((c) => String(c[0])).join('');
     // Both clients' classify failures logged before the throw.
     expect(stderrText).toMatch(/WARNING: Cursor classify failed/);
     expect(stderrText).toMatch(/WARNING: Claude Code classify failed/);
@@ -2356,7 +2404,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
 
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => fakeRepoRoot),
+      findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
     });
     await mcpSetupAction({ monorepo: true, start: false, fund: false, verify: false }, deps);
 
@@ -2438,7 +2486,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       mcpSetupAction({ start: false, fund: false, verify: false }, deps),
     ).resolves.not.toThrow();
 
-    const logged = (logSpy.mock.calls as any[]).map((c) => c.join(' ')).join('\n');
+    const logged = (logSpy.calls as any[]).map((c) => c.join(' ')).join('\n');
     expect(logged).toMatch(/Next steps:/);
   });
 
@@ -2451,7 +2499,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     mkdirSync(cursorDir, { recursive: true });
     writeFileSync(join(cursorDir, 'mcp.json'), '{"corrupt":');
 
-    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stderrSpy = captureWrites(process.stderr, 'write');
     const deps = makeDeps();
 
     await expect(
@@ -2459,7 +2507,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     ).resolves.not.toThrow();
 
     // Stderr warning still fires (operator sees the issue).
-    const stderrText = (stderrSpy.mock.calls as any[]).map((c) => String(c[0])).join('');
+    const stderrText = (stderrSpy.calls as any[]).map((c) => String(c[0])).join('');
     expect(stderrText).toMatch(/WARNING: Cursor classify failed/);
 
     stderrSpy.mockRestore();
@@ -2485,7 +2533,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // path that's NOT process.cwd() (which IS inside the
     // dkg-v9 monorepo when the test runs from within it).
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
-    const findRootSpy = vi.fn((startDir?: string) => {
+    const findRootSpy = recorder((startDir?: string) => {
       // Whatever the start dir is, return null (no monorepo) so
       // we test the auto-detect → installed fallback path.
       return null as string | null;
@@ -2495,8 +2543,8 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     await mcpSetupAction({ start: false, fund: false, verify: false }, deps);
 
     // findRoot was called at least once (by detectContext).
-    expect(findRootSpy).toHaveBeenCalled();
-    const callArg = findRootSpy.mock.calls[0][0];
+    expect((findRootSpy as any).calls.length).toBeGreaterThan(0);
+    const callArg = findRootSpy.calls[0][0];
     // The argument is a string path (running CLI's dir), NOT
     // undefined (which would mean default-walk-from-package-path,
     // the broken pre-Round-1 default).
@@ -2523,7 +2571,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
 
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => fakeRepoRoot),
+      findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
     });
     await mcpSetupAction({ start: false, fund: false, verify: false }, deps);
 
@@ -2542,7 +2590,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // monorepo build.
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => null),
+      findDkgMonorepoRoot: recorder(() => null),
     });
 
     await expect(
@@ -2596,7 +2644,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     //
     // Skipped on non-Linux platforms: the WSL detector early-returns
     // false unless platform() === 'linux', and we can't override
-    // platform() without a vi.mock at the top of the file.
+    // platform() without a module override at the top of the file.
     if (platform() !== 'linux') return;
     saveWslEnv();
     process.env.WSL_DISTRO_NAME = 'TestDistro';
@@ -2699,7 +2747,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const userCwd = process.cwd();
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
 
-    const findStub = vi.fn((startDir?: string) => {
+    const findStub = recorder((startDir?: string) => {
       // cwd matches → return the fake repo root.
       if (startDir === userCwd) return fakeRepoRoot;
       // Any other start dir (cliDir would be vitest's dist
@@ -2720,7 +2768,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       join(fakeRepoRoot, 'packages', 'cli', 'dist', 'cli.js'),
     );
     // findStub was called with cwd at least once (cwd-first).
-    const callArgs = findStub.mock.calls.map((c) => c[0]);
+    const callArgs = findStub.calls.map((c) => c[0]);
     expect(callArgs).toContain(userCwd);
   });
 
@@ -2733,7 +2781,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const fakeRepoRoot = makeFakeMonorepoRoot();
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
 
-    const findStub = vi.fn((startDir?: string) => {
+    const findStub = recorder((startDir?: string) => {
       // Anything matching `<cwd>` (test's tmpHome ancestors) → no
       // monorepo. Anything else (cliDir-derived) → fakeRepoRoot.
       const cwd = process.cwd();
@@ -2750,14 +2798,14 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       join(fakeRepoRoot, 'packages', 'cli', 'dist', 'cli.js'),
     );
     // findStub called at least twice — once with cwd, once with cliDir.
-    expect(findStub.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(findStub.calls.length).toBeGreaterThanOrEqual(2);
   });
 
   it('Codex Round-15 Fix 21: --monorepo + neither cwd nor cliDir has a monorepo → throws actionable error', async () => {
     // Existing behavior preserved: when nothing finds a root, the
     // throw fires with the same actionable message as before.
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
-    const findStub = vi.fn(() => null);
+    const findStub = recorder(() => null);
     const deps = makeDeps({ findDkgMonorepoRoot: findStub });
 
     await expect(
@@ -2765,7 +2813,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     ).rejects.toThrow(/no DKG monorepo root could be located/);
 
     // Both cwd and cliDir attempted before throwing.
-    expect(findStub.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(findStub.calls.length).toBeGreaterThanOrEqual(2);
   });
 
   // ── Codex Round-15 Fix 22: classify DKG_HOME-only + writeRegistration env merge ──
@@ -3076,7 +3124,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const fakeRepoRoot = makeFakeMonorepoRoot();
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
     const deps = makeDeps({
-      findDkgMonorepoRoot: vi.fn(() => fakeRepoRoot),
+      findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
     });
 
     await mcpSetupAction(
@@ -3084,7 +3132,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       deps,
     );
 
-    const logged = (logSpy.mock.calls as any[]).map((c) => c.join(' ')).join('\n');
+    const logged = (logSpy.calls as any[]).map((c) => c.join(' ')).join('\n');
     // The dry-run line cites the resolved home path.
     expect(logged).toMatch(/\[dry-run\] Would write/);
     expect(logged).toContain('.dkg-dev');
@@ -3235,7 +3283,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // recovery guidance).
     writeFileSync(codexPath, '[mcp_servers.dkg\ncommand = "broken"');
 
-    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stderrSpy = captureWrites(process.stderr, 'write');
     const deps = makeDeps();
 
     // Codex CLI is detectable AND malformed → classify throws →
@@ -3248,7 +3296,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       mcpSetupAction({ start: false, fund: false, verify: false }, deps),
     ).rejects.toThrow(/1 client\(s\) failed to register/);
 
-    const stderrText = (stderrSpy.mock.calls as any[]).map((c) => String(c[0])).join('');
+    const stderrText = (stderrSpy.calls as any[]).map((c) => String(c[0])).join('');
     // Per-client warning surfaces the wrapped error text.
     expect(stderrText).toMatch(/WARNING: Codex CLI classify failed/);
     // The wrapped error names the file (path appears in tildified
@@ -3368,7 +3416,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
     const afterRaw = readFileSync(codexPath, 'utf-8');
     const after = TOML.parse(afterRaw) as any;
-    const stderrText = (stderrSilencer.mock.calls as any[])
+    const stderrText = (stderrSilencer.calls as any[])
       .map((c) => String(c[0]))
       .join('');
     expect(stderrText).toMatch(/WARNING: Codex CLI config/);
@@ -3408,7 +3456,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
     const afterRaw = readFileSync(codexPath, 'utf-8');
     const after = TOML.parse(afterRaw) as any;
-    const stderrText = (stderrSilencer.mock.calls as any[])
+    const stderrText = (stderrSilencer.calls as any[])
       .map((c) => String(c[0]))
       .join('');
     expect(stderrText).toMatch(/WARNING: Codex CLI config/);

@@ -19,7 +19,7 @@
 // each peer's Ed25519 public key so we don't need real libp2p PeerId
 // strings.
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   generateEd25519Keypair,
   InMemoryMessageIdempotencyStore,
@@ -31,6 +31,38 @@ import {
 } from '@origintrail-official/dkg-core';
 import { MessageHandler, ed25519ToX25519Private, type ChatHandler, type ChatAclCheck } from '../src/index.js';
 import { Messenger } from '../src/p2p/messenger.js';
+
+// Hand-rolled recorder: a plain function that records every call's
+// arguments and delegates to `impl`. Replaces the vitest spy seams used
+// by these tests (call counting + argument capture) with no behavior
+// mocking — the code under test (MessageHandler) stays real.
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
+
+// Swap a method on `obj` with a recorder over `impl`, exposing a
+// `mockRestore`-style handle so callers can put the original back. Used
+// for the console.warn capture (observe diagnostics without polluting
+// test output).
+function captureMethod<T, K extends keyof T>(
+  obj: T,
+  key: K,
+  impl: T[K] extends (...args: infer A) => infer R ? (...args: A) => R : never,
+) {
+  const original = obj[key];
+  const rec = recorder(impl as (...args: unknown[]) => unknown);
+  obj[key] = rec as unknown as T[K];
+  return Object.assign(rec, {
+    mockRestore: () => {
+      obj[key] = original;
+    },
+  });
+}
 
 // Two PeerId-shaped opaque tokens. We pre-cache the Ed25519 pubkeys via
 // registerPeerKey() so MessageHandler never tries to decode these as
@@ -117,7 +149,7 @@ describe('MessageHandler — chat ACL + contextGraphId plumbing', () => {
   it('contextGraphId rides the encrypted payload and reaches the chat handler', async () => {
     const { a, b } = await buildPair();
 
-    const chatHandler = vi.fn();
+    const chatHandler = recorder<Parameters<ChatHandler>, void>(() => undefined);
     b.onChat(chatHandler);
 
     const result = await a.sendChat(PEER_B, 'hello from A', {
@@ -127,8 +159,8 @@ describe('MessageHandler — chat ACL + contextGraphId plumbing', () => {
     expect(result.delivered).toBe(true);
     expect(result.error).toBeUndefined();
 
-    expect(chatHandler).toHaveBeenCalledTimes(1);
-    const [text, sender, _convId, senderContextGraphId] = chatHandler.mock.calls[0];
+    expect(chatHandler.calls).toHaveLength(1);
+    const [text, sender, _convId, senderContextGraphId] = chatHandler.calls[0];
     expect(text).toBe('hello from A');
     expect(sender).toBe(PEER_A);
     expect(senderContextGraphId).toBe('cg-debug');
@@ -136,59 +168,59 @@ describe('MessageHandler — chat ACL + contextGraphId plumbing', () => {
 
   it('omits contextGraphId when sender did not provide one', async () => {
     const { a, b } = await buildPair();
-    const chatHandler = vi.fn();
+    const chatHandler = recorder<Parameters<ChatHandler>, void>(() => undefined);
     b.onChat(chatHandler);
 
     await a.sendChat(PEER_B, 'no cg');
 
-    const [, , , senderContextGraphId] = chatHandler.mock.calls[0];
+    const [, , , senderContextGraphId] = chatHandler.calls[0];
     expect(senderContextGraphId).toBeUndefined();
   });
 
   it('ACL accept → chat handler is invoked', async () => {
     const { a, b } = await buildPair();
-    const acl: ChatAclCheck = vi.fn((sender, payload) => {
+    const acl = recorder<Parameters<ChatAclCheck>, ReturnType<ChatAclCheck>>((sender, payload) => {
       expect(sender).toBe(PEER_A);
       expect(payload.contextGraphId).toBe('cg-ok');
       return { accept: true };
     });
     b.setChatAcl(acl);
 
-    const chatHandler = vi.fn();
+    const chatHandler = recorder<Parameters<ChatHandler>, void>(() => undefined);
     b.onChat(chatHandler);
 
     const result = await a.sendChat(PEER_B, 'allowed', { contextGraphId: 'cg-ok' });
 
     expect(result.delivered).toBe(true);
-    expect(acl).toHaveBeenCalledTimes(1);
-    expect(chatHandler).toHaveBeenCalledTimes(1);
+    expect(acl.calls).toHaveLength(1);
+    expect(chatHandler.calls).toHaveLength(1);
   });
 
   it('ACL reject → unauthorized response reaches sender, chat handler is NOT invoked', async () => {
     const { a, b } = await buildPair();
     b.setChatAcl(() => ({ accept: false, reason: 'unauthorized: nope' }));
 
-    const chatHandler = vi.fn();
+    const chatHandler = recorder<Parameters<ChatHandler>, void>(() => undefined);
     b.onChat(chatHandler);
 
     const result = await a.sendChat(PEER_B, 'rejected');
 
     expect(result.delivered).toBe(false);
     expect(result.error).toBe('unauthorized: nope');
-    expect(chatHandler).not.toHaveBeenCalled();
+    expect(chatHandler.calls).toEqual([]);
   });
 
   it('ACL reject falls back to default "unauthorized" reason when none provided', async () => {
     const { a, b } = await buildPair();
     b.setChatAcl(() => ({ accept: false }));
-    const chatHandler = vi.fn();
+    const chatHandler = recorder<Parameters<ChatHandler>, void>(() => undefined);
     b.onChat(chatHandler);
 
     const result = await a.sendChat(PEER_B, 'no-reason');
 
     expect(result.delivered).toBe(false);
     expect(result.error).toBe('unauthorized');
-    expect(chatHandler).not.toHaveBeenCalled();
+    expect(chatHandler.calls).toEqual([]);
   });
 
   it('setChatAcl(null) restores accept-all behaviour', async () => {
@@ -196,26 +228,30 @@ describe('MessageHandler — chat ACL + contextGraphId plumbing', () => {
     b.setChatAcl(() => ({ accept: false, reason: 'blocked' }));
     b.setChatAcl(null);
 
-    const chatHandler = vi.fn();
+    const chatHandler = recorder<Parameters<ChatHandler>, void>(() => undefined);
     b.onChat(chatHandler);
 
     const result = await a.sendChat(PEER_B, 'should-pass');
     expect(result.delivered).toBe(true);
-    expect(chatHandler).toHaveBeenCalledTimes(1);
+    expect(chatHandler.calls).toHaveLength(1);
   });
 
   it('backwards compat — legacy 3-arg ChatHandler still works', async () => {
     const { a, b } = await buildPair();
     // Pretend a legacy handler that only knows about 3 args. JS will
     // silently drop the 4th positional arg — verify nothing breaks.
-    const legacyHandler = vi.fn(((text: string, _senderPeerId: string, _convId: string) => {
+    const legacyHandler = recorder<Parameters<ChatHandler>, void>(((
+      text: string,
+      _senderPeerId: string,
+      _convId: string,
+    ) => {
       expect(text).toBe('legacy');
     }) as ChatHandler);
     b.onChat(legacyHandler);
 
     const result = await a.sendChat(PEER_B, 'legacy', { contextGraphId: 'cg-x' });
     expect(result.delivered).toBe(true);
-    expect(legacyHandler).toHaveBeenCalledTimes(1);
+    expect(legacyHandler.calls).toHaveLength(1);
   });
 
   // Codex PR #510 round 4 — a throwing ACL callback must NOT bubble
@@ -226,13 +262,13 @@ describe('MessageHandler — chat ACL + contextGraphId plumbing', () => {
   it('ACL throw → handler catches and fails closed with "unauthorized" reason', async () => {
     const { a, b } = await buildPair();
     // Silence console.warn so the deliberate throw doesn't pollute
-    // the test output.
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // the test output (hand-rolled capture over console.warn).
+    const warnSpy = captureMethod(console, 'warn', () => {});
     try {
       b.setChatAcl(() => {
         throw new Error('db unavailable');
       });
-      const chatHandler = vi.fn();
+      const chatHandler = recorder<Parameters<ChatHandler>, void>(() => undefined);
       b.onChat(chatHandler);
 
       const result = await a.sendChat(PEER_B, 'should-reject-on-throw');
@@ -241,12 +277,12 @@ describe('MessageHandler — chat ACL + contextGraphId plumbing', () => {
       expect(result.error).toMatch(/unauthorized: ACL evaluation error/);
       // Critically: chat handler must NOT run when ACL evaluation
       // failed — fail-closed semantics.
-      expect(chatHandler).not.toHaveBeenCalled();
+      expect(chatHandler.calls).toEqual([]);
       // Diagnostics should land on console.warn so operators can see
       // why ACL is suddenly rejecting everything.
-      expect(warnSpy).toHaveBeenCalledWith(
+      expect(warnSpy.calls).toContainEqual([
         expect.stringContaining('chat ACL threw, failing closed: db unavailable'),
-      );
+      ]);
     } finally {
       warnSpy.mockRestore();
     }
@@ -261,7 +297,7 @@ describe('MessageHandler — chat ACL + contextGraphId plumbing', () => {
     // mucking with raw bytes, but the order-of-operations invariant
     // is asserted indirectly here: any malformed signature would
     // never reach the ACL.
-    const acl = vi.fn(() => ({ accept: true }));
+    const acl = recorder<Parameters<ChatAclCheck>, ReturnType<ChatAclCheck>>(() => ({ accept: true }));
     b.setChatAcl(acl);
     b.onChat(() => {});
 
@@ -269,6 +305,6 @@ describe('MessageHandler — chat ACL + contextGraphId plumbing', () => {
     await a.sendChat(PEER_B, 'm2');
     await a.sendChat(PEER_B, 'm3');
 
-    expect(acl).toHaveBeenCalledTimes(3);
+    expect(acl.calls).toHaveLength(3);
   });
 });

@@ -200,7 +200,7 @@ export function joinDelegationScope(deploymentId: string | undefined, contextGra
 // ── Sync-phase normalisation ──────────────────────────────────────────
 
 export function normalizeSyncPhase(value: unknown): SyncPhase {
-  if (value === 'meta' || value === 'snapshot') return value;
+  if (value === 'meta' || value === 'snapshot' || value === 'catalog') return value;
   return 'data';
 }
 

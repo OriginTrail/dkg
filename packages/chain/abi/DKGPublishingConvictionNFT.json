@@ -199,6 +199,11 @@
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "ZeroPrimaryNode",
+    "type": "error"
+  },
+  {
     "anonymous": false,
     "inputs": [
       {
@@ -340,6 +345,16 @@
         "internalType": "bool",
         "name": "fullySwept",
         "type": "bool"
+      },
+      {
+        "internalType": "uint72",
+        "name": "primaryNode",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint40",
+        "name": "lastPrimaryNodeChangeEpoch",
+        "type": "uint40"
       }
     ],
     "stateMutability": "view",
@@ -441,6 +456,11 @@
         "internalType": "uint96",
         "name": "committedTRAC",
         "type": "uint96"
+      },
+      {
+        "internalType": "uint72",
+        "name": "primaryNode",
+        "type": "uint72"
       }
     ],
     "name": "createAccount",
@@ -953,6 +973,24 @@
       }
     ],
     "name": "setMaxAgentsPerAccount",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint72",
+        "name": "newNode",
+        "type": "uint72"
+      }
+    ],
+    "name": "setPrimaryNode",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

@@ -359,6 +359,54 @@ contracts. The chain-adapter SDK targets the V10 contract family
 `ContextGraphs`, V10 storages, plus shared `Hub` / `Token` / `Profile` /
 `Identity` / `Ask`). Trust model: `Hub.owner` = TracLabs multisig.
 
+## CLI Chain Configuration Resolution
+
+Daemon startup resolves chain configuration through a small CLI boundary before
+constructing the agent. `packages/cli/src/config.ts#resolveChainConfig()` merges
+the persisted operator config layer (`~/.dkg/config.json#chain` or
+`~/.dkg/config.yaml#chain`) over `network/<env>.json#chain` per field, so an
+operator can override one field such as `rpcUrl` while inheriting the network
+`hubAddress`, backup RPCs, token address, and `chainId`. The returned
+`chainBase` may still be partial, so daemon consumers guard for both `rpcUrl`
+and `hubAddress` before constructing EVM-backed runtime config.
+
+Mock mode is the exception: an operator `chain.type = "mock"` short-circuits the
+merge and strips inherited EVM endpoint fields so no daemon consumer can
+accidentally open a real JSON-RPC provider while a `MockChainAdapter` is wired.
+
+`chain.approvalPolicy` is the exception to network inheritance. It belongs only
+to operator-owned chain config because it changes TRAC allowance sizing and
+therefore wallet authorization blast radius. The resolved local policy flows to
+`packages/cli/src/daemon/lifecycle.ts`, which converts it with
+`resolveApprovalPolicy()` and passes the runtime `ApprovalPolicy` into
+`DKGAgent.chainConfig`; the agent then forwards it to `EVMChainAdapter`, where
+allowance sizing is applied. `resolveApprovalPolicy()` is the only conversion
+point from YAML/JSON string numerics to runtime `bigint` fields.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Local as Operator config chain
+  participant Network as network env chain
+  participant Resolver as resolveChainConfig
+  participant Lifecycle as daemon lifecycle
+  participant Policy as resolveApprovalPolicy
+  participant Agent as DKGAgent
+  participant Chain as EVMChainAdapter
+
+  Local->>Resolver: operator overrides, including approvalPolicy
+  Network->>Resolver: default rpcUrl, rpcUrls, hubAddress, tokenAddress, chainId
+  Resolver-->>Lifecycle: chainBase field-merged view
+  alt chainBase has rpcUrl and hubAddress
+    Lifecycle->>Policy: convert chainBase.approvalPolicy
+    Policy-->>Lifecycle: runtime ApprovalPolicy or undefined
+    Lifecycle->>Agent: chainConfig with endpoints, wallets, chainId, approvalPolicy
+    Agent->>Chain: construct adapter with approvalPolicy
+  else chainBase partial or absent
+    Lifecycle->>Agent: omit chainConfig
+  end
+```
+
 ## Component Model
 
 ```mermaid

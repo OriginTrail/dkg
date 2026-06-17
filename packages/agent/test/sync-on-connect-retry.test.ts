@@ -1,10 +1,16 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_ACCESS } from '@origintrail-official/dkg-core';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { runSyncOnConnect, SyncOnConnectPostSyncError } from '../src/sync/on-connect/sync-on-connect.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
+
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => { calls.push(args); return impl(...args); };
+  return Object.assign(fn, { calls });
+}
 
 /**
  * Same rotating bank used by p2p-resilience.test.ts — these are
@@ -39,7 +45,7 @@ describe('runSyncOnConnect callbacks', () => {
     const remotePeer = freshPeerIdString();
     const skipped: Array<{ peerId: string; protocols: string[] }> = [];
     const synced: string[] = [];
-    const syncFromPeer = vi.fn().mockResolvedValue(0);
+    const syncFromPeer = recorder(async () => 0);
 
     const outcome = await runSyncOnConnect({
       remotePeer,
@@ -63,7 +69,7 @@ describe('runSyncOnConnect callbacks', () => {
     expect(outcome).toBe('skipped-no-sync');
     expect(skipped).toEqual([{ peerId: remotePeer, protocols: ['/ipfs/id/1.0.0', '/meshsub/1.1.0'] }]);
     expect(synced).toEqual([]);
-    expect(syncFromPeer).not.toHaveBeenCalled();
+    expect(syncFromPeer.calls).toEqual([]);
   });
 
   it('fires onPeerSynced after a successful sync', async () => {
@@ -538,9 +544,14 @@ describe('runSyncOnConnect callbacks', () => {
     const remotePeer = freshPeerIdString();
     let contextGraphs = ['cg-a'];
     const secondDurableError = new Error('newly discovered durable sync failed');
-    const syncFromPeer = vi.fn()
-      .mockResolvedValueOnce(7)
-      .mockRejectedValueOnce(secondDurableError);
+    const syncFromPeerResults: Array<() => Promise<number>> = [
+      async () => 7,
+      async () => { throw secondDurableError; },
+    ];
+    const syncFromPeer = recorder((..._args: unknown[]) => {
+      const next = syncFromPeerResults.shift() ?? (async () => 0);
+      return next();
+    });
     let caught: unknown;
 
     try {
@@ -565,14 +576,14 @@ describe('runSyncOnConnect callbacks', () => {
 
     expect(caught).toBe(secondDurableError);
     expect(caught).not.toBeInstanceOf(SyncOnConnectPostSyncError);
-    expect(syncFromPeer).toHaveBeenCalledWith(remotePeer);
-    expect(syncFromPeer).toHaveBeenCalledWith(remotePeer, ['cg-b']);
+    expect(syncFromPeer.calls).toContainEqual([remotePeer]);
+    expect(syncFromPeer.calls).toContainEqual([remotePeer, ['cg-b']]);
   });
 
   it('can skip shared-memory catch-up on connect while still running durable sync', async () => {
     const remotePeer = freshPeerIdString();
-    const syncFromPeer = vi.fn().mockResolvedValue(3);
-    const syncSharedMemoryFromPeer = vi.fn().mockResolvedValue(11);
+    const syncFromPeer = recorder(async () => 3);
+    const syncSharedMemoryFromPeer = recorder(async () => 11);
     const synced: Array<{ peerId: string; fresh: boolean | undefined }> = [];
 
     const outcome = await runSyncOnConnect({
@@ -591,15 +602,15 @@ describe('runSyncOnConnect callbacks', () => {
     });
 
     expect(outcome).toBe('synced');
-    expect(syncFromPeer).toHaveBeenCalledOnce();
-    expect(syncSharedMemoryFromPeer).not.toHaveBeenCalled();
+    expect(syncFromPeer.calls).toHaveLength(1);
+    expect(syncSharedMemoryFromPeer.calls).toEqual([]);
     expect(synced).toEqual([{ peerId: remotePeer, fresh: true }]);
   });
 
   it('returns already-syncing without running duplicate work', async () => {
     const remotePeer = freshPeerIdString();
     const syncingPeers = new Set([remotePeer]);
-    const syncFromPeer = vi.fn().mockResolvedValue(0);
+    const syncFromPeer = recorder(async () => 0);
 
     const outcome = await runSyncOnConnect({
       remotePeer,
@@ -615,7 +626,7 @@ describe('runSyncOnConnect callbacks', () => {
     });
 
     expect(outcome).toBe('already-syncing');
-    expect(syncFromPeer).not.toHaveBeenCalled();
+    expect(syncFromPeer.calls).toEqual([]);
   });
 });
 
@@ -751,7 +762,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       const peerB = freshPeerIdString();
 
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
-      vi.spyOn(agent.node.libp2p, 'getPeers').mockImplementation(
+      (agent.node.libp2p as any).getPeers = recorder(
         () => [...origGetPeers(), peerIdFromString(peerA), peerIdFromString(peerB)],
       );
 
@@ -783,7 +794,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       const stalePeer = freshPeerIdString();
 
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
-      vi.spyOn(agent.node.libp2p, 'getPeers').mockImplementation(
+      (agent.node.libp2p as any).getPeers = recorder(
         () => [...origGetPeers(), peerIdFromString(freshPeer), peerIdFromString(stalePeer)],
       );
 
@@ -817,7 +828,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
 
       const remotePeer = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
-      vi.spyOn(agent.node.libp2p, 'getPeers').mockImplementation(
+      (agent.node.libp2p as any).getPeers = recorder(
         () => [...origGetPeers(), peerIdFromString(remotePeer)],
       );
 
@@ -851,7 +862,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       const peerA = freshPeerIdString();
 
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
-      vi.spyOn(agent.node.libp2p, 'getPeers').mockImplementation(
+      (agent.node.libp2p as any).getPeers = recorder(
         () => [...origGetPeers(), peerIdFromString(peerA)],
       );
 
@@ -883,7 +894,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
 
       const peerA = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
-      vi.spyOn(agent.node.libp2p, 'getPeers').mockImplementation(
+      (agent.node.libp2p as any).getPeers = recorder(
         () => [...origGetPeers(), peerIdFromString(peerA)],
       );
 
@@ -945,11 +956,12 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
 
       const peerA = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
-      vi.spyOn(agent.node.libp2p, 'getPeers').mockImplementation(
+      (agent.node.libp2p as any).getPeers = recorder(
         () => [...origGetPeers(), peerIdFromString(peerA)],
       );
-      vi.spyOn(agent as any, 'getPeerProtocols').mockResolvedValue([PROTOCOL_SYNC]);
-      const trySync = vi.spyOn(agent as any, 'trySyncFromPeer').mockResolvedValue(undefined);
+      (agent as any).getPeerProtocols = recorder(async () => [PROTOCOL_SYNC]);
+      const trySync = recorder(async () => undefined);
+      (agent as any).trySyncFromPeer = trySync;
 
       const backoffMap = (agent as any).syncReconcilerBackoff as Map<
         string,
@@ -965,7 +977,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();
 
-      expect(trySync).toHaveBeenCalledTimes(1);
+      expect(trySync.calls).toHaveLength(1);
       expect(backoffMap.get(peerA)?.failures).toBe(1);
       expect(backoffMap.get(peerA)?.protocolsKey).toBe(PROTOCOL_SYNC);
     } finally {
@@ -984,13 +996,14 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
 
       const peerA = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
-      vi.spyOn(agent.node.libp2p, 'getPeers').mockImplementation(
+      (agent.node.libp2p as any).getPeers = recorder(
         () => [...origGetPeers(), peerIdFromString(peerA)],
       );
-      const getPeerProtocols = vi
-        .spyOn(agent as any, 'getPeerProtocols')
-        .mockResolvedValue(['/ipfs/id/1.0.0']);
-      const trySync = vi.spyOn(agent as any, 'trySyncFromPeer');
+      const getPeerProtocols = recorder(async () => ['/ipfs/id/1.0.0']);
+      (agent as any).getPeerProtocols = getPeerProtocols;
+      const origTrySync = (agent as any).trySyncFromPeer.bind(agent);
+      const trySync = recorder((...a: unknown[]) => origTrySync(...a));
+      (agent as any).trySyncFromPeer = trySync;
 
       const backoffMap = (agent as any).syncReconcilerBackoff as Map<
         string,
@@ -1002,8 +1015,8 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();
 
-      expect(trySync).toHaveBeenCalledTimes(2);
-      expect(getPeerProtocols.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(trySync.calls).toHaveLength(2);
+      expect(getPeerProtocols.calls.length).toBeGreaterThanOrEqual(2);
       expect((agent as any).skippedNoSyncPeers.has(peerA)).toBe(true);
       expect(backoffMap.has(peerA)).toBe(false);
     } finally {
@@ -1022,11 +1035,11 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
 
       const peerA = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
-      vi.spyOn(agent.node.libp2p, 'getPeers').mockImplementation(
+      (agent.node.libp2p as any).getPeers = recorder(
         () => [...origGetPeers(), peerIdFromString(peerA)],
       );
-      vi.spyOn(agent as any, 'getPeerProtocols').mockResolvedValue([PROTOCOL_SYNC]);
-      vi.spyOn(agent as any, 'trySyncFromPeer').mockResolvedValue('already-syncing');
+      (agent as any).getPeerProtocols = recorder(async () => [PROTOCOL_SYNC]);
+      (agent as any).trySyncFromPeer = recorder(async () => 'already-syncing');
 
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();
@@ -1048,13 +1061,13 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
 
       const peerA = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
-      vi.spyOn(agent.node.libp2p, 'getPeers').mockImplementation(
+      (agent.node.libp2p as any).getPeers = recorder(
         () => [...origGetPeers(), peerIdFromString(peerA)],
       );
-      vi.spyOn(agent as any, 'getPeerProtocols').mockResolvedValue([PROTOCOL_SYNC]);
-      vi.spyOn(agent as any, 'trySyncFromPeer').mockRejectedValue(
-        new SyncOnConnectPostSyncError(peerA, new Error('discovery failed'), { backoffEligible: false }),
-      );
+      (agent as any).getPeerProtocols = recorder(async () => [PROTOCOL_SYNC]);
+      (agent as any).trySyncFromPeer = recorder(async () => {
+        throw new SyncOnConnectPostSyncError(peerA, new Error('discovery failed'), { backoffEligible: false });
+      });
 
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();
@@ -1076,13 +1089,13 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
 
       const peerA = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
-      vi.spyOn(agent.node.libp2p, 'getPeers').mockImplementation(
+      (agent.node.libp2p as any).getPeers = recorder(
         () => [...origGetPeers(), peerIdFromString(peerA)],
       );
-      vi.spyOn(agent as any, 'getPeerProtocols').mockResolvedValue([PROTOCOL_SYNC]);
-      vi.spyOn(agent as any, 'trySyncFromPeer').mockRejectedValue(
-        new SyncOnConnectPostSyncError(peerA, new Error('shared memory failed'), { backoffEligible: true }),
-      );
+      (agent as any).getPeerProtocols = recorder(async () => [PROTOCOL_SYNC]);
+      (agent as any).trySyncFromPeer = recorder(async () => {
+        throw new SyncOnConnectPostSyncError(peerA, new Error('shared memory failed'), { backoffEligible: true });
+      });
 
       await (agent as any).reconcileSyncFromConnectedPeers();
       await flushMicrotasks();
@@ -1106,7 +1119,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
 
       const peerA = freshPeerIdString();
       let connectedPeers = [peerIdFromString(peerA)];
-      vi.spyOn(agent.node.libp2p, 'getPeers').mockImplementation(() => connectedPeers);
+      (agent.node.libp2p as any).getPeers = recorder(() => connectedPeers);
 
       let resolveAttempt!: () => void;
       const calls: string[] = [];
@@ -1151,7 +1164,7 @@ describe('DKGAgent sync state lifecycle', () => {
       (agent as any).syncReconcilerBackoff.set(remotePeer, { failures: 3, nextRetryAt: Date.now() + 100_000 });
 
       // Stub getPeers so the close handler considers the peer fully gone.
-      vi.spyOn(agent.node.libp2p, 'getPeers').mockReturnValue([]);
+      (agent.node.libp2p as any).getPeers = recorder(() => []);
 
       agent.node.libp2p.dispatchEvent(new CustomEvent('connection:close', {
         detail: {
@@ -1259,7 +1272,7 @@ describe('DKGAgent sync state lifecycle', () => {
         nextRetryAt: now - 20 * 60_000,
       });
       (agent as any).lastSyncDisconnectedAt.set(remotePeer, now - 20 * 60_000);
-      vi.spyOn(agent.node.libp2p, 'getPeers').mockReturnValue([]);
+      (agent.node.libp2p as any).getPeers = recorder(() => []);
 
       (agent as any).pruneSyncReconcilerState(now);
 
@@ -1283,15 +1296,15 @@ describe('DKGAgent sync state lifecycle', () => {
       await agent.start();
 
       const remotePeer = freshPeerIdString();
-      vi.spyOn(agent.node.libp2p, 'getPeers').mockReturnValue([peerIdFromString(remotePeer)]);
-      vi.spyOn(agent as any, 'getPeerProtocols').mockResolvedValue([PROTOCOL_SYNC]);
+      (agent.node.libp2p as any).getPeers = recorder(() => [peerIdFromString(remotePeer)]);
+      (agent as any).getPeerProtocols = recorder(async () => [PROTOCOL_SYNC]);
       (agent as any).skippedNoSyncPeers.add(remotePeer);
       (agent as any).syncReconcilerBackoff.set(remotePeer, {
         failures: 2,
         nextRetryAt: Date.now() - 60_000,
       });
 
-      const syncFromPeerDetailed = vi.fn(async () => ({
+      const syncFromPeerDetailed = recorder(async () => ({
         insertedTriples: 0,
         fetchedMetaTriples: 0,
         fetchedDataTriples: 0,
@@ -1335,7 +1348,7 @@ describe('DKGAgent sync state lifecycle', () => {
       await flushMicrotasks();
       await new Promise(r => setTimeout(r, 0));
 
-      expect(syncFromPeerDetailed).toHaveBeenCalledTimes(1);
+      expect(syncFromPeerDetailed.calls).toHaveLength(1);
       expect((agent as any).skippedNoSyncPeers.has(remotePeer)).toBe(false);
       expect((agent as any).syncReconcilerBackoff.has(remotePeer)).toBe(false);
       expect((agent as any).lastSuccessfulSyncAt.has(remotePeer)).toBe(false);
@@ -1345,7 +1358,7 @@ describe('DKGAgent sync state lifecycle', () => {
       await flushMicrotasks();
       await new Promise(r => setTimeout(r, 0));
 
-      expect(syncFromPeerDetailed).toHaveBeenCalledTimes(2);
+      expect(syncFromPeerDetailed.calls).toHaveLength(2);
       expect((agent as any).syncReconcilerBackoff.has(remotePeer)).toBe(false);
       expect((agent as any).lastSuccessfulSyncAt.has(remotePeer)).toBe(false);
       expect((agent as any).lastSyncProgressAt.has(remotePeer)).toBe(false);
@@ -1365,7 +1378,7 @@ describe('DKGAgent sync state lifecycle', () => {
 
       const peerA = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
-      vi.spyOn(agent.node.libp2p, 'getPeers').mockImplementation(
+      (agent.node.libp2p as any).getPeers = recorder(
         () => [...origGetPeers(), peerIdFromString(peerA)],
       );
 
@@ -1433,12 +1446,12 @@ describe('DKGAgent sync transport — off the messenger substrate (node-ui.db bl
       chainAdapter: new MockChainAdapter(),
     });
     try {
-      const sendToPeer = vi.fn(async () => new Uint8Array(0));
-      const sendReliable = vi.fn(async () => {
+      const sendToPeer = recorder(async (..._args: unknown[]) => new Uint8Array(0));
+      const sendReliable = recorder(async (..._args: unknown[]) => {
         throw new Error('sync requester must not use sendReliable');
       });
       (agent as any).messenger = { sendToPeer, sendReliable };
-      (agent as any).buildSyncRequest = vi.fn(async () => new Uint8Array([1, 2, 3]));
+      (agent as any).buildSyncRequest = recorder(async (..._args: unknown[]) => new Uint8Array([1, 2, 3]));
 
       const result = await (agent as any).fetchSyncPages(
         createOperationContext('sync'),
@@ -1451,9 +1464,9 @@ describe('DKGAgent sync transport — off the messenger substrate (node-ui.db bl
       );
 
       expect(result.quads).toEqual([]);
-      expect(sendToPeer).toHaveBeenCalledTimes(1);
-      expect(sendToPeer.mock.calls[0][1]).toBe(PROTOCOL_SYNC);
-      expect(sendReliable).not.toHaveBeenCalled();
+      expect(sendToPeer.calls).toHaveLength(1);
+      expect(sendToPeer.calls[0][1]).toBe(PROTOCOL_SYNC);
+      expect(sendReliable.calls).toEqual([]);
     } finally {
       await agent.stop().catch(() => {});
     }

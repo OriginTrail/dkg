@@ -1041,129 +1041,29 @@ export class DkgClient {
   }
 
   /**
-   * One-shot publish helper: route through the new assertion
-   * lifecycle (RFC-001 §9.x) — create a fresh assertion with an
-   * auto-generated name, write the supplied quads, finalize (which
-   * computes the merkle root and signs the EIP-712 AuthorAttestation
-   * stored in `_meta`), promote into SWM, then publish to the
-   * verifiable-memory chain. The publisher forwards the seal verbatim
-   * and never re-signs.
+   * One-shot publish helper with explicit quads. Uses the daemon's direct
+   * publish route so core ACK collection receives the publish payload
+   * inline instead of requiring SWM pre-positioning.
    *
-   * For step-wise control (long-running stage, late finalize, etc.)
-   * use the `assertion_create` / `assertion_finalize` /
+   * For step-wise WM/SWM control use the assertion lifecycle and
    * `shared_memory_publish` tools directly.
-   *
-   * Mirrors `packages/adapter-openclaw/src/dkg-client.ts:635-652`.
    */
   async publishQuads(args: {
     contextGraphId: string;
     quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>;
   }): Promise<Record<string, unknown>> {
     const cgId = normalizeContextGraphId(args.contextGraphId);
-    const assertionName = `mcp-publish-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    // The write wire shape is `{subject, predicate, object}` only — the daemon
-    // pins every quad to the per-KA WM graph itself, so a client-supplied
-    // `graph` is ignored/overridden (CONTRACT §0 invariant 2). Auto-finalize is
-    // driven purely by non-empty `quads` (CONTRACT §1 Stage1), so `finalize:true`
-    // is unread and dropped. `promote:true` is kept: the create route reads it as
-    // the `alsoShareSwm` alias (CONTRACT §1 Stage1). Mirrors the OpenClaw adapter.
     const wireQuads = args.quads.map((q) => ({
       subject: q.subject,
       predicate: q.predicate,
       object: q.object,
+      graph: q.graph ?? '',
     }));
-    // FIX W — wrap the create call: on a HARD failure the generated
-    // `assertionName` would otherwise be lost in the throw, so a retry mints a
-    // DUPLICATE if the asset was actually created (e.g. the daemon committed but
-    // the HTTP response failed). Surface the name + recovery guidance.
-    let created: {
-      assertionUri?: string;
-      // The create response carries `merkleRoot` (the seal digest), not a `seal`
-      // object (knowledge-assets.ts:570).
-      merkleRoot?: string;
-      errors?: Array<{ phase?: string; error?: string }>;
-    };
-    try {
-      created = await this.request(
-        'POST',
-        '/api/knowledge-assets',
-        {
-          contextGraphId: cgId,
-          name: assertionName,
-          quads: wireQuads,
-          promote: true,
-        },
-      );
-    } catch (e) {
-      const err = new Error(
-        `Create failed for one-shot publish (asset name "${assertionName}"): ${e instanceof Error ? e.message : String(e)}. ` +
-        `The asset MAY have been created server-side even though the response failed. Before retrying, check via ` +
-        `dkg_knowledge_asset_history for "${assertionName}" to avoid minting a DUPLICATE. A created asset is ` +
-        `auto-shared to SWM (its working-memory draft is empty), so use _history (lifecycle state regardless ` +
-        `of layer) for existence — NOT dkg_knowledge_asset_query, which reads the empty WM draft and would ` +
-        `falsely report "not created". If it exists, re-share + publish it by name rather than re-running this tool.`,
-      ) as Error & Record<string, unknown>;
-      err.assertionName = assertionName;
-      err.phase = 'create';
-      err.cause = e;
-      throw err;
-    }
-
-    // FIX A — the create route returns HTTP 207 `{ created:true, …, errors:[…] }`
-    // when create+finalize succeeded but the `promote:true` share phase FAILED
-    // (knowledge-assets.ts:614). `this.request` treats 207 as success (2xx, no
-    // throw), so without this check we would publish an UNSHARED assertion and
-    // mask the real error. If the share failed, do NOT publish — surface the
-    // sealed-but-unshared asset by name so the caller can recover with the
-    // lifecycle tools instead of recreating it.
-    if (Array.isArray(created.errors) && created.errors.length > 0) {
-      const shareErr = created.errors.find((e) => e?.phase === 'swm-share') ?? created.errors[0];
-      const err = new Error(
-        `Publish aborted: the asset was created + sealed in Working Memory as "${assertionName}", but ` +
-        `sharing it to Shared Working Memory FAILED (${shareErr?.error ?? 'unknown error'}). The on-chain ` +
-        `publish was NOT attempted. Do NOT recreate — re-share the existing sealed asset by name with ` +
-        `dkg_knowledge_asset_share, then publish it with dkg_knowledge_asset_publish.`,
-      ) as Error & Record<string, unknown>;
-      err.assertionName = assertionName;
-      err.assertionUri = created.assertionUri;
-      if (created.merkleRoot) err.merkleRoot = created.merkleRoot;
-      err.phase = shareErr?.phase ?? 'swm-share';
-      err.partial = true;
-      throw err;
-    }
-
-    // FIX B — the asset is created + sealed + shared; only the on-chain publish
-    // remains. If it fails, the random `assertionName` would be lost and the next
-    // dkg_publish would mint a DUPLICATE. Catch + rethrow carrying the name so the
-    // caller can retry the publish of the existing asset, not recreate it.
-    let published: Record<string, unknown>;
-    try {
-      published = await this.request<Record<string, unknown>>(
-        'POST',
-        '/api/shared-memory/publish',
-        {
-          contextGraphId: cgId,
-          assertionName,
-        },
-      );
-    } catch (e) {
-      const err = new Error(
-        `Publish failed for asset "${assertionName}": ${e instanceof Error ? e.message : String(e)}. The asset ` +
-        `is created + sealed + shared to Shared Working Memory; only the on-chain publish failed. Do NOT ` +
-        `recreate — retry the publish of this asset by name with dkg_knowledge_asset_publish.`,
-      ) as Error & Record<string, unknown>;
-      err.assertionName = assertionName;
-      err.assertionUri = created.assertionUri;
-      if (created.merkleRoot) err.merkleRoot = created.merkleRoot;
-      err.phase = 'vm-publish';
-      err.cause = e;
-      throw err;
-    }
-    return {
-      ...published,
-      ...(created.assertionUri ? { assertionUri: created.assertionUri } : {}),
-      ...(created.merkleRoot ? { merkleRoot: created.merkleRoot } : {}),
-    };
+    return this.request<Record<string, unknown>>(
+      'POST',
+      '/api/knowledge-assets/publish',
+      { contextGraphId: cgId, quads: wireQuads },
+    );
   }
 
   /**

@@ -320,12 +320,11 @@ DKG_SHARE_SCHEMA = {
 DKG_PUBLISH_SCHEMA = {
     "name": "dkg_publish",
     "description": (
-        "One-shot write + publish helper: writes the supplied quads as a single fresh, "
-        "uniquely-named sealed assertion, then publishes it to Verifiable Memory. The on-chain "
-        "MINT is atomic and multi-root-safe -- all subjects publish together as one sealed "
-        "assertion in a single mint. This is a TWO-STEP helper (create-and-seal, then publish), "
-        "so it can partially fail between steps; on a partial failure the result reports the "
-        "assertionName so you can recover by name (do not recreate). Chain-anchored, permanent, "
+        "One-shot direct publish helper: sends the supplied quads inline to the daemon's direct "
+        "publish route and publishes them to Verifiable Memory. The core StorageACK request carries "
+        "the publish payload directly, so this path does not depend on Shared Working Memory state. "
+        "The on-chain MINT is atomic and multi-root-safe -- all subjects publish together in a "
+        "single mint. Chain-anchored, permanent, "
         "costs TRAC. Object values starting with http://, https://, urn:, or did: are treated as "
         "URIs; everything else becomes a string literal automatically.\n"
         "This atomic path requires the context graph to be registered on-chain; pass "
@@ -1793,10 +1792,9 @@ class DKGMemoryProvider(MemoryProvider):
         quads = _normalize_quads(args.get("quads"))
         if not quads:
             return tool_error("quads must contain at least one item with subject, predicate, and object.")
-        # register_if_needed: the atomic assertionName fork (publish_quads) does
-        # NOT auto-register the CG (LU-6 transparent register-then-publish is the
-        # selection fork only, memory.ts:1874+), so on a fresh, never-registered
-        # CG the publish would fail "not registered on-chain" on a real chain.
+        # register_if_needed: direct publish does NOT auto-register the CG, so on
+        # a fresh, never-registered CG the publish would fail "not registered
+        # on-chain" on a real chain.
         # When true, register the CG first (idempotent — short-circuits if already
         # registered) BEFORE publishing, so this one-shot is self-contained on a
         # fresh CG. Mirrors the §G register block on dkg_knowledge_asset_publish.
@@ -1822,13 +1820,11 @@ class DKGMemoryProvider(MemoryProvider):
                 # shape (Codex #1084:1810) — leaving the raw {success:false,...} on
                 # result["registration"] makes a clean publish look partly failed.
                 registration = {"alreadyRegistered": True}
-        # Publish via the ATOMIC assertionName fork (parity with OpenClaw + MCP):
-        # create a fresh uniquely-named assertion with these quads (auto-finalize
-        # + promote), then publish that ONE sealed assertion by name. The daemon
-        # publishes only that assertion's exact merkleRoot — multi-root-safe,
-        # correctly scoped, in a single atomic operation. No per-root loop, no
-        # dedup, no partial-failure shape (those apply only to the explicit
-        # CG-wide dkg_shared_memory_publish, which stays on the selection path).
+        # Publish via the direct payload route (parity with OpenClaw + MCP). The
+        # daemon sends these exact quads through the publish ACK path, so this
+        # one-shot helper does not require pre-positioned SWM data. No per-root
+        # loop, no dedup, no SWM selection shape (those apply only to the
+        # explicit CG-wide dkg_shared_memory_publish path).
         result = self._client.publish_quads(
             cg,
             quads,

@@ -47,6 +47,7 @@ export default defineConfig({
           'test/store-wizard.test.ts',
           'test/blazegraph-docker.test.ts',
           'test/store-identity-tag.test.ts',
+          'test/publisher-runner-lu11.test.ts',
           // Release 2 — managed local Oxigraph server (opt-in). Pure logic
           // + injected fetch/spawn/fs; no network, no real binary.
           'test/oxigraph-binary.test.ts',

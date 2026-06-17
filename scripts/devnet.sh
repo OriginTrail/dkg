@@ -632,8 +632,8 @@ start_node() {
       auth_args=(-H "Authorization: Bearer $auth_token")
     fi
   fi
-  local max_wait=30
-  [ "$node_num" -eq 1 ] && max_wait=120
+  local max_wait=${DEVNET_NODE_READY_TIMEOUT:-30}
+  [ "$node_num" -eq 1 ] && max_wait=$(( max_wait > 120 ? max_wait : 120 ))
   local ready=false
   # CRITICAL: declare loop variable `local` so we don't clobber the OUTER
   # caller's `i` (cmd_start's `for ((i = 2; i <= NUM_NODES; i++))` calls

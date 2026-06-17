@@ -470,7 +470,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    * devnet where storage cores otherwise auto-subscribe to everything they
    * host, masking the host-only fill path.
    */
-  unsubscribeFromContextGraph(this: DKGAgent, contextGraphId: string): void {
+  unsubscribeFromContextGraph(this: DKGAgent,
+    contextGraphId: string,
+    options?: { persist?: boolean; updateRehydrationStatus?: boolean },
+  ): void {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     if (!existing) return;
 
@@ -517,7 +520,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this.setContextGraphSubscription(
       contextGraphId,
       { ...existing, subscribed: false },
-      { persist: true },
+      { persist: options?.persist ?? true, updateRehydrationStatus: options?.updateRehydrationStatus },
     );
 
     void this.reconcileSwmHostModeSubscription(contextGraphId).catch((err) => {
@@ -543,6 +546,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   }
 
   async reconcileSharedMemoryGossipSubscription(this: DKGAgent, contextGraphId: string): Promise<void> {
+    // Reconcile is the membership boundary; rebuild this CG's policy view
+    // before deciding whether to keep or drop the SWM subscription.
+    this.contextGraphMetaProjection.markDirty(contextGraphId);
     // OT-RFC-38 / LU-6 Phase B — subscribe on the wire-form (hash) topic.
     // Members compute the hash from their local cleartext id via
     // {@link gossipWireIdFor}; cores hosting CGs they never joined
@@ -813,6 +819,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           subscribeToContextGraph: (id, options) => this.subscribeToContextGraph(id, options),
           setContextGraphSubscription: (id, next, options) => this.setContextGraphSubscription(id, next, options),
           hasConfirmedMetaState: (id) => this.hasConfirmedMetaState(id),
+          getCgMeta: (id) => this.getCgMeta(id),
+          markCgMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
           persistContextGraphSubscription: (id) => this.persistContextGraphSubscriptionState(id),
         },
         { requireContextGraphSubscriptionSetter: true },
@@ -827,6 +835,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         sharedMemoryOwnedEntities: this.workspaceOwnedEntities,
         writeLocks: this.writeLocks,
         localAgentAddresses: () => [...this.localAgents.keys()],
+        contextGraphMetaOracle: (cgId: string) => this.getCgMeta(cgId),
+        markContextGraphMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
         // OT-RFC-38 / LU-6 Phase B: chain-backed agent-allowlist
         // fallback. Cores hosting curated CGs they are NOT members
         // of have no local meta for the allowlist — without this,
@@ -1510,6 +1520,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // resolve the on-chain id locally so per-cgId promotion still
         // fires and the RS prover sees the KC.
         (cgName: string) => this.getContextGraphOnChainId(cgName),
+        (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
       );
     }
     return this.finalizationHandler;

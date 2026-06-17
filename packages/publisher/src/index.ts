@@ -30,6 +30,8 @@ export {
   StaleWriteError,
   AssertionNotPersistedError,
   MultiRootPublishNotAtomicError,
+  CuratorUnconfirmedError,
+  CuratorRejectedError,
   type DKGPublisherConfig,
   type WorkspaceSenderKeyEncryptInput,
   type WorkspaceSenderKeyEncryptor,

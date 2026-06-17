@@ -15,6 +15,8 @@ import { DeployFunction } from 'hardhat-deploy/types';
  *   - `EpochStorageV8`, `Chronos`, `ParametersStorage` (existing)
  *   - `ConvictionStakingStorage` (049b) — TRAC vault the protocol
  *     treasury fee is paid out of via `transferStake`.
+ *   - `ShardingTableStorage` (006) — OT-RFC-51: `nodeExists` validation for
+ *     a designated primary node on `createAccount` / `setPrimaryNode`.
  *
  * Mirror of staking pattern: stateless logic contract sits between the
  * NFT wrapper and the dedicated storage. Logic can be redeployed
@@ -36,4 +38,7 @@ func.dependencies = [
   'Chronos',
   'ParametersStorage',
   'ConvictionStakingStorage',
+  // OT-RFC-51: needed for `nodeExists` validation in `initialize()`'s
+  // `ShardingTableStorage` dependency + `createAccount`/`setPrimaryNode`.
+  'ShardingTableStorage',
 ];

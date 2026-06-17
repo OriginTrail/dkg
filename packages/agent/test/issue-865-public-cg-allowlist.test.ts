@@ -302,4 +302,25 @@ describe('Issue #865 — public CG + allowlist must not be classified as private
       await agent.stop().catch(() => {});
     }
   });
+
+  it('AGENTS graph private declarations are treated as explicit private policy', async () => {
+    const { agent, store } = await makeAgent();
+    try {
+      const id = 'issue-1138-agents-private';
+      const uri = `did:dkg:context-graph:${id}`;
+      const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+      await store.insert([
+        { subject: uri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: agentsGraph },
+        { subject: uri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Agents Private"', graph: agentsGraph },
+        { subject: uri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"private"', graph: agentsGraph },
+        { subject: uri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${await ownerAddress(agent)}`, graph: agentsGraph },
+      ]);
+
+      expect(await agent.getExplicitAccessPolicy(id)).toBe('private');
+      expect(await agent.isPrivateContextGraph(id)).toBe(true);
+      expect(await agent.readLocalAccessPolicyEnum(id)).toBe(1);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
 });

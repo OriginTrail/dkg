@@ -1,19 +1,42 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { DKGNode } from '../src/node.js';
 import { ProtocolRouter } from '../src/protocol-router.js';
 import { PeerDiscoveryManager } from '../src/discovery.js';
 import { TypedEventBus } from '../src/event-bus.js';
 
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => { calls.push(args); return impl(...args); };
+  return Object.assign(fn, { calls });
+}
+
+// Pristine console methods, captured before any test swaps them. Each
+// test that observes console output installs a recorder via the helper
+// below; afterEach reinstates these unconditionally (see note there).
+const ORIG_CONSOLE_WARN = console.warn;
+const ORIG_CONSOLE_LOG = console.log;
+
+// Install a recorder over a suppressed console method (the recorder
+// swallows the call, matching the original suppress-and-observe spy).
+// Returns the recorder so the test can inspect `.calls`.
+function spyConsole(method: 'warn' | 'log') {
+  const rec = recorder((..._args: unknown[]): void => {});
+  console[method] = rec as unknown as typeof console.warn;
+  return rec;
+}
+
 describe('Circuit Relay', () => {
   const nodes: DKGNode[] = [];
 
   afterEach(async () => {
-    // Unconditionally restore any console spies created in the test
-    // body. Codex PR #526 round 5e: per-test spies were restored
-    // inline at the bottom of each test, but a thrown assertion or
-    // start() error left them mocked and corrupted later tests.
-    // Restoring at this scope guarantees cleanup even on failure.
-    vi.restoreAllMocks();
+    // Unconditionally restore any console recorders installed in the
+    // test body. Codex PR #526 round 5e: per-test recorders were
+    // reinstated inline at the bottom of each test, but a thrown
+    // assertion or start() error left console swapped and corrupted
+    // later tests. Restoring at this scope guarantees cleanup even on
+    // failure.
+    console.warn = ORIG_CONSOLE_WARN;
+    console.log = ORIG_CONSOLE_LOG;
     for (const n of nodes) {
       try {
         await n.stop();
@@ -368,7 +391,7 @@ describe('Circuit Relay', () => {
     // to clamp + warn at start(). We verify the warn fires and the
     // edge actually only ends up with 1 /p2p-circuit self-addr (not
     // 3 attempts queued forever).
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = spyConsole('warn');
 
     const relay = new DKGNode({
       listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
@@ -389,10 +412,10 @@ describe('Circuit Relay', () => {
     nodes.push(edge);
     await edge.start();
 
-    const clampWarn = warnSpy.mock.calls.find(call =>
+    const clampWarn = warnSpy.calls.find(call =>
       typeof call[0] === 'string' && call[0].includes('clamping to 1'),
     );
-    expect(clampWarn, `expected clamp warning; got: ${JSON.stringify(warnSpy.mock.calls)}`).toBeDefined();
+    expect(clampWarn, `expected clamp warning; got: ${JSON.stringify(warnSpy.calls)}`).toBeDefined();
 
     // Wait for the (single) reservation, then assert exactly one
     // distinct circuit self-addr (i.e. no extra duplicate listen addrs
@@ -412,7 +435,7 @@ describe('Circuit Relay', () => {
     );
     expect(distinctRelayPids.size).toBe(1);
 
-    warnSpy.mockRestore();
+    console.warn = ORIG_CONSOLE_WARN;
   }, 15000);
 
   it('skips multi-reservation amplification on relay-server (core) nodes with relayPeers', async () => {
@@ -430,7 +453,7 @@ describe('Circuit Relay', () => {
     // keepAlive" test above asserts a core node still functions when
     // relayPeers are set — this test pins the warning + the absence
     // of the multi-reservation amplification.
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = spyConsole('warn');
 
     const upstreamRelay = new DKGNode({
       listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
@@ -455,17 +478,17 @@ describe('Circuit Relay', () => {
     nodes.push(core);
     await core.start();
 
-    const ignoreWarn = warnSpy.mock.calls.find(call =>
+    const ignoreWarn = warnSpy.calls.find(call =>
       typeof call[0] === 'string'
       && call[0].includes('relayReservationCount=3')
       && call[0].includes('relay servers don\'t multi-reserve'),
     );
     expect(
       ignoreWarn,
-      `expected core-ignore warning; got: ${JSON.stringify(warnSpy.mock.calls)}`,
+      `expected core-ignore warning; got: ${JSON.stringify(warnSpy.calls)}`,
     ).toBeDefined();
 
-    warnSpy.mockRestore();
+    console.warn = ORIG_CONSOLE_WARN;
 
     // Also assert the actual NON-amplification contract — Codex PR #526
     // round 5d caught that the warning-only assertion above wouldn't
@@ -499,7 +522,7 @@ describe('Circuit Relay', () => {
     //   2. The edge ends up with exactly 1 distinct `/p2p-circuit`
     //      self-addr (one reservation on the one real relay), not 2
     //      duplicate entries that would falsely satisfy the watchdog.
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = spyConsole('warn');
 
     const relay = new DKGNode({
       listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
@@ -520,7 +543,7 @@ describe('Circuit Relay', () => {
     nodes.push(edge);
     await edge.start();
 
-    const dedupWarn = warnSpy.mock.calls.find((call) =>
+    const dedupWarn = warnSpy.calls.find((call) =>
       typeof call[0] === 'string'
       && call[0].includes('2 entries supplied')
       && call[0].includes('1 distinct relay peers usable')
@@ -528,16 +551,16 @@ describe('Circuit Relay', () => {
     );
     expect(
       dedupWarn,
-      `expected dedup warning; got: ${JSON.stringify(warnSpy.mock.calls.map(c => c[0]))}`,
+      `expected dedup warning; got: ${JSON.stringify(warnSpy.calls.map(c => c[0]))}`,
     ).toBeDefined();
 
-    const clampWarn = warnSpy.mock.calls.find((call) =>
+    const clampWarn = warnSpy.calls.find((call) =>
       typeof call[0] === 'string'
       && call[0].includes('clamping to 1'),
     );
     expect(
       clampWarn,
-      `expected clamp-to-distinct-count warning; got: ${JSON.stringify(warnSpy.mock.calls.map(c => c[0]))}`,
+      `expected clamp-to-distinct-count warning; got: ${JSON.stringify(warnSpy.calls.map(c => c[0]))}`,
     ).toBeDefined();
 
     const deadline = Date.now() + 5_000;
@@ -555,7 +578,7 @@ describe('Circuit Relay', () => {
     );
     expect(distinctRelayPids.size).toBe(1);
 
-    warnSpy.mockRestore();
+    console.warn = ORIG_CONSOLE_WARN;
   }, 15000);
 
   it('drops self-peerId entries from the clamp + relayTargets (Codex PR #526 round 5)', async () => {
@@ -599,7 +622,7 @@ describe('Circuit Relay', () => {
     await relay.start();
     const relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/'))!;
 
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = spyConsole('warn');
 
     const edge = new DKGNode({
       privateKey: seed,
@@ -611,26 +634,26 @@ describe('Circuit Relay', () => {
     nodes.push(edge);
     await edge.start();
 
-    const selfFilterWarn = warnSpy.mock.calls.find((call) =>
+    const selfFilterWarn = warnSpy.calls.find((call) =>
       typeof call[0] === 'string'
       && call[0].includes("pointing at this node's own peerId"),
     );
     expect(
       selfFilterWarn,
-      `expected self-filter warning; got: ${JSON.stringify(warnSpy.mock.calls.map(c => c[0]))}`,
+      `expected self-filter warning; got: ${JSON.stringify(warnSpy.calls.map(c => c[0]))}`,
     ).toBeDefined();
 
-    const clampWarn = warnSpy.mock.calls.find((call) =>
+    const clampWarn = warnSpy.calls.find((call) =>
       typeof call[0] === 'string'
       && call[0].includes('usable relay peers=1')
       && call[0].includes('clamping to 1'),
     );
     expect(
       clampWarn,
-      `expected clamp-to-usable-count warning; got: ${JSON.stringify(warnSpy.mock.calls.map(c => c[0]))}`,
+      `expected clamp-to-usable-count warning; got: ${JSON.stringify(warnSpy.calls.map(c => c[0]))}`,
     ).toBeDefined();
 
-    warnSpy.mockRestore();
+    console.warn = ORIG_CONSOLE_WARN;
 
     const deadline = Date.now() + 5_000;
     let circuitAddrs: string[] = [];
@@ -671,12 +694,12 @@ describe('Circuit Relay', () => {
     // one is unreachable).
     // Round-5e adjustment: alt-addrs aggregation is a healthy
     // supported config and is now logged at info level
-    // (`console.log`), NOT at warn level. The test must spy on log
-    // to observe it AND must NOT see any warn call mentioning
+    // (`console.log`), NOT at warn level. The test must record log
+    // calls to observe it AND must NOT see any warn call mentioning
     // "alternate addrs" (otherwise we've regressed to noisy warnings
     // on healthy startup).
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warnSpy = spyConsole('warn');
+    const logSpy = spyConsole('log');
 
     const relay = new DKGNode({
       listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
@@ -700,21 +723,21 @@ describe('Circuit Relay', () => {
     nodes.push(edge);
     await edge.start();
 
-    const altInfo = logSpy.mock.calls.find((call) =>
+    const altInfo = logSpy.calls.find((call) =>
       typeof call[0] === 'string'
       && call[0].includes('alternate addrs merged')
       && call[0].includes('1 distinct relay peers'),
     );
     expect(
       altInfo,
-      `expected alt-addrs-merged info log; got: ${JSON.stringify(logSpy.mock.calls.map(c => c[0]))}`,
+      `expected alt-addrs-merged info log; got: ${JSON.stringify(logSpy.calls.map(c => c[0]))}`,
     ).toBeDefined();
-    const altWarn = warnSpy.mock.calls.find((call) =>
+    const altWarn = warnSpy.calls.find((call) =>
       typeof call[0] === 'string' && call[0].includes('alternate addrs'),
     );
     expect(
       altWarn,
-      `alt-addrs aggregation must NOT trigger a warn-level log on a healthy config; got warn calls: ${JSON.stringify(warnSpy.mock.calls.map(c => c[0]))}`,
+      `alt-addrs aggregation must NOT trigger a warn-level log on a healthy config; got warn calls: ${JSON.stringify(warnSpy.calls.map(c => c[0]))}`,
     ).toBeUndefined();
 
     const deadline = Date.now() + 5_000;
@@ -747,7 +770,7 @@ describe('Circuit Relay', () => {
     //   - Expected: NO `/p2p-circuit` in listen addresses, no
     //     watchdog started, no `/p2p-circuit` self-addrs ever
     //     advertised.
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = spyConsole('warn');
 
     const edge = new DKGNode({
       listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
@@ -758,16 +781,16 @@ describe('Circuit Relay', () => {
     nodes.push(edge);
     await edge.start();
 
-    const usableWarn = warnSpy.mock.calls.find((call) =>
+    const usableWarn = warnSpy.calls.find((call) =>
       typeof call[0] === 'string'
       && call[0].includes('0 distinct relay peers usable')
       && call[0].includes('malformed'),
     );
     expect(
       usableWarn,
-      `expected "0 distinct relay peers usable / malformed" warning; got: ${JSON.stringify(warnSpy.mock.calls.map(c => c[0]))}`,
+      `expected "0 distinct relay peers usable / malformed" warning; got: ${JSON.stringify(warnSpy.calls.map(c => c[0]))}`,
     ).toBeDefined();
-    warnSpy.mockRestore();
+    console.warn = ORIG_CONSOLE_WARN;
 
     await new Promise(r => setTimeout(r, 500));
 
@@ -837,7 +860,7 @@ describe('Circuit Relay', () => {
       await new Promise(r => setTimeout(r, 250));
     }
 
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const logSpy = spyConsole('log');
     try {
       // Three back-to-back ticks: even if one tick saw a stale
       // snapshot, the per-tick budget should keep total forced
@@ -846,7 +869,7 @@ describe('Circuit Relay', () => {
       await tick();
       await tick();
       await tick();
-      const churnLogs = logSpy.mock.calls.filter((call) =>
+      const churnLogs = logSpy.calls.filter((call) =>
         typeof call[0] === 'string'
         && call[0].includes('Relay watchdog')
         && call[0].includes('to force reserve'),
@@ -856,7 +879,7 @@ describe('Circuit Relay', () => {
         `expected 0 forced-redial logs across 3 ticks; got: ${JSON.stringify(churnLogs.map(c => c[0]))}`,
       ).toHaveLength(0);
     } finally {
-      logSpy.mockRestore();
+      console.log = ORIG_CONSOLE_LOG;
     }
   }, 25000);
 
@@ -932,11 +955,11 @@ describe('Circuit Relay', () => {
       `expected exactly 2 reservations from 2-of-3 config; got circuitAddrs=${JSON.stringify(circuitAddrs)}`,
     ).toBe(2);
 
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const logSpy = spyConsole('log');
     try {
       await (edge as unknown as { watchdogTick: () => Promise<void> }).watchdogTick();
 
-      const churnLog = logSpy.mock.calls.find((call) =>
+      const churnLog = logSpy.calls.find((call) =>
         typeof call[0] === 'string'
         && call[0].includes('Relay watchdog')
         && (
@@ -947,10 +970,10 @@ describe('Circuit Relay', () => {
       );
       expect(
         churnLog,
-        `expected NO watchdog churn for the unreserved peer; got: ${JSON.stringify(logSpy.mock.calls.map(c => c[0]))}`,
+        `expected NO watchdog churn for the unreserved peer; got: ${JSON.stringify(logSpy.calls.map(c => c[0]))}`,
       ).toBeUndefined();
     } finally {
-      logSpy.mockRestore();
+      console.log = ORIG_CONSOLE_LOG;
     }
 
     const finalCircuitAddrs = edge.libp2p

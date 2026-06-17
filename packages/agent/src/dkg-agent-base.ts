@@ -331,6 +331,7 @@ import {
   type ChatSendResult,
   type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
+  type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
@@ -380,6 +381,7 @@ import {
   deserializeSwmSenderReceiveState,
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
+import { ContextGraphMetaProjection } from './context-graph-meta-projection.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 function readNonNegativeNumberEnv(name: string, fallback: number): number {
@@ -400,10 +402,18 @@ function isSparqlUpdateStatement(sparql: string): boolean {
 export function createListContextGraphsCacheInvalidatingStore(
   innerStore: TripleStore,
   invalidate: () => void,
+  markProjectionDirty?: (quads?: readonly Quad[]) => void,
 ): TripleStore {
-  const invalidateAfterMutation = async <T>(work: () => Promise<T>, changed: (result: T) => boolean): Promise<T> => {
+  const invalidateAfterMutation = async <T>(
+    work: () => Promise<T>,
+    changed: (result: T) => boolean,
+    markDirty?: (result: T) => void,
+  ): Promise<T> => {
     const result = await work();
-    if (changed(result)) invalidate();
+    if (changed(result)) {
+      invalidate();
+      markDirty?.(result);
+    }
     return result;
   };
   const wrapper: TripleStore & { readonly innerStore: TripleStore } = {
@@ -415,24 +425,28 @@ export function createListContextGraphsCacheInvalidatingStore(
       return invalidateAfterMutation(
         () => innerStore.insert(quads),
         () => quads.length > 0,
+        () => markProjectionDirty?.(quads),
       );
     },
     delete(quads) {
       return invalidateAfterMutation(
         () => innerStore.delete(quads),
         () => quads.length > 0,
+        () => markProjectionDirty?.(),
       );
     },
     deleteByPattern(pattern) {
       return invalidateAfterMutation(
         () => innerStore.deleteByPattern(pattern),
         removed => removed > 0,
+        () => markProjectionDirty?.(),
       );
     },
     query(sparql, options) {
       return invalidateAfterMutation(
         () => innerStore.query(sparql, options),
         () => isSparqlUpdateStatement(sparql),
+        () => markProjectionDirty?.(),
       );
     },
     hasGraph(graphUri) {
@@ -445,15 +459,22 @@ export function createListContextGraphsCacheInvalidatingStore(
       return invalidateAfterMutation(
         () => innerStore.dropGraph(graphUri),
         () => true,
+        () => markProjectionDirty?.(),
       );
     },
     listGraphs(options) {
       return innerStore.listGraphs(options);
     },
+    listGraphsByPrefix(prefix, options) {
+      return innerStore.listGraphsByPrefix
+        ? innerStore.listGraphsByPrefix(prefix, options)
+        : innerStore.listGraphs(options).then((graphs) => graphs.filter((graph) => graph.startsWith(prefix)));
+    },
     deleteBySubjectPrefix(graphUri, prefix) {
       return invalidateAfterMutation(
         () => innerStore.deleteBySubjectPrefix(graphUri, prefix),
         removed => removed > 0,
+        () => markProjectionDirty?.(),
       );
     },
     countQuads(graphUri) {
@@ -502,6 +523,7 @@ export class DKGAgentBase {
   protected readonly chain: ChainAdapter;
   /** Shared memory-owned root entities per context graph: entity → creatorPeerId. Used by publisher and shared memory handler. */
   protected readonly workspaceOwnedEntities: Map<string, Map<string, string>>;
+  protected readonly contextGraphMetaProjection: ContextGraphMetaProjection;
   /**
    * OT-RFC-38 / LU-6 Phase B (Codex PR #610 round-2 #2) — highest
    * `nextSeqno` already consumed per (contextGraphId, hostPeerId)
@@ -581,6 +603,8 @@ export class DKGAgentBase {
   protected readonly swmHostModeHandlers = new Map<string, (topic: string, data: Uint8Array, from: string) => void>();
   /** Async lock for the host-mode reconciler so simultaneous calls don't double-subscribe. */
   protected hostModeReconcileInflight?: Promise<void>;
+  /** Rotating cursor for bounded host-mode reconcile sweeps over known context graphs. */
+  protected hostModeReconcileCursor = 0;
   /**
    * OT-RFC-43 A2 — the KA-number allocator, retained on the agent (also
    * forwarded to the publisher as `kaAllocator`). Held here so
@@ -722,6 +746,16 @@ export class DKGAgentBase {
   static readonly SWM_SUBSTRATE_FANOUT_TIMEOUT_MS = 15_000;
 
   /**
+   * Per-curator-peer timeout for the STRICT curator-ack gate on a private-CG
+   * write (OT-RFC-49 curator-leader). Shorter than the 15s fan-out budget
+   * because it sits synchronously on the HTTP write path: too long makes a
+   * write hang when the curator is slow/unreachable; too short produces false
+   * `unconfirmed` errors for a curator that would have applied it. 5s is the
+   * default; callers may override via `share({ curatorAckTimeoutMs })`.
+   */
+  static readonly SWM_CURATOR_ACK_TIMEOUT_MS = 5_000;
+
+  /**
    * Lazy CGMemberEnumerator — single instance per agent. Holds the
    * 60s membership cache shared across every share to the same
    * cgId within a window. See {@link getOrCreateCGMemberEnumerator}.
@@ -861,6 +895,13 @@ export class DKGAgentBase {
   protected readonly config: DKGAgentConfig;
   protected started = false;
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
+  protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
+  protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
+  protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
+  protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
+  protected readonly contextGraphSubscriptionPersistCanceledRevisions = new Map<string, number>();
+  protected readonly contextGraphSubscriptionPersistPendingRevisions = new Map<string, Set<number>>();
+  protected readonly contextGraphSubscriptionPersistChains = new Map<string, Promise<void>>();
   protected readonly listContextGraphsCache = new Map<string, {
     expiresAt: number;
     rows: Array<Record<string, unknown>>;
@@ -889,7 +930,10 @@ export class DKGAgentBase {
 
   protected async insertSyncedQuadsAndInvalidateListCache(quads: Quad[]): Promise<void> {
     await this.store.insert(quads);
-    if (quads.length > 0) this.invalidateListContextGraphsCache();
+    if (quads.length > 0) {
+      this.invalidateListContextGraphsCache();
+      this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+    }
   }
   protected readonly gossipRegistered = new Set<string>();
   protected readonly sharedMemoryGossipRegistered = new Set<string>();
@@ -1313,6 +1357,7 @@ export class DKGAgentBase {
     this.wallet = wallet;
     this.node = node;
     this.store = store;
+    this.contextGraphMetaProjection = new ContextGraphMetaProjection(store);
     this.publisher = publisher;
     this.queryEngine = queryEngine;
     this.workspaceOwnedEntities = workspaceOwnedEntities;

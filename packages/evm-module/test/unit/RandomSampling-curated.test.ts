@@ -14,16 +14,17 @@ import {
 } from '../../typechain';
 
 /**
- * RFC-39 Phase A.5 — `RandomSampling` curated-CG picker.
+ * RFC-39 Phase A.5 / OT-RFC-49 — `RandomSampling` curated-CG picker.
  *
  * Locks the picker behaviour changes:
  *
  *   - `_isCGEligible` no longer excludes curated CGs (they reach step 2).
  *   - Step 2 (KC selection) skips curated KCs without a
- *     `(ciphertextChunksRoot, ciphertextChunkCount)` commitment using the
+ *     `(catalogRoot, catalogLeafCount)` commitment using the
  *     same retry-loop pattern as expired KCs.
- *   - Step 3 (leaf index) branches: curated CGs draw against
- *     `ciphertextChunkCount`, public CGs unchanged
+ *   - Step 3 (leaf index) branches: curated CGs draw against the PUBLIC
+ *     `_catalog` `catalogLeafCount` (OT-RFC-49 "hosting follows access" — cores
+ *     prove the public catalog, not private ciphertext), public CGs unchanged
  *     (`merkleLeafCount`).
  *
  * Dedicated test file (separate from `RandomSampling.test.ts`) so the
@@ -35,28 +36,29 @@ import {
  * `previewChallengeForSeed` helper so the curated branch is testable
  * without a full proof-period dance.
  */
-// RFC-39 Phase B (deferred): curated CG random sampling is gated at the
-// `_isCGEligible` level until the off-chain prover (`packages/random-sampling
-// /src/prover.ts`) learns to fetch `getCiphertextChunkCount` /
-// `getCiphertextChunksRoot` and build the proof against the ciphertext
-// chunks on disk. Today the prover still queries `getMerkleLeafCount` and
-// proves against plaintext leaves, so any draw the contract picker resolved
-// to a curated KC produced `V10ProofLeafCountMismatchError` for every
-// proving period (devnet sweep confirmed this on every core node).
-//
-// Until the prover lands its ciphertext path, the contract picker treats
-// curated CGs as ineligible. The picker code in steps 2/3 of
-// `_pickWeightedChallenge` retains the curated branches so the unskip is a
-// one-line revert in `RandomSampling._isCGEligible` + removing the
-// `.skip` below.
+// OT-RFC-49 "hosting follows access": curated CG random sampling now draws
+// against the PUBLIC `_catalog` commitment (`getCatalogLeafCount` /
+// `getCatalogRoot`) instead of the stripped private ciphertext chunks. Cores
+// hold zero private bytes; the off-chain prover fetches the catalog leaves and
+// proves against them. The picker code in steps 2/3 of `_pickWeightedChallenge`
+// retains the curated branches, now keyed on the catalog getters.
 describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () => {
   const CURATED_POLICY = 0;
   const OPEN_POLICY = 1;
   const TEST_KC_BYTE_SIZE = 128n;
-  const SAMPLE_CT_ROOT_A = ethers.keccak256(ethers.toUtf8Bytes('rs-curated-ct-A'));
-  const SAMPLE_CT_ROOT_B = ethers.keccak256(ethers.toUtf8Bytes('rs-curated-ct-B'));
-  const SAMPLE_CT_COUNT_A = 5;
-  const SAMPLE_CT_COUNT_B = 13;
+  // OT-RFC-49: catalog roots are arbitrary non-zero bytes32 sentinels here —
+  // `DKGKnowledgeAssets.setCatalogCommitment` only enforces `root != 0 &&
+  // count > 0`; it does not recompute the catalog tree at commit time, so the
+  // picker draw uses only `catalogLeafCount` (the modulus). The leaf-count
+  // values double as the curated draw modulus under test.
+  const SAMPLE_CATALOG_ROOT_A = ethers.keccak256(
+    ethers.toUtf8Bytes('rs-curated-catalog-A'),
+  );
+  const SAMPLE_CATALOG_ROOT_B = ethers.keccak256(
+    ethers.toUtf8Bytes('rs-curated-catalog-B'),
+  );
+  const SAMPLE_CATALOG_COUNT_A = 5;
+  const SAMPLE_CATALOG_COUNT_B = 13;
 
   let accounts: SignerWithAddress[];
   let HubContract: Hub;
@@ -98,7 +100,7 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
     // Same opSigner registration pattern as the legacy Phase-10 suite —
     // grants accounts[19] the right to call `onlyContracts` methods on
     // storage contracts directly (createContextGraph, createKnowledgeAsset,
-    // setCiphertextChunksCommitment, etc).
+    // setCatalogCommitment, etc).
     await Hub.setContractAddress('TestStorageOperator', signers[19].address);
 
     return {
@@ -192,14 +194,14 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
    * Seed a KC directly on DKGKnowledgeAssets and register it to the
    * given CG. Returns the new KC id.
    *
-   * For curated CGs, pass `ciphertext` to also call
-   * `setCiphertextChunksCommitment` — the picker only treats the KC as
+   * For curated CGs, pass `catalog` to also call
+   * `setCatalogCommitment` — the picker only treats the KC as
    * eligible in the curated draw when a commitment exists.
    */
   async function createKC(args: {
     cgId: bigint;
     endEpoch: bigint;
-    ciphertext?: { root: string; count: number };
+    catalog?: { root: string; count: number };
   }): Promise<bigint> {
     const currentEpoch = await ChronosContract.getCurrentEpoch();
     const createTx = await KCSContract.connect(opSigner).createKnowledgeAsset(
@@ -236,11 +238,11 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
       args.cgId,
       kaId,
     );
-    if (args.ciphertext) {
-      await KCSContract.connect(opSigner).setCiphertextChunksCommitment(
+    if (args.catalog) {
+      await KCSContract.connect(opSigner).setCatalogCommitment(
         kaId,
-        args.ciphertext.root,
-        args.ciphertext.count,
+        args.catalog.root,
+        args.catalog.count,
       );
     }
     return kaId;
@@ -269,7 +271,7 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
       const kaId = await createKC({
         cgId,
         endEpoch,
-        ciphertext: { root: SAMPLE_CT_ROOT_A, count: SAMPLE_CT_COUNT_A },
+        catalog: { root: SAMPLE_CATALOG_ROOT_A, count: SAMPLE_CATALOG_COUNT_A },
       });
       await seedCGValue(cgId, 1_000n);
 
@@ -281,24 +283,24 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
         );
         expect(preview.cgId).to.equal(cgId);
         expect(preview.kaId).to.equal(kaId);
-        // Step 3 uses ciphertextChunkCount for curated CGs.
-        expect(preview.chunkId).to.be.lessThan(BigInt(SAMPLE_CT_COUNT_A));
+        // Step 3 uses catalogLeafCount for curated CGs.
+        expect(preview.chunkId).to.be.lessThan(BigInt(SAMPLE_CATALOG_COUNT_A));
       }
     });
 
-    it('chunkId is drawn against ciphertextChunkCount, not merkleLeafCount, on a curated KC', async () => {
-      // Verify the step-3 leaf-space split by setting a ciphertextChunkCount
+    it('chunkId is drawn against catalogLeafCount, not merkleLeafCount, on a curated KC', async () => {
+      // Verify the step-3 leaf-space split by setting a catalogLeafCount
       // that is much larger than the KC's merkleLeafCount (1, set in
       // createKC above). If the picker were still reading merkleLeafCount,
       // chunkId would always be 0 — `seed % 1 == 0`. With the curated
-      // branch reading ciphertextChunkCount=13, chunkIds across 30 draws
+      // branch reading catalogLeafCount=13, chunkIds across 30 draws
       // should cover several distinct values in [0, 13).
       const cgId = await createCG(CURATED_POLICY);
       const endEpoch = (await ChronosContract.getCurrentEpoch()) + 5n;
       await createKC({
         cgId,
         endEpoch,
-        ciphertext: { root: SAMPLE_CT_ROOT_B, count: SAMPLE_CT_COUNT_B },
+        catalog: { root: SAMPLE_CATALOG_ROOT_B, count: SAMPLE_CATALOG_COUNT_B },
       });
       await seedCGValue(cgId, 1_000n);
 
@@ -309,7 +311,7 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
           testSeed(i),
           currentEpoch,
         );
-        expect(preview.chunkId).to.be.lessThan(BigInt(SAMPLE_CT_COUNT_B));
+        expect(preview.chunkId).to.be.lessThan(BigInt(SAMPLE_CATALOG_COUNT_B));
         seen.add(preview.chunkId);
       }
       // Sanity: 30 draws against a 13-leaf space should hit at least 4
@@ -330,7 +332,7 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
       const committedKcId = await createKC({
         cgId,
         endEpoch,
-        ciphertext: { root: SAMPLE_CT_ROOT_A, count: SAMPLE_CT_COUNT_A },
+        catalog: { root: SAMPLE_CATALOG_ROOT_A, count: SAMPLE_CATALOG_COUNT_A },
       });
       await seedCGValue(cgId, 1_000n);
 
@@ -377,19 +379,19 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
   });
 
   describe('Storage — direct getter parity', () => {
-    it('reads back the persisted commitment via getLatestCiphertextChunksRoot / getCiphertextChunkCount', async () => {
+    it('reads back the persisted commitment via getCatalogRoot / getCatalogLeafCount', async () => {
       const cgId = await createCG(CURATED_POLICY);
       const endEpoch = (await ChronosContract.getCurrentEpoch()) + 5n;
       const kaId = await createKC({
         cgId,
         endEpoch,
-        ciphertext: { root: SAMPLE_CT_ROOT_A, count: SAMPLE_CT_COUNT_A },
+        catalog: { root: SAMPLE_CATALOG_ROOT_A, count: SAMPLE_CATALOG_COUNT_A },
       });
-      expect(await KCSContract.getLatestCiphertextChunksRoot(kaId)).to.equal(
-        SAMPLE_CT_ROOT_A,
+      expect(await KCSContract.getCatalogRoot(kaId)).to.equal(
+        SAMPLE_CATALOG_ROOT_A,
       );
-      expect(await KCSContract.getCiphertextChunkCount(kaId)).to.equal(
-        SAMPLE_CT_COUNT_A,
+      expect(await KCSContract.getCatalogLeafCount(kaId)).to.equal(
+        SAMPLE_CATALOG_COUNT_A,
       );
     });
 
@@ -397,39 +399,39 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
       const cgId = await createCG(OPEN_POLICY);
       const endEpoch = (await ChronosContract.getCurrentEpoch()) + 5n;
       const kaId = await createKC({ cgId, endEpoch });
-      expect(await KCSContract.getLatestCiphertextChunksRoot(kaId)).to.equal(
+      expect(await KCSContract.getCatalogRoot(kaId)).to.equal(
         ethers.ZeroHash,
       );
-      expect(await KCSContract.getCiphertextChunkCount(kaId)).to.equal(0);
+      expect(await KCSContract.getCatalogLeafCount(kaId)).to.equal(0);
     });
 
-    it('setCiphertextChunksCommitment rejects partial commitments (zero root)', async () => {
+    it('setCatalogCommitment rejects partial commitments (zero root)', async () => {
       const cgId = await createCG(CURATED_POLICY);
       const endEpoch = (await ChronosContract.getCurrentEpoch()) + 5n;
       const kaId = await createKC({ cgId, endEpoch });
       await expect(
-        KCSContract.connect(opSigner).setCiphertextChunksCommitment(
+        KCSContract.connect(opSigner).setCatalogCommitment(
           kaId,
           ethers.ZeroHash,
-          SAMPLE_CT_COUNT_A,
+          SAMPLE_CATALOG_COUNT_A,
         ),
-      ).to.be.revertedWith('Invalid ciphertext commitment');
+      ).to.be.revertedWith('Invalid catalog commitment');
     });
 
-    it('setCiphertextChunksCommitment rejects partial commitments (zero count)', async () => {
+    it('setCatalogCommitment rejects partial commitments (zero count)', async () => {
       const cgId = await createCG(CURATED_POLICY);
       const endEpoch = (await ChronosContract.getCurrentEpoch()) + 5n;
       const kaId = await createKC({ cgId, endEpoch });
       await expect(
-        KCSContract.connect(opSigner).setCiphertextChunksCommitment(
+        KCSContract.connect(opSigner).setCatalogCommitment(
           kaId,
-          SAMPLE_CT_ROOT_A,
+          SAMPLE_CATALOG_ROOT_A,
           0,
         ),
-      ).to.be.revertedWith('Invalid ciphertext commitment');
+      ).to.be.revertedWith('Invalid catalog commitment');
     });
 
-    it('setCiphertextChunksCommitment rejects partial commitments (BOTH zero root and count)', async () => {
+    it('setCatalogCommitment rejects partial commitments (BOTH zero root and count)', async () => {
       // Defends against the regression where the require became `||` instead
       // of `&&` — a both-zero commitment is the worst-case sentinel and must
       // also be rejected, not just each axis alone.
@@ -437,15 +439,15 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
       const endEpoch = (await ChronosContract.getCurrentEpoch()) + 5n;
       const kaId = await createKC({ cgId, endEpoch });
       await expect(
-        KCSContract.connect(opSigner).setCiphertextChunksCommitment(
+        KCSContract.connect(opSigner).setCatalogCommitment(
           kaId,
           ethers.ZeroHash,
           0,
         ),
-      ).to.be.revertedWith('Invalid ciphertext commitment');
+      ).to.be.revertedWith('Invalid catalog commitment');
     });
 
-    it('emits KnowledgeAssetCiphertextCommitmentSet with the indexed id and the (root, count) tuple', async () => {
+    it('emits KnowledgeAssetCatalogCommitmentSet with the indexed id and the (root, count) tuple', async () => {
       // Locks the audit-trail invariant: every successful commit MUST emit
       // the event with the exact pair persisted, with the KC id indexed so
       // off-chain indexers can filter without reading every block. A
@@ -455,17 +457,17 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
       const endEpoch = (await ChronosContract.getCurrentEpoch()) + 5n;
       const kaId = await createKC({ cgId, endEpoch });
       await expect(
-        KCSContract.connect(opSigner).setCiphertextChunksCommitment(
+        KCSContract.connect(opSigner).setCatalogCommitment(
           kaId,
-          SAMPLE_CT_ROOT_A,
-          SAMPLE_CT_COUNT_A,
+          SAMPLE_CATALOG_ROOT_A,
+          SAMPLE_CATALOG_COUNT_A,
         ),
       )
-        .to.emit(KCSContract, 'KnowledgeAssetCiphertextCommitmentSet')
-        .withArgs(kaId, SAMPLE_CT_ROOT_A, SAMPLE_CT_COUNT_A);
+        .to.emit(KCSContract, 'KnowledgeAssetCatalogCommitmentSet')
+        .withArgs(kaId, SAMPLE_CATALOG_ROOT_A, SAMPLE_CATALOG_COUNT_A);
     });
 
-    it('rejects setCiphertextChunksCommitment from an EOA without onlyContracts', async () => {
+    it('rejects setCatalogCommitment from an EOA without onlyContracts', async () => {
       // Any address that isn't registered in `Hub` as a contract must NOT be
       // able to write commitments — that's the tx authentication boundary
       // for the curated picker. accounts[5] is a fresh EOA, never set in
@@ -475,10 +477,10 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
       const kaId = await createKC({ cgId, endEpoch });
       const intruder = accounts[5];
       await expect(
-        KCSContract.connect(intruder).setCiphertextChunksCommitment(
+        KCSContract.connect(intruder).setCatalogCommitment(
           kaId,
-          SAMPLE_CT_ROOT_A,
-          SAMPLE_CT_COUNT_A,
+          SAMPLE_CATALOG_ROOT_A,
+          SAMPLE_CATALOG_COUNT_A,
         ),
       ).to.be.reverted;
     });
@@ -495,18 +497,18 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
       const kaId = await createKC({
         cgId,
         endEpoch,
-        ciphertext: { root: SAMPLE_CT_ROOT_A, count: SAMPLE_CT_COUNT_A },
+        catalog: { root: SAMPLE_CATALOG_ROOT_A, count: SAMPLE_CATALOG_COUNT_A },
       });
-      expect(await KCSContract.getLatestCiphertextChunksRoot(kaId)).to.equal(SAMPLE_CT_ROOT_A);
-      expect(await KCSContract.getCiphertextChunkCount(kaId)).to.equal(SAMPLE_CT_COUNT_A);
+      expect(await KCSContract.getCatalogRoot(kaId)).to.equal(SAMPLE_CATALOG_ROOT_A);
+      expect(await KCSContract.getCatalogLeafCount(kaId)).to.equal(SAMPLE_CATALOG_COUNT_A);
 
-      await KCSContract.connect(opSigner).setCiphertextChunksCommitment(
+      await KCSContract.connect(opSigner).setCatalogCommitment(
         kaId,
-        SAMPLE_CT_ROOT_B,
-        SAMPLE_CT_COUNT_B,
+        SAMPLE_CATALOG_ROOT_B,
+        SAMPLE_CATALOG_COUNT_B,
       );
-      expect(await KCSContract.getLatestCiphertextChunksRoot(kaId)).to.equal(SAMPLE_CT_ROOT_B);
-      expect(await KCSContract.getCiphertextChunkCount(kaId)).to.equal(SAMPLE_CT_COUNT_B);
+      expect(await KCSContract.getCatalogRoot(kaId)).to.equal(SAMPLE_CATALOG_ROOT_B);
+      expect(await KCSContract.getCatalogLeafCount(kaId)).to.equal(SAMPLE_CATALOG_COUNT_B);
     });
 
     it('emits a fresh event on every overwrite (no event suppression on identical values)', async () => {
@@ -519,54 +521,54 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
       const kaId = await createKC({ cgId, endEpoch });
 
       await expect(
-        KCSContract.connect(opSigner).setCiphertextChunksCommitment(
+        KCSContract.connect(opSigner).setCatalogCommitment(
           kaId,
-          SAMPLE_CT_ROOT_A,
-          SAMPLE_CT_COUNT_A,
+          SAMPLE_CATALOG_ROOT_A,
+          SAMPLE_CATALOG_COUNT_A,
         ),
       )
-        .to.emit(KCSContract, 'KnowledgeAssetCiphertextCommitmentSet')
-        .withArgs(kaId, SAMPLE_CT_ROOT_A, SAMPLE_CT_COUNT_A);
+        .to.emit(KCSContract, 'KnowledgeAssetCatalogCommitmentSet')
+        .withArgs(kaId, SAMPLE_CATALOG_ROOT_A, SAMPLE_CATALOG_COUNT_A);
       await expect(
-        KCSContract.connect(opSigner).setCiphertextChunksCommitment(
+        KCSContract.connect(opSigner).setCatalogCommitment(
           kaId,
-          SAMPLE_CT_ROOT_A,
-          SAMPLE_CT_COUNT_A,
+          SAMPLE_CATALOG_ROOT_A,
+          SAMPLE_CATALOG_COUNT_A,
         ),
       )
-        .to.emit(KCSContract, 'KnowledgeAssetCiphertextCommitmentSet')
-        .withArgs(kaId, SAMPLE_CT_ROOT_A, SAMPLE_CT_COUNT_A);
+        .to.emit(KCSContract, 'KnowledgeAssetCatalogCommitmentSet')
+        .withArgs(kaId, SAMPLE_CATALOG_ROOT_A, SAMPLE_CATALOG_COUNT_A);
     });
 
     it('returns zero/zero for never-existed KC ids (sentinel default — no out-of-bounds revert)', async () => {
-      // The picker treats both `getLatestCiphertextChunksRoot == bytes32(0)`
-      // and `getCiphertextChunkCount == 0` as "skip" sentinels. The getters
+      // The picker treats both `getCatalogRoot == bytes32(0)`
+      // and `getCatalogLeafCount == 0` as "skip" sentinels. The getters
       // MUST therefore be `view`-safe on never-existed ids — no revert, no
       // overflow — otherwise the picker's commitment check would itself
       // revert and DoS the entire sampling tick.
       const farFutureKcId = 999_999_999n;
-      expect(await KCSContract.getLatestCiphertextChunksRoot(farFutureKcId)).to.equal(
+      expect(await KCSContract.getCatalogRoot(farFutureKcId)).to.equal(
         ethers.ZeroHash,
       );
-      expect(await KCSContract.getCiphertextChunkCount(farFutureKcId)).to.equal(0);
+      expect(await KCSContract.getCatalogLeafCount(farFutureKcId)).to.equal(0);
     });
   });
 
   describe('Picker — public path parity (curated change must not leak into public branch)', () => {
-    it('public CG with a committed KC still draws chunkId against merkleLeafCount, NOT ciphertextChunkCount', async () => {
+    it('public CG with a committed KC still draws chunkId against merkleLeafCount, NOT catalogLeafCount', async () => {
       // The most dangerous regression in PR #630 would be the curated
       // step-3 branch silently leaking into the public path — i.e. the
       // ternary in `_pickWeightedChallenge` always reading
-      // `getCiphertextChunkCount` regardless of `cgIsCurated`. That would
+      // `getCatalogLeafCount` regardless of `cgIsCurated`. That would
       // change consensus deterministically across all proofs on public CGs
       // and is invisible to the curated tests above.
       //
       // We exercise this by setting a commitment on a *public* KC (storage
       // does not gate by curated; KAV10 does, so we have to write the
       // commitment via the storage's onlyContracts gate directly). We pick
-      // ciphertextChunkCount=13 (large) and merkleLeafCount=1 (the default
+      // catalogLeafCount=13 (large) and merkleLeafCount=1 (the default
       // from KAV10 with chunksAmount=1). If the public branch erroneously
-      // read ciphertextChunkCount, chunkIds would distribute over [0,13).
+      // read catalogLeafCount, chunkIds would distribute over [0,13).
       // The correct public branch reads merkleLeafCount=1, so chunkId is
       // always 0.
       const cgId = await createCG(OPEN_POLICY);
@@ -574,10 +576,10 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
       const kaId = await createKC({ cgId, endEpoch });
       // Force a commitment onto the public KC to set up the regression
       // probe (storage allows it — the policy gate lives in KAV10).
-      await KCSContract.connect(opSigner).setCiphertextChunksCommitment(
+      await KCSContract.connect(opSigner).setCatalogCommitment(
         kaId,
-        SAMPLE_CT_ROOT_B,
-        SAMPLE_CT_COUNT_B,
+        SAMPLE_CATALOG_ROOT_B,
+        SAMPLE_CATALOG_COUNT_B,
       );
       await seedCGValue(cgId, 1_000n);
 
@@ -594,7 +596,7 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
       }
       // merkleLeafCount on a chunksAmount=1 KC is 1, so all draws collapse
       // to chunkId=0. If the public branch ever started reading
-      // ciphertextChunkCount, this set would contain >=4 elements (matches
+      // catalogLeafCount, this set would contain >=4 elements (matches
       // the curated leaf-count regression test above).
       expect(Array.from(seen)).to.deep.equal([0n]);
     });
@@ -646,7 +648,7 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
       const eligibleKcId = await createKC({
         cgId: eligibleCg,
         endEpoch,
-        ciphertext: { root: SAMPLE_CT_ROOT_A, count: SAMPLE_CT_COUNT_A },
+        catalog: { root: SAMPLE_CATALOG_ROOT_A, count: SAMPLE_CATALOG_COUNT_A },
       });
       // Heavy weight on exhaustedCg so the *first* weighted draw lands on
       // it for almost every seed — forcing the outer retry to fire.
@@ -741,7 +743,7 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
       await createKC({
         cgId,
         endEpoch,
-        ciphertext: { root: SAMPLE_CT_ROOT_A, count: SAMPLE_CT_COUNT_A },
+        catalog: { root: SAMPLE_CATALOG_ROOT_A, count: SAMPLE_CATALOG_COUNT_A },
       });
       await seedCGValue(cgId, 1_000n);
       // Deactivate it via the storage's onlyContracts API. CGStorageContract's
@@ -804,7 +806,7 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
       await createKC({
         cgId,
         endEpoch,
-        ciphertext: { root: SAMPLE_CT_ROOT_B, count: SAMPLE_CT_COUNT_B },
+        catalog: { root: SAMPLE_CATALOG_ROOT_B, count: SAMPLE_CATALOG_COUNT_B },
       });
       await seedCGValue(cgId, 1_000n);
 
@@ -833,7 +835,7 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
       await createKC({
         cgId,
         endEpoch,
-        ciphertext: { root: SAMPLE_CT_ROOT_B, count: SAMPLE_CT_COUNT_B },
+        catalog: { root: SAMPLE_CATALOG_ROOT_B, count: SAMPLE_CATALOG_COUNT_B },
       });
       await seedCGValue(cgId, 1_000n);
 
@@ -866,7 +868,7 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
       const curatedKcId = await createKC({
         cgId: curatedCg,
         endEpoch,
-        ciphertext: { root: SAMPLE_CT_ROOT_A, count: SAMPLE_CT_COUNT_A },
+        catalog: { root: SAMPLE_CATALOG_ROOT_A, count: SAMPLE_CATALOG_COUNT_A },
       });
       const publicKcId = await createKC({ cgId: publicCg, endEpoch });
       await seedCGValue(curatedCg, 1_000n);
@@ -883,8 +885,8 @@ describe('@unit RandomSampling — RFC-39 curated picker [Phase B enabled]', () 
         cgPicks.set(k, (cgPicks.get(k) ?? 0) + 1);
         if (preview.cgId === curatedCg) {
           expect(preview.kaId).to.equal(curatedKcId);
-          // Step 3 curated branch: bound by ciphertextChunkCount.
-          expect(preview.chunkId).to.be.lessThan(BigInt(SAMPLE_CT_COUNT_A));
+          // Step 3 curated branch: bound by catalogLeafCount.
+          expect(preview.chunkId).to.be.lessThan(BigInt(SAMPLE_CATALOG_COUNT_A));
         } else if (preview.cgId === publicCg) {
           expect(preview.kaId).to.equal(publicKcId);
           // Step 3 public branch: merkleLeafCount=1 → chunkId=0.

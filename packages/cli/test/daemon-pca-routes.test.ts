@@ -34,16 +34,78 @@ function runCtx(method: string, rawPath: string, agent: any, body?: unknown) {
 }
 
 describe('daemon /api/pca V10 caller contract', () => {
-  it('POST /api/pca accepts a V10 body with only tokens (no lockEpochs) → 200', async () => {
+  it('POST /api/pca with tokens + primaryNode → 200 and forwards the node (OT-RFC-51)', async () => {
+    const calls: Array<[bigint, bigint]> = [];
     const agent = {
-      createPublishingConvictionAccount: async () => ({
-        accountId: 1n, hash: '0xabc', blockNumber: 7, success: true,
-      }),
+      createPublishingConvictionAccount: async (committedTRAC: bigint, primaryNode: bigint) => {
+        calls.push([committedTRAC, primaryNode]);
+        return { accountId: 1n, hash: '0xabc', blockNumber: 7, success: true };
+      },
     };
-    const { res, done } = runCtx('POST', '/api/pca', agent, { tokens: '100' });
+    const { res, done } = runCtx('POST', '/api/pca', agent, { tokens: '100', primaryNode: '42' });
     await done;
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).accountId).toBe('1');
+    // The node identityId must reach the facade — otherwise the PCA seeds nobody.
+    expect(calls).toEqual([[ethers.parseEther('100'), 42n]]);
+  });
+
+  it('POST /api/pca WITHOUT primaryNode → 400, facade not called (no silently-inert PCA)', async () => {
+    let called = false;
+    const agent = { createPublishingConvictionAccount: async () => { called = true; return { accountId: 9n, hash: '0x', blockNumber: 1, success: true }; } };
+    const { res, done } = runCtx('POST', '/api/pca', agent, { tokens: '100' });
+    await done;
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/primaryNode is required/);
+    expect(called).toBe(false);
+  });
+
+  it('POST /api/pca with primaryNode 0 (the no-node sentinel) → 400, facade not called', async () => {
+    let called = false;
+    const agent = { createPublishingConvictionAccount: async () => { called = true; return { accountId: 9n, hash: '0x', blockNumber: 1, success: true }; } };
+    const { res, done } = runCtx('POST', '/api/pca', agent, { tokens: '100', primaryNode: '0' });
+    await done;
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/must be > 0/);
+    expect(called).toBe(false);
+  });
+
+  it('POST /api/pca with a non-integer primaryNode → 400, facade not called', async () => {
+    let called = false;
+    const agent = { createPublishingConvictionAccount: async () => { called = true; return { accountId: 9n, hash: '0x', blockNumber: 1, success: true }; } };
+    const { res, done } = runCtx('POST', '/api/pca', agent, { tokens: '100', primaryNode: 'not-a-node' });
+    await done;
+    expect(res.statusCode).toBe(400);
+    expect(called).toBe(false);
+  });
+
+  it('POST /api/pca with a numeric primaryNode beyond JSON safe-integer → 400, facade not called', async () => {
+    // A uint72 id can exceed 2^53-1; as a JSON *number* it is already rounded by
+    // JSON.parse, so it must be rejected (caller should pass it as a string).
+    let called = false;
+    const agent = { createPublishingConvictionAccount: async () => { called = true; return { accountId: 9n, hash: '0x', blockNumber: 1, success: true }; } };
+    // 2**53 is the first non-safe integer (MAX_SAFE_INTEGER is 2**53 - 1).
+    const { res, done } = runCtx('POST', '/api/pca', agent, { tokens: '100', primaryNode: 2 ** 53 });
+    await done;
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/safe-integer/);
+    expect(called).toBe(false);
+  });
+
+  it('POST /api/pca with a large string primaryNode (beyond safe-integer) is accepted losslessly', async () => {
+    // The string path must preserve a uint72 id exactly (no rounding).
+    const big = '4722366482869645213695'; // 2**72 - 1 (max uint72)
+    const calls: Array<[bigint, bigint]> = [];
+    const agent = {
+      createPublishingConvictionAccount: async (committedTRAC: bigint, primaryNode: bigint) => {
+        calls.push([committedTRAC, primaryNode]);
+        return { accountId: 5n, hash: '0xabc', blockNumber: 1, success: true };
+      },
+    };
+    const { res, done } = runCtx('POST', '/api/pca', agent, { tokens: '100', primaryNode: big });
+    await done;
+    expect(res.statusCode).toBe(200);
+    expect(calls).toEqual([[ethers.parseEther('100'), BigInt(big)]]);
   });
 
   it('POST /api/pca/:id/agent registers an agent → 200 with txHash', async () => {
@@ -243,7 +305,7 @@ describe('daemon /api/pca V10 caller contract', () => {
         '(rpcUrl, hubAddress, privateKey) when creating the agent, or set DKG_PRIVATE_KEY.',
       );
     };
-    const create = runCtx('POST', '/api/pca', { createPublishingConvictionAccount: noChainErr }, { tokens: '1' });
+    const create = runCtx('POST', '/api/pca', { createPublishingConvictionAccount: noChainErr }, { tokens: '1', primaryNode: '42' });
     await create.done;
     expect(create.res.statusCode).toBe(503);
 
@@ -254,7 +316,7 @@ describe('daemon /api/pca V10 caller contract', () => {
 
   it('maps a "NFT not deployed on this Hub" throw to HTTP 503 on write and GET, not 500/404', async () => {
     const undeployed = () => { throw new Error('DKGPublishingConvictionNFT not deployed on this Hub.'); };
-    const create = runCtx('POST', '/api/pca', { createPublishingConvictionAccount: undeployed }, { tokens: '1' });
+    const create = runCtx('POST', '/api/pca', { createPublishingConvictionAccount: undeployed }, { tokens: '1', primaryNode: '42' });
     await create.done;
     expect(create.res.statusCode).toBe(503);
 
@@ -307,7 +369,7 @@ describe('daemon /api/pca V10 caller contract', () => {
     const addr = '0x' + '4'.repeat(40);
     const inv = runCtx('POST', '/api/pca', {
       createPublishingConvictionAccount: async () => { throw new Error('execution reverted: InvalidAmount()'); },
-    }, { tokens: '1' });
+    }, { tokens: '1', primaryNode: '42' });
     await inv.done;
     expect(inv.res.statusCode).toBe(400);
     expect(JSON.parse(inv.res.body).error).toBe('InvalidAmount');
@@ -387,10 +449,21 @@ describe('daemon /api/pca V10 caller contract', () => {
   it('maps a TokenTransferFailed revert on POST /api/pca → 400', async () => {
     const { res, done } = runCtx('POST', '/api/pca', {
       createPublishingConvictionAccount: async () => { throw new Error('execution reverted: TokenTransferFailed()'); },
-    }, { tokens: '100' });
+    }, { tokens: '100', primaryNode: '42' });
     await done;
     expect(res.statusCode).toBe(400);
     expect(JSON.parse(res.body).error).toBe('TokenTransferFailed');
+  });
+
+  it('maps an OT-RFC-51 PrimaryNodeNotInShardingTable revert on POST /api/pca → 400, not 500', async () => {
+    // A syntactically valid but nonexistent node id passes parsePrimaryNode but
+    // reverts in createAccount — must be a caller-actionable 400, not a 500.
+    const { res, done } = runCtx('POST', '/api/pca', {
+      createPublishingConvictionAccount: async () => { throw new Error('execution reverted: PrimaryNodeNotInShardingTable(999999)'); },
+    }, { tokens: '100', primaryNode: '999999' });
+    await done;
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toBe('PrimaryNodeNotInShardingTable');
   });
 
   it('maps an AccountAlreadyFullySettled revert on POST /api/pca/:id/settle → 409', async () => {

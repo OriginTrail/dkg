@@ -95,7 +95,10 @@ contract PublishingConvictionStorage is INamed, IVersioned, HubDependent, IIniti
     string private constant _NAME = "PublishingConvictionStorage";
     // 1.0.0 — initial split-out from `DKGPublishingConvictionNFT` v2.0.0.
     //         Identical state shape; no semantic changes.
-    string private constant _VERSION = "10.0.2";
+    // 10.0.3 — OT-RFC-51 "Publishing Allocation": `Account` gains
+    //          `primaryNode` + `lastPrimaryNodeChangeEpoch`, with the
+    //          `setPrimaryNodeData` onlyContracts setter.
+    string private constant _VERSION = "10.0.3";
 
     /// @notice Default cap on registered agents per account, applied on
     ///         first `initialize()` so a fresh deploy has a sane bound
@@ -141,6 +144,13 @@ contract PublishingConvictionStorage is INamed, IVersioned, HubDependent, IIniti
         uint16 discountBps;
         uint16 lastSettledWindow;
         bool fullySwept;
+        // OT-RFC-51 "Publishing Allocation": the node this account's
+        // committed PCA budget is credited to as publishing allocation
+        // (K_n). `0` means no designated node (no allocation seeded).
+        uint72 primaryNode; // designated node identityId; 0 = none
+        // Rate-limit cursor for `setPrimaryNode`: re-designation is allowed
+        // at most once per chain epoch (require currentEpoch > this value).
+        uint40 lastPrimaryNodeChangeEpoch; // re-designation rate-limit cursor
     }
 
     // ============================================================
@@ -274,6 +284,20 @@ contract PublishingConvictionStorage is INamed, IVersioned, HubDependent, IIniti
     ///         observe `fullySwept == true` and short-circuit.
     function setFullySwept(uint256 accountId, bool v) external onlyContracts {
         accounts[accountId].fullySwept = v;
+    }
+
+    /// @notice OT-RFC-51: persist the designated `primaryNode` and the
+    ///         `lastPrimaryNodeChangeEpoch` rate-limit cursor. Logic-side
+    ///         (`PublishingConviction.setPrimaryNode`) is responsible for
+    ///         the once-per-epoch gate and for `nodeExists` validation;
+    ///         storage just records.
+    function setPrimaryNodeData(
+        uint256 accountId,
+        uint72 node,
+        uint40 changeEpoch
+    ) external onlyContracts {
+        accounts[accountId].primaryNode = node;
+        accounts[accountId].lastPrimaryNodeChangeEpoch = changeEpoch;
     }
 
     // ============================================================

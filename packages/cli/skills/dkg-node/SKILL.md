@@ -191,7 +191,7 @@ Drop to HTTP when the operation isn't in the table — participant self-service 
 | `dkg_knowledge_asset_import_artifact_read_markdown` | `POST /api/knowledge-assets/import-artifact/read-markdown` | Safely read Markdown for a completed imported attachment by content-addressed hash |
 | `dkg_knowledge_asset_import_artifact_resolve` | `POST /api/knowledge-assets/import-artifact/resolve` | Optional metadata re-check for completed imported attachments |
 | `dkg_knowledge_asset_semantic_enrichment_write` | `POST /api/knowledge-assets/semantic-enrichment/write` | Append model-derived semantic triples and provenance to the imported assertion |
-| `dkg_publish` | `POST /api/knowledge-assets` + `POST /api/shared-memory/publish` (`{assertionName}`) | **Two-call one-shot helper** (atomic, per-call): creates a fresh auto-named assertion with the supplied quads, then publishes it by `assertionName` via the **atomic finalized-assertion fork** of `/api/shared-memory/publish` — scoped to that one assertion's seal, **multi-root-safe** (no single-root loop, no `409 MULTI_ROOT`). Does **not** auto-register the CG → accepts `register_if_needed` + `access_policy` to register a fresh CG on-chain first (§6). For a single named per-KA sealed publish prefer `dkg_knowledge_asset_publish` |
+| `dkg_publish` | `POST /api/knowledge-assets/publish` | **Direct explicit-quads one-shot publish**: sends the supplied quads inline to the publish route, so core ACK collection receives the payload directly and does **not** depend on SWM pre-positioning. Multi-root-safe in one mint. Does **not** auto-register the CG → accepts `register_if_needed` + `access_policy` to register a fresh CG on-chain first (§6). For a staged/named lifecycle publish use `dkg_knowledge_asset_publish`; for pre-existing SWM data use `dkg_shared_memory_publish` |
 | `dkg_shared_memory_publish` | `POST /api/shared-memory/publish` (`{selection}`) | **SWM-bridge / CG-wide publish (legacy, retained)**: publish existing SWM → VM, no fresh quads. Uses the **`selection` fork** — **single-root-per-call** (loop one root per call with `clearAfter:false` on all but the last, else `409 MULTI_ROOT_PUBLISH_NOT_ATOMIC`). Auto-registers the CG on first publish (OT-RFC-38 LU-6). For the per-KA sealed path use `dkg_knowledge_asset_publish` |
 | `dkg_share` | `POST /api/shared-memory/write` | Directly write concise team-visible knowledge to SWM without staging a WM assertion. Prefer the WM assertion → promote flow for durable/canonical work. Both Hermes and OpenClaw expose the same tool schema (required `content` and `context_graph_id`, optional `sub_graph_name`), so MCP-discovered call signatures are portable. The OpenClaw implementation additionally validates content as non-whitespace, mints a unique subject per share (returned in the response), and N-Triples-quotes content; Hermes is currently looser on those points — the parallel hardening is tracked in OriginTrail/dkg#414. |
 | `dkg_sub_graph_create` | `POST /api/sub-graph/create` | Register a sub-graph inside a CG |
@@ -273,13 +273,15 @@ SWM is for knowledge you've promoted from WM and want peers to see. Data arrives
 
 - `POST /api/shared-memory/write` — write triples directly to SWM (gossip-replicated). Body: `{ contextGraphId, quads, subGraphName? }`. Use the WM → promote path for most workflows; direct SWM writes are for bulk team data that skips the private draft stage.
 - `POST /api/shared-memory/conditional-write` — compare-and-swap write. Body: `{ contextGraphId, quads, conditions: [...], subGraphName? }`. Each condition is `{ subject: IRI, predicate: IRI, expectedValue: string | null }`; `null` means "must not exist", a string must match the current object after N-Triples serialization. Any mismatch throws `StaleWriteError` and leaves SWM unchanged. `conditions` must be non-empty — use `/api/shared-memory/write` for unconditional writes.
-- `POST /api/shared-memory/publish` — publish SWM triples → Verifiable Memory (costs TRAC). This route has **two forks**: (1) the **`selection`** fork (`"all"` | `string[]` | `{ rootEntities: [...] }`) — the **SWM-bridge / CG-wide** path used by `dkg_shared_memory_publish`, **single-root-per-call** (resolving >1 root returns `409 MULTI_ROOT_PUBLISH_NOT_ATOMIC` — loop one root per call with `clearAfter: false` on all but the last); (2) the **`assertionName`** fork — the **atomic per-assertion** path used by `dkg_publish`, which forces `selection:"all"` internally and publishes that one sealed assertion (multi-root-safe, no 409). For the per-KA sealed path that takes no selector and returns a UAL, use `/api/knowledge-assets/{name}/vm/publish` (see VM below).
+- `POST /api/knowledge-assets/publish` — direct explicit-quads one-shot publish. Body: `{ contextGraphId, quads, privateQuads?, accessPolicy?, allowedPeers?, subGraphName? }`. Use this when the request already contains the exact quads to publish; the ACK path carries the inline payload and does not rely on SWM.
+- `POST /api/shared-memory/publish` — publish SWM triples → Verifiable Memory (costs TRAC). This is the explicit SWM-bridge / CG-wide path used by `dkg_shared_memory_publish`; it publishes data that must already be available in SWM on the target cores. Explicit root selections are single-root-per-call (resolving >1 root returns `409 MULTI_ROOT_PUBLISH_NOT_ATOMIC` — loop one root per call with `clearAfter: false` on all but the last). For the per-KA sealed lifecycle path that takes no selector and returns a UAL, use `/api/knowledge-assets/{name}/vm/publish` (see VM below).
 
 ### Verifiable Memory (VM) — Permanent, on-chain
 
-> **All VM publishing goes through SWM.** The HTTP API exposes no direct
-> WM → VM route — always finalize + share to SWM first, then publish from there.
-> The on-chain transaction is a finality signal that seals data peers already hold.
+> **Lifecycle VM publishing goes through SWM.** Named WM assertions are finalized,
+> shared to SWM, then published from there. One-shot requests that already carry
+> explicit quads use `POST /api/knowledge-assets/publish` so the publish ACK path
+> carries the payload directly.
 
 **Two publish surfaces.** rc.17 has two ways to publish SWM → VM:
 
@@ -822,6 +824,8 @@ chain:
 ```
 
 `targetAllowance` is a string because YAML/JSON can't carry bigints natively — the daemon parses it into a bigint at startup, fails fast on garbage input. `refillBelowFraction` clamps to `[0, 1]`; a value of `1` means "refill on every publish" (defeats the policy) and `0` means "never refill until the publish floor (1 wei-TRAC) is breached" (which on a zero-cost CG would mean approve once then never again).
+
+Mode-only shorthand is accepted for compatibility (`approvalPolicy: unlimited` is normalized to `approvalPolicy: { mode: unlimited }`). Use the object form when setting `targetAllowance` or `refillBelowFraction`.
 
 The policy never approves *less* than the immediate publish needs — a too-low `targetAllowance` gets quietly raised to the publish's on-chain floor so misconfiguration can't brick a publish.
 

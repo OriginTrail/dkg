@@ -39,6 +39,14 @@ async function createMockChallenge(
     proofingPeriodDurationInBlocks: proofingPeriodDuration,
     solved: false,
     isCurated: false,
+    // OT-RFC-49 / WS-B Trap 1 — Challenge grew two trailing fields: the
+    // (leafCount, root) pair PINNED at issuance. For a public mock challenge
+    // these mirror the public-branch (merkleLeafCount, latestMerkleRoot); the
+    // exact values are irrelevant to storage round-trip coverage, but the
+    // fields MUST be present or ethers fails encoding with
+    // `missing value for component challengeLeafCount`.
+    challengeLeafCount: 1n,
+    challengeRoot: ethers.ZeroHash,
   };
 }
 
@@ -515,7 +523,7 @@ describe('@unit RandomSamplingStorage', function () {
       expect(await RandomSamplingStorage.name()).to.equal(
         'RandomSamplingStorage',
       );
-      expect(await RandomSamplingStorage.version()).to.equal('10.0.2');
+      expect(await RandomSamplingStorage.version()).to.equal('10.1.0');
     });
 
     it('Should set the initial parameters correctly', async function () {
@@ -845,6 +853,43 @@ describe('@unit RandomSamplingStorage', function () {
         MockChallenge.proofingPeriodDurationInBlocks,
       );
       expect(challenge.solved).to.be.equal(MockChallenge.solved);
+      // OT-RFC-49 / WS-B Trap 1 — the pinned (leafCount, root) pair must
+      // round-trip through storage intact.
+      expect(challenge.isCurated).to.be.equal(MockChallenge.isCurated);
+      expect(challenge.challengeLeafCount).to.be.equal(
+        MockChallenge.challengeLeafCount,
+      );
+      expect(challenge.challengeRoot).to.be.equal(MockChallenge.challengeRoot);
+    });
+
+    // OT-RFC-49 / WS-E — the catalog-cutover migration sweep.
+    it('clearOutstandingChallenges deletes the seeded challenges and emits NodeChallengeCleared', async () => {
+      const idA = 11n;
+      const idB = 12n;
+      const setter = await ethers.getSigner(accounts[0].address);
+      await RandomSamplingStorage.connect(setter).setNodeChallenge(idA, MockChallenge);
+      await RandomSamplingStorage.connect(setter).setNodeChallenge(idB, MockChallenge);
+      // Sanity: both seeded.
+      expect((await RandomSamplingStorage.getNodeChallenge(idA)).knowledgeAssetId).to.equal(
+        MockChallenge.knowledgeAssetId,
+      );
+
+      // Owner clears both in one sweep.
+      await expect(RandomSamplingStorage.connect(accounts[0]).clearOutstandingChallenges([idA, idB]))
+        .to.emit(RandomSamplingStorage, 'NodeChallengeCleared')
+        .withArgs(idA);
+
+      // Both slots are now the zeroed default (knowledgeAssetId === 0).
+      expect((await RandomSamplingStorage.getNodeChallenge(idA)).knowledgeAssetId).to.equal(0n);
+      expect((await RandomSamplingStorage.getNodeChallenge(idB)).knowledgeAssetId).to.equal(0n);
+      // Idempotent: clearing an already-empty entry is a no-op (does not revert).
+      await RandomSamplingStorage.connect(accounts[0]).clearOutstandingChallenges([idA]);
+    });
+
+    it('clearOutstandingChallenges reverts for a non-owner caller', async () => {
+      await expect(
+        RandomSamplingStorage.connect(accounts[1]).clearOutstandingChallenges([1n]),
+      ).to.be.reverted;
     });
 
     it('Should handle multiple challenges and updates correctly', async () => {

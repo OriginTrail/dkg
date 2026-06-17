@@ -1240,13 +1240,21 @@ export async function runDaemonInner(
     agentProfileHeartbeatMs: config.network?.agentProfileHeartbeatMs,
     syncContextGraphs: syncContextGraphs,
     maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
+    // OT-RFC-38 LU-6 / OT-RFC-49 WS-A — plumb the host-mode block (eviction
+    // tiers, discovery rate limits, and the `stripCiphertext` private-ciphertext
+    // strip kill-switch) from config.json. Without this forward the whole
+    // `swmHostMode` config is inert and only in-agent defaults apply, so an
+    // operator could not toggle the strip via config (the rung-1 inert-flag bug).
+    swmHostMode: config.swmHostMode,
     storeConfig: runtimeStore ? {
       backend: runtimeStore.backend,
       options: runtimeStore.options,
+      graphSetIndex: runtimeStore.graphSetIndex,
     } : undefined,
     largeLiteralStorage: runtimeLargeLiteralStorage,
     sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
     syncSharedMemoryOnConnect: config.syncSharedMemoryOnConnect,
+    swmAwaitCuratorAck: config.swmAwaitCuratorAck,
     syncAgentsMeta: role === 'core' ? true : config.syncAgentsMeta,
     queryAccess: config.queryAccess,
     chainAdapter: mockChainAdapter,
@@ -1673,6 +1681,24 @@ export async function runDaemonInner(
               },
               log,
             }),
+            publishEncryptionFactory: async (publishOptions) => {
+              const encryptInlinePayload = await agent._resolveEncryptInlinePayload(
+                publishOptions.contextGraphId,
+                publishOptions.subGraphName,
+                undefined,
+                publishOptions.publishContextGraphId,
+              );
+              const encryptInlineChunked = await agent._resolveEncryptInlineChunked(
+                publishOptions.contextGraphId,
+                publishOptions.subGraphName,
+                undefined,
+                publishOptions.publishContextGraphId,
+              );
+              return {
+                encryptInlinePayload,
+                encryptInlineChunked,
+              };
+            },
             log,
           });
           publisherRuntime = runtime;
@@ -2604,6 +2630,7 @@ export async function runDaemonInner(
   // --- File Store ---
 
   const fileStore = new FileStore(join(dkgDir(), "files"));
+  agent.registerImportedArtifactByteStore(fileStore);
 
   // --- Vector Store (optional, for tri-modal memory) ---
   const vectorStore = new VectorStore(dkgDir());

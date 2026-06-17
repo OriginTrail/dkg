@@ -50,10 +50,10 @@ export const UpdateIntentSchema = new Type('UpdateIntent')
   .add(new Field('burnTokenIds', 8, 'string', 'repeated'))
   /** New flat-KC Merkle leaf count (sorted + deduped). */
   .add(new Field('newMerkleLeafCount', 9, 'uint32'))
-  /** RFC-39 Phase A.5 — refreshed ciphertext-chunks root (32 zero bytes when absent). */
-  .add(new Field('newCiphertextChunksRoot', 10, 'bytes'))
-  /** RFC-39 Phase A.5 — refreshed ciphertext chunk count (0 when absent). */
-  .add(new Field('newCiphertextChunkCount', 11, 'uint32'))
+  /** OT-RFC-49 — refreshed curated `_catalog` root (32 zero bytes when absent). */
+  .add(new Field('newCatalogRoot', 10, 'bytes'))
+  /** OT-RFC-49 — refreshed curated catalog leaf count (0 when absent). */
+  .add(new Field('newCatalogLeafCount', 11, 'uint32'))
   /** Dialing publisher peer id (informational). */
   .add(new Field('publisherPeerId', 12, 'string'))
   /** SOURCE SWM graph id where the data lives (defaults to contextGraphId). */
@@ -89,13 +89,13 @@ export interface UpdateIntentMsg {
   /** New flat-KC Merkle leaf count (sorted + deduped). */
   newMerkleLeafCount: number;
   /**
-   * RFC-39 Phase A.5 — refreshed ciphertext-chunks Merkle root. Omitted /
-   * empty on metadata-only updates and public CGs (decoded as 32 zero
-   * bytes for the digest).
+   * OT-RFC-49 — refreshed curated `_catalog` Merkle root. Omitted / empty
+   * on metadata-only updates and public CGs (decoded as 32 zero bytes for
+   * the digest).
    */
-  newCiphertextChunksRoot?: Uint8Array;
-  /** RFC-39 Phase A.5 — refreshed ciphertext chunk count (0 when absent). */
-  newCiphertextChunkCount?: number;
+  newCatalogRoot?: Uint8Array;
+  /** OT-RFC-49 — refreshed curated catalog leaf count (0 when absent). */
+  newCatalogLeafCount?: number;
   /** Dialing publisher peer id (informational). */
   publisherPeerId: string;
   /**

@@ -33,7 +33,11 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
     //           and silently corrupt claim math. Tests now drive state
     //           through `appendCheckpoint`.
     //         * `getEpochFirstScorePerStake` retired (always 0 under D26).
-    string private constant _VERSION = "10.0.2";
+    // 10.0.2 → 10.1.0: OT-RFC-49 — `RandomSamplingLib.Challenge` grew two
+    // pinned fields (`challengeLeafCount`, `challengeRoot`) so the persisted
+    // tuple via `getNodeChallenge`/`setNodeChallenge` is wider; the migration
+    // `clearOutstandingChallenges` admin path is added in WS-E.
+    string private constant _VERSION = "10.1.0";
     uint8 public constant CHUNK_BYTE_SIZE = 32;
     Chronos public chronos;
 
@@ -141,6 +145,9 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
         uint256 newDelegatorLastSettledNodeEpochScorePerStake
     );
     event NodeChallengeSet(uint72 indexed identityId, RandomSamplingLib.Challenge challenge);
+    /// @notice OT-RFC-49 / WS-E — a node's outstanding challenge was cleared by the
+    ///         `clearOutstandingChallenges` migration sweep at the catalog-cutover redeploy.
+    event NodeChallengeCleared(uint72 indexed identityId);
     event ActiveProofPeriodStartBlockSet(uint256 indexed activeProofPeriodStartBlock);
     event EpochNodeValidProofsCountIncremented(uint256 indexed epoch, uint72 indexed identityId, uint256 newCount);
     event EpochNodeValidProofsCountSet(uint256 indexed epoch, uint72 indexed identityId, uint256 newCount);
@@ -385,6 +392,30 @@ contract RandomSamplingStorage is INamed, IVersioned, IInitializable, ContractSt
     ) external onlyContracts {
         nodesChallenges[identityId] = challenge;
         emit NodeChallengeSet(identityId, challenge);
+    }
+
+    /// @notice OT-RFC-49 / WS-E migration — clear outstanding (unsolved) random-
+    ///         sampling challenges across the redeploy that swaps the curated
+    ///         proof surface from the private ciphertext to the public `_catalog`.
+    ///
+    /// A challenge issued in period N against the OLD (ciphertext) surface must
+    /// not survive the cutover: post-upgrade the pinned `challengeRoot`/
+    /// `challengeLeafCount` fields read as their zero default for any pre-upgrade
+    /// challenge (they were appended to the struct in this version), so `submitProof`
+    /// already reverts them via its `leafCount == 0` bounds check — but a node then
+    /// sits with an unsolved challenge it can neither solve nor (mid-period) replace.
+    /// This admin sweep deletes them so every node re-draws cleanly against the
+    /// catalog surface on the next `createChallenge`. The operator supplies the set
+    /// of node `identityId`s with outstanding challenges (enumerable off-chain from
+    /// `ChallengeGenerated`/`NodeChallengeSet` logs) and runs this ONCE as part of
+    /// the epoch-boundary cut. Idempotent: deleting an already-empty entry is a no-op.
+    ///
+    /// @param identityIds the node identity ids whose challenge slot to clear.
+    function clearOutstandingChallenges(uint72[] calldata identityIds) external onlyOwnerOrMultiSigOwner {
+        for (uint256 i = 0; i < identityIds.length; i++) {
+            delete nodesChallenges[identityIds[i]];
+            emit NodeChallengeCleared(identityIds[i]);
+        }
     }
 
     /**

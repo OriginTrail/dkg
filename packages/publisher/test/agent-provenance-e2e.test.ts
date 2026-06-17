@@ -21,7 +21,9 @@
  *   - **Diagram 3** — PCA-discounted publish through the publisher
  *     pipeline (the discount path was previously only Solidity-unit-tested).
  *   - **Diagram 6** — mode (e) delegated attribution to a non-self
- *     identity, plus the validation-revert case (fake id 9999).
+ *     identity. Under RFC-51 publisherNodeIdentityId is unvalidated and
+ *     ignored at publish, so the former fake-id (9999) validation-revert
+ *     case now asserts the publish CONFIRMS instead of reverting.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -79,8 +81,9 @@ beforeAll(async () => {
   }
 
   // Stake the receiver nodes so they're in the sharding table — required
-  // for mode (e) attribution validation (`shardingTable.nodeExists`) and
-  // for ACK quorum on multi-node publishes. RC11 / PR1: the Hardhat
+  // for ACK quorum on multi-node publishes (RFC-51 removed the per-publish
+  // `shardingTable.nodeExists(publisherNodeIdentityId)` attribution check,
+  // so staking is no longer needed for that). RC11 / PR1: the Hardhat
   // harness now stakes REC1..REC3 at `spawnHardhatEnv` time (so the
   // in-memory V10ACKProvider can collect a 3-of-N quorum), so the
   // per-test loop below would double-stake and revert. Skip it now
@@ -163,7 +166,7 @@ function epochStorage() {
   return new ethers.Contract(
     epsAddress,
     [
-      'function getNodeEpochProducedKnowledgeValue(uint72 identityId, uint256 epoch) view returns (uint96)',
+      'function getNodeEpochPublishingAllocation(uint72 identityId, uint256 epoch) view returns (uint96)',
     ],
     provider,
   );
@@ -252,7 +255,7 @@ describe('Diagram 1 — EOA author attestation, end-to-end on real Hardhat', () 
   it('confirmed publish writes author + attribution + cgValue side-effects', async () => {
     const author = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
     const epoch = await chronos().getCurrentEpoch();
-    const epsBefore: bigint = await epochStorage().getNodeEpochProducedKnowledgeValue(coreId, epoch);
+    const epsBefore: bigint = await epochStorage().getNodeEpochPublishingAllocation(coreId, epoch);
 
     const publisher = makePublisher();
 
@@ -275,9 +278,13 @@ describe('Diagram 1 — EOA author attestation, end-to-end on real Hardhat', () 
     expect(root.publisher).toBeDefined();
     expect(root.merkleRoot).toBeTruthy();
 
-    // (iii) Eps incremented for the daemon's identityId (mode a)
-    const epsAfter: bigint = await epochStorage().getNodeEpochProducedKnowledgeValue(coreId, epoch);
-    expect(epsAfter).toBeGreaterThan(epsBefore);
+    // (iii) RFC-51: a realized publish no longer credits the node's publishing
+    // allocation (K_n). The getter now tracks COMMITTED PCA allocation only
+    // (seeded in PublishingConviction), so a plain publish leaves it unchanged.
+    // `publisherNodeIdentityId` is still recorded as a self-claimed attribution
+    // field on the publish struct — it just no longer feeds K_n.
+    const epsAfter: bigint = await epochStorage().getNodeEpochPublishingAllocation(coreId, epoch);
+    expect(epsAfter).toBe(epsBefore);
   });
 });
 
@@ -346,7 +353,7 @@ describe('Diagram 3 — PCA-discounted vs full-fee cost coverage', () => {
     const pca = new ethers.Contract(
       pcaAddress,
       [
-        'function createAccount(uint96 committedTRAC) external returns (uint256)',
+        'function createAccount(uint96 committedTRAC, uint72 primaryNode) external returns (uint256)',
         'function registerAgent(uint256 accountId, address agent) external',
         'function agentToAccountId(address) view returns (uint256)',
         'function accounts(uint256) view returns (uint96,uint40,uint40,uint40,uint40,uint16,uint16)',
@@ -368,7 +375,10 @@ describe('Diagram 3 — PCA-discounted vs full-fee cost coverage', () => {
     // single publish fee in this test.
     const committed = ethers.parseEther('500000');
     await (await trac.approve(pcaAddress, committed)).wait();
-    const createTx = await pca.createAccount(committed);
+    // primaryNode = 0n: no designated node, so no committed publishing
+    // allocation is seeded. This test asserts windowSpent (PCA discount), not
+    // K_n, so the 0 sentinel keeps Diagram 3's assertions unaffected.
+    const createTx = await pca.createAccount(committed, 0n);
     const createReceipt = await createTx.wait();
 
     // accountId is the next-counter value at create-time; defensive read via
@@ -486,9 +496,9 @@ describe('Diagram 5 — chain canonical author via DKGAgent.getKnowledgeCollecti
 // =============================================================================
 
 describe('Diagram 6 — attribution modes via per-publish override', () => {
-  it('mode (a) default — daemon attributes to its own id, Eps incremented for that id', async () => {
+  it('mode (a) default — daemon attributes to its own id; publish confirms, K_n unchanged', async () => {
     const epoch = await chronos().getCurrentEpoch();
-    const before: bigint = await epochStorage().getNodeEpochProducedKnowledgeValue(coreId, epoch);
+    const before: bigint = await epochStorage().getNodeEpochPublishingAllocation(coreId, epoch);
 
     const publisher = makePublisher();
     const result = await publishSealed(publisher, {
@@ -497,8 +507,11 @@ describe('Diagram 6 — attribution modes via per-publish override', () => {
     });
     expect(result.status).toBe('confirmed');
 
-    const after: bigint = await epochStorage().getNodeEpochProducedKnowledgeValue(coreId, epoch);
-    expect(after).toBeGreaterThan(before);
+    // RFC-51: default self-attribution publish confirms, but no longer credits
+    // the node's publishing allocation (K_n) — that getter tracks committed PCA
+    // allocation only, not per-publish attribution.
+    const after: bigint = await epochStorage().getNodeEpochPublishingAllocation(coreId, epoch);
+    expect(after).toBe(before);
   });
 
   it('mode (d) — override=0n confirms on-chain, no Eps write to any node', async () => {
@@ -507,7 +520,7 @@ describe('Diagram 6 — attribution modes via per-publish override', () => {
     const allNodeIds = [coreId, ...ctx.receiverIds.map((id) => BigInt(id))];
     const before: Record<string, bigint> = {};
     for (const id of allNodeIds) {
-      before[id.toString()] = await epochStorage().getNodeEpochProducedKnowledgeValue(id, epoch);
+      before[id.toString()] = await epochStorage().getNodeEpochPublishingAllocation(id, epoch);
     }
 
     const publisher = makePublisher();
@@ -518,21 +531,23 @@ describe('Diagram 6 — attribution modes via per-publish override', () => {
     });
     expect(result.status).toBe('confirmed');
 
-    // No core's Eps moved — mode (d) is genuinely no-attribution.
+    // No core's K_n moved. Under RFC-51 this holds for any override (no publish
+    // path credits publishing allocation), but mode (d) (override=0) is also
+    // the canonical genuinely-no-attribution case.
     for (const id of allNodeIds) {
-      const after: bigint = await epochStorage().getNodeEpochProducedKnowledgeValue(id, epoch);
+      const after: bigint = await epochStorage().getNodeEpochPublishingAllocation(id, epoch);
       expect(after).toBe(before[id.toString()]);
     }
   });
 
-  it('mode (e) — override to another core id increments THAT node`s Eps', async () => {
+  it('mode (e) — a valid non-self override id is accepted on-chain; K_n unchanged', async () => {
     const ctx = getSharedContext();
     if (ctx.receiverIds.length === 0) return; // need at least one other core to delegate to
 
     const targetId = BigInt(ctx.receiverIds[0]!);
     const epoch = await chronos().getCurrentEpoch();
-    const beforeSelf: bigint = await epochStorage().getNodeEpochProducedKnowledgeValue(coreId, epoch);
-    const beforeTarget: bigint = await epochStorage().getNodeEpochProducedKnowledgeValue(targetId, epoch);
+    const beforeSelf: bigint = await epochStorage().getNodeEpochPublishingAllocation(coreId, epoch);
+    const beforeTarget: bigint = await epochStorage().getNodeEpochPublishingAllocation(targetId, epoch);
 
     const publisher = makePublisher();
     const result = await publishSealed(publisher, {
@@ -540,30 +555,39 @@ describe('Diagram 6 — attribution modes via per-publish override', () => {
       quads: [q(`${ENTITY}/D6e`, 'http://schema.org/name', '"ModeE"')],
       publisherNodeIdentityIdOverride: targetId,
     });
+    // RFC-51: publisherNodeIdentityId is unvalidated/ignored at publish, so
+    // a valid non-self override, override=0 (mode (d)), and even a fake id
+    // (the test below) all confirm — none reverts and none moves any K_n.
+    // The override is recorded only as a self-claimed attribution field.
     expect(result.status).toBe('confirmed');
 
-    const afterSelf: bigint = await epochStorage().getNodeEpochProducedKnowledgeValue(coreId, epoch);
-    const afterTarget: bigint = await epochStorage().getNodeEpochProducedKnowledgeValue(targetId, epoch);
+    const afterSelf: bigint = await epochStorage().getNodeEpochPublishingAllocation(coreId, epoch);
+    const afterTarget: bigint = await epochStorage().getNodeEpochPublishingAllocation(targetId, epoch);
 
-    // Daemon's own Eps unchanged; target node's Eps incremented.
+    // RFC-51: a realized publish no longer credits ANY node's publishing
+    // allocation (K_n), regardless of the attributed id. The override is
+    // recorded as a self-claimed attribution field only — neither self nor
+    // the target node's K_n moves. (Pre-RFC-51 this asserted target++.)
     expect(afterSelf).toBe(beforeSelf);
-    expect(afterTarget).toBeGreaterThan(beforeTarget);
+    expect(afterTarget).toBe(beforeTarget);
   });
 
-  it('validation revert — fake non-existent identity id reverts on chain', async () => {
+  it('fake non-existent identity id is now unvalidated — publish confirms (RFC-51)', async () => {
     const fakeId = 999999n;
 
     const publisher = makePublisher();
-    // RC11 / PR2: the publisher now re-throws chain reverts verbatim
-    // (no silent tentative downgrade). The T-VAL contract revert
-    // surfaces directly to the caller as a CALL_EXCEPTION.
-    await expect(
-      publishSealed(publisher, {
-        contextGraphId: CONTEXT_GRAPH,
-        quads: [q(`${ENTITY}/D6revert`, 'http://schema.org/name', '"FakeId"')],
-        publisherNodeIdentityIdOverride: fakeId,
-      }),
-    ).rejects.toThrow();
+    // RFC-51: the realized-publish credit block that ran
+    // `shardingTable.nodeExists(publisherNodeIdentityId)` was removed. The
+    // field is now vestigial — unvalidated and ignored at publish time
+    // (attribution is the PCA's primaryNode, seeded at account creation).
+    // A fake id therefore no longer reverts the publish; it just resolves.
+    // (Pre-RFC-51 this asserted the publish rejected with a CALL_EXCEPTION.)
+    const result = await publishSealed(publisher, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q(`${ENTITY}/D6revert`, 'http://schema.org/name', '"FakeId"')],
+      publisherNodeIdentityIdOverride: fakeId,
+    });
+    expect(result.status).toBe('confirmed');
   });
 });
 

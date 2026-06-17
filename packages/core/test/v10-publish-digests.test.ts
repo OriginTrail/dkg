@@ -7,15 +7,17 @@ import {
 
 // Golden reference vectors computed via ethers.solidityPackedKeccak256 against
 // the exact abi.encodePacked shapes in KnowledgeAssetsLifecycle.sol:
-//   - ACK digest            → `_executePublishCore` (chainid, address(this),
-//     contextGraphId, merkleRoot, knowledgeAssetsAmount, byteSize, epochs,
-//     tokenAmount, merkleLeafCount, ciphertextChunksRoot, ciphertextChunkCount,
-//     isImmutable) — RFC-39 added the trailing ciphertext + immutable fields.
-//   - Publisher digest      → contract lines 327-335
+//   - ACK digest            → `_executePublishCore` (ACK_DIGEST_VERSION, chainid,
+//     address(this), contextGraphId, merkleRoot, knowledgeAssetsAmount, byteSize,
+//     epochs, tokenAmount, merkleLeafCount, catalogRoot, catalogLeafCount,
+//     isImmutable). OT-RFC-49 prepended the version member (Trap 3) and swapped
+//     the ciphertext pair for the catalog pair (same byte widths/positions).
+//   - Publisher digest      → contract lines 327-335 (unchanged by RFC-49)
 //
-// The contract prefixes both with (block.chainid, address(this)) for H5 replay
-// protection; the publisher digest field order is (identityId, cgId, merkleRoot)
-// per N26. Any drift in packing width, order, or prefix breaks both gates.
+// The contract prefixes the ACK with (ACK_DIGEST_VERSION, block.chainid,
+// address(this)) for version + H5 replay protection; the publisher digest field
+// order is (identityId, cgId, merkleRoot) per N26. Any drift in packing width,
+// order, or prefix breaks both gates SILENTLY (signature recovers wrong signer).
 
 const CHAIN_ID = 31337n;
 const KAV10_ADDRESS = '0x0000000000000000000000000000000000000042';
@@ -31,8 +33,12 @@ const IDENTITY_ID = 5n;
 // Golden hex reference — precomputed offline with ethers.solidityPackedKeccak256.
 // If either of these diverges from the contract, on-chain _verifySignatures and
 // _verifySignature revert on every publish; keep these vectors pinned.
+// OT-RFC-49 layout: keccak256(abi.encodePacked(ACK_DIGEST_VERSION=1, chainId,
+// addr, cgId, merkleRoot, kaCount, byteSize, epochs, tokenAmount, merkleLeafCount,
+// catalogRoot=0, catalogLeafCount=0, isImmutable=0)). Recomputed offline with
+// ethers v6 solidityPackedKeccak256 and cross-checked against computePublishACKDigest.
 const ACK_DIGEST_GOLDEN =
-  '0x8ef358d902d556e9467e313255b83570a5e7a8c5b4058895af9fd0ae4e56efc1';
+  '0x7d7ee24eaaa7cf64ed7900bcc1287923c9778c4b3286f20e60a537365d8c8743';
 const PUBLISHER_DIGEST_GOLDEN =
   '0x511ca6d1022288492fb07cd51c6285513790e6ac1e99745ad1a369bb5b53d991';
 // The same fields in the WRONG order (cgId before identityId) — must NOT match.

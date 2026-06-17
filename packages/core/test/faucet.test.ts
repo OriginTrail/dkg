@@ -1,5 +1,11 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { getFundableWalletAddresses, requestFaucetFunding } from '../src/faucet.js';
+
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => { calls.push(args); return impl(...args); };
+  return Object.assign(fn, { calls });
+}
 
 interface FetchCall {
   url: string | URL | Request;
@@ -117,17 +123,18 @@ describe('requestFaucetFunding', () => {
   });
 
   it('uses a three-minute timeout for faucet batches', async () => {
-    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
-      .mockReturnValue(new AbortController().signal);
+    const original = AbortSignal.timeout.bind(AbortSignal);
+    const timeoutSpy = recorder((_ms: number) => new AbortController().signal);
+    (AbortSignal as any).timeout = timeoutSpy;
     const { fetch } = createTrackingFetch(200, { summary: { success: 0 }, results: [] });
     try {
       await requestFaucetFunding(
         'https://faucet.example.com/fund', 'test', ['0xAAA'], 'timeout-node', fetch,
       );
 
-      expect(timeoutSpy).toHaveBeenCalledWith(180_000);
+      expect(timeoutSpy.calls.at(-1)).toEqual([180_000]);
     } finally {
-      timeoutSpy.mockRestore();
+      (AbortSignal as any).timeout = original;
     }
   });
 

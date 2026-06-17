@@ -21,6 +21,19 @@
  */
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { MockChainAdapter, buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
+
+// Hand-rolled call recorder (replaces vitest spy factories): wraps an
+// implementation, records every argument tuple on `.calls`, and returns the
+// implementation's result. `vi` is retained ONLY for deterministic fake-timer
+// clock control (legitimate time, not a behavior mock).
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import {
   DKG_ONTOLOGY,
@@ -217,7 +230,6 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
       agent = null;
     }
     saved.length = 0;
-    vi.restoreAllMocks();
   });
 
   async function boot(): Promise<AgentInternals> {
@@ -269,22 +281,22 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
 
   it('memoizes ACK-backed access-policy reads when the adapter has no liveness probe', async () => {
     const internals = await boot();
-    const getContextGraphAccessPolicy = vi.fn(async () => 0);
+    const getContextGraphAccessPolicy = recorder(async () => 0);
     internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
     (internals.chain as { isContextGraphActiveOnChain?: unknown }).isContextGraphActiveOnChain = undefined;
 
     await internals.recordCoreHostedPublicCg('43');
     await internals.recordCoreHostedPublicCg('43');
 
-    expect(getContextGraphAccessPolicy).toHaveBeenCalledTimes(1);
+    expect(getContextGraphAccessPolicy.calls).toHaveLength(1);
     expect((internals as any).onChainAccessPolicyCache.get('43')).toBe(0);
   });
 
   it('falls back to ACK-backed policy read when the liveness probe times out', async () => {
     const internals = await boot();
-    const getContextGraphAccessPolicy = vi.fn(async () => 0);
+    const getContextGraphAccessPolicy = recorder(async () => 0);
     internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
-    internals.chain.isContextGraphActiveOnChain = vi.fn(() => new Promise<boolean>(() => undefined));
+    internals.chain.isContextGraphActiveOnChain = recorder(() => new Promise<boolean>(() => undefined));
 
     vi.useFakeTimers();
     try {
@@ -295,14 +307,14 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
       vi.useRealTimers();
     }
 
-    expect(getContextGraphAccessPolicy).toHaveBeenCalledWith(45n);
+    expect(getContextGraphAccessPolicy.calls.at(-1)).toEqual([45n]);
     expect(internals.subscribedContextGraphs.get('45')?.coreHosted).toBe(true);
   });
 
   it('lets in-flight core-host recordings finish while shutdown is draining', async () => {
     const internals = await boot();
     let resolvePolicy!: (value: number) => void;
-    internals.chain.getContextGraphAccessPolicy = vi.fn(() => new Promise<number>((resolve) => {
+    internals.chain.getContextGraphAccessPolicy = recorder(() => new Promise<number>((resolve) => {
       resolvePolicy = resolve;
     }));
     (internals.chain as { isContextGraphActiveOnChain?: unknown }).isContextGraphActiveOnChain = undefined;
@@ -319,7 +331,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
   it('ignores late core-host recording completions from abandoned drain generations after restart', async () => {
     const internals = await boot();
     let resolvePolicy!: (value: number) => void;
-    internals.chain.getContextGraphAccessPolicy = vi.fn(() => new Promise<number>((resolve) => {
+    internals.chain.getContextGraphAccessPolicy = recorder(() => new Promise<number>((resolve) => {
       resolvePolicy = resolve;
     }));
     (internals.chain as { isContextGraphActiveOnChain?: unknown }).isContextGraphActiveOnChain = undefined;
@@ -339,16 +351,17 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
   it('uses cached public access policy when liveness fails and the fallback policy read flakes', async () => {
     const internals = await boot();
     ((internals as any).onChainAccessPolicyCache as Map<string, 0 | 1>).set('50', 0);
-    internals.chain.isContextGraphActiveOnChain = vi.fn(async () => {
+    internals.chain.isContextGraphActiveOnChain = recorder(async () => {
       throw new Error('liveness rpc unavailable');
     });
-    internals.chain.getContextGraphAccessPolicy = vi.fn(async () => {
+    const getContextGraphAccessPolicy = recorder(async (): Promise<number> => {
       throw new Error('rpc unavailable');
     });
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
 
     await internals.recordCoreHostedPublicCg('50', 'cached-public');
 
-    expect(internals.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
+    expect(getContextGraphAccessPolicy.calls).toEqual([]);
     expect(internals.subscribedContextGraphs.get('cached-public')?.coreHosted).toBe(true);
     expect(saved.find((r) => r.id === 'cached-public')?.coreHosted).toBe(true);
   });
@@ -356,26 +369,28 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
   it('forces a fresh policy read after liveness proves the slot is live', async () => {
     const internals = await boot();
     ((internals as any).onChainAccessPolicyCache as Map<string, 0 | 1>).set('51', 0);
-    internals.chain.isContextGraphActiveOnChain = vi.fn(async () => true);
-    internals.chain.getContextGraphAccessPolicy = vi.fn(async () => 1);
+    internals.chain.isContextGraphActiveOnChain = recorder(async () => true);
+    const getContextGraphAccessPolicy = recorder(async () => 1);
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
 
     await internals.recordCoreHostedPublicCg('51', 'stale-cache-curated');
 
-    expect(internals.chain.getContextGraphAccessPolicy).toHaveBeenCalledWith(51n);
+    expect(getContextGraphAccessPolicy.calls.at(-1)).toEqual([51n]);
     expect(internals.subscribedContextGraphs.get('stale-cache-curated')).toBeUndefined();
     expect(saved.find((r) => r.id === 'stale-cache-curated')).toBeUndefined();
   });
 
   it('falls back to ACK-backed policy read when the liveness probe rejects', async () => {
     const internals = await boot();
-    internals.chain.getContextGraphAccessPolicy = vi.fn(async () => 0);
-    internals.chain.isContextGraphActiveOnChain = vi.fn(async () => {
+    const getContextGraphAccessPolicy = recorder(async () => 0);
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
+    internals.chain.isContextGraphActiveOnChain = recorder(async () => {
       throw new Error('rpc unavailable');
     });
 
     await internals.recordCoreHostedPublicCg('46');
 
-    expect(internals.chain.getContextGraphAccessPolicy).toHaveBeenCalledWith(46n);
+    expect(getContextGraphAccessPolicy.calls.at(-1)).toEqual([46n]);
     expect(internals.subscribedContextGraphs.get('46')?.coreHosted).toBe(true);
     expect(saved.find((r) => r.id === '46')?.coreHosted).toBe(true);
   });
@@ -430,7 +445,10 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     const internals = await boot();
     const recordings = (internals as any).coreHostRecordings as Set<Promise<void>>;
     recordings.add(new Promise<void>(() => undefined));
-    const warn = vi.spyOn((internals as any).log, 'warn');
+    const log = (internals as any).log;
+    const origWarn = log.warn.bind(log);
+    const warn = recorder((...a: unknown[]) => origWarn(...a));
+    log.warn = warn;
     const generationBeforeDrain = (internals as any).coreHostRecordingGeneration;
 
     vi.useFakeTimers();
@@ -441,10 +459,10 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
 
       expect(recordings.size).toBe(0);
       expect((internals as any).coreHostRecordingGeneration).toBe(generationBeforeDrain + 1);
-      expect(warn).toHaveBeenCalledWith(
+      expect(warn.calls).toContainEqual([
         expect.anything(),
         expect.stringContaining('timed out draining 1 core-host recording'),
-      );
+      ]);
     } finally {
       recordings.clear();
       vi.useRealTimers();
@@ -653,15 +671,17 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     internals.subscribedContextGraphs.set(localCgId, {
       subscribed: true, onChainId: '5', lastReconciledOrdinal: 4,
     });
-    internals.chain.isContextGraphActiveOnChain = vi.fn(async () => {
+    internals.chain.isContextGraphActiveOnChain = recorder(async () => {
       throw new Error('rpc unavailable');
     });
-    const registerOnChain = vi.spyOn(internals as any, 'registerContextGraphOnChain');
+    const origRegisterOnChain = (internals as any).registerContextGraphOnChain.bind(internals);
+    const registerOnChain = recorder((...a: unknown[]) => origRegisterOnChain(...a));
+    (internals as any).registerContextGraphOnChain = registerOnChain;
 
     await expect(internals.registerContextGraph(localCgId, { callerAgentAddress: ownerAddr }))
       .rejects.toThrow(/liveness could not be verified/);
 
-    expect(registerOnChain).not.toHaveBeenCalled();
+    expect(registerOnChain.calls).toEqual([]);
     expect(internals.subscribedContextGraphs.get(localCgId)).toMatchObject({
       subscribed: true,
       onChainId: '5',
@@ -678,7 +698,6 @@ describe('Phase D - VM reconcile damping', () => {
       await agent.stop().catch(() => undefined);
       agent = null;
     }
-    vi.restoreAllMocks();
   });
 
   async function boot(): Promise<AgentInternals> {
@@ -707,21 +726,22 @@ describe('Phase D - VM reconcile damping', () => {
     const onChainCgId = 42n;
     registerUnmatchedKC(internals.chain, 9001n, onChainCgId);
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
     const originalQuery = internals.store.query.bind(internals.store);
     let expensiveScans = 0;
-    vi.spyOn(internals.store, 'query').mockImplementation(async (sparql: string) => {
+    (internals.store as any).query = recorder(async (sparql: string) => {
       if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
       return originalQuery(sparql);
     });
 
     await expect(internals.reconcileChainOrdinal('42', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(expensiveScans).toBeGreaterThan(0);
 
     expensiveScans = 0;
     await expect(internals.reconcileChainOrdinal('42', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(expensiveScans).toBe(0);
   });
 
@@ -734,16 +754,17 @@ describe('Phase D - VM reconcile damping', () => {
     (agent as any).node.libp2p.getConnections = () =>
       connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
     const originalQuery = internals.store.query.bind(internals.store);
     let expensiveScans = 0;
-    vi.spyOn(internals.store, 'query').mockImplementation(async (sparql: string) => {
+    (internals.store as any).query = recorder(async (sparql: string) => {
       if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
       return originalQuery(sparql);
     });
 
     await expect(internals.reconcileChainOrdinal('54', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(expensiveScans).toBeGreaterThan(0);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
@@ -751,7 +772,7 @@ describe('Phase D - VM reconcile damping', () => {
     connectedPeers = ['peer-empty', 'peer-newly-reachable'];
 
     await expect(internals.reconcileChainOrdinal('54', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch.calls).toHaveLength(3);
     expect(expensiveScans).toBeGreaterThan(0);
   });
 
@@ -764,16 +785,17 @@ describe('Phase D - VM reconcile damping', () => {
     (agent as any).node.libp2p.getConnections = () =>
       connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
     const originalQuery = internals.store.query.bind(internals.store);
     let expensiveScans = 0;
-    vi.spyOn(internals.store, 'query').mockImplementation(async (sparql: string) => {
+    (internals.store as any).query = recorder(async (sparql: string) => {
       if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
       return originalQuery(sparql);
     });
 
     await expect(internals.reconcileChainOrdinal('55', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    const fetchesAfterFirstMiss = fetch.mock.calls.length;
+    const fetchesAfterFirstMiss = fetch.calls.length;
     expect(fetchesAfterFirstMiss).toBeGreaterThan(0);
     expect(expensiveScans).toBeGreaterThan(0);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
@@ -782,7 +804,7 @@ describe('Phase D - VM reconcile damping', () => {
     connectedPeers = ['peer-b', 'peer-a'];
 
     await expect(internals.reconcileChainOrdinal('55', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch).toHaveBeenCalledTimes(fetchesAfterFirstMiss);
+    expect(fetch.calls).toHaveLength(fetchesAfterFirstMiss);
     expect(expensiveScans).toBe(0);
   });
 
@@ -796,23 +818,24 @@ describe('Phase D - VM reconcile damping', () => {
       connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
 
     let primeCalls = 0;
-    vi.spyOn(internals as any, 'primeCatchupConnections').mockImplementation(async () => {
+    (internals as any).primeCatchupConnections = recorder(async () => {
       primeCalls += 1;
       if (primeCalls >= 1) {
         connectedPeers = ['peer-empty', 'peer-discovered'];
       }
     });
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
     const originalQuery = internals.store.query.bind(internals.store);
     let expensiveScans = 0;
-    vi.spyOn(internals.store, 'query').mockImplementation(async (sparql: string) => {
+    (internals.store as any).query = recorder(async (sparql: string) => {
       if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
       return originalQuery(sparql);
     });
 
     await expect(internals.reconcileChainOrdinal('57', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(expensiveScans).toBeGreaterThan(0);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
@@ -820,7 +843,7 @@ describe('Phase D - VM reconcile damping', () => {
 
     await expect(internals.reconcileChainOrdinal('57', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(primeCalls).toBeGreaterThanOrEqual(1);
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch.calls).toHaveLength(3);
     expect(expensiveScans).toBeGreaterThan(0);
   });
 
@@ -833,23 +856,24 @@ describe('Phase D - VM reconcile damping', () => {
       { remotePeer: { toString: () => 'peer-reclassified' } },
     ];
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
     const originalQuery = internals.store.query.bind(internals.store);
     let expensiveScans = 0;
-    vi.spyOn(internals.store, 'query').mockImplementation(async (sparql: string) => {
+    (internals.store as any).query = recorder(async (sparql: string) => {
       if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
       return originalQuery(sparql);
     });
 
     await expect(internals.reconcileChainOrdinal('56', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(expensiveScans).toBeGreaterThan(0);
 
     expensiveScans = 0;
     (internals as any).knownCorePeerIds.add('peer-reclassified');
 
     await expect(internals.reconcileChainOrdinal('56', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.calls).toHaveLength(2);
     expect(expensiveScans).toBeGreaterThan(0);
   });
 
@@ -858,21 +882,22 @@ describe('Phase D - VM reconcile damping', () => {
     const onChainCgId = 46n;
     registerUnmatchedKC(internals.chain, 9006n, onChainCgId, '0x' + '11'.repeat(32));
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
     const originalQuery = internals.store.query.bind(internals.store);
     let expensiveScans = 0;
-    vi.spyOn(internals.store, 'query').mockImplementation(async (sparql: string) => {
+    (internals.store as any).query = recorder(async (sparql: string) => {
       if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
       return originalQuery(sparql);
     });
 
     await expect(internals.reconcileChainOrdinal('46', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(expensiveScans).toBeGreaterThan(0);
 
     expensiveScans = 0;
     await expect(internals.reconcileChainOrdinal('46', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(expensiveScans).toBe(0);
 
     registerUnmatchedKC(internals.chain, 9006n, onChainCgId, '0x' + '22'.repeat(32));
@@ -880,7 +905,7 @@ describe('Phase D - VM reconcile damping', () => {
     // New root bypasses the negative-cache deferral and re-runs the SWM scan;
     // the independent per-CG active-fetch cooldown may still suppress another
     // network fetch in the same sweep interval.
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(expensiveScans).toBeGreaterThan(0);
     const cacheKeys = Array.from(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).keys());
     expect(cacheKeys).toHaveLength(2);
@@ -899,7 +924,8 @@ describe('Phase D - VM reconcile damping', () => {
     );
     registerUnmatchedKC(internals.chain, 9008n, onChainCgId, bytesToHex(root));
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
     await insertWorkspaceOperationMeta(
       internals.store,
       contextGraphWorkspaceMetaGraphUri('48'),
@@ -914,7 +940,7 @@ describe('Phase D - VM reconcile damping', () => {
     await insertWorkspaceDataTriple(internals.store, '48', entity, value);
 
     await expect(internals.reconcileChainOrdinal('48', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
@@ -929,7 +955,7 @@ describe('Phase D - VM reconcile damping', () => {
     );
     registerUnmatchedKC(internals.chain, 9022n, onChainCgId, bytesToHex(root));
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockImplementation(async () => {
+    const fetch = recorder(async () => {
       await seedSwmSnapshot(internals.store, '61', entity, value);
       return {
         ...emptyCatchupStats(),
@@ -945,9 +971,10 @@ describe('Phase D - VM reconcile damping', () => {
         },
       };
     });
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
 
     await expect(internals.reconcileChainOrdinal('61', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
@@ -963,7 +990,8 @@ describe('Phase D - VM reconcile damping', () => {
     );
     registerUnmatchedKC(internals.chain, 9012n, onChainCgId, bytesToHex(root));
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
     await insertWorkspaceOperationMeta(
       internals.store,
       contextGraphWorkspaceMetaGraphUri('52'),
@@ -979,7 +1007,7 @@ describe('Phase D - VM reconcile damping', () => {
     await replaceWorkspaceDataTriple(internals.store, '52', entity, freshValue);
 
     await expect(internals.reconcileChainOrdinal('52', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
@@ -996,7 +1024,8 @@ describe('Phase D - VM reconcile damping', () => {
     );
     registerUnmatchedKC(internals.chain, 9009n, onChainCgId, bytesToHex(root));
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
     await insertWorkspaceOperationMeta(
       internals.store,
       contextGraphWorkspaceMetaGraphUri('49'),
@@ -1012,7 +1041,7 @@ describe('Phase D - VM reconcile damping', () => {
     await insertPrivateMerkleRoot(internals.store, '49', entity, privateRoot);
 
     await expect(internals.reconcileChainOrdinal('49', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
@@ -1027,16 +1056,17 @@ describe('Phase D - VM reconcile damping', () => {
     );
     registerUnmatchedKC(internals.chain, 9013n, onChainCgId, bytesToHex(root));
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
 
     await expect(internals.reconcileChainOrdinal('53', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
     await seedSwmSnapshotInSubGraph(internals.store, '53', 'code', entity, value);
 
     await expect(internals.reconcileChainOrdinal('53', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
 
@@ -1051,18 +1081,24 @@ describe('Phase D - VM reconcile damping', () => {
     );
     registerUnmatchedKC(internals.chain, 9018n, onChainCgId, bytesToHex(root));
 
-    vi.spyOn(GraphManager.prototype, 'listSubGraphs').mockRejectedValue(new Error('subgraph listing failed'));
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const originalListSubGraphs = GraphManager.prototype.listSubGraphs;
+    GraphManager.prototype.listSubGraphs = recorder(async () => { throw new Error('subgraph listing failed'); }) as typeof originalListSubGraphs;
+    try {
+      const fetch = recorder(async () => emptyCatchupStats());
+      (internals as any).syncContextGraphFromConnectedPeers = fetch;
 
-    await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
+      await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+      expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
-    const seededRoot = await seedSwmSnapshot(internals.store, '58', entity, value);
-    expect(bytesToHex(seededRoot)).toBe(bytesToHex(root));
+      const seededRoot = await seedSwmSnapshot(internals.store, '58', entity, value);
+      expect(bytesToHex(seededRoot)).toBe(bytesToHex(root));
 
-    await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
-    expect(fetch).toHaveBeenCalledTimes(1);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+      await expect(internals.reconcileChainOrdinal('58', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+      expect(fetch.calls).toHaveLength(1);
+      expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    } finally {
+      GraphManager.prototype.listSubGraphs = originalListSubGraphs;
+    }
   });
 
   it('keeps a negative cache entry when subgraph enumeration fails during namespace validation', async () => {
@@ -1078,27 +1114,33 @@ describe('Phase D - VM reconcile damping', () => {
       graph: graphManager.subGraphUri('60', 'code'),
     }]);
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
     const originalQuery = internals.store.query.bind(internals.store);
     let expensiveScans = 0;
-    vi.spyOn(internals.store, 'query').mockImplementation(async (sparql: string) => {
+    (internals.store as any).query = recorder(async (sparql: string) => {
       if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
       return originalQuery(sparql);
     });
 
     await expect(internals.reconcileChainOrdinal('60', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    const fetchesAfterFirstMiss = fetch.mock.calls.length;
+    const fetchesAfterFirstMiss = fetch.calls.length;
     expect(fetchesAfterFirstMiss).toBeGreaterThan(0);
     expect(expensiveScans).toBeGreaterThan(0);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
-    vi.spyOn(GraphManager.prototype, 'listSubGraphs').mockRejectedValue(new Error('transient subgraph listing failure'));
-    expensiveScans = 0;
+    const originalListSubGraphs = GraphManager.prototype.listSubGraphs;
+    GraphManager.prototype.listSubGraphs = recorder(async () => { throw new Error('transient subgraph listing failure'); }) as typeof originalListSubGraphs;
+    try {
+      expensiveScans = 0;
 
-    await expect(internals.reconcileChainOrdinal('60', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch).toHaveBeenCalledTimes(fetchesAfterFirstMiss);
-    expect(expensiveScans).toBe(0);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
+      await expect(internals.reconcileChainOrdinal('60', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+      expect(fetch.calls).toHaveLength(fetchesAfterFirstMiss);
+      expect(expensiveScans).toBe(0);
+      expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
+    } finally {
+      GraphManager.prototype.listSubGraphs = originalListSubGraphs;
+    }
   });
 
   it('invalidates a negative cache entry when root SWM changes while subgraph enumeration fails', async () => {
@@ -1120,20 +1162,26 @@ describe('Phase D - VM reconcile damping', () => {
       graph: graphManager.subGraphUri('65', 'code'),
     }]);
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
 
     await expect(internals.reconcileChainOrdinal('65', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    const fetchesAfterFirstMiss = fetch.mock.calls.length;
+    const fetchesAfterFirstMiss = fetch.calls.length;
     expect(fetchesAfterFirstMiss).toBeGreaterThan(0);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(1);
 
-    vi.spyOn(GraphManager.prototype, 'listSubGraphs').mockRejectedValue(new Error('transient subgraph listing failure'));
-    const seededRoot = await seedSwmSnapshot(internals.store, '65', entity, value);
-    expect(bytesToHex(seededRoot)).toBe(bytesToHex(root));
+    const originalListSubGraphs = GraphManager.prototype.listSubGraphs;
+    GraphManager.prototype.listSubGraphs = recorder(async () => { throw new Error('transient subgraph listing failure'); }) as typeof originalListSubGraphs;
+    try {
+      const seededRoot = await seedSwmSnapshot(internals.store, '65', entity, value);
+      expect(bytesToHex(seededRoot)).toBe(bytesToHex(root));
 
-    await expect(internals.reconcileChainOrdinal('65', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
-    expect(fetch).toHaveBeenCalledTimes(fetchesAfterFirstMiss);
-    expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+      await expect(internals.reconcileChainOrdinal('65', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
+      expect(fetch.calls).toHaveLength(fetchesAfterFirstMiss);
+      expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
+    } finally {
+      GraphManager.prototype.listSubGraphs = originalListSubGraphs;
+    }
   });
 
   it('does not reuse a negative cache entry across local CGs for the same KA root', async () => {
@@ -1174,11 +1222,12 @@ describe('Phase D - VM reconcile damping', () => {
     );
     registerUnmatchedKC(internals.chain, 9005n, onChainCgId, bytesToHex(root));
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
     const originalQuery = internals.store.query.bind(internals.store);
     let expensiveScans = 0;
     let generationReads = 0;
-    vi.spyOn(internals.store, 'query').mockImplementation(async (sparql: string) => {
+    (internals.store as any).query = recorder(async (sparql: string) => {
       if (sparql.includes('SELECT ?op ?root ?ts WHERE')) {
         generationReads++;
         if (generationReads <= 2) throw new Error('transient generation read failure');
@@ -1188,7 +1237,7 @@ describe('Phase D - VM reconcile damping', () => {
     });
 
     await expect(internals.reconcileChainOrdinal('45', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(expensiveScans).toBeGreaterThan(0);
     expect(generationReads).toBe(2);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
@@ -1197,7 +1246,7 @@ describe('Phase D - VM reconcile damping', () => {
 
     expensiveScans = 0;
     await expect(internals.reconcileChainOrdinal('45', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'reconciled', blockNumber: 0 });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(expensiveScans).toBeGreaterThan(0);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
   });
@@ -1228,10 +1277,11 @@ describe('Phase D - VM reconcile damping', () => {
     const onChainCgId = 43n;
     registerUnmatchedKC(internals.chain, 9002n, onChainCgId);
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
     const originalQuery = internals.store.query.bind(internals.store);
     let expensiveScans = 0;
-    vi.spyOn(internals.store, 'query').mockImplementation(async (sparql: string) => {
+    (internals.store as any).query = recorder(async (sparql: string) => {
       if (sparql.includes('SELECT ?op ?root WHERE')) expensiveScans++;
       return originalQuery(sparql);
     });
@@ -1245,7 +1295,7 @@ describe('Phase D - VM reconcile damping', () => {
     );
 
     await internals.reconcileChainOrdinal('43', onChainCgId, 0, undefined);
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
 
     await insertWorkspaceOperationMeta(
@@ -1258,7 +1308,7 @@ describe('Phase D - VM reconcile damping', () => {
 
     expensiveScans = 0;
     await internals.reconcileChainOrdinal('43', onChainCgId, 0, undefined);
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(expensiveScans).toBeGreaterThan(0);
 
     await insertWorkspaceOperationMeta(
@@ -1271,7 +1321,7 @@ describe('Phase D - VM reconcile damping', () => {
 
     expensiveScans = 0;
     await internals.reconcileChainOrdinal('43', onChainCgId, 0, undefined);
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
     expect(expensiveScans).toBeGreaterThan(0);
   });
 
@@ -1281,12 +1331,13 @@ describe('Phase D - VM reconcile damping', () => {
     registerUnmatchedKC(internals.chain, 9003n, onChainCgId);
     registerUnmatchedKC(internals.chain, 9004n, onChainCgId);
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(emptyCatchupStats());
+    const fetch = recorder(async () => emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
 
     await internals.reconcileChainOrdinal('44', onChainCgId, 0, undefined);
     await internals.reconcileChainOrdinal('44', onChainCgId, 1, undefined);
 
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.calls).toHaveLength(1);
   });
 
   it('falls through a no-protocol active-fetch peer before caching a miss', async () => {
@@ -1298,23 +1349,23 @@ describe('Phase D - VM reconcile damping', () => {
       { remotePeer: { toString: () => 'peer-empty' } },
     ];
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers')
-      .mockResolvedValueOnce(noProtocolCatchupStats())
-      .mockResolvedValueOnce(emptyCatchupStats());
+    const fetchResults = [noProtocolCatchupStats(), emptyCatchupStats()];
+    const fetch = recorder(async () => fetchResults.shift() ?? emptyCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
 
     await expect(internals.reconcileChainOrdinal('47', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
 
-    expect(fetch).toHaveBeenCalledTimes(2);
-    expect(fetch).toHaveBeenNthCalledWith(1, '47', {
+    expect(fetch.calls).toHaveLength(2);
+    expect(fetch.calls[0]).toEqual(['47', {
       includeSharedMemory: true,
       maxPeers: 1,
       peerRotationKey: '47',
-    });
-    expect(fetch).toHaveBeenNthCalledWith(2, '47', {
+    }]);
+    expect(fetch.calls[1]).toEqual(['47', {
       includeSharedMemory: true,
       maxPeers: 1,
       peerRotationKey: '47',
-    });
+    }]);
   });
 
   it('extends active-fetch attempts after the first fetch round dials another peer', async () => {
@@ -1326,7 +1377,7 @@ describe('Phase D - VM reconcile damping', () => {
     (agent as any).node.libp2p.getConnections = () =>
       connectedPeers.map((peerId) => ({ remotePeer: { toString: () => peerId } }));
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockImplementation(async () => {
+    const fetch = recorder(async () => {
       if (connectedPeers.length === 1) {
         connectedPeers = ['peer-initial', 'peer-dialed'];
       }
@@ -1337,10 +1388,11 @@ describe('Phase D - VM reconcile damping', () => {
         selectedPeers: 1,
       };
     });
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
 
     await expect(internals.reconcileChainOrdinal('59', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
 
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.calls).toHaveLength(2);
   });
 
   it('attempts every connected peer before recording a miss', async () => {
@@ -1348,16 +1400,17 @@ describe('Phase D - VM reconcile damping', () => {
     const onChainCgId = 64n;
     registerUnmatchedKC(internals.chain, 9024n, onChainCgId);
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue({
+    const fetch = recorder(async () => ({
       ...emptyCatchupStats(),
       connectedPeers: 33,
       totalPeers: 33,
       selectedPeers: 1,
-    });
+    }));
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
 
     await expect(internals.reconcileChainOrdinal('64', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
 
-    expect(fetch).toHaveBeenCalledTimes(33);
+    expect(fetch.calls).toHaveLength(33);
   });
 
   it('does not negative-cache no-swm when active fetch reaches no sync-capable peer', async () => {
@@ -1369,11 +1422,12 @@ describe('Phase D - VM reconcile damping', () => {
       { remotePeer: { toString: () => 'peer-no-protocol-b' } },
     ];
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockResolvedValue(noProtocolCatchupStats());
+    const fetch = recorder(async () => noProtocolCatchupStats());
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
 
     await expect(internals.reconcileChainOrdinal('50', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
 
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.calls).toHaveLength(2);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
     expect(((internals as any).vmReconcileFetchCooldownAt as Map<string, unknown>).has('50')).toBe(false);
   });
@@ -1387,11 +1441,12 @@ describe('Phase D - VM reconcile damping', () => {
       { remotePeer: { toString: () => 'peer-fails-b' } },
     ];
 
-    const fetch = vi.spyOn(internals, 'syncContextGraphFromConnectedPeers').mockRejectedValue(new Error('fetch failed'));
+    const fetch = recorder(async () => { throw new Error('fetch failed'); });
+    (internals as any).syncContextGraphFromConnectedPeers = fetch;
 
     await expect(internals.reconcileChainOrdinal('51', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
 
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.calls).toHaveLength(2);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
     expect(((internals as any).vmReconcileFetchCooldownAt as Map<string, unknown>).has('51')).toBe(false);
   });
@@ -1419,9 +1474,9 @@ describe('Phase D - VM reconcile damping', () => {
       candidateNamespaces: [],
       peerTopologyKey: '',
     });
-    vi.spyOn(internals as any, 'getOrCreateFinalizationHandler').mockReturnValue({
-      handleChainReconciledKC: vi.fn().mockResolvedValue('stale-target'),
-    });
+    (internals as any).getOrCreateFinalizationHandler = recorder(() => ({
+      handleChainReconciledKC: recorder(async () => 'stale-target'),
+    }));
 
     await expect(internals.reconcileChainOrdinal('55', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'already', blockNumber: 0 });
 
@@ -1557,7 +1612,6 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       await agent.stop().catch(() => undefined);
       agent = null;
     }
-    vi.restoreAllMocks();
   });
 
   it('sweep triggers a reconcile for a core-hosted CG with NO member subscription', async () => {

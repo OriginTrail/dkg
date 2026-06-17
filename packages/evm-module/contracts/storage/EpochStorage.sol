@@ -9,9 +9,17 @@ import {IVersioned} from "../interfaces/IVersioned.sol";
 
 contract EpochStorage is INamed, IVersioned, HubDependent {
     string private constant _NAME = "EpochStorage";
-    string private constant _VERSION = "10.0.3";
+    // 10.0.4 — OT-RFC-51 "Publishing Allocation": the per-node
+    //          produced-knowledge-value accounting is repurposed as
+    //          committed PCA "publishing allocation". The mappings,
+    //          mutator, event, and getters are renamed
+    //          (`*ProducedKnowledgeValue*` -> `*PublishingAllocation*`)
+    //          and a net-zero `moveEpochPublishingAllocation` mutator is
+    //          added so a PCA can re-designate its primary node without
+    //          changing the epoch total (K_total).
+    string private constant _VERSION = "10.0.4";
 
-    event EpochProducedKnowledgeValueAdded(uint72 indexed identityId, uint256 indexed epoch, uint96 knowledgeValue);
+    event EpochPublishingAllocationAdded(uint72 indexed identityId, uint256 indexed epoch, uint96 amount);
     event TokensAddedToEpochRange(
         uint256 indexed shardId,
         uint256 startEpoch,
@@ -31,9 +39,9 @@ contract EpochStorage is INamed, IVersioned, HubDependent {
     mapping(uint256 => mapping(uint256 => uint96)) public cumulative;
     mapping(uint256 => mapping(uint256 => uint96)) public distributed;
 
-    mapping(uint72 => mapping(uint256 => uint96)) public nodesEpochProducedKnowledgeValue;
-    mapping(uint256 => uint96) public epochProducedKnowledgeValue;
-    mapping(uint256 => uint96) public epochNodeMaxProducedKnowledgeValue;
+    mapping(uint72 => mapping(uint256 => uint96)) public nodesEpochPublishingAllocation;
+    mapping(uint256 => uint96) public epochPublishingAllocation;
+    mapping(uint256 => uint96) public epochNodeMaxPublishingAllocation;
 
     mapping(uint72 => mapping(uint256 => mapping(uint256 => uint96))) public nodesPaidOut;
 
@@ -51,99 +59,135 @@ contract EpochStorage is INamed, IVersioned, HubDependent {
         return _VERSION;
     }
 
-    function addEpochProducedKnowledgeValue(
+    function addEpochPublishingAllocation(
         uint72 identityId,
         uint256 epoch,
-        uint96 knowledgeValue
+        uint96 amount
     ) external onlyContracts {
-        nodesEpochProducedKnowledgeValue[identityId][epoch] += knowledgeValue;
-        epochProducedKnowledgeValue[epoch] += knowledgeValue;
+        nodesEpochPublishingAllocation[identityId][epoch] += amount;
+        epochPublishingAllocation[epoch] += amount;
 
-        if (nodesEpochProducedKnowledgeValue[identityId][epoch] > epochNodeMaxProducedKnowledgeValue[epoch]) {
-            epochNodeMaxProducedKnowledgeValue[epoch] = nodesEpochProducedKnowledgeValue[identityId][epoch];
+        // Maintain the per-epoch node max so its (public) getters stay
+        // consistent. The OT-RFC-51 scoring path does NOT read it
+        // (RandomSampling reads only getNodeEpochPublishingAllocation /
+        // getEpochPublishingAllocation), but the mapping cannot be removed —
+        // it precedes `nodesPaidOut` in this persistent (non-fresh-state)
+        // storage layout — and leaving it written-nowhere/read-in-getters
+        // trips Slither's uninitialized-state finding. The compare/SSTORE is
+        // negligible against the surrounding accounting.
+        if (nodesEpochPublishingAllocation[identityId][epoch] > epochNodeMaxPublishingAllocation[epoch]) {
+            epochNodeMaxPublishingAllocation[epoch] = nodesEpochPublishingAllocation[identityId][epoch];
         }
 
-        emit EpochProducedKnowledgeValueAdded(identityId, epoch, knowledgeValue);
+        emit EpochPublishingAllocationAdded(identityId, epoch, amount);
     }
 
-    function getEpochProducedKnowledgeValue(uint256 epoch) external view returns (uint96) {
-        return epochProducedKnowledgeValue[epoch];
+    /// @notice OT-RFC-51: move `amount` of publishing allocation from one
+    ///         node to another within a single `epoch`. Used when a PCA
+    ///         re-designates its primary node — the epoch total
+    ///         (`epochPublishingAllocation`, i.e. K_total) is intentionally
+    ///         NOT touched, so the move is net-zero on the denominator of
+    ///         every node's publishing factor.
+    /// @dev    `epochNodeMaxPublishingAllocation` is a per-epoch HIGH-WATER
+    ///         MARK, maintained identically on the add and move paths: it is
+    ///         only ever RAISED (when the destination's new value exceeds it),
+    ///         never lowered by the `fromId` decrement — computing the true
+    ///         current max after a decrement would need an O(nodes) scan.
+    ///         Nothing on-chain reads it (scoring reads only
+    ///         get(Node)EpochPublishingAllocation); it exists for off-chain
+    ///         observability, for which the high-water-mark semantic is correct.
+    function moveEpochPublishingAllocation(
+        uint72 fromId,
+        uint72 toId,
+        uint256 epoch,
+        uint96 amount
+    ) external onlyContracts {
+        nodesEpochPublishingAllocation[fromId][epoch] -= amount;
+        nodesEpochPublishingAllocation[toId][epoch] += amount; // epoch total unchanged -> K_total net-zero
+
+        if (nodesEpochPublishingAllocation[toId][epoch] > epochNodeMaxPublishingAllocation[epoch]) {
+            epochNodeMaxPublishingAllocation[epoch] = nodesEpochPublishingAllocation[toId][epoch];
+        }
     }
 
-    function getCurrentEpochProducedKnowledgeValue() external view returns (uint96) {
-        return epochProducedKnowledgeValue[chronos.getCurrentEpoch()];
+    function getEpochPublishingAllocation(uint256 epoch) external view returns (uint96) {
+        return epochPublishingAllocation[epoch];
     }
 
-    function getPreviousEpochProducedKnowledgeValue() external view returns (uint96) {
+    function getCurrentEpochPublishingAllocation() external view returns (uint96) {
+        return epochPublishingAllocation[chronos.getCurrentEpoch()];
+    }
+
+    function getPreviousEpochPublishingAllocation() external view returns (uint96) {
         uint256 currentEpoch = chronos.getCurrentEpoch();
         if (currentEpoch <= 1) {
             return 0;
         }
-        return epochProducedKnowledgeValue[currentEpoch - 1];
+        return epochPublishingAllocation[currentEpoch - 1];
     }
 
-    function getNodeEpochProducedKnowledgeValue(uint72 identityId, uint256 epoch) external view returns (uint96) {
-        return nodesEpochProducedKnowledgeValue[identityId][epoch];
+    function getNodeEpochPublishingAllocation(uint72 identityId, uint256 epoch) external view returns (uint96) {
+        return nodesEpochPublishingAllocation[identityId][epoch];
     }
 
-    function getNodeCurrentEpochProducedKnowledgeValue(uint72 identityId) external view returns (uint96) {
-        return nodesEpochProducedKnowledgeValue[identityId][chronos.getCurrentEpoch()];
+    function getNodeCurrentEpochPublishingAllocation(uint72 identityId) external view returns (uint96) {
+        return nodesEpochPublishingAllocation[identityId][chronos.getCurrentEpoch()];
     }
 
-    function getNodePreviousEpochProducedKnowledgeValue(uint72 identityId) external view returns (uint96) {
+    function getNodePreviousEpochPublishingAllocation(uint72 identityId) external view returns (uint96) {
         uint256 currentEpoch = chronos.getCurrentEpoch();
         if (currentEpoch <= 1) {
             return 0;
         }
-        return nodesEpochProducedKnowledgeValue[identityId][currentEpoch - 1];
+        return nodesEpochPublishingAllocation[identityId][currentEpoch - 1];
     }
 
-    function getEpochNodeMaxProducedKnowledgeValue(uint256 epoch) external view returns (uint96) {
-        return epochNodeMaxProducedKnowledgeValue[epoch];
+    function getEpochNodeMaxPublishingAllocation(uint256 epoch) external view returns (uint96) {
+        return epochNodeMaxPublishingAllocation[epoch];
     }
 
-    function getCurrentEpochNodeMaxProducedKnowledgeValue() external view returns (uint96) {
-        return epochNodeMaxProducedKnowledgeValue[chronos.getCurrentEpoch()];
+    function getCurrentEpochNodeMaxPublishingAllocation() external view returns (uint96) {
+        return epochNodeMaxPublishingAllocation[chronos.getCurrentEpoch()];
     }
 
-    function getPreviousEpochNodeMaxProducedKnowledgeValue() external view returns (uint96) {
+    function getPreviousEpochNodeMaxPublishingAllocation() external view returns (uint96) {
         uint256 currentEpoch = chronos.getCurrentEpoch();
         if (currentEpoch <= 1) {
             return 0;
         }
-        return epochNodeMaxProducedKnowledgeValue[currentEpoch - 1];
+        return epochNodeMaxPublishingAllocation[currentEpoch - 1];
     }
 
-    function getNodeEpochProducedKnowledgeValuePercentage(
+    function getNodeEpochPublishingAllocationPercentage(
         uint72 identityId,
         uint256 epoch
     ) external view returns (uint256) {
-        if (epochProducedKnowledgeValue[epoch] == 0) {
+        if (epochPublishingAllocation[epoch] == 0) {
             return 0;
         }
 
         return
-            (uint256(nodesEpochProducedKnowledgeValue[identityId][epoch]) * 1e18) / epochProducedKnowledgeValue[epoch];
+            (uint256(nodesEpochPublishingAllocation[identityId][epoch]) * 1e18) / epochPublishingAllocation[epoch];
     }
 
-    function getNodeCurrentEpochProducedKnowledgeValuePercentage(uint72 identityId) external view returns (uint256) {
+    function getNodeCurrentEpochPublishingAllocationPercentage(uint72 identityId) external view returns (uint256) {
         uint256 currentEpoch = chronos.getCurrentEpoch();
 
-        if (epochProducedKnowledgeValue[currentEpoch] == 0) {
+        if (epochPublishingAllocation[currentEpoch] == 0) {
             return 0;
         }
 
-        return ((uint256(nodesEpochProducedKnowledgeValue[identityId][currentEpoch]) * 1e18) /
-            epochProducedKnowledgeValue[currentEpoch]);
+        return ((uint256(nodesEpochPublishingAllocation[identityId][currentEpoch]) * 1e18) /
+            epochPublishingAllocation[currentEpoch]);
     }
 
-    function getNodePreviousEpochProducedKnowledgeValuePercentage(uint72 identityId) external view returns (uint256) {
+    function getNodePreviousEpochPublishingAllocationPercentage(uint72 identityId) external view returns (uint256) {
         uint256 currentEpoch = chronos.getCurrentEpoch();
-        if (currentEpoch <= 1 || epochProducedKnowledgeValue[currentEpoch - 1] == 0) {
+        if (currentEpoch <= 1 || epochPublishingAllocation[currentEpoch - 1] == 0) {
             return 0;
         }
-        return ((uint256(nodesEpochProducedKnowledgeValue[identityId][currentEpoch - 1]) * 1e18) /
-            epochProducedKnowledgeValue[currentEpoch - 1]);
+        return ((uint256(nodesEpochPublishingAllocation[identityId][currentEpoch - 1]) * 1e18) /
+            epochPublishingAllocation[currentEpoch - 1]);
     }
 
     function addTokensToEpochRange(

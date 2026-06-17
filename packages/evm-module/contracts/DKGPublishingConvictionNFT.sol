@@ -89,7 +89,10 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
     //           mint counter + TRAC-pull only. Public selectors are
     //           preserved so `IDKGPublishingConvictionNFT` consumers
     //           (`KnowledgeAssetsV10`, `ContextGraphs`) need no changes.
-    string private constant _VERSION = "10.0.2";
+    //   10.0.3 — OT-RFC-51 "Publishing Allocation": `createAccount` gains a
+    //           `primaryNode` argument forwarded to the logic contract, and a
+    //           new owner-gated `setPrimaryNode` forwarder is added.
+    string private constant _VERSION = "10.0.3";
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
 
@@ -138,6 +141,8 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
     error ZeroAddressDependency(string name);
     error OnlyKnowledgeAssetsV10(address caller);
     error NotAccountOwner(uint256 accountId, address caller);
+    /// @notice OT-RFC-51 defense-in-depth: `setPrimaryNode` called with `newNode == 0`.
+    error ZeroPrimaryNode();
     error InvalidAmount();
     error TokenTransferFailed();
 
@@ -209,12 +214,12 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
      *         any failure path — the NFT is never minted without TRAC
      *         backing it and a recorded `Account` row.
      */
-    function createAccount(uint96 committedTRAC) external returns (uint256 accountId) {
+    function createAccount(uint96 committedTRAC, uint72 primaryNode) external returns (uint256 accountId) {
         if (committedTRAC == 0) revert InvalidAmount();
 
         accountId = _nextAccountId++;
 
-        _publishingConviction().createAccount(msg.sender, accountId, committedTRAC);
+        _publishingConviction().createAccount(msg.sender, accountId, committedTRAC, primaryNode);
 
         // Direct publisher -> CSS vault transfer. Contract never holds TRAC.
         // The TRAC sits in escrow against this account's billing windows and
@@ -245,6 +250,22 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
         if (!tokenContract.transferFrom(msg.sender, stakingStorageAddress, amount)) {
             revert TokenTransferFailed();
         }
+    }
+
+    /**
+     * @notice OT-RFC-51: re-designate the primary node that this account's
+     *         committed publishing allocation is credited to. Owner-gated
+     *         here; the logic contract enforces the once-per-epoch rate
+     *         limit and `nodeExists` validation for the new node, and moves
+     *         future-epoch allocation net-zero on K_total.
+     */
+    function setPrimaryNode(uint256 accountId, uint72 newNode) external {
+        _requireOwner(accountId);
+        // OT-RFC-51 defense-in-depth: there is no clear-designation semantic.
+        // The logic contract also rejects this; guard here so a 0 can never
+        // reach it (see PublishingConviction.ZeroPrimaryNode).
+        if (newNode == 0) revert ZeroPrimaryNode();
+        _publishingConviction().setPrimaryNode(accountId, newNode);
     }
 
     // ========================================================================
@@ -347,7 +368,9 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
         uint16 lockDurationEpochs,
         uint16 discountBps,
         uint16 lastSettledWindow,
-        bool fullySwept
+        bool fullySwept,
+        uint72 primaryNode,
+        uint40 lastPrimaryNodeChangeEpoch
     ) {
         return publishingConvictionStorage.accounts(accountId);
     }

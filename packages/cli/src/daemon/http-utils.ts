@@ -34,6 +34,7 @@ export interface PublishRequestBody {
   accessPolicy?: PublishAccessPolicy;
   allowedPeers?: string[];
   subGraphName?: string;
+  onChainContextGraphId?: string;
 }
 
 import type { CorsAllowlist } from './state.js';
@@ -99,6 +100,18 @@ export function isPublishQuad(value: unknown): value is PublishQuad {
   );
 }
 
+function validatePublishQuadObjectTerms(
+  label: string,
+  quads: PublishQuad[],
+): string | null {
+  const badIndex = quads.findIndex((q) => {
+    const object = q.object.trim();
+    return !object.startsWith('"') && !isSafeIri(object);
+  });
+  if (badIndex === -1) return null;
+  return `Invalid "${label}[${badIndex}].object": RDF object must be a quoted literal term or absolute IRI`;
+}
+
 export function parsePublishRequestBody(
   body: string,
 ): { ok: true; value: PublishRequestBody } | { ok: false; error: string } {
@@ -114,7 +127,7 @@ export function parsePublishRequestBody(
   }
 
   const payload = parsed as Record<string, unknown>;
-  const { quads, privateQuads, accessPolicy, allowedPeers, subGraphName } =
+  const { quads, privateQuads, accessPolicy, allowedPeers, subGraphName, onChainContextGraphId } =
     payload;
   const contextGraphId = payload.contextGraphId as unknown;
 
@@ -135,6 +148,8 @@ export function parsePublishRequestBody(
       error: 'Missing or invalid "quads" (must be a non-empty quad array)',
     };
   }
+  const quadObjectError = validatePublishQuadObjectTerms("quads", quads);
+  if (quadObjectError) return { ok: false, error: quadObjectError };
 
   if (
     privateQuads !== undefined &&
@@ -144,6 +159,10 @@ export function parsePublishRequestBody(
       ok: false,
       error: 'Invalid "privateQuads" (must be a quad array)',
     };
+  }
+  if (privateQuads !== undefined) {
+    const privateQuadObjectError = validatePublishQuadObjectTerms("privateQuads", privateQuads);
+    if (privateQuadObjectError) return { ok: false, error: privateQuadObjectError };
   }
 
   if (
@@ -202,6 +221,17 @@ export function parsePublishRequestBody(
     }
   }
 
+  let normalizedOnChainContextGraphId: string | undefined;
+  if (onChainContextGraphId !== undefined) {
+    if (typeof onChainContextGraphId !== "string" || !/^[1-9]\d*$/.test(onChainContextGraphId.trim())) {
+      return {
+        ok: false,
+        error: 'Invalid "onChainContextGraphId" (must be a positive integer string)',
+      };
+    }
+    normalizedOnChainContextGraphId = onChainContextGraphId.trim();
+  }
+
   return {
     ok: true,
     value: {
@@ -211,6 +241,7 @@ export function parsePublishRequestBody(
       accessPolicy,
       allowedPeers,
       subGraphName: subGraphName as string | undefined,
+      onChainContextGraphId: normalizedOnChainContextGraphId,
     },
   };
 }

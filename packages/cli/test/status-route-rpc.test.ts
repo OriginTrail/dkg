@@ -1,140 +1,59 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createServer, type Server } from 'node:http';
+/**
+ * /api/status chain sanitization + /api/chain/rpc-health probing — REAL
+ * daemon, REAL chain, NO mocks.
+ *
+ * The retired version replaced ethers' JsonRpcProvider with a module mock
+ * whose getBlockNumber() returned canned numbers/errors keyed by URL, and
+ * drove `handleStatusRoutes` through a hand-built ctx. That could not notice
+ * a real provider behaviour change (e.g. a different failure shape) and the
+ * sanitization was asserted against a fabricated config.
+ *
+ * This version boots a real edge daemon whose chain config carries TWO RPC
+ * endpoints: the shared Hardhat node (primary — genuinely healthy) and a
+ * dead localhost port (backup — a genuinely unreachable endpoint, so the
+ * failure path is a REAL connection error, not an injected one). The same
+ * contracts are then proven over real HTTP:
+ *   - /api/status returns the sanitized chain summary (no raw rpcUrl /
+ *     rpcUrls / hubAddress leaks),
+ *   - /api/chain/rpc-health probes BOTH endpoints, reports the healthy one
+ *     with a real block number, the dead one with the sanitized
+ *     'RPC health probe failed' error, and never echoes an RPC URL.
+ */
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { getSharedContext } from '../../chain/test/evm-test-context.js';
+import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
 
-const rpcState = vi.hoisted(() => ({
-  responses: new Map<string, number | Error | Promise<never>>(),
-}));
+// A port nothing listens on — connecting to it is a REAL refused connection.
+const DEAD_RPC = 'http://127.0.0.1:9';
 
-vi.mock('ethers', async (importOriginal) => {
-  const actual = await importOriginal<any>();
-  class MockJsonRpcProvider {
-    readonly rpcUrl: string;
-    constructor(rpcUrl: string) {
-      this.rpcUrl = rpcUrl;
-    }
-    async getBlockNumber(): Promise<number> {
-      const response = rpcState.responses.get(this.rpcUrl);
-      if (response instanceof Error) throw response;
-      if (response && typeof (response as Promise<never>).then === 'function') {
-        return response as Promise<never>;
-      }
-      return typeof response === 'number' ? response : 123;
-    }
-  }
-  return {
-    ...actual,
-    ethers: {
-      ...actual.ethers,
-      JsonRpcProvider: MockJsonRpcProvider,
-    },
-  };
-});
+describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => {
+  let daemon: LiveDaemon;
 
-const { handleStatusRoutes } = await import('../src/daemon/routes/status.js');
-
-function makeCtx(path: string) {
-  const url = new URL(path, 'http://127.0.0.1');
-  return {
-    agent: {
-      peerId: '12D3KooStatusRouteTest',
-      multiaddrs: [],
-      node: {
-        libp2p: {
-          getConnections: () => [],
+  beforeAll(async () => {
+    const { rpcUrl, hubAddress } = getSharedContext();
+    daemon = await startLiveDaemon({
+      extraConfig: {
+        chain: {
+          type: 'evm',
+          rpcUrl,
+          rpcUrls: [rpcUrl, DEAD_RPC],
+          hubAddress,
+          chainId: 'evm:31337',
         },
       },
-      publisher: {
-        getIdentityId: () => 0n,
-      },
-    },
-    publisherControl: {},
-    publisherRuntime: null,
-    config: {
-      name: 'status-test',
-      nodeRole: 'edge',
-      chain: {
-        type: 'evm',
-        rpcUrl: 'https://primary.example/rpc',
-        rpcUrls: ['https://backup.example/rpc'],
-        hubAddress: '0x0000000000000000000000000000000000000001',
-        chainId: 'base:84532',
-      },
-    },
-    startedAt: Date.now() - 1000,
-    dashDb: {},
-    opWallets: { wallets: [] },
-    network: null,
-    tracker: {},
-    memoryManager: {},
-    bridgeAuthToken: undefined,
-    nodeVersion: 'test',
-    nodeCommit: 'abc123',
-    catchupTracker: { jobs: new Map(), latestByContextGraph: new Map() },
-    extractionRegistry: {},
-    fileStore: {},
-    extractionStatus: new Map(),
-    assertionImportLocks: new Map(),
-    vectorStore: {},
-    embeddingProvider: null,
-    validTokens: new Set(),
-    apiHost: '127.0.0.1',
-    apiPortRef: { value: 0 },
-    url,
-    path: url.pathname,
-    requestToken: undefined,
-    requestAgentAddress: 'did:dkg:agent:test',
-    emitMemoryGraphChanged: () => {},
-  };
-}
-
-describe('status route multi-RPC shape', () => {
-  let server: Server | undefined;
-  let baseUrl = '';
-
-  beforeEach(async () => {
-    rpcState.responses.clear();
-    server = createServer(async (req, res) => {
-      const requestPath = req.url ?? '/';
-      const ctx = { ...makeCtx(requestPath), req, res };
-      try {
-        await handleStatusRoutes(ctx as any);
-        if (!res.writableEnded) {
-          res.statusCode = 404;
-          res.end();
-        }
-      } catch (err: any) {
-        // Test-harness only: emit a fixed body so the test cannot leak
-        // exception text into a CodeQL `stack-trace-exposure` /
-        // `XSS-via-error-text` alert. The route under test sets its own
-        // body upstream; this catch is purely a safety net.
-        // The thrown error is re-surfaced via console.error so the test
-        // log still has full diagnostics if a route assertion fails.
-        // eslint-disable-next-line no-console
-        console.error('[test-harness] unhandled route error:', err);
-        res.statusCode = 500;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ error: 'internal error' }));
-      }
     });
-    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
-    const addr = server.address();
-    if (!addr || typeof addr === 'string') throw new Error('server did not bind');
-    baseUrl = `http://127.0.0.1:${addr.port}`;
+  }, 120_000);
+
+  afterAll(async () => {
+    await stopLiveDaemon(daemon);
   });
 
-  afterEach(async () => {
-    if (server) {
-      await new Promise<void>((resolve, reject) => server!.close((err) => (err ? reject(err) : resolve())));
-      server = undefined;
-    }
-  });
-
-  it('/api/status returns sanitized chain summary without raw RPC endpoints', async () => {
-    const res = await fetch(`${baseUrl}/api/status`);
-    const body: any = await res.json();
+  it('/api/status returns a sanitized chain summary without raw RPC endpoints', async () => {
+    const res = await fetch(`${daemon.base}/api/status`, { headers: authHeaders(daemon) });
     expect(res.status).toBe(200);
-    expect(body.chain).toEqual({
-      chainId: 'base:84532',
+    const body: any = await res.json();
+    expect(body.chain).toMatchObject({
+      chainId: 'evm:31337',
       configured: true,
       rpcEndpointCount: 2,
       hubConfigured: true,
@@ -144,34 +63,30 @@ describe('status route multi-RPC shape', () => {
     expect(body.chain).not.toHaveProperty('hubAddress');
   });
 
-  it('/api/chain/rpc-health probes all endpoints without returning raw RPC URLs', async () => {
-    rpcState.responses.set('https://primary.example/rpc', new Error('primary down'));
-    rpcState.responses.set('https://backup.example/rpc', 456);
-
-    const res = await fetch(`${baseUrl}/api/chain/rpc-health`);
-    const body: any = await res.json();
+  it('/api/chain/rpc-health probes both endpoints; real block number, sanitized real failure, no URL echo', async () => {
+    const res = await fetch(`${daemon.base}/api/chain/rpc-health`, { headers: authHeaders(daemon) });
     expect(res.status).toBe(200);
-    expect(body.ok).toBe(true);
+    const body: any = await res.json();
     expect(body.configured).toBe(true);
     expect(body.rpcEndpointCount).toBe(2);
     expect(body).not.toHaveProperty('rpcUrl');
     expect(body).not.toHaveProperty('rpcUrls');
-    expect(body.blockNumber).toBe(456);
-    expect(body.rpcs).toEqual([
-      expect.objectContaining({
-        index: 0,
-        role: 'primary',
-        ok: false,
-        blockNumber: null,
-        error: 'RPC health probe failed',
-      }),
-      expect.objectContaining({
-        index: 1,
-        role: 'backup',
-        ok: true,
-        blockNumber: 456,
-      }),
-    ]);
+
+    // Primary = the real Hardhat node: ok with a REAL block number.
+    const primary = body.rpcs.find((p: any) => p.role === 'primary');
+    expect(primary.ok).toBe(true);
+    expect(typeof primary.blockNumber).toBe('number');
+    expect(primary.blockNumber).toBeGreaterThanOrEqual(0);
+
+    // Backup = the dead endpoint: a REAL connection failure, sanitized.
+    const backup = body.rpcs.find((p: any) => p.role === 'backup');
+    expect(backup.ok).toBe(false);
+    expect(backup.blockNumber).toBeNull();
+    expect(backup.error).toBe('RPC health probe failed');
+
+    // The overall probe is healthy (primary up) and no probe leaks a URL.
+    expect(body.ok).toBe(true);
+    expect(typeof body.blockNumber).toBe('number');
     for (const probe of body.rpcs) {
       expect(probe).not.toHaveProperty('rpcUrl');
     }

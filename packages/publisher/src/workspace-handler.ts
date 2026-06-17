@@ -47,6 +47,14 @@ export type WorkspaceSenderKeyDecryptor = (
   ctx: OperationContext,
 ) => Promise<Uint8Array>;
 
+export interface ContextGraphMetaOracleRecord {
+  allowedPeers?: readonly string[];
+  allowedAgents?: readonly string[];
+  participantAgents?: readonly string[];
+  revokedAgents?: readonly string[];
+  accessPolicy?: string;
+}
+
 /**
  * Outcome of one `SharedMemoryHandler.handle()` invocation. Added
  * in rc.9 PR-C (codex R3) so the new substrate fan-out receiver
@@ -170,6 +178,10 @@ export class SharedMemoryHandler {
   private readonly sharedMemoryOwnedEntities: Map<string, Map<string, string>> = new Map();
   private readonly writeLocks: Map<string, Promise<void>>;
   private readonly localAgentAddresses?: () => readonly string[] | Promise<readonly string[]>;
+  private readonly contextGraphMetaOracle?: (
+    contextGraphId: string,
+  ) => Promise<ContextGraphMetaOracleRecord | null>;
+  private readonly markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
   /**
    * OT-RFC-38 / LU-6 Phase B — chain-backed fallback for the agent
    * allowlist read. Returns the participant-agent EOA set for a
@@ -285,6 +297,10 @@ export class SharedMemoryHandler {
       sharedMemoryOwnedEntities?: Map<string, Map<string, string>>;
       writeLocks?: Map<string, Promise<void>>;
       localAgentAddresses?: () => readonly string[] | Promise<readonly string[]>;
+      contextGraphMetaOracle?: (
+        contextGraphId: string,
+      ) => Promise<ContextGraphMetaOracleRecord | null>;
+      markContextGraphMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
       /**
        * OT-RFC-38 / LU-6 Phase B chain-backed agent-allowlist
        * fallback. See {@link SharedMemoryHandler#chainAgentGateOracle}.
@@ -340,6 +356,8 @@ export class SharedMemoryHandler {
     }
     this.writeLocks = options?.writeLocks ?? new Map();
     this.localAgentAddresses = options?.localAgentAddresses;
+    this.contextGraphMetaOracle = options?.contextGraphMetaOracle;
+    this.markContextGraphMetaDirtyFromQuads = options?.markContextGraphMetaDirtyFromQuads;
     this.chainAgentGateOracle = options?.chainAgentGateOracle;
     this.beaconCuratorOracle = options?.beaconCuratorOracle;
     this.workspaceRecipientPrivateKeys = options?.workspaceRecipientPrivateKeys;
@@ -966,6 +984,7 @@ export class SharedMemoryHandler {
             timestamp: new Date(),
           });
           await this.store.insert(regQuads);
+          this.markContextGraphMetaDirtyFromQuads?.(regQuads);
           this.log.info(ctx, `Auto-registered sub-graph "${subGraphName}" in context graph "${contextGraphId}" from SWM`);
         }
       }
@@ -1448,10 +1467,42 @@ export class SharedMemoryHandler {
   }
 
   /**
+   * Read a single agent-list predicate (allowed / participant / revoked)
+   * for a context graph from the local `_meta` graph. Used as the per-field
+   * store fallback when the (partial) projection did not carry that field.
+   */
+  private async queryMetaAgents(contextGraphId: string, predicate: string): Promise<string[]> {
+    const cgMeta = contextGraphMetaUri(contextGraphId);
+    const cgData = contextGraphDataUri(contextGraphId);
+    const result = await this.store.query(
+      `SELECT ?agent WHERE { GRAPH <${cgMeta}> { <${cgData}> <${predicate}> ?agent } }`,
+    );
+    if (result.type !== 'bindings') return [];
+    return result.bindings
+      .map(row => row['agent'])
+      .filter((v): v is string => typeof v === 'string')
+      .map(stripRdfLiteral);
+  }
+
+  /**
    * Returns the peer allowlist for a context graph, or null if no allowlist
    * is set (open CG — all peers allowed).
    */
   private async getContextGraphAllowedPeers(contextGraphId: string): Promise<string[] | null> {
+    // The oracle record is intentionally PARTIAL (OT-RFC-49 public
+    // projection): a populated record does NOT imply every gate field
+    // was projected. Short-circuit on the projection ONLY for the
+    // `allowedPeers` field, and ONLY when that field was actually
+    // projected (`!== undefined`). Treating the whole record as a
+    // complete snapshot here would let a projection that carried only
+    // `accessPolicy`/agent fields skip the peer allowlist entirely
+    // (returns null ⇒ "open CG — all peers allowed").
+    const projected = await this.contextGraphMetaOracle?.(contextGraphId);
+    if (projected?.allowedPeers !== undefined) {
+      const peers = [...new Set(projected.allowedPeers.filter((v): v is string => typeof v === 'string'))];
+      return peers.length > 0 ? peers : null;
+    }
+
     const cgMeta = contextGraphMetaUri(contextGraphId);
     const cgData = contextGraphDataUri(contextGraphId);
     const result = await this.store.query(
@@ -1472,23 +1523,62 @@ export class SharedMemoryHandler {
    * DKG_PARTICIPANT_AGENT metadata.
    */
   private async getContextGraphAgentGateAddresses(contextGraphId: string): Promise<string[] | null> {
-    const cgMeta = contextGraphMetaUri(contextGraphId);
-    const cgData = contextGraphDataUri(contextGraphId);
-    const result = await this.store.query(
-      `SELECT ?agent WHERE { GRAPH <${cgMeta}> {
-        { <${cgData}> <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}> ?agent }
-        UNION
-        { <${cgData}> <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}> ?agent }
-      } }`,
+    // The oracle record is intentionally PARTIAL (OT-RFC-49 public
+    // projection): each gate field is resolved INDEPENDENTLY from the
+    // projection-if-present-else-store, so a projection that carried
+    // only `revokedAgents` (or only `accessPolicy`) cannot silently
+    // discard revocations or skip the allowlist. The allowlist
+    // (allowed + participant) and the revoked tombstone set are
+    // resolved separately and then subtracted — short-circuiting on a
+    // whole truthy record here would let a partial projection fall
+    // back to a *stale store allowlist with no revocation applied*.
+    const projected = await this.contextGraphMetaOracle?.(contextGraphId);
+
+    // Revoked tombstones: prefer the projection when it carried the
+    // field, otherwise read `_meta`. Applied to whichever source the
+    // allowlist comes from, so a projected revocation kicks a store-
+    // resolved member and vice versa.
+    const revoked = new Set<string>(
+      (projected?.revokedAgents !== undefined
+        ? projected.revokedAgents
+        : await this.queryMetaAgents(contextGraphId, DKG_ONTOLOGY.DKG_REVOKED_AGENT)
+      )
+        .filter((v): v is string => typeof v === 'string' && ethers.isAddress(v))
+        .map((v) => v.toLowerCase()),
     );
-    if (result.type === 'bindings' && result.bindings.length > 0) {
-      const agents = result.bindings
-        .map(row => row['agent'])
-        .filter((v): v is string => typeof v === 'string')
-        .map(stripRdfLiteral)
-        .filter((v) => ethers.isAddress(v))
+
+    // Resolve EACH allowlist field (allowed, participant) INDEPENDENTLY:
+    // projection-if-that-specific-field-was-projected, else `_meta` store
+    // fallback for that one field. A partial projection that carried only
+    // `allowedAgents` must NOT suppress the store fallback for
+    // `participantAgents` (and vice versa) — otherwise the gate would be
+    // built from a half-empty allowlist and silently drop legitimate
+    // writers whose membership lives only in the field the oracle omitted.
+    const allowedResolved = projected?.allowedAgents !== undefined
+      ? projected.allowedAgents
+      : await this.queryMetaAgents(contextGraphId, DKG_ONTOLOGY.DKG_ALLOWED_AGENT);
+    const participantResolved = projected?.participantAgents !== undefined
+      ? projected.participantAgents
+      : await this.queryMetaAgents(contextGraphId, DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT);
+
+    // The CG is agent-gated iff EITHER field resolved to any member (from
+    // projection or store). `null` ⇒ not curated (caller falls through);
+    // an empty-but-non-null list ⇒ curated-then-fully-revoked (rejects all).
+    const allowlist: string[] | null =
+      allowedResolved.length > 0 || participantResolved.length > 0
+        ? [...allowedResolved, ...participantResolved]
+        : null;
+
+    if (allowlist !== null) {
+      const agents = allowlist
+        .filter((v): v is string => typeof v === 'string' && ethers.isAddress(v) && !revoked.has(v.toLowerCase()))
         .map((v) => ethers.getAddress(v));
-      return [...new Set(agents)];
+      const unique = [...new Set(agents)];
+      if (unique.length > 0) return unique;
+      // The CG IS agent-gated (an allowlist field was present) but every
+      // member is revoked — return an empty gate (rejects all writers),
+      // NOT null (which the caller reads as "not curated → fall through").
+      if (allowlist.length > 0) return [];
     }
 
     // OT-RFC-38 / LU-6 Phase B: chain-backed fallback when the local
@@ -1550,6 +1640,15 @@ export class SharedMemoryHandler {
   private async contextGraphHasPrivateAccessPolicy(contextGraphId: string): Promise<boolean> {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return false;
+    }
+
+    // Field-specific short-circuit: only when `accessPolicy` was actually
+    // projected (`!== undefined`). The oracle record is PARTIAL, so a
+    // record carrying only agent/peer fields must NOT be read as
+    // "accessPolicy absent ⇒ not private"; fall back to the store.
+    const projected = await this.contextGraphMetaOracle?.(contextGraphId);
+    if (projected?.accessPolicy !== undefined) {
+      return projected.accessPolicy.trim().toLowerCase() === 'private';
     }
 
     const ontologyGraph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);

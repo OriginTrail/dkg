@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   SHUTDOWN_FORCED_CLEANUP_TIMEOUT_MS,
   SHUTDOWN_FORCED_OFFSET,
@@ -81,175 +81,140 @@ describe('encodeForcedShutdownExitCode', () => {
   });
 });
 
-describe('raceShutdownWithTimeout', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
+// ── raceShutdownWithTimeout on REAL timers (no fake-timer virtualization) ──
+// Both deadlines are parameters, so the suite runs them at real millisecond
+// scale: HARD=120ms wall-clock cutoff, FORCED=60ms forced-cleanup budget.
+// The log/onForcedTimeout vitest spies are replaced with plain recording
+// functions. Every timeout that fires here is a genuine event-loop timer.
+const HARD = 120;
+const FORCED = 60;
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-  afterEach(() => {
-    vi.useRealTimers();
-  });
+function recordLog() {
+  const calls: string[] = [];
+  const fn = (msg: string): void => {
+    calls.push(msg);
+  };
+  return Object.assign(fn, { calls });
+}
 
+describe('raceShutdownWithTimeout (real timers)', () => {
   it('resolves with forced=false the moment cleanup settles (happy path)', async () => {
-    const log = vi.fn<(msg: string) => void>();
-    const cleanup = Promise.resolve();
-
-    const result = await raceShutdownWithTimeout(cleanup, 15_000, log);
-
+    const log = recordLog();
+    const result = await raceShutdownWithTimeout(Promise.resolve(), HARD, log);
     expect(result).toEqual({ forced: false });
     // No `[shutdown-timeout]` line on the happy path — operators grep for it
-    // as the unambiguous deadlock signal; emitting it on clean shutdowns would
-    // poison that signal.
-    expect(log).not.toHaveBeenCalled();
+    // as the unambiguous deadlock signal.
+    expect(log.calls).toEqual([]);
   });
 
-  it('resolves with forced=true and logs once after the deadline when cleanup never settles', async () => {
-    const log = vi.fn<(msg: string) => void>();
-    const onForcedTimeout = vi.fn<() => void>();
-    // A promise that never settles models the observed beacon-01 deadlock —
-    // `agent.stop()` awaiting an in-flight libp2p read that holds forever.
+  it('resolves with forced=true and logs once after the REAL deadline when cleanup never settles', async () => {
+    const log = recordLog();
+    let forcedCalls = 0;
+    // A promise that never settles models the observed beacon-01 deadlock.
     const cleanup = new Promise<void>(() => {});
+    const racePromise = raceShutdownWithTimeout(cleanup, HARD, log, () => {
+      forcedCalls += 1;
+    });
 
-    const racePromise = raceShutdownWithTimeout(cleanup, 15_000, log, onForcedTimeout);
+    // Mid-window probe: still racing, no log yet.
+    await sleep(HARD / 2);
+    expect(log.calls).toEqual([]);
 
-    // Just under the deadline: still racing, no log yet.
-    await vi.advanceTimersByTimeAsync(14_999);
-    expect(log).not.toHaveBeenCalled();
-
-    // Tick the last millisecond: timeout fires, log emitted exactly once,
-    // race resolves with forced=true.
-    await vi.advanceTimersByTimeAsync(1);
     const result = await racePromise;
-
     expect(result).toEqual({ forced: true });
-    expect(onForcedTimeout).toHaveBeenCalledTimes(1);
-    expect(log).toHaveBeenCalledTimes(1);
-    expect(log).toHaveBeenCalledWith(
-      expect.stringContaining('[shutdown-timeout]'),
-    );
-    expect(log).toHaveBeenCalledWith(
-      expect.stringContaining('15000ms'),
-    );
+    expect(forcedCalls).toBe(1);
+    expect(log.calls).toHaveLength(1);
+    expect(log.calls[0]).toContain('[shutdown-timeout]');
+    expect(log.calls[0]).toContain(`${HARD}ms`);
   });
 
   it('logs forced-cleanup errors but still resolves forced=true', async () => {
-    const log = vi.fn<(msg: string) => void>();
-    const cleanup = new Promise<void>(() => {});
-    const racePromise = raceShutdownWithTimeout(
-      cleanup,
-      15_000,
+    const log = recordLog();
+    const result = await raceShutdownWithTimeout(
+      new Promise<void>(() => {}),
+      HARD,
       log,
       async () => {
         throw new Error('state-file cleanup failed');
       },
     );
-
-    await vi.advanceTimersByTimeAsync(15_000);
-    const result = await racePromise;
-
     expect(result).toEqual({ forced: true });
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('forced cleanup error'));
+    expect(log.calls.some((m) => m.includes('forced cleanup error'))).toBe(true);
   });
 
-  it('bounds forced cleanup with its own timeout when it hangs (wall-clock cutoff stays hard)', async () => {
-    // Regression test for the bug where forced cleanup awaits inside the
-    // timeout path could resurrect the same zombie shape we're preventing:
-    // if `cleanupStateFiles()` stalls on filesystem I/O, the race must STILL
-    // resolve (so `process.exit(...)` is reached) within the forced-cleanup
-    // budget — not block forever waiting on the FS.
-    const log = vi.fn<(msg: string) => void>();
-    const cleanup = new Promise<void>(() => {});
-    const onForcedTimeout = vi.fn(() => new Promise<void>(() => {}));
-
-    const racePromise = raceShutdownWithTimeout(
-      cleanup,
-      15_000,
+  it('bounds forced cleanup with its own REAL timeout when it hangs (wall-clock cutoff stays hard)', async () => {
+    // Regression: a stalled forced cleanup must not recreate the zombie shape
+    // — the race must still resolve within the forced budget so process.exit
+    // is reached.
+    const log = recordLog();
+    let forcedCalls = 0;
+    const result = await raceShutdownWithTimeout(
+      new Promise<void>(() => {}),
+      HARD,
       log,
-      onForcedTimeout,
-      // Tight 50ms forced budget; the default 1s would also work but slow the
-      // suite. The scenario is the same: forced cleanup never settles.
-      50,
+      () => {
+        forcedCalls += 1;
+        return new Promise<void>(() => {}); // genuinely never settles
+      },
+      FORCED,
     );
-
-    // Tick to the wall-clock deadline: timer fires, forced cleanup starts,
-    // but the race is NOT yet resolved (we're inside the forced-cleanup window).
-    await vi.advanceTimersByTimeAsync(15_000);
-    expect(onForcedTimeout).toHaveBeenCalledTimes(1);
-
-    // Tick the forced-cleanup budget: forced cleanup gets abandoned, race
-    // resolves, supervisor can decode the offset and process.exit() runs.
-    await vi.advanceTimersByTimeAsync(50);
-    const result = await racePromise;
-
     expect(result).toEqual({ forced: true });
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('forced cleanup exceeded 50ms; abandoning'));
+    expect(forcedCalls).toBe(1);
+    expect(log.calls.some((m) => m.includes(`forced cleanup exceeded ${FORCED}ms; abandoning`))).toBe(true);
   });
 
   it('clears the forced-cleanup timer when forced cleanup completes inside its budget', async () => {
-    // Mirror image of the previous test: forced cleanup settles quickly, so
-    // the secondary timer must be cleared (no orphan log line, no leaked
-    // handle keeping the event loop alive past process.exit).
-    const log = vi.fn<(msg: string) => void>();
-    const cleanup = new Promise<void>(() => {});
-    const onForcedTimeout = vi.fn(async () => {
-      // Resolves on next microtask — well inside any forced-cleanup budget.
-    });
-
-    const racePromise = raceShutdownWithTimeout(
-      cleanup,
-      15_000,
+    const log = recordLog();
+    let forcedCalls = 0;
+    const result = await raceShutdownWithTimeout(
+      new Promise<void>(() => {}),
+      HARD,
       log,
-      onForcedTimeout,
-      1_000,
+      async () => {
+        forcedCalls += 1; // settles on the next microtask — inside any budget
+      },
+      FORCED,
     );
-
-    await vi.advanceTimersByTimeAsync(15_000);
-    const result = await racePromise;
-
     expect(result).toEqual({ forced: true });
-    expect(onForcedTimeout).toHaveBeenCalledTimes(1);
-    // Race resolved; advancing past the forced-cleanup deadline must NOT
-    // produce an "abandoning" log entry (that would mean the secondary timer
-    // leaked).
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(log).not.toHaveBeenCalledWith(expect.stringContaining('abandoning'));
+    expect(forcedCalls).toBe(1);
+    // Wait past the forced budget on REAL time: a leaked secondary timer
+    // would emit the "abandoning" line now.
+    await sleep(FORCED * 3);
+    expect(log.calls.some((m) => m.includes('abandoning'))).toBe(false);
   });
 
   it('clears the timeout when cleanup settles first (no leaked timer)', async () => {
-    const log = vi.fn<(msg: string) => void>();
-    let resolveCleanup: () => void;
-    const cleanup = new Promise<void>((resolve) => { resolveCleanup = resolve; });
-
-    const racePromise = raceShutdownWithTimeout(cleanup, 15_000, log);
+    const log = recordLog();
+    let resolveCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => {
+      resolveCleanup = resolve;
+    });
+    const racePromise = raceShutdownWithTimeout(cleanup, HARD, log);
 
     // Cleanup completes well before the deadline.
-    await vi.advanceTimersByTimeAsync(5_000);
-    resolveCleanup!();
+    await sleep(HARD / 4);
+    resolveCleanup();
     const result = await racePromise;
-
     expect(result).toEqual({ forced: false });
 
-    // Advance past the original deadline: the timer must have been cleared,
-    // so no log entry materialises after the race resolved. (If the timer
-    // leaked, the log would fire here and confuse operators investigating
-    // historic shutdowns.)
-    await vi.advanceTimersByTimeAsync(20_000);
-    expect(log).not.toHaveBeenCalled();
+    // Wait past the original deadline on REAL time: the timer must have been
+    // cleared, so no log entry materialises after the race resolved.
+    await sleep(HARD * 2);
+    expect(log.calls).toEqual([]);
   });
 
   it('clears the timeout even when cleanup rejects (no leaked timer)', async () => {
-    const log = vi.fn<(msg: string) => void>();
+    const log = recordLog();
     // Caller is responsible for catching cleanup errors before passing the
     // promise in (see lifecycle.ts), but the helper must still clean its
     // own timer even if a misuse lets the rejection through.
-    const cleanup = Promise.reject(new Error('cleanup blew up'));
-
     await expect(
-      raceShutdownWithTimeout(cleanup, 15_000, log),
+      raceShutdownWithTimeout(Promise.reject(new Error('cleanup blew up')), HARD, log),
     ).rejects.toThrow('cleanup blew up');
 
-    // Past the deadline: timer was cleared in the finally block, so still no log.
-    await vi.advanceTimersByTimeAsync(20_000);
-    expect(log).not.toHaveBeenCalled();
+    // Past the deadline on REAL time: timer was cleared, so still no log.
+    await sleep(HARD * 2);
+    expect(log.calls).toEqual([]);
   });
 });

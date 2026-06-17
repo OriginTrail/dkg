@@ -200,6 +200,50 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
     });
 
 
+    it('parseSyncRequest preserves the R9 recovery flag through the JSON allowlist', async () => {
+      const agent = await DKGAgent.create({
+        name: 'ParseRecoveryFlag',
+        listenHost: '127.0.0.1',
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+      try {
+        await agent.start();
+        // The JSON envelope is a STRICT field allowlist on the responder. If
+        // `recovery` is dropped here, the members-only gate becomes dead code
+        // and recovery silently falls through to the fail-open path.
+        const withRecovery = JSON.stringify({
+          contextGraphId: 'cg-rec', offset: 0, limit: 100, includeSharedMemory: true,
+          phase: 'data', targetPeerId: 'T', requesterPeerId: 'R', requestId: 'id1',
+          issuedAtMs: Date.now(), requesterIdentityId: '0',
+          requesterAgentAddress: '0x' + 'a'.repeat(40),
+          requesterSignatureR: '0x00', requesterSignatureVS: '0x00',
+          recovery: true,
+        });
+        const parsed = (agent as any).parseSyncRequest(new TextEncoder().encode(withRecovery));
+        expect(parsed.recovery).toBe(true);
+
+        // Absent / non-true ⇒ undefined (never a truthy non-bool smuggled through).
+        const withoutRecovery = JSON.stringify({
+          contextGraphId: 'cg-rec', offset: 0, limit: 100, includeSharedMemory: true,
+          phase: 'data', targetPeerId: 'T', requesterPeerId: 'R', requestId: 'id2',
+          issuedAtMs: Date.now(), requesterIdentityId: '0',
+        });
+        const parsedNo = (agent as any).parseSyncRequest(new TextEncoder().encode(withoutRecovery));
+        expect(parsedNo.recovery).toBeUndefined();
+
+        const coerced = JSON.stringify({
+          contextGraphId: 'cg-rec', offset: 0, limit: 100, includeSharedMemory: true,
+          phase: 'data', targetPeerId: 'T', requesterPeerId: 'R', requestId: 'id3',
+          issuedAtMs: Date.now(), requesterIdentityId: '0', recovery: 'yes',
+        });
+        const parsedCoerced = (agent as any).parseSyncRequest(new TextEncoder().encode(coerced));
+        expect(parsedCoerced.recovery).toBeUndefined();
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    });
+
+
     it('canReadContextGraph allows locally subscribed private CGs when identityId is 0n', async () => {
       const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
       (chain as any).getIdentityId = async () => 0n;

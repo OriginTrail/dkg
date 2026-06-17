@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Command } from 'commander';
 import { openclawSetupAction } from '../src/openclaw-setup.js';
 
@@ -23,59 +23,65 @@ function makeCommand(fundSource: FundSource): Pick<Command, 'getOptionValueSourc
 }
 
 describe('openclawSetupAction — --no-fund/--fund flag threading', () => {
-  let warnSpy: ReturnType<typeof vi.spyOn>;
-
+  // Hand-rolled console.warn capture (no vitest mock API).
+  let warnCalls: unknown[][] = [];
+  const originalWarn = console.warn;
   beforeEach(() => {
-    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    warnCalls = [];
+    console.warn = (...args: unknown[]) => {
+      warnCalls.push(args);
+    };
   });
-
   afterEach(() => {
-    warnSpy.mockRestore();
+    console.warn = originalWarn;
   });
 
   it('forwards fund=false into runSetup when --no-fund was supplied', async () => {
-    const runSetup = vi.fn(async () => {});
+    const runSetupCalls: any[] = [];
+    const runSetup = async (opts: any) => { runSetupCalls.push(opts); };
     // Commander's `--no-fund` parsing sets `fund: false`; source is `'cli'`.
     const opts = { dryRun: true, fund: false };
 
     await openclawSetupAction(opts, makeCommand('cli'), { runSetup: runSetup as any });
 
-    expect(warnSpy).not.toHaveBeenCalled();
-    expect(runSetup).toHaveBeenCalledTimes(1);
-    const forwarded = runSetup.mock.calls[0][0];
+    expect(warnCalls).toEqual([]);
+    expect(runSetupCalls).toHaveLength(1);
+    const forwarded = runSetupCalls[0];
     expect(forwarded.fund).toBe(false);
     expect(forwarded.dryRun).toBe(true);
   });
 
   it('forwards fund=true into runSetup when --fund was supplied', async () => {
-    const runSetup = vi.fn(async () => {});
+    const runSetupCalls: any[] = [];
+    const runSetup = async (opts: any) => { runSetupCalls.push(opts); };
     // Commander's `--fund` parsing sets `fund: true`; source is `'cli'`.
     const opts = { dryRun: true, fund: true };
 
     await openclawSetupAction(opts, makeCommand('cli'), { runSetup: runSetup as any });
 
-    expect(warnSpy).not.toHaveBeenCalled();
-    expect(runSetup).toHaveBeenCalledTimes(1);
-    expect(runSetup.mock.calls[0][0].fund).toBe(true);
+    expect(warnCalls).toEqual([]);
+    expect(runSetupCalls).toHaveLength(1);
+    expect(runSetupCalls[0].fund).toBe(true);
   });
 
   it('forwards fund=true into runSetup when neither flag is explicitly supplied (default)', async () => {
-    const runSetup = vi.fn(async () => {});
+    const runSetupCalls: any[] = [];
+    const runSetup = async (opts: any) => { runSetupCalls.push(opts); };
     // Commander fills `fund: true` from the --no-fund declaration even when
     // the user did not type either flag; source is `'default'`.
     const opts = { dryRun: true, fund: true };
 
     await openclawSetupAction(opts, makeCommand('default'), { runSetup: runSetup as any });
 
-    expect(warnSpy).not.toHaveBeenCalled();
-    expect(runSetup).toHaveBeenCalledTimes(1);
-    expect(runSetup.mock.calls[0][0].fund).toBe(true);
+    expect(warnCalls).toEqual([]);
+    expect(runSetupCalls).toHaveLength(1);
+    expect(runSetupCalls[0].fund).toBe(true);
   });
 
   it('propagates errors from runSetup so the caller can decide exit semantics', async () => {
-    const runSetup = vi.fn(async () => {
+    const runSetup = async () => {
       throw new Error('adapter blew up');
-    });
+    };
 
     await expect(
       openclawSetupAction({ dryRun: true }, makeCommand('default'), { runSetup: runSetup as any }),

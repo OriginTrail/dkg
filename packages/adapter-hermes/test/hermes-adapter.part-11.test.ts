@@ -445,9 +445,9 @@ assert result["success"] is True and provider._client.published is True, result
 # registration to a success shape — it must NOT carry the raw {success:false}.
 assert result["registration"] == {"alreadyRegistered": True}, result
 
-# dkg_publish (one-shot) routes through the ATOMIC assertionName fork
-# (client.publish_quads): create a uniquely-named sealed assertion + publish it
-# by name in one atomic mint — no per-root selection/loop (parity w/ OpenClaw+MCP).
+# dkg_publish (one-shot) routes through the direct publish helper
+# (client.publish_quads): send explicit quads inline to the publish route —
+# no per-root selection/loop (parity w/ OpenClaw+MCP).
 class PublishClient:
     def __init__(self):
         self.publish_quads_call = None
@@ -474,7 +474,7 @@ assert len(provider._client.publish_quads_call[1]) == 3, provider._client.publis
 for _k in ("rootEntities", "partial", "publishedRoots", "failedRoot", "notAttemptedRoots"):
     assert _k not in result, _k
 `;
-    const result = spawnSync('python', ['-B', '-c', script], {
+    const result = spawnSync(process.env.PYTHON ?? 'python3', ['-B', '-c', script], {
       cwd: process.cwd(),
       encoding: 'utf-8',
     });

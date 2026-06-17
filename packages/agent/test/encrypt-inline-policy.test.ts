@@ -5,9 +5,35 @@
  * daemon cannot read chain truth for one of them, publishing must fail
  * closed instead of falling back to plaintext.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import {
+  ACK_PROTOCOL_VERSION_V2_LU11,
+  ciphertextChunkStoreGraph,
+  ciphertextChunkStoreSubject,
+  CIPHERTEXT_CHUNK_PREDICATE,
+  decodeStorageACK,
+  encodePublishIntent,
+  isStorageACKDecline,
+} from '@origintrail-official/dkg-core';
+import { StorageACKHandler } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
+
+// Hand-rolled call recorder (replaces vitest spy factories): wraps an
+// implementation, records every argument tuple on `.calls`, captures a
+// monotonic invocation sequence on `.order`, and returns the impl's result.
+let invocationSeq = 0;
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const order: number[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    order.push(invocationSeq++);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls, order });
+}
 
 function makeAgentLike(opts: {
   isPrivate?: boolean;
@@ -21,26 +47,26 @@ function makeAgentLike(opts: {
   activeOnChain?: boolean | 'absent';
 } = {}) {
   const log = {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
+    info: recorder(() => undefined),
+    warn: recorder(() => undefined),
+    error: recorder(() => undefined),
+    debug: recorder(() => undefined),
   };
   const chain: Record<string, unknown> = {};
   if (opts.exposeAccessPolicy !== false) {
-    chain.getContextGraphAccessPolicy = vi.fn(async () => {
+    chain.getContextGraphAccessPolicy = recorder(async () => {
       if (opts.accessPolicyError) throw opts.accessPolicyError;
       return opts.accessPolicy ?? 0;
     });
   }
   if (opts.activeOnChain !== 'absent') {
-    chain.isContextGraphActiveOnChain = vi.fn(async () => opts.activeOnChain ?? true);
+    chain.isContextGraphActiveOnChain = recorder(async () => opts.activeOnChain ?? true);
   }
   const agentLike = {
     log,
     chain,
     onChainAccessPolicyCache: new Map<string, 0 | 1>(),
-    isPrivateContextGraph: vi.fn(async () => opts.isPrivate ?? false),
+    isPrivateContextGraph: recorder(async () => opts.isPrivate ?? false),
   } as any;
   // `probeIsCurated` now consults the on-chain-public override first; bind
   // the real prototype method so the harness exercises production code.
@@ -99,7 +125,7 @@ describe('DKGAgent._resolveEncryptInlinePayload policy lookup', () => {
     const agentLike = makeAgentLike({ accessPolicy: 0 });
 
     await expect(resolveEncryptInlinePayload(agentLike, '42')).resolves.toBeUndefined();
-    expect(agentLike.chain.getContextGraphAccessPolicy).toHaveBeenCalledWith(42n);
+    expect(agentLike.chain.getContextGraphAccessPolicy.calls.at(-1)).toEqual([42n]);
     expect(agentLike.onChainAccessPolicyCache.get('42')).toBe(0);
   });
 
@@ -111,10 +137,10 @@ describe('DKGAgent._resolveEncryptInlinePayload policy lookup', () => {
     await expect(resolveEncryptInlinePayload(agentLike, '42')).rejects.toThrow(
       /publish access-policy is unknown/,
     );
-    expect(agentLike.log.warn).toHaveBeenCalledWith(
+    expect(agentLike.log.warn.calls.at(-1)).toEqual([
       expect.anything(),
       expect.stringContaining('treating as UNKNOWN'),
-    );
+    ]);
   });
 
   it('fails closed when numeric target CG policy getter is missing', async () => {
@@ -135,7 +161,7 @@ describe('DKGAgent._resolveEncryptInlinePayload policy lookup', () => {
     await expect(
       (DKGAgent.prototype as any).isContextGraphPublicOnChain.call(agentLike, '999'),
     ).resolves.toBe(false);
-    expect(agentLike.chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
+    expect(agentLike.chain.getContextGraphAccessPolicy.calls).toEqual([]);
   });
 
   it('fails closed when a remap target numeric CG policy cannot be resolved', async () => {
@@ -147,6 +173,87 @@ describe('DKGAgent._resolveEncryptInlinePayload policy lookup', () => {
       /target CG "42" curated=unknown/,
     );
   });
+
+  it('treats an explicit numeric remap target as a raw on-chain slot', async () => {
+    const contextGraphExists = recorder(async (id: string) => {
+      if (id === '42') throw new Error('numeric local lookup should not run');
+      return false;
+    });
+    const agentLike = {
+      ...makeAgentLike({ accessPolicy: 0 }),
+      getContextGraphOnChainId: recorder(async () => null),
+      contextGraphExists,
+    };
+
+    await expect(resolveEncryptInlinePayload(agentLike, 'local-public-cg', '42')).resolves.toBeUndefined();
+    expect(agentLike.chain.getContextGraphAccessPolicy.calls.at(-1)).toEqual([42n]);
+    expect(contextGraphExists.calls).not.toContainEqual(['42']);
+  });
+});
+
+describe('DKGAgent._publish inline encryption routing', () => {
+  it('does not trust caller accessPolicy=public to bypass chain-confirmed encryption resolution', async () => {
+    const encryptInlinePayload = recorder(async (plaintext: Uint8Array) => plaintext);
+    const encryptInlineChunked = recorder(() => undefined);
+    const publisherPublish = recorder(async () => ({
+      status: 'confirmed',
+      kaId: '1',
+    }));
+    const agentLike = {
+      log: {
+        info: recorder(() => undefined),
+        warn: recorder(() => undefined),
+        error: recorder(() => undefined),
+        debug: recorder(() => undefined),
+      },
+      subscribedContextGraphs: new Set(['local-cg']),
+      contextGraphExists: recorder(async () => true),
+      createV10ACKProvider: recorder(() => undefined),
+      getContextGraphOnChainId: recorder(async () => '42'),
+      chain: {},
+      peerId: 'peer-1',
+      publisher: {
+        publish: publisherPublish,
+      },
+      broadcastPublish: recorder(async () => undefined),
+      // OT-RFC-49: _publish now refreshes the public catalog projection after a
+      // confirmed publish (no-op unless configured). Stub it on the mock.
+      emitPublicProjectionAfterPublish: recorder(async () => undefined),
+      _resolveEncryptInlinePayload: recorder(async () => encryptInlinePayload),
+      _resolveEncryptInlineChunked: recorder(async () => encryptInlineChunked),
+    } as any;
+
+    await (DKGAgent.prototype as any)._publish.call(
+      agentLike,
+      'local-cg',
+      [{ subject: 's', predicate: 'p', object: 'o', graph: 'g' }],
+      undefined,
+      {
+        accessPolicy: 'public',
+        subGraphName: 'sg-a',
+        publisherNodeIdentityIdOverride: 0n,
+      },
+    );
+
+    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
+      'local-cg',
+      'sg-a',
+      undefined,
+      '42',
+    ]);
+    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)).toEqual([
+      'local-cg',
+      'sg-a',
+      undefined,
+      '42',
+    ]);
+    expect(publisherPublish.calls.at(-1)).toEqual([expect.objectContaining({
+      accessPolicy: 'public',
+      publisherNodeIdentityIdOverride: 0n,
+      encryptInlinePayload,
+      encryptInlineChunked,
+    })]);
+  });
 });
 
 describe('DKGAgent._resolveEncryptInlineChunked nonce domain', () => {
@@ -154,20 +261,24 @@ describe('DKGAgent._resolveEncryptInlineChunked nonce domain', () => {
     const signer = ethers.Wallet.createRandom();
     const agentLike = {
       log: {
-        info: vi.fn(),
-        warn: vi.fn(),
-        error: vi.fn(),
-        debug: vi.fn(),
+        info: recorder(() => undefined),
+        warn: recorder(() => undefined),
+        error: recorder(() => undefined),
+        debug: recorder(() => undefined),
       },
+      store: {
+        insert: recorder(async () => {}),
+      },
+      canonicalChunkStoreCgIdOrNull: recorder((cgId: string) => cgId),
       gossip: {
-        publish: vi.fn(async () => {}),
+        publish: recorder(async () => {}),
       },
-      gossipWireIdFor: vi.fn((cgId: string) => cgId),
-      _resolveCuratedChainKeyContext: vi.fn(async () => ({
+      gossipWireIdFor: recorder((cgId: string) => cgId),
+      _resolveCuratedChainKeyContext: recorder(async () => ({
         chainKey: new Uint8Array(32).fill(7),
         aeadCgId: '42',
       })),
-      resolveWorkspaceGossipSigningAgent: vi.fn(async () => ({
+      resolveWorkspaceGossipSigningAgent: recorder(async () => ({
         privateKey: signer.privateKey,
         agentAddress: signer.address,
       })),
@@ -196,4 +307,5 @@ describe('DKGAgent._resolveEncryptInlineChunked nonce domain', () => {
     expect(Buffer.from(first.ciphertextChunksRoot).toString('hex'))
       .not.toBe(Buffer.from(second.ciphertextChunksRoot).toString('hex'));
   });
+
 });

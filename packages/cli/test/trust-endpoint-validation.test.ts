@@ -1,133 +1,74 @@
-import { describe, expect, it, vi } from 'vitest';
-import { Readable } from 'node:stream';
-import { handleQueryRoutes } from '../src/daemon/routes/query.js';
+/**
+ * Trust endpoint input validation (/api/verify, /api/endorse) — REAL daemon,
+ * NO mocks.
+ *
+ * The retired version called `handleQueryRoutes` with a hand-built ctx whose
+ * `agent.verify`/`agent.endorse` were vitest-mock tripwires that threw "should
+ * not be reached", asserting the route rejected unsafe input BEFORE the agent.
+ * The tripwire only proves "not reached" against a fake agent — it can't notice
+ * if the real route stopped validating and started 500-ing or actually
+ * dispatching.
+ *
+ * This version sends the same malicious bodies to a REAL edge daemon: a
+ * SPARQL-injection contextGraphId / UAL and an oversized timeoutMs must each
+ * come back as a real 400 from the real validator, before any trust operation
+ * runs. (A real daemon has no agent stub to spy on — the 400-at-validation IS
+ * the proof that the injection never reaches the engine.) Runs in the standard
+ * cli lane against the shared Hardhat node.
+ */
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { startLiveDaemon, stopLiveDaemon, postJson, type LiveDaemon } from './helpers/live-daemon.js';
 
 const VERIFY_COLLECTION_TIMEOUT_MAX_MS = 30 * 60 * 1000;
+const INJECTION = 'cg> } INSERT DATA { ?s ?p ?o } #';
 
-type CapturedResponse = {
-  statusCode?: number;
-  body?: string;
-  writableEnded?: boolean;
-  writeHead: (statusCode: number, headers: Record<string, string>) => void;
-  end: (body: string) => void;
-};
+describe('trust endpoint input validation (real daemon)', () => {
+  let daemon: LiveDaemon;
 
-function response(): CapturedResponse {
-  return {
-    writeHead(statusCode) {
-      this.statusCode = statusCode;
-    },
-    end(body) {
-      this.body = body;
-      this.writableEnded = true;
-    },
-  };
-}
+  beforeAll(async () => {
+    daemon = await startLiveDaemon();
+  }, 120_000);
 
-function request(path: string, body: unknown): any {
-  const req = Readable.from([Buffer.from(JSON.stringify(body))]) as any;
-  req.method = 'POST';
-  req.url = path;
-  req.headers = { 'content-type': 'application/json' };
-  return req;
-}
+  afterAll(async () => {
+    await stopLiveDaemon(daemon);
+  });
 
-async function callTrustRoute(path: '/api/verify' | '/api/endorse', body: unknown) {
-  const req = request(path, body);
-  const res = response();
-  const agent = {
-    verify: vi.fn(async () => {
-      throw new Error('agent.verify should not be reached');
-    }),
-    endorse: vi.fn(async () => {
-      throw new Error('agent.endorse should not be reached');
-    }),
-  };
-
-  await handleQueryRoutes({
-    req,
-    res,
-    agent,
-    publisherControl: null,
-    publisherRuntime: null,
-    config: {},
-    startedAt: 0,
-    dashDb: null,
-    opWallets: {},
-    network: {},
-    tracker: {},
-    memoryManager: null,
-    bridgeAuthToken: undefined,
-    nodeVersion: 'test',
-    nodeCommit: 'test',
-    catchupTracker: { latestByContextGraph: new Map(), jobs: new Map() },
-    extractionRegistry: null,
-    fileStore: null,
-    extractionStatus: new Map(),
-    assertionImportLocks: new Map(),
-    vectorStore: null,
-    embeddingProvider: null,
-    validTokens: new Set(),
-    apiHost: '127.0.0.1',
-    apiPortRef: { value: 0 },
-    url: new URL(`http://127.0.0.1${path}`),
-    path,
-    requestToken: undefined,
-    requestAgentAddress: '0x0000000000000000000000000000000000000001',
-  } as any);
-
-  return {
-    status: res.statusCode,
-    body: JSON.parse(res.body ?? '{}') as { error?: string },
-    agent,
-  };
-}
-
-describe('trust endpoint input validation', () => {
-  it('/api/verify rejects unsafe contextGraphId before agent.verify', async () => {
-    const result = await callTrustRoute('/api/verify', {
-      contextGraphId: 'cg> } INSERT DATA { ?s ?p ?o } #',
+  it('/api/verify rejects an unsafe contextGraphId with 400', async () => {
+    const { status, body } = await postJson(daemon, '/api/verify', {
+      contextGraphId: INJECTION,
       verifiableMemoryId: '1',
       batchId: '1',
     });
-
-    expect(result.status).toBe(400);
-    expect(result.body.error).toMatch(/contextGraphId|context graph ID|disallowed/i);
-    expect(result.agent.verify).not.toHaveBeenCalled();
+    expect(status).toBe(400);
+    expect(String(body.error)).toMatch(/contextGraphId|context graph ID|disallowed|safe/i);
   });
 
-  it('/api/endorse rejects unsafe contextGraphId before agent.endorse', async () => {
-    const result = await callTrustRoute('/api/endorse', {
-      contextGraphId: 'cg> } INSERT DATA { ?s ?p ?o } #',
+  it('/api/endorse rejects an unsafe contextGraphId with 400', async () => {
+    const { status, body } = await postJson(daemon, '/api/endorse', {
+      contextGraphId: INJECTION,
       ual: 'did:dkg:asset:1',
     });
-
-    expect(result.status).toBe(400);
-    expect(result.body.error).toMatch(/contextGraphId|context graph ID|disallowed/i);
-    expect(result.agent.endorse).not.toHaveBeenCalled();
+    expect(status).toBe(400);
+    expect(String(body.error)).toMatch(/contextGraphId|context graph ID|disallowed|safe/i);
   });
 
-  it('/api/endorse rejects unsafe UAL before agent.endorse', async () => {
-    const result = await callTrustRoute('/api/endorse', {
+  it('/api/endorse rejects an unsafe UAL with 400', async () => {
+    const { status, body } = await postJson(daemon, '/api/endorse', {
       contextGraphId: 'cg-safe',
       ual: 'did:dkg:asset:1> } INSERT DATA { ?s ?p ?o } #',
     });
-
-    expect(result.status).toBe(400);
-    expect(result.body.error).toMatch(/ual|safe IRI/i);
-    expect(result.agent.endorse).not.toHaveBeenCalled();
+    expect(status).toBe(400);
+    expect(String(body.error)).toMatch(/ual|safe IRI/i);
   });
 
-  it('/api/verify rejects oversized timeoutMs before agent.verify', async () => {
-    const result = await callTrustRoute('/api/verify', {
+  it('/api/verify rejects an oversized timeoutMs with 400', async () => {
+    const { status, body } = await postJson(daemon, '/api/verify', {
       contextGraphId: 'cg-safe',
       verifiableMemoryId: '1',
       batchId: '1',
       timeoutMs: VERIFY_COLLECTION_TIMEOUT_MAX_MS + 1,
     });
-
-    expect(result.status).toBe(400);
-    expect(result.body.error).toMatch(/timeoutMs/);
-    expect(result.agent.verify).not.toHaveBeenCalled();
+    expect(status).toBe(400);
+    expect(String(body.error)).toMatch(/timeoutMs/);
   });
 });

@@ -176,7 +176,9 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
     const top2 = hre.ethers.parseEther('10000');
 
     await TokenContract.approve(await NFT.getAddress(), committed + top1 + top2);
-    await NFT.createAccount(committed);
+    // RFC-51: createAccount(committedTRAC, primaryNode); conservation tests
+    // don't assert allocation seeding → inert node = 0.
+    await NFT.createAccount(committed, 0);
     await NFT.registerAgent(1, agent.address);
 
     const epochLength = await ChronosContract.epochLength();
@@ -320,7 +322,8 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
     const expectedTotalFee = perWindowFee * 12n; // 3600 ether
 
     await TokenContract.approve(await NFT.getAddress(), committed);
-    await NFT.createAccount(committed);
+    // RFC-51: createAccount(committedTRAC, primaryNode); inert node = 0.
+    await NFT.createAccount(committed, 0);
 
     const cssAddr = await CSS.getAddress();
     const cssBefore = await TokenContract.balanceOf(cssAddr);
@@ -356,7 +359,8 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
     // No setProtocolTreasury call — default recipient is the zero address.
     const committed = hre.ethers.parseEther('120000');
     await TokenContract.approve(await NFT.getAddress(), committed);
-    await NFT.createAccount(committed);
+    // RFC-51: createAccount(committedTRAC, primaryNode); inert node = 0.
+    await NFT.createAccount(committed, 0);
 
     const cssAddr = await CSS.getAddress();
     const cssBefore = await TokenContract.balanceOf(cssAddr);

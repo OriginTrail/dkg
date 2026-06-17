@@ -52,6 +52,17 @@
           }
         },
         "description": "DKG UI channel bridge"
+      },
+      "dkgSetupState": {
+        "type": "object",
+        "description": "Internal setup metadata for connect/disconnect round-trip restoration (previous tools profile, previous/merged dkg-ui channel shape, merged tools shape, previous memory-slot owner). Written and consumed only by adapter setup/unmerge — never read at runtime.",
+        "properties": {
+          "previousToolsProfile": { "type": ["string", "null"] },
+          "previousChannelsDkgUi": { "type": ["object", "null"] },
+          "mergedChannelsDkgUi": { "type": "object" },
+          "mergedToolsShape": { "type": "object" },
+          "previousMemorySlotOwner": { "type": "string" }
+        }
       }
     }
   }

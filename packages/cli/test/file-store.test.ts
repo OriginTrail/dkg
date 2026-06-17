@@ -137,6 +137,20 @@ describe('FileStore.has', () => {
   });
 });
 
+describe('FileStore.readRange', () => {
+  it('caps user-provided read lengths before allocating the range buffer', async () => {
+    const store = new FileStore(rootDir);
+    const bytes = Buffer.alloc(1024 * 1024 + 64, 0x61);
+    const { hash } = await store.put(bytes, 'application/octet-stream');
+
+    const result = await store.readRange(hash, 0, 10 * 1024 * 1024);
+
+    expect(result).not.toBeNull();
+    expect(result).toHaveLength(1024 * 1024);
+    expect(result!.equals(bytes.subarray(0, 1024 * 1024))).toBe(true);
+  });
+});
+
 describe('FileStore.hashToPath', () => {
   it('resolves a sha256 hash to the absolute sharded blob path', async () => {
     const store = new FileStore(rootDir);

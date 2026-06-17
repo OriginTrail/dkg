@@ -13,6 +13,7 @@ import {PublishingMathLib} from "./libraries/PublishingMathLib.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {PublishingConvictionStorage} from "./storage/PublishingConvictionStorage.sol";
 import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
+import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
@@ -113,7 +114,18 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
     //           call, AFTER all PCS state writes (effects-before-interactions),
     //           keeping the permissionless `settle()` reentrancy-safe.
     //           Dormant while `protocolTreasury == address(0)`.
-    string private constant _VERSION = "10.0.2";
+    //   10.0.3 — OT-RFC-51 "Publishing Allocation": `createAccount` gains a
+    //           `primaryNode` parameter and PRORATE-SEEDS the committed TRAC
+    //           as per-epoch publishing allocation onto that node;
+    //           `setPrimaryNode` re-designates the node, moving FUTURE-epoch
+    //           allocation net-zero on K_total. Adds a `ShardingTableStorage`
+    //           dependency for `nodeExists` validation.
+    //           Gas: the seed/move proration schedule is computed ONCE per
+    //           call (`_scheduleFor`) and indexed per epoch (`_amountForEpoch`)
+    //           instead of recomputing `prorateActiveSink` + chronos reads on
+    //           every loop iteration. Behavior-preserving: per-epoch amounts
+    //           are byte-identical, so seed and move stay net-zero on K_total.
+    string private constant _VERSION = "10.0.4";
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
     /// @notice EpochStorage shard ID for the staker reward pool. Mirrors
@@ -155,6 +167,13 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
     ///         staker-bound amount.
     ConvictionStakingStorage public convictionStakingStorage;
 
+    /// @notice OT-RFC-51: used to validate that a designated `primaryNode`
+    ///         exists in the sharding table before any publishing allocation
+    ///         is seeded onto it (`createAccount`) or moved to it
+    ///         (`setPrimaryNode`). Mirrors the `nodeExists` gate KAV10 used
+    ///         to apply on realized-publishing attribution.
+    ShardingTableStorage public shardingTableStorage;
+
     // ============================================================
     //                          Events
     // ============================================================
@@ -183,6 +202,15 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
     );
     event AgentRegistered(uint256 indexed accountId, address indexed agent);
     event AgentDeregistered(uint256 indexed accountId, address indexed agent);
+    /// @notice OT-RFC-51: emitted when an account's designated primary node
+    ///         changes (including the initial designation at creation, where
+    ///         `oldNode == 0`).
+    event PrimaryNodeChanged(
+        uint256 indexed accountId,
+        uint72 indexed oldNode,
+        uint72 indexed newNode,
+        uint40 changeEpoch
+    );
     /// @notice Emitted for each elapsed billing window that gets swept to
     ///         the staker pool via the passive sink during lazy settlement.
     event WindowSettled(
@@ -217,6 +245,23 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
     /// @notice `kcEpochs` was 0 or exceeded the account's `lockDurationEpochs`.
     error InvalidConvictionKcEpochs(uint256 lockDurationEpochs, uint256 kcEpochs);
     error UnknownAccount(uint256 accountId);
+    /// @notice OT-RFC-51: a designated `primaryNode` is not in the sharding table.
+    error PrimaryNodeNotInShardingTable(uint72 node);
+    /// @notice OT-RFC-51: `setPrimaryNode` called more than once in the same
+    ///         chain epoch (rate-limit: at most once per epoch).
+    error PrimaryNodeChangeRateLimited(uint256 accountId, uint40 lastChangeEpoch);
+    /// @notice OT-RFC-51: `setPrimaryNode` called with `newNode == 0`. There is
+    ///         no "clear designation" semantic — `primaryNode == 0` can only
+    ///         mean never-seeded. Clearing would desync the stored node from
+    ///         the still-seeded future buckets and let a later re-designation
+    ///         double-credit `K_n`/`K_total` (which has no decrement path).
+    error ZeroPrimaryNode();
+    /// @notice OT-RFC-51: `setPrimaryNode` called with `newNode` equal to the
+    ///         current `primaryNode`. A no-op re-designation would still burn
+    ///         the once-per-epoch change slot, emit a spurious
+    ///         `PrimaryNodeChanged`, and run a pointless self-move loop — so it
+    ///         is rejected.
+    error PrimaryNodeUnchanged(uint256 accountId, uint72 node);
 
     // solhint-disable-next-line no-empty-blocks
     constructor(address hubAddress) ContractStatus(hubAddress) {}
@@ -244,6 +289,10 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
         address css = hub.getContractAddress("ConvictionStakingStorage");
         if (css == address(0)) revert ZeroAddressDependency("ConvictionStakingStorage");
         convictionStakingStorage = ConvictionStakingStorage(css);
+
+        address sts = hub.getContractAddress("ShardingTableStorage");
+        if (sts == address(0)) revert ZeroAddressDependency("ShardingTableStorage");
+        shardingTableStorage = ShardingTableStorage(sts);
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -295,9 +344,18 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
     function createAccount(
         address publisher,
         uint256 accountId,
-        uint96 committedTRAC
+        uint96 committedTRAC,
+        uint72 primaryNode
     ) external onlyConvictionNFT {
         if (committedTRAC == 0) revert InvalidAmount();
+
+        // OT-RFC-51: a designated node must exist in the sharding table
+        // before any allocation is seeded onto it. `0` is the explicit
+        // "no designated node" sentinel and skips both the check and the
+        // seeding entirely.
+        if (primaryNode != 0 && !shardingTableStorage.nodeExists(primaryNode)) {
+            revert PrimaryNodeNotInShardingTable(primaryNode);
+        }
 
         uint40 currentEpoch = uint40(chronos.getCurrentEpoch());
         uint40 createdAtTimestamp = uint40(block.timestamp);
@@ -317,22 +375,209 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
         ) + 1;
         uint16 discountBps = uint16(getDiscountBps(committedTRAC));
 
-        publishingConvictionStorage.createAccount(
-            accountId,
-            PublishingConvictionStorage.Account({
-                committedTRAC: committedTRAC,
-                createdAtEpoch: currentEpoch,
-                expiresAtEpoch: expiresAtEpoch,
-                createdAtTimestamp: createdAtTimestamp,
-                expiresAtTimestamp: expiresAtTimestamp,
-                lockDurationEpochs: lockDurationEpochs,
-                discountBps: discountBps,
-                lastSettledWindow: 0,
-                fullySwept: false
-            })
-        );
+        PublishingConvictionStorage.Account memory acct = PublishingConvictionStorage.Account({
+            committedTRAC: committedTRAC,
+            createdAtEpoch: currentEpoch,
+            expiresAtEpoch: expiresAtEpoch,
+            createdAtTimestamp: createdAtTimestamp,
+            expiresAtTimestamp: expiresAtTimestamp,
+            lockDurationEpochs: lockDurationEpochs,
+            discountBps: discountBps,
+            lastSettledWindow: 0,
+            fullySwept: false,
+            primaryNode: primaryNode,
+            lastPrimaryNodeChangeEpoch: currentEpoch
+        });
+
+        publishingConvictionStorage.createAccount(accountId, acct);
+
+        // OT-RFC-51: prorate-seed the committed TRAC as per-epoch publishing
+        // allocation onto the designated node. The seeded total over the
+        // lock equals `committedTRAC` by construction (see `_scheduleFor`).
+        // The proration schedule is computed ONCE (it is loop-invariant) and
+        // each epoch's amount is read off it via `_amountForEpoch`.
+        if (primaryNode != 0) {
+            PublishingMathLib.ActiveSinkRange[3] memory ranges = _scheduleFor(acct);
+            uint256 lockEpochs = uint256(lockDurationEpochs);
+            uint256 lastEpoch = uint256(currentEpoch) + lockEpochs;
+            for (uint256 e = uint256(currentEpoch); e <= lastEpoch; e++) {
+                uint96 amount = _amountForEpoch(ranges, committedTRAC, lockEpochs, e);
+                if (amount > 0) {
+                    epochStorage.addEpochPublishingAllocation(primaryNode, e, amount);
+                }
+            }
+        }
 
         emit AccountCreated(accountId, publisher, committedTRAC, discountBps, currentEpoch, expiresAtEpoch);
+        // Only emit a designation event when a node is actually designated at
+        // creation. createAccount(_, 0) is an inert PCA (no seeding), so a
+        // PrimaryNodeChanged(_, 0, 0, _) would be a spurious no-op that
+        // indexers would otherwise record as a real assignment.
+        if (primaryNode != 0) {
+            emit PrimaryNodeChanged(accountId, 0, primaryNode, currentEpoch);
+        }
+    }
+
+    // ============================================================
+    //          OT-RFC-51 publishing-allocation schedule
+    // ============================================================
+
+    /**
+     * @notice Re-designate the primary node for `accountId`, moving FUTURE
+     *         epochs' publishing allocation from the old node to the new one.
+     *
+     * @dev Called by the NFT wrapper after it has validated `msg.sender ==
+     *      ownerOf(accountId)`.
+     *
+     *      Rules (OT-RFC-51):
+     *        - Rate-limited to at most once per chain epoch
+     *          (`currentEpoch > acct.lastPrimaryNodeChangeEpoch`).
+     *        - The NEW node must exist in the sharding table; the OLD node is
+     *          NOT re-validated (it may have exited the table since seeding).
+     *        - Only FUTURE epochs `e >= currentEpoch + 1` (within the lock)
+     *          are moved. Past/current epochs stay credited to the old node,
+     *          preserving already-realized scoring windows.
+     *        - Per-epoch amounts are recomputed from the SAME stored-field
+     *          schedule used at seeding, so each `move` byte-matches the seed
+     *          and the epoch total (K_total) is unchanged.
+     */
+    function setPrimaryNode(uint256 accountId, uint72 newNode) external onlyConvictionNFT {
+        PublishingConvictionStorage.Account memory acct =
+            publishingConvictionStorage.getAccount(accountId);
+
+        uint40 currentEpoch = uint40(chronos.getCurrentEpoch());
+        if (currentEpoch <= acct.lastPrimaryNodeChangeEpoch) {
+            revert PrimaryNodeChangeRateLimited(accountId, acct.lastPrimaryNodeChangeEpoch);
+        }
+        // OT-RFC-51: no "clear designation" semantic. Allowing newNode == 0
+        // would null the stored primaryNode while leaving the old node's
+        // future buckets seeded (the move loop credits/decrements neither when
+        // newNode == 0), and a later re-designation would take the add-branch
+        // and double-credit K_n / K_total with no offsetting decrement
+        // (K_total has no decrement path). Reject it.
+        if (newNode == 0) revert ZeroPrimaryNode();
+        if (!shardingTableStorage.nodeExists(newNode)) {
+            revert PrimaryNodeNotInShardingTable(newNode);
+        }
+
+        uint72 oldNode = acct.primaryNode;
+        // A no-op re-designation to the same node would burn the once-per-epoch
+        // change slot, emit a spurious PrimaryNodeChanged, and run a pointless
+        // self-move loop — reject it.
+        if (newNode == oldNode) revert PrimaryNodeUnchanged(accountId, newNode);
+
+        // Move only FUTURE epochs within the lock. The schedule's last
+        // credited epoch is `createdAtEpoch + lockDurationEpochs`. The
+        // proration schedule is computed ONCE (it is loop-invariant and
+        // anchored to the stored `Account`, so it byte-matches the
+        // create-time seed) and each epoch's amount is read off it via
+        // `_amountForEpoch` — making each move exactly reverse its seed.
+        PublishingMathLib.ActiveSinkRange[3] memory ranges = _scheduleFor(acct);
+        uint256 lockEpochs = uint256(acct.lockDurationEpochs);
+        uint256 lastEpoch = uint256(acct.createdAtEpoch) + lockEpochs;
+        // Effects before interactions (checks-effects-interactions): persist the
+        // new designation BEFORE the external EpochStorage moves below. The move
+        // loop uses only the locals captured above (oldNode/newNode/ranges/acct),
+        // so this reordering is behaviour-preserving; it also clears Slither's
+        // reentrancy finding (the EpochStorage callees are Hub-registered
+        // onlyContracts storage, but CEI ordering is the right discipline).
+        publishingConvictionStorage.setPrimaryNodeData(accountId, newNode, currentEpoch);
+
+        for (uint256 e = uint256(currentEpoch) + 1; e <= lastEpoch; e++) {
+            uint96 amount = _amountForEpoch(ranges, acct.committedTRAC, lockEpochs, e);
+            if (amount == 0) continue;
+            // newNode is guaranteed non-zero by the guard above.
+            if (oldNode != 0) {
+                epochStorage.moveEpochPublishingAllocation(oldNode, newNode, e, amount);
+            } else {
+                // First designation of a PCA created with primaryNode == 0:
+                // no prior node was seeded for these epochs, so credit new.
+                epochStorage.addEpochPublishingAllocation(newNode, e, amount);
+            }
+        }
+
+        emit PrimaryNodeChanged(accountId, oldNode, newNode, currentEpoch);
+    }
+
+    /// @dev OT-RFC-51 single source of truth for the per-epoch publishing
+    ///      allocation schedule. Reconstructs the proration inputs PURELY
+    ///      from STORED `Account` fields (not live `chronos.timeUntilNextEpoch`)
+    ///      so the schedule is deterministic and identical whether called at
+    ///      seeding time (`createAccount`) or at a later re-designation
+    ///      (`setPrimaryNode`). Without this anchoring, a later
+    ///      re-designation would recompute a different final-partial-epoch
+    ///      amount and the `moveEpochPublishingAllocation` subtraction would
+    ///      underflow.
+    ///
+    ///      Computed ONCE per call (the proration + the two chronos reads are
+    ///      loop-invariant — they depend only on the stored `Account`, never on
+    ///      the per-epoch cursor), then the seed / move loops index each epoch's
+    ///      amount off the returned ranges via {_amountForEpoch}. This is the
+    ///      gas-hoist of OT-RFC-51's first pass: `prorateActiveSink` +
+    ///      `timestampForEpoch` + `epochLength` previously ran on every loop
+    ///      iteration (O(lockDurationEpochs) redundant work) for a result that
+    ///      does not change across the loop.
+    function _scheduleFor(
+        PublishingConvictionStorage.Account memory acct
+    ) internal view returns (PublishingMathLib.ActiveSinkRange[3] memory ranges) {
+        uint40 anchorEpoch = acct.createdAtEpoch;
+        uint256 epochs = uint256(acct.lockDurationEpochs);
+        // Time the account had remaining in its creation epoch, derived from
+        // stored fields: (start of next epoch) - createdAtTimestamp.
+        uint256 nextEpochStart = chronos.timestampForEpoch(uint256(anchorEpoch) + 1);
+        uint256 timeRemainingInCurrentEpoch =
+            nextEpochStart > uint256(acct.createdAtTimestamp)
+                ? nextEpochStart - uint256(acct.createdAtTimestamp)
+                : 0;
+
+        ranges = PublishingMathLib.prorateActiveSink(
+            acct.committedTRAC,
+            anchorEpoch,
+            epochs,
+            chronos.epochLength(),
+            timeRemainingInCurrentEpoch
+        );
+    }
+
+    /// @dev OT-RFC-51 per-epoch reader over a precomputed {_scheduleFor}
+    ///      result. PURE — no external reads — so the seed / move loops pay the
+    ///      proration cost exactly once (in {_scheduleFor}) and only this cheap
+    ///      branch per epoch. Returns the allocation credited to epoch `e`:
+    ///        - createdAtEpoch              -> currentEpochAllocation (partial)
+    ///        - createdAtEpoch+1 .. +(N-1)  -> baseTokensPerFullEpoch (each)
+    ///        - createdAtEpoch+N            -> finalEpochAllocation (dust-corrected)
+    ///      where N = lockDurationEpochs. Any other epoch returns 0.
+    ///      Sum over [createdAtEpoch, createdAtEpoch+N] == committedTRAC.
+    ///
+    ///      The returned values are BYTE-IDENTICAL to the prior per-iteration
+    ///      `_perEpochAmount(acct, e)` (partial-first = `ranges[0].tokenAmount`,
+    ///      each full epoch = `committedTRAC / epochs`, final =
+    ///      `ranges[2].tokenAmount`), so seed and move can never drift.
+    function _amountForEpoch(
+        PublishingMathLib.ActiveSinkRange[3] memory ranges,
+        uint96 committedTRAC,
+        uint256 epochs,
+        uint256 e
+    ) internal pure returns (uint96) {
+        // ranges[0]: partial creation epoch (single epoch).
+        if (ranges[0].tokenAmount > 0 && e == uint256(ranges[0].startEpoch)) {
+            return ranges[0].tokenAmount;
+        }
+        // ranges[1]: full epochs [anchor+1, anchor+epochs-1]; the range's
+        // tokenAmount is the SUM over those epochs, so expand per-epoch as
+        // baseTokensPerFullEpoch = committedTRAC / epochs.
+        if (
+            ranges[1].tokenAmount > 0 &&
+            e >= uint256(ranges[1].startEpoch) &&
+            e <= uint256(ranges[1].endEpoch)
+        ) {
+            return uint96(uint256(committedTRAC) / epochs);
+        }
+        // ranges[2]: final partial epoch (dust-corrected) at anchor+epochs.
+        if (ranges[2].tokenAmount > 0 && e == uint256(ranges[2].startEpoch)) {
+            return ranges[2].tokenAmount;
+        }
+        return 0;
     }
 
     /**

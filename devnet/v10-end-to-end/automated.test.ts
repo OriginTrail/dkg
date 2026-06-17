@@ -371,7 +371,7 @@ async function detectDevnet(): Promise<DevnetState | null> {
   const nft = new ethers.Contract(
     addrs.nftAddress,
     [
-      'function createAccount(uint96) external returns (uint256)',
+      'function createAccount(uint96, uint72) external returns (uint256)',
       'function registerAgent(uint256, address) external',
       'function agentToAccountId(address) view returns (uint256)',
       'function windowSpent(uint256, uint40) view returns (uint96)',
@@ -393,7 +393,7 @@ async function detectDevnet(): Promise<DevnetState | null> {
   const eps = new ethers.Contract(
     addrs.epsAddress,
     [
-      'function getNodeEpochProducedKnowledgeValue(uint72, uint256) view returns (uint96)',
+      'function getNodeEpochPublishingAllocation(uint72, uint256) view returns (uint96)',
     ],
     provider,
   );
@@ -577,7 +577,9 @@ async function ensurePcaAccountForOpWallets(
       nonce: await nextNonce(),
     })
   ).wait();
-  const createTx = await nftAsAdmin.createAccount(committed, {
+  // primaryNode = 0n: no designated node → no committed K_n seeded. This PCA
+  // is used for discount-publishing (windowSpent), not committed allocation.
+  const createTx = await nftAsAdmin.createAccount(committed, 0n, {
     nonce: await nextNonce(),
   });
   const createReceipt = await createTx.wait();
@@ -850,7 +852,7 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
         (await s.nft.windowSpent(accountId, beforeWindow)) +
         (await s.nft.windowSpent(accountId, beforeWindow + 1n));
       const beforeEps: bigint =
-        await s.eps.getNodeEpochProducedKnowledgeValue(
+        await s.eps.getNodeEpochPublishingAllocation(
           core1.identityId,
           epoch,
         );
@@ -881,16 +883,21 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
           ? await s.nft.windowSpent(accountId, afterWindow)
           : 0n);
       expect(afterSpent - beforeSpent).toBeGreaterThan(0n);
-      const afterEps: bigint = await s.eps.getNodeEpochProducedKnowledgeValue(
+      // RFC-51: a realized publish no longer credits the node's publishing
+      // allocation (K_n). That getter tracks COMMITTED PCA allocation only
+      // (seeded when a PCA designates a primaryNode), never per-publish. The
+      // real phase-2 coverage is windowSpent growth + author match; Eps must
+      // simply not move.
+      const afterEps: bigint = await s.eps.getNodeEpochPublishingAllocation(
         core1.identityId,
         epoch,
       );
-      expect(afterEps).toBeGreaterThan(beforeEps);
+      expect(afterEps).toBe(beforeEps);
 
       console.log(
         `phase 2 PASS: kaId=${result.kaId}, author=${onChainAuthor}, ` +
           `windowSpent +${afterSpent - beforeSpent} (window ${beforeWindow}→${afterWindow}), ` +
-          `core1.eps +${afterEps - beforeEps}`,
+          `core1.eps unchanged (RFC-51: no per-publish K_n credit)`,
       );
     },
     240_000,

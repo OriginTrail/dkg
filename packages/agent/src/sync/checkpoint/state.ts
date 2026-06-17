@@ -74,6 +74,7 @@ export function getSyncCheckpointKey(
   phase: SyncPhase,
   snapshotRef?: string,
   sinceBatchId?: string,
+  recovery?: boolean,
 ): string {
   const refSuffix = phase === 'snapshot' && snapshotRef ? `|${snapshotRef}` : '';
   // Phase C: `sinceBatchId` changes the responder's result set, so a delta
@@ -82,5 +83,13 @@ export function getSyncCheckpointKey(
   // triples. Scoping the key by `sinceBatchId` keeps each filtered dataset on
   // its own resume cursor; a full sync (no hint) keeps the unscoped key.
   const sinceSuffix = sinceBatchId ? `|since:${sinceBatchId}` : '';
-  return `${remotePeerId}|${contextGraphId}|${includeSharedMemory ? 'swm' : 'durable'}|${phase}${refSuffix}${sinceSuffix}`;
+  // R10: member SWM recovery reuses the same `(peer|cg|swm|phase)` namespace as
+  // background incremental SWM catch-up. A running recovery's mid-stream cursor
+  // (set/dropped per page) would otherwise overwrite or delete the normal
+  // incremental cursor and force background sync to restart from offset 0. Give
+  // recovery its OWN cursor + responder-session scope so it never mutates the
+  // shared incremental-sync cursor. The flag is additive (only set on the
+  // recovery path), so normal sync keeps its unscoped key.
+  const recoverySuffix = recovery ? '|recovery' : '';
+  return `${remotePeerId}|${contextGraphId}|${includeSharedMemory ? 'swm' : 'durable'}|${phase}${refSuffix}${sinceSuffix}${recoverySuffix}`;
 }
