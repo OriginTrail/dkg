@@ -238,10 +238,10 @@ SELECT ?s ?name ?description WHERE {
       query_success_rate: safeRate(querySuccess, queryFail),
       publisher_get_success_rate: safeRate(assetQuerySuccess, assetQueryFail),
       non_publisher_get_success_rate: '0.00',
-      average_publish_time: (avgPublishMs / 1000).toFixed(2),
-      average_query_time: (avgQueryMs / 1000).toFixed(2),
-      average_publisher_get_time: (avgAssetQueryMs / 1000).toFixed(2),
-      average_non_publisher_get_time: '0.00',
+      average_publish_time: (avgPublishMs / 1000).toFixed(3),
+      average_query_time: (avgQueryMs / 1000).toFixed(3),
+      average_publisher_get_time: (avgAssetQueryMs / 1000).toFixed(3),
+      average_non_publisher_get_time: '0.000',
       time_stamp: new Date().toISOString(),
     };
 

@@ -80,7 +80,10 @@ export function safeRate(success, fail) {
 }
 
 export function formatDuration(ms) {
-  if (!ms || isNaN(ms)) return '0.00 seconds';
+  if (!ms || isNaN(ms)) return '0.00 ms';
+  // Sub-second durations (e.g. local SPARQL queries are a few ms) would round
+  // to "0.00 seconds" — show them in ms so no number is lost.
+  if (ms < 1000) return `${ms.toFixed(2)} ms`;
   const seconds = ms / 1000;
   if (seconds < 60) return `${seconds.toFixed(2)} seconds`;
   const mins = Math.floor(seconds / 60);
