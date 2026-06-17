@@ -145,6 +145,7 @@ async function fetchFirstAvailableAssertionArtifact(
   resolved: AssertionArtifactResolution,
   opts: {
     sourcePeerIds: string[];
+    explicitSourcePeerId?: boolean;
     offset: number;
     maxBytes: number;
     cache: boolean;
@@ -168,7 +169,12 @@ async function fetchFirstAvailableAssertionArtifact(
     if (remote.verifiedBytes) return { availability: 'verified', remote, sourcePeerId };
     const page = remote.response;
     if (!page.denied && !page.unavailable && !page.hashMismatch && page.bytesB64 != null) {
-      return { availability: 'unverified_page', remote, sourcePeerId };
+      const result: AssertionArtifactRemoteResult = { availability: 'unverified_page', remote, sourcePeerId };
+      if (opts.cache && !opts.explicitSourcePeerId) {
+        fallback ??= result;
+        continue;
+      }
+      return result;
     }
     fallback ??= { availability: 'unavailable', remote, sourcePeerId };
   }
@@ -325,6 +331,7 @@ export async function handleKaImportArtifactRead(ctx: RequestContext): Promise<v
     const cache = raw.cache !== false && offset === 0;
     const fetched = await fetchFirstAvailableAssertionArtifact(agent, resolved, {
       sourcePeerIds,
+      explicitSourcePeerId: Boolean(sourcePeerId),
       offset,
       maxBytes,
       cache,
