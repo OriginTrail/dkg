@@ -132,12 +132,21 @@ export function decodeEvmError(data: string | Uint8Array): { name: string; args:
   }
 }
 
-/**
- * Enrich a caught EVM error with a decoded custom error name.
- * Modifies the error message in-place and returns the decoded name (if any).
- */
-export function enrichEvmError(err: unknown): string | null {
-  if (!(err instanceof Error)) return null;
+type EvmErrorLike = {
+  data?: unknown;
+  errorData?: unknown;
+  message?: unknown;
+  revert?: unknown;
+};
+
+function rawRevertDataFromDirectFields(err: EvmErrorLike): string | null {
+  for (const raw of [err.data, err.errorData]) {
+    if (typeof raw === 'string' && /^0x[0-9a-fA-F]+$/.test(raw)) return raw;
+  }
+  return null;
+}
+
+function rawRevertDataFromMessage(message: string): string | null {
   // Match the revert-data hex across the RPC-shape variants we see in the
   // wild. CH-10:
   //   - Hardhat:        ... data="0x..."             (key="value", quoted)
@@ -148,15 +157,30 @@ export function enrichEvmError(err: unknown): string | null {
   // Leading non-letter (or string start) ensures `errorData` doesn't match
   // as `data`. Separator class accepts any combination of `=`, `:`, `"`,
   // `'`, whitespace.
-  const match = err.message.match(
+  const match = message.match(
     /(?:^|[^a-zA-Z])(?:errorData|data)["':=\s]+(0x[0-9a-fA-F]+)/,
   );
-  if (!match) return null;
-  const decoded = decodeEvmError(match[1]);
+  return match?.[1] ?? null;
+}
+
+/**
+ * Enrich a caught EVM error with a decoded custom error name.
+ * Modifies the error message in-place and returns the decoded name (if any).
+ */
+export function enrichEvmError(err: unknown): string | null {
+  if (!err || typeof err !== 'object') return null;
+  const e = err as EvmErrorLike;
+  const message = typeof e.message === 'string' ? e.message : '';
+  const data = rawRevertDataFromDirectFields(e) ?? rawRevertDataFromMessage(message);
+  if (!data) return null;
+  const decoded = decodeEvmError(data);
   if (!decoded) return null;
   const argsStr = decoded.args.length > 0 ? `(${decoded.args.join(', ')})` : '';
   const decodedStr = `${decoded.name}${argsStr}`;
-  err.message = err.message.replace('unknown custom error', decodedStr);
+  if (typeof e.message === 'string') {
+    e.message = e.message.replace('unknown custom error', decodedStr);
+  }
+  e.revert = { name: decoded.name, args: decoded.args };
   return decoded.name;
 }
 
