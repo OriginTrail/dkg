@@ -822,6 +822,7 @@ export class EVMChainAdapterBase {
         );
         return await this.signPopulatedTransaction(signer, populated);
       } catch (err) {
+        if (!forcedReapprove) enrichEvmError(err);
         if (!forcedReapprove && isTooLowAllowanceError(err)) {
           forcedReapprove = true;
           console.warn(
