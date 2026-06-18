@@ -252,6 +252,22 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       await expect(NFT.connect(d).allocate(9_999_999, stake, 0)).to.be.reverted; // dead profile
       await expect(NFT.connect(d).allocate(id, stake, 4)).to.be.reverted; // tier 4 doesn't exist
     });
+
+    it('creditApplied is false (no silent lock-credit) when convictionCreditSeconds is unset', async () => {
+      const d = accounts[2];
+      const id = await createProfile(1);
+      const stake = hre.ethers.parseEther('1000');
+      await seedV8Stake(d, id, stake);
+      // deliberately do NOT arm credit — convictionCreditSeconds stays 0
+      await NFT.connect(accounts[0]).adminMigrateToCredit(d.address, [id]);
+
+      const tx = await NFT.connect(d).allocate(id, stake, 12);
+      const blockTs = BigInt((await hre.ethers.provider.getBlock((await tx.wait())!.blockNumber))!.timestamp);
+      // tier-12 allocation, but creditApplied=false because no credit was configured
+      await expect(tx).to.emit(NFT, 'Allocated').withArgs(d.address, 1n, id, stake, 12n, false);
+      // and the expiry is NOT shortened (full tier-12 duration)
+      expect((await CSS.getPosition(1)).expiryTimestamp).to.equal(blockTs + TIER12_DURATION);
+    });
   });
 
   // ===========================================================================

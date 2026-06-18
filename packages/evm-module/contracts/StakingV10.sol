@@ -992,8 +992,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         // tier-6/12 conviction lock-credit is universal under rev 5 — any 6/12
         // migration allocation earns it (no per-staker eligibility).
         cs.spendMigrationCredit(staker, amount);
-        creditApplied = lockTier == 6 || lockTier == 12;
-        uint40 expiryShortenedBy = creditApplied ? cs.convictionCreditSeconds() : 0;
+        // `creditApplied` must reflect shortening that was ACTUALLY applied:
+        // a tier-6/12 allocation while `convictionCreditSeconds == 0` (credit
+        // not yet configured) shortens by 0, so the flag/event would otherwise
+        // claim a credit that wasn't granted. Gate it on a non-zero duration.
+        uint40 creditSeconds = cs.convictionCreditSeconds();
+        creditApplied = (lockTier == 6 || lockTier == 12) && creditSeconds > 0;
+        uint40 expiryShortenedBy = creditApplied ? creditSeconds : 0;
 
         uint256 currentEpoch = chronos.getCurrentEpoch();
         // Baseline the V10 score cursor BEFORE createPosition so the creation
