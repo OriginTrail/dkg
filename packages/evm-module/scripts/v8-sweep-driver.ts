@@ -217,11 +217,20 @@ async function main() {
   // The unaccounted non-fee, non-active vault TRAC. If >0 there ARE pending
   // amounts (or rewards/dust) the active sweep won't move, so scan for them.
   let enumeratedPending = pairs.reduce((s, p) => s + p.pend, 0n);
+  let enumeratedActive = pairs.reduce((s, p) => s + p.base, 0n);
   let unattributed = vaultBefore - totalStake - feeDrainable - enumeratedPending;
-  if (unattributed > DUST_TOLERANCE) {
+  let activeGap = totalStake - enumeratedActive;
+  // The DelegatorAdded scan recovers delegators MISSING from getDelegators:
+  // pending-only ones (removed on zero stake), AND — on V8 deployments where
+  // DelegatorsInfo was populated late — ACTIVE delegators never registered there.
+  // Trigger on EITHER signal: leftover vault TRAC, OR an active-stake gap
+  // (enumerated active < getTotalStake, the authoritative active-stake read).
+  // Keying only off the vault misses the active gap when the vault is
+  // under-collateralized (vault < totalStake ⇒ unattributed negative).
+  if (unattributed > DUST_TOLERANCE || activeGap > DUST_TOLERANCE) {
     console.log(
-      `\nUnattributed vault TRAC ${fmt(unattributed)} beyond active+enumerated-pending+fees — scanning ` +
-        `DelegatorAdded logs (full historical address set) for pending-only delegators …`,
+      `\nRecovering delegators missing from getDelegators (unattributed vault ${fmt(unattributed)}, ` +
+        `active-stake gap ${fmt(activeGap)}) — scanning DelegatorAdded logs (full historical address set) …`,
     );
     const added = DI.filters.DelegatorAdded();
     const latest = await hre.ethers.provider.getBlockNumber();
@@ -253,16 +262,17 @@ async function main() {
         }
       }
     }
-    console.log(`  +${extra} pending-only pairs recovered${scanDegraded ? ' (⚠️ scan was degraded — see above)' : ''}`);
+    console.log(`  +${extra} missing pairs recovered${scanDegraded ? ' (⚠️ scan was degraded — see above)' : ''}`);
     enumeratedPending = pairs.reduce((s, p) => s + p.pend, 0n);
+    enumeratedActive = pairs.reduce((s, p) => s + p.base, 0n);
     unattributed = vaultBefore - totalStake - feeDrainable - enumeratedPending;
+    activeGap = totalStake - enumeratedActive;
   } else {
-    console.log('\nNo unattributed vault TRAC — DelegatorsInfo.getDelegators is complete; skipping the event scan.');
+    console.log('\nNo unattributed vault TRAC and no active-stake gap — DelegatorsInfo.getDelegators is complete; skipping the event scan.');
   }
 
   // ---- plan report + completeness flags ----
   const nodes = new Set(pairs.map((p) => p.id));
-  const enumeratedActive = pairs.reduce((s, p) => s + p.base, 0n);
   const drainable = totalStake + enumeratedPending; // what we will move SS→CSS
   const chunks = Math.ceil(pairs.length / CHUNK_SIZE);
   const feeChunks = Math.ceil(feeNodes.length / CHUNK_SIZE);
@@ -274,12 +284,13 @@ async function main() {
   console.log(`  total leaving vault (stake + pending + fees): ${fmt(drainable + feeDrainable)}`);
   console.log(`  unattributed vault TRAC (after fees + enumerated pending): ${fmt(unattributed)}`);
 
-  // active-stake gap: getTotalStake is exact, so enumeratedActive < totalStake ⇒ a missing active delegator
-  const activeGap = totalStake - enumeratedActive;
+  // active-stake gap: getTotalStake is exact, so enumeratedActive < totalStake ⇒
+  // a missing active delegator the DelegatorAdded scan (above) could not recover.
   if (activeGap > 0n) {
     console.log(
       `\n  🔴 ACTIVE-STAKE GAP: getTotalStake ${fmt(totalStake)} but enumeration found only ${fmt(enumeratedActive)} ` +
-        `active — ${fmt(activeGap)} TRAC belongs to a delegator NOT in DelegatorsInfo. Investigate before executing.`,
+        `active — ${fmt(activeGap)} TRAC belongs to a delegator NOT recoverable via DelegatorsInfo (not in ` +
+        `getDelegators OR DelegatorAdded). Needs a deeper enumeration source before executing.`,
     );
   }
   if (unattributed > DUST_TOLERANCE) {
