@@ -37,7 +37,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { Interface } from 'ethers';
-import { enrichEvmError, decodeEvmError } from '../src/evm-adapter.js';
+import { enrichEvmError, decodeEvmError, isTooLowAllowanceError } from '../src/evm-adapter.js';
 
 const iface = new Interface([
   'error BatchNotFound(uint256 batchId)',
@@ -46,11 +46,35 @@ const iface = new Interface([
 ]);
 
 const BATCH_NOT_FOUND_HEX = iface.encodeErrorResult('BatchNotFound', [42n]);
+const tooLowAllowanceIface = new Interface([
+  'error TooLowAllowance(address tokenAddress, uint256 allowance, uint256 expected)',
+]);
+const TOO_LOW_ALLOWANCE_HEX = tooLowAllowanceIface.encodeErrorResult('TooLowAllowance', [
+  '0x00000000000000000000000000000000000000aa',
+  0n,
+  1n,
+]);
 
 describe('enrichEvmError — decoder works on raw custom error hex [CH-10]', () => {
   it('decodeEvmError returns the error name for a known selector', () => {
     const out = decodeEvmError(BATCH_NOT_FOUND_HEX);
     expect(out?.name).toBe('BatchNotFound');
+  });
+});
+
+describe('enrichEvmError — raw ethers/provider fields', () => {
+  it('decodes direct raw provider data into TooLowAllowance metadata', () => {
+    const err = {
+      message: 'execution reverted (unknown custom error)',
+      data: TOO_LOW_ALLOWANCE_HEX,
+    };
+
+    const name = enrichEvmError(err);
+
+    expect(name).toBe('TooLowAllowance');
+    expect(err.message).toContain('TooLowAllowance');
+    expect((err as any).revert?.name).toBe('TooLowAllowance');
+    expect(isTooLowAllowanceError(err)).toBe(true);
   });
 });
 
