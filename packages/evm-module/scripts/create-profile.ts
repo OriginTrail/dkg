@@ -1,5 +1,5 @@
 // Creates one DKG node profile and prints its identityId — used as the
-// allocate() target in the OT-RFC-50 rehearsal (a fresh deploy has none).
+// allocate() target in the V8→V10 migration rehearsal (a fresh deploy has none).
 //   [OPERATOR_IDX=1] [OP_FEE=0] npx hardhat run scripts/create-profile.ts --network localhost
 import hre from 'hardhat';
 

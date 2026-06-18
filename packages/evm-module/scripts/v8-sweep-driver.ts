@@ -1,5 +1,5 @@
 // =============================================================================
-// v8-sweep-driver.ts — OT-RFC-50 admin-push migration: the off-chain sweep
+// v8-sweep-driver.ts — V8→V10 admin-push migration: the off-chain sweep
 // =============================================================================
 //
 // Drains EVERY V8 position into V10 migration credit, signed by the Hub owner:
@@ -8,17 +8,14 @@
 //   * operator fees (resting balance + open fee-withdrawal request) → the
 //     operator's SAME credit bucket, via adminDrainOperatorFeesBatch over
 //     (node, operator) pairs.
-// Both run in gas-sized chunks. Since OT-RFC-50 removed self-service migration,
-// THIS is the only path that empties V8 — so it must be provably complete (the
-// vault must end EMPTY, ≤ dust). It is, by construction:
+// Both run in gas-sized chunks. The admin sweep is the only path that empties V8,
+// so it must be provably complete (the vault must end EMPTY, ≤ dust). It is, by
+// construction:
 //
-//   * Enumeration (fast path): DelegatorsInfo.getDelegators(id) — cheap, but NOT
-//     complete on its own: DelegatorsInfo was deployed months AFTER StakingStorage
-//     on the real V8 chains, so addDelegator never fired for pre-DI stakers and
-//     they appear in neither getDelegators NOR DelegatorAdded (the Base Sepolia
-//     fork showed 34% of active stake invisible to it). Treat it as a fast first
-//     pass only.
-//   * Genesis-complete recovery: every V8 stake did
+//   * Enumeration (fast path): DelegatorsInfo.getDelegators(id) — cheap, but not
+//     guaranteed to list every delegator on its own, so it is only a fast first
+//     pass.
+//   * Complete recovery: every V8 stake did
 //     `token.transferFrom(staker, StakingStorage)` (archive/Staking.sol:148), so
 //     Token.Transfer(to = StakingStorage) from the StakingStorage deploy block is
 //     the COMPLETE delegator-address universe (a superset; non-delegator senders
@@ -162,7 +159,7 @@ async function main() {
   // (which leaves getOperatorFeeBalance at request time but only leaves the
   // vault at finalize). Enumerated id-keyed (every node), so it is complete —
   // no address needed to FIND a fee, only to drain it. We DO drain these now
-  // (OT-RFC-50: operator fee → operator's migration credit), so the vault must
+  // (operator fee → operator's migration credit), so the vault must
   // empty to ~0, not to Σ fees.
   type FeeNode = { id: number; fee: bigint; operator: string | null };
   const operatorMap = loadOperatorMap();
@@ -218,23 +215,22 @@ async function main() {
   }
   console.log(`  ${pairs.length} drainable pairs from getDelegators`);
 
-  // ---- genesis-complete recovery: Token.Transfer(to=StakingStorage) ----
+  // ---- complete recovery: Token.Transfer(to=StakingStorage) ----
   // The unaccounted non-fee, non-active vault TRAC. If >0 there ARE pending
   // amounts (or rewards/dust) the active sweep won't move, so scan for them.
   let enumeratedPending = pairs.reduce((s, p) => s + p.pend, 0n);
   let enumeratedActive = pairs.reduce((s, p) => s + p.base, 0n);
   let unattributed = vaultBefore - totalStake - feeDrainable - enumeratedPending;
   let activeGap = totalStake - enumeratedActive;
-  // getDelegators (and DelegatorAdded) only know delegators registered SINCE
-  // DelegatorsInfo was deployed — which on real V8 chains was months after
-  // StakingStorage, so pre-DI stakers are invisible to both. But every V8 stake
-  // did `token.transferFrom(staker, StakingStorage, …)` (archive/Staking.sol:148),
-  // so Token.Transfer(to = StakingStorage) is the COMPLETE genesis delegator-
-  // address universe (a superset — non-delegator senders just read 0 stake and
-  // are skipped). Trigger on leftover vault TRAC OR an active-stake gap
-  // (enumerated active < getTotalStake) — the latter fires even when the vault is
-  // under-collateralized (unattributed negative). Set EVENT_SCAN_FROM to the
-  // StakingStorage deploy block; the full genesis scan needs an archive RPC.
+  // getDelegators is only a fast first pass and is not guaranteed to list every
+  // delegator. But every V8 stake did `token.transferFrom(staker, StakingStorage, …)`
+  // (archive/Staking.sol:148), so Token.Transfer(to = StakingStorage) from the
+  // StakingStorage deploy block is the COMPLETE delegator-address universe (a
+  // superset — non-delegator senders just read 0 stake and are skipped). Trigger
+  // on leftover vault TRAC OR an active-stake gap (enumerated active <
+  // getTotalStake) — the latter fires even when the vault holds less than the
+  // accounting total (unattributed negative). Set EVENT_SCAN_FROM to the
+  // StakingStorage deploy block; the full scan needs an archive RPC.
   // (NB: a position grown purely from restaked rewards has no fresh deposit
   // Transfer — that residual tail is covered by the on-chain `selfMigrate`.)
   if (unattributed > DUST_TOLERANCE || activeGap > DUST_TOLERANCE) {
@@ -382,7 +378,7 @@ async function main() {
   }
 
   // ---- operator fees: resolved nodes only (unresolved blocked above unless
-  // overridden). Folds into the operator's SAME migration credit (OT-RFC-50). ----
+  // overridden). Folds into the operator's SAME migration credit ----
   const resolvedFee = feeNodes.filter((n) => n.operator);
   const submitFeeChunk = async (chunk: FeeNode[]) =>
     (

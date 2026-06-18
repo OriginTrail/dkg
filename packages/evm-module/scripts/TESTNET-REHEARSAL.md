@@ -1,4 +1,4 @@
-# OT-RFC-50 — testnet migration rehearsal (Base Sepolia)
+# V8→V10 stake migration — testnet migration rehearsal (Base Sepolia)
 
 Rehearse the V8→V10 **admin-push** migration on Base Sepolia using a **real
 mainnet delegator's position** as the data shape. The protocol/admin drains
@@ -12,7 +12,7 @@ signs `allocate`. There is no self-service `startMigration`.
 | Contract logic (drain → credit → allocate, universal 6/12 lock-credit, collateralization incl. D8 pending, tier-0 recovery) | ✅ 20 hardhat tests (`test/v10-pool-migration.test.ts`) |
 | Deployed V8 StakingStorage exposes the exact drain interface | ✅ selector probe vs Base-mainnet `0x57307C87…` (all 7 selectors present, no drift) |
 | The 12 `StakingV10.initialize()` deps exist on the freeze Hub | ✅ probe of Base freeze Hub `0x99Aa…` (only CSS missing — the new storage we deploy) |
-| The migration **tooling** end-to-end: deploy → MINTER_ROLE vault funding → seed → set credit → **admin drain** (`adminDrainBatch`) → wallet-signed `allocate` (target ≠ source) → NFT mint, plus the tier-0 recover-to-wallet path | ✅ local `hardhat node` run with a **real mainnet position** (`0x7D1E…`, 17.3754 TRAC) mirrored under a controlled wallet — see "Local end-to-end" below |
+| The migration **tooling** end-to-end: deploy → MINTER_ROLE vault funding → seed → set credit → **admin drain** (`adminDrainBatch`) → wallet-signed `allocate` (target ≠ source) → NFT mint, plus the tier-0 recover-to-wallet path | ✅ local `hardhat node` run with a **real mainnet position** (`0x<MAINNET_DELEGATOR>`, <N> TRAC) mirrored under a controlled wallet — see "Local end-to-end" below |
 | **`allocate`'s tail against a REAL ~59-node active set** (sharding insert, `ask.recalculateActiveSet`) + registration on a live chain | ⬇️ **this Sepolia rehearsal** (or the anvil fork) — the one thing a fresh local/fixture deploy can't fake |
 
 > A local mainnet-**fork** pre-flight (`scripts/fork-rehearsal.ts`) would catch
@@ -31,7 +31,7 @@ signs `allocate`. There is no self-service `startMigration`.
   the real position is mirrored *under this wallet*.
 - A Base **mainnet** RPC (read-only) to source the real position from.
 - A real mainnet delegator to mirror. A known clean one (single position):
-  `0x7D1E9050f02044CBf200BC2B75d443D8e464A0d9` — node **3**, **17.3754 TRAC**,
+  `0x<MAINNET_DELEGATOR>` — a node, **<N> TRAC**,
   no pending withdrawal. (Found via DelegatorsInfo `0xbc50dAB30f…`.)
 
 ## Steps
@@ -58,7 +58,7 @@ no profile; only the allocate *target* does.
 ### 3. Mirror the real mainnet position under your wallet + admin-drain
 
 ```bash
-DELEGATOR=0x7D1E9050f02044CBf200BC2B75d443D8e464A0d9 \
+DELEGATOR=0x<MAINNET_DELEGATOR> \
 TARGET_DELEGATOR=0x<your-testnet-wallet> \
 SOURCE_RPC=https://<base-mainnet-rpc> \
 SOURCE_STAKING_STORAGE=0x57307C87E95a372C5D94BCC372bb7304505A739D \
@@ -119,7 +119,7 @@ npx hardhat deploy --network localhost --config hardhat.node.config.ts \
 npx hardhat run scripts/create-profile.ts --network localhost --config hardhat.node.config.ts   # → IDENTITY_ID=1
 
 # 4. mirror a real mainnet position under a wallet you control (reads mainnet, seeds + admin-drains locally)
-DELEGATOR=0x7D1E9050f02044CBf200BC2B75d443D8e464A0d9 \
+DELEGATOR=0x<MAINNET_DELEGATOR> \
 TARGET_DELEGATOR=0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC \
 SOURCE_RPC=https://<base-mainnet-rpc> \
 SOURCE_STAKING_STORAGE=0x57307C87E95a372C5D94BCC372bb7304505A739D LAST_IDENTITY_ID=3 \
@@ -134,7 +134,7 @@ TARGET_NODE=1 LOCK_TIER=12 \
 npx hardhat run scripts/migrate-as-wallet.ts --network localhost --config hardhat.node.config.ts
 ```
 
-Expected tail: `migrationCredit 17.3754…` then `minted conviction NFT tokenId 1
+Expected tail: `migrationCredit <N>` then `minted conviction NFT tokenId 1
 → owner 0x3C44…`, `remaining credit 0.0`.
 
 ## Optional: local mainnet-fork pre-flight (needs Foundry/anvil)
@@ -150,7 +150,7 @@ npx hardhat run scripts/fork-rehearsal.ts --network localhost
 
 `fork-rehearsal.ts` deploys the 3 contracts onto the forked freeze Hub
 (`0x99Aa…`), wires them as the impersonated Hub owner, then has the Hub owner
-**admin-drain** real delegator `0x7D1E…` (`adminMigrateToCredit`) and the
+**admin-drain** real delegator `0x<MAINNET_DELEGATOR>` (`adminMigrateToCredit`) and the
 delegator `allocate(3, …, 12)` — asserting the drain/credit/collateralization/
 mint invariants. This is the recommended gate before the live Sepolia run when
 Foundry is available.

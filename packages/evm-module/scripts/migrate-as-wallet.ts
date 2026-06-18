@@ -1,11 +1,11 @@
 // =============================================================================
-// migrate-as-wallet.ts — OT-RFC-50 testnet allocation, signed by a real wallet
+// migrate-as-wallet.ts — V8→V10 testnet allocation, signed by a real wallet
 // =============================================================================
 //
 // Runs the staker-facing half of the migration on a live testnet, signing with
 // a wallet you control (TARGET_PK). Under the admin-push model the protocol has
 // ALREADY drained this wallet's V8 stake into migration credit (via
-// mirror-mainnet-delegator.ts / DKGStakingConvictionNFT.adminDrainBatch), so the
+// DKGStakingConvictionNFT.adminDrainBatch), so the
 // user NEVER drains — they only ALLOCATE pre-populated credit:
 //   allocate(targetNode, amount, lockTier)
 //

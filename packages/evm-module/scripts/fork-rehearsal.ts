@@ -1,5 +1,5 @@
 // =============================================================================
-// fork-rehearsal.ts — OT-RFC-50 high-fidelity pre-flight (Base mainnet fork)
+// fork-rehearsal.ts — V8→V10 migration high-fidelity pre-flight (Base mainnet fork)
 // =============================================================================
 //
 // Forks Base mainnet at the live freeze Hub (0x99Aa…), deploys ONLY the 3 new

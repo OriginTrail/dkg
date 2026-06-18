@@ -1,5 +1,5 @@
 // =============================================================================
-// mirror-mainnet-delegator.ts — OT-RFC-50 testnet rehearsal helper
+// mirror-mainnet-delegator.ts — V8→V10 testnet rehearsal helper
 // =============================================================================
 //
 // Replicates ONE real mainnet V8 delegator's position onto a target deployment
@@ -170,7 +170,7 @@ async function main() {
   console.log(`  set convictionCreditSeconds = ${CREDIT_SECONDS} (${Number(CREDIT_SECONDS) / 86400}d)`);
 
   // ---- admin-push: drain the wallet's seeded V8 stake into ITS migration
-  //      credit (OT-RFC-50) via adminDrainBatch over the flattened
+  //      credit via adminDrainBatch over the flattened
   //      (delegator,node) pairs — the same primary path production runs at scale. ----
   const delegators = ids.map(() => TARGET_DELEGATOR);
   await (await (NFT as any).connect(admin).adminDrainBatch(delegators, ids)).wait();

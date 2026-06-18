@@ -1,5 +1,5 @@
 // =============================================================================
-// fork-setup.ts — OT-RFC-50 cutover setup on a forked Hub (freeze-first)
+// fork-setup.ts — V8→V10 cutover setup on a forked Hub (freeze-first)
 // =============================================================================
 //
 // Against an anvil fork of a V8-stake-holding chain, this impersonates the Hub

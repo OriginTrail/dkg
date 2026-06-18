@@ -46,14 +46,14 @@ import {HubLib} from "./libraries/HubLib.sol";
  *
  *      User-facing entry points:
  *        - `createConviction`                             — mint path, fresh V10 stake
- *        - `allocate`                                     — mint path, spends migration credit (OT-RFC-50)
+ *        - `allocate`                                     — mint path, spends migration credit
  *        - `selfMigrate` / `selfMigrateOperatorFee`       — self-service drain into credit (straggler backstop; no mint)
  *        - `finalizeMigrationBatch`                       — DAO closer (D11), sets `v10LaunchEpoch`
  *        - `relock`                                       — D21 burn-and-mint tier re-commit
  *        - `redelegate`                                   — D25 in-place node swap (stable tokenId)
  *        - `withdraw`                                     — D14 atomic burn-and-payout
  *        - `claim`
- *      Admin entry points (OT-RFC-50 admin-push drain into credit; no mint):
+ *      Admin entry points (admin-push drain into credit; no mint):
  *        - `adminDrainBatch` / `adminMigrateToCredit`     — delegator stake (+pending) → credit
  *        - `adminDrainOperatorFeesBatch`                  — operator fees → credit
  *
@@ -92,7 +92,7 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     //           points and events.
     //         * L8 — `identityId != 0` guard added on mint paths so
     //           ambiguous "zero-node" mints fail fast at the wrapper.
-    //         * 10.0.3 — OT-RFC-50 operator-fee migration: added
+    //         * 10.0.3 — operator-fee migration: added
     //           `adminDrainOperatorFeesBatch` + `OperatorFeeMigrated`; bumped so
     //           the breaking migration ABI is detectable via `version()`.
     string private constant _VERSION = "10.0.3";
@@ -184,13 +184,13 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     event PositionWithdrawn(uint256 indexed tokenId, uint96 amount);
 
     /// @notice Emitted when a delegator's V8 stake is drained into migration
-    ///         credit by the admin sweep (OT-RFC-50). `credited` is the total
+    ///         credit by the admin sweep. `credited` is the total
     ///         moved into that delegator's credit by this event.
     event MigrationStarted(address indexed delegator, uint96 credited);
 
     /// @notice Emitted when a node's V8 operator fee (resting balance + any open
     ///         fee-withdrawal request) is drained into the operator's migration
-    ///         credit by the admin sweep (OT-RFC-50). Keyed by `identityId` so
+    ///         credit by the admin sweep. Keyed by `identityId` so
     ///         per-node fee migration reconciles against the V8 vault; `operator`
     ///         is the validated current ADMIN_KEY holder that was credited.
     /// @dev    Reconciliation: total migration credit issued = Σ `MigrationStarted`
@@ -200,8 +200,8 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
 
     /// @notice Emitted when migration credit is allocated into a fresh V10
     ///         conviction position. `creditApplied` is true when the tier-6/12
-    ///         conviction lock-credit was applied (any 6/12 migration allocation,
-    ///         rev 5: universal).
+    ///         conviction lock-credit was applied (any 6/12 migration allocation;
+    ///         universal).
     event Allocated(
         address indexed delegator,
         uint256 indexed tokenId,
@@ -230,7 +230,7 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     error InvalidLockTier();
     error NotPositionOwner();
     error ZeroAmount();
-    /// @notice OT-RFC-50 — thrown by `adminMigrateToCredit` when the delegator
+    /// @notice Thrown by `adminMigrateToCredit` when the delegator
     ///         has no V8 stake across the given source nodes (nothing drained,
     ///         so no credit would be created). `adminDrainBatch` SKIPS such
     ///         entries instead of reverting.
@@ -308,7 +308,7 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     // Source of truth is `ConvictionStakingStorage._tiers`. The baseline
     // ladder seeded at `CSS.initialize()` is {0, 1, 3, 6, 12} mapping to
     // {1x, 1.5x, 2x, 3.5x, 6x} and {0, 30d, 90d, 180d, 360d} wall-clock
-    // lock durations — matching the roadmap in `04_TOKEN_ECONOMICS §4.1`.
+    // lock durations.
     // New tiers can be appended by the HubOwner via `CSS.addTier`; this
     // helper picks them up automatically via the storage read.
     //
@@ -521,16 +521,16 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     }
 
     // ========================================================================
-    // OT-RFC-50 — V8 → V10 "pool & allocate" migration
+    // V8 → V10 "pool & allocate" migration
     // ========================================================================
     //
-    // Admin-push (OT-RFC-50): the protocol drains EVERY wallet's V8 stake across
+    // Admin-push: the protocol drains EVERY wallet's V8 stake across
     // its source nodes into that wallet's in-protocol migration credit, via
     // `adminDrainBatch` (bulk) / `adminMigrateToCredit` (single delegator) —
     // both onlyOwnerOrMultiSigOwner. Users never drain themselves; they only
     // call `allocate` to spend their pre-populated credit into V10 conviction
     // positions (node + amount + tier), repeatably. A tier-6/12 allocation earns
-    // the conviction lock-credit (rev 5: universal — no eligibility registry).
+    // the conviction lock-credit (universal — no eligibility registry).
     // Credit is non-withdrawable as credit; `allocate` is its only sink — but a
     // tier-0 allocation carries no lock and is immediately withdrawable, so
     // drained funds are always recoverable to the wallet in two txs. The credit
@@ -591,7 +591,7 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     ///         node side. Each index `i` is ONE (node, operator) pair: the V8
     ///         operator fee on `identityIds[i]` (resting balance + open
     ///         withdrawal request) is moved into `operators[i]`'s migration
-    ///         credit (OT-RFC-50 §0 Option B — the SAME bucket as delegator
+    ///         credit (the SAME bucket as delegator
     ///         stake). `operators[i]` MUST currently hold ADMIN_KEY on the node
     ///         (validated in `StakingV10.drainOperatorFeeToCredit`, which
     ///         REVERTS a stale/wrong address) — so a mis-resolved operator
@@ -645,7 +645,7 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     /// @notice Spend `amount` of the caller's migration credit into a fresh V10
     ///         conviction position on `targetNode` at `lockTier`. Repeatable
     ///         until the credit is spent. Any tier-6/12 allocation receives the
-    ///         conviction lock-credit (rev 5: universal).
+    ///         conviction lock-credit (universal).
     function allocate(
         uint72 targetNode,
         uint96 amount,
@@ -685,7 +685,7 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
         stakingV10.setConvictionCreditSeconds(secondsValue);
     }
 
-    // ---- Migration credit views (forward to the CSS ledger, OT-RFC-50 §0 Option B) ----
+    // ---- Migration credit views (forward to the CSS ledger) ----
 
     function migrationCredit(address user) external view returns (uint96) {
         return convictionStakingStorage.migrationCredit(user);
@@ -713,8 +713,7 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     // Mint/burn/transfer all flow through `_update`. For transfers, we do
     // NOT settle rewards, reset `lastClaimedEpoch`, or touch the position —
     // the NFT carries its unclaimed rewards like a bond with accrued
-    // coupon. See `V10_CONTRACTS_REDESIGN_v2.md §"NFT transfer model:
-    // accrued-interest"` and the Phase 5 decisions doc Q8.
+    // coupon (the accrued-interest NFT transfer model).
     //
     // The body is a pure `super._update` pass-through; this explicit
     // override exists to (a) document the intent and (b) satisfy the

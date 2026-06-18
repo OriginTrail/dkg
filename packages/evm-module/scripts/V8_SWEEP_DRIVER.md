@@ -1,4 +1,4 @@
-# V8 → V10 sweep driver (OT-RFC-50 cutover)
+# V8 → V10 sweep driver (migration cutover)
 
 `scripts/v8-sweep-driver.ts` drains **every** V8 position into V10 migration
 credit, signed by the Hub owner:
@@ -9,21 +9,16 @@ credit, signed by the Hub owner:
   request) → the operator's **same** credit bucket, via
   `adminDrainOperatorFeesBatch` over `(node, operator)` pairs.
 
-Because OT-RFC-50 removed self-service migration, **this driver is the only path
-that empties V8** — so completeness is the whole game, and the success criterion
-is a **physically empty StakingStorage vault** (`balanceOf(SS) ≤ dust`) before
-the V8 `Staking` contract is unregistered.
+This driver is the only path that empties V8, so completeness is the whole game,
+and the success criterion is a **physically empty StakingStorage vault**
+(`balanceOf(SS) ≤ dust`) before the V8 `Staking` contract is unregistered.
 
 ## Why it's complete (not "enumerate and hope")
 
 - **Delegator fast path:** `DelegatorsInfo.getDelegators(id)` — cheap, but **not
-  complete on its own**. `DelegatorsInfo` was deployed *months after*
-  `StakingStorage` on the real V8 chains (Base mainnet: SS 2024-12-25, DI
-  2025-06-24), so `addDelegator` never fired for pre-DI stakers — they appear in
-  neither `getDelegators` nor the `DelegatorAdded` log. On the Base Sepolia fork,
-  **34% of active stake (7.77M across 14 nodes) was invisible** to it. Use it as a
-  fast first pass only.
-- **Genesis-complete recovery:** every V8 stake did
+  guaranteed to list every delegator on its own**, so use it only as a fast first
+  pass and rely on the complete recovery below to catch the rest.
+- **Complete recovery:** every V8 stake did
   `token.transferFrom(staker, StakingStorage, …)` ([`archive/Staking.sol:148`](../contracts/archive/Staking.sol#L148)),
   so **`Token.Transfer(to = StakingStorage)` from the `StakingStorage` deploy
   block is the complete delegator-address universe** (a superset — non-delegator
@@ -113,8 +108,8 @@ reconcile (`drained == stake + pending + fees`), and the **empty-vault gate**
 `balanceOf(SS) ≤ DUST_TOLERANCE`. It prints `✅ SWEEP COMPLETE` only when all
 hold; otherwise `❌ INCOMPLETE` (re-run — idempotent — or resolve the residual).
 
-**Hard prerequisite:** deploy onto each chain's **V8-stake-holding freeze Hub**
-(Base `0x99Aa…` / Gnosis `0x882D…` / NeuroWeb), not a fresh Hub — else there's
+**Hard prerequisite:** deploy onto each chain's **V8-stake-holding Hub** (the one
+that already holds that chain's V8 stake), not a fresh Hub — else there's
 no V8 stake to read. Address overrides (`TARGET_SS`, `TARGET_NFT`,
 `TARGET_DELEGATORS_INFO`, `TARGET_IDENTITY_STORAGE`, `TARGET_TOKEN`) are accepted
 when contracts aren't resolvable via the Hub.

@@ -1,10 +1,10 @@
 // =============================================================================
-// OT-RFC-50 — V8 → V10 "pool & allocate" migration
+// V8 → V10 "pool & allocate" stake migration
 // =============================================================================
 //
-// Admin-push (OT-RFC-50, rev 5): the protocol drains every wallet's V8 stake
+// Admin-push: the protocol drains every wallet's V8 stake
 // across the given source nodes into ONE in-protocol migration credit on CSS
-// (Option B ledger) — via adminMigrateToCredit (single delegator) /
+// (single credit ledger) — via adminMigrateToCredit (single delegator) /
 // adminDrainBatch (bulk, flattened (delegator,node) pairs, skip-zero). There is
 // NO self-service startMigration and NO eligibility registry. allocate then lets
 // the USER spend that pre-populated credit into fresh V10 conviction positions
@@ -77,7 +77,7 @@ async function deployFixture(): Promise<Fixture> {
   };
 }
 
-describe('@integration OT-RFC-50 pool & allocate migration', function () {
+describe('@integration pool & allocate migration', function () {
   // The first loadFixture deploy spins up the full stack and can exceed mocha's
   // 40s default in this worktree; raise the ceiling so the cold deploy fits.
   this.timeout(300_000);
@@ -136,7 +136,7 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
     return v8Key;
   };
 
-  // Set the conviction credit (owner). rev 5: no eligibility registry / freeze —
+  // Set the conviction credit (owner). No eligibility registry / freeze —
   // the lock-credit is universal on 6/12. The optional arg is ignored (call
   // sites retained to keep the diff small).
   const armCredit = async (_eligible?: Array<[number, string]>) => {
@@ -209,7 +209,7 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       const rcpt = await tx.wait();
       const blockTs = BigInt((await hre.ethers.provider.getBlock(rcpt!.blockNumber))!.timestamp);
 
-      // creditApplied = true for any tier-12 migration allocation (rev 5: universal).
+      // creditApplied = true for any tier-12 migration allocation (universal).
       await expect(tx).to.emit(NFT, 'Allocated').withArgs(d.address, 1n, id, stake, 12n, true);
 
       const pos = await CSS.getPosition(1);
@@ -438,8 +438,8 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
   });
 
   // ===========================================================================
-  // adminDrainOperatorFeesBatch — node-side operator-fee drain. OT-RFC-50 §0
-  // Option B ("one credit"): the V8 operator fee (resting balance + any open
+  // adminDrainOperatorFeesBatch — node-side operator-fee drain.
+  // One-credit model: the V8 operator fee (resting balance + any open
   // fee-withdrawal request) folds into the operator's SAME migrationCredit
   // bucket as delegator stake, recovered via allocate (tier 0 → liquid, or
   // 6/12 → conviction) exactly like a delegator. The operator address is

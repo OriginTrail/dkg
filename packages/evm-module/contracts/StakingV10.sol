@@ -117,7 +117,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     //   3.1.0 — V8→V10 migration conviction credit (CSS v4.1.0):
     //           * `allocateFromCredit`, for migrants picking lockTier 6 or 12,
     //             shortens the V10 NFT's default `expiryTimestamp` by
-    //             `convictionCreditSeconds` (rev 5: universal — no eligibility
+    //             `convictionCreditSeconds` (universal — no eligibility
     //             registry; every 6/12 migration allocation earns it).
     //           * `convictionStorage.createPosition(...)` calls now pass the
     //             new `expiryShortenedBy` arg (CSS v4.1.0). `stake` always
@@ -761,8 +761,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             // operator-fee math, nothing to settle. Skipping here collapses a
             // dormant-epoch iteration from ~25k gas (4 SLOADs + 1 SSTORE for
             // the fee flag) to ~2k gas (single SLOAD + continue). This is
-            // what keeps long-dormant tier-0 positions claimable; see the
-            // dormancy-bomb finding in CODE_REVIEW_V10_D26.md §H1.
+            // what keeps long-dormant tier-0 positions claimable.
             uint256 scorePerStake36 = randomSamplingStorage.getEpochLastScorePerStake(identityId, e);
             if (scorePerStake36 == 0) continue;
 
@@ -860,7 +859,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     // ========================================================================
-    // OT-RFC-50 — V8→V10 "pool & allocate" migration workers
+    // V8→V10 "pool & allocate" migration workers
     // ========================================================================
     //
     // The NFT wrapper (DKGStakingConvictionNFT) is the only caller
@@ -875,7 +874,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         credit on CSS. Returns the drained `total` so the wrapper can
     ///         aggregate across nodes and revert if the grand total is zero;
     ///         a node with no V8 stake contributes 0 (no revert here).
-    /// @dev    rev 5 — no per-source eligibility: the full drained amount is
+    /// @dev    no per-source eligibility: the full drained amount is
     ///         credited to the delegator; the tier-6/12 lock-credit is decided
     ///         later in `allocateFromCredit` from the chosen tier.
     function drainV8ToCredit(
@@ -917,7 +916,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         `operator`'s migration credit on CSS. Returns the drained
     ///         `total`; a node with no fee contributes 0 (no revert here), so
     ///         the wrapper can sweep in bulk.
-    /// @dev    OT-RFC-50 §0 Option B ("one credit"): the operator fee folds
+    /// @dev    "one credit": the operator fee folds
     ///         into the SAME `migrationCredit` bucket as delegator stake, so
     ///         the operator recovers it exactly like a delegator — `allocate`
     ///         at tier 0 (immediately withdrawable) or 6/12 (conviction).
@@ -974,7 +973,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         conviction position on `targetNode` at `lockTier`. Runs the full
     ///         stake tail (score-cursor baseline → createPosition → sharding
     ///         insert → ask recalc). Any tier-6/12 allocation applies the
-    ///         `convictionCreditSeconds` lock-shortening (universal, rev 5). The
+    ///         `convictionCreditSeconds` lock-shortening (universal). The
     ///         wrapper supplies `tokenId` and mints after.
     function allocateFromCredit(
         address staker,
@@ -1000,7 +999,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         }
 
         // Debit credit (reverts if amount == 0 or > migrationCredit). The
-        // tier-6/12 conviction lock-credit is universal under rev 5 — any 6/12
+        // tier-6/12 conviction lock-credit is universal — any 6/12
         // migration allocation earns it (no per-staker eligibility).
         cs.spendMigrationCredit(staker, amount);
         // `creditApplied` must reflect shortening that was ACTUALLY applied:
@@ -1029,7 +1028,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
 
     /// @notice Set the V8→V10 conviction lock-credit (seconds) on CSS. Driven
     ///         by the owner-gated `setConvictionCreditSeconds` entrypoint on the
-    ///         NFT wrapper (rev 5: no freeze gate; settable any time pre-sweep).
+    ///         NFT wrapper (no freeze gate; settable any time pre-sweep).
     function setConvictionCreditSeconds(uint40 secondsValue) external onlyConvictionNFT {
         convictionStorage.setConvictionCreditSeconds(secondsValue);
     }

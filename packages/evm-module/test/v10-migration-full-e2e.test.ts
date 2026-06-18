@@ -8,7 +8,7 @@
 // Hub as the V10 stack and has delegators stake through the GENUINE V8 flow:
 //   Token.approve → Staking.stake() → transferFrom(staker → StakingStorage),
 //   DelegatorsInfo.addDelegator, node/total stake increase, real Transfer logs.
-// Then it runs the whole OT-RFC-50 cutover (freeze → sweep → allocate → recover)
+// Then it runs the whole V8→V10 cutover (freeze → sweep → allocate → recover)
 // against that real state — incl. the genesis Token.Transfer enumeration, which
 // only real stake flows produce.
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
@@ -58,7 +58,7 @@ async function deployFixture() {
   };
 }
 
-describe('@integration OT-RFC-50 FULL e2e — real V8 Staking + real V10 on one Hub', function () {
+describe('@integration FULL e2e — real V8 Staking + real V10 on one Hub', function () {
   this.timeout(600_000);
   let fx: Awaited<ReturnType<typeof deployFixture>>;
 
