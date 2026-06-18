@@ -16,17 +16,28 @@ the V8 `Staking` contract is unregistered.
 
 ## Why it's complete (not "enumerate and hope")
 
-- **Delegator fast path:** `DelegatorsInfo.getDelegators(id)`. The V8 `Staking`
-  contract registers a delegator (`addDelegator`) **in lockstep with every
-  `stakeBase` increase** — including operator self-stake — so this is complete
-  for *active* stake.
-- **The one delegator gap:** a delegator who fully withdrew (`stakeBase → 0`, no
-  current-epoch score) is **removed** from `getDelegators` but may still hold a
-  **pending withdrawal**, whose TRAC is *excluded* from `getNodeStake` /
-  `getTotalStake`. The driver recovers these by scanning `DelegatorsInfo`
-  **`DelegatorAdded(id, address)`** logs (the complete historical address
-  universe) — but only when the pre-sweep vault decomposition shows pending
-  actually exists.
+- **Delegator fast path:** `DelegatorsInfo.getDelegators(id)` — cheap, but **not
+  complete on its own**. `DelegatorsInfo` was deployed *months after*
+  `StakingStorage` on the real V8 chains (Base mainnet: SS 2024-12-25, DI
+  2025-06-24), so `addDelegator` never fired for pre-DI stakers — they appear in
+  neither `getDelegators` nor the `DelegatorAdded` log. On the Base Sepolia fork,
+  **34% of active stake (7.77M across 14 nodes) was invisible** to it. Use it as a
+  fast first pass only.
+- **Genesis-complete recovery:** every V8 stake did
+  `token.transferFrom(staker, StakingStorage, …)` ([`archive/Staking.sol:148`](../contracts/archive/Staking.sol#L148)),
+  so **`Token.Transfer(to = StakingStorage)` from the `StakingStorage` deploy
+  block is the complete delegator-address universe** (a superset — non-delegator
+  senders read 0 stake and are skipped). The driver scans it whenever there's an
+  active-stake gap (`enumerated active < getTotalStake`) or leftover vault TRAC,
+  collects the candidate `from` set, and probes each candidate's stake across all
+  nodes. Set `EVENT_SCAN_FROM` to the SS deploy block; the full scan needs an
+  **archive RPC** (public endpoints cap `getLogs` at ~2000 blocks).
+- **Backstop for the residual tail:** a position grown *purely* from restaked
+  rewards has no fresh deposit `Transfer` (reward TRAC comes from the epoch pool),
+  so even the Transfer scan can miss it. The on-chain **`selfMigrate`** lets any
+  such straggler drain their own stake (keyed by `keccak256(msg.sender)`) — so no
+  one is ever stranded even if enumeration misses them. (Admin-push stays primary;
+  `selfMigrate` is insurance, not a reason to ship a weaker scanner.)
 - **Operator fees are enumerated id-keyed** over every node 1..`lastIdentityId`
   (`getOperatorFeeBalance` + `getOperatorFeeWithdrawalRequestAmount`), so
   *finding* a fee needs no address and is complete by construction. To *drain*

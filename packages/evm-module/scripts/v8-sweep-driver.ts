@@ -12,16 +12,21 @@
 // THIS is the only path that empties V8 — so it must be provably complete (the
 // vault must end EMPTY, ≤ dust). It is, by construction:
 //
-//   * Enumeration (fast path): DelegatorsInfo.getDelegators(id). The V8 Staking
-//     contract registers a delegator (addDelegator, lockstep with every
-//     stakeBase increase incl. operator self-stake) — so getDelegators is
-//     COMPLETE for active stake.
-//   * The one gap: a delegator who fully withdrew (stakeBase→0, no current-epoch
-//     score) is removed from getDelegators but may still hold a PENDING
-//     withdrawal — whose TRAC is excluded from getNodeStake/getTotalStake. We
-//     recover those by scanning DelegatorsInfo `DelegatorAdded(id, address)`
-//     logs (the complete historical address universe) — but ONLY when the
-//     pre-sweep vault decomposition shows pending actually exists.
+//   * Enumeration (fast path): DelegatorsInfo.getDelegators(id) — cheap, but NOT
+//     complete on its own: DelegatorsInfo was deployed months AFTER StakingStorage
+//     on the real V8 chains, so addDelegator never fired for pre-DI stakers and
+//     they appear in neither getDelegators NOR DelegatorAdded (the Base Sepolia
+//     fork showed 34% of active stake invisible to it). Treat it as a fast first
+//     pass only.
+//   * Genesis-complete recovery: every V8 stake did
+//     `token.transferFrom(staker, StakingStorage)` (archive/Staking.sol:148), so
+//     Token.Transfer(to = StakingStorage) from the StakingStorage deploy block is
+//     the COMPLETE delegator-address universe (a superset; non-delegator senders
+//     read 0 and are skipped). We scan it whenever there's an active-stake gap or
+//     leftover vault TRAC, then probe each candidate's stake across all nodes.
+//     Set EVENT_SCAN_FROM to the SS deploy block; the full scan needs an archive
+//     RPC. Residual tail (positions grown purely from restaked rewards, which
+//     have no fresh deposit Transfer) is caught by the on-chain `selfMigrate`.
 //   * Operator fees: enumerated id-keyed over every node (getOperatorFeeBalance
 //     + open fee-withdrawal request) — COMPLETE by construction, no address
 //     needed to FIND a fee. To DRAIN one, migrationCredit is address-keyed but
@@ -213,51 +218,60 @@ async function main() {
   }
   console.log(`  ${pairs.length} drainable pairs from getDelegators`);
 
-  // ---- recover pending-only delegators (removed from getDelegators) ----
+  // ---- genesis-complete recovery: Token.Transfer(to=StakingStorage) ----
   // The unaccounted non-fee, non-active vault TRAC. If >0 there ARE pending
   // amounts (or rewards/dust) the active sweep won't move, so scan for them.
   let enumeratedPending = pairs.reduce((s, p) => s + p.pend, 0n);
   let enumeratedActive = pairs.reduce((s, p) => s + p.base, 0n);
   let unattributed = vaultBefore - totalStake - feeDrainable - enumeratedPending;
   let activeGap = totalStake - enumeratedActive;
-  // The DelegatorAdded scan recovers delegators MISSING from getDelegators:
-  // pending-only ones (removed on zero stake), AND — on V8 deployments where
-  // DelegatorsInfo was populated late — ACTIVE delegators never registered there.
-  // Trigger on EITHER signal: leftover vault TRAC, OR an active-stake gap
-  // (enumerated active < getTotalStake, the authoritative active-stake read).
-  // Keying only off the vault misses the active gap when the vault is
-  // under-collateralized (vault < totalStake ⇒ unattributed negative).
+  // getDelegators (and DelegatorAdded) only know delegators registered SINCE
+  // DelegatorsInfo was deployed — which on real V8 chains was months after
+  // StakingStorage, so pre-DI stakers are invisible to both. But every V8 stake
+  // did `token.transferFrom(staker, StakingStorage, …)` (archive/Staking.sol:148),
+  // so Token.Transfer(to = StakingStorage) is the COMPLETE genesis delegator-
+  // address universe (a superset — non-delegator senders just read 0 stake and
+  // are skipped). Trigger on leftover vault TRAC OR an active-stake gap
+  // (enumerated active < getTotalStake) — the latter fires even when the vault is
+  // under-collateralized (unattributed negative). Set EVENT_SCAN_FROM to the
+  // StakingStorage deploy block; the full genesis scan needs an archive RPC.
+  // (NB: a position grown purely from restaked rewards has no fresh deposit
+  // Transfer — that residual tail is covered by the on-chain `selfMigrate`.)
   if (unattributed > DUST_TOLERANCE || activeGap > DUST_TOLERANCE) {
     console.log(
       `\nRecovering delegators missing from getDelegators (unattributed vault ${fmt(unattributed)}, ` +
-        `active-stake gap ${fmt(activeGap)}) — scanning DelegatorAdded logs (full historical address set) …`,
+        `active-stake gap ${fmt(activeGap)}) — scanning Token.Transfer(to=StakingStorage) from block ` +
+        `${EVENT_SCAN_FROM} for the complete genesis delegator set …`,
     );
-    const added = DI.filters.DelegatorAdded();
+    const depositFilter = Token.filters.Transfer(null, ssAddr); // to == StakingStorage (indexed)
     const latest = await hre.ethers.provider.getBlockNumber();
-    let extra = 0;
+    const candidates = new Set<string>();
     for (let from = EVENT_SCAN_FROM; from <= latest; from += EVENT_SCAN_STEP + 1) {
       const to = Math.min(from + EVENT_SCAN_STEP, latest);
-      let logs: any[] = [];
       try {
-        logs = await DI.queryFilter(added, from, to);
+        const logs = await retry(() => Token.queryFilter(depositFilter, from, to));
+        for (const log of logs) {
+          const a = (log.args.from as string).toLowerCase();
+          if (a !== hre.ethers.ZeroAddress) candidates.add(a);
+        }
       } catch (e: any) {
         scanDegraded = true;
         console.log(
-          `  ⚠️  getLogs FAILED for blocks [${from}, ${to}] — window SKIPPED (scan now INCOMPLETE): ` +
-            `${e?.shortMessage ?? e?.message ?? e}. If this repeats every window, LOWER EVENT_SCAN_STEP ` +
-            `(provider range cap) — do NOT widen EVENT_SCAN_FROM.`,
+          `  ⚠️  getLogs FAILED for blocks [${from}, ${to}] — window SKIPPED (scan INCOMPLETE): ` +
+            `${e?.shortMessage ?? e?.message ?? e}. LOWER EVENT_SCAN_STEP (provider range cap) or use an archive RPC.`,
         );
-        continue;
       }
-      for (const log of logs) {
-        const id = Number(log.args.identityId);
-        const d = log.args.delegator as string;
-        const tag = `${id}:${d.toLowerCase()}`;
+    }
+    console.log(`  ${candidates.size} candidate addresses from deposit Transfers; probing stake across ${lastId} node(s) …`);
+    let extra = 0;
+    for (const addr of candidates) {
+      for (let id = 1; id <= lastId; id++) {
+        const tag = `${id}:${addr}`;
         if (seen.has(tag)) continue;
         seen.add(tag);
-        const { base, pend } = await readPair(id, d);
+        const { base, pend } = await readPair(id, addr);
         if (base + pend > 0n) {
-          pairs.push({ id, delegator: d, base, pend });
+          pairs.push({ id, delegator: addr, base, pend });
           extra++;
         }
       }
@@ -285,18 +299,19 @@ async function main() {
   console.log(`  unattributed vault TRAC (after fees + enumerated pending): ${fmt(unattributed)}`);
 
   // active-stake gap: getTotalStake is exact, so enumeratedActive < totalStake ⇒
-  // a missing active delegator the DelegatorAdded scan (above) could not recover.
+  // a missing active delegator the Token.Transfer scan (above) could not recover.
   if (activeGap > 0n) {
     console.log(
       `\n  🔴 ACTIVE-STAKE GAP: getTotalStake ${fmt(totalStake)} but enumeration found only ${fmt(enumeratedActive)} ` +
         `active — ${fmt(activeGap)} TRAC belongs to a delegator NOT recoverable via DelegatorsInfo (not in ` +
-        `getDelegators OR DelegatorAdded). Needs a deeper enumeration source before executing.`,
+        `getDelegators OR the Token.Transfer scan from EVENT_SCAN_FROM). Widen the scan (EVENT_SCAN_FROM = ` +
+        `StakingStorage deploy block, archive RPC), or have the straggler call selfMigrate, before executing.`,
     );
   }
   if (unattributed > DUST_TOLERANCE) {
     console.log(
       `\n  🔴 UNATTRIBUTED VAULT TRAC: ${fmt(unattributed)} is NOT explained by active stake + enumerated pending + ` +
-        `operator fees. It is EITHER a missed pending delegator (widen the DelegatorAdded scan) OR unclaimed ` +
+        `operator fees. It is EITHER a missed pending delegator (widen the Token.Transfer scan) OR unclaimed ` +
         `rewards/dust. Characterize it (and set DUST_TOLERANCE if benign) before certifying COMPLETE.`,
     );
   }
@@ -335,7 +350,7 @@ async function main() {
   const blockers: string[] = [];
   if (activeGap > 0n) blockers.push(`active-stake gap ${fmt(activeGap)} (a delegator missing from DelegatorsInfo)`);
   if (unattributed > DUST_TOLERANCE) blockers.push(`unattributed vault ${fmt(unattributed)} > dust ${fmt(DUST_TOLERANCE)}`);
-  if (scanDegraded) blockers.push('the DelegatorAdded pending scan was degraded/incomplete (lower EVENT_SCAN_STEP)');
+  if (scanDegraded) blockers.push('the Token.Transfer genesis scan was degraded/incomplete (lower EVENT_SCAN_STEP / archive RPC)');
   if (unresolvedFee.length > 0) blockers.push(`${unresolvedFee.length} fee-bearing node(s) with no current ADMIN_KEY address`);
   if (blockers.length > 0) {
     console.log('\n🛑 PREFLIGHT BLOCKED — no transaction sent:');
