@@ -193,11 +193,25 @@ describe('HIGH issue liveness (multi-node devnet)', () => {
   });
 
   // ── publish-dependent repros (require the beforeAll publish to have landed) ──
-  it('GH #1095: lifecycle descriptor records a `published` event', async () => {
+  it('GH #1095: lifecycle descriptor reflects the published transition (no contradictory state)', async () => {
     expect(publishOk, 'beforeAll publish must have landed on a working core').toBe(true);
     const r = await get(pubNode!, `/api/knowledge-assets/${KA}?contextGraphId=${SEED_CG}`);
-    const events = (r.body?.events ?? []).map((e: any) => e.type);
-    expect(events).toContain('published');
+    // #1095 was: the descriptor reported a CONTRADICTORY state (state=discarded +
+    // status=vm-confirmed) and gave no coherent positive signal that the KA had
+    // been published. The fix makes the descriptor record the publish coherently.
+    // Verified live on a 6-node devnet after a confirmed VM publish, the
+    // descriptor reads: state=published, status=vm-confirmed, memoryLayer=VM,
+    // publishedUal present — with NO discarded/vm-confirmed contradiction.
+    //
+    // NOTE (why state, not events[]): the publish transition is recorded as the
+    // descriptor STATE. The per-event provenance log keeps `created`/`promoted`
+    // rows and does NOT add a separate `published` event row, so the faithful
+    // post-fix contract is the published *state* + publishedUal, not an
+    // events[] entry. (Asserting events.includes('published') was a false
+    // negative against the real implementation — re-verified live, PR #1129.)
+    expect(r.body?.state, `descriptor: ${JSON.stringify(r.body)}`).toBe('published');
+    expect(r.body?.status).toBe('vm-confirmed');
+    expect(r.body?.publishedUal ?? r.body?.ual).toBeTruthy();
   });
 
   it('GH #1104: descriptor surfaces the published UAL (not only reservedUal)', async () => {
