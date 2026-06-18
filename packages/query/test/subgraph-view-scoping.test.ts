@@ -22,7 +22,7 @@
  */
 import { describe, expect, it, beforeEach } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { contextGraphLayerUri, MemoryLayer } from '@origintrail-official/dkg-core';
+import { contextGraphLayerUri, contextGraphMetaUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 
 const CG = 'subgraph-view-cg';
@@ -49,9 +49,19 @@ describe('GH #184 / #675 — sub-graph scoping in view-based WM reads', () => {
   beforeEach(async () => {
     store = new OxigraphStore();
     engine = new DKGQueryEngine(store);
+    // Register the `research-alpha` sub-graph in the ROOT _meta graph — this is
+    // the registry the merged #675 fan-out (discoverRegisteredSubGraphNames)
+    // reads to know which sub-graphs to union into an unscoped view read. The
+    // original test seeded only the WM data graphs, so the fan-out found nothing
+    // to union; with the fix landed (commit d7a055dea), the registration is what
+    // the engine requires (mirrors the passing sub-graph-query.test.ts #675 test).
+    const META = contextGraphMetaUri(CG);
+    const SUBGRAPH_URN = `urn:dkg:subgraph:${CG}:${SUB}`;
     await store.insert([
       q(ROOT_ENTITY, NAME, '"RootEntity"', ROOT_WM_GRAPH),
       q(SUB_ENTITY, NAME, '"SubGraphEntity"', SUB_WM_GRAPH),
+      q(SUBGRAPH_URN, 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://dkg.io/ontology/SubGraph', META),
+      q(SUBGRAPH_URN, 'http://schema.org/name', `"${SUB}"`, META),
     ]);
   });
 

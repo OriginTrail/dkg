@@ -10,11 +10,13 @@
  * ACL; `skill_request` is the outlier.
  *
  * This test asserts the CORRECT (post-fix) behaviour — an UNAUTHORIZED peer's
- * skill_request is rejected and the skill handler is NOT executed — so it is RED
- * today (no ACL: the handler runs and returns success) and turns GREEN once a
- * default-deny authorization gate is added to the skill_request dispatch. It
- * stays red until #462 is fixed. Hermetic — two in-process MessageHandlers over
- * a stub router, no libp2p.
+ * skill_request is rejected and the skill handler is NOT executed. GH #462 is
+ * FIXED: MessageHandler now exposes a skill-ACL gate (`setSkillAcl`) and the
+ * daemon installs a default-deny policy for every node
+ * (packages/cli/src/daemon/lifecycle.ts) — a bare library MessageHandler stays
+ * accept-all for back-compat. The test installs that same default-deny gate and
+ * verifies the unauthorized peer is denied (handler never runs). Hermetic — two
+ * in-process MessageHandlers over a stub router, no libp2p.
  */
 import { describe, it, expect, vi } from 'vitest';
 import {
@@ -95,6 +97,17 @@ describe('GH #462 — skill_request must be authorization-gated, not just authen
       // any authorization — they merely share a libp2p connection.
       const skillHandler = vi.fn(async () => ({ success: true, outputData: new TextEncoder().encode('did-the-thing') }));
       victim.registerSkill(SKILL, skillHandler as never);
+
+      // GH #462 fix: skill_request authorization is enforced by an installed ACL
+      // gate (MessageHandler.setSkillAcl). The DAEMON wires a default-deny policy
+      // for every node (packages/cli/src/daemon/lifecycle.ts); a bare library
+      // MessageHandler is intentionally accept-all for back-compat. Install the
+      // same default-deny gate so this test exercises the real #462 layer — an
+      // unauthorized peer is denied before the skill is dispatched.
+      victim.setSkillAcl((senderPeerId: string) => ({
+        accept: false,
+        reason: `unauthorized: ${senderPeerId} may not invoke skills (default-deny, GH #462)`,
+      }));
 
       const res = await attacker.sendSkillRequest(PEER_VICTIM, {
         skillUri: SKILL,
