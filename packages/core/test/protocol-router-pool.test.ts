@@ -36,7 +36,9 @@ class FakeStream {
   readonly sent: Uint8Array[] = [];
   private readBuf: Uint8Array[] = [];
   private waiters: Array<(v: IteratorResult<Uint8Array>) => void> = [];
+  private closeListeners: EventListener[] = [];
   private ended = false;
+  private closeEmitted = false;
 
   send(data: Uint8Array): void {
     if (this.writeStatus !== 'open') throw new Error('closed');
@@ -50,11 +52,24 @@ class FakeStream {
     else this.readBuf.push(data);
   }
 
+  feedAndAbortAfterDelivery(data: Uint8Array, error = new Error('stream closed after request frame')): void {
+    if (this.ended) return;
+    const w = this.waiters.shift();
+    if (w) {
+      w({ value: data, done: false });
+      queueMicrotask(() => this.abort(error));
+    } else {
+      this.readBuf.push(data);
+      queueMicrotask(() => this.abort(error));
+    }
+  }
+
   endRemote(): void {
     this.ended = true;
     while (this.waiters.length) {
       this.waiters.shift()!({ value: undefined as unknown as Uint8Array, done: true });
     }
+    this.emitClose();
   }
 
   abort(_err: Error): void {
@@ -64,6 +79,24 @@ class FakeStream {
 
   async close(): Promise<void> {
     this.writeStatus = 'closed';
+    this.emitClose();
+  }
+
+  addEventListener(type: 'close', listener: EventListener, _options?: { once?: boolean }): void {
+    if (type === 'close') this.closeListeners.push(listener);
+  }
+
+  removeEventListener(type: 'close', listener: EventListener): void {
+    if (type !== 'close') return;
+    this.closeListeners = this.closeListeners.filter((entry) => entry !== listener);
+  }
+
+  private emitClose(): void {
+    if (this.closeEmitted) return;
+    this.closeEmitted = true;
+    for (const listener of this.closeListeners.splice(0)) {
+      listener(new Event('close'));
+    }
   }
 
   [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
@@ -644,6 +677,525 @@ describe('ProtocolRouter pooled inbound handler', () => {
     expect(parsed[0].type).toBe(FrameType.RESPONSE);
     expect(new TextDecoder().decode(parsed[0].payload)).toBe('echo:hi');
 
+    await router.closePooling();
+  });
+
+  it('removes the node stop listener after successful pooled inbound handling', async () => {
+    type HandlerFn = (
+      stream: import('@libp2p/interface').Stream,
+      connection: { remotePeer: { toString: () => string; toMultihash: () => { bytes: Uint8Array } } },
+    ) => void | Promise<void>;
+    let inboundHandler: HandlerFn | null = null;
+    const stopController = new AbortController();
+    let adds = 0;
+    let removes = 0;
+    const originalAdd = stopController.signal.addEventListener.bind(stopController.signal);
+    const originalRemove = stopController.signal.removeEventListener.bind(stopController.signal);
+    stopController.signal.addEventListener = ((type, listener, options) => {
+      if (type === 'abort') adds += 1;
+      return originalAdd(type, listener, options);
+    }) as AbortSignal['addEventListener'];
+    stopController.signal.removeEventListener = ((type, listener, options) => {
+      if (type === 'abort') removes += 1;
+      return originalRemove(type, listener, options);
+    }) as AbortSignal['removeEventListener'];
+    const node = {
+      get stopSignal() {
+        return stopController.signal;
+      },
+      libp2p: {
+        dialProtocol: async () => {
+          throw new Error('not used');
+        },
+        handle: (_protocolId: string, handler: HandlerFn) => {
+          if (_protocolId === POOLED_MESSAGE_PROTOCOL) {
+            inboundHandler = handler;
+          }
+        },
+        unhandle: () => undefined,
+        getConnections: () => [],
+        peerStore: { get: async () => ({ addresses: [] }) },
+      },
+    } as unknown as DKGNode;
+
+    try {
+      const router = new ProtocolRouter(node);
+      router.enablePooling('/dkg/10.0.1/message', {
+        keepaliveIntervalMs: 0,
+        idleTimeoutMs: 0,
+        peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+      });
+      router.register('/dkg/10.0.1/message', async () => new TextEncoder().encode('ok'));
+
+      expect(inboundHandler).toBeDefined();
+      const inboundStream = new FakeStream();
+      inboundHandler!(inboundStream as unknown as import('@libp2p/interface').Stream, {
+        remotePeer: {
+          toString: () => PEER_NEW,
+          toMultihash: () => ({ bytes: new Uint8Array() }),
+        },
+      });
+      await flush();
+      inboundStream.feed(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('hi')));
+      await flush();
+
+      expect(inboundStream.sent.length).toBeGreaterThanOrEqual(1);
+      expect(adds).toBeGreaterThan(0);
+      expect(removes).toBe(adds);
+
+      inboundStream.endRemote();
+      await router.closePooling();
+    } finally {
+      stopController.signal.addEventListener = originalAdd as AbortSignal['addEventListener'];
+      stopController.signal.removeEventListener = originalRemove as AbortSignal['removeEventListener'];
+    }
+  });
+
+  it('passes a stream abort signal to pooled application handlers', async () => {
+    type HandlerFn = (
+      stream: import('@libp2p/interface').Stream,
+      connection: { remotePeer: { toString: () => string; toMultihash: () => { bytes: Uint8Array } } },
+    ) => void | Promise<void>;
+    let inboundHandler: HandlerFn | null = null;
+    const node = {
+      libp2p: {
+        dialProtocol: async () => {
+          throw new Error('not used');
+        },
+        handle: (_protocolId: string, handler: HandlerFn) => {
+          if (_protocolId === POOLED_MESSAGE_PROTOCOL) {
+            inboundHandler = handler;
+          }
+        },
+        unhandle: () => undefined,
+        getConnections: () => [],
+        peerStore: { get: async () => ({ addresses: [] }) },
+      },
+    } as unknown as DKGNode;
+
+    const router = new ProtocolRouter(node);
+    router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+
+    let seenSignal: AbortSignal | undefined;
+    const signalAborted = new Promise<void>((resolve) => {
+      router.register('/dkg/10.0.1/message', async (_req, _peer, options) => {
+        seenSignal = options?.signal;
+        options?.signal?.addEventListener('abort', () => resolve(), { once: true });
+        await new Promise<never>((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(options.signal?.reason), { once: true });
+        });
+      });
+    });
+
+    expect(inboundHandler).toBeDefined();
+    const inboundStream = new FakeStream();
+    const inboundRun = inboundHandler!(inboundStream as unknown as import('@libp2p/interface').Stream, {
+      remotePeer: {
+        toString: () => PEER_NEW,
+        toMultihash: () => ({ bytes: new Uint8Array() }),
+      },
+    });
+    await flush();
+    inboundStream.feed(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('hi')));
+    await flush();
+
+    expect(seenSignal).toBeInstanceOf(AbortSignal);
+    expect(seenSignal?.aborted).toBe(false);
+
+    inboundStream.abort(new Error('test stream closed'));
+    await signalAborted;
+    expect(seenSignal?.aborted).toBe(true);
+    await inboundRun;
+
+    await router.closePooling();
+  });
+
+  it('skips pooled application handler dispatch when the stream aborts after the request frame is read', async () => {
+    type HandlerFn = (
+      stream: import('@libp2p/interface').Stream,
+      connection: { remotePeer: { toString: () => string; toMultihash: () => { bytes: Uint8Array } } },
+    ) => void | Promise<void>;
+    let inboundHandler: HandlerFn | null = null;
+    const node = {
+      libp2p: {
+        dialProtocol: async () => {
+          throw new Error('not used');
+        },
+        handle: (_protocolId: string, handler: HandlerFn) => {
+          if (_protocolId === POOLED_MESSAGE_PROTOCOL) {
+            inboundHandler = handler;
+          }
+        },
+        unhandle: () => undefined,
+        getConnections: () => [],
+        peerStore: { get: async () => ({ addresses: [] }) },
+      },
+    } as unknown as DKGNode;
+
+    const router = new ProtocolRouter(node);
+    router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+
+    let handlerCalls = 0;
+    router.register('/dkg/10.0.1/message', async () => {
+      handlerCalls += 1;
+      return new TextEncoder().encode('should-not-send');
+    });
+
+    expect(inboundHandler).toBeDefined();
+    const inboundStream = new FakeStream();
+    const inboundRun = inboundHandler!(inboundStream as unknown as import('@libp2p/interface').Stream, {
+      remotePeer: {
+        toString: () => PEER_NEW,
+        toMultihash: () => ({ bytes: new Uint8Array() }),
+      },
+    });
+    await flush();
+    inboundStream.feedAndAbortAfterDelivery(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('hi')));
+    await inboundRun;
+
+    expect(handlerCalls).toBe(0);
+    expect(inboundStream.sent).toHaveLength(0);
+    await router.closePooling();
+  });
+
+  it('uses a fresh abort signal for each pooled request frame', async () => {
+    type HandlerFn = (
+      stream: import('@libp2p/interface').Stream,
+      connection: { remotePeer: { toString: () => string; toMultihash: () => { bytes: Uint8Array } } },
+    ) => void | Promise<void>;
+    let inboundHandler: HandlerFn | null = null;
+    const node = {
+      libp2p: {
+        dialProtocol: async () => {
+          throw new Error('not used');
+        },
+        handle: (_protocolId: string, handler: HandlerFn) => {
+          if (_protocolId === POOLED_MESSAGE_PROTOCOL) {
+            inboundHandler = handler;
+          }
+        },
+        unhandle: () => undefined,
+        getConnections: () => [],
+        peerStore: { get: async () => ({ addresses: [] }) },
+      },
+    } as unknown as DKGNode;
+
+    const router = new ProtocolRouter(node);
+    router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+
+    const seenSignals: AbortSignal[] = [];
+    router.register('/dkg/10.0.1/message', async (_req, _peer, options) => {
+      if (!options?.signal) throw new Error('missing signal');
+      seenSignals.push(options.signal);
+      return new TextEncoder().encode('ok');
+    });
+
+    expect(inboundHandler).toBeDefined();
+    const inboundStream = new FakeStream();
+    const inboundRun = inboundHandler!(inboundStream as unknown as import('@libp2p/interface').Stream, {
+      remotePeer: {
+        toString: () => PEER_NEW,
+        toMultihash: () => ({ bytes: new Uint8Array() }),
+      },
+    });
+
+    await flush();
+    inboundStream.feed(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('one')));
+    await flush();
+    inboundStream.feed(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('two')));
+    await flush();
+
+    expect(seenSignals).toHaveLength(2);
+    expect(seenSignals[0]).not.toBe(seenSignals[1]);
+    expect(seenSignals[0].aborted).toBe(false);
+    expect(seenSignals[1].aborted).toBe(false);
+
+    inboundStream.endRemote();
+    await inboundRun;
+    await router.closePooling();
+  });
+
+  it('composes node stop into pooled application handler signals', async () => {
+    type HandlerFn = (
+      stream: import('@libp2p/interface').Stream,
+      connection: { remotePeer: { toString: () => string; toMultihash: () => { bytes: Uint8Array } } },
+    ) => void | Promise<void>;
+    let inboundHandler: HandlerFn | null = null;
+    const stopController = new AbortController();
+    const node = {
+      get stopSignal() {
+        return stopController.signal;
+      },
+      libp2p: {
+        dialProtocol: async () => {
+          throw new Error('not used');
+        },
+        handle: (_protocolId: string, handler: HandlerFn) => {
+          if (_protocolId === POOLED_MESSAGE_PROTOCOL) {
+            inboundHandler = handler;
+          }
+        },
+        unhandle: () => undefined,
+        getConnections: () => [],
+        peerStore: { get: async () => ({ addresses: [] }) },
+      },
+    } as unknown as DKGNode;
+
+    const router = new ProtocolRouter(node);
+    router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+
+    let seenSignal: AbortSignal | undefined;
+    const signalAborted = new Promise<void>((resolve) => {
+      router.register('/dkg/10.0.1/message', async (_req, _peer, options) => {
+        seenSignal = options?.signal;
+        options?.signal?.addEventListener('abort', () => resolve(), { once: true });
+        await new Promise<never>((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(options.signal?.reason), { once: true });
+        });
+      });
+    });
+
+    expect(inboundHandler).toBeDefined();
+    const inboundStream = new FakeStream();
+    const inboundRun = inboundHandler!(inboundStream as unknown as import('@libp2p/interface').Stream, {
+      remotePeer: {
+        toString: () => PEER_NEW,
+        toMultihash: () => ({ bytes: new Uint8Array() }),
+      },
+    });
+    await flush();
+    inboundStream.feed(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('hi')));
+    await flush();
+
+    expect(seenSignal).toBeInstanceOf(AbortSignal);
+    expect(seenSignal?.aborted).toBe(false);
+
+    stopController.abort(new Error('node stopping'));
+    await signalAborted;
+    expect(seenSignal?.aborted).toBe(true);
+
+    inboundStream.endRemote();
+    await inboundRun;
+    await router.closePooling();
+  });
+
+  it('drops pooled handler responses when the handler signal aborts before return', async () => {
+    type HandlerFn = (
+      stream: import('@libp2p/interface').Stream,
+      connection: { remotePeer: { toString: () => string; toMultihash: () => { bytes: Uint8Array } } },
+    ) => void | Promise<void>;
+    let inboundHandler: HandlerFn | null = null;
+    const stopController = new AbortController();
+    const node = {
+      get stopSignal() {
+        return stopController.signal;
+      },
+      libp2p: {
+        dialProtocol: async () => {
+          throw new Error('not used');
+        },
+        handle: (_protocolId: string, handler: HandlerFn) => {
+          if (_protocolId === POOLED_MESSAGE_PROTOCOL) {
+            inboundHandler = handler;
+          }
+        },
+        unhandle: () => undefined,
+        getConnections: () => [],
+        peerStore: { get: async () => ({ addresses: [] }) },
+      },
+    } as unknown as DKGNode;
+
+    const router = new ProtocolRouter(node);
+    router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+
+    let handlerStarted = false;
+    let releaseHandler!: () => void;
+    router.register('/dkg/10.0.1/message', async () => {
+      handlerStarted = true;
+      await new Promise<void>((resolve) => {
+        releaseHandler = resolve;
+      });
+      return new TextEncoder().encode('too-late');
+    });
+
+    expect(inboundHandler).toBeDefined();
+    const inboundStream = new FakeStream();
+    const inboundRun = inboundHandler!(inboundStream as unknown as import('@libp2p/interface').Stream, {
+      remotePeer: {
+        toString: () => PEER_NEW,
+        toMultihash: () => ({ bytes: new Uint8Array() }),
+      },
+    });
+    await flush();
+    inboundStream.feed(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('hi')));
+    while (!handlerStarted) await flush();
+
+    stopController.abort(new Error('node stopping'));
+    releaseHandler();
+
+    await inboundRun;
+    for (let i = 0; i < 20 && inboundStream.writeStatus !== 'closed'; i++) {
+      await flush();
+    }
+    expect(inboundStream.sent).toHaveLength(0);
+    expect(inboundStream.writeStatus).toBe('closed');
+    await router.closePooling();
+  });
+
+  it('treats generic AbortErrors as cancellation when the request signal is aborted', async () => {
+    type HandlerFn = (
+      stream: import('@libp2p/interface').Stream,
+      connection: { remotePeer: { toString: () => string; toMultihash: () => { bytes: Uint8Array } } },
+    ) => void | Promise<void>;
+    let inboundHandler: HandlerFn | null = null;
+    const stopController = new AbortController();
+    const node = {
+      get stopSignal() {
+        return stopController.signal;
+      },
+      libp2p: {
+        dialProtocol: async () => {
+          throw new Error('not used');
+        },
+        handle: (_protocolId: string, handler: HandlerFn) => {
+          if (_protocolId === POOLED_MESSAGE_PROTOCOL) {
+            inboundHandler = handler;
+          }
+        },
+        unhandle: () => undefined,
+        getConnections: () => [],
+        peerStore: { get: async () => ({ addresses: [] }) },
+      },
+    } as unknown as DKGNode;
+
+    const router = new ProtocolRouter(node);
+    router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+
+    let handlerStarted = false;
+    let releaseHandler!: () => void;
+    router.register('/dkg/10.0.1/message', async () => {
+      handlerStarted = true;
+      await new Promise<void>((resolve) => {
+        releaseHandler = resolve;
+      });
+      const err = new Error('The operation was aborted.');
+      err.name = 'AbortError';
+      throw err;
+    });
+
+    expect(inboundHandler).toBeDefined();
+    const inboundStream = new FakeStream();
+    const inboundRun = inboundHandler!(inboundStream as unknown as import('@libp2p/interface').Stream, {
+      remotePeer: {
+        toString: () => PEER_NEW,
+        toMultihash: () => ({ bytes: new Uint8Array() }),
+      },
+    });
+    await flush();
+    inboundStream.feed(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('hi')));
+    while (!handlerStarted) await flush();
+
+    stopController.abort(new Error('node stopping'));
+    releaseHandler();
+
+    await inboundRun;
+    for (let i = 0; i < 20 && inboundStream.writeStatus !== 'closed'; i++) {
+      await flush();
+    }
+    expect(inboundStream.sent).toHaveLength(0);
+    expect(inboundStream.writeStatus).toBe('closed');
+    await router.closePooling();
+  });
+
+  it('keeps handler-owned AbortErrors as application error frames when the request is live', async () => {
+    type HandlerFn = (
+      stream: import('@libp2p/interface').Stream,
+      connection: { remotePeer: { toString: () => string; toMultihash: () => { bytes: Uint8Array } } },
+    ) => void | Promise<void>;
+    let inboundHandler: HandlerFn | null = null;
+    const node = {
+      libp2p: {
+        dialProtocol: async () => {
+          throw new Error('not used');
+        },
+        handle: (_protocolId: string, handler: HandlerFn) => {
+          if (_protocolId === POOLED_MESSAGE_PROTOCOL) {
+            inboundHandler = handler;
+          }
+        },
+        unhandle: () => undefined,
+        getConnections: () => [],
+        peerStore: { get: async () => ({ addresses: [] }) },
+      },
+    } as unknown as DKGNode;
+
+    const router = new ProtocolRouter(node);
+    router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+
+    router.register('/dkg/10.0.1/message', async () => {
+      const err = new Error('inner work aborted');
+      err.name = 'AbortError';
+      throw err;
+    });
+
+    expect(inboundHandler).toBeDefined();
+    const inboundStream = new FakeStream();
+    const inboundRun = inboundHandler!(inboundStream as unknown as import('@libp2p/interface').Stream, {
+      remotePeer: {
+        toString: () => PEER_NEW,
+        toMultihash: () => ({ bytes: new Uint8Array() }),
+      },
+    });
+    await flush();
+    inboundStream.feed(encodeFrame(FrameType.REQUEST, new TextEncoder().encode('hi')));
+    for (let i = 0; i < 20 && inboundStream.sent.length === 0; i++) {
+      await flush();
+    }
+
+    expect(inboundStream.writeStatus).toBe('open');
+    expect(inboundStream.sent).toHaveLength(1);
+
+    const parsed: { type: FrameType; payload: Uint8Array }[] = [];
+    for await (const f of decodeFrames(
+      (async function* () {
+        for (const c of inboundStream.sent) yield c;
+      })(),
+    )) {
+      parsed.push(f);
+    }
+    expect(parsed[0].type).toBe(FrameType.ERROR);
+    expect(new TextDecoder().decode(parsed[0].payload)).toBe('inner work aborted');
+
+    inboundStream.endRemote();
+    await inboundRun;
     await router.closePooling();
   });
 });

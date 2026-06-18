@@ -844,62 +844,29 @@ describe('DkgDaemonClient', () => {
   // Publish
   // ---------------------------------------------------------------------------
 
-  it('publish should create an assertion then publish it from SWM', async () => {
-    // V10 assertion lifecycle (Phase B-1/B-2): the openclaw client now
-    // routes through `/api/knowledge-assets` (which writes the quads to
-    // SWM and finalizes the EIP-712 seal in one daemon hop) followed by
-    // `/api/shared-memory/publish` to lift the assertion to VM. The
-    // legacy `/api/shared-memory/write` route is gone.
-    fetchResponses.push(
-      new Response(JSON.stringify({ assertionUri: 'urn:assertion:test' }), { status: 200 }),
-      new Response(JSON.stringify({ kaId: 'kc-1' }), { status: 200 }),
-    );
+  it('publish should use the direct explicit-quads route', async () => {
+    fetchResponses.push(new Response(JSON.stringify({ kaId: 'kc-1' }), { status: 200 }));
 
     const quads = [{ subject: 'urn:a', predicate: 'urn:b', object: '"value"' }];
-    const result = await client.publish('testing', quads);
+    const privateQuads = [{ subject: 'urn:a', predicate: 'urn:secret', object: '"secret"' }];
+    const result = await client.publish('testing', quads, privateQuads, {
+      accessPolicy: 'allowList',
+      allowedPeers: ['12D3peer1'],
+    });
     expect(result.kaId).toBe('kc-1');
 
-    expect(fetchCalls).toHaveLength(2);
-    const [createUrl, createOpts] = fetchCalls[0];
-    expect(createUrl).toBe('http://localhost:9200/api/knowledge-assets');
-    expect(createOpts?.method).toBe('POST');
-    const createBody = JSON.parse(createOpts?.body as string);
-    expect(createBody.contextGraphId).toBe('testing');
-    expect(createBody.quads).toHaveLength(1);
-    // CONTRACT §1 Stage1 / §0 invariant 2: `finalize:true` is unread by the
-    // create route (auto-finalize is driven by non-empty quads) and must be
-    // dropped; per-quad `graph` is daemon-pinned and must not be sent. The
-    // write wire shape is `{subject,predicate,object}` only. `promote:true`
-    // stays (the create route reads it as the `alsoShareSwm` alias).
-    expect(createBody.finalize).toBeUndefined();
-    expect(createBody.promote).toBe(true);
-    expect(createBody.quads[0]).toEqual({ subject: 'urn:a', predicate: 'urn:b', object: '"value"' });
-    expect(createBody.quads[0]).not.toHaveProperty('graph');
-
-    const [pubUrl, pubOpts] = fetchCalls[1];
-    expect(pubUrl).toBe('http://localhost:9200/api/shared-memory/publish');
-    expect(pubOpts?.method).toBe('POST');
-    const pubBody = JSON.parse(pubOpts?.body as string);
-    expect(pubBody.contextGraphId).toBe('testing');
-    expect(pubBody.assertionName).toMatch(/^openclaw-publish-/);
-  });
-
-  it('publish should reject privateQuads', async () => {
-    const quads = [{ subject: 'urn:a', predicate: 'urn:b', object: '"public"' }];
-    const privateQuads = [{ subject: 'urn:a', predicate: 'urn:c', object: '"secret"' }];
-    await expect(client.publish('testing', quads, privateQuads)).rejects.toThrow(
-      /not supported in the V10/,
-    );
-  });
-
-  it('publish should reject accessPolicy and allowedPeers', async () => {
-    const quads = [{ subject: 'urn:a', predicate: 'urn:b', object: '"val"' }];
-    await expect(
-      client.publish('testing', quads, undefined, {
-        accessPolicy: 'allowList',
-        allowedPeers: ['12D3peer1', '12D3peer2'],
-      }),
-    ).rejects.toThrow(/not supported in the V10/);
+    expect(fetchCalls).toHaveLength(1);
+    const [url, opts] = fetchCalls[0];
+    expect(url).toBe('http://localhost:9200/api/knowledge-assets/publish');
+    expect(opts?.method).toBe('POST');
+    const body = JSON.parse(opts?.body as string);
+    expect(body).toMatchObject({
+      contextGraphId: 'testing',
+      accessPolicy: 'allowList',
+      allowedPeers: ['12D3peer1'],
+    });
+    expect(body.quads).toEqual([{ subject: 'urn:a', predicate: 'urn:b', object: '"value"', graph: '' }]);
+    expect(body.privateQuads).toEqual([{ subject: 'urn:a', predicate: 'urn:secret', object: '"secret"', graph: '' }]);
   });
 
   // ---------------------------------------------------------------------------

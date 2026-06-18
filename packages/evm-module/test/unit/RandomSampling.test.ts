@@ -253,7 +253,7 @@ describe('@unit RandomSampling', () => {
 
   describe('version()', () => {
     it('Should return correct version', async () => {
-      expect(await RandomSampling.version()).to.equal('10.0.4');
+      expect(await RandomSampling.version()).to.equal('10.2.0');
     });
   });
 
@@ -993,10 +993,10 @@ describe('@unit RandomSampling', () => {
     // -----------------------------------------------------------------------
     // Test 2 — Edge: only-curated-CG-holds-value scenario, KC uncommitted.
     //
-    // RFC-39 Phase B (PR-B): curated CGs are now CG-level eligible, but the
-    // KC in this test has no `(ciphertextChunksRoot, ciphertextChunkCount)`
+    // RFC-39 Phase B (PR-B) / OT-RFC-49: curated CGs are now CG-level eligible,
+    // but the KC in this test has no `(catalogRoot, catalogLeafCount)`
     // commitment. The picker's inner per-KC retry exhausts all MAX_KC_RETRIES
-    // (each candidate is skipped at `getCiphertextChunkCount == 0`), then the
+    // (each candidate is skipped at `getCatalogLeafCount == 0`), then the
     // outer CG-retry marks the curated CG exhausted and re-draws; with no
     // other CGs holding value, the second outer pass hits zero adjustedTotal
     // and the picker reverts with `NoEligibleKnowledgeAsset` (NOT
@@ -1023,8 +1023,8 @@ describe('@unit RandomSampling', () => {
     // Test 3 — Mixed-curation scenario: curated CG (no commitment) coexists
     // with a public CG.
     //
-    // RFC-39 Phase A.5 behaviour: curated CGs participate in the CG-level
-    // lottery; the per-KC ciphertext-commitment gate is what keeps legacy
+    // RFC-39 Phase A.5 / OT-RFC-49 behaviour: curated CGs participate in the
+    // CG-level lottery; the per-KC catalog-commitment gate is what keeps legacy
     // (pre-LU-11) curated KCs out of the curated draw.
     //
     // Codex PR #630 R1 #3 added a bounded outer CG-retry to
@@ -1036,10 +1036,10 @@ describe('@unit RandomSampling', () => {
     // even though the curated CG carries 10× the weight, all 25 draws
     // succeed and EVERY successful draw must land on the public CG/KC
     // (a success on the curated branch would mean the per-KC commitment
-    // filter is leaking and `setCiphertextChunksCommitment` is no longer
+    // filter is leaking and `setCatalogCommitment` is no longer
     // a prerequisite for inclusion in the curated lottery).
     // -----------------------------------------------------------------------
-    it('skips curated KCs without ciphertext commitment; CG-retry fallback routes every draw to the public CG', async () => {
+    it('skips curated KCs without catalog commitment; CG-retry fallback routes every draw to the public CG', async () => {
       const curatedCg = await createCG(CURATED_POLICY);
       const openCg = await createCG(OPEN_POLICY);
 

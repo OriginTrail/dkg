@@ -46,6 +46,20 @@ function formatNTriple(
 }
 
 /**
+ * Canonical V10 leaf CONTENT bytes for a triple — exactly the bytes the Random
+ * Sampling prover submits to `submitProof(bytes content, ...)` and that the chain
+ * hashes: `leaf = keccak256(tripleContentV10(s,p,o)) === hashTripleV10(s,p,o)`.
+ * Single source of truth for the content<->leaf relationship (no drift).
+ */
+export function tripleContentV10(
+  subject: string,
+  predicate: string,
+  object: string,
+): Uint8Array {
+  return textEncoder.encode(formatNTriple(subject, predicate, object));
+}
+
+/**
  * V10 triple hash using keccak256 (spec §9.0.2).
  * Used for V10 merkle trees that match on-chain Solidity verification.
  */
@@ -54,8 +68,7 @@ export function hashTripleV10(
   predicate: string,
   object: string,
 ): Uint8Array {
-  const ntriple = formatNTriple(subject, predicate, object);
-  return keccak256(textEncoder.encode(ntriple));
+  return keccak256(tripleContentV10(subject, predicate, object));
 }
 
 function formatTerm(term: string): string {

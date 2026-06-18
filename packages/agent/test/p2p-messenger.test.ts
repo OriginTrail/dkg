@@ -1,12 +1,32 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { Messenger } from '../src/p2p/messenger.js';
 import type { ProtocolRouter } from '@origintrail-official/dkg-core';
+
+// NO MOCKS: the Messenger is real; `router` is a DI seam it's designed to
+// accept (ProtocolRouter). We substitute a plain hand-rolled recorder that
+// records the forwarded args — not a vitest mock.
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
 
 const PEER_A = '12D3KooWAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const PEER_B = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
 
+// router.send's 4th arg is the send-options object ({ timeoutMs?, signal? }).
+type RouterSendRecorder = ReturnType<
+  typeof recorder<
+    [string, string, Uint8Array, { timeoutMs?: number; signal?: AbortSignal } | undefined],
+    Promise<Uint8Array>
+  >
+>;
+
 interface MockSetup {
-  routerSendMock: ReturnType<typeof vi.fn>;
+  routerSendMock: RouterSendRecorder;
 }
 
 function makeMessenger(overrides: Partial<MockSetup> = {}): {
@@ -16,7 +36,7 @@ function makeMessenger(overrides: Partial<MockSetup> = {}): {
   const mocks: MockSetup = {
     routerSendMock:
       overrides.routerSendMock ??
-      vi.fn(async () => new Uint8Array([0x01, 0x02])),
+      recorder(async () => new Uint8Array([0x01, 0x02])),
   };
 
   const messenger = new Messenger({
@@ -36,33 +56,35 @@ describe('Messenger.sendToPeer', () => {
       new Uint8Array([0xff]),
     );
 
-    expect(mocks.routerSendMock).toHaveBeenCalledWith(
+    expect(mocks.routerSendMock.calls.at(-1)).toEqual([
       PEER_B,
       '/dkg/test/1.0.0',
       expect.any(Uint8Array),
-      undefined,
-    );
+      {},
+    ]);
     expect(out).toEqual(new Uint8Array([0x01, 0x02]));
   });
 
-  it('forwards timeoutMs to router.send', async () => {
+  it('forwards timeoutMs and signal to router.send', async () => {
     const { messenger, mocks } = makeMessenger();
+    const controller = new AbortController();
 
     await messenger.sendToPeer(PEER_A, '/dkg/test/1.0.0', new Uint8Array([0xff]), {
       timeoutMs: 5000,
+      signal: controller.signal,
     });
 
-    expect(mocks.routerSendMock).toHaveBeenCalledWith(
+    expect(mocks.routerSendMock.calls.at(-1)).toEqual([
       PEER_A,
       '/dkg/test/1.0.0',
       expect.any(Uint8Array),
-      5000,
-    );
+      { timeoutMs: 5000, signal: controller.signal },
+    ]);
   });
 
   it('propagates router.send errors to the caller', async () => {
     const { messenger } = makeMessenger({
-      routerSendMock: vi.fn(async () => {
+      routerSendMock: recorder(async () => {
         throw new Error('transport boom');
       }),
     });

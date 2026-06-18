@@ -82,9 +82,10 @@ import {
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
+  ENTITY_PRED_ALT,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -115,6 +116,7 @@ import {
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
+  DEFAULT_REQUIRED_ACKS,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -324,6 +326,7 @@ import {
   type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionStore,
+  type ContextGraphWritePreflightProbe,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
@@ -334,6 +337,7 @@ import {
   type DurableSyncResult,
   type SharedMemorySyncResult,
   type DKGAgentConfig,
+  type ImportedArtifactByteStore,
   type ReplicationEvent,
 } from './dkg-agent-types.js';
 import {
@@ -370,7 +374,7 @@ import {
   deserializeSwmSenderReceiveState,
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
-import { DKGAgentBase } from './dkg-agent-base.js';
+import { DKGAgentBase, createListContextGraphsCacheInvalidatingStore } from './dkg-agent-base.js';
 import { reconcileAndAllocateKaNumber } from './allocator.js';
 import { applyMixins } from './dkg-agent-apply-mixins.js';
 import { OwnershipMethods } from './dkg-agent-ownership.js';
@@ -387,6 +391,7 @@ import { LifecycleSyncMethods } from './dkg-agent-lifecycle.js';
 import { PublishMethods } from './dkg-agent-publish.js';
 import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
 import { ContextGraphMethods } from './dkg-agent-context-graph.js';
+import { ImportedArtifactMethods } from './imported-artifact.js';
 // Public surface re-exported so external consumers that import directly
 // from `./dkg-agent.js` keep working. The new file `dkg-agent-types.ts`
 // is the canonical home; `packages/agent/src/index.ts` re-exports from
@@ -409,6 +414,7 @@ export type {
   ContextGraphSub,
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionStore,
+  ContextGraphWritePreflightProbe,
   ContextGraphMemberPrincipalType,
   ContextGraphMemberStatus,
   ContextGraphMembershipRecord,
@@ -417,6 +423,7 @@ export type {
   SharedMemorySyncDiagnostics,
   CatchupSyncDiagnostics,
   DKGAgentConfig,
+  ImportedArtifactByteStore,
 };
 
 /**
@@ -440,6 +447,19 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
   kaNumber?: string;
   /** did:dkg:<chainId>/<agentAddrLower>/<number> reserved at finalize. */
   reservedUal?: string;
+  /**
+   * #1104 — did:dkg:<chainId>/<kasContract>/<packed kaId> recorded at the
+   * first confirmed vm/publish (re-stamped on updates). This is the on-chain
+   * resolvable UAL; `reservedUal` remains the author-namespace identity
+   * minted at finalize. Both are permanent; this field is the link.
+   */
+  publishedUal?: string;
+}
+
+export interface DiscoverContextGraphsFromChainOptions {
+  incremental?: boolean;
+  seedIncrementalWatermark?: boolean;
+  throwOnChainScanFailure?: boolean;
 }
 
 /**
@@ -454,6 +474,9 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
  *   await agent.stop();
  */
 export class DKGAgent extends DKGAgentBase {
+  private chainContextGraphScanFailure:
+    | { signature: string; count: number }
+    | undefined;
 
   static async create(config: DKGAgentConfig): Promise<DKGAgent> {
     let wallet: DKGAgentWallet;
@@ -507,6 +530,7 @@ export class DKGAgent extends DKGAgentBase {
         tokenAddress: config.chainConfig.tokenAddress,
         chainId: config.chainConfig.chainId,
         approvalPolicy: config.chainConfig.approvalPolicy,
+        cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
       };
       if (config.chainConfig.adminPrivateKey) {
         chain = new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey });
@@ -558,8 +582,21 @@ export class DKGAgent extends DKGAgentBase {
       !adapterCanPublishFromAdvertisedSigner &&
       (!configuredPublisherAddress || publisherAddressMatchesLegacyKey),
     );
-    const publisher = new DKGPublisher({
+    let agentRef: DKGAgent | undefined;
+    const agentStore = createListContextGraphsCacheInvalidatingStore(
       store,
+      () => {
+        agentRef?.invalidateListContextGraphsCache();
+      },
+      (quads) => {
+        if (!agentRef) return;
+        if (quads) agentRef.contextGraphMetaProjection.markDirtyFromQuads(quads);
+        else agentRef.contextGraphMetaProjection.markAllDirty();
+      },
+    );
+
+    const publisher = new DKGPublisher({
+      store: agentStore,
       chain,
       eventBus,
       keypair,
@@ -573,6 +610,8 @@ export class DKGAgent extends DKGAgentBase {
       publicSnapshotStore,
       // OT-RFC-43 Option 1 — deterministic packed reservedKaId minting.
       kaAllocator: config.kaNumberAllocator,
+      // RFC ka-metadata-trim P3.3 — `metadata.provenanceEvents` (default true).
+      provenanceEvents: config.metadataProvenanceEvents,
     });
 
     try {
@@ -603,12 +642,17 @@ export class DKGAgent extends DKGAgentBase {
       log.warn(createOperationContext('init'), `Failed to migrate SWM attribution to agent DID, continuing without: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    const queryEngine = new DKGQueryEngine(store);
+    const queryEngine = new DKGQueryEngine(agentStore);
 
-    return new DKGAgent(
-      config, wallet, node, store, publisher, queryEngine, eventBus, chain,
+    const agent = new DKGAgent(
+      config, wallet, node, agentStore, publisher, queryEngine, eventBus, chain,
       workspaceOwnedEntities, writeLocks, publicSnapshotStore,
     );
+    agentRef = agent;
+    if (config.importedArtifactByteStore) {
+      agent.registerImportedArtifactByteStore(config.importedArtifactByteStore);
+    }
+    return agent;
   }
 
   public getACKSignerCandidateWallets(ctx: OperationContext): ethers.Wallet[] {
@@ -922,9 +966,33 @@ export class DKGAgent extends DKGAgentBase {
       collectEntries(metaResult.bindings as Record<string, string>[], 'meta');
     }
 
+    this.log.debug(ctx, `Discovery scan found ${discoveredEntries.size} CG(s) in store`);
+
     for (const { id, name, source } of discoveredEntries.values()) {
       const existing = this.subscribedContextGraphs.get(id);
-      if (existing) continue;
+      if (existing) {
+        // A restart re-seeds `subscribedContextGraphs` from persisted state but
+        // does NOT re-add the CG to the SWM-sync scope (`config.syncContextGraphs`,
+        // what `getSyncContextGraphs()` and sync-on-connect's shared-memory pass
+        // iterate). For a PRIVATE CG the member is a participant in, that means a
+        // reconnecting member would data-sync the CG but its on-connect SWM pass
+        // would never cover it — the curator-leader REPLACE gate never sees it, so
+        // the member stays stale forever. Re-track the sync scope here for curated
+        // CGs so this same connect cycle's `newlyDiscovered` set picks it up
+        // (refreshing its meta-synced flag) and the shared-memory pass recovers it.
+        // `trackSyncContextGraph` is idempotent, so public/already-scoped CGs are
+        // unaffected. Gate on `existing.subscribed`: `unsubscribeFromContextGraph`
+        // keeps the record but flips `subscribed` to false and drops the CG from
+        // `syncContextGraphs`, so re-tracking an explicitly-unsubscribed (or
+        // host-only) private CG here would silently undo that operator choice on
+        // every discovery scan. Only re-track CGs the node is still a live
+        // subscriber of.
+        if (existing.subscribed && await this.isPrivateContextGraph(id)) {
+          this.trackSyncContextGraph(id);
+          this.log.info(ctx, `Re-tracked already-subscribed private CG "${id.slice(0, 28)}" into the SWM-sync scope on discovery`);
+        }
+        continue;
+      }
 
       // Two kinds of discovered CG, two different opt-in semantics:
       //
@@ -1005,12 +1073,23 @@ export class DKGAgent extends DKGAgentBase {
     return discovered;
   }
 
+  async hasContextGraphRegistryScanWatermark(): Promise<boolean> {
+    return await this.chain.hasContextGraphRegistryScanWatermark?.() ?? false;
+  }
+
   /**
    * Query the on-chain registry for all registered context graphs and
    * auto-subscribe to any not yet in the subscription registry.
+   *
+   * Defaults to a full scan so SDK callers can rebuild missing local state.
+   * Background daemon loops may opt into incremental scans to reuse the
+   * in-memory chain adapter watermark.
+   *
    * Returns the number of newly discovered context graphs.
    */
-  async discoverContextGraphsFromChain(): Promise<number> {
+  async discoverContextGraphsFromChain(
+    options: DiscoverContextGraphsFromChainOptions = {},
+  ): Promise<number> {
     const ctx = createOperationContext('system');
     if (!this.chain.listContextGraphsFromChain) {
       this.log.info(ctx, 'Chain adapter does not support listContextGraphsFromChain — skipping');
@@ -1018,11 +1097,40 @@ export class DKGAgent extends DKGAgentBase {
     }
 
     let onChainContextGraphs;
+    let partialChainScan = false;
+    let partialChainScanError: unknown;
     try {
-      onChainContextGraphs = await this.chain.listContextGraphsFromChain();
+      const scanOptions = options.incremental
+        ? { incremental: true }
+        : options.seedIncrementalWatermark
+          ? { seedIncrementalWatermark: true }
+          : undefined;
+      onChainContextGraphs = await this.chain.listContextGraphsFromChain(undefined, scanOptions);
     } catch (err) {
-      this.log.warn(ctx, `Chain context graph scan failed: ${err instanceof Error ? err.message : String(err)}`);
-      return 0;
+      const message = err instanceof Error ? err.message : String(err);
+      const signature = message
+        .replace(/stopped after block \d+/g, 'stopped after block N')
+        .replace(/\[\d+,\s*\d+\]/g, '[range]')
+        .replace(/\b\d+\s+eth_getLogs calls/g, 'N eth_getLogs calls');
+      if (this.chainContextGraphScanFailure?.signature !== signature) {
+        this.log.warn(ctx, `Chain context graph scan failed: ${message}`);
+        this.chainContextGraphScanFailure = { signature, count: 1 };
+      } else {
+        this.chainContextGraphScanFailure.count += 1;
+      }
+      const partialError = isContextGraphChainScanPartialError(err);
+      if (options.throwOnChainScanFailure && !partialError) throw err;
+      if (!partialError) return 0;
+      partialChainScan = true;
+      partialChainScanError = err;
+      onChainContextGraphs = err.partialResults;
+    }
+    if (!partialChainScan && this.chainContextGraphScanFailure) {
+      this.log.info(
+        ctx,
+        `Chain context graph scan recovered after ${this.chainContextGraphScanFailure.count} failed attempt(s)`,
+      );
+      this.chainContextGraphScanFailure = undefined;
     }
 
     // Build a set of all known on-chain IDs (stored and computed) for fast dedup
@@ -1082,6 +1190,7 @@ export class DKGAgent extends DKGAgentBase {
         graph: ontoGraph,
       }]);
 
+      this.contextGraphMetaProjection.markDirty(p.name);
       this.log.info(ctx, `Discovered on-chain context graph "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
       discovered++;
     }
@@ -1089,6 +1198,7 @@ export class DKGAgent extends DKGAgentBase {
     if (discovered > 0) {
       this.log.info(ctx, `Discovered ${discovered} new context graph(s) from chain`);
     }
+    if (options.throwOnChainScanFailure && partialChainScanError) throw partialChainScanError;
     return discovered;
   }
 
@@ -1151,6 +1261,8 @@ export class DKGAgent extends DKGAgentBase {
       clearInterval(this.vmReconcileTimer);
       this.vmReconcileTimer = null;
     }
+    this.coreHostRecordingsClosed = true;
+    await this.drainCoreHostRecordings();
     if (this.messengerOutboxTimer) {
       clearInterval(this.messengerOutboxTimer);
       this.messengerOutboxTimer = null;
@@ -1272,6 +1384,44 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   /**
+   * Candidate peer pool for ACK collection (#1093).
+   *
+   * `knownCorePeerIds` is populated from identify-time protocol lists in
+   * `runSyncOnConnect`, but identify races `connection:open` — so the set
+   * routinely contains only a SUBSET of the actually-connected core nodes
+   * (the rest were read before their protocol list was populated and were
+   * never re-classified). The old behaviour returned that subset as soon
+   * as it was non-empty, which permanently capped the ACK pool below
+   * quorum (`pool_below_quorum`) and bricked publishing on core nodes.
+   *
+   * Fix: only trust the confirmed-core subset when it can actually
+   * satisfy the quorum. Below that, return confirmed cores FIRST
+   * followed by every other connected peer — edge nodes fail fast at
+   * protocol negotiation (no handler registered), so over-asking is
+   * cheap, while under-asking is fatal.
+   *
+   * Codex review (PR #1107): the quorum threshold here must track the
+   * CHAIN's runtime `requiredACKs` (ParametersStorage
+   * minimumRequiredSignatures), not the hard-coded default — on networks
+   * configured above 3 signatures, a 3-strong confirmed-core subset is
+   * still below quorum and returning only it re-introduces
+   * `pool_below_quorum`. The V10 ACK provider refreshes
+   * `lastKnownRequiredACKs` from chain BEFORE each collect() (the
+   * collector's getConnectedCorePeers callback runs after), so this sync
+   * read sees the current value; the default only covers the first call
+   * on chains without the getter.
+   */
+  private getACKCandidatePeers(): string[] {
+    const peers = this.node.libp2p.getPeers();
+    const connected = peers.map(p => p.toString()).filter(id => id !== this.peerId);
+    const confirmedCore = connected.filter(id => this.knownCorePeerIds.has(id));
+    const quorum = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
+    if (confirmedCore.length >= quorum) return confirmedCore;
+    const rest = connected.filter(id => !this.knownCorePeerIds.has(id));
+    return [...confirmedCore, ...rest];
+  }
+
+  /**
    * Create a V10 ACK provider callback for the publisher.
    * Uses ACKCollector to broadcast PublishIntent and collect StorageACKs
    * via direct P2P from connected core nodes. The required number of ACKs
@@ -1311,20 +1461,7 @@ export class DKGAgent extends DKGAgentBase {
         }
         return sendResult.response;
       },
-      getConnectedCorePeers: () => {
-        const peers = this.node.libp2p.getPeers();
-        const connected = peers.map(p => p.toString()).filter(id => id !== this.peerId);
-        // Prefer peers confirmed as core nodes (advertise StorageACK protocol).
-        if (this.knownCorePeerIds.size > 0) {
-          const filtered = connected.filter(id => this.knownCorePeerIds.has(id));
-          if (filtered.length > 0) return filtered;
-        }
-        // Fallback: return all connected peers during early startup before
-        // protocol discovery completes. Since only core nodes register the
-        // StorageACK handler, requests to edge nodes fail at protocol
-        // negotiation (fast, no error logs on the remote side).
-        return connected;
-      },
+      getConnectedCorePeers: () => this.getACKCandidatePeers(),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -1369,13 +1506,12 @@ export class DKGAgent extends DKGAgentBase {
       subGraphName: string | undefined,
       merkleLeafCount: number,
       isEncryptedPayload?: boolean,
-      // OT-RFC-38 LU-11 — when present, the publisher's chunked
-      // emitter has already AEAD-encrypted + SWM-gossiped per-chunk
-      // ciphertexts. The collector routes through V2 ACK with empty
-      // stagingQuads and these fields populating PublishIntent.
-      chunkedCommitment?: {
-        ciphertextChunksRoot: Uint8Array;
-        ciphertextChunkCount: number;
+      // OT-RFC-49 / WS-D — when present, this is a curated publish: the
+      // committed PUBLIC `_catalog` commitment the core rebuilds + verifies
+      // over the inline catalog `stagingQuads` and that lands on-chain.
+      catalogCommitment?: {
+        catalogRoot: Uint8Array;
+        catalogLeafCount: number;
       },
     ) => {
       // Fail loud on non-numeric or non-positive CG ids: V10 publish requires
@@ -1427,6 +1563,12 @@ export class DKGAgent extends DKGAgentBase {
           throw wrapAsRpcPreconditionIfApplicable(err, 'getMinimumRequiredSignatures');
         }
       }
+      // Codex review (PR #1107): cache the runtime quorum BEFORE collect() so
+      // getACKCandidatePeers' confirmed-core shortcut tracks the chain's real
+      // requiredACKs instead of the hard-coded default.
+      if (typeof requiredACKs === 'number' && requiredACKs > 0) {
+        this.lastKnownRequiredACKs = requiredACKs;
+      }
 
       // H5 prefix inputs — both come from the chain adapter so that
       // publisher-side digest construction matches what core-node handlers
@@ -1464,7 +1606,7 @@ export class DKGAgent extends DKGAgentBase {
         subGraphName,
         merkleLeafCount,
         isEncryptedPayload,
-        chunkedCommitment,
+        catalogCommitment,
       });
       return result.acks;
     };
@@ -1498,15 +1640,7 @@ export class DKGAgent extends DKGAgentBase {
         }
         return sendResult.response;
       },
-      getConnectedCorePeers: () => {
-        const peers = this.node.libp2p.getPeers();
-        const connected = peers.map(p => p.toString()).filter(id => id !== this.peerId);
-        if (this.knownCorePeerIds.size > 0) {
-          const filtered = connected.filter(id => this.knownCorePeerIds.has(id));
-          if (filtered.length > 0) return filtered;
-        }
-        return connected;
-      },
+      getConnectedCorePeers: () => this.getACKCandidatePeers(),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -1543,8 +1677,15 @@ export class DKGAgent extends DKGAgentBase {
       mintAmount: bigint;
       burnTokenIds: bigint[];
       newMerkleLeafCount: number;
-      newCiphertextChunksRoot?: Uint8Array;
-      newCiphertextChunkCount?: number;
+      newCatalogRoot?: Uint8Array;
+      newCatalogLeafCount?: number;
+      // OT-RFC-49 / WS-D — `true` for a curated update (the producer sets it
+      // from `useEncryptedInlineUpdate`). Forwarded into `collectUpdate` so it
+      // stamps `UpdateIntent.isEncryptedPayload`, gating the cores' inline-
+      // catalog rebuild/verify/persist path. Undefined for public updates,
+      // which carry no catalog (unchanged on a healthy chain). Mirrors the publish
+      // closure passing `isEncryptedPayload` into `collect`.
+      isEncryptedPayload?: boolean;
       stagingQuads?: Uint8Array;
       swmGraphId?: string;
       subGraphName?: string;
@@ -1580,6 +1721,12 @@ export class DKGAgent extends DKGAgentBase {
           throw wrapAsRpcPreconditionIfApplicable(err, 'getMinimumRequiredSignatures');
         }
       }
+      // Codex review (PR #1107): cache the runtime quorum BEFORE collect() so
+      // getACKCandidatePeers' confirmed-core shortcut tracks the chain's real
+      // requiredACKs instead of the hard-coded default.
+      if (typeof requiredACKs === 'number' && requiredACKs > 0) {
+        this.lastKnownRequiredACKs = requiredACKs;
+      }
 
       let chainIdBig: bigint;
       try {
@@ -1604,8 +1751,8 @@ export class DKGAgent extends DKGAgentBase {
         mintAmount: params.mintAmount,
         burnTokenIds: params.burnTokenIds,
         newMerkleLeafCount: params.newMerkleLeafCount,
-        newCiphertextChunksRoot: params.newCiphertextChunksRoot,
-        newCiphertextChunkCount: params.newCiphertextChunkCount,
+        newCatalogRoot: params.newCatalogRoot,
+        newCatalogLeafCount: params.newCatalogLeafCount,
         chainId: chainIdBig,
         kav10Address,
         publisherPeerId: this.peerId,
@@ -1613,6 +1760,9 @@ export class DKGAgent extends DKGAgentBase {
         swmGraphId: params.swmGraphId,
         subGraphName: params.subGraphName,
         stagingQuads: params.stagingQuads,
+        // OT-RFC-49 / WS-D — stamp `UpdateIntent.isEncryptedPayload` for a
+        // curated update so cores rebuild/verify/persist the inline catalog.
+        isEncryptedPayload: params.isEncryptedPayload,
       });
       return result.acks;
     };
@@ -1726,7 +1876,7 @@ export class DKGAgent extends DKGAgentBase {
       ): Promise<{ seeded: number; fromLayer: 'swm' | 'vm'; entities: number }> {
         return agent.publisher.assertionPullFrom(contextGraphId, name, agentAddress, sourceLayer, opts);
       },
-      async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string; authorAgentAddress?: string; preSignedAuthorAttestation?: PreSignedAuthorAttestation }): Promise<{ promotedCount: number }> {
+      async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string; authorAgentAddress?: string; preSignedAuthorAttestation?: PreSignedAuthorAttestation; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number }): Promise<{ promotedCount: number }> {
         // Seal-before-share: the on-chain publish path
         // (`publishFromFinalizedAssertion`) requires a FINALIZED assertion, and
         // the seal must be computed over the Working-Memory content BEFORE
@@ -1786,12 +1936,25 @@ export class DKGAgent extends DKGAgentBase {
         // Without this, private/agent-gated CGs receive plaintext
         // gossip and the new `SharedMemoryHandler` check rejects it.
         const gossipSigner = await agent.resolveWorkspaceGossipSigningAgent(contextGraphId);
+        // Strict curator-ack gate (OT-RFC-49 curator-leader) for the WM→SWM
+        // promote path — the same confirmer as share()/conditionalShare(). When
+        // armed (private CG, gate enabled, curator remote), assertionPromote
+        // requires the curator's applied-ack BEFORE it moves WM→SWM, so an
+        // unconfirmed promote aborts (CuratorUnconfirmedError → 503) leaving WM
+        // intact instead of silently committing a write the curator never got.
+        const confirmBeforeCommit = await agent.buildCuratorAckConfirmer(
+          contextGraphId,
+          gossipSigner,
+          { awaitCuratorAck: opts?.awaitCuratorAck, curatorAckTimeoutMs: opts?.curatorAckTimeoutMs },
+          createOperationContext('share'),
+        );
         const { promotedCount, gossipMessage } = await agent.publisher.assertionPromote(
           contextGraphId, name, agentAddress,
           {
             ...opts,
             publisherPeerId: agent.node.peerId.toString(),
             senderAgentAddress: gossipSigner?.agentAddress,
+            confirmBeforeCommit,
           },
         );
         if (gossipMessage) {
@@ -1871,7 +2034,7 @@ export class DKGAgent extends DKGAgentBase {
 
         // Query assertion entity (current state + layer + OT-RFC-43 A2 pointers).
         const entityResult = await agent.store.query(
-          `SELECT ?state ?memoryLayer ?assertionGraph ?wm ?swm ?vm ?kaNum ?reservedUal WHERE {
+          `SELECT ?state ?memoryLayer ?assertionGraph ?wm ?swm ?vm ?kaNum ?reservedUal ?publishedUal WHERE {
             GRAPH <${metaGraph}> {
               <${lifecycleUri}> <${DKG_NS}state> ?state .
               OPTIONAL { <${lifecycleUri}> <${DKG_NS}memoryLayer> ?memoryLayer }
@@ -1881,6 +2044,7 @@ export class DKGAgent extends DKGAgentBase {
               OPTIONAL { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
               OPTIONAL { <${lifecycleUri}> <${KA_ID_PRED}> ?kaNum }
               OPTIONAL { <${lifecycleUri}> <${RESERVED_UAL_PRED}> ?reservedUal }
+              OPTIONAL { <${lifecycleUri}> <${DKG_NS}publishedUal> ?publishedUal }
             }
           } LIMIT 1`,
         );
@@ -1890,16 +2054,32 @@ export class DKGAgent extends DKGAgentBase {
         const stateStr = strip(row['state']) as AssertionState;
         const layerStr = strip(row['memoryLayer']);
         const graphUri = row['assertionGraph'] ?? contextGraphAssertionUri(contextGraphId, addr, name);
-        const wmCurrentAssertion = strip(row['wm']);
-        const swmCurrentAssertion = strip(row['swm']);
+        // RFC ka-metadata-trim Phase 2 — the wm/swm pointers are only
+        // materialised when they DIVERGE from VM (the "all three equal"
+        // steady state is implicit). COALESCE a missing wm/swm to the vm
+        // value; old-store rows (always materialised) read identically.
         const vmCurrentAssertion = strip(row['vm']);
+        const wmCurrentAssertion = strip(row['wm']) ?? vmCurrentAssertion;
+        const swmCurrentAssertion = strip(row['swm']) ?? vmCurrentAssertion;
         const kaNumberStr = strip(row['kaNum']);
         const reservedUal = strip(row['reservedUal']);
+        const publishedUal = strip(row['publishedUal']);
 
         // Query all prov:Activity events that acted on this assertion
         // (linked via prov:used or prov:generated)
+        // RFC ka-metadata-trim Phase 0: the `OPTIONAL { ?event dkg:kcUal }`
+        // clause was removed — its only producer was the dead
+        // `generateAssertionPublishedMetadata` writer, so the binding never
+        // surfaced for live events.
+        // RFC ka-metadata-trim Phase 2 — read-both event shape:
+        //   - `dkg:fromLayer`/`dkg:toLayer` are no longer written (they are
+        //     100% determined by the event class); OPTIONAL here for
+        //     old-store rows, derived below otherwise.
+        //   - the event-side `dkg:rootEntity` rows are no longer written for
+        //     promote events; OPTIONAL here for old-store rows, with the
+        //     stable lifecycle-subject member stamp as the fallback below.
         const eventsResult = await agent.store.query(
-          `SELECT ?event ?type ?timestamp ?fromLayer ?toLayer ?shareOpId ?kcUal ?rootEntity WHERE {
+          `SELECT ?event ?type ?timestamp ?fromLayer ?toLayer ?shareOpId ?rootEntity WHERE {
             GRAPH <${metaGraph}> {
               { ?event <${PROV_NS}generated> <${lifecycleUri}> }
               UNION
@@ -1908,14 +2088,39 @@ export class DKGAgent extends DKGAgentBase {
               ?event a ?type .
               FILTER(STRSTARTS(STR(?type), "${DKG_NS}"))
               ?event <${PROV_NS}startedAtTime> ?timestamp .
-              ?event <${DKG_NS}fromLayer> ?fromLayer .
-              ?event <${DKG_NS}toLayer> ?toLayer .
+              OPTIONAL { ?event <${DKG_NS}fromLayer> ?fromLayer }
+              OPTIONAL { ?event <${DKG_NS}toLayer> ?toLayer }
               OPTIONAL { ?event <${DKG_NS}shareOperationId> ?shareOpId }
-              OPTIONAL { ?event <${DKG_NS}kcUal> ?kcUal }
               OPTIONAL { ?event <${DKG_NS}rootEntity> ?rootEntity }
             }
           } ORDER BY ?timestamp`,
         );
+
+        // Member entities on the STABLE lifecycle subject (SUBSTRATE-1 stamp,
+        // written at promote). Read-both (ENTITY_PRED_ALT) + DISTINCT because
+        // dual-written replica rows carry the same object under both names.
+        const subjectRoots: string[] = [];
+        const subjectRootsResult = await agent.store.query(
+          `SELECT DISTINCT ?root WHERE {
+            GRAPH <${metaGraph}> { <${lifecycleUri}> ${ENTITY_PRED_ALT} ?root }
+          }`,
+        );
+        if (subjectRootsResult.type === 'bindings') {
+          for (const b of subjectRootsResult.bindings) {
+            if (b['root']) subjectRoots.push(b['root']);
+          }
+        }
+
+        // Layer transition by event class (the writers no longer persist it):
+        //   created  ⇒ none→WM   · promoted  ⇒ WM→SWM
+        //   updated  ⇒ VM→VM     · discarded ⇒ WM→none
+        const LAYER_BY_TYPE: Record<string, { from: string; to: string }> = {
+          created: { from: 'none', to: MemoryLayer.WorkingMemory },
+          promoted: { from: MemoryLayer.WorkingMemory, to: MemoryLayer.SharedWorkingMemory },
+          published: { from: MemoryLayer.SharedWorkingMemory, to: MemoryLayer.VerifiableMemory },
+          updated: { from: MemoryLayer.VerifiableMemory, to: MemoryLayer.VerifiableMemory },
+          discarded: { from: MemoryLayer.WorkingMemory, to: 'none' },
+        };
 
         // Group event rows by event URI (rootEntity may produce multiple rows)
         const eventMap = new Map<string, AssertionEvent>();
@@ -1925,13 +2130,13 @@ export class DKGAgent extends DKGAgentBase {
             if (!eventUri) continue;
             if (!eventMap.has(eventUri)) {
               const typeSuffix = (b['type'] ?? '').replace(DKG_NS, '').replace('Assertion', '').toLowerCase();
+              const derived = LAYER_BY_TYPE[typeSuffix];
               eventMap.set(eventUri, {
                 type: (typeSuffix || stateStr) as AssertionState,
                 timestamp: strip(b['timestamp']) ?? '',
-                fromLayer: strip(b['fromLayer']) ?? '',
-                toLayer: strip(b['toLayer']) ?? '',
+                fromLayer: strip(b['fromLayer']) ?? derived?.from ?? '',
+                toLayer: strip(b['toLayer']) ?? derived?.to ?? '',
                 shareOperationId: strip(b['shareOpId']),
-                kcUal: strip(b['kcUal']),
                 rootEntities: b['rootEntity'] ? [b['rootEntity']] : undefined,
               });
             } else if (b['rootEntity']) {
@@ -1940,6 +2145,15 @@ export class DKGAgent extends DKGAgentBase {
               if (!existing.rootEntities.includes(b['rootEntity'])) {
                 existing.rootEntities.push(b['rootEntity']);
               }
+            }
+          }
+          // RFC ka-metadata-trim Phase 2 — promote events written by this
+          // release carry no event-side member rows; surface the lifecycle-
+          // subject member stamp instead so `events[].rootEntities` (API/MCP
+          // descriptor pass-through) keeps resolving.
+          for (const ev of eventMap.values()) {
+            if (ev.type === 'promoted' && !ev.rootEntities && subjectRoots.length > 0) {
+              ev.rootEntities = [...subjectRoots];
             }
           }
         }
@@ -1962,6 +2176,7 @@ export class DKGAgent extends DKGAgentBase {
           status: deriveStatus(pointers),
           kaNumber: kaNumberStr,
           reservedUal,
+          publishedUal,
         };
       },
 
@@ -2119,5 +2334,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods {}
-applyMixins(DKGAgent, [ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods]);
+export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods {}
+applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods]);

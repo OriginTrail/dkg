@@ -167,7 +167,10 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
   ): Promise<bigint> => {
     await Token.mint(owner.address, COMMITTED_TRAC);
     await Token.connect(owner).approve(await NFT.getAddress(), COMMITTED_TRAC);
-    await NFT.connect(owner).createAccount(COMMITTED_TRAC);
+    // RFC-51: createAccount(committedTRAC, primaryNode). These lifecycle
+    // assertions don't exercise publishing-allocation seeding, so pass an
+    // inert primaryNode = 0 (no designated node, no allocation seeded).
+    await NFT.connect(owner).createAccount(COMMITTED_TRAC, 0);
     return NFT.totalSupply();
   };
 
@@ -572,17 +575,17 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     );
   });
 
-  it('greenfield: curated publish requires a ciphertext commitment before value enters sampling', async () => {
+  it('greenfield: curated publish requires a catalog commitment before value enters sampling', async () => {
     const setup = await setupRegisteredAgentPublish();
     const curatedCgId = await createCuratedContextGraphFor(setup.creator);
-    const p = await buildBasePublishParams(setup, 'curated-missing-ct', {
+    const p = await buildBasePublishParams(setup, 'curated-missing-catalog', {
       contextGraphId: curatedCgId,
     });
 
     await expect(KAV10.connect(setup.creator).publish(p))
       .to.be.revertedWithCustomError(
         KAV10,
-        'CuratedCGRequiresCiphertextCommitment',
+        'CuratedCGRequiresCatalogCommitment',
       )
       .withArgs(curatedCgId);
 
@@ -594,31 +597,31 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     );
   });
 
-  it('greenfield: curated publish with a full ciphertext commitment persists the sampling proof anchor', async () => {
+  it('greenfield: curated publish with a full catalog commitment persists the sampling proof anchor', async () => {
     const setup = await setupRegisteredAgentPublish();
     const curatedCgId = await createCuratedContextGraphFor(setup.creator);
-    const ciphertextChunksRoot = ethers.keccak256(
-      ethers.toUtf8Bytes('curated-publish-ct-root'),
+    const catalogRoot = ethers.keccak256(
+      ethers.toUtf8Bytes('curated-publish-catalog-root'),
     );
-    const ciphertextChunkCount = 3n;
-    const p = await buildBasePublishParams(setup, 'curated-with-ct', {
+    const catalogLeafCount = 3n;
+    const p = await buildBasePublishParams(setup, 'curated-with-catalog', {
       contextGraphId: curatedCgId,
-      ciphertextChunksRoot,
-      ciphertextChunkCount,
+      catalogRoot,
+      catalogLeafCount,
     });
 
     await (await KAV10.connect(setup.creator).publish(p)).wait();
 
     const kaId = BigInt(p.reservedKaId);
     expect(await CGS.kaToContextGraph(kaId)).to.equal(curatedCgId);
-    expect(await DKGKnowledgeAssets.getLatestCiphertextChunksRoot(kaId)).to
-      .equal(ciphertextChunksRoot);
-    expect(await DKGKnowledgeAssets.getCiphertextChunkCount(kaId)).to.equal(
-      ciphertextChunkCount,
+    expect(await DKGKnowledgeAssets.getCatalogRoot(kaId)).to
+      .equal(catalogRoot);
+    expect(await DKGKnowledgeAssets.getCatalogLeafCount(kaId)).to.equal(
+      catalogLeafCount,
     );
   });
 
-  it('update: paid legacy curated top-up requires the first ciphertext commitment', async () => {
+  it('update: paid legacy curated top-up requires the first catalog commitment', async () => {
     const setup = await setupRegisteredAgentPublish();
     const curatedCgId = await createCuratedContextGraphFor(setup.creator);
     const storageOperator = accounts[19];
@@ -649,7 +652,7 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
       curatedCgId,
       kaId,
     );
-    expect(await DKGKnowledgeAssets.getLatestCiphertextChunksRoot(kaId)).to
+    expect(await DKGKnowledgeAssets.getCatalogRoot(kaId)).to
       .equal(ethers.ZeroHash);
 
     const up = await buildUpdateParams({
@@ -675,12 +678,12 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     await expect(KAV10.connect(setup.creator).update(up))
       .to.be.revertedWithCustomError(
         KAV10,
-        'CuratedCGRequiresCiphertextCommitment',
+        'CuratedCGRequiresCatalogCommitment',
       )
       .withArgs(curatedCgId);
   });
 
-  it('update: paid legacy curated top-up succeeds when it supplies the first ciphertext commitment', async () => {
+  it('update: paid legacy curated top-up succeeds when it supplies the first catalog commitment', async () => {
     const setup = await setupRegisteredAgentPublish();
     const curatedCgId = await createCuratedContextGraphFor(setup.creator);
     const storageOperator = accounts[19];
@@ -711,7 +714,7 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
       curatedCgId,
       kaId,
     );
-    expect(await DKGKnowledgeAssets.getLatestCiphertextChunksRoot(kaId)).to
+    expect(await DKGKnowledgeAssets.getCatalogRoot(kaId)).to
       .equal(ethers.ZeroHash);
 
     const firstCommitmentRoot = ethers.keccak256(
@@ -736,19 +739,234 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
       knowledgeAssetsToBurn: [],
       updateOperationId: 'legacy-curated-first-commit-op',
       author: setup.creator,
-      newCiphertextChunksRoot: firstCommitmentRoot,
-      newCiphertextChunkCount: firstCommitmentCount,
+      newCatalogRoot: firstCommitmentRoot,
+      newCatalogLeafCount: firstCommitmentCount,
     });
 
     await (await KAV10.connect(setup.creator).update(up)).wait();
 
     // The paid top-up supplied the first commitment, so the legacy KA can now
     // enter value-weighted sampling — the commitment anchor is persisted.
-    expect(await DKGKnowledgeAssets.getLatestCiphertextChunksRoot(kaId)).to
+    expect(await DKGKnowledgeAssets.getCatalogRoot(kaId)).to
       .equal(firstCommitmentRoot);
-    expect(await DKGKnowledgeAssets.getCiphertextChunkCount(kaId)).to.equal(
+    expect(await DKGKnowledgeAssets.getCatalogLeafCount(kaId)).to.equal(
       firstCommitmentCount,
     );
+  });
+
+  // --------------------------------------------------------------------------
+  // OT-RFC-49 catalog-commitment integrity reverts. These MUST/MUST-NOT guards
+  // previously had ZERO assertions; `IncompleteCatalogCommitment` is the exact
+  // KnowledgeAssetsLifecycle lifecycle revert behind the PR #1198 regression.
+  // --------------------------------------------------------------------------
+  it('publish: a PARTIAL catalog commitment (exactly one field zero) on a curated CG reverts IncompleteCatalogCommitment', async () => {
+    const setup = await setupRegisteredAgentPublish();
+    const curatedCgId = await createCuratedContextGraphFor(setup.creator);
+
+    // root set, leafCount zero
+    const pRootOnly = await buildBasePublishParams(setup, 'partial-root-only', {
+      contextGraphId: curatedCgId,
+      catalogRoot: ethers.keccak256(ethers.toUtf8Bytes('partial-root')),
+      catalogLeafCount: 0n,
+    });
+    await expect(
+      KAV10.connect(setup.creator).publish(pRootOnly),
+    ).to.be.revertedWithCustomError(KAV10, 'IncompleteCatalogCommitment');
+
+    // leafCount set, root zero
+    const pCountOnly = await buildBasePublishParams(
+      setup,
+      'partial-count-only',
+      {
+        contextGraphId: curatedCgId,
+        catalogRoot: ethers.ZeroHash,
+        catalogLeafCount: 5n,
+      },
+    );
+    await expect(
+      KAV10.connect(setup.creator).publish(pCountOnly),
+    ).to.be.revertedWithCustomError(KAV10, 'IncompleteCatalogCommitment');
+
+    // nothing minted on either reverted attempt
+    await expect(
+      DKGKnowledgeAssets.ownerOf(pRootOnly.reservedKaId),
+    ).to.be.revertedWithCustomError(
+      DKGKnowledgeAssets,
+      'ERC721NonexistentToken',
+    );
+  });
+
+  it('publish: a PUBLIC CG carrying a catalog commitment reverts PublicCGCannotHaveCatalogCommitment', async () => {
+    const setup = await setupRegisteredAgentPublish();
+    // setup.cgId is the open/public CG created in setupRegisteredAgentPublish.
+    const p = await buildBasePublishParams(setup, 'public-with-catalog', {
+      catalogRoot: ethers.keccak256(
+        ethers.toUtf8Bytes('illegal-public-catalog'),
+      ),
+      catalogLeafCount: 3n,
+    });
+    await expect(KAV10.connect(setup.creator).publish(p))
+      .to.be.revertedWithCustomError(
+        KAV10,
+        'PublicCGCannotHaveCatalogCommitment',
+      )
+      .withArgs(setup.cgId);
+  });
+
+  it('update: a PARTIAL new catalog commitment (one field zero) on a curated KA reverts IncompleteCatalogCommitment', async () => {
+    const setup = await setupRegisteredAgentPublish();
+    const curatedCgId = await createCuratedContextGraphFor(setup.creator);
+    const storageOperator = accounts[19];
+    await HubContract.setContractAddress(
+      'TestStorageOperator',
+      storageOperator.address,
+    );
+
+    const currentEpoch = await Chronos.getCurrentEpoch();
+    const endEpoch = currentEpoch + BigInt(setup.epochs);
+    const initialTokenAmount = ethers.parseEther('1000');
+    const kaId = packReservedKaId(setup.creator.address, 811);
+    await DKGKnowledgeAssets.connect(storageOperator).createKnowledgeAsset(
+      storageOperator.address,
+      setup.creator.address,
+      kaId,
+      'partial-update-op',
+      ethers.keccak256(ethers.toUtf8Bytes('partial-update')),
+      1,
+      1000,
+      currentEpoch,
+      endEpoch,
+      initialTokenAmount,
+      false,
+      1,
+    );
+    await CGS.connect(storageOperator).registerKnowledgeAssetToContextGraph(
+      curatedCgId,
+      kaId,
+    );
+
+    const up = await buildUpdateParams({
+      chainId: DEFAULT_CHAIN_ID,
+      kav10Address: await KAV10.getAddress(),
+      receivingNodes: setup.receivingNodes,
+      publisherIdentityId: setup.publisherIdentityId,
+      receiverIdentityIds: setup.receiverIdentityIds,
+      contextGraphId: curatedCgId,
+      id: kaId,
+      preUpdateMerkleRootCount: 1n,
+      newMerkleRoot: ethers.keccak256(ethers.toUtf8Bytes('partial-update-root')),
+      newByteSize: 1000n,
+      newTokenAmount: initialTokenAmount + ethers.parseEther('1'),
+      mintKnowledgeAssetsAmount: 0n,
+      knowledgeAssetsToBurn: [],
+      updateOperationId: 'partial-update-op',
+      author: setup.creator,
+      newCatalogRoot: ethers.keccak256(ethers.toUtf8Bytes('partial-update-cat')),
+      newCatalogLeafCount: 0n, // partial — one field zero
+    });
+    await expect(
+      KAV10.connect(setup.creator).update(up),
+    ).to.be.revertedWithCustomError(KAV10, 'IncompleteCatalogCommitment');
+  });
+
+  it('update: zero-pairing the catalog on an already-committed curated KA reverts IncompleteCatalogCommitment (no stranding)', async () => {
+    const setup = await setupRegisteredAgentPublish();
+    const curatedCgId = await createCuratedContextGraphFor(setup.creator);
+
+    // Publish with a full commitment so the KA is genuinely committed.
+    const catalogRoot = ethers.keccak256(ethers.toUtf8Bytes('committed-root'));
+    const pub = await buildBasePublishParams(setup, 'strand-publish', {
+      contextGraphId: curatedCgId,
+      catalogRoot,
+      catalogLeafCount: 3n,
+    });
+    await (await KAV10.connect(setup.creator).publish(pub)).wait();
+    const kaId = BigInt(pub.reservedKaId);
+    expect(await DKGKnowledgeAssets.getCatalogRoot(kaId)).to.equal(catalogRoot);
+
+    // A zero-pair (both fields zero) update on a committed KA would strand the
+    // stale commitment — must revert.
+    const up = await buildUpdateParams({
+      chainId: DEFAULT_CHAIN_ID,
+      kav10Address: await KAV10.getAddress(),
+      receivingNodes: setup.receivingNodes,
+      publisherIdentityId: setup.publisherIdentityId,
+      receiverIdentityIds: setup.receiverIdentityIds,
+      contextGraphId: curatedCgId,
+      id: kaId,
+      preUpdateMerkleRootCount: 1n,
+      newMerkleRoot: ethers.keccak256(ethers.toUtf8Bytes('strand-update-root')),
+      newByteSize: 1000n,
+      newTokenAmount: ethers.parseEther('1000'),
+      mintKnowledgeAssetsAmount: 0n,
+      knowledgeAssetsToBurn: [],
+      updateOperationId: 'strand-update-op',
+      author: setup.creator,
+      newCatalogRoot: ethers.ZeroHash,
+      newCatalogLeafCount: 0n,
+    });
+    await expect(
+      KAV10.connect(setup.creator).update(up),
+    ).to.be.revertedWithCustomError(KAV10, 'IncompleteCatalogCommitment');
+  });
+
+  it('update: a PUBLIC CG update carrying a catalog commitment reverts PublicCGCannotHaveCatalogCommitment', async () => {
+    const setup = await setupRegisteredAgentPublish();
+    const storageOperator = accounts[19];
+    await HubContract.setContractAddress(
+      'TestStorageOperator',
+      storageOperator.address,
+    );
+
+    const currentEpoch = await Chronos.getCurrentEpoch();
+    const endEpoch = currentEpoch + BigInt(setup.epochs);
+    const initialTokenAmount = ethers.parseEther('1000');
+    const kaId = packReservedKaId(setup.creator.address, 812);
+    await DKGKnowledgeAssets.connect(storageOperator).createKnowledgeAsset(
+      storageOperator.address,
+      setup.creator.address,
+      kaId,
+      'public-update-op',
+      ethers.keccak256(ethers.toUtf8Bytes('public-update')),
+      1,
+      1000,
+      currentEpoch,
+      endEpoch,
+      initialTokenAmount,
+      false,
+      1,
+    );
+    // setup.cgId is PUBLIC.
+    await CGS.connect(storageOperator).registerKnowledgeAssetToContextGraph(
+      setup.cgId,
+      kaId,
+    );
+
+    const up = await buildUpdateParams({
+      chainId: DEFAULT_CHAIN_ID,
+      kav10Address: await KAV10.getAddress(),
+      receivingNodes: setup.receivingNodes,
+      publisherIdentityId: setup.publisherIdentityId,
+      receiverIdentityIds: setup.receiverIdentityIds,
+      contextGraphId: setup.cgId,
+      id: kaId,
+      preUpdateMerkleRootCount: 1n,
+      newMerkleRoot: ethers.keccak256(ethers.toUtf8Bytes('public-update-root')),
+      newByteSize: 1000n,
+      newTokenAmount: initialTokenAmount + ethers.parseEther('1'),
+      mintKnowledgeAssetsAmount: 0n,
+      knowledgeAssetsToBurn: [],
+      updateOperationId: 'public-update-op',
+      author: setup.creator,
+      newCatalogRoot: ethers.keccak256(ethers.toUtf8Bytes('illegal-public-cat')),
+      newCatalogLeafCount: 4n, // illegal on a public CG
+    });
+    await expect(KAV10.connect(setup.creator).update(up))
+      .to.be.revertedWithCustomError(
+        KAV10,
+        'PublicCGCannotHaveCatalogCommitment',
+      )
+      .withArgs(setup.cgId);
   });
 
   it('update: metadata-only maintenance of a legacy uncommitted curated KA stays allowed without a commitment', async () => {
@@ -783,7 +1001,7 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
       kaId,
     );
 
-    // No paid top-up (newTokenAmount unchanged) and no ciphertext pair: this is
+    // No paid top-up (newTokenAmount unchanged) and no catalog pair: this is
     // metadata-only maintenance, which stays allowed for legacy uncommitted
     // curated KAs — the commitment gate only guards value-adding (paid) updates.
     const up = await buildUpdateParams({
@@ -810,7 +1028,7 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
 
     // Still uncommitted and that is fine — metadata maintenance does not force
     // a commitment on a legacy curated KA.
-    expect(await DKGKnowledgeAssets.getLatestCiphertextChunksRoot(kaId)).to
+    expect(await DKGKnowledgeAssets.getCatalogRoot(kaId)).to
       .equal(ethers.ZeroHash);
   });
 

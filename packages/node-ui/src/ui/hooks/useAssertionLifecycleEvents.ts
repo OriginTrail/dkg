@@ -52,11 +52,11 @@ export interface AssertionLifecycleEvent {
   /** Sub-graph slug if the assertion is sub-graph-scoped. */
   subGraph?: string;
   /**
-   * Number of root entities included in a `'promoted'` bundle —
-   * `count(?event dkg:rootEntity ?root)`. Undefined for `'created'`
-   * (the metadata writer doesn't emit `dkg:rootEntity` on creation,
-   * see `generateAssertionCreatedMetadata` in
-   * `packages/publisher/src/metadata.ts`).
+   * Number of root entities included in a `'promoted'` bundle. Read-both
+   * (RFC ka-metadata-trim Phase 2): old-store events carry per-event
+   * `dkg:rootEntity` rows (counted directly); new events don't — the count
+   * falls back to the stable lifecycle-subject member stamp. Undefined for
+   * `'created'` (no member entities are known before promote).
    */
   entityCount?: number;
 }
@@ -116,21 +116,34 @@ export function buildLifecycleEventsQuery(cgId: string): string {
   // created scoped events before #770 shipped). The reader below
   // prefers the literal when present and parses the URI only when
   // it's absent.
+  // RFC ka-metadata-trim Phase 2 — read-both event shape:
+  //   - `prov:wasAssociatedWith` is no longer written on events. OPTIONAL
+  //     here for old-store rows; the fallback is the assertion subject's
+  //     `prov:wasAttributedTo` (the lifecycle writer stamps the SAME agent
+  //     DID there at create). COALESCE keeps old rows resolving unchanged.
+  //   - the event-side `dkg:rootEntity` rows are no longer written for
+  //     promote events; count the STABLE subject-side member stamp too
+  //     (separate variable — under a cross-product COUNT(DISTINCT …) per
+  //     variable stays correct) and let the consumer prefer the event-side
+  //     count when present (old rows), else the subject-side one.
   return `PREFIX dkg: <${DKG}>
 PREFIX prov: <http://www.w3.org/ns/prov#>
-SELECT ?event ?type ?assertion ?name ?agent ?ts ?subGraphName ?assertionGraph (COUNT(?root) AS ?entityCount) WHERE {
+SELECT ?event ?type ?assertion ?name ?agent ?ts ?subGraphName ?assertionGraph (COUNT(DISTINCT ?root) AS ?entityCount) (COUNT(DISTINCT ?subjRoot) AS ?subjectEntityCount) WHERE {
   GRAPH <${metaGraph}> {
     ?event a ?type ;
-           prov:startedAtTime ?ts ;
-           prov:wasAssociatedWith ?agent .
+           prov:startedAtTime ?ts .
     FILTER(?type IN (dkg:AssertionCreated, dkg:AssertionPromoted))
+    OPTIONAL { ?event prov:wasAssociatedWith ?agentAssoc }
     OPTIONAL { ?event prov:generated ?gen }
     OPTIONAL { ?event prov:used ?used }
     BIND(COALESCE(?gen, ?used) AS ?assertion)
     ?assertion dkg:assertionName ?name .
+    OPTIONAL { ?assertion prov:wasAttributedTo ?agentAttr }
+    BIND(COALESCE(?agentAssoc, ?agentAttr) AS ?agent)
     OPTIONAL { ?assertion dkg:subGraphName ?subGraphName }
     OPTIONAL { ?assertion dkg:assertionGraph ?assertionGraph }
     OPTIONAL { ?event dkg:rootEntity ?root }
+    OPTIONAL { ?assertion dkg:rootEntity ?subjRoot }
   }
 } GROUP BY ?event ?type ?assertion ?name ?agent ?ts ?subGraphName ?assertionGraph
   ORDER BY DESC(?ts) LIMIT 5000`;
@@ -247,9 +260,18 @@ export function useAssertionLifecycleEvents(
           // bare digit string. Missing/zero on created rows.
           let entityCount: number | undefined;
           if (kind === 'promoted') {
+            // Read-both (RFC ka-metadata-trim Phase 2): old-store promote
+            // events carry event-side `dkg:rootEntity` rows; new ones don't
+            // — fall back to the stable subject-side member-stamp count.
             const raw = bv(row.entityCount);
             const n = raw != null ? Number(raw) : NaN;
-            if (Number.isFinite(n) && n >= 0) entityCount = n;
+            if (Number.isFinite(n) && n > 0) {
+              entityCount = n;
+            } else {
+              const subjRaw = bv(row.subjectEntityCount);
+              const subjN = subjRaw != null ? Number(subjRaw) : NaN;
+              if (Number.isFinite(subjN) && subjN >= 0) entityCount = subjN;
+            }
           }
           // PR #771 (Task #18) — read `dkg:subGraphName` directly
           // from the assertion subject for post-#770 rows.

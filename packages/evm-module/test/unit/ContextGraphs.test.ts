@@ -136,7 +136,9 @@ describe('@unit ContextGraphs (facade)', () => {
   async function createPCAAccount(funder: SignerWithAddress, amountEth: string = '60000'): Promise<bigint> {
     const amount = ethers.parseEther(amountEth);
     await TokenContract.connect(funder).approve(await NFT.getAddress(), amount);
-    const tx = await NFT.connect(funder).createAccount(amount);
+    // RFC-51: createAccount(committedTRAC, primaryNode). These CG / agent
+    // tests don't assert publishing-allocation seeding → inert node = 0.
+    const tx = await NFT.connect(funder).createAccount(amount, 0);
     await tx.wait();
     // NFT tokenIds mirror accountIds (both start at 1).
     const balance = await NFT.balanceOf(funder.address);

@@ -32,6 +32,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   V10MerkleTree,
   hashTripleV10,
+  structuredKARootV10,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
@@ -72,9 +73,8 @@ describe('Random Sampling E2E (MockChainAdapter)', () => {
     // 2. Compute V10 leaves + merkle root + leafCount (publisher does
     //    this exact computation in `computeFlatKCRootV10`).
     const rawLeaves = publishQuads.map((q) => hashTripleV10(q.subject, q.predicate, q.object));
-    const tree = new V10MerkleTree(rawLeaves);
-    const merkleRoot = tree.root;
-    const merkleLeafCount = tree.leafCount;
+    // structured public commitment: hashPair(publicRoot, sentinel) — no private data here.
+    const { root: merkleRoot, leafCount: merkleLeafCount, publicTree } = structuredKARootV10(rawLeaves, []);
 
     // 3. Decide identifiers. In a real publish flow the chain mints
     //    the kaId and assigns the cgId; in the test we pick them.
@@ -88,7 +88,7 @@ describe('Random Sampling E2E (MockChainAdapter)', () => {
     //    set the on-chain `_verifyV10MerkleProof` would accept.
     const chunks = Array.from({ length: merkleLeafCount }, (_, idx) => ({
       chunkId: BigInt(idx),
-      chunk: ethers.hexlify(tree.leafAt(idx)),
+      chunk: ethers.hexlify(publicTree.leafAt(idx)),
     }));
     chain.__registerKC({
       kaId,

@@ -58,6 +58,8 @@ interface BuildEnvelopeOptions {
    * envelope with a chain identity.
    */
   requesterAgentAddress?: string;
+  /** R9 — mark the envelope as a member-recovery request. */
+  recovery?: boolean;
 }
 
 async function buildSignedEnvelope(
@@ -84,6 +86,7 @@ async function buildSignedEnvelope(
     requesterSignatureR: ethers.hexlify(sig.r),
     requesterSignatureVS: ethers.hexlify(sig.yParityAndS),
     ...(opts.requesterAgentAddress ? { requesterAgentAddress: opts.requesterAgentAddress } : {}),
+    ...(opts.recovery ? { recovery: true } : {}),
   };
   return { envelope, remotePeerId };
 }
@@ -101,7 +104,10 @@ interface AuthCallParams {
    */
   allowedDelegateePeers?: Map<string, string[]> | Record<string, string[]>;
   allowedDelegateeKeys?: Map<string, string[]> | Record<string, string[]>;
+  /** R9 — fresh `_meta`-only members-only recovery gate (used when envelope.recovery is set). */
+  memberRecoveryGate?: string[] | null;
   verifyIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
+  signal?: AbortSignal;
 }
 
 function toMap(input: Map<string, string[]> | Record<string, string[]> | undefined): Map<string, string[]> {
@@ -129,7 +135,9 @@ async function callAuth(params: AuthCallParams): Promise<{ allowed: boolean; log
     getAgentGateAddresses: async () => params.agentGateAddresses ?? null,
     getAllowedDelegateePeers: async () => peersMap,
     getAllowedDelegateeKeys: async () => keysMap,
+    getMemberRecoveryGate: async () => params.memberRecoveryGate ?? null,
     refreshMetaFromCurator: async () => false,
+    signal: params.signal,
     logWarn: (_c, m) => logs.push(`WARN: ${m}`),
     logInfo: (_c, m) => logs.push(`INFO: ${m}`),
   });
@@ -346,6 +354,7 @@ describe('authorizePrivateSyncRequest — agent-delegation path', () => {
       getAgentGateAddresses: async () => null,
       getAllowedDelegateePeers: async () => new Map<string, string[]>(),
       getAllowedDelegateeKeys: async () => new Map([[agentAddress.toLowerCase(), [nodeOpKey.address.toLowerCase()]]]),
+      getMemberRecoveryGate: async () => null,
       refreshMetaFromCurator: async () => false,
       logWarn: () => {},
       logInfo: () => {},
@@ -383,6 +392,7 @@ describe('authorizePrivateSyncRequest — agent-delegation path', () => {
           ? new Map([[agentAddress.toLowerCase(), [nodeOpKey.address.toLowerCase()]]])
           : new Map<string, string[]>();
       },
+      getMemberRecoveryGate: async () => null,
       refreshMetaFromCurator: async () => {
         refreshed = true;
         return true;
@@ -392,6 +402,115 @@ describe('authorizePrivateSyncRequest — agent-delegation path', () => {
     });
     expect(allowed).toBe(true);
     expect(callsToGetKeys).toEqual(['before-refresh', 'after-refresh']);
+  });
+
+  it('passes the abort signal to auth lookup helpers', async () => {
+    const { envelope, remotePeerId } = await buildSignedEnvelope({
+      signer: nodeOpKey,
+      identityId: '5',
+      requesterAgentAddress: agentAddress,
+    });
+    const controller = new AbortController();
+    const seenSignals: AbortSignal[] = [];
+    const allowed = await authorizePrivateSyncRequest({
+      ctx: {} as any,
+      request: envelope,
+      remotePeerId,
+      localPeerId: LOCAL_PEER,
+      syncAuthMaxAgeMs: 90_000,
+      seenRequestIds: new Map(),
+      computeSyncDigest: computeDigestStub,
+      verifyIdentity: async (_address, _identityId, options) => {
+        if (options?.signal) seenSignals.push(options.signal);
+        return true;
+      },
+      getParticipants: async (_contextGraphId, options) => {
+        if (options?.signal) seenSignals.push(options.signal);
+        return [agentAddress];
+      },
+      getAllowedPeers: async (_contextGraphId, options) => {
+        if (options?.signal) seenSignals.push(options.signal);
+        return null;
+      },
+      getAgentGateAddresses: async (_contextGraphId, options) => {
+        if (options?.signal) seenSignals.push(options.signal);
+        return [agentAddress];
+      },
+      getAllowedDelegateePeers: async (_contextGraphId, options) => {
+        if (options?.signal) seenSignals.push(options.signal);
+        return new Map<string, string[]>();
+      },
+      getAllowedDelegateeKeys: async (_contextGraphId, options) => {
+        if (options?.signal) seenSignals.push(options.signal);
+        return new Map([[agentAddress.toLowerCase(), [nodeOpKey.address.toLowerCase()]]]);
+      },
+      getMemberRecoveryGate: async (_contextGraphId, options) => {
+        if (options?.signal) seenSignals.push(options.signal);
+        return null;
+      },
+      refreshMetaFromCurator: async () => false,
+      signal: controller.signal,
+      logWarn: () => {},
+      logInfo: () => {},
+    });
+
+    expect(allowed).toBe(true);
+    expect(seenSignals).toHaveLength(6);
+    expect(seenSignals.every((signal) => signal === controller.signal)).toBe(true);
+  });
+
+  it('waits for non-abortable auth helpers to settle before rejecting aborts', async () => {
+    const agentWallet = ethers.Wallet.createRandom();
+    const { envelope, remotePeerId } = await buildSignedEnvelope({
+      signer: agentWallet,
+      requesterAgentAddress: agentWallet.address,
+    });
+    const controller = new AbortController();
+    const participantsGate = (() => {
+      let resolve!: (value: string[] | null) => void;
+      const promise = new Promise<string[] | null>((res) => {
+        resolve = res;
+      });
+      return { promise, resolve };
+    })();
+    const seen = new Map<string, number>();
+    let participantsStarted = false;
+    let settled = false;
+    const auth = authorizePrivateSyncRequest({
+      ctx: {} as any,
+      request: envelope,
+      remotePeerId,
+      localPeerId: LOCAL_PEER,
+      syncAuthMaxAgeMs: 90_000,
+      seenRequestIds: seen,
+      computeSyncDigest: computeDigestStub,
+      getParticipants: async () => {
+        participantsStarted = true;
+        return participantsGate.promise;
+      },
+      getAllowedPeers: async () => null,
+      getAgentGateAddresses: async () => null,
+      getAllowedDelegateePeers: async () => new Map<string, string[]>(),
+      getAllowedDelegateeKeys: async () => new Map<string, string[]>(),
+      getMemberRecoveryGate: async () => null,
+      refreshMetaFromCurator: async () => false,
+      signal: controller.signal,
+      logWarn: () => {},
+      logInfo: () => {},
+    });
+    auth.then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+
+    while (!participantsStarted) await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort(new Error('auth aborted'));
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(settled).toBe(false);
+    participantsGate.resolve(null);
+    await expect(auth).rejects.toThrow(/auth aborted/);
+    expect(seen.size).toBe(0);
   });
 
   it('rejects when verifyIdentity fails even if delegatee key would match', async () => {
@@ -455,5 +574,84 @@ describe('authorizePrivateSyncRequest — agent-delegation path', () => {
       allowedDelegateeKeys: { [agentAddress.toLowerCase()]: [nodeOpKey.address.toLowerCase()] },
     });
     expect(allowed).toBe(true);
+  });
+
+  // R9 (SECURITY) — member-recovery branch. Recovery serves plaintext
+  // member-to-member, so a recovery-flagged envelope MUST be gated by the
+  // strict members-only `isMemberRecoveryAuthorized` on a FRESH `_meta` gate,
+  // hard-denying on null/empty, and MUST NOT fall through to the weaker
+  // participant/peer fallback.
+  describe('member-recovery (request.recovery) branch', () => {
+    it('HARD-DENIES recovery on a null gate even though the participant/peer fallback would allow', async () => {
+      const member = ethers.Wallet.createRandom();
+      const { envelope, remotePeerId } = await buildSignedEnvelope({
+        signer: member,
+        requesterAgentAddress: member.address,
+        recovery: true,
+      });
+      const { allowed } = await callAuth({
+        envelope,
+        remotePeerId,
+        // Fallback would ALLOW (participant + peer both match) — recovery must ignore it.
+        participants: [member.address],
+        allowedPeers: [remotePeerId],
+        memberRecoveryGate: null, // transient/empty fresh gate ⇒ hard-deny
+      });
+      expect(allowed).toBe(false);
+    });
+
+    it('allows recovery when the recovered signer is in the fresh members-only gate', async () => {
+      const member = ethers.Wallet.createRandom();
+      const { envelope, remotePeerId } = await buildSignedEnvelope({
+        signer: member,
+        requesterAgentAddress: member.address,
+        recovery: true,
+      });
+      const { allowed } = await callAuth({
+        envelope,
+        remotePeerId,
+        // Fallback gates intentionally absent — only the members-only gate matters.
+        participants: null,
+        allowedPeers: null,
+        memberRecoveryGate: [member.address],
+      });
+      expect(allowed).toBe(true);
+    });
+
+    it('denies recovery when the recovered signer is NOT in the members-only gate', async () => {
+      const member = ethers.Wallet.createRandom();
+      const other = ethers.Wallet.createRandom();
+      const { envelope, remotePeerId } = await buildSignedEnvelope({
+        signer: member,
+        requesterAgentAddress: member.address,
+        recovery: true,
+      });
+      const { allowed } = await callAuth({
+        envelope,
+        remotePeerId,
+        memberRecoveryGate: [other.address], // member not present
+      });
+      expect(allowed).toBe(false);
+    });
+
+    it('decides on the RECOVERED signer, not a forged requesterAgentAddress claim (identity path)', async () => {
+      // op-key signs, but the envelope CLAIMS a member agent address and a chain
+      // identity. The recovered signer is the op-key (a non-member); recovery
+      // must deny even though `requesterAgentAddress` names a gate member.
+      const member = ethers.Wallet.createRandom();
+      const { envelope, remotePeerId } = await buildSignedEnvelope({
+        signer: nodeOpKey,
+        identityId: '9',
+        requesterAgentAddress: member.address, // forged "on behalf of" a member
+        recovery: true,
+      });
+      const { allowed } = await callAuth({
+        envelope,
+        remotePeerId,
+        verifyIdentity: async () => true, // identity check passes; gate must still deny
+        memberRecoveryGate: [member.address], // member IS in the gate, but signer isn't the member
+      });
+      expect(allowed).toBe(false);
+    });
   });
 });

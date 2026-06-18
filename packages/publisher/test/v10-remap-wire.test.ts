@@ -4,6 +4,9 @@ import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
 import { computeFlatKCRootV10, computeFlatKCMerkleLeafCountV10 } from '../src/merkle.js';
 import {
+  ACK_PROTOCOL_VERSION_V2_LU11,
+  buildCiphertextChunksRoot,
+  DEFAULT_MAX_READ_BYTES,
   encodePublishIntent,
   decodePublishIntent,
   encodeStorageACK,

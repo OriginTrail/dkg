@@ -249,18 +249,19 @@ function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus'
   if (status.startedAt) console.log(`Started:       ${new Date(status.startedAt).toISOString()}`);
   if (status.finishedAt) console.log(`Finished:      ${new Date(status.finishedAt).toISOString()}`);
   if (status.result) {
+    const totalConnectedPeers = status.result.totalPeers ?? status.result.connectedPeers;
     console.log(
-      `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${status.result.connectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
+      `Result:        peers ${status.result.peersTried}/${status.result.syncCapablePeers} (connected ${totalConnectedPeers}), data ${status.result.dataSynced}, shared memory ${status.result.sharedMemorySynced}`,
     );
     if (status.result.diagnostics) {
       console.log(
         `Diagnostics:   no-protocol ${status.result.diagnostics.noProtocolPeers}, durable fetched meta/data ${status.result.diagnostics.durable.fetchedMetaTriples}/${status.result.diagnostics.durable.fetchedDataTriples}, inserted meta/data ${status.result.diagnostics.durable.insertedMetaTriples}/${status.result.diagnostics.durable.insertedDataTriples}`,
       );
       console.log(
-        `               durable bytes ${status.result.diagnostics.durable.bytesReceived}, resumed phases ${status.result.diagnostics.durable.resumedPhases}, empty ${status.result.diagnostics.durable.emptyResponses}, meta-only ${status.result.diagnostics.durable.metaOnlyResponses}, no-meta rejects ${status.result.diagnostics.durable.dataRejectedMissingMeta}, rejected KCs ${status.result.diagnostics.durable.rejectedKcs}, failures ${status.result.diagnostics.durable.failedPeers}`,
+        `               durable bytes ${status.result.diagnostics.durable.bytesReceived}, resumed phases ${status.result.diagnostics.durable.resumedPhases}, empty ${status.result.diagnostics.durable.emptyResponses}, meta-only ${status.result.diagnostics.durable.metaOnlyResponses}, no-meta rejects ${status.result.diagnostics.durable.dataRejectedMissingMeta}, rejected KCs ${status.result.diagnostics.durable.rejectedKcs}, transport failures ${status.result.diagnostics.durable.failedPeers}, phase failures ${status.result.diagnostics.durable.failedPhases ?? 0}`,
       );
       console.log(
-        `               swm fetched meta/data ${status.result.diagnostics.sharedMemory.fetchedMetaTriples}/${status.result.diagnostics.sharedMemory.fetchedDataTriples}, inserted meta/data ${status.result.diagnostics.sharedMemory.insertedMetaTriples}/${status.result.diagnostics.sharedMemory.insertedDataTriples}, bytes ${status.result.diagnostics.sharedMemory.bytesReceived}, resumed phases ${status.result.diagnostics.sharedMemory.resumedPhases}, empty ${status.result.diagnostics.sharedMemory.emptyResponses}, dropped ${status.result.diagnostics.sharedMemory.droppedDataTriples}, failures ${status.result.diagnostics.sharedMemory.failedPeers}`,
+        `               swm fetched meta/data ${status.result.diagnostics.sharedMemory.fetchedMetaTriples}/${status.result.diagnostics.sharedMemory.fetchedDataTriples}, inserted meta/data ${status.result.diagnostics.sharedMemory.insertedMetaTriples}/${status.result.diagnostics.sharedMemory.insertedDataTriples}, bytes ${status.result.diagnostics.sharedMemory.bytesReceived}, resumed phases ${status.result.diagnostics.sharedMemory.resumedPhases}, empty ${status.result.diagnostics.sharedMemory.emptyResponses}, dropped ${status.result.diagnostics.sharedMemory.droppedDataTriples}, transport failures ${status.result.diagnostics.sharedMemory.failedPeers}, phase failures ${status.result.diagnostics.sharedMemory.failedPhases ?? 0}`,
       );
     }
   }
@@ -269,7 +270,8 @@ function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus'
   }
   if (
     status.result &&
-    status.result.connectedPeers > 0 &&
+    (status.result.selectedPeers ?? status.result.connectedPeers) >= (status.result.totalPeers ?? status.result.connectedPeers) &&
+    (status.result.totalPeers ?? status.result.connectedPeers) > 0 &&
     status.result.syncCapablePeers === 0 &&
     status.result.dataSynced === 0 &&
     status.result.sharedMemorySynced === 0

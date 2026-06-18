@@ -277,6 +277,51 @@ export class UpdateHandler {
         await this.store.insert(flat);
       }
 
+      // #1099: drain this replica's SWM copy of the updated roots — same
+      // contract as the finalization path. The publisher cleans its own SWM
+      // after a confirmed update, but replicas that mirrored the edit-loop
+      // share kept the stale copy forever and re-served it to late
+      // subscribers via the PROTOCOL_SYNC SWM responder.
+      try {
+        const swmBucket = this.graphManager.sharedMemoryUri(contextGraphId);
+        const swmMeta = this.graphManager.sharedMemoryMetaUri(contextGraphId);
+        const allGraphs = await this.store.listGraphs();
+        const swmGraphs = allGraphs.filter((g) => g === swmBucket || g.startsWith(`${swmBucket}/`));
+        for (const m of manifest) {
+          for (const g of swmGraphs) {
+            await this.deleteEntityTriples(g, m.rootEntity);
+          }
+          await this.store.deleteByPattern({ graph: swmMeta, subject: m.rootEntity });
+          // Detach the root from its WorkspaceOperation rows (and drop ops
+          // that reference nothing else) so the PROTOCOL_SYNC TTL branch
+          // stops serving the drained content to late subscribers.
+          const ops = await this.store.query(
+            `SELECT DISTINCT ?op WHERE { GRAPH <${swmMeta}> { ?op (<http://dkg.io/ontology/rootEntity>|<http://dkg.io/ontology/entity>) <${m.rootEntity}> } }`,
+          );
+          if (ops.type === 'bindings') {
+            for (const row of ops.bindings) {
+              const op = row['op'];
+              if (!op) continue;
+              await this.store.delete([
+                { subject: op, predicate: 'http://dkg.io/ontology/rootEntity', object: m.rootEntity, graph: swmMeta },
+                { subject: op, predicate: 'http://dkg.io/ontology/entity', object: m.rootEntity, graph: swmMeta },
+              ]);
+              const remaining = await this.store.query(
+                `ASK { GRAPH <${swmMeta}> { <${op}> (<http://dkg.io/ontology/rootEntity>|<http://dkg.io/ontology/entity>) ?r } }`,
+              );
+              if (remaining.type === 'boolean' && remaining.value === false) {
+                await this.store.deleteByPattern({ graph: swmMeta, subject: op });
+              }
+            }
+          }
+        }
+      } catch (err) {
+        this.log.warn(
+          ctx,
+          `SWM drain after applied update failed for batchId=${batchId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
       // Record applied update for ordering + context graph binding
       if (verifiedBlockNumber !== undefined) {
         const orderKey = `${contextGraphId}:${batchId}`;

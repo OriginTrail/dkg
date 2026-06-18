@@ -54,12 +54,20 @@ export function resolveViewGraphs(
   contextGraphId: string,
   opts?: {
     agentAddress?: string;
+    /** Same-identity WM namespace aliases — see QueryOptions.agentAddressAliases. */
+    agentAddressAliases?: string[];
     verifiedGraph?: string;
     assertionName?: string;
     /** Resolved KA number for single-graph by-name reads under the uniform layout. */
     kaNumber?: bigint;
     /** Spec §12/§14 trust-gradient filter. Enforced after graph resolution. */
     minTrust?: TrustLevel;
+    /**
+     * GH #184 — when set, the view is scoped to this registered sub-graph: the
+     * uniform layout stores sub-graph layer data at `…/{sub}/{slug}/…`, so the
+     * per-layer prefixes below gain the `/{sub}` segment.
+     */
+    subGraphName?: string;
   },
 ): ViewResolution {
   if (REMOVED_VIEWS.includes(view as string)) {
@@ -68,34 +76,56 @@ export function resolveViewGraphs(
       `See migration guide for details.`,
     );
   }
+  // GH #184 — sub-graph segment threaded into every per-layer prefix/graph.
+  const sg = opts?.subGraphName ? `/${opts.subGraphName}` : '';
   switch (view) {
     case 'working-memory': {
       if (!opts?.agentAddress) {
         throw new Error('agentAddress is required for the working-memory view');
       }
-      // Uniform layout: WM data is in `…/_working_memory/{addr}/{number}`. A by-name read
-      // STAYS a single-graph read (no sibling-assertion leak); the caller resolves
-      // name→number and passes opts.kaNumber. Until then it falls back to the legacy
-      // name-keyed graph (TODO: wire the _meta name→number lookup at the query caller).
+      // Uniform layout: WM data is in `…[/{sub}]/_working_memory/{addr}/{number}`. A
+      // by-name read STAYS a single-graph read (no sibling-assertion leak); the caller
+      // resolves name→number and passes opts.kaNumber, falling back to the legacy
+      // name-keyed graph. Both single-graph URIs mirror the writer
+      // (`DKGPublisher.wmGraphUri`), including the sub-graph segment — without it a
+      // `subGraphName` + `assertionName` read targets the ROOT assertion graph and
+      // misses sub-graph assertions (Codex review on PR #1132).
       if (opts.assertionName) {
         return {
           graphs: [opts.kaNumber !== undefined
-            ? contextGraphLayerUri(contextGraphId, MemoryLayer.WorkingMemory, opts.agentAddress, opts.kaNumber)
-            : contextGraphAssertionUri(contextGraphId, opts.agentAddress, opts.assertionName)],
+            ? contextGraphLayerUri(contextGraphId, MemoryLayer.WorkingMemory, opts.agentAddress, opts.kaNumber, opts.subGraphName)
+            : contextGraphAssertionUri(contextGraphId, opts.agentAddress, opts.assertionName, opts.subGraphName)],
           graphPrefixes: [],
         };
       }
+      // PR #1107 review (🟡): span the primary address AND every
+      // same-identity alias so a node default agent's legacy peerId-keyed
+      // drafts and rc.17+ wallet-keyed drafts are both visible from one
+      // unscoped WM read. Dedupe case-insensitively — graph URIs embed the
+      // address verbatim, so the prefix must use the caller's original form.
+      const seen = new Set<string>([opts.agentAddress.toLowerCase()]);
+      const addresses = [opts.agentAddress];
+      for (const alias of opts.agentAddressAliases ?? []) {
+        if (!alias || seen.has(alias.toLowerCase())) continue;
+        seen.add(alias.toLowerCase());
+        addresses.push(alias);
+      }
       return {
         graphs: [],
-        graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_working_memory/${opts.agentAddress}/`],
+        // Combine main's same-identity alias span (#1107 review 🟡) with
+        // #1132's sub-graph scoping (#184/#675): one prefix per alias address,
+        // each carrying the optional sub-graph suffix.
+        graphPrefixes: addresses.map(
+          (addr) => `did:dkg:context-graph:${contextGraphId}${sg}/_working_memory/${addr}/`,
+        ),
       };
     }
     case 'shared-working-memory':
       // Uniform layout: SWM is per-KA `…/_shared_memory/{addr}/{number}` (the prefix);
       // the bare bucket is kept as a read-both fallback (empty in the pure per-KA flow).
       return {
-        graphs: [contextGraphSharedMemoryUri(contextGraphId)],
-        graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_shared_memory/`],
+        graphs: [contextGraphSharedMemoryUri(contextGraphId, opts?.subGraphName)],
+        graphPrefixes: [`did:dkg:context-graph:${contextGraphId}${sg}/_shared_memory/`],
       };
     case 'verifiable-memory': {
       // `minTrust` is a verifiable-memory concept. The earlier iterations ran the
@@ -164,8 +194,16 @@ export function resolveViewGraphs(
       // `dkg:trustLevel` ConsensusVerified by
       // `DKGAgent.promoteToVerifiableMemory`).
       return {
-        graphs: [`did:dkg:context-graph:${contextGraphId}`],
-        graphPrefixes: [`did:dkg:context-graph:${contextGraphId}/_verifiable_memory/`],
+        // Include the content ROOT graph: the bare CG data graph for an
+        // unscoped read, or the sub-graph root `…/{cg}/{sub}` when scoped.
+        // Codex #1132 review: the publisher's intentional-local / pre-verify
+        // sub-graph publishes land in `…/{cg}/{sub}` (not `…/_verifiable_memory/*`),
+        // so a sub-graph VM read previously returned `[]` and missed confirmed
+        // data — mirror the root-CG branch and include the sub-graph root.
+        graphs: [opts?.subGraphName
+          ? contextGraphSubGraphUri(contextGraphId, opts.subGraphName)
+          : `did:dkg:context-graph:${contextGraphId}`],
+        graphPrefixes: [`did:dkg:context-graph:${contextGraphId}${sg}/_verifiable_memory/`],
       };
     }
   }
@@ -315,11 +353,12 @@ export class DKGQueryEngine implements QueryEngine {
           `view '${options.view}' requires a contextGraphId to scope the query`,
         );
       }
+      // GH #184 — `subGraphName` + `view` is now supported: the view scopes to
+      // the named sub-graph's per-layer partitions (handled in queryWithView /
+      // resolveViewGraphs). Validate the name shape before routing.
       if (options.subGraphName) {
-        throw new Error(
-          `subGraphName cannot be combined with view-based routing (view='${options.view}'). ` +
-          'Sub-graph scoping within views is deferred to V10.x.',
-        );
+        const v = validateSubGraphName(options.subGraphName);
+        if (!v.valid) throw new Error(v.reason);
       }
       return this.queryWithView(sparql, options.view, effectiveContextGraphId, options);
     }
@@ -412,14 +451,18 @@ export class DKGQueryEngine implements QueryEngine {
         contextGraphId,
         options.agentAddress,
         options.assertionName,
+        options.subGraphName,
       );
     }
 
     const resolution = resolveViewGraphs(view, contextGraphId, {
       agentAddress: options.agentAddress,
+      agentAddressAliases: options.agentAddressAliases,
       verifiedGraph: options.verifiedGraph,
       assertionName: options.assertionName,
       kaNumber,
+      // GH #184 — scope the view to a named sub-graph when requested.
+      subGraphName: options.subGraphName,
       // Back-compat: accept the legacy `_minTrust` underscore form for a
       // deprecation window. See QueryOptions._minTrust.
       minTrust: options.minTrust ?? options._minTrust,
@@ -431,6 +474,35 @@ export class DKGQueryEngine implements QueryEngine {
       const discovered = await this.discoverGraphsByPrefix(prefix);
       allGraphs.push(...discovered);
     }
+
+    // GH #675 — a view read WITHOUT an explicit subGraphName must also include
+    // data that lives in registered sub-graphs. The uniform layout stores those
+    // at `…/{sub}/{slug}/…`, which the context-graph-root prefix never matches,
+    // so they were silently excluded. Fan out across registered sub-graphs and
+    // add each one's per-layer partitions. (A by-name WM read is already pinned
+    // to a single graph, so skip the fan-out there.)
+    // Codex #1132 review: also skip the fan-out for a single-graph
+    // `verifiedGraph` VM read — it is already pinned to one graph (like a
+    // by-name WM read); fanning out would broaden it across every sub-graph's
+    // VM partition and return unrelated rows.
+    if (!options.subGraphName && !options.verifiedGraph && !(view === 'working-memory' && options.assertionName)) {
+      const subNames = await this.discoverRegisteredSubGraphNames(contextGraphId);
+      for (const sub of subNames) {
+        const subResolution = resolveViewGraphs(view, contextGraphId, {
+          agentAddress: options.agentAddress,
+          subGraphName: sub,
+        });
+        allGraphs.push(...subResolution.graphs);
+        for (const prefix of subResolution.graphPrefixes) {
+          allGraphs.push(...(await this.discoverGraphsByPrefix(prefix)));
+        }
+      }
+    }
+
+    // De-dup so a sub-graph never gets unioned twice.
+    const dedupedGraphs = [...new Set(allGraphs)];
+    allGraphs.length = 0;
+    allGraphs.push(...dedupedGraphs);
 
     if (allGraphs.length === 0) {
       // PR #239 / r17-2: a zero-graph resolution (e.g. a `verifiable-memory`
@@ -564,7 +636,7 @@ export class DKGQueryEngine implements QueryEngine {
   }
 
   private async discoverGraphsByPrefix(prefix: string): Promise<string[]> {
-    const allGraphs = await this.store.listGraphs();
+    const allGraphs = await listGraphsByPrefix(this.store, prefix);
     return allGraphs.filter(
       (g) => g.startsWith(prefix) && !g.includes('/_meta') && !g.includes('/staging/'),
     );
@@ -580,8 +652,13 @@ export class DKGQueryEngine implements QueryEngine {
     contextGraphId: string,
     agentAddress: string,
     assertionName: string,
+    subGraphName?: string,
   ): Promise<bigint | undefined> {
-    const urn = assertionLifecycleUri(contextGraphId, agentAddress, assertionName);
+    // Mirror the writer (`assertionFinalize`): the `dkg:kaId` stamp lives in the
+    // ROOT `_meta` graph, but keyed by the SUB-GRAPH-AWARE lifecycle URN
+    // (`urn:dkg:assertion:{cg}:{sub}:{addr}:{name}`). Omitting the sub-graph
+    // segment here made every sub-graph by-name lookup miss (Codex on PR #1132).
+    const urn = assertionLifecycleUri(contextGraphId, agentAddress, assertionName, subGraphName);
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const res = await this.store.query(
       `SELECT ?n WHERE { GRAPH <${metaGraph}> { <${urn}> <http://dkg.io/ontology/kaId> ?n } } LIMIT 1`,
@@ -646,7 +723,7 @@ export class DKGQueryEngine implements QueryEngine {
       : await this.discoverRegisteredSubGraphNames(contextGraphId);
     const registeredAssertionGraphs = await this.discoverRegisteredAssertionGraphs(contextGraphId);
     const knownChildContextGraphs = await this.discoverKnownChildContextGraphUris(contextGraphId);
-    const allGraphs = await this.store.listGraphs();
+    const allGraphs = await listGraphFamily(this.store, `did:dkg:context-graph:${contextGraphId}`);
 
     for (const graph of allGraphs) {
       if (
@@ -764,11 +841,22 @@ export class DKGQueryEngine implements QueryEngine {
     // Look up KA metadata across all meta graphs, including subGraphName if recorded.
     // Design B (OT-RFC-44): one KA can hold MULTIPLE rootEntities, so collect
     // every `?ka <rootEntity>` binding (not just bindings[0]) — PR #968 salvage.
+    // Read-both (RFC ka-metadata-trim P3.1): the collapsed shape carries
+    // `dkg:rootEntity` directly on the UAL subject (no `<ual>/<n>` token rows,
+    // no `dkg:partOf`); legacy-shape rows synced from older nodes still use
+    // the token-row + partOf form, so both branches are queried.
     const metaResult = await this.store.query(
       `SELECT ?ka ?rootEntity ?ctxGraph ?sgName WHERE {
         GRAPH ?g {
-          ?ka <http://dkg.io/ontology/rootEntity> ?rootEntity .
-          ?ka <http://dkg.io/ontology/partOf> <${assertSafeIri(ual)}> .
+          {
+            ?ka <http://dkg.io/ontology/rootEntity> ?rootEntity .
+            ?ka <http://dkg.io/ontology/partOf> <${assertSafeIri(ual)}> .
+          }
+          UNION
+          {
+            <${assertSafeIri(ual)}> <http://dkg.io/ontology/rootEntity> ?rootEntity .
+            BIND(<${assertSafeIri(ual)}> AS ?ka)
+          }
           <${assertSafeIri(ual)}> <http://dkg.io/ontology/contextGraph> ?ctxGraph .
           OPTIONAL { <${assertSafeIri(ual)}> <http://dkg.io/ontology/subGraphName> ?sgName }
         }
@@ -934,6 +1022,20 @@ function assertNoCallerDatasetClauses(sparql: string): void {
       'FROM clauses are not allowed on scoped local queries',
     );
   }
+}
+
+async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<string[]> {
+  return store.listGraphsByPrefix
+    ? store.listGraphsByPrefix(prefix)
+    : (await store.listGraphs()).filter((graph) => graph.startsWith(prefix));
+}
+
+async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<string[]> {
+  const graphs = await listGraphsByPrefix(store, `${rootGraph}/`);
+  if (await store.hasGraph(rootGraph)) {
+    graphs.unshift(rootGraph);
+  }
+  return graphs;
 }
 
 function hasCallerDatasetClause(sparql: string): boolean {

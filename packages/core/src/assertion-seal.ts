@@ -87,7 +87,13 @@ export const ASSERTION_PUBLISH_RECEIPT_PREDICATES = {
   PUBLISHED_AT_TX: `${ONT}publishedAtTx`,
   /** Block number (xsd:integer). */
   PUBLISHED_AT_BLOCK: `${ONT}publishedAtBlock`,
-  /** Knowledge collection id assigned by `KnowledgeCollectionStorage` (xsd:integer). */
+  /**
+   * Knowledge collection id assigned by `KnowledgeCollectionStorage`
+   * (xsd:integer). RFC ka-metadata-trim Phase 2: NO LONGER WRITTEN — it was
+   * the third resident copy of the on-chain id, which is queryable as
+   * `dkg:batchId` on the UAL subject. The constant stays for read-both
+   * consumers resolving rows written by older nodes (node-ui receipt hook).
+   */
   PUBLISHED_AT_KA_ID: `${ONT}publishedAtKaId`,
 } as const;
 
@@ -224,7 +230,13 @@ export function buildAssertionPublishReceiptQuads(args: {
   metaGraph: string;
   txHash: string;
   blockNumber: bigint;
-  kaId: bigint;
+  /**
+   * @deprecated RFC ka-metadata-trim Phase 2 — accepted for caller
+   * compatibility but no longer persisted: the on-chain id is queryable as
+   * `dkg:batchId` on the UAL subject; readers of the legacy
+   * `dkg:publishedAtKaId` row are read-both.
+   */
+  kaId?: bigint;
 }): Array<{ subject: string; predicate: string; object: string; graph: string }> {
   const xsdInteger = '<http://www.w3.org/2001/XMLSchema#integer>';
   return [
@@ -238,12 +250,6 @@ export function buildAssertionPublishReceiptQuads(args: {
       subject: args.assertionUri,
       predicate: ASSERTION_PUBLISH_RECEIPT_PREDICATES.PUBLISHED_AT_BLOCK,
       object: `"${args.blockNumber.toString()}"^^${xsdInteger}`,
-      graph: args.metaGraph,
-    },
-    {
-      subject: args.assertionUri,
-      predicate: ASSERTION_PUBLISH_RECEIPT_PREDICATES.PUBLISHED_AT_KA_ID,
-      object: `"${args.kaId.toString()}"^^${xsdInteger}`,
       graph: args.metaGraph,
     },
   ];

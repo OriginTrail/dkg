@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import {
   PeerResolver,
   StubNetworkStateRegistry,
@@ -8,6 +8,15 @@ import {
   type Address,
   type NodeIdentity,
 } from '../src/network/index.js';
+
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
 
 const PEER_A = '12D3KooWA' + 'a'.repeat(43);
 const PEER_B = '12D3KooWB' + 'b'.repeat(43);
@@ -80,9 +89,9 @@ describe('PeerResolver', () => {
 
   it('step 1: returns live-conn remoteAddr and stops', async () => {
     net.__conns.set(PEER_B, [{ remoteAddr: { toString: () => '/ip4/10.0.0.1/tcp/9090' } }]);
-    const findPeerSpy = vi.fn();
+    const findPeerSpy = recorder<Parameters<FindPeerImpl>, Promise<Address[]>>(async () => []);
     net.__findPeerImpl = findPeerSpy;
-    const dirSpy = vi.fn(async () => RELAY_ADDR);
+    const dirSpy = recorder(async () => RELAY_ADDR);
 
     const resolver = new PeerResolver({
       network: net,
@@ -92,8 +101,8 @@ describe('PeerResolver', () => {
     const out = await resolver.resolve(PEER_B);
 
     expect(out).toEqual(['/ip4/10.0.0.1/tcp/9090']);
-    expect(findPeerSpy).not.toHaveBeenCalled();
-    expect(dirSpy).not.toHaveBeenCalled();
+    expect(findPeerSpy.calls).toEqual([]);
+    expect(dirSpy.calls).toEqual([]);
     expect(net.__addedAddresses).toEqual([]);
   });
 
@@ -115,7 +124,7 @@ describe('PeerResolver', () => {
   });
 
   it('step 2: opts.skipDht bypasses findPeer entirely', async () => {
-    const findPeerSpy = vi.fn();
+    const findPeerSpy = recorder<Parameters<FindPeerImpl>, Promise<Address[]>>(async () => []);
     net.__findPeerImpl = findPeerSpy;
 
     const resolver = new PeerResolver({
@@ -125,14 +134,14 @@ describe('PeerResolver', () => {
     });
     await resolver.resolve(PEER_B, { skipDht: true });
 
-    expect(findPeerSpy).not.toHaveBeenCalled();
+    expect(findPeerSpy.calls).toEqual([]);
   });
 
   it('step 2: DHT failures are swallowed and resolution proceeds', async () => {
     net.__findPeerImpl = async () => {
       throw new Error('dht boom');
     };
-    const dirSpy = vi.fn(async () => RELAY_ADDR);
+    const dirSpy = recorder(async () => RELAY_ADDR);
 
     const resolver = new PeerResolver({
       network: net,
@@ -141,7 +150,7 @@ describe('PeerResolver', () => {
     });
     const out = await resolver.resolve(PEER_B);
 
-    expect(dirSpy).toHaveBeenCalledWith(PEER_B, expect.any(Object));
+    expect(dirSpy.calls.at(-1)).toEqual([PEER_B, expect.any(Object)]);
     expect(out).toContain(`${RELAY_ADDR}/p2p-circuit/p2p/${PEER_B}`);
   });
 
@@ -163,7 +172,7 @@ describe('PeerResolver', () => {
 
   it('step 4: agents-CG relay is wrapped as /p2p-circuit/p2p/<peerId>', async () => {
     net.__findPeerImpl = async () => [];
-    const dirSpy = vi.fn(async () => RELAY_ADDR);
+    const dirSpy = recorder(async () => RELAY_ADDR);
 
     const resolver = new PeerResolver({
       network: net,
@@ -530,8 +539,8 @@ describe('PeerResolver', () => {
     // legacy relay entry — without the fallback they'd resolve to
     // an empty address list.
     net.__findPeerImpl = async () => [];
-    const findRelayForPeer = vi.fn(async () => RELAY_ADDR);
-    const findAgentDialAddresses = vi.fn(async () => null);
+    const findRelayForPeer = recorder(async () => RELAY_ADDR);
+    const findAgentDialAddresses = recorder(async () => null);
     const dir: AgentDirectoryLookup = {
       findRelayForPeer,
       findAgentDialAddresses,
@@ -543,8 +552,8 @@ describe('PeerResolver', () => {
     });
     const out = await resolver.resolve(PEER_B);
     expect(out).toEqual([`${RELAY_ADDR}/p2p-circuit/p2p/${PEER_B}`]);
-    expect(findAgentDialAddresses).toHaveBeenCalledOnce();
-    expect(findRelayForPeer).toHaveBeenCalledOnce();
+    expect(findAgentDialAddresses.calls).toHaveLength(1);
+    expect(findRelayForPeer.calls).toHaveLength(1);
   });
 
   it('step 4 (phonebook): one malformed multiaddr does not poison sibling valid addresses', async () => {

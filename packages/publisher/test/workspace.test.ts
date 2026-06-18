@@ -209,6 +209,65 @@ describe('Workspace: share', () => {
     }
   });
 
+  // ── Strict curator-ack gate (OT-RFC-49 curator-leader) ──
+  // The publisher-side hook: `confirmBeforeCommit` runs after the wire message
+  // is built and BEFORE any store mutation. A non-confirmation MUST abort with
+  // zero local persistence — the load-bearing "don't accept state" property.
+  it('curator-ack gate: aborts (CuratorUnconfirmedError) and does NOT persist when the confirmer returns applied:false', async () => {
+    const quads = [q(ENTITY, 'http://schema.org/name', '"GatedV2"')];
+    let received: Uint8Array | undefined;
+    const opts: ShareOptions = {
+      publisherPeerId: 'peer1',
+      confirmBeforeCommit: async (message) => {
+        received = message;
+        return { applied: false };
+      },
+    };
+    await expect(publisher.share(CONTEXT_GRAPH, quads, opts)).rejects.toThrow(
+      /not confirmed by its curator/,
+    );
+    // the confirmer received the real, fully-built wire message
+    expect(received).toBeInstanceOf(Uint8Array);
+    expect(received!.length).toBeGreaterThan(0);
+    // CRITICAL: nothing was persisted — the workspace graph is empty for ENTITY
+    const r = await store.query(
+      `SELECT ?o WHERE { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
+    );
+    expect(r.type).toBe('bindings');
+    if (r.type === 'bindings') expect(r.bindings.length).toBe(0);
+  });
+
+  it('curator-ack gate: aborts (CuratorRejectedError) and does NOT persist on a permanent rejection', async () => {
+    const quads = [q(ENTITY, 'http://schema.org/name', '"GatedRej"')];
+    await expect(
+      publisher.share(CONTEXT_GRAPH, quads, {
+        publisherPeerId: 'peer1',
+        confirmBeforeCommit: async () => ({ applied: false, rejected: true }),
+      }),
+    ).rejects.toThrow(/permanently rejected by its curator/);
+    const r = await store.query(
+      `SELECT ?o WHERE { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
+    );
+    if (r.type === 'bindings') expect(r.bindings.length).toBe(0);
+  });
+
+  it('curator-ack gate: commits normally when the confirmer returns applied:true', async () => {
+    const quads = [q(ENTITY, 'http://schema.org/name', '"GatedOK"')];
+    const result = await publisher.share(CONTEXT_GRAPH, quads, {
+      publisherPeerId: 'peer1',
+      confirmBeforeCommit: async () => ({ applied: true }),
+    });
+    expect(result.shareOperationId).toMatch(/^swm-/);
+    const r = await store.query(
+      `SELECT ?o WHERE { GRAPH <${WORKSPACE_GRAPH}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
+    );
+    expect(r.type).toBe('bindings');
+    if (r.type === 'bindings') {
+      expect(r.bindings.length).toBe(1);
+      expect(r.bindings[0]['o']).toBe('"GatedOK"');
+    }
+  });
+
   it('allows same creator to upsert an existing workspace entity', async () => {
     const quads1 = [q(ENTITY, 'http://schema.org/name', '"First"')];
     await publisher.share(CONTEXT_GRAPH, quads1, { publisherPeerId: 'peer1' });
@@ -466,12 +525,16 @@ describe('Workspace: publishFromSharedMemory', () => {
       expect(dataResult.bindings[0]['o']).toBe('"Context Enshrine"');
     }
 
+    // RFC ka-metadata-trim P3.1 (collapsed shape): KA rows are the UAL
+    // subject itself — identified by the member-entity pair, no `<ual>/<n>`
+    // token rows and no `dkg:partOf`.
     const metaResult = await store.query(
-      `SELECT ?s WHERE { GRAPH <${ctxMetaGraph}> { ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/KnowledgeAsset> } }`,
+      `SELECT ?s WHERE { GRAPH <${ctxMetaGraph}> { ?s <http://dkg.io/ontology/rootEntity> ?root } }`,
     );
     expect(metaResult.type).toBe('bindings');
     if (metaResult.type === 'bindings') {
       expect(metaResult.bindings.length).toBeGreaterThan(0);
+      expect(metaResult.bindings[0]['s']).toBe(result.ual);
     }
   });
 
@@ -581,6 +644,107 @@ describe('Workspace: ownership persistence and reconstruction', () => {
     expect(freshOwned.get(CONTEXT_GRAPH)?.get(entity2)).toBe('peerB');
   });
 
+  it('reconstructs ownership for slash-shaped context graph ids from SWM meta graph names', async () => {
+    const curatedContextGraph = `${CONTEXT_GRAPH}/curated`;
+    const curatedEntity = 'urn:test:entity:curated';
+    const swmMetaGraph = `did:dkg:context-graph:${curatedContextGraph}/_shared_memory_meta`;
+    const op = 'urn:test:op:curated';
+    await store.insert([
+      q('urn:test:root-marker', 'http://schema.org/name', '"Root"', WORKSPACE_META_GRAPH),
+      q(curatedEntity, 'http://dkg.io/ontology/workspaceOwner', '"peerCurated"', swmMetaGraph),
+      q(op, 'http://dkg.io/ontology/rootEntity', curatedEntity, swmMetaGraph),
+      q(op, 'http://dkg.io/ontology/publisherPeerId', '"peerCurated"', swmMetaGraph),
+    ]);
+
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const keypair = await generateEd25519Keypair();
+    const freshOwned = new Map<string, Map<string, string>>();
+    const freshPublisher = new DKGPublisher({
+      kaAllocator: makeTestKaAllocator(),
+      store,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+      sharedMemoryOwnedEntities: freshOwned,
+    });
+
+    const count = await freshPublisher.reconstructWorkspaceOwnership();
+    expect(count).toBe(1);
+    expect(freshOwned.get(curatedContextGraph)?.get(curatedEntity)).toBe('peerCurated');
+  });
+
+  it('reconstructs registered sub-graph ownership under the sub-graph key', async () => {
+    const subGraphName = 'registered-sg';
+    const subGraphUri = `did:dkg:context-graph:${CONTEXT_GRAPH}/${subGraphName}`;
+    const subGraphMetaGraph = `${subGraphUri}/_shared_memory_meta`;
+    const entity = 'urn:test:entity:registered-subgraph';
+    const op = 'urn:test:op:registered-subgraph';
+    await store.insert([
+      q(subGraphUri, 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://dkg.io/ontology/SubGraph', `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`),
+      q(subGraphUri, 'http://schema.org/name', `"${subGraphName}"`, `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`),
+      q(subGraphUri, 'http://dkg.io/ontology/createdBy', '"tester"', `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`),
+      q(entity, 'http://dkg.io/ontology/workspaceOwner', '"peerSubGraph"', subGraphMetaGraph),
+      q(op, 'http://dkg.io/ontology/rootEntity', entity, subGraphMetaGraph),
+      q(op, 'http://dkg.io/ontology/publisherPeerId', '"peerSubGraph"', subGraphMetaGraph),
+    ]);
+
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const keypair = await generateEd25519Keypair();
+    const freshOwned = new Map<string, Map<string, string>>();
+    const freshPublisher = new DKGPublisher({
+      kaAllocator: makeTestKaAllocator(),
+      store,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+      sharedMemoryOwnedEntities: freshOwned,
+    });
+
+    const count = await freshPublisher.reconstructWorkspaceOwnership();
+    expect(count).toBe(1);
+    expect(freshOwned.get(`${CONTEXT_GRAPH}\0${subGraphName}`)?.get(entity)).toBe('peerSubGraph');
+  });
+
+  it('reconstructs registered sub-graph ownership under slash-shaped context graph ids', async () => {
+    const slashContextGraph = `${CONTEXT_GRAPH}/curated`;
+    const subGraphName = 'registered-sg';
+    const subGraphUri = `did:dkg:context-graph:${slashContextGraph}/${subGraphName}`;
+    const subGraphMetaGraph = `${subGraphUri}/_shared_memory_meta`;
+    const entity = 'urn:test:entity:slash-registered-subgraph';
+    const op = 'urn:test:op:slash-registered-subgraph';
+    await store.insert([
+      q(subGraphUri, 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://dkg.io/ontology/SubGraph', `did:dkg:context-graph:${slashContextGraph}/_meta`),
+      q(subGraphUri, 'http://schema.org/name', `"${subGraphName}"`, `did:dkg:context-graph:${slashContextGraph}/_meta`),
+      q(subGraphUri, 'http://dkg.io/ontology/createdBy', '"tester"', `did:dkg:context-graph:${slashContextGraph}/_meta`),
+      q(entity, 'http://dkg.io/ontology/workspaceOwner', '"peerSlashSubGraph"', subGraphMetaGraph),
+      q(op, 'http://dkg.io/ontology/rootEntity', entity, subGraphMetaGraph),
+      q(op, 'http://dkg.io/ontology/publisherPeerId', '"peerSlashSubGraph"', subGraphMetaGraph),
+    ]);
+
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const keypair = await generateEd25519Keypair();
+    const freshOwned = new Map<string, Map<string, string>>();
+    const freshPublisher = new DKGPublisher({
+      kaAllocator: makeTestKaAllocator(),
+      store,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+      sharedMemoryOwnedEntities: freshOwned,
+    });
+
+    const count = await freshPublisher.reconstructWorkspaceOwnership();
+    expect(count).toBe(1);
+    expect(freshOwned.get(`${slashContextGraph}\0${subGraphName}`)?.get(entity)).toBe('peerSlashSubGraph');
+    expect(freshOwned.get(`${slashContextGraph}/${subGraphName}`)?.get(entity)).toBeUndefined();
+  });
+
   it('clears ownership quads on publishFromSharedMemory with clearSharedMemoryAfter', async () => {
     const quads = [q(ENTITY, 'http://schema.org/name', '"Enshrine"')];
     await publisher.share(CONTEXT_GRAPH, quads, { publisherPeerId: 'peer1' });
@@ -657,6 +821,39 @@ describe('SharedMemoryHandler', () => {
       expect(result.bindings[0]['o']).toBe('"Handler Test"');
     }
     expect(workspaceOwned.get(CONTEXT_GRAPH)?.has(ENTITY)).toBe(true);
+  });
+
+  it('notifies context-graph meta invalidation after SWM sub-graph auto-registration', async () => {
+    const dirtyQuads: Quad[] = [];
+    handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: workspaceOwned,
+      markContextGraphMetaDirtyFromQuads: (quads) => { dirtyQuads.push(...quads); },
+    });
+    const subGraphName = 'tasks';
+    const subGraphGraph = `${DATA_GRAPH}/${subGraphName}`;
+    const nquads = `<${ENTITY}> <http://schema.org/name> "SubGraph Handler Test" <${DATA_GRAPH}> .`;
+    const msg = encodeWorkspacePublishRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      subGraphName,
+      nquads: new TextEncoder().encode(nquads),
+      manifest: [{ rootEntity: ENTITY, privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeer',
+      shareOperationId: 'ws-handler-subgraph-dirty',
+      timestampMs: Date.now(),
+    });
+
+    await handler.handle(msg, '12D3KooWPeer');
+
+    expect(dirtyQuads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          subject: subGraphGraph,
+          predicate: 'http://schema.org/name',
+          object: `"${subGraphName}"`,
+          graph: `${DATA_GRAPH}/_meta`,
+        }),
+      ]),
+    );
   });
 
   it('rejects raw workspace gossip when the context graph is agent-gated', async () => {

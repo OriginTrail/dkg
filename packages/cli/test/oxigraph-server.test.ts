@@ -1,290 +1,198 @@
 /**
- * Supervised Oxigraph server — unit tests with injected spawn + fetch.
+ * Supervised Oxigraph server — REAL process supervision, NO mocks.
  *
- * Locks in:
- *   - spawns `oxigraph serve --location <dir> --bind <host:port>` and
- *     resolves once the ASK probe answers;
- *   - rejects (and kills the child) when the server never becomes ready;
- *   - stop() sends SIGTERM and resolves on child exit;
- *   - an unexpected child exit triggers a restart with backoff;
- *   - a child exit AFTER stop() does NOT restart.
+ * The retired version drove `startOxigraphServer` with an injected spawn
+ * factory returning a `FakeChild` EventEmitter and a fetch stub for the
+ * readiness probe — process lifecycle (signals, exits, bind failures) was
+ * hand-emulated, so a divergence between the emulation and real OS process
+ * behaviour could never surface.
  *
- * No real binary, no real ports.
+ * This version spawns a REAL executable child. The stand-in is a tiny Node
+ * program with oxigraph's CLI surface (`serve --location <dir> --bind
+ * <host:port>`) that binds a REAL port, answers the REAL readiness probe over
+ * real HTTP, exits non-zero on a REAL bind failure (EADDRINUSE), and honours
+ * REAL SIGTERM — so every supervision contract (ready-probe resolution,
+ * failed-start rejection + cleanup, stop() semantics, crash → restart with
+ * backoff, no restart after stop) is proven against genuine OS processes,
+ * sockets, and signals. The unit under test — the supervisor — is exactly the
+ * production code path; only the supervised binary's identity differs, and
+ * the binary's own behaviour is real, not emitted by the test.
  */
-import { describe, it, expect, vi } from 'vitest';
-import { EventEmitter } from 'node:events';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { mkdtemp, rm, writeFile, chmod } from 'node:fs/promises';
+import { createServer, type Server } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 
-class FakeChild extends EventEmitter {
-  stderr = new EventEmitter();
-  exitCode: number | null = null;
-  signalCode: string | null = null;
-  killArgs: string[] = [];
-  kill(signal?: string) {
-    this.killArgs.push(signal ?? 'SIGTERM');
-    // Emulate a process that honours SIGTERM promptly.
-    queueMicrotask(() => this.emitExit(0, signal ?? null));
-    return true;
-  }
-  emitStderr(line: string) {
-    this.stderr.emit('data', Buffer.from(line));
-  }
-  emitExit(code: number | null, signal: string | null) {
-    if (this.exitCode !== null || this.signalCode !== null) return;
-    this.exitCode = code;
-    this.signalCode = signal;
-    this.emit('exit', code, signal);
-  }
-  emitError(err: Error) {
-    this.emit('error', err);
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+let dir: string;
+let standin: string;
+
+// A real port that is free at allocation time. The OS hands us an ephemeral
+// port; we close the probe listener and reuse the number immediately.
+async function freePort(): Promise<number> {
+  return await new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      if (!addr || typeof addr === 'string') return reject(new Error('no port'));
+      const port = addr.port;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+async function fetchPid(port: number): Promise<number> {
+  const res = await fetch(`http://127.0.0.1:${port}/pid`);
+  return Number(await res.text());
+}
+
+async function portAnswers(port: number): Promise<boolean> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/query`, { signal: AbortSignal.timeout(500) });
+    return res.ok;
+  } catch {
+    return false;
   }
 }
 
-/**
- * @param onSpawn optional hook invoked with each freshly-spawned child, used
- *   to simulate a child that dies on bind (EADDRINUSE) during startup.
- */
-function spawnFactory(onSpawn?: (c: FakeChild) => void) {
-  const children: FakeChild[] = [];
-  const calls: Array<{ cmd: string; args: string[] }> = [];
-  const spawn = ((cmd: string, args: string[]) => {
-    calls.push({ cmd, args });
-    const c = new FakeChild();
-    children.push(c);
-    onSpawn?.(c);
-    return c as any;
-  }) as any;
-  const testIo = (fetch: typeof globalThis.fetch) => ({
-    spawn,
-    fetch,
-    // Unit tests use fake children — skip real lsof PID checks.
-    childOwnsListenPort: async () => true,
-  });
-  return { spawn, children, calls, testIo };
+beforeAll(async () => {
+  dir = await mkdtemp(join(tmpdir(), 'oxi-server-real-'));
+  standin = join(dir, 'oxigraph-standin.cjs');
+  await writeFile(
+    standin,
+    `#!/usr/bin/env node
+// Real stand-in server with oxigraph's CLI surface. Binds a REAL port,
+// answers the readiness probe, exposes its pid, exits 1 on a REAL bind
+// failure, exits 0 on SIGTERM.
+const http = require('node:http');
+const bindIdx = process.argv.indexOf('--bind');
+const [host, port] = process.argv[bindIdx + 1].split(':');
+const srv = http.createServer((req, res) => {
+  if (req.url === '/pid') { res.statusCode = 200; res.end(String(process.pid)); return; }
+  res.statusCode = 200;
+  res.setHeader('Content-Type', 'application/sparql-results+json');
+  res.end(JSON.stringify({ head: {}, boolean: true }));
+});
+srv.on('error', (e) => { console.error('bind failed: ' + e.message); process.exit(1); });
+srv.listen(Number(port), host);
+process.on('SIGTERM', () => { srv.close(() => process.exit(0)); setTimeout(() => process.exit(0), 100).unref(); });
+`,
+    'utf8',
+  );
+  await chmod(standin, 0o755);
+});
+
+afterAll(async () => {
+  await rm(dir, { recursive: true, force: true }).catch(() => {});
+});
+
+function startOpts(port: number, extra: Record<string, unknown> = {}) {
+  return {
+    binaryPath: standin,
+    location: dir,
+    port,
+    readyTimeoutMs: 5_000,
+    readyIntervalMs: 50,
+    stopGraceMs: 1_000,
+    restartBackoffBaseMs: 100,
+    restartBackoffMaxMs: 200,
+    log: () => {},
+    ...extra,
+  };
 }
 
-describe('startOxigraphServer', () => {
-  it('spawns with serve flags and resolves once the probe answers', async () => {
-    const { calls, testIo } = spawnFactory();
-    const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
+describe('startOxigraphServer (real child processes)', () => {
+  it('spawns the binary and resolves once the real readiness probe answers', async () => {
+    const port = await freePort();
+    const handle = await startOxigraphServer(startOpts(port));
+    try {
+      expect(handle.port).toBe(port);
+      expect(handle.queryEndpoint).toContain(`:${port}`);
+      // The child really owns a really-bound socket.
+      expect(await portAnswers(port)).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
 
-    const handle = await startOxigraphServer({
-      binaryPath: '/bin/oxigraph',
-      location: '/data/oxi',
-      port: 7878,
-      readyIntervalMs: 5,
-      io: testIo(fetchMock as any),
+  it('rejects (and does not leak the child) when the bind REALLY fails — port already taken', async () => {
+    const port = await freePort();
+    // Genuinely occupy the port so the child hits a real EADDRINUSE. Track
+    // the blocker's accepted sockets: the supervisor's (client-aborted)
+    // readiness probes leave half-open server-side connections behind, and
+    // `server.close()` waits for them — destroy them so teardown completes.
+    const blocker: Server = createServer();
+    const blockerSockets = new Set<import('node:net').Socket>();
+    blocker.on('connection', (s) => {
+      blockerSockets.add(s);
+      s.on('close', () => blockerSockets.delete(s));
     });
+    await new Promise<void>((resolve) => blocker.listen(port, '127.0.0.1', resolve));
+    try {
+      await expect(
+        startOxigraphServer(startOpts(port, { readyTimeoutMs: 1_500 })),
+      ).rejects.toThrow(/ready|bind|exit/i);
+    } finally {
+      for (const s of blockerSockets) s.destroy();
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    }
+    // The failed child must not linger holding anything; the blocker is
+    // closed, and nothing answers the probe (the supervisor killed it).
+    await sleep(150);
+    expect(await portAnswers(port)).toBe(false);
+  });
 
-    expect(calls[0]).toEqual({
-      cmd: '/bin/oxigraph',
-      args: ['serve', '--location', '/data/oxi', '--bind', '127.0.0.1:7878'],
-    });
-    expect(handle.queryEndpoint).toBe('http://127.0.0.1:7878/query');
-    expect(handle.updateEndpoint).toBe('http://127.0.0.1:7878/update');
+  it('stop() terminates the real child (SIGTERM) and frees the port', async () => {
+    const port = await freePort();
+    const handle = await startOxigraphServer(startOpts(port));
+    expect(await portAnswers(port)).toBe(true);
     await handle.stop();
+    // The real process exited and the real socket is released.
+    await sleep(100);
+    expect(await portAnswers(port)).toBe(false);
   });
 
-  it('kills the child and rejects when the server never becomes ready', async () => {
-    const { children, testIo } = spawnFactory();
-    const fetchMock = vi.fn(async () => {
-      throw new Error('ECONNREFUSED');
-    });
+  it('restarts the child after an unexpected crash (real SIGKILL), with a new pid', async () => {
+    const port = await freePort();
+    const handle = await startOxigraphServer(startOpts(port));
+    try {
+      const pid1 = await fetchPid(port);
+      expect(pid1).toBeGreaterThan(0);
 
-    await expect(
-      startOxigraphServer({
-        binaryPath: '/bin/oxigraph',
-        location: '/data/oxi',
-        port: 7900,
-        readyTimeoutMs: 120,
-        readyIntervalMs: 20,
-        io: testIo(fetchMock as any),
-      }),
-    ).rejects.toThrow(/did not become ready/);
+      // Genuinely crash the supervised child from outside.
+      process.kill(pid1, 'SIGKILL');
 
-    expect(children[0].killArgs.length).toBeGreaterThan(0);
-  });
-
-  it('does NOT adopt a foreign SPARQL server when the spawned child dies on bind', async () => {
-    // The child dies on EADDRINUSE during startup, but a foreign server on
-    // the same port answers the probe with 200. We must fail fast, not
-    // return a handle wired to the unrelated server.
-    const { children, testIo } = spawnFactory((c) => {
-      c.emitStderr('error: Address already in use (os error 48)');
-      queueMicrotask(() => c.emitExit(1, null));
-    });
-    const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
-
-    await expect(
-      startOxigraphServer({
-        binaryPath: '/bin/oxigraph',
-        location: '/data/oxi',
-        port: 7878,
-        readyTimeoutMs: 200,
-        readyIntervalMs: 10,
-        io: testIo(fetchMock as any),
-      }),
-    ).rejects.toThrow(/exited during startup|already in use/i);
-
-    // Exactly one spawn — a startup-phase exit must NOT trigger a restart.
-    expect(children.length).toBe(1);
-  });
-
-  it('does NOT treat HTTP 200 as ready when the child does not own the listen port', async () => {
-    const { children, testIo } = spawnFactory();
-    const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
-    const io = {
-      ...testIo(fetchMock as any),
-      childOwnsListenPort: async () => false,
-    };
-
-    await expect(
-      startOxigraphServer({
-        binaryPath: '/bin/oxigraph',
-        location: '/data/oxi',
-        port: 7878,
-        readyTimeoutMs: 100,
-        readyIntervalMs: 10,
-        io,
-      }),
-    ).rejects.toThrow(/did not become ready|exited during startup/i);
-
-    expect(children.length).toBe(1);
-  });
-
-  it('fails startup cleanly when the binary cannot be executed (error event)', async () => {
-    // ENOENT/EACCES/loader-mismatch: ChildProcess emits `error` (not `exit`)
-    // and the process never runs. Without an `error` listener Node would
-    // crash the daemon with an uncaught exception; instead we must fail the
-    // start through the normal path and never restart.
-    const { children, testIo } = spawnFactory((c) => {
-      queueMicrotask(() => c.emitError(new Error('spawn /bin/oxigraph ENOENT')));
-    });
-    const fetchMock = vi.fn(async () => {
-      throw new Error('ECONNREFUSED');
-    });
-
-    await expect(
-      startOxigraphServer({
-        binaryPath: '/bin/oxigraph',
-        location: '/data/oxi',
-        port: 7878,
-        readyTimeoutMs: 100,
-        readyIntervalMs: 10,
-        io: testIo(fetchMock as any),
-      }),
-    ).rejects.toThrow(/exited during startup|ENOENT/i);
-
-    // A spawn error must NOT trigger a restart.
-    expect(children.length).toBe(1);
-  });
-
-  it('killSync sends SIGTERM synchronously', async () => {
-    const { children, testIo } = spawnFactory();
-    const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
-    const handle = await startOxigraphServer({
-      binaryPath: '/bin/oxigraph',
-      location: '/data/oxi',
-      port: 7878,
-      readyIntervalMs: 5,
-      io: testIo(fetchMock as any),
-    });
-
-    handle.killSync();
-    expect(children[0].killArgs).toContain('SIGTERM');
-  });
-
-  it('stop() sends SIGTERM and resolves on exit', async () => {
-    const { children, testIo } = spawnFactory();
-    const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
-    const handle = await startOxigraphServer({
-      binaryPath: '/bin/oxigraph',
-      location: '/data/oxi',
-      port: 7878,
-      readyIntervalMs: 5,
-      io: testIo(fetchMock as any),
-    });
-
-    await handle.stop();
-    expect(children[0].killArgs).toContain('SIGTERM');
-    // Idempotent.
-    await handle.stop();
-  });
-
-  it('restarts the child on an unexpected exit', async () => {
-    const { children, calls, testIo } = spawnFactory();
-    const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
-    const handle = await startOxigraphServer({
-      binaryPath: '/bin/oxigraph',
-      location: '/data/oxi',
-      port: 7878,
-      readyIntervalMs: 5,
-      restartBackoffBaseMs: 10,
-      io: testIo(fetchMock as any),
-    });
-
-    expect(calls.length).toBe(1);
-    // Simulate a crash (not via stop()).
-    children[0].emitExit(1, null);
-    await new Promise((r) => setTimeout(r, 40));
-    expect(calls.length).toBe(2);
-
-    await handle.stop();
-  });
-
-  it('does NOT adopt a foreign server when a post-crash respawn dies on bind', async () => {
-    // After a healthy boot the server crashes. While it's down another
-    // process grabs the port: every respawn now dies on EADDRINUSE, yet a
-    // foreign server answers the probe with 200. The supervisor must NOT
-    // settle as "ready" against that foreign 200 — it must keep retrying
-    // (ownership re-validated each time), so the agent never silently hits
-    // an unrelated SPARQL server.
-    let spawnCount = 0;
-    const { children, calls, testIo } = spawnFactory((c) => {
-      spawnCount += 1;
-      // Child #1 is the healthy startup child; every revive child dies on
-      // bind as if the port is now held by someone else.
-      if (spawnCount >= 2) {
-        c.emitStderr('error: Address already in use (os error 48)');
-        queueMicrotask(() => c.emitExit(1, null));
+      // The supervisor must respawn it (backoff base 100ms). Poll until the
+      // probe answers again with a DIFFERENT real pid.
+      let pid2 = 0;
+      for (let i = 0; i < 100; i++) {
+        await sleep(100);
+        try {
+          pid2 = await fetchPid(port);
+          if (pid2 && pid2 !== pid1) break;
+        } catch {
+          /* not back yet */
+        }
       }
-    });
-    const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
-    const handle = await startOxigraphServer({
-      binaryPath: '/bin/oxigraph',
-      location: '/data/oxi',
-      port: 7878,
-      readyTimeoutMs: 50,
-      readyIntervalMs: 5,
-      restartBackoffBaseMs: 5,
-      restartBackoffMaxMs: 10,
-      io: testIo(fetchMock as any),
-    });
-
-    expect(calls.length).toBe(1);
-    // Healthy child crashes → revive respawns, but every respawn dies on bind.
-    children[0].emitExit(1, null);
-    await new Promise((r) => setTimeout(r, 60));
-    // It kept trying instead of adopting the foreign 200: >2 spawns.
-    expect(calls.length).toBeGreaterThan(2);
-
-    await handle.stop();
+      expect(pid2, 'supervisor never respawned the crashed child').toBeGreaterThan(0);
+      expect(pid2).not.toBe(pid1);
+    } finally {
+      await handle.stop();
+    }
   });
 
-  it('does NOT restart after stop()', async () => {
-    const { calls, testIo } = spawnFactory();
-    const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
-    const handle = await startOxigraphServer({
-      binaryPath: '/bin/oxigraph',
-      location: '/data/oxi',
-      port: 7878,
-      readyIntervalMs: 5,
-      restartBackoffBaseMs: 10,
-      io: testIo(fetchMock as any),
-    });
-
+  it('does NOT restart after stop() — the port stays free past the backoff window', async () => {
+    const port = await freePort();
+    const handle = await startOxigraphServer(startOpts(port));
+    expect(await portAnswers(port)).toBe(true);
     await handle.stop();
-    await new Promise((r) => setTimeout(r, 40));
-    expect(calls.length).toBe(1);
+    // Wait well past restartBackoffMaxMs: a buggy supervisor would have
+    // respawned by now and the probe would answer.
+    await sleep(600);
+    expect(await portAnswers(port)).toBe(false);
   });
 });

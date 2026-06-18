@@ -58,21 +58,27 @@ describe('Genesis Knowledge', () => {
         predicate: DKG_ONTOLOGY.DKG_CURATOR,
         object: `did:dkg:agent:${agent.peerId}`,
       }]);
+      (agent as unknown as { contextGraphMetaProjection: { markDirty(id: string): void } })
+        .contextGraphMetaProjection.markDirty('register-legacy-peer-curator');
       await expect(agent.registerContextGraph('register-legacy-peer-curator', { callerAgentAddress: nonDefaultAddr }))
         .resolves.toMatchObject({ onChainId: expect.any(String) });
 
       await agent.createContextGraph({ id: 'register-foreign-peer-only', name: 'Foreign Peer Only' });
       const contextGraphUri = 'did:dkg:context-graph:register-foreign-peer-only';
-      await store.deleteByPattern({ graph: 'did:dkg:context-graph:register-foreign-peer-only/_meta', subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR });
+      const foreignMetaGraph = 'did:dkg:context-graph:register-foreign-peer-only/_meta';
+      await store.deleteByPattern({ graph: foreignMetaGraph, subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CURATOR });
+      await store.deleteByPattern({ graph: foreignMetaGraph, subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
       await store.deleteByPattern({ graph: 'did:dkg:context-graph:ontology', subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_CREATOR });
       await store.insert([
         {
-          graph: 'did:dkg:context-graph:ontology',
+          graph: foreignMetaGraph,
           subject: contextGraphUri,
           predicate: DKG_ONTOLOGY.DKG_CREATOR,
           object: 'did:dkg:agent:12D3KooWForeignCreatorPeer111111111111111111111111',
         },
       ]);
+      (agent as unknown as { contextGraphMetaProjection: { markDirty(id: string): void } })
+        .contextGraphMetaProjection.markDirty('register-foreign-peer-only');
 
       await expect(agent.registerContextGraph('register-foreign-peer-only'))
         .rejects.toThrow(/has no address-scoped curator/);

@@ -36,8 +36,9 @@ describe('discovery — buildListQuery', () => {
   {
     SELECT DISTINCT ?ual ?root ?receivedAt WHERE {
       GRAPH <${META_URI}> {
-        ?ka <http://dkg.io/ontology/rootEntity> ?root .
-        ?ka <http://dkg.io/ontology/partOf> ?ual .
+        { ?ka <http://dkg.io/ontology/partOf> ?ual . ?ka <http://dkg.io/ontology/rootEntity> ?root . }
+        UNION
+        { ?ual <http://dkg.io/ontology/rootEntity> ?root . }
         ?ual <http://dkg.io/ontology/status> ?registrationStatus .
         FILTER(?registrationStatus IN ("confirmed", "tentative"))
         FILTER NOT EXISTS { ?ual <http://dkg.io/ontology/subGraphName> ?_subGraphName . }
@@ -136,8 +137,9 @@ describe('discovery — buildCountQuery', () => {
     expect(q).toBe(
       `SELECT (COUNT(DISTINCT ?ual) AS ?count) WHERE {
   GRAPH <${META_URI}> {
-    ?ka <http://dkg.io/ontology/rootEntity> ?root .
-    ?ka <http://dkg.io/ontology/partOf> ?ual .
+    { ?ka <http://dkg.io/ontology/partOf> ?ual . ?ka <http://dkg.io/ontology/rootEntity> ?root . }
+    UNION
+    { ?ual <http://dkg.io/ontology/rootEntity> ?root . }
     ?ual <http://dkg.io/ontology/status> ?registrationStatus .
     FILTER(?registrationStatus IN ("confirmed", "tentative"))
     FILTER NOT EXISTS { ?ual <http://dkg.io/ontology/subGraphName> ?_subGraphName . }
@@ -188,10 +190,11 @@ describe('discovery — buildSingleByUalQuery', () => {
   it('emits the exact SPARQL string resolving <UAL> via KA partOf in the meta graph then fetching content from the data graph', () => {
     const q = buildSingleByUalQuery({ contextGraphId: 'urn:cg:demo', ual: 'did:dkg:1/0xabc' });
     expect(q).toBe(
-      `SELECT ?root ?p ?o WHERE {
+      `SELECT DISTINCT ?root ?p ?o WHERE {
   GRAPH <${META_URI}> {
-    ?ka <http://dkg.io/ontology/rootEntity> ?root .
-    ?ka <http://dkg.io/ontology/partOf> <did:dkg:1/0xabc> .
+    { ?ka <http://dkg.io/ontology/partOf> <did:dkg:1/0xabc> . ?ka <http://dkg.io/ontology/rootEntity> ?root . }
+    UNION
+    { <did:dkg:1/0xabc> <http://dkg.io/ontology/rootEntity> ?root . }
     <did:dkg:1/0xabc> <http://dkg.io/ontology/status> ?registrationStatus .
     FILTER(?registrationStatus IN ("confirmed", "tentative"))
     FILTER NOT EXISTS { <did:dkg:1/0xabc> <http://dkg.io/ontology/subGraphName> ?_subGraphName . }
@@ -214,6 +217,47 @@ describe('discovery — buildSingleByUalQuery', () => {
   }
 }`,
     );
+  });
+  // Regression (read-both DISTINCT): on a pre-trim / mixed-version store the
+  // bare UAL carries the collapsed `dkg:rootEntity` aggregate row AND the
+  // legacy `<ual>/<n>` token carries `dkg:partOf` + `dkg:rootEntity`, so BOTH
+  // meta-block UNION arms bind the same ?root. Without SELECT DISTINCT every
+  // `?root ?p ?o` data triple is returned twice and bindingsToKa collapses
+  // scalar properties into duplicate arrays (e.g. schema:name: ["demo","demo"]).
+  // buildListQuery already guards this via its inner SELECT DISTINCT.
+  it('selects DISTINCT ?root ?p ?o so mixed-store double rootEntity bindings cannot duplicate data triples', () => {
+    const q = buildSingleByUalQuery({ contextGraphId: 'urn:cg:demo', ual: 'did:dkg:1/0xabc' });
+    expect(q).toMatch(/^SELECT DISTINCT \?root \?p \?o WHERE/);
+  });
+  it('selects DISTINCT for a configured subGraphName too', () => {
+    const q = buildSingleByUalQuery({
+      contextGraphId: 'urn:cg:demo',
+      subGraphName: 'streams',
+      ual: 'did:dkg:1/0xabc',
+    });
+    expect(q).toMatch(/^SELECT DISTINCT \?root \?p \?o WHERE/);
+  });
+  it('keeps scalar properties scalar after DISTINCT dedupes the mixed-store double bindings', () => {
+    // The exact rows the single-UAL query yields on a mixed store. PRE-FIX (no
+    // DISTINCT) the SPARQL engine emits each data triple TWICE — once per
+    // matching meta-block UNION arm (legacy <ual>/0 partOf+rootEntity AND
+    // collapsed <ual> rootEntity, both binding the same ?root). DISTINCT
+    // collapses them back to one row each, so bindingsToKa returns scalars.
+    const distinctRows = [
+      { root: 'urn:entity:demo-root', p: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', o: 'https://ontology.dkg.io/streams#KafkaStream' },
+      { root: 'urn:entity:demo-root', p: 'https://schema.org/name', o: '"demo"' },
+      { root: 'urn:entity:demo-root', p: 'https://ontology.dkg.io/streams#kafkaBootstrapUrl', o: '"kafka://broker:9092"' },
+    ];
+    const ka = bindingsToKa(distinctRows.map((row) => ({ ...row, ual: 'did:dkg:1/0xabc' })));
+    expect(ka!['schema:name']).toBe('demo');
+    expect(ka!['dkg-streams:kafkaBootstrapUrl']).toBe('kafka://broker:9092');
+    expect(ka!['@type']).toBe('dkg-streams:KafkaStream');
+
+    // Guard the failure mode itself: had DISTINCT been absent, the engine would
+    // have surfaced each row twice and the scalars would collapse into arrays.
+    const duplicatedRows = [...distinctRows, ...distinctRows];
+    const duplicatedKa = bindingsToKa(duplicatedRows.map((row) => ({ ...row, ual: 'did:dkg:1/0xabc' })));
+    expect(duplicatedKa!['schema:name']).toEqual(['demo', 'demo']);
   });
   it('rejects UAL strings containing illegal SPARQL delimiters', () => {
     expect(() =>

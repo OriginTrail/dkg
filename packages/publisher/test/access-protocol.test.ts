@@ -5,12 +5,15 @@ import {
   TypedEventBus,
   generateEd25519Keypair,
   PROTOCOL_ACCESS,
+  encodeAccessRequest,
+  decodeAccessResponse,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, GraphManager, PrivateContentStore, type Quad } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { AccessHandler } from '../src/access-handler.js';
 import { AccessClient } from '../src/access-client.js';
+import { computePrivateRootV10 } from '../src/merkle.js';
 import { createSubstrateClient, registerSubstrateHandler } from './_helpers/substrate.js';
 import { multiaddr } from '@multiformats/multiaddr';
 import { ethers } from 'ethers';
@@ -191,13 +194,16 @@ describe('Access Protocol', () => {
     const privateRootHex = Array.from(result.kaManifest[0].privateMerkleRoot!)
       .map((byte) => byte.toString(16).padStart(2, '0'))
       .join('');
+    // RFC ka-metadata-trim P3.1 (collapsed shape): private count + private
+    // merkle root now live on the bare UAL subject — the `<ual>/1` token row
+    // is no longer minted.
     const metaResult = await storeA.query(`
       SELECT ?policy ?publisher ?privateCount ?privateRoot WHERE {
         GRAPH <${metaGraph}> {
           OPTIONAL { <${kcUal}> <http://dkg.io/ontology/accessPolicy> ?policy }
           OPTIONAL { <${kcUal}> <http://dkg.io/ontology/publisherPeerId> ?publisher }
-          OPTIONAL { <${kaUal}> <http://dkg.io/ontology/privateTripleCount> ?privateCount }
-          OPTIONAL { <${kaUal}> <http://dkg.io/ontology/privateMerkleRoot> ?privateRoot }
+          OPTIONAL { <${kcUal}> <http://dkg.io/ontology/privateTripleCount> ?privateCount }
+          OPTIONAL { <${kcUal}> <http://dkg.io/ontology/privateMerkleRoot> ?privateRoot }
         }
       }
     `);
@@ -426,4 +432,99 @@ describe('Access Protocol', () => {
       }),
     ).rejects.toThrow('accessPolicy "allowList" requires non-empty "allowedPeers"');
   });
+});
+
+// Adversarial review F3 — collapsed multi-root pairing (RFC ka-metadata-trim
+// P3.1). On the collapsed shape ALL member `dkg:rootEntity` rows and ALL
+// per-root `dkg:privateMerkleRoot` rows sit on the same UAL subject with no
+// token row tying them together. The handler's meta query cross-products the
+// two patterns, so its old `LIMIT 1` could pair member root A with private
+// merkle root B — attesting B's root over A's served triples. The fix detects
+// the ambiguity and recomputes the root from the actually-served triples.
+describe('AccessHandler — collapsed multi-root private KA (review F3)', () => {
+  const CG = 'multi-root-access-cg';
+  const META = `did:dkg:context-graph:${CG}/_meta`;
+  const PRIVATE = `did:dkg:context-graph:${CG}/_private`;
+  const DKG_NS = 'http://dkg.io/ontology/';
+  const UAL = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000aa/77';
+  const ROOT_A = 'urn:test:multiroot:alpha';
+  const ROOT_B = 'urn:test:multiroot:beta';
+
+  async function requestPrivate(handler: AccessHandler, kaUal: string) {
+    const data = encodeAccessRequest({
+      kaUal,
+      requesterPeerId: 'requester-peer',
+      paymentProof: new Uint8Array(0),
+      requesterSignature: new Uint8Array(0),
+    });
+    const raw = await handler.handler(
+      data,
+      { toString: () => 'requester-peer', toBytes: () => new Uint8Array() } as never,
+    );
+    return decodeAccessResponse(raw);
+  }
+
+  it('serves a privateMerkleRoot that matches the SERVED triples, never an arbitrary meta pairing', async () => {
+    const store = new OxigraphStore();
+    // Collapsed-shape `_meta`: two member roots + two private merkle roots,
+    // all directly on the UAL subject. The literal meta root values are
+    // deliberately bogus so any blind meta pick is detectable.
+    await store.insert([
+      { subject: UAL, predicate: `${DKG_NS}rootEntity`, object: ROOT_A, graph: META },
+      { subject: UAL, predicate: `${DKG_NS}rootEntity`, object: ROOT_B, graph: META },
+      { subject: UAL, predicate: `${DKG_NS}privateMerkleRoot`, object: `"${'aa'.repeat(32)}"`, graph: META },
+      { subject: UAL, predicate: `${DKG_NS}privateMerkleRoot`, object: `"${'bb'.repeat(32)}"`, graph: META },
+      { subject: UAL, predicate: `${DKG_NS}contextGraph`, object: `did:dkg:context-graph:${CG}`, graph: META },
+      // Public policy: keep the test focused on attestation, not signatures.
+      { subject: UAL, predicate: `${DKG_NS}accessPolicy`, object: '"public"', graph: META },
+    ]);
+    // Private payloads for BOTH member roots (whichever the handler picks).
+    await store.insert([
+      { subject: ROOT_A, predicate: 'http://ex.org/secretA', object: '"alpha-secret"', graph: PRIVATE },
+      { subject: ROOT_B, predicate: 'http://ex.org/secretB', object: '"beta-secret"', graph: PRIVATE },
+    ]);
+
+    const handler = new AccessHandler(store, new TypedEventBus());
+    const response = await requestPrivate(handler, UAL);
+
+    expect(response.granted).toBe(true);
+    const servedNquads = new TextDecoder().decode(response.nquads);
+    const servedRoot = servedNquads.includes('alpha-secret') ? ROOT_A : ROOT_B;
+    expect(servedNquads.includes('alpha-secret') || servedNquads.includes('beta-secret')).toBe(true);
+
+    // The attested root must be computed from the triples actually served —
+    // NOT either of the (ambiguous) meta-row values.
+    const privateStore = new PrivateContentStore(store, new GraphManager(store));
+    const servedQuads = await privateStore.getPrivateTriples(CG, servedRoot);
+    expect(servedQuads.length).toBeGreaterThan(0);
+    const expectedRoot = computePrivateRootV10(servedQuads)!;
+    const toHexStr = (bytes: Uint8Array) =>
+      Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
+    expect(toHexStr(Uint8Array.from(response.privateMerkleRoot))).toBe(toHexStr(expectedRoot));
+    expect(toHexStr(Uint8Array.from(response.privateMerkleRoot))).not.toBe('aa'.repeat(32));
+    expect(toHexStr(Uint8Array.from(response.privateMerkleRoot))).not.toBe('bb'.repeat(32));
+  }, 20000);
+
+  it('single-root collapsed KA keeps the cheap meta-row attestation path', async () => {
+    const store = new OxigraphStore();
+    const metaRootHex = 'cd'.repeat(32);
+    await store.insert([
+      { subject: UAL, predicate: `${DKG_NS}rootEntity`, object: ROOT_A, graph: META },
+      { subject: UAL, predicate: `${DKG_NS}privateMerkleRoot`, object: `"${metaRootHex}"`, graph: META },
+      { subject: UAL, predicate: `${DKG_NS}contextGraph`, object: `did:dkg:context-graph:${CG}`, graph: META },
+      { subject: UAL, predicate: `${DKG_NS}accessPolicy`, object: '"public"', graph: META },
+    ]);
+    await store.insert([
+      { subject: ROOT_A, predicate: 'http://ex.org/secretA', object: '"alpha-secret"', graph: PRIVATE },
+    ]);
+
+    const handler = new AccessHandler(store, new TypedEventBus());
+    const response = await requestPrivate(handler, UAL);
+
+    expect(response.granted).toBe(true);
+    const toHexStr = (bytes: Uint8Array) =>
+      Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
+    // Unambiguous 1:1 pairing — the stored meta root is authoritative.
+    expect(toHexStr(Uint8Array.from(response.privateMerkleRoot))).toBe(metaRootHex);
+  }, 20000);
 });

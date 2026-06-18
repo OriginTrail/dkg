@@ -263,17 +263,21 @@ async function authed(
   return fetch(`http://127.0.0.1:${d.apiPort}${path}`, init);
 }
 async function createContextGraph(d: Daemon, cgId: string): Promise<void> {
+  // GH #1013 — the e2e CG is deliberately LOCAL-ONLY (no on-chain
+  // registration). The kafka plugin registers streams as fully-PRIVATE KAs
+  // (`{ private: ka }`), and this harness is a single isolated daemon: a
+  // chain-registered CG can never collect the private-payload storage ACKs
+  // quorum here, so the async publish now fails HONESTLY (the old run only
+  // reached `finalized` through the fake local-finalization #1013 removed).
+  // A chainless CG finalizes locally as a legitimate, honest terminal state,
+  // which keeps this suite covering the full register→list→get pipeline.
   const res = await authed(d, 'POST', '/api/context-graph/create', {
     id: cgId,
     name: cgId,
-    register: true,
+    register: false,
   });
   if (![200, 201, 409].includes(res.status)) {
     throw new Error(`createContextGraph failed: ${res.status} ${await res.text()}`);
-  }
-  const body = await res.json().catch(() => null);
-  if (body?.registered === false && body.registerErrorStatus !== 409) {
-    throw new Error(`createContextGraph: register leg failed: ${JSON.stringify(body)}`);
   }
 }
 async function pollUntilFinalized(

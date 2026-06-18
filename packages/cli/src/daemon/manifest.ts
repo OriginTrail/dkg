@@ -849,6 +849,38 @@ export function normalizeDetectedContentType(contentType: string | undefined): s
     : "application/octet-stream";
 }
 
+/**
+ * #1101: filename-extension fallback for import-file content-type detection.
+ *
+ * Plain `curl -F file=@notes.md` sends `application/octet-stream` for any
+ * file type curl doesn't recognise — which includes Markdown. Relying solely
+ * on the multipart part's Content-Type header therefore silently skipped
+ * extraction for the single most common upload type. When the header (and
+ * the explicit `contentType` override) yields only octet-stream, fall back
+ * to the uploaded filename's extension. Returns undefined when the
+ * extension is unknown so callers keep the octet-stream default.
+ */
+export function inferContentTypeFromFilename(filename: string | undefined): string | undefined {
+  if (!filename) return undefined;
+  const dot = filename.lastIndexOf(".");
+  if (dot < 0 || dot === filename.length - 1) return undefined;
+  const ext = filename.slice(dot + 1).toLowerCase();
+  const map: Record<string, string> = {
+    md: "text/markdown",
+    markdown: "text/markdown",
+    pdf: "application/pdf",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    csv: "text/csv",
+    html: "text/html",
+    htm: "text/html",
+    epub: "application/epub+zip",
+    xml: "application/xml",
+  };
+  return map[ext];
+}
+
 export function currentBundledMarkItDownAssetName(): string | null {
   return (
     loadMarkItDownTargets().find(

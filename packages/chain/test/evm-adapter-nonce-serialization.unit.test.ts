@@ -11,9 +11,18 @@
  * via `as any`, the same convention the rest of evm-adapter.unit.test.ts uses)
  * so deleting the `signerTxSerializer.run(...)` wrap turns the suite red.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const OTHER_PK = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b63b91100';
@@ -78,7 +87,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       await tick(10);
       return { signedTx: `tx-${id}`, txHash: `0x${id}` };
     };
-    (a as any).sendSignedTransactionAndWait = vi.fn(async (signedTx: string) => {
+    (a as any).sendSignedTransactionAndWait = recorder(async (signedTx: string) => {
       events.push(`send:${signedTx}`);
       await tick(10);
       events.push(`done:${signedTx}`);
@@ -108,7 +117,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       await tick(20);
       return { signedTx: `tx-${id}`, txHash: `0x${id}` };
     };
-    (a as any).sendSignedTransactionAndWait = vi.fn(async (signedTx: string) => fakeReceipt(signedTx));
+    (a as any).sendSignedTransactionAndWait = recorder(async (signedTx: string) => fakeReceipt(signedTx));
 
     await Promise.all([
       (a as any).dispatchSerializedV10Write(s1, 'publish', undefined, build('a'), neverNull),
@@ -133,7 +142,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       await tick(5); // populate / sign gap
       return { signedTx: String(nonce), txHash: `0x${nonce}` };
     };
-    (a as any).sendSignedTransactionAndWait = vi.fn(async (signedTx: string) => {
+    (a as any).sendSignedTransactionAndWait = recorder(async (signedTx: string) => {
       const nonce = Number(signedTx);
       await tick(5);
       if (nonce !== pending) {
@@ -178,7 +187,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       await tick(5);
       return { signedTx: String(publishNonce), txHash: `0x${publishNonce}` };
     };
-    (a as any).sendSignedTransactionAndWait = vi.fn(async (signedTx: string) => {
+    (a as any).sendSignedTransactionAndWait = recorder(async (signedTx: string) => {
       const nonce = Number(signedTx);
       await tick(5);
       if (nonce !== pending) {
@@ -213,17 +222,21 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         }),
       },
     };
-    const runSpy = vi.spyOn((a as any).signerTxSerializer, 'run');
+    const serializer = (a as any).signerTxSerializer;
+    const origRun = serializer.run.bind(serializer);
+    const runSpy = recorder((...args: unknown[]) => origRun(...args));
+    serializer.run = runSpy;
     const SENTINEL = 'APPROVE_REACHED_INSIDE_LOCK';
-    (a as any).ensureV10ApproveTrac = vi.fn(async () => {
+    const ensureV10ApproveTrac = recorder(async () => {
       throw new Error(SENTINEL);
     });
+    (a as any).ensureV10ApproveTrac = ensureV10ApproveTrac;
 
     await expect(a.createKnowledgeAssets(minimalPublishParams())).rejects.toThrow(SENTINEL);
 
     // The lock was entered (run called) AND the approve was reached from inside it.
-    expect(runSpy).toHaveBeenCalledTimes(1);
-    expect((a as any).ensureV10ApproveTrac).toHaveBeenCalledTimes(1);
+    expect(runSpy.calls).toHaveLength(1);
+    expect(ensureV10ApproveTrac.calls).toHaveLength(1);
   });
 
   it('publishToContextGraph (V9→V10 mirror) throws BEFORE any on-chain side effect (Option-1 §F2)', async () => {
@@ -238,7 +251,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       token: {},
     };
     // Any side effect would have to go through one of these first.
-    const signerSpy = vi.fn(async () => {
+    const signerSpy = recorder(async () => {
       throw new Error('SIGNER_ACQUIRED_BEFORE_GUARD');
     });
     (a as any).nextAuthorizedSigner = signerSpy;
@@ -246,15 +259,15 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
     await expect(a.publishToContextGraph(minimalPublishParams())).rejects.toThrow(
       'not supported under OT-RFC-43 Option-1',
     );
-    expect(signerSpy).not.toHaveBeenCalled();
+    expect(signerSpy.calls).toEqual([]);
   });
 
   it('fails closed when the WAL onBroadcast hook throws — never broadcasts', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     const signer = new ethers.Wallet(DEPLOYER_PK);
-    const send = vi.fn(async () => fakeReceipt('0xsent'));
+    const send = recorder(async () => fakeReceipt('0xsent'));
     (a as any).sendSignedTransactionAndWait = send;
-    const onBroadcast = vi.fn(async () => {
+    const onBroadcast = recorder(async () => {
       throw new Error('WAL disk full');
     });
 
@@ -267,13 +280,13 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
         neverNull,
       ),
     ).rejects.toThrow('chain:writeahead hook failed before publish broadcast: WAL disk full');
-    expect(send).not.toHaveBeenCalled();
+    expect(send.calls).toEqual([]);
   });
 
   it('a failed write does not wedge the wallet — the next same-wallet write still runs', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     const signer = new ethers.Wallet(DEPLOYER_PK);
-    (a as any).sendSignedTransactionAndWait = vi.fn(async (signedTx: string) => {
+    (a as any).sendSignedTransactionAndWait = recorder(async (signedTx: string) => {
       if (signedTx === 'boom') throw new Error('broadcast failed');
       return fakeReceipt(signedTx);
     });
@@ -301,7 +314,7 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
   it('invokes onNullReceipt with the pre-broadcast tx hash when the receipt is null', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     const signer = new ethers.Wallet(DEPLOYER_PK);
-    (a as any).sendSignedTransactionAndWait = vi.fn(async () => null);
+    (a as any).sendSignedTransactionAndWait = recorder(async () => null);
 
     await expect(
       (a as any).dispatchSerializedV10Write(

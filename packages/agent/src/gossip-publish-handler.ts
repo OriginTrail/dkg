@@ -1,7 +1,7 @@
 import {
   decodePublishRequest, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
   Logger, createOperationContext,
-  isSafeIri, assertSafeIri, validateSubGraphName,
+  isSafeIri, assertSafeIri, validateSubGraphName, validateContextGraphId,
   contextGraphSubGraphUri,
   contextGraphMetaGraphUri, contextGraphDataGraphUri,
   type OperationContext,
@@ -15,6 +15,8 @@ import {
   type KAMetadata,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
+import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
+import type { ContextGraphSub } from './dkg-agent-types.js';
 
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
 
@@ -22,6 +24,7 @@ export interface GossipPublishHandlerCallbacks {
   contextGraphExists: (id: string) => Promise<boolean>;
   getContextGraphOwner: (id: string) => Promise<string | null>;
   subscribeToContextGraph: (id: string, options?: { trackSyncScope?: boolean; persist?: boolean }) => void;
+  setContextGraphSubscription?: (id: string, next: ContextGraphSub, options?: { persist?: boolean }) => void;
   /**
    * Same semantics as `DKGAgent#hasConfirmedMetaState`: returns true when the
    * local store already has a trustworthy public announcement for this CG
@@ -35,27 +38,56 @@ export interface GossipPublishHandlerCallbacks {
    * callback returned `false`).
    */
   hasConfirmedMetaState?: (id: string) => Promise<boolean>;
+  getCgMeta?: (id: string) => Promise<ContextGraphMetaRecord>;
+  markCgMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
   persistContextGraphSubscription?: (id: string) => void;
   onPhase?: GossipPhaseCallback;
+}
+
+export interface GossipPublishHandlerOptions {
+  /**
+   * Agent-backed handlers require the invalidating subscription setter so
+   * gossip state changes keep listContextGraphs cache and durable subscription
+   * bookkeeping coherent. Standalone/legacy handlers can omit the callback and
+   * keep the historical in-memory map fallback.
+   */
+  requireContextGraphSubscriptionSetter?: boolean;
 }
 
 export class GossipPublishHandler {
   private readonly store: TripleStore;
   private readonly chain: ChainAdapter | undefined;
-  private readonly subscribedContextGraphs: Map<string, any>;
+  private readonly subscribedContextGraphs: Map<string, ContextGraphSub>;
   private readonly callbacks: GossipPublishHandlerCallbacks;
   private readonly log = new Logger('GossipPublishHandler');
 
   constructor(
     store: TripleStore,
     chain: ChainAdapter | undefined,
-    subscribedContextGraphs: Map<string, any>,
+    subscribedContextGraphs: Map<string, ContextGraphSub>,
     callbacks: GossipPublishHandlerCallbacks,
+    options: GossipPublishHandlerOptions = {},
   ) {
+    if (options.requireContextGraphSubscriptionSetter && !callbacks.setContextGraphSubscription) {
+      throw new Error('GossipPublishHandler requires setContextGraphSubscription for agent-backed subscription state');
+    }
     this.store = store;
     this.chain = chain;
     this.subscribedContextGraphs = subscribedContextGraphs;
     this.callbacks = callbacks;
+  }
+
+  private setContextGraphSubscription(
+    id: string,
+    next: ContextGraphSub,
+    options?: { persist?: boolean },
+  ): void {
+    const setter = this.callbacks.setContextGraphSubscription;
+    if (setter) {
+      setter(id, next, options);
+      return;
+    }
+    this.subscribedContextGraphs.set(id, next);
   }
 
   async handlePublishMessage(data: Uint8Array, contextGraphId: string, onPhase?: GossipPhaseCallback, fromPeerId?: string): Promise<void> {
@@ -73,11 +105,16 @@ export class GossipPublishHandler {
         if (!request.contextGraphId) {
           request.contextGraphId = contextGraphId;
         } else if (request.contextGraphId !== contextGraphId) {
-          // If the decoded contextGraphId contains non-printable characters, this is a
-          // different message type (e.g. finalization) that was decoded as a publish
-          // request. Silently skip to avoid spammy WARN logs.
-          if (/[^\x20-\x7E]/.test(request.contextGraphId)) return;
-          this.log.warn(ctx, `Gossip: request contextGraphId "${request.contextGraphId}" does not match topic "${contextGraphId}", ignoring`);
+          // #1100: protobuf decoding is structurally permissive — agent-profile
+          // and other non-publish gossip frames "successfully" decode as publish
+          // requests with multi-KB RDF garbage in the contextGraphId field. The
+          // old guard only skipped on non-printable characters, so any payload
+          // that happened to be printable ASCII was dumped wholesale into the
+          // log as a WARN, every few seconds, forever. A real cross-topic
+          // mismatch always carries a *well-formed* CG id, so validate the
+          // decoded value first and silently skip mis-decoded frames.
+          if (!validateContextGraphId(request.contextGraphId).valid) return;
+          this.log.warn(ctx, `Gossip: request contextGraphId "${request.contextGraphId.slice(0, 120)}" does not match topic "${contextGraphId}", ignoring`);
           return;
         }
       } finally {
@@ -166,7 +203,7 @@ export class GossipPublishHandler {
               q.subject === `${contextGraphPrefix}${newId}` && q.predicate === DKG_ONTOLOGY.SCHEMA_NAME,
             );
             const name = nameQuad ? stripLiteral(nameQuad.object) : newId;
-            this.subscribedContextGraphs.set(newId, {
+            const next = {
               name,
               subscribed: true,
               // `synced: false` — we just got the definition triple via
@@ -177,7 +214,8 @@ export class GossipPublishHandler {
               synced: false,
               metaSynced: false,
               onChainId: this.subscribedContextGraphs.get(newId)?.onChainId,
-            });
+            };
+            this.setContextGraphSubscription(newId, next, { persist: false });
             this.callbacks.subscribeToContextGraph(newId, { trackSyncScope: true });
             this.log.info(ctx, `Discovered context graph "${name}" (${newId}) via gossip — auto-subscribed (sync-enabled)`);
           }
@@ -210,7 +248,7 @@ export class GossipPublishHandler {
         // confirmable from the local store (system contextGraph, populated
         // `_meta`, or `<cg> rdf:type dkg:ContextGraph` in ontology — the same
         // check Viktor introduced in `hasConfirmedMetaState`). If yes,
-        // flip the flag in place and proceed; if no, keep the strict
+        // update the flag through the agent subscription setter and proceed; if no, keep the strict
         // deny behavior so curated CGs without a synced allowlist can't
         // leak through.
         if (allowedPeers === null
@@ -222,8 +260,7 @@ export class GossipPublishHandler {
               ? await this.callbacks.hasConfirmedMetaState(request.contextGraphId)
               : false;
             if (confirmed) {
-              sub.metaSynced = true;
-              this.callbacks.persistContextGraphSubscription?.(request.contextGraphId);
+              this.setContextGraphSubscription(request.contextGraphId, { ...sub, metaSynced: true });
             } else {
               this.log.warn(ctx, `Gossip publish deferred: context graph "${request.contextGraphId}" _meta not yet synced — defaulting to deny`);
               return;
@@ -250,7 +287,7 @@ export class GossipPublishHandler {
           return;
         }
         const sparql = `SELECT DISTINCT ?s WHERE { GRAPH ?g { ?s ?p ?o } VALUES ?s { ${rootEntities.map(e => `<${e}>`).join(' ')} } FILTER(STRSTARTS(STR(?g), "${dataGraph}/_verifiable_memory/") || STR(?g) = "${dataGraph}") }`;
-        const result = await this.store.query(sparql);
+        const result = await this.store.query(sparql, { source: 'agent.gossipPublishValidation' });
         const existingEntities = new Set<string>(
           result.type === 'bindings' ? result.bindings.map(b => b['s']).filter(Boolean) : [],
         );
@@ -291,6 +328,7 @@ export class GossipPublishHandler {
             timestamp: new Date(),
           });
           await this.store.insert(regQuads);
+          this.callbacks.markCgMetaDirtyFromQuads?.(regQuads);
           this.log.info(ctx, `Auto-registered sub-graph "${subGraphName}" in context graph "${request.contextGraphId}" from gossip`);
         }
       }
@@ -298,6 +336,7 @@ export class GossipPublishHandler {
       phase?.('store', 'start');
       if (normalized.length > 0 && !isReplay) {
         await this.store.insert(normalized);
+        this.callbacks.markCgMetaDirtyFromQuads?.(normalized);
       }
 
       if (request.ual) {
@@ -337,7 +376,6 @@ export class GossipPublishHandler {
           ual: request.ual,
           contextGraphId: request.contextGraphId,
           merkleRoot,
-          kaCount: kaMetadata.length > 0 ? 1 : 0,
           publisherPeerId: request.publisherAddress || 'unknown',
           timestamp: new Date(),
           subGraphName,
@@ -347,6 +385,7 @@ export class GossipPublishHandler {
         // never trust self-reported on-chain status from gossip messages.
         const metaQuads = generateTentativeMetadata(kcMeta, kaMetadata);
         await this.store.insert(metaQuads);
+        this.callbacks.markCgMetaDirtyFromQuads?.(metaQuads);
         phase?.('store', 'end');
 
         // If the gossip message includes on-chain proof (txHash + blockNumber),
@@ -449,7 +488,7 @@ export class GossipPublishHandler {
   private async promoteGossipToConfirmed(
     ual: string,
     contextGraphId: string,
-    _kcMeta: { ual: string; contextGraphId: string; merkleRoot: Uint8Array; kaCount: number; publisherPeerId: string; timestamp: Date },
+    _kcMeta: { ual: string; contextGraphId: string; merkleRoot: Uint8Array; publisherPeerId: string; timestamp: Date },
     _kaMetadata: KAMetadata[],
   ): Promise<void> {
     const tentativeStatus = getTentativeStatusQuad(ual, contextGraphId);
@@ -553,6 +592,11 @@ export class GossipPublishHandler {
   }
 
   private async getContextGraphAllowedPeers(contextGraphId: string): Promise<string[] | null> {
+    if (this.callbacks.getCgMeta) {
+      const peers = (await this.callbacks.getCgMeta(contextGraphId)).allowedPeers;
+      return peers.length > 0 ? peers : null;
+    }
+
     const cgMeta = contextGraphMetaGraphUri(contextGraphId);
     const cgData = contextGraphDataGraphUri(contextGraphId);
     const result = await this.store.query(

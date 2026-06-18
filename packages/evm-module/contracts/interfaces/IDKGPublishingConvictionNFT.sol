@@ -52,7 +52,11 @@ interface IDKGPublishingConvictionNFT {
             uint16 lockDurationEpochs,
             uint16 discountBps,
             uint16 lastSettledWindow,
-            bool fullySwept
+            bool fullySwept,
+            // OT-RFC-51 "Publishing Allocation": designated node + its
+            // re-designation rate-limit cursor.
+            uint72 primaryNode,
+            uint40 lastPrimaryNodeChangeEpoch
         );
 
     /// @notice Spend a publishing agent's conviction allowance for a base

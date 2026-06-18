@@ -1,6 +1,8 @@
 import type {
   TripleStore,
   Quad as DKGQuad,
+  QueryOptions,
+  TripleStoreQueryOptions,
   QueryResult,
   SelectResult,
   ConstructResult,
@@ -18,6 +20,8 @@ import { buildBlankNodeSafeDelete } from './sparql-http.js';
  * plus Blazegraph's N-Quads bulk-insert endpoint.
  */
 export class BlazegraphStore implements TripleStore {
+  readonly queryCancellation = 'interruptible' as const;
+
   private readonly url: string;
 
   constructor(url: string) {
@@ -87,14 +91,18 @@ export class BlazegraphStore implements TripleStore {
   // Queries
   // -------------------------------------------------------------------
 
-  async query(sparql: string): Promise<QueryResult> {
+  async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
+    if (options?.signal?.aborted) {
+      const reason = options.signal.reason;
+      throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
+    }
     const trimmed = sparql.trim();
     const upper = trimmed.toUpperCase();
     const isAsk = upper.startsWith('ASK');
     const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
 
     if (isConstruct) {
-      return this.queryConstruct(trimmed);
+      return this.queryConstruct(trimmed, options);
     }
 
     // Direct POST (W3C SPARQL 1.1 Protocol): send the query as the raw
@@ -111,6 +119,7 @@ export class BlazegraphStore implements TripleStore {
         Accept: 'application/sparql-results+json',
       },
       body: trimmed,
+      signal: options?.signal,
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
@@ -136,7 +145,7 @@ export class BlazegraphStore implements TripleStore {
     return { type: 'bindings', bindings } satisfies SelectResult;
   }
 
-  private async queryConstruct(sparql: string): Promise<ConstructResult> {
+  private async queryConstruct(sparql: string, options?: QueryOptions): Promise<ConstructResult> {
     const res = await fetch(this.url, {
       method: 'POST',
       headers: {
@@ -144,6 +153,7 @@ export class BlazegraphStore implements TripleStore {
         Accept: 'text/x-nquads, application/n-quads',
       },
       body: sparql,
+      signal: options?.signal,
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
@@ -173,9 +183,10 @@ export class BlazegraphStore implements TripleStore {
     await this.sparqlUpdate(`DROP SILENT GRAPH <${escapeUri(graphUri)}>`);
   }
 
-  async listGraphs(): Promise<string[]> {
+  async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
     const r = await this.query(
       'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
+      options,
     );
     if (r.type !== 'bindings') return [];
     return r.bindings.map((b) => b.g).filter(Boolean);

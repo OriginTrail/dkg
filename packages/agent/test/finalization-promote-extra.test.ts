@@ -289,14 +289,17 @@ describe('PR #779: same-graph dual-write into root + per-on-chain-id partition',
   });
 });
 
-describe('Round 5 §10: replica-side dkg:Publication / dkg:authoredBy provenance', () => {
-  it('emits dkg:authoredBy + dkg:Publication when authorAddress is threaded through', async () => {
+describe('Round 5 §10: replica-side author provenance (prov:wasAttributedTo)', () => {
+  it('attributes the KC to the threaded author via prov:wasAttributedTo (no dkg:Publication — RFC ka-metadata-trim)', async () => {
     // Regression for the round-5 review finding: replicas confirming a KC via
-    // FinalizationHandler used to rebuild `_meta` without `dkg:authoredBy`,
-    // making author provenance inconsistent across the network. Fix threads
-    // the EIP-712-attested author from `KnowledgeAssetCreated.author`
+    // FinalizationHandler used to rebuild `_meta` without author provenance,
+    // making it inconsistent across the network. Fix threads the
+    // EIP-712-attested author from `KnowledgeAssetCreated.author`
     // into `KCMetadata` via `verifyOnChain`. This unit-level pin verifies the
     // promote-side wiring without standing up a full chain.
+    // RFC ka-metadata-trim Phase 1: the `dkg:Publication`/`dkg:authoredBy`
+    // mirror was dropped — attribution is carried by `prov:wasAttributedTo`
+    // on the KC row.
     const store = new OxigraphStore();
     const handler = new FinalizationHandler(store, undefined);
     const cgId = `r5-author-${ethers.hexlify(ethers.randomBytes(3)).slice(2)}`;
@@ -320,26 +323,34 @@ describe('Round 5 §10: replica-side dkg:Publication / dkg:authoredBy provenance
       author,
     );
 
-    // The Publication URI is content-addressable on txHash so every node
-    // converges on the same id (see promoteSharedMemoryToCanonical comment).
-    const pubAsk = await store.query(
-      `ASK { GRAPH <${metaGraph}> { <urn:dkg:publication:${txHash}> <http://dkg.io/ontology/authoredBy> "${author}" } }`,
+    // Attribution lands on the KC row as the author's agent DID
+    // (lowercased EVM address — see `agentDid()`).
+    const attrAsk = await store.query(
+      `ASK { GRAPH <${metaGraph}> { ?kc <http://www.w3.org/ns/prov#wasAttributedTo> <did:dkg:agent:${author.toLowerCase()}> } }`,
     );
-    expect(pubAsk.type).toBe('boolean');
-    if (pubAsk.type === 'boolean') {
+    expect(attrAsk.type).toBe('boolean');
+    if (attrAsk.type === 'boolean') {
       expect(
-        pubAsk.value,
-        'replica must emit dkg:authoredBy on the Publication subject when on-chain author is threaded',
+        attrAsk.value,
+        'replica must attribute the KC to the threaded on-chain author via prov:wasAttributedTo',
       ).toBe(true);
     }
+
+    // RFC ka-metadata-trim: no dkg:Publication subject is emitted anymore.
+    const pubAsk = await store.query(
+      `ASK { GRAPH <${metaGraph}> { ?p a <http://dkg.io/ontology/Publication> } }`,
+    );
+    expect(pubAsk.type).toBe('boolean');
+    if (pubAsk.type === 'boolean') expect(pubAsk.value).toBe(false);
   });
 
-  it('skips Publication block when authorAddress is the unattributed sentinel (address(0))', async () => {
+  it('treats authorAddress address(0) as unattributed (no fake agent DID, no Publication)', async () => {
     // RFC-001 §3.6 unattributed-publish path on chain stores
     // `address(0)` for `KnowledgeAssetCreated.author`. Replicas must
-    // preserve that semantic by NOT emitting a Publication subject — the
-    // legacy no-author behaviour is the contract for downstream queries
-    // that treat presence of `dkg:authoredBy` as "verified author on file".
+    // preserve that semantic by NOT minting a `did:dkg:agent:0x000…000`
+    // attribution — the legacy no-author behaviour is the contract for
+    // downstream queries that treat an agent-DID attribution as
+    // "verified author on file".
     const store = new OxigraphStore();
     const handler = new FinalizationHandler(store, undefined);
     const cgId = `r5-noauth-${ethers.hexlify(ethers.randomBytes(3)).slice(2)}`;
@@ -369,9 +380,16 @@ describe('Round 5 §10: replica-side dkg:Publication / dkg:authoredBy provenance
     if (pubAsk.type === 'boolean') {
       expect(
         pubAsk.value,
-        'replica must NOT emit a Publication subject for unattributed publishes (address(0) sentinel)',
+        'replica must NOT emit a Publication subject (writer removed; sentinel must not resurrect it)',
       ).toBe(false);
     }
+
+    // And no zero-address agent DID is minted for the attribution.
+    const zeroAttrAsk = await store.query(
+      `ASK { GRAPH <${metaGraph}> { ?kc <http://www.w3.org/ns/prov#wasAttributedTo> <did:dkg:agent:0x0000000000000000000000000000000000000000> } }`,
+    );
+    expect(zeroAttrAsk.type).toBe('boolean');
+    if (zeroAttrAsk.type === 'boolean') expect(zeroAttrAsk.value).toBe(false);
   });
 });
 

@@ -6,6 +6,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { GossipPublishHandler } from '../src/gossip-publish-handler.js';
+import type { ContextGraphSub } from '../src/index.js';
 
 const CONTEXT_GRAPH = 'test-gossip-handler';
 
@@ -30,18 +31,25 @@ function makePublishMessage(opts: {
   });
 }
 
-function createHandler(store?: OxigraphStore, callbacks?: Partial<{ contextGraphExists: (id: string) => Promise<boolean>; getContextGraphOwner: (id: string) => Promise<string | null>; subscribeToContextGraph: (id: string) => void }>) {
+function createHandler(store?: OxigraphStore, callbacks?: Partial<{
+  contextGraphExists: (id: string) => Promise<boolean>;
+  getContextGraphOwner: (id: string) => Promise<string | null>;
+  subscribeToContextGraph: (id: string) => void;
+  setContextGraphSubscription: (id: string, next: ContextGraphSub) => void;
+}>) {
   const s = store ?? new OxigraphStore();
+  const subscriptions = new Map<string, ContextGraphSub>();
   return {
     store: s,
     handler: new GossipPublishHandler(
       s,
       undefined,
-      new Map<string, any>(),
+      subscriptions,
       {
         contextGraphExists: callbacks?.contextGraphExists ?? (async () => false),
         getContextGraphOwner: callbacks?.getContextGraphOwner ?? (async () => null),
         subscribeToContextGraph: callbacks?.subscribeToContextGraph ?? (() => {}),
+        setContextGraphSubscription: callbacks?.setContextGraphSubscription ?? ((id, next) => { subscriptions.set(id, next); }),
       },
     ),
   };
@@ -166,6 +174,56 @@ describe('GossipPublishHandler', () => {
     );
     const bindings = result.type === 'bindings' ? result.bindings : [];
     expect(bindings.length).toBeGreaterThan(0);
+  });
+
+  it('keeps legacy subscription-map fallback when setContextGraphSubscription is omitted', async () => {
+    const store = new OxigraphStore();
+    const subscriptions = new Map<string, ContextGraphSub>();
+    const handler = new GossipPublishHandler(
+      store,
+      undefined,
+      subscriptions,
+      {
+        contextGraphExists: async () => false,
+        getContextGraphOwner: async () => null,
+        subscribeToContextGraph: () => {},
+      },
+    );
+
+    const id = 'legacy-callback-discovery';
+    const data = makePublishMessage({
+      contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      nquads: [
+        `<did:dkg:context-graph:${id}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> <did:dkg:context-graph:${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}> .`,
+        `<did:dkg:context-graph:${id}> <${DKG_ONTOLOGY.SCHEMA_NAME}> "Legacy Callback Discovery" <did:dkg:context-graph:${SYSTEM_CONTEXT_GRAPHS.ONTOLOGY}> .`,
+      ].join('\n'),
+    });
+
+    await handler.handlePublishMessage(data, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+
+    expect(subscriptions.get(id)).toMatchObject({
+      name: 'Legacy Callback Discovery',
+      subscribed: true,
+      synced: false,
+      metaSynced: false,
+    });
+  });
+
+  it('requires the invalidating subscription setter for agent-backed handlers', () => {
+    const store = new OxigraphStore();
+    const subscriptions = new Map<string, ContextGraphSub>();
+
+    expect(() => new GossipPublishHandler(
+      store,
+      undefined,
+      subscriptions,
+      {
+        contextGraphExists: async () => false,
+        getContextGraphOwner: async () => null,
+        subscribeToContextGraph: () => {},
+      },
+      { requireContextGraphSubscriptionSetter: true },
+    )).toThrow('requires setContextGraphSubscription');
   });
 
   it('rejects forged ontology policy approvals from non-owners', async () => {

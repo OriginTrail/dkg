@@ -16,6 +16,7 @@ import {
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
+  ENTITY_PRED_ALT, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY,
   contextGraphSharedMemoryUri,
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
@@ -208,11 +209,12 @@ import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-cor
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
-import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
+import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
+import { recoverContextGraphSwm, type RecoverContextGraphSwmResult } from './sync/requester/swm-recovery.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
-import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome } from './sync/on-connect/sync-on-connect.js';
+import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   ensureWorkspaceEncryptionKey,
@@ -237,8 +239,9 @@ import { createCursorState, type CursorState } from './reconcile-cursor.js';
  * Default cap on how many persisted context-graph subscriptions are activated
  * (gossip-subscribed + sync-tracked) on startup. A large backlog of stale
  * subscriptions otherwise fans out store-touching gossip/sync work that
- * starves authenticated store-backed routes (issue #997). Override via
- * `DKGAgentConfig.maxRehydratedContextGraphSubscriptions` (0 disables).
+ * starves authenticated store-backed routes (issue #997). Rows beyond the cap
+ * remain persisted/dormant and are exposed through subscription diagnostics.
+ * Override via `DKGAgentConfig.maxRehydratedContextGraphSubscriptions` (0 disables).
  */
 const DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS = 64;
 /** Yield to the event loop every N activations so concurrent store work can interleave. */
@@ -343,6 +346,7 @@ import {
   type ChatSendResult,
   type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
+  type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
@@ -395,9 +399,23 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 
+const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
+
+function jitteredIntervalMs(intervalMs: number, ratio: number | undefined): number {
+  const normalizedRatio =
+    typeof ratio === 'number' && Number.isFinite(ratio)
+      ? Math.min(1, Math.max(0, ratio))
+      : DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO;
+  if (normalizedRatio === 0) return intervalMs;
+  const delta = intervalMs * normalizedRatio;
+  return Math.max(1, Math.round(intervalMs - delta + Math.random() * delta * 2));
+}
+
 export class LifecycleSyncMethods extends DKGAgentBase {
   async start(this: DKGAgent): Promise<void> {
     if (this.started) return;
+    this.coreHostRecordingGeneration += 1;
+    this.coreHostRecordingsClosed = false;
     const ctx = createOperationContext('connect');
     this.log.info(ctx, `Starting DKG node`);
 
@@ -581,7 +599,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (this.config.queryAccess?.defaultPolicy === 'public') {
       this.log.warn(ctx, 'Query access policy is "public" — all remote queries will be accepted. Set queryAccess.defaultPolicy to "deny" for stricter security.');
     }
-    const queryRemoteHandler = new QueryHandler(this.queryEngine, queryAccessConfig);
+    // #1105: even under deny-by-default, a CG whose live on-chain
+    // accessPolicy is public (0) is remotely queryable — otherwise
+    // `accessPolicy: "public"` at CG creation has no remote-query effect
+    // and every devnet/fresh install (which ships no queryAccess config)
+    // denies everything. Explicit queryAccess.contextGraphs entries still
+    // override; isContextGraphPublicOnChain fails closed on any lookup
+    // error, so private/curated/unregistered CGs remain denied.
+    const queryRemoteHandler = new QueryHandler(this.queryEngine, queryAccessConfig, {
+      isContextGraphPublic: (contextGraphId: string) =>
+        this.isContextGraphPublicOnChain(contextGraphId, createOperationContext('query')),
+    });
     // rc.9 PR-9: PROTOCOL_QUERY_REMOTE migrated onto the Universal
     // Messenger substrate. Wire prefix bumped to /dkg/10.0.1/* (hard
     // cutover; rc.8 ↔ rc.9 cross-version query stops working) so
@@ -1104,7 +1132,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 // hosts the CG so the chain-driven VM reconciler fills its gaps
                 // across restarts. Best-effort + public-CG-gated inside the
                 // helper; never blocks or affects the (sync) provenance return.
-                void this.recordCoreHostedPublicCg(cgId, swmGraphId);
+                this.trackCoreHostRecording(() => this.recordCoreHostedPublicCg(cgId, swmGraphId));
                 const wireFromCgId = cgId ? this.gossipWireIdFor(cgId) : undefined;
                 const wireFromSwmGraphId = swmGraphId && swmGraphId !== cgId
                   ? this.gossipWireIdFor(swmGraphId)
@@ -1353,17 +1381,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // would no-op on this without a pre-existing record, so
             // upsert a minimal stub first.
             if (!this.subscribedContextGraphs.has(hashLower)) {
-              this.subscribedContextGraphs.set(hashLower, {
+              this.setContextGraphSubscription(hashLower, {
                 subscribed: false,
                 synced: false,
                 onChainId: contextGraphId,
                 onChainHash: hashLower,
                 pendingMeta: true,
-              });
+              }, { persist: false });
             } else {
-              const existing = this.subscribedContextGraphs.get(hashLower)!;
-              this.bindSubscriptionOnChainId(hashLower, existing, contextGraphId);
-              existing.onChainHash = hashLower;
+              const next = { ...this.subscribedContextGraphs.get(hashLower)! };
+              this.bindSubscriptionOnChainId(hashLower, next, contextGraphId);
+              next.onChainHash = hashLower;
+              this.setContextGraphSubscription(hashLower, next, { persist: false });
             }
             this.recordCgWireId(hashLower, hashLower);
 
@@ -1521,6 +1550,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this._pendingChatAcl = null;
     }
 
+    // GH #462 — wire up pending skill ACL (set via `agent.setSkillAcl(...)`).
+    if (this._pendingSkillAcl) {
+      this.messageHandler.setSkillAcl(this._pendingSkillAcl);
+      this._pendingSkillAcl = null;
+    }
+
     // Register skill handlers
     if (this.config.skills) {
       for (const skill of this.config.skills) {
@@ -1539,7 +1574,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // for sync only; other substrate protocols keep their dedup.)
     registerSyncHandler({
       register: (protocol, handler) =>
-        this.router.register(protocol, (data, peerIdObj) => handler(data, peerIdObj.toString())),
+        this.router.register(protocol, (data, peerIdObj, options) => handler(data, peerIdObj.toString(), options)),
       protocolSync: PROTOCOL_SYNC,
       syncDeniedResponse: SYNC_DENIED_RESPONSE,
       syncPageSize: SYNC_PAGE_SIZE,
@@ -1938,8 +1973,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       })();
 
       const now = Date.now();
+      const lastSuccessfulSync = this.lastSuccessfulSyncAt.get(remotePeer);
+      const lastDisconnected = this.lastSyncDisconnectedAt.get(remotePeer) ?? 0;
+      if (
+        lastSuccessfulSync != null &&
+        lastSuccessfulSync > lastDisconnected &&
+        now - lastSuccessfulSync < SYNC_STALENESS_THRESHOLD_MS
+      ) {
+        return;
+      }
       const last = this.catchupOnConnectAt.get(remotePeer) ?? 0;
-      if (now - last < CATCHUP_ON_CONNECT_COOLDOWN_MS) return;
+      if (last > lastDisconnected && now - last < CATCHUP_ON_CONNECT_COOLDOWN_MS) return;
       this.catchupOnConnectAt.set(remotePeer, now);
       setTimeout(() => {
         this.trySyncFromPeer(remotePeer).catch((err: unknown) => {
@@ -1948,26 +1992,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }, 3000);
     });
 
-    // Clear the per-peer cooldown timestamp when the last live connection
-    // to a peer is torn down. The cooldown's job is to dedupe overlapping
-    // `connection:open` bursts (libp2p can fire more than one when
-    // multiple transports come up for the same peer within a few hundred
-    // ms). Without this close handler, a peer that dropped and
-    // reconnected 10–20s later — exactly the flaky-relay case this
-    // catch-up hook is meant to repair — would be silently skipped for
-    // up to a minute, so catch-up would stall until some other trigger
-    // fires. `connection:close` fires per connection, so we only forget
-    // the timestamp once no live connection to the peer remains. Codex
-    // tier-4i finding at packages/agent/src/dkg-agent.ts:1105.
-    //
-    // We also drop the peer from `skippedNoSyncPeers` and forget its
-    // `lastSuccessfulSyncAt` here. The next `connection:open` will
-    // re-trigger sync-on-connect from scratch, so keeping stale entries
-    // would only cause memory leaks across long-lived nodes that see
-    // many transient peers. Note: a brief disconnect+reconnect of the
-    // SAME peer ID still benefits — the new sync-on-connect run will
-    // either succeed (and re-stamp `lastSuccessfulSyncAt`) or get
-    // re-added to `skippedNoSyncPeers` for the event/reconciler retry.
+    // Remember when the last live connection to a peer is gone. A3 keeps
+    // `lastSuccessfulSyncAt` and reconciler backoff across relay flaps, but
+    // the next `connection:open` must not suppress catch-up using a sync
+    // timestamp from before an offline gap. `lastSyncDisconnectedAt` is the
+    // boundary that distinguishes stale pre-disconnect success from a fresh
+    // sync in the current live session.
     this.node.libp2p.addEventListener('connection:close', (evt) => {
       const remotePeer = evt.detail.remotePeer.toString();
       if (remotePeer === this.node.libp2p.peerId.toString()) return;
@@ -1975,10 +2005,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         .getPeers()
         .some((p) => p.toString() === remotePeer);
       if (stillConnected) return;
-      this.catchupOnConnectAt.delete(remotePeer);
       this.skippedNoSyncPeers.delete(remotePeer);
-      this.lastSuccessfulSyncAt.delete(remotePeer);
-      this.syncReconcilerBackoff.delete(remotePeer);
+      this.lastSyncDisconnectedAt.set(remotePeer, Date.now());
     });
 
     // Event-driven sync-retry: libp2p emits `peer:update` whenever a
@@ -2044,6 +2072,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // store's TTL/cap prune.
     if (this.swmHostModeStore) {
       const reconcileEveryMs = this.config.swmHostMode?.reconcileIntervalMs ?? 30_000;
+      const reconcileTimerMs = jitteredIntervalMs(
+        reconcileEveryMs,
+        this.config.swmHostMode?.reconcileJitterRatio,
+      );
       const pruneEveryMs = this.config.swmHostMode?.pruneIntervalMs ?? 5 * 60_000;
       this.reconcileHostModeSubscriptions().catch(() => {});
       this.hostModeReconcilerTimer = setInterval(() => {
@@ -2051,7 +2083,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const msg = err instanceof Error ? err.message : String(err);
           this.log.warn(createOperationContext('system'), `Host-mode reconciler tick failed: ${msg}`);
         });
-      }, reconcileEveryMs);
+      }, reconcileTimerMs);
       if (this.hostModeReconcilerTimer.unref) this.hostModeReconcilerTimer.unref();
       this.hostModePruneTimer = setInterval(() => {
         this.swmHostModeStore?.prune().catch((err: unknown) => {
@@ -2221,34 +2253,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         useWorkerThread: this.config.randomSamplingUseWorkerThread ?? true,
         tickIntervalMs: this.config.randomSamplingTickIntervalMs,
         log: this.randomSamplingLogger(ctx),
-        // OT-RFC-39 late-join sync — gives the prover an escape hatch
-        // when its tick fires on a curated KC whose ciphertext chunks
-        // never reached this core's local triple store (typically: the
-        // core was offline during the curator's publish, or joined the
-        // CG after the gossip envelopes rolled off the mesh). The hook
-        // pulls the missing chunks from authorized peers on demand via
-        // `PROTOCOL_GET_CIPHERTEXT_CHUNK` and persists them, after
-        // which the prover retries the extract exactly once. See
-        // `buildCiphertextChunkBackfill` for the discovery + fetch
-        // policy.
-        ciphertextChunkBackfill: this.buildCiphertextChunkBackfill(ctx),
-        // Codex review on PR #715 — let the prover's extractor pin
-        // the per-CG named graph instead of scanning `GRAPH ?g`. We
-        // chain `resolveLocalCgIdByOnChainId` (numeric → cleartext)
-        // then `gossipWireIdFor` (cleartext → curator nameHash, the
-        // wire form), matching what `ingestSwmCiphertextChunkEnvelope`
-        // and the V2 ACK loadChunk persist/look up under. Returns
-        // null when the local node doesn't have the CG metadata yet
-        // (chain replay still catching up); the extractor falls back
-        // to wildcard scanning for that tick, identical to pre-fix
-        // behaviour, so a missing local map degrades to "no
-        // cross-CG collision guard for this tick" rather than
-        // "extract fails outright".
-        canonicalCgIdForChunkStore: (cgId: bigint): string | null => {
-          const local = this.resolveLocalCgIdByOnChainId(cgId);
-          if (local === null) return null;
-          return this.gossipWireIdFor(local);
-        },
       });
       if (this.randomSamplingHandle && this.randomSamplingHandle !== handle) {
         try { await this.randomSamplingHandle.stop(); } catch { /* swallow bind replacement cleanup */ }
@@ -2313,7 +2317,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * them into our local store. Used on peer:connect for initial catch-up,
    * with a per-peer guard to avoid overlapping sync storms.
    */
-  async trySyncFromPeer(this: DKGAgent, remotePeer: string): Promise<SyncOnConnectOutcome | 'not-started'> {
+  async trySyncFromPeer(
+    this: DKGAgent,
+    remotePeer: string,
+    onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
+  ): Promise<SyncOnConnectOutcome | 'not-started'> {
     if (!this.started) {
       return 'not-started';
     }
@@ -2323,19 +2331,31 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
       knownCorePeerIds: this.knownCorePeerIds,
       getSyncContextGraphs: () => this.config.syncContextGraphs ?? [],
-      syncFromPeer: (peerId, contextGraphIds) => this.syncFromPeer(peerId, contextGraphIds),
+      syncFromPeer: (peerId, contextGraphIds) => this.syncFromPeerDetailed(
+        peerId,
+        contextGraphIds ?? [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, ...(this.config.syncContextGraphs ?? [])],
+      ),
       refreshMetaSyncedFlags: (contextGraphIds) => this.refreshMetaSyncedFlags(contextGraphIds),
       discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
-      syncSharedMemoryFromPeer: (peerId, contextGraphIds) => this.syncSharedMemoryFromPeer(peerId, contextGraphIds),
+      syncSharedMemoryFromPeer: (peerId, contextGraphIds) => this.syncSharedMemoryFromPeerDetailed(peerId, contextGraphIds),
       syncSharedMemoryOnConnect: this.config.syncSharedMemoryOnConnect ?? true,
       logInfo: (ctx, message) => this.log.info(ctx, message),
       onPeerSkippedNoSync: (peerId) => {
         this.skippedNoSyncPeers.add(peerId);
       },
-      onPeerSynced: (peerId) => {
-        this.lastSuccessfulSyncAt.set(peerId, Date.now());
+      onPeerSynced: (peerId, outcome) => {
+        const progressAt = Math.max(Date.now(), (this.lastSyncProgressAt.get(peerId) ?? 0) + 1);
+        if (outcome?.progress) {
+          this.lastSyncProgressAt.set(peerId, progressAt);
+        }
+        if (outcome?.fresh ?? true) {
+          this.lastSuccessfulSyncAt.set(peerId, progressAt);
+        }
         this.skippedNoSyncPeers.delete(peerId);
         this.syncReconcilerBackoff.delete(peerId);
+        if (outcome) {
+          onSyncAccounting?.(outcome);
+        }
       },
     });
   }
@@ -2356,6 +2376,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   handlePeerUpdateForSyncRetry(this: DKGAgent, peerId: string, protocols: readonly string[]): void {
     if (peerId === this.node.libp2p.peerId.toString()) return;
+    // #1093: keep the confirmed-core set fresh from `peer:update` too.
+    // `runSyncOnConnect` reads the protocol list exactly once, racing
+    // identify — a core peer whose identify completed late was never
+    // re-classified, leaving `knownCorePeerIds` permanently partial and
+    // the ACK candidate pool capped below quorum. Identify delivers the
+    // complete protocol list, so add-on-present is always safe; we only
+    // add (never delete) here because some `peer:update` events fire
+    // with a not-yet-populated list and must not evict a known core.
+    if (protocols.includes(PROTOCOL_STORAGE_ACK)) {
+      this.knownCorePeerIds.add(peerId);
+    }
     if (!this.skippedNoSyncPeers.has(peerId)) return;
     if (!protocols.includes(PROTOCOL_SYNC)) return;
     this.skippedNoSyncPeers.delete(peerId);
@@ -2377,10 +2408,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    *   - is in {@link skippedNoSyncPeers} and now advertises `PROTOCOL_SYNC`
    *     (covers the case where the `peer:update` listener missed the
    *     event for whatever reason), or
-   *   - has no `lastSuccessfulSyncAt` entry, or whose entry is older
-   *     than {@link SYNC_STALENESS_THRESHOLD_MS} (covers slow identify,
-   *     transport-level reconnects that didn't fire connection:open,
-   *     and any future failure mode of the event-driven path).
+   *   - has no recent clean success or useful-progress cooldown marker, or
+   *     whose newest marker is older than {@link SYNC_STALENESS_THRESHOLD_MS}
+   *     (covers slow identify, transport-level reconnects that didn't fire
+   *     connection:open, and any future failure mode of the event-driven path).
    *
    * Designed to be safe to call concurrently with the event-driven path
    * — `runSyncOnConnect` itself is idempotent via `syncingPeers`.
@@ -2389,11 +2420,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!this.started) return;
     const now = Date.now();
     const ctx = createOperationContext('sync');
+    this.pruneSyncReconcilerState(now);
     for (const pid of this.node.libp2p.getPeers()) {
       const peerId = pid.toString();
       if (this.syncingPeers.has(peerId)) continue;
       const lastOk = this.lastSuccessfulSyncAt.get(peerId);
-      const stale = lastOk == null || (now - lastOk) >= SYNC_STALENESS_THRESHOLD_MS;
+      const lastDisconnected = this.lastSyncDisconnectedAt.get(peerId) ?? 0;
+      const lastProgress = this.lastSyncProgressAt.get(peerId);
+      const lastSyncCooldown = Math.max(lastOk ?? 0, lastProgress ?? 0);
+      const stale = lastSyncCooldown === 0
+        || lastSyncCooldown <= lastDisconnected
+        || (now - lastSyncCooldown) >= SYNC_STALENESS_THRESHOLD_MS;
       if (!stale) continue;
       // Per-peer exponential backoff: a peer that can never be synced
       // (dead / NAT-stuck / persistently stream-resetting) never stamps
@@ -2412,19 +2449,29 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
       const shortPeer = peerId.slice(-8);
       this.log.info(ctx, `Sync reconciler retrying ${shortPeer} (last success: ${lastOk == null ? 'never' : `${Math.round((now - lastOk) / 1000)}s ago`}${backoff ? `, prior failures: ${backoff.failures}` : ''})`);
-      this.trySyncFromPeer(peerId)
+      let syncAccountingClearedBackoff = false;
+      this.trySyncFromPeer(peerId, () => {
+        syncAccountingClearedBackoff = true;
+      })
         .then((outcome) => {
           if (outcome === 'skipped-no-sync' || outcome === 'already-syncing' || outcome === 'not-started') {
             return;
           }
-          // `onPeerSynced` clears the backoff on a real success. If the
-          // attempt resolved WITHOUT advancing `lastSuccessfulSyncAt`
-          // (e.g. no progress), treat it as a genuine sync failure so the
-          // backoff grows. A peer that still does not advertise
-          // PROTOCOL_SYNC is handled above and remains eligible on every
-          // reconciler tick, so a missed identify update cannot stretch into
-          // a 5/10/20/60-minute delay.
-          if (this.lastSuccessfulSyncAt.get(peerId) === lastOk) {
+          // `onPeerSynced` clears the backoff when a round makes progress or
+          // gets a clean denial. Only useful progress writes the cooldown
+          // marker; denial-only rounds must remain eligible next tick because
+          // a later ACL approval does not emit peer:update/connection:open.
+          // If the attempt resolved without advancing either marker, treat it
+          // as a genuine sync failure so peer backoff grows unless sync
+          // accounting explicitly cleared backoff for this attempt. A peer
+          // that still does not advertise PROTOCOL_SYNC is handled above and
+          // remains eligible on every reconciler tick, so a missed identify
+          // update cannot stretch into a 5/10/20/60-minute delay.
+          if (
+            !syncAccountingClearedBackoff &&
+            this.lastSuccessfulSyncAt.get(peerId) === lastOk &&
+            this.lastSyncProgressAt.get(peerId) === lastProgress
+          ) {
             this.recordSyncReconcilerFailure(peerId, probe);
           }
         })
@@ -2441,6 +2488,36 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this.recordSyncReconcilerFailure(peerId, probe);
           this.log.warn(ctx, `Sync reconciler retry failed for ${shortPeer}: ${message}`);
         });
+    }
+  }
+
+  pruneSyncReconcilerState(this: DKGAgent, now = Date.now()): void {
+    this.syncCheckpoints.pruneExpired?.(now);
+    const connected = new Set(this.node.libp2p.getPeers().map((pid) => pid.toString()));
+    for (const [peerId, ts] of this.catchupOnConnectAt) {
+      if (!connected.has(peerId) && now - ts >= SYNC_STALENESS_THRESHOLD_MS) {
+        this.catchupOnConnectAt.delete(peerId);
+      }
+    }
+    for (const [peerId, ts] of this.lastSyncDisconnectedAt) {
+      if (now - ts >= SYNC_STALENESS_THRESHOLD_MS) {
+        this.lastSyncDisconnectedAt.delete(peerId);
+      }
+    }
+    for (const [peerId, ts] of this.lastSuccessfulSyncAt) {
+      if (!connected.has(peerId) && now - ts >= SYNC_STALENESS_THRESHOLD_MS) {
+        this.lastSuccessfulSyncAt.delete(peerId);
+      }
+    }
+    for (const [peerId, ts] of this.lastSyncProgressAt) {
+      if (!connected.has(peerId) && now - ts >= SYNC_STALENESS_THRESHOLD_MS) {
+        this.lastSyncProgressAt.delete(peerId);
+      }
+    }
+    for (const [peerId, backoff] of this.syncReconcilerBackoff) {
+      if (!connected.has(peerId) && now >= backoff.nextRetryAt + SYNC_STALENESS_THRESHOLD_MS) {
+        this.syncReconcilerBackoff.delete(peerId);
+      }
     }
   }
 
@@ -2488,8 +2565,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * not produce a successful sync. `nextRetryAt` advances by
    * `SYNC_BACKOFF_BASE_MS * 2^(failures-1)` (capped at
    * `SYNC_BACKOFF_MAX_MS`) with ±`SYNC_BACKOFF_JITTER` randomisation to
-   * de-correlate retries across peers. Reset to absent on success
-   * (`onPeerSynced`) or disconnect (`connection:close`).
+   * de-correlate retries across peers. Reset to absent on successful
+   * progress / denial-only clean response (`onPeerSynced`). Disconnect
+   * no longer clears this immediately; stale disconnected entries are
+   * pruned by `pruneSyncReconcilerState`.
    */
   recordSyncReconcilerFailure(this: DKGAgent, peerId: string, probe: SyncReconcilerProbe): void {
     if (!this.started || !this.isPeerConnectedForSyncBackoff(peerId)) return;
@@ -2545,10 +2624,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       unpin: (peerId, ctx) => this.unpinWarmCore(peerId, ctx),
       dial: (peerId, ctx) => this.dialWarmCore(peerId, ctx),
       previouslyWarmed: this.warmedCores,
+      previouslyFailedUnpins: this.warmCoreFailedUnpins,
       log: (ctx, msg) => this.log.info(ctx, msg),
     });
     // Carry the pinned set into the next tick so stale Cores get unpinned.
     this.warmedCores = result.warmed;
+    this.warmCoreFailedUnpins = result.failedUnpins;
   }
 
   /**
@@ -2608,6 +2689,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.log.info(ctx, `warm-core: unpin ${shortPeer} failed: ${message}`);
+      throw err;
     }
   }
 
@@ -2732,11 +2814,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphIds,
       onPhase,
       onAccessDenied,
+      syncAgentsMeta: this.config.nodeRole === 'core' ? true : this.config.syncAgentsMeta,
       createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
       fetchSyncPages: this.fetchSyncPages.bind(this),
       sinceBatchIdFor,
       processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
-      storeInsert: (quads) => this.store.insert(quads),
+      storeInsert: (quads) => this.insertSyncedQuadsAndInvalidateListCache(quads),
       deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
       setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
       logInfo: (opCtx, message) => this.log.info(opCtx, message),
@@ -2759,6 +2842,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     deadline: number,
     snapshotRef?: string,
     sinceBatchId?: string,
+    signal?: AbortSignal,
+    // R9/R10 — member SWM recovery marker. Forks the checkpoint namespace (R10)
+    // and the request envelope auth mode (R9). Only the recovery driver sets it.
+    recovery?: boolean,
   ): Promise<SyncPageResult> {
     return fetchSyncPages({
       ctx,
@@ -2770,11 +2857,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       snapshotRef,
       sinceBatchId,
       deadline,
+      recovery,
       syncPageTimeoutMs: SYNC_PAGE_TIMEOUT_MS,
       syncRouterAttempts: SYNC_ROUTER_ATTEMPTS,
       syncPageRetryAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
       syncPageSize: SYNC_PAGE_SIZE,
       syncDeniedResponse: SYNC_DENIED_RESPONSE,
+      signal,
       // Legacy sentinel that older (pre-v10-rc) responders still emit on ACL
       // denial. Recognising it in the requester is what keeps mixed-version
       // catch-up correct: without the second sentinel, a curated-CG denial
@@ -2806,8 +2895,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // `messageId` minted by sync-transport.ts is now unused by this
       // adapter — harmless, left in place to keep the transport surface
       // stable (reverts rc.9 PR-E for sync only).
-      send: async (peerId, protocolId, data, sendTimeoutMs, _messageId) =>
-        this.messenger.sendToPeer(peerId, protocolId, data, { timeoutMs: sendTimeoutMs }),
+      send: async (peerId, protocolId, data, sendTimeoutMs, _messageId, sendSignal) =>
+        this.messenger.sendToPeer(peerId, protocolId, data, { timeoutMs: sendTimeoutMs, signal: sendSignal }),
       logWarn: (opCtx, message) => this.log.warn(opCtx, message),
       logInfo: (opCtx, message) => this.log.info(opCtx, message),
       logDebug: (opCtx, message) => this.log.debug(opCtx, message),
@@ -2828,58 +2917,354 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return result.insertedTriples;
   }
 
+  /**
+   * Resolve the CURATOR's libp2p peer id(s) for a context graph, for the WRITE
+   * path's strict curator-ack gate (OT-RFC-49 curator-leader: a private-CG write
+   * is durable iff the curator applied it). Mirrors the reconnect gate's
+   * structural-then-legacy resolution (syncSharedMemoryFromPeerDetailed) but is
+   * standalone + single-CG: it does NOT memoize across a batch and does NOT
+   * compare against a connecting peer — the write path just needs "who is the
+   * curator, is it me, and what peer(s) do I send the reliable apply to".
+   *
+   * - `curatorIsLocal`: this node owns the curator agent → no remote leg needed
+   *   (a curator never reverse-confirms a CG it owns; the local commit IS authority).
+   * - `peerIds`: the curator's advertised peer(s) from the AGENTS registry
+   *   (structural path) or the single resolved curator peer (legacy triple path).
+   *   Empty → curator not resolvable right now → caller must treat the write as
+   *   UNCONFIRMED (never silently confirmed).
+   * - `legacyTripleResolved`: true when resolution fell back to the
+   *   dkg:curator/dkg:creator triples (member-self-stamp defect possible) — the
+   *   caller MUST degrade an ambiguous legacy result to unconfirmed, never confirm.
+   */
+  async resolveCuratorPeerIdsForCg(this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<{ peerIds: string[]; curatorIsLocal: boolean; legacyTripleResolved: boolean }> {
+    const structuralCuratorDid = deriveCuratorDidFromCgId(contextGraphId);
+    if (structuralCuratorDid) {
+      const structuralAgent = structuralCuratorDid.slice('did:dkg:agent:'.length).toLowerCase();
+      if ([...this.localAgents.keys()].some((addr) => addr.toLowerCase() === structuralAgent)) {
+        return { peerIds: [], curatorIsLocal: true, legacyTripleResolved: false };
+      }
+      const resolve = async (): Promise<string[]> => {
+        let agents: Array<{ agentAddress?: string; peerId: string }>;
+        try {
+          agents = await this.discovery.findAgents();
+        } catch {
+          agents = [];
+        }
+        return agents
+          .filter((a) => a.agentAddress?.toLowerCase() === structuralAgent)
+          .map((a) => a.peerId);
+      };
+      let curatorPeers = await resolve();
+      if (curatorPeers.length === 0) {
+        await this.refreshMetaFromCurator(contextGraphId).catch(() => undefined);
+        curatorPeers = await resolve();
+      }
+      return { peerIds: curatorPeers, curatorIsLocal: false, legacyTripleResolved: false };
+    }
+    // Legacy non-wallet-scoped CG: fall back to triple-based curator resolution.
+    if (await this.isCuratorOf(contextGraphId)) {
+      return { peerIds: [], curatorIsLocal: true, legacyTripleResolved: true };
+    }
+    let curatorPeerId = await this.resolveCuratorPeerId(contextGraphId);
+    if (!curatorPeerId) {
+      await this.refreshMetaFromCurator(contextGraphId).catch(() => undefined);
+      curatorPeerId = await this.resolveCuratorPeerId(contextGraphId);
+    }
+    if (!curatorPeerId) return { peerIds: [], curatorIsLocal: false, legacyTripleResolved: true };
+    if (curatorPeerId === this.peerId) return { peerIds: [], curatorIsLocal: true, legacyTripleResolved: true };
+    return { peerIds: [curatorPeerId], curatorIsLocal: false, legacyTripleResolved: true };
+  }
+
   async syncSharedMemoryFromPeerDetailed(this: DKGAgent,
     remotePeerId: string,
     contextGraphIds: string[],
   ): Promise<SharedMemorySyncResult> {
     const ctx = createOperationContext('sync');
-    const allowedContextGraphIds: string[] = [];
+    // M2 (curator-leader convergence): a PRIVATE CG converges by REPLACE-recovering the
+    // current state from its CURATOR (the authoritative SWM replica), never the
+    // bidirectional mesh union-sync — which corrupts a reconnecting member into {old,new}
+    // AND pollutes the curator back (proven on devnet). PUBLIC CGs keep the union path
+    // (correct for cold-start / empty target).
+    const publicContextGraphIds: string[] = [];
+    const privateRecoverFromCurator: string[] = [];
+    // Memoized agent-registry lookup: resolve a curator WALLET -> its libp2p peer
+    // via the AGENTS registry (the authoritative agent->peer map), bypassing the
+    // dkg:curator/dkg:creator `_meta` triples — a member that pre-created the CG
+    // self-stamps both, which would otherwise resolve the member AS the curator.
+    let cachedAgents: Array<{ agentAddress?: string; peerId: string }> | undefined;
+    // Resolve EVERY libp2p peer the AGENTS registry advertises for a curator
+    // wallet, not the first match: `findAgents()` is not a unique wallet->peer
+    // map (agent registration is consent-free, so several URIs can share a
+    // wallet, and a restarted curator can linger under a stale peerId). The
+    // caller only needs to know whether the CONNECTING peer is among them, so a
+    // first-match pick could resolve a stale/wrong peer and wrongly defer (or,
+    // for a same-wallet Byzantine advertiser, mis-gate) recovery.
+    const resolveAgentPeers = async (agentAddrLower: string): Promise<string[]> => {
+      if (!cachedAgents) {
+        try {
+          cachedAgents = await this.discovery.findAgents();
+        } catch {
+          cachedAgents = [];
+        }
+      }
+      return cachedAgents
+        .filter((a) => a.agentAddress?.toLowerCase() === agentAddrLower)
+        .map((a) => a.peerId);
+    };
     for (const contextGraphId of contextGraphIds) {
-      if (await this.canUseSharedMemoryForContextGraph(contextGraphId)) {
-        allowedContextGraphIds.push(contextGraphId);
-      } else {
+      if (!(await this.canUseSharedMemoryForContextGraph(contextGraphId))) {
         this.log.warn(ctx, `Skipping SWM sync for unauthorized or unconfirmed context graph "${contextGraphId}"`);
+        continue;
+      }
+      if (await this.isPrivateContextGraph(contextGraphId)) {
+        // The curator (curator-leader) is the authoritative SWM replica; it never
+        // reverse-syncs a CG it owns. Decide curatorship AND resolve the curator's
+        // peer by the STRUCTURAL curator — the wallet-scoped id prefix `0x<addr>` —
+        // NOT the dkg:curator/dkg:creator triples. A member that locally pre-created
+        // the CG (the rfc38 multi-member onboarding pattern) self-stamps its OWN
+        // wallet as a dkg:curator triple and its OWN peer as dkg:creator, which makes
+        // BOTH isCuratorOf() and resolveCuratorPeerId() resolve the member AS the
+        // curator — so the gate would skip the member's own recovery and it would
+        // silently never converge (a zero-byte-core durability failure). The id
+        // prefix is authoritative; only the node owning that agent is the curator.
+        const structuralCuratorDid = deriveCuratorDidFromCgId(contextGraphId);
+        if (structuralCuratorDid) {
+          const structuralAgent = structuralCuratorDid.slice('did:dkg:agent:'.length).toLowerCase();
+          if ([...this.localAgents.keys()].some((addr) => addr.toLowerCase() === structuralAgent)) {
+            this.log.debug(ctx, `SWM sync: skipping "${contextGraphId}" — local node is the curator (never reverse-syncs a CG it owns)`);
+            continue;
+          }
+          // Resolve the structural curator's peer via the agent registry. On a
+          // reconnect the registry may not be populated yet, so refresh meta once.
+          let curatorPeers = await resolveAgentPeers(structuralAgent);
+          if (curatorPeers.length === 0) {
+            await this.refreshMetaFromCurator(contextGraphId).catch(() => undefined);
+            cachedAgents = undefined; // force a fresh registry read after the refresh
+            curatorPeers = await resolveAgentPeers(structuralAgent);
+          }
+          if (curatorPeers.length === 0) {
+            this.log.info(ctx, `SWM recovery skipped for private CG "${contextGraphId.slice(0, 28)}": curator (${structuralAgent.slice(0, 10)}) peer not resolved yet`);
+          } else if (!curatorPeers.includes(remotePeerId)) {
+            this.log.info(ctx, `SWM recovery deferred for private CG "${contextGraphId.slice(0, 28)}": connecting peer ${remotePeerId.slice(0, 12)} is not among the curator's ${curatorPeers.length} registered peer(s)`);
+          } else {
+            this.log.info(ctx, `SWM recovery ENQUEUED for private CG "${contextGraphId.slice(0, 28)}" from curator peer ${remotePeerId.slice(0, 12)}`);
+            privateRecoverFromCurator.push(contextGraphId);
+          }
+          continue;
+        }
+        // Legacy non-wallet-scoped CG (no structural curator): fall back to the
+        // triple-based curator resolution.
+        if (await this.isCuratorOf(contextGraphId)) {
+          this.log.debug(ctx, `SWM sync: skipping "${contextGraphId}" — local node is the curator (never reverse-syncs a CG it owns)`);
+          continue;
+        }
+        let curatorPeerId = await this.resolveCuratorPeerId(contextGraphId);
+        if (!curatorPeerId) {
+          await this.refreshMetaFromCurator(contextGraphId).catch(() => undefined);
+          curatorPeerId = await this.resolveCuratorPeerId(contextGraphId);
+        }
+        if (!curatorPeerId) {
+          this.log.info(ctx, `SWM recovery skipped for private CG "${contextGraphId.slice(0, 28)}": curator peerId not resolved`);
+        } else if (curatorPeerId === this.peerId) {
+          this.log.info(ctx, `SWM recovery skipped for private CG "${contextGraphId.slice(0, 28)}": local node resolves AS the curator`);
+        } else if (curatorPeerId !== remotePeerId) {
+          this.log.info(ctx, `SWM recovery deferred for private CG "${contextGraphId.slice(0, 28)}": connecting peer is not the curator`);
+        } else {
+          this.log.info(ctx, `SWM recovery ENQUEUED for private CG "${contextGraphId.slice(0, 28)}" from curator ${curatorPeerId.slice(0, 12)}`);
+          privateRecoverFromCurator.push(contextGraphId);
+        }
+        continue;
+      }
+      publicContextGraphIds.push(contextGraphId);
+    }
+
+    const subGraphAdmissionByContextGraph = new Map<string, Promise<{ registered: string[]; excluded: string[] }>>();
+    const getSubGraphAdmission = (contextGraphId: string) => {
+      let admission = subGraphAdmissionByContextGraph.get(contextGraphId);
+      if (!admission) {
+        admission = getSharedMemorySubGraphAdmission(this.store, contextGraphId, this.listSubGraphs(contextGraphId));
+        subGraphAdmissionByContextGraph.set(contextGraphId, admission);
+      }
+      return admission;
+    };
+
+    const summary: SharedMemorySyncResult = publicContextGraphIds.length === 0
+      ? {
+          insertedTriples: 0, fetchedMetaTriples: 0, fetchedDataTriples: 0,
+          insertedMetaTriples: 0, insertedDataTriples: 0, bytesReceived: 0,
+          resumedPhases: 0, timedOutPhases: 0, completedPhases: 0, checkpointAdvances: 0,
+          emptyResponses: 0, droppedDataTriples: 0, failedPeers: 0, failedPhases: 0, deniedPhases: 0,
+        }
+      : await runSharedMemorySync({
+          ctx,
+          remotePeerId,
+          contextGraphIds: publicContextGraphIds,
+          createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
+          fetchSyncPages: this.fetchSyncPages.bind(this),
+          processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames) =>
+            this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(
+              wsDataQuads,
+              wsMetaQuads,
+              contextGraphId,
+              registeredSubGraphNames,
+              excludedSubGraphNames,
+            ),
+          getRegisteredSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).registered,
+          getExcludedSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).excluded,
+          ensureContextGraph: async (contextGraphId) => {
+            const graphManager = new GraphManager(this.store);
+            await graphManager.ensureContextGraph(contextGraphId);
+          },
+          storeInsert: async (quads) => {
+            await this.store.insert(quads);
+            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+          },
+          publicSnapshotStore: this.publicSnapshotStore,
+          deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
+          setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
+          ensureOwnedMap: (contextGraphId) => {
+            if (!this.workspaceOwnedEntities.has(contextGraphId)) {
+              this.workspaceOwnedEntities.set(contextGraphId, new Map());
+            }
+            return this.workspaceOwnedEntities.get(contextGraphId)!;
+          },
+          logInfo: (opCtx, message) => this.log.info(opCtx, message),
+          logWarn: (opCtx, message) => this.log.warn(opCtx, message),
+          logDebug: (opCtx, message) => this.log.debug(opCtx, message),
+        });
+
+    // PRIVATE CGs: REPLACE-recover the current state from the curator (= remotePeerId,
+    // gated above to be the curator and not self). Reuses the all-or-nothing recovery.
+    for (const contextGraphId of privateRecoverFromCurator) {
+      try {
+        const r = await this.recoverContextGraphSwmFromPeer(remotePeerId, contextGraphId);
+        summary.insertedDataTriples += r.insertedDataQuads;
+        summary.insertedMetaTriples += r.insertedMetaQuads;
+        summary.insertedTriples += r.insertedDataQuads + r.insertedMetaQuads;
+        summary.droppedDataTriples += r.droppedDataTriples;
+        // `recoverContextGraphSwmFromPeer` signals a partial / deadline-bounded
+        // fetch with `completed === false` WITHOUT throwing (all-or-nothing
+        // REPLACE mutates nothing on a partial). The on-connect accounting and
+        // the catch-up runner key success off the phase counters, so an
+        // incomplete recovery that left `failedPhases`/`completedPhases` at 0
+        // would be reported clean — stamping `lastSuccessfulSyncAt` and
+        // suppressing the next retry while the member stays stale. Count an
+        // incomplete recovery as a failed phase (forces a prompt retry); count a
+        // complete one as a completed phase so an idempotent 0-insert REPLACE
+        // still registers as progress.
+        if (r.completed) {
+          summary.completedPhases += 1;
+        } else {
+          summary.failedPhases += 1;
+        }
+      } catch (err) {
+        this.log.warn(ctx, `Curator-recovery for private CG "${contextGraphId}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
+        summary.failedPeers += 1;
       }
     }
-    if (allowedContextGraphIds.length === 0) {
-      return {
-        insertedTriples: 0,
-        fetchedMetaTriples: 0,
-        fetchedDataTriples: 0,
-        insertedMetaTriples: 0,
-        insertedDataTriples: 0,
-        bytesReceived: 0,
-        resumedPhases: 0,
-        emptyResponses: 0,
-        droppedDataTriples: 0,
-        failedPeers: 0,
-        deniedPhases: 0,
-      };
-    }
-    return runSharedMemorySync({
+
+    return summary;
+  }
+
+  /**
+   * recover ONE context graph's `_shared_memory` to current
+   * state from a single authoritative peer (member / anchor), applying via
+   * REPLACE rather than the shared incremental union path (which corrupts a
+   * non-empty store). Invoked by the member-recovery driver after the frontier
+   * detects a full / cross-epoch gap; isolated from `runSharedMemorySync` so the
+   * incremental path is untouched.
+   */
+  async recoverContextGraphSwmFromPeer(this: DKGAgent,
+    remotePeerId: string,
+    contextGraphId: string,
+  ): Promise<RecoverContextGraphSwmResult> {
+    const ctx = createOperationContext('sync');
+    const admission = await getSharedMemorySubGraphAdmission(
+      this.store, contextGraphId, this.listSubGraphs(contextGraphId),
+    );
+    return recoverContextGraphSwm({
       ctx,
       remotePeerId,
-      contextGraphIds: allowedContextGraphIds,
-      createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
-      fetchSyncPages: this.fetchSyncPages.bind(this),
-      processSharedMemoryBatch: (wsDataQuads, wsMetaQuads) => this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(wsDataQuads, wsMetaQuads),
-      ensureContextGraph: async (contextGraphId) => {
-        const graphManager = new GraphManager(this.store);
-        await graphManager.ensureContextGraph(contextGraphId);
+      contextGraphId,
+      deadline: this.createContextGraphSyncDeadline(1),
+      // R9/R10 — pin recovery=true at the lifecycle boundary so swm-recovery's
+      // deps signature stays unchanged. This forks BOTH the checkpoint namespace
+      // (R10: a distinct `|recovery` cursor that never mutates the shared
+      // incremental-sync cursor) AND the request envelope auth mode (R9: the
+      // responder gates via the strict members-only `isMemberRecoveryAuthorized`).
+      fetchSyncPages: (ctx2, remotePeerId2, contextGraphId2, includeSharedMemory2, phase2, graphUri2, deadline2) =>
+        this.fetchSyncPages(ctx2, remotePeerId2, contextGraphId2, includeSharedMemory2, phase2, graphUri2, deadline2, undefined, undefined, undefined, true),
+      processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, cgId, registered, excluded) =>
+        this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(wsDataQuads, wsMetaQuads, cgId, registered, excluded),
+      // SwmRecoveryStore: invalidate the list cache + mark the meta projection
+      // dirty on insert (parity with runSharedMemorySync's
+      // insertSyncedQuadsAndInvalidateListCache); deletes pass through to the store.
+      store: {
+        insert: async (quads) => {
+          await this.store.insert(quads);
+          if (quads.length > 0) {
+            this.invalidateListContextGraphsCache();
+            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+          }
+        },
+        deleteByPattern: (pattern) => this.store.deleteByPattern(pattern),
+        deleteBySubjectPrefix: (graph, prefix) => this.store.deleteBySubjectPrefix(graph, prefix),
       },
-      storeInsert: (quads) => this.store.insert(quads),
-      publicSnapshotStore: this.publicSnapshotStore,
-      deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
-      setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
-      ensureOwnedMap: (contextGraphId) => {
-        if (!this.workspaceOwnedEntities.has(contextGraphId)) {
-          this.workspaceOwnedEntities.set(contextGraphId, new Map());
+      // Codex high: REPLACE per-root SWM meta (mirror the publisher's
+      // deleteMetaForRoot). For each recovered root, drop the op→root-entity
+      // links in the curator's fresh-meta graphs, then delete any op left with
+      // no remaining roots — so a stale WorkspaceOperation can't survive to
+      // TTL-delete the just-recovered root. Runs before swm-recovery inserts the
+      // fresh verifiedMeta. Falls back to the base meta graph if none provided.
+      replaceMetaForRoots: async (roots, metaGraphs) => {
+        const graphs = metaGraphs.length > 0
+          ? metaGraphs
+          : [contextGraphWorkspaceMetaGraphUri(contextGraphId)];
+        const entities = [...new Set(roots.map((r) => r.entity))];
+        for (const metaGraph of graphs) {
+          for (const entity of entities) {
+            const ops = await this.store.query(
+              `SELECT DISTINCT ?op WHERE { GRAPH <${metaGraph}> { ?op ${ENTITY_PRED_ALT} <${entity}> } }`,
+            );
+            if (ops.type !== 'bindings') continue;
+            for (const row of ops.bindings) {
+              const op = row['op'];
+              if (!op) continue;
+              await this.store.delete([
+                { subject: op, predicate: DKG_ROOT_ENTITY_LEGACY, object: entity, graph: metaGraph },
+                { subject: op, predicate: DKG_ENTITY, object: entity, graph: metaGraph },
+              ]);
+              const remaining = await this.store.query(
+                `SELECT (COUNT(DISTINCT ?r) AS ?c) WHERE { GRAPH <${metaGraph}> { <${op}> ${ENTITY_PRED_ALT} ?r } }`,
+              );
+              const raw = remaining.type === 'bindings' ? remaining.bindings[0]?.['c'] : undefined;
+              const countVal = raw ? parseInt(String(raw).match(/\d+/)?.[0] ?? '0', 10) : 0;
+              if (countVal === 0) {
+                await this.store.deleteByPattern({ graph: metaGraph, subject: op });
+              }
+            }
+          }
         }
-        return this.workspaceOwnedEntities.get(contextGraphId)!;
+      },
+      ensureContextGraph: async (cgId) => {
+        const graphManager = new GraphManager(this.store);
+        await graphManager.ensureContextGraph(cgId);
+      },
+      setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
+      deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
+      getRegisteredSubGraphNames: async () => admission.registered,
+      getExcludedSubGraphNames: async () => admission.excluded,
+      // R2 — hydrate the Rule-4 ownership cache (same map runSharedMemorySync uses).
+      ensureOwnedMap: (ownershipKey) => {
+        if (!this.workspaceOwnedEntities.has(ownershipKey)) {
+          this.workspaceOwnedEntities.set(ownershipKey, new Map());
+        }
+        return this.workspaceOwnedEntities.get(ownershipKey)!;
       },
       logInfo: (opCtx, message) => this.log.info(opCtx, message),
       logWarn: (opCtx, message) => this.log.warn(opCtx, message),
-      logDebug: (opCtx, message) => this.log.debug(opCtx, message),
     });
   }
 
@@ -2896,19 +3281,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   async syncContextGraphFromConnectedPeers(this: DKGAgent,
     contextGraphId: string,
-    options?: { includeSharedMemory?: boolean },
+    options?: { includeSharedMemory?: boolean; maxPeers?: number; peerRotationKey?: string },
   ): Promise<{
+    /** Ordered connected peers before optional maxPeers windowing. */
     connectedPeers: number;
+    /** Ordered connected peers before optional maxPeers windowing. */
+    totalPeers: number;
+    /** Peers selected and evaluated after optional maxPeers windowing. */
+    selectedPeers: number;
     syncCapablePeers: number;
     peersTried: number;
     /**
+     * Subset of `peersTried` whose sync-capable peer produced a non-transport-
+     * failed round. Denials, metadata-only rows, and timeout-after-response
+     * still count as responses; daemon status mapping uses this to avoid
+     * reporting reachable-but-failed peers as curator-offline.
+     */
+    peersResponded: number;
+    /**
      * Subset of `peersTried` whose sync round finished without a transport
-     * failure AND without an explicit ACL denial. Used by the daemon
-     * subscribe job to distinguish a real "curator unreachable" outcome
-     * (`peersTried > 0 && peersSucceeded === 0 && !denied`) from a slow
-     * public CG (some peers responded with empty / meta-only) — the UI
-     * surfaces a dedicated `unreachable` terminal status with a "send
-     * signed join request" CTA instead of the generic timeout copy.
+     * failure, without an explicit ACL denial, and with either real progress
+     * or a clean non-metadata-only empty completion.
      */
     peersSucceeded: number;
     dataSynced: number;
@@ -2917,12 +3310,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
      * `true` iff at least one peer in this run explicitly denied the sync
      * by emitting a denial sentinel (`syncDenied` marker raised from
      * `sync/requester/page-fetch.ts`, rolled up via `deniedPhases`). Kept
-     * as a boolean instead of v10-rc-style `accessDeniedPeers: number`
-     * because the daemon catchup-status endpoint only ever cared about
-     * "any peer denied us?"; see `cli/src/daemon.ts` subscribe job.
-     * Replaces the pre-refactor per-peer `accessDeniedPeers` counter.
+     * as a boolean for the subscribe job's terminal status mapping.
      */
     denied: boolean;
+    /**
+     * Number of peers that explicitly denied at least one durable/SWM phase
+     * during this context-graph catch-up run.
+     */
+    deniedPeers: number;
     diagnostics: CatchupSyncDiagnostics;
   }> {
     const ctx = createOperationContext('sync');
@@ -2938,38 +3333,138 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     await this.primeCatchupConnections();
 
-    const peers = this.selectCatchupPeers(
+    const orderedPeers = this.selectCatchupPeers(
       [...new Map(
         this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
       ).values()],
       preferredPeerId,
       isPrivateContextGraph,
     );
-    const coreCount = peers.filter((p) => this.knownCorePeerIds.has(p.toString())).length;
+    const peerPriorityRanks = new Map<string, number>();
+    for (const peer of orderedPeers) {
+      const peerId = peer.toString();
+      const rank = peerId === preferredPeerId ? 2 : this.knownCorePeerIds.has(peerId) ? 1 : 0;
+      if (rank > 0) peerPriorityRanks.set(peerId, rank);
+    }
+    const peers = this.selectCatchupPeerWindow(orderedPeers, { ...options, peerPriorityRanks });
+    const coreCount = orderedPeers.filter((p) => this.knownCorePeerIds.has(p.toString())).length;
     this.log.info(
       ctx,
-      `catchup peer order for "${contextGraphId}": preferred=${preferredPeerId ?? 'none'} cores=${coreCount} total=${peers.length}`,
+      `catchup peer order for "${contextGraphId}": preferred=${preferredPeerId ?? 'none'} cores=${coreCount} total=${orderedPeers.length} selected=${peers.length}`,
     );
-    return this.runCatchupOverPeers(contextGraphId, includeSharedMemory, peers);
+    return this.runCatchupOverPeers(contextGraphId, includeSharedMemory, peers, {
+      totalPeers: orderedPeers.length,
+    });
+  }
+
+  selectCatchupPeerWindow(this: DKGAgent,
+    peers: Array<{ toString(): string }>,
+    options?: { maxPeers?: number; peerRotationKey?: string; peerPriorityRanks?: ReadonlyMap<string, number> },
+  ): Array<{ toString(): string }> {
+    const maxPeers = options?.maxPeers;
+    if (maxPeers === undefined || !Number.isInteger(maxPeers) || maxPeers <= 0) {
+      return peers;
+    }
+
+    let start = 0;
+    const rotationKey = options?.peerRotationKey;
+    const currentPriorityRank = (peerId: string): number => options?.peerPriorityRanks?.get(peerId) ?? 0;
+    const rememberRotation = (peerIds: string[], selectedCount: number): void => {
+      if (!rotationKey) return;
+      if (peerIds.length === 0) {
+        this.vmReconcileCatchupPeerCursor.delete(rotationKey);
+        this.vmReconcileCatchupPeerOrder.delete(rotationKey);
+        return;
+      }
+      const nextCursor = start + selectedCount;
+      const selectedAll = selectedCount >= peerIds.length;
+      this.vmReconcileCatchupPeerCursor.delete(rotationKey);
+      this.vmReconcileCatchupPeerCursor.set(rotationKey, nextCursor);
+      this.vmReconcileCatchupPeerOrder.delete(rotationKey);
+      this.vmReconcileCatchupPeerOrder.set(rotationKey, {
+        orderedPeers: peerIds,
+        nextPeerId: selectedAll ? undefined : peerIds[nextCursor % peerIds.length],
+        priorityRanks: Object.fromEntries(
+          peerIds
+            .map((peerId) => [peerId, currentPriorityRank(peerId)] as const)
+            .filter(([, rank]) => rank > 0),
+        ),
+      });
+    };
+
+    if (peers.length <= maxPeers) {
+      if (rotationKey) {
+        this.pruneVmReconcileState();
+        rememberRotation(peers.map((peer) => peer.toString()), peers.length);
+      }
+      return peers;
+    }
+
+    if (rotationKey) {
+      this.pruneVmReconcileState();
+      const peerIds = peers.map((peer) => peer.toString());
+      const previousOrder = this.vmReconcileCatchupPeerOrder.get(rotationKey);
+      const nextPeerId = previousOrder?.nextPeerId;
+      const previousPriorityRank = (peerId: string): number => previousOrder?.priorityRanks?.[peerId] ?? 0;
+      const gainedPriority = (peerId: string): boolean => currentPriorityRank(peerId) > previousPriorityRank(peerId);
+      if (nextPeerId) {
+        const nextPeerIndex = peerIds.indexOf(nextPeerId);
+        if (nextPeerIndex >= 0) {
+          const previousPeers = new Set(previousOrder.orderedPeers);
+          const firstInvalidatingPeerIndex = peerIds
+            .slice(0, nextPeerIndex)
+            .findIndex((peerId) => (!previousPeers.has(peerId) && currentPriorityRank(peerId) > 0) || gainedPriority(peerId));
+          start = firstInvalidatingPeerIndex >= 0 ? firstInvalidatingPeerIndex : nextPeerIndex;
+        } else {
+          const previousPeers = new Set(previousOrder.orderedPeers);
+          const firstInvalidatingPeerIndex = peerIds.findIndex((peerId) =>
+            (!previousPeers.has(peerId) && currentPriorityRank(peerId) > 0) || gainedPriority(peerId),
+          );
+          start = firstInvalidatingPeerIndex >= 0
+            ? firstInvalidatingPeerIndex
+            : (this.vmReconcileCatchupPeerCursor.get(rotationKey) ?? 0) % peers.length;
+        }
+      } else {
+        const previousPeers = new Set(previousOrder?.orderedPeers ?? []);
+        const firstInvalidatingPeerIndex = peerIds.findIndex((peerId) =>
+          !previousPeers.has(peerId) || gainedPriority(peerId),
+        );
+        start = firstInvalidatingPeerIndex >= 0
+          ? firstInvalidatingPeerIndex
+          : (this.vmReconcileCatchupPeerCursor.get(rotationKey) ?? 0) % peers.length;
+      }
+      rememberRotation(peerIds, maxPeers);
+    }
+
+    return [...peers.slice(start), ...peers.slice(0, start)].slice(0, maxPeers);
   }
 
   async runCatchupOverPeers(this: DKGAgent,
     contextGraphId: string,
     includeSharedMemory: boolean,
     peers: Array<{ toString(): string }>,
+    stats?: { totalPeers?: number },
   ): Promise<{
+    /** Ordered connected peers before optional caller windowing. */
     connectedPeers: number;
+    /** Ordered connected peers before optional caller windowing. */
+    totalPeers: number;
+    /** Peers selected and evaluated after optional caller windowing. */
+    selectedPeers: number;
     syncCapablePeers: number;
     peersTried: number;
+    peersResponded: number;
     peersSucceeded: number;
     dataSynced: number;
     sharedMemorySynced: number;
     denied: boolean;
+    deniedPeers: number;
     diagnostics: CatchupSyncDiagnostics;
   }> {
     const ctx = createOperationContext('sync');
     let syncCapablePeers = 0;
     let peersTried = 0;
+    let peersResponded = 0;
     let dataSynced = 0;
     let sharedMemorySynced = 0;
     let noProtocolPeers = 0;
@@ -2982,11 +3477,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         insertedDataTriples: 0,
         bytesReceived: 0,
         resumedPhases: 0,
+        timedOutPhases: 0,
+        completedPhases: 0,
+        checkpointAdvances: 0,
         emptyResponses: 0,
         metaOnlyResponses: 0,
         dataRejectedMissingMeta: 0,
         rejectedKcs: 0,
         failedPeers: 0,
+        failedPhases: 0,
       },
       sharedMemory: {
         fetchedMetaTriples: 0,
@@ -2995,9 +3494,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         insertedDataTriples: 0,
         bytesReceived: 0,
         resumedPhases: 0,
+        timedOutPhases: 0,
+        completedPhases: 0,
+        checkpointAdvances: 0,
         emptyResponses: 0,
         droppedDataTriples: 0,
         failedPeers: 0,
+        failedPhases: 0,
       },
     };
 
@@ -3048,11 +3551,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       insertedDataTriples: 0,
       bytesReceived: 0,
       resumedPhases: 0,
+      timedOutPhases: 0,
+      completedPhases: 0,
+      checkpointAdvances: 0,
       emptyResponses: 0,
       metaOnlyResponses: 0,
       dataRejectedMissingMeta: 0,
       rejectedKcs: 0,
       failedPeers: 1,
+      failedPhases: 0,
       deniedPhases: 0,
     });
     const emptyShared = (): SharedMemorySyncResult => ({
@@ -3063,9 +3570,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       insertedDataTriples: 0,
       bytesReceived: 0,
       resumedPhases: 0,
+      timedOutPhases: 0,
+      completedPhases: 0,
+      checkpointAdvances: 0,
       emptyResponses: 0,
       droppedDataTriples: 0,
       failedPeers: 1,
+      failedPhases: 0,
       deniedPhases: 0,
     });
     const results = await Promise.all(syncCapable.map(async (remotePeerId) => {
@@ -3081,44 +3592,77 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let accessDeniedPeers = 0;
     let peersSucceeded = 0;
     for (const r of results) {
-      // A peer "succeeded" when its sync round finished without a
-      // transport failure AND without an explicit denial. We treat the
-      // emergency `failedPeers: 1` produced by `emptyDurable()` /
-      // `emptyShared()` (set when `syncFromPeerDetailed` rejected) as
-      // the failure marker — anything else (data, meta-only, empty
-      // response) counts as a legitimate response from a host that
-      // happens to hold no/incomplete data for this CG.
+      // A peer "succeeded" when its sync round finished without a transport
+      // failure/denial and either made phase/checkpoint progress, or cleanly
+      // completed with no timeout. Empty responses still count as a
+      // legitimate host response, but a no-progress timeout must not make the
+      // subscribe/VM catch-up path report a successful peer.
       const durableFailed = r.durable.failedPeers > 0;
       const sharedFailed = r.shared ? r.shared.failedPeers > 0 : false;
+      const durablePhaseFailed = (r.durable.failedPhases ?? 0) > 0;
+      const sharedPhaseFailed = r.shared ? (r.shared.failedPhases ?? 0) > 0 : false;
       const peerDeniedRound = r.durable.deniedPhases > 0
         || (r.shared ? r.shared.deniedPhases > 0 : false);
-      if (!durableFailed && !sharedFailed && !peerDeniedRound) {
+      const durableProgress = r.durable.insertedDataTriples > 0
+        || r.durable.checkpointAdvances > 0
+        || (r.durable.completedPhases > 0 && r.durable.resumedPhases > 0);
+      const sharedProgress = r.shared
+        ? r.shared.insertedDataTriples > 0
+          || r.shared.checkpointAdvances > 0
+          || (r.shared.completedPhases > 0 && r.shared.resumedPhases > 0)
+        : false;
+      const peerMadeProgress = durableProgress || sharedProgress;
+      const peerMetadataOnly = !peerMadeProgress && (
+        r.durable.insertedMetaTriples > 0
+        || r.durable.metaOnlyResponses > 0
+        || (r.shared ? r.shared.insertedMetaTriples > 0 : false)
+      );
+      const peerTimedOut = r.durable.timedOutPhases > 0 || (r.shared ? r.shared.timedOutPhases > 0 : false);
+      if (!durableFailed || (r.shared && !sharedFailed)) {
+        peersResponded++;
+      }
+      if (
+        !durableFailed &&
+        !sharedFailed &&
+        !durablePhaseFailed &&
+        !sharedPhaseFailed &&
+        !peerDeniedRound &&
+        (peerMadeProgress || (!peerTimedOut && !peerMetadataOnly))
+      ) {
         peersSucceeded++;
       }
-      dataSynced += r.durable.insertedTriples;
+      dataSynced += r.durable.insertedDataTriples;
       diagnostics.durable.fetchedMetaTriples += r.durable.fetchedMetaTriples;
       diagnostics.durable.fetchedDataTriples += r.durable.fetchedDataTriples;
       diagnostics.durable.insertedMetaTriples += r.durable.insertedMetaTriples;
       diagnostics.durable.insertedDataTriples += r.durable.insertedDataTriples;
       diagnostics.durable.bytesReceived += r.durable.bytesReceived;
       diagnostics.durable.resumedPhases += r.durable.resumedPhases;
+      diagnostics.durable.timedOutPhases += r.durable.timedOutPhases;
+      diagnostics.durable.completedPhases += r.durable.completedPhases;
+      diagnostics.durable.checkpointAdvances += r.durable.checkpointAdvances;
       diagnostics.durable.emptyResponses += r.durable.emptyResponses;
       diagnostics.durable.metaOnlyResponses += r.durable.metaOnlyResponses;
       diagnostics.durable.dataRejectedMissingMeta += r.durable.dataRejectedMissingMeta;
       diagnostics.durable.rejectedKcs += r.durable.rejectedKcs;
       diagnostics.durable.failedPeers += r.durable.failedPeers;
+      diagnostics.durable.failedPhases += r.durable.failedPhases ?? 0;
       let peerDenied = r.durable.deniedPhases > 0;
       if (r.shared) {
-        sharedMemorySynced += r.shared.insertedTriples;
+        sharedMemorySynced += r.shared.insertedDataTriples;
         diagnostics.sharedMemory.fetchedMetaTriples += r.shared.fetchedMetaTriples;
         diagnostics.sharedMemory.fetchedDataTriples += r.shared.fetchedDataTriples;
         diagnostics.sharedMemory.insertedMetaTriples += r.shared.insertedMetaTriples;
         diagnostics.sharedMemory.insertedDataTriples += r.shared.insertedDataTriples;
         diagnostics.sharedMemory.bytesReceived += r.shared.bytesReceived;
         diagnostics.sharedMemory.resumedPhases += r.shared.resumedPhases;
+        diagnostics.sharedMemory.timedOutPhases += r.shared.timedOutPhases;
+        diagnostics.sharedMemory.completedPhases += r.shared.completedPhases;
+        diagnostics.sharedMemory.checkpointAdvances += r.shared.checkpointAdvances;
         diagnostics.sharedMemory.emptyResponses += r.shared.emptyResponses;
         diagnostics.sharedMemory.droppedDataTriples += r.shared.droppedDataTriples;
         diagnostics.sharedMemory.failedPeers += r.shared.failedPeers;
+        diagnostics.sharedMemory.failedPhases += r.shared.failedPhases ?? 0;
         peerDenied = peerDenied || r.shared.deniedPhases > 0;
       }
       if (peerDenied) accessDeniedPeers++;
@@ -3141,13 +3685,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     return {
-      connectedPeers: peers.length,
+      connectedPeers: stats?.totalPeers ?? peers.length,
+      totalPeers: stats?.totalPeers ?? peers.length,
+      selectedPeers: peers.length,
       syncCapablePeers,
       peersTried,
+      peersResponded,
       peersSucceeded,
       dataSynced,
       sharedMemorySynced,
       denied: accessDeniedPeers > 0,
+      deniedPeers: accessDeniedPeers,
       diagnostics,
     };
   }
@@ -3278,15 +3826,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (!sub) continue;
       if (await this.hasConfirmedMetaState(contextGraphId)) {
         if (sub.metaSynced !== true) {
-          sub.metaSynced = true;
-          this.persistContextGraphSubscription(contextGraphId);
+          this.setContextGraphSubscription(contextGraphId, { ...sub, metaSynced: true });
         }
         if (sub.pendingMeta) {
           // Meta arrived; the freshly-joined "waiting for sync" state
           // (set by the join-approved handler) no longer applies — the
           // CG will now surface via the normal `_meta` branch in
           // `listContextGraphs`.
-          sub.pendingMeta = false;
+          const current = this.subscribedContextGraphs.get(contextGraphId) ?? sub;
+          this.setContextGraphSubscription(contextGraphId, {
+            ...current,
+            metaSynced: true,
+            pendingMeta: false,
+          });
         }
         this.queueSharedMemoryGossipSubscription(contextGraphId);
       }
@@ -3296,11 +3848,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   setContextGraphSubscription(this: DKGAgent,
     contextGraphId: string,
     next: ContextGraphSub,
-    options?: { persist?: boolean },
+    options?: { persist?: boolean; updateRehydrationStatus?: boolean },
   ): ContextGraphSub {
+    this.invalidateListContextGraphsCache();
     this.subscribedContextGraphs.set(contextGraphId, next);
+    if (!next.subscribed && !next.coreHosted) {
+      this.clearVmReconcileStateForContextGraph(contextGraphId);
+    }
     if (options?.persist !== false) {
-      this.persistContextGraphSubscription(contextGraphId);
+      if (this.config.contextGraphSubscriptionStore) {
+        const revision = this.nextContextGraphSubscriptionPersistRevision(contextGraphId);
+        this.persistContextGraphSubscription(
+          contextGraphId,
+          {
+            revision,
+            updateRehydrationStatus: options?.updateRehydrationStatus !== false,
+          },
+        );
+      }
       if (next.subscribed) {
         this.persistLocalNodeMembership(contextGraphId);
       } else {
@@ -3316,28 +3881,243 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.setContextGraphSubscription(contextGraphId, { ...existing, ...patch });
   }
 
-  persistContextGraphSubscriptionState(this: DKGAgent, contextGraphId: string): void {
-    this.persistContextGraphSubscription(contextGraphId);
+  nextContextGraphSubscriptionPersistRevision(this: DKGAgent, contextGraphId: string): number {
+    const revision = (this.contextGraphSubscriptionPersistRevisions.get(contextGraphId) ?? 0) + 1;
+    this.contextGraphSubscriptionPersistRevisions.set(contextGraphId, revision);
+    return revision;
   }
 
-  persistContextGraphSubscription(this: DKGAgent, contextGraphId: string): void {
+  cancelContextGraphSubscriptionPersistRevisions(this: DKGAgent, contextGraphId: string): void {
+    if (!this.config.contextGraphSubscriptionStore) {
+      this.clearContextGraphSubscriptionPersistRevisionStateIfIdle(contextGraphId);
+      return;
+    }
+    const revision = this.nextContextGraphSubscriptionPersistRevision(contextGraphId);
+    this.contextGraphSubscriptionPersistCanceledRevisions.set(contextGraphId, revision);
+  }
+
+  claimContextGraphSubscriptionPersistRevision(this: DKGAgent, contextGraphId: string, revision?: number): boolean {
+    if (revision == null) return false;
+    const canceledRevision = this.contextGraphSubscriptionPersistCanceledRevisions.get(contextGraphId) ?? 0;
+    if (revision <= canceledRevision) return false;
+    const appliedRevision = this.contextGraphSubscriptionPersistAppliedRevisions.get(contextGraphId) ?? 0;
+    if (revision <= appliedRevision) return false;
+    this.contextGraphSubscriptionPersistAppliedRevisions.set(contextGraphId, revision);
+    return true;
+  }
+
+  beginContextGraphSubscriptionPersistRevision(this: DKGAgent, contextGraphId: string, revision?: number): void {
+    if (revision == null) return;
+    let pending = this.contextGraphSubscriptionPersistPendingRevisions.get(contextGraphId);
+    if (!pending) {
+      pending = new Set<number>();
+      this.contextGraphSubscriptionPersistPendingRevisions.set(contextGraphId, pending);
+    }
+    pending.add(revision);
+  }
+
+  enqueueContextGraphSubscriptionPersistWrite(
+    this: DKGAgent,
+    contextGraphId: string,
+    write: () => Promise<void>,
+  ): Promise<void> {
+    const previous = this.contextGraphSubscriptionPersistChains.get(contextGraphId) ?? Promise.resolve();
+    const run = previous.then(write);
+    const chain = run.catch(() => undefined);
+    this.contextGraphSubscriptionPersistChains.set(contextGraphId, chain);
+    void chain.finally(() => {
+      if (this.contextGraphSubscriptionPersistChains.get(contextGraphId) !== chain) return;
+      this.contextGraphSubscriptionPersistChains.delete(contextGraphId);
+      this.clearContextGraphSubscriptionPersistRevisionStateIfIdle(contextGraphId);
+    });
+    return run;
+  }
+
+  finishContextGraphSubscriptionPersistRevision(this: DKGAgent, contextGraphId: string, revision?: number): void {
+    if (revision == null) return;
+    const pending = this.contextGraphSubscriptionPersistPendingRevisions.get(contextGraphId);
+    pending?.delete(revision);
+    if (pending && pending.size > 0) return;
+    this.contextGraphSubscriptionPersistPendingRevisions.delete(contextGraphId);
+    this.clearContextGraphSubscriptionPersistRevisionStateIfIdle(contextGraphId);
+  }
+
+  clearContextGraphSubscriptionPersistRevisionStateIfIdle(this: DKGAgent, contextGraphId: string): void {
+    if ((this.contextGraphSubscriptionPersistPendingRevisions.get(contextGraphId)?.size ?? 0) > 0) return;
+    if (this.contextGraphSubscriptionPersistChains.has(contextGraphId)) return;
+    const sub = this.subscribedContextGraphs.get(contextGraphId);
+    if (sub?.subscribed === true || sub?.coreHosted === true) return;
+    if (this.contextGraphSubscriptionRehydrationAccountedIds.has(contextGraphId)) return;
+    this.contextGraphSubscriptionPersistPendingRevisions.delete(contextGraphId);
+    this.contextGraphSubscriptionPersistRevisions.delete(contextGraphId);
+    this.contextGraphSubscriptionPersistAppliedRevisions.delete(contextGraphId);
+    this.contextGraphSubscriptionPersistCanceledRevisions.delete(contextGraphId);
+  }
+
+  updateContextGraphSubscriptionRehydrationStatusAfterPersist(this: DKGAgent,
+    contextGraphId: string,
+    next?: ContextGraphSub,
+  ): void {
+    const status = this.contextGraphSubscriptionRehydrationStatus;
+    if (!status) return;
+    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) return;
+
+    const sortIds = (ids: string[]): string[] => [...ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const wasDormant = status.dormantIds.includes(contextGraphId);
+    const hostedActivatedIds = status.hostedActivatedIds ?? [];
+    const wasAccounted = this.contextGraphSubscriptionRehydrationAccountedIds.has(contextGraphId);
+    const isPersisted = next?.subscribed === true || next?.coreHosted === true;
+
+    let persistedTotal = status.persistedTotal;
+    let activated = status.activated;
+    let dormantIds = status.dormantIds.filter((id) => id !== contextGraphId);
+    let nextHostedActivatedIds = hostedActivatedIds.filter((id) => id !== contextGraphId);
+    if (next?.coreHosted === true) {
+      nextHostedActivatedIds = sortIds([...nextHostedActivatedIds, contextGraphId]);
+    }
+
+    if (isPersisted) {
+      if (wasDormant) {
+        activated += 1;
+      } else if (!wasAccounted) {
+        persistedTotal += 1;
+        activated += 1;
+      }
+      this.contextGraphSubscriptionRehydrationAccountedIds.add(contextGraphId);
+    } else if (wasAccounted) {
+      persistedTotal = Math.max(0, persistedTotal - 1);
+      if (!wasDormant) {
+        activated = Math.max(0, activated - 1);
+      }
+      this.contextGraphSubscriptionRehydrationAccountedIds.delete(contextGraphId);
+    }
+
+    this.contextGraphSubscriptionRehydrationStatus = {
+      ...status,
+      persistedTotal,
+      hostedActivated: nextHostedActivatedIds.length,
+      hostedActivatedIds: nextHostedActivatedIds,
+      activated,
+      dormant: dormantIds.length,
+      dormantIds,
+      updatedAt: Date.now(),
+    };
+  }
+
+  updateContextGraphSubscriptionRehydrationStatusAfterClear(this: DKGAgent,
+    clearedIds: Iterable<string>,
+    deactivatedIds: Iterable<string> = [],
+  ): void {
+    const status = this.contextGraphSubscriptionRehydrationStatus;
+    if (!status) return;
+    const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
+    const dormantIds = [...status.dormantIds];
+    const hostedActivatedIds = [...(status.hostedActivatedIds ?? [])];
+    const removeFrom = (ids: string[], id: string): boolean => {
+      const index = ids.indexOf(id);
+      if (index < 0) return false;
+      ids.splice(index, 1);
+      return true;
+    };
+    let persistedTotal = status.persistedTotal;
+    let activated = status.activated;
+    const clearedSet = new Set(clearedIds);
+
+    for (const id of clearedSet) {
+      if (systemContextGraphs.has(id)) continue;
+      const wasAccounted = this.contextGraphSubscriptionRehydrationAccountedIds.delete(id);
+      const wasDormant = removeFrom(dormantIds, id);
+      removeFrom(hostedActivatedIds, id);
+      if (!wasAccounted) continue;
+      persistedTotal = Math.max(0, persistedTotal - 1);
+      if (!wasDormant) {
+        activated = Math.max(0, activated - 1);
+      }
+    }
+    for (const id of new Set(deactivatedIds)) {
+      if (systemContextGraphs.has(id) || clearedSet.has(id)) continue;
+      if (!this.contextGraphSubscriptionRehydrationAccountedIds.has(id)) continue;
+      removeFrom(hostedActivatedIds, id);
+      if (!dormantIds.includes(id)) {
+        activated = Math.max(0, activated - 1);
+        dormantIds.push(id);
+      }
+    }
+    dormantIds.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+    this.contextGraphSubscriptionRehydrationStatus = {
+      ...status,
+      persistedTotal,
+      hostedActivated: hostedActivatedIds.length,
+      hostedActivatedIds,
+      activated,
+      dormant: dormantIds.length,
+      dormantIds,
+      updatedAt: Date.now(),
+    };
+    for (const id of clearedSet) {
+      this.clearContextGraphSubscriptionPersistRevisionStateIfIdle(id);
+    }
+  }
+
+  deleteContextGraphSubscription(this: DKGAgent, contextGraphId: string): boolean {
+    this.invalidateListContextGraphsCache();
+    this.forceClearVmReconcileStateForContextGraph(contextGraphId);
+    return this.subscribedContextGraphs.delete(contextGraphId);
+  }
+
+  persistContextGraphSubscriptionState(this: DKGAgent, contextGraphId: string): void {
+    if (!this.config.contextGraphSubscriptionStore) {
+      this.clearContextGraphSubscriptionPersistRevisionStateIfIdle(contextGraphId);
+      return;
+    }
+    this.persistContextGraphSubscription(contextGraphId, {
+      revision: this.nextContextGraphSubscriptionPersistRevision(contextGraphId),
+      updateRehydrationStatus: false,
+    });
+  }
+
+  persistContextGraphSubscription(this: DKGAgent,
+    contextGraphId: string,
+    options?: {
+      revision?: number;
+      updateRehydrationStatus?: boolean;
+    },
+  ): void {
+    this.invalidateListContextGraphsCache();
     const store = this.config.contextGraphSubscriptionStore;
-    if (!store) return;
+    if (!store) {
+      this.clearContextGraphSubscriptionPersistRevisionStateIfIdle(contextGraphId);
+      return;
+    }
     const sub = this.subscribedContextGraphs.get(contextGraphId);
     // Persist member subscriptions AND (Phase D) public CGs this Core hosts —
     // the host-only record MUST survive restart so a Core that was offline
     // during a publish remembers it hosts the CG and fills its gap. Drop the
     // row only when the node neither subscribes to nor hosts the CG.
+    this.beginContextGraphSubscriptionPersistRevision(contextGraphId, options?.revision);
     if (!sub?.subscribed && !sub?.coreHosted) {
-      void store.delete(contextGraphId).catch((err) => {
-        this.log.warn(
-          createOperationContext('system'),
-          `Failed to delete persisted context-graph subscription for "${contextGraphId}": ${err instanceof Error ? err.message : String(err)}`,
-        );
-      });
+      void this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, () => store.delete(contextGraphId))
+        .then(() => {
+          if (
+            options?.updateRehydrationStatus === true &&
+            this.claimContextGraphSubscriptionPersistRevision(contextGraphId, options.revision)
+          ) {
+            this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, undefined);
+          }
+        })
+        .catch((err) => {
+          this.log.warn(
+            createOperationContext('system'),
+            `Failed to delete persisted context-graph subscription for "${contextGraphId}": ${err instanceof Error ? err.message : String(err)}`,
+          );
+        })
+        .finally(() => {
+          this.finishContextGraphSubscriptionPersistRevision(contextGraphId, options?.revision);
+        });
       return;
     }
-    void store.save({
+    const record = {
       id: contextGraphId,
       name: sub.name,
       subscribed: sub.subscribed,
@@ -3349,12 +4129,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       lastReconciledOrdinal: sub.lastReconciledOrdinal,
       coreHosted: sub.coreHosted,
       syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
-    }).catch((err) => {
-      this.log.warn(
-        createOperationContext('system'),
-        `Failed to persist context-graph subscription for "${contextGraphId}": ${err instanceof Error ? err.message : String(err)}`,
-      );
-    });
+    };
+    void this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, () => store.save(record))
+      .then(() => {
+        if (
+          options?.updateRehydrationStatus === true &&
+          this.claimContextGraphSubscriptionPersistRevision(contextGraphId, options.revision)
+        ) {
+          this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, sub);
+        }
+      }).catch((err) => {
+        this.log.warn(
+          createOperationContext('system'),
+          `Failed to persist context-graph subscription for "${contextGraphId}": ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }).finally(() => {
+        this.finishContextGraphSubscriptionPersistRevision(contextGraphId, options?.revision);
+      });
   }
 
   normalizeMembershipPrincipal(this: DKGAgent,
@@ -3419,6 +4210,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
   }
 
+  getContextGraphSubscriptionRehydrationStatus(this: DKGAgent): ContextGraphSubscriptionRehydrationStatus | null {
+    const status = this.contextGraphSubscriptionRehydrationStatus;
+    if (!status) return null;
+    return {
+      ...status,
+      hostedActivatedIds: [...(status.hostedActivatedIds ?? [])],
+      dormantIds: [...status.dormantIds],
+    };
+  }
+
   async rehydrateContextGraphSubscriptions(this: DKGAgent): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
     if (!store) return;
@@ -3430,7 +4231,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // would let them consume activation slots and leave USER subscriptions
       // dormant. Exclude them from the rehydration set entirely.
       const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
-      const rows = (await store.loadAll()).filter((r) => !systemContextGraphs.has(r.id));
+      const persistedRows = await store.loadAll();
+      const rows = persistedRows.filter((r) => !systemContextGraphs.has(r.id));
       // Cap how many subscriptions we ACTIVATE on boot. Activation
       // (in-memory restore + sync-track + gossip subscribe + member persist)
       // does store-touching work per row; a large stale backlog fans this out
@@ -3466,13 +4268,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // reconcile / host-mode path depends on it — so EXEMPT them from the cap.
       // The cap (a #997 anti-wedge measure) applies only to the non-hosted
       // user-subscription backlog, which is what fans out and starves the store
-      // on boot. Prioritise subscribed rows within the capped set.
-      const hostedRows = rows.filter((r) => r.coreHosted);
+      // on boot. Sort every group explicitly so the dormant set is stable and
+      // operator diagnostics identify the same IDs across restarts.
+      const byId = (a: ContextGraphSubscriptionRecord, b: ContextGraphSubscriptionRecord): number =>
+        a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+      const hostedRows = rows.filter((r) => r.coreHosted).sort(byId);
       const userRows = [...rows.filter((r) => !r.coreHosted)].sort(
-        (a, b) => (b.subscribed ? 1 : 0) - (a.subscribed ? 1 : 0),
+        (a, b) => (b.subscribed ? 1 : 0) - (a.subscribed ? 1 : 0) || byId(a, b),
       );
       const cappedUserRows = cap > 0 ? userRows.slice(0, cap) : userRows;
       const toActivate = [...hostedRows, ...cappedUserRows];
+      const dormantRows = cap > 0 ? userRows.slice(cap) : [];
       for (let i = 0; i < toActivate.length; i++) {
         const row = toActivate[i];
         this.setContextGraphSubscription(row.id, {
@@ -3486,6 +4292,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           lastReconciledOrdinal: row.lastReconciledOrdinal,
           coreHosted: row.coreHosted,
         }, { persist: false });
+        if (row.onChainHash) {
+          this.recordCgWireId(row.id, row.onChainHash);
+        }
         if (row.syncScoped) {
           this.trackSyncContextGraph(row.id);
         }
@@ -3499,11 +4308,29 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           await new Promise<void>((resolve) => setTimeout(resolve, 0));
         }
       }
-      const skipped = userRows.length - cappedUserRows.length;
+      const skipped = dormantRows.length;
+      this.contextGraphSubscriptionRehydrationAccountedIds.clear();
+      for (const row of rows) {
+        this.contextGraphSubscriptionRehydrationAccountedIds.add(row.id);
+      }
+      const completedAt = Date.now();
+      this.contextGraphSubscriptionRehydrationStatus = {
+        persistedTotal: rows.length,
+        systemExcluded: persistedRows.length - rows.length,
+        hostedActivated: hostedRows.length,
+        hostedActivatedIds: hostedRows.map((r) => r.id),
+        activated: toActivate.length,
+        dormant: skipped,
+        activationCap: cap,
+        capDisabled: cap === 0,
+        dormantIds: dormantRows.map((r) => r.id),
+        completedAt,
+        updatedAt: completedAt,
+      };
       if (rows.length > 0) {
         this.log.info(
           ctx,
-          `Rehydrated ${toActivate.length} of ${rows.length} persisted context-graph subscription(s)` +
+          `Rehydrated ${toActivate.length} of ${rows.length} non-system persisted context-graph subscription(s)` +
             (skipped > 0
               ? ` (${skipped} non-hosted left dormant — over the ${cap} activation cap; ` +
                 `${hostedRows.length} hosted always restored)`
@@ -3515,7 +4342,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ctx,
           `${skipped} context-graph subscription(s) left dormant to avoid store contention (#997). ` +
             `Prune stale ones via 'DELETE /api/context-graph/subscriptions', or raise ` +
-            `maxRehydratedContextGraphSubscriptions.`,
+            `maxRehydratedContextGraphSubscriptions. Inspect ` +
+            `'GET /api/context-graph/subscriptions' for dormant ids.`,
         );
       }
     } catch (err) {
@@ -3581,7 +4409,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
       }
     }
-    const total = persistedUserIds.length;
+    const activeUserIdsWithPendingStoreWrite = store
+      ? activeUserIds.filter((id) => this.contextGraphSubscriptionPersistChains.has(id))
+      : [];
+    const storeDeleteIds = [...new Set([...persistedUserIds, ...activeUserIdsWithPendingStoreWrite])];
+    const total = storeDeleteIds.length;
+    const idsToCancel = store ? [...new Set([...storeDeleteIds, ...activeUserIds])] : [];
+    // Cancel any in-flight save callbacks that started before this bulk clear.
+    for (const id of idsToCancel) {
+      this.cancelContextGraphSubscriptionPersistRevisions(id);
+    }
 
     // Tear down active in-memory USER subscriptions (gossip topics + sync scope),
     // then REMOVE the registry entry. `unsubscribeFromContextGraph` only flips
@@ -3592,11 +4429,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // + coreHosted CGs, so this only drops the cleared non-hosted user entries.)
     for (const id of activeUserIds) {
       try {
-        this.unsubscribeFromContextGraph(id);
+        this.unsubscribeFromContextGraph(id, { persist: false, updateRehydrationStatus: false });
+        this.deleteContextGraphMember(id, 'node', this.peerId);
       } catch {
         /* best-effort teardown */
       }
-      this.subscribedContextGraphs.delete(id);
+      this.deleteContextGraphSubscription(id);
     }
 
     // Delete the persisted USER rows (active + dormant). Selective — never the
@@ -3605,15 +4443,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // reported as cleared, or this recovery endpoint would answer 200 "all
     // gone" while stale rows survive in the store.
     let cleared = persistedUserIds.length;
+    const clearedIds: string[] = [];
+    const deactivatedIds: string[] = [];
+    const activeUserIdSet = new Set(activeUserIds);
     let failed = 0;
     if (store) {
       cleared = 0;
-      for (const id of persistedUserIds) {
+      for (const id of storeDeleteIds) {
         try {
-          await store.delete(id);
+          await this.enqueueContextGraphSubscriptionPersistWrite(id, () => store.delete(id));
           cleared++;
+          clearedIds.push(id);
         } catch (err) {
           failed++;
+          if (activeUserIdSet.has(id)) {
+            deactivatedIds.push(id);
+          }
           this.log.warn(
             ctx,
             `clearContextGraphSubscriptions: failed to delete persisted subscription "${id}": ` +
@@ -3621,6 +4466,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           );
         }
       }
+    }
+    if (cleared > 0 || deactivatedIds.length > 0) {
+      this.updateContextGraphSubscriptionRehydrationStatusAfterClear(clearedIds, deactivatedIds);
     }
 
     this.log.info(
@@ -3800,7 +4648,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           }
 
           // Uniform layout: span the per-KA …/_shared_memory/{addr}/{number} graphs + bucket.
-          const wsGraphs = (await this.store.listGraphs()).filter(g => g === wsGraph || g.startsWith(`${wsGraph}/`));
+          const wsGraphs = await listGraphFamily(this.store, wsGraph);
           for (const re of rootEntities) {
             for (const g of wsGraphs) {
               // Exact root only; then skolemized descendants only (prefix would over-delete e.g. urn:foo vs urn:foobar)
@@ -3823,8 +4671,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             graphDeleted += ownerDeleted;
           }
 
-          const ownedSet = this.workspaceOwnedEntities.get(pid);
-          if (ownedSet) {
+          // Evict every per-subgraph ownership key for the expired roots.
+          // SWM data now spans the root workspace graph plus the per-KA /
+          // subgraph `…/_shared_memory/{addr}/{number}` graphs (wsGraphs), and
+          // ownership is cached under one key per graph family:
+          // `pid` for the root/bucket and `${pid}\0${subGraph}` for per-subgraph
+          // graphs (see sharedMemoryOwnershipKeyFromGraph). Only clearing the
+          // `pid`-keyed map would leave the per-subgraph entries behind, so an
+          // expired root could still look owned and mis-arbitrate later writes.
+          const ownershipKeys = new Set<string>();
+          for (const g of wsGraphs) {
+            const ownershipKey = sharedMemoryOwnershipKeyFromGraph(pid, g);
+            if (ownershipKey) ownershipKeys.add(ownershipKey);
+          }
+          for (const ownershipKey of ownershipKeys) {
+            const ownedSet = this.workspaceOwnedEntities.get(ownershipKey);
+            if (!ownedSet) continue;
             for (const re of rootEntities) {
               ownedSet.delete(re);
             }
@@ -3843,4 +4705,53 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return totalDeleted;
   }
 
+}
+
+async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<string[]> {
+  const graphs = await listGraphsByPrefix(store, `${rootGraph}/`);
+  if (await store.hasGraph(rootGraph)) {
+    graphs.unshift(rootGraph);
+  }
+  return graphs;
+}
+
+async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<string[]> {
+  return store.listGraphsByPrefix
+    ? store.listGraphsByPrefix(prefix)
+    : (await store.listGraphs()).filter((graph) => graph.startsWith(prefix));
+}
+
+async function getSharedMemorySubGraphAdmission(
+  store: TripleStore,
+  contextGraphId: string,
+  subGraphsPromise: Promise<Array<{ name: string; uri?: string }>>,
+): Promise<{ registered: string[]; excluded: string[] }> {
+  const registered: string[] = [];
+  const excluded: string[] = [];
+  for (const subGraph of await subGraphsPromise) {
+    const childContextGraphUri = `${contextGraphDataGraphUri(contextGraphId)}/${subGraph.name}`;
+    if (subGraph.uri && subGraph.uri !== childContextGraphUri) continue;
+    if (await isKnownContextGraphUri(store, childContextGraphUri)) {
+      excluded.push(subGraph.name);
+    } else {
+      registered.push(subGraph.name);
+    }
+  }
+  return { registered, excluded };
+}
+
+async function isKnownContextGraphUri(store: TripleStore, contextGraphUri: string): Promise<boolean> {
+  const metaGraph = `${contextGraphUri}/_meta`;
+  const result = await store.query(`
+    ASK {
+      GRAPH <${assertSafeIri(metaGraph)}> {
+        {
+          <${assertSafeIri(contextGraphUri)}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
+        } UNION {
+          <${assertSafeIri(contextGraphUri)}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status .
+        }
+      }
+    }
+  `);
+  return result.type === 'boolean' && result.value;
 }

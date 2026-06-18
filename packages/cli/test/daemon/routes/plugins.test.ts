@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import type { ServerResponse } from 'node:http';
 import type { RequestContext } from '../../../src/daemon/routes/context.js';
 import type { RoutePlugin } from '../../../src/daemon/plugin-api.js';
@@ -71,14 +71,21 @@ function makeCtx(routePlugins: RoutePlugin[], res = makeRes()): {
 }
 
 describe('handlePluginRoutes', () => {
-  // Throw-path tests would otherwise dump real stack traces from the dispatcher's `console.error` breadcrumb.
-  // Stub per test; the "logs the plugin name" test reads `errorSpy.mock.calls` directly.
-  let errorSpy: ReturnType<typeof vi.spyOn<typeof console, 'error'>>;
+  // Throw-path tests would otherwise dump real stack traces from the
+  // dispatcher's `console.error` breadcrumb. Hand-rolled capture (no vitest
+  // mock API — nothing under test is faked): save/restore the real
+  // console.error and record its calls; the "logs the plugin name" test
+  // reads `errorCalls` directly.
+  let errorCalls: unknown[][] = [];
+  const originalConsoleError = console.error;
   beforeEach(() => {
-    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    errorCalls = [];
+    console.error = (...args: unknown[]) => {
+      errorCalls.push(args);
+    };
   });
   afterEach(() => {
-    errorSpy.mockRestore();
+    console.error = originalConsoleError;
   });
 
   it('returns without writing when routePlugins is empty', async () => {
@@ -175,8 +182,8 @@ describe('handlePluginRoutes', () => {
     const { ctx } = makeCtx([thrower]);
     await handlePluginRoutes(ctx);
 
-    expect(errorSpy).toHaveBeenCalled();
-    const joined = errorSpy.mock.calls
+    expect(errorCalls.length).toBeGreaterThan(0);
+    const joined = errorCalls
       .map((args) =>
         args
           .map((a) =>

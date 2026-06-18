@@ -14,18 +14,30 @@
  *
  * The method only depends on `this.chain` and `this.log`, so we exercise
  * it by binding the prototype method to a minimal stub instead of
- * standing up a full DkgAgent.
+ * standing up a full DkgAgent. The chain/log dependency seams are
+ * hand-rolled recorders (no behavior mocks).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { DKGAgent } from '../src/dkg-agent.js';
+
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
+
+type Recorder<A extends unknown[], R> = ((...args: A) => R) & { calls: A[] };
 
 interface ChainStub {
   identityId: bigint;
   relayCapable: boolean;
   getRelayCapableSupported: boolean;
-  getIdentityId: ReturnType<typeof vi.fn>;
-  getRelayCapable: ReturnType<typeof vi.fn>;
-  setRelayCapable: ReturnType<typeof vi.fn>;
+  getIdentityId: Recorder<[], Promise<bigint>>;
+  getRelayCapable: Recorder<[bigint?], Promise<boolean>>;
+  setRelayCapable: Recorder<[boolean], Promise<{ txHash: string }>>;
 }
 
 function makeChainStub({
@@ -38,12 +50,28 @@ function makeChainStub({
     relayCapable,
     getRelayCapableSupported,
   } as ChainStub;
-  stub.getIdentityId = vi.fn(async () => stub.identityId);
-  stub.getRelayCapable = vi.fn(async () => stub.relayCapable);
-  stub.setRelayCapable = vi.fn(async (v: boolean) => {
-    stub.relayCapable = v;
-    return { txHash: '0xdead' };
-  });
+  // Per-call override queues let a single test inject a one-shot rejection
+  // (the no-mocks replacement for a one-time rejected-promise override).
+  const getIdentityIdOverrides: Array<() => Promise<bigint>> = [];
+  const setRelayCapableOverrides: Array<() => Promise<{ txHash: string }>> = [];
+  stub.getIdentityId = Object.assign(
+    recorder(async () => {
+      const override = getIdentityIdOverrides.shift();
+      if (override) return override();
+      return stub.identityId;
+    }),
+    { overrides: getIdentityIdOverrides },
+  );
+  stub.getRelayCapable = recorder(async () => stub.relayCapable);
+  stub.setRelayCapable = Object.assign(
+    recorder(async (v: boolean) => {
+      const override = setRelayCapableOverrides.shift();
+      if (override) return override();
+      stub.relayCapable = v;
+      return { txHash: '0xdead' };
+    }),
+    { overrides: setRelayCapableOverrides },
+  );
   if (!getRelayCapableSupported) {
     delete (stub as any).getRelayCapable;
   }
@@ -52,10 +80,10 @@ function makeChainStub({
 
 function makeAgentLike(chain: ChainStub) {
   const log = {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
+    info: recorder(() => undefined),
+    warn: recorder(() => undefined),
+    error: recorder(() => undefined),
+    debug: recorder(() => undefined),
   };
   return { chain, log } as any;
 }
@@ -78,81 +106,85 @@ describe('DKGAgent.publishRelayRegistry — tri-state semantics (Codex PR #506)'
 
   it('relayCapable=true on a fresh node flips on-chain flag to true', async () => {
     await callPublish(agentLike, { relayCapable: true });
-    expect(chain.setRelayCapable).toHaveBeenCalledWith(true);
+    expect(chain.setRelayCapable.calls.at(-1)).toEqual([true]);
     expect(chain.relayCapable).toBe(true);
   });
 
   it('relayCapable=true is idempotent when already true on chain', async () => {
     chain.relayCapable = true;
     await callPublish(agentLike, { relayCapable: true });
-    expect(chain.setRelayCapable).not.toHaveBeenCalled();
+    expect(chain.setRelayCapable.calls).toEqual([]);
   });
 
   it('relayCapable=false actively clears a stale on-chain opt-in (Codex PR #506 fix)', async () => {
     chain.relayCapable = true;
     await callPublish(agentLike, { relayCapable: false });
-    expect(chain.setRelayCapable).toHaveBeenCalledWith(false);
+    expect(chain.setRelayCapable.calls.at(-1)).toEqual([false]);
     expect(chain.relayCapable).toBe(false);
   });
 
   it('relayCapable=false is idempotent when already false on chain', async () => {
     await callPublish(agentLike, { relayCapable: false });
-    expect(chain.setRelayCapable).not.toHaveBeenCalled();
+    expect(chain.setRelayCapable.calls).toEqual([]);
   });
 
   it('relayCapable=undefined is a no-op (preserves manual admin flips)', async () => {
     chain.relayCapable = true;
     await callPublish(agentLike, { relayCapable: undefined });
-    expect(chain.setRelayCapable).not.toHaveBeenCalled();
+    expect(chain.setRelayCapable.calls).toEqual([]);
     expect(chain.relayCapable).toBe(true);
   });
 
   it('opts omitted entirely is a no-op', async () => {
     chain.relayCapable = true;
     await callPublish(agentLike);
-    expect(chain.setRelayCapable).not.toHaveBeenCalled();
+    expect(chain.setRelayCapable.calls).toEqual([]);
     expect(chain.relayCapable).toBe(true);
   });
 
   it('non-boolean opts.relayCapable is treated as no opinion', async () => {
     chain.relayCapable = true;
     await callPublish(agentLike, { relayCapable: 'yes' as any });
-    expect(chain.setRelayCapable).not.toHaveBeenCalled();
+    expect(chain.setRelayCapable.calls).toEqual([]);
     expect(chain.relayCapable).toBe(true);
   });
 
   it('skips when chain adapter does not implement setRelayCapable', async () => {
     const noRelayChain: any = {
-      getIdentityId: vi.fn(async () => 42n),
+      getIdentityId: recorder(async () => 42n),
     };
     const local = makeAgentLike(noRelayChain);
     await callPublish(local, { relayCapable: true });
-    expect(noRelayChain.getIdentityId).not.toHaveBeenCalled();
+    expect(noRelayChain.getIdentityId.calls).toEqual([]);
   });
 
   it('skips when node has no on-chain profile yet (identityId === 0)', async () => {
     chain.identityId = 0n;
     await callPublish(agentLike, { relayCapable: true });
-    expect(chain.setRelayCapable).not.toHaveBeenCalled();
+    expect(chain.setRelayCapable.calls).toEqual([]);
   });
 
   it('skips when getIdentityId throws', async () => {
-    chain.getIdentityId.mockRejectedValueOnce(new Error('rpc down'));
+    (chain.getIdentityId as any).overrides.push(async () => {
+      throw new Error('rpc down');
+    });
     await callPublish(agentLike, { relayCapable: true });
-    expect(chain.setRelayCapable).not.toHaveBeenCalled();
-    expect(agentLike.log.warn).toHaveBeenCalled();
+    expect(chain.setRelayCapable.calls).toEqual([]);
+    expect(agentLike.log.warn.calls.length).toBeGreaterThan(0);
   });
 
   it('treats missing getRelayCapable as current=false and flips when desired=true', async () => {
     const local = makeChainStub({ getRelayCapableSupported: false });
     const localAgent = makeAgentLike(local);
     await callPublish(localAgent, { relayCapable: true });
-    expect(local.setRelayCapable).toHaveBeenCalledWith(true);
+    expect(local.setRelayCapable.calls.at(-1)).toEqual([true]);
   });
 
   it('does not throw when setRelayCapable rejects (best-effort, logged)', async () => {
-    chain.setRelayCapable.mockRejectedValueOnce(new Error('tx revert'));
+    (chain.setRelayCapable as any).overrides.push(async () => {
+      throw new Error('tx revert');
+    });
     await expect(callPublish(agentLike, { relayCapable: true })).resolves.toBeUndefined();
-    expect(agentLike.log.warn).toHaveBeenCalled();
+    expect(agentLike.log.warn.calls.length).toBeGreaterThan(0);
   });
 });

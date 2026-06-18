@@ -52,6 +52,15 @@ function classifyPcaRevert(msg: string): { status: number; error: string } | nul
   if (/\bAgentCapReached\b/.test(msg)) return { status: 409, error: 'AgentCapReached' };
   if (/\bAccountExpired\b/.test(msg)) return { status: 409, error: 'AccountExpired' };
   if (/\bAccountAlreadyFullySettled\b/.test(msg)) return { status: 409, error: 'AccountAlreadyFullySettled' };
+  // OT-RFC-51 primary-node reverts. `PrimaryNodeNotInShardingTable` is reachable
+  // from POST /api/pca (createAccount validates a non-zero node against the
+  // sharding table) → a bad-but-well-formed node id is a 400, not a 500. The
+  // rest are setPrimaryNode-only (re-designation, not yet wired via the daemon)
+  // but classified here so they map cleanly the moment that route lands.
+  if (/\bPrimaryNodeNotInShardingTable\b/.test(msg)) return { status: 400, error: 'PrimaryNodeNotInShardingTable' };
+  if (/\bZeroPrimaryNode\b/.test(msg)) return { status: 400, error: 'ZeroPrimaryNode' };
+  if (/\bPrimaryNodeUnchanged\b/.test(msg)) return { status: 409, error: 'PrimaryNodeUnchanged' };
+  if (/\bPrimaryNodeChangeRateLimited\b/.test(msg)) return { status: 409, error: 'PrimaryNodeChangeRateLimited' };
   // OZ v5 _requireOwned on an unminted NFT id → caller mistake, 404.
   // Legacy string-revert fallback for older OZ ERC721 builds.
   if (/\bERC721NonexistentToken\b/.test(msg) ||
@@ -69,6 +78,44 @@ function parseAccountId(idStr: string): bigint | null {
   } catch {
     return null;
   }
+}
+
+// OT-RFC-51: a PCA's committed TRAC funds the publishing factor P(t) of ONE
+// node (`primaryNode`), seeded per-epoch over the lock. The value is that
+// node's identityId (uint72). `0` is the contract's "no designated node"
+// sentinel — but the daemon does not expose `setPrimaryNode`, so a PCA created
+// here with node 0 would be permanently inert (it funds nobody and cannot be
+// re-pointed). We therefore REQUIRE an explicit, non-zero node at creation.
+const MAX_UINT72 = (1n << 72n) - 1n;
+
+function parsePrimaryNode(raw: unknown): bigint | { error: string } {
+  if (typeof raw === 'number') {
+    // A uint72 identityId can exceed Number.MAX_SAFE_INTEGER. By the time we
+    // see a JSON number, JSON.parse has ALREADY rounded it to the nearest
+    // double — so String(raw)/BigInt() below would silently read a different
+    // node. Only safe-integer numbers survive losslessly; larger ids must come
+    // as strings.
+    if (!Number.isSafeInteger(raw)) {
+      return { error: 'primaryNode exceeds JSON safe-integer range — pass the node identityId as a string' };
+    }
+  } else if (typeof raw !== 'string') {
+    return { error: 'primaryNode is required: the node identityId (uint72) this PCA allocates publishing to' };
+  }
+  const s = String(raw).trim();
+  if (!/^\d+$/.test(s)) {
+    return { error: 'primaryNode must be a positive integer node identityId' };
+  }
+  let id: bigint;
+  try {
+    id = BigInt(s);
+  } catch (e: any) {
+    return { error: `primaryNode parse error: ${e?.message ?? String(e)}` };
+  }
+  if (id <= 0n) {
+    return { error: 'primaryNode must be > 0 (0 designates no node; daemon-created PCAs must allocate to a node)' };
+  }
+  if (id > MAX_UINT72) return { error: 'primaryNode exceeds the uint72 node identityId range' };
+  return id;
 }
 
 function parseTokenAmount(raw: unknown, field: string): bigint | { error: string } {
@@ -117,16 +164,20 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
   if (!path.startsWith('/api/pca')) return;
 
   // POST /api/pca — mint a conviction NFT to the daemon EOA (the owner).
-  // No `lockEpochs` (global protocol param). Body: { tokens: "100000" }
+  // No `lockEpochs` (global protocol param). Body: { tokens: "100000",
+  // primaryNode: "42" } — `primaryNode` (the node identityId this PCA funds,
+  // OT-RFC-51) is REQUIRED; see parsePrimaryNode for why node 0 is rejected.
   if (req.method === 'POST' && path === '/api/pca') {
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = safeParseJson(body);
     if (!parsed.ok) return jsonResponse(res, 400, { error: parsed.error });
-    const { tokens } = parsed.value ?? {};
+    const { tokens, primaryNode } = parsed.value ?? {};
     const amount = parseTokenAmount(tokens, 'tokens');
     if (typeof amount !== 'bigint') return jsonResponse(res, 400, amount);
+    const node = parsePrimaryNode(primaryNode);
+    if (typeof node !== 'bigint') return jsonResponse(res, 400, node);
     try {
-      const result = await agent.createPublishingConvictionAccount(amount);
+      const result = await agent.createPublishingConvictionAccount(amount, node);
       if (result === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
       return jsonResponse(res, 200, {
         accountId: result.accountId.toString(),

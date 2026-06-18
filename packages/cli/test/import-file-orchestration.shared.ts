@@ -1,4 +1,5 @@
 import { contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri, parseMultipart, findReservedSubjectPrefix, isSkolemizedUri, FileStore, ExtractionPipelineRegistry, extractFromMarkdown, randomUUID, buildImportFileResponse, normalizeDetectedContentType, ImportFileRouteError, type CapturedQuad, type MockAgent, type ImportFileResult, type ExtractionStatusRecord } from './import-file-test-helpers';
+import { inferContentTypeFromFilename } from '../src/daemon/manifest.js';
 
 
 
@@ -44,7 +45,18 @@ export async function runImportFileOrchestration(params: {
       : undefined;
   const ontologyRef = textField('ontologyRef');
   const subGraphName = textField('subGraphName');
-  const detectedContentType = normalizeDetectedContentType(contentTypeOverride ?? filePart.contentType);
+  // Mirror the daemon's detection (#1101 + Codex PR #1107): filename-extension
+  // inference rescues the IMPLICIT octet-stream default, but an EXPLICIT
+  // `contentType=application/octet-stream` override is the opaque-blob escape
+  // hatch and suppresses inference.
+  let detectedContentType = normalizeDetectedContentType(contentTypeOverride ?? filePart.contentType);
+  const explicitOctetStream =
+    contentTypeOverride !== undefined &&
+    normalizeDetectedContentType(contentTypeOverride) === 'application/octet-stream';
+  if (detectedContentType === 'application/octet-stream' && !explicitOctetStream) {
+    const inferred = inferContentTypeFromFilename(filePart.filename);
+    if (inferred) detectedContentType = inferred;
+  }
   if (subGraphName) {
     const registeredSubGraphs = await agent.listSubGraphs(contextGraphId);
     if (!registeredSubGraphs.some(subGraph => subGraph.name === subGraphName)) {

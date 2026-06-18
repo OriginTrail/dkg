@@ -19,7 +19,9 @@ describe('DKGAgent V10 PCA facade', () => {
     const chain = new MockChainAdapter('mock:31337', owner.address);
     const agent = await makeAgent(chain);
 
-    const created = await agent.createPublishingConvictionAccount(1_000n);
+    // OT-RFC-51: primaryNode is now required (no silent 0n default). The mock
+    // adapter accepts it for parity but doesn't model per-node allocation.
+    const created = await agent.createPublishingConvictionAccount(1_000n, 42n);
     expect(created).not.toBeNull();
     expect(created!.accountId).toBeGreaterThan(0n);
     expect(created!.hash).toMatch(/^0x/);

@@ -193,6 +193,16 @@
         "internalType": "bool",
         "name": "fullySwept",
         "type": "bool"
+      },
+      {
+        "internalType": "uint72",
+        "name": "primaryNode",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint40",
+        "name": "lastPrimaryNodeChangeEpoch",
+        "type": "uint40"
       }
     ],
     "stateMutability": "view",
@@ -333,6 +343,16 @@
             "internalType": "bool",
             "name": "fullySwept",
             "type": "bool"
+          },
+          {
+            "internalType": "uint72",
+            "name": "primaryNode",
+            "type": "uint72"
+          },
+          {
+            "internalType": "uint40",
+            "name": "lastPrimaryNodeChangeEpoch",
+            "type": "uint40"
           }
         ],
         "internalType": "struct PublishingConvictionStorage.Account",
@@ -419,6 +439,16 @@
             "internalType": "bool",
             "name": "fullySwept",
             "type": "bool"
+          },
+          {
+            "internalType": "uint72",
+            "name": "primaryNode",
+            "type": "uint72"
+          },
+          {
+            "internalType": "uint40",
+            "name": "lastPrimaryNodeChangeEpoch",
+            "type": "uint40"
           }
         ],
         "internalType": "struct PublishingConvictionStorage.Account",
@@ -622,6 +652,29 @@
       }
     ],
     "name": "setMaxAgentsPerAccount",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint72",
+        "name": "node",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint40",
+        "name": "changeEpoch",
+        "type": "uint40"
+      }
+    ],
+    "name": "setPrimaryNodeData",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

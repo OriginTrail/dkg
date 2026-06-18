@@ -41,7 +41,12 @@ describe('Gossip handler phase-sequence contract', () => {
     const store = new OxigraphStore();
     const handler = new GossipPublishHandler(
       store, undefined, new Map(),
-      { contextGraphExists: async () => false, subscribeToContextGraph: () => {} },
+      {
+        contextGraphExists: async () => false,
+        getContextGraphOwner: async () => null,
+        subscribeToContextGraph: () => {},
+        setContextGraphSubscription: () => {},
+      },
     );
 
     const { calls, fn } = recorder();
@@ -63,7 +68,12 @@ describe('Gossip handler phase-sequence contract', () => {
     const store = new OxigraphStore();
     const handler = new GossipPublishHandler(
       store, undefined, new Map(),
-      { contextGraphExists: async () => false, subscribeToContextGraph: () => {} },
+      {
+        contextGraphExists: async () => false,
+        getContextGraphOwner: async () => null,
+        subscribeToContextGraph: () => {},
+        setContextGraphSubscription: () => {},
+      },
     );
 
     const msg = encodePublishRequest({
@@ -96,7 +106,12 @@ describe('Gossip handler phase-sequence contract', () => {
     const store = new OxigraphStore();
     const handler = new GossipPublishHandler(
       store, undefined, new Map(),
-      { contextGraphExists: async () => false, subscribeToContextGraph: () => {} },
+      {
+        contextGraphExists: async () => false,
+        getContextGraphOwner: async () => null,
+        subscribeToContextGraph: () => {},
+        setContextGraphSubscription: () => {},
+      },
     );
 
     const { calls, fn } = recorder();

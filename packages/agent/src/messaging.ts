@@ -103,6 +103,18 @@ export type ChatAclCheck = (
   verifiedContextGraphId?: string;
 };
 
+/**
+ * GH #462 — authorization hook for `skill_request` (parallel to ChatAclCheck).
+ * `PROTOCOL_MESSAGE` authenticates the caller's peerId via Ed25519 but did no
+ * authorization, so any connected peer could invoke any registered skill. When
+ * a check is installed it gates skill invocation; the daemon installs a
+ * default-deny-for-unknown-peers policy (see buildSkillAcl).
+ */
+export type SkillAclCheck = (
+  senderPeerId: string,
+  skillUri: string,
+) => { accept: boolean; reason?: string };
+
 interface ConversationState {
   highWaterMark: number;
   lastActivity: number;
@@ -130,6 +142,7 @@ export class MessageHandler {
   private readonly peerKeys = new Map<string, Uint8Array>();
   private chatHandler: ChatHandler | null = null;
   private chatAclCheck: ChatAclCheck | null = null;
+  private skillAclCheck: SkillAclCheck | null = null;
 
   constructor(
     messenger: Messenger,
@@ -171,6 +184,15 @@ export class MessageHandler {
    */
   setChatAcl(check: ChatAclCheck | null): void {
     this.chatAclCheck = check;
+  }
+
+  /**
+   * GH #462 — install an authorisation hook for inbound `skill_request`. When
+   * unset, skills remain open (legacy). The daemon installs a default-deny
+   * policy for unknown peers — see buildSkillAcl / lifecycle.ts.
+   */
+  setSkillAcl(check: SkillAclCheck | null): void {
+    this.skillAclCheck = check;
   }
 
   /**
@@ -457,6 +479,28 @@ export class MessageHandler {
 
     if (parsed.type === 'skill_request') {
       const skillUri = parsed.skillUri as string;
+
+      // GH #462 — authorize the skill invocation. Without this gate any peer
+      // with a libp2p connection could invoke any registered skill (the
+      // Ed25519 check only authenticates *who* the caller is, not whether they
+      // may invoke). Fail closed on an ACL error.
+      if (this.skillAclCheck) {
+        let verdict: { accept: boolean; reason?: string };
+        try {
+          verdict = this.skillAclCheck(fromPeerId, skillUri);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[MessageHandler] skill ACL threw, failing closed: ${msg}`);
+          verdict = { accept: false, reason: 'unauthorized: skill ACL evaluation error' };
+        }
+        if (!verdict.accept) {
+          return this.encryptAndSign(conv.sharedSecret, convId, seq + 1, {
+            success: false,
+            error: verdict.reason ?? 'unauthorized',
+          });
+        }
+      }
+
       const handler = this.skillHandlers.get(skillUri);
 
       if (!handler) {

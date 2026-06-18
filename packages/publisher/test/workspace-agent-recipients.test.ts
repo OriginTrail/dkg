@@ -3,6 +3,7 @@ import { ethers } from 'ethers';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   DKG_ONTOLOGY,
+  SYSTEM_CONTEXT_GRAPHS,
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
   computeWorkspaceAgentEncryptionKeyProofPayload,
   computeWorkspaceAgentEncryptionKeyRevocationPayload,
@@ -17,6 +18,7 @@ import { resolveWorkspaceAgentRecipients } from '../src/index.js';
 const CONTEXT_GRAPH_ID = 'workspace-agent-recipient-resolution';
 const DATA_GRAPH = contextGraphDataUri(CONTEXT_GRAPH_ID);
 const META_GRAPH = contextGraphMetaUri(CONTEXT_GRAPH_ID);
+const AGENTS_GRAPH = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
 const DKG = 'https://dkg.network/ontology#';
 const DKG_PUBLIC_ENCRYPTION_KEY = `${DKG}publicEncryptionKey`;
 const DKG_ENCRYPTION_KEY_ALGORITHM = `${DKG}encryptionKeyAlgorithm`;
@@ -181,6 +183,32 @@ describe('resolveWorkspaceAgentRecipients', () => {
     expect(resolution.recipients).toHaveLength(1);
     expect(resolution.recipients[0]?.recipientId).toBe(agentUri(wallet.address));
     expect(resolution.recipients[0]?.encryptionKeyAlgorithm).toBe(WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519);
+  });
+
+  it('resolves AGENTS-graph private declarations through the sender-key recipient path', async () => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    await store.insert([
+      {
+        subject: DATA_GRAPH,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"private"',
+        graph: AGENTS_GRAPH,
+      },
+      {
+        subject: DATA_GRAPH,
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+        object: `"${wallet.address}"`,
+        graph: AGENTS_GRAPH,
+      },
+    ]);
+    await insertAgentEncryptionKey(store, wallet);
+
+    const resolution = await resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID });
+
+    expect(resolution.requiresEncryption).toBe(true);
+    expect(resolution.recipients).toHaveLength(1);
+    expect(resolution.recipients[0]?.agentAddress).toBe(ethers.getAddress(wallet.address));
   });
 
   it('preserves peer-only non-private graphs as legacy plaintext-compatible SWM', async () => {

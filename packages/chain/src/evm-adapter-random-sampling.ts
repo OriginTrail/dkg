@@ -53,6 +53,10 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
     const kaId = BigInt(raw.knowledgeAssetId ?? raw[0]);
     const startBlock = BigInt(raw.activeProofPeriodStartBlock ?? raw[4]);
     if (kaId === 0n && startBlock === 0n) return null;
+    // OT-RFC-49 — tuple grew two pinned fields (challengeLeafCount @8,
+    // challengeRoot @9) after isCurated @7; ethers.getBytes normalises the
+    // bytes32 root to the Uint8Array the prover/proof-builder consume.
+    const rootRaw = raw.challengeRoot ?? raw[9] ?? ethers.ZeroHash;
     return {
       knowledgeAssetId: kaId,
       chunkId: BigInt(raw.chunkId ?? raw[1]),
@@ -61,6 +65,9 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
       activeProofPeriodStartBlock: startBlock,
       proofingPeriodDurationInBlocks: BigInt(raw.proofingPeriodDurationInBlocks ?? raw[5]),
       solved: Boolean(raw.solved ?? raw[6]),
+      isCurated: Boolean(raw.isCurated ?? raw[7]),
+      challengeLeafCount: BigInt(raw.challengeLeafCount ?? raw[8] ?? 0n),
+      challengeRoot: ethers.getBytes(rootRaw),
     };
   }
 
@@ -140,13 +147,13 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
     });
   }
 
-  async submitProof(leaf: Uint8Array | `0x${string}`, merkleProof: Uint8Array[]): Promise<TxResult> {
+  async submitProof(content: Uint8Array | `0x${string}`, merkleProof: Uint8Array[]): Promise<TxResult> {
     await this.init();
 
-    const leafHex = typeof leaf === 'string' ? leaf : ethers.hexlify(leaf);
-    if (!ethers.isHexString(leafHex, 32)) {
-      throw new Error('submitProof: leaf must be a 32-byte value (bytes32)');
-    }
+    // CONTENT-BINDING: the contract now takes the raw content (`bytes`) and
+    // derives `leaf = keccak256(content)` on-chain. No 32-byte guard — content
+    // is the public N-Triple / curated `_catalog` triple bytes of arbitrary length.
+    const contentHex = typeof content === 'string' ? content : ethers.hexlify(content);
     const proofHex = merkleProof.map((p) => ethers.hexlify(p));
 
     return this.withHubStaleRetry(async () => {
@@ -157,7 +164,7 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
         receipt = await this.sendContractTransaction(
           rs,
           'submitProof',
-          [leafHex, proofHex],
+          [contentHex, proofHex],
           this.signer,
           'submit random-sampling proof',
         );

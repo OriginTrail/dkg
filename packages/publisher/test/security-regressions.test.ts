@@ -11,10 +11,7 @@ import {
   DKGPublisher,
   UpdateHandler,
   SharedMemoryHandler,
-  autoPartition,
-  computePublicRootV10 as computePublicRoot,
-  computeKARootV10 as computeKARoot,
-  computeKCRootV10 as computeKCRoot,
+  computeStructuredKCRootV10,
 } from '../src/index.js';
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
@@ -71,16 +68,19 @@ function quadsToNQuads(quads: Quad[], graph: string): Uint8Array {
   return new TextEncoder().encode(str);
 }
 
+// Mirrors the gossip-receive path in `UpdateHandler` (update-handler.ts): the
+// structured KC root flattens ALL public quads into one V10 tree and collapses
+// the manifest's private roots into a single committed sibling —
+// `hashPair(publicRoot, privateDataHash)`. (The old per-entity KA→KC tree model
+// predates the PoS content-binding redesign; partitioning is irrelevant to the
+// root now.) Keeping this identical to the handler is what the chainId=none
+// "accepts correct root" test verifies.
 function computeGossipMerkleRoot(quads: Quad[], manifest: { rootEntity: string; privateMerkleRoot?: Uint8Array }[]): Uint8Array {
-  const partitioned = autoPartition(quads);
-  const kaRoots: Uint8Array[] = [];
-  for (const m of manifest) {
-    const entityQuads = partitioned.get(m.rootEntity) ?? [];
-    const pubRoot = computePublicRoot(entityQuads);
-    const privRoot = m.privateMerkleRoot?.length ? new Uint8Array(m.privateMerkleRoot) : undefined;
-    kaRoots.push(computeKARoot(pubRoot, privRoot));
-  }
-  return computeKCRoot(kaRoots);
+  const privateRoots = manifest
+    .map((m) => m.privateMerkleRoot)
+    .filter((r): r is Uint8Array => r != null && r.length > 0)
+    .map((r) => new Uint8Array(r));
+  return computeStructuredKCRootV10(quads, privateRoots).root;
 }
 
 let _fileSnapshot: string;

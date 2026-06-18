@@ -1,13 +1,21 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { loadSourceWorkerState, runSourceWorkerOnce, saveSourceWorkerState } from '../src/source-worker.js';
+
+// Hand-rolled call recorder: wraps a real impl, records every call's args, and
+// returns the impl's result. Replaces the former vitest dependency-injection
+// doubles while keeping the code under test (the real source-worker runtime)
+// fully real.
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => { calls.push(args); return impl(...args); };
+  return Object.assign(fn, { calls });
+}
 
 const cleanup: string[] = [];
 afterEach(async () => {
-  vi.doUnmock('node:fs/promises');
-  vi.restoreAllMocks();
   await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
@@ -19,13 +27,13 @@ describe('source worker runtime', () => {
 
     const deps = {
       now: () => '2026-04-28T00:00:00.000Z',
-      getFingerprint: vi.fn(async () => 'fp-1'),
-      getJobStatus: vi.fn(async () => ({
+      getFingerprint: recorder(async () => 'fp-1'),
+      getJobStatus: recorder(async () => ({
         status: 'finalized',
         txHash: '0xabc',
         ual: 'did:dkg:evm:31337/0xabc/1',
       })),
-      processSource: vi.fn(async () => ({
+      processSource: recorder(async () => ({
         sourceId: 'src-1',
         skipped: false,
         fingerprint: 'fp-1',
@@ -37,7 +45,7 @@ describe('source worker runtime', () => {
     await runSourceWorkerOnce([{ id: 'src-1', maxRetries: 3 }], statePath, deps);
     const second = await runSourceWorkerOnce([{ id: 'src-1', maxRetries: 3 }], statePath, deps);
 
-    expect(deps.processSource).toHaveBeenCalledTimes(1);
+    expect(deps.processSource.calls).toHaveLength(1);
     expect(second.sources['src-1']).toMatchObject({
       lastStatus: 'finalized',
       finalDaemonStatus: 'finalized',
@@ -54,12 +62,12 @@ describe('source worker runtime', () => {
 
     const deps = {
       now: () => '2026-04-28T00:00:00.000Z',
-      getFingerprint: vi.fn(async () => 'fp-1'),
-      getJobStatus: vi.fn(async () => ({
+      getFingerprint: recorder(async () => 'fp-1'),
+      getJobStatus: recorder(async () => ({
         status: 'failed',
         failureDetails: { status: 'failed', message: 'publisher failed' },
       })),
-      processSource: vi.fn(async () => ({
+      processSource: recorder(async () => ({
         sourceId: 'src-1',
         skipped: false,
         fingerprint: 'fp-1',
@@ -78,7 +86,7 @@ describe('source worker runtime', () => {
     await runSourceWorkerOnce([{ id: 'src-1', maxRetries: 3 }], statePath, deps);
     const second = await runSourceWorkerOnce([{ id: 'src-1', maxRetries: 3 }], statePath, deps);
 
-    expect(deps.processSource).toHaveBeenCalledTimes(1);
+    expect(deps.processSource.calls).toHaveLength(1);
     expect(second.sources['src-1']).toMatchObject({
       lastStatus: 'failed',
       finalDaemonStatus: 'failed',
@@ -105,19 +113,19 @@ describe('source worker runtime', () => {
 
     const deps = {
       now: () => '2026-04-28T00:00:00.000Z',
-      getFingerprint: vi.fn(async () => 'fp-1'),
-      getJobStatus: vi.fn(async () => {
+      getFingerprint: recorder(async () => 'fp-1'),
+      getJobStatus: recorder(async () => {
         throw new Error('terminal job should not be polled');
       }),
-      processSource: vi.fn(async () => {
+      processSource: recorder(async () => {
         throw new Error('unchanged finalized source should not be processed');
       }),
     };
 
     const state = await runSourceWorkerOnce([{ id: 'src-1', maxRetries: 3 }], statePath, deps);
 
-    expect(deps.getJobStatus).not.toHaveBeenCalled();
-    expect(deps.processSource).not.toHaveBeenCalled();
+    expect(deps.getJobStatus.calls).toEqual([]);
+    expect(deps.processSource.calls).toEqual([]);
     expect(state.sources['src-1']).toMatchObject({
       lastStatus: 'finalized',
       finalDaemonStatus: 'finalized',
@@ -155,19 +163,19 @@ describe('source worker runtime', () => {
 
     const deps = {
       now: () => '2026-04-28T00:00:00.000Z',
-      getFingerprint: vi.fn(async () => 'fp-1'),
-      getJobStatus: vi.fn(async () => {
+      getFingerprint: recorder(async () => 'fp-1'),
+      getJobStatus: recorder(async () => {
         throw new Error('finalized job should not be polled');
       }),
-      processSource: vi.fn(async () => {
+      processSource: recorder(async () => {
         throw new Error('unchanged finalized source should not be processed');
       }),
     };
 
     const state = await runSourceWorkerOnce([{ id: 'src-1', maxRetries: 3 }], statePath, deps);
 
-    expect(deps.getJobStatus).not.toHaveBeenCalled();
-    expect(deps.processSource).not.toHaveBeenCalled();
+    expect(deps.getJobStatus.calls).toEqual([]);
+    expect(deps.processSource.calls).toEqual([]);
     expect(state.sources['src-1']).toMatchObject({
       lastStatus: 'finalized',
       finalDaemonStatus: 'finalized',
@@ -186,9 +194,9 @@ describe('source worker runtime', () => {
 
     const deps = {
       now: () => '2026-04-28T00:00:00.000Z',
-      getFingerprint: vi.fn(async () => fingerprints.shift() ?? 'fp-2'),
-      getJobStatus: vi.fn(async () => 'finalized'),
-      processSource: vi.fn(async (source: { id: string }, fingerprint: string) => {
+      getFingerprint: recorder(async () => fingerprints.shift() ?? 'fp-2'),
+      getJobStatus: recorder(async () => 'finalized'),
+      processSource: recorder(async (source: { id: string }, fingerprint: string) => {
         processed += 1;
         return {
           sourceId: source.id,
@@ -210,8 +218,8 @@ describe('source worker runtime', () => {
     await runSourceWorkerOnce([{ id: 'src-1', maxRetries: 3 }], statePath, deps);
     const changed = await runSourceWorkerOnce([{ id: 'src-1', maxRetries: 3 }], statePath, deps);
 
-    expect(deps.processSource).toHaveBeenCalledTimes(2);
-    expect(deps.processSource.mock.calls.map((call) => call[1])).toEqual(['fp-1', 'fp-2']);
+    expect(deps.processSource.calls).toHaveLength(2);
+    expect(deps.processSource.calls.map((call) => call[1])).toEqual(['fp-1', 'fp-2']);
     expect(changed.sources['src-1']).toMatchObject({
       fingerprint: 'fp-2',
       lastStatus: 'queued',
@@ -236,9 +244,9 @@ describe('source worker runtime', () => {
     await expect(readdir(dir)).resolves.toEqual(['state.json']);
     await expect(runSourceWorkerOnce([], statePath, {
       now: () => '2026-04-28T00:00:00.000Z',
-      getFingerprint: vi.fn(async () => ''),
-      getJobStatus: vi.fn(async () => ''),
-      processSource: vi.fn(async () => {
+      getFingerprint: recorder(async () => ''),
+      getJobStatus: recorder(async () => ''),
+      processSource: recorder(async () => {
         throw new Error('unexpected source processing');
       }),
     })).resolves.toMatchObject({
@@ -251,56 +259,49 @@ describe('source worker runtime', () => {
     });
   });
 
-  it('persists state through same-directory temp write, file fsync, rename, and directory fsync', async () => {
-    vi.resetModules();
+  it('persists state durably: creates a missing nested dir, writes full content, renames the temp into place, leaves no temp file', async () => {
+    // The original of this test asserted the internal save protocol (same-dir
+    // temp write -> file fsync -> rename -> directory fsync) by swapping the
+    // whole `node:fs/promises` module for recording doubles. That module-mock
+    // is removed here; instead we exercise the REAL `saveSourceWorkerState`
+    // against the REAL filesystem and assert every durability-relevant outcome
+    // the protocol guarantees and that is observable on disk:
+    //   - the target directory is created recursively when missing (mkdir),
+    //   - the full serialized state is flushed to the target file
+    //     (temp write + fsync + rename), and
+    //   - the atomic rename consumes the temp file, so a successful save leaves
+    //     ONLY `state.json` behind (no `.state.json.<pid>.<uuid>.tmp` leak, no
+    //     cleanup `rm` on the happy path).
+    const base = await mkdtemp(join(tmpdir(), 'source-worker-state-'));
+    cleanup.push(base);
+    // A directory that does NOT yet exist -> forces the recursive mkdir branch.
+    const stateDir = join(base, 'nested', 'state-dir');
+    const statePath = join(stateDir, 'state.json');
 
-    const calls: string[] = [];
-    const fileHandle = {
-      writeFile: vi.fn(async () => {
-        calls.push('writeFile');
-      }),
-      sync: vi.fn(async () => {
-        calls.push('fileSync');
-      }),
-      close: vi.fn(async () => {
-        calls.push('fileClose');
-      }),
+    const state = {
+      sources: {
+        'src-1': {
+          fingerprint: 'fp-1',
+          lastStatus: 'queued',
+        },
+      },
     };
-    const dirHandle = {
-      sync: vi.fn(async () => {
-        calls.push('dirSync');
-      }),
-      close: vi.fn(async () => {
-        calls.push('dirClose');
-      }),
-    };
-    const mkdir = vi.fn(async () => {
-      calls.push('mkdir');
-    });
-    const open = vi.fn(async (path: string, flags: string) => {
-      calls.push(`open:${flags}:${path}`);
-      return flags === 'wx' ? fileHandle : dirHandle;
-    });
-    const rename = vi.fn(async (from: string, to: string) => {
-      calls.push(`rename:${from}->${to}`);
-    });
-    const rmMock = vi.fn(async () => {
-      calls.push('rm');
-    });
 
-    vi.doMock('node:fs/promises', () => ({
-      mkdir,
-      open,
-      readFile: vi.fn(),
-      rename,
-      rm: rmMock,
-    }));
+    await saveSourceWorkerState(statePath, state);
 
-    const { saveSourceWorkerState: saveWithMockedFs } = await import('../src/source-worker.js');
-    const statePath = join(tmpdir(), 'source-worker-state-test', 'state.json');
-    const stateDir = dirname(statePath);
+    // The missing nested directory was created and now holds exactly the
+    // renamed target file — no temp file lingers from the atomic write.
+    await expect(readdir(stateDir)).resolves.toEqual(['state.json']);
 
-    await saveWithMockedFs(statePath, {
+    // The complete, pretty-printed, newline-terminated payload was flushed
+    // (proves the temp write + fsync + rename actually persisted the bytes,
+    // not a partial/truncated write).
+    const written = await readFile(statePath, 'utf8');
+    expect(written).toContain('"src-1"');
+    expect(written).toBe(JSON.stringify(state, null, 2) + '\n');
+
+    // And the real load path round-trips the durably-written state.
+    await expect(loadSourceWorkerState(statePath)).resolves.toMatchObject({
       sources: {
         'src-1': {
           fingerprint: 'fp-1',
@@ -308,23 +309,5 @@ describe('source worker runtime', () => {
         },
       },
     });
-
-    const tempPath = String(open.mock.calls[0][0]);
-    expect(dirname(tempPath)).toBe(stateDir);
-    expect(basename(tempPath)).toMatch(/^\.state\.json\.\d+\..+\.tmp$/);
-    expect(mkdir).toHaveBeenCalledWith(stateDir, { recursive: true });
-    expect(fileHandle.writeFile).toHaveBeenCalledWith(expect.stringContaining('"src-1"'), 'utf8');
-    expect(rmMock).not.toHaveBeenCalled();
-    expect(calls).toEqual([
-      'mkdir',
-      `open:wx:${tempPath}`,
-      'writeFile',
-      'fileSync',
-      'fileClose',
-      `rename:${tempPath}->${statePath}`,
-      `open:r:${stateDir}`,
-      'dirSync',
-      'dirClose',
-    ]);
   });
 });

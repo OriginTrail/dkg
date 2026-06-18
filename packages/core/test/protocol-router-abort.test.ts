@@ -16,8 +16,17 @@
  * coverage + the production wire-up review.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { readAllWithSignal, composeAbortSignals } from '../src/protocol-router.js';
+
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
 
 function streamFromChunks(chunks: Uint8Array[]): AsyncIterable<Uint8Array> & { abort: (err: Error) => void; aborted: { err: Error } | null } {
   const state = { aborted: null as { err: Error } | null };
@@ -107,9 +116,11 @@ describe('readAllWithSignal', () => {
     const ctrl = new AbortController();
     ctrl.abort(new Error('pre-aborted'));
     const stream = streamFromChunks([Uint8Array.of(1)]);
-    const abortSpy = vi.spyOn(stream, 'abort');
+    const origAbort = stream.abort.bind(stream);
+    const abortSpy = recorder((...a: [Error]) => origAbort(...a));
+    stream.abort = abortSpy;
     await expect(readAllWithSignal(stream, 1024, ctrl.signal)).rejects.toThrow();
-    expect(abortSpy).toHaveBeenCalled();
+    expect(abortSpy.calls.length).toBeGreaterThan(0);
   });
 
   it('aborts a hanging read when the signal fires mid-flight (the beacon-01 repro)', async () => {
@@ -136,19 +147,27 @@ describe('readAllWithSignal', () => {
 
   it('does not leak the abort listener after a successful read', async () => {
     const ctrl = new AbortController();
-    const removeSpy = vi.spyOn(ctrl.signal, 'removeEventListener');
+    const origRemove = ctrl.signal.removeEventListener.bind(ctrl.signal);
+    const removeSpy = recorder((...a: Parameters<AbortSignal['removeEventListener']>) =>
+      origRemove(...a),
+    );
+    ctrl.signal.removeEventListener = removeSpy as AbortSignal['removeEventListener'];
     await readAllWithSignal(streamFromChunks([Uint8Array.of(1)]), 1024, ctrl.signal);
-    expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+    expect(removeSpy.calls).toContainEqual(['abort', expect.any(Function)]);
   });
 
   it('does not leak the abort listener after an aborted read', async () => {
     const { stream } = hangingStream();
     const ctrl = new AbortController();
-    const removeSpy = vi.spyOn(ctrl.signal, 'removeEventListener');
+    const origRemove = ctrl.signal.removeEventListener.bind(ctrl.signal);
+    const removeSpy = recorder((...a: Parameters<AbortSignal['removeEventListener']>) =>
+      origRemove(...a),
+    );
+    ctrl.signal.removeEventListener = removeSpy as AbortSignal['removeEventListener'];
     const p = readAllWithSignal(stream, 1024, ctrl.signal);
     ctrl.abort(new Error('cancel'));
     await p.catch(() => {});
-    expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
+    expect(removeSpy.calls).toContainEqual(['abort', expect.any(Function)]);
   });
 });
 

@@ -6,6 +6,12 @@ import {
 import { encodeVerifyApproval, decodeVerifyProposal } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => { calls.push(args); return impl(...args); };
+  return Object.assign(fn, { calls });
+}
+
 function makeApproval(proposalId: Uint8Array, wallet: ethers.Wallet, digest: Uint8Array) {
   const prefixedHash = ethers.hashMessage(digest);
   const sig = wallet.signingKey.sign(prefixedHash);
@@ -134,7 +140,7 @@ describe('VerifyCollector', () => {
   });
 
   it('rejects oversized timeout values before sending proposals', async () => {
-    const sendP2P = vi.fn(async () => new Uint8Array(0));
+    const sendP2P = recorder(async () => new Uint8Array(0));
     const collector = new VerifyCollector({
       sendP2P,
       getParticipantPeers: () => ['peer-a'],
@@ -152,7 +158,7 @@ describe('VerifyCollector', () => {
       timeoutMs: VERIFY_COLLECTION_TIMEOUT_MAX_MS + 1,
     })).rejects.toThrow(/verify_timeout_invalid/);
 
-    expect(sendP2P).not.toHaveBeenCalled();
+    expect(sendP2P.calls).toEqual([]);
   });
 
   it('clears the timeout timer after quorum resolves', async () => {

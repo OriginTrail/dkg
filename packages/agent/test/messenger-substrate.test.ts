@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   InMemoryMessageIdempotencyStore,
   InMemoryProtocolOutboxStore,
@@ -11,25 +11,63 @@ import {
 } from '@origintrail-official/dkg-core';
 import { Messenger, MessengerNotConfiguredError } from '../src/p2p/messenger.js';
 
+/**
+ * Hand-rolled call recorder: records every call's args on `.calls`
+ * and delegates to `impl`. Replaces the former vitest auto-spies as
+ * a plain DI seam — no behaviour mocking, just observation.
+ */
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
+
+/**
+ * Mutable clock seam: a no-arg recorder whose backing implementation
+ * can be swapped via `.set(impl)`. Stands in for the injectable
+ * wall-clock the Messenger reads; tests drive deterministic
+ * timestamps by re-pointing the impl mid-test.
+ */
+function makeClock(initial: () => number) {
+  let impl = initial;
+  const calls: [][] = [];
+  const fn = (): number => {
+    calls.push([]);
+    return impl();
+  };
+  return Object.assign(fn, {
+    calls,
+    set(next: () => number) {
+      impl = next;
+    },
+  });
+}
+
 const PEER_A = '12D3KooWAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const PEER_B = '12D3KooWBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
 const PROTO = '/dkg/10.0.1/message';
 const FIXED_MSG_ID = '00000000-0000-4000-8000-000000000001';
 
 interface RouterDouble {
-  send: ReturnType<typeof vi.fn>;
-  register: ReturnType<typeof vi.fn>;
+  send: ReturnType<typeof recorder<[string, string, Uint8Array, ...unknown[]], Promise<Uint8Array>>>;
+  register: ReturnType<typeof recorder<[string, StreamHandler], void>>;
   /** Inbound stream handler captured from `register` for tests that invoke it. */
   inboundHandler?: StreamHandler;
 }
 
 function makeRouter(sendImpl?: () => Promise<Uint8Array>): RouterDouble {
-  const router: RouterDouble = {
-    send: vi.fn(sendImpl ?? (async () => new Uint8Array([0x10]))),
-    register: vi.fn((_protocol: string, handler: StreamHandler) => {
-      router.inboundHandler = handler;
-    }),
-  };
+  const send = recorder(
+    (sendImpl ?? (async () => new Uint8Array([0x10]))) as (
+      ...args: [string, string, Uint8Array, ...unknown[]]
+    ) => Promise<Uint8Array>,
+  );
+  const register = recorder((_protocol: string, handler: StreamHandler): void => {
+    router.inboundHandler = handler;
+  });
+  const router: RouterDouble = { send, register };
   return router;
 }
 
@@ -40,7 +78,7 @@ function makeSubstrate(overrides: { router?: RouterDouble } = {}) {
     backoffs: [10],
     maxAgeMs: 60_000,
   });
-  const clock = vi.fn(() => 1_700_000_000_000);
+  const clock = makeClock(() => 1_700_000_000_000);
   const messenger = new Messenger({
     router: router as unknown as ProtocolRouter,
     idempotencyStore,
@@ -66,8 +104,8 @@ describe('Messenger.sendReliable (happy path semantics)', () => {
       messageId: FIXED_MSG_ID,
       attempts: 1,
     });
-    expect(router.send).toHaveBeenCalledTimes(1);
-    const [, , wireBytes] = router.send.mock.calls[0];
+    expect(router.send.calls).toHaveLength(1);
+    const [, , wireBytes] = router.send.calls[0];
     const decoded = decodeReliableEnvelope(wireBytes as Uint8Array);
     expect(decoded.messageId).toBe(FIXED_MSG_ID);
     expect(decoded.version).toBe(RELIABLE_ENVELOPE_VERSION);
@@ -112,11 +150,11 @@ describe('Messenger.sendReliable (sender-side idempotency)', () => {
     await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
       messageId: FIXED_MSG_ID,
     });
-    expect(router.send).toHaveBeenCalledTimes(1);
+    expect(router.send.calls).toHaveLength(1);
     const second = await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([2]), {
       messageId: FIXED_MSG_ID,
     });
-    expect(router.send).toHaveBeenCalledTimes(1);
+    expect(router.send.calls).toHaveLength(1);
     expect(second.delivered).toBe(true);
     expect(second.delivered && Array.from(second.response)).toEqual([0x42]);
   });
@@ -155,7 +193,7 @@ describe('Messenger.sendReliable (failure / outbox)', () => {
     const first = messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
       messageId: FIXED_MSG_ID,
     });
-    expect(router.send).toHaveBeenCalledTimes(1);
+    expect(router.send.calls).toHaveLength(1);
 
     const second = await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
       messageId: FIXED_MSG_ID,
@@ -209,11 +247,11 @@ describe('Messenger.sendReliable (failure / outbox)', () => {
 describe('Messenger.register (receiver-side idempotency)', () => {
   it('decodes the envelope and invokes the handler with the inner payload', async () => {
     const { messenger, router } = makeSubstrate();
-    const handler = vi.fn(async (req: Uint8Array, _peer: string) => {
+    const handler = recorder(async (req: Uint8Array, _peer: string) => {
       return new Uint8Array([...req, 0xff]);
     });
     messenger.register(PROTO, handler);
-    expect(router.register).toHaveBeenCalledWith(PROTO, expect.any(Function));
+    expect(router.register.calls.at(-1)).toEqual([PROTO, expect.any(Function)]);
 
     const envelope = encodeReliableEnvelope({
       messageId: FIXED_MSG_ID,
@@ -224,16 +262,16 @@ describe('Messenger.register (receiver-side idempotency)', () => {
     const peerIdObj = { toString: () => PEER_A, toBytes: () => new Uint8Array() };
     const response = await router.inboundHandler!(envelope, peerIdObj);
 
-    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.calls).toHaveLength(1);
     // protobufjs decodes `bytes` fields into Node Buffer (a Uint8Array
     // subclass). Compare bytes-as-array rather than typed-array identity.
-    expect(Array.from(handler.mock.calls[0][0])).toEqual([1, 2, 3]);
+    expect(Array.from(handler.calls[0][0])).toEqual([1, 2, 3]);
     expect(Array.from(response)).toEqual([1, 2, 3, 0xff]);
   });
 
   it('returns the cached response on a duplicate receive without invoking the handler', async () => {
     const { messenger, router } = makeSubstrate();
-    const handler = vi.fn(async () => new Uint8Array([0xaa]));
+    const handler = recorder(async () => new Uint8Array([0xaa]));
     messenger.register(PROTO, handler);
 
     const envelope = encodeReliableEnvelope({
@@ -246,7 +284,7 @@ describe('Messenger.register (receiver-side idempotency)', () => {
     const first = await router.inboundHandler!(envelope, peerIdObj);
     const second = await router.inboundHandler!(envelope, peerIdObj);
 
-    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.calls).toHaveLength(1);
     expect(Array.from(first)).toEqual([0xaa]);
     expect(Array.from(second)).toEqual([0xaa]);
   });
@@ -257,7 +295,7 @@ describe('Messenger.register (receiver-side idempotency)', () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const handler = vi.fn(async () => {
+    const handler = recorder(async () => {
       await gate;
       return new Uint8Array([0xab]);
     });
@@ -273,12 +311,12 @@ describe('Messenger.register (receiver-side idempotency)', () => {
     const first = router.inboundHandler!(envelope, peerIdObj);
     const second = router.inboundHandler!(envelope, peerIdObj);
 
-    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.calls).toHaveLength(1);
     release();
     const [firstResponse, secondResponse] = await Promise.all([first, second]);
     expect(Array.from(firstResponse)).toEqual([0xab]);
     expect(Array.from(secondResponse)).toEqual([0xab]);
-    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.calls).toHaveLength(1);
   });
 
   it('returns RESPONSE_GONE bytes on a duplicate receive when the original response was too big to cache', async () => {
@@ -348,14 +386,14 @@ describe('Messenger.processOutboxTick (retry loop semantics)', () => {
       messageId: FIXED_MSG_ID,
     });
     expect(outboxStore.size()).toBe(1);
-    const sendCallsBefore = router.send.mock.calls.length;
+    const sendCallsBefore = router.send.calls.length;
 
     // Sibling flush completes delivery — we model that as
     // markDelivered without going through the wire.
     outboxStore.markDelivered(PEER_A, PROTO, FIXED_MSG_ID);
 
     await messenger.processOutboxTick(clock() + 100);
-    expect(router.send.mock.calls.length).toBe(sendCallsBefore);
+    expect(router.send.calls.length).toBe(sendCallsBefore);
   });
 });
 
@@ -389,14 +427,14 @@ describe('Messenger.getSloStats (SLO histogram)', () => {
   it('records latency from sendReliable invoke → delivered:true', async () => {
     const { messenger, clock } = makeSubstrate();
     // Start at T=1_700_000_000_000 (from makeSubstrate's clock default).
-    clock.mockImplementation(() => 1_700_000_000_000);
+    clock.set(() => 1_700_000_000_000);
     const sendPromise = messenger.sendReliable(PEER_B, PROTO, new Uint8Array([1]), {
       messageId: FIXED_MSG_ID,
     });
     // Tick the clock forward before the await resolves — the SLO
     // sample should be the *delivery* timestamp minus the *first
     // invocation* timestamp (here: 250ms).
-    clock.mockImplementation(() => 1_700_000_000_250);
+    clock.set(() => 1_700_000_000_250);
     const result = await sendPromise;
     expect(result.delivered).toBe(true);
 
@@ -418,7 +456,7 @@ describe('Messenger.getSloStats (SLO histogram)', () => {
     });
     const { messenger, clock } = makeSubstrate({ router });
     // First attempt at T=0 fails → queued.
-    clock.mockImplementation(() => 1_700_000_000_000);
+    clock.set(() => 1_700_000_000_000);
     const first = await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
       messageId: FIXED_MSG_ID,
     });
@@ -430,7 +468,7 @@ describe('Messenger.getSloStats (SLO histogram)', () => {
 
     // Backoff ladder is 10ms; advance to T+10, retry succeeds.
     shouldFail = false;
-    clock.mockImplementation(() => 1_700_000_000_010);
+    clock.set(() => 1_700_000_000_010);
     await messenger.processOutboxTick(1_700_000_000_010);
 
     stats = messenger.getSloStats();
@@ -450,7 +488,7 @@ describe('Messenger.getSloStats (SLO histogram)', () => {
       const sendStart = base + i * 1_000_000; // well-separated windows
       const sendEnd = sendStart + latencies[i];
       let next = sendStart;
-      clock.mockImplementation(() => next);
+      clock.set(() => next);
       const p = messenger.sendReliable(PEER_B, PROTO, new Uint8Array([i]), {
         messageId: `m-${i}-${'0'.repeat(34)}`,
       });
@@ -510,11 +548,11 @@ describe('Messenger.getSloStats (SLO histogram)', () => {
         (resp) => !(resp.byteLength === 1 && resp[0] === 0x01),
       );
 
-      clock.mockImplementation(() => 1_700_000_000_000);
+      clock.set(() => 1_700_000_000_000);
       const p = messenger.sendReliable(PEER_B, PROTO, new Uint8Array([1]), {
         messageId: 'm-rej-' + '0'.repeat(30),
       });
-      clock.mockImplementation(() => 1_700_000_000_500);
+      clock.set(() => 1_700_000_000_500);
       const result = await p;
 
       // Caller still sees a successful response with the sentinel
@@ -593,9 +631,9 @@ describe('Messenger.getSloStats (SLO histogram)', () => {
   it('per-protocol stats are isolated', async () => {
     const { messenger, clock } = makeSubstrate();
     const PROTO_B = '/dkg/10.0.1/private-access';
-    clock.mockImplementation(() => 1_000_000);
+    clock.set(() => 1_000_000);
     let next = 1_000_000;
-    clock.mockImplementation(() => next);
+    clock.set(() => next);
     const p1 = messenger.sendReliable(PEER_B, PROTO, new Uint8Array([1]), {
       messageId: 'msg-A-' + '0'.repeat(30),
     });
@@ -623,7 +661,7 @@ describe('Messenger.getSloStats (SLO histogram)', () => {
 // bandwidth.
 describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
   function makeStallSubstrate(opts: {
-    resolvePeer?: ReturnType<typeof vi.fn>;
+    resolvePeer?: ReturnType<typeof recorder<[string, { signal: AbortSignal }], Promise<void>>>;
     backoffs?: readonly number[];
     initialClock?: number;
     errorMessage?: string;
@@ -640,7 +678,9 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
     const advance = (ms: number) => {
       nowMs += ms;
     };
-    const resolvePeer = opts.resolvePeer ?? vi.fn(async () => undefined);
+    const resolvePeer =
+      opts.resolvePeer ??
+      recorder(async (_peerId: string, _opts: { signal: AbortSignal }): Promise<void> => undefined);
     const messenger = new Messenger({
       router: router as unknown as ProtocolRouter,
       idempotencyStore,
@@ -663,7 +703,7 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
       advance(1000);
     }
 
-    expect(resolvePeer).not.toHaveBeenCalled();
+    expect(resolvePeer.calls).toEqual([]);
   });
 
   it('fires resolvePeer once when the stall threshold is hit', async () => {
@@ -676,8 +716,8 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
       advance(1000);
     }
 
-    expect(resolvePeer).toHaveBeenCalledTimes(1);
-    expect(resolvePeer).toHaveBeenCalledWith(PEER_A, { signal: expect.any(AbortSignal) });
+    expect(resolvePeer.calls).toHaveLength(1);
+    expect(resolvePeer.calls.at(-1)).toEqual([PEER_A, { signal: expect.any(AbortSignal) }]);
   });
 
   it('treats NO_RESERVATION as recoverable and triggers the DHT walk', async () => {
@@ -693,7 +733,7 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
       advance(1000);
     }
 
-    expect(resolvePeer).toHaveBeenCalledTimes(1);
+    expect(resolvePeer.calls).toHaveLength(1);
   });
 
   // Regression for the May 2026 multi-node soak. libp2p surfaces
@@ -719,8 +759,8 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
       advance(1000);
     }
 
-    expect(resolvePeer).toHaveBeenCalledTimes(1);
-    expect(resolvePeer).toHaveBeenCalledWith(PEER_A, { signal: expect.any(AbortSignal) });
+    expect(resolvePeer.calls).toHaveLength(1);
+    expect(resolvePeer.calls.at(-1)).toEqual([PEER_A, { signal: expect.any(AbortSignal) }]);
   });
 
   it('rate-limits resolvePeer per peer (no second walk within DHT_WALK_RATE_LIMIT_MS)', async () => {
@@ -732,7 +772,7 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
       });
       advance(1000);
     }
-    expect(resolvePeer).toHaveBeenCalledTimes(1);
+    expect(resolvePeer.calls).toHaveLength(1);
 
     for (let i = 0; i < 5; i++) {
       await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
@@ -740,13 +780,13 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
       });
       advance(1000);
     }
-    expect(resolvePeer).toHaveBeenCalledTimes(1);
+    expect(resolvePeer.calls).toHaveLength(1);
 
     advance(5 * 60 * 1000 + 1);
     await messenger.sendReliable(PEER_A, PROTO, new Uint8Array([1]), {
       messageId: FIXED_MSG_ID,
     });
-    expect(resolvePeer).toHaveBeenCalledTimes(2);
+    expect(resolvePeer.calls).toHaveLength(2);
   });
 
   it('does NOT fire resolvePeer for non-address-resolution errors (stream resets etc.)', async () => {
@@ -755,7 +795,9 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
     });
     const idempotencyStore = new InMemoryMessageIdempotencyStore();
     const outboxStore = new InMemoryProtocolOutboxStore({ backoffs: [10], maxAgeMs: 60_000 });
-    const resolvePeer = vi.fn(async () => undefined);
+    const resolvePeer = recorder(
+      async (_peerId: string, _opts: { signal: AbortSignal }): Promise<void> => undefined,
+    );
     const messenger = new Messenger({
       router: router as unknown as ProtocolRouter,
       idempotencyStore,
@@ -771,7 +813,7 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
       });
     }
 
-    expect(resolvePeer).not.toHaveBeenCalled();
+    expect(resolvePeer.calls).toEqual([]);
   });
 
   it('is a no-op when resolvePeer is not wired (backwards compat)', async () => {
@@ -808,8 +850,8 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
       advance(100);
     }
 
-    expect(resolvePeer).toHaveBeenCalledTimes(2);
-    const peers = resolvePeer.mock.calls.map((c) => c[0]).sort();
+    expect(resolvePeer.calls).toHaveLength(2);
+    const peers = resolvePeer.calls.map((c) => c[0]).sort();
     expect(peers).toEqual([PEER_A, PEER_B].sort());
   });
 
@@ -822,7 +864,7 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
       });
       advance(1000);
     }
-    expect(resolvePeer).toHaveBeenCalledTimes(1);
+    expect(resolvePeer.calls).toHaveLength(1);
 
     const dropped = messenger.dropExpiredOutbox(now() + 60_001);
     expect(dropped).toHaveLength(1);
@@ -834,13 +876,15 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
       });
       advance(1000);
     }
-    expect(resolvePeer).toHaveBeenCalledTimes(2);
+    expect(resolvePeer.calls).toHaveLength(2);
   });
 
   it('swallows resolvePeer rejections (failure must not bubble to caller)', async () => {
-    const resolvePeer = vi.fn(async () => {
-      throw new Error('DHT walk timed out');
-    });
+    const resolvePeer = recorder(
+      async (_peerId: string, _opts: { signal: AbortSignal }): Promise<void> => {
+        throw new Error('DHT walk timed out');
+      },
+    );
     const { messenger } = makeStallSubstrate({ resolvePeer });
 
     for (let i = 0; i < 5; i++) {
@@ -848,7 +892,7 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
         messageId: FIXED_MSG_ID,
       });
     }
-    expect(resolvePeer).toHaveBeenCalledTimes(1);
+    expect(resolvePeer.calls).toHaveLength(1);
   });
 
   it('also fires from the retry tick path (not only from sendReliable)', async () => {
@@ -860,12 +904,12 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
       });
       advance(1000);
     }
-    expect(resolvePeer).not.toHaveBeenCalled();
+    expect(resolvePeer.calls).toEqual([]);
     expect(outboxStore.size()).toBe(1);
 
     advance(100);
     await messenger.processOutboxTick(20_000_000_000_000);
 
-    expect(resolvePeer).toHaveBeenCalledTimes(1);
+    expect(resolvePeer.calls).toHaveLength(1);
   });
 });

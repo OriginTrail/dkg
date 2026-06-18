@@ -21,7 +21,7 @@
 //      level split also came from PR #524 review — emitting the ok
 //      line at warn level breaks operator alerting downstream.
 
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import {
   DEFAULT_RELAY_SERVER_CAPACITY,
   RELAY_CAPACITY_MULTIPLIER,
@@ -34,6 +34,15 @@ import {
   validateRelayServerCapacity,
   checkFdLimit,
 } from '../src/node.js';
+
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
 
 describe('deriveRelayCaps', () => {
   it('returns the default capacity-derived caps at the documented 1:2 ratio', () => {
@@ -160,24 +169,28 @@ describe('checkFdLimit', () => {
   // process.report.getReport() is the only cross-platform Node API
   // that surfaces RLIMIT_NOFILE without a syscall dep. The
   // `process.report` property itself is a read-only getter, so we
-  // spy on the `getReport` method (which is writable on the
-  // returned report object) per-test rather than reassigning the
-  // parent property.
+  // swap the `getReport` method (which is writable on the report
+  // object) for a hand-rolled recorder per-test rather than
+  // reassigning the parent property, and restore the original
+  // afterwards.
+  const originalGetReport = (process.report as any).getReport;
   afterEach(() => {
-    vi.restoreAllMocks();
+    (process.report as any).getReport = originalGetReport;
   });
 
-  function spyOnReport(report: any) {
-    return vi.spyOn(process.report, 'getReport').mockReturnValue(report);
+  function stubReport(report: any) {
+    const m = recorder(() => report);
+    (process.report as any).getReport = m;
+    return m;
   }
 
   it('emits warn level when soft limit is below recommended (= max(4096, maxConnections × 2))', () => {
-    spyOnReport({ userLimits: { open_files: { soft: 1024, hard: 'unlimited' } } });
-    const log = vi.fn();
+    stubReport({ userLimits: { open_files: { soft: 1024, hard: 'unlimited' } } });
+    const log = recorder((_level: string, _msg: string) => undefined);
     // maxConnections=2048 → recommended = max(4096, 4096) = 4096; soft=1024 is below.
     checkFdLimit(2048, log);
-    expect(log).toHaveBeenCalledTimes(1);
-    const [level, msg] = log.mock.calls[0];
+    expect(log.calls).toHaveLength(1);
+    const [level, msg] = log.calls[0];
     expect(level).toBe('warn');
     expect(msg).toMatch(/^relay server enabled/);
     expect(msg).toContain('soft=1024');
@@ -194,11 +207,11 @@ describe('checkFdLimit', () => {
     // would trip operator-facing alerting downstream on every
     // healthy startup. The level split is the contract being
     // pinned here.
-    spyOnReport({ userLimits: { open_files: { soft: 8192, hard: 'unlimited' } } });
-    const log = vi.fn();
+    stubReport({ userLimits: { open_files: { soft: 8192, hard: 'unlimited' } } });
+    const log = recorder((_level: string, _msg: string) => undefined);
     checkFdLimit(2048, log);
-    expect(log).toHaveBeenCalledTimes(1);
-    const [level, msg] = log.mock.calls[0];
+    expect(log.calls).toHaveLength(1);
+    const [level, msg] = log.calls[0];
     expect(level).toBe('info');
     expect(msg).toMatch(/soft=8192 >= recommended 4096, ok/);
   });
@@ -209,21 +222,21 @@ describe('checkFdLimit', () => {
     // recommend a sensible minimum — fd usage isn't dominated by
     // libp2p alone on a real host (SQLite, log files, the daemon
     // HTTP server, etc. all chip in).
-    spyOnReport({ userLimits: { open_files: { soft: 1500, hard: 'unlimited' } } });
-    const log = vi.fn();
+    stubReport({ userLimits: { open_files: { soft: 1500, hard: 'unlimited' } } });
+    const log = recorder((_level: string, _msg: string) => undefined);
     checkFdLimit(512, log);
-    const [level, msg] = log.mock.calls[0];
+    const [level, msg] = log.calls[0];
     expect(level).toBe('warn');
     expect(msg).toContain('recommended 4096');
     expect(msg).not.toContain('recommended 1024');
   });
 
   it('logs the can-not-read fallback at warn level when userLimits is missing (e.g. exotic Node build)', () => {
-    spyOnReport({ userLimits: {} });
-    const log = vi.fn();
+    stubReport({ userLimits: {} });
+    const log = recorder((_level: string, _msg: string) => undefined);
     checkFdLimit(2048, log);
-    expect(log).toHaveBeenCalledTimes(1);
-    const [level, msg] = log.mock.calls[0];
+    expect(log.calls).toHaveLength(1);
+    const [level, msg] = log.calls[0];
     expect(level).toBe('warn');
     expect(msg).toMatch(/could not read host ulimit/);
     expect(msg).toContain('>= 4096');
@@ -233,23 +246,24 @@ describe('checkFdLimit', () => {
     // POSIX returns either a number or the string "unlimited" for the
     // hard limit; soft is usually numeric but the API contract
     // doesn't strictly require it. Defence in depth.
-    spyOnReport({ userLimits: { open_files: { soft: 'unlimited', hard: 'unlimited' } } });
-    const log = vi.fn();
+    stubReport({ userLimits: { open_files: { soft: 'unlimited', hard: 'unlimited' } } });
+    const log = recorder((_level: string, _msg: string) => undefined);
     checkFdLimit(2048, log);
-    expect(log).toHaveBeenCalledTimes(1);
-    const [level, msg] = log.mock.calls[0];
+    expect(log.calls).toHaveLength(1);
+    const [level, msg] = log.calls[0];
     expect(level).toBe('warn');
     expect(msg).toMatch(/could not read host ulimit/);
   });
 
   it('logs the error fallback at warn level when process.report.getReport() throws', () => {
-    vi.spyOn(process.report, 'getReport').mockImplementation(() => {
+    const throwingGetReport = recorder(() => {
       throw new Error('exotic test environment');
     });
-    const log = vi.fn();
+    (process.report as any).getReport = throwingGetReport;
+    const log = recorder((_level: string, _msg: string) => undefined);
     checkFdLimit(2048, log);
-    expect(log).toHaveBeenCalledTimes(1);
-    const [level, msg] = log.mock.calls[0];
+    expect(log.calls).toHaveLength(1);
+    const [level, msg] = log.calls[0];
     expect(level).toBe('warn');
     expect(msg).toMatch(/error reading ulimit/);
     expect(msg).toContain('exotic test environment');

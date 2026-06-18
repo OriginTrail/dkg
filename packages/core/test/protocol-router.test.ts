@@ -1,7 +1,19 @@
 import { describe, it, expect } from 'vitest';
-import { composeAbortSignals, isRecoverableSendError, DEFAULT_SEND_TIMEOUT_MS, ProtocolRouter } from '../src/protocol-router.js';
+import {
+  composeAbortSignals,
+  isRecoverableSendError,
+  DEFAULT_SEND_TIMEOUT_MS,
+  ProtocolRouter,
+  QuietRetryableHandlerError,
+} from '../src/protocol-router.js';
 import type { DKGNode } from '../src/node.js';
 import type { PeerResolver } from '../src/network/peer-resolver.js';
+
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => { calls.push(args); return impl(...args); };
+  return Object.assign(fn, { calls });
+}
 
 describe('ProtocolRouter', () => {
   describe('isRecoverableSendError', () => {
@@ -20,6 +32,12 @@ describe('ProtocolRouter', () => {
       expect(isRecoverableSendError(new Error('no valid addresses'))).toBe(true);
       expect(isRecoverableSendError(new Error('NO_RESERVATION'))).toBe(true);
       expect(isRecoverableSendError(new Error('no reservation for relay'))).toBe(true);
+    });
+
+    it('returns true for retryable sync responder backpressure aborts', () => {
+      expect(isRecoverableSendError(new Error('sync responder queue full'))).toBe(true);
+      expect(isRecoverableSendError(new Error('sync responder peer queue full'))).toBe(true);
+      expect(isRecoverableSendError(new Error('sync responder queue wait exceeded'))).toBe(true);
     });
 
     // Regression for the May 2026 multi-node soak: libp2p surfaces
@@ -51,6 +69,254 @@ describe('ProtocolRouter', () => {
   describe('DEFAULT_SEND_TIMEOUT_MS', () => {
     it('is 20 seconds for relay/sync tolerance', () => {
       expect(DEFAULT_SEND_TIMEOUT_MS).toBe(20_000);
+    });
+  });
+
+  describe('register() inbound abort signal', () => {
+    const PROTOCOL = '/dkg/test/inbound-abort/1.0.0';
+    const REMOTE_PEER = '12D3KooWInboundAbortPeer';
+
+    class FakeInboundStream extends EventTarget {
+      sent: Uint8Array | null = null;
+      aborted: Error | null = null;
+      closedWithSignal: AbortSignal | undefined;
+
+      constructor(
+        private readonly chunks: Uint8Array[],
+        private readonly afterReadComplete?: () => void,
+      ) {
+        super();
+      }
+
+      send(data: Uint8Array): void {
+        this.sent = data;
+      }
+
+      async close(options?: { signal?: AbortSignal }): Promise<void> {
+        this.closedWithSignal = options?.signal;
+      }
+
+      abort(error: Error): void {
+        this.aborted = error;
+      }
+
+      [Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array> {
+        let index = 0;
+        let completed = false;
+        return {
+          next: async () => {
+            if (index < this.chunks.length) {
+              return { value: this.chunks[index++], done: false };
+            }
+            if (!completed && this.afterReadComplete) {
+              completed = true;
+              return await new Promise<IteratorResult<Uint8Array>>((resolve) => {
+                setTimeout(() => {
+                  resolve({ value: undefined as unknown as Uint8Array, done: true });
+                  queueMicrotask(() => this.afterReadComplete?.());
+                }, 0);
+              });
+            }
+            return { value: undefined as unknown as Uint8Array, done: true };
+          },
+          [Symbol.asyncIterator]() {
+            return this;
+          },
+        };
+      }
+    }
+
+    function makeInboundFixture(stopSignal?: AbortSignal) {
+      let inbound: ((stream: FakeInboundStream, connection: unknown) => Promise<void>) | null = null;
+      const node = {
+        get stopSignal() {
+          return stopSignal;
+        },
+        libp2p: {
+          handle: (_protocol: string, handler: (stream: FakeInboundStream, connection: unknown) => Promise<void>) => {
+            inbound = handler;
+          },
+          unhandle: () => undefined,
+        },
+      } as unknown as DKGNode;
+      const router = new ProtocolRouter(node);
+      const connection = {
+        remotePeer: {
+          toString: () => REMOTE_PEER,
+          toMultihash: () => ({ bytes: new Uint8Array([1, 2, 3]) }),
+        },
+      };
+      return {
+        router,
+        invoke: async (stream: FakeInboundStream) => {
+          if (!inbound) throw new Error('handler not registered');
+          await inbound(stream, connection);
+        },
+      };
+    }
+
+    it('passes a live AbortSignal to raw handlers and preserves it through close', async () => {
+      let seenSignal: AbortSignal | undefined;
+      const fixture = makeInboundFixture();
+      fixture.router.register(PROTOCOL, async (_data, _peer, options) => {
+        seenSignal = options?.signal;
+        return new Uint8Array([0xaa]);
+      });
+      const stream = new FakeInboundStream([new Uint8Array([0x01])]);
+
+      await fixture.invoke(stream);
+
+      expect(seenSignal).toBeDefined();
+      expect(seenSignal?.aborted).toBe(false);
+      expect(stream.sent).toEqual(new Uint8Array([0xaa]));
+      expect(stream.closedWithSignal).toBeUndefined();
+      expect(stream.aborted).toBeNull();
+    });
+
+    it('removes the node stop listener after successful raw inbound handling', async () => {
+      const stopController = new AbortController();
+      let adds = 0;
+      let removes = 0;
+      const originalAdd = stopController.signal.addEventListener.bind(stopController.signal);
+      const originalRemove = stopController.signal.removeEventListener.bind(stopController.signal);
+      stopController.signal.addEventListener = ((type, listener, options) => {
+        if (type === 'abort') adds += 1;
+        return originalAdd(type, listener, options);
+      }) as AbortSignal['addEventListener'];
+      stopController.signal.removeEventListener = ((type, listener, options) => {
+        if (type === 'abort') removes += 1;
+        return originalRemove(type, listener, options);
+      }) as AbortSignal['removeEventListener'];
+
+      try {
+        const fixture = makeInboundFixture(stopController.signal);
+        fixture.router.register(PROTOCOL, async () => new Uint8Array([0xaa]));
+        await fixture.invoke(new FakeInboundStream([new Uint8Array([0x01])]));
+
+        expect(adds).toBeGreaterThan(0);
+        expect(removes).toBe(adds);
+      } finally {
+        stopController.signal.addEventListener = originalAdd as AbortSignal['addEventListener'];
+        stopController.signal.removeEventListener = originalRemove as AbortSignal['removeEventListener'];
+      }
+    });
+
+    it('aborts the handler signal when the inbound stream closes while work is pending', async () => {
+      let seenSignal: AbortSignal | undefined;
+      const fixture = makeInboundFixture();
+      fixture.router.register(PROTOCOL, async (_data, _peer, options) => {
+        seenSignal = options?.signal;
+        await new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(options.signal?.reason), { once: true });
+        });
+        return new Uint8Array([0xbb]);
+      });
+      const stream = new FakeInboundStream([new Uint8Array([0x01])]);
+      const inbound = fixture.invoke(stream);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      stream.dispatchEvent(new Event('close'));
+      await inbound;
+
+      expect(seenSignal?.aborted).toBe(true);
+      expect(stream.sent).toBeNull();
+      expect(stream.aborted?.message).toMatch(/stream closed by peer/);
+    });
+
+    it('skips raw handler dispatch when the stream aborts after the request body is read', async () => {
+      const fixture = makeInboundFixture();
+      let handlerCalls = 0;
+      fixture.router.register(PROTOCOL, async () => {
+        handlerCalls += 1;
+        return new Uint8Array([0xdd]);
+      });
+      let stream!: FakeInboundStream;
+      stream = new FakeInboundStream([new Uint8Array([0x01])], () => {
+        stream.dispatchEvent(new Event('close'));
+      });
+
+      await fixture.invoke(stream);
+
+      expect(handlerCalls).toBe(0);
+      expect(stream.sent).toBeNull();
+      expect(stream.aborted?.message).toMatch(/stream closed by peer/);
+    });
+
+    it('aborts the handler signal when node stop fires while work is pending', async () => {
+      const stopController = new AbortController();
+      let seenSignal: AbortSignal | undefined;
+      const fixture = makeInboundFixture(stopController.signal);
+      fixture.router.register(PROTOCOL, async (_data, _peer, options) => {
+        seenSignal = options?.signal;
+        await new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(options.signal?.reason), { once: true });
+        });
+        return new Uint8Array([0xcc]);
+      });
+      const stream = new FakeInboundStream([new Uint8Array([0x01])]);
+      const inbound = fixture.invoke(stream);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      stopController.abort(new Error('node stopping'));
+      await inbound;
+
+      expect(seenSignal?.aborted).toBe(true);
+      expect(stream.sent).toBeNull();
+      expect(stream.aborted?.message).toMatch(/node stopping/);
+    });
+
+    it('aborts quietly for retryable handler backpressure', async () => {
+      const originalError = console.error;
+      const errorSpy = recorder((..._args: unknown[]) => undefined);
+      console.error = errorSpy as unknown as typeof console.error;
+      try {
+        const fixture = makeInboundFixture();
+        fixture.router.register(PROTOCOL, async () => {
+          throw new QuietRetryableHandlerError('sync responder peer queue full');
+        });
+        const stream = new FakeInboundStream([new Uint8Array([0x01])]);
+
+        await fixture.invoke(stream);
+
+        expect(stream.sent).toBeNull();
+        expect(stream.aborted?.message).toBe('sync responder peer queue full');
+        expect(errorSpy.calls).toEqual([]);
+      } finally {
+        console.error = originalError;
+      }
+    });
+
+    it('does not mask non-abort handler failures just because the handler signal is aborted', async () => {
+      const originalError = console.error;
+      const errorSpy = recorder((..._args: unknown[]) => undefined);
+      console.error = errorSpy as unknown as typeof console.error;
+      try {
+        let seenSignal: AbortSignal | undefined;
+        const fixture = makeInboundFixture();
+        fixture.router.register(PROTOCOL, async (_data, _peer, options) => {
+          seenSignal = options?.signal;
+          await new Promise<void>((resolve) => {
+            options?.signal?.addEventListener('abort', () => resolve(), { once: true });
+          });
+          throw new Error('store query failed');
+        });
+        const stream = new FakeInboundStream([new Uint8Array([0x01])]);
+        const inbound = fixture.invoke(stream);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        stream.dispatchEvent(new Event('close'));
+        await inbound;
+
+        expect(seenSignal?.aborted).toBe(true);
+        expect(stream.sent).toBeNull();
+        expect(stream.aborted?.message).toBe('handler error');
+        expect(errorSpy.calls).toContainEqual([
+          expect.stringContaining('[ProtocolRouter] handler error'),
+          'store query failed',
+        ]);
+      } finally {
+        console.error = originalError;
+      }
     });
   });
 
@@ -94,6 +360,87 @@ describe('ProtocolRouter', () => {
       await expect(
         router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), 5000),
       ).rejects.toThrow(/aborted/);
+
+      expect(closeSignal).toBeDefined();
+      expect(closeSignal?.aborted).toBe(true);
+      expect(dialCalls).toBe(1);
+    });
+
+    it('does not mutate default AbortController reasons while shutdown cancels backoff', async () => {
+      const stopController = new AbortController();
+      let dialCalls = 0;
+      let releaseDialed: () => void = () => {};
+      const dialed = new Promise<void>((resolve) => {
+        releaseDialed = resolve;
+      });
+      const node = {
+        get stopSignal() {
+          return stopController.signal;
+        },
+        libp2p: {
+          getConnections: () => [],
+          dialProtocol: async () => {
+            dialCalls += 1;
+            releaseDialed();
+            throw new Error('stream reset');
+          },
+          handle: () => undefined,
+          unhandle: () => undefined,
+          peerStore: { get: async () => { throw new Error('NotFound'); } },
+        },
+      } as unknown as DKGNode;
+      const peerResolver = { resolve: async () => [] } as unknown as PeerResolver;
+      const router = new ProtocolRouter(node, { peerResolver });
+
+      const sendPromise = router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), 5000);
+
+      await dialed;
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      expect(() => stopController.abort()).not.toThrow();
+      await expect(sendPromise).rejects.toMatchObject({ name: 'AbortError' });
+      expect(dialCalls).toBe(1);
+    });
+
+    it('passes caller signals through close/dial work and does not retry caller aborts', async () => {
+      const callerController = new AbortController();
+      let dialCalls = 0;
+      let closeSignal: AbortSignal | undefined;
+      const node = {
+        libp2p: {
+          getConnections: () => [],
+          dialProtocol: async () => {
+            dialCalls += 1;
+            return {
+              writeStatus: 'open' as const,
+              send: () => undefined,
+              close: async (opts?: { signal?: AbortSignal }) => {
+                closeSignal = opts?.signal;
+                const err = new Error('request cancelled');
+                err.name = 'AbortError';
+                callerController.abort(err);
+                throw err;
+              },
+              abort: () => undefined,
+              async *[Symbol.asyncIterator]() {
+                /* never reached */
+              },
+            };
+          },
+          handle: () => undefined,
+          unhandle: () => undefined,
+          peerStore: { get: async () => { throw new Error('NotFound'); } },
+        },
+      } as unknown as DKGNode;
+      const peerResolver = { resolve: async () => [] } as unknown as PeerResolver;
+      const router = new ProtocolRouter(node, { peerResolver });
+
+      await expect(
+        router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), {
+          timeoutMs: 5000,
+          signal: callerController.signal,
+        }),
+      ).rejects.toThrow('request cancelled');
 
       expect(closeSignal).toBeDefined();
       expect(closeSignal?.aborted).toBe(true);

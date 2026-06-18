@@ -130,11 +130,11 @@ async function loadContracts(): Promise<Contracts> {
   const nft = new ethers.Contract(
     c('DKGPublishingConvictionNFT'),
     [
-      'function createAccount(uint96) external returns (uint256)',
+      'function createAccount(uint96, uint72) external returns (uint256)',
       'function registerAgent(uint256, address) external',
       'function deregisterAgent(uint256, address) external',
       'function agentToAccountId(address) view returns (uint256)',
-      'function accounts(uint256) view returns (uint96 committedTRAC,uint40 createdAtEpoch,uint40 expiresAtEpoch,uint40 createdAtTimestamp,uint40 expiresAtTimestamp,uint16 lockDurationEpochs,uint16 discountBps,uint16 lastSettledWindow,bool fullySwept)',
+      'function accounts(uint256) view returns (uint96 committedTRAC,uint40 createdAtEpoch,uint40 expiresAtEpoch,uint40 createdAtTimestamp,uint40 expiresAtTimestamp,uint16 lockDurationEpochs,uint16 discountBps,uint16 lastSettledWindow,bool fullySwept,uint72 primaryNode,uint40 lastPrimaryNodeChangeEpoch)',
       'function windowSpent(uint256, uint40) view returns (uint96)',
       'function topUpBalance(uint256) view returns (uint96)',
       'function getCurrentBillingWindow(uint256) view returns (uint40)',
@@ -469,7 +469,9 @@ describe('V10 PCA lazy settlement — devnet validation', () => {
       nonce: await rawTxNonce(s.provider, admin.address),
     })).wait();
 
-    const tx = await nftRw.createAccount(committed, {
+    // primaryNode = 0n: this lazy-settlement test exercises billing-window
+    // settlement, not committed publishing allocation, so no node is designated.
+    const tx = await nftRw.createAccount(committed, 0n, {
       nonce: await rawTxNonce(s.provider, admin.address),
     });
     const receipt = await tx.wait();

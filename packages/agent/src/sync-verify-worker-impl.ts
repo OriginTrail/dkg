@@ -1,11 +1,16 @@
 import { parentPort } from 'node:worker_threads';
+import { validateSubGraphName } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncVerifyResult, SyncVerifyLogEntry, SyncParseResult, SharedMemoryProcessResult, DurableBatchProcessResult, SharedMemoryBatchProcessResult } from './sync-verify-worker.js';
+import { isSharedMemoryBucketDescendantDataGraph } from './sync/shared-memory-graphs.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
-parentPort!.on('message', async (message: { id: number; method: string; args: unknown[] }) => {
+// Guarded so this module is importable on the main thread (unit tests import
+// `verifySyncedData` directly); in a real worker `parentPort` is always set.
+parentPort?.on('message', async (message: { id: number; method: string; args: unknown[] }) => {
   try {
     if (message.method === 'verify') {
       const [dataQuads, metaQuads, acceptUnverified] = message.args as [Quad[], Quad[], boolean];
@@ -32,8 +37,15 @@ parentPort!.on('message', async (message: { id: number; method: string; args: un
       return;
     }
     if (message.method === 'processSharedMemoryBatch') {
-      const [wsDataQuads, wsMetaQuads] = message.args as [Quad[], Quad[]];
-      const result = processSharedMemoryBatch(wsDataQuads, wsMetaQuads);
+      const [wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames] =
+        message.args as [Quad[], Quad[], string, readonly string[] | undefined, readonly string[] | undefined];
+      const result = processSharedMemoryBatch(
+        wsDataQuads,
+        wsMetaQuads,
+        contextGraphId,
+        registeredSubGraphNames,
+        excludedSubGraphNames,
+      );
       parentPort!.postMessage({ id: message.id, result });
       return;
     }
@@ -43,7 +55,7 @@ parentPort!.on('message', async (message: { id: number; method: string; args: un
   }
 });
 
-function verifySyncedData(
+export function verifySyncedData(
   dataQuads: Quad[],
   metaQuads: Quad[],
   acceptUnverified = false,
@@ -59,18 +71,46 @@ function verifySyncedData(
     if (q.predicate === `${DKG_NS}merkleRoot`) kcMerkleRoots.set(q.subject, stripLiteral(q.object));
   }
 
+  // Read-both (RFC ka-metadata-trim P3.1): legacy rows tie a token subject
+  // `<ual>/<n>` to its KC via `dkg:partOf`; collapsed-shape rows carry ALL
+  // member `dkg:rootEntity` rows directly on the merkleRoot-bearing UAL
+  // subject with NO partOf edge. kaRootEntity is a multi-map because the
+  // collapsed UAL subject holds every member root; legacy token subjects
+  // carry one row each, so legacy behaviour is unchanged. Keep this in sync
+  // with the identical logic in dkg-agent-utils.ts verifySyncedData.
   const kaToKc = new Map<string, string>();
-  const kaRootEntity = new Map<string, string>();
+  const kaRootEntity = new Map<string, string[]>();
   for (const q of metaQuads) {
     if (q.predicate === `${DKG_NS}partOf`) kaToKc.set(q.subject, stripLiteral(q.object));
-    if (q.predicate === `${DKG_NS}rootEntity`) kaRootEntity.set(q.subject, stripLiteral(q.object));
+    if (q.predicate === `${DKG_NS}rootEntity`) {
+      const entity = stripLiteral(q.object);
+      const list = kaRootEntity.get(q.subject);
+      if (list) list.push(entity);
+      else kaRootEntity.set(q.subject, [entity]);
+    }
+  }
+
+  // Self-map collapsed rows: a merkleRoot-bearing subject that carries its
+  // own rootEntity rows IS the KA (P3.1 — no token edge to join through).
+  // Keying on kcMerkleRoots guards against non-KA rootEntity carriers
+  // (lifecycle URNs, SWM op rows, …) minting bogus KCs. Without this,
+  // collapsed-shape KCs built no kaToKc entry and fell into the
+  // "no KA info — accept on trust" branch, skipping Merkle verification.
+  for (const kcUal of kcMerkleRoots.keys()) {
+    if (kaRootEntity.has(kcUal) && !kaToKc.has(kcUal)) kaToKc.set(kcUal, kcUal);
   }
 
   for (const [kaUri, kcUri] of kaToKc) {
-    const rootEntity = kaRootEntity.get(kaUri);
-    if (!rootEntity || !kcMerkleRoots.has(kcUri)) continue;
-    if (!kcRootEntities.has(kcUri)) kcRootEntities.set(kcUri, []);
-    kcRootEntities.get(kcUri)!.push(rootEntity);
+    const rootsForKa = kaRootEntity.get(kaUri);
+    if (!rootsForKa || !kcMerkleRoots.has(kcUri)) continue;
+    let list = kcRootEntities.get(kcUri);
+    if (!list) { list = []; kcRootEntities.set(kcUri, list); }
+    for (const rootEntity of rootsForKa) {
+      // Dedupe: pre-trim stores (and multi-root dual-shape writes) carry the
+      // same root on BOTH the aggregate UAL row and its `<ual>/<n>` token
+      // row — double-counting a partition would corrupt the recomputed root.
+      if (!list.includes(rootEntity)) list.push(rootEntity);
+    }
   }
 
   if (kcMerkleRoots.size === 0) {
@@ -129,19 +169,15 @@ function verifySyncedData(
         }
       }
 
+      // PoS content-binding: `computeFlatKCRoot` now returns the STRUCTURED root
+      // hashPair(publicRoot, privateDataHash) — private data is always anchored as
+      // the sibling. The legacy "without private root anchoring" fallback is removed:
+      // a root that omits the private sibling is now a genuine mismatch, not a
+      // tolerated legacy format (pre-mainnet cutover clears/re-publishes old KCs).
       const flatHex = toHex(computeFlatKCRoot(allQuadsForKC, privateRoots));
       if (flatHex === claimedHex) {
         verifiedKcUals.add(kcUal);
         continue;
-      }
-
-      if (privateRoots.length > 0) {
-        const legacyHex = toHex(computeFlatKCRoot(allQuadsForKC, []));
-        if (legacyHex === claimedHex) {
-          logs.push({ level: 'debug', message: `KC ${kcUal} verified via legacy flat root (without private root anchoring)` });
-          verifiedKcUals.add(kcUal);
-          continue;
-        }
       }
 
       logs.push({
@@ -199,9 +235,14 @@ function parseAndFilterNQuads(text: string, graphUri: string, contextGraphId: st
   };
 }
 
-function processSharedMemory(wsDataQuads: Quad[], wsMetaQuads: Quad[]): SharedMemoryProcessResult {
+function processSharedMemory(
+  wsDataQuads: Quad[],
+  wsMetaQuads: Quad[],
+  contextGraphId?: string,
+  registeredSubGraphNames?: readonly string[],
+  excludedSubGraphNames?: readonly string[],
+): SharedMemoryProcessResult {
   const DKG_ROOT_ENTITY = 'http://dkg.io/ontology/rootEntity';
-  const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
   const DKG_WORKSPACE_OP = 'http://dkg.io/ontology/WorkspaceOperation';
   const DKG_PUBLISHED_AT = 'http://dkg.io/ontology/publishedAt';
   const DKG_PUBLISHER_PEER_ID = 'http://dkg.io/ontology/publisherPeerId';
@@ -213,6 +254,10 @@ function processSharedMemory(wsDataQuads: Quad[], wsMetaQuads: Quad[]): SharedMe
   //   <cgPrefix>/<sub>/_shared_memory <-> <cgPrefix>/<sub>/_shared_memory_meta
   // Stripping the suffix yields the matching data graph URI.
   const META_SUFFIX = '_meta';
+  const effectiveRegisteredSubGraphNames = combineRegisteredSubGraphNames(
+    registeredSubGraphNames,
+    excludedSubGraphNames,
+  );
 
   // Codex review on #885 — keep validity scoped per (meta graph, op
   // subject). Pre-fix the Sets were global, so an op subject that
@@ -263,8 +308,8 @@ function processSharedMemory(wsDataQuads: Quad[], wsMetaQuads: Quad[]): SharedMe
     if (q.predicate !== DKG_ROOT_ENTITY) continue;
     const validForGraph = validOpsByMeta.get(q.graph);
     if (!validForGraph || !validForGraph.has(q.subject)) continue;
-    if (!q.graph.endsWith(META_SUFFIX)) continue;
-    const dataGraph = q.graph.slice(0, -META_SUFFIX.length);
+    const dataGraph = swmDataGraphFromMetaGraph(q.graph, contextGraphId, META_SUFFIX, effectiveRegisteredSubGraphNames);
+    if (!dataGraph) continue;
     const entity = q.object.startsWith('"') ? stripLiteral(q.object) : q.object;
     let s = allowedRootsByDataGraph.get(dataGraph);
     if (!s) { s = new Set(); allowedRootsByDataGraph.set(dataGraph, s); }
@@ -272,7 +317,7 @@ function processSharedMemory(wsDataQuads: Quad[], wsMetaQuads: Quad[]): SharedMe
   }
 
   const validQuads = wsDataQuads.filter((q) => {
-    const allowed = allowedRootsByDataGraph.get(q.graph);
+    const allowed = allowedRootsForSwmDataGraph(allowedRootsByDataGraph, q.graph);
     if (!allowed) return false;
     if (allowed.has(q.subject)) return true;
     for (const root of allowed) {
@@ -308,8 +353,8 @@ function processSharedMemory(wsDataQuads: Quad[], wsMetaQuads: Quad[]): SharedMe
   for (const q of wsMetaQuads) {
     const validForGraph = validOpsByMeta.get(q.graph);
     if (q.predicate === DKG_ROOT_ENTITY && validForGraph?.has(q.subject)) {
-      if (!q.graph.endsWith(META_SUFFIX)) continue;
-      const dataGraph = q.graph.slice(0, -META_SUFFIX.length);
+      const dataGraph = swmDataGraphFromMetaGraph(q.graph, contextGraphId, META_SUFFIX, effectiveRegisteredSubGraphNames);
+      if (!dataGraph) continue;
       const entity = q.object.startsWith('"') ? stripLiteral(q.object) : q.object;
       const creator = opCreators.get(q.subject);
       const key = `${dataGraph}\0${entity}`;
@@ -324,6 +369,52 @@ function processSharedMemory(wsDataQuads: Quad[], wsMetaQuads: Quad[]): SharedMe
     dropped: wsDataQuads.length - validQuads.length,
     entityCreators: [...entityCreators.values()],
   };
+}
+
+function swmDataGraphFromMetaGraph(
+  metaGraph: string,
+  contextGraphId: string | undefined,
+  metaSuffix: string,
+  registeredSubGraphNames?: readonly string[],
+): string | undefined {
+  if (!metaGraph.endsWith('/_shared_memory_meta')) return undefined;
+  if (contextGraphId === undefined) return metaGraph.slice(0, -metaSuffix.length);
+  const rootMetaGraph = `did:dkg:context-graph:${contextGraphId}/_shared_memory_meta`;
+  if (metaGraph === rootMetaGraph) return metaGraph.slice(0, -metaSuffix.length);
+
+  const prefix = `did:dkg:context-graph:${contextGraphId}/`;
+  const suffix = '/_shared_memory_meta';
+  if (!metaGraph.startsWith(prefix) || !metaGraph.endsWith(suffix)) return undefined;
+  const subGraphName = metaGraph.slice(prefix.length, -suffix.length);
+  if (!validateSubGraphName(subGraphName).valid) return undefined;
+  if (!registeredSubGraphNames?.includes(subGraphName)) return undefined;
+  return metaGraph.slice(0, -metaSuffix.length);
+}
+
+function allowedRootsForSwmDataGraph(
+  allowedRootsByDataGraph: Map<string, Set<string>>,
+  graph: string,
+): Set<string> | undefined {
+  const exact = allowedRootsByDataGraph.get(graph);
+  if (exact) return exact;
+  for (const [bucketGraph, allowed] of allowedRootsByDataGraph) {
+    if (isSharedMemoryBucketDescendantDataGraph(graph, bucketGraph)) {
+      return allowed;
+    }
+  }
+  return undefined;
+}
+
+function combineRegisteredSubGraphNames(
+  localNames: readonly string[] | undefined,
+  excludedNames: readonly string[] | undefined,
+): string[] {
+  const out = new Set<string>();
+  const excluded = new Set((excludedNames ?? []).filter((name) => validateSubGraphName(name).valid));
+  for (const name of localNames ?? []) {
+    if (validateSubGraphName(name).valid && !excluded.has(name)) out.add(name);
+  }
+  return [...out];
 }
 
 function processDurableBatch(
@@ -392,6 +483,9 @@ function processDurableBatch(
 function processSharedMemoryBatch(
   wsDataQuads: Quad[],
   wsMetaQuads: Quad[],
+  contextGraphId?: string,
+  registeredSubGraphNames?: readonly string[],
+  excludedSubGraphNames?: readonly string[],
 ): SharedMemoryBatchProcessResult {
   const totalFetchedDataQuads = wsDataQuads.length;
   const totalFetchedMetaQuads = wsMetaQuads.length;
@@ -407,16 +501,36 @@ function processSharedMemoryBatch(
     };
   }
 
-  const processed = processSharedMemory(wsDataQuads, wsMetaQuads);
+  const processed = processSharedMemory(
+    wsDataQuads,
+    wsMetaQuads,
+    contextGraphId,
+    registeredSubGraphNames,
+    excludedSubGraphNames,
+  );
+  const effectiveRegisteredSubGraphNames = combineRegisteredSubGraphNames(
+    registeredSubGraphNames,
+    excludedSubGraphNames,
+  );
   return {
     verifiedData: processed.validQuads,
-    verifiedMeta: wsMetaQuads,
+    verifiedMeta: filterSharedMemoryMetaQuads(wsMetaQuads, contextGraphId, effectiveRegisteredSubGraphNames),
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
     droppedDataTriples: processed.dropped,
     emptyResponses: 0,
     entityCreators: processed.entityCreators,
   };
+}
+
+function filterSharedMemoryMetaQuads(
+  wsMetaQuads: readonly Quad[],
+  contextGraphId: string | undefined,
+  registeredSubGraphNames: readonly string[],
+): Quad[] {
+  return wsMetaQuads.filter((q) =>
+    swmDataGraphFromMetaGraph(q.graph, contextGraphId, '_meta', registeredSubGraphNames) !== undefined,
+  );
 }
 
 function parseNQuads(text: string): Quad[] {

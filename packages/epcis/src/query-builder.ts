@@ -261,8 +261,9 @@ WHERE {
   ${filterClauses.join('\n  ')}
   OPTIONAL {
     GRAPH <${metaGraph}> {
-      ?ka dkg:rootEntity ?event .
-      ?ka dkg:partOf ?ual .
+      { ?ka dkg:rootEntity ?event . ?ka dkg:partOf ?ual . }
+      union
+      { ?ual dkg:rootEntity ?event . ?ual dkg:batchId ?ualBid . }
     }
   }
 }

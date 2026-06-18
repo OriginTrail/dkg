@@ -27,6 +27,7 @@ export default defineConfig({
           'test/resolve-standalone-install.test.ts',
           'test/nat-status.test.ts',
           'test/core-prereq-check.test.ts',
+          'test/catchup-runner.test.ts',
           'test/relay-status-block.test.ts',
           'test/supervisor-liveness.test.ts',
           'test/promote-async-routes.test.ts',
@@ -46,6 +47,7 @@ export default defineConfig({
           'test/store-wizard.test.ts',
           'test/blazegraph-docker.test.ts',
           'test/store-identity-tag.test.ts',
+          'test/publisher-runner-lu11.test.ts',
           // Release 2 — managed local Oxigraph server (opt-in). Pure logic
           // + injected fetch/spawn/fs; no network, no real binary.
           'test/oxigraph-binary.test.ts',
@@ -68,6 +70,7 @@ export default defineConfig({
           // timeout attribution regressions in the fast unit lane too.
           'test/daemon-openclaw.test.ts',
           'test/daemon-hermes.test.ts',
+          'test/chain-discovery-scan-mode.test.ts',
         ],
     testTimeout: runsDaemonHttpBehavior ? 120_000 : 60_000,
     globalSetup: runsDaemonHttpBehavior ? ['../chain/test/hardhat-global-setup.ts'] : [],

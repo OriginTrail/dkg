@@ -90,6 +90,23 @@ const KA_HIGH_WATER_MAX_SCAN_PAGES = 1_500;
 /** Default pre-10.0.4 fallback eth_getLogs window — the smallest common cap. */
 const KA_HIGH_WATER_DEFAULT_PAGE_SIZE = 2_000;
 
+const CG_REGISTRY_DEFAULT_PAGE_SIZE = 2_000;
+
+const CG_REGISTRY_LEGACY_PAGE_SIZE = 9_000;
+const CG_REGISTRY_LEGACY_MAX_SCAN_PAGES = 1_500;
+
+/**
+ * Preserve the old default registry scan span while using smaller RPC-safe
+ * pages. Larger configured page windows extend the block span at the same call
+ * budget.
+ */
+export const CG_REGISTRY_MAX_SCAN_PAGES = Math.ceil(
+  (CG_REGISTRY_LEGACY_PAGE_SIZE * CG_REGISTRY_LEGACY_MAX_SCAN_PAGES) /
+  CG_REGISTRY_DEFAULT_PAGE_SIZE,
+);
+
+export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
+
 /**
  * Per-backend timeout for a single KnowledgeAssetCreated scan page before
  * failing over to the next eligible backend — generous enough for a slow
@@ -98,6 +115,14 @@ const KA_HIGH_WATER_DEFAULT_PAGE_SIZE = 2_000;
  * front of the line for subsequent pages).
  */
 const KA_HIGH_WATER_PAGE_TIMEOUT_MS = 15_000;
+
+type ScanProvider = { provider: JsonRpcProvider; backendHead: number };
+
+function normalizeScanPageSize(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1
+    ? Math.floor(value)
+    : fallback;
+}
 
 /**
  * True for the UNAMBIGUOUS "the deployed DKGKnowledgeAssets has no
@@ -451,13 +476,17 @@ export class EVMChainAdapterBase {
   protected cachedMinRequiredSignatures: { value: number; cachedAt: number } | undefined;
 
   /**
-   * Cached deploy block of the resolved DKGKnowledgeAssets storage contract,
-   * keyed by address. Anchors the pre-10.0.4 KnowledgeAssetCreated fallback scan
-   * at the contract's birth instead of genesis (a from-0 scan is ~21k eth_getLogs
-   * calls under Base Sepolia's 2,000-block cap — #1080 redux). A contract's
+   * Cached deploy blocks, keyed by lowercase contract address. Anchors long
+   * event-log scans at the contract's birth instead of genesis. A contract's
    * deploy block is immutable, so this needs no TTL.
    */
-  protected cachedKaStorageDeployBlock: { value: number; address: string } | undefined;
+  protected readonly cachedContractDeployBlocks: Map<string, number> = new Map();
+
+  /**
+   * Next unbuffered block for ContextGraphNameRegistry scans, keyed by lowercase
+   * registry address. Read with a reorg buffer; duplicate delivery is harmless.
+   */
+  protected readonly contextGraphRegistryScanWatermarks: Map<string, number> = new Map();
 
   /**
    * eth_getLogs block-window for the pre-10.0.4 getMaxKaNumberForAuthor fallback
@@ -465,6 +494,8 @@ export class EVMChainAdapterBase {
    * values fall back to KA_HIGH_WATER_DEFAULT_PAGE_SIZE = 2,000).
    */
   protected readonly kaHighWaterScanPageSize: number;
+
+  protected readonly cgRegistryScanPageSize: number;
 
   /**
    * Reset the PR3 publish-preflight cache. Public so daemon code that
@@ -477,7 +508,8 @@ export class EVMChainAdapterBase {
     this.cachedChainId = undefined;
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
-    this.cachedKaStorageDeployBlock = undefined;
+    this.cachedContractDeployBlocks.clear();
+    this.contextGraphRegistryScanWatermarks.clear();
   }
 
   protected static preflightCacheFresh(
@@ -493,12 +525,14 @@ export class EVMChainAdapterBase {
     // Floor a finite `>= 1` value (so e.g. 10000.5 -> 10000, preserving the
     // window); only a `< 1` (or non-finite) value falls back to the default — a
     // fractional value in (0,1) must NOT floor to 0 (which makes pages Infinity).
-    this.kaHighWaterScanPageSize =
-      typeof config.kaHighWaterScanPageSize === 'number' &&
-      Number.isFinite(config.kaHighWaterScanPageSize) &&
-      config.kaHighWaterScanPageSize >= 1
-        ? Math.floor(config.kaHighWaterScanPageSize)
-        : KA_HIGH_WATER_DEFAULT_PAGE_SIZE;
+    this.kaHighWaterScanPageSize = normalizeScanPageSize(
+      config.kaHighWaterScanPageSize,
+      KA_HIGH_WATER_DEFAULT_PAGE_SIZE,
+    );
+    this.cgRegistryScanPageSize = normalizeScanPageSize(
+      config.cgRegistryScanPageSize,
+      CG_REGISTRY_DEFAULT_PAGE_SIZE,
+    );
     // BUG-022 root-cause fix: force ethers' `PollingEventSubscriber`
     // (eth_getLogs over a sliding block window) instead of the default
     // `FilterIdEventSubscriber` (eth_newFilter + eth_getFilterChanges).
@@ -1576,8 +1610,30 @@ export class EVMChainAdapterBase {
     filter: unknown,
     lo: number,
     hi: number,
-    scanProviders: ReadonlyArray<{ provider: JsonRpcProvider; backendHead: number }>,
+    scanProviders: ReadonlyArray<ScanProvider>,
     connected: Map<JsonRpcProvider, Contract>,
+    preferred?: JsonRpcProvider,
+  ): Promise<{ logs: ReadonlyArray<ethers.EventLog | ethers.Log>; provider: JsonRpcProvider }> {
+    return this.queryEventLogsPage(
+      storage,
+      filter,
+      lo,
+      hi,
+      scanProviders,
+      connected,
+      'getMaxKaNumberForAuthor KnowledgeAssetCreated',
+      preferred,
+    );
+  }
+
+  protected async queryEventLogsPage(
+    baseContract: Contract,
+    filter: unknown,
+    lo: number,
+    hi: number,
+    scanProviders: ReadonlyArray<ScanProvider>,
+    connected: Map<JsonRpcProvider, Contract>,
+    label: string,
     preferred?: JsonRpcProvider,
   ): Promise<{ logs: ReadonlyArray<ethers.EventLog | ethers.Log>; provider: JsonRpcProvider }> {
     // Eligible backends (tip covers the page), with the sticky preferred one moved
@@ -1595,14 +1651,14 @@ export class EVMChainAdapterBase {
     for (const { provider } of ordered) {
       let contract = connected.get(provider);
       if (!contract) {
-        contract = storage.connect(provider) as Contract;
+        contract = baseContract.connect(provider) as Contract;
         connected.set(provider, contract);
       }
       try {
         const logs = await withTimeout(
           contract.queryFilter(filter as any, lo, hi),
           KA_HIGH_WATER_PAGE_TIMEOUT_MS,
-          `getMaxKaNumberForAuthor KnowledgeAssetCreated getLogs [${lo}, ${hi}]`,
+          `${label} getLogs [${lo}, ${hi}]`,
         );
         return { logs, provider };
       } catch (err) {
@@ -1610,8 +1666,8 @@ export class EVMChainAdapterBase {
       }
     }
     throw new Error(
-      `getMaxKaNumberForAuthor: no configured RPC could serve the KnowledgeAssetCreated ` +
-        `log range [${lo}, ${hi}]${pageError ? `: ${errorMessage(pageError)}` : ''}.`,
+      `${label}: no configured RPC could serve the log range [${lo}, ${hi}]` +
+        `${pageError ? `: ${errorMessage(pageError)}` : ''}.`,
       pageError ? { cause: pageError } : undefined,
     );
   }
@@ -1648,14 +1704,59 @@ export class EVMChainAdapterBase {
   ): Promise<{
     fromBlock: number;
     head: number;
-    scanProviders: ReadonlyArray<{ provider: JsonRpcProvider; backendHead: number }>;
+    scanProviders: ReadonlyArray<ScanProvider>;
+  }> {
+    return this.resolveContractDeployBlock(
+      address,
+      'getMaxKaNumberForAuthor',
+      'DKGKnowledgeAssets',
+    );
+  }
+
+  protected async resolveLogScanHead(
+    operationLabel: string,
+  ): Promise<{
+    head: number;
+    scanProviders: ReadonlyArray<ScanProvider>;
+  }> {
+    let probeError: unknown;
+    const reachable: ScanProvider[] = [];
+    for (const provider of this.providers) {
+      try {
+        const backendHead = await withTimeout(
+          provider.getBlockNumber(),
+          RPC_READ_STALL_TIMEOUT_MS,
+          `${operationLabel} backend head probe`,
+        );
+        reachable.push({ provider, backendHead });
+      } catch (err) {
+        if (!isHistoricalStateUnavailable(err)) probeError = err;
+      }
+    }
+    if (reachable.length === 0) {
+      if (probeError !== undefined) throw probeError;
+      throw new Error(`${operationLabel}: no RPC backend returned a block number to anchor the log scan.`);
+    }
+    reachable.sort((a, b) => b.backendHead - a.backendHead);
+    return { head: reachable[0].backendHead, scanProviders: reachable };
+  }
+
+  protected async resolveContractDeployBlock(
+    address: string,
+    operationLabel: string,
+    contractLabel: string,
+  ): Promise<{
+    fromBlock: number;
+    head: number;
+    scanProviders: ReadonlyArray<ScanProvider>;
+    degradedFromGenesis?: boolean;
   }> {
     // 1. Probe every reachable backend for its head; order freshest-first. A
     //    head-probe failure on an UNREACHABLE backend is kept separate — it only
     //    matters when NO backend is reachable at all; it must NOT force a throw
     //    when a reachable (e.g. pruned) backend could still degrade to the scan.
     let probeError: unknown;
-    const reachable: Array<{ provider: JsonRpcProvider; backendHead: number }> = [];
+    const reachable: ScanProvider[] = [];
     for (const provider of this.providers) {
       try {
         // Bound the probe: these are direct per-backend reads (not via the
@@ -1665,7 +1766,7 @@ export class EVMChainAdapterBase {
         const backendHead = await withTimeout(
           provider.getBlockNumber(),
           RPC_READ_STALL_TIMEOUT_MS,
-          'getMaxKaNumberForAuthor backend head probe',
+          `${operationLabel} backend head probe`,
         );
         reachable.push({ provider, backendHead });
       } catch (err) {
@@ -1674,7 +1775,7 @@ export class EVMChainAdapterBase {
     }
     if (reachable.length === 0) {
       if (probeError !== undefined) throw probeError;
-      throw new Error('getMaxKaNumberForAuthor: no RPC backend returned a block number to anchor the pre-10.0.4 fallback.');
+      throw new Error(`${operationLabel}: no RPC backend returned a block number to anchor the log scan.`);
     }
     reachable.sort((a, b) => b.backendHead - a.backendHead);
     // `head` is the FRESHEST backend's tip. The caller crawls each page on the
@@ -1687,26 +1788,39 @@ export class EVMChainAdapterBase {
     // 2. Deploy block (immutable): cache hit, else binary-search a backend that
     //    serves historical getCode — each search uses ITS OWN head (self-
     //    consistent); fail over across backends, freshest-first.
-    const cached = this.cachedKaStorageDeployBlock;
-    if (cached?.address === address) return { fromBlock: cached.value, head, scanProviders: reachable };
+    const cacheKey = address.toLowerCase();
+    const cached = this.cachedContractDeployBlocks.get(cacheKey);
+    if (cached !== undefined) return { fromBlock: cached, head, scanProviders: reachable };
     let throttle: unknown; // a transient rate-limit/throttle seen during the search
     const throttledProviders = new Set<JsonRpcProvider>();
     for (const { provider: searchProvider, backendHead } of reachable) {
       try {
         // Verify code at this backend's head before searching it; a head BEFORE
         // deploy on this backend is skipped (would otherwise cache a stale value).
-        if ((await this.getContractCodeAtBlock(searchProvider, address, backendHead)) === '0x') {
+        if ((await this.getContractCodeAtBlock(
+          searchProvider,
+          address,
+          backendHead,
+          operationLabel,
+          contractLabel,
+        )) === '0x') {
           continue;
         }
         let lo = 0;
         let hi = backendHead;
         while (lo < hi) {
           const mid = lo + Math.floor((hi - lo) / 2);
-          const codeAtMid = await this.getContractCodeAtBlock(searchProvider, address, mid);
+          const codeAtMid = await this.getContractCodeAtBlock(
+            searchProvider,
+            address,
+            mid,
+            operationLabel,
+            contractLabel,
+          );
           if (codeAtMid !== '0x') hi = mid;
           else lo = mid + 1;
         }
-        this.cachedKaStorageDeployBlock = { address, value: lo };
+        this.cachedContractDeployBlocks.set(cacheKey, lo);
         // Drop any backend that throttled earlier in this search from the scan too
         // (same rationale as the degraded path below — a throttled endpoint must not
         // be re-queried by the log scan). The backend that just pinned the deploy
@@ -1741,7 +1855,7 @@ export class EVMChainAdapterBase {
     // surfaced by the scan (page-1 throw with cause). The degraded `0` is not cached.
     const scanProviders = reachable.filter((r) => !throttledProviders.has(r.provider));
     if (scanProviders.length === 0) throw throttle;
-    return { fromBlock: 0, head, scanProviders };
+    return { fromBlock: 0, head, scanProviders, degradedFromGenesis: true };
   }
 
   /**
@@ -1754,7 +1868,13 @@ export class EVMChainAdapterBase {
    * diagnose it — degrade only for historical-state-unavailable, surface real
    * outages/auth/timeouts.
    */
-  private async getContractCodeAtBlock(provider: JsonRpcProvider, address: string, block: number): Promise<string> {
+  private async getContractCodeAtBlock(
+    provider: JsonRpcProvider,
+    address: string,
+    block: number,
+    operationLabel: string,
+    contractLabel: string,
+  ): Promise<string> {
     let lastErr: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
@@ -1770,7 +1890,7 @@ export class EVMChainAdapterBase {
         const code = await withTimeout(
           provider.getCode(address, block),
           RPC_READ_STALL_TIMEOUT_MS,
-          `getMaxKaNumberForAuthor eth_getCode at block ${block}`,
+          `${operationLabel} eth_getCode at block ${block}`,
         );
         return code && code !== '0x' ? code : '0x';
       } catch (err) {
@@ -1778,7 +1898,7 @@ export class EVMChainAdapterBase {
       }
     }
     throw new Error(
-      `getMaxKaNumberForAuthor: eth_getCode for DKGKnowledgeAssets ${address} at block ${block} ` +
+      `${operationLabel}: eth_getCode for ${contractLabel} ${address} at block ${block} ` +
         `failed after 3 attempts: ${errorMessage(lastErr)}`,
       { cause: lastErr },
     );
@@ -1946,38 +2066,37 @@ export class EVMChainAdapterBase {
       tokenAmount: flooredTokenAmount,
       isImmutable: params.isImmutable,
       merkleLeafCount: params.merkleLeafCount,
-      // RFC-39 Phase A.5 / LU-11 — ciphertext-commitment pair.
+      // OT-RFC-49 — curated `_catalog` commitment pair (REPLACED the stripped
+      // ciphertext-chunks pair; same on-chain PublishParams struct slot).
       //
       // The two fields MUST be set together or omitted together.
-      // - Both omitted (or root=ZeroHash + count=0) = legacy /
-      //   public-KC path: picker skips this KC in the curated draw
-      //   today (commit 8 baseline) and RFC-39 random sampling never
-      //   indexes it; safe wire-compatible default for non-chunked
-      //   callers.
-      // - Both set = LU-11 chunked publish: cores already hold the
-      //   matching per-chunk ciphertexts under
-      //   urn:dkg:swm:v10-publish-ciphertext-chunk/<batchId>/<i> and
-      //   recomputed the same root before signing the V2 ACK.
-      // Anything else is a programmer error — fail loud instead of
-      // silently defaulting one side and producing an asymmetric
-      // commitment that on-chain `_pickWeightedChallenge` would
-      // skip (count=0) or that core-side V2 verifiers would never
-      // try to satisfy (root=ZeroHash but count>0).
-      ciphertextChunksRoot: (() => {
-        const haveRoot = !!params.ciphertextChunksRoot && params.ciphertextChunksRoot.length === 32;
-        const haveCount = typeof params.ciphertextChunkCount === 'number' && params.ciphertextChunkCount > 0;
+      // - Both omitted (or root=ZeroHash + count=0) = legacy / public-KC
+      //   path: picker skips this KC in the curated draw and RFC-39 random
+      //   sampling never indexes it; safe wire-compatible default for
+      //   public callers.
+      // - Both set = curated publish: the publisher committed
+      //   `computeCatalogRoot(catalogCommittedLeaves(...))` and the cores
+      //   recomputed the same root over their locally-served `<cg>/_catalog`
+      //   before signing the ACK; the prover proves the same tree.
+      // Anything else is a programmer error — fail loud instead of silently
+      // defaulting one side and producing an asymmetric commitment that
+      // on-chain `_pickWeightedChallenge` would skip (count=0) or that the
+      // prover could never satisfy (root=ZeroHash but count>0).
+      catalogRoot: (() => {
+        const haveRoot = !!params.catalogRoot && params.catalogRoot.length === 32;
+        const haveCount = typeof params.catalogLeafCount === 'number' && params.catalogLeafCount > 0;
         if (haveRoot !== haveCount) {
           throw new Error(
-            `evm-adapter.createKnowledgeAssets: ciphertextChunksRoot and ciphertextChunkCount ` +
+            `evm-adapter.createKnowledgeAssets: catalogRoot and catalogLeafCount ` +
             `must both be set or both omitted; got root=${haveRoot ? 'set' : 'unset'}, ` +
-            `count=${haveCount ? params.ciphertextChunkCount : 'unset'}. ` +
+            `count=${haveCount ? params.catalogLeafCount : 'unset'}. ` +
             `An asymmetric pair would leave RandomSampling._pickWeightedChallenge unable to ` +
-            `verify the curated draw against off-chain ciphertext storage.`,
+            `verify the curated draw against the off-chain catalog.`,
           );
         }
-        return haveRoot ? ethers.hexlify(params.ciphertextChunksRoot!) : ethers.ZeroHash;
+        return haveRoot ? ethers.hexlify(params.catalogRoot!) : ethers.ZeroHash;
       })(),
-      ciphertextChunkCount: params.ciphertextChunkCount ?? 0,
+      catalogLeafCount: params.catalogLeafCount ?? 0,
       publisherNodeIdentityId: params.publisherNodeIdentityId,
       authorAddress: params.author.address,
       authorR: ethers.hexlify(params.author.signature.r),

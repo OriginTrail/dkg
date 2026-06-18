@@ -1059,9 +1059,8 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
   // shape `generateKCMetadata` emits (`packages/publisher/src/metadata.ts`):
   //   - KC UAL subjects (carry `dkg:batchId`, `dkg:merkleRoot`, `dkg:status`, …).
   //   - KA UAL subjects (`<UAL/tokenId>`; identified by `dkg:partOf <KC>`).
-  //   - Publication URIs (`<urn:dkg:publication:opId>`; reached from a KA
-  //     via `<KA> dkg:publication <pub>`; carry `dkg:authoredBy`,
-  //     `dkg:Publication` type, etc).
+  // (RFC ka-metadata-trim Phase 1: the Publication-URI arm was removed —
+  // `generateKCMetadata` no longer emits `dkg:Publication` subjects.)
   //
   // Granularity is PER-KC, not per-CG: each KC is gated by an
   // independent `FILTER NOT EXISTS` against the target graph, so a
@@ -1123,7 +1122,6 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
 
     const DKG_BATCH_ID = 'http://dkg.io/ontology/batchId';
     const DKG_PART_OF = 'http://dkg.io/ontology/partOf';
-    const DKG_PUBLICATION = 'http://dkg.io/ontology/publication';
 
     const reports: CgReport[] = [];
     for (const [cgName, onChainId] of cgEntries) {
@@ -1149,23 +1147,24 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         }
 
         // CONSTRUCT only the meta for KCs that are MISSING from the
-        // target per-cgId graph. Three UNION arms:
+        // target per-cgId graph. Two UNION arms:
         //   1. KC subjects (`?kc`) whose `dkg:batchId` is in source
         //      but not in target.
         //   2. KA subjects (`?ka`) whose parent KC is in that
         //      missing-from-target set.
-        //   3. Publication subjects (`?pub`) reached from a KA via
-        //      `<KA> dkg:publication <pub>`. This is the actual
-        //      provenance shape `generateKCMetadata` emits — earlier
-        //      revisions of this endpoint used the wrong direction
-        //      (`<KC> dkg:authoredBy <pub>`) and silently dropped all
-        //      `dkg:Publication` / `dkg:authoredBy` triples (Codex
-        //      review on PR #763).
+        // (RFC ka-metadata-trim Phase 1: the third arm that copied
+        // `dkg:Publication` subjects via `<KA> dkg:publication <pub>` was
+        // removed together with the writer.)
+        // Read-both (RFC ka-metadata-trim P3.1/P3.5): the collapsed shape
+        // carries the member-entity pair + privateMerkleRoot directly on the
+        // UAL subject, so arm 1 already copies everything a collapsed KC
+        // needs (the RS prover's extractor is read-both too); arm 2 only
+        // fires for legacy `<ual>/<n> partOf <ual>` token rows.
         //
         // The `FILTER NOT EXISTS` is anchored on the KC's `dkg:batchId`
         // because every per-KC promotion writes that triple — so its
         // presence in the target is the canonical signal that the KC
-        // (and its KAs + publication) are already there. Set semantics
+        // (and its KAs) are already there. Set semantics
         // of `store.insert` mean accidentally re-inserting a quad is a
         // no-op; the filter is for efficiency + clean diagnostic
         // counts, not for correctness.
@@ -1180,12 +1179,6 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
               ?s <${DKG_PART_OF}> ?kc .
               ?kc <${DKG_BATCH_ID}> ?bid2 .
               FILTER NOT EXISTS { GRAPH <${targetMeta}> { ?kc <${DKG_BATCH_ID}> ?bidT2 } }
-            } UNION {
-              ?s ?p ?o .
-              ?ka <${DKG_PUBLICATION}> ?s .
-              ?ka <${DKG_PART_OF}> ?kc3 .
-              ?kc3 <${DKG_BATCH_ID}> ?bid3 .
-              FILTER NOT EXISTS { GRAPH <${targetMeta}> { ?kc3 <${DKG_BATCH_ID}> ?bidT3 } }
             }
           }
         }`);

@@ -1509,6 +1509,16 @@ WHERE {
     ) {
       return jsonResponse(res, 400, { error: '"localOnly" must be a boolean' });
     }
+    // Per-request override of the strict curator-ack gate (OT-RFC-49
+    // curator-leader). Omitted → the agent uses its config default
+    // (`swmAwaitCuratorAck`). Only meaningful for private, non-localOnly writes.
+    if (
+      parsed.awaitCuratorAck !== undefined &&
+      typeof parsed.awaitCuratorAck !== "boolean"
+    ) {
+      return jsonResponse(res, 400, { error: '"awaitCuratorAck" must be a boolean' });
+    }
+    const awaitCuratorAck: boolean | undefined = parsed.awaitCuratorAck;
     const contextGraphId = parsed.contextGraphId;
     if (!quads?.length)
       return jsonResponse(res, 400, { error: 'Missing "quads"' });
@@ -1535,6 +1545,7 @@ WHERE {
           localOnly,
           operationCtx: ctx,
           callerAgentAddress: requestAgentAddress,
+          awaitCuratorAck,
         }),
       );
       tracker.complete(ctx, { tripleCount: quads.length });
@@ -1559,6 +1570,25 @@ WHERE {
         err.message.includes("has not been registered")
       ) {
         return jsonResponse(res, 400, { error: err.message });
+      }
+      // Strict curator-ack gate (OT-RFC-49 curator-leader): the write was NOT
+      // persisted because the curator (the authoritative replica) did not
+      // confirm it. Surface a distinct, actionable status instead of a generic
+      // 500 — the client is TOLD, never silently led to believe it succeeded.
+      // Duck-type on `.code` (the publisher's wire contract).
+      if (err?.code === "CURATOR_UNCONFIRMED") {
+        return jsonResponse(res, 503, {
+          error: err.message,
+          code: "CURATOR_UNCONFIRMED",
+          curatorDelivery: "unconfirmed",
+        });
+      }
+      if (err?.code === "CURATOR_REJECTED") {
+        return jsonResponse(res, 409, {
+          error: err.message,
+          code: "CURATOR_REJECTED",
+          curatorDelivery: "rejected",
+        });
       }
       throw err;
     }
@@ -2393,15 +2423,22 @@ WHERE {
     const cgUri = `did:dkg:context-graph:${contextGraphId}`;
     const graphFilters = memoryLayers.map((l: string) => {
       if (l === 'swm') return `STRSTARTS(STR(?g), "${cgUri}/_shared_memory")`;
-      if (l === 'vm') return `STRSTARTS(STR(?g), "${cgUri}/_verified")`;
+      // #1096: VM graphs live under `/_verifiable_memory/<id>` (see
+      // contextGraphVerifiableMemoryUri in dkg-core). The pre-rc.16
+      // "_verified" prefix matched nothing, so memory layer "vm" could
+      // never return SPARQL hits.
+      if (l === 'vm') return `STRSTARTS(STR(?g), "${cgUri}/_verifiable_memory")`;
       return `STRSTARTS(STR(?g), "${cgUri}/")`;
     }).join(' || ');
     try {
+      // #1096: accept both http:// and https:// schema.org forms — real
+      // payloads overwhelmingly use https://schema.org, which the previous
+      // http-only property path silently excluded.
       const sparqlResult = await agent.store.query(`
         SELECT DISTINCT ?entity ?name ?desc WHERE {
           GRAPH ?g {
-            ?entity <http://schema.org/name>|<http://www.w3.org/2000/01/rdf-schema#label> ?name .
-            OPTIONAL { ?entity <http://schema.org/description> ?desc }
+            ?entity <http://schema.org/name>|<https://schema.org/name>|<http://www.w3.org/2000/01/rdf-schema#label> ?name .
+            OPTIONAL { ?entity <http://schema.org/description>|<https://schema.org/description> ?desc }
           }
           FILTER(${graphFilters})
           FILTER(

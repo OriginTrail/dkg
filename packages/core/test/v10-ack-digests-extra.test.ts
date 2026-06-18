@@ -125,7 +125,10 @@ describe('computeACKDigest (6-field) — H5 cost-parameter binding [C-2]', () =>
 });
 
 // Golden vectors: ethers.solidityPackedKeccak256 with the exact field order
-// from `KnowledgeAssetsV10._executeUpdateCore` (incl. trailing newMerkleLeafCount).
+// from `KnowledgeAssetsLifecycle._executeUpdateCore`. OT-RFC-49 prepended the
+// ACK_DIGEST_VERSION member and replaced the ciphertext pair with the catalog
+// pair (newCatalogRoot=0, newCatalogLeafCount=0 here, both defaulted), so these
+// were recomputed offline and cross-checked against computeUpdateACKDigest.
 describe('computeUpdateACKDigest — KAV10 update ACK layout [C-1]', () => {
   const newMerkleRoot = new Uint8Array(32).fill(0xbb);
   const kaId = 7n;
@@ -137,11 +140,11 @@ describe('computeUpdateACKDigest — KAV10 update ACK layout [C-1]', () => {
   const newMerkleLeafCount = 11n;
 
   const GOLDEN =
-    '0xdd98e80b35d99c065fabae6f7f11308346b9b5e0abfbbce2528e3ab466e1ce73';
+    '0x56808044fa345d73830799d758aac4792afbee4cf132f4f008ceaa8a9215fe68';
   const GOLDEN_WRONG_TOKEN =
-    '0x8ae17a4a33277c7715c9f65cf5946c1329b4b865b55e256a893264d6799a3146';
+    '0x44f01316fc4b4cd8e3252acf64f186715b9b0a8f9df708cba5ac050bf4445f7c';
   const GOLDEN_EMPTY_BURN =
-    '0xb76f60d101209bb804fd1df2d560d8ad50d6e3d6f974973bf195ba560aeb3f9a';
+    '0xa724809e338fe770609ce210ece9b604693c517f7441f512e9db4371278a7ce4';
 
   it('matches the contract-layout golden vector', () => {
     const digest = computeUpdateACKDigest(

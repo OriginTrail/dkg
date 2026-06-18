@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
@@ -18,7 +18,12 @@ const fixtureAbs = resolve(
 
 function makeLogger() {
   const log = new Logger('test');
-  const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
+  // Hand-rolled capture on the REAL Logger instance (no vitest mock API):
+  // silences the warning output and records every call for assertions.
+  const warn = { calls: [] as unknown[][] };
+  log.warn = ((...args: unknown[]) => {
+    warn.calls.push(args);
+  }) as typeof log.warn;
   return { log, warn };
 }
 
@@ -69,7 +74,7 @@ describe('loadRoutePlugins', () => {
     const { log, warn } = makeLogger();
     const plugins = await loadRoutePlugins([], log);
     expect(plugins).toEqual([]);
-    expect(warn).not.toHaveBeenCalled();
+    expect(warn.calls).toEqual([]);
   });
 
   it('loads a single plugin from an absolute-path spec (default export)', async () => {
@@ -78,15 +83,15 @@ describe('loadRoutePlugins', () => {
     expect(plugins).toHaveLength(1);
     expect(plugins[0].name).toBe('sample-fixture-echo');
     expect(typeof plugins[0].handle).toBe('function');
-    expect(warn).not.toHaveBeenCalled();
+    expect(warn.calls).toEqual([]);
   });
 
   it('skips and warns on a non-existent package name', async () => {
     const { log, warn } = makeLogger();
     const plugins = await loadRoutePlugins(['definitely-not-a-real-pkg-xyz'], log);
     expect(plugins).toEqual([]);
-    expect(warn).toHaveBeenCalledTimes(1);
-    const arg = String(warn.mock.calls[0][1]);
+    expect(warn.calls).toHaveLength(1);
+    const arg = String(warn.calls[0][1]);
     expect(arg).toContain('route-plugin-load-failed');
     expect(arg).toContain('definitely-not-a-real-pkg-xyz');
   });
@@ -100,8 +105,8 @@ describe('loadRoutePlugins', () => {
       const { log, warn } = makeLogger();
       const plugins = await loadRoutePlugins([tempAbs], log);
       expect(plugins).toEqual([]);
-      expect(warn).toHaveBeenCalledTimes(1);
-      expect(String(warn.mock.calls[0][1])).toContain('route-plugin-load-failed');
+      expect(warn.calls).toHaveLength(1);
+      expect(String(warn.calls[0][1])).toContain('route-plugin-load-failed');
     } finally {
       rmSync(dirname(tempAbs), { recursive: true, force: true });
     }
@@ -117,7 +122,7 @@ describe('loadRoutePlugins', () => {
       const plugins = await loadRoutePlugins([tempAbs], log);
       expect(plugins).toHaveLength(1);
       expect(plugins[0].name).toBe('cjs-named-plugin');
-      expect(warn).not.toHaveBeenCalled();
+      expect(warn.calls).toEqual([]);
     } finally {
       rmSync(dirname(tempAbs), { recursive: true, force: true });
     }
@@ -149,7 +154,7 @@ describe('loadRoutePlugins', () => {
       const plugins = await loadRoutePlugins([pkgName], log);
       expect(plugins).toHaveLength(1);
       expect(plugins[0].name).toBe('esm-only-fixture-plugin');
-      expect(warn).not.toHaveBeenCalled();
+      expect(warn.calls).toEqual([]);
     } finally {
       rmSync(parentDir, { recursive: true, force: true });
     }
@@ -180,7 +185,7 @@ describe('loadRoutePlugins', () => {
       const plugins = await loadRoutePlugins([pkgName], log);
       expect(plugins).toHaveLength(1);
       expect(plugins[0].name).toBe('cjs-only-fixture-plugin');
-      expect(warn).not.toHaveBeenCalled();
+      expect(warn.calls).toEqual([]);
     } finally {
       rmSync(parentDir, { recursive: true, force: true });
     }
@@ -227,8 +232,8 @@ describe('loadRoutePlugins', () => {
       const { log, warn } = makeLogger();
       const plugins = await loadRoutePlugins([pkgName], log, { dkgHome });
       expect(plugins).toEqual([]);
-      expect(warn).toHaveBeenCalledTimes(1);
-      const msg = String(warn.mock.calls[0][1]);
+      expect(warn.calls).toHaveLength(1);
+      const msg = String(warn.calls[0][1]);
       expect(msg).toContain('route-plugin-load-failed');
       expect(msg).toContain('missing-from-stable-root');
       expect(msg).not.toContain('stale-daemon-local-plugin');
@@ -247,8 +252,8 @@ describe('loadRoutePlugins', () => {
       log,
     );
     expect(plugins).toEqual([]);
-    expect(warn).toHaveBeenCalledTimes(1);
-    const msg = String(warn.mock.calls[0][1]);
+    expect(warn.calls).toHaveLength(1);
+    const msg = String(warn.calls[0][1]);
     expect(msg).toContain('route-plugins-invalid-config');
     expect(msg).toContain('string');
   });
@@ -260,8 +265,8 @@ describe('loadRoutePlugins', () => {
       log,
     );
     expect(plugins).toEqual([]);
-    expect(warn).toHaveBeenCalledTimes(1);
-    const msg = String(warn.mock.calls[0][1]);
+    expect(warn.calls).toHaveLength(1);
+    const msg = String(warn.calls[0][1]);
     expect(msg).toContain('route-plugins-invalid-config');
   });
 
@@ -272,7 +277,7 @@ describe('loadRoutePlugins', () => {
       log1,
     );
     expect(plugins1).toEqual([]);
-    expect(warn1).not.toHaveBeenCalled();
+    expect(warn1.calls).toEqual([]);
 
     const { log: log2, warn: warn2 } = makeLogger();
     const plugins2 = await loadRoutePlugins(
@@ -280,7 +285,7 @@ describe('loadRoutePlugins', () => {
       log2,
     );
     expect(plugins2).toEqual([]);
-    expect(warn2).not.toHaveBeenCalled();
+    expect(warn2.calls).toEqual([]);
   });
 
   it('filters non-string entries from a partially-malformed array, warning per bad entry', async () => {
@@ -293,8 +298,8 @@ describe('loadRoutePlugins', () => {
     expect(plugins).toHaveLength(1);
     expect(plugins[0].name).toBe('sample-fixture-echo');
     // One warn per non-string entry: 42, null, '' (empty), object → 4 warns.
-    expect(warn).toHaveBeenCalledTimes(4);
-    for (const [, msg] of warn.mock.calls) {
+    expect(warn.calls).toHaveLength(4);
+    for (const [, msg] of warn.calls) {
       expect(String(msg)).toContain('route-plugins-invalid-spec');
     }
   });
@@ -304,8 +309,8 @@ describe('loadRoutePlugins', () => {
     const { log, warn } = makeLogger();
     const plugins = await loadRoutePlugins(['./not-a-real-plugin.js'], log);
     expect(plugins).toEqual([]);
-    expect(warn).toHaveBeenCalledTimes(1);
-    const msg = String(warn.mock.calls[0][1]);
+    expect(warn.calls).toHaveLength(1);
+    const msg = String(warn.calls[0][1]);
     expect(msg).toContain('route-plugin-load-failed');
     expect(msg.toLowerCase()).toContain('relative');
   });
@@ -315,8 +320,8 @@ describe('loadRoutePlugins', () => {
     const { log, warn } = makeLogger();
     const plugins = await loadRoutePlugins(['../config.js'], log);
     expect(plugins).toEqual([]);
-    expect(warn).toHaveBeenCalledTimes(1);
-    const msg = String(warn.mock.calls[0][1]);
+    expect(warn.calls).toHaveLength(1);
+    const msg = String(warn.calls[0][1]);
     expect(msg.toLowerCase()).toContain('relative');
   });
 
@@ -327,8 +332,8 @@ describe('loadRoutePlugins', () => {
     const { log, warn } = makeLogger();
     const plugins = await loadRoutePlugins(['.\\plugin.js', '..\\config.js'], log);
     expect(plugins).toEqual([]);
-    expect(warn).toHaveBeenCalledTimes(2);
-    for (const call of warn.mock.calls) {
+    expect(warn.calls).toHaveLength(2);
+    for (const call of warn.calls) {
       expect(String(call[1]).toLowerCase()).toContain('relative');
     }
   });
@@ -341,7 +346,7 @@ describe('loadRoutePlugins', () => {
     );
     expect(plugins).toHaveLength(1);
     expect(plugins[0].name).toBe('sample-fixture-echo');
-    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.calls).toHaveLength(1);
   });
 
   it('does not silently fall back to CJS when the ESM entry has a syntax error', async () => {
@@ -375,8 +380,8 @@ describe('loadRoutePlugins', () => {
       const { log, warn } = makeLogger();
       const plugins = await loadRoutePlugins([pkgName], log);
       expect(plugins).toEqual([]);
-      expect(warn).toHaveBeenCalledTimes(1);
-      const msg = String(warn.mock.calls[0][1]);
+      expect(warn.calls).toHaveLength(1);
+      const msg = String(warn.calls[0][1]);
       expect(msg).toContain('route-plugin-load-failed');
     } finally {
       rmSync(parentDir, { recursive: true, force: true });
@@ -415,8 +420,8 @@ describe('loadRoutePlugins', () => {
       const { log, warn } = makeLogger();
       const plugins = await loadRoutePlugins([pkgName], log);
       expect(plugins).toEqual([]);
-      expect(warn).toHaveBeenCalledTimes(1);
-      const msg = String(warn.mock.calls[0][1]);
+      expect(warn.calls).toHaveLength(1);
+      const msg = String(warn.calls[0][1]);
       expect(msg).toContain('route-plugin-load-failed');
       // Phrasing differs Node vs Vite; the missing filename is the cross-env anchor.
       expect(msg).toContain('missing-helper');
@@ -438,8 +443,8 @@ describe('loadRoutePlugins', () => {
       const { log, warn } = makeLogger();
       const plugins = await loadRoutePlugins([tempAbs], log);
       expect(plugins).toEqual([]);
-      expect(warn).toHaveBeenCalledTimes(1);
-      expect(String(warn.mock.calls[0][1])).toContain('route-plugin-load-failed');
+      expect(warn.calls).toHaveLength(1);
+      expect(String(warn.calls[0][1])).toContain('route-plugin-load-failed');
     } finally {
       rmSync(dirname(tempAbs), { recursive: true, force: true });
     }
@@ -458,8 +463,8 @@ describe('loadRoutePlugins', () => {
       const { log, warn } = makeLogger();
       const plugins = await loadRoutePlugins([tempAbs], log);
       expect(plugins).toEqual([]);
-      expect(warn).toHaveBeenCalledTimes(1);
-      expect(String(warn.mock.calls[0][1])).toContain('route-plugin-load-failed');
+      expect(warn.calls).toHaveLength(1);
+      expect(String(warn.calls[0][1])).toContain('route-plugin-load-failed');
     } finally {
       rmSync(dirname(tempAbs), { recursive: true, force: true });
     }
@@ -483,7 +488,7 @@ describe('loadRoutePlugins', () => {
       const plugins = await loadRoutePlugins([tempAbs], log);
       expect(plugins).toHaveLength(1);
       expect(plugins[0].name).toBe('from-plugin-export');
-      expect(warn).not.toHaveBeenCalled();
+      expect(warn.calls).toEqual([]);
     } finally {
       rmSync(dirname(tempAbs), { recursive: true, force: true });
     }
@@ -523,8 +528,8 @@ describe('loadRoutePlugins', () => {
       const { log, warn } = makeLogger();
       const plugins = await loadRoutePlugins([tempAbs], log);
       expect(plugins).toEqual([]);
-      expect(warn).toHaveBeenCalledTimes(1);
-      expect(String(warn.mock.calls[0][1])).toContain('route-plugin-load-failed');
+      expect(warn.calls).toHaveLength(1);
+      expect(String(warn.calls[0][1])).toContain('route-plugin-load-failed');
     } finally {
       rmSync(dirname(tempAbs), { recursive: true, force: true });
     }
@@ -555,8 +560,8 @@ describe('loadRoutePlugins', () => {
       const { log, warn } = makeLogger();
       const plugins = await loadRoutePlugins([pkgName], log);
       expect(plugins).toEqual([]);
-      expect(warn).toHaveBeenCalledTimes(1);
-      const msg = String(warn.mock.calls[0][1]);
+      expect(warn.calls).toHaveLength(1);
+      const msg = String(warn.calls[0][1]);
       expect(msg).toContain('route-plugin-load-failed');
       // The diagnostic must be the CJS SyntaxError, NOT the ESM "no exports condition" message.
       expect(msg).not.toMatch(/No known conditions|No "exports" main defined|Failed to resolve entry/i);

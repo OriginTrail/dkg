@@ -350,6 +350,20 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(loaded.relayReservationCount).toBe(5);
   });
 
+  it('round-trips syncAgentsMeta=false through saveConfig/loadConfig (edge store-load optimization)', async () => {
+    await saveConfig({
+      name: 'test-node',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      syncAgentsMeta: false,
+    });
+
+    const loaded = await loadConfig();
+    expect(loaded.nodeRole).toBe('edge');
+    expect(loaded.syncAgentsMeta).toBe(false);
+  });
+
   it('omits relayReservationCount when not set (so DKGNode.start() applies the default)', async () => {
     await saveConfig({
       name: 'test-node',
@@ -486,6 +500,20 @@ describe('resolveChainConfig (field-level merge)', () => {
     expect(merged?.chainId).toBe(fullNetworkChain.chainId);
   });
 
+  it('merges cgRegistryScanPageSize with operator precedence', () => {
+    const inherited = resolveChainConfig(
+      {},
+      { chain: { ...fullNetworkChain, cgRegistryScanPageSize: 10_000 } },
+    );
+    expect(inherited?.cgRegistryScanPageSize).toBe(10_000);
+
+    const overridden = resolveChainConfig(
+      { chain: { cgRegistryScanPageSize: 4_000 } },
+      { chain: { ...fullNetworkChain, cgRegistryScanPageSize: 10_000 } },
+    );
+    expect(overridden?.cgRegistryScanPageSize).toBe(4_000);
+  });
+
   it('dedupes primary + backups while preserving operator priority', () => {
     const merged = resolveChainConfig(
       {
@@ -556,6 +584,73 @@ describe('resolveChainConfig (field-level merge)', () => {
       { chain: { tokenAddress: operatorTokenAddress } },
       { chain: { ...fullNetworkChain, tokenAddress: networkTokenAddress } },
     )?.tokenAddress).toBe(operatorTokenAddress);
+  });
+
+  it('preserves operator approvalPolicy', () => {
+    const operatorApprovalPolicy = {
+      mode: 'replenishing' as const,
+      targetAllowance: '1000000000000000000',
+      refillBelowFraction: 0.5,
+    };
+
+    expect(resolveChainConfig(
+      { chain: { approvalPolicy: operatorApprovalPolicy } },
+      { chain: fullNetworkChain },
+    )?.approvalPolicy).toEqual(operatorApprovalPolicy);
+  });
+
+  it('keeps approvalPolicy local-only even when network config supplies one', () => {
+    const networkApprovalPolicy = {
+      mode: 'unlimited' as const,
+    };
+    const operatorApprovalPolicy = {
+      mode: 'replenishing' as const,
+      targetAllowance: '1000000000000000000',
+    };
+
+    expect(resolveChainConfig(
+      {},
+      { chain: { ...fullNetworkChain, approvalPolicy: networkApprovalPolicy } as any },
+    )?.approvalPolicy).toBeUndefined();
+
+    expect(resolveChainConfig(
+      {},
+      { chain: { ...fullNetworkChain, approvalPolicy: [] } as any },
+    )?.approvalPolicy).toBeUndefined();
+
+    expect(resolveChainConfig(
+      { chain: { approvalPolicy: operatorApprovalPolicy } },
+      { chain: { ...fullNetworkChain, approvalPolicy: networkApprovalPolicy } as any },
+    )?.approvalPolicy).toEqual(operatorApprovalPolicy);
+  });
+
+  it('normalizes operator approvalPolicy string shorthand', () => {
+    expect(resolveChainConfig(
+      { chain: { approvalPolicy: 'unlimited' } },
+      { chain: fullNetworkChain },
+    )?.approvalPolicy).toEqual({ mode: 'unlimited' });
+  });
+
+  it('rejects malformed non-object operator approvalPolicy values', () => {
+    expect(() => resolveChainConfig(
+      { chain: { approvalPolicy: 'forever' as any } },
+      { chain: fullNetworkChain },
+    )).toThrow(/chain\.approvalPolicy must be an object or a valid mode string/);
+
+    expect(() => resolveChainConfig(
+      { chain: { approvalPolicy: [] as any } },
+      { chain: fullNetworkChain },
+    )).toThrow(/chain\.approvalPolicy must be an object/);
+  });
+
+  it('treats null operator approvalPolicy as unset', () => {
+    const merged = resolveChainConfig(
+      { chain: { approvalPolicy: null as any } },
+      { chain: fullNetworkChain },
+    );
+
+    expect(merged?.approvalPolicy).toBeUndefined();
+    expect(merged?.rpcUrl).toBe(fullNetworkChain.rpcUrl);
   });
 
   it('returns a partial block when only config supplies fields (no network)', () => {

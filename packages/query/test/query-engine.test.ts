@@ -1,7 +1,13 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { validateReadOnlySparql } from '../src/sparql-guard.js';
+
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => { calls.push(args); return impl(...args); };
+  return Object.assign(fn, { calls });
+}
 
 const CONTEXT_GRAPH = 'agent-registry';
 const GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
@@ -1030,13 +1036,15 @@ describe('DKGQueryEngine', () => {
 
     // rc.17 uniform layout adds unmemoized per-KA prefix discoveries
     // (`…/_verifiable_memory/…` read-both) that also hit `store.listGraphs`,
-    // so a raw `listGraphs` spy no longer isolates partition discovery.
-    // Spy on the memoized partition-discovery routine directly — that is
+    // so a raw `listGraphs` recorder no longer isolates partition discovery.
+    // Wrap the memoized partition-discovery routine directly — that is
     // what the in-flight cache de-dupes across concurrent scans.
-    const partitionDiscoverySpy = vi.spyOn(
-      engine as unknown as { discoverScopedContentGraphAllowList: (...args: unknown[]) => Promise<string[]> },
-      'discoverScopedContentGraphAllowList',
-    );
+    const discoveryTarget = engine as unknown as {
+      discoverScopedContentGraphAllowList: (...args: unknown[]) => Promise<string[]>;
+    };
+    const origDiscovery = discoveryTarget.discoverScopedContentGraphAllowList.bind(engine);
+    const partitionDiscoverySpy = recorder((...a: unknown[]) => origDiscovery(...a));
+    discoveryTarget.discoverScopedContentGraphAllowList = partitionDiscoverySpy;
     const sparql = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } } ORDER BY ?name`;
 
     const results = await Promise.all([
@@ -1045,7 +1053,7 @@ describe('DKGQueryEngine', () => {
       engine.query(sparql, { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true }),
     ]);
 
-    expect(partitionDiscoverySpy).toHaveBeenCalledTimes(1);
+    expect(partitionDiscoverySpy.calls).toHaveLength(1);
     for (const result of results) {
       const graphs = new Set(result.bindings.map((row) => row['g']));
       expect(graphs.has(rootSharedMemoryGraph)).toBe(true);
@@ -1068,17 +1076,19 @@ describe('DKGQueryEngine', () => {
     // also call `store.listGraphs`, so spy on the memoized partition-
     // discovery routine directly to pin "discovered once per completed
     // scan, re-discovered after the in-flight promise settles".
-    const partitionDiscoverySpy = vi.spyOn(
-      engine as unknown as { discoverScopedContentGraphAllowList: (...args: unknown[]) => Promise<string[]> },
-      'discoverScopedContentGraphAllowList',
-    );
+    const discoveryTarget = engine as unknown as {
+      discoverScopedContentGraphAllowList: (...args: unknown[]) => Promise<string[]>;
+    };
+    const origDiscovery = discoveryTarget.discoverScopedContentGraphAllowList.bind(engine);
+    const partitionDiscoverySpy = recorder((...a: unknown[]) => origDiscovery(...a));
+    discoveryTarget.discoverScopedContentGraphAllowList = partitionDiscoverySpy;
     const sparql = `SELECT ?g ?name WHERE { GRAPH ?g { ?s <${SCHEMA_NAME}> ?name } } ORDER BY ?name`;
     const first = await engine.query(
       sparql,
       { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true },
     );
     expect(first.bindings.some((row) => row['g'] === codeSubGraph)).toBe(true);
-    expect(partitionDiscoverySpy).toHaveBeenCalledTimes(1);
+    expect(partitionDiscoverySpy.calls).toHaveLength(1);
 
     await store.insert([
       ...subGraphRegistration('docs'),
@@ -1089,7 +1099,7 @@ describe('DKGQueryEngine', () => {
       sparql,
       { contextGraphId: CONTEXT_GRAPH, includeContextGraphPartitions: true },
     );
-    expect(partitionDiscoverySpy).toHaveBeenCalledTimes(2);
+    expect(partitionDiscoverySpy.calls).toHaveLength(2);
     expect(second.bindings.some((row) => row['g'] === docsSubGraph)).toBe(true);
   });
 

@@ -74,34 +74,28 @@ export type V10ACKProvider = (
   /** V10 flat-KC Merkle leaf count (sorted + deduped); binds ACK + on-chain KC to RandomSampling. */
   merkleLeafCount: number,
   /**
-   * OT-RFC-38 / LU-5 — when `true`, `stagingQuads` is opaque AEAD
-   * ciphertext (curated CG payload) and cores skip merkle-root
-   * recompute. The publisher's claimed `merkleRoot`, `kaCount`, and
-   * `merkleLeafCount` are signed verbatim into the V10 digest; member
-   * post-decrypt verification (LU-8) is what catches lies. Cores
-   * still verify `stagingQuads.length === publicByteSize` to keep
-   * pricing honest. Defaults to `false` so existing public-CG callers
-   * are unchanged.
+   * OT-RFC-49 / WS-D — when `true`, this is a CURATED publish: `stagingQuads`
+   * carries the PUBLIC `_catalog` N-quads (plaintext — the catalog is public),
+   * and the private data is encrypted for MEMBERS only (off the ACK wire).
+   * Cores skip the flat-KC plaintext recompute (they don't hold the private
+   * data) and instead rebuild + verify the catalog root from `catalogCommitment`
+   * against the inline `stagingQuads`. Defaults to `false` so existing public-CG
+   * callers are unchanged.
    */
   isEncryptedPayload?: boolean,
   /**
-   * OT-RFC-38 LU-11 / OT-RFC-39. When present, the publisher has
-   * already chunked + AEAD-encrypted the curated payload + fanned
-   * per-chunk ciphertexts via SWM gossip. The ACK request is sent
-   * over `PROTOCOL_STORAGE_ACK_V2` with `stagingQuads` empty (chunks
-   * live on SWM, never on the ACK wire) and the PublishIntent
-   * carries `ciphertextChunksRoot` + `ciphertextChunkCount` +
-   * `ackProtocolVersion = 2`. Cores recompute the root from local
-   * per-chunk store and DECLINE on mismatch.
-   *
-   * Mutually exclusive with the LU-5 single-blob path:
-   * `isEncryptedPayload` must also be `true` when this is set, and
-   * `stagingQuads` MUST be empty/undefined. Pre-LU-11 cores never
-   * see this field and stay on V1 semantics.
+   * OT-RFC-49 / WS-D — the CURATED PUBLIC `_catalog` commitment for this
+   * publish (REPLACED the stripped ciphertext-chunks commitment). When present,
+   * the publisher computed `computeCatalogRoot(catalogCommittedLeaves(...))`
+   * over the committed catalog leaf-set; the same `(catalogRoot, catalogLeafCount)`
+   * is signed into the V10 ACK digest, lands on-chain, and is what the core
+   * rebuilds over the inline catalog `stagingQuads` (DECLINE `CATALOG_ROOT_MISMATCH`
+   * on disagreement). Required when `isEncryptedPayload === true` AND the curated
+   * CG has a catalog entry; absent for public CGs.
    */
-  chunkedCommitment?: {
-    ciphertextChunksRoot: Uint8Array;
-    ciphertextChunkCount: number;
+  catalogCommitment?: {
+    catalogRoot: Uint8Array;
+    catalogLeafCount: number;
   },
 ) => Promise<V10CoreNodeACK[]>;
 
@@ -131,8 +125,15 @@ export type V10UpdateACKProvider = (params: {
   mintAmount: bigint;
   burnTokenIds: bigint[];
   newMerkleLeafCount: number;
-  newCiphertextChunksRoot?: Uint8Array;
-  newCiphertextChunkCount?: number;
+  newCatalogRoot?: Uint8Array;
+  newCatalogLeafCount?: number;
+  /**
+   * OT-RFC-49 / WS-D — set `true` for a curated update so the agent closure
+   * forwards it into `collectUpdate`, stamping `UpdateIntent.isEncryptedPayload`.
+   * Cores gate the inline-catalog rebuild/verify/persist path on this flag.
+   * Omitted (undefined) for public updates — no catalog; unchanged on a healthy chain.
+   */
+  isEncryptedPayload?: boolean;
   /** Updated KC quads (N-Quads) so peers can recompute newMerkleRoot. */
   stagingQuads?: Uint8Array;
   /** Source SWM graph id (defaults to contextGraphId). */
@@ -169,6 +170,12 @@ export interface PublishOptions {
   entityProofs?: boolean;
   /** Optional callback invoked at each phase boundary for instrumentation. */
   onPhase?: PhaseCallback;
+  /**
+   * Skip the publisher-level context-graph graph creation/ensure step.
+   * Only callers that already validated the target context graph should set
+   * this; it avoids re-entering store-backed graph discovery on direct publish.
+   */
+  skipContextGraphEnsure?: boolean;
   /** Override the data graph URI (used for context graph publishing). */
   targetGraphUri?: string;
   /** Override the meta graph URI (used for context graph publishing). */
@@ -246,6 +253,7 @@ export interface PublishOptions {
   }) => Promise<{
     ciphertextChunksRoot: Uint8Array;
     ciphertextChunkCount: number;
+    ciphertextChunks?: Uint8Array[];
     /**
      * Ciphertext byte size the publisher signed into the V10 ACK
      * digest. Concatenation of every per-chunk ciphertext length —
@@ -359,6 +367,19 @@ export interface PublishResult {
   kaManifest: KAManifestEntry[];
   status: 'tentative' | 'confirmed' | 'failed';
   onChainResult?: OnChainPublishResult;
+  /**
+   * GH #1013 — when a publish lands `tentative` (local-only), WHY it skipped
+   * chain submission:
+   *   - `no-chain`        — no on-chain CG id / chain not V10-ready: local is the
+   *                         only possible outcome (an honest local finalization).
+   *   - `private-no-acks` — the CG IS chain-registered but a private payload
+   *                         couldn't collect storage ACKs, so it never reached the
+   *                         chain it should have. The async lift must NOT report
+   *                         this as `finalized` with a provisional UAL (#1013) —
+   *                         the real fix for reaching chain here is #1121.
+   * Undefined on confirmed publishes and pre-#1013 results.
+   */
+  localChainSkipReason?: 'no-chain' | 'private-no-acks';
   /** Public quads that were stored (used for broadcast — never includes private triples). */
   publicQuads?: Quad[];
   /** Set when KC is confirmed on-chain but context-graph registration failed. */

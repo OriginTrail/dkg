@@ -90,6 +90,12 @@ async function bootResponderAgent(): Promise<{ agent: DKGAgent; internals: Respo
   const agent = await DKGAgent.create({
     name: 'GetChunkResponderTest',
     chainAdapter: new MockChainAdapter(),
+    // OT-RFC-49 WS-A defaults `stripCiphertext` ON, which retires host-mode
+    // ciphertext-chunk custody (the handler declines "private-ciphertext strip
+    // is on" before any lookup). These tests verify the chunk-SERVING handler's
+    // canonical-CG keying / authority / replay logic, which is only reachable
+    // when a node opts INTO custody — so disable the strip for this responder.
+    swmHostMode: { stripCiphertext: false },
   });
   const internals = agent as unknown as ResponderInternals;
   return { agent, internals };

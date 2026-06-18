@@ -24,7 +24,11 @@ import {
 import {
   V10MerkleTree,
   hashTripleV10,
+  tripleContentV10,
+  keccak256,
+  structuredKARootV10,
   buildV10ProofMaterial,
+  verifyV10ProofMaterial,
   contextGraphDataUri,
   contextGraphMetaUri,
 } from '@origintrail-official/dkg-core';
@@ -270,13 +274,15 @@ describe('extractV10KCFromStore — happy path / publisher round-trip parity', (
     await seedKC(store, fixture);
 
     const result = await extractV10KCFromStore(store, fixture.cgId, fixture.kaId);
-    const tree = new V10MerkleTree(result.leaves);
-    const expected = { merkleRoot: tree.root, merkleLeafCount: tree.leafCount };
+    // content-binding + structured commitment: prover submits N-Triple content bytes;
+    // private sub-roots ride along as the committed sibling.
+    const contents = result.triples.map((t) => tripleContentV10(t.subject, t.predicate, t.object));
+    const { root, leafCount } = structuredKARootV10(contents.map(keccak256), result.privateRoots);
+    const expected = { merkleRoot: root, merkleLeafCount: leafCount };
 
-    for (let chunkId = 0; chunkId < tree.leafCount; chunkId++) {
-      const material = buildV10ProofMaterial(result.leaves, chunkId, expected);
-      expect(V10MerkleTree.verify(expected.merkleRoot, material.leaf, material.proof, chunkId))
-        .toBe(true);
+    for (let chunkId = 0; chunkId < leafCount; chunkId++) {
+      const material = buildV10ProofMaterial(contents, result.privateRoots, chunkId, expected);
+      expect(verifyV10ProofMaterial(material, chunkId, expected)).toBe(true);
     }
   });
 
@@ -800,15 +806,22 @@ describe('restateLabelGraphForUpdate — label graph full restatement (GH #842 �
     // Stale 'urn:orig:r' data is gone; only the new root remains.
     expect(await labelDataSubjects()).toEqual(['urn:new:r']);
 
-    // rootEntity repointed on the SAME ka subject (provenance preserved).
+    // RFC ka-metadata-trim P3.1 (collapsed shape): rootEntity is re-stamped
+    // on the UAL subject itself; the legacy `<ual>/1` token row found in the
+    // store is removed entirely (the restate IS the migration).
     const rootRes = await store.query(
-      `SELECT ?root WHERE { GRAPH <${labelMeta}> { <${UAL}/1> <${DKG}rootEntity> ?root } }`,
+      `SELECT ?root WHERE { GRAPH <${labelMeta}> { <${UAL}> <${DKG}rootEntity> ?root } }`,
     );
     expect(rootRes.type === 'bindings' && rootRes.bindings[0]['root']).toBe('urn:new:r');
-    const authRes = await store.query(
-      `ASK { GRAPH <${labelMeta}> { <${UAL}/1> <${DKG}authoredBy> "0xauthor" } }`,
+    const tokenGone = await store.query(
+      `ASK { GRAPH <${labelMeta}> { <${UAL}/1> ?p ?o } }`,
     );
-    expect(authRes.type === 'boolean' && authRes.value).toBe(true);
+    expect(tokenGone.type === 'boolean' && tokenGone.value).toBe(false);
+    // KC-level rows on the UAL subject are preserved.
+    const batchKept = await store.query(
+      `ASK { GRAPH <${labelMeta}> { <${UAL}> <${DKG}batchId> "${KA_ID}"^^<${XSD}integer> } }`,
+    );
+    expect(batchKept.type === 'boolean' && batchKept.value).toBe(true);
   });
 
   it('purges prior label data discovered through new-only dkg:entity rows', async () => {
@@ -958,12 +971,25 @@ describe('GH#842 / PR #845 — Codex review fixes', () => {
       }),
     ).toBe(true);
 
-    // After restatement, EVERY token `<ual>/N` MUST point at `urn:new:N`.
-    // With a lex-sort regression we'd see `<ual>/10` bound to `urn:new:2` (or
-    // vice-versa) because `"urn:new:10"` lex-sorts before `"urn:new:2"`.
+    // RFC ka-metadata-trim P3.1 conditional collapse: a MULTI-root update
+    // re-emits the per-token `<ual>/N` rows ALONGSIDE the collapsed UAL-subject
+    // member set (see packages/publisher/test/multi-root-token-rows.test.ts).
+    // The collapsed aggregate carries every new root as an unordered set.
+    const rootsRes = await store.query(
+      `SELECT ?root WHERE { GRAPH <${labelMeta}> { <${UAL}> <${DKG}rootEntity> ?root } }`,
+    );
+    expect(rootsRes.type).toBe('bindings');
+    if (rootsRes.type === 'bindings') {
+      const roots = new Set(rootsRes.bindings.map((b) => b['root']));
+      expect(roots).toEqual(new Set(Array.from({ length: N }, (_, i) => `urn:new:${i + 1}`)));
+    }
+    // Codex bug 2 regression lock: EVERY re-emitted token `<ual>/N` MUST bind
+    // `urn:new:N` in MANIFEST order. With a lex-sort regression we'd see
+    // `<ual>/10` bound to `urn:new:2` (or vice-versa) because `"urn:new:10"`
+    // lex-sorts before `"urn:new:2"`.
     for (let i = 1; i <= N; i++) {
       const res = await store.query(
-        `SELECT ?root WHERE { GRAPH <${labelMeta}> { <${UAL}/${i}> <${DKG}rootEntity> ?root } }`,
+        `SELECT ?root WHERE { GRAPH <${labelMeta}> { <${UAL}/${i}> <${DKG}rootEntity> ?root . <${UAL}/${i}> <${DKG}partOf> <${UAL}> } }`,
       );
       expect(res.type).toBe('bindings');
       if (res.type === 'bindings') {
@@ -1003,25 +1029,46 @@ describe('GH#842 / PR #845 — Codex review fixes', () => {
       }),
     ).toBe(true);
 
-    // `<ual>/3`, `<ual>/4`, `<ual>/5` must be FULLY gone — no rdf:type, no
-    // partOf, nothing. Enumeration queries that look for KnowledgeAssets
-    // partOf <ual> should see exactly the 2 retained tokens.
+    // RFC ka-metadata-trim P3.1 (CONDITIONAL collapse): a MULTI-root update
+    // re-emits exactly `newRoots.length` per-token rows in manifest order
+    // alongside the UAL-subject member set. The Codex-bug-3 invariant is that
+    // NO SURPLUS token survives the shrink: after 5→2, only `<ual>/1` and
+    // `<ual>/2` exist; `<ual>/3..5` (and their roots) are gone.
     const enumRes = await store.query(
-      `SELECT DISTINCT ?ka WHERE { GRAPH <${labelMeta}> { ?ka <${DKG}partOf> <${UAL}> ; <${RDF}type> <${DKG}KnowledgeAsset> } }`,
+      `SELECT DISTINCT ?ka WHERE { GRAPH <${labelMeta}> { ?ka <${DKG}partOf> <${UAL}> } }`,
     );
     expect(enumRes.type).toBe('bindings');
     if (enumRes.type === 'bindings') {
-      const present = enumRes.bindings.map((b) => b['ka']).sort();
-      expect(present).toEqual([`${UAL}/1`, `${UAL}/2`]);
+      expect(new Set(enumRes.bindings.map((b) => b['ka']))).toEqual(
+        new Set([`${UAL}/1`, `${UAL}/2`]),
+      );
     }
-    // And the retained tokens point at the new roots in manifest order.
-    const r1 = await store.query(
-      `SELECT ?root WHERE { GRAPH <${labelMeta}> { <${UAL}/1> <${DKG}rootEntity> ?root } }`,
+    // Surplus prior tokens deleted: none of <ual>/3..5 survive.
+    const surplusGone = await store.query(
+      `ASK { GRAPH <${labelMeta}> {
+         VALUES ?ka { <${UAL}/3> <${UAL}/4> <${UAL}/5> }
+         ?ka ?p ?o .
+       } }`,
     );
-    expect(r1.type === 'bindings' && r1.bindings[0]['root']).toBe('urn:new:a');
-    const r2 = await store.query(
-      `SELECT ?root WHERE { GRAPH <${labelMeta}> { <${UAL}/2> <${DKG}rootEntity> ?root } }`,
+    expect(surplusGone.type === 'boolean' && surplusGone.value).toBe(false);
+    // Re-emitted tokens carry the new roots in manifest order.
+    const tokenRootRes = await store.query(
+      `SELECT ?ka ?root WHERE { GRAPH <${labelMeta}> {
+         ?ka <${DKG}partOf> <${UAL}> ; <${DKG}rootEntity> ?root .
+       } }`,
     );
-    expect(r2.type === 'bindings' && r2.bindings[0]['root']).toBe('urn:new:b');
+    expect(tokenRootRes.type).toBe('bindings');
+    if (tokenRootRes.type === 'bindings') {
+      const byToken = new Map(tokenRootRes.bindings.map((b) => [b['ka'], b['root']]));
+      expect(byToken.get(`${UAL}/1`)).toBe('urn:new:a');
+      expect(byToken.get(`${UAL}/2`)).toBe('urn:new:b');
+    }
+    const rootsRes = await store.query(
+      `SELECT ?root WHERE { GRAPH <${labelMeta}> { <${UAL}> <${DKG}rootEntity> ?root } }`,
+    );
+    expect(rootsRes.type).toBe('bindings');
+    if (rootsRes.type === 'bindings') {
+      expect(new Set(rootsRes.bindings.map((b) => b['root']))).toEqual(new Set(['urn:new:a', 'urn:new:b']));
+    }
   });
 });

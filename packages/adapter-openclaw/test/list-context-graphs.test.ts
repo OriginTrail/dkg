@@ -174,7 +174,6 @@ describe('dkg_publish tool', () => {
 
   it('publishes quads array with literal objects', async () => {
     ft.addResponses(
-      new Response(JSON.stringify({ triplesWritten: 2 }), { status: 200 }),
       new Response(JSON.stringify({ kaId: 'kc-123', kas: [{ tokenId: '1', rootEntity: 'urn:x' }] }), { status: 200 }),
     );
 
@@ -190,16 +189,18 @@ describe('dkg_publish tool', () => {
     expect(parsed.kaCount).toBe(1);
     expect(parsed.quadsPublished).toBe(2);
 
-    const writeBody = JSON.parse(ft.calls[0][1]?.body as string);
-    expect(writeBody.contextGraphId).toBe('testing');
-    expect(writeBody.quads).toHaveLength(2);
-    expect(writeBody.quads[0].subject).toBe('https://example.org/wine');
-    expect(writeBody.quads[0].object).toBe('"Cabernet Sauvignon"');
+    expect(ft.calls).toHaveLength(1);
+    expect(String(ft.calls[0][0])).toContain('/api/knowledge-assets/publish');
+    const publishBody = JSON.parse(ft.calls[0][1]?.body as string);
+    expect(publishBody.contextGraphId).toBe('testing');
+    expect(publishBody.quads).toHaveLength(2);
+    expect(publishBody.quads[0].subject).toBe('https://example.org/wine');
+    expect(publishBody.quads[0].object).toBe('"Cabernet Sauvignon"');
+    expect(publishBody.quads[0].graph).toBe('');
   });
 
   it('publishes quads array with URI objects (auto-detected)', async () => {
     ft.addResponses(
-      new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),
       new Response(JSON.stringify({ kaId: 'kc-uri', kas: [] }), { status: 200 }),
     );
 
@@ -209,13 +210,12 @@ describe('dkg_publish tool', () => {
     ];
     const result = await tool.execute('call-uri', { context_graph_id: 'testing', quads });
 
-    const writeBody = JSON.parse(ft.calls[0][1]?.body as string);
-    expect(writeBody.quads[0].object).toBe('https://schema.org/Product');
+    const publishBody = JSON.parse(ft.calls[0][1]?.body as string);
+    expect(publishBody.quads[0].object).toBe('https://schema.org/Product');
   });
 
   it('accepts a full context graph DID without double-prefixing the publish graph', async () => {
     ft.addResponses(
-      new Response(JSON.stringify({ assertionUri: 'urn:assertion:test' }), { status: 200 }),
       new Response(JSON.stringify({ kaId: 'kc-did', kas: [] }), { status: 200 }),
     );
 
@@ -225,19 +225,14 @@ describe('dkg_publish tool', () => {
       quads: [{ subject: 'urn:a', predicate: 'urn:b', object: 'hello' }],
     });
 
-    const createBody = JSON.parse(ft.calls[0][1]?.body as string);
-    expect(createBody.contextGraphId).toBe('0xabc/tuesday-cg');
-    // CONTRACT §0 invariant 2: the write wire shape is {subject,predicate,object}
-    // — the daemon pins quads to the per-KA WM graph, so no per-quad `graph` is
-    // sent (the legacy double-prefixed graph field was dropped in PR1).
-    expect(createBody.quads[0]).not.toHaveProperty('graph');
-    const publishBody = JSON.parse(ft.calls[1][1]?.body as string);
+    expect(ft.calls).toHaveLength(1);
+    const publishBody = JSON.parse(ft.calls[0][1]?.body as string);
     expect(publishBody.contextGraphId).toBe('0xabc/tuesday-cg');
+    expect(publishBody.quads[0].graph).toBe('');
   });
 
   it('handles mixed URI and literal objects', async () => {
     ft.addResponses(
-      new Response(JSON.stringify({ triplesWritten: 3 }), { status: 200 }),
       new Response(JSON.stringify({ kaId: 'kc-mix', kas: [] }), { status: 200 }),
     );
 
@@ -252,10 +247,10 @@ describe('dkg_publish tool', () => {
 
     expect(parsed.quadsPublished).toBe(3);
 
-    const writeBody = JSON.parse(ft.calls[0][1]?.body as string);
-    expect(writeBody.quads[0].object).toBe('https://schema.org/Product');
-    expect(writeBody.quads[1].object).toBe('"Cabernet"');
-    expect(writeBody.quads[2].object).toBe('urn:winemaker:alice');
+    const publishBody = JSON.parse(ft.calls[0][1]?.body as string);
+    expect(publishBody.quads[0].object).toBe('https://schema.org/Product');
+    expect(publishBody.quads[1].object).toBe('"Cabernet"');
+    expect(publishBody.quads[2].object).toBe('urn:winemaker:alice');
   });
 
   it('returns error for empty quads array', async () => {
@@ -277,7 +272,6 @@ describe('dkg_publish tool', () => {
 
   it('escapes quotes in literal object values', async () => {
     ft.addResponses(
-      new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),
       new Response(JSON.stringify({ kaId: 'kc-esc', kas: [] }), { status: 200 }),
     );
 
@@ -287,37 +281,34 @@ describe('dkg_publish tool', () => {
     ];
     const result = await tool.execute('call-esc', { context_graph_id: 'testing', quads });
 
-    const writeBody = JSON.parse(ft.calls[0][1]?.body as string);
-    expect(writeBody.quads[0].object).toBe('"She said \\"hello\\""');
+    const publishBody = JSON.parse(ft.calls[0][1]?.body as string);
+    expect(publishBody.quads[0].object).toBe('"She said \\"hello\\""');
   });
 
-  it('drops a client-supplied per-quad graph field (CONTRACT §0 invariant 2)', async () => {
+  it('preserves a client-supplied per-quad graph field for the direct publish payload', async () => {
     ft.addResponses(
-      new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),
       new Response(JSON.stringify({ kaId: 'kc-graph', kas: [] }), { status: 200 }),
     );
 
     const tool = findTool('dkg_publish');
-    // The dkg_publish schema no longer advertises a per-quad `graph` (query-tools),
-    // and even if an agent injects one the publish path must NOT forward it: the
-    // daemon overrides the graph to the per-KA WM graph. The write wire shape is
-    // {subject,predicate,object} only.
     const quads = [
       { subject: 'urn:a', predicate: 'urn:b', object: 'hello', graph: 'urn:my-graph' },
     ];
     await tool.execute('call-graph', { context_graph_id: 'testing', quads });
 
-    const writeBody = JSON.parse(ft.calls[0][1]?.body as string);
-    expect(writeBody.quads[0]).not.toHaveProperty('graph');
-    expect(writeBody.quads[0]).toMatchObject({ subject: 'urn:a', predicate: 'urn:b' });
+    const publishBody = JSON.parse(ft.calls[0][1]?.body as string);
+    expect(publishBody.quads[0]).toMatchObject({
+      subject: 'urn:a',
+      predicate: 'urn:b',
+      graph: 'urn:my-graph',
+    });
   });
 
   // ── CONTRACT §G — register_if_needed on the one-shot dkg_publish ──────────
   it('register_if_needed:true registers the CG on-chain THEN publishes', async () => {
     ft.addResponses(
       new Response(JSON.stringify({ registered: 'testing', onChainId: 'chain:testing' }), { status: 200 }), // register
-      new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),                                  // create
-      new Response(JSON.stringify({ kaId: 'kc-reg', kas: [] }), { status: 200 }),                            // publish
+      new Response(JSON.stringify({ kaId: 'kc-reg', kas: [] }), { status: 200 }),                            // direct publish
     );
     const tool = findTool('dkg_publish');
     const result = await tool.execute('call-reg', {
@@ -326,11 +317,11 @@ describe('dkg_publish tool', () => {
       register_if_needed: true,
       access_policy: 1,
     });
-    // register first, then the publish two-call path.
+    // register first, then the direct publish path.
     expect(String(ft.calls[0][0])).toContain('/api/context-graph/register');
     const regBody = JSON.parse(ft.calls[0][1]?.body as string);
     expect(regBody).toMatchObject({ id: 'testing', accessPolicy: 1 });
-    expect(String(ft.calls[1][0])).toContain('/api/knowledge-assets');
+    expect(String(ft.calls[1][0])).toContain('/api/knowledge-assets/publish');
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.kaId).toBe('kc-reg');
     expect(parsed.registration).toBeDefined();
@@ -339,8 +330,7 @@ describe('dkg_publish tool', () => {
   it('register_if_needed:true tolerates an already-registered CG and still publishes', async () => {
     ft.addResponses(
       new Response(JSON.stringify({ error: 'context graph already registered' }), { status: 400 }), // register → already
-      new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),                          // create
-      new Response(JSON.stringify({ kaId: 'kc-already', kas: [] }), { status: 200 }),                // publish
+      new Response(JSON.stringify({ kaId: 'kc-already', kas: [] }), { status: 200 }),                // direct publish
     );
     const tool = findTool('dkg_publish');
     const result = await tool.execute('call-already', {
@@ -384,19 +374,11 @@ describe('dkg_publish tool', () => {
     expect(ft.calls).toHaveLength(0);
   });
 
-  // ── FIX A — create 207 share-phase partial-failure → do NOT publish ──────
-  it('aborts (no publish) when create returns a 207 share-phase partial-failure, surfacing the assertionName', async () => {
+  it('surfaces direct publish NO_DATA_IN_SWM failures without hidden assertion state', async () => {
     ft.addResponses(
-      // create → 207: sealed in WM but the promote/share phase failed.
       new Response(
-        JSON.stringify({
-          created: true,
-          name: 'openclaw-publish-x',
-          assertionUri: 'urn:assertion:x',
-          status: 'wm-sealed',
-          errors: [{ phase: 'swm-share', error: 'gossip peer unreachable' }],
-        }),
-        { status: 207, headers: { 'Content-Type': 'application/json' } },
+        JSON.stringify({ error: 'NO_DATA_IN_SWM' }),
+        { status: 502, headers: { 'Content-Type': 'application/json' } },
       ),
     );
     const tool = findTool('dkg_publish');
@@ -406,18 +388,14 @@ describe('dkg_publish tool', () => {
     });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.error).toBeTruthy();
-    expect(parsed.error).toContain('gossip peer unreachable'); // the share error
-    expect(parsed.error).toMatch(/openclaw-publish-/); // the created asset name for recovery
-    expect(parsed.error).toMatch(/do not recreate/i);
-    // The /api/shared-memory/publish call was NEVER made — only the create call.
+    expect(parsed.error).toContain('NO_DATA_IN_SWM');
+    expect(parsed.error).not.toMatch(/openclaw-publish-/);
     expect(ft.calls).toHaveLength(1);
-    expect(String(ft.calls[0][0])).toContain('/api/knowledge-assets');
+    expect(String(ft.calls[0][0])).toContain('/api/knowledge-assets/publish');
   });
 
-  // ── FIX W — create HARD failure surfaces the assertionName for recovery ──
-  it('surfaces the generated assertionName when the create call HARD-fails (FIX W)', async () => {
+  it('surfaces direct publish hard failures without creating a recovery assertionName', async () => {
     ft.addResponses(
-      // create → 500: the asset MAY have been created server-side despite the failure.
       new Response(JSON.stringify({ error: 'daemon timeout after commit' }), { status: 500 }),
     );
     const tool = findTool('dkg_publish');
@@ -427,23 +405,15 @@ describe('dkg_publish tool', () => {
     });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.error).toBeTruthy();
-    expect(parsed.error).toMatch(/openclaw-publish-/);            // the generated name, for recovery
-    // FIX Y: point recovery at _history (lifecycle state, any layer) — the WM
-    // draft is empty after the create's promote, so _query would falsely read
-    // "not created".
-    expect(parsed.error).toMatch(/dkg_knowledge_asset_history/);
-    expect(parsed.error).toMatch(/NOT dkg_knowledge_asset_query/i);
-    expect(parsed.error).toMatch(/duplicate/i);
-    // only the create call was made — no publish.
+    expect(parsed.error).toMatch(/daemon timeout after commit/);
+    expect(parsed.error).not.toMatch(/openclaw-publish-/);
     expect(ft.calls).toHaveLength(1);
-    expect(String(ft.calls[0][0])).toContain('/api/knowledge-assets');
+    expect(String(ft.calls[0][0])).toContain('/api/knowledge-assets/publish');
   });
 
-  // ── FIX B — publish fails after create → surface the assertionName ───────
-  it('surfaces the created assertionName when the publish call fails after a successful create', async () => {
+  it('surfaces direct publish chain failures from the publish route', async () => {
     ft.addResponses(
-      new Response(JSON.stringify({ assertionUri: 'urn:assertion:y', status: 'swm-shared' }), { status: 201 }), // create OK
-      new Response(JSON.stringify({ error: 'on-chain revert' }), { status: 502 }),                               // publish fails
+      new Response(JSON.stringify({ error: 'on-chain revert' }), { status: 502 }),
     );
     const tool = findTool('dkg_publish');
     const result = await tool.execute('call-pubfail', {
@@ -452,19 +422,14 @@ describe('dkg_publish tool', () => {
     });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.error).toBeTruthy();
-    expect(parsed.error).toMatch(/openclaw-publish-/);  // assertionName for retry
-    expect(parsed.error).toMatch(/do not recreate/i);
-    expect(parsed.error).toMatch(/retry the publish/i);
-    // both create + publish calls were made (the failure was the 2nd call).
-    expect(ft.calls).toHaveLength(2);
-    expect(String(ft.calls[1][0])).toContain('/api/shared-memory/publish');
+    expect(parsed.error).toMatch(/on-chain revert/);
+    expect(ft.calls).toHaveLength(1);
+    expect(String(ft.calls[0][0])).toContain('/api/knowledge-assets/publish');
   });
 
   // ── FIX E — publish returns 207 contextGraphError → surface partial/warning ──
   it('surfaces a 207 partial (minted on-chain, CG bind failed) as a WARNING, not plain success', async () => {
     ft.addResponses(
-      new Response(JSON.stringify({ assertionUri: 'urn:assertion:z', status: 'swm-shared' }), { status: 201 }), // create OK
-      // publish → 207 body: minted (ual/kaId valid) but the CG binding failed.
       new Response(
         JSON.stringify({ kaId: 'kc-z', ual: 'did:dkg:1/0xauthor/9', status: 'confirmed', contextGraphError: 'context-graph binding timed out' }),
         { status: 207, headers: { 'Content-Type': 'application/json' } },
@@ -488,7 +453,6 @@ describe('dkg_publish tool', () => {
 
   it('reports plain success on a 200 publish (no contextGraphError)', async () => {
     ft.addResponses(
-      new Response(JSON.stringify({ assertionUri: 'urn:assertion:ok', status: 'swm-shared' }), { status: 201 }),
       new Response(JSON.stringify({ kaId: 'kc-ok', ual: 'did:dkg:1/0xauthor/10', kas: [{ tokenId: '1', rootEntity: 'urn:a' }] }), { status: 200 }),
     );
     const tool = findTool('dkg_publish');
@@ -1064,7 +1028,7 @@ describe('dkg_wallet_balances tool', () => {
   });
 });
 
-describe('dkg_publish SWM-first flow', () => {
+describe('dkg_publish direct flow', () => {
   let ft: ReturnType<typeof setupFetchOverride>;
 
   beforeEach(() => { ft = setupFetchOverride(); });
@@ -1072,9 +1036,8 @@ describe('dkg_publish SWM-first flow', () => {
 
   const VALID_QUADS = [{ subject: 'urn:a', predicate: 'urn:b', object: 'c' }];
 
-  it('writes to SWM then publishes from SWM', async () => {
+  it('publishes explicit quads through the direct publish route', async () => {
     ft.addResponses(
-      new Response(JSON.stringify({ assertionUri: 'urn:assertion:test' }), { status: 200 }),
       new Response(JSON.stringify({ kaId: 'kc-1', kas: [] }), { status: 200 }),
     );
 
@@ -1085,15 +1048,14 @@ describe('dkg_publish SWM-first flow', () => {
     expect(parsed.kaId).toBe('kc-1');
     expect(parsed.quadsPublished).toBe(1);
 
-    // V10 assertion lifecycle: the publish flow now creates a finalized
-    // assertion (`/api/knowledge-assets` with `finalize: true`) and then
-    // promotes it via `/api/shared-memory/publish`. The legacy
-    // `/api/shared-memory/write` route was removed in Phase B-1.
-    expect(ft.calls).toHaveLength(2);
-    const createUrl = ft.calls[0][0] as string;
-    expect(createUrl).toContain('/api/knowledge-assets');
-    const pubUrl = ft.calls[1][0] as string;
-    expect(pubUrl).toContain('/api/shared-memory/publish');
+    expect(ft.calls).toHaveLength(1);
+    const publishUrl = ft.calls[0][0] as string;
+    expect(publishUrl).toContain('/api/knowledge-assets/publish');
+    const publishBody = JSON.parse(ft.calls[0][1]?.body as string);
+    expect(publishBody).toMatchObject({
+      contextGraphId: 'testing',
+      quads: [{ subject: 'urn:a', predicate: 'urn:b', object: '"c"', graph: '' }],
+    });
   });
 
   it('rejects an invalid access_policy (now a recognized 0|1 param, CONTRACT §G)', async () => {
@@ -1110,8 +1072,7 @@ describe('dkg_publish SWM-first flow', () => {
   it('accepts a valid access_policy WITH register_if_needed:true (registers then publishes) — FIX S', async () => {
     ft.addResponses(
       new Response(JSON.stringify({ registered: 'testing' }), { status: 200 }), // register
-      new Response(JSON.stringify({ triplesWritten: 1 }), { status: 200 }),      // create
-      new Response(JSON.stringify({ kaId: 'kc-2', kas: [] }), { status: 200 }),  // publish
+      new Response(JSON.stringify({ kaId: 'kc-2', kas: [] }), { status: 200 }),  // direct publish
     );
 
     const tool = findTool('dkg_publish');

@@ -144,11 +144,16 @@ export async function handleNotificationRoutes(ctx: RequestContext): Promise<voi
       const notifications = [...byId.values()];
 
       // Authoritative pending-join set per curated CG (G3 reconcile).
+      // GH #757 made `listPendingJoinRequests` curator-gated, so pass the
+      // token-verified caller explicitly: these are `curatedCgIds` (the caller
+      // IS the curator), but without the address the gate would resolve
+      // against the node default agent and silently empty the pending set for
+      // any non-default curator agent.
       const pendingByGraph = new Map<string, Set<string>>();
       await Promise.all(
         [...scope.curatedCgIds].map(async (cgId) => {
           try {
-            const pending = await agent.listPendingJoinRequests(cgId);
+            const pending = await agent.listPendingJoinRequests(cgId, callerAddress);
             pendingByGraph.set(cgId, new Set(pending.map((r) => r.agentAddress.toLowerCase())));
           } catch {
             pendingByGraph.set(cgId, new Set());

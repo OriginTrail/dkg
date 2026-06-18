@@ -20,6 +20,7 @@ import {
   contextGraphSharedMemoryUri,
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
+  contextGraphCatalogUri,
   contextGraphLayerUri,
   deriveCuratorDidFromCgId,
   MemoryLayer,
@@ -95,6 +96,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
   sharedMemoryReadBothFilter,
+  partitionCatalogQuads,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
@@ -149,6 +151,7 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
+import { emitPublicProjection, buildPublicProjection } from './context-graph-public-projection.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
@@ -487,6 +490,12 @@ export class PublishMethods extends DKGAgentBase {
       plan = chooseFanOutTier({
         enumeration,
         maxSubstrateMembers: this.swmSubstrateMaxMembers,
+        // OT-RFC-49 WS-A — for a PRIVATE allowlist CG, this flips the gossip
+        // leg OFF so curated SWM ciphertext stays off the public mesh and
+        // reaches the roster over the reliable substrate only. Resolved on
+        // the same planning path that already runs `isPrivateContextGraph`
+        // for enumeration, so no extra store round-trip beyond its cache.
+        isPrivate: await this.isPrivateContextGraph(contextGraphId),
       });
     } catch (err) {
       const errClass = err instanceof Error
@@ -1180,7 +1189,7 @@ export class PublishMethods extends DKGAgentBase {
     this.log.info(ctx, `Starting publish to context graph "${contextGraphId}" with ${quads.length} triples`);
 
     const isSystem = contextGraphId === SYSTEM_CONTEXT_GRAPHS.AGENTS || contextGraphId === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY;
-    if (!isSystem) {
+    if (!isSystem && !this.subscribedContextGraphs.has(contextGraphId)) {
       const exists = await this.contextGraphExists(contextGraphId);
       if (!exists) {
         throw new Error(
@@ -1190,7 +1199,7 @@ export class PublishMethods extends DKGAgentBase {
     }
     const v10ACKProvider = this.createV10ACKProvider(contextGraphId);
 
-    const onChainId = await this.getContextGraphOnChainId(contextGraphId);
+    const onChainId = opts?.onChainContextGraphId ?? await this.getContextGraphOnChainId(contextGraphId);
 
     // RFC-001 §9.x — sign-at-creation. The publisher refuses on-chain
     // publishes without a `precomputedAttestation`, so the agent
@@ -1255,8 +1264,7 @@ export class PublishMethods extends DKGAgentBase {
     // OT-RFC-38 LU-11 — also resolve the chunked emitter for curated
     // CGs. When set, the publisher prefers this path: chunks fan out
     // via SWM gossip and the V2 ACK carries only the commitment.
-    // Public CGs short-circuit to `undefined` here just like the
-    // single-blob resolver above.
+    // Public CGs resolve to `undefined` inside the chain-confirmed resolver.
     const encryptInlineChunked = await this._resolveEncryptInlineChunked(
       contextGraphId,
       opts?.subGraphName,
@@ -1274,7 +1282,9 @@ export class PublishMethods extends DKGAgentBase {
       subGraphName: opts?.subGraphName,
       operationCtx: ctx,
       onPhase,
+      skipContextGraphEnsure: true,
       v10ACKProvider,
+      publisherNodeIdentityIdOverride: opts?.publisherNodeIdentityIdOverride,
       publishContextGraphId: onChainId ?? undefined,
       publishEpochs: opts?.publishEpochs,
       precomputedAttestation,
@@ -1287,7 +1297,92 @@ export class PublishMethods extends DKGAgentBase {
     await this.broadcastPublish(contextGraphId, result, ctx);
     onPhase?.('broadcast', 'end');
     this.log.info(ctx, `Publish complete — status=${result.status} kaId=${result.kaId}`);
+
+    // refresh the private CG's public projection now the root
+    // is committed. No-op unless configured; best-effort and error-isolated so
+    // it can never affect the publish just completed.
+    await this.emitPublicProjectionAfterPublish(contextGraphId, result, ctx);
+
     return result;
+  }
+
+  /**
+   * emit/refresh the public projection of a private CG once
+   * its VM publish is confirmed on chain. Binds the private CG into the public
+   * graph as a discoverable, verifiable node (floor: `a dkg:PrivateContextGraph`,
+   * UAL, `dct:accessRights dkg:Private`, `dkg:committedRoot`) while disclosing
+   * nothing beyond chain state (§5.9.1).
+   *
+   * No-op unless `publicProjectionContextGraphId` is configured; skips public
+   * CGs (they are their own public face, handled inside `emitPublicProjection`)
+   * and the discovery CG itself (recursion guard). Fully error-isolated — a
+   * projection failure logs and returns, never affecting the triggering publish.
+   */
+  async emitPublicProjectionAfterPublish(
+    this: DKGAgent,
+    contextGraphId: string,
+    result: PublishResult,
+    ctx: OperationContext,
+  ): Promise<void> {
+    try {
+      const target = this.config.publicProjectionContextGraphId;
+      // Off unless configured; never project the discovery CG into itself.
+      if (!target || contextGraphId === target) return;
+      // Only a confirmed publish has a real on-chain committed root.
+      if (result.status !== 'confirmed' || result.merkleRoot.length !== 32) return;
+      const committedRoot = `0x${Buffer.from(result.merkleRoot).toString('hex')}`;
+
+      await emitPublicProjection(
+        {
+          isPrivateContextGraph: (id) => this.isPrivateContextGraph(id),
+          // B7 — the catalog subject is the context-graph DID
+          // (`did:dkg:context-graph:<id>`), NOT the knowledge-asset UAL
+          // (`result.ual`). Resolving from the CG id makes every publish refresh
+          // the SAME catalog entry (one stable subject per CG) that open-serve
+          // and the in-finalize injection also key off.
+          resolveUal: async (id) => contextGraphDataUri(id),
+          // B8 — persist the projection under the SOURCE CG's `_catalog` graph
+          // (`<source-cg>/_catalog`), the exact graph open-serve reads via
+          // `contextGraphCatalogUri`. The previous TARGET-CG data graph left
+          // outsiders with an empty `<source-cg>/_catalog`.
+          projectionGraph: (id) => contextGraphCatalogUri(id),
+          // buildPublicProjection already stamps each quad's graph from
+          // `projectionGraph` (the source `_catalog`), so the insert lands them
+          // in the right named graph — matching the canonical publisher catalog
+          // persist (dkg-publisher.ts persistCatalogEntry).
+          //
+          // R8 — CLEAR/REPLACE, not append. `committedRoot` changes every
+          // publish, so a bare insert accumulates multiple `dkg:committedRoot`
+          // (and floor) triples for the SAME catalog subject (the CG DID) in
+          // `<source-cg>/_catalog`, leaving open-serve unable to tell which root
+          // is current. Mirror `persistCatalogEntry`: purge the prior rows for
+          // each catalog subject in this graph before inserting the refreshed
+          // entry. `graph` is the callback's third arg (= `contextGraphCatalogUri(id)`,
+          // emitPublicProjection line 225), so delete-graph === insert-graph by
+          // construction; subjects derive from the quads (one stable CG DID),
+          // deleting exactly what we replace. Then invalidate the projection
+          // cache so a cached CG record picks up the new committed root — the
+          // floor predicates (rdf:type / dct:accessRights) are in
+          // CATALOG_META_PREDICATES, so this dirties the right entry.
+          publishProjection: async (_id, quads, graph) => {
+            const subjects = new Set(quads.map((q) => q.subject));
+            for (const subject of subjects) {
+              await this.store.deleteByPattern({ graph, subject });
+            }
+            await this.store.insert(quads);
+            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+          },
+          log: (level, message) =>
+            level === 'warn' ? this.log.warn(ctx, message) : this.log.info(ctx, message),
+        },
+        contextGraphId,
+        committedRoot,
+      );
+    } catch (err) {
+      // Defense-in-depth: emitPublicProjection already isolates its own errors,
+      // but a bug in target/root resolution must never break a good publish.
+      this.log.warn(ctx, `public projection skipped: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   async update(this: DKGAgent,
@@ -1330,9 +1425,78 @@ export class PublishMethods extends DKGAgentBase {
     // could not be resolved (the provider re-resolves the digest cgId from
     // the adapter regardless, so the digest TARGET stays chain-truth).
     const v10UpdateACKProvider = this.createV10UpdateACKProvider(updateOnChainId ?? contextGraphId);
+
+    // OT-RFC-49 / WS-D — curated-UPDATE discrimination + floor re-projection.
+    // A1: resolve the single-blob curated AEAD hook the SAME way the publish
+    // path does (dkg-agent-publish.ts:1257 _resolveEncryptInlinePayload). The
+    // resolver returns a function for a curated CG (accessPolicy=curated) and
+    // `undefined` for a public CG, so the function's truthiness IS the curated
+    // gate — exactly what the producer keys `useEncryptedInlineUpdate` off of.
+    // No separate accessPolicy read is needed. The 4th arg mirrors publish: the
+    // target on-chain cgId so the AEAD key derives from the canonical id
+    // consumers verify against.
+    const updateEncryptInlinePayload = await this._resolveEncryptInlinePayload(
+      contextGraphId,
+      undefined,
+      undefined,
+      updateOnChainId ?? undefined,
+    );
+    const isCuratedUpdate = typeof updateEncryptInlinePayload === 'function';
+
+    // ALSO resolve the chunked SWM emitter — the MEMBER-DISTRIBUTION path. A
+    // curated update must actively fan the updated private payload out to CG
+    // members (OT-RFC-49: cores hold zero ciphertext, members hold it), exactly
+    // as curated publish does — otherwise members silently fall behind a
+    // committed update. The producer prefers this side-effecting chunked emitter
+    // over the pure single-blob hook. Like publish, it THROWS for a curated CG
+    // with no workspace-gossip signer (cores reject unsigned chunked envelopes):
+    // fail-closed — you cannot update a curated CG you cannot distribute to
+    // members. Public CGs → `undefined` (no-op), unchanged.
+    const updateEncryptInlineChunked = isCuratedUpdate
+      ? await this._resolveEncryptInlineChunked(
+          contextGraphId,
+          undefined,
+          undefined,
+          updateOnChainId ?? undefined,
+        )
+      : undefined;
+
+    // A2: USER DECISION (a) — deterministic floor RE-PROJECTION (not read-and-
+    // merge). For a curated update, the public `_catalog` floor MUST be in the
+    // quads handed to the publisher so `partitionCatalogQuads` can lift it back
+    // out, commit a non-zero `newCatalogRoot`, and satisfy the on-chain
+    // `CuratedCGRequiresCatalogCommitment` gate — even for a metadata-only
+    // update (Open Decision #2: every curated update re-commits the floor).
+    // The update analogue of `_ensureCuratedCatalogInSwm` (3606): build the
+    // floor via the SAME `buildPublicProjection({ ual: cgDid, accessPolicy:
+    // 'private' })` so the committed catalog is byte-identical across publish
+    // and update. STRIP-THEN-APPEND: drop any catalog quads the caller's
+    // payload already carries (the from-SWM `publishFromFinalizedAssertion`
+    // path at 3213 can re-load a previously-injected floor) so the floor is
+    // never duplicated, then append exactly the fresh projection. The graph
+    // is cosmetic — `partitionCatalogQuads` matches on subject (the CG DID)
+    // and the catalog root excludes the graph term — so we stamp the canonical
+    // CG-DID data graph for clarity. Public updates skip this block entirely (no
+    // floor, no hook) and are unchanged on a HEALTHY chain. NB: update() now
+    // resolves the access policy unconditionally (~:1442), exactly as the publish
+    // path always has — so under a DEGRADED / stale policy probe a public update
+    // fails closed (throws) consistently with publish, where the OLD update path
+    // would have proceeded. Fail-closed, never a leak; see PR #1208 notes.
+    let updateQuads = quads;
+    if (isCuratedUpdate) {
+      const cgDid = contextGraphDataUri(contextGraphId);
+      const { otherQuads: nonCatalogQuads } = partitionCatalogQuads(quads, cgDid);
+      const catalogFloor = buildPublicProjection({
+        ual: cgDid,
+        accessPolicy: 'private',
+        graph: cgDid,
+      });
+      updateQuads = [...nonCatalogQuads, ...catalogFloor];
+    }
+
     const result = await this.publisher.update(kaId, {
       contextGraphId,
-      quads,
+      quads: updateQuads,
       privateQuads,
       publisherPeerId: this.node.peerId.toString(),
       publishContextGraphId: updateOnChainId ?? undefined,
@@ -1340,6 +1504,13 @@ export class PublishMethods extends DKGAgentBase {
       onPhase,
       precomputedUpdateAttestation: opts?.precomputedUpdateAttestation,
       v10UpdateACKProvider,
+      // Curated → wire the single-blob AEAD hook so the producer's
+      // `useEncryptedInlineUpdate` gate fires (catalog commit). Public →
+      // `undefined` (no catalog); unchanged on a healthy chain.
+      encryptInlinePayload: updateEncryptInlinePayload,
+      // Curated → the chunked emitter the producer prefers to fan the updated
+      // private payload out to CG members (member distribution). Public → undefined.
+      encryptInlineChunked: updateEncryptInlineChunked,
     });
     this.log.info(ctx, `Update complete — status=${result.status}`);
 
@@ -1385,18 +1556,25 @@ export class PublishMethods extends DKGAgentBase {
    * When localOnly is false (default), replicates via GossipSub shared memory topic.
    * When localOnly is true, stores locally without broadcasting — use for private data.
    */
-  async share(this: DKGAgent, contextGraphId: string, quads: Quad[], opts?: { localOnly?: boolean; operationCtx?: OperationContext; subGraphName?: string; callerAgentAddress?: string }): Promise<{ shareOperationId: string }> {
+  async share(this: DKGAgent, contextGraphId: string, quads: Quad[], opts?: { localOnly?: boolean; operationCtx?: OperationContext; subGraphName?: string; callerAgentAddress?: string; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number }): Promise<{ shareOperationId: string }> {
     const ctx = opts?.operationCtx ?? createOperationContext('share');
     const sgLabel = opts?.subGraphName ? ` (sub-graph: ${opts.subGraphName})` : '';
     this.log.info(ctx, `Sharing ${quads.length} quads to SWM for context graph ${contextGraphId}${sgLabel}${opts?.localOnly ? ' (local-only)' : ''}`);
     const shouldCreateImplicitContextGraph = await this.shouldCreateImplicitSharedMemoryContextGraph(contextGraphId);
     const gossipSigner = opts?.localOnly ? null : await this.resolveWorkspaceGossipSigningAgent(contextGraphId);
+
+    // Strict curator-ack gate (OT-RFC-49 curator-leader): require the curator's
+    // applied-ack BEFORE the local commit for a gated private-CG write (see
+    // buildCuratorAckConfirmer). Undefined → legacy best-effort path.
+    const confirmBeforeCommit = await this.buildCuratorAckConfirmer(contextGraphId, gossipSigner, opts, ctx);
+
     const { shareOperationId, message } = await this.publisher.writeToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
       subGraphName: opts?.subGraphName,
       localOnly: opts?.localOnly,
       senderAgentAddress: gossipSigner?.agentAddress,
+      confirmBeforeCommit,
     });
     if (shouldCreateImplicitContextGraph) {
       await this.ensureImplicitSharedMemoryContextGraph(contextGraphId, {
@@ -1407,9 +1585,101 @@ export class PublishMethods extends DKGAgentBase {
       // rc.9 PR-D: pass shareOperationId so publishWorkspaceGossip
       // can register the share with SwmAckQuorum and the watchdog
       // can fire substrate top-up if gossip-side acks miss quorum.
+      // (When the curator-ack gate confirmed above, the curator already
+      // holds this write; the fan-out here is the cross-version safety net
+      // + propagation to the OTHER members. A redundant curator delivery is
+      // idempotent — swm.redundantApplies.)
       await this.publishWorkspaceGossip(contextGraphId, message, ctx, gossipSigner, shareOperationId);
     }
     return { shareOperationId };
+  }
+
+  /**
+   * Build the strict curator-ack gate's `confirmBeforeCommit` callback for a
+   * private-CG SWM write (OT-RFC-49 curator-leader), or `undefined` when the gate
+   * does not apply. The callback runs inside the publisher's `_shareImpl`, under
+   * the per-CG write lock, between message-build and the first store mutation —
+   * so the lock is held across the curator round-trip (writes serialize through
+   * the curator) and a non-confirmation aborts the write with zero local state.
+   *
+   * Returns `undefined` (legacy best-effort path, no gate) when: the write is
+   * `localOnly`; the gate is off (per-call `awaitCuratorAck` ?? config
+   * `swmAwaitCuratorAck` ?? false); the CG is public; or this node IS the curator
+   * (its own commit is authoritative — a curator never confirms with itself).
+   * Shared by `share()`, `conditionalShare()`, and the WM→SWM `promote()` path
+   * (all flow through the publisher's `confirmBeforeCommit` seam). Public because
+   * the mixin-split `promote()` lives in a different class (cf. publishWorkspaceGossip).
+   */
+  async buildCuratorAckConfirmer(this: DKGAgent,
+    contextGraphId: string,
+    gossipSigner: Parameters<DKGAgent['encodeWorkspaceGossipMessage']>[2],
+    opts: { localOnly?: boolean; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number } | undefined,
+    ctx: OperationContext,
+  ): Promise<((message: Uint8Array) => Promise<{ applied: boolean; rejected?: boolean }>) | undefined> {
+    const wantCuratorAck = !opts?.localOnly
+      && (opts?.awaitCuratorAck ?? this.config.swmAwaitCuratorAck ?? false);
+    if (!wantCuratorAck) return undefined;
+    if (!(await this.isPrivateContextGraph(contextGraphId))) return undefined;
+    const curator = await this.resolveCuratorPeerIdsForCg(contextGraphId);
+    if (curator.curatorIsLocal) return undefined;
+    const timeoutMs = opts?.curatorAckTimeoutMs ?? DKGAgentBase.SWM_CURATOR_ACK_TIMEOUT_MS;
+    return async (message: Uint8Array) => {
+      // The publisher hands us the INNER workspace payload. The curator's
+      // PROTOCOL_SWM_UPDATE handler expects the SAME signed gossip-message
+      // envelope the substrate fan-out sends (encodeWorkspaceGossipMessage),
+      // NOT the raw inner bytes — sending the inner bytes fails protobuf decode
+      // on the receiver (a permanent rejection). Encode identically.
+      const wireMessage = await this.encodeWorkspaceGossipMessage(contextGraphId, message, gossipSigner);
+      return this.confirmCuratorApplied(contextGraphId, curator.peerIds, wireMessage, timeoutMs, ctx);
+    };
+  }
+
+  /**
+   * STRICT curator-ack confirmer for a gated SWM write (OT-RFC-49 curator-leader).
+   * Reliably delivers the exact wire `message` to the curator's peer(s) and waits
+   * for an applied-ack. Returns `{ applied: true }` ONLY on a `delivered` (empty)
+   * reply — which the receiver returns ONLY after it persisted the write
+   * (`handleSwmUpdate`: empty reply ⇔ `outcome.applied`). `{ applied: false,
+   * rejected: true }` on the 0x01 permanent-rejection sentinel; `{ applied: false }`
+   * for an unresolved curator, a timeout, a transient (0x02) rejection, or a send
+   * throw — every "not definitely applied" case fails CLOSED so the publisher
+   * aborts the write with no local persistence. A `delivered` from ANY advertised
+   * curator peer wins (the write landed); rejection only when no peer applied it.
+   */
+  private async confirmCuratorApplied(this: DKGAgent,
+    contextGraphId: string,
+    curatorPeerIds: string[],
+    message: Uint8Array,
+    timeoutMs: number,
+    ctx: OperationContext,
+  ): Promise<{ applied: boolean; rejected?: boolean }> {
+    if (curatorPeerIds.length === 0) {
+      this.log.info(ctx, `SWM curator-ack: curator peer unresolved for "${contextGraphId.slice(0, 28)}" — write cannot be confirmed (fail-closed)`);
+      return { applied: false };
+    }
+    let sawRejection = false;
+    for (const peerId of curatorPeerIds) {
+      try {
+        const sendResult = await this.messenger.sendReliable(peerId, PROTOCOL_SWM_UPDATE, message, {
+          messageId: `swm-curator-confirm-${ctx.operationId}-${peerId.slice(0, 8)}`,
+          timeoutMs,
+        });
+        const classified = classifySendResult(peerId, sendResult);
+        if (classified.outcome === 'delivered') {
+          return { applied: true };
+        }
+        if (classified.outcome === 'rejected') {
+          // Permanent refusal from a curator peer (allowlist / signature /
+          // validation). Keep trying the curator's other advertised peers in
+          // case this one is stale/wrong, but remember it for the verdict.
+          sawRejection = true;
+        }
+        // retryable / failed / queued / inFlight → not confirmed; try next peer.
+      } catch (err) {
+        this.log.debug(ctx, `SWM curator-ack: send to ${peerId.slice(0, 12)} threw: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return sawRejection ? { applied: false, rejected: true } : { applied: false };
   }
 
   /**
@@ -1421,13 +1691,15 @@ export class PublishMethods extends DKGAgentBase {
     contextGraphId: string,
     quads: Quad[],
     conditions: CASCondition[],
-    opts?: { localOnly?: boolean; operationCtx?: OperationContext; subGraphName?: string; callerAgentAddress?: string },
+    opts?: { localOnly?: boolean; operationCtx?: OperationContext; subGraphName?: string; callerAgentAddress?: string; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number },
   ): Promise<{ shareOperationId: string }> {
     const ctx = opts?.operationCtx ?? createOperationContext('share');
     const sgLabel = opts?.subGraphName ? ` (sub-graph: ${opts.subGraphName})` : '';
     this.log.info(ctx, `CAS write: ${quads.length} quads, ${conditions.length} conditions for ${contextGraphId}${sgLabel}`);
     const shouldCreateImplicitContextGraph = await this.shouldCreateImplicitSharedMemoryContextGraph(contextGraphId);
     const gossipSigner = opts?.localOnly ? null : await this.resolveWorkspaceGossipSigningAgent(contextGraphId);
+    // Strict curator-ack gate — same seam as share() (both flow through _shareImpl).
+    const confirmBeforeCommit = await this.buildCuratorAckConfirmer(contextGraphId, gossipSigner, opts, ctx);
     const { shareOperationId, message } = await this.publisher.writeConditionalToWorkspace(contextGraphId, quads, {
       publisherPeerId: this.node.peerId.toString(),
       operationCtx: ctx,
@@ -1435,6 +1707,7 @@ export class PublishMethods extends DKGAgentBase {
       subGraphName: opts?.subGraphName,
       localOnly: opts?.localOnly,
       senderAgentAddress: gossipSigner?.agentAddress,
+      confirmBeforeCommit,
     });
     if (shouldCreateImplicitContextGraph) {
       await this.ensureImplicitSharedMemoryContextGraph(contextGraphId, {
@@ -1517,6 +1790,7 @@ export class PublishMethods extends DKGAgentBase {
     ];
 
     await this.store.insert(quads);
+    this.contextGraphMetaProjection.markDirtyFromQuads(quads);
     await gm.ensureContextGraph(contextGraphId);
     await this.store.flush?.();
     this.subscribeToContextGraph(contextGraphId);
@@ -1596,7 +1870,10 @@ export class PublishMethods extends DKGAgentBase {
     const metaGraph = contextGraphMetaUri(contextGraphId);
 
     // 2. Pull the assertion's quads. Refuse to finalize an empty
-    //    assertion — there's nothing to commit.
+    //    assertion — there's nothing to commit. The public DCAT catalog entry
+    //    for a private CG is injected ONLY AFTER this validation (below), so a
+    //    catalog-only assertion (zero user-authored quads) is correctly
+    //    rejected here rather than slipping through on the catalog quad alone.
     const rawQuads = await this.publisher.assertionQuery(
       contextGraphId,
       name,
@@ -1619,14 +1896,38 @@ export class PublishMethods extends DKGAgentBase {
     //     the post-strip set or it commits to a root the publish path
     //     can never recompute. (Round 4 review §8 — "assertionFinalize
     //     hashes WM-only urn:dkg:file: rows".)
-    const quads = rawQuads.filter((q) => !isReservedSubject(q.subject) && !isTrustLevelQuad(q));
-    if (quads.length === 0) {
+    const userQuads = rawQuads.filter((q) => !isReservedSubject(q.subject) && !isTrustLevelQuad(q));
+    if (userQuads.length === 0) {
       throw new Error(
         `Cannot finalize assertion <${assertionUri}>: every quad has a ` +
           `reserved-namespace subject (urn:dkg:file:* / urn:dkg:extraction:*) ` +
           `which is filtered out before SWM. Add at least one user-authored ` +
           `quad on a non-reserved subject before finalizing.`,
       );
+    }
+
+    // B6 — inject the public DCAT catalog entry for a PRIVATE CG ONLY AFTER the
+    // "≥1 real user-authored quad" contract has been validated against
+    // `userQuads` above, so a catalog-only assertion can never finalize.
+    // The entry rides in the CG's OWN merkle root as a public KA whose subject
+    // is the context-graph DID (`contextGraphDataUri(contextGraphId)` ===
+    // `did:dkg:context-graph:<contextGraphId>`), the SAME subject open-serve
+    // reads from `<source-cg>/_catalog`. Persisted to the WM graph so
+    // promote/reload carry it; the publish-path partition keeps it out of the
+    // ciphertext and routes it to the public `_catalog` sink. The catalog quads
+    // are appended to `quads` (the merkle input) so the root the seal commits
+    // matches the root the publisher recomputes after reloading WM (which then
+    // includes the catalog) — the leaf hash is over (subject, predicate, object)
+    // only, so the placeholder `graph` here does not affect the root.
+    // Idempotent across re-finalize: identical quads dedupe in the WM store.
+    const quads = [...userQuads];
+    if (await this.isPrivateContextGraph(contextGraphId)) {
+      const cgDid = contextGraphDataUri(contextGraphId);
+      // `graph` is a non-empty placeholder only (buildPublicProjection requires
+      // one); assertionWrite re-stamps it with the correct wmGraphUri.
+      const catalogQuads = buildPublicProjection({ ual: cgDid, accessPolicy: 'private', graph: assertionUri });
+      await this.publisher.assertionWrite(contextGraphId, name, agentAddress, catalogQuads, opts?.subGraphName);
+      quads.push(...catalogQuads);
     }
 
     // 3. Compute merkleRoot using the SAME algorithm the publisher
@@ -1720,9 +2021,10 @@ export class PublishMethods extends DKGAgentBase {
         throw new Error(
           `assertionFinalize: assertion <${assertionUri}> is already finalized with a ` +
             `different merkleRoot (existing=${ethers.hexlify(existingSeal.merkleRoot)}, ` +
-            `current=${ethers.hexlify(merkleRoot)}). Discard and re-create the assertion if ` +
-            `you intended to change its content; in-place mutation of a finalized assertion ` +
-            `breaks the author signature and is rejected.`,
+            `current=${ethers.hexlify(merkleRoot)}). In-place mutation of a finalized assertion ` +
+            `breaks the author signature and is rejected. To edit already-shared/published ` +
+            `content, start a sanctioned edit loop with POST /api/knowledge-assets/{name}/wm/pull-from ` +
+            `(which re-opens a fresh draft and clears the stale seal), or discard and re-create the assertion.`,
         );
       }
       // Seal exists and matches — return the existing record. The rebuilt digest
@@ -2064,7 +2366,9 @@ export class PublishMethods extends DKGAgentBase {
     const merkleHexBare = ethers.hexlify(merkleRoot).slice(2);
     // Re-stamp the WM pointer (idempotent: drop any prior value first so a
     // re-finalize / update advances WM without accumulating stale pointers).
-    await this._stampPointer(lifecycleUri, WM_CURRENT_ASSERTION_PRED, merkleHexBare, metaGraph);
+    // RFC ka-metadata-trim Phase 2: only materialised when it diverges from
+    // VM — readers COALESCE a missing wm pointer to vm.
+    await this._stampPointerIfDivergedFromVm(lifecycleUri, WM_CURRENT_ASSERTION_PRED, merkleHexBare, metaGraph);
 
     if (freshNumber !== undefined) {
       // chainId here is the EVM uint256 from getEvmChainId(); the reservedUal
@@ -2435,7 +2739,7 @@ export class PublishMethods extends DKGAgentBase {
   ): Promise<{ chainKey: Uint8Array; aeadCgId: string; senderAddress: string } | undefined> {
     const ctx = createOperationContext('publish');
     const targetCgId = publishContextGraphId ?? contextGraphId;
-    const probeIsCurated = async (cgId: string): Promise<boolean | null> => {
+    const probeIsCurated = async (cgId: string, opts?: { rawOnChainSlot?: boolean }): Promise<boolean | null> => {
       // Consume the SHARED tri-state resolver (the same one behind the
       // SWM-gossip gate) so the publish-inline path can never DIVERGE from it,
       // and — critically (#884 review 🔴 GZh-c) — so a genuine UNKNOWN is
@@ -2445,7 +2749,12 @@ export class PublishMethods extends DKGAgentBase {
       // fails closed.
       let policyState: 0 | 1 | 'unregistered' | 'unknown';
       try {
-        policyState = await this.resolveOnChainAccessPolicyState(cgId, ctx);
+        if (opts?.rawOnChainSlot && /^\d+$/.test(cgId.trim())) {
+          const policy = await this.readLiveOnChainAccessPolicy(cgId.trim(), ctx);
+          policyState = policy === 0 || policy === 1 ? policy : 'unknown';
+        } else {
+          policyState = await this.resolveOnChainAccessPolicyState(cgId, ctx);
+        }
       } catch (err) {
         this.log.warn(ctx, `${logPrefix}: chain access-policy probe for ${cgId} failed — treating as UNKNOWN (fail-closed): ${err instanceof Error ? err.message : String(err)}`);
         return null;
@@ -2478,11 +2787,19 @@ export class PublishMethods extends DKGAgentBase {
       } catch { /* fall through to the plaintext-inline default */ }
       return false;
     };
-    const sourceIsCurated = await probeIsCurated(contextGraphId);
-    const targetIsCurated = targetCgId === contextGraphId
-      ? sourceIsCurated
-      : await probeIsCurated(targetCgId);
-    if (targetIsCurated == null || (targetCgId !== contextGraphId && sourceIsCurated == null)) {
+    const explicitRawTarget = publishContextGraphId !== undefined && /^\d+$/.test(targetCgId.trim());
+    let sourceIsCurated: boolean | null;
+    let targetIsCurated: boolean | null;
+    if (targetCgId !== contextGraphId && explicitRawTarget) {
+      targetIsCurated = await probeIsCurated(targetCgId, { rawOnChainSlot: true });
+      sourceIsCurated = targetIsCurated ? null : await probeIsCurated(contextGraphId);
+    } else {
+      sourceIsCurated = await probeIsCurated(contextGraphId);
+      targetIsCurated = targetCgId === contextGraphId
+        ? sourceIsCurated
+        : await probeIsCurated(targetCgId);
+    }
+    if (targetIsCurated == null || (targetCgId !== contextGraphId && sourceIsCurated == null && !targetIsCurated)) {
       throw new Error(
         `${logPrefix}: publish access-policy is unknown — ` +
         `source CG "${contextGraphId}" curated=${sourceIsCurated ?? 'unknown'}, ` +
@@ -2490,7 +2807,14 @@ export class PublishMethods extends DKGAgentBase {
         `Refusing to choose plaintext vs encrypted inline payload without chain-confirmed policy.`,
       );
     }
-    if (targetCgId !== contextGraphId && sourceIsCurated !== targetIsCurated) {
+    if (targetCgId !== contextGraphId && sourceIsCurated == null && targetIsCurated) {
+      this.log.warn(
+        ctx,
+        `${logPrefix}: source CG "${contextGraphId}" access-policy is unknown, but explicit target ` +
+        `on-chain CG "${targetCgId}" is chain-confirmed curated; selecting encrypted direct publish payload.`,
+      );
+    }
+    if (targetCgId !== contextGraphId && sourceIsCurated != null && sourceIsCurated !== targetIsCurated) {
       throw new Error(
         `${logPrefix}: remap publish source/target access-policy mismatch — ` +
         `source CG "${contextGraphId}" curated=${sourceIsCurated}, ` +
@@ -2653,6 +2977,7 @@ export class PublishMethods extends DKGAgentBase {
         ciphertextChunksRoot: Uint8Array;
         ciphertextChunkCount: number;
         totalCiphertextBytes: number;
+        ciphertextChunks: Uint8Array[];
       }>)
     | undefined
   > {
@@ -2681,6 +3006,7 @@ export class PublishMethods extends DKGAgentBase {
       ciphertextChunksRoot: Uint8Array;
       ciphertextChunkCount: number;
       totalCiphertextBytes: number;
+      ciphertextChunks: Uint8Array[];
     }> => {
       if (input.batchId.length !== 32) {
         throw new Error(
@@ -2706,6 +3032,27 @@ export class PublishMethods extends DKGAgentBase {
         const payload = new Uint8Array(input.batchId.length + ct.length);
         payload.set(input.batchId, 0);
         payload.set(ct, input.batchId.length);
+        const persistCanonical = this.canonicalChunkStoreCgIdOrNull(contextGraphId);
+        const chunksGraph = ciphertextChunkStoreGraph(persistCanonical ?? contextGraphId);
+        const subject = ciphertextChunkStoreSubject(input.batchId, i);
+        const literal = `"${Buffer.from(ct).toString('base64')}"`;
+        try {
+          await this.store.insert([{
+            subject,
+            predicate: CIPHERTEXT_CHUNK_PREDICATE,
+            object: literal,
+            graph: chunksGraph,
+          }]);
+        } catch (err) {
+          log.warn(
+            ctx,
+            `LU-11: failed to persist local ciphertext chunk cgId=${contextGraphId} ` +
+            `batchId=${batchIdHex.slice(0, 18)}... op=${input.publishOperationId} chunkIndex=${i}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+          throw err;
+        }
         const timestamp = new Date().toISOString();
         const signingPayload = computeGossipSigningPayloadV2(
           GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
@@ -2748,6 +3095,7 @@ export class PublishMethods extends DKGAgentBase {
         ciphertextChunksRoot: root,
         ciphertextChunkCount: leafCount,
         totalCiphertextBytes,
+        ciphertextChunks,
       };
     };
   }
@@ -2800,7 +3148,7 @@ export class PublishMethods extends DKGAgentBase {
         ${sharedMemoryReadBothFilter(swmGraph)}
       }`;
     }
-    const result = await this.store.query(sparql);
+    const result = await this.store.query(sparql, { source: 'agent.resolveLiftWorkspaceSlice' });
     return result.type === 'quads' ? result.quads : [];
   }
 
@@ -2881,6 +3229,17 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
+    // Merge note (PR #1107 ← main): #1097's "auto-promote a sealed-but-unstaged
+    // assertion before publish" was dropped here. main reworked the memory
+    // model so that publishing a finalized-but-unshared assertion is an
+    // explicit caller precondition — `publishFromFinalizedAssertion` surfaces
+    // the actionable "No quads in shared memory" error and the vm/publish route
+    // maps it to a clean 409 VM_PUBLISH_PRECONDITION (see
+    // packages/cli/test/knowledge-assets-route.test.ts). Auto-promoting here
+    // defeats that precondition (it stages the data, so the publish proceeds
+    // instead of returning 409), so main's explicit share→publish contract
+    // supersedes the PR's auto-promote approach to the same issue.
+
     // ── OT-RFC-43 A2 (decision 3) — CREATE-VS-UPDATE ROUTING ──
     //
     // BEFORE minting, read the per-layer VM pointer + the stamped kaId off the
@@ -2952,15 +3311,40 @@ export class PublishMethods extends DKGAgentBase {
         },
       );
 
+      // #1099: the update primitive (`publisher.update`) has no SWM-drain of
+      // its own — only the mint path's `publishFromSharedMemory` cleans SWM
+      // after chain confirmation. Without this, every edit-loop update left
+      // the re-shared SWM copy in place forever (locally AND on every replica
+      // that mirrored the share), so SWM and VM permanently disagreed.
+      if (result.status === 'confirmed') {
+        try {
+          await this.publisher.clearPublishedSwmRoots(
+            contextGraphId,
+            seal.rootEntities,
+            opts?.subGraphName,
+            opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+          );
+        } catch (err) {
+          this.log.warn(
+            opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+            `Failed to clear SWM after confirmed update of <${lifecycleUri}>: ` +
+              (err instanceof Error ? err.message : String(err)),
+          );
+        }
+      }
+
       // Stamp UPDATE provenance + re-stamp VM/WM pointers to the new merkle.
       if (result.status === 'confirmed' || result.status === 'tentative') {
         try {
           const priorBare = vmCurrent.startsWith('0x') ? vmCurrent.slice(2) : vmCurrent;
           const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
-          // Re-point VM + WM to the new merkle (drop-then-set), then record the
-          // revision chain via prov:wasRevisionOf <prior>.
+          // Re-point VM to the new merkle (drop-then-set), then record the
+          // revision chain via prov:wasRevisionOf <prior>. RFC ka-metadata-trim
+          // Phase 2: WM converges back to VM after the update mint, so the
+          // divergence-only stamp DELETES any stale WM row instead of
+          // duplicating the new merkle (readers COALESCE missing wm → vm).
           await this._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
-          await this._stampPointer(lifecycleUri, WM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
+          await this._stampPointerIfDivergedFromVm(lifecycleUri, WM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
           await this.store.insert([
             { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
             { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: `"${priorBare}"`, graph: metaGraph },
@@ -3089,6 +3473,33 @@ export class PublishMethods extends DKGAgentBase {
         await this.store.insert([
           { subject: lifecycleUri, predicate: STATE_PRED, object: '"published"', graph: metaGraph },
         ]);
+        // #1104: reconcile the KA's dual identity. `dkg:reservedUal`
+        // (chain/author/kaNumber, stamped at finalize) and the published
+        // UAL (chain/contract/tokenId, returned by vm/publish) are both
+        // permanent — record the published UAL on the lifecycle URN
+        // (drop-then-set, so updates re-point to the latest published UAL).
+        //
+        // Merge note (PR #1107 ← main): #1095's separate `published`
+        // prov:Activity EVENT minting was dropped here — main's RFC
+        // ka-metadata-trim deliberately removed `generateAssertionPublishedMetadata`,
+        // and main already stamps `dkg:state="published"` above (which
+        // `deriveStatus` maps to `vm-confirmed`), so the lifecycle STATE fix
+        // #1095 targeted is satisfied without the trimmed event entity.
+        if (result.ual) {
+          try {
+            const PUBLISHED_UAL_PRED = 'http://dkg.io/ontology/publishedUal';
+            await this.store.deleteByPattern({ subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, graph: metaGraph });
+            await this.store.insert([
+              { subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, object: `"${result.ual}"`, graph: metaGraph },
+            ]);
+          } catch (err) {
+            this.log.warn(
+              opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+              `Failed to record publishedUal for <${lifecycleUri}>: ` +
+                (err instanceof Error ? err.message : String(err)),
+            );
+          }
+        }
         // SUBSTRATE-2 — re-point dkg:assertionGraph to the per-KA verifiable-
         // memory graph this publish actually wrote
         // (…/_verifiable_memory/{author}/{number}). promote() left the pointer on
@@ -3124,6 +3535,26 @@ export class PublishMethods extends DKGAgentBase {
             await this.store.deleteByPattern({ subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, graph: metaGraph });
             await this.store.insert([
               { subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, object: vmGraph, graph: metaGraph },
+            ]);
+            // RFC ka-metadata-trim Phase 2 (corrected by adversarial review
+            // F4) — WM-graph marker flip at the VM transition.
+            // `assertionCreate` stamps `<wmGraph> dkg:memoryLayer "WM"` on the
+            // per-KA number-keyed WM graph URI (assertionPromote flips it in
+            // place to "SWM"). The flip above only covers the lifecycle URN
+            // and the legacy name-keyed assertion URI; the data-graph-URI
+            // marker would otherwise read "SWM" forever — misleading, since
+            // the data now lives at VM. We UPDATE it to "VM" rather than
+            // DELETE it: `assertAssertionDataPersisted` (dkg-publisher.ts)
+            // reads this exact row as its "already promoted → harmless no-op"
+            // witness, so deleting it would make a stale re-promote after a
+            // successful publish misfire AssertionNotPersistedError when the
+            // preserved extraction markers are present (Codex #898 case).
+            // Any non-"WM" value short-circuits that guard, so "VM" keeps the
+            // no-op witness AND tells the truth about the layer.
+            const wmGraph = contextGraphLayerUri(contextGraphId, MemoryLayer.WorkingMemory, vmAuthor, vmNumber, opts?.subGraphName);
+            await this.store.deleteByPattern({ subject: wmGraph, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
+            await this.store.insert([
+              { subject: wmGraph, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph },
             ]);
           }
         }
@@ -3213,6 +3644,43 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   /**
+   * RFC ka-metadata-trim Phase 2 — divergence-only wm/swm pointer stamp.
+   * `dkg:vmCurrentAssertion` is always materialised; the wm/swm pointers are
+   * only written when they DIVERGE from the current VM value (the common
+   * "all three equal" steady state is implicit). When the new value equals
+   * VM, any prior row for `pred` is deleted instead (drop-then-skip), so a
+   * stale divergent pointer never lingers. Readers COALESCE a missing wm/swm
+   * to the vm value (see `agent.assertion.history()`), which also keeps
+   * old-store rows (always materialised) readable unchanged.
+   */
+  async _stampPointerIfDivergedFromVm(
+    this: DKGAgent,
+    lifecycleUri: string,
+    pred: string,
+    merkleHex: string,
+    metaGraph: string,
+  ): Promise<void> {
+    const bare = merkleHex.startsWith('0x') ? merkleHex.slice(2) : merkleHex;
+    let vmBare: string | undefined;
+    try {
+      const res = await this.store.query(
+        `SELECT ?vm WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm } } LIMIT 1`,
+      );
+      const raw = res.type === 'bindings' ? res.bindings[0]?.['vm'] : undefined;
+      vmBare = raw?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
+    } catch {
+      // On a failed VM read fall back to the always-write behaviour below —
+      // an extra convergent row is harmless (readers COALESCE), a missing
+      // divergent row is not.
+    }
+    if (vmBare !== undefined && vmBare === bare) {
+      await this.store.deleteByPattern({ subject: lifecycleUri, predicate: pred, graph: metaGraph });
+      return;
+    }
+    await this._stampPointer(lifecycleUri, pred, bare, metaGraph);
+  }
+
+  /**
    * OT-RFC-43 A2 (decision 2) — stamp `dkg:swmCurrentAssertion` on the
    * lifecycle URN when an assertion is promoted/shared into SWM. The pointer
    * value is the assertion's sealed merkle root hex (read from the seal on the
@@ -3239,7 +3707,10 @@ export class PublishMethods extends DKGAgentBase {
       const seal = parseAssertionSealQuads(metaQuads, assertionUri);
       if (!seal) return; // not finalized — nothing to point at
       const merkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
-      await this._stampPointer(lifecycleUri, SWM_CURRENT_ASSERTION_PRED, merkleHexBare, metaGraph);
+      // RFC ka-metadata-trim Phase 2: divergence-only — a re-promote of
+      // already-published content (swm == vm) materialises no row; readers
+      // COALESCE a missing swm pointer to vm.
+      await this._stampPointerIfDivergedFromVm(lifecycleUri, SWM_CURRENT_ASSERTION_PRED, merkleHexBare, metaGraph);
     } catch (err) {
       this.log.warn(
         createOperationContext('share'),
@@ -3247,6 +3718,54 @@ export class PublishMethods extends DKGAgentBase {
           (err instanceof Error ? err.message : String(err)),
       );
     }
+  }
+
+  /**
+   * OT-RFC-49 — ensure a curated CG's public `_catalog` floor projection is in
+   * the SWM before a from-SWM publish that bypassed `assertionFinalize`.
+   *
+   * Mirrors the finalize-path injection (`assertionFinalize`): the catalog
+   * subject is `contextGraphDataUri(contextGraphId)` — the EXACT subject the
+   * publisher's `partitionCatalogQuads` matches — and the floor quads are built
+   * by the SAME `buildPublicProjection`, so the committed catalog is byte-identical
+   * across both paths.
+   *
+   * IDEMPOTENT: if the catalog is already in the SWM read scope (finalize path, or
+   * a prior from-SWM publish), it does nothing. Re-injection would in any case
+   * dedupe in the V10 merkle (identical leaves) so `catalogLeafCount` is stable,
+   * but the guard avoids the redundant write entirely.
+   *
+   * Returns a possibly-extended `selection`: for a `{rootEntities}` publish the
+   * CG-DID catalog subject is appended so it is in scope for BOTH the author seal
+   * (`_loadSelectedSWMQuads`) and the publisher's reload — which scope identically.
+   * For `selection: 'all'` the selection is returned unchanged (both already read
+   * the whole SWM graph).
+   */
+  async _ensureCuratedCatalogInSwm(this: DKGAgent,
+    contextGraphId: string,
+    selection: 'all' | { rootEntities: string[] },
+    subGraphName: string | undefined,
+    ctx: OperationContext,
+  ): Promise<'all' | { rootEntities: string[] }> {
+    const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
+    const cgDid = contextGraphDataUri(contextGraphId);
+    const existing = await this.store.query(
+      `CONSTRUCT { <${cgDid}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DCAT_DATASET}> } ` +
+      `WHERE { GRAPH ?g { <${cgDid}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DCAT_DATASET}> } ${sharedMemoryReadBothFilter(swmGraph)} }`,
+    );
+    const alreadyPresent = existing.type === 'quads' && existing.quads.length > 0;
+    if (!alreadyPresent) {
+      const catalogQuads = buildPublicProjection({ ual: cgDid, accessPolicy: 'private', graph: swmGraph });
+      await this.store.insert(catalogQuads);
+      this.log.info(
+        ctx,
+        `OT-RFC-49: injected ${catalogQuads.length}-quad public _catalog floor into SWM for curated CG ${contextGraphId} (from-SWM publish without finalize)`,
+      );
+    }
+    if (selection !== 'all' && !selection.rootEntities.includes(cgDid)) {
+      return { rootEntities: [...selection.rootEntities, cgDid] };
+    }
+    return selection;
   }
 
   /**
@@ -3340,6 +3859,22 @@ export class PublishMethods extends DKGAgentBase {
     const onChainId = ctxGraphIdStr ?? (await this.getContextGraphOnChainId(contextGraphId)) ?? undefined;
 
     const v10ACKProvider = this.createV10ACKProvider(contextGraphId);
+
+    // OT-RFC-49 — inject the public `_catalog` projection for a curated CG
+    // publishing from raw SWM (the `/api/shared-memory/write` + `/publish`
+    // shortcut) that did NOT go through `assertionFinalize` — which is what
+    // normally injects the catalog. Without it the reloaded payload carries no
+    // catalog, the on-chain catalog commitment stays zero, and the core ACK
+    // falls back to SWM-lookup and DECLINEs `NO_DATA_IN_SWM`. Run BEFORE the
+    // author seal below so the attestation's merkleRoot covers the catalog, and
+    // idempotent so a finalize-path publish (where the catalog is already in SWM)
+    // is unaffected. Gated on an on-chain id so a local-only publish gets nothing
+    // spurious. Returns a possibly-extended selection so the CG-DID catalog
+    // subject is in scope for a `{rootEntities}` publish too (the seal-read and
+    // the publisher reload scope identically).
+    if (onChainId != null && (await this.isPrivateContextGraph(contextGraphId))) {
+      selection = await this._ensureCuratedCatalogInSwm(contextGraphId, selection, options?.subGraphName, ctx);
+    }
 
     // RFC-001 §9.x — selection-based publish bridge. If the caller
     // already sealed the content (named-assertion lifecycle) they

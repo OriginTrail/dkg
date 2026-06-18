@@ -115,6 +115,12 @@ async function deployE2EFixture(): Promise<E2EFixture> {
 }
 
 describe('V10 E2E Conviction System', function () {
+  // The before-each deploys the full V10 stack and the flow runs a complete
+  // publish; under load this far exceeds Mocha's 40s default.
+  // `hardhat.node.config.ts` (used by the repo's run-tests.js) has no mocha
+  // block to raise the timeout, so set it per-suite here.
+  this.timeout(600000);
+
   let accounts: SignerWithAddress[];
   let Hub: Hub;
   let Token: Token;
@@ -270,7 +276,11 @@ describe('V10 E2E Conviction System', function () {
       const cssBalanceBefore = await Token.balanceOf(
         await ConvictionStakingStorage.getAddress(),
       );
-      await NFT.connect(creator).createAccount(COMMITTED_TRAC);
+      // OT-RFC-51: `createAccount` gained a `primaryNode` arg — the PCA's
+      // designated publishing-allocation node. Use the publishing node (already
+      // staked / in the sharding table) so the `nodeExists` gate passes and the
+      // committed TRAC is prorate-seeded as that node's publishing allocation.
+      await NFT.connect(creator).createAccount(COMMITTED_TRAC, publisherIdentityId);
       const accountId = await NFT.totalSupply();
       expect(accountId).to.equal(1n);
 

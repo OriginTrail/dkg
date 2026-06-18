@@ -26,7 +26,19 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "RandomSampling";
-    string private constant _VERSION = "10.0.4";
+    // OT-RFC-49 WS-B: bumped 10.0.4 -> 10.1.0 alongside the proof-race rewrite of
+    // submitProof (reads the snapshotted challengeRoot/challengeLeafCount) and the
+    // coupled RandomSamplingStorage 10.0.2 -> 10.1.0 / RandomSamplingLib.Challenge
+    // struct growth. The on-chain version string must change when behavior does,
+    // so a redeploy is not mistaken for a no-op (live base_sepolia is 10.0.4).
+    // 10.1.1 — OT-RFC-51 "Publishing Allocation": the publishing factor P(t)
+    //          is fed by committed PCA publishing allocation over a single
+    //          current-epoch window (was a 4-epoch realized-publishing sum).
+    //          Coefficients / S(t) / A(t) unchanged.
+    // 10.2.0 — PoS content-binding: submitProof(bytes content) derives
+    //          leaf = keccak256(content); public-CG commitment is the structured
+    //          hashPair(publicRoot, privateDataHash). Supersedes 10.1.1.
+    string private constant _VERSION = "10.2.0";
     uint256 public constant SCALE18 = 1e18;
 
     /// @notice Maximum number of in-CG resamples when the picker hits an
@@ -58,10 +70,10 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     ConvictionStakingStorage public convictionStakingStorage;
 
     error MerkleRootMismatchError(bytes32 computedMerkleRoot, bytes32 expectedMerkleRoot);
-    /// @notice Thrown by `_generateChallenge` when no public, active CG holds
-    ///         non-zero per-epoch value at the current epoch — i.e. there is
-    ///         nothing eligible to challenge against. The caller's transaction
-    ///         reverts and the node retries on the next proof period.
+    /// @notice Thrown by `_generateChallenge` when no active CG (public or
+    ///         curated) holds non-zero per-epoch value at the current epoch —
+    ///         i.e. there is nothing eligible to challenge against. The caller's
+    ///         transaction reverts and the node retries on the next proof period.
     error NoEligibleContextGraph();
     /// @notice Thrown by `_generateChallenge` when the chosen CG's KC list is
     ///         empty or all sampled KCs are expired after `MAX_KC_RETRIES`
@@ -228,18 +240,19 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      * `merkleProof` is the sibling path produced by
      * `V10MerkleTree.proof(leafIndex)`.
      *
-     * Curated CG path (RFC-39 Phase A.5) — same `_verifyV10MerkleProof`
-     * sibling-pair composition over a different leaf/root pair: `leaf` is
-     * `keccak256(ct_i)` (hash of the LU-11 ciphertext chunk at index
-     * `challenge.chunkId`), and the root is the per-KC
-     * `getLatestCiphertextChunksRoot` set at publish time. `_verifyV10MerkleProof`
-     * is unchanged — only the (root, leaf, count) triple changes between
-     * the two paths.
+     * Curated CG path (OT-RFC-49) — same `_verifyV10MerkleProof` sibling-pair
+     * composition over a different leaf/root pair: `leaf` is `hashTripleV10(s,p,o)`
+     * of the challenged PUBLIC `_catalog` triple at index `challenge.chunkId`, and
+     * the root is the per-KC catalog root (`getCatalogRoot`) snapshotted at
+     * issuance. Cores hold zero private bytes post-strip, so they prove the public
+     * catalog, never the ciphertext. `_verifyV10MerkleProof` is unchanged — only
+     * the (root, leaf, count) triple differs between the two paths.
      *
-     * Branch selection: read the `isCurated` flag PINNED on the challenge at
-     * issuance (`_generateChallenge`), not a live `ContextGraphStorage` lookup.
-     * Pinning keeps verification on the same branch the leaf was drawn against
-     * even if the CG-store singleton is re-pointed/cut over mid-period (R3 seam).
+     * Root/count source: the (root, leafCount) pair is PINNED on the challenge at
+     * issuance (`_generateChallenge`). `submitProof` reads NO live getter, so a KA
+     * update mid-period cannot rotate the challenge surface out from under an
+     * honest prover (Trap 1), and the pinned root also captures the exact branch /
+     * KA-store / generation the leaf was drawn against (subsumes the R3 seam).
      *
      * Sharding-table check: `nodeExistsInShardingTable` is universal
      * membership today. RFC-39 §5.2 calls for tightening to per-CG
@@ -249,7 +262,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      * functionally equivalent — every active core hosts every KC's
      * substrate.
      */
-    function submitProof(bytes32 leaf, bytes32[] calldata merkleProof)
+    function submitProof(bytes calldata content, bytes32[] calldata merkleProof)
         external
         profileExists(identityStorage.getIdentityId(msg.sender))
         nodeExistsInShardingTable(identityStorage.getIdentityId(msg.sender))
@@ -271,47 +284,40 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
             revert("This challenge is no longer active");
         }
 
-        // RFC-39 Phase A.5: curation status selects the right (root, count)
-        // pair. We read the flag PINNED on the challenge at issuance
-        // (`_generateChallenge`) rather than re-deriving it from the live
-        // `ContextGraphStorage` singleton via `kaToContextGraph` + `getIsCurated`.
-        // Re-deriving would be wrong under the R3 multi-store seam: a
-        // ContextGraphStorage generation cutover (or a Hub re-point to a store
-        // where this KA's CG binding differs or is absent) would reclassify an
-        // older curated challenge as public mid-period and verify it against the
-        // wrong (merkle vs ciphertext) root/count pair. The pinned flag captures
-        // the EXACT branch the leaf was drawn against, so verification is immune
-        // to any later singleton movement — symmetric with the KA-store pin below.
-        bool isCurated = challenge.isCurated;
-
-        // OT-RFC-43 / R3 — multi-store (generation) seam. Verify against the
-        // EXACT KA store this challenge was ISSUED against — recorded per
-        // challenge in `_generateChallenge` as `knowledgeAssetStorageContract`
-        // — rather than the currently-bound `knowledgeAssetStorage` singleton.
-        // Today there is exactly one KA store, so
-        // `challenge.knowledgeAssetStorageContract == address(knowledgeAssetStorage)`
-        // and this is strictly behaviour-neutral. Reading it here (1) keeps the
-        // recorded field LIVE so it is not pruned as dead code, (2) makes
-        // verification immune to a mid-period Hub re-point of the singleton, and
-        // (3) is the hook a future multi-generation RandomSampling needs: a
-        // challenge issued against generation-N's store MUST verify against that
-        // store. Together with the pinned `isCurated` above, `submitProof` no
-        // longer reads ANY live singleton for branch/root selection — both the
-        // store and the curation branch are resolved from the challenge itself.
-        DKGKnowledgeAssets challengeKaStore = DKGKnowledgeAssets(challenge.knowledgeAssetStorageContract);
-
-        // Get the expected merkle root + leaf count for this challenge.
-        bytes32 expectedMerkleRoot = isCurated
-            ? challengeKaStore.getLatestCiphertextChunksRoot(challenge.knowledgeAssetId)
-            : challengeKaStore.getLatestMerkleRoot(challenge.knowledgeAssetId);
-
-        uint32 leafCount = isCurated
-            ? challengeKaStore.getCiphertextChunkCount(challenge.knowledgeAssetId)
-            : challengeKaStore.getMerkleLeafCount(challenge.knowledgeAssetId);
+        // OT-RFC-49 / WS-B Trap 1 (proof-race): verify against the
+        // (root, leafCount) pair PINNED on the challenge at issuance
+        // (`_generateChallenge`), NOT a live re-read of `getCatalogRoot` /
+        // `getLatestMerkleRoot`. A KA update landing between `createChallenge` and
+        // `submitProof` rotates the live root + leaf count; reading them live here
+        // would verify an honest prover's issuance-time proof against the NEW
+        // surface and fail it — burning the stake of a node that did nothing
+        // wrong. (The prior in-source comment claimed `submitProof` read nothing
+        // live for branch/root selection — it was FALSE: the two ternaries below
+        // read four live getters. This snapshot makes that claim true.)
+        //
+        // The pinned root SUBSUMES both prior pins: it already encodes the exact
+        // curation branch (catalog vs merkle) AND the exact KA store / generation
+        // the leaf was drawn against, so `submitProof` reads NO live singleton for
+        // root/branch selection. `challenge.isCurated` /
+        // `challenge.knowledgeAssetStorageContract` remain on the persisted
+        // challenge for off-chain indexers and a future multi-generation verifier.
+        bytes32 expectedMerkleRoot = challenge.challengeRoot;
+        uint32 leafCount = challenge.challengeLeafCount;
 
         if (leafCount == 0 || challenge.chunkId >= uint256(leafCount)) {
             revert MerkleRootMismatchError(bytes32(0), expectedMerkleRoot);
         }
+
+        // CONTENT-BINDING (proof-of-storage empty-proof fix): derive the leaf
+        // from the submitted content instead of trusting a caller-supplied leaf.
+        // The prover must submit the actual challenged data — public N-Triple
+        // bytes, or the curated `_catalog` triple bytes — and the chain hashes it
+        // to `hashTripleV10(...)`. An attacker can no longer pass an empty proof
+        // with `leaf = getLatestMerkleRoot/getCatalogRoot`, because no real
+        // triple's keccak256 equals a stored 32-byte root (preimage resistance).
+        // The structured commitment binds private data as a sibling, so the
+        // public proof folds: leaf -> publicRoot -> hashPair(publicRoot, privateDataHash).
+        bytes32 leaf = keccak256(content);
 
         if (!_verifyV10MerkleProof(expectedMerkleRoot, leaf, challenge.chunkId, merkleProof)) {
             revert MerkleRootMismatchError(bytes32(0), expectedMerkleRoot);
@@ -390,12 +396,16 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      * value at the current epoch, and then picks a KC uniformly at random
      * within that CG.
      *
-     * Read-time exclusion (NOT a write-time filter): curated ("private") CGs
-     * and deactivated CGs are skipped during both the adjusted-total
-     * accumulation and the cumulative walk. Phase 8 writes to
-     * `ContextGraphValueStorage` unconditionally because it ships earlier;
-     * filtering at read time keeps Phase 10 isolated and reversible without
-     * touching the publish path.
+     * Read-time eligibility (NOT a write-time filter): deactivated CGs are
+     * skipped during both the adjusted-total accumulation and the cumulative
+     * walk (`_isCGEligible`). Curated ("private") CGs ARE eligible and ARE
+     * drawn — post-RFC-49 their cores prove the PUBLIC `_catalog` (a per-KC
+     * `catalogRoot`/`catalogLeafCount`), not the private payload, so they earn
+     * the sampling reward like public CGs. A curated KC with no catalog
+     * commitment (`catalogLeafCount == 0`) is skipped at the KC level in step 2.
+     * (Historical note: an earlier RFC-39 revision DID exclude curated CGs here;
+     * RFC-39 Phase B re-enabled them and RFC-49 moved the proof target to the
+     * catalog — this docstring previously lagged that change.)
      *
      * ## Open Risks (documented for V11+ — out of scope for Phase 10)
      *
@@ -432,11 +442,26 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         // OT-RFC-43 / R3 — pin the curation classification at issuance. `cgId`
         // came from `_pickWeightedChallenge`, which only returns an eligible
         // (non-zero, active) CG, so this resolves the SAME curated/public branch
-        // the leaf draw above used. `submitProof` reads `challenge.isCurated`
-        // back instead of re-deriving it from the live singleton, so a
-        // ContextGraphStorage generation cutover can never reclassify this
-        // challenge mid-period.
+        // the leaf draw above used. Retained on the challenge for off-chain
+        // indexers; `submitProof` no longer re-derives it (the pinned root below
+        // already captures the branch).
         bool isCurated = contextGraphStorage.getIsCurated(cgId);
+
+        // OT-RFC-49 / WS-B Trap 1 — SNAPSHOT the (leafCount, root) pair the proof
+        // must verify against, resolved from the SAME curated/public branch the
+        // leaf was drawn against. `submitProof` reads THESE pinned values, never a
+        // live getter, so a KA update landing between issuance and proof submission
+        // cannot rotate the challenge surface out from under an honest prover.
+        // Read in the same `view` tx as the `chunkId = seed % leafCount` draw, so
+        // the snapshotted count equals the count the draw used.
+        //   curated → public `_catalog` commitment (cores prove the catalog);
+        //   public  → the full flat-KC merkle root over all leaves.
+        uint32 challengeLeafCount = isCurated
+            ? knowledgeAssetStorage.getCatalogLeafCount(kaId)
+            : knowledgeAssetStorage.getMerkleLeafCount(kaId);
+        bytes32 challengeRoot = isCurated
+            ? knowledgeAssetStorage.getCatalogRoot(kaId)
+            : knowledgeAssetStorage.getLatestMerkleRoot(kaId);
 
         return
             RandomSamplingLib.Challenge(
@@ -447,7 +472,9 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
                 startBlock,
                 getActiveProofingPeriodDurationInBlocks(),
                 false,
-                isCurated
+                isCurated,
+                challengeLeafCount,
+                challengeRoot
             );
     }
 
@@ -515,23 +542,26 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      *      bounded resampling on expired KCs.
      *
      *      Step 1 — Walk all CGs once to compute the adjusted total (sum of
-     *      `getCGValueAtEpoch` over CGs that are both active and non-curated).
-     *      `ContextGraphValueStorage.getTotalValueAtEpoch` would be cheaper
-     *      but it includes private CGs unconditionally; the adjusted total
-     *      MUST exclude them at read time. Walk again with a running cumulative
-     *      to pick the first eligible CG whose cumulative > r. Linear scan is
-     *      gas-acceptable up to ~1K CGs per V10_CONTRACTS_REDESIGN_v2 §"Gas
-     *      scaling" — Fenwick tree is the V10.x upgrade path.
+     *      `getCGValueAtEpoch` over every ELIGIBLE CG, i.e. active — see
+     *      `_isCGEligible`). Curated ("private") CGs ARE included post-RFC-49:
+     *      their cores prove the public `_catalog`, so they earn the sampling
+     *      reward like public CGs. The only read-time exclusions are deactivated
+     *      CGs and, in a retry, the exhausted-CG list. Walk again with a running
+     *      cumulative to pick the first eligible CG whose cumulative > r. Linear
+     *      scan is gas-acceptable up to ~1K CGs per V10_CONTRACTS_REDESIGN_v2
+     *      §"Gas scaling" — Fenwick tree is the V10.x upgrade path.
      *
      *      Step 2 — Pick a KC at a random index in `_contextGraphKCList[cgId]`
      *      (via `getContextGraphKCAt` so we copy a single element instead of
      *      the full list). Resample up to `MAX_KC_RETRIES` if the picked KC
-     *      has expired (`endEpoch < currentEpoch`). Uses a fresh seed each
+     *      has expired (`endEpoch < currentEpoch`) or — for curated CGs — has no
+     *      catalog commitment (`getCatalogLeafCount == 0`). Uses a fresh seed each
      *      attempt via `keccak256(seed, attempt)`.
      *
-     *      Step 3 — Pick a V10 Merkle leaf index: `uint256(kcSeed) % merkleLeafCount`
-     *      (see `DKGKnowledgeAssets.getMerkleLeafCount`). Reverts
-     *      `NoEligibleKnowledgeAsset` if the KC has zero leaves recorded.
+     *      Step 3 — Pick a V10 Merkle leaf index `uint256(kcSeed) % leafCount`,
+     *      where `leafCount` is the curated KC's `getCatalogLeafCount` (catalog
+     *      leaves) or the public KC's `getMerkleLeafCount` (all flat-KC leaves).
+     *      Reverts `NoEligibleKnowledgeAsset` if the KC has zero leaves recorded.
      *
      *      Reverts:
      *      - {NoEligibleContextGraph}        adjustedTotal == 0 (no public,
@@ -595,11 +625,13 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
 
             // ---- Step 2: pick a KC inside `chosenCg` with bounded retries. ----
             //
-            // RFC-39 Phase A.5: the per-KC eligibility test is extended for
-            // curated CGs — a curated KC without a `(ciphertextChunksRoot,
-            // ciphertextChunkCount)` commitment is "legacy / pre-LU-11
-            // transitional" and skipped here the same way an expired KC is
-            // skipped. Forward-only adoption per RFC-39 §6.4 (Q4).
+            // OT-RFC-49: the per-KC eligibility test for curated CGs gates on the
+            // PUBLIC `_catalog` commitment, not the (stripped) ciphertext one. A
+            // curated KC with `catalogLeafCount == 0` has no catalog commitment
+            // (legacy KC not re-published since RFC-49, or a malformed publish that
+            // the KAV10 gate would have rejected) and is skipped here the same way
+            // an expired KC is skipped — cores prove the catalog, so a KC with no
+            // catalog tree is unchallengeable.
             //
             // Caching `cgIsCurated` once outside the loop keeps the per-
             // attempt cost at exactly 2 SLOADs on the curated path and 1
@@ -614,7 +646,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
                     uint256 idx = uint256(kcSeed) % kcCount;
                     uint256 candidate = contextGraphStorage.getContextGraphKCAt(chosenCg, idx);
                     if (knowledgeAssetStorage.getEndEpoch(candidate) < currentEpoch) continue;
-                    if (cgIsCurated && knowledgeAssetStorage.getCiphertextChunkCount(candidate) == 0) continue;
+                    if (cgIsCurated && knowledgeAssetStorage.getCatalogLeafCount(candidate) == 0) continue;
                     pickedKaId = candidate;
                     break;
                 }
@@ -622,8 +654,10 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
 
             if (pickedKaId != 0) {
                 // ---- Step 3: leaf index draw (curated vs public). ----
+                // curated → draw over the public `_catalog` leaves;
+                // public  → draw over the full flat-KC merkle leaves.
                 uint32 leafCount = cgIsCurated
-                    ? knowledgeAssetStorage.getCiphertextChunkCount(pickedKaId)
+                    ? knowledgeAssetStorage.getCatalogLeafCount(pickedKaId)
                     : knowledgeAssetStorage.getMerkleLeafCount(pickedKaId);
                 if (leafCount == 0) revert NoEligibleKnowledgeAsset();
                 cgId = chosenCg;
@@ -662,29 +696,25 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     /**
      * @dev True iff the CG is active.
      *
-     *      RFC-39 Phase A.5 change: curated CGs are NO LONGER filtered out
-     *      here. Under RFC-38 decoupled hosting, cores host curated CG
-     *      ciphertext exactly as they host public CG plaintext, and RFC-39
-     *      extends the random-sampling reward surface to that ciphertext via
-     *      the per-KC `(ciphertextChunksRoot, ciphertextChunkCount)`
-     *      commitment on `DKGKnowledgeAssets`. The economic-parity
-     *      goal forbids any CG-wide curated exclusion; KC-level eligibility
-     *      (legacy/transitional curated KCs without a commitment) is handled
-     *      inside `_pickWeightedChallenge` step 2 via the per-KC commitment
-     *      check, not here.
+     *      Curated CGs are NOT filtered out here. Post-RFC-49 ("hosting follows
+     *      access") cores hold zero private bytes; the random-sampling reward
+     *      surface for a curated CG is its PUBLIC `_catalog` (the per-KC
+     *      `catalogRoot`/`catalogLeafCount` commitment on `DKGKnowledgeAssets`),
+     *      which cores DO host and serve. The economic-parity goal forbids any
+     *      CG-wide curated exclusion; KC-level eligibility (a curated KC with no
+     *      catalog commitment) is handled inside `_pickWeightedChallenge` step 2
+     *      via the per-KC `getCatalogLeafCount == 0` check, not here.
      */
     // Slither: this storage read is intentionally used inside the bounded
     // sampling loop above.
     // slither-disable-next-line calls-loop
     function _isCGEligible(uint256 contextGraphId) internal view returns (bool) {
-        // RFC-39 Phase B (PR-B): curated CGs are re-enabled in the random-
-        // sampling draw now that the off-chain prover ships a curated branch
-        // (`packages/random-sampling/src/prover.ts`: picks
-        // `getLatestCiphertextChunksRoot` + `getCiphertextChunkCount` for
-        // curated KCs and proves over the per-chunk Merkle tree). The KC-
-        // level per-KC commitment check inside `_pickWeightedChallenge`
-        // remains the authoritative gate for legacy / pre-LU-11 curated KCs
-        // (those silently skipped via `getCiphertextChunkCount == 0`).
+        // OT-RFC-49: curated CGs are drawn (the off-chain prover at
+        // `packages/random-sampling/src/prover.ts` ships a catalog branch that
+        // proves the public `_catalog` leaves). The KC-level catalog-commitment
+        // check inside `_pickWeightedChallenge` step 2 is the authoritative gate
+        // for curated KCs that have no catalog commitment yet (skipped via
+        // `getCatalogLeafCount == 0`).
         return contextGraphStorage.isContextGraphActive(contextGraphId);
     }
 
@@ -732,16 +762,18 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         uint256 stakeRatio18 = (nodeEffectiveStake * SCALE18) / stakeCap;
         uint256 stakeFactor18 = Math.sqrt(stakeRatio18 * SCALE18);
 
-        // 2. Publishing factor P(t) = K_n / K_total over 4 epochs (RFC-26 Section 4.2)
-        // Sum knowledge value over epochs (t-3, t-2, t-1, t)
-        uint256 nodeKnowledgeValue = 0;
-        uint256 totalKnowledgeValue = 0;
-        uint256 startEpoch = currentEpoch >= 3 ? currentEpoch - 3 : 0;
-        for (uint256 e = startEpoch; e <= currentEpoch; e++) {
-            nodeKnowledgeValue += uint256(epochStorage.getNodeEpochProducedKnowledgeValue(identityId, e));
-            totalKnowledgeValue += uint256(epochStorage.getEpochProducedKnowledgeValue(e));
-        }
-        uint256 publishingFactor18 = totalKnowledgeValue > 0 ? (nodeKnowledgeValue * SCALE18) / totalKnowledgeValue : 0;
+        // 2. Publishing factor P(t) = K_n / K_total (RFC-26 Section 4.2,
+        //    re-based by OT-RFC-51 "Publishing Allocation").
+        //
+        //    OT-RFC-51: the publishing factor is now fed by COMMITTED PCA
+        //    "publishing allocation" rather than realized publishing, over a
+        //    single (current-epoch) window instead of the prior 4-epoch sum.
+        //    `K_n` = the current epoch's allocation seeded to this node by
+        //    its designated PCAs; `K_total` = the network-wide current-epoch
+        //    allocation. Coefficients / S(t) / A(t) below are unchanged.
+        uint256 nodeKV = epochStorage.getNodeEpochPublishingAllocation(identityId, currentEpoch);
+        uint256 totalKV = epochStorage.getEpochPublishingAllocation(currentEpoch);
+        uint256 publishingFactor18 = totalKV > 0 ? (nodeKV * SCALE18) / totalKV : 0;
 
         // 3. Ask alignment factor A(t) = 1 - |nodeAsk - networkPrice| / networkPrice (RFC-26 Section 4.3)
         // Rewards nodes whose ask is close to the network reference price:

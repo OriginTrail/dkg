@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type { Command } from 'commander';
 import {
   hermesSetupAction,
@@ -13,7 +13,13 @@ function makeCommand(): Pick<Command, 'getOptionValueSource'> {
 
 describe('hermesSetupAction', () => {
   it('normalizes setup CLI args before delegating to adapter setup', async () => {
-    const runSetup = vi.fn(async () => {});
+    // Hand-rolled recorder (no vitest mock API): runSetup is this action's
+    // dependency-injection seam; a plain recording function captures what the
+    // normalizer forwarded.
+    const runSetupCalls: unknown[] = [];
+    const runSetup = async (opts: unknown) => {
+      runSetupCalls.push(opts);
+    };
 
     await hermesSetupAction(
       {
@@ -32,7 +38,8 @@ describe('hermesSetupAction', () => {
       { runSetup },
     );
 
-    expect(runSetup).toHaveBeenCalledWith({
+    expect(runSetupCalls).toHaveLength(1);
+    expect(runSetupCalls[0]).toEqual({
       profile: 'default',
       daemonUrl: 'http://127.0.0.1:9200',
       bridgeUrl: 'http://127.0.0.1:9202',

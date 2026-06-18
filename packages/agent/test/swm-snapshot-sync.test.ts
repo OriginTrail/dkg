@@ -70,16 +70,19 @@ describe('SWM snapshot catch-up sync', () => {
       authority: { type: 'owner', proofRef: 'proof:owner:1' },
     });
     const payload = await asyncPublisher.inspectPreparedPayload(jobId);
+    // GH #1122 — the async lift preserves caller root IRIs (parity with sync):
+    // the prepared payload carries the verbatim caller subjects (root + its
+    // skolemized child), not a dkg:<cg>:<ns>:<scope>/… rewrite.
     expect(payload?.publishOptions.quads).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          subject: expect.stringMatching(/^dkg:swm-snapshot-sync:aloha:person-profile\/entity-/),
+          subject: ENTITY,
           predicate: 'http://schema.org/name',
           object: '"Synced Snapshot"',
           graph: '',
         }),
         expect.objectContaining({
-          subject: expect.stringMatching(/^dkg:swm-snapshot-sync:aloha:person-profile\/entity-.*\/\.well-known\/genid\/child$/),
+          subject: `${ENTITY}/.well-known/genid/child`,
           predicate: 'http://schema.org/value',
           object: '"Nested"',
           graph: '',
@@ -102,18 +105,32 @@ describe('SWM snapshot catch-up sync', () => {
     installSharedMemorySyncMock(nodeB, nodeA, sourceSnapshots, { omitSnapshots: true });
 
     const detailed = await (nodeB as unknown as {
-      syncSharedMemoryFromPeerDetailed(peerId: string, contextGraphIds: string[]): Promise<{ failedPeers: number; insertedTriples: number }>;
+      syncSharedMemoryFromPeerDetailed(peerId: string, contextGraphIds: string[]): Promise<{ failedPeers: number; failedPhases: number; insertedTriples: number }>;
     }).syncSharedMemoryFromPeerDetailed(REMOTE_PEER, [CONTEXT_GRAPH]);
-    expect(detailed.failedPeers).toBe(1);
+    // The peer is reachable and responds; only its snapshot phase fails the
+    // digest/count check. That is a phase failure (failedPhases), not a peer
+    // reachability failure (failedPeers) — but it still suppresses the
+    // success-stamp/backoff via the lifecycle success-gate.
+    expect(detailed.failedPeers).toBe(0);
+    expect(detailed.failedPhases).toBe(1);
     expect(detailed.insertedTriples).toBe(0);
 
     const metaGraph = contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH);
+    // RFC ka-metadata-trim Phase 2: the snapshot pointer is the digest row
+    // (no more `dkg:publicSnapshotRef`); a failed sync must leave NEITHER.
     const refs = await nodeB.store.query(
       `SELECT ?ref WHERE { GRAPH <${metaGraph}> { ?s <http://dkg.io/ontology/publicSnapshotRef> ?ref } }`,
     );
     expect(refs.type).toBe('bindings');
     if (refs.type === 'bindings') {
       expect(refs.bindings).toHaveLength(0);
+    }
+    const digests = await nodeB.store.query(
+      `SELECT ?digest WHERE { GRAPH <${metaGraph}> { ?s <http://dkg.io/ontology/publicQuadsDigest> ?digest } }`,
+    );
+    expect(digests.type).toBe('bindings');
+    if (digests.type === 'bindings') {
+      expect(digests.bindings).toHaveLength(0);
     }
   });
 
@@ -174,6 +191,7 @@ function installSharedMemorySyncMock(
       nextOffset: quads.length,
       checkpointKey: `mock:${phase}:${snapshotRef ?? 'graph'}`,
       completed: true,
+      timedOut: false,
     };
   };
 }
@@ -193,16 +211,21 @@ async function selectGraphQuads(agent: DKGAgent, graph: string): Promise<Quad[]>
 
 async function getSnapshotRef(agent: DKGAgent, shareOperationId: string): Promise<string> {
   const metaGraph = contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH);
+  // Read-both (RFC ka-metadata-trim Phase 2): `dkg:publicSnapshotRef` is no
+  // longer written — for store-backed rows the ref IS `dkg:publicQuadsDigest`
+  // (`putSnapshot` returns `ref === digest`). A legacy explicit ref row,
+  // when present, still wins.
   const result = await agent.store.query(
-    `SELECT ?ref WHERE {
+    `SELECT ?ref ?digest WHERE {
       GRAPH <${metaGraph}> {
         ?s <http://dkg.io/ontology/shareOperationId> "${shareOperationId}" ;
-           <http://dkg.io/ontology/publicSnapshotRef> ?ref .
+           <http://dkg.io/ontology/publicQuadsDigest> ?digest .
+        OPTIONAL { ?s <http://dkg.io/ontology/publicSnapshotRef> ?ref }
       }
     } LIMIT 1`,
   );
   if (result.type !== 'bindings') throw new Error('Unexpected snapshot ref query result');
-  const ref = result.bindings[0]?.['ref']?.replace(/^"|"$/g, '');
+  const ref = (result.bindings[0]?.['ref'] ?? result.bindings[0]?.['digest'])?.replace(/^"|"$/g, '');
   if (!ref) throw new Error(`Missing snapshot ref for ${shareOperationId}`);
   return ref;
 }

@@ -44,11 +44,11 @@
       {
         "indexed": false,
         "internalType": "uint96",
-        "name": "knowledgeValue",
+        "name": "amount",
         "type": "uint96"
       }
     ],
-    "name": "EpochProducedKnowledgeValueAdded",
+    "name": "EpochPublishingAllocationAdded",
     "type": "event"
   },
   {
@@ -177,11 +177,11 @@
       },
       {
         "internalType": "uint96",
-        "name": "knowledgeValue",
+        "name": "amount",
         "type": "uint96"
       }
     ],
-    "name": "addEpochProducedKnowledgeValue",
+    "name": "addEpochPublishingAllocation",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -307,7 +307,7 @@
         "type": "uint256"
       }
     ],
-    "name": "epochNodeMaxProducedKnowledgeValue",
+    "name": "epochNodeMaxPublishingAllocation",
     "outputs": [
       {
         "internalType": "uint96",
@@ -326,7 +326,7 @@
         "type": "uint256"
       }
     ],
-    "name": "epochProducedKnowledgeValue",
+    "name": "epochPublishingAllocation",
     "outputs": [
       {
         "internalType": "uint96",
@@ -339,7 +339,7 @@
   },
   {
     "inputs": [],
-    "name": "getCurrentEpochNodeMaxProducedKnowledgeValue",
+    "name": "getCurrentEpochNodeMaxPublishingAllocation",
     "outputs": [
       {
         "internalType": "uint96",
@@ -371,7 +371,7 @@
   },
   {
     "inputs": [],
-    "name": "getCurrentEpochProducedKnowledgeValue",
+    "name": "getCurrentEpochPublishingAllocation",
     "outputs": [
       {
         "internalType": "uint96",
@@ -433,7 +433,7 @@
         "type": "uint256"
       }
     ],
-    "name": "getEpochNodeMaxProducedKnowledgeValue",
+    "name": "getEpochNodeMaxPublishingAllocation",
     "outputs": [
       {
         "internalType": "uint96",
@@ -476,7 +476,7 @@
         "type": "uint256"
       }
     ],
-    "name": "getEpochProducedKnowledgeValue",
+    "name": "getEpochPublishingAllocation",
     "outputs": [
       {
         "internalType": "uint96",
@@ -548,7 +548,7 @@
         "type": "uint72"
       }
     ],
-    "name": "getNodeCurrentEpochProducedKnowledgeValue",
+    "name": "getNodeCurrentEpochPublishingAllocation",
     "outputs": [
       {
         "internalType": "uint96",
@@ -567,7 +567,7 @@
         "type": "uint72"
       }
     ],
-    "name": "getNodeCurrentEpochProducedKnowledgeValuePercentage",
+    "name": "getNodeCurrentEpochPublishingAllocationPercentage",
     "outputs": [
       {
         "internalType": "uint256",
@@ -620,7 +620,7 @@
         "type": "uint256"
       }
     ],
-    "name": "getNodeEpochProducedKnowledgeValue",
+    "name": "getNodeEpochPublishingAllocation",
     "outputs": [
       {
         "internalType": "uint96",
@@ -644,7 +644,7 @@
         "type": "uint256"
       }
     ],
-    "name": "getNodeEpochProducedKnowledgeValuePercentage",
+    "name": "getNodeEpochPublishingAllocationPercentage",
     "outputs": [
       {
         "internalType": "uint256",
@@ -687,7 +687,7 @@
         "type": "uint72"
       }
     ],
-    "name": "getNodePreviousEpochProducedKnowledgeValue",
+    "name": "getNodePreviousEpochPublishingAllocation",
     "outputs": [
       {
         "internalType": "uint96",
@@ -706,7 +706,7 @@
         "type": "uint72"
       }
     ],
-    "name": "getNodePreviousEpochProducedKnowledgeValuePercentage",
+    "name": "getNodePreviousEpochPublishingAllocationPercentage",
     "outputs": [
       {
         "internalType": "uint256",
@@ -738,7 +738,7 @@
   },
   {
     "inputs": [],
-    "name": "getPreviousEpochNodeMaxProducedKnowledgeValue",
+    "name": "getPreviousEpochNodeMaxPublishingAllocation",
     "outputs": [
       {
         "internalType": "uint96",
@@ -770,7 +770,7 @@
   },
   {
     "inputs": [],
-    "name": "getPreviousEpochProducedKnowledgeValue",
+    "name": "getPreviousEpochPublishingAllocation",
     "outputs": [
       {
         "internalType": "uint96",
@@ -840,6 +840,34 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "fromId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint72",
+        "name": "toId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "name": "moveEpochPublishingAllocation",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "name",
     "outputs": [
@@ -865,7 +893,7 @@
         "type": "uint256"
       }
     ],
-    "name": "nodesEpochProducedKnowledgeValue",
+    "name": "nodesEpochPublishingAllocation",
     "outputs": [
       {
         "internalType": "uint96",

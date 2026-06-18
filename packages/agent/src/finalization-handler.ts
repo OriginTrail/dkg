@@ -1,8 +1,9 @@
 import {
   decodeFinalizationMessage,
   contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
+  sharedMemoryReadBothFilter,
   contextGraphDataUri, contextGraphMetaUri,
-  contextGraphSubGraphUri, validateSubGraphName,
+  contextGraphSubGraphUri, validateSubGraphName, validateContextGraphId,
   DKGEvent, Logger, createOperationContext,
   assertSafeIri, isSafeIri,
   type EventBus,
@@ -43,11 +44,14 @@ export type ResolveContextGraphOnChainId = (
   contextGraphId: string,
 ) => Promise<string | null | undefined>;
 
+export type MarkContextGraphMetaDirtyFromQuads = (quads: readonly Quad[]) => void;
+
 export class FinalizationHandler {
   private readonly store: TripleStore;
   private readonly chain: ChainAdapter | undefined;
   private readonly eventBus: EventBus | undefined;
   private readonly resolveContextGraphOnChainId: ResolveContextGraphOnChainId | undefined;
+  private readonly markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads | undefined;
   private readonly log = new Logger('FinalizationHandler');
   private readonly processedUals = new Set<string>();
 
@@ -56,11 +60,13 @@ export class FinalizationHandler {
     chain: ChainAdapter | undefined,
     eventBus?: EventBus,
     resolveContextGraphOnChainId?: ResolveContextGraphOnChainId,
+    markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads,
   ) {
     this.store = store;
     this.chain = chain;
     this.eventBus = eventBus;
     this.resolveContextGraphOnChainId = resolveContextGraphOnChainId;
+    this.markContextGraphMetaDirtyFromQuads = markContextGraphMetaDirtyFromQuads;
   }
 
   async handleFinalizationMessage(data: Uint8Array, contextGraphId: string): Promise<void> {
@@ -72,7 +78,11 @@ export class FinalizationHandler {
       }
 
       if (msg.contextGraphId && msg.contextGraphId !== contextGraphId) {
-        this.log.warn(ctx, `Finalization: contextGraphId "${msg.contextGraphId}" does not match topic "${contextGraphId}", ignoring`);
+        // #1100: same guard as GossipPublishHandler — frames of other gossip
+        // message types decode "successfully" with garbage in this field, so
+        // only WARN when the mismatched value is a plausible CG id.
+        if (!validateContextGraphId(msg.contextGraphId).valid) return;
+        this.log.warn(ctx, `Finalization: contextGraphId "${msg.contextGraphId.slice(0, 120)}" does not match topic "${contextGraphId}", ignoring`);
         return;
       }
 
@@ -128,11 +138,15 @@ export class FinalizationHandler {
         }
       }
 
-      // Dedup guard: skip if this batch was already promoted (e.g. by ChainEventPoller)
+      // Dedup guard: skip if this batch was already promoted (e.g. by ChainEventPoller).
+      // Read-both (review F5): also ASK the label `_meta` — the minimal
+      // per-cgId partition shape carries no `dkg:status` row.
       const targetMetaGraph = ctxGraphId
         ? contextGraphMetaUri(contextGraphId, ctxGraphId)
         : `did:dkg:context-graph:${contextGraphId}/_meta`;
-      const alreadyPromoted = await this.isAlreadyConfirmed(msg.ual, targetMetaGraph);
+      const alreadyPromoted = await this.isAlreadyConfirmed(
+        msg.ual, targetMetaGraph, `did:dkg:context-graph:${contextGraphId}/_meta`,
+      );
       if (alreadyPromoted) {
         this.markProcessed(dedupeKey);
         this.log.info(ctx, `Finalization: ${msg.ual} already confirmed in ${ctxGraphId ? `context graph ${ctxGraphId}` : 'context graph'}, skipping`);
@@ -264,11 +278,26 @@ export class FinalizationHandler {
     }
   }
 
-  private async isAlreadyConfirmed(ual: string, metaGraph: string): Promise<boolean> {
+  /**
+   * Read-both (adversarial review F5, RFC ka-metadata-trim): the REQUIRED
+   * `dkg:status "confirmed"` ASK used to target only the per-cgId partition
+   * meta graph — but the minimal partition shape (`restateKaPartition`, the
+   * publisher's own same-graph promote) no longer carries `dkg:status`; the
+   * status row lives in the LABEL `_meta` graph. Without the fallback the
+   * gossip/chain-reconcile dedup never fired on new-shape stores and the
+   * publisher's own broadcast echo re-promoted. Old-shape stores (and the
+   * replica full-move path, which still writes status into the partition)
+   * keep their original semantics via the first GRAPH clause; `labelMetaGraph`
+   * is only consulted as the UNION branch.
+   */
+  private async isAlreadyConfirmed(ual: string, metaGraph: string, labelMetaGraph?: string): Promise<boolean> {
     try {
-      const result = await this.store.query(
-        `ASK { GRAPH <${assertSafeIri(metaGraph)}> { <${assertSafeIri(ual)}> <http://dkg.io/ontology/status> "confirmed" } }`,
-      );
+      const safeUal = assertSafeIri(ual);
+      const partitionPattern = `GRAPH <${assertSafeIri(metaGraph)}> { <${safeUal}> <http://dkg.io/ontology/status> "confirmed" }`;
+      const ask = labelMetaGraph && labelMetaGraph !== metaGraph
+        ? `ASK { { ${partitionPattern} } UNION { GRAPH <${assertSafeIri(labelMetaGraph)}> { <${safeUal}> <http://dkg.io/ontology/status> "confirmed" } } }`
+        : `ASK { ${partitionPattern} }`;
+      const result = await this.store.query(ask);
       return result.type === 'boolean' && result.value === true;
     } catch {
       return false;
@@ -284,8 +313,18 @@ export class FinalizationHandler {
     if (safeRoots.length === 0) return [];
 
     const values = safeRoots.map(r => `<${r}>`).join(' ');
+    // #1098/#1099: replicas store gossiped SWM shares in the PER-KA graphs
+    // `…/_shared_memory/{author}/{number}` (workspace-handler.ts ~line 987),
+    // not the bare bucket. Reading only the bucket made every replica report
+    // "no shared memory data … peer missed SWM sharing" on finalization, so
+    // the published KA was never materialized into VM on subscribed peers
+    // (the VM-divergence half of #1098). Read-both: bucket + per-KA graphs.
+    // CONSTRUCT (not SELECT) so literal terms keep full datatype/lang
+    // fidelity for the merkle recompute, and so the same logical triple
+    // present in BOTH the bucket and a per-KA graph collapses to one
+    // (a constructed graph is a set).
     const sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
-      GRAPH <${sharedMemoryGraph}> {
+      GRAPH ?g {
         VALUES ?root { ${values} }
         ?s ?p ?o .
         FILTER(
@@ -293,9 +332,10 @@ export class FinalizationHandler {
           || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
         )
       }
+      ${sharedMemoryReadBothFilter(sharedMemoryGraph)}
     }`;
 
-    const result = await this.store.query(sparql);
+    const result = await this.store.query(sparql, { source: 'agent.finalization.sharedMemorySlice' });
     return result.type === 'quads' ? result.quads : [];
   }
 
@@ -322,7 +362,7 @@ export class FinalizationHandler {
 
     const roots: Uint8Array[] = [];
     try {
-      const result = await this.store.query(sparql);
+      const result = await this.store.query(sparql, { source: 'agent.finalization.privateRoots' });
       if (result.type === 'bindings') {
         for (const row of result.bindings) {
           const hex = (row['root'] as string).replace(/^"(.*)".*$/, '$1').replace(/^0x/, '');
@@ -370,7 +410,7 @@ export class FinalizationHandler {
       }
     }`;
     try {
-      const result = await this.store.query(sparql);
+      const result = await this.store.query(sparql, { source: 'agent.finalization.keepRootCopySignal' });
       if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
       let sawFalse = false;
       for (const row of result.bindings) {
@@ -416,7 +456,7 @@ export class FinalizationHandler {
     } LIMIT 1`;
 
     try {
-      const result = await this.store.query(sparql);
+      const result = await this.store.query(sparql, { source: 'agent.finalization.publisherPeerId' });
       if (result.type === 'bindings' && result.bindings.length > 0) {
         const raw = result.bindings[0]['peerId'] as string;
         const peerId = raw.replace(/^"(.*)".*$/, '$1');
@@ -581,7 +621,9 @@ export class FinalizationHandler {
 
     // Idempotency — VM may already hold this (gossip beat the chain path, or a
     // prior sweep promoted it). Treat as success so the cursor can advance.
-    if (await this.isAlreadyConfirmed(ual, targetMetaGraph)) {
+    // Read-both (review F5): the minimal per-cgId partition shape carries no
+    // `dkg:status` row — the status lives in the label `_meta` graph.
+    if (await this.isAlreadyConfirmed(ual, targetMetaGraph, `did:dkg:context-graph:${contextGraphId}/_meta`)) {
       this.log.info(ctx, `Chain-reconcile: ${ual} already confirmed in VM, skipping`);
       return 'already-confirmed';
     }
@@ -766,7 +808,10 @@ export class FinalizationHandler {
 
     if (rootsByOp.size === 0) return null;
 
-    for (const roots of rootsByOp.values()) {
+    const opsSorted = [...rootsByOp.entries()].sort(
+      ([a], [b]) => (a < b ? -1 : a > b ? 1 : 0),
+    );
+    for (const [, roots] of opsSorted) {
       const sharedMemoryQuads = await this.getSharedMemoryQuadsForRoots(contextGraphId, roots, subGraphName);
       if (sharedMemoryQuads.length === 0) continue;
       const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, roots, subGraphName);
@@ -928,12 +973,14 @@ export class FinalizationHandler {
         } }`,
       );
       if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
-        await this.store.insert(generateSubGraphRegistration({
+        const regQuads = generateSubGraphRegistration({
           contextGraphId,
           subGraphName,
           createdBy: publisherAddress || 'finalization-discovery',
           timestamp: new Date(),
-        }));
+        });
+        await this.store.insert(regQuads);
+        this.markContextGraphMetaDirtyFromQuads?.(regQuads);
         this.log.info(ctx, `Finalization: auto-registered sub-graph "${subGraphName}" in context graph "${contextGraphId}"`);
       }
     }
@@ -1035,22 +1082,12 @@ export class FinalizationHandler {
 
     const wsPeerId = await this.getPublisherPeerIdFromMeta(contextGraphId, msgRootEntities, subGraphName);
     // Round 5 review §10 — propagate the on-chain-attested author into the
-    // confirmed `_meta` block so replicas emit `dkg:Publication` /
-    // `dkg:authoredBy` triples matching the originator's. We treat
-    // `address(0)` (the unattributed-publish sentinel) as "no author" by
-    // skipping the field; the dkg:Publication block in
-    // `generateKCMetadata` only fires when both `authorAddress` and
-    // `publishOperationId` are present, so the legacy no-author behaviour
-    // is preserved verbatim.
-    //
-    // `publishOperationId`: replicas don't have access to the originator's
-    // session-scoped publish-operation-id (that's a publisher-internal
-    // identifier). Use the canonical, content-addressable `txHash` instead —
-    // every node observing the chain converges on the same publication URI
-    // (`urn:dkg:publication:<txHash>`), even when the originator's URI
-    // (`urn:dkg:publication:<sessionId>-<seq>`) is different. SPARQL
-    // queries that select on `dkg:authoredBy` work either way; cross-node
-    // URI fragmentation is the documented trade-off.
+    // confirmed `_meta` block so replicas emit a `prov:wasAttributedTo`
+    // matching the originator's. We treat `address(0)` (the
+    // unattributed-publish sentinel) as "no author" by skipping the field,
+    // so the legacy no-author behaviour is preserved verbatim. (The former
+    // `dkg:Publication` / `dkg:authoredBy` mirror was dropped — RFC
+    // ka-metadata-trim Phase 1, zero readers.)
     const isUnattributed = !authorAddress
       || authorAddress === '0x0000000000000000000000000000000000000000'
       || authorAddress.toLowerCase() === '0x0000000000000000000000000000000000000000';
@@ -1058,13 +1095,12 @@ export class FinalizationHandler {
       ual,
       contextGraphId,
       merkleRoot,
-      kaCount: kaMetadata.length > 0 ? 1 : 0,
       publisherPeerId: wsPeerId || publisherAddress,
       timestamp: new Date(),
       subGraphName,
       ...(isUnattributed
         ? {}
-        : { authorAddress, publishOperationId: txHash }),
+        : { authorAddress }),
     };
 
     let blockTimestamp = Math.floor(Date.now() / 1000);
@@ -1165,12 +1201,27 @@ export class FinalizationHandler {
     const swmMetaGraph = subGraphName
       ? graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName)
       : contextGraphWorkspaceMetaGraphUri(contextGraphId);
+    // #1099: replicas hold the gossiped SWM copy in PER-KA graphs
+    // `…/_shared_memory/{author}/{number}` (workspace-handler.ts ~line 987),
+    // but this cleanup only drained the bare bucket. The stale per-KA copy
+    // survived every publish, kept being served to late subscribers via the
+    // PROTOCOL_SYNC SWM responder (which reads the whole `…/_shared_memory/`
+    // prefix), and re-poisoned even the publisher's own SWM on resync —
+    // publisher and replicas permanently disagreed about SWM content.
+    // Mirror DKGPublisher's `swmGraphsUnder`: drain the bucket AND every
+    // graph under its `/` prefix.
+    const allGraphs = await this.store.listGraphs();
+    const swmGraphsForClear = allGraphs.filter(
+      (g) => g === sharedMemoryGraph || g.startsWith(`${sharedMemoryGraph}/`),
+    );
     for (const rootEntity of rootEntities) {
-      await this.store.deleteByPattern({ graph: sharedMemoryGraph, subject: rootEntity });
-      await this.store.deleteBySubjectPrefix(sharedMemoryGraph, rootEntity + '/.well-known/genid/');
-      await this.store.deleteByPattern({
-        graph: sharedMemoryGraph, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
-      });
+      for (const g of swmGraphsForClear) {
+        await this.store.deleteByPattern({ graph: g, subject: rootEntity });
+        await this.store.deleteBySubjectPrefix(g, rootEntity + '/.well-known/genid/');
+        await this.store.deleteByPattern({
+          graph: g, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
+        });
+      }
       await this.store.deleteByPattern({
         graph: swmMetaGraph, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
       });

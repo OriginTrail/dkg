@@ -12,6 +12,7 @@
  *  - "challenge no longer active" once the period rolls over
  */
 import { describe, it, expect, beforeEach } from 'vitest';
+import { ethers } from 'ethers';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import {
   NoEligibleContextGraphError,
@@ -20,7 +21,9 @@ import {
   ChallengeNoLongerActiveError,
 } from '../src/chain-adapter.js';
 
-const LEAF0 = ('0x' + '01'.repeat(32)) as `0x${string}`;
+// content-binding: the prover submits CONTENT; the chain derives leaf = keccak256(content).
+const CONTENT0 = ('0x' + 'aa'.repeat(20)) as `0x${string}`;
+const LEAF0 = ethers.keccak256(CONTENT0) as `0x${string}`;
 
 async function freshAdapter(): Promise<MockChainAdapter> {
   const a = new MockChainAdapter();
@@ -131,7 +134,7 @@ describe('MockChainAdapter random sampling — submitProof', () => {
     const idId = await a.getIdentityId();
     const created = await a.createChallenge();
 
-    const submit = await a.submitProof(LEAF0, []);
+    const submit = await a.submitProof(CONTENT0, []);
     expect(submit.success).toBe(true);
 
     const score = await a.getNodeEpochProofPeriodScore(

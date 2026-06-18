@@ -731,17 +731,22 @@ describe('publishJsonLd', () => {
       { localOnly: true },
     );
 
+    // RFC ka-metadata-trim Phase 2: `dkg:publicSnapshotRef` is no longer
+    // written — the disk-store ref IS `dkg:publicQuadsDigest` (a store-backed
+    // row is "digest + no `dkg:publicSnapshotGraph`").
     const metadata = await store.query(
-      `SELECT ?snapshotRef ?snapshotGraph WHERE {
+      `SELECT ?snapshotRef ?digest ?snapshotGraph WHERE {
         GRAPH <did:dkg:context-graph:async-seal-disk-snapshot/_shared_memory_meta> {
-          ?s <http://dkg.io/ontology/publicSnapshotRef> ?snapshotRef .
+          ?s <http://dkg.io/ontology/publicQuadsDigest> ?digest .
+          OPTIONAL { ?s <http://dkg.io/ontology/publicSnapshotRef> ?snapshotRef }
           OPTIONAL { ?s <http://dkg.io/ontology/publicSnapshotGraph> ?snapshotGraph }
         }
       }`,
     );
     expect(metadata.type).toBe('bindings');
     if (metadata.type === 'bindings') {
-      expect(metadata.bindings.some((row) => row['snapshotRef']?.includes('sha256:'))).toBe(true);
+      expect(metadata.bindings.some((row) => row['digest']?.includes('sha256:'))).toBe(true);
+      expect(metadata.bindings.every((row) => row['snapshotRef'] === undefined)).toBe(true);
       expect(metadata.bindings.every((row) => row['snapshotGraph'] === undefined)).toBe(true);
     }
 
@@ -1255,22 +1260,10 @@ describe('publishJsonLd', () => {
     await agent.registerContextGraph('async-subtract-observe');
 
     const root = 'http://example.org/AlreadyPublished';
-    const namespace = 'async-publish';
-    const scope = 'context-graph';
-    // Mirror `canonicalRootIri` in async-lift-validation.ts: slugged
-    // (cgId:ns:scope) + rootTail + first-6-byte sha256 hex digest.
-    const { sha256 } = await import('@origintrail-official/dkg-core');
-    const slug = (v: string) =>
-      v.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'unknown';
-    const rootTail = (() => {
-      const i = Math.max(root.lastIndexOf('/'), root.lastIndexOf(':'));
-      return i >= 0 ? root.slice(i + 1) : root;
-    })();
-    const rootHash = Array.from(sha256(new TextEncoder().encode(root)))
-      .slice(0, 6)
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('');
-    const canonical = `dkg:${slug('async-subtract-observe')}:${slug(namespace)}:${slug(scope)}/${slug(rootTail)}-${rootHash}`;
+    // GH #1122 — the async lift preserves caller root IRIs (identity
+    // canonicalization, parity with sync), so the authoritative confirmed
+    // state lives at the CALLER root itself, not a dkg:<cg>:… rewrite.
+    const canonical = root;
     const dataGraph = `did:dkg:context-graph:async-subtract-observe`;
     const metaGraph = `did:dkg:context-graph:async-subtract-observe/_meta`;
     const kcUal = 'urn:dkg:test:kc:async-subtract-observe';

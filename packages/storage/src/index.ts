@@ -2,11 +2,13 @@ export {
   type Quad,
   type TripleStore,
   type QueryResult,
+  type QueryOptions,
   type SelectResult,
   type ConstructResult,
   type AskResult,
   type TripleStoreConfig,
   type TripleStoreBackend,
+  type TripleStoreQueryOptions,
   type LargeLiteralStorageConfig,
   registerTripleStoreAdapter,
   createTripleStore,
@@ -21,11 +23,23 @@ export {
   SharedMemoryLiteralBlobStore,
   type SharedMemoryLiteralBlobStoreOptions,
 } from './shared-memory-literal-blob-store.js';
+export {
+  DEFAULT_GRAPH_SET_REVALIDATE_MS,
+  GraphSetIndexStore,
+  type GraphSetIndexStoreOptions,
+  type GraphSetMutationEvent,
+  type GraphSetMutationSource,
+} from './graph-set-index-store.js';
 
 export { OxigraphStore } from './adapters/oxigraph.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';
 export { BlazegraphStore } from './adapters/blazegraph.js';
-export { SparqlHttpStore, type SparqlHttpStoreOptions } from './adapters/sparql-http.js';
+export {
+  SparqlHttpStore,
+  type SparqlHttpStoreOptions,
+  type SparqlHttpQueryOptions,
+  type SparqlHttpSlowQueryEvent,
+} from './adapters/sparql-http.js';
 export { ContextGraphManager, GraphManager } from './graph-manager.js';
 export { PrivateContentStore } from './private-store.js';
 

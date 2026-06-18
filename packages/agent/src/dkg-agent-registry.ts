@@ -135,7 +135,7 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
-import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck } from './messaging.js';
+import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck, type SkillAclCheck } from './messaging.js';
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
 import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, collectPublishableMultiaddrs, type AgentProfileConfig } from './profile.js';
 import {
@@ -1111,7 +1111,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
     let markedDefaultAddr: string | undefined;
     const needsMigration: AgentKeyRecord[] = [];
     try {
-      const result = await this.store.query(sparql);
+      const result = await this.store.query(sparql, { source: 'agent.agentKeyMigration' });
       if (result.type !== 'bindings') return;
       const strip = (v?: string) => v?.replace(/^"|"$/g, '').replace(/"?\^\^.*$/, '') ?? '';
       for (const row of result.bindings) {
@@ -1473,11 +1473,17 @@ export class AgentRegistryMethods extends DKGAgentBase {
     return typeof this.chain.getPublishingConvictionAccountInfo === 'function';
   }
 
+  // OT-RFC-51: `primaryNode` (the node identityId this PCA's committed TRAC
+  // funds via the publishing factor) is REQUIRED — no silent `0n` default. A
+  // PCA created with node 0 seeds no allocation to anyone, and the SDK exposes
+  // no `setPrimaryNode`, so a defaulted-0 PCA would be silently inert. Forcing
+  // the caller to pass a node makes that outcome impossible by accident.
   async createPublishingConvictionAccount(this: DKGAgent,
     committedTRAC: bigint,
+    primaryNode: bigint,
   ): Promise<({ accountId: bigint } & TxResult) | null> {
     if (typeof this.chain.createPublishingConvictionAccount !== 'function') return null;
-    return this.chain.createPublishingConvictionAccount(committedTRAC);
+    return this.chain.createPublishingConvictionAccount(committedTRAC, primaryNode);
   }
 
   async topUpPublishingConvictionAccount(this: DKGAgent, accountId: bigint, amount: bigint): Promise<TxResult | null> {
@@ -1523,7 +1529,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
     peerId: string,
     protocolId: string,
     data: Uint8Array,
-    opts?: { timeoutMs?: number },
+    opts?: { timeoutMs?: number; signal?: AbortSignal },
   ): Promise<Uint8Array> {
     return this.messenger.sendToPeer(peerId, protocolId, data, opts);
   }
@@ -1629,6 +1635,19 @@ export class AgentRegistryMethods extends DKGAgentBase {
       return;
     }
     this.messageHandler.setChatAcl(check);
+  }
+
+  /**
+   * GH #462 — install / clear the inbound skill-invocation ACL. Pass `null` to
+   * disable (legacy open skills). The daemon constructs a default-deny policy
+   * from `messaging` config — see lifecycle.ts / buildSkillAcl.
+   */
+  setSkillAcl(this: DKGAgent, check: SkillAclCheck | null): void {
+    if (!this.messageHandler) {
+      this._pendingSkillAcl = check;
+      return;
+    }
+    this.messageHandler.setSkillAcl(check);
   }
 
   async invokeSkill(this: DKGAgent,

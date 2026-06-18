@@ -105,12 +105,25 @@ export {
   type ContextGraphMembershipRecord,
   type ContextGraphMembershipStore,
   type ContextGraphSubscriptionRecord,
+  type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
+  type ContextGraphWritePreflightProbe,
   type PeerHealth,
   type CclPublishedEvaluationRecord,
   type CclPublishedResultEntry,
   type PendingSenderKeyEntry,
+  type AssertionArtifactKind,
+  type ImportedArtifactByteStore,
 } from './dkg-agent-types.js';
+export {
+  computeImportedArtifactSelector,
+  IMPORTED_ARTIFACT_AUTH_PURPOSE,
+  IMPORTED_ARTIFACT_MAX_PAGE_BYTES,
+  type AssertionArtifactAvailabilityParams,
+  type ImportedArtifactRequest,
+  type ImportedArtifactResponse,
+  type ReadAssertionArtifactParams,
+} from './imported-artifact.js';
 export {
   bindRandomSampling,
   type RandomSamplingBindOptions,
@@ -156,3 +169,11 @@ export * from './source-worker.js';
 export * from './source-registry.js';
 export * from './generic-sql-source.js';
 export { KaNumberAllocator, type KaAllocation } from './allocator.js';
+// OT-RFC-49 WS-D — the curated public `_catalog` floor builder. Exported on the
+// public surface so off-band tooling (e.g. the devnet update-seal helper) can
+// re-inject the SAME deterministic floor the producer's curated update() does,
+// without deep-importing the compiled `dist/` module.
+export {
+  buildPublicProjection,
+  type PublicProjectionInput,
+} from './context-graph-public-projection.js';

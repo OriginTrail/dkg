@@ -193,6 +193,7 @@ export class ConvictionMethods extends EVMChainAdapterBase {
 
   async createPublishingConvictionAccount(
     committedTRAC: bigint,
+    primaryNode: bigint = 0n,
   ): Promise<{ accountId: bigint } & TxResult> {
     await this.init();
     return this.pcaWrite(async () => {
@@ -217,7 +218,7 @@ export class ConvictionMethods extends EVMChainAdapterBase {
       const receipt = await this.sendContractTransaction(
         nft,
         'createAccount',
-        [committedTRAC],
+        [committedTRAC, primaryNode],
         this.signer,
         'create publishing conviction account',
       );

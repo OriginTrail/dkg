@@ -7,13 +7,22 @@
  *     and log target make the time-based suppression deterministic.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   isFilterNotFoundError,
   formatProviderError,
   createFilterErrorSilencer,
   DEFAULT_DEDUP_WINDOW_MS,
 } from '../src/filter-error-silencer.js';
+
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
 
 function filterNotFoundError(): Error {
   return Object.assign(new Error('could not coalesce error'), {
@@ -156,27 +165,27 @@ describe('formatProviderError', () => {
 
 describe('createFilterErrorSilencer', () => {
   it('returns false (does NOT handle) for non-filter errors', () => {
-    const log = vi.fn();
+    const log = recorder((_msg: string) => undefined);
     const silencer = createFilterErrorSilencer({ log });
     expect(silencer.handle(new Error('ECONNRESET'))).toBe(false);
-    expect(log).not.toHaveBeenCalled();
+    expect(log.calls).toEqual([]);
     expect(silencer.stats().filterErrorsTotal).toBe(0);
   });
 
   it('emits the first filter error immediately', () => {
-    const log = vi.fn();
+    const log = recorder((_msg: string) => undefined);
     const silencer = createFilterErrorSilencer({ log, now: () => 1_000 });
     expect(silencer.handle(filterNotFoundError())).toBe(true);
-    expect(log).toHaveBeenCalledTimes(1);
-    expect(log.mock.calls[0][0]).toContain('RPC filter expired');
-    expect(log.mock.calls[0][0]).toContain('RandomSampling/RandomSamplingStorage have a TTL fallback');
-    expect(log.mock.calls[0][0]).toContain('other Hub-resolved contract handles may stay stale');
+    expect(log.calls).toHaveLength(1);
+    expect(log.calls[0][0]).toContain('RPC filter expired');
+    expect(log.calls[0][0]).toContain('RandomSampling/RandomSamplingStorage have a TTL fallback');
+    expect(log.calls[0][0]).toContain('other Hub-resolved contract handles may stay stale');
     expect(silencer.stats().filterErrorsTotal).toBe(1);
     expect(silencer.stats().filterErrorsSuppressedInWindow).toBe(0);
   });
 
   it('suppresses subsequent errors within the dedup window', () => {
-    const log = vi.fn();
+    const log = recorder((_msg: string) => undefined);
     let clock = 1_000;
     const silencer = createFilterErrorSilencer({
       log,
@@ -184,18 +193,18 @@ describe('createFilterErrorSilencer', () => {
       now: () => clock,
     });
     silencer.handle(filterNotFoundError());
-    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.calls).toHaveLength(1);
     clock = 30_000;
     silencer.handle(filterNotFoundError());
     silencer.handle(filterNotFoundError());
     silencer.handle(filterNotFoundError());
-    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.calls).toHaveLength(1);
     expect(silencer.stats().filterErrorsTotal).toBe(4);
     expect(silencer.stats().filterErrorsSuppressedInWindow).toBe(3);
   });
 
   it('re-emits after the dedup window elapses with the suppressed count', () => {
-    const log = vi.fn();
+    const log = recorder((_msg: string) => undefined);
     let clock = 1_000;
     const silencer = createFilterErrorSilencer({
       log,
@@ -203,20 +212,20 @@ describe('createFilterErrorSilencer', () => {
       now: () => clock,
     });
     silencer.handle(filterNotFoundError());
-    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.calls).toHaveLength(1);
     clock = 30_000;
     silencer.handle(filterNotFoundError());
     silencer.handle(filterNotFoundError());
     clock = 70_000;
     silencer.handle(filterNotFoundError());
-    expect(log).toHaveBeenCalledTimes(2);
-    expect(log.mock.calls[1][0]).toContain('2 similar errors suppressed');
+    expect(log.calls).toHaveLength(2);
+    expect(log.calls[1][0]).toContain('2 similar errors suppressed');
     expect(silencer.stats().filterErrorsTotal).toBe(4);
     expect(silencer.stats().filterErrorsSuppressedInWindow).toBe(0);
   });
 
   it('omits the suppressed-suffix when no errors were suppressed since the last emit', () => {
-    const log = vi.fn();
+    const log = recorder((_msg: string) => undefined);
     let clock = 1_000;
     const silencer = createFilterErrorSilencer({
       log,
@@ -226,27 +235,27 @@ describe('createFilterErrorSilencer', () => {
     silencer.handle(filterNotFoundError());
     clock = 5_000;
     silencer.handle(filterNotFoundError());
-    expect(log).toHaveBeenCalledTimes(2);
-    expect(log.mock.calls[0][0]).not.toContain('similar errors suppressed');
-    expect(log.mock.calls[1][0]).not.toContain('similar errors suppressed');
+    expect(log.calls).toHaveLength(2);
+    expect(log.calls[0][0]).not.toContain('similar errors suppressed');
+    expect(log.calls[1][0]).not.toContain('similar errors suppressed');
   });
 
   it('uses the default 5-minute window when not overridden', () => {
-    const log = vi.fn();
+    const log = recorder((_msg: string) => undefined);
     let clock = 1_000;
     const silencer = createFilterErrorSilencer({ log, now: () => clock });
     silencer.handle(filterNotFoundError());
-    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.calls).toHaveLength(1);
     clock = 1_000 + DEFAULT_DEDUP_WINDOW_MS - 1;
     silencer.handle(filterNotFoundError());
-    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.calls).toHaveLength(1);
     clock = 1_000 + DEFAULT_DEDUP_WINDOW_MS;
     silencer.handle(filterNotFoundError());
-    expect(log).toHaveBeenCalledTimes(2);
+    expect(log.calls).toHaveLength(2);
   });
 
   it('resetForTest clears all internal state', () => {
-    const log = vi.fn();
+    const log = recorder((_msg: string) => undefined);
     const silencer = createFilterErrorSilencer({ log, now: () => 1_000 });
     silencer.handle(filterNotFoundError());
     silencer.handle(filterNotFoundError());
@@ -260,7 +269,7 @@ describe('createFilterErrorSilencer', () => {
   });
 
   it('non-filter errors don\'t bump the counter or affect the dedup window', () => {
-    const log = vi.fn();
+    const log = recorder((_msg: string) => undefined);
     let clock = 1_000;
     const silencer = createFilterErrorSilencer({
       log,
@@ -271,17 +280,22 @@ describe('createFilterErrorSilencer', () => {
     silencer.handle(new Error('ECONNRESET'));
     silencer.handle(new Error('rate limited'));
     expect(silencer.stats().filterErrorsTotal).toBe(1);
-    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.calls).toHaveLength(1);
   });
 });
 
 describe('production wiring shape (sanity)', () => {
   it('createFilterErrorSilencer with no args returns a working silencer using console.warn', () => {
     const silencer = createFilterErrorSilencer();
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    silencer.handle(filterNotFoundError());
-    expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(warnSpy.mock.calls[0][0]).not.toContain('recreate');
-    warnSpy.mockRestore();
+    const originalWarn = console.warn;
+    const warnSpy = recorder((..._args: unknown[]) => undefined);
+    (console as { warn: unknown }).warn = warnSpy;
+    try {
+      silencer.handle(filterNotFoundError());
+      expect(warnSpy.calls).toHaveLength(1);
+      expect(warnSpy.calls[0][0]).not.toContain('recreate');
+    } finally {
+      console.warn = originalWarn;
+    }
   });
 });

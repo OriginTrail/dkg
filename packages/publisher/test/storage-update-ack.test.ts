@@ -9,6 +9,7 @@ import {
   encodeUpdateIntent,
   decodeStorageACK,
   computeUpdateACKDigest,
+  computeCatalogRoot,
   isStorageACKDecline,
   STORAGE_ACK_DECLINE_CODES,
   PROTOCOL_STORAGE_UPDATE_ACK,
@@ -94,6 +95,126 @@ describe('V10 UPDATE StorageACK — peer handler + collector quorum', () => {
       BigInt(newMerkleLeafCount),
     );
   }
+
+  // OT-RFC-49 WS-D — curated UPDATE catalog ACK. A curated update ships the
+  // PUBLIC `_catalog` N-quads inline; the core REBUILDS the catalog root and
+  // DECLINEs CATALOG_ROOT_MISMATCH on disagreement — the PRIVATE newMerkleRoot
+  // stays trusted (the core holds no plaintext). byteSize parity is vs
+  // `newByteSize` (UpdateIntent has NO publicByteSize, unlike PublishIntent),
+  // which the producer sets to the catalog footprint.
+  describe('isEncryptedPayload (curated catalog ACK path — OT-RFC-49 WS-D)', () => {
+    const cgDid = `did:dkg:context-graph:${contextGraphId}`;
+    const catalogTriples = [
+      { subject: cgDid, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://www.w3.org/ns/dcat#Dataset' },
+      { subject: cgDid, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'https://dkg.network/ontology#PrivateContextGraph' },
+      { subject: cgDid, predicate: 'http://purl.org/dc/terms/identifier', object: `"${cgDid}"` },
+    ];
+    const catalogNquads = catalogTriples
+      .map((t) => `<${t.subject}> <${t.predicate}> ${t.object.startsWith('"') ? t.object : `<${t.object}>`} .`)
+      .join('\n');
+    const catalogBytes = new TextEncoder().encode(catalogNquads);
+    const expectedCatalog = computeCatalogRoot(catalogTriples);
+    const catalogRoot = expectedCatalog.root;
+    const catalogLeafCount = expectedCatalog.leafCount;
+    // The PRIVATE flat-KC root the core cannot recompute — trusted + signed verbatim.
+    const claimedPrivateRoot = ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('curated-update-private-root')));
+
+    function curatedUpdateIntent(overrides: Record<string, unknown> = {}): Uint8Array {
+      return encodeUpdateIntent({
+        kaId: kaId.toString(),
+        contextGraphId,
+        preUpdateMerkleRootCount: Number(preUpdateMerkleRootCount),
+        newMerkleRoot: claimedPrivateRoot,
+        newByteSize: catalogBytes.length, // byteSize = catalog footprint (the trap)
+        newTokenAmount: newTokenAmount.toString(),
+        mintAmount: Number(mintAmount),
+        burnTokenIds: burnTokenIds.map((b) => b.toString()),
+        newMerkleLeafCount,
+        publisherPeerId: 'curator-edge',
+        stagingQuads: catalogBytes,
+        isEncryptedPayload: true,
+        newCatalogRoot: catalogRoot,
+        newCatalogLeafCount: catalogLeafCount,
+        ...overrides,
+      });
+    }
+
+    function curatedDigest(): Uint8Array {
+      return computeUpdateACKDigest(
+        TEST_CHAIN_ID,
+        TEST_KAV10_ADDR,
+        cgIdBigInt,
+        kaId,
+        preUpdateMerkleRootCount,
+        claimedPrivateRoot,
+        BigInt(catalogBytes.length),
+        newTokenAmount,
+        mintAmount,
+        burnTokenIds,
+        BigInt(newMerkleLeafCount),
+        catalogRoot,
+        BigInt(catalogLeafCount),
+      );
+    }
+
+    function makeHandler(wallet: ethers.Wallet, store = new OxigraphStore()) {
+      return new StorageACKHandler(store as any, makeConfig(wallet, 42n), new TypedEventBus() as any);
+    }
+
+    it('rebuilds + verifies the catalog root, persists <cg>/_catalog, and signs the catalog ACK digest', async () => {
+      const wallet = ethers.Wallet.createRandom();
+      const store = new OxigraphStore();
+      const handler = makeHandler(wallet, store);
+
+      const ack = decodeStorageACK(await handler.updateHandler(curatedUpdateIntent(), fakePeerId));
+      expect(isStorageACKDecline(ack)).toBe(false);
+
+      // The ACK carries the trusted PRIVATE merkleRoot (the core never recomputes it).
+      const decodedRoot = ack.merkleRoot instanceof Uint8Array ? ack.merkleRoot : new Uint8Array(ack.merkleRoot);
+      expect(Buffer.from(decodedRoot).equals(Buffer.from(claimedPrivateRoot))).toBe(true);
+
+      // The digest is signed over the CATALOG commitment (not opaque ciphertext).
+      const recovered = ethers.recoverAddress(ethers.hashMessage(curatedDigest()), {
+        r: ethers.hexlify(ack.coreNodeSignatureR instanceof Uint8Array ? ack.coreNodeSignatureR : new Uint8Array(ack.coreNodeSignatureR)),
+        yParityAndS: ethers.hexlify(ack.coreNodeSignatureVS instanceof Uint8Array ? ack.coreNodeSignatureVS : new Uint8Array(ack.coreNodeSignatureVS)),
+      });
+      expect(recovered.toLowerCase()).toBe(wallet.address.toLowerCase());
+
+      // The verified public catalog is REPLACE-persisted to `<cg>/_catalog`.
+      const persisted = await store.query(`SELECT ?s WHERE { GRAPH <${cgDid}/_catalog> { ?s ?p ?o } } LIMIT 1`);
+      expect(persisted.type).toBe('bindings');
+      if (persisted.type === 'bindings') expect(persisted.bindings.length).toBeGreaterThan(0);
+    });
+
+    it('DECLINEs CATALOG_ROOT_MISMATCH when the rebuilt root != the claimed newCatalogRoot', async () => {
+      const handler = makeHandler(ethers.Wallet.createRandom());
+      const wrongRoot = ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('wrong-catalog-root')));
+      const ack = decodeStorageACK(await handler.updateHandler(curatedUpdateIntent({ newCatalogRoot: wrongRoot }), fakePeerId));
+      expect(isStorageACKDecline(ack)).toBe(true);
+      expect(ack.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH);
+    });
+
+    it('DECLINEs CATALOG_ROOT_MISMATCH on byteSize fraud (newByteSize != inline catalog bytes)', async () => {
+      const handler = makeHandler(ethers.Wallet.createRandom());
+      const ack = decodeStorageACK(await handler.updateHandler(curatedUpdateIntent({ newByteSize: catalogBytes.length + 100 }), fakePeerId));
+      expect(isStorageACKDecline(ack)).toBe(true);
+      expect(ack.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH);
+    });
+
+    it('DECLINEs CATALOG_ROOT_MISMATCH when the inline catalog stagingQuads is missing', async () => {
+      const handler = makeHandler(ethers.Wallet.createRandom());
+      const ack = decodeStorageACK(await handler.updateHandler(curatedUpdateIntent({ stagingQuads: undefined, newByteSize: 0 }), fakePeerId));
+      expect(isStorageACKDecline(ack)).toBe(true);
+      expect(ack.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH);
+    });
+
+    it('leaves a non-curated (public) update untouched — no catalog gate, MERKLE recompute path', async () => {
+      // Regression guard: isEncryptedPayload=false skips the curated block entirely.
+      const handler = makeHandler(ethers.Wallet.createRandom());
+      const ack = decodeStorageACK(await handler.updateHandler(buildIntent(), fakePeerId));
+      expect(isStorageACKDecline(ack)).toBe(false);
+    });
+  });
 
   it('peer signs computeUpdateACKDigest and the signature recovers to the operational key', async () => {
     const wallet = ethers.Wallet.createRandom();

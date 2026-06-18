@@ -122,6 +122,44 @@ decisions: []
       await node.stop().catch(() => {});
     });
 
+    // GH #757 follow-up (Codex review on PR #1132): the notifications route
+    // passes a LOWERCASED token-verified caller address, while curator DIDs are
+    // stored as written (usually EIP-55 checksummed). The owner check must
+    // compare EVM addresses case-insensitively or the true curator's
+    // pending-join read fails and notifications silently drop.
+    it('listPendingJoinRequests accepts the curator address case-insensitively and still rejects non-curators', async () => {
+      const store = new OxigraphStore();
+      const node = await DKGAgent.create({
+        name: 'CaseInsensitiveCuratorNode',
+        store,
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      });
+      await node.start();
+
+      const curatorAddr = new ethers.Wallet(HARDHAT_KEYS.REC1_OP).address; // checksummed
+      const siblingAddr = new ethers.Wallet(HARDHAT_KEYS.REC2_OP).address;
+      await node.createContextGraph({
+        id: 'ops-case-insensitive',
+        name: 'Case CG',
+        callerAgentAddress: curatorAddr,
+      });
+
+      // Lowercased caller (exactly what the notifications route resolves) —
+      // must be accepted as the curator.
+      await expect(node.listPendingJoinRequests('ops-case-insensitive', curatorAddr.toLowerCase()))
+        .resolves.toEqual([]);
+      // Checksummed caller still works.
+      await expect(node.listPendingJoinRequests('ops-case-insensitive', curatorAddr))
+        .resolves.toEqual([]);
+      // Non-curator agents (any casing) and the node default agent stay rejected.
+      await expect(node.listPendingJoinRequests('ops-case-insensitive', siblingAddr.toLowerCase()))
+        .rejects.toThrow(/Only the context graph curator/);
+      await expect(node.listPendingJoinRequests('ops-case-insensitive'))
+        .rejects.toThrow(/Only the context graph curator/);
+
+      await node.stop().catch(() => {});
+    });
+
 
     it('maps local access policy to EVM publish policy and forwards participant agents on registration', async () => {
       const chain = new AsyncSignerAddressContextGraphChainAdapter();

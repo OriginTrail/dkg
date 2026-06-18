@@ -597,7 +597,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(result.promotedCount).toBe(0);
   });
 
-  it('promote records ShareTransition metadata in _shared_memory_meta', async () => {
+  it('RFC ka-metadata-trim P3.4: promote writes NO ShareTransition record', async () => {
     const SWM_META = `did:dkg:context-graph:${CG_ID}/_shared_memory_meta`;
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
@@ -615,8 +615,10 @@ describe('Working Memory Assertion Lifecycle', () => {
       const shareTransitions = result.bindings.filter(
         (b) => b['type'] === 'http://dkg.io/ontology/ShareTransition',
       );
-      expect(shareTransitions.length).toBe(1);
-      expect(shareTransitions[0]['s']).toMatch(/^urn:dkg:share:/);
+      // Dropped (RFC ka-metadata-trim P3.4): the node-ui receipt hook now
+      // reads the seal-subject receipt rows directly; ShareTransition rows
+      // only exist on stores written by older nodes (read-both fallback).
+      expect(shareTransitions.length).toBe(0);
     }
   });
 
@@ -1212,6 +1214,18 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
     return result.bindings[0]['layer']?.replace(/^"|"$/g, '');
   }
 
+  // Read-both event shape (RFC ka-metadata-trim Phase 2): the writers no
+  // longer persist `dkg:fromLayer`/`dkg:toLayer` — they are 100% determined
+  // by the event class. Mirror the production history reader: OPTIONAL
+  // patterns for old-store rows, derived-by-class otherwise. The layer
+  // assertions in the tests below now pin the DERIVATION contract.
+  const LAYER_BY_EVENT_TYPE: Record<string, { from: string; to: string }> = {
+    AssertionCreated: { from: 'none', to: 'WM' },
+    AssertionPromoted: { from: 'WM', to: 'SWM' },
+    AssertionUpdated: { from: 'VM', to: 'VM' },
+    AssertionDiscarded: { from: 'WM', to: 'none' },
+  };
+
   async function queryEvents(name: string = ASSERTION_NAME): Promise<Array<{ type: string; fromLayer: string; toLayer: string }>> {
     const uri = assertionLifecycleUri(CG_ID, AGENT, name);
     const result = await store.query(
@@ -1223,17 +1237,21 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
           ?event a <${PROV}Activity> .
           ?event <${RDF_TYPE}> ?type .
           FILTER(STRSTARTS(STR(?type), "${DKG}"))
-          ?event <${DKG}fromLayer> ?from .
-          ?event <${DKG}toLayer> ?to .
+          OPTIONAL { ?event <${DKG}fromLayer> ?from }
+          OPTIONAL { ?event <${DKG}toLayer> ?to }
         }
       } ORDER BY ?event`,
     );
     if (result.type !== 'bindings') return [];
-    return result.bindings.map(b => ({
-      type: (b['type'] ?? '').replace(DKG, ''),
-      fromLayer: (b['from'] ?? '').replace(/^"|"$/g, ''),
-      toLayer: (b['to'] ?? '').replace(/^"|"$/g, ''),
-    }));
+    return result.bindings.map(b => {
+      const type = (b['type'] ?? '').replace(DKG, '');
+      const derived = LAYER_BY_EVENT_TYPE[type];
+      return {
+        type,
+        fromLayer: b['from'] ? b['from'].replace(/^"|"$/g, '') : derived?.from ?? '',
+        toLayer: b['to'] ? b['to'].replace(/^"|"$/g, '') : derived?.to ?? '',
+      };
+    });
   }
 
   it('assertionCreate writes state "created" and memoryLayer "WM"', async () => {
@@ -1284,7 +1302,7 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
     expect(events[1].toLayer).toBe('SWM');
   });
 
-  it('promote event records rootEntities and shareOperationId', async () => {
+  it('promote records shareOperationId on the event; member entities on the stable lifecycle subject', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
     await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT);
@@ -1300,11 +1318,21 @@ describe('Assertion Lifecycle Provenance (Event-Sourced, PROV-O)', () => {
         `SELECT ?opId WHERE { GRAPH <${META_GRAPH}> { <${eventUri}> <${DKG}shareOperationId> ?opId } } LIMIT 1`,
       );
       expect(opResult.type === 'bindings' && opResult.bindings.length).toBeGreaterThan(0);
-      const entityResult = await store.query(
+      // RFC ka-metadata-trim Phase 2: the event node no longer duplicates
+      // the member list — the SUBSTRATE-1 stamp on the stable lifecycle
+      // subject is the canonical member index (read-both for old rows).
+      const eventEntityResult = await store.query(
         `SELECT ?entity WHERE { GRAPH <${META_GRAPH}> { <${eventUri}> <${DKG}rootEntity> ?entity } }`,
       );
-      if (entityResult.type === 'bindings') {
-        expect(entityResult.bindings.length).toBeGreaterThanOrEqual(2);
+      if (eventEntityResult.type === 'bindings') {
+        expect(eventEntityResult.bindings.length).toBe(0);
+      }
+      const subjectEntityResult = await store.query(
+        `SELECT ?entity WHERE { GRAPH <${META_GRAPH}> { <${uri}> <${DKG}rootEntity> ?entity } }`,
+      );
+      expect(subjectEntityResult.type).toBe('bindings');
+      if (subjectEntityResult.type === 'bindings') {
+        expect(subjectEntityResult.bindings.length).toBeGreaterThanOrEqual(2);
       }
     }
   });

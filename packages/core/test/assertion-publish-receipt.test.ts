@@ -49,10 +49,13 @@ describe('assertion publish receipt quads (KC→KA predicate pinning)', () => {
     );
   });
 
-  it('emits the KA-id receipt under publishedAtKaId — never the retired publishedAtKcId', () => {
+  it('RFC ka-metadata-trim Phase 2: no publishedAtKaId row is written (and never the retired publishedAtKcId)', () => {
+    // The id was the third resident copy of the on-chain id — readers
+    // resolve `dkg:batchId` on the UAL subject instead (read-both: the
+    // node-ui receipt hook still accepts old-store publishedAtKaId rows).
     const quads = build(7n);
     const predicates = quads.map((q) => q.predicate);
-    expect(predicates).toContain('http://dkg.io/ontology/publishedAtKaId');
+    expect(predicates).not.toContain('http://dkg.io/ontology/publishedAtKaId');
     // Hard guard against a partial rename leaking the old predicate.
     for (const p of predicates) {
       expect(p).not.toBe('http://dkg.io/ontology/publishedAtKcId');
@@ -60,23 +63,15 @@ describe('assertion publish receipt quads (KC→KA predicate pinning)', () => {
     }
   });
 
-  it('builds exactly the three receipt quads, all on the assertion subject + meta graph', () => {
+  it('builds exactly the two receipt quads, all on the assertion subject + meta graph', () => {
     const quads = build(7n);
-    expect(quads).toHaveLength(3);
+    expect(quads).toHaveLength(2);
     for (const q of quads) {
       expect(q.subject).toBe(ASSERTION_URI);
       expect(q.graph).toBe(META_GRAPH);
     }
     // No duplicate predicates.
-    expect(new Set(quads.map((q) => q.predicate)).size).toBe(3);
-  });
-
-  it('renders the kaId as a typed xsd:integer literal carrying the exact id', () => {
-    const kaQuad = build(123n).find(
-      (q) => q.predicate === 'http://dkg.io/ontology/publishedAtKaId',
-    );
-    expect(kaQuad).toBeDefined();
-    expect(kaQuad!.object).toBe(`"123"^^${XSD_INTEGER}`);
+    expect(new Set(quads.map((q) => q.predicate)).size).toBe(2);
   });
 
   it('renders the block number as a typed xsd:integer and the tx hash as a quoted string literal', () => {
@@ -92,13 +87,12 @@ describe('assertion publish receipt quads (KC→KA predicate pinning)', () => {
     expect(txQuad.object).toBe('"0xabc123"');
   });
 
-  it('faithfully encodes kaId === 0n (does not silently drop the receipt)', () => {
-    // A confirmed VM publish should never have kaId 0, but the builder
-    // must encode whatever it is told verbatim so a downstream check can
-    // catch a 0 — it must not coerce/omit it.
-    const kaQuad = build(0n).find(
-      (q) => q.predicate === 'http://dkg.io/ontology/publishedAtKaId',
-    )!;
-    expect(kaQuad.object).toBe(`"0"^^${XSD_INTEGER}`);
+  it('accepts the deprecated kaId arg without persisting it (caller compatibility)', () => {
+    // RFC ka-metadata-trim Phase 2 — `kaId` stays in the input shape so
+    // existing callers compile, but no quad is emitted for it.
+    for (const kaId of [0n, 7n]) {
+      const predicates = build(kaId).map((q) => q.predicate);
+      expect(predicates).not.toContain('http://dkg.io/ontology/publishedAtKaId');
+    }
   });
 });

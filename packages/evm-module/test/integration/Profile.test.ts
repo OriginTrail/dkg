@@ -48,7 +48,16 @@ const quads = [
   ),
 ];
 
-// Helper function to ensure node has chunks and submit proof
+// Helper function to ensure node has chunks and submit proof.
+//
+// OT-RFC-51: a realized publish (createKnowledgeAsset) no longer credits the
+// node's epoch publishing allocation (the realized-credit blocks were removed
+// from KnowledgeAssetsLifecycle), so `getNodeCurrentEpochPublishingAllocation`
+// is NO LONGER a valid "did this node publish a KA this epoch?" probe — under
+// the new model it only moves via PCA primaryNode designation, never via
+// publishing. We therefore probe the node's challengeable state directly:
+// whether it already has a challenge for the current epoch. If not, publish a
+// KA so the node has chunks to be challenged on, then refresh the proof period.
 async function ensureNodeHasChunksThisEpoch(
   nodeId: number,
   node: { operational: SignerWithAddress; admin: SignerWithAddress },
@@ -61,12 +70,13 @@ async function ensureNodeHasChunksThisEpoch(
   receivingNodesIdentityIds: number[],
   chunkSize: number,
 ): Promise<void> {
-  const produced =
-    await contracts.epochStorage.getNodeCurrentEpochProducedKnowledgeValue(
-      nodeId,
-    );
+  // A node with no knowledge-asset id on its current-epoch challenge has not
+  // yet been set up with challengeable chunks this epoch.
+  const challenge =
+    await contracts.randomSamplingStorage.getNodeChallenge(nodeId);
+  const hasChunks = challenge.knowledgeAssetId !== 0n;
 
-  if (produced === 0n) {
+  if (!hasChunks) {
     if (
       !receivingNodes.some(
         (r) => r.operational.address === node.operational.address,
@@ -998,7 +1008,12 @@ const fixtureInitialRewardsState = deployments.createFixture(
 
 /* ───────────────────────────── tests ───────────────────────────── */
 
-describe('Profile Contract', () => {
+describe('Profile Contract', function () {
+  // These tests run a full `deployments.fixture` (the whole V10 stack) which,
+  // under load, exceeds Mocha's 40s default. `hardhat.node.config.ts` (used by
+  // the repo's run-tests.js) has no mocha block to raise it, so set it here.
+  this.timeout(600000);
+
   // Operator Fee Management describe block removed: the shared
   // `fixtureInitialRewardsState` beforeEach hook fails on main with
   // ethers 'invalid BytesLike value' because the V8-era rewards
@@ -1104,7 +1119,11 @@ describe('Profile Contract', () => {
 
 /* ───────── recreate-profile-recovery 0001 — id-keyed state ───────── */
 
-describe('@integration Profile recreate preserves id-keyed state', () => {
+describe('@integration Profile recreate preserves id-keyed state', function () {
+  // Full-stack deploy fixture per test; raise above Mocha's 40s default
+  // (node config has no mocha block — same reason as the suite above).
+  this.timeout(600000);
+
   const fixtureRecreate = deployments.createFixture(async () => {
     await hre.deployments.fixture(['Profile']);
     const signers = await hre.ethers.getSigners();

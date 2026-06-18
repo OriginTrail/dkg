@@ -201,14 +201,12 @@ describe('publish tools — write+publish helper + canonical SWM finalizer', () 
     });
 
     expect(bodies[0].contextGraphId).toBe('0xabc/my-cg');
-    // CONTRACT §0 invariant 2 / §1 Stage1 (OpenClaw parity): the create/write
-    // body drops the per-quad `graph` (daemon-pinned) and the unread
-    // `finalize:true`; `promote:true` stays (read as the alsoShareSwm alias).
-    expect(bodies[0].quads[0]).not.toHaveProperty('graph');
+    // One-shot publish is direct: the payload carries explicit quads inline,
+    // with a default graph value for the daemon's direct publish schema.
     expect(bodies[0].finalize).toBeUndefined();
-    expect(bodies[0].promote).toBe(true);
-    expect(bodies[0].quads[0]).toEqual({ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' });
-    expect(bodies[1].contextGraphId).toBe('0xabc/my-cg');
+    expect(bodies[0].promote).toBeUndefined();
+    expect(bodies[0].quads[0]).toEqual({ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o', graph: '' });
+    expect(bodies).toHaveLength(1);
   });
 
   it('DkgClient normalizes full context graph DIDs on read/setup routes', async () => {

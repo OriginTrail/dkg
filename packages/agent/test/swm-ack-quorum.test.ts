@@ -1,10 +1,19 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   createSwmAckQuorum,
   type SwmAckQuorum,
   type SubstrateTopUp,
   type SwmAckQuorumObservers,
 } from '../src/swm/ack-quorum.js';
+
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
 
 const PAYLOAD = new TextEncoder().encode('share-bytes');
 
@@ -103,8 +112,9 @@ describe('createSwmAckQuorum: track + onAck happy path', () => {
   });
 
   it('pre-completes at track time if substrate alone meets the threshold', () => {
+    const onQuorumCompleted = recorder(() => undefined);
     const observers: SwmAckQuorumObservers = {
-      onQuorumCompleted: vi.fn(),
+      onQuorumCompleted,
     };
     const q = makeQuorum({ observers });
     q.track({
@@ -120,7 +130,7 @@ describe('createSwmAckQuorum: track + onAck happy path', () => {
     expect(q.stats().tracked).toBe(1);
     expect(q.stats().completed).toBe(1);
     expect(q.stats().pending).toBe(0);
-    expect(observers.onQuorumCompleted).toHaveBeenCalledTimes(1);
+    expect(onQuorumCompleted.calls).toHaveLength(1);
   });
 
   it('substrate pre-acks outside expectedMembers are filtered out', () => {
@@ -346,7 +356,10 @@ describe('createSwmAckQuorum: tick + watchdog + deadline', () => {
   it('tick AT watchdogMs (and quorum not met) fires top-up exactly once with missing peers', () => {
     let nowMs = 1_000_000;
     const { calls, fn } = makeTopUp();
-    const onWatchdogFired = vi.fn();
+    const onWatchdogFired = recorder(
+      (_input: Parameters<NonNullable<SwmAckQuorumObservers['onWatchdogFired']>>[0]) =>
+        undefined,
+    );
     const q = makeQuorum({
       now: () => nowMs,
       topUp: fn,
@@ -378,13 +391,13 @@ describe('createSwmAckQuorum: tick + watchdog + deadline', () => {
     expect(calls[0]!.missingPeers).toHaveLength(2);
 
     expect(q.stats().watchdogFired).toBe(1);
-    expect(onWatchdogFired).toHaveBeenCalledOnce();
-    expect(onWatchdogFired).toHaveBeenCalledWith({
+    expect(onWatchdogFired.calls).toHaveLength(1);
+    expect(onWatchdogFired.calls.at(-1)).toEqual([{
       shareOperationId: 'op-watch',
       cgId: 'cg-watch',
       missingCount: 2,
       expectedCount: 4,
-    });
+    }]);
 
     // Subsequent ticks before deadline must NOT re-fire.
     nowMs += 30_000;
@@ -425,7 +438,10 @@ describe('createSwmAckQuorum: tick + watchdog + deadline', () => {
   it('tick at deadlineHardMs reaps the record and fires onDeadlineExpired', () => {
     let nowMs = 1_000_000;
     const { calls, fn } = makeTopUp();
-    const onDeadlineExpired = vi.fn();
+    const onDeadlineExpired = recorder(
+      (_input: Parameters<NonNullable<SwmAckQuorumObservers['onDeadlineExpired']>>[0]) =>
+        undefined,
+    );
     const q = makeQuorum({
       now: () => nowMs,
       topUp: fn,
@@ -454,13 +470,13 @@ describe('createSwmAckQuorum: tick + watchdog + deadline', () => {
     expect(q.stats().deadlineExpired).toBe(1);
     expect(q.stats().pending).toBe(0);
     expect(q.inspect('op-dead')).toBeUndefined();
-    expect(onDeadlineExpired).toHaveBeenCalledWith({
+    expect(onDeadlineExpired.calls.at(-1)).toEqual([{
       shareOperationId: 'op-dead',
       cgId: 'cg-dead',
       ackedCount: 1,
       expectedCount: 3,
       ackPct: 1 / 3,
-    });
+    }]);
   });
 
   it('multiple records advance independently in a single tick', () => {
@@ -548,7 +564,10 @@ describe('createSwmAckQuorum: rearmWatchdog (PR-H bug 1)', () => {
   it('rearm does NOT extend the hard deadline (deadline reference is the original startedAtMs)', () => {
     let nowMs = 1_000_000;
     const { calls, fn } = makeTopUp();
-    const onDeadlineExpired = vi.fn();
+    const onDeadlineExpired = recorder(
+      (_input: Parameters<NonNullable<SwmAckQuorumObservers['onDeadlineExpired']>>[0]) =>
+        undefined,
+    );
     const q = makeQuorum({
       now: () => nowMs,
       topUp: fn,
@@ -577,7 +596,7 @@ describe('createSwmAckQuorum: rearmWatchdog (PR-H bug 1)', () => {
 
     expect(q.stats().deadlineExpired).toBe(1);
     expect(q.inspect('op-rearm-dl')).toBeUndefined();
-    expect(onDeadlineExpired).toHaveBeenCalledTimes(1);
+    expect(onDeadlineExpired.calls).toHaveLength(1);
   });
 
   it('rearm on an unknown shareOperationId is a no-op (does not throw)', () => {
@@ -900,7 +919,10 @@ describe('createSwmAckQuorum: time-bound boundary edge cases', () => {
     // the system must not crash and must not silently treat 0 as
     // "default".
     let nowMs = 1_000_000;
-    const onDeadlineExpired = vi.fn();
+    const onDeadlineExpired = recorder(
+      (_input: Parameters<NonNullable<SwmAckQuorumObservers['onDeadlineExpired']>>[0]) =>
+        undefined,
+    );
     const q = makeQuorum({
       now: () => nowMs,
       observers: { onDeadlineExpired },
@@ -915,7 +937,7 @@ describe('createSwmAckQuorum: time-bound boundary edge cases', () => {
     });
     q.tick();
     expect(q.stats().deadlineExpired).toBe(1);
-    expect(onDeadlineExpired).toHaveBeenCalledOnce();
+    expect(onDeadlineExpired.calls).toHaveLength(1);
     expect(q.inspect('op-zero-deadline')).toBeUndefined();
   });
 
@@ -1034,7 +1056,10 @@ describe('createSwmAckQuorum: snapshot immutability + ordering', () => {
     // 4/4 = 1.0 ≥ 0.9 → complete. Locks the inclusive-equality
     // semantic (not strict-greater-than which would block at
     // exactly-0.9 thresholds).
-    const onQuorumCompleted = vi.fn();
+    const onQuorumCompleted = recorder(
+      (_input: Parameters<NonNullable<SwmAckQuorumObservers['onQuorumCompleted']>>[0]) =>
+        undefined,
+    );
     const q = makeQuorum({ observers: { onQuorumCompleted } });
     q.track({
       shareOperationId: 'op-boundary',
@@ -1050,8 +1075,8 @@ describe('createSwmAckQuorum: snapshot immutability + ordering', () => {
 
     q.onAck('op-boundary', 'p4');
     expect(q.stats().completed).toBe(1);
-    expect(onQuorumCompleted).toHaveBeenCalledOnce();
-    expect(onQuorumCompleted.mock.calls[0][0]).toMatchObject({
+    expect(onQuorumCompleted.calls).toHaveLength(1);
+    expect(onQuorumCompleted.calls[0][0]).toMatchObject({
       shareOperationId: 'op-boundary',
       ackedCount: 4,
       expectedCount: 4,

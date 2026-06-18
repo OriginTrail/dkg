@@ -18,18 +18,21 @@ export {
   computeTripleHashV10,
   computePublicRootV10,
   computePrivateRootV10,
+  computeStructuredKCRootV10,
   computeFlatKCRootV10,
   computeFlatKCMerkleLeafCountV10,
   computeKARootV10,
   computeKCRootV10,
 } from './merkle.js';
 export { validatePublishRequest, type ValidationResult, type ValidationOptions } from './validation.js';
-export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateAuthorshipProof, generateShareTransitionMetadata, generateShareMetadata, generateWorkspaceMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, promoteUpdatedKaToPerCgId, restateKaPartition, restateLabelGraphForUpdate, readMaterializedVersion, shouldApplyMaterialization, writeMaterializedVersion, withMaterializationLock, compareMaterializedVersion, type MaterializedVersion, generateAssertionCreatedMetadata, generateAssertionPromotedMetadata, generateAssertionPublishedMetadata, generateAssertionUpdatedMetadata, generateAssertionDiscardedMetadata, assertionStateQuad, assertionLayerQuad, deriveStatus, assertionLayerPointerQuad, stampLayerPointerSparql, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, KA_ID_PRED, RESERVED_UAL_PRED, PROV_WAS_REVISION_OF, type KaStatus, type StatusPointers, type KCMetadata, type KAMetadata, type OnChainProvenance, type AuthorshipProof, type ShareTransitionMetadata, type ShareMetadata, type WorkspaceMetadata, type SubGraphRegistration, type AssertionCreatedMeta, type AssertionPromotedMeta, type AssertionPublishedMeta, type AssertionUpdatedMeta, type AssertionDiscardedMeta } from './metadata.js';
+export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateShareMetadata, generateWorkspaceMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, promoteUpdatedKaToPerCgId, restateKaPartition, restateLabelGraphForUpdate, readMaterializedVersion, shouldApplyMaterialization, writeMaterializedVersion, withMaterializationLock, compareMaterializedVersion, type MaterializedVersion, generateAssertionCreatedMetadata, generateAssertionPromotedMetadata, generateAssertionUpdatedMetadata, generateAssertionDiscardedMetadata, assertionStateQuad, assertionLayerQuad, deriveStatus, assertionLayerPointerQuad, stampLayerPointerSparql, type LifecycleMetadataOptions, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, KA_ID_PRED, RESERVED_UAL_PRED, PROV_WAS_REVISION_OF, type KaStatus, type StatusPointers, type KCMetadata, type KAMetadata, type OnChainProvenance, type ShareMetadata, type WorkspaceMetadata, type SubGraphRegistration, type AssertionCreatedMeta, type AssertionPromotedMeta, type AssertionUpdatedMeta, type AssertionDiscardedMeta } from './metadata.js';
 export {
   DKGPublisher,
   StaleWriteError,
   AssertionNotPersistedError,
   MultiRootPublishNotAtomicError,
+  CuratorUnconfirmedError,
+  CuratorRejectedError,
   type DKGPublisherConfig,
   type WorkspaceSenderKeyEncryptInput,
   type WorkspaceSenderKeyEncryptor,
@@ -47,6 +50,7 @@ export {
 } from './workspace-agent-recipients.js';
 export {
   ACKCollector,
+  DEFAULT_REQUIRED_ACKS,
   type ACKCollectorDeps,
   type CollectedACK,
   type ACKCollectionResult,

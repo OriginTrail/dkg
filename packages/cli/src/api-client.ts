@@ -429,15 +429,12 @@ export class ApiClient {
   }
 
   /**
-   * One-shot legacy publish: routed through the new assertion lifecycle
-   * with an auto-generated assertion name. The seal carries the same
-   * EIP-712 AuthorAttestation that the publisher used to derive at
-   * chain-tx time; from a caller's perspective this is the same method
-   * — only the on-the-wire route changed.
+   * One-shot publish with explicit quads. This uses the daemon's direct
+   * publish route so StorageACK collection receives the publish payload
+   * inline and never depends on target cores already having SWM state.
    *
-   * Use `publishAssertion(contextGraphId, name, quads, opts)` directly
-   * when you want to control the assertion name (for resumability,
-   * audit, dedupe, etc.).
+   * Use `publishAssertion(contextGraphId, name, quads, opts)` when you
+   * deliberately want the named assertion lifecycle (WM -> SWM -> VM).
    */
   async publish(contextGraphId: string, quads: Array<{
     subject: string; predicate: string; object: string; graph: string;
@@ -457,20 +454,15 @@ export class ApiClient {
     batchId?: string;
     publisherAddress?: string;
   }> {
-    if (privateQuads?.length || options?.accessPolicy || options?.allowedPeers?.length) {
-      throw new Error(
-        'privateQuads, accessPolicy, and allowedPeers are not supported in the V10 assertion-lifecycle publish flow. ' +
-        'Re-think the publish: there is no longer a free-form SWM write that can carry private quads — ' +
-        'every published assertion goes through finalize, which signs an EIP-712 attestation over the public quads.',
-      );
-    }
-    const autoName = `cli-publish-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    return this.publishAssertion(contextGraphId, autoName, quads, {
-      ...(options?.publishEpochs !== undefined
-        ? { publishEpochs: options.publishEpochs }
-        : {}),
+    return this.post('/api/knowledge-assets/publish', {
+      contextGraphId,
+      quads,
+      ...(privateQuads !== undefined ? { privateQuads } : {}),
+      ...(options?.accessPolicy !== undefined ? { accessPolicy: options.accessPolicy } : {}),
+      ...(options?.allowedPeers !== undefined ? { allowedPeers: options.allowedPeers } : {}),
+      ...(options?.publishEpochs !== undefined ? { publishEpochs: options.publishEpochs } : {}),
       ...(options?.publisherNodeIdentityIdOverride !== undefined
-        ? { publisherNodeIdentityIdOverride: options.publisherNodeIdentityIdOverride }
+        ? { publisherNodeIdentityIdOverride: options.publisherNodeIdentityIdOverride.toString() }
         : {}),
     });
   }
@@ -887,6 +879,9 @@ export class ApiClient {
 
   async createPca(request: {
     tokens: string;
+    // OT-RFC-51: the node identityId this PCA's committed TRAC funds. Required
+    // — a PCA created with no node seeds publishing allocation to nobody.
+    primaryNode: string;
   }): Promise<{
     accountId: string;
     txHash: string;
@@ -1176,8 +1171,12 @@ export class ApiClient {
     catchup?:
       | {
         connectedPeers: number;
+        totalPeers?: number;
+        selectedPeers?: number;
         syncCapablePeers: number;
         peersTried: number;
+        peersResponded: number;
+        peersSucceeded: number;
         dataSynced: number;
         sharedMemorySynced: number;
         denied: boolean;
@@ -1191,11 +1190,15 @@ export class ApiClient {
             insertedDataTriples: number;
             bytesReceived: number;
             resumedPhases: number;
+            timedOutPhases: number;
+            completedPhases: number;
+            checkpointAdvances: number;
             emptyResponses: number;
             metaOnlyResponses: number;
             dataRejectedMissingMeta: number;
             rejectedKcs: number;
             failedPeers: number;
+            failedPhases: number;
           };
           sharedMemory: {
             fetchedMetaTriples: number;
@@ -1204,9 +1207,13 @@ export class ApiClient {
             insertedDataTriples: number;
             bytesReceived: number;
             resumedPhases: number;
+            timedOutPhases: number;
+            completedPhases: number;
+            checkpointAdvances: number;
             emptyResponses: number;
             droppedDataTriples: number;
             failedPeers: number;
+            failedPhases: number;
           };
         };
       }
@@ -1225,8 +1232,12 @@ export class ApiClient {
     catchup?:
       | {
         connectedPeers: number;
+        totalPeers?: number;
+        selectedPeers?: number;
         syncCapablePeers: number;
         peersTried: number;
+        peersResponded: number;
+        peersSucceeded: number;
         dataSynced: number;
         sharedMemorySynced: number;
         denied: boolean;
@@ -1240,11 +1251,15 @@ export class ApiClient {
             insertedDataTriples: number;
             bytesReceived: number;
             resumedPhases: number;
+            timedOutPhases: number;
+            completedPhases: number;
+            checkpointAdvances: number;
             emptyResponses: number;
             metaOnlyResponses: number;
             dataRejectedMissingMeta: number;
             rejectedKcs: number;
             failedPeers: number;
+            failedPhases: number;
           };
           sharedMemory: {
             fetchedMetaTriples: number;
@@ -1253,9 +1268,13 @@ export class ApiClient {
             insertedDataTriples: number;
             bytesReceived: number;
             resumedPhases: number;
+            timedOutPhases: number;
+            completedPhases: number;
+            checkpointAdvances: number;
             emptyResponses: number;
             droppedDataTriples: number;
             failedPeers: number;
+            failedPhases: number;
           };
         };
       }
@@ -1278,8 +1297,11 @@ export class ApiClient {
     finishedAt?: number;
     result?: {
       connectedPeers: number;
+      totalPeers?: number;
+      selectedPeers?: number;
       syncCapablePeers: number;
       peersTried: number;
+      peersResponded: number;
       peersSucceeded: number;
       dataSynced: number;
       sharedMemorySynced: number;
@@ -1294,11 +1316,15 @@ export class ApiClient {
           insertedDataTriples: number;
           bytesReceived: number;
           resumedPhases: number;
+          timedOutPhases: number;
+          completedPhases: number;
+          checkpointAdvances: number;
           emptyResponses: number;
           metaOnlyResponses: number;
           dataRejectedMissingMeta: number;
           rejectedKcs: number;
           failedPeers: number;
+          failedPhases: number;
         };
         sharedMemory: {
           fetchedMetaTriples: number;
@@ -1307,9 +1333,13 @@ export class ApiClient {
           insertedDataTriples: number;
           bytesReceived: number;
           resumedPhases: number;
+          timedOutPhases: number;
+          completedPhases: number;
+          checkpointAdvances: number;
           emptyResponses: number;
           droppedDataTriples: number;
           failedPeers: number;
+          failedPhases: number;
         };
       };
     };

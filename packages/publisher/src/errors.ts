@@ -48,6 +48,51 @@ export class StaleWriteError extends Error {
 }
 
 /**
+ * Thrown by a gated SWM write (`ShareOptions.confirmBeforeCommit`) when the
+ * curator — the authoritative SWM replica under OT-RFC-49 curator-leader — did
+ * NOT confirm it applied the write within the deadline (unreachable on the
+ * reliable leg, ack timed out, curator peer unresolvable, or a transient
+ * receiver rejection). The write is aborted with ZERO local persistence: the
+ * curator is the durable authority, so a write it never applied did not happen,
+ * and reporting success would be a silent lie (the next reconnect would
+ * REPLACE-revert it anyway). The `.name`/`.code` strings are the wire contract
+ * the daemon route maps to HTTP 503; do not rename without updating the route.
+ */
+export class CuratorUnconfirmedError extends Error {
+  readonly code = 'CURATOR_UNCONFIRMED' as const;
+  readonly contextGraphId: string;
+  constructor(contextGraphId: string) {
+    super(
+      `SWM write to private context graph "${contextGraphId}" was not confirmed by its curator ` +
+        `(the authoritative replica) and was NOT persisted locally. The curator is unreachable or did ` +
+        `not acknowledge in time. Retry when connectivity to the curator is restored.`,
+    );
+    this.name = 'CuratorUnconfirmedError';
+    this.contextGraphId = contextGraphId;
+  }
+}
+
+/**
+ * Thrown by a gated SWM write when the curator PERMANENTLY rejected it (the
+ * `FANOUT_RESPONSE_REJECTED` 0x01 sentinel: not in the allowlist, bad
+ * signature, or validation failure). Distinct from {@link CuratorUnconfirmedError}
+ * — retrying the identical bytes will fail again. Maps to HTTP 409.
+ */
+export class CuratorRejectedError extends Error {
+  readonly code = 'CURATOR_REJECTED' as const;
+  readonly contextGraphId: string;
+  constructor(contextGraphId: string) {
+    super(
+      `SWM write to private context graph "${contextGraphId}" was permanently rejected by its curator ` +
+        `(allowlist / signature / validation failure). The write was NOT persisted locally. ` +
+        `Retrying the same write will fail again.`,
+    );
+    this.name = 'CuratorRejectedError';
+    this.contextGraphId = contextGraphId;
+  }
+}
+
+/**
  * Thrown when `publish()` receives a quad whose subject sits in the
  * protocol-reserved URN namespace (`urn:dkg:file:...`, etc.).
  *

@@ -495,7 +495,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       });
     }
     // Body has `id` + `name` → context-graph-style context graph definition create (handled below)
-    const { id, name, description, allowedAgents, allowedPeers, participantAgents, publishPolicy, accessPolicy, register } = parsed;
+    // #1102: accept `contextGraphId` as an alias for `id` — sibling routes
+    // (subscribe/unsubscribe) use `contextGraphId`, and the mixed naming was
+    // a recurring caller trap.
+    const { name, description, allowedAgents, allowedPeers, participantAgents, publishPolicy, accessPolicy, register } = parsed;
+    const id = parsed.id ?? parsed.contextGraphId;
     if (!id || !name)
       return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
     if (!isValidContextGraphId(id))
@@ -647,8 +651,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
-    const { id, accessPolicy, publishPolicy, strictEoaCuratorMatch } = parsed;
-    if (!id) return jsonResponse(res, 400, { error: 'Missing "id"' });
+    const { accessPolicy, publishPolicy, strictEoaCuratorMatch } = parsed;
+    // #1102: accept `contextGraphId` as an alias for `id`.
+    const id = parsed.id ?? parsed.contextGraphId;
+    if (!id) return jsonResponse(res, 400, { error: 'Missing "id" (or "contextGraphId")' });
     if (typeof id !== 'string') return jsonResponse(res, 400, { error: '"id" must be a string' });
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,
@@ -984,10 +990,18 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   if (req.method === "GET" && joinRequestsMatch) {
     const contextGraphId = decodeURIComponent(joinRequestsMatch[1]);
     try {
-      const requests = await agent.listPendingJoinRequests(contextGraphId);
+      // GH #757 — pass the caller so the agent can enforce curator-only access.
+      const requests = await agent.listPendingJoinRequests(contextGraphId, requestAgentAddress);
       return jsonResponse(res, 200, { contextGraphId, requests });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      // GH #757 — map the curator/creator owner-check failure to 403 (reusing
+      // the shared classifier that already handles "Only the context graph
+      // curator …"); everything else stays a 400.
+      const classified = classifyRegisterContextGraphError(err);
+      if (classified && classified.status === 403) {
+        return jsonResponse(res, 403, classified.body ?? { error: msg });
+      }
       return jsonResponse(res, 400, { error: msg });
     }
   }
@@ -1128,6 +1142,15 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         // in `delegation`; callers that want delivery POST it (with
         // a `curatorPeerId`) to `/request-join`.
         agentAddress: delegation.agentAddress,
+        // #1103: callers repeatedly read this route's 200 as "the join
+        // request is on its way to the curator" and then waited forever
+        // (the curator's /join-requests stays empty — nothing was sent).
+        // Make the sign-only contract explicit in the response itself.
+        forwarded: false,
+        next:
+          `This route only SIGNS the join request — nothing was sent to the curator. ` +
+          `To deliver it, POST /api/context-graph/${encodeURIComponent(contextGraphId)}/request-join ` +
+          `with body { "delegation": <the delegation object above>, "curatorPeerId": "<curator's libp2p peer id>", "agentName"?: "..." }.`,
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1424,6 +1447,34 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     }
   }
 
+  // POST /api/context-graph/recover-shared-memory
+  // Explicit member recovery: re-fetch a context graph's shared memory to the
+  // current state from ONE chosen authoritative peer and apply via per-KA-graph
+  // REPLACE (not the corrupting union). Used to repair a stale or corrupt local
+  // SWM copy. Pulls only from the peer the caller names — never a blanket sweep.
+  if (req.method === "POST" && path === "/api/context-graph/recover-shared-memory") {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = JSON.parse(body);
+    const contextGraphId = parsed.contextGraphId;
+    const remotePeerId = parsed.remotePeerId ?? parsed.peerId;
+    if (!contextGraphId)
+      return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
+    if (!remotePeerId)
+      return jsonResponse(res, 400, { error: 'Missing "remotePeerId"' });
+    try {
+      const result = await agent.recoverContextGraphSwmFromPeer(remotePeerId, contextGraphId);
+      return jsonResponse(res, 200, {
+        recovered: contextGraphId,
+        fromPeer: remotePeerId,
+        ...result,
+      });
+    } catch (err) {
+      return jsonResponse(res, 500, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   // POST /api/context-graph/subscribe (V10) or /api/subscribe (legacy)
   if (
     req.method === "POST" &&
@@ -1432,10 +1483,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = JSON.parse(body);
     const { includeWorkspace, includeSharedMemory } = parsed;
-    const contextGraphId = parsed.contextGraphId;
+    // #1102: accept `id` as an alias for `contextGraphId`.
+    const contextGraphId = parsed.contextGraphId ?? parsed.id;
     if (!contextGraphId)
       return jsonResponse(res, 400, {
-        error: 'Missing "contextGraphId"',
+        error: 'Missing "contextGraphId" (or "id")',
       });
 
     // For curated CGs, verify this node's agent is on the allowlist.
@@ -1547,19 +1599,17 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
         const d = result.diagnostics?.durable;
         const s = result.diagnostics?.sharedMemory;
+        const servedUsableData =
+          result.dataSynced > 0 ||
+          result.sharedMemorySynced > 0;
+        const totalConnectedPeers = result.totalPeers ?? result.connectedPeers;
+        const selectedConnectedPeers = result.selectedPeers ?? result.connectedPeers;
         const cleanResponse =
-          result.dataSynced > 0 ||
-          result.sharedMemorySynced > 0 ||
+          servedUsableData ||
           (d?.emptyResponses ?? 0) > 0 ||
-          (d?.metaOnlyResponses ?? 0) > 0 ||
-          (s?.emptyResponses ?? 0) > 0;
-        const servedByPeer =
-          result.dataSynced > 0 ||
-          result.sharedMemorySynced > 0 ||
-          (d?.insertedMetaTriples ?? 0) > 0 ||
-          (s?.insertedMetaTriples ?? 0) > 0 ||
-          (d?.metaOnlyResponses ?? 0) > 0;
-        if (result.denied && !servedByPeer) {
+          (s?.emptyResponses ?? 0) > 0 ||
+          (!result.denied && (d?.metaOnlyResponses ?? 0) > 0);
+        if (result.denied && !servedUsableData) {
           job.status = "denied";
           job.error = result.deniedPeers > 1 ? `Sync denied by ${result.deniedPeers} remote peers` : "Sync denied by remote peer";
           if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} denied by remote peer(s): ${result.deniedPeers}`);
@@ -1573,7 +1623,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
               ...(shouldSyncSharedMemory ? { sharedMemorySynced: true } : {}),
               ...(hasContent ? { metaSynced: true } : {}),
             });
-          } else if (result.peersTried > 0 && result.peersSucceeded === 0) {
+          } else if (result.peersTried > 0 && (result.peersResponded ?? result.peersSucceeded) === 0) {
             // No peer answered within the run — curator likely offline
             // or no node currently holds this CG. Distinct from `denied`
             // so the UI can render "couldn't reach the curator" copy +
@@ -1587,7 +1637,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           } else if (result.peersTried > 0) {
             job.status = "failed";
             job.error = "Sync did not complete — all reachable peers failed (timeouts or transport errors). Retry once the network is healthier.";
-          } else if (result.connectedPeers > 0 && result.syncCapablePeers === 0) {
+          } else if (totalConnectedPeers > 0 && selectedConnectedPeers >= totalConnectedPeers && result.syncCapablePeers === 0) {
             // Connected to peers, but none speak the sync protocol —
             // i.e. all our connections are non-DKG / mismatched
             // versions. From the joiner's perspective this is the same
@@ -1595,7 +1645,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             // reuse the dedicated terminal status.
             job.status = "unreachable";
             job.error = "No sync-capable peers found for catch-up — the curator may be offline.";
-          } else if (result.connectedPeers === 0) {
+          } else if (totalConnectedPeers === 0) {
             // No peers connected at all → definitionally unreachable.
             job.status = "unreachable";
             job.error = "No peers connected — couldn't reach the curator. They may be offline, or your node hasn't bootstrapped to the network yet.";
@@ -1604,7 +1654,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           if (DEBUG_SYNC_TRACE) {
             console.log(
               `[catchup] job=${jobId} contextGraph=${contextGraphId} status=${job.status} ` +
-                `peers=${result.peersTried}/${result.syncCapablePeers} connected=${result.connectedPeers} ` +
+                `peers=${result.peersTried}/${result.syncCapablePeers} connected=${totalConnectedPeers} ` +
                 `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
             );
           }
@@ -1641,9 +1691,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     (path === "/api/context-graph/unsubscribe" || path === "/api/unsubscribe")
   ) {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const contextGraphId = JSON.parse(body)?.contextGraphId;
+    const unsubscribeParsed = JSON.parse(body);
+    // #1102: accept `id` as an alias for `contextGraphId`.
+    const contextGraphId = unsubscribeParsed?.contextGraphId ?? unsubscribeParsed?.id;
     if (!contextGraphId) {
-      return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
+      return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "id")' });
     }
     agent.unsubscribeFromContextGraph(contextGraphId);
     const sub = agent.getSubscribedContextGraphs()?.get(contextGraphId);
@@ -1655,9 +1707,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   }
 
   // GET /api/context-graph/subscriptions — list the node's ACTIVE in-memory
-  // context-graph subscriptions (diagnostics for #997: see how many are live).
-  // The total PERSISTED backlog is reported in the boot log ("Rehydrated X of
-  // Y"); anything beyond the activation cap is dormant until pruned below.
+  // context-graph subscriptions plus startup rehydration diagnostics (#997/#1180).
+  // Rows beyond the activation cap are persisted/dormant, not gossip/sync active.
   if (req.method === "GET" && path === "/api/context-graph/subscriptions") {
     // Operator-only: this is a NODE-WIDE view, so an agent-scoped token would
     // otherwise be able to enumerate OTHER agents' subscribed/private CG IDs.
@@ -1672,20 +1723,24 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const map = agent.getSubscribedContextGraphs?.();
     const subscriptions = map
       ? [...map.entries()]
-          // ACTIVE USER subscriptions only. Exclude (a) discoverable-only /
-          // unsubscribed registry entries (`subscribed: false`) and (b) the
-          // always-on AGENTS/ONTOLOGY system CGs — which the startup cap/log also
-          // exclude — so `count` and the payload match the rehydrated
-          // user-subscription total rather than running ≥2 higher.
+          // ACTIVE USER subscriptions only. Exclude discoverable/host-only
+          // registry entries and the always-on AGENTS/ONTOLOGY system CGs.
+          // Host-only boot activations are exposed separately through
+          // `rehydration.hostedActivatedIds` so the legacy subscriptions
+          // contract stays subscribed-only.
           .filter(([id, s]) => s?.subscribed === true && !systemContextGraphs.has(id))
           .map(([id, s]) => ({
             contextGraphId: id,
-            subscribed: true,
+            subscribed: s?.subscribed === true,
             synced: s?.synced === true,
             coreHosted: s?.coreHosted === true,
           }))
       : [];
-    return jsonResponse(res, 200, { count: subscriptions.length, subscriptions });
+    return jsonResponse(res, 200, {
+      count: subscriptions.length,
+      subscriptions,
+      rehydration: agent.getContextGraphSubscriptionRehydrationStatus?.() ?? null,
+    });
   }
 
   // DELETE /api/context-graph/subscriptions — operator recovery for #997: tear
@@ -1719,9 +1774,14 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // CGs (private curated graphs read their definition from `_meta`).
   if (req.method === "POST" && path === "/api/context-graph/rename") {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { id, name } = JSON.parse(body);
+    const renameParsed = JSON.parse(body);
+    // #1102: accept `contextGraphId` as an alias for `id` — SKILL.md
+    // documented `contextGraphId` for this route while the implementation
+    // only read `id`, so every documented call failed with a 400.
+    const id = renameParsed.id ?? renameParsed.contextGraphId;
+    const name = renameParsed.name;
     if (!id || !name) {
-      return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
+      return jsonResponse(res, 400, { error: 'Missing "id" (or "contextGraphId") or "name"' });
     }
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,

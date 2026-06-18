@@ -511,9 +511,9 @@
   {
     "inputs": [
       {
-        "internalType": "bytes32",
-        "name": "leaf",
-        "type": "bytes32"
+        "internalType": "bytes",
+        "name": "content",
+        "type": "bytes"
       },
       {
         "internalType": "bytes32[]",

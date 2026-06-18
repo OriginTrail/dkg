@@ -593,7 +593,12 @@ export class JoinRequestMethods extends DKGAgentBase {
    */
   async listPendingJoinRequests(this: DKGAgent,
     contextGraphId: string,
+    callerAgentAddress?: string,
   ): Promise<Array<{ agentAddress: string; name?: string; signature: string; timestamp: number; status: string }>> {
+    // GH #757 — join-request moderation data is curator-only. Gate the read
+    // server-side (the same owner check approve/reject already enforce), so a
+    // valid non-curator token can't enumerate another CG's pending requests.
+    await this.assertContextGraphOwner(contextGraphId, callerAgentAddress, 'view join requests');
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const DKG = 'https://dkg.network/ontology#';
     const result = await this.store.query(

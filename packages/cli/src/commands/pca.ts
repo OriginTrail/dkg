@@ -122,12 +122,14 @@ pcaCmd
   .command('create')
   .description('Create a new V10 conviction NFT. Daemon EOA becomes the owner')
   .requiredOption('--tokens <amount>', 'TRAC commitment (decimal, e.g. 100000)')
-  .action(async (opts: { tokens: string }) => {
+  .requiredOption('--primary-node <identityId>', 'OT-RFC-51: node identityId this PCA funds (uint72, > 0)')
+  .action(async (opts: { tokens: string; primaryNode: string }) => {
     try {
       const client = await ApiClient.connect();
-      const result = await client.createPca({ tokens: opts.tokens });
+      const result = await client.createPca({ tokens: opts.tokens, primaryNode: opts.primaryNode });
       console.log(`PCA created (owner = daemon EOA):`);
       console.log(`  accountId:        ${result.accountId}`);
+      console.log(`  primaryNode:      ${opts.primaryNode}`);
       console.log(`  committedTokens:  ${result.committedTokens} TRAC`);
       console.log(`  txHash:           ${result.txHash}`);
       console.log(`  block:            ${result.blockNumber}`);

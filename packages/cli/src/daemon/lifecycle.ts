@@ -14,7 +14,16 @@ import {
   type ServerResponse,
 } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
-import { GET_TOTAL_TRIPLES_SPARQL, parseRdfInt } from "./metrics-queries.js";
+import {
+  buildContextGraphDeclarationsSparql,
+  contextGraphIdsFromDeclarationBindings,
+  contextGraphIdsFromLocalRootMetaGraphs,
+  contextGraphIdsFromMetricSubscriptionCandidates,
+  countContextGraphsFromGraphUris,
+  GET_TOTAL_TRIPLES_SPARQL,
+  parseRdfInt,
+  shadowContextGraphIdsFromMetricSubscriptionCandidates,
+} from "./metrics-queries.js";
 import {
   appendFile,
   chmod,
@@ -73,6 +82,7 @@ import {
   LlmClient,
   SqliteMessageIdempotencyStore,
   SqliteProtocolOutboxStore,
+  SqliteSyncCheckpointStore,
   SqliteKaNumberStore,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
@@ -228,6 +238,10 @@ import {
   resolveCorsOrigin,
   corsHeaders,
   HttpRateLimiter,
+  InFlightLimiter,
+  admitRequest,
+  resolveIntSetting,
+  applyServerLimits,
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
@@ -570,6 +584,26 @@ export function mergePreferredRelays(input: {
     configCount: configParsed.length,
     preferredCount: preferredInResult.length,
   };
+}
+
+export function shouldUseIncrementalChainDiscoveryScan(input: {
+  run: number;
+  watermarkSeeded: boolean;
+  fullScanEvery: number;
+}): boolean {
+  return (
+    input.watermarkSeeded &&
+    input.run !== 0 &&
+    input.run % input.fullScanEvery !== 0
+  );
+}
+
+export function chainDiscoveryScanOptions(incremental: boolean):
+  | { incremental: true }
+  | { seedIncrementalWatermark: true; throwOnChainScanFailure: true } {
+  return incremental
+    ? { incremental: true }
+    : { seedIncrementalWatermark: true, throwOnChainScanFailure: true };
 }
 
 export interface PromoteWorkerDaemonLifecycle {
@@ -1171,6 +1205,7 @@ export async function runDaemonInner(
       return DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS[idx];
     },
   });
+  const syncCheckpointStore = new SqliteSyncCheckpointStore(dashDb);
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain
@@ -1209,13 +1244,22 @@ export async function runDaemonInner(
     agentProfileHeartbeatMs: config.network?.agentProfileHeartbeatMs,
     syncContextGraphs: syncContextGraphs,
     maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
+    // OT-RFC-38 LU-6 / OT-RFC-49 WS-A — plumb the host-mode block (eviction
+    // tiers, discovery rate limits, and the `stripCiphertext` private-ciphertext
+    // strip kill-switch) from config.json. Without this forward the whole
+    // `swmHostMode` config is inert and only in-agent defaults apply, so an
+    // operator could not toggle the strip via config (the rung-1 inert-flag bug).
+    swmHostMode: config.swmHostMode,
     storeConfig: runtimeStore ? {
       backend: runtimeStore.backend,
       options: runtimeStore.options,
+      graphSetIndex: runtimeStore.graphSetIndex,
     } : undefined,
     largeLiteralStorage: runtimeLargeLiteralStorage,
     sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
     syncSharedMemoryOnConnect: config.syncSharedMemoryOnConnect,
+    swmAwaitCuratorAck: config.swmAwaitCuratorAck,
+    syncAgentsMeta: role === 'core' ? true : config.syncAgentsMeta,
     queryAccess: config.queryAccess,
     chainAdapter: mockChainAdapter,
     // Only forward chain to the agent when both required fields resolved.
@@ -1232,11 +1276,15 @@ export async function runDaemonInner(
       operationalKeys: opWallets.wallets.map((w) => w.privateKey),
       chainId: chainBase.chainId,
       approvalPolicy: resolveApprovalPolicy(chainBase.approvalPolicy) as ApprovalPolicy | undefined,
+      cgRegistryScanPageSize: chainBase.cgRegistryScanPageSize,
     } : undefined,
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
+    // RFC ka-metadata-trim P3.3 — lifecycle PROV event writes (default true).
+    metadataProvenanceEvents: config.metadata?.provenanceEvents,
     randomSamplingWalPath: config.randomSampling?.walPath,
     randomSamplingTickIntervalMs: config.randomSampling?.tickIntervalMs,
     randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
+    syncCheckpointStore,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,
@@ -1251,6 +1299,22 @@ export async function runDaemonInner(
         coreHosted: row.core_hosted == null ? undefined : row.core_hosted === 1,
         syncScoped: row.sync_scoped === 1,
       })),
+      load: async (contextGraphId) => {
+        const row = dashDb.getContextGraphSubscription(contextGraphId);
+        return row ? {
+          id: row.context_graph_id,
+          name: row.name ?? undefined,
+          subscribed: row.subscribed === 1,
+          synced: row.synced === 1,
+          sharedMemorySynced: row.shared_memory_synced == null ? undefined : row.shared_memory_synced === 1,
+          metaSynced: row.meta_synced == null ? undefined : row.meta_synced === 1,
+          onChainId: row.on_chain_id ?? undefined,
+          onChainHash: row.on_chain_hash ?? undefined,
+          lastReconciledOrdinal: row.last_reconciled_ordinal ?? undefined,
+          coreHosted: row.core_hosted == null ? undefined : row.core_hosted === 1,
+          syncScoped: row.sync_scoped === 1,
+        } : null;
+      },
       save: async (record) => {
         dashDb.upsertContextGraphSubscription({
           context_graph_id: record.id,
@@ -1360,6 +1424,25 @@ export async function runDaemonInner(
       log,
     }),
   );
+
+  // GH #462 — skill_request authorization. Default-deny remote skill invocation
+  // (any connected peer could otherwise invoke any registered skill). Operators
+  // restore open skills with `messaging.openSkills: true`, or allowlist specific
+  // peers via `messaging.skillAllowedPeers`.
+  {
+    const openSkills = config.messaging?.openSkills === true;
+    const allowedSkillPeers = new Set(config.messaging?.skillAllowedPeers ?? []);
+    agent.setSkillAcl((senderPeerId: string) => {
+      if (openSkills) return { accept: true };
+      if (allowedSkillPeers.has(senderPeerId)) return { accept: true };
+      return {
+        accept: false,
+        reason:
+          'unauthorized: skill invocation is default-deny for remote peers; ' +
+          'set messaging.openSkills or add this peer to messaging.skillAllowedPeers (GH #462)',
+      };
+    });
+  }
 
   let chatDb: DashboardDB | null = null;
   agent.onChat((text, senderPeerId, _convId, senderContextGraphId, verifiedContextGraphId, messageId) => {
@@ -1621,6 +1704,24 @@ export async function runDaemonInner(
               },
               log,
             }),
+            publishEncryptionFactory: async (publishOptions) => {
+              const encryptInlinePayload = await agent._resolveEncryptInlinePayload(
+                publishOptions.contextGraphId,
+                publishOptions.subGraphName,
+                undefined,
+                publishOptions.publishContextGraphId,
+              );
+              const encryptInlineChunked = await agent._resolveEncryptInlineChunked(
+                publishOptions.contextGraphId,
+                publishOptions.subGraphName,
+                undefined,
+                publishOptions.publishContextGraphId,
+              );
+              return {
+                encryptInlinePayload,
+                encryptInlineChunked,
+              };
+            },
             log,
           });
           publisherRuntime = runtime;
@@ -1699,24 +1800,27 @@ export async function runDaemonInner(
   // Run an initial chain scan for context graphs we might not know about,
   // then repeat every 30 minutes as a fallback discovery mechanism.
   const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
-  setTimeout(async () => {
+  const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
+  let chainScanRuns = 0;
+  const runChainDiscoveryScan = async () => {
     try {
-      const found = await agent.discoverContextGraphsFromChain();
+      const run = chainScanRuns++;
+      const incremental = shouldUseIncrementalChainDiscoveryScan({
+        run,
+        watermarkSeeded: await agent.hasContextGraphRegistryScanWatermark(),
+        fullScanEvery: CHAIN_FULL_SCAN_EVERY,
+      });
+      const found = await agent.discoverContextGraphsFromChain(
+        chainDiscoveryScanOptions(incremental),
+      );
       if (found > 0)
         log(`Chain scan: discovered ${found} new context graph(s)`);
     } catch {
       /* non-critical */
     }
-  }, 15_000);
-  const chainScanTimer = setInterval(async () => {
-    try {
-      const found = await agent.discoverContextGraphsFromChain();
-      if (found > 0)
-        log(`Chain scan: discovered ${found} new context graph(s)`);
-    } catch {
-      /* non-critical */
-    }
-  }, CHAIN_SCAN_INTERVAL_MS);
+  };
+  setTimeout(runChainDiscoveryScan, 15_000);
+  const chainScanTimer = setInterval(runChainDiscoveryScan, CHAIN_SCAN_INTERVAL_MS);
   if (chainScanTimer.unref) chainScanTimer.unref();
 
   // Periodic peer health ping (every 2 minutes)
@@ -1843,28 +1947,77 @@ export async function runDaemonInner(
         return 0;
       }
     },
-    getContextGraphCount: async () => (await agent.listContextGraphs()).length,
+    getContextGraphCount: async () => {
+      const graphUris = await agent.store.listGraphs();
+      const knownContextGraphIds = new Set<string>();
+      const subscribedContextGraphs = agent.getSubscribedContextGraphs();
+      const shadowContextGraphIds = new Set(
+        shadowContextGraphIdsFromMetricSubscriptionCandidates(subscribedContextGraphs.entries()),
+      );
+      for (const contextGraphId of contextGraphIdsFromMetricSubscriptionCandidates(
+        subscribedContextGraphs.entries(),
+      )) {
+        knownContextGraphIds.add(contextGraphId);
+      }
+      for (const contextGraphId of contextGraphIdsFromLocalRootMetaGraphs(
+        graphUris,
+        subscribedContextGraphs.keys(),
+      )) {
+        if (!shadowContextGraphIds.has(contextGraphId)) knownContextGraphIds.add(contextGraphId);
+      }
+      const declarationQuery = buildContextGraphDeclarationsSparql(graphUris, knownContextGraphIds);
+      const declarationResult = declarationQuery
+        ? await agent.store.query(declarationQuery)
+        : null;
+      if (declarationResult?.type === "bindings") {
+        for (const contextGraphId of contextGraphIdsFromDeclarationBindings(
+          declarationResult.bindings as Record<string, string>[],
+        )) {
+          if (!shadowContextGraphIds.has(contextGraphId)) knownContextGraphIds.add(contextGraphId);
+        }
+      }
+      return countContextGraphsFromGraphUris(graphUris, knownContextGraphIds, shadowContextGraphIds);
+    },
     // The count getters below each issue a data-proportional full-scan COUNT,
     // but the only caller is the 30 s metrics tick (metricsSource is consumed
     // solely by MetricsCollector — no on-demand /api/status path), so each tick
     // already re-reads the store fresh and there is nothing concurrent to
     // coalesce. They are intentionally left uncached so a snapshot never serves
-    // a stale count and can't mask a store outage. The one heavy metrics read,
-    // getContextGraphCount, is relieved at the chokepoint by R6-A's listGraphs
-    // cache; these COUNTs are cheap (~0.015 CPU-s/tick on a 75k-triple store).
+    // a stale count and can't mask a store outage. The context-graph count
+    // avoids the composite context-graph listing enrichment path. It uses the
+    // cached store graph inventory plus backed subscription/declaration evidence,
+    // then dedupes local layer graphs. It intentionally includes private CG graphs
+    // that are backed by local subscription/declaration state.
+    // These COUNTs are cheap (~0.015 CPU-s/tick on a 75k-triple store).
     getTotalTriples: async () => {
       const r = await agent.query(GET_TOTAL_TRIPLES_SPARQL);
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
+    // RFC ka-metadata-trim (Phase 2 ⊕ / Phase 3 P3.1): the KC/KA counters are
+    // predicate-based, not rdf:type-based — `generateKCMetadata` no longer
+    // emits `rdf:type dkg:KnowledgeCollection` / `dkg:KnowledgeAsset` rows.
+    //   - KC ≙ a subject carrying `dkg:status` (every KC row, old shape or
+    //     new, has exactly one tentative/confirmed status quad).
+    //   - KA ≙ read-both: a legacy `<ual>/<n>` token row carrying
+    //     `dkg:partOf`, OR (collapsed shape, P3.1) a UAL subject carrying
+    //     `dkg:status` + the entity pair with NO token row pointing at it
+    //     (the NOT-EXISTS guard prevents double-counting old-shape rows,
+    //     whose aggregate UAL node also carries `dkg:rootEntity`).
     getTotalKCs: async () => {
       const r = await agent.query(
-        "SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc a <http://dkg.io/ontology/KnowledgeCollection> } }",
+        "SELECT (COUNT(DISTINCT ?kc) AS ?c) WHERE { GRAPH ?g { ?kc <http://dkg.io/ontology/status> ?s } }",
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
     getTotalKAs: async () => {
       const r = await agent.query(
-        "SELECT (COUNT(DISTINCT ?ka) AS ?c) WHERE { GRAPH ?g { ?ka a <http://dkg.io/ontology/KnowledgeAsset> } }",
+        `SELECT (COUNT(DISTINCT ?ka) AS ?c) WHERE { GRAPH ?g {
+          { ?ka <http://dkg.io/ontology/partOf> ?kc }
+          UNION
+          { ?ka <http://dkg.io/ontology/status> ?st .
+            ?ka <http://dkg.io/ontology/rootEntity> ?re .
+            FILTER NOT EXISTS { ?tok <http://dkg.io/ontology/partOf> ?ka } }
+        } }`,
       );
       return parseRdfInt(r?.bindings?.[0]?.c);
     },
@@ -2500,6 +2653,7 @@ export async function runDaemonInner(
   // --- File Store ---
 
   const fileStore = new FileStore(join(dkgDir(), "files"));
+  agent.registerImportedArtifactByteStore(fileStore);
 
   // --- Vector Store (optional, for tri-modal memory) ---
   const vectorStore = new VectorStore(dkgDir());
@@ -2542,6 +2696,26 @@ export async function runDaemonInner(
       "/.well-known/skill.md",
     ],
   );
+
+  // Admission control: cap concurrent in-flight requests so a burst (including
+  // loopback traffic, which bypasses the per-IP rate limiter) can't pile
+  // unbounded pending work onto the single event loop / store worker thread.
+  // IP-agnostic on purpose — local agents legitimately burst, so we shed by
+  // concurrency (503 + Retry-After) rather than by per-minute rate. Tunable via
+  // DKG_MAX_INFLIGHT (explicit 0 disables); default 64. Malformed/empty values
+  // fall back to the default instead of silently disabling the cap.
+  const maxInFlight = resolveIntSetting(
+    process.env.DKG_MAX_INFLIGHT,
+    config.maxInFlightRequests,
+    64,
+    { allowNonPositive: true },
+  );
+  const inFlightLimiter = new InFlightLimiter(maxInFlight);
+  // Throttle the "shedding" warning so a sustained burst can't spam the log,
+  // while still letting operators see the limiter is active (per review).
+  let lastShedLogAt = 0;
+  const SHED_LOG_THROTTLE_MS = 10_000;
+
   let corsAllowed: CorsAllowlist = "*";
   daemonState.catchupRunner = createCatchupRunner(agent);
 
@@ -2561,6 +2735,25 @@ export async function runDaemonInner(
         res.end(JSON.stringify({ error: 'Too many requests' }));
         return;
       }
+
+      // Admission control — shed load (503 + Retry-After) when too many
+      // requests are already in flight. Applied to ALL traffic (not bypassed
+      // for loopback) so it also bounds local agents the per-IP rate limiter
+      // exempts; OPTIONS preflight and cheap health/liveness paths are exempt
+      // inside admitRequest so monitoring stays answerable under saturation.
+      const gate = admitRequest(inFlightLimiter, req.method, reqUrl.pathname, res, reqCorsOrigin);
+      if (!gate.admitted) {
+        const nowMs = Date.now();
+        if (nowMs - lastShedLogAt >= SHED_LOG_THROTTLE_MS) {
+          lastShedLogAt = nowMs;
+          log(
+            `admission-control: shedding requests (503) — inFlight=${inFlightLimiter.inFlight}/${inFlightLimiter.max} rejectedTotal=${inFlightLimiter.rejectedTotal}`,
+          );
+        }
+        return;
+      }
+      // (admitRequest registers slot release on the response's `close` event —
+      // covers streaming/plugin responses; nothing to release here.)
 
       // CORS preflight
       if (req.method === "OPTIONS") {
@@ -2748,6 +2941,19 @@ export async function runDaemonInner(
         jsonResponse(res, 500, { error: err.message });
       }
     }
+    // Note: the admission slot is released on the response's `close` event
+    // (registered above), not in a finally here — see the comment at acquire.
+  });
+
+  // Bound simultaneous sockets and slow-header connections so a flood of
+  // clients can't exhaust file descriptors or park half-open connections.
+  // Resolution + assignment live in applyServerLimits (unit-tested); tunable via
+  // DKG_MAX_CONNECTIONS / DKG_HEADERS_TIMEOUT_MS, with malformed/empty values
+  // falling back to defaults rather than becoming NaN.
+  applyServerLimits(server, {
+    maxConnectionsEnv: process.env.DKG_MAX_CONNECTIONS,
+    maxConnectionsConfig: config.maxConnections,
+    headersTimeoutEnv: process.env.DKG_HEADERS_TIMEOUT_MS,
   });
 
   const apiPort = config.apiPort || 0;

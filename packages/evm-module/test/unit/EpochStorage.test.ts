@@ -39,51 +39,54 @@ describe('@unit EpochStorage', () => {
 
   it('Should have correct name and version', async () => {
     expect(await EpochStorage.name()).to.equal('EpochStorage');
-    expect(await EpochStorage.version()).to.equal('10.0.3');
+    expect(await EpochStorage.version()).to.equal('10.0.4');
   });
 
-  it('Add knowledge value for single epoch, verify totals and max', async () => {
+  it('Add knowledge value for single epoch, verify totals and running node max', async () => {
     const epoch = 10;
-    await EpochStorage.addEpochProducedKnowledgeValue(123, epoch, 500);
-    expect(await EpochStorage.getEpochProducedKnowledgeValue(epoch)).to.equal(
+    await EpochStorage.addEpochPublishingAllocation(123, epoch, 500);
+    expect(await EpochStorage.getEpochPublishingAllocation(epoch)).to.equal(
       500,
     );
     expect(
-      await EpochStorage.getNodeEpochProducedKnowledgeValue(123, epoch),
+      await EpochStorage.getNodeEpochPublishingAllocation(123, epoch),
     ).to.equal(500);
+    // `addEpochPublishingAllocation` maintains the per-epoch node max so its
+    // public getters stay consistent (Slither uninitialized-state). A single
+    // node with 500 → the running max is 500.
     expect(
-      await EpochStorage.getEpochNodeMaxProducedKnowledgeValue(epoch),
+      await EpochStorage.getEpochNodeMaxPublishingAllocation(epoch),
     ).to.equal(500);
   });
 
   it('Add knowledge values to multiple epochs, check accumulated node stats', async () => {
-    await EpochStorage.addEpochProducedKnowledgeValue(42, 1, 1000);
-    await EpochStorage.addEpochProducedKnowledgeValue(42, 2, 250);
-    await EpochStorage.addEpochProducedKnowledgeValue(42, 3, 500);
-    expect(await EpochStorage.getEpochProducedKnowledgeValue(1)).to.equal(1000);
-    expect(await EpochStorage.getEpochProducedKnowledgeValue(2)).to.equal(250);
-    expect(await EpochStorage.getEpochProducedKnowledgeValue(3)).to.equal(500);
+    await EpochStorage.addEpochPublishingAllocation(42, 1, 1000);
+    await EpochStorage.addEpochPublishingAllocation(42, 2, 250);
+    await EpochStorage.addEpochPublishingAllocation(42, 3, 500);
+    expect(await EpochStorage.getEpochPublishingAllocation(1)).to.equal(1000);
+    expect(await EpochStorage.getEpochPublishingAllocation(2)).to.equal(250);
+    expect(await EpochStorage.getEpochPublishingAllocation(3)).to.equal(500);
     expect(
-      await EpochStorage.getNodeEpochProducedKnowledgeValue(42, 1),
+      await EpochStorage.getNodeEpochPublishingAllocation(42, 1),
     ).to.equal(1000);
     expect(
-      await EpochStorage.getNodeEpochProducedKnowledgeValue(42, 2),
+      await EpochStorage.getNodeEpochPublishingAllocation(42, 2),
     ).to.equal(250);
     expect(
-      await EpochStorage.getNodeEpochProducedKnowledgeValue(42, 3),
+      await EpochStorage.getNodeEpochPublishingAllocation(42, 3),
     ).to.equal(500);
   });
 
   it('Get node knowledge value percentage returns zero if total is zero', async () => {
     expect(
-      await EpochStorage.getNodeEpochProducedKnowledgeValuePercentage(
+      await EpochStorage.getNodeEpochPublishingAllocationPercentage(
         9999,
         100,
       ),
     ).to.equal(0);
-    await EpochStorage.addEpochProducedKnowledgeValue(777, 100, 0);
+    await EpochStorage.addEpochPublishingAllocation(777, 100, 0);
     expect(
-      await EpochStorage.getNodeEpochProducedKnowledgeValuePercentage(777, 100),
+      await EpochStorage.getNodeEpochPublishingAllocationPercentage(777, 100),
     ).to.equal(0);
   });
 
@@ -137,12 +140,15 @@ describe('@unit EpochStorage', () => {
     expect(await EpochStorage.accumulatedRemainder(5)).to.be.gt(0);
   });
 
-  it('Add big knowledge values for multiple identities in same epoch, check nodeMax', async () => {
-    await EpochStorage.addEpochProducedKnowledgeValue(101, 20, 1500);
-    await EpochStorage.addEpochProducedKnowledgeValue(202, 20, 3000);
-    await EpochStorage.addEpochProducedKnowledgeValue(303, 20, 2800);
+  it('Add big knowledge values for multiple identities in same epoch — node max tracks the largest', async () => {
+    await EpochStorage.addEpochPublishingAllocation(101, 20, 1500);
+    await EpochStorage.addEpochPublishingAllocation(202, 20, 3000);
+    await EpochStorage.addEpochPublishingAllocation(303, 20, 2800);
+    // The epoch total accumulates all three; the per-epoch node max tracks the
+    // single largest per-node allocation = max(1500, 3000, 2800) = 3000.
+    expect(await EpochStorage.getEpochPublishingAllocation(20)).to.equal(7300);
     expect(
-      await EpochStorage.getEpochNodeMaxProducedKnowledgeValue(20),
+      await EpochStorage.getEpochNodeMaxPublishingAllocation(20),
     ).to.equal(3000);
   });
 
@@ -339,57 +345,60 @@ describe('@unit EpochStorage', () => {
     expect(totalRange).to.be.closeTo(totalInd, 1);
   });
 
-  it('getCurrentEpochProducedKnowledgeValue, getPreviousEpochProducedKnowledgeValue', async () => {
-    await EpochStorage.addEpochProducedKnowledgeValue(10, 1, 200);
+  it('getCurrentEpochPublishingAllocation, getPreviousEpochPublishingAllocation', async () => {
+    await EpochStorage.addEpochPublishingAllocation(10, 1, 200);
     await time.increase(epochSeconds);
-    await EpochStorage.addEpochProducedKnowledgeValue(20, 2, 300);
-    expect(await EpochStorage.getCurrentEpochProducedKnowledgeValue()).to.equal(
+    await EpochStorage.addEpochPublishingAllocation(20, 2, 300);
+    expect(await EpochStorage.getCurrentEpochPublishingAllocation()).to.equal(
       300,
     );
     expect(
-      await EpochStorage.getPreviousEpochProducedKnowledgeValue(),
+      await EpochStorage.getPreviousEpochPublishingAllocation(),
     ).to.equal(200);
   });
 
-  it('getNodeCurrentEpochProducedKnowledgeValue, getNodePreviousEpochProducedKnowledgeValue', async () => {
-    await EpochStorage.addEpochProducedKnowledgeValue(123, 1, 500);
+  it('getNodeCurrentEpochPublishingAllocation, getNodePreviousEpochPublishingAllocation', async () => {
+    await EpochStorage.addEpochPublishingAllocation(123, 1, 500);
     await time.increase(epochSeconds);
-    await EpochStorage.addEpochProducedKnowledgeValue(123, 2, 700);
+    await EpochStorage.addEpochPublishingAllocation(123, 2, 700);
     expect(
-      await EpochStorage.getNodeCurrentEpochProducedKnowledgeValue(123),
+      await EpochStorage.getNodeCurrentEpochPublishingAllocation(123),
     ).to.equal(700);
     expect(
-      await EpochStorage.getNodePreviousEpochProducedKnowledgeValue(123),
+      await EpochStorage.getNodePreviousEpochPublishingAllocation(123),
     ).to.equal(500);
   });
 
-  it('getCurrentEpochNodeMaxProducedKnowledgeValue, getPreviousEpochNodeMaxProducedKnowledgeValue', async () => {
-    await EpochStorage.addEpochProducedKnowledgeValue(1, 1, 1000);
-    await EpochStorage.addEpochProducedKnowledgeValue(2, 1, 500);
+  it('getCurrentEpochNodeMaxPublishingAllocation, getPreviousEpochNodeMaxPublishingAllocation track the per-epoch max', async () => {
+    await EpochStorage.addEpochPublishingAllocation(1, 1, 1000);
+    await EpochStorage.addEpochPublishingAllocation(2, 1, 500);
     await time.increase(epochSeconds);
-    await EpochStorage.addEpochProducedKnowledgeValue(1, 2, 300);
-    await EpochStorage.addEpochProducedKnowledgeValue(2, 2, 800);
+    await EpochStorage.addEpochPublishingAllocation(1, 2, 300);
+    await EpochStorage.addEpochPublishingAllocation(2, 2, 800);
+    // `addEpochPublishingAllocation` maintains the per-epoch node max. Epoch 1
+    // max = max(1000, 500) = 1000; epoch 2 max = max(300, 800) = 800. After the
+    // time.increase, the current epoch is 2 and the previous is 1.
     expect(
-      await EpochStorage.getCurrentEpochNodeMaxProducedKnowledgeValue(),
+      await EpochStorage.getCurrentEpochNodeMaxPublishingAllocation(),
     ).to.equal(800);
     expect(
-      await EpochStorage.getPreviousEpochNodeMaxProducedKnowledgeValue(),
+      await EpochStorage.getPreviousEpochNodeMaxPublishingAllocation(),
     ).to.equal(1000);
   });
 
-  it('getNodeCurrentEpochProducedKnowledgeValuePercentage, getNodePreviousEpochProducedKnowledgeValuePercentage', async () => {
-    await EpochStorage.addEpochProducedKnowledgeValue(1111, 1, 500);
-    await EpochStorage.addEpochProducedKnowledgeValue(2222, 1, 1500);
+  it('getNodeCurrentEpochPublishingAllocationPercentage, getNodePreviousEpochPublishingAllocationPercentage', async () => {
+    await EpochStorage.addEpochPublishingAllocation(1111, 1, 500);
+    await EpochStorage.addEpochPublishingAllocation(2222, 1, 1500);
     await time.increase(epochSeconds);
-    await EpochStorage.addEpochProducedKnowledgeValue(1111, 2, 1000);
-    await EpochStorage.addEpochProducedKnowledgeValue(2222, 2, 2000);
+    await EpochStorage.addEpochPublishingAllocation(1111, 2, 1000);
+    await EpochStorage.addEpochPublishingAllocation(2222, 2, 2000);
     expect(
-      await EpochStorage.getNodePreviousEpochProducedKnowledgeValuePercentage(
+      await EpochStorage.getNodePreviousEpochPublishingAllocationPercentage(
         1111,
       ),
     ).to.equal((500n * 1000000000000000000n) / 2000n);
     expect(
-      await EpochStorage.getNodeCurrentEpochProducedKnowledgeValuePercentage(
+      await EpochStorage.getNodeCurrentEpochPublishingAllocationPercentage(
         1111,
       ),
     ).to.equal((1000n * 1000000000000000000n) / 3000n);

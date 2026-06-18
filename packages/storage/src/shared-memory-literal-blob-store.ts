@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type {
   ConstructResult,
   Quad,
+  QueryOptions,
   QueryResult,
   SelectResult,
   TripleStore,
@@ -28,6 +29,11 @@ export interface SharedMemoryLiteralBlobStoreOptions {
 }
 
 export class SharedMemoryLiteralBlobStore implements TripleStore {
+  get queryCancellation() {
+    return this.inner.queryCancellation;
+  }
+
+  readonly innerStore: TripleStore;
   private readonly inner: TripleStore;
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
@@ -41,6 +47,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
       throw new Error('SharedMemoryLiteralBlobStore requires a non-negative integer thresholdBytes');
     }
     this.inner = inner;
+    this.innerStore = inner;
     this.blobDir = options.blobDir;
     this.thresholdBytes = options.thresholdBytes;
   }
@@ -71,16 +78,16 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     return removed;
   }
 
-  async query(sparql: string): Promise<QueryResult> {
+  async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
     const rewritten = this.rewriteLargeLiteralConstants(sparql);
     if (!rewritten) {
-      const result = await this.inner.query(sparql);
+      const result = await this.inner.query(sparql, options);
       return this.hydrateQueryResult(result);
     }
 
     const [original, placeholder] = await Promise.all([
-      this.inner.query(sparql),
-      this.inner.query(rewritten),
+      this.inner.query(sparql, options),
+      this.inner.query(rewritten, options),
     ]);
     return this.hydrateQueryResult(mergeQueryResults(original, placeholder));
   }
@@ -97,8 +104,14 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     return this.inner.dropGraph(graphUri);
   }
 
-  async listGraphs(): Promise<string[]> {
-    return this.inner.listGraphs();
+  async listGraphs(options?: QueryOptions): Promise<string[]> {
+    return this.inner.listGraphs(options);
+  }
+
+  async listGraphsByPrefix(prefix: string, options?: QueryOptions): Promise<string[]> {
+    return this.inner.listGraphsByPrefix
+      ? this.inner.listGraphsByPrefix(prefix, options)
+      : (await this.inner.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> {

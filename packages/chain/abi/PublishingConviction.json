@@ -125,6 +125,49 @@
   {
     "inputs": [
       {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint40",
+        "name": "lastChangeEpoch",
+        "type": "uint40"
+      }
+    ],
+    "name": "PrimaryNodeChangeRateLimited",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "node",
+        "type": "uint72"
+      }
+    ],
+    "name": "PrimaryNodeNotInShardingTable",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint72",
+        "name": "node",
+        "type": "uint72"
+      }
+    ],
+    "name": "PrimaryNodeUnchanged",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "string",
         "name": "msg",
         "type": "string"
@@ -163,6 +206,11 @@
   {
     "inputs": [],
     "name": "ZeroAgentAddress",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroPrimaryNode",
     "type": "error"
   },
   {
@@ -312,6 +360,37 @@
       }
     ],
     "name": "CostCovered",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint72",
+        "name": "oldNode",
+        "type": "uint72"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint72",
+        "name": "newNode",
+        "type": "uint72"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "changeEpoch",
+        "type": "uint40"
+      }
+    ],
+    "name": "PrimaryNodeChanged",
     "type": "event"
   },
   {
@@ -478,6 +557,11 @@
         "internalType": "uint96",
         "name": "committedTRAC",
         "type": "uint96"
+      },
+      {
+        "internalType": "uint72",
+        "name": "primaryNode",
+        "type": "uint72"
       }
     ],
     "name": "createAccount",
@@ -720,6 +804,24 @@
   {
     "inputs": [
       {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint72",
+        "name": "newNode",
+        "type": "uint72"
+      }
+    ],
+    "name": "setPrimaryNode",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "bool",
         "name": "_status",
         "type": "bool"
@@ -741,6 +843,19 @@
     "name": "settle",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "shardingTableStorage",
+    "outputs": [
+      {
+        "internalType": "contract ShardingTableStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {

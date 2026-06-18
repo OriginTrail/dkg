@@ -850,6 +850,10 @@ export class EndorseVerifyMethods extends DKGAgentBase {
 
   async getRootEntities(this: DKGAgent, contextGraphId: string, batchId: bigint): Promise<string[]> {
     const metaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
+    // Read-both note (RFC ka-metadata-trim P3.1): this UNION already covers
+    // BOTH shapes — the first branch matches the collapsed UAL subject
+    // (`rootEntity` + `batchId` on one node), the second the legacy
+    // `<ual>/<n> partOf <ual>` token rows. No migration needed.
     // Try typed literal first, fallback to untyped for backward compat
     for (const ns of ['http://dkg.io/ontology/', 'https://dkg.network/ontology#']) {
       for (const literal of [`"${batchId}"^^<http://www.w3.org/2001/XMLSchema#integer>`, `"${batchId}"`]) {

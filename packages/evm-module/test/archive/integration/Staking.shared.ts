@@ -113,19 +113,17 @@ async function calculateExpectedNodeScore(
   const stakeRatio18 = (nodeStake * SCALE18) / stakeCap;
   const stakeFactor18 = sqrt(stakeRatio18 * SCALE18);
 
-  // 2. Publishing Factor P(t) = K_n / K_total over 4 epochs (RFC-26 Section 4.2)
-  let nodeKnowledgeValue = 0n;
-  let totalKnowledgeValue = 0n;
-  const startEpoch = currentEpoch >= 3n ? currentEpoch - 3n : 0n;
-  for (let e = startEpoch; e <= currentEpoch; e++) {
-    nodeKnowledgeValue +=
-      await contracts.epochStorage.getNodeEpochProducedKnowledgeValue(
-        nodeId,
-        e,
-      );
-    totalKnowledgeValue +=
-      await contracts.epochStorage.getEpochProducedKnowledgeValue(e);
-  }
+  // 2. Publishing Factor P(t) = K_n / K_total for the CURRENT epoch only.
+  // OT-RFC-51: RandomSampling._calculateNodeScore now reads K_n / K_total
+  // from `currentEpoch` exclusively (no 4-epoch lookback window). Mirror that
+  // single-epoch read here so the expected score matches the contract.
+  const nodeKnowledgeValue =
+    await contracts.epochStorage.getNodeEpochPublishingAllocation(
+      nodeId,
+      currentEpoch,
+    );
+  const totalKnowledgeValue =
+    await contracts.epochStorage.getEpochPublishingAllocation(currentEpoch);
   const publishingFactor18 =
     totalKnowledgeValue > 0n
       ? (nodeKnowledgeValue * SCALE18) / totalKnowledgeValue
@@ -319,7 +317,7 @@ async function ensureNodeHasChunksThisEpoch(
   chunkSize: number,
 ): Promise<void> {
   const produced =
-    await contracts.epochStorage.getNodeCurrentEpochProducedKnowledgeValue(
+    await contracts.epochStorage.getNodeCurrentEpochPublishingAllocation(
       nodeId,
     );
 

@@ -1,7 +1,7 @@
 import { beforeAll, beforeEach, afterAll, describe, expect, it } from 'vitest';
 import { GraphManager, OxigraphStore, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, generateEd25519Keypair, sha256 } from '@origintrail-official/dkg-core';
+import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
@@ -135,15 +135,6 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       throw new Error(`Unexpected expiresAt literal: ${value}`);
     }
     return Number.parseInt(match[1] as string, 10);
-  }
-
-  function canonicalRoot(root: string): string {
-    const digest = sha256(new TextEncoder().encode(root));
-    const suffix = Array.from(digest)
-      .slice(0, 6)
-      .map((byte) => byte.toString(16).padStart(2, '0'))
-      .join('');
-    return `dkg:${CONTEXT_GRAPH}:aloha:person-profile/rihana-${suffix}`;
   }
 
   it('creates accepted jobs and returns status', async () => {
@@ -601,8 +592,9 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         publishExecutor: async ({ walletId, publishOptions }) => {
           expect(walletId).toBe('wallet-1');
           expect(publishOptions.contextGraphId).toBe('music-social');
-          expect(publishOptions.quads[0]?.subject).toContain('dkg:music-social:aloha:person-profile/rihana-');
-          expect(publishOptions.privateQuads?.[0]?.subject).toContain('dkg:music-social:aloha:person-profile/rihana-');
+          // GH #1122 — async lift preserves caller root IRIs (parity with sync).
+          expect(publishOptions.quads[0]?.subject).toBe('urn:local:/rihana');
+          expect(publishOptions.privateQuads?.[0]?.subject).toBe('urn:local:/rihana');
           return {
             kaId: 1n,
             ual: 'did:dkg:mock:31337/0xabc/1',
@@ -803,7 +795,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     const result = await dkgPublisher.publish({
       contextGraphId: CONTEXT_GRAPH,
       quads: [
-        { subject: canonicalRoot('urn:local:/rihana'), predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
+        { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
       ],
       publisherPeerId: 'peer-1',
     });
@@ -857,11 +849,27 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
-    const canonical = canonicalRoot('urn:local:/rihana');
-    await dkgPublisher.publish({
+    // GH #1122 — the async lift now PRESERVES caller root IRIs (parity with
+    // sync), so authoritative VM state and the SWM share live at the SAME root
+    // (`urn:local:/rihana`). Seed the authoritative state through a SEPARATE
+    // publisher instance: Rule-4 entity exclusivity is tracked per-process in
+    // memory (`ownedEntities`, never hydrated from the store), so `dkgPublisher`
+    // does not see this root as locally owned and the subsequent share() is
+    // allowed — exactly the cross-node idempotency case the CREATE-remainder
+    // subtraction guards (node A finalized R; node B shares R and lifts a CREATE,
+    // and subtraction drops the already-finalized quads from the store).
+    const seedPublisher = makeTestPublisher({
+      store,
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+    await seedPublisher.publish({
       contextGraphId: CONTEXT_GRAPH,
       quads: [
-        { subject: canonical, predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
+        { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
       ],
       publisherPeerId: 'peer-1',
     });
@@ -900,11 +908,22 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
-    const canonical = canonicalRoot('urn:local:/rihana');
-    await dkgPublisher.publish({
+    // GH #1122 — caller-IRI parity: seed authoritative VM state at the SAME root
+    // through a SEPARATE publisher instance so `dkgPublisher`'s per-process Rule-4
+    // tracking does not block the share (see the remainder test above for the
+    // full rationale).
+    const seedPublisher = makeTestPublisher({
+      store,
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+    await seedPublisher.publish({
       contextGraphId: CONTEXT_GRAPH,
       quads: [
-        { subject: canonical, predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
+        { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
       ],
       publisherPeerId: 'peer-1',
     });

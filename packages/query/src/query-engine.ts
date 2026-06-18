@@ -39,6 +39,18 @@ export interface QueryOptions {
   view?: GetView;
   /** Agent address — required when view is 'working-memory' to resolve assertion graphs. */
   agentAddress?: string;
+  /**
+   * Additional WM namespaces that are ALIASES of the same identity as
+   * `agentAddress` (PR #1107 review 🟡). The node default agent's WM data is
+   * split across two eras of layout: legacy drafts under the peerId-keyed
+   * namespace and rc.17+ drafts under the EVM-wallet namespace. Unscoped
+   * `view: 'working-memory'` reads span every listed alias so neither era is
+   * stranded. Callers MUST only pass addresses that canonicalise to the same
+   * identity as `agentAddress` — this is an alias list, not an
+   * access-widening mechanism. Ignored for by-name (assertionName) reads,
+   * which stay single-graph on the primary address.
+   */
+  agentAddressAliases?: string[];
   /** Specific verified graph name — used with view='verifiable-memory' to target a single verified graph. */
   verifiedGraph?: string;
   /** Specific assertion name — used with view='working-memory' to target a single assertion graph. */

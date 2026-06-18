@@ -1,7 +1,21 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { encodeFinalizationMessage, type FinalizationMessageMsg } from '@origintrail-official/dkg-core';
 import { FinalizationHandler, type ResolveContextGraphOnChainId } from '../src/finalization-handler.js';
+
+/**
+ * Hand-rolled call recorder: wraps an implementation, records every call's
+ * argument list in `.calls`, and forwards to `impl`. Replaces the former
+ * mock factory for the resolver dependency-injection seam.
+ */
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
 
 /**
  * Regression tests for the receiver-side `ctxGraphId` resolution in
@@ -124,7 +138,7 @@ describe('FinalizationHandler ctxGraphId resolution', () => {
     await seedConfirmedAt(store, GOSSIP_PER_CG_META_GRAPH);
     await seedConfirmedAt(store, LEGACY_META_GRAPH);
 
-    const resolver = vi.fn<Parameters<ResolveContextGraphOnChainId>, ReturnType<ResolveContextGraphOnChainId>>(
+    const resolver = recorder<Parameters<ResolveContextGraphOnChainId>, ReturnType<ResolveContextGraphOnChainId>>(
       () => Promise.resolve('UNEXPECTED'),
     );
     const handler = new FinalizationHandler(store, undefined, undefined, resolver);
@@ -133,7 +147,7 @@ describe('FinalizationHandler ctxGraphId resolution', () => {
     await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CONTEXT_GRAPH);
 
     expect(queriedGraph(captured, GOSSIP_PER_CG_META_GRAPH)).toBe(true);
-    expect(resolver).not.toHaveBeenCalled();
+    expect(resolver.calls).toEqual([]);
   });
 
   it('falls back to the resolver when the gossip envelope omits targetContextGraphId', async () => {
@@ -144,7 +158,7 @@ describe('FinalizationHandler ctxGraphId resolution', () => {
     // workspace graph, NOT the resolver-target graph).
     await seedConfirmedAt(store, RESOLVER_PER_CG_META_GRAPH);
 
-    const resolver = vi.fn<Parameters<ResolveContextGraphOnChainId>, ReturnType<ResolveContextGraphOnChainId>>(
+    const resolver = recorder<Parameters<ResolveContextGraphOnChainId>, ReturnType<ResolveContextGraphOnChainId>>(
       () => Promise.resolve(PER_CG_ID_FROM_RESOLVER),
     );
     const handler = new FinalizationHandler(store, undefined, undefined, resolver);
@@ -152,10 +166,18 @@ describe('FinalizationHandler ctxGraphId resolution', () => {
     const msg = makeMsg();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CONTEXT_GRAPH);
 
-    expect(resolver).toHaveBeenCalledTimes(1);
-    expect(resolver).toHaveBeenCalledWith(CONTEXT_GRAPH);
+    expect(resolver.calls).toHaveLength(1);
+    expect(resolver.calls.at(-1)).toEqual([CONTEXT_GRAPH]);
     expect(queriedGraph(captured, RESOLVER_PER_CG_META_GRAPH)).toBe(true);
-    expect(queriedGraph(captured, LEGACY_META_GRAPH)).toBe(false);
+    // Adversarial review F5 (read-both dedup): the dedup ASK now legitimately
+    // UNIONs the label `_meta` graph as the status fallback (the minimal
+    // per-cgId partition shape carries no `dkg:status` row), so the legacy
+    // URI is allowed to appear — but ONLY inside the same read-both ASK that
+    // probes the resolver-target graph. A standalone probe of the legacy
+    // graph (the original regression: "use the wire iff present" downgrade
+    // routing dedup/promotion to `<cgName>/_meta`) must still trip this.
+    const legacyMentions = captured.filter((q) => q.includes(`<${LEGACY_META_GRAPH}>`));
+    expect(legacyMentions.every((q) => q.includes(`<${RESOLVER_PER_CG_META_GRAPH}>`))).toBe(true);
   });
 
   it('falls back to the legacy meta URI when no resolver is wired (back-compat)', async () => {
@@ -174,7 +196,7 @@ describe('FinalizationHandler ctxGraphId resolution', () => {
     // pre-cd68fa689 behaviour rather than dropping the gossip on the floor.
     await seedConfirmedAt(store, LEGACY_META_GRAPH);
 
-    const resolver = vi.fn<Parameters<ResolveContextGraphOnChainId>, ReturnType<ResolveContextGraphOnChainId>>(
+    const resolver = recorder<Parameters<ResolveContextGraphOnChainId>, ReturnType<ResolveContextGraphOnChainId>>(
       () => Promise.reject(new Error('chain RPC dead')),
     );
     const handler = new FinalizationHandler(store, undefined, undefined, resolver);
@@ -182,7 +204,7 @@ describe('FinalizationHandler ctxGraphId resolution', () => {
     const msg = makeMsg();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CONTEXT_GRAPH);
 
-    expect(resolver).toHaveBeenCalledTimes(1);
+    expect(resolver.calls).toHaveLength(1);
     expect(queriedGraph(captured, LEGACY_META_GRAPH)).toBe(true);
   });
 
@@ -193,7 +215,7 @@ describe('FinalizationHandler ctxGraphId resolution', () => {
     // CGs — so we keep the legacy semantics intact.
     await seedConfirmedAt(store, LEGACY_META_GRAPH);
 
-    const resolver = vi.fn<Parameters<ResolveContextGraphOnChainId>, ReturnType<ResolveContextGraphOnChainId>>(
+    const resolver = recorder<Parameters<ResolveContextGraphOnChainId>, ReturnType<ResolveContextGraphOnChainId>>(
       () => Promise.resolve(null),
     );
     const handler = new FinalizationHandler(store, undefined, undefined, resolver);
@@ -201,7 +223,7 @@ describe('FinalizationHandler ctxGraphId resolution', () => {
     const msg = makeMsg();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CONTEXT_GRAPH);
 
-    expect(resolver).toHaveBeenCalledTimes(1);
+    expect(resolver.calls).toHaveLength(1);
     expect(queriedGraph(captured, LEGACY_META_GRAPH)).toBe(true);
   });
 
@@ -212,7 +234,7 @@ describe('FinalizationHandler ctxGraphId resolution', () => {
     // is a strict fallback, not an override.
     await seedConfirmedAt(store, GOSSIP_PER_CG_META_GRAPH);
 
-    const resolver = vi.fn<Parameters<ResolveContextGraphOnChainId>, ReturnType<ResolveContextGraphOnChainId>>(
+    const resolver = recorder<Parameters<ResolveContextGraphOnChainId>, ReturnType<ResolveContextGraphOnChainId>>(
       () => Promise.resolve('99'),
     );
     const handler = new FinalizationHandler(store, undefined, undefined, resolver);
@@ -220,7 +242,7 @@ describe('FinalizationHandler ctxGraphId resolution', () => {
     const msg = makeMsg({ targetContextGraphId: PER_CG_ID_FROM_GOSSIP });
     await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CONTEXT_GRAPH);
 
-    expect(resolver).not.toHaveBeenCalled();
+    expect(resolver.calls).toEqual([]);
     expect(queriedGraph(captured, GOSSIP_PER_CG_META_GRAPH)).toBe(true);
     expect(queriedGraph(captured, `did:dkg:context-graph:${CONTEXT_GRAPH}/context/99/_meta`)).toBe(false);
   });

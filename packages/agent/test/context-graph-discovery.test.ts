@@ -1,8 +1,21 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
-import { DKGAgent, type ContextGraphSub } from '../src/index.js';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphSharedMemoryUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
+
+function recorder<A extends unknown[], R>(impl: (...a: A) => R) {
+  const calls: A[] = [];
+  const fn = (...a: A): R => {
+    calls.push(a);
+    return impl(...a);
+  };
+  return Object.assign(fn, { calls });
+}
+import { DKGAgent, type ContextGraphSub, type ContextGraphSubscriptionStore } from '../src/index.js';
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { OxigraphStore, SharedMemoryLiteralBlobStore, SparqlHttpStore, registerTripleStoreAdapter, type TripleStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
+import { SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphSharedMemoryUri, contextGraphMetaGraphUri, Logger } from '@origintrail-official/dkg-core';
 import { type ChainAdapter, type ContextGraphOnChain } from '@origintrail-official/dkg-chain';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
@@ -20,20 +33,48 @@ afterAll(async () => {
   await revertSnapshot(_fileSnapshot);
 });
 
+function sparqlHttpStoreBackedBy(backing: OxigraphStore): TripleStore {
+  const store = new SparqlHttpStore({ queryEndpoint: 'http://127.0.0.1:9999/sparql' }) as TripleStore;
+  Object.defineProperty(store, 'queryCancellation', {
+    value: 'interruptible',
+    configurable: true,
+  });
+  const methods: Array<keyof TripleStore> = [
+    'insert',
+    'delete',
+    'deleteByPattern',
+    'query',
+    'hasGraph',
+    'createGraph',
+    'dropGraph',
+    'listGraphs',
+    'deleteBySubjectPrefix',
+    'countQuads',
+    'close',
+  ];
+  for (const method of methods) {
+    (store as any)[method] = (backing as any)[method].bind(backing);
+  }
+  return store;
+}
+
 async function createTestAgent(opts?: {
   chainAdapter?: ChainAdapter;
-  store?: OxigraphStore;
+  store?: TripleStore;
+  storeConfig?: TripleStoreConfig;
+  contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
 }) {
-  const store = opts?.store ?? new OxigraphStore();
   const agent = await DKGAgent.create({
-      kaNumberAllocator: makeTestKaNumberAllocator(),
+    kaNumberAllocator: makeTestKaNumberAllocator(),
     name: 'ContextGraphTestAgent',
     listenPort: 0,
     listenHost: '127.0.0.1',
-    store,
+    ...(opts?.store ? { store: opts.store } : {}),
+    ...(opts?.storeConfig ? { storeConfig: opts.storeConfig } : {}),
     chainAdapter: opts?.chainAdapter ?? createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+    contextGraphSubscriptionStore: opts?.contextGraphSubscriptionStore,
   });
-  return { agent, store };
+  return { agent, store: opts?.store ?? agent.store };
 }
 
 describe('ensureContextGraphLocal', () => {
@@ -140,6 +181,73 @@ describe('ensureContextGraphLocal', () => {
     ]);
 
     await expect(agent.contextGraphExists('workspace-only')).resolves.toBe(true);
+  }, 15000);
+
+  it('probes write preflight policy and curator declarations from the AGENTS graph', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    const contextGraphId = 'agents-declared-private';
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+    const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    const caller = new ethers.Wallet(HARDHAT_KEYS.DEPLOYER).address;
+
+    await store.insert([
+      {
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: agentsGraph,
+      },
+      {
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"private"',
+        graph: agentsGraph,
+      },
+      {
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.DKG_CURATOR,
+        object: `did:dkg:agent:${caller}`,
+        graph: agentsGraph,
+      },
+    ]);
+
+    const allowlistSpy = recorder(async () => {
+      throw new Error('allowlist lookup should be skipped for curator');
+    });
+    (agent as any).callerIsAllowlistedAgentParticipant = allowlistSpy;
+
+    const probe = await agent.probeContextGraphWritePreflight(contextGraphId, {
+      callerAgentAddress: caller,
+    });
+
+    expect(probe).toMatchObject({
+      exists: true,
+      declarationFound: true,
+      accessPolicy: 'private',
+      callerAuthorized: true,
+    });
+    expect(allowlistSpy.calls).toEqual([]);
+  }, 15000);
+
+  it('does not scan loadAll during exact write preflight when indexed subscription load is unavailable', async () => {
+    const loadAll = recorder(async () => {
+      throw new Error('loadAll scan should not run in write preflight');
+    });
+    const result = await createTestAgent({
+      contextGraphSubscriptionStore: {
+        loadAll,
+        save: async () => {},
+        delete: async () => {},
+      },
+    });
+    agent = result.agent;
+
+    const probe = await agent.probeContextGraphWritePreflight('loadless-cg');
+
+    expect(loadAll.calls).toEqual([]);
+    expect(probe.persistedSubscription).toBeUndefined();
   }, 15000);
 });
 
@@ -417,6 +525,29 @@ describe('listContextGraphs merge', () => {
     expect(contextGraphs.find(p => p.id === 'phantom-cg')).toBeUndefined();
   }, 15000);
 
+  it('keeps phantom-candidate subscriptions when local content probe times out', async () => {
+    const result = await createTestAgent({ store: sparqlHttpStoreBackedBy(new OxigraphStore()) });
+    agent = result.agent;
+    await agent.start();
+
+    (agent as any).setContextGraphSubscription('slow-local-content-cg', {
+      name: 'Slow Local Content',
+      subscribed: true,
+      synced: false,
+    } satisfies ContextGraphSub, { persist: false });
+    (agent as any).contextGraphHasLocalContent = recorder(async (contextGraphId: string) => {
+      if (contextGraphId === 'slow-local-content-cg') {
+        return new Promise<boolean>(() => {});
+      }
+      return false;
+    });
+
+    const contextGraphs = await agent.listContextGraphs();
+    const entry = contextGraphs.find(p => p.id === 'slow-local-content-cg');
+    expect(entry).toBeDefined();
+    expect(entry!.name).toBe('Slow Local Content');
+  }, 15000);
+
   it('marks SPARQL-only contextGraphs (not in registry) as subscribed=false', async () => {
     const store = new OxigraphStore();
     const result = await createTestAgent({ store });
@@ -506,6 +637,1583 @@ describe('listContextGraphs merge', () => {
 
     const unauthenticated = await agent.listContextGraphs();
     expect(unauthenticated.find(p => p.id === 'my-curated')).toBeUndefined();
+  }, 15000);
+
+  it('does not reject the whole list when one row enrichment fails', async () => {
+    const store = sparqlHttpStoreBackedBy(new OxigraphStore());
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    await store.insert([
+      {
+        subject: contextGraphDataGraphUri('healthy-enrichment-row'),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: contextGraphDataGraphUri('healthy-enrichment-row'),
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Healthy Row"',
+        graph: ontologyGraph,
+      },
+      {
+        subject: contextGraphDataGraphUri('healthy-enrichment-row'),
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: ontologyGraph,
+      },
+      {
+        subject: contextGraphDataGraphUri('broken-enrichment-row'),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: contextGraphDataGraphUri('broken-enrichment-row'),
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Broken Row"',
+        graph: ontologyGraph,
+      },
+      {
+        subject: contextGraphDataGraphUri('broken-enrichment-row'),
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: ontologyGraph,
+      },
+    ]);
+
+    (agent as any).getContextGraphOnChainId = recorder(async (id: string) => {
+      if (id === 'broken-enrichment-row') return new Promise<undefined>(() => {});
+      return undefined;
+    });
+
+    const contextGraphs = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(contextGraphs.find(p => p.id === 'healthy-enrichment-row')).toBeDefined();
+    expect(contextGraphs.find(p => p.id === 'broken-enrichment-row')).toBeDefined();
+  }, 15000);
+
+  it('drops subscribed rows from scoped output when policy enrichment times out', async () => {
+    const store = sparqlHttpStoreBackedBy(new OxigraphStore());
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'degraded-private-cg';
+    const metaGraph = contextGraphMetaGraphUri(id);
+    const contextGraphUri = contextGraphDataGraphUri(id);
+    await store.insert([
+      {
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: metaGraph,
+      },
+      {
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Degraded Private"',
+        graph: metaGraph,
+      },
+      {
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"private"',
+        graph: metaGraph,
+      },
+    ]);
+    (agent as any).subscribedContextGraphs.set(id, {
+      name: 'Degraded Private',
+      subscribed: true,
+      synced: false,
+      pendingMeta: true,
+    } satisfies ContextGraphSub);
+
+    const originalQuery = store.query.bind(store);
+    (store as any).query = recorder(async (query: string) => {
+      if (query.includes(`<${metaGraph}>`) && query.includes('SELECT ?name ?desc ?creator ?created ?curator ?access')) {
+        return new Promise<any>(() => {});
+      }
+      return originalQuery(query);
+    });
+
+    const stranger = ethers.Wallet.createRandom().address;
+    const fromStranger = await agent.listContextGraphs({ callerAgentAddress: stranger });
+    expect(fromStranger.find(p => p.id === id)).toBeUndefined();
+
+    const noWallet = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(noWallet.find(p => p.id === id)).toBeUndefined();
+  }, 15000);
+
+  it('invalidates cached scoped results when remote meta sync writes policy metadata', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'remote-meta-cache-cg';
+    (agent as any).subscribedContextGraphs.set(id, {
+      name: 'Remote Meta Cache',
+      subscribed: true,
+      synced: false,
+      pendingMeta: true,
+    } satisfies ContextGraphSub);
+
+    const first = await agent.listContextGraphs({ callerAgentAddress: null });
+    const firstEntry = first.find(p => p.id === id);
+    expect(firstEntry).toBeDefined();
+    expect(firstEntry!.name).toBe('Remote Meta Cache');
+    expect(firstEntry!.accessPolicy).toBeUndefined();
+
+    const uri = contextGraphDataGraphUri(id);
+    const metaGraph = contextGraphMetaGraphUri(id);
+    await (agent as any).insertSyncedQuadsAndInvalidateListCache([
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: metaGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Remote Meta Cache Synced"',
+        graph: metaGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: metaGraph,
+      },
+    ]);
+
+    const second = await agent.listContextGraphs({ callerAgentAddress: null });
+    const secondEntry = second.find(p => p.id === id);
+    expect(secondEntry).toBeDefined();
+    expect(secondEntry!.name).toBe('Remote Meta Cache Synced');
+    expect(secondEntry!.accessPolicy).toBe('public');
+  }, 15000);
+
+  it('invalidates pending-meta cached rows when meta sync flags refresh', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'pending-meta-refresh-cache-cg';
+    (agent as any).setContextGraphSubscription(id, {
+      name: 'Pending Meta Cache',
+      subscribed: true,
+      synced: false,
+      pendingMeta: true,
+      metaSynced: false,
+    } satisfies ContextGraphSub, { persist: false });
+
+    const first = await agent.listContextGraphs({ callerAgentAddress: null });
+    const firstEntry = first.find(p => p.id === id);
+    expect(firstEntry).toBeDefined();
+    expect(firstEntry!.name).toBe('Pending Meta Cache');
+
+    const uri = contextGraphDataGraphUri(id);
+    const metaGraph = contextGraphMetaGraphUri(id);
+    await result.store.insert([
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: metaGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Pending Meta Cache Synced"',
+        graph: metaGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: metaGraph,
+      },
+    ]);
+
+    await (agent as any).refreshMetaSyncedFlags([id]);
+
+    const second = await agent.listContextGraphs({ callerAgentAddress: null });
+    const secondEntry = second.find(p => p.id === id);
+    expect(secondEntry).toBeDefined();
+    expect(secondEntry!.name).toBe('Pending Meta Cache Synced');
+    expect(secondEntry!.accessPolicy).toBe('public');
+  }, 15000);
+
+  it('keeps map-state tail rows in scoped output when legacy privacy lookup confirms public', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'policy-unknown-tail-cg';
+    (agent as any).subscribedContextGraphs.set(id, {
+      name: 'Policy Unknown Tail',
+      subscribed: true,
+      synced: false,
+      onChainId: '0xabc123',
+    } satisfies ContextGraphSub);
+
+    const scoped = await agent.listContextGraphs({ callerAgentAddress: ethers.Wallet.createRandom().address });
+    expect(scoped.find(p => p.id === id)).toBeDefined();
+
+    const explicitNoWallet = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(explicitNoWallet.find(p => p.id === id)).toBeDefined();
+
+    const ownerLocal = await agent.listContextGraphs();
+    expect(ownerLocal.find(p => p.id === id)).toBeDefined();
+  }, 15000);
+
+  it('skips legacy privacy fallback for unscoped owner list rows', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'unscoped-no-legacy-fallback';
+    (agent as any).setContextGraphSubscription(id, {
+      name: 'Unscoped No Legacy Fallback',
+      subscribed: true,
+      synced: false,
+      onChainId: '0xabc123',
+    } satisfies ContextGraphSub, { persist: false });
+
+    const isPrivateOrig = (agent as any).isPrivateContextGraph.bind(agent);
+    const legacyPrivacy = recorder((...a: unknown[]) => isPrivateOrig(...a));
+    (agent as any).isPrivateContextGraph = legacyPrivacy;
+    const rows = await agent.listContextGraphs();
+    expect(rows.find(p => p.id === id)).toBeDefined();
+    expect(legacyPrivacy.calls.filter(([contextGraphId]) => contextGraphId === id)).toHaveLength(0);
+  }, 15000);
+
+  it('drops storage-only rows from scoped output when policy enrichment times out', async () => {
+    const store = sparqlHttpStoreBackedBy(new OxigraphStore());
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    await store.insert([
+      {
+        subject: 'urn:workspace-only:policy-unknown',
+        predicate: 'http://schema.org/name',
+        object: '"Policy Unknown"',
+        graph: contextGraphSharedMemoryUri('policy-unknown-storage'),
+      },
+    ]);
+
+    const originalQuery = store.query.bind(store);
+    (store as any).query = recorder(async (query: string) => {
+      if (query.includes('SELECT ?p ?o WHERE') && query.includes('did:dkg:context-graph:policy-unknown-storage')) {
+        return new Promise<any>(() => {});
+      }
+      return originalQuery(query);
+    });
+
+    const explicitNoWallet = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(explicitNoWallet.find(p => p.id === 'policy-unknown-storage')).toBeUndefined();
+
+    const ownerLocal = await agent.listContextGraphs();
+    expect(ownerLocal.find(p => p.id === 'policy-unknown-storage')).toBeDefined();
+  }, 15000);
+
+  it('drops stale public discovery seeds from scoped output when authoritative projection lookup times out', async () => {
+    const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
+    const originalAuthBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+      value: 25,
+      configurable: true,
+    });
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS', {
+      value: 25,
+      configurable: true,
+    });
+    try {
+      const assertScopedTimeoutDropsRow = async (callerAgentAddress: string | null) => {
+        const store = sparqlHttpStoreBackedBy(new OxigraphStore());
+        const result = await createTestAgent({ store });
+        agent = result.agent;
+        await agent.start();
+        try {
+          const id = 'projection-timeout-stale-public-private';
+          const uri = contextGraphDataGraphUri(id);
+          const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+          const metaGraph = contextGraphMetaGraphUri(id);
+          await store.insert([
+            {
+              subject: uri,
+              predicate: DKG_ONTOLOGY.RDF_TYPE,
+              object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+              graph: ontologyGraph,
+            },
+            {
+              subject: uri,
+              predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+              object: '"Projection Timeout Stale Public"',
+              graph: ontologyGraph,
+            },
+            {
+              subject: uri,
+              predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+              object: '"public"',
+              graph: ontologyGraph,
+            },
+            {
+              subject: uri,
+              predicate: DKG_ONTOLOGY.RDF_TYPE,
+              object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+              graph: metaGraph,
+            },
+            {
+              subject: uri,
+              predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+              object: '"private"',
+              graph: metaGraph,
+            },
+          ]);
+
+          const originalQuery = store.query.bind(store);
+          let blockedProjectionReads = 0;
+          (store as any).query = recorder(async (query: string, options?: any) => {
+            if (
+              blockedProjectionReads === 0
+              && query.includes('SELECT ?p ?o WHERE')
+              && query.includes(`<${metaGraph}>`)
+              && query.includes(`<${uri}> ?p ?o`)
+            ) {
+              blockedProjectionReads += 1;
+              return new Promise<any>(() => {});
+            }
+            return originalQuery(query, options);
+          });
+
+          const rows = await agent.listContextGraphs({ callerAgentAddress });
+          expect(rows.find(p => p.id === id)).toBeUndefined();
+          expect(blockedProjectionReads).toBe(1);
+          expect((agent as any).listContextGraphsCache.size).toBe(0);
+        } finally {
+          await result.agent.stop().catch(() => {});
+          if (agent === result.agent) {
+            agent = undefined;
+          }
+        }
+      };
+
+      await assertScopedTimeoutDropsRow(null);
+      await assertScopedTimeoutDropsRow(ethers.Wallet.createRandom().address);
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+        value: originalRowBudget,
+        configurable: true,
+      });
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS', {
+        value: originalAuthBudget,
+        configurable: true,
+      });
+    }
+  }, 15000);
+
+  it('preserves private discovery seeds when authoritative projection lookup times out', async () => {
+    const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+      value: 25,
+      configurable: true,
+    });
+    try {
+      const result = await createTestAgent();
+      const localAgent = result.agent;
+      agent = localAgent;
+      await localAgent.start();
+
+      const id = 'projection-timeout-private-seed';
+      const uri = contextGraphDataGraphUri(id);
+      const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+      await result.store.insert([
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.RDF_TYPE,
+          object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+          graph: agentsGraph,
+        },
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+          object: '"Projection Timeout Private Seed"',
+          graph: agentsGraph,
+        },
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+          object: '"private"',
+          graph: agentsGraph,
+        },
+      ]);
+
+      const originalGetCgMeta = localAgent.getCgMeta.bind(localAgent);
+      let blockedProjectionReads = 0;
+      const getCgMetaSpy = recorder(async (
+        contextGraphId: string,
+        options?: { signal?: AbortSignal },
+      ) => {
+        if (contextGraphId === id && blockedProjectionReads === 0) {
+          blockedProjectionReads += 1;
+          return new Promise<any>(() => {});
+        }
+        return originalGetCgMeta(contextGraphId, options);
+      });
+      (localAgent as any).getCgMeta = getCgMetaSpy;
+      const rows = await localAgent.listContextGraphs();
+      expect(rows.find(p => p.id === id)).toBeUndefined();
+      expect(blockedProjectionReads).toBe(1);
+      expect((localAgent as any).listContextGraphsCache.size).toBe(0);
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+        value: originalRowBudget,
+        configurable: true,
+      });
+    }
+  }, 15000);
+
+  it('keeps storage-only rows in scoped output when legacy privacy lookup confirms public', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    await store.insert([
+      {
+        subject: 'urn:workspace-only:policy-absent',
+        predicate: 'http://schema.org/name',
+        object: '"Policy Absent"',
+        graph: contextGraphSharedMemoryUri('policy-absent-storage'),
+      },
+    ]);
+
+    const explicitNoWallet = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(explicitNoWallet.find(p => p.id === 'policy-absent-storage')).toBeDefined();
+
+    const ownerLocal = await agent.listContextGraphs();
+    expect(ownerLocal.find(p => p.id === 'policy-absent-storage')).toBeDefined();
+  }, 15000);
+
+  it('preserves legacy allowlist privacy for scoped list callers without explicit policy', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'legacy-allowlist-no-policy';
+    const member = ethers.Wallet.createRandom().address;
+    const stranger = ethers.Wallet.createRandom().address;
+    const uri = contextGraphDataGraphUri(id);
+    const metaGraph = contextGraphMetaGraphUri(id);
+    await store.insert([
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: metaGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Legacy Allowlist"',
+        graph: metaGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+        object: `"${member}"`,
+        graph: metaGraph,
+      },
+    ]);
+    (agent as any).subscribedContextGraphs.set(id, {
+      name: 'Legacy Allowlist',
+      subscribed: true,
+      synced: true,
+    } satisfies ContextGraphSub);
+
+    const memberRows = await agent.listContextGraphs({ callerAgentAddress: member });
+    const memberEntry = memberRows.find(p => p.id === id);
+    expect(memberEntry).toBeDefined();
+    expect(memberEntry!.callerInvolved).toBe(true);
+
+    const strangerRows = await agent.listContextGraphs({ callerAgentAddress: stranger });
+    expect(strangerRows.find(p => p.id === id)).toBeUndefined();
+
+    const noWalletRows = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(noWalletRows.find(p => p.id === id)).toBeUndefined();
+  }, 15000);
+
+  it('omits callerInvolved instead of reporting false when public allowlist lookup times out', async () => {
+    const store = sparqlHttpStoreBackedBy(new OxigraphStore());
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'public-allowlist-timeout';
+    const caller = ethers.Wallet.createRandom().address;
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const uri = contextGraphDataGraphUri(id);
+    await store.insert([
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Public Allowlist Timeout"',
+        graph: ontologyGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: ontologyGraph,
+      },
+    ]);
+
+    const originalAllowlist = agent.callerIsAllowlistedAgentParticipant.bind(agent);
+    (agent as any).callerIsAllowlistedAgentParticipant = recorder(async (contextGraphId: string, wallet: string) => {
+      if (contextGraphId === id && ethers.getAddress(wallet) === ethers.getAddress(caller)) {
+        return new Promise<boolean>(() => {});
+      }
+      return originalAllowlist(contextGraphId, wallet);
+    });
+
+    const rows = await agent.listContextGraphs({ callerAgentAddress: caller });
+    const entry = rows.find(p => p.id === id);
+    expect(entry).toBeDefined();
+    expect(entry!.callerInvolved).toBeUndefined();
+  }, 15000);
+
+  it('bypasses list cache when the configured TTL is zero', async () => {
+    const originalTtl = DKGAgentBase.LIST_CONTEXT_GRAPHS_CACHE_TTL_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_CACHE_TTL_MS', {
+      value: 0,
+      configurable: true,
+    });
+    try {
+      const result = await createTestAgent();
+      agent = result.agent;
+      await agent.start();
+      const store = result.store;
+
+      const id = 'zero-cache-ttl-cg';
+      const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      const uri = contextGraphDataGraphUri(id);
+      await store.insert([
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.RDF_TYPE,
+          object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+          graph: ontologyGraph,
+        },
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+          object: '"Zero Cache TTL"',
+          graph: ontologyGraph,
+        },
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+          object: '"public"',
+          graph: ontologyGraph,
+        },
+      ]);
+
+      const originalQuery = store.query.bind(store);
+      let definitionScans = 0;
+      (store as any).query = recorder(async (query: string) => {
+        if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access')) {
+          definitionScans += 1;
+        }
+        return originalQuery(query);
+      });
+
+      expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === id)).toBeDefined();
+      expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === id)).toBeDefined();
+      expect(definitionScans).toBe(2);
+      expect((agent as any).listContextGraphsCache.size).toBe(0);
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_CACHE_TTL_MS', {
+        value: originalTtl,
+        configurable: true,
+      });
+    }
+  }, 15000);
+
+  it('bypasses list cache for injected unmanaged external stores', async () => {
+    const backing = new OxigraphStore();
+    const store = sparqlHttpStoreBackedBy(backing);
+    const result = await createTestAgent({
+      store,
+      storeConfig: {
+        backend: 'oxigraph',
+      },
+    });
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'external-store-no-cache-cg';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const uri = contextGraphDataGraphUri(id);
+    await store.insert([
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"External Store No Cache"',
+        graph: ontologyGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: ontologyGraph,
+      },
+    ]);
+
+    const originalQuery = store.query.bind(store);
+    let definitionScans = 0;
+    (store as any).query = recorder(async (query: string, options?: any) => {
+      if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access')) {
+        definitionScans += 1;
+      }
+      return originalQuery(query, options);
+    });
+
+    expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === id)).toBeDefined();
+    expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === id)).toBeDefined();
+    expect(definitionScans).toBe(2);
+    expect((agent as any).listContextGraphsCache.size).toBe(0);
+  }, 15000);
+
+  it('bypasses list cache for unknown configured store backends', async () => {
+    const backend = 'test-remote-list-cache-backend';
+    registerTripleStoreAdapter(backend, async () => new OxigraphStore());
+    const created = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'ContextGraphTestAgent',
+      listenPort: 0,
+      listenHost: '127.0.0.1',
+      storeConfig: { backend },
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+    });
+    agent = created;
+    await agent.start();
+
+    const id = 'unknown-backend-no-cache-cg';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const uri = contextGraphDataGraphUri(id);
+    await agent.store.insert([
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Unknown Backend No Cache"',
+        graph: ontologyGraph,
+      },
+      {
+        subject: uri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: ontologyGraph,
+      },
+    ]);
+
+    const originalQuery = agent.store.query.bind(agent.store);
+    let definitionScans = 0;
+    (agent.store as any).query = recorder(async (query: string, options?: any) => {
+      if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access')) {
+        definitionScans += 1;
+      }
+      return originalQuery(query, options);
+    });
+
+    expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === id)).toBeDefined();
+    expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === id)).toBeDefined();
+    expect(definitionScans).toBe(2);
+    expect((agent as any).listContextGraphsCache.size).toBe(0);
+  }, 15000);
+
+  it('bypasses list cache for injected local wrapper stores', async () => {
+    const blobDir = await mkdtemp(join(tmpdir(), 'dkg-list-cache-'));
+    try {
+      const store = new SharedMemoryLiteralBlobStore(new OxigraphStore(), { blobDir, thresholdBytes: 1 });
+      const result = await createTestAgent({ store });
+      agent = result.agent;
+      await agent.start();
+      expect((agent as any).listContextGraphsCacheAllowed()).toBe(false);
+
+      const id = 'wrapped-local-cache-cg';
+      const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      const uri = contextGraphDataGraphUri(id);
+      await store.insert([
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.RDF_TYPE,
+          object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+          graph: ontologyGraph,
+        },
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+          object: '"Wrapped Local Cache"',
+          graph: ontologyGraph,
+        },
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+          object: '"public"',
+          graph: ontologyGraph,
+        },
+      ]);
+
+      const originalQuery = store.query.bind(store);
+      let definitionScans = 0;
+      (store as any).query = recorder(async (query: string, options?: any) => {
+        if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access')) {
+          definitionScans += 1;
+        }
+        return originalQuery(query, options);
+      });
+
+      expect((await agent.listContextGraphs()).find(p => p.id === id)).toBeDefined();
+      expect((await agent.listContextGraphs()).find(p => p.id === id)).toBeDefined();
+      expect(definitionScans).toBe(2);
+      expect((agent as any).listContextGraphsCache.size).toBe(0);
+    } finally {
+      await rm(blobDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it('invalidates cached list rows after delete and drop graph writes', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+    const agentStore = (agent as any).store as TripleStore;
+
+    const renamedId = 'delete-invalidates-list-cache-cg';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const renamedUri = contextGraphDataGraphUri(renamedId);
+    await result.store.insert([
+      {
+        subject: renamedUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: renamedUri,
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Delete Invalidates List Cache"',
+        graph: ontologyGraph,
+      },
+      {
+        subject: renamedUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: ontologyGraph,
+      },
+    ]);
+
+    const first = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(first.find(p => p.id === renamedId)?.name).toBe('Delete Invalidates List Cache');
+
+    await agentStore.deleteByPattern({
+      graph: ontologyGraph,
+      subject: renamedUri,
+      predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+    });
+
+    const second = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(second.find(p => p.id === renamedId)?.name).toBe(renamedId);
+
+    const droppedId = 'drop-invalidates-list-cache-cg';
+    const droppedGraph = contextGraphDataGraphUri(droppedId);
+    await result.store.insert([{
+      subject: `${droppedGraph}#seed`,
+      predicate: DKG_ONTOLOGY.RDF_TYPE,
+      object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+      graph: droppedGraph,
+    }]);
+
+    expect((await agent.listContextGraphs()).find(p => p.id === droppedId)).toBeDefined();
+
+    await agentStore.dropGraph(droppedGraph);
+
+    expect((await agent.listContextGraphs()).find(p => p.id === droppedId)).toBeUndefined();
+  }, 15000);
+
+  it('does not list empty named graphs created by graph ensure calls', async () => {
+    const originalTtl = DKGAgentBase.LIST_CONTEXT_GRAPHS_CACHE_TTL_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_CACHE_TTL_MS', {
+      value: 0,
+      configurable: true,
+    });
+    try {
+      const result = await createTestAgent();
+      agent = result.agent;
+      await agent.start();
+
+      const id = 'empty-created-graph-cg';
+      await result.store.createGraph(contextGraphDataGraphUri(id));
+
+      expect((await agent.listContextGraphs()).find(p => p.id === id)).toBeUndefined();
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_CACHE_TTL_MS', {
+        value: originalTtl,
+        configurable: true,
+      });
+    }
+  }, 15000);
+
+  it('expires cached list rows using monotonic time when wall clock moves backwards', async () => {
+    const originalTtl = DKGAgentBase.LIST_CONTEXT_GRAPHS_CACHE_TTL_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_CACHE_TTL_MS', {
+      value: 50,
+      configurable: true,
+    });
+    const originalDateNow = Date.now;
+    let dateNowValue = 10_000;
+    Date.now = recorder(() => dateNowValue);
+    try {
+      const result = await createTestAgent();
+      agent = result.agent;
+      await agent.start();
+      const store = result.store;
+
+      const id = 'monotonic-list-cache-cg';
+      const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      const uri = contextGraphDataGraphUri(id);
+      await store.insert([
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.RDF_TYPE,
+          object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+          graph: ontologyGraph,
+        },
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+          object: '"Monotonic List Cache"',
+          graph: ontologyGraph,
+        },
+        {
+          subject: uri,
+          predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+          object: '"public"',
+          graph: ontologyGraph,
+        },
+      ]);
+
+      let monotonicNow = 1_000;
+      (agent as any).listContextGraphsCacheNow = recorder(() => monotonicNow);
+      const originalQuery = store.query.bind(store);
+      let definitionScans = 0;
+      (store as any).query = recorder(async (query: string, options?: any) => {
+        if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access')) {
+          definitionScans += 1;
+        }
+        return originalQuery(query, options);
+      });
+
+      expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === id)).toBeDefined();
+      dateNowValue = 1;
+      monotonicNow += 51;
+      expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === id)).toBeDefined();
+      expect(definitionScans).toBe(2);
+    } finally {
+      Date.now = originalDateNow;
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_CACHE_TTL_MS', {
+        value: originalTtl,
+        configurable: true,
+      });
+    }
+  }, 15000);
+
+  it('uses a catalog scan budget that is independent from the per-row enrichment budget', async () => {
+    const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
+    const originalScanBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS', {
+      value: 80,
+      configurable: true,
+    });
+    try {
+      const store = new OxigraphStore();
+      const result = await createTestAgent({ store });
+      agent = result.agent;
+      await agent.start();
+
+      const id = 'slow-catalog-scan-cg';
+      const uri = contextGraphDataGraphUri(id);
+      const originalQuery = store.query.bind(store);
+      (store as any).query = recorder(async (query: string, options?: any) => {
+        if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access ?isSystem')) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+          return {
+            type: 'bindings',
+            bindings: [{
+              ctxGraph: uri,
+              name: '"Slow Catalog Scan"',
+              access: '"public"',
+            }],
+          } as any;
+        }
+        return originalQuery(query, options);
+      });
+
+      const rows = await agent.listContextGraphs({ callerAgentAddress: null });
+      expect(rows.find(p => p.id === id)).toBeDefined();
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+        value: originalRowBudget,
+        configurable: true,
+      });
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS', {
+        value: originalScanBudget,
+        configurable: true,
+      });
+    }
+  }, 15000);
+
+  it('aborts budgeted catalog scans after timeout', async () => {
+    const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
+    const originalScanBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    try {
+      const store = sparqlHttpStoreBackedBy(new OxigraphStore());
+      const result = await createTestAgent({ store });
+      agent = result.agent;
+      await agent.start();
+
+      const originalQuery = store.query.bind(store);
+      let sawAbort = false;
+      let scanSettled: Promise<void> | undefined;
+      (store as any).query = recorder(async (query: string, options?: any) => {
+        if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access ?isSystem')) {
+          scanSettled = new Promise(resolve => setTimeout(resolve, 20));
+          await scanSettled;
+          sawAbort = options?.signal?.aborted === true;
+          return { type: 'bindings', bindings: [] } as any;
+        }
+        return originalQuery(query, options);
+      });
+
+      await expect(agent.listContextGraphs({ callerAgentAddress: null }))
+        .rejects.toThrow('ontology/agents definition scan');
+      await scanSettled;
+      expect(sawAbort).toBe(true);
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+        value: originalRowBudget,
+        configurable: true,
+      });
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS', {
+        value: originalScanBudget,
+        configurable: true,
+      });
+    }
+  }, 15000);
+
+  it('rejects when the budgeted storage graph scan times out', async () => {
+    const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
+    const originalScanBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    try {
+      const store = sparqlHttpStoreBackedBy(new OxigraphStore());
+      const result = await createTestAgent({ store });
+      agent = result.agent;
+      await agent.start();
+
+      let sawAbort = false;
+      let scanSettled: Promise<void> | undefined;
+      (store as any).listGraphs = recorder(async (options?: any) => {
+        scanSettled = new Promise(resolve => setTimeout(resolve, 20));
+        await scanSettled;
+        sawAbort = options?.signal?.aborted === true;
+        return [];
+      });
+
+      await expect(agent.listContextGraphs({ callerAgentAddress: null }))
+        .rejects.toThrow('storage context graph scan');
+      await scanSettled;
+      expect(sawAbort).toBe(true);
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+        value: originalRowBudget,
+        configurable: true,
+      });
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS', {
+        value: originalScanBudget,
+        configurable: true,
+      });
+    }
+  }, 15000);
+
+  it('does not downgrade synchronous pre-dispatch store reads', async () => {
+    const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
+    const originalScanBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    try {
+      const store = new OxigraphStore();
+      const result = await createTestAgent({ store });
+      agent = result.agent;
+      await agent.start();
+
+      const id = 'pre-dispatch-budget-cg';
+      const uri = contextGraphDataGraphUri(id);
+      const originalQuery = store.query.bind(store);
+      (store as any).query = recorder(async (query: string, options?: any) => {
+        if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access ?isSystem')) {
+          const startedAt = performance.now();
+          while (performance.now() - startedAt < 8) {
+            // Simulate the default native Oxigraph path blocking the event loop.
+          }
+          expect(options?.signal?.aborted).toBe(false);
+          return {
+            type: 'bindings',
+            bindings: [{
+              ctxGraph: uri,
+              name: '"Pre Dispatch Budget"',
+              access: '"public"',
+            }],
+          } as any;
+        }
+        return originalQuery(query, options);
+      });
+
+      const rows = await agent.listContextGraphs({ callerAgentAddress: null });
+      expect(rows.find(p => p.id === id)).toBeDefined();
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+        value: originalRowBudget,
+        configurable: true,
+      });
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_SCAN_BUDGET_MS', {
+        value: originalScanBudget,
+        configurable: true,
+      });
+    }
+  }, 15000);
+
+  it('still applies auth budget to async membership work on pre-dispatch stores', async () => {
+    const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
+    const originalAuthBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    try {
+      const result = await createTestAgent({ store: new OxigraphStore() });
+      agent = result.agent;
+      await agent.start();
+
+      const id = 'pre-dispatch-auth-budget-cg';
+      const member = ethers.Wallet.createRandom().address;
+      await agent.createContextGraph({
+        id,
+        name: 'Pre Dispatch Auth Budget',
+        accessPolicy: 1,
+        allowedAgents: [agent.getDefaultAgentAddress()!],
+      });
+
+      const originalAllowlist = agent.callerIsAllowlistedAgentParticipant.bind(agent);
+      let targetCalls = 0;
+      let signalSeen: AbortSignal | undefined;
+      (agent as any).callerIsAllowlistedAgentParticipant = recorder(async (contextGraphId: string, caller: string, options?: { signal?: AbortSignal }) => {
+        if (contextGraphId === id && ethers.getAddress(caller) === ethers.getAddress(member)) {
+          targetCalls += 1;
+          signalSeen = options?.signal;
+          return new Promise<boolean>(() => {});
+        }
+        return originalAllowlist(contextGraphId, caller, options);
+      });
+
+      const timeout = { timedOut: true as const };
+      const rows = await Promise.race([
+        agent.listContextGraphs({ callerAgentAddress: member }),
+        new Promise<typeof timeout>(resolve => setTimeout(() => resolve(timeout), 100)),
+      ]);
+
+      expect(rows).not.toBe(timeout);
+      if (rows === timeout) return;
+      expect(rows.find(p => p.id === id)).toBeUndefined();
+      expect(targetCalls).toBe(1);
+      expect(signalSeen?.aborted).toBe(true);
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+        value: originalRowBudget,
+        configurable: true,
+      });
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS', {
+        value: originalAuthBudget,
+        configurable: true,
+      });
+    }
+  }, 15000);
+
+  it('does not cache private membership misses when allowlist lookup degrades', async () => {
+    const result = await createTestAgent({ store: sparqlHttpStoreBackedBy(new OxigraphStore()) });
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'allowlist-unknown-cache-cg';
+    const member = ethers.Wallet.createRandom().address;
+    await agent.createContextGraph({
+      id,
+      name: 'Allowlist Unknown Cache',
+      accessPolicy: 1,
+      allowedAgents: [member],
+    });
+
+    const originalAllowlist = agent.callerIsAllowlistedAgentParticipant.bind(agent);
+    let targetCalls = 0;
+    (agent as any).callerIsAllowlistedAgentParticipant = recorder(async (contextGraphId: string, caller: string) => {
+      if (contextGraphId === id && ethers.getAddress(caller) === ethers.getAddress(member)) {
+        targetCalls += 1;
+        if (targetCalls === 1) return new Promise<boolean>(() => {});
+        return true;
+      }
+      return originalAllowlist(contextGraphId, caller);
+    });
+
+    const first = await agent.listContextGraphs({ callerAgentAddress: member });
+    expect(first.find(p => p.id === id)).toBeUndefined();
+
+    const second = await agent.listContextGraphs({ callerAgentAddress: member });
+    const entry = second.find(p => p.id === id);
+    expect(entry).toBeDefined();
+    expect(entry!.callerInvolved).toBe(true);
+    expect(targetCalls).toBe(2);
+  }, 15000);
+
+  it('does not cache wallet-scoped visibility when membership comes from live chain identity state', async () => {
+    const chainAdapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const result = await createTestAgent({ chainAdapter });
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'chain-auth-cache-cg';
+    const member = ethers.Wallet.createRandom().address;
+    const identityId = 424242n;
+    let registered = true;
+    let registrationCalls = 0;
+    (chainAdapter as any).isOperationalWalletRegistered = recorder(async (actualIdentityId: bigint, actualAddress: string) => {
+      registrationCalls += 1;
+      expect(actualIdentityId).toBe(identityId);
+      expect(ethers.getAddress(actualAddress)).toBe(ethers.getAddress(member));
+      await new Promise(resolve => setTimeout(resolve, 20));
+      return registered;
+    });
+
+    await agent.createContextGraph({
+      id,
+      name: 'Chain Auth Cache',
+      accessPolicy: 1,
+      allowedAgents: [agent.getDefaultAgentAddress()!],
+    });
+    await result.store.insert([{
+      subject: contextGraphDataGraphUri(id),
+      predicate: DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID,
+      object: `"${identityId.toString()}"`,
+      graph: contextGraphMetaGraphUri(id),
+    }]);
+
+    const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
+    const originalAuthBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS', {
+      value: 80,
+      configurable: true,
+    });
+    try {
+      const before = await agent.listContextGraphs({ callerAgentAddress: member });
+      expect(before.find(p => p.id === id)).toBeDefined();
+      expect(registrationCalls).toBe(1);
+
+      registered = false;
+      const after = await agent.listContextGraphs({ callerAgentAddress: member });
+      expect(after.find(p => p.id === id)).toBeUndefined();
+      expect(registrationCalls).toBe(2);
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+        value: originalRowBudget,
+        configurable: true,
+      });
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS', {
+        value: originalAuthBudget,
+        configurable: true,
+      });
+    }
+  }, 15000);
+
+  it('rejects scoped list calls when allowlist lookup fails with a real error', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'allowlist-real-error-cg';
+    const stranger = ethers.Wallet.createRandom().address;
+    await agent.createContextGraph({
+      id,
+      name: 'Allowlist Real Error',
+      accessPolicy: 1,
+      allowedAgents: [agent.getDefaultAgentAddress()!],
+    });
+
+    (agent as any).callerIsAllowlistedAgentParticipant = recorder(async (contextGraphId: string, caller: string) => {
+      if (contextGraphId === id && ethers.getAddress(caller) === ethers.getAddress(stranger)) {
+        throw new Error('simulated store failure');
+      }
+      return false;
+    });
+
+    await expect(agent.listContextGraphs({ callerAgentAddress: stranger }))
+      .rejects.toThrow('simulated store failure');
+  }, 15000);
+
+  it('invalidates wallet-scoped cached list results after agent revocation', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const owner = agent.getDefaultAgentAddress()!;
+    const member = ethers.Wallet.createRandom().address;
+    await agent.createContextGraph({
+      id: 'cached-revoke-cg',
+      name: 'Cached Revoke',
+      accessPolicy: 1,
+      allowedAgents: [member],
+    });
+
+    const before = await agent.listContextGraphs({ callerAgentAddress: member });
+    expect(before.find(p => p.id === 'cached-revoke-cg')).toBeDefined();
+
+    await agent.removeAgentFromContextGraph('cached-revoke-cg', member, owner);
+
+    const after = await agent.listContextGraphs({ callerAgentAddress: member });
+    expect(after.find(p => p.id === 'cached-revoke-cg')).toBeUndefined();
+  }, 15000);
+
+  it('invalidates wallet-scoped cached misses after agent invitation', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const owner = agent.getDefaultAgentAddress()!;
+    const member = ethers.Wallet.createRandom().address;
+    await agent.createContextGraph({
+      id: 'cached-invite-cg',
+      name: 'Cached Invite',
+      accessPolicy: 1,
+    });
+
+    const before = await agent.listContextGraphs({ callerAgentAddress: member });
+    expect(before.find(p => p.id === 'cached-invite-cg')).toBeUndefined();
+
+    await agent.inviteAgentToContextGraph('cached-invite-cg', member, owner);
+
+    const after = await agent.listContextGraphs({ callerAgentAddress: member });
+    expect(after.find(p => p.id === 'cached-invite-cg')).toBeDefined();
+  }, 15000);
+
+  it('single-flights same-scope list calls, caches results, and invalidates on subscription changes', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const originalQuery = result.store.query.bind(result.store);
+    let releaseDefinitionScan: (() => void) | undefined;
+    const definitionScanGate = new Promise<void>((resolve) => {
+      releaseDefinitionScan = resolve;
+    });
+    let definitionScans = 0;
+    (result.store as any).query = recorder(async (query: string, options?: any) => {
+      if (query.includes('SELECT ?ctxGraph ?name ?desc ?creator ?created ?curator ?access ?isSystem')) {
+        definitionScans += 1;
+        if (definitionScans === 1) {
+          await definitionScanGate;
+        }
+      }
+      return originalQuery(query, options);
+    });
+
+    const first = agent.listContextGraphs({ callerAgentAddress: null });
+    const second = agent.listContextGraphs({ callerAgentAddress: null });
+    await Promise.resolve();
+    expect(definitionScans).toBe(1);
+    releaseDefinitionScan?.();
+    await Promise.all([first, second]);
+
+    await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(definitionScans).toBe(1);
+
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const invalidatedUri = contextGraphDataGraphUri('cache-invalidated-cg');
+    await result.store.insert([
+      {
+        subject: invalidatedUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: invalidatedUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: ontologyGraph,
+      },
+    ]);
+    (agent as any).setContextGraphSubscription('cache-invalidated-cg', {
+      name: 'Cache Invalidated',
+      subscribed: true,
+      synced: false,
+      onChainId: '0xabc123',
+    } satisfies ContextGraphSub, { persist: false });
+
+    const afterInvalidation = await agent.listContextGraphs({ callerAgentAddress: null });
+    expect(definitionScans).toBe(2);
+    expect(afterInvalidation.find(p => p.id === 'cache-invalidated-cg')).toBeDefined();
+  }, 15000);
+
+  it('does not rewrite the caller-provided store when binding list cache invalidation', async () => {
+    const store = new OxigraphStore();
+    const originalInsert = store.insert;
+    const originalDelete = store.delete;
+    const originalQuery = store.query;
+
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    expect(store.insert).toBe(originalInsert);
+    expect(store.delete).toBe(originalDelete);
+    expect(store.query).toBe(originalQuery);
+    expect((agent as any).store).not.toBe(store);
+    expect((agent as any).store.innerStore).toBe(store);
+  }, 15000);
+
+  it('listContextGraphs applies the same privacy rules to AGENTS-declared private CGs', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const id = 'agents-declared-private';
+    const myWallet = agent.getDefaultAgentAddress()!;
+    const uri = contextGraphDataGraphUri(id);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    const metaGraph = contextGraphMetaGraphUri(id);
+    await result.store.insert([
+      { subject: uri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: ontologyGraph },
+      { subject: uri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"public"', graph: ontologyGraph },
+      { subject: uri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: agentsGraph },
+      { subject: uri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Agents Declared Private"', graph: agentsGraph },
+      { subject: uri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"private"', graph: agentsGraph },
+      { subject: uri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${myWallet}`, graph: agentsGraph },
+      { subject: uri, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: `"${myWallet}"`, graph: metaGraph },
+    ]);
+
+    const otherWallet = ethers.Wallet.createRandom().address;
+    expect((await agent.listContextGraphs()).find(p => p.id === id)).toBeUndefined();
+    expect((await agent.listContextGraphs({ callerAgentAddress: otherWallet })).find(p => p.id === id)).toBeUndefined();
+    const visible = (await agent.listContextGraphs({ callerAgentAddress: myWallet })).find(p => p.id === id);
+    expect(visible).toBeDefined();
+    expect(visible?.accessPolicy).toBe('private');
+  }, 15000);
+
+  it('listContextGraphs projection mode preserves AGENTS privacy and root _meta discovery', async () => {
+    const previous = process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION;
+    process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION = '1';
+    try {
+      const result = await createTestAgent();
+      agent = result.agent;
+      await agent.start();
+
+      const privateId = 'projection-list-agents-private';
+      const gateOnlyId = 'projection-list-gate-only-private';
+      const metaOnlyId = 'projection-list-meta-only';
+      const policyUnknownId = 'projection-list-policy-unknown';
+      const implicitPublicId = 'projection-list-implicit-public';
+      const myWallet = agent.getDefaultAgentAddress()!;
+      const privateUri = contextGraphDataGraphUri(privateId);
+      const gateOnlyUri = contextGraphDataGraphUri(gateOnlyId);
+      const metaOnlyUri = contextGraphDataGraphUri(metaOnlyId);
+      const policyUnknownUri = contextGraphDataGraphUri(policyUnknownId);
+      const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+      const privateMetaGraph = contextGraphMetaGraphUri(privateId);
+      const gateOnlyMetaGraph = contextGraphMetaGraphUri(gateOnlyId);
+      await result.store.insert([
+        { subject: privateUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: ontologyGraph },
+        { subject: privateUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"public"', graph: ontologyGraph },
+        { subject: privateUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: agentsGraph },
+        { subject: privateUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Projection Agents Private"', graph: agentsGraph },
+        { subject: privateUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"private"', graph: agentsGraph },
+        { subject: privateUri, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${myWallet}`, graph: agentsGraph },
+        { subject: privateUri, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: `"${myWallet}"`, graph: privateMetaGraph },
+        { subject: gateOnlyUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: agentsGraph },
+        { subject: gateOnlyUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Projection Gate Only Private"', graph: agentsGraph },
+        { subject: gateOnlyUri, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: `"${myWallet}"`, graph: gateOnlyMetaGraph },
+        { subject: metaOnlyUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: contextGraphMetaGraphUri(metaOnlyId) },
+        { subject: metaOnlyUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Projection Meta Only"', graph: contextGraphMetaGraphUri(metaOnlyId) },
+        { subject: policyUnknownUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: agentsGraph },
+        { subject: policyUnknownUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Projection Unknown Policy"', graph: agentsGraph },
+        { subject: policyUnknownUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"membersOnly"', graph: agentsGraph },
+        { subject: 'urn:projection-list-policy-unknown:root', predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Policy Unknown"', graph: contextGraphSharedMemoryUri(policyUnknownId) },
+      ]);
+      await agent.share(implicitPublicId, [
+        {
+          subject: 'urn:projection-list-implicit-public:root',
+          predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+          object: '"Projection Implicit Public"',
+          graph: '',
+        },
+      ], { callerAgentAddress: myWallet });
+
+      const unscoped = await agent.listContextGraphs();
+      expect(unscoped.find(p => p.id === privateId)).toBeUndefined();
+      expect(unscoped.find(p => p.id === gateOnlyId)).toBeUndefined();
+      expect(unscoped.find(p => p.id === metaOnlyId)?.name).toBe('Projection Meta Only');
+      expect(unscoped.find(p => p.id === policyUnknownId)?.accessPolicy).toBe('membersOnly');
+      expect((await agent.listContextGraphs({ callerAgentAddress: null })).find(p => p.id === policyUnknownId)).toBeUndefined();
+
+      const otherWallet = ethers.Wallet.createRandom().address;
+      expect((await agent.listContextGraphs({ callerAgentAddress: otherWallet })).find(p => p.id === privateId)).toBeUndefined();
+      expect((await agent.listContextGraphs({ callerAgentAddress: otherWallet })).find(p => p.id === gateOnlyId)).toBeUndefined();
+      expect((await agent.listContextGraphs({ callerAgentAddress: otherWallet })).find(p => p.id === policyUnknownId)).toBeUndefined();
+
+      const visible = (await agent.listContextGraphs({ callerAgentAddress: myWallet })).find(p => p.id === privateId);
+      expect(visible).toBeDefined();
+      expect(visible?.accessPolicy).toBe('private');
+      expect(visible?.callerInvolved).toBe(true);
+      const gateVisible = (await agent.listContextGraphs({ callerAgentAddress: myWallet })).find(p => p.id === gateOnlyId);
+      expect(gateVisible).toBeDefined();
+      expect(gateVisible?.accessPolicy).toBe('private');
+      expect(gateVisible?.callerInvolved).toBe(true);
+      const implicitPublic = (await agent.listContextGraphs({ callerAgentAddress: myWallet })).find(p => p.id === implicitPublicId);
+      expect(implicitPublic).toBeDefined();
+      expect(implicitPublic?.accessPolicy).toBe('public');
+      expect(implicitPublic?.callerInvolved).toBe(true);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION;
+      } else {
+        process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION = previous;
+      }
+    }
+  }, 15000);
+
+  it('listContextGraphs projection mode reuses the graph index and cached projected metadata', async () => {
+    const previous = process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION;
+    process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION = '1';
+    try {
+      const result = await createTestAgent();
+      agent = result.agent;
+      await agent.start();
+
+      const owner = agent.getDefaultAgentAddress()!;
+      await agent.ensureContextGraphLocal({
+        id: 'projection-list-perf-public',
+        name: 'Projection List Perf Public',
+      });
+      await agent.createContextGraph({
+        id: 'projection-list-perf-private',
+        name: 'Projection List Perf Private',
+        accessPolicy: 1,
+        allowedAgents: [owner],
+      });
+
+      const listGraphsOrig = (result.store as any).listGraphs.bind(result.store);
+      const listGraphsSpy = recorder((...a: unknown[]) => listGraphsOrig(...a));
+      (result.store as any).listGraphs = listGraphsSpy;
+      const listGraphsByPrefixOrig = (result.store as any).listGraphsByPrefix.bind(result.store);
+      const listGraphsByPrefixSpy = recorder((...a: unknown[]) => listGraphsByPrefixOrig(...a));
+      (result.store as any).listGraphsByPrefix = listGraphsByPrefixSpy;
+      const queryOrig = (result.store as any).query.bind(result.store);
+      const querySpy = recorder((...a: unknown[]) => queryOrig(...a));
+      (result.store as any).query = querySpy;
+      const projectionRecordQueries = () => querySpy.calls.filter(([query]) => {
+        const text = String(query);
+        return text.includes('SELECT ?p ?o WHERE') ||
+          text.includes('SELECT ?subGraph ?name ?createdBy ?createdAt ?description WHERE');
+      }).length;
+      const unboundMetaDiscoveryScans = () => querySpy.calls.filter(([query]) => {
+        const text = String(query);
+        return text.includes('GRAPH ?g') && !text.includes('VALUES ?g');
+      }).length;
+
+      await agent.listContextGraphs({ callerAgentAddress: owner });
+      const firstListGraphsCalls = listGraphsSpy.calls.length;
+      const firstPrefixCalls = listGraphsByPrefixSpy.calls.length;
+      const firstProjectionRecordQueries = projectionRecordQueries();
+
+      await agent.listContextGraphs({ callerAgentAddress: owner });
+
+      expect(firstPrefixCalls).toBeGreaterThan(0);
+      expect(listGraphsByPrefixSpy.calls.length).toBeGreaterThan(firstPrefixCalls);
+      expect(listGraphsSpy.calls.length).toBe(firstListGraphsCalls);
+      expect(projectionRecordQueries()).toBe(firstProjectionRecordQueries);
+      expect(unboundMetaDiscoveryScans()).toBe(0);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION;
+      } else {
+        process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION = previous;
+      }
+    }
   }, 15000);
 });
 
@@ -629,6 +2337,138 @@ describe('discoverContextGraphsFromChain', () => {
 
     const discovered = await agent.discoverContextGraphsFromChain();
     expect(discovered).toBe(0);
+  }, 15000);
+
+  it('keeps full chain discovery as the default and makes incremental opt-in', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const calls: unknown[] = [];
+    (chain as any).listContextGraphsFromChain = async (_fromBlock?: number, options?: unknown) => {
+      calls.push(options);
+      return [];
+    };
+
+    const result = await createTestAgent({ chainAdapter: chain });
+    agent = result.agent;
+    await agent.start();
+
+    expect(await agent.discoverContextGraphsFromChain()).toBe(0);
+    expect(await agent.discoverContextGraphsFromChain({ incremental: true })).toBe(0);
+    expect(await agent.discoverContextGraphsFromChain({ seedIncrementalWatermark: true })).toBe(0);
+
+    expect(calls).toEqual([undefined, { incremental: true }, { seedIncrementalWatermark: true }]);
+  }, 15000);
+
+  it('warns once for repeated chain scan failures and logs recovery', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    let fail = true;
+    (chain as any).listContextGraphsFromChain = async () => {
+      if (fail) throw new Error('range too wide [0, 1999]');
+      return [];
+    };
+    const entries: Array<{ level: string; message: string }> = [];
+    Logger.setSink((entry) => entries.push({ level: entry.level, message: entry.message }));
+    try {
+      const result = await createTestAgent({ chainAdapter: chain });
+      agent = result.agent;
+      await agent.start();
+
+      expect(await agent.discoverContextGraphsFromChain()).toBe(0);
+      expect(await agent.discoverContextGraphsFromChain()).toBe(0);
+      fail = false;
+      expect(await agent.discoverContextGraphsFromChain()).toBe(0);
+    } finally {
+      Logger.setSink(null);
+    }
+
+    const warnings = entries.filter((entry) =>
+      entry.level === 'warn' && entry.message.includes('Chain context graph scan failed'),
+    );
+    expect(warnings).toHaveLength(1);
+    expect(entries.some((entry) =>
+      entry.level === 'info' && entry.message.includes('Chain context graph scan recovered after 2 failed attempt(s)'),
+    )).toBe(true);
+  }, 15000);
+
+  it('can surface chain scan failures for daemon seed retries without changing the default contract', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const failure = new Error('seed scan failed');
+    (chain as any).listContextGraphsFromChain = async () => {
+      throw failure;
+    };
+
+    const result = await createTestAgent({ chainAdapter: chain });
+    agent = result.agent;
+    await agent.start();
+
+    expect(await agent.discoverContextGraphsFromChain()).toBe(0);
+    await expect(
+      agent.discoverContextGraphsFromChain({
+        seedIncrementalWatermark: true,
+        throwOnChainScanFailure: true,
+      }),
+    ).rejects.toThrow('seed scan failed');
+  }, 15000);
+
+  it('processes partial chain scan prefixes without marking the scan recovered', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    let calls = 0;
+    (chain as any).listContextGraphsFromChain = async () => {
+      calls += 1;
+      const stopped = calls === 1 ? 1_999 : 3_999;
+      const failedFrom = calls === 1 ? 2_000 : 4_000;
+      const failedTo = calls === 1 ? 3_999 : 5_999;
+      const err = new Error(
+        `partial ContextGraphNameRegistry scan stopped after block ${stopped}; ` +
+          `failed page [${failedFrom}, ${failedTo}]: range too wide`,
+      ) as Error & {
+        partialResults: ContextGraphOnChain[];
+        scannedToBlock: number;
+        failedFromBlock: number;
+        failedToBlock: number;
+      };
+      err.name = 'ContextGraphChainScanPartialError';
+      err.partialResults = [
+        {
+          contextGraphId: '0xfeedbeef00000000000000000000000000000000000000000000000000000001',
+          name: 'partial-revealed',
+          creator: '0x1234',
+          accessPolicy: 0,
+          blockNumber: 100,
+          metadataRevealed: true,
+        },
+      ];
+      err.scannedToBlock = stopped;
+      err.failedFromBlock = failedFrom;
+      err.failedToBlock = failedTo;
+      throw err;
+    };
+    const entries: Array<{ level: string; message: string }> = [];
+    Logger.setSink((entry) => entries.push({ level: entry.level, message: entry.message }));
+    try {
+      const result = await createTestAgent({ chainAdapter: chain });
+      agent = result.agent;
+      await agent.start();
+
+      await expect(agent.discoverContextGraphsFromChain({
+        incremental: true,
+        throwOnChainScanFailure: true,
+      })).rejects.toThrow('partial ContextGraphNameRegistry scan');
+      expect(await agent.discoverContextGraphsFromChain({ incremental: true })).toBe(0);
+    } finally {
+      Logger.setSink(null);
+    }
+
+    const entry = agent!.getSubscribedContextGraphs().get('partial-revealed');
+    expect(entry).toBeDefined();
+    expect(entry!.onChainId).toBe('0xfeedbeef00000000000000000000000000000000000000000000000000000001');
+    expect((agent as any).chainContextGraphScanFailure?.count).toBe(2);
+    const warnings = entries.filter((entry) =>
+      entry.level === 'warn' && entry.message.includes('Chain context graph scan failed'),
+    );
+    expect(warnings).toHaveLength(1);
+    expect(entries.some((entry) =>
+      entry.level === 'info' && entry.message.includes('Chain context graph scan recovered'),
+    )).toBe(false);
   }, 15000);
 });
 

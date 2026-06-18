@@ -53,6 +53,29 @@ function quads(n: number): Quad[] {
   return out;
 }
 
+function abortDuringListenerRegistration(message: string): AbortSignal {
+  let aborted = false;
+  let reason: Error | undefined;
+  return {
+    get aborted() {
+      return aborted;
+    },
+    get reason() {
+      return reason;
+    },
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+      if (type !== 'abort') return;
+      aborted = true;
+      reason = new Error(message);
+      if (typeof listener === 'function') listener(new Event('abort'));
+      else listener.handleEvent(new Event('abort'));
+    },
+    removeEventListener: () => undefined,
+    dispatchEvent: () => true,
+    onabort: null,
+  } as unknown as AbortSignal;
+}
+
 // Occupy the single worker thread with a large UNBOUNDED insert (mutations are
 // not bounded by the timeout), so a read posted right after it queues behind a
 // busy worker — the production "wedged worker" signature in miniature.
@@ -82,6 +105,31 @@ describe('OxigraphWorkerStore resilience', () => {
       expect(err.method).toBe('query');
       expect(err.timeoutMs).toBe(5);
       await busy.catch(() => {});
+    } finally {
+      await closeQuietly(store);
+    }
+  });
+
+  it('rejects a queued READ promptly when the caller aborts', async () => {
+    const store = makeStore({ operationTimeoutMs: 60_000 });
+    try {
+      const busy = store.insert(quads(50_000));
+      const controller = new AbortController();
+      const read = store.query(BUSY_QUERY, { signal: controller.signal });
+      controller.abort(new Error('caller aborted queued read'));
+      await expect(read).rejects.toThrow(/caller aborted queued read/);
+      await busy.catch(() => {});
+    } finally {
+      await closeQuietly(store);
+    }
+  });
+
+  it('rejects when the caller aborts while registering the abort listener', async () => {
+    const store = makeStore({ operationTimeoutMs: 60_000 });
+    try {
+      await expect(
+        store.query(BUSY_QUERY, { signal: abortDuringListenerRegistration('listener registration aborted') }),
+      ).rejects.toThrow(/listener registration aborted/);
     } finally {
       await closeQuietly(store);
     }

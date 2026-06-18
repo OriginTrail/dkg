@@ -119,6 +119,37 @@ describe('reconcileContextGraph — sweep', () => {
     const r2 = await reconcileContextGraph(deps, state, 'cg', 1n);
     expect(r2.watermark).toBe(1);
   });
+
+  it('skips promotion during transient head fetch failure and retries when the head recovers', async () => {
+    let headThrows = true;
+    const attempted: number[] = [];
+    const { deps, persisted } = makeDeps({
+      getKCCount: async () => 2,
+      confirmationDepth: 5,
+      getHeadBlock: async () => {
+        if (headThrows) throw new Error('RPC down');
+        return 100;
+      },
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempted.push(ordinal);
+        return { status: 'reconciled', blockNumber: 90 };
+      },
+    });
+    const state = createCursorState(0);
+
+    const r1 = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(r1.reconciled).toBe(0);
+    expect(r1.pending).toBe(2);
+    expect(r1.watermark).toBe(0);
+    expect(attempted).toEqual([]);
+    expect(persisted).toEqual([]);
+
+    headThrows = false;
+    const r2 = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(r2.watermark).toBe(2);
+    expect(attempted).toEqual([0, 1]);
+    expect(persisted).toEqual([{ cg: 'cg', watermark: 2 }]);
+  });
 });
 
 describe('ReconcileCoalescer', () => {
@@ -169,5 +200,18 @@ describe('RecentUalSet', () => {
     expect(set.has('a')).toBe(false);
     expect(set.has('b')).toBe(true);
     expect(set.has('c')).toBe(true);
+  });
+
+  it('deletes all entries for one local CG prefix without touching others', () => {
+    const set = new RecentUalSet(10);
+    set.add('cg-a\0ual#01');
+    set.add('cg-a\0ual#02');
+    set.add('cg-b\0ual#01');
+
+    set.deleteByPrefix('cg-a\0');
+
+    expect(set.has('cg-a\0ual#01')).toBe(false);
+    expect(set.has('cg-a\0ual#02')).toBe(false);
+    expect(set.has('cg-b\0ual#01')).toBe(true);
   });
 });

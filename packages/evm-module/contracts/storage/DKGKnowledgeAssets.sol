@@ -55,19 +55,18 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     event KnowledgeAssetEndEpochUpdated(uint256 indexed id, uint256 endEpoch);
     event URIUpdate(string newURI);
 
-    /// @notice RFC-39 Phase A.5: a per-KC ciphertext commitment was set for
-    ///         curated random sampling. Emitted by
-    ///         `setCiphertextChunksCommitment`, called by `KnowledgeAssetsV10`
-    ///         immediately after `createKnowledgeAsset` when the publish
-    ///         input carries a non-zero `(ciphertextChunksRoot,
-    ///         ciphertextChunkCount)` pair AND the owning CG is curated.
-    ///         Off-chain indexers consume this to know which KCs participate
-    ///         in the curated-CG sampling lottery (the picker treats
-    ///         missing commitments as "skip this KC").
-    event KnowledgeAssetCiphertextCommitmentSet(
+    /// @notice OT-RFC-49 / WS-B: a per-KC PUBLIC `_catalog` commitment was set for
+    ///         curated random sampling. Emitted by `setCatalogCommitment`, called by
+    ///         `KnowledgeAssetsLifecycle._executePublishCore` immediately after
+    ///         `createKnowledgeAsset` when the publish input carries a non-zero
+    ///         `(catalogRoot, catalogLeafCount)` pair AND the owning CG is curated.
+    ///         Off-chain indexers consume this to know which KCs participate in the
+    ///         curated-CG sampling lottery (the picker treats missing commitments as
+    ///         "skip this KC").
+    event KnowledgeAssetCatalogCommitmentSet(
         uint256 indexed id,
-        bytes32 ciphertextChunksRoot,
-        uint32 ciphertextChunkCount
+        bytes32 catalogRoot,
+        uint32 catalogLeafCount
     );
 
     // --- OT-RFC-43 Option 1 (variant 1a) errors ---
@@ -84,7 +83,7 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     error GetLatestKnowledgeAssetIdDeprecated();
 
     string private constant _NAME = "DKGKnowledgeAssets";
-    string private constant _VERSION = "10.0.4";
+    string private constant _VERSION = "10.1.0";
 
     string private _tokenURI;
 
@@ -137,45 +136,21 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     /// `/api/kc/:id/author` and SPARQL author-filter queries.
     mapping(uint256 => mapping(uint256 => address)) public merkleRootAuthors;
 
-    /// @notice RFC-39 Phase A.5: per-KC ciphertext-chunks Merkle root.
+    /// @notice OT-RFC-49: DEAD — slot preserved for storage-layout stability.
     ///
-    /// Used by `RandomSampling._pickWeightedChallenge` and
-    /// `RandomSampling.submitProof` for curated CGs in place of the
-    /// `merkleRoots[].merkleRoot` chain (which commits to plaintext leaves
-    /// the cores cannot see). The root commits to the leaf sequence
-    /// `[keccak256(ct_i)]` in `swmMessageIndex` order for the latest publish
-    /// batch — exactly the ciphertext chunks the curated CG's hosting
-    /// cores persist via the LU-11 ACK envelope.
-    ///
-    /// Parallel-mapping (not a struct field on `KnowledgeAsset`) for
-    /// two reasons: (1) avoids slot-stride drift in the existing dynamic
-    /// `merkleRoots[]` array, identical reasoning to the
-    /// `merkleRootAuthors` design above; (2) decouples RFC-39 evolution
-    /// from `KnowledgeAssetLib.KnowledgeAsset`, which is
-    /// concurrently being extended on other branches — keeping ciphertext
-    /// commitment in its own slot space avoids merge friction.
-    ///
-    /// Population is conditional, set by
-    /// `KnowledgeAssetsV10._executePublishCore`: populated for curated
-    /// CGs when the publish input carries a non-zero pair, NOT populated
-    /// for public CGs or for legacy/transitional curated publishes that
-    /// pre-date the LU-11 chunked-AEAD substrate. The default `bytes32(0)`
-    /// is the explicit "no curated commitment" sentinel that
-    /// `RandomSampling` uses to skip this KC in the curated draw — see
-    /// RFC-39 §3.4.1 for the feature-flag rationale.
-    mapping(uint256 => bytes32) public ciphertextChunksRoots;
+    /// Formerly `ciphertextChunksRoots` (RFC-39 Phase A.5 curated ciphertext
+    /// commitment). RFC-49 ("hosting follows access") strips private ciphertext
+    /// from cores entirely, so cores can no longer prove a ciphertext chunk —
+    /// the curated random-sampling commitment is now the PUBLIC `_catalog` root
+    /// (`catalogRoots` below). This slot is intentionally retained (not deleted)
+    /// so that removing it cannot shift the base slot of `_authorKaNumberHighWater`
+    /// or any later mapping; same discipline as `_deprecatedKnowledgeAssetsCounter`.
+    /// Never read or written after RFC-49.
+    mapping(uint256 => bytes32) private _deprecatedCiphertextChunksRoots;
 
-    /// @notice RFC-39 Phase A.5: per-KC count of ciphertext chunks.
-    ///
-    /// Equals the SWM message count of the publish batch and is the
-    /// leaf-count input for the `chunkId = uint256(seed) % count` draw
-    /// in `RandomSampling._pickWeightedChallenge` step 3 for curated
-    /// CGs. Stored separately from `merkleLeafCount` because the curated
-    /// commitment counts ciphertext chunks (LU-11 envelopes), not V10
-    /// flat-KC plaintext leaves — the two leaf-spaces are deliberately
-    /// distinct and a curated KC must not collide its random-sampling
-    /// granularity with its public-projection leaf count.
-    mapping(uint256 => uint32) public ciphertextChunkCounts;
+    /// @notice OT-RFC-49: DEAD — slot preserved. Formerly `ciphertextChunkCounts`.
+    /// See `_deprecatedCiphertextChunksRoots`. Superseded by `catalogLeafCounts`.
+    mapping(uint256 => uint32) private _deprecatedCiphertextChunkCounts;
 
     /// @notice OT-RFC-43 Option 1 (variant 1a): per-author high-water KA `number`
     ///         (the low 96 bits of the packed kaId), stored as `maxNumber + 1` so
@@ -187,6 +162,35 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     ///         of storage to preserve the slot layout of every field above (see the
     ///         layout note on `_deprecatedKnowledgeAssetsCounter`).
     mapping(address => uint256) private _authorKaNumberHighWater;
+
+    /// @notice OT-RFC-49 / WS-B: per-KC PUBLIC `_catalog` Merkle root — the curated
+    ///         random-sampling commitment that replaces the stripped ciphertext one.
+    ///
+    /// Used by `RandomSampling._pickWeightedChallenge` (eligibility + leaf draw) and
+    /// `RandomSampling.submitProof` for curated CGs in place of the ciphertext root.
+    /// The root commits ONLY to the public `_catalog` leaves of the latest publish —
+    /// the same plaintext triples cores host and serve under
+    /// `did:dkg:context-graph:<cgId>/_catalog`. Computed off-chain by
+    /// `computeCatalogRoot` (a dedicated `V10MerkleTree` over the catalog quads only;
+    /// the private sub-roots stay in `merkleRoots[]` for proof-of-existence but are
+    /// NEVER drawn). Set by `KnowledgeAssetsLifecycle._executePublishCore` for curated
+    /// CGs. Default `bytes32(0)` is the "no catalog commitment" sentinel that
+    /// `RandomSampling` uses to skip this KC in the curated draw (legacy KCs read 0 →
+    /// grandfathered out until they re-publish post-RFC-49).
+    ///
+    /// Appended at the END of storage (after `_authorKaNumberHighWater`) to preserve
+    /// every existing slot; new slot space cannot masquerade old ciphertext roots as
+    /// catalog roots.
+    mapping(uint256 => bytes32) public catalogRoots;
+
+    /// @notice OT-RFC-49 / WS-B: per-KC PUBLIC `_catalog` leaf count (POST sort+dedupe,
+    ///         == `V10MerkleTree.leafCount`, NOT the raw catalog-quad count).
+    ///
+    /// The leaf-count input for the `chunkId = uint256(seed) % count` draw in
+    /// `RandomSampling._pickWeightedChallenge` step 3 for curated CGs, and the bounds
+    /// check in `submitProof`. Must equal the off-chain tree's `leafCount` exactly or
+    /// an honest prover cannot build a proof for a drawn `chunkId`.
+    mapping(uint256 => uint32) public catalogLeafCounts;
 
     constructor(
         address hubAddress,
@@ -462,48 +466,51 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
         return knowledgeAssets[id].merkleLeafCount;
     }
 
-    /// @notice RFC-39 Phase A.5: write the curated ciphertext commitment for
-    ///         a freshly-created KC. Caller must enforce the curated-CG
-    ///         gate — KCS does not look at `ContextGraphStorage` to keep the
-    ///         storage layer policy-free. The commitment is treated as
-    ///         immutable for v1 (no update path) per RFC-39 §3.4.1.
+    /// @notice OT-RFC-49 / WS-B: write the curated PUBLIC `_catalog` commitment for
+    ///         a freshly-created (or updated) KC. Caller must enforce the curated-CG
+    ///         gate — KCS does not look at `ContextGraphStorage` to keep the storage
+    ///         layer policy-free.
     ///
-    ///         Both fields must be non-zero — partial commitments (a non-zero
-    ///         root with zero count, or vice versa) are forbidden because they
-    ///         would silently de-rail the picker (zero count → divide-by-zero
-    ///         in the chunk-index draw, zero root → proof verification against
-    ///         an empty tree). KAV10 normalises "no commitment" to a literal
-    ///         no-call (no event emitted, both slots stay at default zero).
-    function setCiphertextChunksCommitment(
+    ///         Both fields must be non-zero — partial commitments (a non-zero root
+    ///         with zero count, or vice versa) are forbidden because they would
+    ///         silently de-rail the picker (zero count → divide-by-zero in the
+    ///         catalog-leaf draw, zero root → proof verification against an empty
+    ///         tree). `KnowledgeAssetsLifecycle` normalises "no commitment" to a
+    ///         literal no-call (no event emitted, both slots stay at default zero).
+    ///         Unlike the stripped ciphertext commitment, the catalog commitment is
+    ///         re-set on every curated update so the random-sampling surface tracks
+    ///         the latest published `_catalog`.
+    function setCatalogCommitment(
         uint256 id,
-        bytes32 ciphertextChunksRoot,
-        uint32 ciphertextChunkCount
+        bytes32 catalogRoot,
+        uint32 catalogLeafCount
     ) external onlyContracts {
         require(
-            ciphertextChunksRoot != bytes32(0) && ciphertextChunkCount > 0,
-            "Invalid ciphertext commitment"
+            catalogRoot != bytes32(0) && catalogLeafCount > 0,
+            "Invalid catalog commitment"
         );
-        ciphertextChunksRoots[id] = ciphertextChunksRoot;
-        ciphertextChunkCounts[id] = ciphertextChunkCount;
+        catalogRoots[id] = catalogRoot;
+        catalogLeafCounts[id] = catalogLeafCount;
 
-        emit KnowledgeAssetCiphertextCommitmentSet(id, ciphertextChunksRoot, ciphertextChunkCount);
+        emit KnowledgeAssetCatalogCommitmentSet(id, catalogRoot, catalogLeafCount);
     }
 
-    /// @notice RFC-39 Phase A.5: latest ciphertext-chunks Merkle root for a
-    ///         curated KC, or `bytes32(0)` if no commitment was ever set
-    ///         (public KC, or legacy/transitional curated KC that pre-dates
-    ///         the LU-11 chunked-AEAD substrate). `RandomSampling` treats
-    ///         the zero sentinel as "skip this KC in the curated draw".
-    function getLatestCiphertextChunksRoot(uint256 id) external view returns (bytes32) {
-        return ciphertextChunksRoots[id];
+    /// @notice OT-RFC-49 / WS-B: latest PUBLIC `_catalog` Merkle root for a curated
+    ///         KC, or `bytes32(0)` if no commitment was ever set (public KC, or a
+    ///         legacy curated KC that has not re-published since RFC-49).
+    ///         `RandomSampling` treats the zero sentinel as "skip this KC in the
+    ///         curated draw".
+    function getCatalogRoot(uint256 id) external view returns (bytes32) {
+        return catalogRoots[id];
     }
 
-    /// @notice RFC-39 Phase A.5: number of ciphertext chunks for a curated
-    ///         KC, or `0` if no commitment was ever set. Used as the
-    ///         leaf-count input for the curated picker's `chunkId = seed %
-    ///         count` draw and as the bounds check in `submitProof`.
-    function getCiphertextChunkCount(uint256 id) external view returns (uint32) {
-        return ciphertextChunkCounts[id];
+    /// @notice OT-RFC-49 / WS-B: PUBLIC `_catalog` leaf count for a curated KC, or
+    ///         `0` if no commitment was ever set. Used as the leaf-count input for
+    ///         the curated picker's `chunkId = seed % count` draw and as the bounds
+    ///         check in `submitProof`. Equals the off-chain `V10MerkleTree.leafCount`
+    ///         (post sort+dedupe), never the raw catalog-quad count.
+    function getCatalogLeafCount(uint256 id) external view returns (uint32) {
+        return catalogLeafCounts[id];
     }
 
     function getKnowledgeAssetMetadata(

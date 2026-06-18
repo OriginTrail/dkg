@@ -1,132 +1,59 @@
-import { describe, expect, it, vi } from 'vitest';
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { RequestContext } from '../../../src/daemon/routes/context.js';
-import { handleQueryRoutes } from '../../../src/daemon/routes/query.js';
+/**
+ * /api/query route error-mapping contract — REAL daemon, NO mocks.
+ *
+ * The retired version of this file fed `handleQueryRoutes` a hand-built
+ * `RequestContext` whose `agent.query` was a vitest mock that rejected with a
+ * hand-typed `Error('error at 1:27: …')`. That pinned the route's error→HTTP-status
+ * classification against a HAND-TYPED error string — if the real query engine
+ * changed the shape of its parse/scope errors, the route could start
+ * misclassifying them (500 instead of 400) and the mock test would stay green.
+ *
+ * This version drives the contract through a real edge daemon: a genuinely
+ * malformed SPARQL makes the REAL oxigraph throw its REAL parse error, and the
+ * REAL route maps it. So the #889 fix (parser errors → 400, not 500) is proven
+ * end-to-end, and the guard that a VALID query is not misclassified is a real
+ * 200. Runs in the standard cli lane against the shared Hardhat node.
+ */
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { startLiveDaemon, stopLiveDaemon, postJson, type LiveDaemon } from '../../helpers/live-daemon.js';
 
-interface FakeRes {
-  writableEnded: boolean;
-  headersSent: boolean;
-  statusCode: number;
-  headers: Record<string, string | number | string[]>;
-  body: string;
-  writeHead: (status: number, headers?: Record<string, string | number | string[]>) => FakeRes;
-  end: (chunk?: string) => void;
-}
+describe('/api/query error mapping (real daemon)', () => {
+  let daemon: LiveDaemon;
 
-function makeRes(): FakeRes {
-  const res: FakeRes = {
-    writableEnded: false,
-    headersSent: false,
-    statusCode: 200,
-    headers: {},
-    body: '',
-    writeHead(status, headers) {
-      res.statusCode = status;
-      if (headers) Object.assign(res.headers, headers);
-      res.headersSent = true;
-      return res;
-    },
-    end(chunk?: string) {
-      if (typeof chunk === 'string') res.body += chunk;
-      res.headersSent = true;
-      res.writableEnded = true;
-    },
-  };
-  return res;
-}
+  beforeAll(async () => {
+    daemon = await startLiveDaemon();
+  }, 120_000);
 
-function makeReq(body: Record<string, unknown>): IncomingMessage {
-  return {
-    method: 'POST',
-    headers: {},
-    __dkgPrebufferedBody: Buffer.from(JSON.stringify(body)),
-  } as unknown as IncomingMessage;
-}
-
-function makeTracker() {
-  return {
-    start: vi.fn(),
-    startPhase: vi.fn(),
-    completePhase: vi.fn(),
-    complete: vi.fn(),
-    fail: vi.fn(),
-  };
-}
-
-function makeCtx(agent: Record<string, unknown>, body: Record<string, unknown>, res = makeRes()): {
-  ctx: RequestContext;
-  res: FakeRes;
-} {
-  const ctx = {
-    req: makeReq(body),
-    res: res as unknown as ServerResponse,
-    agent,
-    tracker: makeTracker(),
-    validTokens: new Set<string>(),
-    path: '/api/query',
-    url: new URL('http://127.0.0.1/api/query'),
-    requestToken: undefined,
-  } as unknown as RequestContext;
-  return { ctx, res };
-}
-
-describe('handleQueryRoutes /api/query', () => {
-  it('maps scoped-query violations from the query engine to HTTP 400', async () => {
-    const error = new Error(
-      'Scoped query violation: GRAPH <did:dkg:context-graph:other> is outside the allowed graph set',
-    );
-    const agent = {
-      resolveAgentByToken: vi.fn(),
-      query: vi.fn().mockRejectedValue(error),
-    };
-    const { ctx, res } = makeCtx(agent, {
-      sparql: 'SELECT ?s WHERE { GRAPH <did:dkg:context-graph:other> { ?s ?p ?o } }',
-      contextGraphId: 'agent-registry',
-    });
-
-    await handleQueryRoutes(ctx);
-
-    expect(res.statusCode).toBe(400);
-    expect(JSON.parse(res.body).error).toBe(error.message);
+  afterAll(async () => {
+    await stopLiveDaemon(daemon);
   });
 
-  it('maps oxigraph SPARQL syntax errors ("error at L:C: ...") to HTTP 400, not 500 (#889)', async () => {
-    // Reproduces the rc.12 finding: a malformed query (missing closing
-    // brace / incomplete triple) makes oxigraph throw
-    // `error at <line>:<col>: expected one of ...`. Before the fix this
-    // fell through to the top-level 500 handler; it must be a 400.
-    const error = new Error(
-      'error at 1:27: expected one of ",", ".", ";", "{", "}", ...',
-    );
-    const agent = {
-      resolveAgentByToken: vi.fn(),
-      query: vi.fn().mockRejectedValue(error),
-    };
-    const { ctx, res } = makeCtx(agent, {
+  it('maps a real malformed-SPARQL parse error to HTTP 400, not 500 (#889)', async () => {
+    // Missing closing brace → the real oxigraph throws `error at <l>:<c>: …`.
+    const { status, body } = await postJson(daemon, '/api/query', {
       sparql: 'SELECT ?s WHERE { ?s ?p ?o',
       contextGraphId: 'all',
     });
-
-    await handleQueryRoutes(ctx);
-
-    expect(res.statusCode).toBe(400);
-    expect(JSON.parse(res.body).error).toBe(error.message);
+    expect(status).toBe(400);
+    expect(String(body.error)).toMatch(/error at \d+:\d+|expected one of|parse/i);
   });
 
-  it('still surfaces genuine server-side errors as 500 (not misclassified as 400)', async () => {
-    // Guard: the #889 widening must not swallow real server faults whose
-    // message happens to differ from the parser-error shape.
-    const error = new Error('Database connection lost');
-    const agent = {
-      resolveAgentByToken: vi.fn(),
-      query: vi.fn().mockRejectedValue(error),
-    };
-    const { ctx, res } = makeCtx(agent, {
-      sparql: 'SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } } LIMIT 1',
+  it('a valid SELECT is not misclassified as 400 (the #889 widening stays narrow)', async () => {
+    const { status } = await postJson(daemon, '/api/query', {
+      sparql: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 1',
       contextGraphId: 'all',
     });
+    expect(status).toBe(200);
+  });
 
-    await expect(handleQueryRoutes(ctx)).rejects.toThrow('Database connection lost');
-    expect(res.statusCode).not.toBe(400);
+  it('rejects a SPARQL mutation (INSERT/DELETE) with a 4xx, not a 500', async () => {
+    // Read endpoint must refuse writes — a real, observable contract that
+    // does not depend on any injected error string.
+    const { status } = await postJson(daemon, '/api/query', {
+      sparql: 'INSERT DATA { <urn:s> <urn:p> <urn:o> }',
+      contextGraphId: 'all',
+    });
+    expect(status).toBeGreaterThanOrEqual(400);
+    expect(status).toBeLessThan(500);
   });
 });

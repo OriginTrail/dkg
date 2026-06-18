@@ -34,6 +34,7 @@ import {
   validateEntities,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
+  parsePublishRequestBody,
   normalizeContextGraphIdOrUri,
   resolveRequiredWriteContextGraphId,
 } from "../http-utils.js";
@@ -41,6 +42,7 @@ import { validatePreSignedAuthorAttestation } from "./memory.js";
 import { recordAssertionActivity } from "../activity-notification.js";
 import {
   handleKaImportArtifactResolve,
+  handleKaImportArtifactRead,
   handleKaImportArtifactReadMarkdown,
   handleKaSemanticEnrichmentWrite,
   handleKaImportFile,
@@ -128,6 +130,28 @@ function respondAssertionError(res: RequestContext["res"], e: any): void {
       contextGraphId: e.contextGraphId,
       assertionGraph: e.assertionGraph,
       expectedTripleCount: e.expectedTripleCount,
+    });
+    return;
+  }
+  // Strict curator-ack gate (OT-RFC-49 curator-leader) on the WM→SWM promote
+  // (swm/share). The curator (authoritative replica) did not confirm, so the
+  // promote was aborted with WM left intact — surface a distinct, actionable
+  // status instead of a 500. The client is TOLD, never silently led to success.
+  if (e?.code === "CURATOR_UNCONFIRMED") {
+    jsonResponse(res, 503, {
+      error: e.message,
+      code: "CURATOR_UNCONFIRMED",
+      curatorDelivery: "unconfirmed",
+      contextGraphId: e.contextGraphId,
+    });
+    return;
+  }
+  if (e?.code === "CURATOR_REJECTED") {
+    jsonResponse(res, 409, {
+      error: e.message,
+      code: "CURATOR_REJECTED",
+      curatorDelivery: "rejected",
+      contextGraphId: e.contextGraphId,
     });
     return;
   }
@@ -407,6 +431,41 @@ function resolveFinalizedPublishOptions(
   };
 }
 
+async function verifyDirectPublishOnChainContextGraphId(
+  agent: RequestContext["agent"],
+  contextGraphId: string,
+  onChainContextGraphId: string | undefined,
+  res: RequestContext["res"],
+): Promise<string | undefined | null> {
+  if (onChainContextGraphId === undefined) return undefined;
+  let resolvedOnChainContextGraphId: string | null | undefined;
+  try {
+    resolvedOnChainContextGraphId = await agent.getContextGraphOnChainId(contextGraphId);
+  } catch (err) {
+    jsonResponse(res, 400, {
+      error:
+        `Unable to verify "onChainContextGraphId" for context graph "${contextGraphId}": ${err instanceof Error ? err.message : String(err)}`,
+    });
+    return null;
+  }
+  const normalizedResolved = String(resolvedOnChainContextGraphId ?? "").trim();
+  if (!/^[1-9]\d*$/.test(normalizedResolved)) {
+    jsonResponse(res, 400, {
+      error:
+        `"onChainContextGraphId" cannot be supplied for context graph "${contextGraphId}" because no trusted positive on-chain mapping is available`,
+    });
+    return null;
+  }
+  if (BigInt(normalizedResolved) !== BigInt(onChainContextGraphId)) {
+    jsonResponse(res, 400, {
+      error:
+        `"onChainContextGraphId" (${onChainContextGraphId}) does not match the trusted mapping for context graph "${contextGraphId}" (${normalizedResolved})`,
+    });
+    return null;
+  }
+  return normalizedResolved;
+}
+
 export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, agent, path, url, requestToken, requestAgentAddress, emitMemoryGraphChanged } = ctx;
   if (path !== PREFIX && !path.startsWith(`${PREFIX}/`)) return;
@@ -420,6 +479,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   // create handler (`path === PREFIX`) is unaffected — these paths all carry
   // a trailing segment.
   if (method === "POST" && path === `${PREFIX}/import-artifact/resolve`) return handleKaImportArtifactResolve(ctx);
+  if (method === "POST" && path === `${PREFIX}/import-artifact/read`) return handleKaImportArtifactRead(ctx);
   if (method === "POST" && path === `${PREFIX}/import-artifact/read-markdown`) return handleKaImportArtifactReadMarkdown(ctx);
   if (method === "POST" && path === `${PREFIX}/semantic-enrichment/write`) return handleKaSemanticEnrichmentWrite(ctx);
 
@@ -480,6 +540,92 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     callerAgentAddress: writePreflightCallerAgentAddress,
     allowLocalExactFallback: !writePreflightCallerAgentAddress,
   };
+
+  // ── POST /api/knowledge-assets/publish — explicit-quads one-shot publish ──
+  //
+  // This is intentionally separate from the assertion/SWM lifecycle routes. If
+  // the caller already has the exact quads to publish, use agent.publish()
+  // directly so the publisher's ACK/direct-payload path owns availability. The
+  // SWM/finalized-assertion methods below remain only for callers that have
+  // explicitly staged or finalized the target content first.
+  if (method === "POST" && path === `${PREFIX}/publish`) {
+    const rawBody = await readBody(req);
+    const parsed = parsePublishRequestBody(rawBody);
+    if (!parsed.ok) return jsonResponse(res, 400, { error: parsed.error });
+    const raw = JSON.parse(rawBody) as Record<string, unknown>;
+    const {
+      contextGraphId,
+      quads,
+      privateQuads,
+      accessPolicy,
+      allowedPeers,
+      subGraphName,
+      onChainContextGraphId,
+    } = parsed.value;
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      contextGraphId,
+      res,
+      writePreflightContextGraphOpts,
+    );
+    if (!resolvedContextGraphId) return;
+    const publishControls = resolveFinalizedPublishOptions(ctx, raw);
+    if (publishControls === null) return;
+    const {
+      clearSharedMemoryAfter: _ignoredClearSharedMemoryAfter,
+      ...directPublishControls
+    } = publishControls;
+    const verifiedOnChainContextGraphId = await verifyDirectPublishOnChainContextGraphId(
+      agent,
+      resolvedContextGraphId,
+      onChainContextGraphId,
+      res,
+    );
+    if (verifiedOnChainContextGraphId === null) return;
+    try {
+      const pub: any = await agent.publish(resolvedContextGraphId, quads, privateQuads, {
+        accessPolicy,
+        allowedPeers,
+        subGraphName,
+        ...(verifiedOnChainContextGraphId !== undefined
+          ? { onChainContextGraphId: verifiedOnChainContextGraphId }
+          : {}),
+        ...directPublishControls,
+      });
+      const { httpStatus, reason } = classifyVmPublish(pub);
+      if (httpStatus === 200) {
+        recordActivityAndNotify(ctx, {
+          contextGraphId: resolvedContextGraphId,
+          kind: "published",
+          actorAgentAddress: requestAgentAddress,
+          subGraphName,
+        });
+      }
+      const chain = pub?.onChainResult;
+      const kaManifest = Array.isArray(pub?.kaManifest) ? pub.kaManifest : [];
+      return jsonResponse(res, httpStatus, {
+        ...pub,
+        mode: "direct",
+        kaId: pub?.kaId != null ? String(pub.kaId) : pub?.kaId,
+        status: pub?.status,
+        kas: kaManifest.map((ka: any) => ({
+          tokenId: String(ka.tokenId),
+          rootEntity: ka.rootEntity,
+        })),
+        ...(chain?.txHash ? { txHash: chain.txHash } : {}),
+        ...(chain?.blockNumber !== undefined ? { blockNumber: chain.blockNumber } : {}),
+        ...(chain?.batchId !== undefined ? { batchId: String(chain.batchId) } : {}),
+        ...(chain?.publisherAddress ? { publisherAddress: chain.publisherAddress } : {}),
+        ...(typeof pub?.contextGraphError === "string" ? { contextGraphError: pub.contextGraphError } : {}),
+        ...(reason ? { error: reason } : {}),
+      });
+    } catch (e: any) {
+      if (isPayloadTooLargeError(e)) {
+        return jsonResponse(res, 413, payloadTooLargeResponseBody(e));
+      }
+      return jsonResponse(res, 500, { error: e?.message ?? String(e) });
+    }
+  }
 
   // ── POST /api/knowledge-assets — create KA + open WM draft (atomic shortcut) ──
   if (method === "POST" && path === PREFIX) {
@@ -859,7 +1005,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
 
     // ── SWM verb: share (WM → SWM; OT-RFC-43 §10.6 renames promote → share) ──
     if (layer === "swm" && verb === "share") {
-      const share = await agent.assertion.promote(contextGraphId, name, { entities: parsed.entities, subGraphName });
+      // Per-request opt-in to the strict curator-ack gate (OT-RFC-49). Omitted →
+      // agent config default (`swmAwaitCuratorAck`). The promote aborts with 503
+      // (mapped in respondAssertionError) if the curator doesn't confirm.
+      const awaitCuratorAck = typeof parsed?.awaitCuratorAck === "boolean" ? parsed.awaitCuratorAck : undefined;
+      const share = await agent.assertion.promote(contextGraphId, name, { entities: parsed.entities, subGraphName, awaitCuratorAck });
       if (share.promotedCount !== 0) {
         emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm", "swm"], subGraphName, operation: "assertion_promoted", source: "api", counts: { triples: share.promotedCount } });
         recordActivityAndNotify(ctx, { contextGraphId, kind: "promoted", actorAgentAddress: requestAgentAddress, subGraphName, tripleCount: share.promotedCount });
@@ -951,7 +1101,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // is safe. Everything else (on-chain reverts, storage, "Invalid"/
         // "Unsafe" publisher text) keeps the generic 500 — the #988 parity
         // contract that publish must NOT down-classify on-chain errors.
-        if (/is not finalized/.test(msg) || /No quads in shared memory/.test(msg)) {
+        // `has no private payload` is the curated-CG analogue of `No quads in
+        // shared memory`: a curated publish with nothing private shared (only
+        // the public catalog entry) — a caller precondition, thrown before any
+        // chain interaction, so 409 is safe + consistent with the public path.
+        if (/is not finalized/.test(msg) || /No quads in shared memory/.test(msg) || /has no private payload/.test(msg)) {
           return jsonResponse(res, 409, { code: "VM_PUBLISH_PRECONDITION", error: msg });
         }
         return jsonResponse(res, 500, { error: msg });

@@ -205,7 +205,8 @@ describe('@integration V10 PCA — consent-free agent DoS (audit fix)', function
   ) => {
     await Token.mint(attacker.address, 1n);
     await Token.connect(attacker).approve(await NFT.getAddress(), 1n);
-    await NFT.connect(attacker).createAccount(1n);
+    // RFC-51: createAccount(committedTRAC, primaryNode); inert node = 0.
+    await NFT.connect(attacker).createAccount(1n, 0);
     const accountId = await NFT.totalSupply();
     await NFT.connect(attacker).registerAgent(accountId, victim.address);
     expect(await NFT.agentToAccountId(victim.address)).to.equal(accountId);
@@ -345,7 +346,8 @@ describe('@integration V10 PCA — consent-free agent DoS (audit fix)', function
     // the conviction gate active once the victim IS registered.
     await Token.mint(attacker.address, 1n);
     await Token.connect(attacker).approve(await NFT.getAddress(), 1n);
-    await NFT.connect(attacker).createAccount(1n);
+    // RFC-51: createAccount(committedTRAC, primaryNode); inert node = 0.
+    await NFT.connect(attacker).createAccount(1n, 0);
     const attackerAccountId = await NFT.totalSupply();
     const lockEpochs = Number((await NFT.accounts(attackerAccountId))[5]);
 

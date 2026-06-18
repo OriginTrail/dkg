@@ -99,7 +99,9 @@ describe('@unit DKGPublishingConvictionNFT — extra audit coverage (E-6)', func
 
   async function createAccount(signer: SignerWithAddress, committed: bigint) {
     await TokenContract.connect(signer).approve(await NFT.getAddress(), committed);
-    await NFT.connect(signer).createAccount(committed);
+    // RFC-51: createAccount(committedTRAC, primaryNode). These tests don't
+    // assert publishing-allocation seeding, so pass inert primaryNode = 0.
+    await NFT.connect(signer).createAccount(committed, 0);
     return await NFT.totalSupply();
   }
 
@@ -265,7 +267,8 @@ describe('@unit DKGPublishingConvictionNFT — extra audit coverage (E-6)', func
       const agent = accounts[3];
 
       await TokenContract.connect(owner).approve(await NFT.getAddress(), committed);
-      await NFT.connect(owner).createAccount(committed);
+      // RFC-51: createAccount(committedTRAC, primaryNode); inert node = 0.
+      await NFT.connect(owner).createAccount(committed, 0);
       const acctId = await NFT.totalSupply();
 
       // Bind the agent so `agentToAccountId[agent] != 0` and we reach the

@@ -84,7 +84,18 @@ export function partitionPublishAsyncQuads(publicQuads: Quad[], privateQuads: Qu
   let publicByRoot = skolemizeByEntity(stagedPublicQuads);
 
   for (const rootEntity of privateByRoot.keys()) {
-    if (!publicByRoot.has(rootEntity)) {
+    // GH #1122 / Codex #1132 review: stamp `dkg:privateDataAnchor "true"` for
+    // EVERY root that has private staging, INCLUDING mixed public+private roots
+    // — not just private-only roots. Partition-aware readers (EPCIS, Kafka
+    // discovery) bridge public→private via this anchor; before the #1122
+    // canonicalRootIri→identity flip the anchor was stamped on the canonical
+    // subject for mixed roots, but identity made `stampCanonicalAnchorsInWorkspace`
+    // a no-op, so mixed roots silently lost the anchor and their private data
+    // disappeared from those readers. Idempotent: skip if already anchored.
+    const alreadyAnchored = stagedPublicQuads.some(
+      (q) => q.subject === rootEntity && q.predicate === PRIVATE_DATA_ANCHOR,
+    );
+    if (!alreadyAnchored) {
       stagedPublicQuads.push({
         subject: rootEntity,
         predicate: PRIVATE_DATA_ANCHOR,
@@ -200,7 +211,7 @@ export function joinDelegationScope(deploymentId: string | undefined, contextGra
 // ── Sync-phase normalisation ──────────────────────────────────────────
 
 export function normalizeSyncPhase(value: unknown): SyncPhase {
-  if (value === 'meta' || value === 'snapshot') return value;
+  if (value === 'meta' || value === 'snapshot' || value === 'catalog') return value;
   return 'data';
 }
 

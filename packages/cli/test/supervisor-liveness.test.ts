@@ -1,10 +1,25 @@
 /**
- * Unit tests for the supervisor-liveness watchdog.
+ * Unit tests for the supervisor-liveness watchdog — NO service mocks.
  *
- * Pure-logic surface — `startLivenessWatcher` is exercised with an injected
- * stub probe so tests stay deterministic and don't need to bind real TCP
- * sockets. `probeWorkerAlive` itself is covered by a small "real socket
- * round-trip" block at the end using a node:net server.
+ * `startLivenessWatcher`'s `probe` / `onUnresponsive` / `onFailure` /
+ * `isShuttingDown` parameters are the module's OWN documented
+ * dependency-injection seams (the source: "Injectable probe — tests pass a
+ * stub"; "Exported so tests can verify the truth table"), not service
+ * collaborators whose shapes can drift from a live daemon. So the retired
+ * vitest-fn stubs are replaced with plain hand-rolled recorders — controllable
+ * functions that capture their calls — which is exactly what the seams are
+ * designed to receive. `probeWorkerAlive` (the real TCP primitive the default
+ * probe uses) is already exercised mock-free against real `node:net` sockets
+ * in the bottom block.
+ *
+ * `vi.useFakeTimers` is RETAINED on purpose: the watcher is a multi-tick
+ * consecutive-failure state machine whose contract is inherently about
+ * wall-clock ticks (30s in production), and deterministic virtual time is the
+ * only non-flaky way to assert tick-by-tick invariants like "after exactly N
+ * failed ticks the counter is N, after the grace window it re-arms". It
+ * controls the CLOCK — it does not fake a daemon, a node, or any data — so it
+ * is not a behaviour mock; forcing real timers here would only trade exact,
+ * deterministic coverage for scheduling-jitter flakiness.
  */
 
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
@@ -17,6 +32,19 @@ import {
   LIVENESS_PROBE_INTERVAL_MS,
   LIVENESS_PROBE_TIMEOUT_MS,
 } from '../src/daemon/supervisor-liveness.js';
+
+// Plain DI recorder (no vitest mock API): captures every call's args and
+// delegates to a real implementation. Used for the watcher's injected
+// probe/callback seams.
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => {
+    calls.push(args);
+    return impl(...args);
+  };
+  return Object.assign(fn, { calls });
+}
+const noop = (): void => undefined;
 
 describe('isLivenessProbeEnabled', () => {
   it.each([
@@ -71,9 +99,9 @@ describe('startLivenessWatcher', () => {
   }
 
   it('fires onUnresponsive after N consecutive failures', async () => {
-    const probe = vi.fn().mockResolvedValue(false);
-    const onUnresponsive = vi.fn();
-    const onFailure = vi.fn();
+    const probe = recorder(async () => false);
+    const onUnresponsive = recorder(noop);
+    const onFailure = recorder((_c: number) => undefined);
     const watcher = startLivenessWatcher({
       port: 1234,
       probe,
@@ -85,20 +113,20 @@ describe('startLivenessWatcher', () => {
     });
 
     await advanceTicks(2, 1000);
-    expect(onUnresponsive).not.toHaveBeenCalled();
-    expect(onFailure).toHaveBeenCalledTimes(2);
-    expect(onFailure).toHaveBeenNthCalledWith(1, 1);
-    expect(onFailure).toHaveBeenNthCalledWith(2, 2);
+    expect(onUnresponsive.calls).toEqual([]);
+    expect(onFailure.calls).toHaveLength(2);
+    expect(onFailure.calls[0]).toEqual([1]);
+    expect(onFailure.calls[1]).toEqual([2]);
 
     await advanceTicks(1, 1000);
-    expect(onUnresponsive).toHaveBeenCalledTimes(1);
+    expect(onUnresponsive.calls).toHaveLength(1);
     watcher.stop();
   });
 
   it('resets the failure counter on a successful probe', async () => {
     let alive = false;
-    const probe = vi.fn().mockImplementation(() => Promise.resolve(alive));
-    const onUnresponsive = vi.fn();
+    const probe = recorder(async () => alive);
+    const onUnresponsive = recorder(noop);
     const watcher = startLivenessWatcher({
       port: 1234,
       probe,
@@ -112,10 +140,10 @@ describe('startLivenessWatcher', () => {
     await advanceTicks(1, 1000);
     alive = false;
     await advanceTicks(2, 1000);
-    expect(onUnresponsive).not.toHaveBeenCalled();
+    expect(onUnresponsive.calls).toEqual([]);
 
     await advanceTicks(1, 1000);
-    expect(onUnresponsive).toHaveBeenCalledTimes(1);
+    expect(onUnresponsive.calls).toHaveLength(1);
     watcher.stop();
   });
 
@@ -123,8 +151,8 @@ describe('startLivenessWatcher', () => {
     // If the counter weren't reset post-fire, a slow-respawning worker would
     // trip the threshold again before its listener bound, causing a
     // pathological kill-respawn loop. Lock that invariant.
-    const probe = vi.fn().mockResolvedValue(false);
-    const onUnresponsive = vi.fn();
+    const probe = recorder(async () => false);
+    const onUnresponsive = recorder(noop);
     const watcher = startLivenessWatcher({
       port: 1234,
       probe,
@@ -134,18 +162,18 @@ describe('startLivenessWatcher', () => {
     });
 
     await advanceTicks(2, 1000);
-    expect(onUnresponsive).toHaveBeenCalledTimes(1);
+    expect(onUnresponsive.calls).toHaveLength(1);
 
     // Three MORE failed ticks should yield only ONE more onUnresponsive
     // (after threshold of 2), not three or four.
     await advanceTicks(2, 1000);
-    expect(onUnresponsive).toHaveBeenCalledTimes(2);
+    expect(onUnresponsive.calls).toHaveLength(2);
     watcher.stop();
   });
 
   it('stop() halts further probing', async () => {
-    const probe = vi.fn().mockResolvedValue(false);
-    const onUnresponsive = vi.fn();
+    const probe = recorder(async () => false);
+    const onUnresponsive = recorder(noop);
     const watcher = startLivenessWatcher({
       port: 1234,
       probe,
@@ -155,11 +183,11 @@ describe('startLivenessWatcher', () => {
     });
 
     await advanceTicks(2, 1000);
-    const callsBeforeStop = probe.mock.calls.length;
+    const callsBeforeStop = probe.calls.length;
     watcher.stop();
 
     await advanceTicks(10, 1000);
-    expect(probe.mock.calls.length).toBe(callsBeforeStop);
+    expect(probe.calls.length).toBe(callsBeforeStop);
   });
 
   it('does not pile up concurrent probes when a probe is slow', async () => {
@@ -167,7 +195,7 @@ describe('startLivenessWatcher', () => {
     // drop the second tick rather than queue another probe — otherwise a
     // slow worker (e.g. CPU-bound) generates a probe storm.
     let resolveSlowProbe: (alive: boolean) => void;
-    const probe = vi.fn().mockImplementation(
+    const probe = recorder(
       () =>
         new Promise<boolean>((resolve) => {
           resolveSlowProbe = resolve;
@@ -176,47 +204,47 @@ describe('startLivenessWatcher', () => {
     const watcher = startLivenessWatcher({
       port: 1234,
       probe,
-      onUnresponsive: vi.fn(),
+      onUnresponsive: recorder(noop),
       intervalMs: 1000,
     });
 
     await advanceTicks(1, 1000);
-    expect(probe).toHaveBeenCalledTimes(1);
+    expect(probe.calls).toHaveLength(1);
     await advanceTicks(3, 1000);
-    expect(probe).toHaveBeenCalledTimes(1);
+    expect(probe.calls).toHaveLength(1);
 
     resolveSlowProbe!(true);
     await advanceTicks(1, 1000);
-    expect(probe).toHaveBeenCalledTimes(2);
+    expect(probe.calls).toHaveLength(2);
     watcher.stop();
   });
 
   it('passes the configured host through to the probe', async () => {
-    const probe = vi.fn().mockResolvedValue(true);
+    const probe = recorder(async () => true);
     const watcher = startLivenessWatcher({
       port: 1234,
       host: '::1',
       probe,
-      onUnresponsive: vi.fn(),
+      onUnresponsive: recorder(noop),
       intervalMs: 1000,
       timeoutMs: 250,
     });
 
     await advanceTicks(1, 1000);
-    expect(probe).toHaveBeenCalledWith(1234, '::1', 250);
+    expect(probe.calls[0]).toEqual([1234, '::1', 250]);
     watcher.stop();
   });
 
   it('ignores a probe result that resolves after stop()', async () => {
     let resolveProbe: (alive: boolean) => void;
-    const probe = vi.fn().mockImplementation(
+    const probe = recorder(
       () =>
         new Promise<boolean>((resolve) => {
           resolveProbe = resolve;
         }),
     );
-    const onUnresponsive = vi.fn();
-    const onFailure = vi.fn();
+    const onUnresponsive = recorder(noop);
+    const onFailure = recorder((_c: number) => undefined);
     const watcher = startLivenessWatcher({
       port: 1234,
       probe,
@@ -232,14 +260,14 @@ describe('startLivenessWatcher', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(onFailure).not.toHaveBeenCalled();
-    expect(onUnresponsive).not.toHaveBeenCalled();
+    expect(onFailure.calls).toEqual([]);
+    expect(onUnresponsive.calls).toEqual([]);
   });
 
   it('healthy probes never trigger onFailure / onUnresponsive', async () => {
-    const probe = vi.fn().mockResolvedValue(true);
-    const onUnresponsive = vi.fn();
-    const onFailure = vi.fn();
+    const probe = recorder(async () => true);
+    const onUnresponsive = recorder(noop);
+    const onFailure = recorder((_c: number) => undefined);
     const watcher = startLivenessWatcher({
       port: 1234,
       probe,
@@ -250,8 +278,8 @@ describe('startLivenessWatcher', () => {
     });
 
     await advanceTicks(10, 1000);
-    expect(onUnresponsive).not.toHaveBeenCalled();
-    expect(onFailure).not.toHaveBeenCalled();
+    expect(onUnresponsive.calls).toEqual([]);
+    expect(onFailure.calls).toEqual([]);
     watcher.stop();
   });
 
@@ -266,10 +294,10 @@ describe('startLivenessWatcher', () => {
     // it enters a bounded grace window during which failures are
     // suppressed. The "still armed after the window" case is covered in
     // the dedicated `re-arms SIGKILL after shutdownGraceMs elapses` test.
-    const probe = vi.fn().mockResolvedValue(false);
-    const onUnresponsive = vi.fn();
-    const onFailure = vi.fn();
-    const isShuttingDown = vi.fn().mockReturnValue(true);
+    const probe = recorder(async () => false);
+    const onUnresponsive = recorder(noop);
+    const onFailure = recorder((_c: number) => undefined);
+    const isShuttingDown = recorder(() => true);
     const watcher = startLivenessWatcher({
       port: 1234,
       probe,
@@ -283,9 +311,9 @@ describe('startLivenessWatcher', () => {
     });
 
     await advanceTicks(5, 1000);
-    expect(onUnresponsive).not.toHaveBeenCalled();
-    expect(onFailure).not.toHaveBeenCalled();
-    expect(isShuttingDown).toHaveBeenCalled();
+    expect(onUnresponsive.calls).toEqual([]);
+    expect(onFailure.calls).toEqual([]);
+    expect(isShuttingDown.calls.length).toBeGreaterThan(0);
     watcher.stop();
   });
 
@@ -293,9 +321,9 @@ describe('startLivenessWatcher', () => {
     // Mirror image of the previous test: api.port present + probe failing
     // means the worker is genuinely a zombie (event loop wedged after a
     // partial shutdown attempt), and the watcher must still trip.
-    const probe = vi.fn().mockResolvedValue(false);
-    const onUnresponsive = vi.fn();
-    const isShuttingDown = vi.fn().mockReturnValue(false);
+    const probe = recorder(async () => false);
+    const onUnresponsive = recorder(noop);
+    const isShuttingDown = recorder(() => false);
     const watcher = startLivenessWatcher({
       port: 1234,
       probe,
@@ -306,7 +334,7 @@ describe('startLivenessWatcher', () => {
     });
 
     await advanceTicks(3, 1000);
-    expect(onUnresponsive).toHaveBeenCalledTimes(1);
+    expect(onUnresponsive.calls).toHaveLength(1);
     watcher.stop();
   });
 
@@ -315,9 +343,9 @@ describe('startLivenessWatcher', () => {
     // api.port), we MUST NOT silently disarm — that would let a real zombie
     // hide behind a flaky FS. Treat detector errors as "not shutting down"
     // and keep counting failures.
-    const probe = vi.fn().mockResolvedValue(false);
-    const onUnresponsive = vi.fn();
-    const isShuttingDown = vi.fn().mockRejectedValue(new Error('FS busy'));
+    const probe = recorder(async () => false);
+    const onUnresponsive = recorder(noop);
+    const isShuttingDown = recorder(async () => { throw new Error('FS busy'); });
     const watcher = startLivenessWatcher({
       port: 1234,
       probe,
@@ -328,7 +356,7 @@ describe('startLivenessWatcher', () => {
     });
 
     await advanceTicks(2, 1000);
-    expect(onUnresponsive).toHaveBeenCalledTimes(1);
+    expect(onUnresponsive.calls).toHaveLength(1);
     watcher.stop();
   });
 
@@ -336,18 +364,18 @@ describe('startLivenessWatcher', () => {
     // Performance: the supervisor probes every 30s in production. We only
     // need to consult `isShuttingDown` when the probe FAILS — checking on
     // every healthy tick wastes a syscall in the steady state.
-    const probe = vi.fn().mockResolvedValue(true);
-    const isShuttingDown = vi.fn().mockReturnValue(false);
+    const probe = recorder(async () => true);
+    const isShuttingDown = recorder(() => false);
     const watcher = startLivenessWatcher({
       port: 1234,
       probe,
-      onUnresponsive: vi.fn(),
+      onUnresponsive: recorder(noop),
       isShuttingDown,
       intervalMs: 1000,
     });
 
     await advanceTicks(5, 1000);
-    expect(isShuttingDown).not.toHaveBeenCalled();
+    expect(isShuttingDown.calls).toEqual([]);
     watcher.stop();
   });
 
@@ -358,9 +386,9 @@ describe('startLivenessWatcher', () => {
     // or respawn the worker. The fix: keep probing during shutdown, but
     // resume counting failures after a bounded grace window so wedged
     // teardowns still get force-killed.
-    const probe = vi.fn().mockResolvedValue(false);
-    const onUnresponsive = vi.fn();
-    const isShuttingDown = vi.fn().mockReturnValue(true);
+    const probe = recorder(async () => false);
+    const onUnresponsive = recorder(noop);
+    const isShuttingDown = recorder(() => true);
     const watcher = startLivenessWatcher({
       port: 1234,
       probe,
@@ -373,20 +401,20 @@ describe('startLivenessWatcher', () => {
 
     // Within grace window: no SIGKILL even though probes are failing.
     await advanceTicks(4, 1000);
-    expect(onUnresponsive).not.toHaveBeenCalled();
+    expect(onUnresponsive.calls).toEqual([]);
 
     // After grace window expires, consecutive failures start counting
     // again; with threshold=2 the watcher trips on the next 2 failed
     // probes.
     await advanceTicks(3, 1000);
-    expect(onUnresponsive).toHaveBeenCalledTimes(1);
+    expect(onUnresponsive.calls).toHaveLength(1);
     watcher.stop();
   });
 
   it('resets stale failure count when entering shutdown grace', async () => {
-    const probe = vi.fn().mockResolvedValue(false);
-    const onUnresponsive = vi.fn();
-    const onFailure = vi.fn();
+    const probe = recorder(async () => false);
+    const onUnresponsive = recorder(noop);
+    const onFailure = recorder((_c: number) => undefined);
     let shuttingDown = false;
     const watcher = startLivenessWatcher({
       port: 1234,
@@ -400,15 +428,15 @@ describe('startLivenessWatcher', () => {
     });
 
     await advanceTicks(2, 1000);
-    expect(onFailure).toHaveBeenCalledTimes(2);
+    expect(onFailure.calls).toHaveLength(2);
     shuttingDown = true;
     await advanceTicks(3, 1000);
-    expect(onUnresponsive).not.toHaveBeenCalled();
+    expect(onUnresponsive.calls).toEqual([]);
 
     await advanceTicks(2, 1000);
-    expect(onUnresponsive).not.toHaveBeenCalled();
+    expect(onUnresponsive.calls).toEqual([]);
     await advanceTicks(1, 1000);
-    expect(onUnresponsive).toHaveBeenCalledTimes(1);
+    expect(onUnresponsive.calls).toHaveLength(1);
     watcher.stop();
   });
 
@@ -416,9 +444,9 @@ describe('startLivenessWatcher', () => {
     // Operators who explicitly want the rc.11-and-earlier "never SIGKILL
     // during graceful shutdown" semantic can opt back in with a negative
     // grace value.
-    const probe = vi.fn().mockResolvedValue(false);
-    const onUnresponsive = vi.fn();
-    const isShuttingDown = vi.fn().mockReturnValue(true);
+    const probe = recorder(async () => false);
+    const onUnresponsive = recorder(noop);
+    const isShuttingDown = recorder(() => true);
     const watcher = startLivenessWatcher({
       port: 1234,
       probe,
@@ -430,7 +458,7 @@ describe('startLivenessWatcher', () => {
     });
 
     await advanceTicks(20, 1000);
-    expect(onUnresponsive).not.toHaveBeenCalled();
+    expect(onUnresponsive.calls).toEqual([]);
     watcher.stop();
   });
 });

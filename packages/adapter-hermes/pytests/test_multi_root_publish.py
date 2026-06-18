@@ -176,15 +176,15 @@ def test_all_duplicate_roots_collapse_to_single_call(recording_client):
     assert body["clearAfter"] is True
 
 
-# -- dkg_publish (one-shot) uses the ATOMIC assertionName fork --------------
+# -- dkg_publish (one-shot) uses the direct publish route -------------------
 # (Fast-follow: parity with OpenClaw + MCP. The selection/loop/dedup above is
 #  still used by the explicit CG-wide dkg_shared_memory_publish tool.)
 
 import json
 
 
-class _AssertionNameProbe:
-    """Fake client recording the assertionName-fork one-shot publish."""
+class _DirectPublishProbe:
+    """Fake client recording the direct one-shot publish."""
 
     def __init__(self):
         self.publish_quads_call = None
@@ -202,11 +202,11 @@ def _publish_provider(plugin_module):
     p = plugin_module.DKGMemoryProvider()
     p._offline = False
     p._config = {"publish_tool": "direct", "allow_direct_publish": True}
-    p._client = _AssertionNameProbe()
+    p._client = _DirectPublishProbe()
     return p
 
 
-def test_handle_publish_routes_to_assertionname_fork(plugin_module):
+def test_handle_publish_routes_to_direct_publish(plugin_module):
     p = _publish_provider(plugin_module)
     out = json.loads(p.handle_tool_call("dkg_publish", {
         "context_graph_id": "cg:test",
@@ -244,245 +244,84 @@ def test_handle_publish_result_has_no_per_root_shape(plugin_module):
         assert key not in out, key
 
 
-def test_dkg_publish_description_atomic_mint_two_step(plugin_module):
-    # FIX L (#1084:324): the ATOMIC claim is scoped to the on-chain MINT
-    # (multi-root-safe); the whole helper is a TWO-STEP create-then-publish that
-    # can partially fail — it must NOT be called "one ATOMIC operation".
+def test_dkg_publish_description_direct_publish(plugin_module):
     p = _publish_provider(plugin_module)
     desc = next(s for s in p.get_tool_schemas() if s["name"] == "dkg_publish")["description"]
+    assert "direct publish" in desc.lower()
+    assert "shared working memory" in desc.lower()
+    assert "does not depend" in desc.lower()
     assert "atomic" in desc.lower()
     assert "one ATOMIC operation" not in desc
-    assert "TWO-STEP" in desc or "two-step" in desc.lower()
-    assert "partially fail" in desc.lower()
+    assert "TWO-STEP" not in desc
+    assert "two-step" not in desc.lower()
+    assert "assertionName" not in desc
     assert "multi-root-safe" in desc
     assert "NON-ATOMIC" not in desc
     assert "per-root" not in desc.lower()
 
 
-# -- client.publish_quads payload shaping (assertionName fork) ---------------
+# -- client.publish_quads payload shaping (direct publish route) -------------
 
-def test_publish_quads_two_calls_create_then_publish_by_name(recording_client):
+def test_publish_quads_posts_inline_quads_to_direct_publish(recording_client):
     client = recording_client
-
-    def responder(path, body):
-        if path == "/api/knowledge-assets":
-            # the create route returns merkleRoot (a hex string), not a seal object
-            return {"assertionUri": "urn:a", "merkleRoot": "0xr"}
-        return {"kaId": "ka", "ual": "did:dkg:1/0xabc/5", "status": "confirmed"}
-
-    client.responder = responder
+    client.responder = lambda path, body: {
+        "kaId": "ka", "ual": "did:dkg:1/0xabc/5", "status": "confirmed",
+    }
     result = client.publish_quads("did:dkg:context-graph:cg", [
         {"subject": "urn:s1", "predicate": "urn:p", "object": "x", "graph": "urn:g"},
         {"subject": "urn:s2", "predicate": "urn:p", "object": "y"},
     ])
     paths = [p for p, _ in client.posts]
-    assert paths == ["/api/knowledge-assets", "/api/shared-memory/publish"]
-    create_body = client.posts[0][1]
-    assert create_body["contextGraphId"] == "cg"
-    assert create_body["promote"] is True
-    assert create_body["name"].startswith("hermes-publish-")
-    # graph stripped on the create quads (CONTRACT §0 invariant 2)
-    assert all(set(q.keys()) == {"subject", "predicate", "object"} for q in create_body["quads"])
-    publish_body = client.posts[1][1]
-    # assertionName fork — name only, NO selection
-    assert publish_body == {"contextGraphId": "cg", "assertionName": create_body["name"]}
+    assert paths == ["/api/knowledge-assets/publish"]
+    publish_body = client.posts[0][1]
+    assert publish_body["contextGraphId"] == "cg"
+    assert publish_body["quads"] == [
+        {"subject": "urn:s1", "predicate": "urn:p", "object": "x", "graph": "urn:g"},
+        {"subject": "urn:s2", "predicate": "urn:p", "object": "y", "graph": ""},
+    ]
     assert "selection" not in publish_body
-    # merged result surfaces ual/assertionUri/merkleRoot/assertionName
+    assert "name" not in publish_body
     assert result["ual"] == "did:dkg:1/0xabc/5"
-    assert result["assertionUri"] == "urn:a"
-    assert result["merkleRoot"] == "0xr"
-    assert "seal" not in result  # FIX J: the always-None seal is gone
-    assert result["assertionName"] == create_body["name"]
 
 
-def test_publish_quads_unique_name_per_call(recording_client):
+def test_publish_quads_forwards_sub_graph_name(recording_client):
     client = recording_client
-    client.responder = lambda path, body: (
-        {"assertionUri": "u"} if path == "/api/knowledge-assets" else {"status": "confirmed"}
-    )
-    client.publish_quads("cg", [{"subject": "urn:s", "predicate": "urn:p", "object": "o"}])
-    n1 = client.posts[0][1]["name"]
-    client.posts.clear()
-    client.publish_quads("cg", [{"subject": "urn:s", "predicate": "urn:p", "object": "o"}])
-    n2 = client.posts[0][1]["name"]
-    assert n1 != n2
-
-
-def test_publish_quads_create_failure_short_circuits(recording_client):
-    # FIX W (#1084:743): the create HARD-failure must surface the assertionName so a
-    # created-but-lost-response is recoverable by name (mirrors the share/publish
-    # failure branches) — NOT return the raw error verbatim, which drops the name.
-    client = recording_client
-    client.responder = lambda path, body: (
-        {"success": False, "error": "boom"} if path == "/api/knowledge-assets" else {"status": "confirmed"}
-    )
-    result = client.publish_quads("cg", [{"subject": "urn:s", "predicate": "urn:p", "object": "o"}])
-    assert result["success"] is False
-    assert result["assertionName"].startswith("hermes-publish-")
-    # the original daemon error stays visible, wrapped in recover-by-name guidance
-    assert "boom" in result["error"]
-    assert result["assertionName"] in result["error"]
-    assert "before recreating" in result["error"]
-    # FIX Y (#1076:1047): a created asset is auto-shared to SWM (WM draft empty), so
-    # recovery must point at dkg_knowledge_asset_history (lifecycle state, any layer)
-    # and NOT dkg_knowledge_asset_query (the WM-draft reader, which would read 0).
-    assert "dkg_knowledge_asset_history" in result["error"]
-    assert "not dkg_knowledge_asset_query" in result["error"]
-    # publish was never attempted
-    assert [p for p, _ in client.posts] == ["/api/knowledge-assets"]
-
-
-def test_publish_quads_create_failure_carries_sub_graph_name(recording_client):
-    # FIX W: recovery by name needs the sub-graph the create targeted.
-    client = recording_client
-    client.responder = lambda path, body: (
-        {"success": False, "error": "boom"} if path == "/api/knowledge-assets" else {"status": "confirmed"}
-    )
-    result = client.publish_quads(
-        "cg", [{"subject": "urn:s", "predicate": "urn:p", "object": "o"}],
-        sub_graph_name="evidence",
-    )
-    assert result["subGraphName"] == "evidence"
-    assert "sub-graph 'evidence'" in result["error"]
-
-
-# -- FIX A (#1084:714): create 207 with errors[] (share failed) -> no publish -
-
-def test_publish_quads_create_207_errors_does_not_publish(recording_client):
-    client = recording_client
-    client.responder = lambda path, body: (
-        {
-            "created": True, "assertionUri": "urn:a", "merkleRoot": "0xr",
-            "status": "wm-sealed",
-            "errors": [{"phase": "swm-share", "error": "gossip timeout"}],
-        }
-        if path == "/api/knowledge-assets" else {"kaId": "k", "ual": "u", "status": "confirmed"}
-    )
-    result = client.publish_quads("cg", _Q)
-    # the assertion was sealed but NOT shared -> must NOT publish
-    assert [p for p, _ in client.posts] == ["/api/knowledge-assets"]
-    assert result["success"] is False
-    # assertionName + recovery context surfaced
-    assert result["assertionName"].startswith("hermes-publish-")
-    assert result["assertionUri"] == "urn:a"
-    # FIX J (#1084:733): carry merkleRoot (the create proof), not the always-None seal
-    assert result["merkleRoot"] == "0xr"
-    assert "seal" not in result
-    assert "swm-share" in result["error"]
-    assert "NOT shared" in result["error"]
-    assert "recreate" in result["error"].lower()
-    # FIX F (#1084:742): point to dkg_knowledge_asset_share + _publish, NOT
-    # dkg_shared_memory_publish (which can't retry by name).
-    assert "dkg_knowledge_asset_share" in result["error"]
-    assert "dkg_knowledge_asset_publish" in result["error"]
-    assert "dkg_shared_memory_publish" not in result["error"]
-
-
-def test_publish_quads_create_empty_errors_publishes(recording_client):
-    client = recording_client
-    client.responder = lambda path, body: (
-        {"created": True, "assertionUri": "urn:a", "errors": []}
-        if path == "/api/knowledge-assets" else {"kaId": "k", "ual": "u", "status": "confirmed"}
-    )
-    result = client.publish_quads("cg", _Q)
-    assert [p for p, _ in client.posts] == ["/api/knowledge-assets", "/api/shared-memory/publish"]
-    assert result["ual"] == "u"
-
-
-# -- FIX B (#1084:723): publish fails after create+share -> keep assertionName -
-
-def test_publish_quads_publish_failure_merges_assertion_name(recording_client):
-    client = recording_client
-    client.responder = lambda path, body: (
-        {"assertionUri": "urn:a", "merkleRoot": "0xr", "swmShared": True}
-        if path == "/api/knowledge-assets"
-        else {"success": False, "error": "chain revert: insufficient TRAC"}
-    )
-    result = client.publish_quads("cg", _Q)
-    assert [p for p, _ in client.posts] == ["/api/knowledge-assets", "/api/shared-memory/publish"]
-    assert result["success"] is False
-    # the random name is kept (don't recreate — retry by name)
-    assert result["assertionName"].startswith("hermes-publish-")
-    assert result["assertionUri"] == "urn:a"
-    # FIX J (#1084:733): carry merkleRoot, not the always-None seal
-    assert result["merkleRoot"] == "0xr"
-    assert "seal" not in result
-    assert "insufficient TRAC" in result["error"]
-    assert "shared to SWM" in result["error"]
-    assert "Retry the publish" in result["error"]
-    assert "recreate" in result["error"].lower()
-    # FIX F (#1084:742): retry-by-name points to dkg_knowledge_asset_publish only.
-    assert "dkg_knowledge_asset_publish" in result["error"]
-    assert "dkg_shared_memory_publish" not in result["error"]
-
-
-# -- FIX O (#1084:730): recovery payloads carry subGraphName + mention it -------
-
-def test_publish_quads_create_207_carries_sub_graph_name(recording_client):
-    client = recording_client
-    client.responder = lambda path, body: (
-        {"created": True, "assertionUri": "urn:a", "merkleRoot": "0xr",
-         "errors": [{"phase": "swm-share", "error": "x"}]}
-        if path == "/api/knowledge-assets" else {"status": "confirmed"}
-    )
+    client.responder = lambda path, body: {"kaId": "k", "status": "confirmed"}
     result = client.publish_quads("cg", _Q, sub_graph_name="notes")
-    assert result["subGraphName"] == "notes"
-    assert "sub-graph 'notes'" in result["error"]
-    assert "sub_graph_name" in result["error"]  # guidance mentions it for recovery
+    assert result["kaId"] == "k"
+    assert client.posts[0][1]["subGraphName"] == "notes"
 
-
-def test_publish_quads_publish_fail_carries_sub_graph_name(recording_client):
-    client = recording_client
-    client.responder = lambda path, body: (
-        {"assertionUri": "urn:a", "merkleRoot": "0xr", "swmShared": True}
-        if path == "/api/knowledge-assets"
-        else {"success": False, "error": "chain revert"}
-    )
-    result = client.publish_quads("cg", _Q, sub_graph_name="notes")
-    assert result["subGraphName"] == "notes"
-    assert "sub-graph 'notes'" in result["error"]
-    assert "sub_graph_name" in result["error"]
-
-
-def test_publish_quads_recovery_omits_sub_graph_name_when_absent(recording_client):
-    client = recording_client
-    client.responder = lambda path, body: (
-        {"created": True, "errors": [{"phase": "swm-share", "error": "x"}]}
-        if path == "/api/knowledge-assets" else {"status": "confirmed"}
-    )
-    result = client.publish_quads("cg", _Q)
-    assert "subGraphName" not in result
-    assert "sub-graph" not in result["error"]
-
-
-# -- FIX R (#1084:787): publish_quads annotates a 207 at the client ------------
 
 def test_publish_quads_annotates_207_partial_at_client(recording_client):
     client = recording_client
-    client.responder = lambda path, body: (
-        {"assertionUri": "urn:a", "merkleRoot": "0xr"}
-        if path == "/api/knowledge-assets"
-        else {"kaId": "k", "ual": "u", "status": "confirmed", "contextGraphError": "bind failed"}
-    )
+    client.responder = lambda path, body: {
+        "kaId": "k", "ual": "u", "status": "confirmed", "contextGraphError": "bind failed",
+    }
     # the client itself (no handler wrap) returns the partial-annotated result
     result = client.publish_quads("cg", _Q)
     assert result["partial"] is True
     assert "Partial publish" in result["warning"]
     assert "bind failed" in result["warning"]
     assert result["ual"] == "u"
-    assert result["assertionName"].startswith("hermes-publish-")
+    assert "assertionName" not in result
 
 
 def test_publish_quads_clean_200_not_partial(recording_client):
     client = recording_client
-    client.responder = lambda path, body: (
-        {"assertionUri": "urn:a", "merkleRoot": "0xr"}
-        if path == "/api/knowledge-assets"
-        else {"kaId": "k", "ual": "u", "status": "confirmed"}
-    )
+    client.responder = lambda path, body: {"kaId": "k", "ual": "u", "status": "confirmed"}
     result = client.publish_quads("cg", _Q)
     assert "partial" not in result
     assert "warning" not in result
+
+
+def test_publish_quads_direct_failure_has_no_recovery_assertion_name(recording_client):
+    client = recording_client
+    client.responder = lambda path, body: {"success": False, "error": "NO_DATA_IN_SWM"}
+    result = client.publish_quads("cg", _Q)
+    assert result["success"] is False
+    assert result["error"] == "NO_DATA_IN_SWM"
+    assert "assertionName" not in result
+    assert [p for p, _ in client.posts] == ["/api/knowledge-assets/publish"]
 
 
 def test_annotate_207_partial_client_helper(client_module):
@@ -496,8 +335,8 @@ def test_annotate_207_partial_client_helper(client_module):
 
 
 # -- Phase B (fast-follow): register_if_needed on the one-shot dkg_publish ----
-# The atomic assertionName fork does NOT auto-register the CG (LU-6 is selection-
-# fork only), so dkg_publish gets its own register lever (mirrors §G).
+# Direct publish does NOT auto-register the CG, so dkg_publish gets its own
+# register lever (mirrors §G).
 
 _Q = [{"subject": "urn:s", "predicate": "urn:p", "object": "o"}]
 
@@ -572,7 +411,7 @@ def test_publish_register_already_registered_short_circuits(plugin_module):
 def test_publish_207_context_graph_error_surfaces_partial(plugin_module):
     p = _register_provider(plugin_module, {"registered": "cg"}, publish_response={
         "kaId": "ka", "ual": "did:dkg:1/0xabc/5", "status": "confirmed",
-        "assertionName": "hermes-publish-x", "contextGraphError": "cg bind timed out",
+        "contextGraphError": "cg bind timed out",
     })
     out = json.loads(p.handle_tool_call("dkg_publish", {
         "context_graph_id": "cg", "quads": _Q,
@@ -583,7 +422,7 @@ def test_publish_207_context_graph_error_surfaces_partial(plugin_module):
     # minted-on-chain identifiers stay visible
     assert out["ual"] == "did:dkg:1/0xabc/5"
     assert out["kaId"] == "ka"
-    assert out["assertionName"] == "hermes-publish-x"
+    assert "assertionName" not in out
 
 
 def test_publish_clean_200_not_marked_partial(plugin_module):
