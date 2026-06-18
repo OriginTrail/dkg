@@ -2957,6 +2957,29 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     expect(signSpy.calls).toEqual([]);
   });
 
+  it('enriches the SECOND raw TooLowAllowance before throwing the one-shot failure', async () => {
+    const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
+    const populate = recorder(async () => { throw rawTooLowAllowanceRevert(); });
+    const kaContract = { publish: { populateTransaction: populate } };
+
+    let thrown: any;
+    try {
+      await (a as any).populateAndSignV10WithAllowanceRecovery(
+        signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
+      );
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown.message).toContain('TooLowAllowance');
+    expect(thrown.message).not.toContain('unknown custom error');
+    expect(thrown.revert?.name).toBe('TooLowAllowance');
+    expect(populate.calls).toHaveLength(2);
+    expect(ensureSpy.calls).toHaveLength(1);
+    expect(signSpy.calls).toEqual([]);
+  });
+
   it('propagates an unrelated revert immediately without forcing a re-approve', async () => {
     const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
     const populate = recorder(async () => { throw new Error('execution reverted: NotBatchPublisher()'); });
