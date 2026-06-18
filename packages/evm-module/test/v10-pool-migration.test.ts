@@ -85,6 +85,7 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
   let accounts: SignerWithAddress[];
   let NFT: DKGStakingConvictionNFT;
   let StakingV10Contract: StakingV10;
+  let HubContract: Hub;
   let SS: StakingStorage;
   let CSS: ConvictionStakingStorage;
   let ProfileContract: Profile;
@@ -94,6 +95,7 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
     hre.helpers.resetDeploymentsJson();
     ({
       accounts,
+      Hub: HubContract,
       NFT,
       StakingV10: StakingV10Contract,
       StakingStorage: SS,
@@ -578,6 +580,81 @@ describe('@integration OT-RFC-50 pool & allocate migration', function () {
       await expect(
         NFT.connect(accounts[2]).adminDrainOperatorFeesBatch([id], [accounts[0].address]),
       ).to.be.reverted;
+    });
+  });
+
+  // ===========================================================================
+  // selfMigrate — self-service straggler backstop + the freeze-first gate
+  // ===========================================================================
+  describe('selfMigrate (straggler backstop) + freeze gate', () => {
+    // register/unregister a dummy "Staking" name to simulate V8 Staking live/frozen
+    const setStakingLive = (live: boolean) =>
+      live
+        ? HubContract.connect(accounts[0]).setContractAddress('Staking', accounts[15].address)
+        : HubContract.connect(accounts[0]).removeContractByName('Staking');
+
+    it('a missed delegator self-migrates their OWN V8 stake into credit', async () => {
+      const d = accounts[2];
+      const id = await createProfile(1);
+      const stake = hre.ethers.parseEther('4200');
+      await seedV8Stake(d, id, stake);
+      // no "Staking" registered in the fixture = frozen state → drains allowed
+      await expect(NFT.connect(d).selfMigrate([id]))
+        .to.emit(NFT, 'MigrationStarted')
+        .withArgs(d.address, stake);
+      expect(await NFT.migrationCredit(d.address)).to.equal(stake);
+      expect(await SS.getDelegatorStakeBase(id, keyOf(d.address))).to.equal(0n);
+    });
+
+    it('reverts NothingToMigrate when the caller has no V8 stake', async () => {
+      const id = await createProfile(1);
+      await expect(NFT.connect(accounts[2]).selfMigrate([id])).to.be.revertedWithCustomError(NFT, 'NothingToMigrate');
+    });
+
+    it('can only drain the caller’s OWN key (keccak256(msg.sender)) — not someone else’s', async () => {
+      const victim = accounts[2];
+      const attacker = accounts[3];
+      const id = await createProfile(1);
+      const stake = hre.ethers.parseEther('1000');
+      await seedV8Stake(victim, id, stake);
+      // attacker self-migrates → drains keccak256(attacker), which holds nothing
+      await expect(NFT.connect(attacker).selfMigrate([id])).to.be.revertedWithCustomError(NFT, 'NothingToMigrate');
+      expect(await SS.getDelegatorStakeBase(id, keyOf(victim.address))).to.equal(stake); // victim untouched
+    });
+
+    it('freeze gate: drains revert while V8 Staking is live, succeed once frozen (admin + self)', async () => {
+      const d = accounts[2];
+      const id = await createProfile(1);
+      const stake = hre.ethers.parseEther('1000');
+      await seedV8Stake(d, id, stake);
+
+      await setStakingLive(true); // simulate V8 Staking still Hub-registered
+      await expect(NFT.connect(d).selfMigrate([id])).to.be.revertedWithCustomError(
+        StakingV10Contract,
+        'V8StakingStillLive',
+      );
+      // the same chokepoint gates the admin path too
+      await expect(NFT.connect(accounts[0]).adminDrainBatch([d.address], [id])).to.be.revertedWithCustomError(
+        StakingV10Contract,
+        'V8StakingStillLive',
+      );
+
+      await setStakingLive(false); // freeze
+      await NFT.connect(d).selfMigrate([id]);
+      expect(await NFT.migrationCredit(d.address)).to.equal(stake);
+    });
+
+    it('selfMigrateOperatorFee: node admin self-migrates the node fee; non-admin reverts', async () => {
+      const id = await createProfile(1); // admin = accounts[0]
+      const fee = hre.ethers.parseEther('300');
+      await TokenContract.mint(await SS.getAddress(), fee);
+      await SS.connect(accounts[0]).increaseOperatorFeeBalance(id, fee);
+
+      await expect(NFT.connect(accounts[2]).selfMigrateOperatorFee(id)).to.be.reverted; // not an admin
+      await expect(NFT.connect(accounts[0]).selfMigrateOperatorFee(id))
+        .to.emit(NFT, 'OperatorFeeMigrated')
+        .withArgs(id, accounts[0].address, fee);
+      expect(await NFT.migrationCredit(accounts[0].address)).to.equal(fee);
     });
   });
 

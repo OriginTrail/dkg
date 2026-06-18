@@ -152,6 +152,11 @@
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "V8StakingStillLive",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint256",

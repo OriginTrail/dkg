@@ -612,6 +612,32 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
         }
     }
 
+    /// @notice Self-service straggler backstop. The connected wallet drains ITS
+    ///         OWN V8 stake (keyed by `keccak256(msg.sender)`) across `sourceNodes`
+    ///         into its own migration credit. Admin-push (`adminDrainBatch`) is the
+    ///         primary path; this exists so any delegator the off-chain sweep
+    ///         missed can never be stranded. Permissionless and self-validating —
+    ///         you can only ever drain the V8 key that hashes from your own
+    ///         address, into your own credit. Works after V8 Staking is
+    ///         unregistered (the drain goes through StakingStorage directly); the
+    ///         worker's freeze gate means it is only callable once V8 Staking is
+    ///         frozen (so it cannot race live V8 reward/sharding accounting).
+    function selfMigrate(uint72[] calldata sourceNodes) external returns (uint96 credited) {
+        credited = _drainAll(msg.sender, sourceNodes);
+        if (credited == 0) revert NothingToMigrate();
+        emit MigrationStarted(msg.sender, credited);
+    }
+
+    /// @notice Self-service operator-fee backstop: the node admin (msg.sender,
+    ///         validated against ADMIN_KEY inside `drainOperatorFeeToCredit`)
+    ///         drains the node's V8 operator fee into its own migration credit.
+    ///         Same freeze-gated, post-unregister-safe properties as `selfMigrate`.
+    function selfMigrateOperatorFee(uint72 identityId) external returns (uint96 credited) {
+        credited = stakingV10.drainOperatorFeeToCredit(identityId, msg.sender);
+        if (credited == 0) revert NothingToMigrate();
+        emit OperatorFeeMigrated(identityId, msg.sender, credited);
+    }
+
     /// @notice Spend `amount` of the caller's migration credit into a fresh V10
     ///         conviction position on `targetNode` at `lockTier`. Repeatable
     ///         until the credit is spent. Any tier-6/12 allocation receives the

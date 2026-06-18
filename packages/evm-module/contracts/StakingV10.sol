@@ -199,6 +199,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     error RewardOverflow();
     error PositionNotFound();
     error UnclaimedEpochs();
+    error V8StakingStillLive();
 
     // ========================================================================
     // Constructor + initialize
@@ -881,6 +882,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         address delegator,
         uint72 identityId
     ) external onlyConvictionNFT returns (uint96 total) {
+        // Freeze-first invariant (on-chain): the V8 `Staking` logic must be
+        // unregistered before ANY drain (admin sweep OR self-migrate). A drain
+        // zeroes stakeBase without settling the reward cursor; if V8 `Staking`
+        // is still live it keeps computing rewards/sharding off StakingStorage,
+        // so draining against live state corrupts it. Gating here covers every
+        // drain path through one chokepoint; selfMigrate auto-opens at freeze.
+        if (hub.isContract("Staking")) revert V8StakingStillLive();
         bytes32 v8Key = keccak256(abi.encodePacked(delegator));
         StakingStorage ss = stakingStorage;
         uint96 stakeBase = ss.getDelegatorStakeBase(identityId, v8Key);
@@ -927,6 +935,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         uint72 identityId,
         address operator
     ) external onlyConvictionNFT returns (uint96 total) {
+        // Freeze-first invariant (see drainV8ToCredit) — no fee drain while V8
+        // Staking is still live and could finalize/restake the same balance.
+        if (hub.isContract("Staking")) revert V8StakingStillLive();
         StakingStorage ss = stakingStorage;
         uint96 feeBalance = ss.getOperatorFeeBalance(identityId);
         uint96 feeRequest = ss.getOperatorFeeWithdrawalRequestAmount(identityId);
