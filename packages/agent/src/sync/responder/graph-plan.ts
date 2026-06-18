@@ -427,13 +427,17 @@ export async function readDurableDataPage(params: {
   }).sort(compareCodePoint);
 
   let assertionGraphs: Set<string> | null = null;
+  // Per-request memo: the admission walk re-ASKs the same ancestor URIs for
+  // every candidate graph; this collapses ~O(graphs × segments) identical
+  // `isKnownContextGraph` ASKs to ~O(unique-URIs) without changing the result.
+  const isKnownMemo = createIsKnownContextGraphMemo(params.store);
   const isAdmitted = (signal?: AbortSignal) => async (graph: string): Promise<boolean> => {
     if (graph.includes('/assertion/')) {
       assertionGraphs ??= await readAdmittedAssertionGraphs(params.store, params.contextGraphId, signal);
       const assertionGraph = graph.endsWith('/_meta') ? graph.slice(0, -'/_meta'.length) : graph;
       if (!assertionGraphs.has(assertionGraph)) return false;
     }
-    return !(await isDescendantOfKnownChildContextGraph(params.store, cgPrefix, graph, signal));
+    return !(await isDescendantOfKnownChildContextGraph(params.store, cgPrefix, graph, signal, isKnownMemo));
   };
 
   if (params.sinceBatchId == null) {
@@ -638,10 +642,14 @@ async function readAdmittedSwmSubGraphNames(
   signal?: AbortSignal,
 ): Promise<string[]> {
   const cgPrefix = contextGraphDataGraphUri(contextGraphId);
+  // Per-call memo dedupes the per-sub-graph isKnownContextGraph ASKs (same
+  // un-memoized admission storm as the durable-data path; deterministic ASK,
+  // read-only request).
+  const isKnown = createIsKnownContextGraphMemo(store);
   const names: string[] = [];
   for (const name of await readRegisteredSubGraphNames(store, contextGraphId, signal)) {
     const childCgUri = `${cgPrefix}/${name}`;
-    if (await isKnownContextGraph(store, childCgUri, signal)) continue;
+    if (await isKnown(childCgUri, signal)) continue;
     names.push(name);
   }
   return names.sort(compareCodePoint);
@@ -708,25 +716,56 @@ async function isKnownContextGraph(
   return res.type === 'boolean' && res.value;
 }
 
+/**
+ * Resolves `isKnownContextGraph(uri)` and is the SAME deterministic predicate;
+ * a memo just dedupes the redundant ASKs (admission walks the same ancestor
+ * URIs across every candidate graph). The admitted set is provably unchanged.
+ */
+type IsKnownContextGraphResolver = (uri: string, signal?: AbortSignal) => Promise<boolean>;
+
+/**
+ * Per-request memo for {@link isKnownContextGraph}. The admission walk
+ * (`isDescendantOfKnownChildContextGraph`) re-ASKs the same ancestor URIs for
+ * every candidate graph under a shared prefix; on a multi-sub-graph CG a single
+ * page build fires ~O(graphs × segments) identical ASKs. The memo collapses
+ * those to ~O(unique-URIs). Scope is ONE page request: the cache is created per
+ * `readDurableDataPage` call, sync is read-only so the ASK result cannot change
+ * mid-request, and the cached promise is bound to the first caller's signal —
+ * all admission callers within one request share that request's signal, so this
+ * is safe. Do NOT hoist this cache to a cross-request lifetime without reworking
+ * the abort-signal handling.
+ */
+function createIsKnownContextGraphMemo(store: TripleStore): IsKnownContextGraphResolver {
+  const cache = new Map<string, Promise<boolean>>();
+  return (uri, signal) => {
+    const cached = cache.get(uri);
+    if (cached) return cached;
+    const pending = isKnownContextGraph(store, uri, signal);
+    cache.set(uri, pending);
+    return pending;
+  };
+}
+
 async function isDescendantOfKnownChildContextGraph(
   store: TripleStore,
   cgPrefix: string,
   graph: string,
   signal?: AbortSignal,
+  isKnown: IsKnownContextGraphResolver = (uri, sig) => isKnownContextGraph(store, uri, sig),
 ): Promise<boolean> {
   if (graph === cgPrefix || !graph.startsWith(`${cgPrefix}/`)) return false;
   const remainder = graph.slice(cgPrefix.length + 1);
   const segments = remainder.split('/').filter(Boolean);
   if (isParentOwnedReservedGraphSegments(segments)) return false;
-  if (await isKnownContextGraph(store, graph, signal)) return true;
+  if (await isKnown(graph, signal)) return true;
   if (graph.endsWith('/_meta')) {
     const graphOwner = graph.slice(0, -'/_meta'.length);
-    if (await isKnownContextGraph(store, graphOwner, signal)) return true;
+    if (await isKnown(graphOwner, signal)) return true;
   }
   let childUri = cgPrefix;
   for (const segment of segments) {
     childUri = `${childUri}/${segment}`;
-    if (await isKnownContextGraph(store, childUri, signal)) return true;
+    if (await isKnown(childUri, signal)) return true;
   }
   return false;
 }
@@ -791,6 +830,53 @@ async function readRowsAcrossGraphs(
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
     .filter((row) => row.s && row.p && row.o && row.g)
     .sort(compareRows);
+}
+
+/**
+ * Like {@link readRowsAcrossGraphs} but pushes the SWM root-membership filter
+ * into SPARQL instead of materializing every quad and filtering in JS. The
+ * `FILTER` is placed at the WHERE level (after the `GRAPH ?g { ?s ?p ?o }`
+ * block, never inside it) so the store still streams only matching quads while
+ * the page-build cost drops from O(graph) to O(matched). The filter is the
+ * SAME shape already used by the durable-delta path
+ * ({@link durableDeltaWhereClauseForGraphs}): a subject is kept iff it is a
+ * fresh root or a genid descendant of one — byte-identical to the JS predicate
+ * `roots.has(s) || rootPrefixes.some((p) => s.startsWith(p))` with
+ * `rootPrefixes === root + "/.well-known/genid/"`.
+ */
+async function readRowsAcrossGraphsForRoots(
+  store: TripleStore,
+  graphs: readonly string[],
+  roots: ReadonlySet<string>,
+  signal?: AbortSignal,
+): Promise<SyncRow[]> {
+  const graphValuesClause = graphValues(graphs);
+  const rootValuesClause = rootValues(roots);
+  if (!graphValuesClause || !rootValuesClause) return [];
+  const res = await store.query(`
+    SELECT ?g ?s ?p ?o WHERE {
+      VALUES ?g { ${graphValuesClause} }
+      GRAPH ?g { ?s ?p ?o }
+      VALUES ?swmRoot { ${rootValuesClause} }
+      FILTER(sameTerm(?s, ?swmRoot) || STRSTARTS(STR(?s), CONCAT(STR(?swmRoot), "/.well-known/genid/")))
+    }
+  `, { signal });
+  if (res.type !== 'bindings') return [];
+  // The `VALUES ?swmRoot` join can yield a row once per matching root. A genid
+  // subject normally matches exactly one root, but a nested-genid subject could
+  // match two (one root being a genid-prefix of another), so dedupe to keep the
+  // old JS `.filter()` semantics of one row per quad.
+  const seen = new Set<string>();
+  const rows: SyncRow[] = [];
+  for (const binding of res.bindings) {
+    const row = { s: binding['s'], p: binding['p'], o: binding['o'], g: binding['g'] };
+    if (!row.s || !row.p || !row.o || !row.g) continue;
+    const key = `${row.g} ${row.s} ${row.p} ${row.o}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push(row);
+  }
+  return rows.sort(compareRows);
 }
 
 async function readRowsPageAcrossGraphs(
@@ -901,12 +987,19 @@ async function readFreshSwmDataRows(
     if (!graphSet.has(metaGraph)) continue;
     const roots = await readFreshSwmRoots(store, metaGraph, cutoffIso, signal);
     if (roots.size === 0) continue;
-    const rootPrefixes = [...roots].map((root) => `${root}/.well-known/genid/`);
-    const graphRows = await readRowsAcrossGraphs(store, candidateGraphsFor(graph), signal);
-    rows.push(...graphRows.filter((row) =>
-      roots.has(row.s) || rootPrefixes.some((prefix) => row.s.startsWith(prefix)),
-    ));
+    // Push the root-membership filter into SPARQL (was a full per-graph
+    // materialize + JS filter). Equivalent to the old predicate
+    // `roots.has(s) || rootPrefixes.some((p) => s.startsWith(p))`.
+    const graphRows = await readRowsAcrossGraphsForRoots(
+      store,
+      candidateGraphsFor(graph),
+      roots,
+      signal,
+    );
+    rows.push(...graphRows);
   }
+  // Post-merge sort across the multi-graph union is load-bearing: per-graph
+  // store ordering does not order the union, and pages slice this list.
   return rows.sort(compareRows);
 }
 
@@ -965,6 +1058,15 @@ async function readDurableMetaRows(
     }
   }
 
+  const matchesAssertionName = (subject: string): boolean => {
+    // Equivalent to `assertionNames.some((name) => subject.endsWith('/' + name))`
+    // but O(1): assertion names are single path segments, so the old predicate
+    // matches iff the subject's final segment is a known assertion name.
+    if (!subject.includes('/assertion/')) return false;
+    const lastSegment = subject.slice(subject.lastIndexOf('/') + 1);
+    return assertionNames.has(lastSegment);
+  };
+
   return rows.filter((row) =>
     row.s === cgEntity ||
     registeredSubGraphSubjects.has(row.s) ||
@@ -973,10 +1075,7 @@ async function readDurableMetaRows(
     nonWorkingLifecycles.has(row.s) ||
     assertionGraphs.has(row.s) ||
     eventSubjects.has(row.s) ||
-    (
-      row.s.includes('/assertion/') &&
-      [...assertionNames].some((name) => row.s.endsWith(`/${name}`))
-    ),
+    matchesAssertionName(row.s),
   );
 }
 
@@ -1087,6 +1186,10 @@ function durableDeltaGroupClause(
 
 function graphValues(graphs: readonly string[]): string {
   return dedupeStrings(graphs).map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
+}
+
+function rootValues(roots: ReadonlySet<string>): string {
+  return dedupeStrings([...roots]).map((root) => `<${assertSafeIri(root)}>`).join(' ');
 }
 
 function durableDataRowListCacheKey(scope: string, contextGraphId: string, sinceBatchId: bigint | null): string {
