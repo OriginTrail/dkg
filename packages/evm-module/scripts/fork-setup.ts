@@ -90,6 +90,54 @@ async function main() {
     }
   }
 
+  // ---- 2b. re-point the CSS consumers at the freshly-deployed CSS ----
+  // Ask / ShardingTable / RandomSampling cache the ConvictionStakingStorage
+  // address in their OWN initialize() (they read it from the Hub once). When we
+  // deploy a fresh CSS above and overwrite the Hub registration, those caches go
+  // stale — so allocate's tail (insertNode + recalculateActiveSet) would read the
+  // OLD CSS and the rehearsal's active-set path would be exercised against stale
+  // stake. Their initialize() is pure dependency-wiring (onlyHub, no initializer
+  // guard), so re-calling it re-reads the new CSS. Required for a faithful
+  // allocate-tail rehearsal on a Hub that already had a V10 CSS (PR #1192 [14]).
+  console.log('\nRe-pointing CSS consumers at the fresh CSS:');
+  let staleConsumer = false;
+  for (const n of ['Ask', 'ShardingTable', 'RandomSampling']) {
+    try {
+      const consumer = await ethers.getContractAt(n, await hub.getContractAddress(n));
+      await (await (consumer as any).connect(owner).initialize()).wait();
+      // Verify it ACTUALLY re-read the fresh CSS. The on-chain contract may be a
+      // PRE-CONVICTION version (e.g. Base Sepolia ships ShardingTable/Ask v1.0.0,
+      // which rank by V8 getNodeStake and have no CSS pointer) — then initialize()
+      // ran against old bytecode and re-wired nothing.
+      let ptr: string | undefined;
+      try {
+        ptr = await (consumer as any).convictionStakingStorage();
+      } catch {
+        ptr = undefined;
+      }
+      if (ptr && ptr.toLowerCase() === cssAddr.toLowerCase()) {
+        console.log(`  ${n}.initialize ✓ (re-read CSS = ${cssAddr})`);
+      } else {
+        staleConsumer = true;
+        console.log(
+          `  ⚠️  ${n} is PRE-CONVICTION (no CSS pointer) — cannot be re-wired by re-init. ` +
+            `allocate's active-set tail will NOT be faithful on this fork unless a conviction-aware ` +
+            `${n} is deployed onto the Hub.`,
+        );
+      }
+    } catch (e: any) {
+      console.log(`  ${n} re-point skipped (${e?.shortMessage ?? 'not registered'})`);
+    }
+  }
+  if (staleConsumer) {
+    console.log(
+      '\n  NOTE: this Hub has a pre-conviction active-set stack. The drain/credit/selfMigrate paths\n' +
+        '  still rehearse faithfully (they touch StakingStorage + CSS directly), but a faithful\n' +
+        "  allocate active-set tail needs the conviction-aware ShardingTable/Ask/RandomSampling\n" +
+        '  deployed here (the production cutover deploy ships them at current versions + initializes).',
+    );
+  }
+
   // ---- 3. conviction lock-credit ----
   await (await (wrapper as any).connect(owner).setConvictionCreditSeconds(CREDIT_SECONDS)).wait();
   console.log(`\nconvictionCreditSeconds = ${CREDIT_SECONDS} (${Number(CREDIT_SECONDS) / 86400}d) ✓`);

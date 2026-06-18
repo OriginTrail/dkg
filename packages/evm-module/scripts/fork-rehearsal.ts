@@ -137,6 +137,33 @@ async function main() {
   await (await (wrapper as any).connect(owner).initialize()).wait();
   console.log('  wrapper.initialize ✓');
 
+  // ---- 4b. re-point the CSS consumers at the fresh CSS (PR #1192 [14]) ----
+  // Ask / ShardingTable / RandomSampling cache the CSS address in their own
+  // initialize(); deploying a fresh CSS leaves those caches stale, so allocate's
+  // tail would read the OLD CSS. Re-init re-reads it — but only works if the
+  // on-chain contract is conviction-aware (has the CSS pointer); a pre-conviction
+  // version can't be re-wired and the allocate tail won't be faithful here.
+  console.log('\nRe-pointing CSS consumers at the fresh CSS:');
+  for (const n of ['Ask', 'ShardingTable', 'RandomSampling']) {
+    try {
+      const c = await ethers.getContractAt(n, await hub.getContractAddress(n));
+      await (await (c as any).connect(owner).initialize()).wait();
+      let ptr: string | undefined;
+      try {
+        ptr = await (c as any).convictionStakingStorage();
+      } catch {
+        ptr = undefined;
+      }
+      console.log(
+        ptr && ptr.toLowerCase() === cssAddr.toLowerCase()
+          ? `  ${n}.initialize ✓ (re-read CSS)`
+          : `  ⚠️  ${n} is PRE-CONVICTION — allocate's active-set tail is NOT faithful unless a conviction-aware ${n} is deployed here`,
+      );
+    } catch (e: any) {
+      console.log(`  ${n} re-point skipped (${e?.shortMessage ?? 'not registered'})`);
+    }
+  }
+
   // ---- 5. set the conviction lock-credit (universal 6/12; no eligibility/freeze) ----
   console.log('\nSetting the conviction lock-credit (as owner):');
   await (await (wrapper as any).connect(owner).setConvictionCreditSeconds(CREDIT_SECONDS)).wait();
