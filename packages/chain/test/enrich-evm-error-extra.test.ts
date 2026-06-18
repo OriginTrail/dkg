@@ -76,6 +76,32 @@ describe('enrichEvmError — raw ethers/provider fields', () => {
     expect((err as any).revert?.name).toBe('TooLowAllowance');
     expect(isTooLowAllowanceError(err)).toBe(true);
   });
+
+  it('walks common provider wrappers without scanning arbitrary fields', () => {
+    const err = {
+      message: 'execution reverted (unknown custom error)',
+      info: {
+        error: {
+          data: TOO_LOW_ALLOWANCE_HEX,
+        },
+      },
+    };
+
+    const name = enrichEvmError(err);
+
+    expect(name).toBe('TooLowAllowance');
+    expect((err as any).revert?.name).toBe('TooLowAllowance');
+    expect(isTooLowAllowanceError(err)).toBe(true);
+
+    const arbitrary = {
+      message: 'execution reverted (unknown custom error)',
+      randomEnvelope: {
+        data: TOO_LOW_ALLOWANCE_HEX,
+      },
+    };
+    expect(enrichEvmError(arbitrary)).toBeNull();
+    expect((arbitrary as any).revert).toBeUndefined();
+  });
 });
 
 describe('enrichEvmError — Hardhat-shape error message [CH-10]', () => {
