@@ -147,13 +147,13 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
     });
   }
 
-  async submitProof(leaf: Uint8Array | `0x${string}`, merkleProof: Uint8Array[]): Promise<TxResult> {
+  async submitProof(content: Uint8Array | `0x${string}`, merkleProof: Uint8Array[]): Promise<TxResult> {
     await this.init();
 
-    const leafHex = typeof leaf === 'string' ? leaf : ethers.hexlify(leaf);
-    if (!ethers.isHexString(leafHex, 32)) {
-      throw new Error('submitProof: leaf must be a 32-byte value (bytes32)');
-    }
+    // CONTENT-BINDING: the contract now takes the raw content (`bytes`) and
+    // derives `leaf = keccak256(content)` on-chain. No 32-byte guard — content
+    // is the public N-Triple / curated `_catalog` triple bytes of arbitrary length.
+    const contentHex = typeof content === 'string' ? content : ethers.hexlify(content);
     const proofHex = merkleProof.map((p) => ethers.hexlify(p));
 
     return this.withHubStaleRetry(async () => {
@@ -164,7 +164,7 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
         receipt = await this.sendContractTransaction(
           rs,
           'submitProof',
-          [leafHex, proofHex],
+          [contentHex, proofHex],
           this.signer,
           'submit random-sampling proof',
         );

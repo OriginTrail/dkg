@@ -15,8 +15,13 @@ export { MerkleTree, compareBytes } from './merkle.js';
 export {
   V10MerkleTree,
   computeCatalogRoot,
+  SENTINEL_NO_PRIVATE_V10,
+  SENTINEL_NO_PUBLIC_V10,
+  collapsePrivateDataHashV10,
+  structuredKARootV10,
   type CatalogTriple,
   type CatalogRootResult,
+  type StructuredKARootResult,
 } from './v10-merkle.js';
 
 export {
@@ -27,6 +32,7 @@ export {
 
 export {
   buildV10ProofMaterial,
+  buildV10CatalogProofMaterial,
   buildV10CiphertextChunksProofMaterial,
   verifyV10ProofMaterial,
   V10ProofRootMismatchError,
@@ -36,7 +42,7 @@ export {
   type V10MerkleCommitment,
 } from './proof-material.js';
 
-export { canonicalize, hashTriple, hashTripleV10 } from './canonicalize.js';
+export { canonicalize, hashTriple, hashTripleV10, tripleContentV10 } from './canonicalize.js';
 
 export { hexToBytes } from './oracle-verify.js';
 

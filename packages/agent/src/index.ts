@@ -169,3 +169,11 @@ export * from './source-worker.js';
 export * from './source-registry.js';
 export * from './generic-sql-source.js';
 export { KaNumberAllocator, type KaAllocation } from './allocator.js';
+// OT-RFC-49 WS-D — the curated public `_catalog` floor builder. Exported on the
+// public surface so off-band tooling (e.g. the devnet update-seal helper) can
+// re-inject the SAME deterministic floor the producer's curated update() does,
+// without deep-importing the compiled `dist/` module.
+export {
+  buildPublicProjection,
+  type PublicProjectionInput,
+} from './context-graph-public-projection.js';

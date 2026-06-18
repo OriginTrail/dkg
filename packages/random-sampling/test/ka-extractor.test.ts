@@ -24,7 +24,11 @@ import {
 import {
   V10MerkleTree,
   hashTripleV10,
+  tripleContentV10,
+  keccak256,
+  structuredKARootV10,
   buildV10ProofMaterial,
+  verifyV10ProofMaterial,
   contextGraphDataUri,
   contextGraphMetaUri,
 } from '@origintrail-official/dkg-core';
@@ -270,13 +274,15 @@ describe('extractV10KCFromStore — happy path / publisher round-trip parity', (
     await seedKC(store, fixture);
 
     const result = await extractV10KCFromStore(store, fixture.cgId, fixture.kaId);
-    const tree = new V10MerkleTree(result.leaves);
-    const expected = { merkleRoot: tree.root, merkleLeafCount: tree.leafCount };
+    // content-binding + structured commitment: prover submits N-Triple content bytes;
+    // private sub-roots ride along as the committed sibling.
+    const contents = result.triples.map((t) => tripleContentV10(t.subject, t.predicate, t.object));
+    const { root, leafCount } = structuredKARootV10(contents.map(keccak256), result.privateRoots);
+    const expected = { merkleRoot: root, merkleLeafCount: leafCount };
 
-    for (let chunkId = 0; chunkId < tree.leafCount; chunkId++) {
-      const material = buildV10ProofMaterial(result.leaves, chunkId, expected);
-      expect(V10MerkleTree.verify(expected.merkleRoot, material.leaf, material.proof, chunkId))
-        .toBe(true);
+    for (let chunkId = 0; chunkId < leafCount; chunkId++) {
+      const material = buildV10ProofMaterial(contents, result.privateRoots, chunkId, expected);
+      expect(verifyV10ProofMaterial(material, chunkId, expected)).toBe(true);
     }
   });
 

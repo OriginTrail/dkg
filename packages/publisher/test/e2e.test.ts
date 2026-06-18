@@ -20,8 +20,7 @@ import { createSubstrateClient, registerSubstrateHandler } from './_helpers/subs
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { multiaddr } from '@multiformats/multiaddr';
 import { ethers } from 'ethers';
-import { computePublicRootV10 as computePublicRoot, computeKARootV10 as computeKARoot, computeKCRootV10 as computeKCRoot } from '../src/merkle.js';
-import { autoPartition } from '../src/auto-partition.js';
+import { computeStructuredKCRootV10 } from '../src/merkle.js';
 import { parseSimpleNQuads } from '../src/publish-handler.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
@@ -299,13 +298,10 @@ describe('Publisher wallet signature verification', () => {
     startKAId: number,
     endKAId: number,
   ) {
-    const kaMap = autoPartition(quads);
-    const kaRoots: Uint8Array[] = [];
-    for (const [, publicQuads] of kaMap) {
-      const pubRoot = computePublicRoot(publicQuads);
-      kaRoots.push(computeKARoot(pubRoot!, undefined));
-    }
-    const merkleRoot = computeKCRoot(kaRoots);
+    // Structured KC root (PoS content-binding): flatten all public quads into one
+    // V10 tree with the private sibling collapsed to the sentinel (no private data
+    // here) — identical to what PublishHandler recomputes, so confirmPublish matches.
+    const merkleRoot = computeStructuredKCRootV10(quads, []).root;
 
     const nquads = quads.map(
       (q) => `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`,
@@ -566,14 +562,8 @@ describe('Publisher wallet signature verification', () => {
     const nquadsStr = new TextDecoder().decode(request.nquads);
     const parsedQuads = parseSimpleNQuads(nquadsStr);
 
-    const kaMap = autoPartition(parsedQuads);
-    const kaRoots: Uint8Array[] = [];
-    for (const entry of request.kas) {
-      const publicQuads = kaMap.get(entry.rootEntity) ?? [];
-      const pubRoot = computePublicRoot(publicQuads);
-      kaRoots.push(computeKARoot(pubRoot!, undefined));
-    }
-    const recomputedRoot = computeKCRoot(kaRoots);
+    // Same structured root the handler computes over the full payload.
+    const recomputedRoot = computeStructuredKCRootV10(parsedQuads, []).root;
 
     expect(recomputedRoot).toEqual(merkleRoot);
   });

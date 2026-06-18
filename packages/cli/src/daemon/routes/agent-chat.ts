@@ -772,13 +772,21 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   if (req.method === "POST" && path === "/api/chat") {
     const serverT0 = Date.now();
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { to, text, contextGraphId } = JSON.parse(body) as {
+    const chatParsed = JSON.parse(body) as {
       to?: string;
       text?: string;
+      peerId?: string;
+      message?: string;
       contextGraphId?: string;
     };
+    // #1106 (1): accept the intuitive `peerId`/`message` aliases for
+    // `to`/`text` — callers integrating from the tool tables repeatedly
+    // guessed this shape and got an unexplained 400.
+    const to = chatParsed.to ?? chatParsed.peerId;
+    const text = chatParsed.text ?? chatParsed.message;
+    const contextGraphId = chatParsed.contextGraphId;
     if (!to || !text)
-      return jsonResponse(res, 400, { error: 'Missing "to" or "text"' });
+      return jsonResponse(res, 400, { error: 'Missing "to" or "text" (aliases: "peerId" / "message")' });
 
     const resolveT0 = Date.now();
     const peerId = await resolveNameToPeerId(agent, to);

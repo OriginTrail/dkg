@@ -618,6 +618,43 @@ describe('[Q-3] resolveViewGraphs + DKGQueryEngine route working-memory', () => 
     ]);
   });
 
+  // PR #1107 review (🟡): the node default agent's WM is split across the
+  // legacy peerId-keyed namespace and the rc.17+ wallet-keyed namespace —
+  // an unscoped WM read must span every same-identity alias.
+  it('resolveViewGraphs(working-memory, {agentAddress, agentAddressAliases}) → one prefix per alias', () => {
+    const PEER = '12D3KooWLegacyPeerIdNamespace';
+    const res = resolveViewGraphs('working-memory', CG, {
+      agentAddress: AGENT,
+      agentAddressAliases: [PEER],
+    });
+    expect(res.graphs).toEqual([]);
+    expect(res.graphPrefixes).toEqual([
+      `did:dkg:context-graph:${CG}/_working_memory/${AGENT}/`,
+      `did:dkg:context-graph:${CG}/_working_memory/${PEER}/`,
+    ]);
+  });
+
+  it('resolveViewGraphs working-memory aliases dedupe case-insensitively against the primary', () => {
+    const res = resolveViewGraphs('working-memory', CG, {
+      agentAddress: AGENT,
+      agentAddressAliases: [AGENT.toLowerCase(), '', AGENT],
+    });
+    expect(res.graphPrefixes).toEqual([
+      `did:dkg:context-graph:${CG}/_working_memory/${AGENT}/`,
+    ]);
+  });
+
+  it('resolveViewGraphs working-memory aliases are ignored for by-name (assertionName) reads', () => {
+    const res = resolveViewGraphs('working-memory', CG, {
+      agentAddress: AGENT,
+      agentAddressAliases: ['12D3KooWLegacyPeerIdNamespace'],
+      assertionName: 'note-1',
+    });
+    // Single-graph read on the primary address only — no sibling-namespace leak.
+    expect(res.graphs).toEqual([contextGraphAssertionUri(CG, AGENT, 'note-1')]);
+    expect(res.graphPrefixes).toEqual([]);
+  });
+
   it('DKGQueryEngine.query(view=working-memory) returns ONLY this agent\'s assertions and ignores other agents', async () => {
     const store = new OxigraphStore();
     const engine = new DKGQueryEngine(store);
@@ -640,6 +677,31 @@ describe('[Q-3] resolveViewGraphs + DKGQueryEngine route working-memory', () => 
     const names = result.bindings.map((b) => b['name']).sort();
     expect(names).toEqual(['"MyNote"', '"MyTodo"']);
     expect(names).not.toContain('"OtherAgent"');
+  });
+
+  it('DKGQueryEngine.query(view=working-memory) with agentAddressAliases unions wallet- and peerId-keyed namespaces (PR #1107 🟡)', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const PEER = '12D3KooWLegacyPeerIdNamespace';
+    const STRANGER = '0xDeAd000000000000000000000000000000000002';
+
+    const walletEra = contextGraphLayerUri(CG, MemoryLayer.WorkingMemory, AGENT, 1n);
+    const peerEra = contextGraphLayerUri(CG, MemoryLayer.WorkingMemory, PEER, 1n);
+    const theirs = contextGraphLayerUri(CG, MemoryLayer.WorkingMemory, STRANGER, 1n);
+
+    await store.insert([
+      quad('urn:a:1', 'http://schema.org/name', '"WalletEra"', walletEra),
+      quad('urn:a:2', 'http://schema.org/name', '"PeerIdEra"', peerEra),
+      quad('urn:a:3', 'http://schema.org/name', '"NotMine"', theirs),
+    ]);
+
+    const result = await engine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { contextGraphId: CG, view: 'working-memory', agentAddress: AGENT, agentAddressAliases: [PEER] },
+    );
+    const names = result.bindings.map((b) => b['name']).sort();
+    // Both eras of the SAME identity visible; other identities still excluded.
+    expect(names).toEqual(['"PeerIdEra"', '"WalletEra"']);
   });
 
   it('DKGQueryEngine.query(view=working-memory, assertionName) scopes to one assertion graph', async () => {

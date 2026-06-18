@@ -406,6 +406,137 @@ describe('QueryHandler', () => {
     });
   });
 
+  // PR #1107 review fixes (Codex on the #1105 public-CG resolver):
+  // 🔴 1 — rate limiting must run BEFORE the (potentially chain-hitting)
+  //        access check, and resolver verdicts must be cached.
+  // 🔴 2 — ENTITY_BY_UAL must enforce the RESOLVED context graph's policy,
+  //        including the on-chain public resolver.
+  describe('PR #1107 review: resolver DoS + UAL access enforcement', () => {
+    const PUBLIC_CG = 'cg-onchain-public';
+    const PRIVATE_CG = 'cg-onchain-private';
+
+    /** Engine stub whose resolveKA lands the UAL in a chosen context graph. */
+    function fakeEngine(resolvedCg: string) {
+      return {
+        query: async () => ({ bindings: [] }),
+        resolveKA: async () => ({
+          rootEntity: ENTITY_A,
+          rootEntities: [ENTITY_A],
+          contextGraphId: resolvedCg,
+          quads: [{ subject: ENTITY_A, predicate: SCHEMA_NAME, object: '"Alice"', graph: 'g' }],
+        }),
+      } as any;
+    }
+
+    it('rate-limits BEFORE the access check — throttled traffic never reaches the chain resolver (🔴 1)', async () => {
+      let resolverCalls = 0;
+      const handler = new QueryHandler(
+        engine,
+        { defaultPolicy: 'deny', rateLimitPerMinute: 1 },
+        {
+          isContextGraphPublic: async () => {
+            resolverCalls++;
+            return false;
+          },
+        },
+      );
+
+      const r1 = await handler.handle(makeRequest({ entityUri: ENTITY_A, contextGraphId: 'cg-a' }), 'peer-dos');
+      expect(r1.status).toBe('ACCESS_DENIED');
+      expect(resolverCalls).toBe(1);
+
+      // Everything past the budget is throttled WITHOUT touching the resolver.
+      for (let i = 0; i < 5; i++) {
+        const r = await handler.handle(
+          makeRequest({ entityUri: ENTITY_A, contextGraphId: `cg-${i}` }),
+          'peer-dos',
+        );
+        expect(r.status).toBe('RATE_LIMITED');
+      }
+      expect(resolverCalls).toBe(1);
+    });
+
+    it('caches resolver verdicts — repeated queries for the same CG cost one chain lookup (🔴 1)', async () => {
+      let resolverCalls = 0;
+      const handler = new QueryHandler(
+        engine,
+        { defaultPolicy: 'deny', rateLimitPerMinute: 100 },
+        {
+          isContextGraphPublic: async () => {
+            resolverCalls++;
+            return true;
+          },
+        },
+      );
+
+      for (let i = 0; i < 4; i++) {
+        const r = await handler.handle(makeRequest({ entityUri: ENTITY_A }), 'peer-1');
+        expect(r.status).toBe('OK');
+      }
+      expect(resolverCalls).toBe(1);
+    });
+
+    it('ENTITY_BY_UAL against an on-chain-public CG is allowed on a default-deny config (🔴 2)', async () => {
+      const handler = new QueryHandler(
+        fakeEngine(PUBLIC_CG),
+        { defaultPolicy: 'deny' },
+        { isContextGraphPublic: async (cg) => cg === PUBLIC_CG },
+      );
+
+      const response = await handler.handle(
+        makeRequest({ lookupType: 'ENTITY_BY_UAL', contextGraphId: undefined, ual: 'did:dkg:ual:ka-1' }),
+        'peer-1',
+      );
+      expect(response.status).toBe('OK');
+      expect(response.ntriples).toContain(ENTITY_A);
+    });
+
+    it('ENTITY_BY_UAL resolving into a non-public CG stays denied (🔴 2, fail closed)', async () => {
+      const handler = new QueryHandler(
+        fakeEngine(PRIVATE_CG),
+        { defaultPolicy: 'deny' },
+        { isContextGraphPublic: async (cg) => cg === PUBLIC_CG },
+      );
+
+      const response = await handler.handle(
+        makeRequest({ lookupType: 'ENTITY_BY_UAL', contextGraphId: undefined, ual: 'did:dkg:ual:ka-2' }),
+        'peer-1',
+      );
+      expect(response.status).toBe('ACCESS_DENIED');
+      expect(response.ntriples).toBeUndefined();
+    });
+
+    it('ENTITY_BY_UAL no longer leaks THROUGH an explicitly denied CG when another public CG exists (🔴 2)', async () => {
+      // Pre-fix: the blanket hasAnyPublicContextGraph() pre-check allowed any
+      // UAL lookup as long as SOME public CG was configured — even when the
+      // UAL's own CG was explicitly denied by the operator.
+      const handler = new QueryHandler(fakeEngine(PRIVATE_CG), {
+        defaultPolicy: 'deny',
+        contextGraphs: {
+          [PRIVATE_CG]: { policy: 'deny' },
+          'cg-other-public': { policy: 'public' },
+        },
+      });
+
+      const response = await handler.handle(
+        makeRequest({ lookupType: 'ENTITY_BY_UAL', contextGraphId: undefined, ual: 'did:dkg:ual:ka-3' }),
+        'peer-1',
+      );
+      expect(response.status).toBe('ACCESS_DENIED');
+    });
+
+    it('ENTITY_BY_UAL fast-deny is preserved when no resolver is wired and nothing is public', async () => {
+      const handler = new QueryHandler(fakeEngine(PUBLIC_CG), { defaultPolicy: 'deny' });
+
+      const response = await handler.handle(
+        makeRequest({ lookupType: 'ENTITY_BY_UAL', contextGraphId: undefined, ual: 'did:dkg:ual:ka-4' }),
+        'peer-1',
+      );
+      expect(response.status).toBe('ACCESS_DENIED');
+      expect(response.error).toContain('No context graphs are queryable');
+    });
+  });
+
   describe('SPARQL security', () => {
     let handler: QueryHandler;
 

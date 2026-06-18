@@ -35,6 +35,7 @@ import { ethers } from 'ethers';
 import {
   V10MerkleTree,
   hashTripleV10,
+  structuredKARootV10,
   computePublishACKDigest,
   buildAuthorAttestationTypedData,
 } from '@origintrail-official/dkg-core';
@@ -76,9 +77,8 @@ describe('Random Sampling E2E (Hardhat)', () => {
   const rawLeaves = publishQuads.map((q) =>
     hashTripleV10(q.subject, q.predicate, q.object),
   );
-  const tree = new V10MerkleTree(rawLeaves);
-  const merkleRoot = tree.root;
-  const merkleLeafCount = tree.leafCount;
+  // structured public commitment (no private payload here): hashPair(publicRoot, sentinel).
+  const { root: merkleRoot, leafCount: merkleLeafCount } = structuredKARootV10(rawLeaves, []);
 
   // Since rc.12 the contract mints exactly ONE knowledge asset per publish
   // tx — `KnowledgeAssetsLifecycle.publish` reverts `InvalidKnowledgeAssetsAmount`
@@ -348,4 +348,32 @@ describe('Random Sampling E2E (Hardhat)', () => {
       await store.close();
     }
   }, 90_000);
+
+  // Bounty Finding #3 regression — the empty-proof bypass is dead ON-CHAIN.
+  // Uses REC2 (an independent sharded node) so it never disturbs REC1's
+  // honest challenge above.
+  it('reverts the empty-proof bypass on the real RandomSampling.sol (content-binding)', async () => {
+    const ctx = getSharedContext();
+    const attacker = createEVMAdapter(HARDHAT_KEYS.REC2_OP);
+    const attackerId = BigInt(ctx.receiverIds[1]!);
+
+    // Draw a real challenge (the single valued CG holds our published KC).
+    const { challenge } = await attacker.createChallenge!();
+    const root = challenge.challengeRoot; // the public structured merkle root
+
+    // THE BYPASS: echo the public root as `content` with an EMPTY proof.
+    // Pre-fix this verified (the caller-supplied leaf == root). Now the chain
+    // derives leaf = keccak256(content) != root, so the merkle verify reverts.
+    await expect(attacker.submitProof!(root, [])).rejects.toThrow();
+
+    // Arbitrary content + empty proof also reverts — no triple's keccak256
+    // equals the stored 32-byte root (preimage resistance).
+    await expect(
+      attacker.submitProof!(ethers.toUtf8Bytes('<urn:x> <urn:y> <urn:z> .'), []),
+    ).rejects.toThrow();
+
+    // No credit: the challenge stays unsolved after the failed attacks.
+    const after = await attacker.getNodeChallenge!(attackerId);
+    expect(after?.solved).toBe(false);
+  }, 60_000);
 });

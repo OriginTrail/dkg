@@ -135,7 +135,7 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
-import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck } from './messaging.js';
+import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck, type SkillAclCheck } from './messaging.js';
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
 import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, collectPublishableMultiaddrs, type AgentProfileConfig } from './profile.js';
 import {
@@ -1635,6 +1635,19 @@ export class AgentRegistryMethods extends DKGAgentBase {
       return;
     }
     this.messageHandler.setChatAcl(check);
+  }
+
+  /**
+   * GH #462 — install / clear the inbound skill-invocation ACL. Pass `null` to
+   * disable (legacy open skills). The daemon constructs a default-deny policy
+   * from `messaging` config — see lifecycle.ts / buildSkillAcl.
+   */
+  setSkillAcl(this: DKGAgent, check: SkillAclCheck | null): void {
+    if (!this.messageHandler) {
+      this._pendingSkillAcl = check;
+      return;
+    }
+    this.messageHandler.setSkillAcl(check);
   }
 
   async invokeSkill(this: DKGAgent,

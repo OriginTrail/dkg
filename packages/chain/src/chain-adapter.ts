@@ -1208,8 +1208,8 @@ export interface ChainAdapter {
    * {@link ChallengeNoLongerActiveError} when the proof window has
    * already closed (also non-retryable; rebuild on next period).
    */
-  /** @param leaf 32-byte leaf (`hashTripleV10` or private sub-root), hex string or raw bytes */
-  submitProof?(leaf: Uint8Array | `0x${string}`, merkleProof: Uint8Array[]): Promise<TxResult>;
+  /** @param content raw bytes the chain hashes to the leaf (`leaf = keccak256(content)`): public N-Triple / curated `_catalog` triple bytes */
+  submitProof?(content: Uint8Array | `0x${string}`, merkleProof: Uint8Array[]): Promise<TxResult>;
 
   /**
    * Read the active proof-period state without writing. Cheap; safe to

@@ -35,7 +35,17 @@ const {
 const {
   buildUpdateAuthorAttestationTypedData,
   AUTHOR_SCHEME_VERSION_V1,
+  partitionCatalogQuads,
+  contextGraphDataUri,
 } = req('@origintrail-official/dkg-core');
+// OT-RFC-49 WS-D — the curated public `_catalog` floor builder, imported from
+// the agent package's public surface. A curated UPDATE re-injects this
+// deterministic floor into the payload BEFORE the on-chain merkle is computed
+// (mirrors dkg-agent-publish.ts update()'s isCuratedUpdate branch), and the
+// producer hard-checks precomputedUpdateAttestation.expectedNewMerkleRoot
+// against the floor-injected recompute — so a curated update seal MUST commit
+// to the SAME injection.
+const { buildPublicProjection } = req('@origintrail-official/dkg-agent');
 
 function out(o) {
   process.stdout.write(JSON.stringify(o, (_k, v) => (typeof v === 'bigint' ? v.toString() : v)) + '\n');
@@ -45,8 +55,18 @@ function toHex32(bytes) {
   return ethers.hexlify(bytes);
 }
 
-async function buildUpdateSeal({ kaId, quads, privateQuads, author, kav10Address, provider }) {
-  const kaMap = autoPartition(quads);
+async function buildUpdateSeal({ kaId, quads, privateQuads, author, kav10Address, provider, curatedContextGraphId }) {
+  // OT-RFC-49 WS-D — for a CURATED CG, re-inject the deterministic public
+  // `_catalog` floor exactly as the producer's update() does, so the seal
+  // commits to the merkle the publisher will recompute post-injection.
+  let sealQuads = quads;
+  if (curatedContextGraphId) {
+    const cgDid = contextGraphDataUri(curatedContextGraphId);
+    const { otherQuads } = partitionCatalogQuads(quads, cgDid);
+    const floor = buildPublicProjection({ ual: cgDid, accessPolicy: 'private', graph: cgDid });
+    sealQuads = [...otherQuads, ...floor];
+  }
+  const kaMap = autoPartition(sealQuads);
   const allPublic = [...kaMap.values()].flat();
   const privateRoots = [];
   for (const rootEntity of kaMap.keys()) {
@@ -86,12 +106,17 @@ async function main() {
   let kaId = null;
   let quadsJson = null;
   let privateQuadsJson = null;
+  let curatedContextGraphId = null;
   const argv = process.argv.slice(2);
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--key') key = argv[++i];
     else if (argv[i] === '--ka-id') kaId = argv[++i];
     else if (argv[i] === '--quads-json') quadsJson = argv[++i];
     else if (argv[i] === '--private-quads-json') privateQuadsJson = argv[++i];
+    // OT-RFC-49 WS-D — for a curated CG, the seal must inject the public
+    // `_catalog` floor. Pass the LOCAL context-graph id (the same value
+    // POST /api/update carries as `contextGraphId`).
+    else if (argv[i] === '--curated') curatedContextGraphId = argv[++i];
   }
   if (!key || kaId == null || !quadsJson) {
     out({ ok: false, error: 'usage: --key 0x.. --ka-id <id> --quads-json <json-array>' });
@@ -141,6 +166,7 @@ async function main() {
       author,
       kav10Address: kav10,
       provider,
+      curatedContextGraphId,
     });
     out({ ok: true, precomputedUpdateAttestation: seal });
   } catch (e) {

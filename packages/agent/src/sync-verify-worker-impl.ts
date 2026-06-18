@@ -169,19 +169,15 @@ export function verifySyncedData(
         }
       }
 
+      // PoS content-binding: `computeFlatKCRoot` now returns the STRUCTURED root
+      // hashPair(publicRoot, privateDataHash) — private data is always anchored as
+      // the sibling. The legacy "without private root anchoring" fallback is removed:
+      // a root that omits the private sibling is now a genuine mismatch, not a
+      // tolerated legacy format (pre-mainnet cutover clears/re-publishes old KCs).
       const flatHex = toHex(computeFlatKCRoot(allQuadsForKC, privateRoots));
       if (flatHex === claimedHex) {
         verifiedKcUals.add(kcUal);
         continue;
-      }
-
-      if (privateRoots.length > 0) {
-        const legacyHex = toHex(computeFlatKCRoot(allQuadsForKC, []));
-        if (legacyHex === claimedHex) {
-          logs.push({ level: 'debug', message: `KC ${kcUal} verified via legacy flat root (without private root anchoring)` });
-          verifiedKcUals.add(kcUal);
-          continue;
-        }
       }
 
       logs.push({

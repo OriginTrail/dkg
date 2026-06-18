@@ -1,8 +1,9 @@
 import {
   decodeFinalizationMessage,
   contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
+  sharedMemoryReadBothFilter,
   contextGraphDataUri, contextGraphMetaUri,
-  contextGraphSubGraphUri, validateSubGraphName,
+  contextGraphSubGraphUri, validateSubGraphName, validateContextGraphId,
   DKGEvent, Logger, createOperationContext,
   assertSafeIri, isSafeIri,
   type EventBus,
@@ -77,7 +78,11 @@ export class FinalizationHandler {
       }
 
       if (msg.contextGraphId && msg.contextGraphId !== contextGraphId) {
-        this.log.warn(ctx, `Finalization: contextGraphId "${msg.contextGraphId}" does not match topic "${contextGraphId}", ignoring`);
+        // #1100: same guard as GossipPublishHandler — frames of other gossip
+        // message types decode "successfully" with garbage in this field, so
+        // only WARN when the mismatched value is a plausible CG id.
+        if (!validateContextGraphId(msg.contextGraphId).valid) return;
+        this.log.warn(ctx, `Finalization: contextGraphId "${msg.contextGraphId.slice(0, 120)}" does not match topic "${contextGraphId}", ignoring`);
         return;
       }
 
@@ -308,8 +313,18 @@ export class FinalizationHandler {
     if (safeRoots.length === 0) return [];
 
     const values = safeRoots.map(r => `<${r}>`).join(' ');
+    // #1098/#1099: replicas store gossiped SWM shares in the PER-KA graphs
+    // `…/_shared_memory/{author}/{number}` (workspace-handler.ts ~line 987),
+    // not the bare bucket. Reading only the bucket made every replica report
+    // "no shared memory data … peer missed SWM sharing" on finalization, so
+    // the published KA was never materialized into VM on subscribed peers
+    // (the VM-divergence half of #1098). Read-both: bucket + per-KA graphs.
+    // CONSTRUCT (not SELECT) so literal terms keep full datatype/lang
+    // fidelity for the merkle recompute, and so the same logical triple
+    // present in BOTH the bucket and a per-KA graph collapses to one
+    // (a constructed graph is a set).
     const sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
-      GRAPH <${sharedMemoryGraph}> {
+      GRAPH ?g {
         VALUES ?root { ${values} }
         ?s ?p ?o .
         FILTER(
@@ -317,6 +332,7 @@ export class FinalizationHandler {
           || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
         )
       }
+      ${sharedMemoryReadBothFilter(sharedMemoryGraph)}
     }`;
 
     const result = await this.store.query(sparql, { source: 'agent.finalization.sharedMemorySlice' });
@@ -1185,12 +1201,27 @@ export class FinalizationHandler {
     const swmMetaGraph = subGraphName
       ? graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName)
       : contextGraphWorkspaceMetaGraphUri(contextGraphId);
+    // #1099: replicas hold the gossiped SWM copy in PER-KA graphs
+    // `…/_shared_memory/{author}/{number}` (workspace-handler.ts ~line 987),
+    // but this cleanup only drained the bare bucket. The stale per-KA copy
+    // survived every publish, kept being served to late subscribers via the
+    // PROTOCOL_SYNC SWM responder (which reads the whole `…/_shared_memory/`
+    // prefix), and re-poisoned even the publisher's own SWM on resync —
+    // publisher and replicas permanently disagreed about SWM content.
+    // Mirror DKGPublisher's `swmGraphsUnder`: drain the bucket AND every
+    // graph under its `/` prefix.
+    const allGraphs = await this.store.listGraphs();
+    const swmGraphsForClear = allGraphs.filter(
+      (g) => g === sharedMemoryGraph || g.startsWith(`${sharedMemoryGraph}/`),
+    );
     for (const rootEntity of rootEntities) {
-      await this.store.deleteByPattern({ graph: sharedMemoryGraph, subject: rootEntity });
-      await this.store.deleteBySubjectPrefix(sharedMemoryGraph, rootEntity + '/.well-known/genid/');
-      await this.store.deleteByPattern({
-        graph: sharedMemoryGraph, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
-      });
+      for (const g of swmGraphsForClear) {
+        await this.store.deleteByPattern({ graph: g, subject: rootEntity });
+        await this.store.deleteBySubjectPrefix(g, rootEntity + '/.well-known/genid/');
+        await this.store.deleteByPattern({
+          graph: g, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
+        });
+      }
       await this.store.deleteByPattern({
         graph: swmMetaGraph, subject: rootEntity, predicate: 'http://dkg.io/ontology/workspaceOwner',
       });

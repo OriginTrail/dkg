@@ -1,7 +1,7 @@
 import {
   decodePublishRequest, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
   Logger, createOperationContext,
-  isSafeIri, assertSafeIri, validateSubGraphName,
+  isSafeIri, assertSafeIri, validateSubGraphName, validateContextGraphId,
   contextGraphSubGraphUri,
   contextGraphMetaGraphUri, contextGraphDataGraphUri,
   type OperationContext,
@@ -105,11 +105,16 @@ export class GossipPublishHandler {
         if (!request.contextGraphId) {
           request.contextGraphId = contextGraphId;
         } else if (request.contextGraphId !== contextGraphId) {
-          // If the decoded contextGraphId contains non-printable characters, this is a
-          // different message type (e.g. finalization) that was decoded as a publish
-          // request. Silently skip to avoid spammy WARN logs.
-          if (/[^\x20-\x7E]/.test(request.contextGraphId)) return;
-          this.log.warn(ctx, `Gossip: request contextGraphId "${request.contextGraphId}" does not match topic "${contextGraphId}", ignoring`);
+          // #1100: protobuf decoding is structurally permissive — agent-profile
+          // and other non-publish gossip frames "successfully" decode as publish
+          // requests with multi-KB RDF garbage in the contextGraphId field. The
+          // old guard only skipped on non-printable characters, so any payload
+          // that happened to be printable ASCII was dumped wholesale into the
+          // log as a WARN, every few seconds, forever. A real cross-topic
+          // mismatch always carries a *well-formed* CG id, so validate the
+          // decoded value first and silently skip mis-decoded frames.
+          if (!validateContextGraphId(request.contextGraphId).valid) return;
+          this.log.warn(ctx, `Gossip: request contextGraphId "${request.contextGraphId.slice(0, 120)}" does not match topic "${contextGraphId}", ignoring`);
           return;
         }
       } finally {

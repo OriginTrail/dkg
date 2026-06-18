@@ -30,6 +30,7 @@ import {
   contextGraphDataUri,
   contextGraphMetaUri,
   hashTripleV10,
+  structuredKARootV10,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { InMemoryProverWal, RandomSamplingProver } from '../src/index.js';
@@ -127,9 +128,11 @@ async function seedKC(store: OxigraphStore, fixture: KCFixture): Promise<{ root:
   await store.insert(metaQuads);
   await store.insert(fixture.publicTriples.map((t) => ({ ...t, graph: dataGraph })));
 
+  // PUBLIC path is structured: hashPair(publicRoot, privateDataHash). The fixture
+  // seeds no private data, so the prover extracts privateRoots=[] -> sentinel sibling.
   const leaves = fixture.publicTriples.map((t) => hashTripleV10(t.subject, t.predicate, t.object));
-  const tree = new V10MerkleTree(leaves);
-  return { root: tree.root, leafCount: tree.leafCount };
+  const { root, leafCount } = structuredKARootV10(leaves, []);
+  return { root, leafCount };
 }
 
 /**

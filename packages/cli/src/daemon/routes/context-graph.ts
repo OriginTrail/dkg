@@ -495,7 +495,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       });
     }
     // Body has `id` + `name` → context-graph-style context graph definition create (handled below)
-    const { id, name, description, allowedAgents, allowedPeers, participantAgents, publishPolicy, accessPolicy, register } = parsed;
+    // #1102: accept `contextGraphId` as an alias for `id` — sibling routes
+    // (subscribe/unsubscribe) use `contextGraphId`, and the mixed naming was
+    // a recurring caller trap.
+    const { name, description, allowedAgents, allowedPeers, participantAgents, publishPolicy, accessPolicy, register } = parsed;
+    const id = parsed.id ?? parsed.contextGraphId;
     if (!id || !name)
       return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
     if (!isValidContextGraphId(id))
@@ -647,8 +651,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
-    const { id, accessPolicy, publishPolicy, strictEoaCuratorMatch } = parsed;
-    if (!id) return jsonResponse(res, 400, { error: 'Missing "id"' });
+    const { accessPolicy, publishPolicy, strictEoaCuratorMatch } = parsed;
+    // #1102: accept `contextGraphId` as an alias for `id`.
+    const id = parsed.id ?? parsed.contextGraphId;
+    if (!id) return jsonResponse(res, 400, { error: 'Missing "id" (or "contextGraphId")' });
     if (typeof id !== 'string') return jsonResponse(res, 400, { error: '"id" must be a string' });
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,
@@ -984,10 +990,18 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   if (req.method === "GET" && joinRequestsMatch) {
     const contextGraphId = decodeURIComponent(joinRequestsMatch[1]);
     try {
-      const requests = await agent.listPendingJoinRequests(contextGraphId);
+      // GH #757 — pass the caller so the agent can enforce curator-only access.
+      const requests = await agent.listPendingJoinRequests(contextGraphId, requestAgentAddress);
       return jsonResponse(res, 200, { contextGraphId, requests });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      // GH #757 — map the curator/creator owner-check failure to 403 (reusing
+      // the shared classifier that already handles "Only the context graph
+      // curator …"); everything else stays a 400.
+      const classified = classifyRegisterContextGraphError(err);
+      if (classified && classified.status === 403) {
+        return jsonResponse(res, 403, classified.body ?? { error: msg });
+      }
       return jsonResponse(res, 400, { error: msg });
     }
   }
@@ -1128,6 +1142,15 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         // in `delegation`; callers that want delivery POST it (with
         // a `curatorPeerId`) to `/request-join`.
         agentAddress: delegation.agentAddress,
+        // #1103: callers repeatedly read this route's 200 as "the join
+        // request is on its way to the curator" and then waited forever
+        // (the curator's /join-requests stays empty — nothing was sent).
+        // Make the sign-only contract explicit in the response itself.
+        forwarded: false,
+        next:
+          `This route only SIGNS the join request — nothing was sent to the curator. ` +
+          `To deliver it, POST /api/context-graph/${encodeURIComponent(contextGraphId)}/request-join ` +
+          `with body { "delegation": <the delegation object above>, "curatorPeerId": "<curator's libp2p peer id>", "agentName"?: "..." }.`,
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1460,10 +1483,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = JSON.parse(body);
     const { includeWorkspace, includeSharedMemory } = parsed;
-    const contextGraphId = parsed.contextGraphId;
+    // #1102: accept `id` as an alias for `contextGraphId`.
+    const contextGraphId = parsed.contextGraphId ?? parsed.id;
     if (!contextGraphId)
       return jsonResponse(res, 400, {
-        error: 'Missing "contextGraphId"',
+        error: 'Missing "contextGraphId" (or "id")',
       });
 
     // For curated CGs, verify this node's agent is on the allowlist.
@@ -1667,9 +1691,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     (path === "/api/context-graph/unsubscribe" || path === "/api/unsubscribe")
   ) {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const contextGraphId = JSON.parse(body)?.contextGraphId;
+    const unsubscribeParsed = JSON.parse(body);
+    // #1102: accept `id` as an alias for `contextGraphId`.
+    const contextGraphId = unsubscribeParsed?.contextGraphId ?? unsubscribeParsed?.id;
     if (!contextGraphId) {
-      return jsonResponse(res, 400, { error: 'Missing "contextGraphId"' });
+      return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "id")' });
     }
     agent.unsubscribeFromContextGraph(contextGraphId);
     const sub = agent.getSubscribedContextGraphs()?.get(contextGraphId);
@@ -1748,9 +1774,14 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // CGs (private curated graphs read their definition from `_meta`).
   if (req.method === "POST" && path === "/api/context-graph/rename") {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const { id, name } = JSON.parse(body);
+    const renameParsed = JSON.parse(body);
+    // #1102: accept `contextGraphId` as an alias for `id` — SKILL.md
+    // documented `contextGraphId` for this route while the implementation
+    // only read `id`, so every documented call failed with a 400.
+    const id = renameParsed.id ?? renameParsed.contextGraphId;
+    const name = renameParsed.name;
     if (!id || !name) {
-      return jsonResponse(res, 400, { error: 'Missing "id" or "name"' });
+      return jsonResponse(res, 400, { error: 'Missing "id" (or "contextGraphId") or "name"' });
     }
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,

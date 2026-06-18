@@ -35,8 +35,27 @@ import { DKGAgent } from '../src/index.js';
 import {
   extractCatalogLeavesFromStore,
 } from '@origintrail-official/dkg-random-sampling';
-import { computeCatalogRoot, contextGraphCatalogUri } from '@origintrail-official/dkg-core';
-import { ethers } from 'ethers';
+import {
+  computeCatalogRoot,
+  contextGraphCatalogUri,
+  contextGraphDataUri,
+  partitionCatalogQuads,
+  buildUpdateAuthorAttestationTypedData,
+  AUTHOR_SCHEME_VERSION_V1,
+  type PrecomputedUpdateAttestation,
+} from '@origintrail-official/dkg-core';
+// The curated-UPDATE leg signs its precomputedUpdateAttestation over the SAME
+// floor-injected quads the producer's update() recomputes from, so it imports
+// the exact floor builder the feature uses (deterministic from the CG DID) plus
+// the matching V10 merkle/partition helpers.
+import { buildPublicProjection } from '../src/context-graph-public-projection.js';
+import {
+  autoPartition,
+  computeFlatKCRootV10,
+  computePrivateRootV10,
+} from '../../publisher/src/index.js';
+import type { Quad } from '@origintrail-official/dkg-storage';
+import { ethers, Wallet } from 'ethers';
 import {
   spawnHardhatEnv, killHardhat, setMinimumRequiredSignatures, HARDHAT_KEYS, type HardhatContext,
 } from '../../chain/test/hardhat-harness.js';
@@ -62,6 +81,60 @@ function numericCgIdFromCatalogGraph(graphUri: string): bigint | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Build a `precomputedUpdateAttestation` for a curated UPDATE.
+ *
+ * A V10 update requires a caller-supplied attestation over the NEW merkle root
+ * (the agent's `update()` never auto-mints one). For a CURATED CG the producer's
+ * `update()` RE-INJECTS the deterministic public `_catalog` floor into the
+ * payload BEFORE computing the on-chain merkle (dkg-agent-publish.ts: the
+ * `isCuratedUpdate` branch — `partitionCatalogQuads` + `buildPublicProjection`
+ * → `[...nonCatalog, ...floor]`), then hard-checks
+ * `precomputedUpdateAttestation.expectedNewMerkleRoot === kcMerkleRoot`. So this
+ * seal MUST commit to the merkle over the POST-floor-injection quads — we mirror
+ * the producer's injection here with the SAME builder (deterministic floor) so
+ * the two roots agree by construction. Graph term and order are irrelevant: the
+ * V10 triple hash excludes the graph and the tree sorts+dedupes its leaves.
+ */
+async function buildCuratedUpdateSeal(opts: {
+  kaId: bigint;
+  contextGraphId: string;
+  newQuads: Quad[];
+  author: Wallet;
+  provider: ethers.JsonRpcProvider;
+  kav10Address: string;
+}): Promise<PrecomputedUpdateAttestation> {
+  const cgDid = contextGraphDataUri(opts.contextGraphId);
+  // Mirror dkg-agent-publish.ts update()'s curated floor injection EXACTLY.
+  const { otherQuads: nonCatalogQuads } = partitionCatalogQuads(opts.newQuads, cgDid);
+  const catalogFloor = buildPublicProjection({ ual: cgDid, accessPolicy: 'private', graph: cgDid });
+  const injected: Quad[] = [...nonCatalogQuads, ...catalogFloor];
+
+  // Mirror publisher.update()'s merkle recompute (skolemize === autoPartition,
+  // computeFlatKCRootV10 over the flattened public quads + per-entity private
+  // roots). The UPDATE leg below ships no private quads, so privateRoots is [].
+  const kaMap = autoPartition(injected);
+  const allPublic = [...kaMap.values()].flat();
+  const newMerkleRoot = computeFlatKCRootV10(allPublic, []);
+
+  const chainId = await opts.provider.getNetwork().then((n) => n.chainId);
+  const td = buildUpdateAuthorAttestationTypedData({
+    chainId: BigInt(chainId),
+    kav10Address: opts.kav10Address,
+    kaId: opts.kaId,
+    newMerkleRoot,
+    authorAddress: opts.author.address,
+  });
+  const sigHex = await opts.author.signTypedData(td.domain, td.types, td.message);
+  const sig = ethers.Signature.from(sigHex);
+  return {
+    expectedNewMerkleRoot: newMerkleRoot,
+    authorAddress: opts.author.address,
+    signature: { r: ethers.getBytes(sig.r), vs: ethers.getBytes(sig.yParityAndS) },
+    schemeVersion: AUTHOR_SCHEME_VERSION_V1,
+  };
 }
 
 describe('OT-RFC-49 WS-D — catalog producer↔extractor↔chain parity', () => {
@@ -176,5 +249,89 @@ describe('OT-RFC-49 WS-D — catalog producer↔extractor↔chain parity', () =>
       'the rebuilt root must not change when a post-publish stamp lands',
     ).toBe(onChainRootHex);
     expect(rebuiltAfter.leafCount).toBe(onChainLeafCount);
+  }, 180_000);
+
+  it('curated UPDATE re-commits the catalog (root non-zero, == publish baseline) and a remote core re-hosts it', async () => {
+    const CG = 'rfc49-parity-update';
+    await publisher.createContextGraph({ id: CG, name: 'RFC49 Parity Update', accessPolicy: 1, callerAgentAddress: curator });
+    await publisher.registerContextGraph(CG, { callerAgentAddress: curator });
+
+    const name = 'shipment-upd';
+    // ── initial curated publish (the baseline) ──
+    await publisher.assertion.create(CG, name);
+    await publisher.assertion.write(CG, name, [
+      { subject: 'urn:acme:shipment/SH-99', predicate: 'urn:acme:product', object: '"P-1"' },
+    ]);
+    await publisher.assertion.finalize(CG, name);
+    await publisher.assertion.promote(CG, name);
+    const pub: any = await publisher.publishFromFinalizedAssertion(CG, name);
+    expect(pub.status).toBe('confirmed');
+    const kaId: bigint = pub.kaId;
+
+    const chain: any = (publisher as any).chain;
+    const baselineRoot = ethers.hexlify(await chain.getCatalogRoot(kaId));
+    const baselineLeafCount: number = await chain.getCatalogLeafCount(kaId);
+    expect(baselineRoot).not.toBe(ethers.ZeroHash);
+    expect(baselineLeafCount).toBeGreaterThan(0);
+
+    // ── the curated UPDATE ──
+    // Re-finalizing a PUBLISHED assertion is structurally impossible: the seal
+    // is keyed by the assertion URI, and neither `discard` (clears the
+    // number-based WM-layer URI) nor `create` (clears the lifecycle URN) touches
+    // it, so re-finalize hits `already finalized with a different merkleRoot`.
+    // So we drive the on-chain UPDATE primitive directly — the SAME primitive
+    // `publishFromFinalizedAssertion`'s update branch delegates to — by calling
+    // `publisher.update(kaId, ...)` with new content + a `precomputedUpdateAttestation`.
+    // This exercises the identical curated WS-D feature code (the `isCuratedUpdate`
+    // floor re-projection in dkg-agent-publish.ts update()): the producer re-injects
+    // the public `_catalog` floor, ships it inline, commits a NON-ZERO catalog root,
+    // and the update CONFIRMS. BEFORE this feature a curated update shipped a zero
+    // catalog root and REVERTED with `CuratedCGRequiresCatalogCommitment`.
+    //
+    // The attestation is signed by the KA's ORIGINAL author (the operational key
+    // that published the baseline) over the POST-floor-injection merkle — see
+    // `buildCuratedUpdateSeal`.
+    const author = new Wallet(HARDHAT_KEYS.CORE_OP, ctx.provider);
+    expect(
+      author.address.toLowerCase(),
+      'the baseline publish was authored by the publisher operational key (CORE_OP)',
+    ).toBe(String(pub.seal.authorAddress).toLowerCase());
+
+    const newQuads: Quad[] = [
+      { subject: 'urn:acme:shipment/SH-99', predicate: 'urn:acme:product', object: '"P-1"', graph: '' },
+      { subject: 'urn:acme:shipment/SH-99', predicate: 'urn:acme:status', object: '"delivered"', graph: '' },
+    ];
+    const precomputedUpdateAttestation = await buildCuratedUpdateSeal({
+      kaId,
+      contextGraphId: CG,
+      newQuads,
+      author,
+      provider: ctx.provider,
+      kav10Address: await chain.getKnowledgeAssetsLifecycleAddress(),
+    });
+
+    const upd: any = await publisher.update(kaId, CG, newQuads, [], { precomputedUpdateAttestation });
+    expect(upd.status, 'curated update must CONFIRM (no CuratedCGRequiresCatalogCommitment revert)').toBe('confirmed');
+    // The update targets — and re-confirms — the SAME on-chain KA as the publish.
+    expect(upd.kaId).toBe(kaId);
+
+    // ── on-chain: catalog still committed, non-zero, EQUALS the publish baseline. ──
+    // The catalog is the stable public floor — a curated update RE-COMMITS the
+    // same root (that's what satisfies the on-chain gate); it does NOT rotate.
+    const afterRoot = ethers.hexlify(await chain.getCatalogRoot(kaId));
+    const afterLeafCount: number = await chain.getCatalogLeafCount(kaId);
+    expect(afterRoot).not.toBe(ethers.ZeroHash);
+    expect(afterRoot, 'curated update re-commits the stable floor (== baseline, not rotated)').toBe(baselineRoot);
+    expect(afterLeafCount).toBe(baselineLeafCount);
+
+    // ── the REMOTE core re-hosts the updated catalog; rebuilt == on-chain. ──
+    // The update ACK supplied by ackCore drove its updateHandler to rebuild +
+    // verify + REPLACE-persist `<cg>/_catalog`, so an updated curated KA is
+    // genuinely provable (it was inert before WS-D).
+    const cgId: bigint = await chain.getKAContextGraphId(kaId);
+    const ackStore: any = (ackCore as any).store;
+    const rebuilt = computeCatalogRoot(await extractCatalogLeavesFromStore({ store: ackStore, contextGraphId: cgId }));
+    expect(ethers.hexlify(rebuilt.root), 'remote core re-hosts the updated catalog; rebuilt must equal on-chain').toBe(afterRoot);
+    expect(rebuilt.leafCount).toBe(afterLeafCount);
   }, 180_000);
 });

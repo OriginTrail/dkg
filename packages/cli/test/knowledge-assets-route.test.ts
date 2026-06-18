@@ -379,14 +379,22 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(String(res.body.error)).toContain('layer');
     });
 
-    it('GH #1094 (live bug): pull-from {layer} 500s "No sealed entity list" on every path', async () => {
-      // The happy {seeded} + WM_DRAFT_CONFLICT 409 the mock returned describe
-      // behaviour the engine does not yet have — the route's sealed-entity
-      // store is never populated. Pinned as a red-while-live repro: when #1094
-      // ships, this flips and must be upgraded to the positive seeding leg.
+    it('GH #1094 (fixed): pull-from {layer:swm} re-opens the WM draft and re-seeds the sealed entities', async () => {
+      // #1094 shipped (PR #1107): the route's sealed-entity lookup now spans the
+      // per-KA SWM/VM graphs (…/_shared_memory|_verifiable_memory/{author}/{n})
+      // and clears the stale seal when re-opening, so pull-from seeds the draft
+      // instead of 500ing "No sealed entity list". This is the positive seeding
+      // leg the prior red-while-live repro promised to flip to. `share` was
+      // finalized + shared to SWM earlier in this suite, so pulling from SWM
+      // re-opens its WM draft and re-seeds its one entity (ex:A).
       const res = await postJson(daemon, '/api/knowledge-assets/share/wm/pull-from', { contextGraphId: REG, layer: 'swm' });
-      expect(res.status).toBe(500);
-      expect(String(res.body.error)).toMatch(/No sealed entity list|requires a finalized assertion/);
+      expect(res.status).toBe(200);
+      expect(res.body.wmDraft).toBe('open');
+      expect(res.body.seededFrom).toEqual({ layer: 'swm' });
+      expect(res.body.fromLayer).toBe('swm');
+      expect(typeof res.body.seeded).toBe('number');
+      expect(res.body.seeded).toBeGreaterThanOrEqual(1);
+      expect(res.body.entities).toBeGreaterThanOrEqual(1);
     });
   });
 

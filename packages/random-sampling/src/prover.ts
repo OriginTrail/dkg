@@ -22,7 +22,7 @@ import {
   type NodeChallenge,
 } from '@origintrail-official/dkg-chain';
 import {
-  hashTripleV10,
+  tripleContentV10,
   V10ProofChunkOutOfRangeError,
   V10ProofLeafCountMismatchError,
   V10ProofRootMismatchError,
@@ -38,7 +38,7 @@ import {
   extractCatalogLeavesFromStore,
   CatalogLeavesMissingError,
 } from './catalog-extractor.js';
-import type { ProofBuilder } from './proof-builder.js';
+import type { ProofBuilder, ProofBuilderRequest } from './proof-builder.js';
 import { InProcessProofBuilder } from './proof-builder.js';
 import {
   makeWalEntry,
@@ -343,8 +343,12 @@ export class RandomSamplingProver {
     const expectedRoot = challenge.challengeRoot;
     const expectedLeafCount = Number(challenge.challengeLeafCount);
 
-    let leaves: Uint8Array[];
-    let proofKind: 'flat-kc' | 'ciphertext-chunks';
+    // content-binding: the prover submits the N-Triple CONTENT bytes; the chain
+    // derives `leaf = keccak256(content)`. Public path is structured (private as a
+    // committed sibling); catalog path is a plain tree (no sibling).
+    let contents: Uint8Array[];
+    let privateRoots: Uint8Array[];
+    let proofKind: 'public' | 'catalog';
     if (isCurated) {
       // OT-RFC-49 / WS-C — curated CGs prove the PUBLIC `_catalog` Merkle
       // root, NOT private ciphertext chunks. The catalog tree is a plain
@@ -353,13 +357,15 @@ export class RandomSamplingProver {
       // gap (catalog not yet replicated to this core) the extractor throws
       // `CatalogLeavesMissingError`, which we map to the same
       // `kc-not-synced` skip the public path uses for missing data.
-      proofKind = 'flat-kc';
+      proofKind = 'catalog';
       try {
         const catalogTriples = await extractCatalogLeavesFromStore({
           store: this.store,
           contextGraphId: cgId,
         });
-        leaves = catalogTriples.map((t) => hashTripleV10(t.subject, t.predicate, t.object));
+        // catalog is a plain public tree (no private sibling).
+        contents = catalogTriples.map((t) => tripleContentV10(t.subject, t.predicate, t.object));
+        privateRoots = [];
       } catch (err) {
         if (err instanceof CatalogLeavesMissingError) {
           this.log.warn('rs.tick.kc-not-synced', {
@@ -381,10 +387,12 @@ export class RandomSamplingProver {
         throw err;
       }
     } else {
-      proofKind = 'flat-kc';
+      proofKind = 'public';
       try {
         const extracted = await extractV10KCFromStore(this.store, cgId, kaId);
-        leaves = extracted.leaves;
+        // public structured path: contents = N-Triple bytes; private sub-roots -> sibling.
+        contents = extracted.triples.map((t) => tripleContentV10(t.subject, t.predicate, t.object));
+        privateRoots = extracted.privateRoots;
       } catch (err) {
         if (err instanceof KCNotFoundError || err instanceof KCDataMissingError) {
           this.log.warn('rs.tick.kc-not-synced', {
@@ -434,14 +442,15 @@ export class RandomSamplingProver {
       }),
     );
 
+    const expected = { merkleRoot: expectedRoot, merkleLeafCount: expectedLeafCount };
+    const req: ProofBuilderRequest =
+      proofKind === 'public'
+        ? { kind: 'public', contents, privateRoots, chunkId: Number(chunkId), expected }
+        : { kind: 'catalog', contents, chunkId: Number(chunkId), expected };
+
     let material;
     try {
-      material = await this.builder.build({
-        leaves,
-        chunkId: Number(chunkId),
-        expected: { merkleRoot: expectedRoot, merkleLeafCount: expectedLeafCount },
-        kind: proofKind,
-      });
+      material = await this.builder.build(req);
     } catch (err) {
       const reason = mapBuilderError(err);
       if (reason) {
@@ -456,7 +465,7 @@ export class RandomSamplingProver {
           ...(typeof e?.expectedLeafCount === 'number' ? { expectedLeafCount: e.expectedLeafCount } : {}),
           ...(typeof e?.chunkId === 'number' ? { chunkId: e.chunkId } : {}),
           ...(typeof e?.leafCount === 'number' ? { leafCount: e.leafCount } : {}),
-          extractedLeafCount: leaves.length,
+          extractedLeafCount: contents.length,
           chainExpectedLeafCount: Number(expectedLeafCount),
         });
         await this.wal.append(
@@ -482,7 +491,7 @@ export class RandomSamplingProver {
 
     let txResult;
     try {
-      txResult = await this.chain.submitProof(material.leaf, material.proof);
+      txResult = await this.chain.submitProof(material.content, material.proof);
     } catch (err) {
       if (err instanceof ChallengeNoLongerActiveError) {
         this.log.warn('rs.tick.submit-stale', {

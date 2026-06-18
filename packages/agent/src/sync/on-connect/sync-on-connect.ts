@@ -174,7 +174,12 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
 
     if (protocols.includes(PROTOCOL_STORAGE_ACK)) {
       knownCorePeerIds.add(remotePeer);
-    } else {
+    } else if (protocols.length > 0) {
+      // #1093: only de-classify on a POPULATED protocol list. An empty
+      // list means identify hasn't completed yet (the dominant race on
+      // inbound connections) — evicting a previously-confirmed core here
+      // would re-poison the ACK candidate pool that
+      // `DKGAgent.getACKCandidatePeers` builds for the publisher.
       knownCorePeerIds.delete(remotePeer);
     }
 

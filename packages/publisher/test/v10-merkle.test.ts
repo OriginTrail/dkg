@@ -5,8 +5,10 @@ import {
   computePublicRootV10,
   computePrivateRootV10,
   computeFlatKCRootV10,
+  computeFlatKCMerkleLeafCountV10,
   computeKARootV10,
   computeKCRootV10,
+  SENTINEL_NO_PRIVATE_V10,
 } from '../src/merkle.js';
 
 const quad = (s: string, p: string, o: string) => ({
@@ -71,24 +73,41 @@ describe('V10 publisher merkle wrappers', () => {
     });
   });
 
-  describe('computeFlatKCRootV10', () => {
-    it('combines public quads and private roots', () => {
-      const publicQuads = [
-        quad('http://example.org/e1', 'http://schema.org/name', '"Alice"'),
-      ];
-      const privateRoot = new Uint8Array(32).fill(0xab);
-      const root = computeFlatKCRootV10(publicQuads, [privateRoot]);
+  // STRUCTURED (PoS content-binding redesign): root = hashPair(publicRoot, privateDataHash).
+  // Public is the challengeable subtree; private data is a committed sibling, never sampled.
+  describe('computeFlatKCRootV10 (structured)', () => {
+    const publicQuads = [
+      quad('http://example.org/e1', 'http://schema.org/name', '"Alice"'),
+      quad('http://example.org/e2', 'http://schema.org/name', '"Bob"'),
+    ];
+
+    it('is hashPair(publicRoot, collapsed privateDataHash)', () => {
+      const privateRoots = [new Uint8Array(32).fill(0xab), new Uint8Array(32).fill(0xcd)];
+      const root = computeFlatKCRootV10(publicQuads, privateRoots);
+      const publicRoot = computePublicRootV10(publicQuads)!;
+      const privateDataHash = new V10MerkleTree(privateRoots).root; // N->1 collapse
+      expect(root).toEqual(computeKARootV10(publicRoot, privateDataHash));
       expect(root).toHaveLength(32);
     });
 
-    it('without private roots, matches public root', () => {
-      const publicQuads = [
-        quad('http://example.org/e1', 'http://schema.org/name', '"Alice"'),
-        quad('http://example.org/e2', 'http://schema.org/name', '"Bob"'),
-      ];
-      const flatRoot = computeFlatKCRootV10(publicQuads, []);
-      const publicRoot = computePublicRootV10(publicQuads);
-      expect(flatRoot).toEqual(publicRoot);
+    it('private data is bound into the root (integrity): changing it changes the root', () => {
+      const r1 = computeFlatKCRootV10(publicQuads, [new Uint8Array(32).fill(0x01)]);
+      const r2 = computeFlatKCRootV10(publicQuads, [new Uint8Array(32).fill(0x02)]);
+      expect(r1).not.toEqual(r2);
+    });
+
+    it('no private data uses the non-zero sentinel, NOT the bare public root', () => {
+      const root = computeFlatKCRootV10(publicQuads, []);
+      const publicRoot = computePublicRootV10(publicQuads)!;
+      expect(root).not.toEqual(publicRoot); // would be the bypass-prone flat root
+      expect(root).toEqual(computeKARootV10(publicRoot, SENTINEL_NO_PRIVATE_V10));
+    });
+
+    it('leaf count is PUBLIC-only and ignores private roots', () => {
+      const withPrivate = computeFlatKCMerkleLeafCountV10(publicQuads, [new Uint8Array(32).fill(0x09)]);
+      const noPrivate = computeFlatKCMerkleLeafCountV10(publicQuads, []);
+      expect(withPrivate).toEqual(noPrivate);
+      expect(noPrivate).toEqual(new V10MerkleTree(publicQuads.map(computeTripleHashV10)).leafCount);
     });
   });
 

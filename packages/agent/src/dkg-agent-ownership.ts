@@ -458,22 +458,39 @@ export class OwnershipMethods extends DKGAgentBase {
 
   /**
    * Check if the given owner DID matches the caller or the node's own identity.
-   * When `callerAgentAddress` is provided, only that exact address is accepted
+   * When `callerAgentAddress` is provided, only that address is accepted
    * (plus legacy peerId compat only for the default agent).
    * Without a caller (node-level token), falls back to defaultAgentAddress and peerId.
+   *
+   * EVM addresses compare case-insensitively: EIP-55 checksums are display-only,
+   * owner DIDs are stored as written (often checksummed), and HTTP callers may
+   * pass lowercased addresses (e.g. the notifications route). Peer IDs (base58)
+   * stay exact-match.
    */
   isCallerOrNodeOwner(this: DKGAgent, ownerDid: string, callerAgentAddress?: string): boolean {
     const peerDid = `did:dkg:agent:${this.peerId}`;
+    const didMatchesAddress = (did: string, address: string): boolean => {
+      const ownerPart = did.replace(/^did:dkg:agent:/, '');
+      if (ethers.isAddress(ownerPart) && ethers.isAddress(address)) {
+        return ownerPart.toLowerCase() === address.toLowerCase();
+      }
+      return did === `did:dkg:agent:${address}`;
+    };
+    const isDefaultAgent = (address: string): boolean =>
+      !!this.defaultAgentAddress &&
+      (address === this.defaultAgentAddress ||
+        (ethers.isAddress(address) && ethers.isAddress(this.defaultAgentAddress) &&
+          address.toLowerCase() === this.defaultAgentAddress.toLowerCase()));
     if (callerAgentAddress) {
-      if (ownerDid === `did:dkg:agent:${callerAgentAddress}`) return true;
-      if (callerAgentAddress === this.defaultAgentAddress && ownerDid === peerDid) return true;
+      if (didMatchesAddress(ownerDid, callerAgentAddress)) return true;
+      if (isDefaultAgent(callerAgentAddress) && ownerDid === peerDid) return true;
       return false;
     }
     // No explicit caller (SDK / node-level token): accept only the node's
     // own identities (peerId + defaultAgentAddress). On multi-agent nodes,
     // callers must supply callerAgentAddress to operate on non-default CGs.
     if (ownerDid === peerDid) return true;
-    if (this.defaultAgentAddress && ownerDid === `did:dkg:agent:${this.defaultAgentAddress}`) return true;
+    if (this.defaultAgentAddress && didMatchesAddress(ownerDid, this.defaultAgentAddress)) return true;
     return false;
   }
 

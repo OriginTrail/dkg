@@ -1,179 +1,129 @@
 /**
- * proof-material — V10 Random Sampling proof builder unit tests.
+ * proof-material — V10 Random Sampling proof builders (content-binding).
  *
- * Covers the `submitProof` argument tuple builder used by the off-chain
- * Random Sampling prover:
- *  - happy path: leaves -> tree -> (leaf, proof) round-trips through V10MerkleTree.verify
- *  - root mismatch -> V10ProofRootMismatchError (non-retryable for the period)
- *  - leaf-count mismatch -> V10ProofLeafCountMismatchError
- *  - chunkId out of range -> V10ProofChunkOutOfRangeError
- *  - V10MerkleTree.leafAt boundary parity with proof()
+ * Two builders, both content-bound (`leaf = keccak256(content)`):
+ *  - buildV10CatalogProofMaterial — plain tree (curated public `_catalog`)
+ *  - buildV10ProofMaterial        — structured tree (public CG: private as sibling)
  *
- * Invariants tested deliberately mirror the on-chain
- * `_verifyV10MerkleProof` boundary so a publisher refactor that breaks
- * the prover surfaces here, not in production.
+ * Invariants mirror the on-chain `submitProof` boundary so a publisher/prover
+ * refactor that breaks the agreement surfaces here, not in production.
  */
 import { describe, it, expect } from 'vitest';
 import {
   V10MerkleTree,
-  hashTripleV10,
+  tripleContentV10,
+  keccak256,
+  structuredKARootV10,
   buildV10ProofMaterial,
+  buildV10CatalogProofMaterial,
   verifyV10ProofMaterial,
   V10ProofRootMismatchError,
   V10ProofLeafCountMismatchError,
   V10ProofChunkOutOfRangeError,
 } from '../src/index.js';
 
-function leafFor(s: string, p: string, o: string): Uint8Array {
-  return hashTripleV10(s, p, o);
+const hex = (u: Uint8Array) => Buffer.from(u).toString('hex');
+
+/** Canonical N-Triple content bytes — what the prover submits; leaf = keccak256(content). */
+function content(s: string, p: string, o: string): Uint8Array {
+  return tripleContentV10(s, p, o);
+}
+function dummyContents(n: number): Uint8Array[] {
+  return Array.from({ length: n }, (_, i) => content(`<urn:s:${i}>`, '<urn:p:eq>', `<urn:o:${i}>`));
 }
 
-function dummyLeaves(n: number): Uint8Array[] {
-  return Array.from({ length: n }, (_, i) => leafFor(`urn:s:${i}`, 'urn:p:eq', `urn:o:${i}`));
-}
+// ── CATALOG path: plain tree, content-binding ─────────────────────────
+describe('buildV10CatalogProofMaterial — plain tree, content-binding', () => {
+  const expectedFor = (contents: Uint8Array[]) => {
+    const tree = new V10MerkleTree(contents.map(keccak256));
+    return { merkleRoot: tree.root, merkleLeafCount: tree.leafCount };
+  };
 
-describe('buildV10ProofMaterial — happy path', () => {
-  it('produces a proof that V10MerkleTree.verify accepts at every leaf index', () => {
-    const leaves = dummyLeaves(5);
-    const tree = new V10MerkleTree(leaves);
-    const expected = { merkleRoot: tree.root, merkleLeafCount: tree.leafCount };
-
-    for (let chunkId = 0; chunkId < tree.leafCount; chunkId++) {
-      const material = buildV10ProofMaterial(leaves, chunkId, expected);
-
-      expect(material.leafCount).toBe(tree.leafCount);
-      expect(material.merkleRoot).toEqual(tree.root);
-      expect(V10MerkleTree.verify(expected.merkleRoot, material.leaf, material.proof, chunkId))
-        .toBe(true);
-      expect(verifyV10ProofMaterial(material, chunkId, expected)).toBe(true);
+  it('every leaf index verifies and is content-bound (keccak256(content) === leaf)', () => {
+    const contents = dummyContents(5);
+    const expected = expectedFor(contents);
+    for (let chunkId = 0; chunkId < expected.merkleLeafCount; chunkId++) {
+      const m = buildV10CatalogProofMaterial(contents, chunkId, expected);
+      expect(m.leafCount).toBe(expected.merkleLeafCount);
+      expect(m.merkleRoot).toEqual(expected.merkleRoot);
+      expect(hex(keccak256(m.content))).toBe(hex(m.leaf));
+      expect(verifyV10ProofMaterial(m, chunkId, expected)).toBe(true);
     }
   });
 
-  it('handles unsorted + duplicated input the same way the publisher does', () => {
-    const a = leafFor('urn:s:1', 'p', 'o');
-    const b = leafFor('urn:s:2', 'p', 'o');
-    const c = leafFor('urn:s:3', 'p', 'o');
-    const unsortedWithDupes = [c, a, b, a, c];
-
-    const tree = new V10MerkleTree(unsortedWithDupes);
-    const expected = { merkleRoot: tree.root, merkleLeafCount: tree.leafCount };
-
-    expect(tree.leafCount).toBe(3); // dedupe
-    const material = buildV10ProofMaterial(unsortedWithDupes, 1, expected);
-    expect(verifyV10ProofMaterial(material, 1, expected)).toBe(true);
+  it('handles unsorted + duplicated content the way the publisher does', () => {
+    const a = content('<urn:s:1>', '<p>', '<o>');
+    const b = content('<urn:s:2>', '<p>', '<o>');
+    const c = content('<urn:s:3>', '<p>', '<o>');
+    const dupes = [c, a, b, a, c];
+    const expected = expectedFor(dupes);
+    expect(expected.merkleLeafCount).toBe(3); // dedupe
+    expect(verifyV10ProofMaterial(buildV10CatalogProofMaterial(dupes, 1, expected), 1, expected)).toBe(true);
   });
 
-  it('leaf returned matches V10MerkleTree.leafAt at the same index', () => {
-    const leaves = dummyLeaves(7);
-    const tree = new V10MerkleTree(leaves);
-    const expected = { merkleRoot: tree.root, merkleLeafCount: tree.leafCount };
-
-    const material = buildV10ProofMaterial(leaves, 3, expected);
-    expect(material.leaf).toEqual(tree.leafAt(3));
+  it('throws on root / leafCount / chunkId violations', () => {
+    const contents = dummyContents(4);
+    const expected = expectedFor(contents);
+    expect(() => buildV10CatalogProofMaterial(contents, 0, { merkleRoot: new Uint8Array(32).fill(0xff), merkleLeafCount: expected.merkleLeafCount })).toThrow(V10ProofRootMismatchError);
+    expect(() => buildV10CatalogProofMaterial(contents, 0, { merkleRoot: expected.merkleRoot, merkleLeafCount: expected.merkleLeafCount + 1 })).toThrow(V10ProofLeafCountMismatchError);
+    expect(() => buildV10CatalogProofMaterial(contents, 99, expected)).toThrow(V10ProofChunkOutOfRangeError);
+    expect(() => buildV10CatalogProofMaterial(contents, -1, expected)).toThrow(V10ProofChunkOutOfRangeError);
   });
 });
 
-describe('buildV10ProofMaterial — invariant violations', () => {
-  it('throws V10ProofRootMismatchError when expected root does not match', () => {
-    const leaves = dummyLeaves(4);
-    const tree = new V10MerkleTree(leaves);
-    const wrongRoot = new Uint8Array(32).fill(0xff);
+// ── PUBLIC path: structured tree, content-binding ─────────────────────
+describe('buildV10ProofMaterial — structured tree, content-binding', () => {
+  const privateRoots = [new Uint8Array(32).fill(0xab)];
+  const expectedFor = (contents: Uint8Array[], priv: Uint8Array[]) => {
+    const { root, leafCount } = structuredKARootV10(contents.map(keccak256), priv);
+    return { merkleRoot: root, merkleLeafCount: leafCount };
+  };
 
-    expect(() =>
-      buildV10ProofMaterial(leaves, 0, {
-        merkleRoot: wrongRoot,
-        merkleLeafCount: tree.leafCount,
-      }),
-    ).toThrow(V10ProofRootMismatchError);
-  });
-
-  it('throws V10ProofLeafCountMismatchError when expected count does not match', () => {
-    const leaves = dummyLeaves(4);
-    const tree = new V10MerkleTree(leaves);
-
-    expect(() =>
-      buildV10ProofMaterial(leaves, 0, {
-        merkleRoot: tree.root,
-        merkleLeafCount: tree.leafCount + 1,
-      }),
-    ).toThrow(V10ProofLeafCountMismatchError);
-  });
-
-  it('checks leaf count BEFORE root so leaf-set drift surfaces with the precise message', () => {
-    const leaves = dummyLeaves(4);
-    const tree = new V10MerkleTree(leaves);
-
-    try {
-      buildV10ProofMaterial(leaves, 0, {
-        merkleRoot: new Uint8Array(32).fill(0xff),
-        merkleLeafCount: tree.leafCount + 1,
-      });
-      throw new Error('expected throw');
-    } catch (err) {
-      expect(err).toBeInstanceOf(V10ProofLeafCountMismatchError);
+  it('every leaf index verifies; proof ends with the privateDataHash sibling', () => {
+    const contents = dummyContents(5);
+    const expected = expectedFor(contents, privateRoots);
+    for (let chunkId = 0; chunkId < expected.merkleLeafCount; chunkId++) {
+      const m = buildV10ProofMaterial(contents, privateRoots, chunkId, expected);
+      expect(hex(keccak256(m.content))).toBe(hex(m.leaf));
+      expect(m.proof.length).toBeGreaterThanOrEqual(1); // ≥ the private sibling
+      expect(verifyV10ProofMaterial(m, chunkId, expected)).toBe(true);
     }
   });
 
-  it.each([
-    { chunkId: -1 },
-    { chunkId: 999 },
-  ])('throws V10ProofChunkOutOfRangeError for chunkId=$chunkId', ({ chunkId }) => {
-    const leaves = dummyLeaves(3);
-    const tree = new V10MerkleTree(leaves);
+  it('binds private data into the root (integrity): different private -> different root', () => {
+    const contents = dummyContents(3);
+    expect(hex(expectedFor(contents, [new Uint8Array(32).fill(0x01)]).merkleRoot))
+      .not.toBe(hex(expectedFor(contents, [new Uint8Array(32).fill(0x02)]).merkleRoot));
+  });
 
-    expect(() =>
-      buildV10ProofMaterial(leaves, chunkId, {
-        merkleRoot: tree.root,
-        merkleLeafCount: tree.leafCount,
-      }),
-    ).toThrow(V10ProofChunkOutOfRangeError);
+  it('no private data still uses the sentinel sibling (NOT the bypass-prone flat root)', () => {
+    const contents = dummyContents(4);
+    const structured = expectedFor(contents, []);
+    const flat = new V10MerkleTree(contents.map(keccak256)).root;
+    expect(hex(structured.merkleRoot)).not.toBe(hex(flat));
+    expect(verifyV10ProofMaterial(buildV10ProofMaterial(contents, [], 0, structured), 0, structured)).toBe(true);
   });
 });
 
-describe('verifyV10ProofMaterial', () => {
-  it('returns false when the supplied leaf has been tampered with', () => {
-    const leaves = dummyLeaves(4);
-    const tree = new V10MerkleTree(leaves);
-    const expected = { merkleRoot: tree.root, merkleLeafCount: tree.leafCount };
-    const material = buildV10ProofMaterial(leaves, 1, expected);
+// ── content-binding rejections (the bypass is dead) ───────────────────
+describe('verifyV10ProofMaterial — content-binding rejections', () => {
+  const contents = dummyContents(4);
+  const priv = [new Uint8Array(32).fill(0xcd)];
+  const { root, leafCount } = structuredKARootV10(contents.map(keccak256), priv);
+  const expected = { merkleRoot: root, merkleLeafCount: leafCount };
 
-    const tampered = { ...material, leaf: new Uint8Array(32).fill(0xab) };
-    expect(verifyV10ProofMaterial(tampered, 1, expected)).toBe(false);
+  it('rejects an empty proof with content echoing the root (the original bypass)', () => {
+    const atk = { content: root, leaf: keccak256(root), proof: [], merkleRoot: root, leafCount };
+    expect(verifyV10ProofMaterial(atk, 0, expected)).toBe(false);
   });
 
-  it('returns false when verifying against a different expected root', () => {
-    const leaves = dummyLeaves(4);
-    const tree = new V10MerkleTree(leaves);
-    const expected = { merkleRoot: tree.root, merkleLeafCount: tree.leafCount };
-    const material = buildV10ProofMaterial(leaves, 0, expected);
-
-    expect(verifyV10ProofMaterial(material, 0, {
-      merkleRoot: new Uint8Array(32).fill(0xff),
-      merkleLeafCount: tree.leafCount,
-    })).toBe(false);
-  });
-});
-
-describe('V10MerkleTree.leafAt', () => {
-  it('returns the same byte content the prover signed', () => {
-    const leaves = dummyLeaves(5);
-    const tree = new V10MerkleTree(leaves);
-
-    const sortedDeduped = [...leaves].sort((a, b) => {
-      for (let i = 0; i < Math.min(a.length, b.length); i++) {
-        if (a[i] !== b[i]) return a[i] - b[i];
-      }
-      return a.length - b.length;
-    });
-
-    for (let i = 0; i < tree.leafCount; i++) {
-      expect(tree.leafAt(i)).toEqual(sortedDeduped[i]);
-    }
+  it('rejects when content does not hash to the leaf', () => {
+    const m = buildV10ProofMaterial(contents, priv, 0, expected);
+    expect(verifyV10ProofMaterial({ ...m, content: content('<x>', '<y>', '<z>') }, 0, expected)).toBe(false);
   });
 
-  it('throws RangeError outside [0, leafCount)', () => {
-    const tree = new V10MerkleTree(dummyLeaves(3));
-    expect(() => tree.leafAt(-1)).toThrow(RangeError);
-    expect(() => tree.leafAt(tree.leafCount)).toThrow(RangeError);
+  it('rejects a stripped proof (private sibling removed)', () => {
+    const m = buildV10ProofMaterial(contents, priv, 0, expected);
+    expect(verifyV10ProofMaterial({ ...m, proof: [] }, 0, expected)).toBe(false);
   });
 });

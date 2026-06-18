@@ -1618,7 +1618,7 @@ export class MockChainAdapter implements ChainAdapter {
     };
   }
 
-  async submitProof(leaf: Uint8Array | `0x${string}`, _merkleProof: Uint8Array[]): Promise<TxResult> {
+  async submitProof(content: Uint8Array | `0x${string}`, _merkleProof: Uint8Array[]): Promise<TxResult> {
     const identityId = await this.getIdentityId();
     if (identityId === 0n) {
       throw new Error('Mock: cannot submitProof without an identity (call ensureProfile first)');
@@ -1643,10 +1643,11 @@ export class MockChainAdapter implements ChainAdapter {
     if (expectedLeaf === undefined) {
       throw new Error(`Mock: KC ${challenge.knowledgeAssetId} has no leaf at index ${challenge.chunkId}`);
     }
-    const leafHex = (typeof leaf === 'string' ? leaf : ethers.hexlify(leaf)).toLowerCase();
-    if (!/^0x[0-9a-f]{64}$/.test(leafHex)) {
-      throw new Error('Mock: submitProof leaf must be a 32-byte hex string (bytes32)');
-    }
+    // CONTENT-BINDING: derive the leaf from the submitted content, exactly as the
+    // chain does (`leaf = keccak256(content)`). The prover submits the N-Triple /
+    // catalog content bytes; an attacker can no longer echo the public root.
+    const contentBytes = typeof content === 'string' ? ethers.getBytes(content) : content;
+    const leafHex = ethers.keccak256(contentBytes).toLowerCase();
     if (expectedLeaf.toLowerCase() !== leafHex) {
       const computed = '0x' + 'cc'.repeat(32);
       throw new MerkleRootMismatchError(computed, kcEntry.merkleRootHex);

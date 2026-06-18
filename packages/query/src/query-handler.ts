@@ -17,6 +17,13 @@ const MAX_LIMIT = 1000;
 const DEFAULT_TIMEOUT_MS = 5000;
 const MAX_TIMEOUT_MS = 30000;
 const MAX_RESULT_BYTES = 1_048_576; // 1 MB
+// PR #1107 review (🔴): cache isContextGraphPublic verdicts so repeated
+// remote queries against the same CG don't each burn an RPC round-trip on
+// the chain adapter. Short TTL keeps policy flips (public → private)
+// bounded; the cache is size-capped so an attacker cycling CG ids can't
+// grow it without bound.
+const PUBLIC_CG_CACHE_TTL_MS = 60_000;
+const PUBLIC_CG_CACHE_MAX_ENTRIES = 1000;
 
 interface RateBucket {
   count: number;
@@ -30,16 +37,33 @@ interface RateBucket {
  * Evaluates access policy, rate limits, dispatches to the local query
  * engine, and enforces result size limits.
  */
+export interface QueryHandlerDeps {
+  /**
+   * #1105: optional resolver consulted when a CG has NO explicit
+   * `queryAccess.contextGraphs` entry and `defaultPolicy` is 'deny'.
+   * Should return true only for CGs whose own access policy is
+   * provably public (e.g. live on-chain `accessPolicy === 0`). This
+   * closes the gap where a CG created with `accessPolicy: "public"`
+   * was still remotely unqueryable because the query ACL is a
+   * separate, unshipped config surface. Failures must be treated as
+   * "not public" by the resolver (fail closed).
+   */
+  isContextGraphPublic?: (contextGraphId: string) => Promise<boolean>;
+}
+
 export class QueryHandler {
   private readonly queryEngine: DKGQueryEngine;
   private readonly config: QueryAccessConfig;
   private readonly rateBuckets = new Map<string, RateBucket>();
   private readonly defaultRatePerMinute: number;
+  private readonly deps: QueryHandlerDeps;
+  private readonly publicCgCache = new Map<string, { value: boolean; expiresAt: number }>();
 
-  constructor(queryEngine: DKGQueryEngine, config: QueryAccessConfig) {
+  constructor(queryEngine: DKGQueryEngine, config: QueryAccessConfig, deps: QueryHandlerDeps = {}) {
     this.queryEngine = queryEngine;
     this.config = config;
     this.defaultRatePerMinute = config.rateLimitPerMinute ?? 60;
+    this.deps = deps;
   }
 
   /**
@@ -75,13 +99,17 @@ export class QueryHandler {
       return errorResponse(opId, 'ERROR', 'Invalid request: contextGraphId is required for this lookup type');
     }
 
-    // Access policy check
-    const accessResult = this.checkAccess(request.lookupType, contextGraphId, peerId);
-    if (accessResult) return { ...accessResult, operationId: opId };
-
-    // Rate limit check
+    // Rate limit check FIRST. PR #1107 review (🔴): `checkAccess` can do a
+    // live chain lookup (the #1105 public-CG resolver), so running it before
+    // the rate limiter let an unauthenticated peer burn RPC quota on every
+    // request — including traffic that should already be throttled. Denied
+    // requests intentionally consume rate budget so they stay cheap.
     const rateResult = this.checkRateLimit(peerId);
     if (rateResult) return { ...rateResult, operationId: opId };
+
+    // Access policy check
+    const accessResult = await this.checkAccess(request.lookupType, contextGraphId, peerId);
+    if (accessResult) return { ...accessResult, operationId: opId };
 
     // Dispatch to lookup handler
     try {
@@ -93,7 +121,7 @@ export class QueryHandler {
 
       switch (request.lookupType) {
         case 'ENTITY_BY_UAL':
-          response = await this.lookupByUAL(opId, request.ual!);
+          response = await this.lookupByUAL(opId, request.ual!, peerId);
           break;
         case 'ENTITIES_BY_TYPE':
           response = await this.lookupByType(opId, contextGraphId!, request.rdfType!, limit);
@@ -120,25 +148,50 @@ export class QueryHandler {
     }
   }
 
-  private checkAccess(
+  private async checkAccess(
     lookupType: LookupType,
     contextGraphId: string | undefined,
     peerId: string,
-  ): QueryResponse | null {
+  ): Promise<QueryResponse | null> {
     const defaultPolicy = this.config.defaultPolicy ?? 'deny';
 
-    // For ENTITY_BY_UAL, we skip context-graph-level check (UAL resolves internally)
+    // ENTITY_BY_UAL: the target CG is only known AFTER the UAL resolves, so
+    // per-CG enforcement happens post-resolution in `lookupByUAL` (PR #1107
+    // review 🔴: the previous blanket `hasAnyPublicContextGraph()` gate never
+    // consulted the #1105 on-chain resolver, so UAL lookups against
+    // on-chain-public CGs stayed denied on fresh/default configs). Keep only
+    // the cheap fast-deny for nodes that provably have nothing queryable:
+    // default-deny, no config-public CG, and no resolver wired.
     if (lookupType === 'ENTITY_BY_UAL') {
-      if (defaultPolicy === 'deny' && !this.hasAnyPublicContextGraph()) {
+      if (defaultPolicy === 'deny' && !this.hasAnyPublicContextGraph() && !this.deps.isContextGraphPublic) {
         return errorResponse('', 'ACCESS_DENIED', 'No context graphs are queryable on this node');
       }
       return null;
     }
 
-    const cgConfigs = this.config.contextGraphs ?? this.config.contextGraphs;
-    const cgConfig = cgConfigs?.[contextGraphId!];
+    return this.checkContextGraphAccess(lookupType, contextGraphId!, peerId);
+  }
+
+  /**
+   * Per-CG access evaluation shared by the upfront check (CG-scoped lookups)
+   * and the post-resolution check for ENTITY_BY_UAL.
+   */
+  private async checkContextGraphAccess(
+    lookupType: LookupType,
+    contextGraphId: string,
+    peerId: string,
+  ): Promise<QueryResponse | null> {
+    const defaultPolicy = this.config.defaultPolicy ?? 'deny';
+    const cgConfig = this.config.contextGraphs?.[contextGraphId];
     if (!cgConfig) {
       if (defaultPolicy === 'deny') {
+        // #1105: a CG whose OWN access policy is provably public (live
+        // on-chain accessPolicy=0) is remotely queryable even without an
+        // explicit queryAccess entry — "public" would otherwise be a
+        // discoverability flag that no remote peer can act on. Explicit
+        // per-CG queryAccess entries (handled below) still take
+        // precedence, so operators can deny or allowlist a public CG.
+        if (await this.resolvePublicContextGraph(contextGraphId)) return null;
         return errorResponse('', 'ACCESS_DENIED', `Context graph '${contextGraphId}' is not queryable`);
       }
       // defaultPolicy is 'public' — allow with default lookup types
@@ -168,6 +221,28 @@ export class QueryHandler {
     }
 
     return null;
+  }
+
+  /**
+   * Cached wrapper around `deps.isContextGraphPublic`. The resolver may hit
+   * the chain adapter (RPC), so verdicts are memoised for a short TTL and the
+   * cache is size-capped (oldest-first eviction) to keep hostile traffic —
+   * which has already paid the rate-limit toll — from amplifying into
+   * unbounded RPC load or memory growth. Resolver failures are treated as
+   * "not public" (fail closed) and cached like any other negative verdict.
+   */
+  private async resolvePublicContextGraph(contextGraphId: string): Promise<boolean> {
+    if (!this.deps.isContextGraphPublic) return false;
+    const now = Date.now();
+    const cached = this.publicCgCache.get(contextGraphId);
+    if (cached && now < cached.expiresAt) return cached.value;
+    const value = await this.deps.isContextGraphPublic(contextGraphId).catch(() => false);
+    if (this.publicCgCache.size >= PUBLIC_CG_CACHE_MAX_ENTRIES && !this.publicCgCache.has(contextGraphId)) {
+      const oldest = this.publicCgCache.keys().next().value;
+      if (oldest !== undefined) this.publicCgCache.delete(oldest);
+    }
+    this.publicCgCache.set(contextGraphId, { value, expiresAt: now + PUBLIC_CG_CACHE_TTL_MS });
+    return value;
   }
 
   private hasAnyPublicContextGraph(): boolean {
@@ -204,13 +279,21 @@ export class QueryHandler {
     return null;
   }
 
-  private async lookupByUAL(opId: string, ual: string): Promise<QueryResponse> {
+  private async lookupByUAL(opId: string, ual: string, peerId: string): Promise<QueryResponse> {
     if (!ual) {
       return errorResponse(opId, 'ERROR', 'Invalid request: missing ual');
     }
 
     try {
       const resolved = await this.queryEngine.resolveKA(ual);
+      // PR #1107 review (🔴): enforce the RESOLVED context graph's access
+      // policy — config entry first (operator override), then the #1105
+      // on-chain public resolver. Pre-fix, UAL lookups bypassed per-CG
+      // evaluation entirely: they were denied for on-chain-public CGs on
+      // default configs, yet allowed THROUGH explicitly denied CGs whenever
+      // any other public CG existed on the node.
+      const denied = await this.checkContextGraphAccess('ENTITY_BY_UAL', resolved.contextGraphId, peerId);
+      if (denied) return { ...denied, operationId: opId };
       const ntriples = resolved.quads
         .map(q => `<${q.subject}> <${q.predicate}> ${formatObject(q.object)} .`)
         .join('\n');

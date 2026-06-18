@@ -956,6 +956,10 @@ export interface ImportFileExtractionPayload {
   pipelineUsed: string | null;
   mdIntermediateHash?: string;
   error?: string;
+  // #1101: when status === "skipped", explain WHY extraction was skipped so
+  // callers don't have to guess (the dominant cause is an unrecognized
+  // content type with no registered converter).
+  skipReason?: string;
 }
 
 export function buildImportFileResponse(args: {
@@ -978,6 +982,7 @@ export function buildImportFileResponse(args: {
         ? { mdIntermediateHash: args.extraction.mdIntermediateHash }
         : {}),
       ...(args.extraction.error ? { error: args.extraction.error } : {}),
+      ...(args.extraction.skipReason ? { skipReason: args.extraction.skipReason } : {}),
     },
   };
 }
@@ -1218,6 +1223,197 @@ export class HttpRateLimiter {
     clearInterval(this._timer);
     this._hits.clear();
   }
+}
+
+/**
+ * Bounds the number of HTTP requests being processed concurrently by the
+ * daemon, independent of client IP. This is admission control, not rate
+ * limiting: the single-process daemon funnels every request onto one event
+ * loop (and, on the embedded store backend, one Oxigraph worker thread), so a
+ * burst of concurrent in-flight requests — including local/loopback traffic
+ * that bypasses {@link HttpRateLimiter} — can pile pending work onto the heap
+ * and stall the node. When the cap is reached, callers should shed load with a
+ * 503 + Retry-After rather than queue unboundedly.
+ *
+ * `tryAcquire()` must be paired with exactly one `release()` in a `finally`.
+ */
+export class InFlightLimiter {
+  private _inFlight = 0;
+  private _rejectedTotal = 0;
+  private readonly _max: number;
+
+  constructor(max: number) {
+    // A non-positive cap disables the limiter (always admits).
+    this._max = Number.isFinite(max) && max > 0 ? Math.floor(max) : 0;
+  }
+
+  get inFlight(): number {
+    return this._inFlight;
+  }
+
+  get max(): number {
+    return this._max;
+  }
+
+  /** Monotonic count of requests shed (tryAcquire returned false) — for metrics/logging. */
+  get rejectedTotal(): number {
+    return this._rejectedTotal;
+  }
+
+  /** Returns true and reserves a slot, or false if at capacity (shed load). */
+  tryAcquire(): boolean {
+    if (this._max > 0 && this._inFlight >= this._max) {
+      this._rejectedTotal += 1;
+      return false;
+    }
+    this._inFlight += 1;
+    return true;
+  }
+
+  release(): void {
+    if (this._inFlight > 0) this._inFlight -= 1;
+  }
+}
+
+/**
+ * Parse a base-10 integer from an env-style string. Returns null for
+ * `undefined`, empty/whitespace, or any non-integer text — so malformed input
+ * falls through to the next source instead of becoming `NaN`/`0`.
+ */
+function parseIntOrNull(value: string | undefined): number | null {
+  if (value === undefined) return null;
+  const t = value.trim();
+  if (t === '' || !/^-?\d+$/.test(t)) return null;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Resolve an integer setting from an env var (highest precedence), then a
+ * config value, then a fallback. Malformed / empty / NaN inputs are IGNORED
+ * (fall through) rather than silently disabling the setting — a typo like
+ * `DKG_MAX_INFLIGHT=abc` or an empty string yields the documented default, not
+ * `NaN`/`0`.
+ *
+ * Pass `allowNonPositive` when `<= 0` is a meaningful value (e.g. "disable the
+ * cap"): then ANY integer is accepted, so `0` or a negative flows through to
+ * disable rather than falling back to the default. Without it the minimum
+ * accepted value is 1. (Named for what it does — it admits negatives too, not
+ * just zero.)
+ */
+export function resolveIntSetting(
+  envValue: string | undefined,
+  configValue: number | undefined,
+  fallback: number,
+  opts: { allowNonPositive?: boolean } = {},
+): number {
+  const accepts = (n: number | null | undefined): n is number =>
+    typeof n === 'number' && Number.isInteger(n) && (opts.allowNonPositive === true || n >= 1);
+  const fromEnv = parseIntOrNull(envValue);
+  if (accepts(fromEnv)) return fromEnv;
+  if (accepts(configValue)) return configValue;
+  return fallback;
+}
+
+/** Minimal shape of the bits of `http.Server` that {@link applyServerLimits} sets. */
+export interface ServerLimitsTarget {
+  maxConnections: number;
+  headersTimeout: number;
+}
+
+/**
+ * Resolve and APPLY the socket-level limits to an HTTP server: `maxConnections`
+ * (cap simultaneous sockets) and `headersTimeout` (kill slow-header
+ * connections). `requestTimeout` is intentionally left at the Node default so
+ * legitimately long publishes / SPARQL queries aren't truncated. Extracted from
+ * the daemon so the resolution precedence AND the assignment are unit-testable.
+ */
+export function applyServerLimits(
+  server: ServerLimitsTarget,
+  opts: {
+    maxConnectionsEnv?: string;
+    maxConnectionsConfig?: number;
+    headersTimeoutEnv?: string;
+  },
+): void {
+  server.maxConnections = resolveIntSetting(opts.maxConnectionsEnv, opts.maxConnectionsConfig, 256);
+  server.headersTimeout = resolveIntSetting(opts.headersTimeoutEnv, undefined, 60_000);
+}
+
+/**
+ * Cheap GET/HEAD paths exempt from concurrency admission control — liveness /
+ * health / manifest handlers that must stay answerable under load (monitoring,
+ * `dkg status`, doctor, MCP setup probes), plus the long-lived `/api/events`
+ * SSE stream (which must NOT hold an in-flight slot for the connection's whole
+ * lifetime, or a few open dashboard tabs would exhaust the pool).
+ *
+ * NOTE: this is one of several HTTP path-category tables in the daemon (see
+ * `auth.ts` public paths, `isLoopbackRateLimitExemptPath`, and the default
+ * rate-limit exempt list in `lifecycle.ts`). Centralizing them behind one
+ * source of truth is a worthwhile follow-up; kept local here for now.
+ */
+const ADMISSION_EXEMPT_GET_PATHS: ReadonlySet<string> = new Set([
+  '/api/status',
+  '/api/chain/rpc-health',
+  '/api/events',
+  '/.well-known/skill.md',
+  '/.well-known/skill-importer.md',
+]);
+
+/**
+ * Whether a request bypasses admission control. METHOD-AWARE on purpose: only
+ * `OPTIONS` (CORS preflight, any path) and safe `GET`/`HEAD` reads of the cheap
+ * liveness/doc/SSE paths bypass. A `POST`/`PUT`/etc. to those same paths is NOT
+ * exempt — it falls through to the router/route-plugins and so must still take
+ * a slot, otherwise a buggy/authenticated local client could run real work
+ * outside the cap via e.g. `POST /api/status`.
+ */
+export function isAdmissionExempt(method: string | undefined, pathname: string): boolean {
+  if (method === 'OPTIONS') return true;
+  if ((method === 'GET' || method === 'HEAD') && ADMISSION_EXEMPT_GET_PATHS.has(pathname)) return true;
+  return false;
+}
+
+/**
+ * Apply concurrency admission control to one request. Exempt requests (see
+ * {@link isAdmissionExempt}) always pass and take no slot. Otherwise a slot is
+ * reserved; on capacity it writes `503` + `Retry-After` (with CORS headers so
+ * browsers surface it) and returns `{ admitted: false }`.
+ *
+ * Ownership model: the slot is released automatically when the RESPONSE
+ * completes (`res` `close`), NOT when the request handler returns — route
+ * plugins and SSE can return with the response still streaming, and releasing
+ * on handler return would free the slot mid-stream and let that work run
+ * outside the cap. The release is registered here so callers cannot get it
+ * wrong; they only need to honor `admitted`.
+ */
+export function admitRequest(
+  limiter: InFlightLimiter,
+  method: string | undefined,
+  pathname: string,
+  res: ServerResponse,
+  corsOrigin: string | null,
+): { admitted: boolean } {
+  if (isAdmissionExempt(method, pathname)) {
+    return { admitted: true };
+  }
+  if (!limiter.tryAcquire()) {
+    res.writeHead(503, {
+      'Content-Type': 'application/json',
+      'Retry-After': '1',
+      ...corsHeaders(corsOrigin),
+    });
+    res.end(JSON.stringify({ error: 'Server busy, retry shortly' }));
+    return { admitted: false };
+  }
+  // Release exactly once, when the response completes (finish or abort).
+  let released = false;
+  res.once('close', () => {
+    if (released) return;
+    released = true;
+    limiter.release();
+  });
+  return { admitted: true };
 }
 
 export function isLoopbackClientIp(ip: string): boolean {

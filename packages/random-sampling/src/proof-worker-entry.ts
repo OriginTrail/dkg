@@ -10,27 +10,21 @@
 import { parentPort } from 'node:worker_threads';
 import {
   buildV10ProofMaterial,
-  buildV10CiphertextChunksProofMaterial,
+  buildV10CatalogProofMaterial,
   V10ProofRootMismatchError,
   V10ProofLeafCountMismatchError,
   V10ProofChunkOutOfRangeError,
-  type V10MerkleCommitment,
 } from '@origintrail-official/dkg-core';
+import type { ProofBuilderRequest } from './proof-builder.js';
 
-interface BuildRequest {
-  /** Monotonic id; echoed in the response so the host can correlate. */
-  taskId: number;
-  /** Leaves transferred as ArrayBuffer-backed Uint8Array[]. */
-  leaves: Uint8Array[];
-  chunkId: number;
-  expected: V10MerkleCommitment;
-  /** OT-RFC-39 — selects flat-KC (default) vs curated chunked tree. */
-  kind?: 'flat-kc' | 'ciphertext-chunks';
-}
+// The host posts a ProofBuilderRequest plus a correlation id. Discriminated on
+// `kind`, so `privateRoots` is present iff `kind === 'public'`.
+type BuildRequest = { taskId: number } & ProofBuilderRequest;
 
 interface BuildResponse {
   taskId: number;
   ok: true;
+  content: Uint8Array;
   leaf: Uint8Array;
   proof: Uint8Array[];
   merkleRoot: Uint8Array;
@@ -67,12 +61,13 @@ if (!parentPort) {
 
 parentPort.on('message', (msg: BuildRequest) => {
   try {
-    const material = msg.kind === 'ciphertext-chunks'
-      ? buildV10CiphertextChunksProofMaterial(msg.leaves, msg.chunkId, msg.expected)
-      : buildV10ProofMaterial(msg.leaves, msg.chunkId, msg.expected);
+    const material = msg.kind === 'catalog'
+      ? buildV10CatalogProofMaterial(msg.contents, msg.chunkId, msg.expected)
+      : buildV10ProofMaterial(msg.contents, msg.privateRoots, msg.chunkId, msg.expected);
     const response: BuildResponse = {
       taskId: msg.taskId,
       ok: true,
+      content: material.content,
       leaf: material.leaf,
       proof: material.proof,
       merkleRoot: material.merkleRoot,

@@ -16,6 +16,7 @@ import {
   decodePublishAck,
   createOperationContext,
   V10MerkleTree as MerkleTree,
+  structuredKARootV10,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter } from '@origintrail-official/dkg-chain';
@@ -145,7 +146,7 @@ describe('Publish lifecycle (aligned with diagram)', () => {
     expect(result.status).toBe('confirmed');
 
     const hashes = triples.map(computeTripleHash);
-    const flatTree = new MerkleTree(hashes);
+    const flatTree = { root: structuredKARootV10(hashes, []).root };
     expect(Buffer.from(result.merkleRoot).toString('hex'))
       .toBe(Buffer.from(flatTree.root).toString('hex'));
   });
@@ -184,7 +185,7 @@ describe('Publish lifecycle (aligned with diagram)', () => {
     expect(result.merkleRoot).toHaveLength(32);
 
     const hashes = triples.map(computeTripleHash);
-    const flatTree = new MerkleTree(hashes);
+    const flatTree = { root: structuredKARootV10(hashes, []).root };
     expect(Buffer.from(result.merkleRoot).toString('hex'))
       .toBe(Buffer.from(flatTree.root).toString('hex'));
   });
@@ -224,9 +225,11 @@ describe('Publish lifecycle (aligned with diagram)', () => {
     });
 
     const actualHex = Buffer.from(result.merkleRoot).toString('hex');
-    const goldenHex =
-      '0a3a66a345e5e8a25c50dd01be3373ae3d6b242807b62cbe7ada5ec208812a16';
-    expect(actualHex).toBe(goldenHex);
+    // Structured root over the fixed quads (no blank nodes → no skolemization).
+    const expectedHex = Buffer.from(
+      structuredKARootV10(fixedQuads.map(computeTripleHash), []).root,
+    ).toString('hex');
+    expect(actualHex).toBe(expectedHex);
   });
 
   it('same quads in different order produce the same merkle root', async () => {
@@ -302,7 +305,7 @@ describe('Publish lifecycle (aligned with diagram)', () => {
 
     const publicHashes = [q(ENTITY, 'http://schema.org/name', '"PrivBot"')].map(computeTripleHash);
     const privateRoot = result.kaManifest[0].privateMerkleRoot!;
-    const expectedRoot = new MerkleTree([...publicHashes, privateRoot]).root;
+    const expectedRoot = structuredKARootV10(publicHashes, [privateRoot]).root;
     expect(Buffer.from(result.merkleRoot).toString('hex'))
       .toBe(Buffer.from(expectedRoot).toString('hex'));
   });
@@ -383,7 +386,7 @@ describe('Publisher ↔ Receiver merkle consistency (regression)', () => {
       const publisherHex = Buffer.from(result.merkleRoot).toString('hex');
 
       const receiverHashes = result.publicQuads!.map(computeTripleHash);
-      const receiverRoot = new MerkleTree(receiverHashes).root;
+      const receiverRoot = structuredKARootV10(receiverHashes, []).root;
       const receiverHex = Buffer.from(receiverRoot).toString('hex');
 
       expect(receiverHex).toBe(publisherHex);
@@ -415,7 +418,7 @@ describe('Publisher ↔ Receiver merkle consistency (regression)', () => {
 
     const publisherHex = Buffer.from(result.merkleRoot).toString('hex');
     const receiverHashes = result.publicQuads!.map(computeTripleHash);
-    const receiverRoot = new MerkleTree(receiverHashes).root;
+    const receiverRoot = structuredKARootV10(receiverHashes, []).root;
     const receiverHex = Buffer.from(receiverRoot).toString('hex');
 
     expect(receiverHex).toBe(publisherHex);
@@ -456,7 +459,7 @@ describe('Publisher ↔ Receiver merkle consistency (regression)', () => {
     const privateRoots = result.kaManifest
       .filter(m => m.privateMerkleRoot)
       .map(m => m.privateMerkleRoot!);
-    const receiverRoot = new MerkleTree([...receiverHashes, ...privateRoots]).root;
+    const receiverRoot = structuredKARootV10(receiverHashes, privateRoots).root;
     const receiverHex = Buffer.from(receiverRoot).toString('hex');
 
     expect(receiverHex).toBe(publisherHex);
@@ -484,7 +487,7 @@ describe('Tentative data and chain event confirmation', () => {
 
     const triples = [q('did:dkg:agent:QmTentative', 'http://schema.org/name', '"TentBot"')];
     const hashes = triples.map(computeTripleHash);
-    const merkleRoot = new MerkleTree(hashes).root;
+    const merkleRoot = structuredKARootV10(hashes, []).root;
 
     const ntriples = triples.map(t =>
       `<${t.subject}> <${t.predicate}> ${t.object} .`,
@@ -563,7 +566,7 @@ describe('Tentative data and chain event confirmation', () => {
 
     const triples = [q('did:dkg:agent:QmMisAddr', 'http://schema.org/name', '"MisAddrBot"')];
     const hashes = triples.map(computeTripleHash);
-    const merkleRoot = new MerkleTree(hashes).root;
+    const merkleRoot = structuredKARootV10(hashes, []).root;
 
     const ntriples = triples.map(t =>
       `<${t.subject}> <${t.predicate}> ${t.object} .`,
@@ -644,7 +647,7 @@ describe('Tentative data and chain event confirmation', () => {
 
     const triples = [q('did:dkg:agent:QmByRoot', 'http://schema.org/name', '"RootBot"')];
     const hashes = triples.map(computeTripleHash);
-    const merkleRoot = new MerkleTree(hashes).root;
+    const merkleRoot = structuredKARootV10(hashes, []).root;
 
     const ntriples = triples.map(t =>
       `<${t.subject}> <${t.predicate}> ${t.object} .`,
@@ -710,7 +713,7 @@ describe('Tentative data and chain event confirmation', () => {
     // The handler computes its own merkle root from the autoPartition of received quads,
     // so we need to ensure the merkle root matches what the chain event carries.
     const hashes = triples.map(computeTripleHash);
-    const expectedMerkleRoot = new MerkleTree(hashes).root;
+    const expectedMerkleRoot = structuredKARootV10(hashes, []).root;
 
     const ntriples = triples.map(t =>
       `<${t.subject}> <${t.predicate}> ${t.object} .`,

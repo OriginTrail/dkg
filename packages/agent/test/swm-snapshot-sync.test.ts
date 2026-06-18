@@ -70,16 +70,19 @@ describe('SWM snapshot catch-up sync', () => {
       authority: { type: 'owner', proofRef: 'proof:owner:1' },
     });
     const payload = await asyncPublisher.inspectPreparedPayload(jobId);
+    // GH #1122 — the async lift preserves caller root IRIs (parity with sync):
+    // the prepared payload carries the verbatim caller subjects (root + its
+    // skolemized child), not a dkg:<cg>:<ns>:<scope>/… rewrite.
     expect(payload?.publishOptions.quads).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          subject: expect.stringMatching(/^dkg:swm-snapshot-sync:aloha:person-profile\/entity-/),
+          subject: ENTITY,
           predicate: 'http://schema.org/name',
           object: '"Synced Snapshot"',
           graph: '',
         }),
         expect.objectContaining({
-          subject: expect.stringMatching(/^dkg:swm-snapshot-sync:aloha:person-profile\/entity-.*\/\.well-known\/genid\/child$/),
+          subject: `${ENTITY}/.well-known/genid/child`,
           predicate: 'http://schema.org/value',
           object: '"Nested"',
           graph: '',

@@ -56,6 +56,12 @@ export interface StartDaemonOpts {
   /** Extra keys merged into config.json (e.g. preset contextGraphs). */
   extraConfig?: Record<string, unknown>;
   readyTimeoutMs?: number;
+  /**
+   * Extra env vars for the daemon process. A value of `undefined` DELETES an
+   * inherited var — use this to make a test hermetic against ambient env (e.g.
+   * pin `DKG_MAX_INFLIGHT` instead of inheriting the developer/CI value).
+   */
+  env?: Record<string, string | undefined>;
 }
 
 /** Boot a real edge daemon against the shared Hardhat node and wait for readiness. */
@@ -97,14 +103,19 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
     { mode: 0o600 },
   );
 
+  const childEnv: Record<string, string | undefined> = {
+    ...process.env,
+    DKG_HOME: home,
+    DKG_API_PORT: String(apiPort),
+    DKG_NO_BLUE_GREEN: '1',
+    DKG_DISABLE_TELEMETRY: '1',
+    ...(opts.env ?? {}),
+  };
+  // Drop keys explicitly cleared via `env: { KEY: undefined }` so a test can
+  // remove an inherited var (spawn would otherwise pass it through).
+  for (const k of Object.keys(childEnv)) if (childEnv[k] === undefined) delete childEnv[k];
   const child = spawn('node', [CLI_ENTRY, 'daemon-worker'], {
-    env: {
-      ...process.env,
-      DKG_HOME: home,
-      DKG_API_PORT: String(apiPort),
-      DKG_NO_BLUE_GREEN: '1',
-      DKG_DISABLE_TELEMETRY: '1',
-    },
+    env: childEnv,
     stdio: 'ignore',
   });
 

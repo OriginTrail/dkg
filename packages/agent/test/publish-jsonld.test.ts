@@ -1260,22 +1260,10 @@ describe('publishJsonLd', () => {
     await agent.registerContextGraph('async-subtract-observe');
 
     const root = 'http://example.org/AlreadyPublished';
-    const namespace = 'async-publish';
-    const scope = 'context-graph';
-    // Mirror `canonicalRootIri` in async-lift-validation.ts: slugged
-    // (cgId:ns:scope) + rootTail + first-6-byte sha256 hex digest.
-    const { sha256 } = await import('@origintrail-official/dkg-core');
-    const slug = (v: string) =>
-      v.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'unknown';
-    const rootTail = (() => {
-      const i = Math.max(root.lastIndexOf('/'), root.lastIndexOf(':'));
-      return i >= 0 ? root.slice(i + 1) : root;
-    })();
-    const rootHash = Array.from(sha256(new TextEncoder().encode(root)))
-      .slice(0, 6)
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('');
-    const canonical = `dkg:${slug('async-subtract-observe')}:${slug(namespace)}:${slug(scope)}/${slug(rootTail)}-${rootHash}`;
+    // GH #1122 — the async lift preserves caller root IRIs (identity
+    // canonicalization, parity with sync), so the authoritative confirmed
+    // state lives at the CALLER root itself, not a dkg:<cg>:… rewrite.
+    const canonical = root;
     const dataGraph = `did:dkg:context-graph:async-subtract-observe`;
     const metaGraph = `did:dkg:context-graph:async-subtract-observe/_meta`;
     const kcUal = 'urn:dkg:test:kc:async-subtract-observe';

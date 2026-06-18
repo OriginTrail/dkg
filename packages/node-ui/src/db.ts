@@ -95,7 +95,35 @@ export interface DashboardDBOptions {
   dataDir: string;
   /** Days to retain data before pruning. Default: 14 */
   retentionDays?: number;
+  /**
+   * TTL (ms) for the in-process memo over polled replication rollups. `<= 0`
+   * disables caching. When omitted, falls back to the
+   * `DKG_DASHBOARD_CACHE_TTL_MS` env var, then a 2000ms default.
+   */
+  cacheTtlMs?: number;
 }
+
+/**
+ * Resolve the replication-rollup memo TTL: an explicit option (any finite
+ * number, incl. `<= 0` to disable) wins; otherwise a STRICT parse of
+ * `DKG_DASHBOARD_CACHE_TTL_MS` — empty / malformed falls back to the default so
+ * an empty env var in a deploy file doesn't silently disable the memo; otherwise
+ * 2000ms.
+ */
+function resolveCacheTtlMs(optValue: number | undefined): number {
+  if (typeof optValue === 'number' && Number.isFinite(optValue)) return optValue;
+  const raw = process.env.DKG_DASHBOARD_CACHE_TTL_MS;
+  if (raw === undefined || !/^-?\d+$/.test(raw.trim())) return 2000;
+  const n = Number(raw.trim());
+  return Number.isFinite(n) ? n : 2000;
+}
+
+/**
+ * A rollup is only memoized when its smallest relevant time window is at least
+ * this many multiples of the TTL — so a cached moving-window result can never
+ * represent a meaningfully different window than the live request.
+ */
+const MEMO_WINDOW_SAFETY_FACTOR = 10;
 
 export class DashboardDB {
   readonly db: Database.Database;
@@ -107,6 +135,7 @@ export class DashboardDB {
     this.dataDir = opts.dataDir;
     this.explicitRetentionDays = opts.retentionDays !== undefined;
     this.retentionDays = opts.retentionDays ?? DEFAULT_RETENTION_DAYS;
+    this._memoTtlMs = resolveCacheTtlMs(opts.cacheTtlMs);
     const dbPath = join(opts.dataDir, 'node-ui.db');
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
@@ -871,6 +900,50 @@ export class DashboardDB {
     return this._stmts[key];
   }
 
+  // --- Short-TTL memo for polled, scan-heavy read rollups ---
+  // The replication summary/per-cg/timeline endpoints scan `replication_events`
+  // synchronously on the daemon's event loop and are polled by the dashboard on
+  // a few-second cadence. A short memo collapses repeated identical scans (extra
+  // browser tabs, a runaway poller) into one, with no visible staleness on
+  // window-based analytics. TTL resolved in the constructor from
+  // `cacheTtlMs` / DKG_DASHBOARD_CACHE_TTL_MS (<=0 disables; default 2000).
+  private _memo = new Map<string, { at: number; value: unknown }>();
+  private readonly _memoTtlMs: number;
+
+  /**
+   * Memoize a rollup for up to `_memoTtlMs`. `minWindowMs` is the smallest time
+   * window the result depends on; caching is bypassed unless that window is at
+   * least MEMO_WINDOW_SAFETY_FACTOR x the TTL. These rollups are computed over a
+   * moving `Date.now()` window, so a cached value can represent a slightly older
+   * window than the live request; requiring a 10x margin keeps that drift a
+   * negligible fraction of the window. A 1x guard is technically sufficient for
+   * `periodMs` (only the window cutoff drives staleness, not `bucketMs`), but per
+   * review (zsculac) we apply the conservative 10x margin to the smallest
+   * relevant window so the cache is used only where staleness is unambiguously
+   * acceptable. Default dashboard windows (1h/24h) are far above the 2s TTL, so
+   * they always cache.
+   *
+   * Returned values are structuredClone'd so a caller that sorts/pushes/annotates
+   * the summary or rows cannot mutate the cached instance and poison later reads
+   * (these methods previously returned a fresh result object on every call).
+   */
+  private memoized<T>(key: string, minWindowMs: number, fn: () => T): T {
+    // `< F*ttl` bypasses, so a window of exactly F*ttl IS cached — matching the
+    // ">= 10x cacheable" contract documented above.
+    if (!(this._memoTtlMs > 0) || minWindowMs < this._memoTtlMs * MEMO_WINDOW_SAFETY_FACTOR) {
+      return fn();
+    }
+    const now = Date.now();
+    const hit = this._memo.get(key);
+    if (hit && now - hit.at < this._memoTtlMs) return structuredClone(hit.value) as T;
+    const value = fn();
+    // Bound the map: keys are few in practice, but per-CG timeline variants can
+    // accumulate. Entries are short-lived, so a rare full clear is safe.
+    if (this._memo.size > 256) this._memo.clear();
+    this._memo.set(key, { at: now, value });
+    return structuredClone(value) as T;
+  }
+
   // --- Metric snapshots ---
 
   insertSnapshot(snap: MetricSnapshotRow): void {
@@ -1008,6 +1081,10 @@ export class DashboardDB {
    *  - raw action counts.
    */
   getReplicationSummary(periodMs = 86_400_000): ReplicationSummary {
+    return this.memoized(`replicationSummary:${periodMs}`, periodMs, () => this._computeReplicationSummary(periodMs));
+  }
+
+  private _computeReplicationSummary(periodMs: number): ReplicationSummary {
     const cutoff = Date.now() - periodMs;
     const rows = this.db.prepare(
       `SELECT action, COUNT(*) AS n FROM replication_events WHERE ts >= ? GROUP BY action`,
@@ -1066,6 +1143,10 @@ export class DashboardDB {
 
   /** Per-CG rollup of replication activity over the window, newest-active first. */
   getReplicationPerCg(periodMs = 86_400_000): ReplicationPerCgRow[] {
+    return this.memoized(`replicationPerCg:${periodMs}`, periodMs, () => this._computeReplicationPerCg(periodMs));
+  }
+
+  private _computeReplicationPerCg(periodMs: number): ReplicationPerCgRow[] {
     const cutoff = Date.now() - periodMs;
     return this.db.prepare(`
       SELECT context_graph_id,
@@ -1089,6 +1170,18 @@ export class DashboardDB {
    * is given, the series is scoped to that CG.
    */
   getReplicationTimeline(opts: { periodMs: number; bucketMs: number; contextGraphId?: string }): ReplicationTimelineBucket[] {
+    return this.memoized(
+      `replicationTimeline:${opts.periodMs}:${opts.bucketMs}:${opts.contextGraphId ?? ''}`,
+      // Staleness is driven by the rolling `periodMs` cutoff; `bucketMs` only
+      // controls grouping. We still pass the smaller of the two so timeline
+      // caching also requires a comfortably-large bucket (conservative, per
+      // review) — fine-grained buckets fall back to a fresh compute.
+      Math.min(opts.periodMs, opts.bucketMs),
+      () => this._computeReplicationTimeline(opts),
+    );
+  }
+
+  private _computeReplicationTimeline(opts: { periodMs: number; bucketMs: number; contextGraphId?: string }): ReplicationTimelineBucket[] {
     const cutoff = Date.now() - opts.periodMs;
     const bucket = Math.max(1, Math.floor(opts.bucketMs));
     const where = opts.contextGraphId ? 'AND context_graph_id = @cg' : '';

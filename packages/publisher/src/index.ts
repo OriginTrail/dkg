@@ -18,6 +18,7 @@ export {
   computeTripleHashV10,
   computePublicRootV10,
   computePrivateRootV10,
+  computeStructuredKCRootV10,
   computeFlatKCRootV10,
   computeFlatKCMerkleLeafCountV10,
   computeKARootV10,
@@ -49,6 +50,7 @@ export {
 } from './workspace-agent-recipients.js';
 export {
   ACKCollector,
+  DEFAULT_REQUIRED_ACKS,
   type ACKCollectorDeps,
   type CollectedACK,
   type ACKCollectionResult,

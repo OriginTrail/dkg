@@ -366,21 +366,12 @@ export function verifySyncedData(
       const flatRoot = computeFlatKCRoot(allQuadsForKC, kcPrivateRoots);
       const flatHex = Array.from(flatRoot).map(b => b.toString(16).padStart(2, '0')).join('');
 
+      // PoS content-binding: `computeFlatKCRoot` now returns the STRUCTURED root
+      // (private data anchored as a sibling). The legacy "without private root
+      // anchoring" fallback is removed — a non-anchoring root is a genuine
+      // mismatch (pre-mainnet cutover clears/re-publishes old KCs).
       if (flatHex === claimedHex) {
         verifiedKcUals.add(kcUal);
-      } else if (kcPrivateRoots.length > 0) {
-        const legacyRoot = computeFlatKCRoot(allQuadsForKC, []);
-        const legacyHex = Array.from(legacyRoot).map(b => b.toString(16).padStart(2, '0')).join('');
-        if (legacyHex === claimedHex) {
-          log.debug(ctx, `KC ${kcUal} verified via legacy flat root (without private root anchoring)`);
-          verifiedKcUals.add(kcUal);
-        } else if (acceptUnverified) {
-          log.debug(ctx, `Merkle mismatch for ${kcUal} (system context graph, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
-          rejected++;
-        } else {
-          log.warn(ctx, `Merkle mismatch for ${kcUal}: claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
-          rejected++;
-        }
       } else if (acceptUnverified) {
         log.debug(ctx, `Merkle mismatch for ${kcUal} (system context graph, accepted): claimed ${claimedHex.slice(0, 16)}…, flat ${flatHex.slice(0, 16)}…`);
         rejected++;

@@ -1,5 +1,4 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { sha256 } from '@origintrail-official/dkg-core';
 import type { LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import type { LiftJobValidationMetadata, LiftRequest } from './lift-job.js';
 
@@ -98,31 +97,30 @@ function canonicalizeTerm(term: string, canonicalRootMap: Record<string, string>
   return term;
 }
 
-export function canonicalRootIri(request: LiftRequest, root: string): string {
-  const rootName = slugPart(rootTail(root));
-  const rootHash = shortRootHash(root);
-  return `dkg:${slugPart(request.contextGraphId)}:${slugPart(request.namespace)}:${slugPart(request.scope)}/${rootName}-${rootHash}`;
+/**
+ * GH #1122 — async/sync publish root-canonicalization parity.
+ *
+ * The async lift used to rewrite caller-provided root IRIs to a generated
+ * `dkg:<cg>:<ns>:<scope>/<name>-<hash>` form, while the SYNCHRONOUS publish path
+ * (`canonicalPublishPayload` → `skolemizeByEntity`) keeps the caller's
+ * `rootEntity` IRIs verbatim and stores private data at that caller root. That
+ * divergence broke stable IRI linking: the same domain payload produced
+ * different RDF subjects depending on sync vs async, so VM graphs rendered
+ * disconnected and integrations couldn't follow caller-IRI references.
+ *
+ * The fix is parity: the async lift now PRESERVES the caller root IRI (identity)
+ * exactly like sync. Because every downstream consumer reads
+ * `validation.canonicalRootMap` symmetrically, an identity map propagates
+ * cleanly — quad rewriting becomes a no-op, private data is stored at the caller
+ * root, and the canonical-vs-source `privateDataAnchor` bridge (an async-only
+ * artifact of the old rewrite that sync never created) is correctly skipped.
+ */
+export function canonicalRootIri(_request: LiftRequest, root: string): string {
+  return root;
 }
 
 function normalizeRoots(roots: readonly string[]): string[] {
   return [...new Set(roots.map((root) => root.trim()).filter(Boolean))];
-}
-
-function rootTail(root: string): string {
-  const trimmed = root.trim();
-  const slashIndex = trimmed.lastIndexOf('/');
-  const colonIndex = trimmed.lastIndexOf(':');
-  const cutIndex = Math.max(slashIndex, colonIndex);
-  return cutIndex >= 0 ? trimmed.slice(cutIndex + 1) : trimmed;
-}
-
-function slugPart(value: string): string {
-  const normalized = value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  return normalized || 'unknown';
 }
 
 function normalizePriorVersion(priorVersion: string | undefined): string | undefined {
@@ -154,12 +152,4 @@ function assertNoCanonicalRootCollisions(canonicalRootMap: Record<string, string
     }
     reverse.set(canonicalRoot, sourceRoot);
   }
-}
-
-function shortRootHash(root: string): string {
-  const digest = sha256(new TextEncoder().encode(root));
-  return Array.from(digest)
-    .slice(0, 6)
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('');
 }

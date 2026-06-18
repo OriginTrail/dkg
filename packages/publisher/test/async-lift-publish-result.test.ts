@@ -155,4 +155,22 @@ describe('async lift publish result mapping', () => {
     expect(failure.phase).toBe('confirmation');
     expect(failure.retryable).toBe(false);
   });
+
+  it('classifies a private-no-acks broadcast failure as TERMINAL, not retryable (Codex #1132 / GH #1013/#1121)', () => {
+    // Before the fix this generic broadcast-phase failure fell through to
+    // `rpc_unavailable` (retryable) and the queue retried forever a publish
+    // that can never reach VM until encrypted private async publish (#1121).
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: new Error(
+        'Async publish to a chain-registered context graph could not reach Verifiable Memory: ' +
+        'private payload had no collectable storage ACKs (peers cannot see private data).',
+      ),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:private-no-acks',
+    });
+
+    expect(failure.code).toBe('private_unanchorable');
+    expect(failure.mode).toBe('terminal');
+    expect(failure.retryable).toBe(false);
+  });
 });

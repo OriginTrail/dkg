@@ -19,7 +19,7 @@
 // each peer's Ed25519 public key so we don't need real libp2p PeerId
 // strings.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   generateEd25519Keypair,
   InMemoryMessageIdempotencyStore,
@@ -306,5 +306,93 @@ describe('MessageHandler — chat ACL + contextGraphId plumbing', () => {
     await a.sendChat(PEER_B, 'm3');
 
     expect(acl.calls).toHaveLength(3);
+  });
+});
+
+// GH #462 — skill_request authorization (parallel to the chat ACL above).
+// PROTOCOL_MESSAGE authenticates the caller's peerId via Ed25519 but did no
+// authorization: any connected peer could invoke any registered skill. The
+// MessageHandler-level hook is accept-all when unset (library back-compat);
+// the DAEMON installs the default-deny policy (lifecycle.ts, buildSkillAcl).
+describe('MessageHandler — skill_request ACL (GH #462)', () => {
+  const SKILL = 'did:dkg:skill:test/echo';
+
+  function echoSkill() {
+    return vi.fn(async (req: { inputData: Uint8Array }) => ({
+      success: true,
+      outputData: req.inputData,
+    }));
+  }
+
+  it('no ACL installed → skill executes (library-level back-compat)', async () => {
+    const { a, b } = await buildPair();
+    const handler = echoSkill();
+    b.registerSkill(SKILL, handler as never);
+
+    const res = await a.sendSkillRequest(PEER_B, { skillUri: SKILL, inputData: new TextEncoder().encode('hi') });
+    expect(res.success).toBe(true);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('ACL reject → unauthorized response, skill handler NOT invoked', async () => {
+    const { a, b } = await buildPair();
+    const handler = echoSkill();
+    b.registerSkill(SKILL, handler as never);
+    b.setSkillAcl(() => ({ accept: false, reason: 'unauthorized: default-deny (GH #462)' }));
+
+    const res = await a.sendSkillRequest(PEER_B, { skillUri: SKILL, inputData: new Uint8Array([1]) });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/unauthorized/);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('ACL accept for the sender → skill executes', async () => {
+    const { a, b } = await buildPair();
+    const handler = echoSkill();
+    b.registerSkill(SKILL, handler as never);
+    const acl = vi.fn((senderPeerId: string) => ({ accept: senderPeerId === PEER_A }));
+    b.setSkillAcl(acl);
+
+    const res = await a.sendSkillRequest(PEER_B, { skillUri: SKILL, inputData: new Uint8Array([2]) });
+    expect(res.success).toBe(true);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(acl).toHaveBeenCalledWith(PEER_A, SKILL);
+  });
+
+  it('ACL throw → fails closed with unauthorized, handler NOT invoked', async () => {
+    const { a, b } = await buildPair();
+    const handler = echoSkill();
+    b.registerSkill(SKILL, handler as never);
+    b.setSkillAcl(() => { throw new Error('boom'); });
+
+    const res = await a.sendSkillRequest(PEER_B, { skillUri: SKILL, inputData: new Uint8Array([3]) });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/unauthorized/);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('ACL denial happens BEFORE unknown-skill resolution (no skill-existence oracle)', async () => {
+    const { a, b } = await buildPair();
+    b.setSkillAcl(() => ({ accept: false, reason: 'unauthorized: default-deny (GH #462)' }));
+
+    // Unauthorized caller probing an unregistered skill must see the SAME
+    // unauthorized error, not "Unknown skill: …" (which would leak the
+    // registered-skill namespace to unauthenticated peers).
+    const res = await a.sendSkillRequest(PEER_B, { skillUri: 'did:dkg:skill:test/none', inputData: new Uint8Array() });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/unauthorized/);
+    expect(res.error).not.toMatch(/Unknown skill/);
+  });
+
+  it('setSkillAcl(null) restores accept-all behaviour', async () => {
+    const { a, b } = await buildPair();
+    const handler = echoSkill();
+    b.registerSkill(SKILL, handler as never);
+    b.setSkillAcl(() => ({ accept: false }));
+    b.setSkillAcl(null);
+
+    const res = await a.sendSkillRequest(PEER_B, { skillUri: SKILL, inputData: new Uint8Array([4]) });
+    expect(res.success).toBe(true);
+    expect(handler).toHaveBeenCalledTimes(1);
   });
 });

@@ -197,6 +197,48 @@ describe('import-file orchestration — happy paths', () => {
     });
 
 
+    it('explicit contentType=application/octet-stream suppresses filename inference — opaque-blob escape hatch (Codex PR #1107)', async () => {
+      // The caller DELIBERATELY pins octet-stream while uploading a .md file
+      // whose part header even says text/markdown. Pre-fix, the filename
+      // fallback re-inferred text/markdown and ran extraction anyway,
+      // removing the documented "store as opaque blob" escape hatch.
+      const body = buildMultipart([
+        { kind: 'text', name: 'contextGraphId', value: 'cg' },
+        { kind: 'text', name: 'contentType', value: 'application/octet-stream' },
+        { kind: 'file', name: 'file', filename: 'notes.md', contentType: 'text/markdown', content: Buffer.from('# Secret\n\nKeep opaque.\n', 'utf-8') },
+      ]);
+
+      const result = await runImportFileOrchestration({
+        agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+        multipartBody: body, boundary: BOUNDARY, assertionName: 'opaque-escape-hatch',
+      });
+
+      expect(result.detectedContentType).toBe('application/octet-stream');
+      expect(result.extraction.status).toBe('skipped');
+      expect(result.extraction.pipelineUsed).toBeNull();
+    });
+
+
+    it('IMPLICIT octet-stream (no override) still infers from the filename extension (#1101 preserved)', async () => {
+      // Same .md upload, but the octet-stream comes from the file part header
+      // (curl default), NOT an explicit override — the #1101 inference must
+      // still rescue extraction here.
+      const body = buildMultipart([
+        { kind: 'text', name: 'contextGraphId', value: 'cg' },
+        { kind: 'file', name: 'file', filename: 'notes.md', contentType: 'application/octet-stream', content: Buffer.from('# Hello\n\nStill markdown.\n', 'utf-8') },
+      ]);
+
+      const result = await runImportFileOrchestration({
+        agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+        multipartBody: body, boundary: BOUNDARY, assertionName: 'implicit-inference',
+      });
+
+      expect(result.detectedContentType).toBe('text/markdown');
+      expect(result.extraction.status).toBe('completed');
+      expect(result.extraction.pipelineUsed).toBe('text/markdown');
+    });
+
+
     it('registered converter path — runs Phase 1, stores MD intermediate, runs Phase 2', async () => {
       // Register a stub converter for application/pdf that converts "fake-pdf" bytes to real markdown
       const stubConverter: ExtractionPipeline = {

@@ -40,6 +40,7 @@ interface PendingTask {
 interface WorkerResponseOk {
   taskId: number;
   ok: true;
+  content: Uint8Array;
   leaf: Uint8Array;
   proof: Uint8Array[];
   merkleRoot: Uint8Array;
@@ -107,6 +108,7 @@ export class WorkerThreadProofBuilder implements ProofBuilder {
       this.pending.delete(msg.taskId);
       if (msg.ok) {
         task.resolve({
+          content: msg.content,
           leaf: msg.leaf,
           proof: msg.proof,
           merkleRoot: msg.merkleRoot,
@@ -174,10 +176,7 @@ export class WorkerThreadProofBuilder implements ProofBuilder {
       worker.postMessage(
         {
           taskId,
-          leaves: req.leaves,
-          chunkId: req.chunkId,
-          expected: req.expected,
-          kind: req.kind ?? 'flat-kc',
+          ...req, // discriminated union — `privateRoots` only on the 'public' variant
         },
         // We don't transfer ArrayBuffers (cheaper structuredClone is
         // fine for v1; transfer adds complexity around lifetime

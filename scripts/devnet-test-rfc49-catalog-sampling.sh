@@ -26,10 +26,17 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+export REPO_ROOT
 # shellcheck source=devnet-publish-helpers.sh
 source "$SCRIPT_DIR/devnet-publish-helpers.sh"
 
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
+# Owner-sealed POST /api/update helpers (build_update_body / ka_owner_key) —
+# used by the curated-UPDATE leg (section 9b). Sourced AFTER DEVNET_DIR is set
+# because the helper asserts on it.
+NUM_NODES="${NUM_NODES:-6}"
+# shellcheck source=devnet-update-helpers.sh
+source "$SCRIPT_DIR/devnet-update-helpers.sh"
 API_PORT_BASE="${API_PORT_BASE:-9201}"
 HARDHAT_PORT="${HARDHAT_PORT:-8545}"
 CONTRACTS_JSON="$REPO_ROOT/packages/evm-module/deployments/localhost_contracts.json"
@@ -334,6 +341,127 @@ done
 [ "$RS_OK" -eq 1 ] || fail "no core submitted a random-sampling proof within the window (the curated KC's _catalog was not proven)"
 
 # ---------------------------------------------------------------------------
+# 9b. CURATED UPDATE (OT-RFC-49 WS-D): update the confirmed curated KA with new
+#     data and prove the catalog stays committed + re-hosted + provable.
+#
+#   A curated UPDATE re-commits the deterministic public `_catalog` floor: the
+#   producer's update() re-injects the floor, ships it inline, the cores rebuild
+#   + REPLACE-persist `<cg>/_catalog`, and the on-chain catalog commitment is set
+#   so the update CONFIRMS (before this feature a curated update shipped a ZERO
+#   catalog root and REVERTED with CuratedCGRequiresCatalogCommitment). The
+#   catalog is the STABLE public floor — the update RE-COMMITS THE SAME ROOT, it
+#   does NOT rotate — so we assert root non-zero AND == the publish baseline.
+#
+#   Driven via POST /api/update with an owner-sealed precomputedUpdateAttestation
+#   (build_update_body --curated). Re-finalize is NOT usable: the seal is keyed
+#   by the assertion URI and neither discard nor re-create clears it, so a 2nd
+#   wm/finalize of changed content hits "already finalized with a different
+#   merkleRoot". /api/update is the on-chain UPDATE primitive the daemon exposes.
+# ---------------------------------------------------------------------------
+log "── CURATED UPDATE path (POST /api/update, owner-sealed, floor re-injected) ──"
+UPD_QUADS=$(STAMP="$STAMP" PRIV_SUBJ="$PRIV_SUBJ" node -e '
+const stamp=process.env.STAMP, subj=process.env.PRIV_SUBJ;
+console.log(JSON.stringify([
+  { subject: subj, predicate: "http://schema.org/name", object: `"Alice Private ${stamp} — UPDATED value, still padded out to keep the encrypted member payload chunking through the LU-11 ciphertext substrate on this devnet update"`, graph: "" },
+  { subject: subj, predicate: "http://schema.org/email", object: `"alice-${stamp}@example.org"`, graph: "" },
+  { subject: subj, predicate: "http://schema.org/role", object: `"private-member-data, UPDATED — padded so the encrypted member payload reliably produces at least one LU-11 ciphertext chunk on this devnet update"`, graph: "" },
+  { subject: subj, predicate: "http://schema.org/jobTitle", object: "\"Lead (added on update)\"", graph: "" }
+]))')
+
+# build_update_body resolves the KA owner key (ownerOf), injects the curated
+# `_catalog` floor (6th arg = LOCAL cg id), seals, and emits the /api/update body.
+UPD_BODY=$(REPO_ROOT="$REPO_ROOT" DEVNET_DIR="$DEVNET_DIR" NUM_NODES="$NUM_NODES" \
+  build_update_body "$EDGE_CURATOR" "$KA_ID" "$CG_ID" "$UPD_QUADS" "[]" "$CG_ID") \
+  || fail "could not build curated update body (seal/owner-key resolution failed)"
+UPD_RESP=$(api_call "$EDGE_CURATOR" POST /api/update "$UPD_BODY")
+log "POST /api/update: $UPD_RESP"
+UPD_STATUS=$(printf '%s' "$UPD_RESP" | jq_field ".status")
+UPD_KA=$(printf '%s' "$UPD_RESP" | jq_field ".kaId")
+[ "$UPD_STATUS" = "confirmed" ] || fail "curated update status=$UPD_STATUS (expected confirmed — CuratedCGRequiresCatalogCommitment regression?): $UPD_RESP"
+[ "$UPD_KA" = "$KA_ID" ] || fail "curated update kaId=$UPD_KA != publish kaId=$KA_ID (update did not target the same KA)"
+pass "curated update confirmed and targets the SAME KA (kaId=$UPD_KA)"
+
+# ── on-chain: catalog still committed, non-zero, EQUALS the publish baseline. ──
+UPD_CHAIN=$(cd "$REPO_ROOT/packages/evm-module" && \
+  RPC_URL="http://127.0.0.1:$HARDHAT_PORT" CONTRACTS_JSON="$CONTRACTS_JSON" ABI_DIR="$ABI_DIR" KA_ID="$KA_ID" node -e '
+const {ethers}=require("ethers");const fs=require("fs");const path=require("path");
+(async()=>{
+  const provider=new ethers.JsonRpcProvider(process.env.RPC_URL);
+  const c=JSON.parse(fs.readFileSync(process.env.CONTRACTS_JSON,"utf8")).contracts;
+  const addr=c.DKGKnowledgeAssets?.evmAddress||c.DKGKnowledgeAssets?.address;
+  const abi=JSON.parse(fs.readFileSync(path.join(process.env.ABI_DIR,"DKGKnowledgeAssets.json"),"utf8"));
+  const k=new ethers.Contract(addr,abi,provider);
+  console.log(JSON.stringify({root:await k.getCatalogRoot(BigInt(process.env.KA_ID)),count:(await k.getCatalogLeafCount(BigInt(process.env.KA_ID))).toString()}));
+})().catch(e=>{console.error(e?.message||e);process.exit(1)});
+') || fail "post-update on-chain getCatalogRoot read failed"
+UPD_ROOT=$(printf '%s' "$UPD_CHAIN" | jq_field ".root")
+UPD_COUNT=$(printf '%s' "$UPD_CHAIN" | jq_field ".count")
+log "post-update on-chain catalogRoot=$UPD_ROOT catalogLeafCount=$UPD_COUNT (baseline root=$CAT_ROOT count=$CAT_COUNT)"
+[ "$UPD_ROOT" != "$ZERO" ] || fail "post-update catalogRoot is ZERO — the curated update dropped the catalog commitment"
+[ "$UPD_ROOT" = "$CAT_ROOT" ] || fail "post-update catalogRoot=$UPD_ROOT != publish baseline=$CAT_ROOT — the stable floor must RE-COMMIT, not rotate"
+[ "$UPD_COUNT" = "$CAT_COUNT" ] || fail "post-update catalogLeafCount=$UPD_COUNT != baseline=$CAT_COUNT"
+pass "curated update RE-COMMITTED the stable catalog floor (root non-zero, == baseline, leafCount=$UPD_COUNT)"
+
+# ── stripped/host-mode cores RE-HOST the updated `_catalog`. ──
+# The update ACK drives each core's updateHandler to rebuild + verify +
+# REPLACE-persist `<cg>/_catalog`. Poll until it lands (same propagation race
+# as the publish path's section 7).
+log "waiting for the updated _catalog to (re-)propagate to the stripped cores (up to 3 min)…"
+for i in $(seq 1 60); do
+  holders=0
+  for n in "${STRIPPED_CORES[@]}"; do c=$(catalog_count "$n"); [ "${c:-0}" -ge 1 ] 2>/dev/null && holders=$((holders+1)); done
+  [ "$holders" -ge 1 ] && { log "  updated catalog present on $holders/${#STRIPPED_CORES[@]} stripped cores"; break; }
+  [ "$i" -eq 1 ] || [ $((i % 10)) -eq 0 ] && log "  …updated catalog on $holders/${#STRIPPED_CORES[@]} cores after $((i*3))s"
+  sleep 3
+done
+UPD_CAT_HOLDERS=0
+for n in "${STRIPPED_CORES[@]}"; do cat=$(catalog_count "$n"); [ "${cat:-0}" -ge 1 ] 2>/dev/null && UPD_CAT_HOLDERS=$((UPD_CAT_HOLDERS+1)); done
+[ "$UPD_CAT_HOLDERS" -ge 1 ] || fail "no stripped core re-hosts the updated public _catalog after the update"
+pass "$UPD_CAT_HOLDERS/${#STRIPPED_CORES[@]} stripped cores re-host the updated public _catalog"
+
+# ── a core submits a random-sampling proof against the UPDATED catalog. ──
+log "driving random sampling against the updated catalog — submittedCount per core:"
+RSU0=()
+for n in "${STRIPPED_CORES[@]}" "$BASELINE_CORE"; do RSU0[$n]=$(rs_submitted "$n"); log "  core$n=${RSU0[$n]:-?}"; done
+RSU_OK=0
+for round in $(seq 1 12); do
+  hardhat_mine 250
+  sleep 8
+  for n in "${STRIPPED_CORES[@]}" "$BASELINE_CORE"; do
+    now=$(rs_submitted "$n")
+    if [ -n "$now" ] && [ -n "${RSU0[$n]}" ] && [ "$now" -gt "${RSU0[$n]}" ] 2>/dev/null; then
+      pass "core$n submitted a random-sampling proof after the update (submittedCount ${RSU0[$n]}→$now) — proving the UPDATED _catalog"
+      RSU_OK=1; break 2
+    fi
+  done
+  log "  round $round: no new post-update proof yet…"
+done
+[ "$RSU_OK" -eq 1 ] || fail "no core submitted a random-sampling proof against the updated catalog within the window"
+
+# ── MEMBER converges to the UPDATED private payload (OT-RFC-49 member distribution). ──
+# The curated update now DISTRIBUTES the updated payload: the producer emits the
+# LU-11 ciphertext chunk and the curator persists it (vs the OLD encrypt-then-
+# discard, which delivered NOTHING and left members permanently stale). This is
+# the NON-VACUOUS proof: unlike the catalog re-host (the floor is stable, so cores
+# already held it from publish), the member must end up holding the UPDATED value.
+# NOTE: a live gossip-push to an ALREADY-CONNECTED member is the known M2-a
+# converge race (issue #1205 — affects ALL SWM updates, not curated-update-
+# specific); the SUPPORTED catch-up is converge-on-reconnect. So restart the
+# member to exercise the converge path, then assert it holds the UPDATED value.
+log "restarting member edge$EDGE_MEMBER to exercise SWM converge to the UPDATED payload…"
+"$REPO_ROOT/scripts/devnet.sh" restart-node "$EDGE_MEMBER" >/dev/null 2>&1 || true
+for _ in $(seq 1 90); do curl -sf --max-time 1 -o /dev/null "http://127.0.0.1:$(node_port "$EDGE_MEMBER")/api/status" 2>/dev/null && break; sleep 1; done
+MEMBER_GOT_UPDATE=0
+for i in $(seq 1 40); do
+  got=$(api_call "$EDGE_MEMBER" POST /api/query "$(S="$PRIV_SUBJ" node -e 'console.log(JSON.stringify({sparql:`SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { <${process.env.S}> ?p ?o . FILTER(CONTAINS(STR(?o), "UPDATED")) } }`}))')" | _count_from_query)
+  [ "${got:-0}" -ge 1 ] 2>/dev/null && { MEMBER_GOT_UPDATE=1; break; }
+  { [ "$i" -eq 1 ] || [ $((i % 10)) -eq 0 ]; } && log "  …member converging — still on pre-update value after $((i*3))s"
+  sleep 3
+done
+[ "$MEMBER_GOT_UPDATE" -ge 1 ] || fail "member edge$EDGE_MEMBER did NOT converge to the UPDATED private payload after reconnect — the curated update did not DISTRIBUTE to members (Option B regression)"
+pass "member edge$EDGE_MEMBER converged to the UPDATED private payload — the curated update DISTRIBUTES to members (producer emit + curator-held + converge-on-reconnect)"
+
+# ---------------------------------------------------------------------------
 # 10. FROM-SWM SHORTCUT (OT-RFC-49 catalog auto-injection): a curated publish via
 #     the RAW /api/shared-memory/write + /api/shared-memory/publish path (NO
 #     assertion finalize) must ALSO get the `_catalog` injected → confirmed ACK +
@@ -389,5 +517,6 @@ log "  • curated publish → on-chain catalog commitment (root=$CAT_ROOT, leav
 log "  • stripped cores ${STRIPPED_CORES[*]}: ZERO private ciphertext, hold the _catalog"
 log "  • ${BASELINE_SUMMARY:-baseline core: (not evaluated)}"
 log "  • a core proved the public _catalog in random sampling"
+log "  • curated UPDATE (POST /api/update): re-committed the stable catalog floor (root==baseline, leaves=${UPD_COUNT:-?}), cores re-host it, a core proved the updated catalog"
 log "  • FROM-SWM shortcut (raw write+publish, no finalize): catalog auto-injected (leafCount=$SC_COUNT), cores hold it — and the finalize path above stayed intact (leafCount=$CAT_COUNT)"
 log "============================================================"

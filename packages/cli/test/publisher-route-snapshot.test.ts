@@ -70,9 +70,11 @@ describe('publisher routes with disk public snapshot refs', () => {
       };
     };
     expect(body.payload?.publishOptions?.publishEpochs).toBe(9);
+    // GH #1122 — the async lift preserves caller root IRIs (parity with sync);
+    // the payload carries the verbatim caller subject, not a dkg:<cg>:… rewrite.
     expect(body.payload?.publishOptions?.quads).toEqual([
       expect.objectContaining({
-        subject: expect.stringMatching(/^dkg:publisher-route-snapshot:aloha:person-profile\/entity-/),
+        subject: ENTITY,
         predicate: 'http://schema.org/name',
         object: '"Route Snapshot"',
       }),

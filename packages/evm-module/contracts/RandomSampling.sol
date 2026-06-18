@@ -35,7 +35,10 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
     //          is fed by committed PCA publishing allocation over a single
     //          current-epoch window (was a 4-epoch realized-publishing sum).
     //          Coefficients / S(t) / A(t) unchanged.
-    string private constant _VERSION = "10.1.1";
+    // 10.2.0 — PoS content-binding: submitProof(bytes content) derives
+    //          leaf = keccak256(content); public-CG commitment is the structured
+    //          hashPair(publicRoot, privateDataHash). Supersedes 10.1.1.
+    string private constant _VERSION = "10.2.0";
     uint256 public constant SCALE18 = 1e18;
 
     /// @notice Maximum number of in-CG resamples when the picker hits an
@@ -259,7 +262,7 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
      * functionally equivalent — every active core hosts every KC's
      * substrate.
      */
-    function submitProof(bytes32 leaf, bytes32[] calldata merkleProof)
+    function submitProof(bytes calldata content, bytes32[] calldata merkleProof)
         external
         profileExists(identityStorage.getIdentityId(msg.sender))
         nodeExistsInShardingTable(identityStorage.getIdentityId(msg.sender))
@@ -304,6 +307,17 @@ contract RandomSampling is INamed, IVersioned, ContractStatus, IInitializable {
         if (leafCount == 0 || challenge.chunkId >= uint256(leafCount)) {
             revert MerkleRootMismatchError(bytes32(0), expectedMerkleRoot);
         }
+
+        // CONTENT-BINDING (proof-of-storage empty-proof fix): derive the leaf
+        // from the submitted content instead of trusting a caller-supplied leaf.
+        // The prover must submit the actual challenged data — public N-Triple
+        // bytes, or the curated `_catalog` triple bytes — and the chain hashes it
+        // to `hashTripleV10(...)`. An attacker can no longer pass an empty proof
+        // with `leaf = getLatestMerkleRoot/getCatalogRoot`, because no real
+        // triple's keccak256 equals a stored 32-byte root (preimage resistance).
+        // The structured commitment binds private data as a sibling, so the
+        // public proof folds: leaf -> publicRoot -> hashPair(publicRoot, privateDataHash).
+        bytes32 leaf = keccak256(content);
 
         if (!_verifyV10MerkleProof(expectedMerkleRoot, leaf, challenge.chunkId, merkleProof)) {
             revert MerkleRootMismatchError(bytes32(0), expectedMerkleRoot);

@@ -599,7 +599,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (this.config.queryAccess?.defaultPolicy === 'public') {
       this.log.warn(ctx, 'Query access policy is "public" — all remote queries will be accepted. Set queryAccess.defaultPolicy to "deny" for stricter security.');
     }
-    const queryRemoteHandler = new QueryHandler(this.queryEngine, queryAccessConfig);
+    // #1105: even under deny-by-default, a CG whose live on-chain
+    // accessPolicy is public (0) is remotely queryable — otherwise
+    // `accessPolicy: "public"` at CG creation has no remote-query effect
+    // and every devnet/fresh install (which ships no queryAccess config)
+    // denies everything. Explicit queryAccess.contextGraphs entries still
+    // override; isContextGraphPublicOnChain fails closed on any lookup
+    // error, so private/curated/unregistered CGs remain denied.
+    const queryRemoteHandler = new QueryHandler(this.queryEngine, queryAccessConfig, {
+      isContextGraphPublic: (contextGraphId: string) =>
+        this.isContextGraphPublicOnChain(contextGraphId, createOperationContext('query')),
+    });
     // rc.9 PR-9: PROTOCOL_QUERY_REMOTE migrated onto the Universal
     // Messenger substrate. Wire prefix bumped to /dkg/10.0.1/* (hard
     // cutover; rc.8 ↔ rc.9 cross-version query stops working) so
@@ -1540,6 +1550,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this._pendingChatAcl = null;
     }
 
+    // GH #462 — wire up pending skill ACL (set via `agent.setSkillAcl(...)`).
+    if (this._pendingSkillAcl) {
+      this.messageHandler.setSkillAcl(this._pendingSkillAcl);
+      this._pendingSkillAcl = null;
+    }
+
     // Register skill handlers
     if (this.config.skills) {
       for (const skill of this.config.skills) {
@@ -2360,6 +2376,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   handlePeerUpdateForSyncRetry(this: DKGAgent, peerId: string, protocols: readonly string[]): void {
     if (peerId === this.node.libp2p.peerId.toString()) return;
+    // #1093: keep the confirmed-core set fresh from `peer:update` too.
+    // `runSyncOnConnect` reads the protocol list exactly once, racing
+    // identify — a core peer whose identify completed late was never
+    // re-classified, leaving `knownCorePeerIds` permanently partial and
+    // the ACK candidate pool capped below quorum. Identify delivers the
+    // complete protocol list, so add-on-present is always safe; we only
+    // add (never delete) here because some `peer:update` events fire
+    // with a not-yet-populated list and must not evict a known core.
+    if (protocols.includes(PROTOCOL_STORAGE_ACK)) {
+      this.knownCorePeerIds.add(peerId);
+    }
     if (!this.skippedNoSyncPeers.has(peerId)) return;
     if (!protocols.includes(PROTOCOL_SYNC)) return;
     this.skippedNoSyncPeers.delete(peerId);

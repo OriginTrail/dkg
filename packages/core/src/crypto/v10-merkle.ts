@@ -203,3 +203,57 @@ export function computeCatalogRoot(catalogTriples: ReadonlyArray<CatalogTriple>)
   const tree = new V10MerkleTree(leaves);
   return { root: tree.root, leafCount: tree.leafCount, tree };
 }
+
+// ── PoS content-binding redesign — structured public/private KA commitment ──
+//
+// The flat-KC tree (public hashes ++ private sub-roots, sorted together) let a
+// challenge land on a private leaf with no content to bind. The structured root
+// keeps private data as a single committed SIBLING (integrity preserved) that
+// is NEVER a challengeable leaf — sampling draws only the public subtree. Same
+// idea as the curated `_catalog` tree above (Trap 2), applied to the public path.
+//
+// Sentinels keep the shape uniform when a side is empty. They MUST be non-zero
+// (zero collides with the on-chain bytes32(0) revert/uninitialized sentinel) and
+// MUST match the constants hardcoded in RandomSampling.sol.
+const _sentinelEncoder = new TextEncoder();
+export const SENTINEL_NO_PRIVATE_V10: Uint8Array = keccak256(_sentinelEncoder.encode('DKG_NO_PRIVATE_DATA_V10'));
+export const SENTINEL_NO_PUBLIC_V10: Uint8Array = keccak256(_sentinelEncoder.encode('DKG_NO_PUBLIC_DATA_V10'));
+
+/** Collapse N per-entity private sub-roots into ONE privateDataHash (sentinel if none). */
+export function collapsePrivateDataHashV10(privateRoots: ReadonlyArray<Uint8Array>): Uint8Array {
+  return privateRoots.length > 0 ? new V10MerkleTree(privateRoots as Uint8Array[]).root : SENTINEL_NO_PRIVATE_V10;
+}
+
+/** Result of {@link structuredKARootV10}. */
+export interface StructuredKARootResult {
+  /** `hashPair(publicRoot, privateDataHash)` — the on-chain `merkleRoot`. */
+  root: Uint8Array;
+  /** Public-only deduped leaf count — the challenge index space (`chunkId` modulus). */
+  leafCount: number;
+  /** The PUBLIC subtree, so the prover can call `tree.proof(chunkId)` / `tree.leafAt(chunkId)`. */
+  publicTree: V10MerkleTree;
+  /** The collapsed private sibling actually committed (real root or sentinel). */
+  privateDataHash: Uint8Array;
+}
+
+/**
+ * SINGLE source of truth for the structured public-CG KA commitment. Both the
+ * publisher (sets `merkleRoot` / `merkleLeafCount`) and the prover (rebuilds the
+ * proof) MUST go through this, so they agree byte-for-byte with each other and
+ * with the on-chain `submitProof` verify.
+ *
+ *   root = hashPair(publicRoot, privateDataHash)   // public LEFT, private RIGHT
+ *
+ * @param publicLeaves `hashTripleV10` of each public triple (unsorted/undeduped).
+ * @param privateRoots per-entity private sub-roots (collapsed N->1 internally).
+ */
+export function structuredKARootV10(
+  publicLeaves: ReadonlyArray<Uint8Array>,
+  privateRoots: ReadonlyArray<Uint8Array>,
+): StructuredKARootResult {
+  const publicTree = new V10MerkleTree(publicLeaves as Uint8Array[]);
+  const publicRoot = publicLeaves.length > 0 ? publicTree.root : SENTINEL_NO_PUBLIC_V10;
+  const privateDataHash = collapsePrivateDataHashV10(privateRoots);
+  const root = V10MerkleTree.computeKARoot(publicRoot, privateDataHash); // hashPair (both present)
+  return { root, leafCount: publicTree.leafCount, publicTree, privateDataHash };
+}

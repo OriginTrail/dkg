@@ -85,7 +85,13 @@ export interface ACKCollectionResult {
   contextGraphId: bigint;
 }
 
-const DEFAULT_REQUIRED_ACKS = 3;
+/**
+ * Default ACK quorum when the chain's `minimumRequiredSignatures()` is
+ * unavailable. Exported so peer-pool providers (see
+ * `DKGAgent.getACKCandidatePeers`) can size their candidate pools to the
+ * same floor instead of hardcoding a drifting copy of this number.
+ */
+export const DEFAULT_REQUIRED_ACKS = 3;
 const ACK_TIMEOUT_MS = 120_000;
 const MAX_RETRIES = 3;
 // #887: transient declines (the core's SWM replica is still catching up

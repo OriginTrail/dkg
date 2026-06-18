@@ -840,6 +840,105 @@ export class StorageACKHandler {
           `UpdateIntent.isEncryptedPayload=true rejected for cg=${cgId}: local curation oracle reports ${curationVerdict === false ? 'PUBLIC (not curated)' : 'UNKNOWN'}; the encrypted-payload path is curated-only`,
         );
       }
+      // OT-RFC-49 WS-D (update): if this curated update carries a public
+      // `_catalog` commitment, INDEPENDENTLY rebuild + verify it and REPLACE-
+      // persist `<cg>/_catalog` — the SAME guarantee the publish handler gives.
+      // The PRIVATE newMerkleRoot stays trusted (the core can't decrypt it),
+      // but the catalog is public and verifiable, so a curated update can no
+      // longer obtain a signed ACK for a catalog root that doesn't match the
+      // data, and cores re-host the rotated catalog so sampling can prove it.
+      // A 32-zero-byte newCatalogRoot = no commitment (the on-chain gate
+      // rejects a zero-root value-adding curated update), so we only ADD the
+      // verification where a commitment is present — legacy/no-op flows intact.
+      if (
+        intent.newCatalogRoot &&
+        intent.newCatalogRoot.length === 32 &&
+        intent.newCatalogRoot.some((b) => b !== 0)
+      ) {
+        const MAX_CATALOG_BYTES = 4 * 1024 * 1024;
+        if (!intent.stagingQuads || intent.stagingQuads.length === 0) {
+          return this.encodeDecline(
+            cgId,
+            STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
+            'curated UPDATE ACK requires the public catalog N-quads inline (empty stagingQuads)',
+          );
+        }
+        if (intent.stagingQuads.length > MAX_CATALOG_BYTES) {
+          throw new Error(
+            `curated UPDATE catalog stagingQuads payload (${intent.stagingQuads.length} bytes) exceeds ` +
+            `${MAX_CATALOG_BYTES} byte limit — rejecting request`,
+          );
+        }
+        // byteSize parity: a curated update prices off the catalog footprint, so
+        // the inline catalog bytes MUST equal the claimed `newByteSize`. NOTE:
+        // UpdateIntent has NO `publicByteSize` (unlike PublishIntent) — parity is
+        // vs `newByteSize`, which the producer sets to the catalog byte count.
+        const claimedNewByteSize = typeof intent.newByteSize === 'number'
+          ? intent.newByteSize
+          : Number(
+              BigInt(intent.newByteSize.low >>> 0) |
+                (BigInt(intent.newByteSize.high >>> 0) << 32n),
+            );
+        if (intent.stagingQuads.length !== claimedNewByteSize) {
+          return this.encodeDecline(
+            cgId,
+            STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
+            `curated UPDATE ACK byteSize mismatch: inline catalog is ${intent.stagingQuads.length} bytes ` +
+            `but publisher claims newByteSize=${claimedNewByteSize}. For curated updates newByteSize MUST ` +
+            `equal the catalog N-quads byte count.`,
+          );
+        }
+        const claimedCatalogLeafCount = intent.newCatalogLeafCount ?? 0;
+        if (claimedCatalogLeafCount <= 0) {
+          return this.encodeDecline(
+            cgId,
+            STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
+            `curated UPDATE ACK requires a positive newCatalogLeafCount; got ${claimedCatalogLeafCount}`,
+          );
+        }
+        // Rebuild over the SHARED committed-leaf definition (post-publish stamps
+        // stripped) so the rebuilt root is byte-identical to the producer's
+        // committed root AND the prover's later rebuild. DECLINE on disagreement.
+        const parsedCatalog = parseSimpleNQuads(
+          new TextDecoder().decode(intent.stagingQuads),
+        );
+        const committedLeaves = catalogCommittedLeaves(parsedCatalog);
+        if (committedLeaves.length === 0) {
+          return this.encodeDecline(
+            cgId,
+            STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
+            'curated UPDATE ACK: inline catalog parsed to zero committed leaves',
+          );
+        }
+        const rebuilt = computeCatalogRoot(committedLeaves);
+        if (rebuilt.leafCount !== claimedCatalogLeafCount) {
+          return this.encodeDecline(
+            cgId,
+            STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
+            `curated UPDATE ACK leaf-count mismatch: rebuilt ${rebuilt.leafCount} catalog leaves ` +
+            `but publisher claims ${claimedCatalogLeafCount}`,
+          );
+        }
+        if (!bytesEqual(rebuilt.root, intent.newCatalogRoot)) {
+          return this.encodeDecline(
+            cgId,
+            STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
+            `curated UPDATE ACK root mismatch: rebuilt catalog root=${ethers.hexlify(rebuilt.root).slice(0, 18)}... ` +
+            `does not match publisher claim=${ethers.hexlify(intent.newCatalogRoot).slice(0, 18)}...`,
+          );
+        }
+        // Root verified — REPLACE-persist the updated public catalog to
+        // `<cg>/_catalog` so this core serves + later proves the rotated root.
+        const catalogGraph = contextGraphCatalogUri(cgId);
+        assertSafeIri(catalogGraph);
+        const catalogSubjects = new Set(parsedCatalog.map((q) => q.subject));
+        for (const subject of catalogSubjects) {
+          await this.store.deleteByPattern({ graph: catalogGraph, subject });
+        }
+        await this.store.insert(
+          parsedCatalog.map((q) => ({ ...q, graph: catalogGraph })),
+        );
+      }
       // Encrypted updates trust the publisher's claimed newMerkleRoot —
       // no recompute. Fall through to the digest sign below.
     } else if (intent.stagingQuads && intent.stagingQuads.length > 0) {

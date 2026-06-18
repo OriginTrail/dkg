@@ -196,12 +196,12 @@ Drop to HTTP when the operation isn't in the table — participant self-service 
 | `dkg_share` | `POST /api/shared-memory/write` | Directly write concise team-visible knowledge to SWM without staging a WM assertion. Prefer the WM assertion → promote flow for durable/canonical work. Both Hermes and OpenClaw expose the same tool schema (required `content` and `context_graph_id`, optional `sub_graph_name`), so MCP-discovered call signatures are portable. The OpenClaw implementation additionally validates content as non-whitespace, mints a unique subject per share (returned in the response), and N-Triples-quotes content; Hermes is currently looser on those points — the parallel hardening is tracked in OriginTrail/dkg#414. |
 | `dkg_sub_graph_create` | `POST /api/sub-graph/create` | Register a sub-graph inside a CG |
 | `dkg_sub_graph_list` | `GET /api/sub-graph/list` | List sub-graphs in a CG |
-| `dkg_query` | `POST /api/query` | Read-only SPARQL across assertions in a CG. Pass `view` (`working-memory` / `shared-working-memory` / `verifiable-memory`) to pick the layer — when `view` is set, `context_graph_id` is required; for WM reads, optional `agent_address` targets another agent's WM (defaults to this node). Omit `view` for a legacy cross-graph data-path query. |
+| `dkg_query` | `POST /api/query` | Read-only SPARQL across assertions in a CG. Pass `view` (`working-memory` / `shared-working-memory` / `verifiable-memory`) to pick the layer — when `view` is set, `context_graph_id` is required; for WM reads, optional `agent_address` targets another agent's WM (when omitted it defaults to this node's primary agent wallet, falling back to the peer ID on nodes without a configured default agent). Omit `view` for a legacy cross-graph data-path query. |
 | `dkg_query_catalog_list` | `POST /api/profile/query-catalog/read` | List saved SPARQL queries declared in the project profile query catalog |
 | `dkg_query_catalog_run` | `POST /api/profile/query-catalog/read` + `POST /api/query` | Run a saved catalog query by slug or exact display name |
 | `dkg_query_catalog_save` | `POST /api/profile/query-catalog/write` | Save a read-only SPARQL query into the project profile query catalog |
 | `dkg_find_agents` | `GET /api/agents` | Discover other agents (best-effort P2P) |
-| `dkg_send_message` | `POST /api/chat` | Send a direct message (best-effort P2P) |
+| `dkg_send_message` | `POST /api/chat` | Send a direct message (best-effort P2P). Body: `{ to: "<peerId>", text: "...", contextGraphId? }` (`peerId`/`message` are accepted as aliases for `to`/`text`) |
 | `dkg_read_messages` | `GET /api/messages` | Read inbound messages |
 | `dkg_invoke_skill` | `POST /api/invoke-skill` | Call another agent's skill (best-effort P2P) |
 
@@ -369,7 +369,7 @@ For predictable publishing, call `wm/finalize` explicitly before `swm/share`.
 
 - `POST /api/knowledge-assets/{name}/vm/publish` — per-KA sealed publish → VM (costs TRAC; returns the UAL). Canonical.
 - `POST /api/shared-memory/publish` — SWM-bridge / CG-wide publish → VM (costs TRAC; legacy, retained).
-- `POST /api/update` — update an existing Knowledge Asset (reads new data from SWM; references it by `kaId`)
+- `POST /api/update` — update an existing Knowledge Asset on-chain. Body: `{ kaId, contextGraphId, quads, privateQuads?, precomputedUpdateAttestation? }` — the new data is passed **inline as `quads`** (it is NOT read from SWM). For the name-based edit loop, prefer `wm/pull-from` → edit → `wm/finalize` → `swm/share` → `vm/publish` instead.
 - `POST /api/endorse` — endorse a Knowledge Asset ("I vouch for this")
 - `POST /api/verify` — propose or approve M-of-N consensus verification
 
@@ -629,8 +629,8 @@ Implications:
   > is the recommended surface for agent workflows; raw HTTP is for
   > programmatic clients that want explicit control.
 - `POST /api/context-graph/register` — register a previously-created local CG on-chain (two-phase creation). Body: `{ id, accessPolicy?, publishPolicy? }`, where `accessPolicy` controls public/private discovery and `publishPolicy` controls open/curated publishing. Use this to promote a free CG to an on-chain identity before publishing to Verifiable Memory. `revealOnChain` is deprecated and ignored on the V10 ContextGraphs path.
-- `POST /api/context-graph/rename` — rename a CG (human-readable name only; the ID is immutable). Body: `{ contextGraphId, name }`.
-- `POST /api/context-graph/subscribe` — subscribe to a context graph
+- `POST /api/context-graph/rename` — rename a CG (human-readable name only; the ID is immutable). Body: `{ contextGraphId, name }` (`id` is accepted as an alias for `contextGraphId`; all `/api/context-graph/*` routes accept either).
+- `POST /api/context-graph/subscribe` — subscribe to a context graph. Body: `{ contextGraphId }` (or `{ id }`).
 - `GET /api/context-graph/list` — list known context graphs; tool wrappers default to the caller's created/joined graphs and can expose all known graphs with `scope: "all"`
 - `GET /api/context-graph/exists` — check if a context graph exists
 - `GET /api/sync/catchup-status?contextGraphId=...` — poll CG sync progress after subscribing
@@ -642,7 +642,7 @@ Implications:
 
 A **sub-graph** is a named partition inside a context graph. Use them to organize assertions by topic, source, or any other axis. Sub-graphs are optional — by default assertions live at the CG root. A sub-graph must be registered before any assertion op passes `subGraphName`; otherwise those ops fail with `Sub-graph "{name}" has not been registered in context graph "{id}". Call createSubGraph() first.`
 
-- `POST /api/sub-graph/create` — register a new sub-graph. Body: `{ contextGraphId, subGraphName }`.
+- `POST /api/sub-graph/create` — register a new sub-graph. Body: `{ contextGraphId, subGraphName }`. Sub-graph names **cannot contain `/`** (it is the graph-URI path separator) — use `-` or `.` for hierarchy-flavored names (e.g. `research-alpha`, not `research/alpha`).
 - `GET /api/sub-graph/list?contextGraphId=...` — list all sub-graphs registered in a CG.
 
 To put an assertion in a sub-graph, pass `subGraphName` on `/api/knowledge-assets` (create), `/wm/write`, `/wm/quads`, `/swm/share`, `/wm/discard`, `/wm/import-file`, the `GET /api/knowledge-assets/{name}` descriptor, and on `/api/query` when scoping queries.
@@ -655,11 +655,11 @@ To put an assertion in a sub-graph, pass `subGraphName` on `/api/knowledge-asset
 | `POST` | `/api/context-graph/{id}/add-participant` | `{ agentAddress }` | Directly add a participant by agent address (creator only). |
 | `POST` | `/api/context-graph/{id}/remove-participant` | `{ agentAddress }` | Remove a participant (creator only). |
 | `GET`  | `/api/context-graph/{id}/participants` | — | List current participants. Returns `{ contextGraphId, allowedAgents: [...] }`. |
-| `POST` | `/api/context-graph/{id}/request-join` | `{ agentAddress, signature, timestamp, agentName? }` | Signed request from an invitee to join. If local node is the curator, stored locally; otherwise P2P-forwarded to the curator. |
+| `POST` | `/api/context-graph/{id}/request-join` | `{ delegation, curatorPeerId, agentName? }` | Deliver a signed join request. `delegation` is the full object returned by `sign-join`; `curatorPeerId` is the curator's libp2p peer id (V10 invite codes embed it as `"<cgId>\n<peerId>"`) and is required unless the local node IS the curator. If local node is the curator, stored locally; otherwise P2P-forwarded to the curator. |
 | `GET`  | `/api/context-graph/{id}/join-requests` | — | List pending join requests (curator view). |
 | `POST` | `/api/context-graph/{id}/approve-join` | `{ agentAddress }` | Approve a pending request. |
 | `POST` | `/api/context-graph/{id}/reject-join` | `{ agentAddress }` | Reject a pending request. |
-| `POST` | `/api/context-graph/{id}/sign-join` | — | Sign a join request as the caller and forward to the curator via P2P (multi-sig CGs). Signs `(contextGraphId, agentAddress, timestamp)` with the caller's private key; the bearer token only resolves which local agent is signing — external agents without a locally-stored private key cannot use this route. No body required. |
+| `POST` | `/api/context-graph/{id}/sign-join` | — | **Sign-only**: sign a join-request delegation as the caller and return it — this route does **NOT** forward anything to the curator (the response carries `forwarded: false`). To deliver, POST the returned `delegation` to `/request-join` with the curator's `curatorPeerId`. The bearer token only resolves which local agent is signing — external agents without a locally-stored private key cannot use this route. No body required. |
 
 ## 7. File Ingestion
 
@@ -674,7 +674,7 @@ through the same path as `POST /api/knowledge-assets/{name}/wm/write`.
 | Field | Required | Description |
 |---|---|---|
 | `file` | yes | Document bytes |
-| `contextGraphId` | yes | Exact existing target context graph id, or full `did:dkg:context-graph:<id>` URI |
+| `contextGraphId` | yes | Exact existing target context graph id, or full `did:dkg:context-graph:<id>` URI. Must be a **multipart form field** (`-F "contextGraphId=..."`) — passing it as a URL query parameter returns `400 Missing "contextGraphId"` |
 | `contentType` | no | Override the file part's Content-Type |
 | `ontologyRef` | no | CG `_ontology` URI for guided extraction |
 | `subGraphName` | no | Target sub-graph, already registered |

@@ -58,7 +58,7 @@ import {
   type ImportedArtifactResolution,
 } from "./shared-assertion-helpers.js";
 import { parseBoundary, parseMultipart, MultipartParseError } from "../../http/multipart.js";
-import { normalizeDetectedContentType } from "../manifest.js";
+import { normalizeDetectedContentType, inferContentTypeFromFilename } from "../manifest.js";
 import { extractFromMarkdown } from "../../extraction/index.js";
 import {
   type ExtractionStatusRecord,
@@ -688,9 +688,26 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
   contextGraphId = resolvedContextGraphId;
   if (!validateOptionalSubGraphName(subGraphName, res)) return;
 
-  const detectedContentType = normalizeDetectedContentType(
+  // #1101: precedence is explicit `contentType` field > multipart part
+  // Content-Type header > filename-extension fallback. The fallback only
+  // engages when the first two resolve to application/octet-stream (curl
+  // and many HTTP clients send octet-stream for .md files) AND the caller
+  // did not say octet-stream EXPLICITLY: an explicit
+  // `contentType=application/octet-stream` form field is the documented
+  // "store as opaque blob" escape hatch, so inferring `notes.md` back to
+  // text/markdown there would override a deliberate choice (Codex review
+  // on PR #1107). Only the implicit default (no override, generic or
+  // absent part header) is eligible for filename inference.
+  let detectedContentType = normalizeDetectedContentType(
     contentTypeOverride ?? filePart.contentType,
   );
+  const explicitOctetStream =
+    contentTypeOverride !== undefined &&
+    normalizeDetectedContentType(contentTypeOverride) === "application/octet-stream";
+  if (detectedContentType === "application/octet-stream" && !explicitOctetStream) {
+    const inferred = inferContentTypeFromFilename(filePart.filename);
+    if (inferred) detectedContentType = inferred;
+  }
 
   if (subGraphName) {
     try {
@@ -1361,6 +1378,7 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
         status: "skipped",
         tripleCount: 0,
         pipelineUsed: null,
+        skipReason: `no extraction pipeline registered for content type "${detectedContentType}" — the file was stored as a blob; pass an explicit contentType form field (e.g. text/markdown) or upload with a recognized file extension to enable extraction`,
       });
     }
 

@@ -238,6 +238,10 @@ import {
   resolveCorsOrigin,
   corsHeaders,
   HttpRateLimiter,
+  InFlightLimiter,
+  admitRequest,
+  resolveIntSetting,
+  applyServerLimits,
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
@@ -1420,6 +1424,25 @@ export async function runDaemonInner(
       log,
     }),
   );
+
+  // GH #462 — skill_request authorization. Default-deny remote skill invocation
+  // (any connected peer could otherwise invoke any registered skill). Operators
+  // restore open skills with `messaging.openSkills: true`, or allowlist specific
+  // peers via `messaging.skillAllowedPeers`.
+  {
+    const openSkills = config.messaging?.openSkills === true;
+    const allowedSkillPeers = new Set(config.messaging?.skillAllowedPeers ?? []);
+    agent.setSkillAcl((senderPeerId: string) => {
+      if (openSkills) return { accept: true };
+      if (allowedSkillPeers.has(senderPeerId)) return { accept: true };
+      return {
+        accept: false,
+        reason:
+          'unauthorized: skill invocation is default-deny for remote peers; ' +
+          'set messaging.openSkills or add this peer to messaging.skillAllowedPeers (GH #462)',
+      };
+    });
+  }
 
   let chatDb: DashboardDB | null = null;
   agent.onChat((text, senderPeerId, _convId, senderContextGraphId, verifiedContextGraphId, messageId) => {
@@ -2673,6 +2696,26 @@ export async function runDaemonInner(
       "/.well-known/skill.md",
     ],
   );
+
+  // Admission control: cap concurrent in-flight requests so a burst (including
+  // loopback traffic, which bypasses the per-IP rate limiter) can't pile
+  // unbounded pending work onto the single event loop / store worker thread.
+  // IP-agnostic on purpose — local agents legitimately burst, so we shed by
+  // concurrency (503 + Retry-After) rather than by per-minute rate. Tunable via
+  // DKG_MAX_INFLIGHT (explicit 0 disables); default 64. Malformed/empty values
+  // fall back to the default instead of silently disabling the cap.
+  const maxInFlight = resolveIntSetting(
+    process.env.DKG_MAX_INFLIGHT,
+    config.maxInFlightRequests,
+    64,
+    { allowNonPositive: true },
+  );
+  const inFlightLimiter = new InFlightLimiter(maxInFlight);
+  // Throttle the "shedding" warning so a sustained burst can't spam the log,
+  // while still letting operators see the limiter is active (per review).
+  let lastShedLogAt = 0;
+  const SHED_LOG_THROTTLE_MS = 10_000;
+
   let corsAllowed: CorsAllowlist = "*";
   daemonState.catchupRunner = createCatchupRunner(agent);
 
@@ -2692,6 +2735,25 @@ export async function runDaemonInner(
         res.end(JSON.stringify({ error: 'Too many requests' }));
         return;
       }
+
+      // Admission control — shed load (503 + Retry-After) when too many
+      // requests are already in flight. Applied to ALL traffic (not bypassed
+      // for loopback) so it also bounds local agents the per-IP rate limiter
+      // exempts; OPTIONS preflight and cheap health/liveness paths are exempt
+      // inside admitRequest so monitoring stays answerable under saturation.
+      const gate = admitRequest(inFlightLimiter, req.method, reqUrl.pathname, res, reqCorsOrigin);
+      if (!gate.admitted) {
+        const nowMs = Date.now();
+        if (nowMs - lastShedLogAt >= SHED_LOG_THROTTLE_MS) {
+          lastShedLogAt = nowMs;
+          log(
+            `admission-control: shedding requests (503) — inFlight=${inFlightLimiter.inFlight}/${inFlightLimiter.max} rejectedTotal=${inFlightLimiter.rejectedTotal}`,
+          );
+        }
+        return;
+      }
+      // (admitRequest registers slot release on the response's `close` event —
+      // covers streaming/plugin responses; nothing to release here.)
 
       // CORS preflight
       if (req.method === "OPTIONS") {
@@ -2879,6 +2941,19 @@ export async function runDaemonInner(
         jsonResponse(res, 500, { error: err.message });
       }
     }
+    // Note: the admission slot is released on the response's `close` event
+    // (registered above), not in a finally here — see the comment at acquire.
+  });
+
+  // Bound simultaneous sockets and slow-header connections so a flood of
+  // clients can't exhaust file descriptors or park half-open connections.
+  // Resolution + assignment live in applyServerLimits (unit-tested); tunable via
+  // DKG_MAX_CONNECTIONS / DKG_HEADERS_TIMEOUT_MS, with malformed/empty values
+  // falling back to defaults rather than becoming NaN.
+  applyServerLimits(server, {
+    maxConnectionsEnv: process.env.DKG_MAX_CONNECTIONS,
+    maxConnectionsConfig: config.maxConnections,
+    headersTimeoutEnv: process.env.DKG_HEADERS_TIMEOUT_MS,
   });
 
   const apiPort = config.apiPort || 0;

@@ -116,6 +116,7 @@ import {
   type WorkspaceAgentRecipientResolverInput,
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
+  DEFAULT_REQUIRED_ACKS,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -446,6 +447,13 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
   kaNumber?: string;
   /** did:dkg:<chainId>/<agentAddrLower>/<number> reserved at finalize. */
   reservedUal?: string;
+  /**
+   * #1104 — did:dkg:<chainId>/<kasContract>/<packed kaId> recorded at the
+   * first confirmed vm/publish (re-stamped on updates). This is the on-chain
+   * resolvable UAL; `reservedUal` remains the author-namespace identity
+   * minted at finalize. Both are permanent; this field is the link.
+   */
+  publishedUal?: string;
 }
 
 export interface DiscoverContextGraphsFromChainOptions {
@@ -1376,6 +1384,44 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   /**
+   * Candidate peer pool for ACK collection (#1093).
+   *
+   * `knownCorePeerIds` is populated from identify-time protocol lists in
+   * `runSyncOnConnect`, but identify races `connection:open` — so the set
+   * routinely contains only a SUBSET of the actually-connected core nodes
+   * (the rest were read before their protocol list was populated and were
+   * never re-classified). The old behaviour returned that subset as soon
+   * as it was non-empty, which permanently capped the ACK pool below
+   * quorum (`pool_below_quorum`) and bricked publishing on core nodes.
+   *
+   * Fix: only trust the confirmed-core subset when it can actually
+   * satisfy the quorum. Below that, return confirmed cores FIRST
+   * followed by every other connected peer — edge nodes fail fast at
+   * protocol negotiation (no handler registered), so over-asking is
+   * cheap, while under-asking is fatal.
+   *
+   * Codex review (PR #1107): the quorum threshold here must track the
+   * CHAIN's runtime `requiredACKs` (ParametersStorage
+   * minimumRequiredSignatures), not the hard-coded default — on networks
+   * configured above 3 signatures, a 3-strong confirmed-core subset is
+   * still below quorum and returning only it re-introduces
+   * `pool_below_quorum`. The V10 ACK provider refreshes
+   * `lastKnownRequiredACKs` from chain BEFORE each collect() (the
+   * collector's getConnectedCorePeers callback runs after), so this sync
+   * read sees the current value; the default only covers the first call
+   * on chains without the getter.
+   */
+  private getACKCandidatePeers(): string[] {
+    const peers = this.node.libp2p.getPeers();
+    const connected = peers.map(p => p.toString()).filter(id => id !== this.peerId);
+    const confirmedCore = connected.filter(id => this.knownCorePeerIds.has(id));
+    const quorum = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
+    if (confirmedCore.length >= quorum) return confirmedCore;
+    const rest = connected.filter(id => !this.knownCorePeerIds.has(id));
+    return [...confirmedCore, ...rest];
+  }
+
+  /**
    * Create a V10 ACK provider callback for the publisher.
    * Uses ACKCollector to broadcast PublishIntent and collect StorageACKs
    * via direct P2P from connected core nodes. The required number of ACKs
@@ -1415,20 +1461,7 @@ export class DKGAgent extends DKGAgentBase {
         }
         return sendResult.response;
       },
-      getConnectedCorePeers: () => {
-        const peers = this.node.libp2p.getPeers();
-        const connected = peers.map(p => p.toString()).filter(id => id !== this.peerId);
-        // Prefer peers confirmed as core nodes (advertise StorageACK protocol).
-        if (this.knownCorePeerIds.size > 0) {
-          const filtered = connected.filter(id => this.knownCorePeerIds.has(id));
-          if (filtered.length > 0) return filtered;
-        }
-        // Fallback: return all connected peers during early startup before
-        // protocol discovery completes. Since only core nodes register the
-        // StorageACK handler, requests to edge nodes fail at protocol
-        // negotiation (fast, no error logs on the remote side).
-        return connected;
-      },
+      getConnectedCorePeers: () => this.getACKCandidatePeers(),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -1530,6 +1563,12 @@ export class DKGAgent extends DKGAgentBase {
           throw wrapAsRpcPreconditionIfApplicable(err, 'getMinimumRequiredSignatures');
         }
       }
+      // Codex review (PR #1107): cache the runtime quorum BEFORE collect() so
+      // getACKCandidatePeers' confirmed-core shortcut tracks the chain's real
+      // requiredACKs instead of the hard-coded default.
+      if (typeof requiredACKs === 'number' && requiredACKs > 0) {
+        this.lastKnownRequiredACKs = requiredACKs;
+      }
 
       // H5 prefix inputs — both come from the chain adapter so that
       // publisher-side digest construction matches what core-node handlers
@@ -1601,15 +1640,7 @@ export class DKGAgent extends DKGAgentBase {
         }
         return sendResult.response;
       },
-      getConnectedCorePeers: () => {
-        const peers = this.node.libp2p.getPeers();
-        const connected = peers.map(p => p.toString()).filter(id => id !== this.peerId);
-        if (this.knownCorePeerIds.size > 0) {
-          const filtered = connected.filter(id => this.knownCorePeerIds.has(id));
-          if (filtered.length > 0) return filtered;
-        }
-        return connected;
-      },
+      getConnectedCorePeers: () => this.getACKCandidatePeers(),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -1648,6 +1679,13 @@ export class DKGAgent extends DKGAgentBase {
       newMerkleLeafCount: number;
       newCatalogRoot?: Uint8Array;
       newCatalogLeafCount?: number;
+      // OT-RFC-49 / WS-D — `true` for a curated update (the producer sets it
+      // from `useEncryptedInlineUpdate`). Forwarded into `collectUpdate` so it
+      // stamps `UpdateIntent.isEncryptedPayload`, gating the cores' inline-
+      // catalog rebuild/verify/persist path. Undefined for public updates,
+      // which carry no catalog (unchanged on a healthy chain). Mirrors the publish
+      // closure passing `isEncryptedPayload` into `collect`.
+      isEncryptedPayload?: boolean;
       stagingQuads?: Uint8Array;
       swmGraphId?: string;
       subGraphName?: string;
@@ -1683,6 +1721,12 @@ export class DKGAgent extends DKGAgentBase {
           throw wrapAsRpcPreconditionIfApplicable(err, 'getMinimumRequiredSignatures');
         }
       }
+      // Codex review (PR #1107): cache the runtime quorum BEFORE collect() so
+      // getACKCandidatePeers' confirmed-core shortcut tracks the chain's real
+      // requiredACKs instead of the hard-coded default.
+      if (typeof requiredACKs === 'number' && requiredACKs > 0) {
+        this.lastKnownRequiredACKs = requiredACKs;
+      }
 
       let chainIdBig: bigint;
       try {
@@ -1716,6 +1760,9 @@ export class DKGAgent extends DKGAgentBase {
         swmGraphId: params.swmGraphId,
         subGraphName: params.subGraphName,
         stagingQuads: params.stagingQuads,
+        // OT-RFC-49 / WS-D — stamp `UpdateIntent.isEncryptedPayload` for a
+        // curated update so cores rebuild/verify/persist the inline catalog.
+        isEncryptedPayload: params.isEncryptedPayload,
       });
       return result.acks;
     };
@@ -1987,7 +2034,7 @@ export class DKGAgent extends DKGAgentBase {
 
         // Query assertion entity (current state + layer + OT-RFC-43 A2 pointers).
         const entityResult = await agent.store.query(
-          `SELECT ?state ?memoryLayer ?assertionGraph ?wm ?swm ?vm ?kaNum ?reservedUal WHERE {
+          `SELECT ?state ?memoryLayer ?assertionGraph ?wm ?swm ?vm ?kaNum ?reservedUal ?publishedUal WHERE {
             GRAPH <${metaGraph}> {
               <${lifecycleUri}> <${DKG_NS}state> ?state .
               OPTIONAL { <${lifecycleUri}> <${DKG_NS}memoryLayer> ?memoryLayer }
@@ -1997,6 +2044,7 @@ export class DKGAgent extends DKGAgentBase {
               OPTIONAL { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
               OPTIONAL { <${lifecycleUri}> <${KA_ID_PRED}> ?kaNum }
               OPTIONAL { <${lifecycleUri}> <${RESERVED_UAL_PRED}> ?reservedUal }
+              OPTIONAL { <${lifecycleUri}> <${DKG_NS}publishedUal> ?publishedUal }
             }
           } LIMIT 1`,
         );
@@ -2015,6 +2063,7 @@ export class DKGAgent extends DKGAgentBase {
         const swmCurrentAssertion = strip(row['swm']) ?? vmCurrentAssertion;
         const kaNumberStr = strip(row['kaNum']);
         const reservedUal = strip(row['reservedUal']);
+        const publishedUal = strip(row['publishedUal']);
 
         // Query all prov:Activity events that acted on this assertion
         // (linked via prov:used or prov:generated)
@@ -2127,6 +2176,7 @@ export class DKGAgent extends DKGAgentBase {
           status: deriveStatus(pointers),
           kaNumber: kaNumberStr,
           reservedUal,
+          publishedUal,
         };
       },
 

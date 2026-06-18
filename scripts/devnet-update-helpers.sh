@@ -49,15 +49,21 @@ sys.exit(1)
 PY
 }
 
-# Args: node_num kaId contextGraphId quads_json_array_string [private_quads_json_array_string]
+# Args: node_num kaId contextGraphId quads_json_array_string [private_quads_json_array_string] [curated_context_graph_id]
+# When the 6th arg is set, the seal injects the OT-RFC-49 public `_catalog`
+# floor (curated CG) so expectedNewMerkleRoot matches the producer's
+# post-injection recompute. Pass the LOCAL context-graph id (== `cg`).
 build_update_body() {
-  local node=$1 kc=$2 cg=$3 quads_json=$4 private_quads_json="${5:-[]}" key seal owner_line seal_args
+  local node=$1 kc=$2 cg=$3 quads_json=$4 private_quads_json="${5:-[]}" curated_cg="${6:-}" key seal owner_line seal_args
   owner_line=$(ka_owner_key "$kc") || return 1
   key="${owner_line##*$'\t'}"
   [ -z "$key" ] && return 1
   seal_args=(--key "$key" --ka-id "$kc" --quads-json "$quads_json")
   if [ "$private_quads_json" != "[]" ] && [ -n "$private_quads_json" ]; then
     seal_args+=(--private-quads-json "$private_quads_json")
+  fi
+  if [ -n "$curated_cg" ]; then
+    seal_args+=(--curated "$curated_cg")
   fi
   seal=$($UPDATE_SEAL "${seal_args[@]}") || return 1
   python3 -c "

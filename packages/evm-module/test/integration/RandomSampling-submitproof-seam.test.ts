@@ -16,20 +16,34 @@ import {
 } from '../../typechain';
 import { createProfile } from '../helpers/profile-helpers';
 
-// Single-leaf KA: with merkleLeafCount=1 the challenge chunkId is always 0 and
-// a 1-leaf tree's root IS its only leaf, so `submitProof(root, [])` verifies
-// trivially on-chain (`h = leaf`; empty proof; `h == root`). This deliberately
-// avoids the kcTools merkle builder (which sorts pairs) vs the on-chain
-// `_verifyV10MerkleProof` (which pairs positionally) — they don't match, which
-// is orthogonal to what these tests cover (the store-routing of the read and,
-// in Test C2, the proof-race pinning of the catalog root).
-const merkleRoot = ethers.keccak256(
-  ethers.toUtf8Bytes('r3-seam-single-leaf-root'),
+// CONTENT-BINDING (proof-of-storage empty-proof fix): submitProof takes
+// `(bytes content, bytes32[] proof)` and derives `leaf = keccak256(content)`
+// on-chain — a caller can no longer echo a stored 32-byte root as a self-asserted
+// leaf with an empty proof. Every KA below is single-leaf (merkleLeafCount /
+// catalogLeafCount = 1 ⇒ challenge chunkId always 0), keeping the subtree shapes
+// trivial and avoiding the kcTools-sorts-pairs vs on-chain-pairs-positionally
+// mismatch (orthogonal to what these tests cover: store-routing and, in C2,
+// catalog-root pinning).
+
+// ── PUBLIC structured single-leaf KA (Test A, B) ──
+// 1-leaf public tree ⇒ publicRoot == its only leaf == keccak256(publicContent).
+// The committed KA root is the STRUCTURED root hashPair(publicRoot, privateDataHash);
+// with no private data the sibling is SENTINEL_NO_PRIVATE. The on-chain fold for
+// chunkId 0 is keccak256(leaf ++ sib), so the honest proof carries exactly the
+// single private sibling [SENTINEL_NO_PRIVATE] and merkleRoot == keccak256(publicRoot ++ SENTINEL).
+const SENTINEL_NO_PRIVATE = ethers.keccak256(
+  ethers.toUtf8Bytes('DKG_NO_PRIVATE_DATA_V10'),
 );
+const publicContent = ethers.toUtf8Bytes('r3-seam-public-leaf-content');
+const publicRoot = ethers.keccak256(publicContent); // 1-leaf tree: root == leaf
+const merkleRoot = ethers.keccak256(
+  ethers.concat([publicRoot, SENTINEL_NO_PRIVATE]),
+); // structured KA root = hashPair(publicRoot, privateDataHash)
+const publicProof = [SENTINEL_NO_PRIVATE];
 
 // Decoy PUBLIC merkle root for the curated KA (Test C). The curated KA records
 // this as its plaintext `merkleRoot`, but its PUBLIC `_catalog` commitment root
-// is the real proof target (`merkleRoot` above). A challenge MISclassified as
+// (`catalogRoot` below) is the real proof target. A challenge MISclassified as
 // public would verify against THIS decoy and fail — that's the RED the pin
 // prevents (OT-RFC-49: curated proofs target the catalog, not the plaintext
 // merkle root).
@@ -37,14 +51,19 @@ const decoyMerkleRoot = ethers.keccak256(
   ethers.toUtf8Bytes('r3-seam-decoy-public-root'),
 );
 
-// OT-RFC-49 / WS-B Trap 1 (proof-race, Test C2): a NEW catalog root the curated
-// KA rotates to AFTER its challenge is issued. An honest proof built against the
-// PINNED issuance-time catalog root (`merkleRoot`) must still verify; a proof
-// against this rotated live root must fail, because `submitProof` reads the
+// ── CURATED catalog single-leaf KA (Test C, C2) ──
+// The curated `_catalog` is a PLAIN public tree (NO private sibling). 1-leaf ⇒
+// catalogRoot == keccak256(catalogContent) and an EMPTY proof verifies (h == root).
+const catalogContent = ethers.toUtf8Bytes('r3-seam-catalog-content');
+const catalogRoot = ethers.keccak256(catalogContent);
+
+// OT-RFC-49 / WS-B Trap 1 (proof-race, Test C2): a NEW catalog the curated KA
+// rotates to AFTER its challenge is issued. An honest proof built against the
+// PINNED issuance-time catalog (`catalogContent`) must still verify; a proof
+// against this rotated live catalog must fail, because `submitProof` reads the
 // pinned `challenge.challengeRoot`, never the live `getCatalogRoot`.
-const rotatedCatalogRoot = ethers.keccak256(
-  ethers.toUtf8Bytes('r3-seam-rotated-catalog-root'),
-);
+const rotatedCatalogContent = ethers.toUtf8Bytes('r3-seam-rotated-catalog-content');
+const rotatedCatalogRoot = ethers.keccak256(rotatedCatalogContent);
 
 const OPEN_POLICY = 1; // public CG (accessPolicy=0 ⇒ getIsCurated()=false ⇒ merkle path)
 const CURATED_ACCESS = 1; // accessPolicy=1 ⇒ getIsCurated()=true ⇒ catalog path
@@ -249,12 +268,13 @@ describe('@integration RandomSampling submitProof + multi-store seam (R3)', () =
       log as unknown as { topics: string[]; data: string },
     )!.args[0] as bigint;
 
-    // The real curated proof target: catalog root == `merkleRoot`, count=1
-    // (single-leaf ⇒ chunkId 0, root == leaf, empty proof verifies).
+    // The real curated proof target: catalog root == `catalogRoot` (plain tree,
+    // no private sibling), count=1 (single-leaf ⇒ chunkId 0; an honest proof is
+    // `submitProof(catalogContent, [])` since keccak256(catalogContent) == catalogRoot).
     await (
       await DKGKnowledgeAssets.connect(opSigner).setCatalogCommitment(
         kaId,
-        merkleRoot,
+        catalogRoot,
         1,
       )
     ).wait();
@@ -312,8 +332,12 @@ describe('@integration RandomSampling submitProof + multi-store seam (R3)', () =
     expect(challenge.isCurated).to.equal(false); // public CG ⇒ pinned public
     expect(challenge.chunkId).to.equal(0n); // merkleLeafCount=1 ⇒ chunkId always 0
 
-    // 1-leaf tree: root == leaf, empty proof.
-    await RandomSampling.connect(node.operational).submitProof(merkleRoot, []);
+    // Structured single-leaf public KA: leaf = keccak256(publicContent) = publicRoot;
+    // the proof folds the single private sibling to hashPair(publicRoot, SENTINEL) = merkleRoot.
+    await RandomSampling.connect(node.operational).submitProof(
+      publicContent,
+      publicProof,
+    );
 
     const solved = await RandomSamplingStorage.getNodeChallenge(
       node.identityId,
@@ -350,9 +374,12 @@ describe('@integration RandomSampling submitProof + multi-store seam (R3)', () =
     // verification uses the store recorded in the challenge (store-A).
     expect(await RandomSampling.knowledgeAssetStorage()).to.equal(storeB);
 
-    // 1-leaf tree: root == leaf, empty proof. Succeeds only because the seam
-    // reads store-A (recorded in the challenge); the bound store-B is empty.
-    await RandomSampling.connect(node.operational).submitProof(merkleRoot, []);
+    // Structured single-leaf public KA (same proof as Test A). Succeeds only
+    // because the seam reads store-A (recorded in the challenge); store-B is empty.
+    await RandomSampling.connect(node.operational).submitProof(
+      publicContent,
+      publicProof,
+    );
 
     const solved = await RandomSamplingStorage.getNodeChallenge(
       node.identityId,
@@ -377,7 +404,7 @@ describe('@integration RandomSampling submitProof + multi-store seam (R3)', () =
     expect(challenge.chunkId).to.equal(0n); // catalogLeafCount=1 ⇒ chunkId 0
     // The pinned catalog root is the curated proof target (decoy plaintext root
     // is NOT) — the private-sub-root-as-decoy distinction OT-RFC-49 preserves.
-    expect(challenge.challengeRoot).to.equal(merkleRoot);
+    expect(challenge.challengeRoot).to.equal(catalogRoot);
     expect(challenge.challengeRoot).to.not.equal(decoyMerkleRoot);
 
     // Simulate a ContextGraphStorage generation cutover: re-point the Hub to an
@@ -404,8 +431,12 @@ describe('@integration RandomSampling submitProof + multi-store seam (R3)', () =
 
     // The KA store was NOT re-pointed, so the recorded store still holds the
     // catalog commitment. Curated branch verifies against the pinned catalog
-    // root (== merkleRoot); the now-empty CG singleton is never consulted.
-    await RandomSampling.connect(node.operational).submitProof(merkleRoot, []);
+    // root (== catalogRoot); the now-empty CG singleton is never consulted.
+    // Plain catalog tree, single leaf ⇒ empty proof (leaf == catalogRoot).
+    await RandomSampling.connect(node.operational).submitProof(
+      catalogContent,
+      [],
+    );
 
     const solved = await RandomSamplingStorage.getNodeChallenge(
       node.identityId,
@@ -429,7 +460,7 @@ describe('@integration RandomSampling submitProof + multi-store seam (R3)', () =
     // (== merkleRoot), and the pinned leaf count is 1.
     expect(challenge.knowledgeAssetId).to.equal(kaId);
     expect(challenge.isCurated).to.equal(true);
-    expect(challenge.challengeRoot).to.equal(merkleRoot);
+    expect(challenge.challengeRoot).to.equal(catalogRoot);
     expect(challenge.challengeLeafCount).to.equal(1n);
     expect(challenge.chunkId).to.equal(0n); // catalogLeafCount=1 ⇒ chunkId 0
 
@@ -452,22 +483,26 @@ describe('@integration RandomSampling submitProof + multi-store seam (R3)', () =
       challenge.challengeRoot,
     );
 
-    // A proof built against the NEW live root must FAIL — submitProof verifies
-    // the leaf against the PINNED `challenge.challengeRoot`, not the live
-    // getter. (A reverted submitProof rolls back and leaves the challenge
-    // unsolved, so we can attempt the honest proof immediately after.)
+    // A proof built against the NEW live catalog must FAIL — submitProof derives
+    // leaf = keccak256(rotatedCatalogContent) = rotatedCatalogRoot and folds it
+    // against the PINNED `challenge.challengeRoot` (the issuance-time catalogRoot),
+    // not the live getter. (A reverted submitProof rolls back and leaves the
+    // challenge unsolved, so we can attempt the honest proof immediately after.)
     await expect(
       RandomSampling.connect(node.operational).submitProof(
-        rotatedCatalogRoot,
+        rotatedCatalogContent,
         [],
       ),
     ).to.be.revertedWithCustomError(RandomSampling, 'MerkleRootMismatchError');
 
-    // The honest proof against the PINNED issuance-time root still verifies,
+    // The honest proof against the PINNED issuance-time catalog still verifies,
     // even though the live catalog root has since rotated. This is the
     // proof-race immunity: an update cannot retroactively invalidate an
     // in-flight challenge and slash an honest prover.
-    await RandomSampling.connect(node.operational).submitProof(merkleRoot, []);
+    await RandomSampling.connect(node.operational).submitProof(
+      catalogContent,
+      [],
+    );
 
     const solved = await RandomSamplingStorage.getNodeChallenge(
       node.identityId,

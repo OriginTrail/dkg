@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { validateLiftPublishPayload, type LiftValidationInput } from '../src/index.js';
-import { sha256 } from '@origintrail-official/dkg-core';
 
 describe('validateLiftPublishPayload', () => {
   function baseInput(): LiftValidationInput {
@@ -49,23 +48,16 @@ describe('validateLiftPublishPayload', () => {
     };
   }
 
-  function canonicalRoot(root: string): string {
-    const digest = sha256(new TextEncoder().encode(root));
-    const suffix = Array.from(digest)
-      .slice(0, 6)
-      .map((byte) => byte.toString(16).padStart(2, '0'))
-      .join('');
-    return `dkg:music-social:aloha:person-profile/rihana-${suffix}`;
-  }
-
-  it('validates and canonicalizes resolved lift payloads', () => {
+  // GH #1122 — the async lift now PRESERVES caller root IRIs (parity with sync),
+  // so the "canonical" root is the caller root itself (identity).
+  it('validates lift payloads while preserving caller root IRIs (GH #1122 parity)', () => {
     const validated = validateLiftPublishPayload(baseInput());
-    const expectedCanonicalRoot = canonicalRoot('urn:local:/rihana');
+    const callerRoot = 'urn:local:/rihana';
 
     expect(validated.validation).toEqual({
-      canonicalRoots: [expectedCanonicalRoot],
+      canonicalRoots: [callerRoot],
       canonicalRootMap: {
-        'urn:local:/rihana': expectedCanonicalRoot,
+        'urn:local:/rihana': callerRoot,
       },
       swmQuadCount: 4,
       authorityProofRef: 'proof:owner:1',
@@ -74,12 +66,12 @@ describe('validateLiftPublishPayload', () => {
     });
 
     expect(validated.resolved.quads.map((quad) => quad.subject)).toEqual([
-      expectedCanonicalRoot,
-      `${expectedCanonicalRoot}/.well-known/genid/child-1`,
-      expectedCanonicalRoot,
+      callerRoot,
+      `${callerRoot}/.well-known/genid/child-1`,
+      callerRoot,
     ]);
-    expect(validated.resolved.quads[2]?.object).toBe(expectedCanonicalRoot);
-    expect(validated.resolved.privateQuads?.[0]?.subject).toBe(expectedCanonicalRoot);
+    expect(validated.resolved.quads[2]?.object).toBe(callerRoot);
+    expect(validated.resolved.privateQuads?.[0]?.subject).toBe(callerRoot);
   });
 
   it('rejects missing authority proof refs', () => {
