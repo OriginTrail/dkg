@@ -665,10 +665,12 @@ export class ImportedArtifactMethods extends DKGAgentBase {
       if (page.denied || page.unavailable || page.hashMismatch || page.bytesB64 == null) {
         return { response: page };
       }
+      const pageByteLength = Buffer.byteLength(page.bytesB64, 'base64');
       if (
         page.offset !== requestedRange.offset ||
         page.hash !== params.hash ||
-        (page.totalBytes != null && page.offset + Buffer.byteLength(page.bytesB64, 'base64') > page.totalBytes) ||
+        pageByteLength > requestedRange.maxBytes ||
+        (page.totalBytes != null && page.offset + pageByteLength > page.totalBytes) ||
         (page.truncated && (page.nextOffset == null || page.nextOffset <= page.offset))
       ) {
         return { response: { ...page, bytesB64: undefined, hashMismatch: true } };
@@ -695,6 +697,10 @@ export class ImportedArtifactMethods extends DKGAgentBase {
     if (first.offset !== 0 || first.hash !== params.hash) {
       return { response: { ...first, bytesB64: undefined, hashMismatch: true } };
     }
+    const firstByteLength = Buffer.byteLength(first.bytesB64, 'base64');
+    if (firstByteLength > IMPORTED_ARTIFACT_MAX_PAGE_BYTES || first.offset + firstByteLength > total) {
+      return { response: { ...first, bytesB64: undefined, hashMismatch: true } };
+    }
     const chunks = [Buffer.from(first.bytesB64, 'base64')];
     let nextOffset = first.nextOffset;
     while (first.truncated && nextOffset != null && nextOffset < total) {
@@ -707,10 +713,13 @@ export class ImportedArtifactMethods extends DKGAgentBase {
       if (page.denied || page.unavailable || page.hashMismatch || page.bytesB64 == null) {
         return { response: page };
       }
+      const pageByteLength = Buffer.byteLength(page.bytesB64, 'base64');
       if (
         page.offset !== requestedOffset ||
         page.hash !== params.hash ||
+        pageByteLength > IMPORTED_ARTIFACT_MAX_PAGE_BYTES ||
         (page.totalBytes != null && page.totalBytes !== total) ||
+        page.offset + pageByteLength > total ||
         (page.truncated && (page.nextOffset == null || page.nextOffset <= requestedOffset || page.nextOffset > total))
       ) {
         return { response: { ...page, bytesB64: undefined, hashMismatch: true } };

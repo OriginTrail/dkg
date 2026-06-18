@@ -678,6 +678,43 @@ describe('generic imported artifact peer handler', () => {
     }));
   });
 
+  it('rejects an oversized unverified remote page', async () => {
+    const bytes = Buffer.from('abcdef');
+    const artifactHash = keccakHash(bytes);
+    const agent = {
+      readAssertionArtifact: vi.fn(async ({ offset = 0 }) => ({
+        version: 1,
+        contextGraphId,
+        assertionUri,
+        kind: 'source',
+        hash: artifactHash,
+        offset,
+        totalBytes: bytes.length + offset,
+        truncated: false,
+        bytesB64: bytes.toString('base64'),
+      })),
+    };
+
+    const res = await ImportedArtifactMethods.prototype.fetchAndVerifyAssertionArtifact.call(agent, {
+      contextGraphId,
+      assertionUri,
+      kind: 'source',
+      hash: artifactHash,
+      offset: 1,
+      maxBytes: 3,
+      sourcePeerId: 'peer-local',
+      cache: false,
+    });
+
+    expect(res.response.hashMismatch).toBe(true);
+    expect(res.response.bytesB64).toBeUndefined();
+    expect(res.verifiedBytes).toBeUndefined();
+    expect(agent.readAssertionArtifact).toHaveBeenCalledWith(expect.objectContaining({
+      offset: 1,
+      maxBytes: 3,
+    }));
+  });
+
   it('serves requested pages for artifacts larger than the cache promotion cap', async () => {
     const firstPage = Buffer.from('first page');
     const requestedPage = Buffer.from('requested page');
