@@ -46,16 +46,19 @@ import {HubLib} from "./libraries/HubLib.sol";
  *
  *      User-facing entry points:
  *        - `createConviction`                             — mint path, fresh V10 stake
- *        - `selfMigrateV8`                                — mint path, D7 self migration
- *        - `adminMigrateV8` / `adminMigrateV8Batch`       — mint path, D7 straggler rescue (admin)
+ *        - `allocate`                                     — mint path, spends migration credit (OT-RFC-50)
+ *        - `selfMigrate` / `selfMigrateOperatorFee`       — self-service drain into credit (straggler backstop; no mint)
  *        - `finalizeMigrationBatch`                       — DAO closer (D11), sets `v10LaunchEpoch`
  *        - `relock`                                       — D21 burn-and-mint tier re-commit
  *        - `redelegate`                                   — D25 in-place node swap (stable tokenId)
  *        - `withdraw`                                     — D14 atomic burn-and-payout
  *        - `claim`
+ *      Admin entry points (OT-RFC-50 admin-push drain into credit; no mint):
+ *        - `adminDrainBatch` / `adminMigrateToCredit`     — delegator stake (+pending) → credit
+ *        - `adminDrainOperatorFeesBatch`                  — operator fees → credit
  *
  *      NFT lifecycle:
- *        - `createConviction` / `selfMigrateV8` / `adminMigrateV8*`:
+ *        - `createConviction` / `allocate`:
  *          fresh mints. Monotonic `nextTokenId`.
  *        - `relock` (D21): burns `oldTokenId` and mints `newTokenId`.
  *          CSS-level position state migrates via the D23
@@ -273,7 +276,8 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     }
 
     // ========================================================================
-    // Admin gate — used by D7 `adminMigrateV8*` and D11 `finalizeMigrationBatch`
+    // Admin gate — used by the admin drains (`adminDrainBatch` /
+    // `adminMigrateToCredit` / `adminDrainOperatorFeesBatch`) and `finalizeMigrationBatch`
     // ========================================================================
 
     /// @dev Matches the ownership + multisig pattern used by other admin
