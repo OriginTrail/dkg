@@ -2860,6 +2860,19 @@ function makeRecoveryAdapter() {
 const tooLowAllowanceRevert = () =>
   new Error('execution reverted: TooLowAllowance(0xTRAC, 0, 1)');
 
+const rawTooLowAllowanceRevert = () => {
+  const iface = new Interface([
+    'error TooLowAllowance(address tokenAddress, uint256 allowance, uint256 expected)',
+  ]);
+  const err = new Error('execution reverted (unknown custom error)');
+  (err as any).data = iface.encodeErrorResult('TooLowAllowance', [
+    V10_KA_ADDRESS,
+    0n,
+    1n,
+  ]);
+  return err;
+};
+
 describe('populateAndSignV10WithAllowanceRecovery — shared publish/update recovery (#888/#896)', () => {
 
   // The 🔴 fix: BOTH write paths recover from a pre-broadcast
@@ -2899,6 +2912,34 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
       expect(ensureSpy.calls[0][4]).toBe(true);
     },
   );
+
+  it('enriches raw unknown-custom-error data before deciding whether to force re-approve', async () => {
+    const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
+    const populateQueue: Array<() => Promise<{ to: string; data: string }>> = [
+      async () => { throw rawTooLowAllowanceRevert(); },
+      async () => ({ to: V10_KA_ADDRESS, data: '0xabcd' }),
+    ];
+    const populate = recorder(async () => (
+      populateQueue.shift() ?? (async () => ({ to: V10_KA_ADDRESS, data: '0xabcd' }))
+    )());
+    const kaContract = { publish: { populateTransaction: populate } };
+
+    const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
+      signer,
+      kaContract,
+      'publish',
+      {},
+      V10_KA_ADDRESS,
+      0n,
+      'approve V10 publish TRAC (forced re-approve, #888)',
+    );
+
+    expect(result).toEqual({ signedTx: '0xsigned', txHash: '0xhash' });
+    expect(populate.calls).toHaveLength(2);
+    expect(signSpy.calls).toHaveLength(1);
+    expect(ensureSpy.calls).toHaveLength(1);
+    expect(ensureSpy.calls[0][4]).toBe(true);
+  });
 
   it('propagates a SECOND consecutive TooLowAllowance (recovery is one-shot, no infinite loop)', async () => {
     const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
