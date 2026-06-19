@@ -1,6 +1,6 @@
 {
   "networkName": "DKG V10 Mainnet",
-  "networkId": "PLACEHOLDER",
+  "networkId": "7449c543ff04a550b2dafa999fe8ee577a00b212023bb4d4244e8d58a4792c7b",
   "genesisVersion": 1,
   "relays": [
     "/ip4/178.105.87.39/tcp/9090/p2p/PEER_ID_SOLARIS",
@@ -19,7 +19,7 @@
   "chain": {
     "type": "evm",
     "rpcUrl": "https://rpc.gnosischain.com",
-    "hubAddress": "PLACEHOLDER",
+    "hubAddress": "0x882D0BF07F956b1b94BBfe9E77F47c6fc7D4EC8f",
     "chainId": "gnosis:100"
   }
 }

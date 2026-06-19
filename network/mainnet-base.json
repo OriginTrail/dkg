@@ -1,6 +1,6 @@
 {
   "networkName": "DKG V10 Mainnet",
-  "networkId": "PLACEHOLDER",
+  "networkId": "7449c543ff04a550b2dafa999fe8ee577a00b212023bb4d4244e8d58a4792c7b",
   "genesisVersion": 1,
   "relays": [
     "/ip4/178.105.87.39/tcp/9090/p2p/PEER_ID_SOLARIS",
@@ -19,7 +19,7 @@
   "chain": {
     "type": "evm",
     "rpcUrl": "https://mainnet.base.org",
-    "hubAddress": "PLACEHOLDER",
+    "hubAddress": "0x99Aa571fD5e681c2D27ee08A7b7989DB02541d13",
     "chainId": "base:8453"
   }
 }
