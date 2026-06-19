@@ -265,7 +265,10 @@ describe('Random Sampling E2E (Hardhat)', () => {
       rsAddress,
       [
         'function createChallenge()',
-        'function previewChallengeForSeed(bytes32 seed, uint256 targetEpoch) view returns (uint256 cgId, uint256 kaId, uint256 chunkId)',
+        // PR #1226 made the preview 1-arg (it reads chronos.getCurrentEpoch()
+        // internally). Was `previewChallengeForSeed(bytes32,uint256)` — calling
+        // the old 2-arg selector now hits no function and reverts.
+        'function previewChallengeForSeed(bytes32 seed) view returns (uint256 cgId, uint256 kaId, uint256 chunkId)',
         'event ChallengeGenerated(uint72 indexed identityId, uint256 indexed contextGraphId, uint256 indexed knowledgeAssetId, uint256 chunkId, uint256 epoch, uint256 activeProofPeriodStartBlock)',
       ],
       rec2,
@@ -299,14 +302,10 @@ describe('Random Sampling E2E (Hardhat)', () => {
         ['uint256', 'bytes32', 'address', 'uint8'],
         [difficulty, refBlock.hash, rec2.address, 1],
       );
-      // Predict the draw NOW — before createChallenge is mined — at the epoch
-      // createChallenge will read (`chronos.getCurrentEpoch()`). Epochs span many
-      // blocks, so the value is stable across the single mine below.
-      const rsViews = new ethers.Contract(rsAddress, ['function chronos() view returns (address)'], provider);
-      const chronosAddr: string = await rsViews.chronos();
-      const chronos = new ethers.Contract(chronosAddr, ['function getCurrentEpoch() view returns (uint256)'], provider);
-      const epochForPreview: bigint = await chronos.getCurrentEpoch();
-      predicted = await rs.previewChallengeForSeed(reconstructedSeed, epochForPreview);
+      // Predict the draw NOW — before createChallenge is mined. The preview
+      // reads the current epoch internally (chronos.getCurrentEpoch()); epochs
+      // span many blocks so it's stable across the single mine below.
+      predicted = await rs.previewChallengeForSeed(reconstructedSeed);
 
       // Now mine the proposer's createChallenge into block N (with the pinned
       // prevrandao). Send the tx (queued), then mine exactly one block.
