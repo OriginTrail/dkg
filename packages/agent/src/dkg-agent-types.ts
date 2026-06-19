@@ -746,6 +746,7 @@ export interface DurableSyncDiagnostics {
   rejectedKcs: number;
   failedPeers: number;
   failedPhases: number;
+  backoffWorthyFailures?: number;
 }
 
 export interface SharedMemorySyncDiagnostics {
@@ -762,6 +763,7 @@ export interface SharedMemorySyncDiagnostics {
   droppedDataTriples: number;
   failedPeers: number;
   failedPhases: number;
+  backoffWorthyFailures?: number;
 }
 
 export interface CatchupSyncDiagnostics {

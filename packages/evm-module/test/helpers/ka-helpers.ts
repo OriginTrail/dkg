@@ -3,7 +3,7 @@ import { ethers, getBytes } from 'ethers';
 import { HexString } from 'ethers/lib.commonjs/utils/data';
 import hre from 'hardhat';
 
-import { KCSignaturesData, NodeAccounts } from './types';
+import { KASignaturesData, NodeAccounts } from './types';
 import {
   ContextGraphStorage,
   ContextGraphValueStorage,
@@ -25,14 +25,14 @@ export async function signMessage(
   return { r, vs };
 }
 
-export async function getKCSignaturesData(
+export async function getKASignaturesData(
   publishingNode: NodeAccounts,
   publisherIdentityId: number,
   receivingNodes: NodeAccounts[],
   merkleRoot: HexString = ethers.keccak256(
     ethers.toUtf8Bytes('test-merkle-root'),
   ),
-): Promise<KCSignaturesData> {
+): Promise<KASignaturesData> {
   const publisherMessageHash = ethers.solidityPackedKeccak256(
     ['uint72', 'bytes32'],
     [publisherIdentityId, merkleRoot],
@@ -65,7 +65,7 @@ export async function getKCSignaturesData(
 
 /**
  * Optional Phase 10 bridge: when supplied, `createKnowledgeAsset` will
- * also register the freshly-published KC into the given Context Graph and
+ * also register the freshly-published KA into the given Context Graph and
  * seed its per-epoch value entry in `ContextGraphValueStorage`. Required for
  * any test that subsequently calls `RandomSampling.createChallenge`, which
  * needs the CG-side state (the V8 publishing flow does not write it — Phase
@@ -86,7 +86,7 @@ export type Phase10CGBridge = {
   ContextGraphValueStorage: ContextGraphValueStorage;
   Chronos: Chronos;
   /** Optional value seed (defaults to 1 ether). Inflated to keep adjusted
-   *  totals comfortably above zero across many concurrent KCs. */
+   *  totals comfortably above zero across many concurrent KAs. */
   valueWei?: bigint;
   /** Optional value lifetime in epochs (defaults to 100). Long enough that
    *  multi-epoch tests don't accidentally drop the seed. */
@@ -94,7 +94,7 @@ export type Phase10CGBridge = {
 };
 
 export async function createKnowledgeAsset(
-  kcCreator: SignerWithAddress,
+  kaCreator: SignerWithAddress,
   publishingNode: NodeAccounts,
   publishingNodeIdentityId: number,
   receivingNodes: NodeAccounts[],
@@ -116,7 +116,7 @@ export async function createKnowledgeAsset(
   phase10Bridge?: Phase10CGBridge,
   merkleLeafCount: number = 1,
 ) {
-  const signaturesData = await getKCSignaturesData(
+  const signaturesData = await getKASignaturesData(
     publishingNode,
     publishingNodeIdentityId,
     receivingNodes,
@@ -124,14 +124,14 @@ export async function createKnowledgeAsset(
   );
 
   // Approve tokens
-  await contracts.Token.connect(kcCreator).increaseAllowance(
+  await contracts.Token.connect(kaCreator).increaseAllowance(
     contracts.KnowledgeCollection.getAddress(),
     tokenAmount,
   );
 
-  // Create knowledge collection
+  // Create knowledge asset
   const tx = await contracts.KnowledgeCollection.connect(
-    kcCreator,
+    kaCreator,
   ).createKnowledgeAsset(
     publishOperationId,
     signaturesData.merkleRoot,
@@ -178,7 +178,7 @@ export async function createKnowledgeAsset(
   } else {
     // Phase 10 bridge — implicit / opt-in path. If the test fixture has both
     // CG storages deployed AND a `TestStorageOperator` sentinel registered in
-    // the Hub, transparently bind every published KC into a default open CG
+    // the Hub, transparently bind every published KA into a default open CG
     // and seed its per-epoch value. This lets pre-existing integration tests
     // that publish via V8 still drive `RandomSampling.createChallenge` after
     // Phase 10 lands, without each call site having to know about the bridge.
@@ -186,7 +186,7 @@ export async function createKnowledgeAsset(
     // Tests that deliberately want an empty CG-side state (i.e. assert
     // `NoEligibleContextGraph`) MUST avoid registering the operator OR
     // explicitly skip publishing.
-    await _autoBridgeKCToDefaultCG(collectionId);
+    await _autoBridgeKAToDefaultCG(collectionId);
   }
 
   return { tx, receipt, collectionId };
@@ -208,7 +208,7 @@ type AutoBridgeCache = {
 };
 let _autoBridgeCache: AutoBridgeCache | null = null;
 
-async function _autoBridgeKCToDefaultCG(kaId: number): Promise<void> {
+async function _autoBridgeKAToDefaultCG(kaId: number): Promise<void> {
   // Resolve Hub. If the deployment doesn't have a Hub at all (rare: pure
   // standalone unit tests), bail silently.
   let HubCtr: Hub;
@@ -242,7 +242,7 @@ async function _autoBridgeKCToDefaultCG(kaId: number): Promise<void> {
   if (!_autoBridgeCache) {
     // Sanity-check that all three preconditions hold — if any are missing,
     // the test fixture didn't opt in to Phase 10 bridging and we leave the
-    // KC unattached. The picker will revert when called, which is the
+    // KA unattached. The picker will revert when called, which is the
     // intended signal that the fixture needs updating.
     let storageAddr: string;
     let valueAddr: string;

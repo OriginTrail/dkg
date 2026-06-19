@@ -21,6 +21,7 @@ import {
   readSwmDataPage,
   readSwmMetaPage,
   serializeResponderRows,
+  SyncRowSnapshotLimitError,
 } from './graph-plan.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
@@ -68,9 +69,12 @@ interface RegisterSyncHandlerParams {
 
 const SYNC_RESPONDER_GLOBAL_CONCURRENCY = 3;
 const SYNC_RESPONDER_PER_PEER_CONCURRENCY = 1;
-const SYNC_RESPONDER_QUEUE_LIMIT = 32;
+const SYNC_RESPONDER_QUEUE_LIMIT = 64;
 const SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT = 4;
 const SYNC_RESPONDER_MAX_QUEUE_WAIT_MS = 10_000;
+export const SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT = 128;
+export const SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT = 64;
+export const SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT = 64;
 
 class SyncResponderBusyError extends Error {
   constructor(message: string) {
@@ -231,9 +235,18 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     logDebug,
   } = params;
   const graphListMemo = createResponderGraphListMemo(store);
-  const durableDataRowsMemo = createResponderSyncRowListMemo(DURABLE_DATA_SYNC_SESSION_TTL_MS);
-  const durableMetaRowsMemo = createResponderSyncRowListMemo(DURABLE_DATA_SYNC_SESSION_TTL_MS);
-  const swmRowsMemo = createResponderSyncRowListMemo(DURABLE_DATA_SYNC_SESSION_TTL_MS);
+  const durableDataRowsMemo = createResponderSyncRowListMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
+  );
+  const durableMetaRowsMemo = createResponderSyncRowListMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT,
+  );
+  const swmRowsMemo = createResponderSyncRowListMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
+  );
   const syncSessionTokens = new Map<string, SyncSessionTokenEntry>();
   const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
   const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
@@ -486,6 +499,15 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       if (err instanceof SyncResponderBusyError) {
         logDebug(createOperationContext('sync'), `Sync responder busy for "${contextGraphId}" from peer ${peerId} (phase=${phase}): ${err.message}`);
         throw new QuietRetryableHandlerError(err.message);
+      }
+      if (err instanceof SyncRowSnapshotLimitError) {
+        logWarn(
+          createOperationContext('sync'),
+          `Sync responder snapshot limit for "${contextGraphId}" from peer ${peerId} (phase=${phase}, workspace=${isWorkspace}): active=${err.activeEntries}/${err.maxEntries} cached=${err.cachedEntries} inflight=${err.inflightEntries} key=${err.key}`,
+        );
+        throw new QuietRetryableHandlerError(
+          `sync responder snapshot limit exceeded (active=${err.activeEntries}/${err.maxEntries})`,
+        );
       }
       throw err;
     });

@@ -803,7 +803,7 @@ export class EVMChainAdapterBase {
    * revert we force a fresh approve up to the publish floor — confirming it
    * is visible on the same read path via `ensureV10ApproveTrac(force=true)` —
    * and retry populate+sign exactly once. Any other error, or a second
-   * `TooLowAllowance`, propagates unchanged.
+   * `TooLowAllowance`, is enriched when possible and then propagated.
    */
   protected async populateAndSignV10WithAllowanceRecovery(
     signer: Wallet,
@@ -822,6 +822,7 @@ export class EVMChainAdapterBase {
         );
         return await this.signPopulatedTransaction(signer, populated);
       } catch (err) {
+        enrichEvmError(err);
         if (!forcedReapprove && isTooLowAllowanceError(err)) {
           forcedReapprove = true;
           console.warn(

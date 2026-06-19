@@ -105,12 +105,15 @@ export interface SwmAckQuorumObservers {
     ackedCount: number;
     expectedCount: number;
     ackPct: number;
+    enumerationSource: CGMemberEnumeration['source'];
   }) => void;
   onWatchdogFired?: (input: {
     shareOperationId: string;
     cgId: string;
     missingCount: number;
     expectedCount: number;
+    missingPeers: readonly string[];
+    enumerationSource: CGMemberEnumeration['source'];
   }) => void;
   onDeadlineExpired?: (input: {
     shareOperationId: string;
@@ -118,6 +121,8 @@ export interface SwmAckQuorumObservers {
     ackedCount: number;
     expectedCount: number;
     ackPct: number;
+    missingPeers: readonly string[];
+    enumerationSource: CGMemberEnumeration['source'];
   }) => void;
 }
 
@@ -329,18 +334,22 @@ export function createSwmAckQuorum(deps: SwmAckQuorumDeps): SwmAckQuorum {
       ackedCount: record.acked.size,
       expectedCount: record.expectedMembers.size,
       ackPct: ackPctOf(record),
+      enumerationSource: record.enumerationSource,
     }));
   }
 
   function expireRecord(record: TrackedRecord): void {
     if (!records.delete(record.shareOperationId)) return;
     deadlineExpiredCount += 1;
+    const missingPeers = [...record.expectedMembers].filter((peerId) => !record.acked.has(peerId));
     safeInvoke(() => observers.onDeadlineExpired?.({
       shareOperationId: record.shareOperationId,
       cgId: record.cgId,
       ackedCount: record.acked.size,
       expectedCount: record.expectedMembers.size,
       ackPct: ackPctOf(record),
+      missingPeers,
+      enumerationSource: record.enumerationSource,
     }));
   }
 
@@ -356,6 +365,8 @@ export function createSwmAckQuorum(deps: SwmAckQuorumDeps): SwmAckQuorum {
       cgId: record.cgId,
       missingCount: missingPeers.length,
       expectedCount: record.expectedMembers.size,
+      missingPeers,
+      enumerationSource: record.enumerationSource,
     }));
     safeInvoke(() => {
       const r = deps.substrateTopUp({

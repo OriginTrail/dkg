@@ -27,13 +27,13 @@ import { createProfile, createProfiles } from './helpers/profile-helpers';
 import {
   getDefaultPublishingNode,
   getDefaultReceivingNodes,
-  getDefaultKCCreator,
+  getDefaultKACreator,
 } from './helpers/setup-helpers';
 import {
   buildPublishParams,
   packReservedKaId,
   DEFAULT_CHAIN_ID,
-} from './helpers/v10-kc-helpers';
+} from './helpers/v10-ka-helpers';
 
 const SCALE18 = 10n ** 18n;
 
@@ -166,22 +166,22 @@ describe('V10 E2E Conviction System', function () {
   //   5. Authorization via ContextGraphs.isAuthorizedPublisher using the
   //      PAYING principal (msg.sender), NOT the recovered node signer (N17)
   //   6. Auto-resolve via agentToAccountId inside coverPublishingCost (N8)
-  //   7. KC registered in KCS with msg.sender as the publisher of record
+  //   7. KA registered in KAS with msg.sender as the publisher of record
   //      (commit 41be7c71 — KA tokens minted to the paying agent, so the
   //      N16 ERC-1155 balanceOf gate works on follow-up updates)
   //   8. Atomic CG binding via ContextGraphs.registerKnowledgeAsset
-  //      (kaToContextGraph[kaId] == cgId, contextGraphKCList[cgId] includes
+  //      (kaToContextGraph[kaId] == cgId, contextGraphKaList[cgId] includes
   //      kaId) (N20)
   //   9. CG value ledger written via
   //      ContextGraphValueStorage.addCGValueForEpochRange (N20, Phase 1)
   //  10. Active-sink distribution: `TokensAddedToEpochRange` events
-  //      emitted by `EpochStorage` sum to `discountedCost` across the KC's
+  //      emitted by `EpochStorage` sum to `discountedCost` across the KA's
   //      `[currentEpoch, currentEpoch + epochs]` chain-epoch range
   //      (prorated current-epoch partial + middle full + tail partial,
   //      mirroring `KnowledgeAssetsLifecycle._distributeTokens`). The NFT
   //      is the funding agent on the conviction branch — KAV10 MUST NOT
   //      call `_distributeTokens` (no double-count).
-  //  11. KC retrieval through the KCS public reader
+  //  11. KA retrieval through the KAS public reader
   // ========================================================================
   describe('Flow 3: V10 Publish via Conviction NFT + Context Graphs', function () {
     const COMMITTED_TRAC = ethers.parseEther('50000'); // 20% discount tier
@@ -265,7 +265,7 @@ describe('V10 E2E Conviction System', function () {
       // msg.sender into the CSS vault directly (fail-closed transferFrom)
       // and writes the full amount across the 12-epoch lock window via
       // `EpochStorage.addTokensToEpochRange`. The contract NEVER holds TRAC.
-      const creator = getDefaultKCCreator(accounts);
+      const creator = getDefaultKACreator(accounts);
       await Token.connect(accounts[0]).transfer(creator.address, COMMITTED_TRAC);
       await Token.connect(creator).approve(await NFT.getAddress(), COMMITTED_TRAC);
 
@@ -313,7 +313,7 @@ describe('V10 E2E Conviction System', function () {
 
       // ---- Step 4: Compute expected active-sink distribution ----
       //
-      // V10 lazy-settlement model: conviction-path publish funds the KC's
+      // V10 lazy-settlement model: conviction-path publish funds the KA's
       // epoch range with `discountedCost = tokenAmount * (1 - discountBps/1e4)`
       // through the NFT's `coverPublishingCost` → `addTokensToEpochRange`.
       // For COMMITTED_TRAC = 50K, discountBps = 2000 (20%), so the active
@@ -427,7 +427,7 @@ describe('V10 E2E Conviction System', function () {
       // the _distributeTokens call on the conviction branch.)
       void kav10AddrLower;
 
-      // ---- Step 7: KC registered in KCS; publisher of record is msg.sender ----
+      // ---- Step 7: KA registered in KAS; publisher of record is msg.sender ----
       // OT-RFC-43 Option 1 (1a): the minted kaId equals the packed reservedKaId
       // (author-namespaced; ids are no longer globally sequential 1,2,3,...).
       const kaId = reservedKaId;
@@ -443,7 +443,7 @@ describe('V10 E2E Conviction System', function () {
       const latestPublisher =
         await DKGKnowledgeAssets.getLatestMerkleRootPublisher(kaId);
       expect(latestPublisher).to.equal(creator.address);
-      // The KA NFT (ERC-721, one token per KC id) is minted to the author on
+      // The KA NFT (ERC-721, one token per KA id) is minted to the author on
       // publish (`DKGKnowledgeAssets._safeMint(author, kaId)`). Assert the
       // specific token `kaId` is owned by `creator` — a `balanceOf > 0` check
       // would also pass if some unrelated KA were owned by `creator` while
@@ -472,20 +472,20 @@ describe('V10 E2E Conviction System', function () {
       // KAV10 pays the full tokenAmount on top). The active-sink event
       // sum is the canonical guard.
 
-      // ---- Step 11: KC retrieval via public reader ----
-      const retrievedKc = await DKGKnowledgeAssets.getKnowledgeAsset(kaId);
-      expect(retrievedKc.byteSize).to.equal(1000n);
-      expect(retrievedKc.startEpoch).to.equal(currentEpoch);
-      expect(retrievedKc.endEpoch).to.equal(currentEpoch + BigInt(epochs));
-      expect(retrievedKc.tokenAmount).to.equal(tokenAmount);
-      expect(retrievedKc.merkleRoots.length).to.equal(1);
-      expect(retrievedKc.merkleRoots[0].merkleRoot).to.equal(merkleRoot);
-      expect(retrievedKc.merkleRoots[0].publisher).to.equal(creator.address);
+      // ---- Step 11: KA retrieval via public reader ----
+      const retrievedKa = await DKGKnowledgeAssets.getKnowledgeAsset(kaId);
+      expect(retrievedKa.byteSize).to.equal(1000n);
+      expect(retrievedKa.startEpoch).to.equal(currentEpoch);
+      expect(retrievedKa.endEpoch).to.equal(currentEpoch + BigInt(epochs));
+      expect(retrievedKa.tokenAmount).to.equal(tokenAmount);
+      expect(retrievedKa.merkleRoots.length).to.equal(1);
+      expect(retrievedKa.merkleRoots[0].merkleRoot).to.equal(merkleRoot);
+      expect(retrievedKa.merkleRoots[0].publisher).to.equal(creator.address);
       // Verified author identity persisted on chain. In this conviction
       // E2E the author signer == creator (the test builds `p` via
       // `buildPublishParams` with the creator as both author and msg.sender).
       // Author lives in the parallel `merkleRootAuthors` map (keeps the
-      // MerkleRoot struct at 3 storage slots so prior KCs decode correctly
+      // MerkleRoot struct at 3 storage slots so prior KAs decode correctly
       // post-upgrade — see KnowledgeAssetLib comments).
       expect(
         await DKGKnowledgeAssets.getMerkleRootAuthorByIndex(kaId, 0),

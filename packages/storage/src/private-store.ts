@@ -8,6 +8,16 @@ import type { TripleStore, Quad } from './triple-store.js';
 import type { ContextGraphManager } from './graph-manager.js';
 
 /**
+ * GH #1078 — predicate used for the per-(cg,root[,sub]) "current verifiable
+ * commitment" marker. Stored on a dedicated `urn:dkg:private-commitment-marker:…`
+ * subject inside the private graph so it is (a) never returned by
+ * `getPrivateTriples` (which filters on the root subject / its skolem children),
+ * (b) never collected by the plaintext dedup scan (different predicate), and
+ * (c) dropped together with the private graph on `dropContextGraph`.
+ */
+const PRIVATE_COMMITMENT_PRED = 'http://dkg.io/ontology/privateCommitment';
+
+/**
  * Manages private triples stored on the local node. Peer-to-peer private
  * payloads are encrypted before they arrive here; after a node decrypts and
  * accepts the payload, RDF terms in the local private graph stay plaintext so
@@ -171,6 +181,7 @@ export class PrivateContentStore {
     rootEntity: string,
     quads: Quad[],
     subGraphName?: string,
+    commitmentId?: string,
   ): Promise<void> {
     if (quads.length === 0) return;
 
@@ -178,9 +189,41 @@ export class PrivateContentStore {
     for (const q of quads) {
       assertSafePrivateQuad(q);
     }
+    if (commitmentId !== undefined && !/^[A-Za-z0-9_.:-]+$/.test(commitmentId)) {
+      throw new Error(`Unsafe private commitmentId: ${commitmentId.slice(0, 80)}`);
+    }
 
     const graphUri = this.privateGraph(contextGraphId, subGraphName);
     await this.withGraphWriteLock(graphUri, async () => {
+      // GH #1078 — verifiable-commitment scoping. When the caller supplies the
+      // commitment this root actually committed (its `privateMerkleRoot`) AND it
+      // DIFFERS from the commitment currently recorded for the root, a NEW
+      // commitment is superseding a stale one (a re-publish, or a draft slice
+      // replaced by the finalized one): drop the root's prior finalized private
+      // slice before inserting the new one, so a later hydration / privateData-
+      // Anchor never returns a different commitment's triples. With NO
+      // commitmentId the behaviour is unchanged (append + dedup), preserving
+      // every existing caller and multi-value private predicates.
+      if (commitmentId !== undefined) {
+        const markerSubject = privateCommitmentMarkerSubject(contextGraphId, rootEntity, subGraphName);
+        const current = await this.readPrivateCommitment(graphUri, markerSubject);
+        if (current !== commitmentId) {
+          // A different (or first) commitment takes over this root: drop the
+          // root's prior finalized private slice (a no-op on the very first
+          // write) so the new commitment fully replaces it, then stamp the new
+          // commitment marker. Repeated stores under the SAME commitment fall
+          // through to the append+dedup path below (chunked/retry-safe).
+          await this.deleteRootPrivateSlice(graphUri, rootEntity);
+          await this.store.deleteByPattern({ graph: graphUri, subject: markerSubject });
+          await this.store.insert([{
+            subject: markerSubject,
+            predicate: PRIVATE_COMMITMENT_PRED,
+            object: `"${commitmentId}"`,
+            graph: graphUri,
+          }]);
+        }
+      }
+
       const existingPlainKeys = await this.collectExistingPlaintextKeys(
         graphUri,
         quads,
@@ -323,10 +366,49 @@ export class PrivateContentStore {
   ): Promise<void> {
     assertSafeIri(rootEntity);
     const graphUri = this.privateGraph(contextGraphId, subGraphName);
-    await this.store.deleteBySubjectPrefix(graphUri, rootEntity);
+    await this.deleteRootPrivateSlice(graphUri, rootEntity);
     const key = this.privateKey(contextGraphId, subGraphName);
     const entities = this.privateEntities.get(key);
     if (entities) entities.delete(rootEntity);
+  }
+
+  /**
+   * Delete exactly ONE root's private slice from `graphUri`: the exact root
+   * subject plus its skolem children (`<root>/.well-known/genid/…`), the SAME
+   * shape `getPrivateTriples` reads. We deliberately do NOT use a bare
+   * `deleteBySubjectPrefix(root)` — RDF root IRIs are not prefix-delimited, so a
+   * raw prefix would also delete sibling roots that share it (e.g. superseding
+   * `urn:device:1` would nuke `urn:device:10`'s private triples). The skolem
+   * prefix IS delimited (`…/.well-known/genid/`), so it is collision-safe.
+   */
+  private async deleteRootPrivateSlice(graphUri: string, rootEntity: string): Promise<void> {
+    assertSafeIri(rootEntity);
+    await this.store.deleteByPattern({ graph: graphUri, subject: rootEntity });
+    await this.store.deleteBySubjectPrefix(graphUri, `${rootEntity}/.well-known/genid/`);
+  }
+
+  /**
+   * GH #1078 — read the commitment id currently recorded for a root's private
+   * slice (undefined when none has been recorded, i.e. legacy/append-only
+   * writers). Used to decide whether an incoming commitment supersedes the
+   * stored slice.
+   */
+  private async readPrivateCommitment(
+    graphUri: string,
+    markerSubject: string,
+  ): Promise<string | undefined> {
+    const result = await this.store.query(
+      `SELECT ?c WHERE {
+        GRAPH <${assertSafeIri(graphUri)}> {
+          <${assertSafeIri(markerSubject)}> <${PRIVATE_COMMITMENT_PRED}> ?c .
+        }
+      } LIMIT 1`,
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
+    const raw = result.bindings[0]?.['c'];
+    if (typeof raw !== 'string') return undefined;
+    const m = raw.match(/^"([\s\S]*)"(\^\^.*)?$/);
+    return m ? m[1] : raw;
   }
 }
 
@@ -339,6 +421,23 @@ function privateStageSubject(
   const parts = [contextGraphId, subGraphName ?? '_', shareOperationId, rootEntity]
     .map((part) => encodeURIComponent(part));
   const subject = `urn:dkg:private-stage:${parts.join(':')}`;
+  assertSafeIri(subject);
+  return subject;
+}
+
+/**
+ * GH #1078 — subject for the per-(cg,root[,sub]) commitment marker. Deliberately
+ * NOT prefixed by the root IRI so `getPrivateTriples`' root-subject filter and
+ * the `deleteBySubjectPrefix(root)` supersede sweep never touch it.
+ */
+function privateCommitmentMarkerSubject(
+  contextGraphId: string,
+  rootEntity: string,
+  subGraphName?: string,
+): string {
+  const parts = [contextGraphId, subGraphName ?? '_', rootEntity]
+    .map((part) => encodeURIComponent(part));
+  const subject = `urn:dkg:private-commitment-marker:${parts.join(':')}`;
   assertSafeIri(subject);
   return subject;
 }

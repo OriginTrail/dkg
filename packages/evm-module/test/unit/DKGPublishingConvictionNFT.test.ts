@@ -759,31 +759,31 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       return newId;
     }
 
-    it('returns the discounted cost, deducts from epoch allowance, and funds the KC epoch range (active sink)', async () => {
+    it('returns the discounted cost, deducts from epoch allowance, and funds the KA epoch range (active sink)', async () => {
       const committed = hre.ethers.parseEther('1200000');
       await createAtWithAgent(committed, agent.address);
 
       const baseCost = hre.ethers.parseEther('10000');
       const expectedDiscount = (baseCost * (BPS - 7500n)) / BPS; // 2500 TRAC
       const currentEpoch = await ChronosContract.getCurrentEpoch();
-      const kcEpochs = 3n;
+      const kaEpochs = 3n;
 
       const returned = await NFT.connect(Kav10Signer).coverPublishingCost.staticCall(
         agent.address,
         baseCost,
         currentEpoch,
-        kcEpochs,
+        kaEpochs,
       );
       expect(returned).to.equal(expectedDiscount);
 
       // Pin the active-sink distribution via the sum of
       // `TokensAddedToEpochRange` events emitted by `EpochStorage`. The
       // distribution now mirrors `KnowledgeAssetsV10._distributeTokens`:
-      // the discountedCost is prorated across `kcEpochs + 1` chain epochs
-      // (partial current + (kcEpochs - 1) full middle + partial final),
+      // the discountedCost is prorated across `kaEpochs + 1` chain epochs
+      // (partial current + (kaEpochs - 1) full middle + partial final),
       // so we get up to 3 separate events. The TOTAL summed across all
       // emissions must equal `expectedDiscount`, and every event must
-      // sit within `[currentEpoch, currentEpoch + kcEpochs]` for shard
+      // sit within `[currentEpoch, currentEpoch + kaEpochs]` for shard
       // STAKER_SHARD_ID. Event-based assertion (rather than per-epoch
       // pool deltas) because V8 staker-shard `cumulative[...]` storage
       // is shared with pre-existing unfinalized diffs from the deploy
@@ -792,7 +792,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
         agent.address,
         baseCost,
         currentEpoch,
-        kcEpochs,
+        kaEpochs,
       );
       const receipt = await tx.wait();
       const epsAddr = (await EpochStorageContract.getAddress()).toLowerCase();
@@ -808,7 +808,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
         eventCount++;
         expect(parsed.args.shardId).to.equal(STAKER_SHARD_ID);
         expect(parsed.args.startEpoch).to.be.gte(currentEpoch);
-        expect(parsed.args.endEpoch).to.be.lte(currentEpoch + kcEpochs);
+        expect(parsed.args.endEpoch).to.be.lte(currentEpoch + kaEpochs);
         totalDistributed += BigInt(parsed.args.tokenAmount);
       }
       expect(eventCount).to.be.greaterThan(0);
@@ -834,7 +834,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
 
         const baseCost = hre.ethers.parseEther('10000');
         const expectedDiscount = (baseCost * (BPS - 7500n)) / BPS;
-        const kcEpochs = 3n;
+        const kaEpochs = 3n;
 
         const Harness = await hre.ethers.getContractFactory('PublishingMathLibHarness');
         const harness = await Harness.deploy();
@@ -846,7 +846,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
         const [starts, ends, amounts] = await harness.prorateActiveSink(
           expectedDiscount,
           targetEpoch,
-          kcEpochs,
+          kaEpochs,
           epochLength,
           timeRemaining,
         );
@@ -856,7 +856,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
           agent.address,
           baseCost,
           targetEpoch,
-          kcEpochs,
+          kaEpochs,
         );
         const receipt = await tx.wait();
         const epsAddr = (await EpochStorageContract.getAddress()).toLowerCase();
@@ -893,12 +893,12 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       const baseCost = hre.ethers.parseEther('20000');
       const discounted = (baseCost * (BPS - 3000n)) / BPS; // 14000
       const baseAllowance = committed / 12n; // 10000
-      const kcStart = await ChronosContract.getCurrentEpoch();
+      const kaStart = await ChronosContract.getCurrentEpoch();
 
       await NFT.connect(Kav10Signer).coverPublishingCost(
         agent.address,
         baseCost,
-        kcStart,
+        kaStart,
         LOCK_DURATION,
       );
 
@@ -913,67 +913,67 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       const committed = hre.ethers.parseEther('60000');
       await createAtWithAgent(committed, agent.address);
       const baseCost1 = ((committed / 12n) * BPS) / (BPS - 2000n);
-      const kcStart = await ChronosContract.getCurrentEpoch();
+      const kaStart = await ChronosContract.getCurrentEpoch();
       await NFT.connect(Kav10Signer).coverPublishingCost(
         agent.address,
         baseCost1,
-        kcStart,
+        kaStart,
         LOCK_DURATION,
       );
       await expect(
         NFT.connect(Kav10Signer).coverPublishingCost(
           agent.address,
           hre.ethers.parseEther('100'),
-          kcStart,
+          kaStart,
           LOCK_DURATION,
         ),
       ).to.be.revertedWithCustomError(LogicContract, 'InsufficientAllowance');
     });
 
     it('reverts NoConvictionAccount for an unregistered agent', async () => {
-      const kcStart = await ChronosContract.getCurrentEpoch();
+      const kaStart = await ChronosContract.getCurrentEpoch();
       await expect(
-        NFT.connect(Kav10Signer).coverPublishingCost(accounts[9].address, 1n, kcStart, 1n),
+        NFT.connect(Kav10Signer).coverPublishingCost(accounts[9].address, 1n, kaStart, 1n),
       )
         .to.be.revertedWithCustomError(LogicContract, 'NoConvictionAccount')
         .withArgs(accounts[9].address);
     });
 
-    it('reverts InvalidConvictionKcEpochs when kcEpochs is 0 or exceeds lockDurationEpochs', async () => {
+    it('reverts InvalidConvictionKaEpochs when kaEpochs is 0 or exceeds lockDurationEpochs', async () => {
       const committed = hre.ethers.parseEther('60000');
       await createAtWithAgent(committed, agent.address);
-      const kcStart = await ChronosContract.getCurrentEpoch();
+      const kaStart = await ChronosContract.getCurrentEpoch();
 
-      // kcEpochs == 0 → reject.
+      // kaEpochs == 0 → reject.
       await expect(
         NFT.connect(Kav10Signer).coverPublishingCost(
           agent.address,
           hre.ethers.parseEther('1'),
-          kcStart,
+          kaStart,
           0n,
         ),
       )
-        .to.be.revertedWithCustomError(LogicContract, 'InvalidConvictionKcEpochs')
+        .to.be.revertedWithCustomError(LogicContract, 'InvalidConvictionKaEpochs')
         .withArgs(LOCK_DURATION, 0n);
 
-      // kcEpochs == LOCK_DURATION + 1 → reject (above ceiling).
+      // kaEpochs == LOCK_DURATION + 1 → reject (above ceiling).
       await expect(
         NFT.connect(Kav10Signer).coverPublishingCost(
           agent.address,
           hre.ethers.parseEther('1'),
-          kcStart,
+          kaStart,
           LOCK_DURATION + 1,
         ),
       )
-        .to.be.revertedWithCustomError(LogicContract, 'InvalidConvictionKcEpochs')
+        .to.be.revertedWithCustomError(LogicContract, 'InvalidConvictionKaEpochs')
         .withArgs(LOCK_DURATION, LOCK_DURATION + 1);
 
-      // kcEpochs == LOCK_DURATION → accepted (boundary).
+      // kaEpochs == LOCK_DURATION → accepted (boundary).
       await expect(
         NFT.connect(Kav10Signer).coverPublishingCost(
           agent.address,
           hre.ethers.parseEther('1'),
-          kcStart,
+          kaStart,
           LOCK_DURATION,
         ),
       ).not.to.be.reverted;
@@ -998,13 +998,13 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       expect(await NFT.windowSpent(1, windowA)).to.equal(0n);
       expect(await NFT.windowSpent(2, windowB)).to.equal(0n);
 
-      const kcStart = await ChronosContract.getCurrentEpoch();
+      const kaStart = await ChronosContract.getCurrentEpoch();
       const baseCostA = hre.ethers.parseEther('1000');
       const discountedA = (baseCostA * (BPS - 3000n)) / BPS; // 700
       await NFT.connect(Kav10Signer).coverPublishingCost(
         agent.address,
         baseCostA,
-        kcStart,
+        kaStart,
         LOCK_DURATION,
       );
       expect(await NFT.windowSpent(1, windowA)).to.equal(discountedA);
@@ -1015,7 +1015,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       await NFT.connect(Kav10Signer).coverPublishingCost(
         agentB.address,
         baseCostB,
-        kcStart,
+        kaStart,
         LOCK_DURATION,
       );
       expect(await NFT.windowSpent(1, windowA)).to.equal(discountedA);
@@ -1029,12 +1029,12 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       const Attacker = accounts[7];
       await HubContract.setContractAddress('MaliciousCaller', Attacker.address);
 
-      const kcStart = await ChronosContract.getCurrentEpoch();
+      const kaStart = await ChronosContract.getCurrentEpoch();
       await expect(
         NFT.connect(Attacker).coverPublishingCost(
           agent.address,
           hre.ethers.parseEther('100'),
-          kcStart,
+          kaStart,
           LOCK_DURATION,
         ),
       )
@@ -1046,12 +1046,12 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       const committed = hre.ethers.parseEther('60000');
       await createAtWithAgent(committed, agent.address);
       const eoa = accounts[7];
-      const kcStart = await ChronosContract.getCurrentEpoch();
+      const kaStart = await ChronosContract.getCurrentEpoch();
       await expect(
         NFT.connect(eoa).coverPublishingCost(
           agent.address,
           hre.ethers.parseEther('100'),
-          kcStart,
+          kaStart,
           LOCK_DURATION,
         ),
       )
@@ -1059,15 +1059,15 @@ describe('@unit DKGPublishingConvictionNFT', function () {
         .withArgs(eoa.address);
     });
 
-    it('ABI has exactly 4 parameters: (publishingAgent, baseCost, kcStartEpoch, kcEpochs)', async () => {
+    it('ABI has exactly 4 parameters: (publishingAgent, baseCost, kaStartEpoch, kaEpochs)', async () => {
       const fn = NFT.interface.getFunction('coverPublishingCost');
       expect(fn).to.not.equal(null);
       expect(fn!.inputs.length).to.equal(4);
       expect(fn!.inputs[0].name).to.equal('publishingAgent');
       expect(fn!.inputs[0].type).to.equal('address');
       expect(fn!.inputs[1].name).to.equal('baseCost');
-      expect(fn!.inputs[2].name).to.equal('kcStartEpoch');
-      expect(fn!.inputs[3].name).to.equal('kcEpochs');
+      expect(fn!.inputs[2].name).to.equal('kaStartEpoch');
+      expect(fn!.inputs[3].name).to.equal('kaEpochs');
     });
 
     // PublishingConviction 1.0.1 — post-discount floor pin.
@@ -1091,15 +1091,15 @@ describe('@unit DKGPublishingConvictionNFT', function () {
 
       const baseCost = 1n;
       const expectedFloor = 1n;
-      const kcStart = await ChronosContract.getCurrentEpoch();
-      const kcEpochs = 2n;
+      const kaStart = await ChronosContract.getCurrentEpoch();
+      const kaEpochs = 2n;
 
       // staticCall verifies the floor reaches the return value.
       const returned = await NFT.connect(Kav10Signer).coverPublishingCost.staticCall(
         agent.address,
         baseCost,
-        kcStart,
-        kcEpochs,
+        kaStart,
+        kaEpochs,
       );
       expect(returned).to.equal(expectedFloor);
 
@@ -1115,8 +1115,8 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       const tx = await NFT.connect(Kav10Signer).coverPublishingCost(
         agent.address,
         baseCost,
-        kcStart,
-        kcEpochs,
+        kaStart,
+        kaEpochs,
       );
       const receipt = await tx.wait();
 
@@ -1152,14 +1152,14 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       const committed = hre.ethers.parseEther('30000');
       await createAtWithAgent(committed, agent.address);
 
-      const kcStart = await ChronosContract.getCurrentEpoch();
-      const kcEpochs = 2n;
+      const kaStart = await ChronosContract.getCurrentEpoch();
+      const kaEpochs = 2n;
 
       const returned = await NFT.connect(Kav10Signer).coverPublishingCost.staticCall(
         agent.address,
         0n,
-        kcStart,
-        kcEpochs,
+        kaStart,
+        kaEpochs,
       );
       expect(returned).to.equal(0n);
 
@@ -1174,8 +1174,8 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       await NFT.connect(Kav10Signer).coverPublishingCost(
         agent.address,
         0n,
-        kcStart,
-        kcEpochs,
+        kaStart,
+        kaEpochs,
       );
 
       const windowSpentAfter = await NFT.windowSpent(1, currentWindow);

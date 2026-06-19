@@ -60,24 +60,24 @@ interface IDKGPublishingConvictionNFT {
         );
 
     /// @notice Spend a publishing agent's conviction allowance for a base
-    ///         cost and fund the published KC's epoch range from escrow.
+    ///         cost and fund the published KA's epoch range from escrow.
     /// @dev Caller MUST be `KnowledgeAssetsV10` — the NFT gates this via Hub
     ///      lookup. The NFT resolves the paying account internally from
     ///      `agentToAccountId[publishingAgent]`, so KAV10 MUST NOT supply an
     ///      account id (N28 closure: removes victim-account-drain vector).
     ///
-    ///      `kcStartEpoch` / `kcEpochs` describe the published KC's
+    ///      `kaStartEpoch` / `kaEpochs` describe the published KA's
     ///      lifetime: the discounted cost will be distributed across the
-    ///      chain epochs `[kcStartEpoch, kcStartEpoch + kcEpochs - 1]`
-    ///      (active sink). `kcEpochs` MUST be <= the account's
+    ///      chain epochs `[kaStartEpoch, kaStartEpoch + kaEpochs - 1]`
+    ///      (active sink). `kaEpochs` MUST be <= the account's
     ///      `lockDurationEpochs` or the call reverts with
-    ///      `InvalidConvictionKcEpochs`.
+    ///      `InvalidConvictionKaEpochs`.
     ///
     ///      Reverts:
     ///      - `NoConvictionAccount(publishingAgent)` if agent has no account.
     ///      - `AccountExpired(accountId, expiresAt)` if account is past lock.
-    ///      - `InvalidConvictionKcEpochs(lockDurationEpochs, kcEpochs)` if
-    ///         `kcEpochs == 0` or exceeds the account lock window.
+    ///      - `InvalidConvictionKaEpochs(lockDurationEpochs, kaEpochs)` if
+    ///         `kaEpochs == 0` or exceeds the account lock window.
     ///      - `InsufficientAllowance(...)` if epoch + top-up cannot cover cost.
     ///      - `OnlyKnowledgeAssetsV10(caller)` if msg.sender is not KAV10.
     ///
@@ -89,8 +89,8 @@ interface IDKGPublishingConvictionNFT {
     function coverPublishingCost(
         address publishingAgent,
         uint96 baseCost,
-        uint40 kcStartEpoch,
-        uint40 kcEpochs
+        uint40 kaStartEpoch,
+        uint40 kaEpochs
     ) external returns (uint96 discountedCost);
 
     /// @notice Public lazy settlement entry point. Sweeps elapsed billing

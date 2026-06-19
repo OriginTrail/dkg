@@ -274,10 +274,17 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         throw new Error(`No publisher configured for wallet ${walletId}`);
       }
       const encryption = await args.publishEncryptionFactory?.(publishOptions);
+      // GH #1121 — the agent-resolved, chainKey-bound AEAD closure MUST win over
+      // any callback already on publishOptions. The async-lift mapper now
+      // pre-populates a fail-closed default `encryptInlinePayload` for non-public
+      // CGs (so plaintext can never silently ship); that default must only apply
+      // when the real factory yields nothing — otherwise it would shadow the
+      // real curated-publish encryption and make every private async publish
+      // throw. Hence: real factory first, mapper default as the fallback.
       const publishOptionsWithEncryption: PublishOptions = {
         ...publishOptions,
-        encryptInlinePayload: publishOptions.encryptInlinePayload ?? encryption?.encryptInlinePayload,
-        encryptInlineChunked: publishOptions.encryptInlineChunked ?? encryption?.encryptInlineChunked,
+        encryptInlinePayload: encryption?.encryptInlinePayload ?? publishOptions.encryptInlinePayload,
+        encryptInlineChunked: encryption?.encryptInlineChunked ?? publishOptions.encryptInlineChunked,
       };
       const v10ACKProvider = publishOptionsWithEncryption.v10ACKProvider
         ?? args.v10ACKProviderFactory?.()

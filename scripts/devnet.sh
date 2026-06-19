@@ -615,7 +615,11 @@ start_node() {
   rm -f "$node_dir/daemon.pid"
 
   log "Starting node $node_num..."
-  DKG_HOME="$node_dir" DKG_NO_BLUE_GREEN=1 \
+  # DKG_WALLETS_NO_MIGRATE=1: this harness writes a plaintext wallets.json with
+  # RANDOM operational keys and the staking step (cmd_start) re-reads
+  # wallets[0].privateKey directly, so the daemon must NOT migrate it to an
+  # encrypted keystore (GH #11). Production daemons omit this and auto-migrate.
+  DKG_HOME="$node_dir" DKG_NO_BLUE_GREEN=1 DKG_WALLETS_NO_MIGRATE=1 \
     node "$REPO_ROOT/packages/cli/dist/cli.js" start --foreground \
     > "$node_dir/daemon.log" 2>&1 &
   local node_pid=$!

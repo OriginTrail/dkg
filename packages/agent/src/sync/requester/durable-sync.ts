@@ -3,7 +3,7 @@ import { contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { PhaseCallback } from '@origintrail-official/dkg-publisher';
-import { didSyncPeerRespond, isSyncTransportFailure } from '../error-tags.js';
+import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncTransportFailure } from '../error-tags.js';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
 
@@ -25,6 +25,7 @@ export interface DurableSyncSummary {
   rejectedKcs: number;
   failedPeers: number;
   failedPhases: number;
+  backoffWorthyFailures: number;
 }
 
 interface DurableSyncContext {
@@ -61,6 +62,7 @@ interface DurableSyncContext {
    * backed by a CONTIGUOUS watermark. Undefined ⇒ full scan (default today).
    */
   sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
+  stopOnBackoffWorthyFailure?: boolean;
   processDurableBatchInWorker: (dataQuads: Quad[], metaQuads: Quad[], ctx: OperationContext, acceptUnverified: boolean) => Promise<{
     verifiedData: Quad[];
     verifiedMeta: Quad[];
@@ -90,6 +92,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     createContextGraphSyncDeadline,
     fetchSyncPages,
     sinceBatchIdFor,
+    stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
     storeInsert,
     deleteCheckpoint,
@@ -117,6 +120,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     rejectedKcs: 0,
     failedPeers: 0,
     failedPhases: 0,
+    backoffWorthyFailures: 0,
   };
 
   const recordPhaseOutcome = (result: SyncPageResult, options: { updateCheckpoint: boolean; countProgress?: boolean }) => {
@@ -139,6 +143,11 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
   };
 
   let peerFailed = false;
+  const shouldStopAfterBackoffWorthyFailure = (contextGraphId: string, reason: string): boolean => {
+    if (!stopOnBackoffWorthyFailure) return false;
+    logInfo(ctx, `Stopping durable sync fanout for ${remotePeerId} after "${contextGraphId}" (${reason})`);
+    return true;
+  };
   for (const [index, pid] of contextGraphIds.entries()) {
     let activePhase: 'fetch' | 'verify' | 'store' | undefined;
     let peerRespondedForContextGraph = false;
@@ -177,6 +186,11 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
           }
         : await fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline);
       if (!skipAgentsMeta) peerRespondedForContextGraph = true;
+      if (metaResult.timedOut && shouldStopAfterBackoffWorthyFailure(pid, 'meta timeout')) {
+        recordPhaseOutcome(metaResult, { updateCheckpoint: false });
+        endPhase();
+        break;
+      }
       const dataResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline, undefined, sinceBatchIdFor?.(pid));
       peerRespondedForContextGraph = true;
       endPhase();
@@ -211,6 +225,9 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       ) {
         recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
         recordPhaseOutcome(dataResult, { updateCheckpoint: updateDataCheckpoint });
+        if ((metaResult.timedOut || dataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
+          break;
+        }
         continue;
       }
 
@@ -229,6 +246,9 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
       recordPhaseOutcome(dataResult, { updateCheckpoint: updateDataCheckpoint });
       endPhase();
+      if ((metaResult.timedOut || dataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
+        break;
+      }
       const storeDurationMs = Date.now() - storeStartedAt;
 
       if (fetchDurationMs + verifyDurationMs + storeDurationMs > 100) {
@@ -245,6 +265,10 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     } catch (pidErr) {
       endPhase();
       logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${pidErr instanceof Error ? pidErr.message : String(pidErr)}`);
+      const backoffWorthy = isSyncBackoffWorthyError(pidErr);
+      if (backoffWorthy) {
+        summary.backoffWorthyFailures += 1;
+      }
       if ((pidErr as Error & { syncDenied?: boolean }).syncDenied) {
         onAccessDenied?.(pid);
         summary.deniedPhases += 1;
@@ -256,6 +280,9 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         summary.failedPhases += 1;
       } else {
         peerFailed = true;
+      }
+      if (backoffWorthy && shouldStopAfterBackoffWorthyFailure(pid, 'backoff-worthy failure')) {
+        break;
       }
     }
   }

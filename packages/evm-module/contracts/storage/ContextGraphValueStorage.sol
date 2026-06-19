@@ -17,7 +17,7 @@ import {IVersioned} from "../interfaces/IVersioned.sol";
  *         int256/uint256 because publish values are wei-of-TRAC and exceed uint96.
  *
  * Design rationale (see V10_CONTRACTS_REDESIGN_v2.md §"Data in
- * ContextGraphValueStorage"): a KC published with value `V` for `lifetime`
+ * ContextGraphValueStorage"): a KA published with value `V` for `lifetime`
  * epochs contributes `V / lifetime` per epoch during its active window
  * [startEpoch, startEpoch + lifetime - 1]. Expiry is handled implicitly by the
  * negative diff written at `startEpoch + lifetime`. No cleanup, no keeper.
@@ -194,7 +194,7 @@ contract ContextGraphValueStorage is INamed, IVersioned, HubDependent {
     // -------------------------------------------------------------------------
 
     /// @notice Active per-epoch contribution of `cgId` at `epoch` (sum of all
-    ///         active KCs' per-epoch values at that epoch). Returns the
+    ///         active KAs' per-epoch values at that epoch). Returns the
     ///         simulated value if the epoch has not been finalized yet.
     function getCGValueAtEpoch(uint256 cgId, uint256 epoch) public view returns (uint256) {
         if (epoch <= cgLastFinalizedEpoch[cgId]) {

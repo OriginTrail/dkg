@@ -1,0 +1,229 @@
+import { describe, expect, it } from 'vitest';
+import { createOperationContext } from '@origintrail-official/dkg-core';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { DKGAgent } from '../src/index.js';
+import type { SyncPhase } from '../src/sync/auth/request-build.js';
+import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+
+const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+const PEER_B = '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw';
+const DEFAULT_DEADLINE = Date.UTC(2100, 0, 1);
+
+type FetchArgs = {
+  remotePeerId?: string;
+  contextGraphId?: string;
+  includeSharedMemory?: boolean;
+  phase?: SyncPhase;
+  graphUri?: string;
+  deadline?: number;
+  snapshotRef?: string;
+  sinceBatchId?: string;
+  signal?: AbortSignal;
+  recovery?: boolean;
+};
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+async function createAgentWithSend(
+  sendToPeer: (...args: unknown[]) => Promise<Uint8Array>,
+): Promise<DKGAgent> {
+  const agent = await DKGAgent.create({
+    name: 'SyncFetchCoalescing',
+    listenHost: '127.0.0.1',
+    chainAdapter: new MockChainAdapter(),
+  });
+  (agent as any).messenger = { sendToPeer };
+  (agent as any).buildSyncRequest = async () => new Uint8Array([1, 2, 3]);
+  return agent;
+}
+
+function fetchPages(agent: DKGAgent, args: FetchArgs = {}): Promise<SyncPageResult> {
+  return (agent as any).fetchSyncPages(
+    createOperationContext('sync'),
+    args.remotePeerId ?? PEER_A,
+    args.contextGraphId ?? 'coalesced-cg',
+    args.includeSharedMemory ?? false,
+    args.phase ?? 'data',
+    args.graphUri ?? 'did:dkg:context-graph:coalesced-cg',
+    args.deadline ?? DEFAULT_DEADLINE,
+    args.snapshotRef,
+    args.sinceBatchId,
+    args.signal,
+    args.recovery,
+  );
+}
+
+describe('DKGAgent sync fetch coalescing', () => {
+  it('joins concurrent identical fetches onto one sync page sequence', async () => {
+    const response = deferred<Uint8Array>();
+    let sends = 0;
+    const agent = await createAgentWithSend(async () => {
+      sends++;
+      return response.promise;
+    });
+
+    try {
+      const first = fetchPages(agent);
+      await flushMicrotasks();
+      const second = fetchPages(agent);
+      await flushMicrotasks();
+
+      expect(sends).toBe(1);
+      response.resolve(new Uint8Array(0));
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      expect(firstResult).toBe(secondResult);
+      expect(firstResult.quads).toEqual([]);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('does not coalesce different sync identity keys', async () => {
+    const cases: Array<{ name: string; base: FetchArgs; variant: FetchArgs }> = [
+      { name: 'remotePeerId', base: {}, variant: { remotePeerId: PEER_B } },
+      { name: 'contextGraphId', base: {}, variant: { contextGraphId: 'other-cg', graphUri: 'did:dkg:context-graph:other-cg' } },
+      { name: 'includeSharedMemory', base: {}, variant: { includeSharedMemory: true, graphUri: 'did:dkg:context-graph:coalesced-cg/_shared_memory' } },
+      { name: 'phase', base: {}, variant: { phase: 'meta', graphUri: 'did:dkg:context-graph:coalesced-cg/_meta' } },
+      { name: 'graphUri', base: {}, variant: { graphUri: 'did:dkg:context-graph:coalesced-cg/_alternate' } },
+      { name: 'deadline', base: {}, variant: { deadline: DEFAULT_DEADLINE + 1 } },
+      {
+        name: 'snapshotRef',
+        base: { includeSharedMemory: true, phase: 'snapshot', graphUri: '', snapshotRef: 'snapshot-a' },
+        variant: { includeSharedMemory: true, phase: 'snapshot', graphUri: '', snapshotRef: 'snapshot-b' },
+      },
+      { name: 'sinceBatchId', base: { sinceBatchId: '10' }, variant: { sinceBatchId: '11' } },
+      { name: 'recovery', base: { includeSharedMemory: true, recovery: false }, variant: { includeSharedMemory: true, recovery: true } },
+    ];
+
+    for (const testCase of cases) {
+      const response = deferred<Uint8Array>();
+      let sends = 0;
+      const agent = await createAgentWithSend(async () => {
+        sends++;
+        return response.promise;
+      });
+
+      try {
+        const first = fetchPages(agent, testCase.base);
+        await flushMicrotasks();
+        const second = fetchPages(agent, testCase.variant);
+        await flushMicrotasks();
+
+        expect(sends, testCase.name).toBe(2);
+        response.resolve(new Uint8Array(0));
+        await Promise.all([first, second]);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    }
+  });
+
+  it('clears the in-flight entry after success and after failure', async () => {
+    let sends = 0;
+    let failParser = true;
+    const agent = await createAgentWithSend(async () => {
+      sends++;
+      return new TextEncoder().encode('<not-valid-nquads>');
+    });
+    (agent as any).getOrCreateSyncVerifyWorker = () => ({
+      parseAndFilter: async () => {
+        if (failParser) throw new Error('parse failed');
+        return { quads: [], totalQuads: 0 };
+      },
+    });
+
+    try {
+      await expect(fetchPages(agent)).rejects.toThrow('parse failed');
+      expect(sends).toBe(1);
+
+      failParser = false;
+      await expect(fetchPages(agent)).resolves.toMatchObject({ quads: [] });
+      expect(sends).toBe(2);
+
+      await expect(fetchPages(agent)).resolves.toMatchObject({ quads: [] });
+      expect(sends).toBe(3);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('lets one waiter abort without aborting the shared fetch for another waiter', async () => {
+    const response = deferred<Uint8Array>();
+    let sends = 0;
+    const agent = await createAgentWithSend(async () => {
+      sends++;
+      return response.promise;
+    });
+    const abort = new AbortController();
+
+    try {
+      const first = fetchPages(agent);
+      await flushMicrotasks();
+      const second = fetchPages(agent, { signal: abort.signal });
+      await flushMicrotasks();
+      expect(sends).toBe(1);
+
+      abort.abort(new Error('waiter aborted'));
+      await expect(second).rejects.toMatchObject({ name: 'AbortError', message: 'waiter aborted' });
+
+      response.resolve(new Uint8Array(0));
+      await expect(first).resolves.toMatchObject({ quads: [] });
+      expect(sends).toBe(1);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('aborts the shared fetch when the last waiter aborts', async () => {
+    let sends = 0;
+    let sendSignal: AbortSignal | undefined;
+    const abortObserved = deferred<void>();
+    const agent = await createAgentWithSend(async (...args: unknown[]) => {
+      sends++;
+      const options = args[3] as { signal?: AbortSignal };
+      sendSignal = options.signal;
+      return new Promise<Uint8Array>((_resolve, reject) => {
+        const rejectAbort = () => {
+          abortObserved.resolve();
+          const err = new Error('shared fetch aborted');
+          err.name = 'AbortError';
+          reject(err);
+        };
+        if (options.signal?.aborted) {
+          rejectAbort();
+          return;
+        }
+        options.signal?.addEventListener('abort', rejectAbort, { once: true });
+      });
+    });
+    const abort = new AbortController();
+
+    try {
+      const waiter = fetchPages(agent, { signal: abort.signal });
+      await flushMicrotasks();
+      expect(sends).toBe(1);
+      expect(sendSignal?.aborted).toBe(false);
+
+      abort.abort(new Error('only waiter aborted'));
+      await expect(waiter).rejects.toMatchObject({ name: 'AbortError', message: 'only waiter aborted' });
+      await abortObserved.promise;
+      expect(sendSignal?.aborted).toBe(true);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+});

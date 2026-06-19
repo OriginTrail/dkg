@@ -397,7 +397,10 @@ describe('createSwmAckQuorum: tick + watchdog + deadline', () => {
       cgId: 'cg-watch',
       missingCount: 2,
       expectedCount: 4,
+      missingPeers: expect.arrayContaining(['p3', 'p4']),
+      enumerationSource: 'topic-subscribers',
     }]);
+    expect(onWatchdogFired.calls.at(-1)![0].missingPeers).toHaveLength(2);
 
     // Subsequent ticks before deadline must NOT re-fire.
     nowMs += 30_000;
@@ -476,7 +479,10 @@ describe('createSwmAckQuorum: tick + watchdog + deadline', () => {
       ackedCount: 1,
       expectedCount: 3,
       ackPct: 1 / 3,
+      missingPeers: expect.arrayContaining(['p2', 'p3']),
+      enumerationSource: 'allowlist',
     }]);
+    expect(onDeadlineExpired.calls.at(-1)![0].missingPeers).toHaveLength(2);
   });
 
   it('multiple records advance independently in a single tick', () => {

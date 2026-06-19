@@ -28,6 +28,7 @@ import {
 } from './async-lift-publish-result.js';
 import { prepareAsyncPublishPayload, type AsyncPreparedPublishPayload, type LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import { canonicalRootIri, validateLiftPublishPayload } from './async-lift-validation.js';
+import { computePrivateRootV10 } from './merkle.js';
 import { subtractFinalizedExactQuads } from './async-lift-subtraction.js';
 import { resolveLiftWorkspaceSlice } from './workspace-resolution.js';
 import {
@@ -1001,11 +1002,18 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
       const canonicalRoot = job.validation.canonicalRootMap[sourceRoot] ?? sourceRoot;
       const canonicalQuads = canonicalizePrivateStagedQuads(staged, job.validation.canonicalRootMap);
+      // GH #1078 — derive the commitment from the finalized slice's
+      // privateMerkleRoot so a re-finalize that produces DIFFERENT content
+      // supersedes the stale slice (re-finalizing identical content is
+      // idempotent: same digest → append+dedup, no churn).
+      const commitmentRoot = computePrivateRootV10(canonicalQuads);
+      const commitmentId = commitmentRoot ? Buffer.from(commitmentRoot).toString('hex') : undefined;
       await privateStore.storePrivateTriples(
         job.request.contextGraphId,
         canonicalRoot,
         canonicalQuads,
         job.request.subGraphName,
+        commitmentId,
       );
       await privateStore.deletePrivateTriplesForOperation(
         job.request.contextGraphId,

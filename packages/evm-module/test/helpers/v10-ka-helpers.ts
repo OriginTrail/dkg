@@ -1,7 +1,7 @@
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { ethers } from 'ethers';
 
-import { signMessage } from './kc-helpers';
+import { signMessage } from './ka-helpers';
 import { NodeAccounts } from './types';
 import { KnowledgeAssetsLifecycle } from '../../typechain';
 
@@ -258,7 +258,7 @@ export function buildPublishAckDigest(
  * the contract will look up, or signature verification will fail.
  *
  * `preUpdateMerkleRootCount` is the length of `knowledgeCollections[id].merkleRoots`
- * BEFORE the update runs — 1 for a fresh KC from a single publish.
+ * BEFORE the update runs — 1 for a fresh KA from a single publish.
  */
 export function buildUpdateAckDigest(
   chainId: bigint,

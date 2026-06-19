@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mapLiftRequestToPublishOptions, prepareAsyncPublishPayload, type LiftPublishMappingInput } from '../src/async-lift-publish-options.js';
+import { mapLiftRequestToPublishOptions, prepareAsyncPublishPayload, isFailClosedInlineEncrypt, type LiftPublishMappingInput } from '../src/async-lift-publish-options.js';
 
 describe('mapLiftRequestToPublishOptions', () => {
   function baseInput(): LiftPublishMappingInput {
@@ -576,5 +576,103 @@ describe('mapLiftRequestToPublishOptions', () => {
       },
     });
     expect(options.precomputedAttestation).toBeUndefined();
+  });
+});
+
+// GH #1121 follow-up — the inline-encryption callback precedence/forcing that
+// `async-lift-publisher-impl` depends on, asserted at the `prepareAsyncPublishPayload`
+// seam the impl actually calls (not just the lower-level mapper). The impl threads
+// `prepared.publishOptions` straight into `publishExecutor`/`publisher.publish`, so
+// whatever lands here is exactly what the publisher's `useEncryptedInline` gate sees.
+describe('prepareAsyncPublishPayload — inline-encryption callback handoff to publisher.publish', () => {
+  function baseInput(): LiftPublishMappingInput {
+    return {
+      request: {
+        swmId: 'swm-1',
+        shareOperationId: 'op-1',
+        roots: ['urn:local:/rihana'],
+        contextGraphId: 'music-social',
+        namespace: 'aloha',
+        scope: 'person-profile',
+        transitionType: 'CREATE',
+        authority: { type: 'owner', proofRef: 'proof:owner:1' },
+      },
+      validation: {
+        authorityProofRef: 'proof:owner:1',
+        priorVersion: undefined,
+        transitionType: 'CREATE',
+      },
+      resolved: {
+        quads: [
+          {
+            subject: 'did:dkg:music-social:rihana',
+            predicate: 'http://schema.org/name',
+            object: '"Rihana"',
+            graph: 'did:dkg:context-graph:music-social/_data',
+          },
+        ],
+      },
+    };
+  }
+
+  it('forwards the agent-resolved real encryption factory into publishOptions (NOT the fail-closed default) for a non-public publish', () => {
+    // KoOvD: the impl hands `prepared.publishOptions` to `publishExecutor`, which
+    // calls `publisher.publish`. If the mapper ever shadowed the real factory with
+    // the throwing fail-closed default, every private async publish would throw at
+    // encryption time. Pin that the REAL closure reaches the publish boundary.
+    const realInline = async (b: Uint8Array): Promise<Uint8Array> => new Uint8Array([...b, 0xff]);
+    const realChunked = async (): Promise<void> => { /* member key fan-out */ };
+    const prepared = prepareAsyncPublishPayload({
+      ...baseInput(),
+      request: { ...baseInput().request, accessPolicy: 'ownerOnly' },
+      resolved: {
+        ...baseInput().resolved,
+        accessPolicy: 'ownerOnly',
+        publisherPeerId: '12D3KooWPublisher',
+        encryptInlinePayload: realInline,
+        encryptInlineChunked: realChunked,
+      },
+    });
+    expect(prepared.publishOptions.accessPolicy).toBe('ownerOnly');
+    expect(prepared.publishOptions.encryptInlinePayload).toBe(realInline);
+    expect(prepared.publishOptions.encryptInlineChunked).toBe(realChunked);
+    expect(isFailClosedInlineEncrypt(prepared.publishOptions.encryptInlinePayload)).toBe(false);
+  });
+
+  it('hands the fail-closed default to publisher.publish for a non-public publish with NO resolved factory (so it throws rather than leaking plaintext)', () => {
+    // When no factory is wired, the publish boundary must receive the throwing
+    // fail-closed marker — never `undefined`, which would silently ship plaintext.
+    const prepared = prepareAsyncPublishPayload({
+      ...baseInput(),
+      request: { ...baseInput().request, accessPolicy: 'ownerOnly' },
+      resolved: {
+        ...baseInput().resolved,
+        accessPolicy: 'ownerOnly',
+        publisherPeerId: '12D3KooWPublisher',
+      },
+    });
+    expect(prepared.publishOptions.encryptInlinePayload).toBeDefined();
+    expect(isFailClosedInlineEncrypt(prepared.publishOptions.encryptInlinePayload)).toBe(true);
+  });
+
+  it('hands publisher.publish NO inline-encryption callbacks for a public publish, even when the resolver supplies them', () => {
+    // KoOvA at the handoff boundary: a stray resolver/default callback must not
+    // reach the publisher for a public CG, or its `useEncryptedInline` gate would
+    // encrypt public content at rest. Both inline callbacks must be undefined.
+    const strayInline = async (b: Uint8Array): Promise<Uint8Array> => new Uint8Array([...b, 0xff]);
+    const strayChunked = async (): Promise<void> => { /* would fan out members */ };
+    const prepared = prepareAsyncPublishPayload({
+      ...baseInput(),
+      request: { ...baseInput().request, accessPolicy: 'public' },
+      resolved: {
+        ...baseInput().resolved,
+        accessPolicy: 'public',
+        encryptInlinePayload: strayInline,
+        encryptInlineChunked: strayChunked,
+      },
+    });
+    expect(prepared.publishOptions.accessPolicy).toBe('public');
+    expect(prepared.publishOptions.encryptInlinePayload).toBeUndefined();
+    expect(prepared.publishOptions.encryptInlineChunked).toBeUndefined();
   });
 });

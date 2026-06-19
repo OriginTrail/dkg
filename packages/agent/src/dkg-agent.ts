@@ -987,8 +987,7 @@ export class DKGAgent extends DKGAgentBase {
         // host-only) private CG here would silently undo that operator choice on
         // every discovery scan. Only re-track CGs the node is still a live
         // subscriber of.
-        if (existing.subscribed && await this.isPrivateContextGraph(id)) {
-          this.trackSyncContextGraph(id);
+        if (existing.subscribed && await this.isPrivateContextGraph(id) && this.trackSyncContextGraph(id)) {
           this.log.info(ctx, `Re-tracked already-subscribed private CG "${id.slice(0, 28)}" into the SWM-sync scope on discovery`);
         }
         continue;

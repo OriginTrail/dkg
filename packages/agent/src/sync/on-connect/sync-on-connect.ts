@@ -11,6 +11,7 @@ interface SyncProgressSummary {
   failedPeers?: number;
   failedPhases?: number;
   deniedPhases?: number;
+  backoffWorthyFailures?: number;
 }
 
 type SyncFromPeerResult = number | SyncProgressSummary;
@@ -26,6 +27,7 @@ interface SyncOnConnectContext {
   getPeerProtocols: (peerId: string) => Promise<string[]>;
   knownCorePeerIds: Set<string>;
   getSyncContextGraphs: () => string[];
+  getSharedMemorySyncContextGraphs?: (remotePeerId: string) => string[] | Promise<string[]>;
   syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<SyncFromPeerResult>;
   refreshMetaSyncedFlags: (contextGraphIds: Iterable<string>) => Promise<void>;
   discoverContextGraphsFromStore: () => Promise<number>;
@@ -86,7 +88,11 @@ function madeSyncProgress(result: SyncFromPeerResult): boolean {
 
 function hadBackoffWorthyFailure(result: SyncFromPeerResult): boolean {
   if (typeof result === 'number') return false;
-  return (result.failedPeers ?? 0) > 0 || (result.timedOutPhases ?? 0) > 0;
+  return (
+    (result.backoffWorthyFailures ?? 0) > 0 ||
+    (result.failedPeers ?? 0) > 0 ||
+    (result.timedOutPhases ?? 0) > 0
+  );
 }
 
 function hadDeniedPhase(result: SyncFromPeerResult): boolean {
@@ -130,6 +136,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     getPeerProtocols,
     knownCorePeerIds,
     getSyncContextGraphs,
+    getSharedMemorySyncContextGraphs,
     syncFromPeer,
     refreshMetaSyncedFlags,
     discoverContextGraphsFromStore,
@@ -160,6 +167,17 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       sawDurableMetadataOnlyDetailedSync = sawDurableMetadataOnlyDetailedSync || (typeof result !== 'number' && metadataOnlySync(result));
       cleanDurableDetailedRound = cleanDurableDetailedRound || cleanDetailedSync(result);
     }
+  };
+  const finishSyncAccounting = (): SyncOnConnectOutcome => {
+    const cleanDurableRound = cleanDurableDetailedRound && !sawDurableMetadataOnlyDetailedSync;
+    const clearsPeerBackoff = madeProgress || (!sawBackoffWorthyFailure && (cleanDurableRound || sawDeniedPhase));
+    if (clearsPeerBackoff) {
+      context.onPeerSynced?.(remotePeer, {
+        fresh: !sawBackoffWorthyFailure && !sawDeniedPhase && !sawFailedPhase && cleanDurableRound,
+        progress: madeProgress,
+      });
+    }
+    return 'synced';
   };
   const runNonTransportStep = async <T>(step: () => Promise<T>): Promise<T> => {
     try {
@@ -195,6 +213,10 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     const synced = await syncFromPeer(remotePeer);
     recordSyncAccounting(synced, 'durable');
     logInfo(ctx, `Synced ${insertedTriples(synced)} data triples from peer ${shortPeer}`);
+    if (hadBackoffWorthyFailure(synced)) {
+      logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after durable sync hit backoff-worthy pressure`);
+      return finishSyncAccounting();
+    }
 
     const syncScope = new Set<string>([
       SYSTEM_CONTEXT_GRAPHS.AGENTS,
@@ -212,11 +234,17 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       const discoverSynced = await syncFromPeer(remotePeer, newlyDiscovered);
       recordSyncAccounting(discoverSynced, 'durable');
       logInfo(ctx, `Synced ${insertedTriples(discoverSynced)} durable triples for newly discovered CG(s) from ${shortPeer}`);
+      if (hadBackoffWorthyFailure(discoverSynced)) {
+        logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after discovered-CG durable sync hit backoff-worthy pressure`);
+        return finishSyncAccounting();
+      }
       await runNonTransportStep(() => refreshMetaSyncedFlags(newlyDiscovered));
     }
 
     durableSyncCompleted = true;
-    const wsContextGraphIds = getSyncContextGraphs() ?? [];
+    const wsContextGraphIds = getSharedMemorySyncContextGraphs
+      ? await runNonTransportStep(() => Promise.resolve(getSharedMemorySyncContextGraphs(remotePeer)))
+      : getSyncContextGraphs() ?? [];
     if (syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
       const wsSynced = await syncSharedMemoryFromPeer(remotePeer, wsContextGraphIds);
       recordSyncAccounting(wsSynced, 'shared');
@@ -225,15 +253,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       logInfo(ctx, `Skipping shared memory sync from peer ${shortPeer} (syncSharedMemoryOnConnect=false)`);
     }
 
-    const cleanDurableRound = cleanDurableDetailedRound && !sawDurableMetadataOnlyDetailedSync;
-    const clearsPeerBackoff = madeProgress || (!sawBackoffWorthyFailure && (cleanDurableRound || sawDeniedPhase));
-    if (clearsPeerBackoff) {
-      context.onPeerSynced?.(remotePeer, {
-        fresh: !sawBackoffWorthyFailure && !sawDeniedPhase && !sawFailedPhase && cleanDurableRound,
-        progress: madeProgress,
-      });
-    }
-    return 'synced';
+    return finishSyncAccounting();
   } catch (err) {
     if (err instanceof SyncOnConnectPostSyncError) {
       throw err;

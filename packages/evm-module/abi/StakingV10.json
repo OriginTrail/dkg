@@ -43,11 +43,6 @@
   },
   {
     "inputs": [],
-    "name": "NoV8StakeToConvert",
-    "type": "error"
-  },
-  {
-    "inputs": [],
     "name": "NotPositionOwner",
     "type": "error"
   },
@@ -157,6 +152,11 @@
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "V8StakingStillLive",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint256",
@@ -191,55 +191,6 @@
     "inputs": [],
     "name": "ZeroTokenAmount",
     "type": "error"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "delegator",
-        "type": "address"
-      },
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      },
-      {
-        "indexed": true,
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "stakeBaseAbsorbed",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "pendingAbsorbed",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint40",
-        "name": "lockTier",
-        "type": "uint40"
-      },
-      {
-        "indexed": false,
-        "internalType": "bool",
-        "name": "isAdmin",
-        "type": "bool"
-      }
-    ],
-    "name": "ConvertedFromV8",
-    "type": "event"
   },
   {
     "anonymous": false,
@@ -389,7 +340,7 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "delegator",
+        "name": "staker",
         "type": "address"
       },
       {
@@ -399,8 +350,13 @@
       },
       {
         "internalType": "uint72",
-        "name": "identityId",
+        "name": "targetNode",
         "type": "uint72"
+      },
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
       },
       {
         "internalType": "uint40",
@@ -408,8 +364,14 @@
         "type": "uint40"
       }
     ],
-    "name": "adminConvertToNFT",
-    "outputs": [],
+    "name": "allocateFromCredit",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "creditApplied",
+        "type": "bool"
+      }
+    ],
     "stateMutability": "nonpayable",
     "type": "function"
   },
@@ -481,6 +443,54 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "address",
+        "name": "operator",
+        "type": "address"
+      }
+    ],
+    "name": "drainOperatorFeeToCredit",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "total",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "delegator",
+        "type": "address"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "drainV8ToCredit",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "total",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -666,27 +676,12 @@
   {
     "inputs": [
       {
-        "internalType": "address",
-        "name": "staker",
-        "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      },
-      {
         "internalType": "uint40",
-        "name": "lockTier",
+        "name": "secondsValue",
         "type": "uint40"
       }
     ],
-    "name": "selfConvertToNFT",
+    "name": "setConvictionCreditSeconds",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -808,19 +803,6 @@
     "outputs": [
       {
         "internalType": "contract IERC20",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "v8MigrationEligibility",
-    "outputs": [
-      {
-        "internalType": "contract V8MigrationEligibility",
         "name": "",
         "type": "address"
       }

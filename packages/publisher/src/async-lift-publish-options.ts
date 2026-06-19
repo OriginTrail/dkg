@@ -37,6 +37,48 @@ export interface LiftResolvedPublishSlice {
   readonly onPhase?: PhaseCallback;
   readonly receiverSignatureProvider?: ReceiverSignatureProvider;
   readonly publishContextGraphId?: string;
+  /**
+   * GH #1121 — inline-encryption callbacks for private/curated CGs, threaded
+   * from the async worker (the agent-resolved, chainKey-bound AEAD closures)
+   * into the mapper exactly like `onPhase`/`receiverSignatureProvider`. When a
+   * non-public CG reaches the mapper WITHOUT these, the mapper substitutes a
+   * fail-closed default so cores can never silently receive plaintext.
+   */
+  readonly encryptInlinePayload?: PublishOptions['encryptInlinePayload'];
+  readonly encryptInlineChunked?: PublishOptions['encryptInlineChunked'];
+}
+
+/**
+ * GH #1121 fail-closed default. A private/curated async publish must never ship
+ * plaintext to cores. The real chainKey-bound AEAD closure is resolved live at
+ * execute time by the agent and threaded through `LiftResolvedPublishSlice`
+ * (and, in the CLI runtime, merged in `publisher-runner.ts` where it takes
+ * precedence over this default). If a non-public CG ever reaches the publisher
+ * with NO inline-encryption callback, this default makes the publish FAIL LOUD
+ * instead of leaking plaintext.
+ */
+const FAIL_CLOSED_MARKER = '__dkgFailClosedInlineEncrypt';
+const failClosedInlineEncrypt: NonNullable<PublishOptions['encryptInlinePayload']> = Object.assign(
+  (() => {
+    throw new Error(
+      'Async-lift private/curated CG publish requires an encryptInlinePayload factory threaded ' +
+        'through LiftResolvedPublishSlice (a non-public context graph must not ship plaintext to cores). ' +
+        'Wire publishEncryptionFactory in the async publisher runtime.',
+    );
+  }) as NonNullable<PublishOptions['encryptInlinePayload']>,
+  { [FAIL_CLOSED_MARKER]: true as const },
+);
+
+/**
+ * True iff `cb` is the mapper's fail-closed default (not a real agent-resolved
+ * encryption callback). The publisher uses this to skip the encrypted-inline
+ * path on a chainless/local publish that ships nothing to cores — there is no
+ * plaintext leak to guard, so the default must not throw — while still honouring
+ * any REAL callback the caller wired, and still firing the default (fail-closed)
+ * for an actual on-chain publish with no real encryption resolved.
+ */
+export function isFailClosedInlineEncrypt(cb: unknown): boolean {
+  return typeof cb === 'function' && (cb as unknown as Record<string, unknown>)[FAIL_CLOSED_MARKER] === true;
 }
 
 export interface LiftPublishMappingInput {
@@ -108,6 +150,22 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
     throw new Error('Lift publish mapping only allows allowedPeers when accessPolicy is allowList');
   }
 
+  // GH #1121 — derive the inline-encryption path. Public CGs MUST stay
+  // plaintext: force BOTH inline callbacks to `undefined` so even a resolver
+  // that supplies a default encryption factory cannot push DKGPublisher onto
+  // the encrypted-inline path for a public CG (otherwise public content would
+  // be silently encrypted at rest and unreadable by readers). Non-public CGs
+  // MUST carry an inline-encryption callback: use the agent-resolved one
+  // threaded through `resolved`, else the fail-closed default so a missing
+  // factory throws at publish time rather than leaking plaintext. The chunked
+  // callback is optional (the inline blob path is the floor).
+  const encryptInlinePayload = accessPolicy === 'public'
+    ? undefined
+    : (input.resolved.encryptInlinePayload ?? failClosedInlineEncrypt);
+  const encryptInlineChunked = accessPolicy === 'public'
+    ? undefined
+    : input.resolved.encryptInlineChunked;
+
   // Request flags (enqueue-time caller intent) win over resolved hints (per-process defaults).
   const entityProofs = input.request.entityProofs ?? input.resolved.entityProofs;
   const publishEpochs = input.request.publishEpochs;
@@ -133,6 +191,8 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
     onPhase: input.resolved.onPhase,
     receiverSignatureProvider: input.resolved.receiverSignatureProvider,
     publishContextGraphId: input.resolved.publishContextGraphId,
+    encryptInlinePayload,
+    encryptInlineChunked,
     ...(publishEpochs !== undefined
       ? { publishEpochs }
       : {}),

@@ -3,7 +3,7 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import type { SyncPhase } from '../auth/request-build.js';
-import { didSyncPeerRespond, isSyncTransportFailure } from '../error-tags.js';
+import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncTransportFailure } from '../error-tags.js';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncPageResult } from './page-fetch.js';
 
@@ -25,6 +25,7 @@ export interface SharedMemorySyncSummary {
   droppedDataTriples: number;
   failedPeers: number;
   failedPhases: number;
+  backoffWorthyFailures: number;
 }
 
 interface SharedMemorySyncContext {
@@ -62,6 +63,7 @@ interface SharedMemorySyncContext {
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
+  stopOnBackoffWorthyFailure?: boolean;
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
   ensureOwnedMap: (ownershipKey: string) => Map<string, string>;
@@ -83,6 +85,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     publicSnapshotStore,
     getRegisteredSubGraphNames,
     getExcludedSubGraphNames,
+    stopOnBackoffWorthyFailure = false,
     deleteCheckpoint,
     setCheckpoint,
     ensureOwnedMap,
@@ -107,11 +110,14 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     droppedDataTriples: 0,
     failedPeers: 0,
     failedPhases: 0,
+    backoffWorthyFailures: 0,
   };
 
-  const recordPhaseOutcome = (result: SyncPageResult) => {
+  const recordPhaseOutcome = (result: SyncPageResult, options: { updateCheckpoint?: boolean } = {}) => {
+    const updateCheckpoint = options.updateCheckpoint ?? true;
     summary.resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
     summary.timedOutPhases += result.timedOut ? 1 : 0;
+    if (!updateCheckpoint) return;
     if (result.completed && (result.resumedFromOffset > 0 || result.nextOffset > result.resumedFromOffset)) {
       summary.completedPhases += 1;
     }
@@ -125,6 +131,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
   };
 
   let peerFailed = false;
+  const shouldStopAfterBackoffWorthyFailure = (contextGraphId: string, reason: string): boolean => {
+    if (!stopOnBackoffWorthyFailure) return false;
+    logInfo(ctx, `Stopping SWM sync fanout for ${remotePeerId} after "${contextGraphId}" (${reason})`);
+    return true;
+  };
   for (const [index, pid] of contextGraphIds.entries()) {
     let peerRespondedForContextGraph = false;
     try {
@@ -137,6 +148,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const fetchStartedAt = Date.now();
       const wsMetaResult = await fetchSyncPages(ctx, remotePeerId, pid, true, 'meta', wsMetaGraph, deadline);
       peerRespondedForContextGraph = true;
+      if (wsMetaResult.timedOut && shouldStopAfterBackoffWorthyFailure(pid, 'meta timeout')) {
+        recordPhaseOutcome(wsMetaResult, { updateCheckpoint: false });
+        break;
+      }
       const wsDataResult = await fetchSyncPages(ctx, remotePeerId, pid, true, 'data', wsGraph, deadline);
       peerRespondedForContextGraph = true;
       const fetchDurationMs = Date.now() - fetchStartedAt;
@@ -165,6 +180,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       if (processed.emptyResponses > 0) {
         recordPhaseOutcome(wsMetaResult);
         recordPhaseOutcome(wsDataResult);
+        if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
+          break;
+        }
         continue;
       }
 
@@ -215,6 +233,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           recordPhaseOutcome(wsDataResult);
           hydrateOwnership();
         }
+        if (snapshotSync.timedOutPhases > 0 && shouldStopAfterBackoffWorthyFailure(pid, 'snapshot timeout')) {
+          break;
+        }
         continue;
       }
 
@@ -233,6 +254,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       }
       recordPhaseOutcome(wsMetaResult);
       recordPhaseOutcome(wsDataResult);
+      if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
+        break;
+      }
 
       hydrateOwnership();
       const storeDurationMs = Date.now() - storeStartedAt;
@@ -246,6 +270,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       }
     } catch (err) {
       logWarn(ctx, `SWM sync for context graph "${pid}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
+      const backoffWorthy = isSyncBackoffWorthyError(err);
+      if (backoffWorthy) {
+        summary.backoffWorthyFailures += 1;
+      }
       if ((err as Error & { syncDenied?: boolean }).syncDenied) {
         summary.deniedPhases += 1;
       } else if (
@@ -256,6 +284,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         summary.failedPhases += 1;
       } else {
         peerFailed = true;
+      }
+      if (backoffWorthy && shouldStopAfterBackoffWorthyFailure(pid, 'backoff-worthy failure')) {
+        break;
       }
     }
   }

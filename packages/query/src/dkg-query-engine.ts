@@ -499,6 +499,21 @@ export class DKGQueryEngine implements QueryEngine {
       }
     }
 
+    // GH #1098 — include the per-cgId VM data graph(s) `<cg>/context/<onChainId>`.
+    // Chain-driven VM reconcile (and any per-cgId-only materialisation — e.g. a
+    // peer that subscribed BEFORE publish and recovered via the reconcile sweep,
+    // which writes confirmed data into the per-cgId graph WITHOUT the root-label
+    // dual-write copy) lands confirmed data ONLY in `<cg>/context/<id>`. The base
+    // `verifiable-memory` resolution above only reads the root content graph +
+    // `_verifiable_memory/*`, so that data was invisible to a VM read (the
+    // observable symptom of #1098: a pre-subscribed peer never "saw" the
+    // published KA even though it had materialised it). Union the per-cgId DATA
+    // graphs (resolved from the store, so no subscription state is needed) into
+    // the allow-set for an unscoped VM read.
+    if (view === 'verifiable-memory' && !options.verifiedGraph && !options.subGraphName) {
+      allGraphs.push(...(await this.discoverContextGraphPerCgIdDataGraphs(contextGraphId)));
+    }
+
     // De-dup so a sub-graph never gets unioned twice.
     const dedupedGraphs = [...new Set(allGraphs)];
     allGraphs.length = 0;
@@ -640,6 +655,25 @@ export class DKGQueryEngine implements QueryEngine {
     return allGraphs.filter(
       (g) => g.startsWith(prefix) && !g.includes('/_meta') && !g.includes('/staging/'),
     );
+  }
+
+  /**
+   * GH #1098 — discover the per-cgId VM DATA graphs `<cg>/context/<onChainId>`
+   * for a context graph. Chain-reconciled / per-cgId-only publishes materialise
+   * confirmed VM content here rather than in the root content graph. We keep
+   * ONLY the bare `<cg>/context/<id>` data graphs: `discoverGraphsByPrefix`
+   * already drops `/_meta` + `/staging/`, and the extra `!rest.includes('/')`
+   * guard excludes any nested per-cgId sub-partition (`…/context/<id>/_private`,
+   * `…/context/<id>/_shared_memory`, …) so a VM content read never pulls
+   * private/SWM rows.
+   */
+  private async discoverContextGraphPerCgIdDataGraphs(contextGraphId: string): Promise<string[]> {
+    const base = `did:dkg:context-graph:${contextGraphId}/context/`;
+    const discovered = await this.discoverGraphsByPrefix(base);
+    return discovered.filter((g) => {
+      const rest = g.slice(base.length);
+      return rest.length > 0 && !rest.includes('/');
+    });
   }
 
   /**

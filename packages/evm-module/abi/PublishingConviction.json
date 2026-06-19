@@ -82,11 +82,11 @@
       },
       {
         "internalType": "uint256",
-        "name": "kcEpochs",
+        "name": "kaEpochs",
         "type": "uint256"
       }
     ],
-    "name": "InvalidConvictionKcEpochs",
+    "name": "InvalidConvictionKaEpochs",
     "type": "error"
   },
   {
@@ -521,12 +521,12 @@
       },
       {
         "internalType": "uint40",
-        "name": "kcStartEpoch",
+        "name": "kaStartEpoch",
         "type": "uint40"
       },
       {
         "internalType": "uint40",
-        "name": "kcEpochs",
+        "name": "kaEpochs",
         "type": "uint40"
       }
     ],

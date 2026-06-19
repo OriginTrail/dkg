@@ -173,6 +173,10 @@ import {
   createSwmAckQuorum,
   type SwmAckQuorum,
 } from './swm/ack-quorum.js';
+import {
+  classifySwmFanoutPeerOutcome,
+  type SelectSwmFanoutPeersResult,
+} from './swm/swm-fanout-peer-selection.js';
 import { SwmHostModeStore, type SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import {
   BEACON_ACCESS_POLICY_CURATED,
@@ -516,6 +520,33 @@ export class PublishMethods extends DKGAgentBase {
       };
     }
 
+    let substrateMembers = plan.substrateMembers;
+    let fanoutSelection: SelectSwmFanoutPeersResult | undefined;
+    if (plan.useSubstrate && plan.substrateMembers.length > 0) {
+      fanoutSelection = this.selectSwmFanoutPeersForActiveShare({
+        contextGraphId,
+        candidatePeers: plan.substrateMembers,
+        enumerationSource: plan.enumerationSource,
+      });
+      substrateMembers = fanoutSelection.selectedPeers;
+      if (
+        plan.enumerationSource === 'topic-subscribers'
+        && (
+          substrateMembers.length !== plan.substrateMembers.length
+          || fanoutSelection.skippedRecentPeers.length > 0
+        )
+      ) {
+        this.log.info(
+          ctx,
+          `SWM public fan-out narrowed cgId=${contextGraphId} `
+          + `selected=${substrateMembers.length}/${plan.substrateMembers.length} `
+          + `knownGood=${fanoutSelection.knownGoodPeers.length} `
+          + `unknownProbe=${fanoutSelection.unknownProbedPeers.length} `
+          + `skippedRecent=${fanoutSelection.skippedRecentPeers.length}`,
+        );
+      }
+    }
+
     // rc.9 PR-D codex follow-up #D5 (rebased onto PR-G's G2
     // detach): register the SwmAckQuorum tracker BEFORE
     // substrate + gossip fire so a fast receiver's
@@ -579,6 +610,18 @@ export class PublishMethods extends DKGAgentBase {
     //      we don't pretend we can verify those deliveries.
     //      Cross-peer SWM-inbox SPARQL remains the ground-truth
     //      check.
+    // #1227 regression fix: gate + track on the FULL dialable set
+    // (`plan.substrateMembers`), NOT the churn-selector-narrowed
+    // `substrateMembers` send set. The active-fanout selector only
+    // bounds which peers we ATTEMPT this round (to limit churn); the
+    // ack-quorum's `expectedMembers` must stay the complete
+    // roundtrip-eligible roster so a peer the selector skipped this
+    // round still counts toward quorum once it acks (via gossip or a
+    // later top-up). Narrowing `expectedMembers` to the probe-limited
+    // subset silently dropped real subscribers from the quorum target
+    // — the same class of bug the codex-RED note in
+    // `enumerate-cg-members.ts` (`members` must not shrink
+    // `expectedMembers`) was added to prevent.
     const ackQuorumActive = !!shareOperationId
       && plan.useGossip
       && plan.substrateMembers.length > 0;
@@ -604,7 +647,7 @@ export class PublishMethods extends DKGAgentBase {
     //   2. (PR-D #D5) Feed substrate-`delivered` peers into
     //      the quorum via onAck so they count toward the same
     //      quorum target as gossip-side acks.
-    if (plan.useSubstrate) {
+    if (plan.useSubstrate && substrateMembers.length > 0) {
       const baseBookkeeper = this.substrateFanoutBookkeeper();
       // PR-J: capture per-peer outcomes for the optional detail
       // line emitted when anything queues/fails/is rejected. Lets
@@ -617,7 +660,7 @@ export class PublishMethods extends DKGAgentBase {
             contextGraphId,
             protocolId: PROTOCOL_SWM_UPDATE,
             payload: wireMessage,
-            members: plan.substrateMembers,
+            members: substrateMembers,
             sendTimeoutMs: DKGAgentBase.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS,
             substrate: this.messenger,
             bookkeeper: {
@@ -628,6 +671,24 @@ export class PublishMethods extends DKGAgentBase {
                   && record.outcome === 'delivered'
                 ) {
                   trackedQuorum.onAck(shareOperationId, record.peerId);
+                }
+                // #1227 regression fix: only feed TERMINAL initial-fanout
+                // outcomes (delivered→good, failed/rejected→failed/
+                // unsupported) into the active-fanout churn selector. A
+                // transient `queued`/`retryable`/`inFlight` outcome
+                // classifies as `nonTerminal` and would be cached with the
+                // negative TTL (2m) — which is longer than the watchdog
+                // interval (30s), so it suppressed the SAME share's first
+                // watchdog top-up of that very peer (the watchdog exists
+                // precisely to retry those queued/transient peers). Cross-
+                // share churn limiting still works: a genuinely failed/
+                // unsupported peer is remembered, and the top-up path
+                // (swmSubstrateTopUp) keeps feeding its own outcomes.
+                if (
+                  plan.enumerationSource === 'topic-subscribers'
+                  && classifySwmFanoutPeerOutcome(record) !== 'nonTerminal'
+                ) {
+                  this.recordSwmFanoutPeerRecord(contextGraphId, record);
                 }
                 if (
                   record.outcome === 'queued'
@@ -649,6 +710,7 @@ export class PublishMethods extends DKGAgentBase {
             ctx,
             `SWM substrate fan-out cgId=${contextGraphId} source=${plan.enumerationSource} `
             + `enumerated=${plan.enumeratedCount} `
+            + `selected=${substrateMembers.length} `
             + `attempted=${substrateResult.attempted} `
             + `delivered=${substrateResult.delivered} rejected=${substrateResult.rejected} `
             + `retryable=${substrateResult.retryable} `
@@ -681,6 +743,13 @@ export class PublishMethods extends DKGAgentBase {
         this.inFlightSubstrateFanOuts.delete(tracked);
       });
       this.inFlightSubstrateFanOuts.add(tracked);
+    } else if (plan.useSubstrate && plan.enumerationSource === 'topic-subscribers') {
+      this.log.info(
+        ctx,
+        `SWM public substrate fan-out skipped cgId=${contextGraphId}: `
+        + `no eligible peers after recent outcome filtering `
+        + `(candidates=${plan.substrateMembers.length})`,
+      );
     }
 
     if (plan.useGossip) {

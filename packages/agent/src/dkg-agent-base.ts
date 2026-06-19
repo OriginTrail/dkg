@@ -166,6 +166,9 @@ import {
   createSwmAckQuorum,
   type SwmAckQuorum,
 } from './swm/ack-quorum.js';
+import {
+  type SwmFanoutPeerSelector,
+} from './swm/swm-fanout-peer-selection.js';
 import { SwmHostModeStore, type SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import {
   BEACON_ACCESS_POLICY_CURATED,
@@ -773,6 +776,12 @@ export class DKGAgentBase {
    */
   protected swmAckQuorum?: SwmAckQuorum;
   protected swmAckQuorumTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Active SWM sender-side peer outcome cache. Public CG fan-out uses this
+   * to keep stale/flapping subscriber peers out of the short-term
+   * substrate/ACK set without changing private allowlist semantics.
+   */
+  protected swmFanoutPeerSelector?: SwmFanoutPeerSelector;
   /**
    * Period at which `SwmAckQuorum.tick()` runs. Picked to match
    * RFC-003 §5.2 ("watchdog tick: 5s") — a finer cadence buys

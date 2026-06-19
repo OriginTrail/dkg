@@ -3,7 +3,13 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   createResponderGraphListMemo,
   createResponderSyncRowListMemo,
+  SyncRowSnapshotLimitError,
 } from '../src/sync/responder/graph-plan.js';
+import {
+  SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
+  SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT,
+  SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
+} from '../src/sync/responder/sync-handler.js';
 import {
   DKG_NS,
   lineGraphsFromNquads,
@@ -34,6 +40,12 @@ function deferred<T>() {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+it('keeps responder snapshot defaults above the generic memo fallback', () => {
+  expect(SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT).toBe(128);
+  expect(SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT).toBe(64);
+  expect(SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT).toBe(64);
 });
 
 function watchBoundedPageQuery(
@@ -810,13 +822,85 @@ describe('sync responder pagination interleaving', () => {
     await expect(memo.get('durable:session-1', loadRows)).resolves.toHaveLength(1);
     await expect(memo.get('durable:session-2', loadRows)).resolves.toHaveLength(1);
     await expect(memo.get('durable:session-3', loadRows)).rejects.toThrow(
-      'Too many active durable data sync session snapshots',
+      SyncRowSnapshotLimitError,
     );
+    await expect(memo.get('durable:session-3', loadRows)).rejects.toMatchObject({
+      key: 'durable:session-3',
+      maxEntries: 2,
+      cachedEntries: 2,
+      inflightEntries: 0,
+      activeEntries: 2,
+    });
 
     await expect(
       memo.get('durable:session-1', loadRows, { requireExisting: true }),
     ).resolves.toMatchObject([{ o: '"snapshot-1"' }]);
     expect(loads).toBe(2);
+  });
+
+  it('retains the completed snapshot for reuse when the serving request aborts mid-build', async () => {
+    // The owner's row load is not abort-aware, so a settled snapshot is the
+    // COMPLETE result even if the owner's stream aborted while it was loading.
+    // The aborted owner must still reject, but the snapshot it already paid to
+    // build must be cached so a later same-session request reuses it instead of
+    // issuing a second, redundant store query (regression: PR #1142 discarded it,
+    // breaking sync-responder-protection's "keeps row-list cache-miss owners
+    // counted until the shared snapshot settles" on the CI ordering).
+    const memo = createResponderSyncRowListMemo(10_000, 1);
+    const snapshot = deferred<readonly {
+      s: string;
+      p: string;
+      o: string;
+      g: string;
+    }[]>();
+    const controller = new AbortController();
+    let loads = 0;
+    const loadRows = () => {
+      loads += 1;
+      return snapshot.promise;
+    };
+
+    const first = memo.get('durable:aborted', loadRows, { signal: controller.signal });
+    controller.abort(new Error('request aborted'));
+    snapshot.resolve([{
+      s: 'urn:memo:row',
+      p: `${DKG_NS}label`,
+      o: '"aborted"',
+      g: 'urn:memo:graph',
+    }]);
+
+    // The aborting owner still rejects (its stream is gone).
+    await expect(first).rejects.toThrow('request aborted');
+
+    // A later same-session reader reuses the cached snapshot — no second load.
+    await expect(
+      memo.get('durable:aborted', () => {
+        throw new Error('snapshot must be reused, not re-loaded');
+      }, { requireExisting: true }),
+    ).resolves.toHaveLength(1);
+    expect(loads).toBe(1);
+  });
+
+  it('releases completed durable row snapshots after the completion grace window', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const memo = createResponderSyncRowListMemo(10_000, 1);
+    const row = {
+      s: 'urn:memo:row',
+      p: `${DKG_NS}label`,
+      o: '"snapshot"',
+      g: 'urn:memo:graph',
+    };
+
+    await expect(memo.get('durable:complete', async () => [row])).resolves.toHaveLength(1);
+    memo.release('durable:complete', { graceMs: 10 });
+
+    await expect(memo.get('durable:blocked', async () => [row])).rejects.toThrow(
+      SyncRowSnapshotLimitError,
+    );
+
+    vi.advanceTimersByTime(11);
+    await expect(memo.get('durable:blocked', async () => [row])).resolves.toHaveLength(1);
   });
 
   it('coalesces concurrent durable row snapshot refreshes', async () => {

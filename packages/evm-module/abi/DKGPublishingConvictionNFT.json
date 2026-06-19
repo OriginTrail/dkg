@@ -430,12 +430,12 @@
       },
       {
         "internalType": "uint40",
-        "name": "kcStartEpoch",
+        "name": "kaStartEpoch",
         "type": "uint40"
       },
       {
         "internalType": "uint40",
-        "name": "kcEpochs",
+        "name": "kaEpochs",
         "type": "uint40"
       }
     ],

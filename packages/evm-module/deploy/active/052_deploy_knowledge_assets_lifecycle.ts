@@ -31,4 +31,7 @@ func.dependencies = [
   'ContextGraphs',
   'ContextGraphValueStorage',
   'DKGPublishingConvictionNFT',
+  // Phase 10.x — KnowledgeAssetsLifecycle.initialize() resolves CGWeightTreeStorage
+  // for settle-on-spend; it must be registered in the Hub before this script runs.
+  'CGWeightTreeStorage',
 ];

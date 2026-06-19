@@ -28,7 +28,7 @@ contract ProfileStorage is INamed, IVersioned, HubDependent {
         uint256 effectiveDate
     );
     event OperatorFeesUpdated(uint72 indexed identityId, ProfileLib.OperatorFee[] operatorFees);
-    // RFC 04 v0.3: relay-capability flag (multiaddrs live in attestation KCs, not Profile).
+    // RFC 04 v0.3: relay-capability flag (multiaddrs live in attestation KAs, not Profile).
     event RelayCapabilityUpdated(uint72 indexed identityId, bool oldValue, bool newValue);
 
     mapping(uint72 => ProfileLib.ProfileInfo) public profiles;
@@ -165,7 +165,7 @@ contract ProfileStorage is INamed, IVersioned, HubDependent {
     // gates the operator's per-round attestation publish (RFC 04 Phase 2)
     // — operators with relayCapable=false don't bother running the cosig
     // + submit pipeline at all. Multiaddrs themselves live in the
-    // per-round attestation KC body, not on Profile (RFC 04 §5.2).
+    // per-round attestation KA body, not on Profile (RFC 04 §5.2).
     // =====================================================================
 
     function getRelayCapable(uint72 identityId) external view returns (bool) {

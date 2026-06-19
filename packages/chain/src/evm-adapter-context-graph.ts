@@ -474,14 +474,14 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   async getContextGraphKCCount(contextGraphId: bigint): Promise<bigint> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    const count: bigint = await cgs.getContextGraphKCCount(contextGraphId);
+    const count: bigint = await cgs.getContextGraphKaCount(contextGraphId);
     return BigInt(count);
   }
 
   async getContextGraphKCAt(contextGraphId: bigint, index: bigint): Promise<bigint> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    const kaId: bigint = await cgs.getContextGraphKCAt(contextGraphId, index);
+    const kaId: bigint = await cgs.getContextGraphKaAt(contextGraphId, index);
     return BigInt(kaId);
   }
 

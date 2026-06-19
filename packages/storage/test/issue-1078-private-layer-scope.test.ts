@@ -36,13 +36,14 @@ describe('GH #1078 — private payload storage must be scoped to the committing 
       // Commitment #1 — an EARLIER private slice for ROOT (e.g. a WM/SWM draft or
       // a superseded KA version). The exact authority does not matter; what
       // matters is that it is a DIFFERENT private payload committed under the
-      // same root.
-      await pcs.storePrivateTriples(CG, ROOT, [priv('https://schema.org/serialNumber', '"OLD-0001"')]);
+      // same root, identified by its own verifiable-commitment id.
+      await pcs.storePrivateTriples(CG, ROOT, [priv('https://schema.org/serialNumber', '"OLD-0001"')], undefined, 'commitment-old');
 
       // Commitment #2 — the slice the AUTHORITATIVE / verifiable KA actually
       // committed for ROOT. This is what a `privateDataAnchor` on the verifiable
-      // KA should resolve to.
-      await pcs.storePrivateTriples(CG, ROOT, [priv('https://schema.org/serialNumber', '"NEW-0002"')]);
+      // KA should resolve to. A NEW commitment supersedes the stale one for the
+      // same root, so the stale slice must not survive into hydration.
+      await pcs.storePrivateTriples(CG, ROOT, [priv('https://schema.org/serialNumber', '"NEW-0002"')], undefined, 'commitment-new');
 
       // Hydration for ROOT (the only main-API read path).
       const hydrated = await pcs.getPrivateTriples(CG, ROOT);
@@ -59,6 +60,33 @@ describe('GH #1078 — private payload storage must be scoped to the committing 
       // superseded "OLD-0001" leaks back in — exactly the cross-commitment
       // hydration #1078 describes.
       expect(serials).not.toContain('"OLD-0001"');
+    },
+  );
+
+  it(
+    'superseding one root does NOT delete a sibling root whose IRI shares its prefix',
+    async () => {
+      const store = new OxigraphStore();
+      const gm = new GraphManager(store);
+      const pcs = new PrivateContentStore(store, gm);
+
+      const R1 = 'urn:gh1078:device:1';
+      const R10 = 'urn:gh1078:device:10'; // shares the "urn:gh1078:device:1" prefix
+
+      await pcs.storePrivateTriples(CG, R1, [{ subject: R1, predicate: 'https://schema.org/serialNumber', object: '"R1-OLD"', graph: '' }], undefined, 'c1');
+      await pcs.storePrivateTriples(CG, R10, [{ subject: R10, predicate: 'https://schema.org/serialNumber', object: '"R10-KEEP"', graph: '' }], undefined, 'c10');
+
+      // Re-publish R1 under a NEW commitment → supersedes R1's slice. A bare
+      // prefix delete would also wipe R10 (STRSTARTS("urn:device:1")); the
+      // exact-root + skolem-prefix delete must leave R10 intact.
+      await pcs.storePrivateTriples(CG, R1, [{ subject: R1, predicate: 'https://schema.org/serialNumber', object: '"R1-NEW"', graph: '' }], undefined, 'c1-v2');
+
+      const r10 = (await pcs.getPrivateTriples(CG, R10)).map((q) => q.object);
+      expect(r10, 'sibling root R10 must survive R1 supersede').toContain('"R10-KEEP"');
+
+      const r1 = (await pcs.getPrivateTriples(CG, R1)).map((q) => q.object);
+      expect(r1).toContain('"R1-NEW"');
+      expect(r1).not.toContain('"R1-OLD"');
     },
   );
 });

@@ -5,7 +5,7 @@ import { ethers } from 'ethers';
 import hre from 'hardhat';
 
 import { Hub, DKGKnowledgeAssets } from '../typechain';
-import { packReservedKaId } from './helpers/v10-kc-helpers';
+import { packReservedKaId } from './helpers/v10-ka-helpers';
 
 /**
  * OT-RFC-43 Option 1 (variant 1a): `getMaxKaNumberForAuthor` is the O(1)

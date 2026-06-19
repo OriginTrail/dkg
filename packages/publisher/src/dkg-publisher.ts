@@ -17,8 +17,11 @@ import {
   computeFlatKCMerkleLeafCountV10,
 } from './merkle.js';
 import { validatePublishRequest } from './validation.js';
+import { isFailClosedInlineEncrypt } from './async-lift-publish-options.js';
 import {
   generateConfirmedFullMetadata,
+  buildDeterministicTokenRows,
+  compareRootIris,
   generateOwnershipQuads,
   generateAssertionCreatedMetadata,
   generateAssertionPromotedMetadata,
@@ -1898,8 +1901,19 @@ export class DKGPublisher implements Publisher {
     // many entities it contains. The on-chain KA count and ACK digest stay at
     // one below, while these token IDs remain compatibility labels for
     // per-root response/meta subjects (`<ual>/1`, `<ual>/2`, ...).
+    // GH #936 — mint the compatibility tokenIds over a CANONICAL (lexicographic
+    // by rootEntity) order, the SAME order the replica reconcile/gossip path
+    // uses in `FinalizationHandler.promoteSharedMemoryToCanonical`. Without this,
+    // the ORIGINATOR would label `<ual>/<tokenId>` by input-quad order while
+    // replicas label by sorted order, so a multi-root KC could resolve a
+    // different root for the same token label depending on which node a client
+    // queries. These tokenIds are non-on-chain compatibility labels (the
+    // on-chain KA count is 1), so a content-derived sort is safe.
+    const orderedEntries = [...canonical.manifestEntries].sort((a, b) =>
+      compareRootIris(a.rootEntity, b.rootEntity),
+    );
     let compatibilityTokenId = 1n;
-    for (const entry of canonical.manifestEntries) {
+    for (const entry of orderedEntries) {
       const tokenId = compatibilityTokenId++;
       manifestEntries.push({
         tokenId,
@@ -1978,14 +1992,31 @@ export class DKGPublisher implements Publisher {
     // to ACK / chain digests — moving it past the chain-success branch
     // would risk a race where the publisher returns 'confirmed' before
     // its own private store has the data.
-    for (const entry of canonical.manifestEntries) {
-      const entityPrivateQuads = privateQuads.filter(
-        (q) => q.subject === entry.rootEntity || q.subject.startsWith(entry.rootEntity + '/.well-known/genid/'),
-      );
-      if (entityPrivateQuads.length > 0) {
-        await this.privateStore.storePrivateTriples(contextGraphId, entry.rootEntity, entityPrivateQuads, options.subGraphName);
+    // GH #1078 — persist the finalized private slices. DEFERRED to the terminal
+    // branches (post-chain-confirmation, or the intentional-local finalize) and
+    // NEVER run on the chain-failure path. Because `storePrivateTriples(…,
+    // commitmentId)` now SUPERSEDES a root's prior private slice when the
+    // commitment differs, running it pre-chain would let a failed/rejected
+    // re-publish delete the private data of the still-current KA while the chain
+    // still points at the old version. Gating it on confirmation keeps the
+    // private store consistent with the committed `privateMerkleRoot`, and
+    // invoking it BEFORE the publish returns 'confirmed' preserves the
+    // no-"confirmed-before-data" guarantee the pre-chain insert used to give.
+    const persistFinalizedPrivateSlices = async (): Promise<void> => {
+      for (const entry of canonical.manifestEntries) {
+        const entityPrivateQuads = privateQuads.filter(
+          (q) => q.subject === entry.rootEntity || q.subject.startsWith(entry.rootEntity + '/.well-known/genid/'),
+        );
+        if (entityPrivateQuads.length > 0) {
+          // Tag the stored slice with the commitment this root committed (its
+          // privateMerkleRoot) so a later re-publish supersedes the stale slice.
+          const commitmentId = entry.privateMerkleRoot
+            ? Buffer.from(entry.privateMerkleRoot).toString('hex')
+            : undefined;
+          await this.privateStore.storePrivateTriples(contextGraphId, entry.rootEntity, entityPrivateQuads, options.subGraphName, commitmentId);
+        }
       }
-    }
+    };
 
     onPhase?.('store', 'end');
 
@@ -2102,7 +2133,19 @@ export class DKGPublisher implements Publisher {
     // with NO_DATA_IN_SWM — the exact bug §1.1 surfaces. Public CGs keep
     // the existing behaviour: `fromSharedMemory` → cores look up SWM
     // locally; otherwise plaintext inline.
-    const useEncryptedInline = typeof options.encryptInlinePayload === 'function';
+    // GH #1121 — take the encrypted-inline path whenever a REAL encryption
+    // callback is wired. The ONE exception: skip the async-lift mapper's
+    // fail-closed DEFAULT on a chainless / local-only publish (ownerOnly KA on
+    // an unregistered CG, chain-not-ready node, …). Such a publish ships nothing
+    // to other nodes, so there is no plaintext-to-cores leak to guard — and the
+    // default (which exists only to prevent that leak) cannot resolve a real
+    // chain-key off-chain, so invoking it would needlessly fail a legitimate
+    // local publish. For an actual on-chain publish the default still fires
+    // (fail-closed): a private payload is never shipped to cores in the clear.
+    const inlineEncryptCb = options.encryptInlinePayload;
+    const useEncryptedInline =
+      typeof inlineEncryptCb === 'function'
+      && (canAttemptOnChainPublish || !isFailClosedInlineEncrypt(inlineEncryptCb));
     // OT-RFC-49 / WS-D — a curated publish is now identified by a non-zero
     // catalog commitment. The on-chain commitment + the core ACK verify the
     // PUBLIC `_catalog`; the PRIVATE data stays encrypted for MEMBERS only.
@@ -2542,6 +2585,9 @@ export class DKGPublisher implements Publisher {
       }
       this.log.info(ctx, `Storing ${normalizedQuads.length} triples in local store (${reasonLog})`);
       await this.store.insert(normalizedQuads);
+      // GH #1078 — persist private slices on this intentional-local terminal
+      // branch too (a chainless / ownerOnly publish still finalizes here).
+      await persistFinalizedPrivateSlices();
       await this.store.insert(tentativeMeta);
       // B3: only now that the local publish has persisted do we refresh the
       // public catalog entry (CLEAR/REPLACE — see persistCatalogEntry).
@@ -2929,6 +2975,15 @@ export class DKGPublisher implements Publisher {
             chainId: this.chain.chainId,
           },
         );
+        // GH #936 — append the SHARED deterministic per-root token rows (the
+        // same helper the gossip / chain-reconcile path uses) so the originator
+        // exposes the IDENTICAL `<ual>/<tokenId>` → root map as replicas. kaMetadata
+        // is already in canonical (sorted) tokenId order. graph = default
+        // `<cg>/_meta` so the remap below routes them to the per-cgId `_meta`.
+        confirmedQuads = [
+          ...confirmedQuads,
+          ...buildDeterministicTokenRows(ual, kaMetadata, `did:dkg:context-graph:${contextGraphId}/_meta`),
+        ];
         if (options.targetMetaGraphUri) {
           const defaultMeta = `did:dkg:context-graph:${contextGraphId}/_meta`;
           confirmedQuads = confirmedQuads.map((q) =>
@@ -2954,6 +3009,10 @@ export class DKGPublisher implements Publisher {
         this.log.info(ctx, `Storing ${vmQuads.length} triples in ${vmGraph} (post-confirmation)`);
         await this.store.insert(vmQuads);
         await this.store.insert(confirmedQuads);
+        // GH #1078 — supersede/persist private slices only now that the chain
+        // has confirmed (before returning 'confirmed', so no read sees the KA
+        // confirmed without its private data).
+        await persistFinalizedPrivateSlices();
         await stampTrustLevel(
           this.store,
           vmGraph,

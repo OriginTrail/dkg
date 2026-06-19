@@ -274,7 +274,7 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
 
     /**
      * @notice Charge a publishing agent's allowance for `baseCost` and
-     *         distribute `discountedCost` over the published KC's
+     *         distribute `discountedCost` over the published KA's
      *         epoch range. Callable ONLY by `KnowledgeAssetsV10`.
      *
      * @dev    The KAV10 gate lives here (not on the logic contract) so
@@ -286,13 +286,13 @@ contract DKGPublishingConvictionNFT is INamed, IVersioned, HubDependent, IInitia
     function coverPublishingCost(
         address publishingAgent,
         uint96 baseCost,
-        uint40 kcStartEpoch,
-        uint40 kcEpochs
+        uint40 kaStartEpoch,
+        uint40 kaEpochs
     ) external returns (uint96 discountedCost) {
         address kav10 = hub.getContractAddress("KnowledgeAssetsLifecycle");
         if (msg.sender != kav10) revert OnlyKnowledgeAssetsV10(msg.sender);
 
-        return _publishingConviction().coverPublishingCost(publishingAgent, baseCost, kcStartEpoch, kcEpochs);
+        return _publishingConviction().coverPublishingCost(publishingAgent, baseCost, kaStartEpoch, kaEpochs);
     }
 
     /// @notice Permissionless lazy-settlement entry point.

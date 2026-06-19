@@ -165,6 +165,14 @@ import {
   createSwmAckQuorum,
   type SwmAckQuorum,
 } from './swm/ack-quorum.js';
+import {
+  classifySwmFanoutPeerOutcome,
+  createSwmFanoutPeerSelector,
+  type SelectSwmFanoutPeersInput,
+  type SelectSwmFanoutPeersResult,
+  type SwmFanoutPeerOutcome,
+  type SwmFanoutPeerSelector,
+} from './swm/swm-fanout-peer-selection.js';
 import { SwmHostModeStore, type SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import {
   BEACON_ACCESS_POLICY_CURATED,
@@ -683,7 +691,12 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         );
         return new Uint8Array();
       }
-      this.getOrCreateSwmAckQuorum().onAck(ack.shareOperationId, fromPeerId);
+      const quorum = this.getOrCreateSwmAckQuorum();
+      const record = quorum.inspect(ack.shareOperationId);
+      if (record?.enumerationSource === 'topic-subscribers') {
+        this.recordSwmFanoutPeerOutcome(record.cgId, fromPeerId, 'good');
+      }
+      quorum.onAck(ack.shareOperationId, fromPeerId);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       this.log.warn(
@@ -725,6 +738,38 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     ackPct: number;
   } | undefined {
     return this.swmAckQuorum?.inspect(shareOperationId);
+  }
+
+  getOrCreateSwmFanoutPeerSelector(this: DKGAgent): SwmFanoutPeerSelector {
+    if (!this.swmFanoutPeerSelector) {
+      this.swmFanoutPeerSelector = createSwmFanoutPeerSelector();
+    }
+    return this.swmFanoutPeerSelector;
+  }
+
+  selectSwmFanoutPeersForActiveShare(this: DKGAgent, input: SelectSwmFanoutPeersInput): SelectSwmFanoutPeersResult {
+    return this.getOrCreateSwmFanoutPeerSelector().select(input);
+  }
+
+  recordSwmFanoutPeerOutcome(
+    this: DKGAgent,
+    contextGraphId: string,
+    peerId: string,
+    outcome: SwmFanoutPeerOutcome,
+  ): void {
+    this.getOrCreateSwmFanoutPeerSelector().record(contextGraphId, peerId, outcome);
+  }
+
+  recordSwmFanoutPeerRecord(this: DKGAgent, contextGraphId: string, record: FanOutPeerRecord): void {
+    this.recordSwmFanoutPeerOutcome(
+      contextGraphId,
+      record.peerId,
+      classifySwmFanoutPeerOutcome(record),
+    );
+  }
+
+  getSwmFanoutPeerOutcomeForTests(this: DKGAgent, contextGraphId: string, peerId: string, now?: number): SwmFanoutPeerOutcome | undefined {
+    return this.swmFanoutPeerSelector?.get(contextGraphId, peerId, now);
   }
 
   /**
@@ -793,14 +838,15 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    * Add a context graph to runtime sync scope so sync-on-connect includes it.
    * System context graphs are already included by default and are skipped here.
    */
-  public trackSyncContextGraph(this: DKGAgent, contextGraphId: string): void {
+  public trackSyncContextGraph(this: DKGAgent, contextGraphId: string): boolean {
     const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
-    if (systemContextGraphs.has(contextGraphId)) return;
+    if (systemContextGraphs.has(contextGraphId)) return false;
 
     const syncSet = new Set<string>(this.config.syncContextGraphs ?? []);
-    if (syncSet.has(contextGraphId)) return;
+    if (syncSet.has(contextGraphId)) return false;
     syncSet.add(contextGraphId);
     this.config.syncContextGraphs = [...syncSet];
+    return true;
   }
 
   getOrCreateGossipPublishHandler(this: DKGAgent): GossipPublishHandler {
@@ -1144,9 +1190,35 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       );
       return;
     }
+    const quorumRecord = this.swmAckQuorum?.inspect(shareOperationId);
+    let topUpPeers = dialableMissingPeers;
+    if (quorumRecord?.enumerationSource === 'topic-subscribers') {
+      const selection = this.selectSwmFanoutPeersForActiveShare({
+        contextGraphId: cgId,
+        candidatePeers: dialableMissingPeers,
+        enumerationSource: 'topic-subscribers',
+      });
+      topUpPeers = selection.selectedPeers;
+      if (selection.skippedRecentPeers.length > 0 || topUpPeers.length !== dialableMissingPeers.length) {
+        this.log.info(
+          ctx,
+          `SWM public top-up narrowed cg=${cgId} selected=${topUpPeers.length}/${dialableMissingPeers.length} `
+          + `knownGood=${selection.knownGoodPeers.length} `
+          + `unknownProbe=${selection.unknownProbedPeers.length} `
+          + `skippedRecent=${selection.skippedRecentPeers.length}`,
+        );
+      }
+      if (topUpPeers.length === 0) {
+        this.log.info(
+          ctx,
+          `SWM public top-up skipped for ${shareOperationId} (cg=${cgId}): all ${dialableMissingPeers.length} dialable peer(s) are inside recent negative TTL`,
+        );
+        return;
+      }
+    }
     this.log.info(
       ctx,
-      `SWM ack-quorum watchdog firing substrate top-up for ${shareOperationId} to ${dialableMissingPeers.length}/${missingPeers.length} dialable peer(s) (cg=${cgId})`,
+      `SWM ack-quorum watchdog firing substrate top-up for ${shareOperationId} to ${topUpPeers.length}/${missingPeers.length} peer(s) (cg=${cgId}, dialable=${dialableMissingPeers.length})`,
     );
     // PR-H bug 1: route per-peer outcomes to the right ack-quorum
     // hook. Pre-PR-H ignored outcomes entirely except for
@@ -1186,13 +1258,16 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     //     publisher) would tighten this further; out of scope
     //     for this PR — see PR #582 comments / follow-up issue.
     let rearmCount = 0;
-    await Promise.allSettled(dialableMissingPeers.map(async (peerId: string) => {
+    await Promise.allSettled(topUpPeers.map(async (peerId: string) => {
       try {
         const sendResult = await this.messenger.sendReliable(peerId, PROTOCOL_SWM_UPDATE, payload, {
           messageId: `swm-topup-${shareOperationId}-${peerId}`,
           timeoutMs: DKGAgentBase.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS,
         });
         const classified = classifySendResult(peerId, sendResult);
+        if (quorumRecord?.enumerationSource === 'topic-subscribers') {
+          this.recordSwmFanoutPeerRecord(cgId, classified);
+        }
         switch (classified.outcome) {
           case 'delivered':
             this.swmAckQuorum?.onAck(shareOperationId, peerId);
@@ -1209,6 +1284,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         }
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
+        if (quorumRecord?.enumerationSource === 'topic-subscribers') {
+          this.recordSwmFanoutPeerOutcome(cgId, peerId, 'failed');
+        }
+        this.swmAckQuorum?.dropPeer(shareOperationId, peerId);
         this.log.warn(ctx, `SWM top-up to ${peerId} failed: ${reason}`);
       }
     }));
@@ -1259,7 +1338,13 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           },
           onDeadlineExpired: (e: {
             shareOperationId: string; cgId: string; ackedCount: number; expectedCount: number; ackPct: number;
+            missingPeers: readonly string[]; enumerationSource: 'allowlist' | 'topic-subscribers' | 'none';
           }) => {
+            if (e.enumerationSource === 'topic-subscribers') {
+              for (const peerId of e.missingPeers) {
+                this.recordSwmFanoutPeerOutcome(e.cgId, peerId, 'nonTerminal');
+              }
+            }
             this.log.warn(
               createOperationContext('share', e.shareOperationId),
               `SWM share deadline expired cg=${e.cgId} acked=${e.ackedCount}/${e.expectedCount} (${(e.ackPct * 100).toFixed(1)}%) — offline peers will recover via runSyncOnConnect`,

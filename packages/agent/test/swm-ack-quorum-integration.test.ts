@@ -1114,4 +1114,178 @@ describe('DKGAgent SwmAckQuorum integration (rc.9 PR-D)', () => {
     expect(statsAfter.completed).toBe(1);
     expect(statsAfter.pending).toBe(1);
   });
+
+  /**
+   * #1236 review 🔴 discriminator (otReviewAgent on the #1227
+   * regression fix). PR #1236 widened the ack-quorum's
+   * `expectedMembers` back to the FULL `plan.substrateMembers`
+   * (not the churn-narrowed initial-push set), but the watchdog
+   * top-up in `swmSubstrateTopUp` was NOT changed: for a public
+   * (`topic-subscribers`) CG it still runs the fan-out selector,
+   * which SKIPS any peer sitting in the selector's negative-TTL
+   * cache. The bot's worry: a quorum-EXPECTED peer that
+   * TERMINALLY FAILED the initial push (→ negative cache) and
+   * does NOT ack via gossip might never be re-attempted by the
+   * watchdog, stalling the quorum until the hard deadline.
+   *
+   * This test constructs EXACTLY that scenario and asserts what
+   * actually happens (empirical, not theoretical):
+   *
+   *   - `Term` rejects the initial push (0x01 sentinel →
+   *     classified `failed` → recorded into the selector's
+   *     negative cache with the 2-min negative TTL). It IS part
+   *     of the full quorum set (`expectedMembers`) and does NOT
+   *     ack via gossip.
+   *   - `Good1` / `Good2` queue on the initial push (NOT terminal
+   *     → NOT cached), then ack via gossip — but 2/3 < the 0.9
+   *     default quorum threshold, so the record stays pending on
+   *     `Term`.
+   *   - The watchdog then fires substrate top-up for the only
+   *     missing peer, `Term`.
+   *
+   * OBSERVED OUTCOME = (b), graceful degradation:
+   *   1. The top-up does NOT re-reach `Term` — the selector
+   *      classifies it as a recent-negative peer and drops it
+   *      from `selectedPeers` (`sendReliable` for the
+   *      `swm-topup-` messageId is never called for `Term`). This
+   *      confirms the bot's mechanism is real: the watchdog DOES
+   *      skip a quorum-expected, negative-cached peer.
+   *   2. BUT the share is NOT permanently stuck: the hard
+   *      deadline reaps the record cleanly via `onDeadlineExpired`
+   *      (`deadlineExpired` ticks, `pending` returns to 0, the
+   *      record is removed). Offline/rejecting peers fall through
+   *      to `runSyncOnConnect` — the documented catch-up safety
+   *      net (ack-quorum.ts §4).
+   *
+   * Why (b) and not (c): the skipped peer here TERMINALLY
+   * rejected the initial push. Re-blasting the identical wire
+   * bytes at it on every 30s watchdog tick would reproduce the
+   * exact churn-amplification soak bug #1227's selector was added
+   * to stop — and would never succeed (a permanent rejection
+   * rejects again). The deadline-reap + sync-on-connect recovery
+   * is the correct terminal for a peer that can't accept the
+   * share. So the 🔴 is a defensible graceful-degradation path,
+   * NOT a correctness bug — no source change is warranted; this
+   * test documents the deadline-resolution contract.
+   */
+  it('#1236 🔴 (b): watchdog top-up skips a terminally-failed, negative-cached quorum-expected peer; deadline reaps it cleanly (graceful degradation)', async () => {
+    const agent = register(await createAgent('AckQuorum1236TerminalSkip'));
+    const gossip = new CapturingGossip();
+    gossip.subscribers = ['12D3KooWTerm', '12D3KooWGood1', '12D3KooWGood2'];
+    (agent as unknown as { gossip: CapturingGossip }).gossip = gossip;
+
+    // Initial fan-out: `Term` returns the 0x01 REJECTED sentinel
+    // (delivered: true at the wire layer, but the receiver
+    // permanently rejected) → classified `failed` →
+    // terminal → fed into the fan-out selector's negative cache.
+    // `Good1` / `Good2` queue (non-terminal → NOT cached) so
+    // they stay pending after the initial push.
+    const { calls, install } = stubMessengerSendReliable((peerId, _proto, msgId) => {
+      const isTopUp = msgId?.startsWith('swm-topup-');
+      if (!isTopUp) {
+        if (peerId === '12D3KooWTerm') {
+          // 0x01 → rejected → classifySwmFanoutPeerOutcome → 'failed'
+          return { delivered: true, response: new Uint8Array([0x01]), attempts: 1, messageId: 'init-term' };
+        }
+        return { delivered: false, queued: true, attempts: 1, messageId: 'q-init', error: 'transient', nextAttemptAtMs: Date.now() + 1000 };
+      }
+      // Any top-up that DOES reach a peer succeeds (so if the
+      // watchdog were to re-reach `Term`, we'd see it).
+      return { delivered: true, response: new Uint8Array(), attempts: 1, messageId: msgId! };
+    });
+    install(agent);
+
+    const { shareOperationId } = await agent.share('cg-1236-terminal-skip', [{
+      subject: 'urn:test:1236', predicate: 'http://schema.org/name', object: '"t1236"', graph: '',
+    }]);
+
+    // The share must have run a public (topic-subscribers)
+    // substrate fan-out — that's the only enumeration source the
+    // selector (and thus the negative cache) applies to. If this
+    // assertion ever flips, the discriminator's preconditions no
+    // longer hold and the outcome below is meaningless.
+    const snap0 = agent.getSwmAckQuorumRecordSnapshotForTests(shareOperationId);
+    expect(snap0).toBeDefined();
+    expect([...(snap0?.expectedMembers ?? [])].sort()).toEqual([
+      '12D3KooWGood1', '12D3KooWGood2', '12D3KooWTerm',
+    ]);
+
+    // Precondition 1: the initial fan-out actually attempted all 3
+    // peers (so `Term`'s rejection was observed by the bookkeeper).
+    const initCalls = calls.filter((c) => !c.messageId?.startsWith('swm-topup-') && c.protocolId === PROTOCOL_SWM_UPDATE);
+    expect(initCalls.map((c) => c.peerId).sort()).toEqual([
+      '12D3KooWGood1', '12D3KooWGood2', '12D3KooWTerm',
+    ]);
+
+    // Precondition 2: `Term` landed in the fan-out selector's
+    // negative cache (this is the gate the watchdog top-up
+    // re-applies). `failed` is a negative outcome, so the
+    // selector will skip it inside the 2-min TTL.
+    expect(agent.getSwmFanoutPeerOutcomeForTests('cg-1236-terminal-skip', '12D3KooWTerm')).toBe('failed');
+
+    // `Good1` / `Good2` ack via gossip. 2/3 = 0.67 < 0.9 default
+    // threshold, so the record is still pending on `Term`.
+    const ackHandler = await agent.getOrCreateSwmShareAckHandlerForTests();
+    await ackHandler(encodeSwmShareAck({ shareOperationId, ackPeerId: '12D3KooWGood1' }), '12D3KooWGood1');
+    await ackHandler(encodeSwmShareAck({ shareOperationId, ackPeerId: '12D3KooWGood2' }), '12D3KooWGood2');
+    const snap1 = agent.getSwmAckQuorumRecordSnapshotForTests(shareOperationId);
+    expect(snap1).toBeDefined();
+    expect([...(snap1?.acked ?? [])].sort()).toEqual(['12D3KooWGood1', '12D3KooWGood2']);
+    expect(agent.getSwmAckQuorumStats().completed).toBe(0);
+    expect(agent.getSwmAckQuorumStats().pending).toBe(1);
+
+    // Make `Term` dialable for the top-up's `isPeerDialable`
+    // filter so we isolate the negative-cache skip (not a
+    // dialability skip) as the reason the top-up doesn't reach it.
+    // (Short test peer ids resolve via the gossip-subscriber
+    // fast path in `installAllReachableLibp2pStub`; `Term` is in
+    // `gossip.subscribers`, so it's already dialable.)
+
+    // Count top-up calls BEFORE driving the watchdog.
+    const topUpCallsBefore = calls.filter((c) => c.messageId?.startsWith('swm-topup-')).length;
+
+    // Drive the watchdog top-up for the only missing peer (`Term`).
+    // This is the EXACT path the 5s tick → fireWatchdog →
+    // substrateTopUp would take, with `missingPeers` =
+    // expectedMembers ∖ acked = [Term].
+    await agent.invokeSwmSubstrateTopUpForTests({
+      shareOperationId,
+      cgId: 'cg-1236-terminal-skip',
+      payload: new Uint8Array([0xde, 0xad, 0xbe, 0xef]),
+      missingPeers: ['12D3KooWTerm'],
+    });
+
+    // OBSERVED (1): the top-up did NOT re-reach `Term`. The
+    // selector classified it as a recent-negative peer and
+    // dropped it from `selectedPeers`, so no `swm-topup-`
+    // sendReliable fired for it. This confirms the bot's
+    // mechanism: the watchdog DOES skip a quorum-expected,
+    // negative-cached peer.
+    const topUpCallsAfter = calls.filter((c) => c.messageId?.startsWith('swm-topup-'));
+    expect(topUpCallsAfter.filter((c) => c.peerId === '12D3KooWTerm')).toEqual([]);
+    expect(topUpCallsAfter.length).toBe(topUpCallsBefore);
+
+    // The record is still pending on `Term` (the top-up was a
+    // no-op for it).
+    expect(agent.getSwmAckQuorumRecordSnapshotForTests(shareOperationId)).toBeDefined();
+    expect(agent.getSwmAckQuorumStats().pending).toBe(1);
+    expect(agent.getSwmAckQuorumStats().completed).toBe(0);
+
+    // OBSERVED (2): the share is NOT permanently stuck. The hard
+    // deadline reaps the record cleanly via `onDeadlineExpired`.
+    // Advance the quorum clock past `startedAtMs + deadlineHardMs`
+    // (5 min default) and tick — the record is removed,
+    // `deadlineExpired` increments, `pending` returns to 0.
+    const quorum = (agent as unknown as {
+      getOrCreateSwmAckQuorum: () => { tick: (now?: number) => void };
+    }).getOrCreateSwmAckQuorum();
+    quorum.tick(Date.now() + 5 * 60_000 + 1);
+
+    expect(agent.getSwmAckQuorumRecordSnapshotForTests(shareOperationId)).toBeUndefined();
+    const finalStats = agent.getSwmAckQuorumStats();
+    expect(finalStats.pending).toBe(0);
+    expect(finalStats.deadlineExpired).toBe(1);
+    // Never falsely counted as completed.
+    expect(finalStats.completed).toBe(0);
+  });
 });

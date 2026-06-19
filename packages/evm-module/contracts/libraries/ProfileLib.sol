@@ -18,7 +18,7 @@ library ProfileLib {
         // backwards-compatible at the slot level: old keys read this as
         // false until the operator opts in via Profile.updateRelayCapable.
         // Multiaddrs are deliberately NOT stored on Profile — they live in
-        // per-round attestation KCs (RFC 04 §5.2).
+        // per-round attestation KAs (RFC 04 §5.2).
         bool relayCapable;
     }
 

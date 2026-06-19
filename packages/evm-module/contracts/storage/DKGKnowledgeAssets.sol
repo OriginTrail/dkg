@@ -20,7 +20,7 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     ///      author-attestation EIP-712 envelope, or `address(0)` for legacy
     ///      callers (`KnowledgeAsset (V10.1 active path)`) that do not perform author
     ///      attestation. Indexers SHOULD prefer this `indexed` field over
-    ///      walking storage when filtering KCs by author.
+    ///      walking storage when filtering KAs by author.
     event KnowledgeAssetCreated(
         uint256 indexed id,
         address indexed author,
@@ -55,14 +55,14 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     event KnowledgeAssetEndEpochUpdated(uint256 indexed id, uint256 endEpoch);
     event URIUpdate(string newURI);
 
-    /// @notice OT-RFC-49 / WS-B: a per-KC PUBLIC `_catalog` commitment was set for
+    /// @notice OT-RFC-49 / WS-B: a per-KA PUBLIC `_catalog` commitment was set for
     ///         curated random sampling. Emitted by `setCatalogCommitment`, called by
     ///         `KnowledgeAssetsLifecycle._executePublishCore` immediately after
     ///         `createKnowledgeAsset` when the publish input carries a non-zero
     ///         `(catalogRoot, catalogLeafCount)` pair AND the owning CG is curated.
-    ///         Off-chain indexers consume this to know which KCs participate in the
+    ///         Off-chain indexers consume this to know which KAs participate in the
     ///         curated-CG sampling lottery (the picker treats missing commitments as
-    ///         "skip this KC").
+    ///         "skip this KA").
     event KnowledgeAssetCatalogCommitmentSet(
         uint256 indexed id,
         bytes32 catalogRoot,
@@ -120,7 +120,7 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     /// `KnowledgeAsset.merkleRoots` is a dynamic array, so
     /// extending its element struct from 3 to 4 storage slots would
     /// shift the slot stride of every prior root entry — already-
-    /// deployed KCs would decode their historical
+    /// deployed KAs would decode their historical
     /// `publisher`/`merkleRoot`/`timestamp` from the wrong offsets.
     /// Layout-preserving fix: keep `MerkleRoot` at 3 slots and store
     /// the EIP-712-recovered author identity at
@@ -133,7 +133,7 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     /// Indexers SHOULD prefer the indexed `author` topic on
     /// `KnowledgeAssetCreated` / `KnowledgeAssetUpdated`
     /// events; this on-chain mapping is the canonical lookup for
-    /// `/api/kc/:id/author` and SPARQL author-filter queries.
+    /// `/api/knowledge-assets/:id/author` and SPARQL author-filter queries.
     mapping(uint256 => mapping(uint256 => address)) public merkleRootAuthors;
 
     /// @notice OT-RFC-49: DEAD — slot preserved for storage-layout stability.
@@ -163,7 +163,7 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     ///         layout note on `_deprecatedKnowledgeAssetsCounter`).
     mapping(address => uint256) private _authorKaNumberHighWater;
 
-    /// @notice OT-RFC-49 / WS-B: per-KC PUBLIC `_catalog` Merkle root — the curated
+    /// @notice OT-RFC-49 / WS-B: per-KA PUBLIC `_catalog` Merkle root — the curated
     ///         random-sampling commitment that replaces the stripped ciphertext one.
     ///
     /// Used by `RandomSampling._pickWeightedChallenge` (eligibility + leaf draw) and
@@ -175,7 +175,7 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     /// the private sub-roots stay in `merkleRoots[]` for proof-of-existence but are
     /// NEVER drawn). Set by `KnowledgeAssetsLifecycle._executePublishCore` for curated
     /// CGs. Default `bytes32(0)` is the "no catalog commitment" sentinel that
-    /// `RandomSampling` uses to skip this KC in the curated draw (legacy KCs read 0 →
+    /// `RandomSampling` uses to skip this KA in the curated draw (legacy KAs read 0 →
     /// grandfathered out until they re-publish post-RFC-49).
     ///
     /// Appended at the END of storage (after `_authorKaNumberHighWater`) to preserve
@@ -183,7 +183,7 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     /// catalog roots.
     mapping(uint256 => bytes32) public catalogRoots;
 
-    /// @notice OT-RFC-49 / WS-B: per-KC PUBLIC `_catalog` leaf count (POST sort+dedupe,
+    /// @notice OT-RFC-49 / WS-B: per-KA PUBLIC `_catalog` leaf count (POST sort+dedupe,
     ///         == `V10MerkleTree.leafCount`, NOT the raw catalog-quad count).
     ///
     /// The leaf-count input for the `chunkId = uint256(seed) % count` draw in
@@ -268,9 +268,9 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
 
         uint256 knowledgeAssetId = kaId;
 
-        KnowledgeAssetLib.KnowledgeAsset storage kc = knowledgeAssets[knowledgeAssetId];
+        KnowledgeAssetLib.KnowledgeAsset storage ka = knowledgeAssets[knowledgeAssetId];
 
-        kc.merkleRoots.push(
+        ka.merkleRoots.push(
             KnowledgeAssetLib.MerkleRoot(publisher, merkleRoot, block.timestamp)
         );
         // First root of a fresh KA — index 0. `kaId` was just proven unminted
@@ -278,19 +278,19 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
         // empty; the unconditional shape is kept for parity with
         // `updateKnowledgeAsset` below, where the index can have been
         // previously used (post-pop).
-        merkleRootAuthors[knowledgeAssetId][kc.merkleRoots.length - 1] = author;
-        kc.byteSize = byteSize;
-        kc.startEpoch = startEpoch;
-        kc.endEpoch = endEpoch;
-        kc.tokenAmount = tokenAmount;
-        kc.isImmutable = isImmutable;
-        kc.merkleLeafCount = merkleLeafCount;
+        merkleRootAuthors[knowledgeAssetId][ka.merkleRoots.length - 1] = author;
+        ka.byteSize = byteSize;
+        ka.startEpoch = startEpoch;
+        ka.endEpoch = endEpoch;
+        ka.tokenAmount = tokenAmount;
+        ka.isImmutable = isImmutable;
+        ka.merkleLeafCount = merkleLeafCount;
 
         unchecked {
             _totalTokenAmount += tokenAmount;
         }
 
-        kc.minted = 1;
+        ka.minted = 1;
         _totalMintedKnowledgeAssetsCounter += 1;
 
         // OT-RFC-43 Option 1: record the per-author high-water `number` BEFORE the
@@ -373,13 +373,13 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
         uint96 tokenAmount,
         uint32 merkleLeafCount
     ) external onlyContracts {
-        KnowledgeAssetLib.KnowledgeAsset storage kc = knowledgeAssets[id];
+        KnowledgeAssetLib.KnowledgeAsset storage ka = knowledgeAssets[id];
 
         unchecked {
-            _totalTokenAmount = _totalTokenAmount - kc.tokenAmount + tokenAmount;
+            _totalTokenAmount = _totalTokenAmount - ka.tokenAmount + tokenAmount;
         }
 
-        kc.merkleRoots.push(
+        ka.merkleRoots.push(
             KnowledgeAssetLib.MerkleRoot(publisher, merkleRoot, block.timestamp)
         );
         // Unconditional overwrite — this index may have been written by
@@ -389,10 +389,10 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
         // lifecycle update path supplies; `address(0)` only on admin/legacy
         // paths) to make the canonical mapping monotonic with the
         // merkleRoots array.
-        merkleRootAuthors[id][kc.merkleRoots.length - 1] = author;
-        kc.byteSize = byteSize;
-        kc.tokenAmount = tokenAmount;
-        kc.merkleLeafCount = merkleLeafCount;
+        merkleRootAuthors[id][ka.merkleRoots.length - 1] = author;
+        ka.byteSize = byteSize;
+        ka.tokenAmount = tokenAmount;
+        ka.merkleLeafCount = merkleLeafCount;
 
         // Burn with an empty list is a no-op (the inner for-loop over
         // tokenIds skips when length == 0). Mint with amount == 0 was
@@ -405,7 +405,7 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
         if (mintKnowledgeAssetsAmount != 0 || knowledgeAssetsToBurn.length != 0) {
             revert KnowledgeAssetLib.ExceededKnowledgeAssetBatchSize(
                 id,
-                kc.minted,
+                ka.minted,
                 mintKnowledgeAssetsAmount,
                 0
             );
@@ -425,7 +425,7 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     /// monotonically on every update, the memory cost (and thus gas
     /// cost) of calling that getter from the update path itself scales
     /// linearly — actually super-linearly due to EVM memory-expansion
-    /// quadratic term — with the number of prior updates. A KC with
+    /// quadratic term — with the number of prior updates. A KA with
     /// thousands of historical entries eventually becomes un-updatable.
     ///
     /// This getter returns only the scalar slots and the merkle-root
@@ -448,27 +448,27 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
             uint32 merkleLeafCount
         )
     {
-        KnowledgeAssetLib.KnowledgeAsset storage kc = knowledgeAssets[id];
+        KnowledgeAssetLib.KnowledgeAsset storage ka = knowledgeAssets[id];
         return (
-            kc.merkleRoots.length,
-            kc.minted,
-            kc.byteSize,
-            kc.endEpoch,
-            kc.tokenAmount,
-            kc.isImmutable,
-            kc.merkleLeafCount
+            ka.merkleRoots.length,
+            ka.minted,
+            ka.byteSize,
+            ka.endEpoch,
+            ka.tokenAmount,
+            ka.isImmutable,
+            ka.merkleLeafCount
         );
     }
 
-    /// @notice Leaf count for the V10 flat-KC Merkle tree at latest root
+    /// @notice Leaf count for the V10 flat-KA Merkle tree at latest root
     ///         (see `merkleLeafCount` on `KnowledgeAsset`).
     function getMerkleLeafCount(uint256 id) external view returns (uint32) {
         return knowledgeAssets[id].merkleLeafCount;
     }
 
     /// @notice OT-RFC-49 / WS-B: write the curated PUBLIC `_catalog` commitment for
-    ///         a freshly-created (or updated) KC. Caller must enforce the curated-CG
-    ///         gate — KCS does not look at `ContextGraphStorage` to keep the storage
+    ///         a freshly-created (or updated) KA. Caller must enforce the curated-CG
+    ///         gate — KAS does not look at `ContextGraphStorage` to keep the storage
     ///         layer policy-free.
     ///
     ///         Both fields must be non-zero — partial commitments (a non-zero root
@@ -496,15 +496,15 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     }
 
     /// @notice OT-RFC-49 / WS-B: latest PUBLIC `_catalog` Merkle root for a curated
-    ///         KC, or `bytes32(0)` if no commitment was ever set (public KC, or a
-    ///         legacy curated KC that has not re-published since RFC-49).
-    ///         `RandomSampling` treats the zero sentinel as "skip this KC in the
+    ///         KA, or `bytes32(0)` if no commitment was ever set (public KA, or a
+    ///         legacy curated KA that has not re-published since RFC-49).
+    ///         `RandomSampling` treats the zero sentinel as "skip this KA in the
     ///         curated draw".
     function getCatalogRoot(uint256 id) external view returns (bytes32) {
         return catalogRoots[id];
     }
 
-    /// @notice OT-RFC-49 / WS-B: PUBLIC `_catalog` leaf count for a curated KC, or
+    /// @notice OT-RFC-49 / WS-B: PUBLIC `_catalog` leaf count for a curated KA, or
     ///         `0` if no commitment was ever set. Used as the leaf-count input for
     ///         the curated picker's `chunkId = seed % count` draw and as the bounds
     ///         check in `submitProof`. Equals the off-chain `V10MerkleTree.leafCount`
@@ -529,17 +529,17 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
             bool
         )
     {
-        KnowledgeAssetLib.KnowledgeAsset memory kc = knowledgeAssets[id];
+        KnowledgeAssetLib.KnowledgeAsset memory ka = knowledgeAssets[id];
 
         return (
-            kc.merkleRoots,
-            kc.burned,
-            kc.minted,
-            kc.byteSize,
-            kc.startEpoch,
-            kc.endEpoch,
-            kc.tokenAmount,
-            kc.isImmutable
+            ka.merkleRoots,
+            ka.burned,
+            ka.minted,
+            ka.byteSize,
+            ka.startEpoch,
+            ka.endEpoch,
+            ka.tokenAmount,
+            ka.isImmutable
         );
     }
 
@@ -628,7 +628,7 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     /// carry an author attestation (legacy/admin path only; both the publish
     /// and the V10.1 update path now attest the author — OT-RFC-45). Used by
     /// `/api/get` and other off-chain readers as the
-    /// canonical "who authored this KC" lookup — chain wins over any
+    /// canonical "who authored this KA" lookup — chain wins over any
     /// off-chain `dkg:authoredBy` triple.
     function getLatestMerkleRootAuthor(uint256 id) external view returns (address) {
         uint256 len = knowledgeAssets[id].merkleRoots.length;
@@ -769,16 +769,16 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     }
 
     function getKnowledgeAssetsRange(uint256 id) external view returns (uint256, uint256, uint256[] memory) {
-        KnowledgeAssetLib.KnowledgeAsset memory kc = knowledgeAssets[id];
-        if (kc.minted == 0) {
-            return (0, 0, kc.burned);
+        KnowledgeAssetLib.KnowledgeAsset memory ka = knowledgeAssets[id];
+        if (ka.minted == 0) {
+            return (0, 0, ka.burned);
         }
-        return (id, id, kc.burned);
+        return (id, id, ka.burned);
     }
 
     function getKnowledgeAssetsAmount(uint256 id) external view returns (uint256) {
-        KnowledgeAssetLib.KnowledgeAsset memory kc = knowledgeAssets[id];
-        return kc.minted - kc.burned.length;
+        KnowledgeAssetLib.KnowledgeAsset memory ka = knowledgeAssets[id];
+        return ka.minted - ka.burned.length;
     }
 
     function isKnowledgeAssetOwner(address owner, uint256 id) external view returns (bool) {
@@ -798,11 +798,11 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     function _safeGetLatestMerkleRootObject(
         uint256 id
     ) internal view returns (KnowledgeAssetLib.MerkleRoot memory) {
-        KnowledgeAssetLib.KnowledgeAsset memory kc = knowledgeAssets[id];
-        if (kc.merkleRoots.length == 0) {
+        KnowledgeAssetLib.KnowledgeAsset memory ka = knowledgeAssets[id];
+        if (ka.merkleRoots.length == 0) {
             return KnowledgeAssetLib.MerkleRoot(address(0), bytes32(0), 0);
         }
-        return kc.merkleRoots[kc.merkleRoots.length - 1];
+        return ka.merkleRoots[ka.merkleRoots.length - 1];
     }
 
 }

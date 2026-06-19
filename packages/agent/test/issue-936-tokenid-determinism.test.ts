@@ -120,5 +120,16 @@ describe('GH #936 — chain-driven reconcile must map each root to a determinist
     // identical on every replica. Today it is positional over a store-dependent
     // order, so the two replicas disagree on which root owns `<ual>/1`.
     expect(replicaA).toEqual(replicaB);
+
+    // Pin the EXACT canonical (lexicographic-by-IRI) map, not just that the two
+    // replicas agree — otherwise, if oxigraph ever returned the unordered
+    // bindings already sorted, the old positional code would also produce
+    // identical maps and this test would be false-green. aaa < mmm < zzz.
+    const expectedCanonicalMap: Record<string, string> = {
+      'urn:gh936:aaa': '1',
+      'urn:gh936:mmm': '2',
+      'urn:gh936:zzz': '3',
+    };
+    expect(replicaA).toEqual(expectedCanonicalMap);
   });
 });

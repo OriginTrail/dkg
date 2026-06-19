@@ -266,6 +266,10 @@ class WorkerCatchupRunner implements CatchupRunner {
         const [contextGraphId, dataSynced, sharedMemorySynced] = args as [string, number, number];
         await agent.refreshMetaSyncedFlags([contextGraphId]);
         if (dataSynced > 0 || sharedMemorySynced > 0) {
+          agent.markContextGraphSubscriptionState?.(contextGraphId, {
+            synced: true,
+            ...(sharedMemorySynced > 0 ? { sharedMemorySynced: true } : {}),
+          });
           agent.eventBus.emit(DKGEvent.PROJECT_SYNCED, {
             contextGraphId,
             dataSynced,

@@ -33,9 +33,6 @@ func.dependencies = [
   'Hub',
   'StakingStorage',
   'ConvictionStakingStorage',
-  // v3.1.0 — `StakingV10.initialize()` resolves V8MigrationEligibility
-  // for the V8→V10 conviction credit lookup in `_convertToNFT`.
-  'V8MigrationEligibility',
   'Chronos',
   'RandomSamplingStorage',
   'ShardingTableStorage',

@@ -1,4 +1,4 @@
-import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
 import { ethers } from 'ethers';
 import hre from 'hardhat';
@@ -13,6 +13,7 @@ import {
   ShardingTable,
   ContextGraphStorage,
   ContextGraphValueStorage,
+  CGWeightTreeStorage,
 } from '../../typechain';
 import { createProfile } from '../helpers/profile-helpers';
 
@@ -67,7 +68,7 @@ const rotatedCatalogRoot = ethers.keccak256(rotatedCatalogContent);
 
 const OPEN_POLICY = 1; // public CG (accessPolicy=0 ⇒ getIsCurated()=false ⇒ merkle path)
 const CURATED_ACCESS = 1; // accessPolicy=1 ⇒ getIsCurated()=true ⇒ catalog path
-const TEST_KC_BYTE_SIZE = 128n;
+const TEST_KA_BYTE_SIZE = 128n;
 
 /**
  * V10 `RandomSampling.submitProof` happy path — NOT exercised by any running
@@ -98,6 +99,7 @@ describe('@integration RandomSampling submitProof + multi-store seam (R3)', () =
   let ShardingTable: ShardingTable;
   let ContextGraphStorage: ContextGraphStorage;
   let ContextGraphValueStorage: ContextGraphValueStorage;
+  let CGWeightTreeStorage: CGWeightTreeStorage;
   let kaNumber = 0n;
 
   async function deployFixture() {
@@ -148,6 +150,11 @@ describe('@integration RandomSampling submitProof + multi-store seam (R3)', () =
       await hre.ethers.getContract<ContextGraphValueStorage>(
         'ContextGraphValueStorage',
       );
+    CGWeightTreeStorage =
+      await hre.ethers.getContract<CGWeightTreeStorage>('CGWeightTreeStorage');
+    // Phase 10.x — unlock the BIT index (fresh chain) so createChallenge can draw;
+    // accounts[19] is a registered Hub contract so it passes onlyContracts.
+    await CGWeightTreeStorage.connect(accounts[19]).finishBackfill();
     opSigner = accounts[19];
     kaNumber = 0n;
   }
@@ -188,7 +195,7 @@ describe('@integration RandomSampling submitProof + multi-store seam (R3)', () =
         'seam-test-op',
         merkleRoot,
         1, // knowledgeAssetsAmount
-        TEST_KC_BYTE_SIZE,
+        TEST_KA_BYTE_SIZE,
         currentEpoch,
         endEpoch,
         0, // tokenAmount
@@ -216,6 +223,55 @@ describe('@integration RandomSampling submitProof + multi-store seam (R3)', () =
         1_000n, // per-epoch value
       )
     ).wait();
+    // settle-on-spend: reconcile the BIT leaf so createChallenge can draw this CG.
+    await (await CGWeightTreeStorage.connect(opSigner).settle(cgId)).wait();
+    return kaId;
+  }
+
+  // Like seedKa but with explicit KA expiry / value lifetime / per-epoch weight — used by the
+  // settle-on-miss test to build a dominant CG that goes stale (KA expires + value decays) while
+  // its BIT leaf keeps the old (over-stated) weight until something settles it.
+  async function seedKaCustom(
+    cgId: bigint,
+    kaEndEpoch: bigint,
+    lifetime: bigint,
+    value: bigint,
+  ): Promise<bigint> {
+    const currentEpoch = await Chronos.getCurrentEpoch();
+    const receipt = await (
+      await DKGKnowledgeAssets.connect(opSigner).createKnowledgeAsset(
+        opSigner.address,
+        opSigner.address,
+        nextKaId(),
+        'seam-settle-miss',
+        merkleRoot,
+        1,
+        TEST_KA_BYTE_SIZE,
+        currentEpoch,
+        kaEndEpoch,
+        0,
+        false,
+        1,
+      )
+    ).wait();
+    const iface = DKGKnowledgeAssets.interface;
+    const topic = iface.getEvent('KnowledgeAssetCreated')!.topicHash;
+    const log = receipt!.logs.find((l) => l.topics[0] === topic)!;
+    const kaId = iface.parseLog(
+      log as unknown as { topics: string[]; data: string },
+    )!.args[0] as bigint;
+    await (
+      await ContextGraphStorage.connect(opSigner).registerKnowledgeAssetToContextGraph(cgId, kaId)
+    ).wait();
+    await (
+      await ContextGraphValueStorage.connect(opSigner).addCGValueForEpochRange(
+        cgId,
+        currentEpoch,
+        lifetime,
+        value,
+      )
+    ).wait();
+    await (await CGWeightTreeStorage.connect(opSigner).settle(cgId)).wait();
     return kaId;
   }
 
@@ -253,7 +309,7 @@ describe('@integration RandomSampling submitProof + multi-store seam (R3)', () =
         'seam-test-curated',
         decoyMerkleRoot, // plaintext root = decoy (public branch would use this)
         1,
-        TEST_KC_BYTE_SIZE,
+        TEST_KA_BYTE_SIZE,
         currentEpoch,
         endEpoch,
         0,
@@ -292,6 +348,8 @@ describe('@integration RandomSampling submitProof + multi-store seam (R3)', () =
         1_000n,
       )
     ).wait();
+    // settle-on-spend: reconcile the BIT leaf so createChallenge can draw this CG.
+    await (await CGWeightTreeStorage.connect(opSigner).settle(cgId)).wait();
     return kaId;
   }
 
@@ -319,6 +377,71 @@ describe('@integration RandomSampling submitProof + multi-store seam (R3)', () =
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
     await loadFixture(deployFixture);
+  });
+
+  it('Test E — createChallenge reverts ChallengeDrawPaused while the BIT index is backfill-locked', async () => {
+    const node = await setupChallengingNode();
+    await RandomSampling.updateAndGetActiveProofPeriodStartBlock();
+
+    // Swap in a fresh, still-LOCKED CGWeightTreeStorage and re-point RandomSampling at it
+    // (the migration window). accounts[0] is the Hub owner: setContractAddress is
+    // onlyHubOwner and initialize() is onlyHub (owner allowed).
+    const Factory = await hre.ethers.getContractFactory('CGWeightTreeStorage');
+    const lockedTree = await Factory.connect(accounts[0]).deploy(
+      await Hub.getAddress(),
+      2n ** 21n,
+    );
+    await lockedTree.waitForDeployment();
+    await Hub.connect(accounts[0]).setContractAddress(
+      'CGWeightTreeStorage',
+      await lockedTree.getAddress(),
+    );
+    await RandomSampling.connect(accounts[0]).initialize(); // re-resolve to the locked tree
+    expect(await lockedTree.backfillLocked()).to.equal(true);
+
+    // The gate fires before the draw, so no seeded CG is needed.
+    await expect(
+      RandomSampling.connect(node.operational).createChallenge(),
+    ).to.be.revertedWithCustomError(RandomSampling, 'ChallengeDrawPaused');
+  });
+
+  it('Test F — createChallenge settle-on-miss: a dominant STALE CG is reconciled (and the reconcile PERSISTS) before the draw lands on a live CG', async () => {
+    const node = await setupChallengingNode();
+    const epoch = await Chronos.getCurrentEpoch();
+
+    // Stale-dominant CG A: huge per-epoch weight (1e24/2 = 5e23), short lifetime, KA expires soon.
+    const cgA = await createPublicCG();
+    await seedKaCustom(cgA, epoch + 2n, 2n, 10n ** 24n);
+    // Live CG B: tiny weight (1), long lifetime, KA lives long.
+    const cgB = await createPublicCG();
+    const kaB = await seedKaCustom(cgB, epoch + 1000n, 1000n, 1000n);
+
+    const leafA0 = await CGWeightTreeStorage.cgWeight(cgA);
+    const leafB0 = await CGWeightTreeStorage.cgWeight(cgB);
+    // A's stale leaf dominates the weighted draw, so createChallenge deterministically lands on A first.
+    expect(leafA0).to.be.greaterThan(leafB0 * 10n ** 6n);
+
+    // Advance past A's lifetime + KA expiry, but well within B's. No re-settle, so A's BIT leaf
+    // stays at the old (over-stated) weight while its ledger value has decayed to 0.
+    const epochSeconds = Number(await Chronos.epochLength());
+    await time.increase(epochSeconds * 3);
+    const now = await Chronos.getCurrentEpoch();
+    expect(await ContextGraphValueStorage.getCGValueAtEpoch(cgA, now)).to.equal(0n); // A decayed
+    expect(await ContextGraphValueStorage.getCGValueAtEpoch(cgB, now)).to.be.greaterThan(0n); // B live
+    expect(await CGWeightTreeStorage.cgWeight(cgA)).to.equal(leafA0); // leaf still stale (over-stated)
+
+    // Production path: A dominates → drawn first → KA expired → settle-on-miss reconciles A's
+    // leaf to its true (0) value → A excluded → re-draw lands on the live CG B → SUCCESS (commits).
+    await RandomSampling.updateAndGetActiveProofPeriodStartBlock();
+    await RandomSampling.connect(node.operational).createChallenge();
+    const ch = await RandomSamplingStorage.getNodeChallenge(node.identityId);
+
+    // The challenge is for the live CG B...
+    expect(ch.knowledgeAssetId).to.equal(kaB);
+    // ...and settle-on-miss reconciled A's stale leaf to 0 AND it PERSISTED (the tx committed).
+    expect(await CGWeightTreeStorage.cgWeight(cgA)).to.equal(0n);
+    // B was the winning draw (not a miss), so its leaf is untouched.
+    expect(await CGWeightTreeStorage.cgWeight(cgB)).to.equal(leafB0);
   });
 
   it('Test A — submits a valid proof against the single store (solved=true)', async () => {

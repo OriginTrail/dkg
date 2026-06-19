@@ -759,7 +759,7 @@ describe('@unit Profile contract', function () {
   // =====================================================================
   // RFC 04 v0.3 / Issue #461 — relay-capability flag.
   // Multiaddrs are intentionally NOT stored on Profile — they live in
-  // per-round attestation KCs (RFC 04 §5.2).
+  // per-round attestation KAs (RFC 04 §5.2).
   // =====================================================================
 
   describe('Relay capability flag (RFC 04 v0.3 / Issue #461)', () => {

@@ -41,7 +41,9 @@ import {ERC721Enumerable} from "@openzeppelin/contracts/token/ERC721/extensions/
  */
 contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
     string private constant _NAME = "ContextGraphStorage";
-    string private constant _VERSION = "10.0.2";
+    // 10.0.3 — KC→KA terminology: public getters renamed getContextGraphKCCount/At/List →
+    //          getContextGraphKaCount/At/List (ABI selector change; no behavior change).
+    string private constant _VERSION = "10.0.3";
 
     // -----------------------------------------------------------------------
     // Bounds on participant list — anti-griefing cap.
@@ -90,11 +92,11 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
     // by the discovery beacon path instead.
     mapping(uint256 contextGraphId => bytes32) private _contextGraphNameHash;
 
-    // KC -> CG reverse lookup (Phase 10 random sampling).
+    // KA -> CG reverse lookup (Phase 10 random sampling).
     // Public for convenience; zero means "not registered".
     mapping(uint256 kaId => uint256 contextGraphId) public kaToContextGraph;
 
-    // CG -> [KC IDs] forward list for uniform random KC selection within a CG.
+    // CG -> [KA IDs] forward list for uniform random KA selection within a CG.
     mapping(uint256 contextGraphId => uint256[]) private _contextGraphKAList;
 
     // -----------------------------------------------------------------------
@@ -289,11 +291,11 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
     }
 
     // -----------------------------------------------------------------------
-    // KC <-> CG registration (Phase 8 publish flow + Phase 10 sampling)
+    // KA <-> CG registration (Phase 8 publish flow + Phase 10 sampling)
     // -----------------------------------------------------------------------
 
     /**
-     * @notice Bind a Knowledge Collection to a Context Graph.
+     * @notice Bind a Knowledge Asset to a Context Graph.
      * @dev Records both the reverse lookup (`kaToContextGraph[kaId] = cgId`)
      *      and the forward list (`_contextGraphKAList[cgId].push(kaId)`).
      *      Reverts on double registration.
@@ -318,40 +320,40 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
     }
 
     /**
-     * @notice Return the entire KC list for a context graph as a memory array.
+     * @notice Return the entire KA list for a context graph as a memory array.
      * @dev WARNING — ON-CHAIN CALLERS MUST NOT USE THIS GETTER. Gas cost is
      *      O(n) in the list length and the ABI decode copies the full array
      *      into memory. Phase 10 random sampling and any other on-chain
-     *      consumer MUST use `getContextGraphKCAt(cgId, index)` together
-     *      with `getContextGraphKCCount(cgId)` to fetch a single element at
+     *      consumer MUST use `getContextGraphKaAt(cgId, index)` together
+     *      with `getContextGraphKaCount(cgId)` to fetch a single element at
      *      a bounded cost. This full-array getter is retained for off-chain
      *      indexers (eth_call) where the gas cost is not charged.
      */
-    function getContextGraphKCList(
+    function getContextGraphKaList(
         uint256 contextGraphId
     ) external view returns (uint256[] memory) {
         return _contextGraphKAList[contextGraphId];
     }
 
-    function getContextGraphKCCount(
+    function getContextGraphKaCount(
         uint256 contextGraphId
     ) external view returns (uint256) {
         return _contextGraphKAList[contextGraphId].length;
     }
 
     /**
-     * @notice Return a single KC id at a given index within a CG's KC list.
+     * @notice Return a single KA id at a given index within a CG's KA list.
      * @dev O(1) indexed accessor for on-chain consumers (Phase 10 random
-     *      sampling). Reverts with `InvalidContextGraphConfig("kcIndex oob")`
+     *      sampling). Reverts with `InvalidContextGraphConfig("kaIndex oob")`
      *      on out-of-bounds access — empty list rejects all indices.
      */
-    function getContextGraphKCAt(
+    function getContextGraphKaAt(
         uint256 contextGraphId,
         uint256 index
     ) external view returns (uint256 kaId) {
         uint256[] storage list = _contextGraphKAList[contextGraphId];
         if (index >= list.length) {
-            revert KnowledgeAssetsLib.InvalidContextGraphConfig("kcIndex oob");
+            revert KnowledgeAssetsLib.InvalidContextGraphConfig("kaIndex oob");
         }
         return list[index];
     }
@@ -601,7 +603,7 @@ contract ContextGraphStorage is INamed, IVersioned, Guardian, ERC721Enumerable {
      * configuration and must accept ciphertext commitments.
      *
      * Used by `RandomSampling._pickWeightedChallenge` step 2 to decide
-     * whether the per-KC ciphertext-commitment filter applies (RFC-39
+     * whether the per-KA ciphertext-commitment filter applies (RFC-39
      * Phase A.5). Both call sites converge on this access-policy check.
      */
     function getIsCurated(

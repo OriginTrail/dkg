@@ -34,4 +34,7 @@ func.dependencies = [
   'ContextGraphStorage',
   'ContextGraphValueStorage',
   'ConvictionStakingStorage',
+  // Phase 10.x — RandomSampling.initialize() resolves CGWeightTreeStorage; the BIT
+  // index must be registered in the Hub before this script runs.
+  'CGWeightTreeStorage',
 ];

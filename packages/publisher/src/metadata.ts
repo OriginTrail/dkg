@@ -298,6 +298,47 @@ export function generateConfirmedFullMetadata(
   ];
 }
 
+/**
+ * GH #936 — explicit, deterministic per-root token map
+ * (`<ual>/<tokenId>` dkg:tokenId / dkg:entity) for MULTI-root KCs. Emitted via a
+ * SHARED helper so the publisher (originator) and the gossip / chain-reconcile
+ * replica paths expose an IDENTICAL, queryable rootEntity→tokenId mapping — the
+ * same multi-root KC must not surface different token rows depending on which
+ * node materialised it. Kept OUT of generateKCMetadata (metadata.test.ts pins
+ * that output to the collapsed `dkg:rootEntity` shape and forbids these
+ * predicates); both call sites append these rows alongside the confirmed
+ * metadata. `kaEntries` MUST already be in the canonical
+ * (lexicographically-sorted-by-rootEntity) tokenId order — both call sites sort
+ * before minting.
+ */
+/**
+ * GH #936 — the canonical root ordering used for deterministic compatibility
+ * tokenId assignment. The publisher (originator), the gossip path, and the
+ * chain-reconcile path MUST all assign `<ual>/<tokenId>` over roots sorted by
+ * THIS comparator, so every node derives the identical rootEntity→tokenId map.
+ * Shared here so the invariant is API-enforced rather than comment-enforced.
+ */
+export function compareRootIris(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+export function buildDeterministicTokenRows(
+  ual: string,
+  kaEntries: ReadonlyArray<{ tokenId: bigint; rootEntity: string }>,
+  metaGraph: string,
+): Quad[] {
+  if (kaEntries.length <= 1) return [];
+  const rows: Quad[] = [];
+  for (const ka of kaEntries) {
+    const subject = `${ual}/${ka.tokenId}`;
+    rows.push(
+      mq(subject, `${DKG}tokenId`, intLit(ka.tokenId), metaGraph),
+      mq(subject, DKG_ENTITY, ka.rootEntity, metaGraph),
+    );
+  }
+  return rows;
+}
+
 function mq(s: string, p: string, o: string, g: string): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
 }

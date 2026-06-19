@@ -16,7 +16,7 @@ import { GraphManager, type TripleStore, type Quad } from '@origintrail-official
 import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
-  generateConfirmedFullMetadata, getTentativeStatusQuad,
+  generateConfirmedFullMetadata, buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad,
   generateSubGraphRegistration,
   shouldApplyMaterialization, writeMaterializedVersion, withMaterializationLock,
   type MaterializedVersion,
@@ -1066,8 +1066,18 @@ export class FinalizationHandler {
     }
     const kaMetadata: KAMetadata[] = [];
 
-    for (let tokenIdx = 0; tokenIdx < rootEntities.length; tokenIdx++) {
-      const rootEntity = rootEntities[tokenIdx];
+    // GH #936 — assign per-root tokenIds over a CANONICAL (lexicographic) root
+    // order, NOT the SPARQL/gossip binding order. oxigraph binding order is
+    // store-history-dependent, so two replicas reconciling the same KC from
+    // chain would otherwise mint divergent root→tokenId maps. These tokenIds are
+    // local compatibility labels (the on-chain KA count is 1, no on-chain
+    // dependency — see dkg-publisher.ts), so a content-derived sort makes the
+    // map a pure function of the root SET: identical on every replica and on
+    // both the gossip and chain-reconcile promotion paths.
+    const orderedRoots = [...rootEntities].sort(compareRootIris);
+
+    for (let tokenIdx = 0; tokenIdx < orderedRoots.length; tokenIdx++) {
+      const rootEntity = orderedRoots[tokenIdx];
       const entityQuads = partitioned.get(rootEntity) ?? [];
       if (entityQuads.length === 0) continue;
       kaMetadata.push({
@@ -1159,6 +1169,16 @@ export class FinalizationHandler {
     } catch { /* tentative status may not exist */ }
 
     let metaQuads = generateConfirmedFullMetadata(kcMeta, kaMetadata, provenance);
+
+    // GH #936 — append the SHARED deterministic per-root token rows (no-op for
+    // single-root). This is the SAME helper the publisher uses on the originator
+    // path, so a locally-published and a chain-reconciled multi-root KC expose
+    // an identical, queryable rootEntity→tokenId map. graph = the default
+    // `<cg>/_meta` so the ctxGraphId remap below routes them to the per-cgId
+    // `_meta` (and dual-writes a root copy when keepRootCopyOnLabel).
+    metaQuads.push(
+      ...buildDeterministicTokenRows(ual, kaMetadata, `did:dkg:context-graph:${contextGraphId}/_meta`),
+    );
     if (ctxGraphId) {
       const defaultMeta = `did:dkg:context-graph:${contextGraphId}/_meta`;
       const targetMeta = contextGraphMetaUri(contextGraphId, ctxGraphId);

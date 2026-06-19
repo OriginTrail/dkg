@@ -80,6 +80,18 @@ export {
 } from './swm/verify-batch.js';
 export { createCGHostEnumerator, type CGHostEnumerator, type CGHostEnumeratorDeps } from './swm/enumerate-cg-hosts.js';
 export {
+  createSwmCatchupPeerSelector,
+  classifySwmCatchupPeerOutcome,
+  SwmCatchupPeerSelector,
+  SWM_CATCHUP_FALLBACK_PROBE_LIMIT,
+  SWM_CATCHUP_PEER_GOOD_TTL_MS,
+  SWM_CATCHUP_PEER_NEGATIVE_TTL_MS,
+  type SelectSwmCatchupPeersInput,
+  type SelectSwmCatchupPeersResult,
+  type SwmCatchupPeerOutcome,
+  type SwmCatchupPeerSelectorOptions,
+} from './swm/swm-catchup-peer-selection.js';
+export {
   mintMemberAttestation,
   verifyMemberAttestation,
   computeAttestationDigest,
@@ -165,6 +177,17 @@ export {
   type TrackInput,
   type TrackedRecordSnapshot,
 } from './swm/ack-quorum.js';
+export {
+  classifySwmFanoutPeerOutcome,
+  createSwmFanoutPeerSelector,
+  SWM_FANOUT_PEER_GOOD_TTL_MS,
+  SWM_FANOUT_PEER_NEGATIVE_TTL_MS,
+  SWM_FANOUT_UNKNOWN_PROBE_LIMIT,
+  type SelectSwmFanoutPeersInput,
+  type SelectSwmFanoutPeersResult,
+  type SwmFanoutPeerOutcome,
+  type SwmFanoutPeerSelectorOptions,
+} from './swm/swm-fanout-peer-selection.js';
 export * from './source-worker.js';
 export * from './source-registry.js';
 export * from './generic-sql-source.js';

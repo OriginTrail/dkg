@@ -419,6 +419,19 @@
   },
   {
     "inputs": [],
+    "name": "cgWeightTreeStorage",
+    "outputs": [
+      {
+        "internalType": "contract CGWeightTreeStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "chronos",
     "outputs": [
       {

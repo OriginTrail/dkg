@@ -181,7 +181,9 @@ const PINNED_DIGESTS: Record<string, string> = {
   // from chain events — no off-chain discovery channel required for
   // registered CGs.
   ContextGraphs:                'a27718118b5d03626b0e3389ad854451caf3ed0c702cea1b770953bb439d589e',
-  ContextGraphStorage:          '3c020eecc06c6332738f80358be922d6837d9332fed194e4e2bdf87eec6050a0',
+  // Repinned: KC→KA rename of the public getters (getContextGraphKCCount/At/List →
+  // getContextGraphKaCount/At/List); adapter updated, contract bumped to 10.0.3.
+  ContextGraphStorage:          '30d101a1794836279085d21dc8e7acb83fe6545ab1bc1455fab80fc33ecafa8c',
   // Identity / staking — consulted on every publish.
   Hub:                          '36976cc71bb87963b8b715791b32e4eb6b7bb85c712998afd6184221289a506b',
   Identity:                     'ca39efe9bd9ec4fd8ae67dccdf9eb888bf91232341c3a56216624477620ff4d8',
@@ -254,7 +256,9 @@ const PINNED_DIGESTS: Record<string, string> = {
   // Updated OT-RFC-51: see the conviction-pin note above — createAccount arity,
   // setPrimaryNode/ZeroPrimaryNode/PrimaryNodeUnchanged/moveEpochPublishingAllocation,
   // widened Account tuple, realized-publish credit removed / publishingAllocation rename.
-  PublishingConviction:         '6ad9aa97f4c049c126f302658257363a097ae4fdcc1a12f7d084082f81b44b07',
+  // Repinned: KC→KA rename of error InvalidConvictionKcEpochs → InvalidConvictionKaEpochs
+  // (error selector change; contract bumped to 10.0.5).
+  PublishingConviction:         'a4d44a594509e508091b1f91adfb1d68bec65e38e497f054116493af327ff096',
   // Updated OT-RFC-51: storage surface for the above — primaryNode field on the
   // widened Account tuple + the seeded per-epoch publishing allocation getters.
   PublishingConvictionStorage:  '7eeae71f0efd9183fce232ccc669227dfd70fe4f93b4663392a0a52c1ccba859',

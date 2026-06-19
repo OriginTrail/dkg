@@ -9,7 +9,6 @@ import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
 import {StakingStorage} from "./storage/StakingStorage.sol";
 import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
-import {V8MigrationEligibility} from "./storage/V8MigrationEligibility.sol";
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {RandomSamplingStorage} from "./storage/RandomSamplingStorage.sol";
 import {EpochStorage} from "./storage/EpochStorage.sol";
@@ -116,14 +115,10 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     //           * `stakingStorage` is retained ONLY for `_convertToNFT`'s
     //             V8→V10 drain at cutover.
     //   3.1.0 — V8→V10 migration conviction credit (CSS v4.1.0):
-    //           * `_convertToNFT` consults the new `V8MigrationEligibility`
-    //             registry and, for migrants picking lockTier 6 or 12 who
-    //             held continuous V8 stake on the destination node for the
-    //             60 days preceding V10 launch, shortens the V10 NFT's
-    //             default `expiryTimestamp` by 2 epochs (60 days).
-    //           * Eligibility set is fixed off-chain and frozen on-chain
-    //             before migration opens; no V10 hot-path code reconstructs
-    //             V8 history.
+    //           * `allocateFromCredit`, for migrants picking lockTier 6 or 12,
+    //             shortens the V10 NFT's default `expiryTimestamp` by
+    //             `convictionCreditSeconds` (universal — no eligibility
+    //             registry; every 6/12 migration allocation earns it).
     //           * `convictionStorage.createPosition(...)` calls now pass the
     //             new `expiryShortenedBy` arg (CSS v4.1.0). `stake` always
     //             passes 0; `_convertToNFT` passes 0 except for eligible
@@ -158,11 +153,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         exclusively (v4.0.0 consolidation).
     StakingStorage public stakingStorage;
     ConvictionStakingStorage public convictionStorage;
-    /// @notice v3.1.0 — frozen registry of V8 delegators eligible for the
-    ///         60-day V10 conviction-lock credit. Read by `_convertToNFT`
-    ///         on every migration to decide whether the destination NFT's
-    ///         `expiryTimestamp` is shortened by 2 epochs.
-    V8MigrationEligibility public v8MigrationEligibility;
     Chronos public chronos;
     RandomSamplingStorage public randomSamplingStorage;
     ShardingTableStorage public shardingTableStorage;
@@ -194,20 +184,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         wrapper burns `tokenId` on the back half.
     event Withdrawn(uint256 indexed tokenId, address indexed staker, uint96 amount);
     event RewardsClaimed(uint256 indexed tokenId, uint96 amount);
-    /// @notice Authoritative V8→V10 migration event. `rawAbsorbed` is the
-    ///         combined `stakeBase + pendingWithdrawal` amount (D8). `isAdmin`
-    ///         distinguishes self-migration (user called `selfMigrateV8`)
-    ///         from straggler-rescue migration (admin called `adminMigrateV8`,
-    ///         D7 dual-path).
-    event ConvertedFromV8(
-        address indexed delegator,
-        uint256 indexed tokenId,
-        uint72 indexed identityId,
-        uint96 stakeBaseAbsorbed,
-        uint96 pendingAbsorbed,
-        uint40 lockTier,
-        bool isAdmin
-    );
 
     // ========================================================================
     // Errors
@@ -222,8 +198,8 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     error ProfileDoesNotExist();
     error RewardOverflow();
     error PositionNotFound();
-    error NoV8StakeToConvert();
     error UnclaimedEpochs();
+    error V8StakingStillLive();
 
     // ========================================================================
     // Constructor + initialize
@@ -242,7 +218,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     function initialize() external onlyHub {
         stakingStorage = StakingStorage(hub.getContractAddress("StakingStorage"));
         convictionStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
-        v8MigrationEligibility = V8MigrationEligibility(hub.getContractAddress("V8MigrationEligibility"));
         chronos = Chronos(hub.getContractAddress("Chronos"));
         randomSamplingStorage = RandomSamplingStorage(hub.getContractAddress("RandomSamplingStorage"));
         shardingTableStorage = ShardingTableStorage(hub.getContractAddress("ShardingTableStorage"));
@@ -786,8 +761,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             // operator-fee math, nothing to settle. Skipping here collapses a
             // dormant-epoch iteration from ~25k gas (4 SLOADs + 1 SSTORE for
             // the fee flag) to ~2k gas (single SLOAD + continue). This is
-            // what keeps long-dormant tier-0 positions claimable; see the
-            // dormancy-bomb finding in CODE_REVIEW_V10_D26.md §H1.
+            // what keeps long-dormant tier-0 positions claimable.
             uint256 scorePerStake36 = randomSamplingStorage.getEpochLastScorePerStake(identityId, e);
             if (scorePerStake36 == 0) continue;
 
@@ -884,117 +858,45 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         emit RewardsClaimed(tokenId, rewardU96);
     }
 
-    /**
-     * @notice Self-service V8 → V10 migration. The delegator calls the NFT
-     *         wrapper's `selfMigrateV8`, which forwards here with
-     *         `delegator == msg.sender`. Drains their V8 address-keyed
-     *         delegation on `identityId` and seeds a V10 NFT-backed
-     *         position at `migrationEpoch = currentEpoch`.
-     *
-     * @dev D7 — dual-path migration: this is the self path. The straggler-
-     *      rescue path is `adminConvertToNFT`, which takes an explicit
-     *      `delegator` and is gated at the NFT wrapper by
-     *      `onlyOwnerOrMultiSigOwner`. Both paths share `_convertToNFT`.
-     */
-    function selfConvertToNFT(
-        address staker,
-        uint256 tokenId,
-        uint72 identityId,
-        uint40 lockTier
-    ) external onlyConvictionNFT {
-        _convertToNFT(staker, tokenId, identityId, lockTier, false);
-    }
+    // ========================================================================
+    // V8→V10 "pool & allocate" migration workers
+    // ========================================================================
+    //
+    // The NFT wrapper (DKGStakingConvictionNFT) is the only caller
+    // (onlyConvictionNFT). It owns the tokenId counter + ERC-721 mint and the
+    // owner gating; these workers do the privileged StakingStorage/CSS
+    // mutations. `drainV8ToCredit` is the drain half of the old `_convertToNFT`
+    // (now per-node, mints nothing, credits CSS); `allocateFromCredit` is the
+    // V10-seed half (now funded from migration credit, not a fresh transfer).
 
-    /**
-     * @notice Admin straggler-rescue V8 → V10 migration. Takes an explicit
-     *         `delegator` (the V8 address whose delegation is being drained
-     *         and who receives the freshly-minted V10 NFT). Access-gated at
-     *         the NFT wrapper layer by `onlyOwnerOrMultiSigOwner`.
-     *
-     * @dev D7 — stragglers are delegators who haven't migrated by
-     *      `v10LaunchEpoch`. Admin is responsible for picking a sensible
-     *      default `lockTier` (typically `0` — the rest-state tier — so
-     *      the user gets their full balance with no lock surprise).
-     */
-    function adminConvertToNFT(
+    /// @notice Drain ALL of `delegator`'s V8 stake on `identityId` (active
+    ///         stakeBase + any pending withdrawal, D8) into their migration
+    ///         credit on CSS. Returns the drained `total` so the wrapper can
+    ///         aggregate across nodes and revert if the grand total is zero;
+    ///         a node with no V8 stake contributes 0 (no revert here).
+    /// @dev    no per-source eligibility: the full drained amount is
+    ///         credited to the delegator; the tier-6/12 lock-credit is decided
+    ///         later in `allocateFromCredit` from the chosen tier.
+    function drainV8ToCredit(
         address delegator,
-        uint256 tokenId,
-        uint72 identityId,
-        uint40 lockTier
-    ) external onlyConvictionNFT {
-        _convertToNFT(delegator, tokenId, identityId, lockTier, true);
-    }
-
-    /**
-     * @notice Admin: set the V10 launch epoch marker on CSS. This is the
-     *         retroactive-attribution boundary used by `adminMigrateV8`
-     *         bookkeeping and off-chain analytics. Expected to be called
-     *         exactly once, in the deploy-script migration cutover. Gate
-     *         enforced at the NFT wrapper (`onlyOwnerOrMultiSigOwner`).
-     *
-     * @dev D7 — the V10 launch epoch is the cutoff past which V8-era
-     *      state should not continue to accrue rewards; anything the
-     *      migration process hasn't swept by this epoch is treated as a
-     *      straggler and rescued via `adminConvertToNFT`.
-     */
-    function setV10LaunchEpoch(uint256 epoch) external onlyConvictionNFT {
-        convictionStorage.setV10LaunchEpoch(epoch);
-    }
-
-    /**
-     * @dev Core V8→V10 migration worker. Absorbs BOTH the V8 active
-     *      stakeBase AND any pending V8 withdrawal (D8) into the new V10
-     *      position's `raw`. TRAC stays in the StakingStorage vault; no
-     *      external token transfer happens here.
-     *
-     * V8-side state drain:
-     *   - `setDelegatorStakeBase(id, v8Key, 0)` — zero the V8 key's active stake.
-     *   - `deleteDelegatorWithdrawalRequest(id, v8Key)` (only if pending).
-     *   - `decreaseNodeStake(id, stakeBase)` — V8 pending was already
-     *     excluded from nodeStake at request time, so we only subtract
-     *     the active portion.
-     *   - `decreaseTotalStake(stakeBase)` — same reasoning.
-     *
-     * V10-side state seed:
-     *   - `cs.createPosition(tokenId, id, stakeBase + pending, lockTier,
-     *     migrationEpoch = currentEpoch, expiryShortenedBy)`. This also
-     *     pushes the tokenId into `nodeTokens[id]` and increments
-     *     nodeStakeV10 + totalStakeV10 in the same call (D5 + D15).
-     *     `expiryShortenedBy` is the V8→V10 conviction credit
-     *     (`2 * chronos.epochLength()` for eligible 6m/12m migrants,
-     *     0 otherwise). See v3.1.0 release note above.
-     *
-     * Preconditions absorbed in the V10 migration simplification:
-     *   - NO V8 rolling-rewards / lastClaimedEpoch precondition: D3 drops
-     *     DelegatorsInfo; pre-migration rewards are handled by `claim()`'s
-     *     D6 retroactive branch starting from `migrationEpoch`.
-     *   - NO V8 `Staking.prepareForStakeChange` cross-call: D13/D17 drop
-     *     V8 Staking from the hub.
-     *
-     * `migrationEpoch = currentEpoch` anchors the retroactive claim window
-     * so `claim()` starts the reward walk at the migration epoch
-     * (inclusive) and not at `currentEpoch - 1` (the default for fresh V10
-     * stakes).
-     */
-    function _convertToNFT(
-        address delegator,
-        uint256 tokenId,
-        uint72 identityId,
-        uint40 lockTier,
-        bool isAdmin
-    ) internal {
-        uint256 currentEpoch = chronos.getCurrentEpoch();
-
+        uint72 identityId
+    ) external onlyConvictionNFT returns (uint96 total) {
+        // Freeze-first invariant (on-chain): the V8 `Staking` logic must be
+        // unregistered before ANY drain (admin sweep OR self-migrate). A drain
+        // zeroes stakeBase without settling the reward cursor; if V8 `Staking`
+        // is still live it keeps computing rewards/sharding off StakingStorage,
+        // so draining against live state corrupts it. Gating here covers every
+        // drain path through one chokepoint; selfMigrate auto-opens at freeze.
+        if (hub.isContract("Staking")) revert V8StakingStillLive();
         bytes32 v8Key = keccak256(abi.encodePacked(delegator));
         StakingStorage ss = stakingStorage;
         uint96 stakeBase = ss.getDelegatorStakeBase(identityId, v8Key);
         uint96 pending = ss.getDelegatorWithdrawalRequestAmount(identityId, v8Key);
-        // D8 — absorb BOTH amounts; straggler with zero active stake but a
-        // pending V8 withdrawal is still a valid migration target.
-        uint96 total = stakeBase + pending;
-        if (total == 0) revert NoV8StakeToConvert();
+        total = stakeBase + pending;
+        if (total == 0) return 0;
 
-        // V8 drain — see header NatSpec for the node/total stake reasoning.
+        // V8 drain. Pending was already excluded from node/total stake at
+        // request time, so only the active base is decremented.
         if (stakeBase > 0) {
             ss.setDelegatorStakeBase(identityId, v8Key, 0);
             ss.decreaseNodeStake(identityId, stakeBase);
@@ -1003,96 +905,150 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         if (pending > 0) {
             ss.deleteDelegatorWithdrawalRequest(identityId, v8Key);
         }
-        // Move the migrated TRAC physically from StakingStorage (SS) to
-        // ConvictionStakingStorage (CSS). The V8-side decrements above zero out
-        // SS's accounting; without this transfer CSS would be undercollateralized
-        // by Σ(migrated), allowing later withdrawers to drain fresh V10 deposits.
-        // StakingStorage.transferStake is onlyContracts and StakingV10 is
-        // Hub-registered, so the call is authorized.
+        // Move the migrated TRAC SS -> CSS so the credit stays collateralized.
         ss.transferStake(address(convictionStorage), total);
 
-        // Settle V10 side at zero stake — baseline the V10 token's score
-        // cursor at `currentEpoch` so a later `claim()` doesn't collect
-        // pre-migration node score via the V10 key.
-        _prepareForStakeChangeV10(currentEpoch, tokenId, identityId);
-
-        // maxStake cap on the destination V10 node stake (post-migration
-        // cap reads V10 canonical).
-        {
-            uint256 maxStake = uint256(parametersStorage.maximumStake());
-            uint256 v10NodeAfter = convictionStorage.getNodeStakeV10(identityId) + uint256(total);
-            if (v10NodeAfter > maxStake) revert MaxStakeExceeded();
-        }
-
-        // v3.1.0 — V8→V10 conviction credit. Eligible delegators (continuous
-        // V8 stake on this node for the 60d preceding V10 launch, recorded in
-        // the frozen `V8MigrationEligibility` registry) who pick a high-
-        // conviction tier (6 or 12) get their lock shortened by a fixed
-        // 60 days. Lower tiers and ineligible migrants migrate at the
-        // default lock.
-        //
-        // Frozen-registry precondition: every migration must read against a
-        // finalised eligibility set. Without `frozen() == true`, HubOwner
-        // could still grow the set after migrations open, which would let
-        // two otherwise-identical migrants receive different lock expiries
-        // depending on tx ordering. Failing loud (vs. silently skipping the
-        // bonus) protects eligible delegators against the operator
-        // mis-ordering the runbook — they get a clean revert and can retry
-        // after `freeze()` lands, instead of paying the migration tx and
-        // losing the credit. The runbook
-        // (V8_MIGRATION_CREDIT_RUNBOOK.md) already calls `freeze()` as
-        // the last step before opening migration, so this just enforces
-        // the documented invariant on-chain.
-        uint40 expiryShortenedBy = 0;
-        if (lockTier == 6 || lockTier == 12) {
-            V8MigrationEligibility eligibility = v8MigrationEligibility;
-            require(eligibility.frozen(), "V8 eligibility not frozen");
-            if (eligibility.isEligible(identityId, delegator)) {
-                // Fixed 60-day credit, expressed in seconds. Earlier revs
-                // computed this as `chronos.epochLength() * 2` to track
-                // the "two epochs" framing, but that silently degrades on
-                // networks where `epochLength` is tuned (devnet: 1h →
-                // 2h credit; testnet: 1d → 2d credit). The off-chain
-                // eligibility window in `V8MigrationEligibility` is a
-                // fixed 60-day wall-clock window preceding V10 launch,
-                // so the credit must match — independent of the
-                // destination network's epoch tuning.
-                expiryShortenedBy = uint40(60 days);
-            }
-        }
-
-        // L11 — multiplier18 is no longer passed; CSS reads it from the tier table.
-        convictionStorage.createPosition(
-            tokenId,
-            identityId,
-            total,
-            lockTier,
-            uint32(currentEpoch), // D6 — retroactive claim boundary
-            expiryShortenedBy // v3.1.0 — V8→V10 conviction credit (0 if not applied)
-        );
-
-        // Sharding-table: V8 drain + V10 seed of the same on-node total is
-        // typically a wash, but the guards handle the edge cases (node was
-        // only in ST via V8 or only via the combined bar, and the V10
-        // canonical aggregate now needs to be checked alone).
-        {
-            ShardingTableStorage sts = shardingTableStorage;
-            uint256 minStake = uint256(parametersStorage.minimumStake());
-            uint256 v10NodeStake = convictionStorage.getNodeStakeV10(identityId);
-            if (!sts.nodeExists(identityId) && v10NodeStake >= minStake) {
-                shardingTable.insertNode(identityId);
-            }
-            // V8 drain-induced ST removals are intentionally not run here:
-            // the old ST entry was gated on the V8+V10 combined bar, and
-            // the V10 canonical aggregate is what the post-migration ST
-            // maintenance reads. The next flow that touches the node will
-            // prune it if subcritical.
-        }
-
-        ask.recalculateActiveSet();
-
-        emit ConvertedFromV8(delegator, tokenId, identityId, stakeBase, pending, lockTier, isAdmin);
+        convictionStorage.addMigrationCredit(delegator, total);
     }
+
+    /// @notice Drain node `identityId`'s V8 operator fee (the resting
+    ///         `operatorFeeBalance` PLUS any open fee-withdrawal request) into
+    ///         `operator`'s migration credit on CSS. Returns the drained
+    ///         `total`; a node with no fee contributes 0 (no revert here), so
+    ///         the wrapper can sweep in bulk.
+    /// @dev    "one credit": the operator fee folds
+    ///         into the SAME `migrationCredit` bucket as delegator stake, so
+    ///         the operator recovers it exactly like a delegator — `allocate`
+    ///         at tier 0 (immediately withdrawable) or 6/12 (conviction).
+    ///
+    ///         Operator addresses are NOT recoverable on-chain — IdentityStorage
+    ///         holds key *hashes*, not addresses — so the off-chain sweep
+    ///         supplies `operator` and this function validates it currently
+    ///         holds ADMIN_KEY on the node (mirroring who V8
+    ///         `finalizeOperatorFeeWithdrawal` would have paid). A stale/wrong
+    ///         address REVERTS rather than crediting silently, so a
+    ///         mis-resolved operator can never be paid; the sweep hard-fails
+    ///         and re-resolves. The check is skipped only when there is nothing
+    ///         to drain (`total == 0`), keeping re-runs idempotent and cheap.
+    function drainOperatorFeeToCredit(
+        uint72 identityId,
+        address operator
+    ) external onlyConvictionNFT returns (uint96 total) {
+        // Freeze-first invariant (see drainV8ToCredit) — no fee drain while V8
+        // Staking is still live and could finalize/restake the same balance.
+        if (hub.isContract("Staking")) revert V8StakingStillLive();
+        StakingStorage ss = stakingStorage;
+        uint96 feeBalance = ss.getOperatorFeeBalance(identityId);
+        uint96 feeRequest = ss.getOperatorFeeWithdrawalRequestAmount(identityId);
+        total = feeBalance + feeRequest;
+        if (total == 0) return 0;
+
+        // Credit only an address that currently controls the node.
+        if (
+            !identityStorage.keyHasPurpose(
+                identityId,
+                keccak256(abi.encodePacked(operator)),
+                IdentityLib.ADMIN_KEY
+            )
+        ) {
+            revert Permissions.OnlyProfileAdminFunction(operator);
+        }
+
+        // Zero the V8 fee slots (idempotent: a re-drain reads 0, returns 0).
+        // The open-request amount stayed in the SS vault at request time (no
+        // token moved), so deleting it here releases it for the SS->CSS move.
+        if (feeBalance > 0) {
+            ss.setOperatorFeeBalance(identityId, 0);
+        }
+        if (feeRequest > 0) {
+            ss.deleteOperatorFeeWithdrawalRequest(identityId);
+        }
+        // Move the migrated TRAC SS -> CSS so the credit stays collateralized.
+        ss.transferStake(address(convictionStorage), total);
+
+        convictionStorage.addMigrationCredit(operator, total);
+    }
+
+    /// @notice Spend `amount` of `staker`'s migration credit into a fresh V10
+    ///         conviction position on `targetNode` at `lockTier`. Runs the full
+    ///         stake tail (score-cursor baseline → createPosition → sharding
+    ///         insert → ask recalc). Any tier-6/12 allocation applies the
+    ///         `convictionCreditSeconds` lock-shortening (universal). The
+    ///         wrapper supplies `tokenId` and mints after.
+    function allocateFromCredit(
+        address staker,
+        uint256 tokenId,
+        uint72 targetNode,
+        uint96 amount,
+        uint40 lockTier
+    ) external onlyConvictionNFT returns (bool creditApplied) {
+        if (!profileStorage.profileExists(targetNode)) revert ProfileDoesNotExist();
+        ConvictionStakingStorage cs = convictionStorage;
+        // Active-tier check: createPosition skips _requireActiveTier on the
+        // migration path (migrationEpoch > 0), and this is a NEW tier choice
+        // (not honoring a prior V8 commitment), so reject deactivated tiers —
+        // EXCEPT tier 0. Tier 0 is the no-lock recovery sink that guarantees
+        // admin-drained credit is always withdrawable in two txs (allocate
+        // tier-0 -> withdraw); exempting it keeps that safety net independent of
+        // whether the owner has retired the no-lock product.
+        require(lockTier == 0 || cs.getTier(lockTier).active, "Inactive tier");
+
+        // maxStake cap on the destination node (post-allocation aggregate).
+        if (cs.getNodeStakeV10(targetNode) + uint256(amount) > uint256(parametersStorage.maximumStake())) {
+            revert MaxStakeExceeded();
+        }
+
+        // Debit credit (reverts if amount == 0 or > migrationCredit). The
+        // tier-6/12 conviction lock-credit is universal — any 6/12
+        // migration allocation earns it (no per-staker eligibility).
+        cs.spendMigrationCredit(staker, amount);
+        // `creditApplied` must reflect shortening that was ACTUALLY applied:
+        // a tier-6/12 allocation while `convictionCreditSeconds == 0` (credit
+        // not yet configured) shortens by 0, so the flag/event would otherwise
+        // claim a credit that wasn't granted. Gate it on a non-zero duration.
+        uint40 creditSeconds = cs.convictionCreditSeconds();
+        creditApplied = (lockTier == 6 || lockTier == 12) && creditSeconds > 0;
+        uint40 expiryShortenedBy = creditApplied ? creditSeconds : 0;
+
+        uint256 currentEpoch = chronos.getCurrentEpoch();
+        // Baseline the V10 score cursor BEFORE createPosition so the creation
+        // epoch is not retroactively over-credited.
+        _prepareForStakeChangeV10(currentEpoch, tokenId, targetNode);
+
+        cs.createPosition(tokenId, targetNode, amount, lockTier, uint32(currentEpoch), expiryShortenedBy);
+
+        if (
+            !shardingTableStorage.nodeExists(targetNode) &&
+            cs.getNodeStakeV10(targetNode) >= uint256(parametersStorage.minimumStake())
+        ) {
+            shardingTable.insertNode(targetNode);
+        }
+        ask.recalculateActiveSet();
+    }
+
+    /// @notice Set the V8→V10 conviction lock-credit (seconds) on CSS. Driven
+    ///         by the owner-gated `setConvictionCreditSeconds` entrypoint on the
+    ///         NFT wrapper (no freeze gate; settable any time pre-sweep).
+    function setConvictionCreditSeconds(uint40 secondsValue) external onlyConvictionNFT {
+        convictionStorage.setConvictionCreditSeconds(secondsValue);
+    }
+
+    /**
+     * @notice Admin: set the V10 launch epoch marker on CSS. This is the
+     *         retroactive-attribution boundary used by the admin migration
+     *         bookkeeping and off-chain analytics. Expected to be called
+     *         exactly once, in the deploy-script migration cutover. Gate
+     *         enforced at the NFT wrapper (`onlyOwnerOrMultiSigOwner`).
+     *
+     * @dev D7 — the V10 launch epoch is the cutoff past which V8-era
+     *      state should not continue to accrue rewards; anything the
+     *      migration process hasn't swept by this epoch is treated as a
+     *      straggler and drained via `adminDrainBatch` / `adminMigrateToCredit`.
+     */
+    function setV10LaunchEpoch(uint256 epoch) external onlyConvictionNFT {
+        convictionStorage.setV10LaunchEpoch(epoch);
+    }
+
 
     // ========================================================================
     // Internal helpers — V10 score-per-stake settlement

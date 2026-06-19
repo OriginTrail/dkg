@@ -111,6 +111,13 @@ export const GOSSIP_DIAL_TIMEOUT_MS = 10_000;
  * (each of which fires its own connection:open).
  */
 export const CATCHUP_ON_CONNECT_COOLDOWN_MS = 60_000;
+/**
+ * A full libp2p disconnect shorter than this is treated as relay/direct
+ * transport churn, not a meaningful offline gap. Without this grace window,
+ * short circuit-relay flaps reset the catch-up cooldown and every reconnect
+ * can fan out a full sync round.
+ */
+export const SYNC_RECONNECT_FLAP_GRACE_MS = 15_000;
 
 // ── Reconciler / staleness ────────────────────────────────────────────
 /**

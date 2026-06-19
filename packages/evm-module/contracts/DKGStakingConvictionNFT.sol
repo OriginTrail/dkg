@@ -46,16 +46,19 @@ import {HubLib} from "./libraries/HubLib.sol";
  *
  *      User-facing entry points:
  *        - `createConviction`                             — mint path, fresh V10 stake
- *        - `selfMigrateV8`                                — mint path, D7 self migration
- *        - `adminMigrateV8` / `adminMigrateV8Batch`       — mint path, D7 straggler rescue (admin)
+ *        - `allocate`                                     — mint path, spends migration credit
+ *        - `selfMigrate` / `selfMigrateOperatorFee`       — self-service drain into credit (straggler backstop; no mint)
  *        - `finalizeMigrationBatch`                       — DAO closer (D11), sets `v10LaunchEpoch`
  *        - `relock`                                       — D21 burn-and-mint tier re-commit
  *        - `redelegate`                                   — D25 in-place node swap (stable tokenId)
  *        - `withdraw`                                     — D14 atomic burn-and-payout
  *        - `claim`
+ *      Admin entry points (admin-push drain into credit; no mint):
+ *        - `adminDrainBatch` / `adminMigrateToCredit`     — delegator stake (+pending) → credit
+ *        - `adminDrainOperatorFeesBatch`                  — operator fees → credit
  *
  *      NFT lifecycle:
- *        - `createConviction` / `selfMigrateV8` / `adminMigrateV8*`:
+ *        - `createConviction` / `allocate`:
  *          fresh mints. Monotonic `nextTokenId`.
  *        - `relock` (D21): burns `oldTokenId` and mints `newTokenId`.
  *          CSS-level position state migrates via the D23
@@ -89,7 +92,10 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     //           points and events.
     //         * L8 — `identityId != 0` guard added on mint paths so
     //           ambiguous "zero-node" mints fail fast at the wrapper.
-    string private constant _VERSION = "10.0.2";
+    //         * 10.0.3 — operator-fee migration: added
+    //           `adminDrainOperatorFeesBatch` + `OperatorFeeMigrated`; bumped so
+    //           the breaking migration ABI is detectable via `version()`.
+    string private constant _VERSION = "10.0.3";
 
     // ========================================================================
     // Constants
@@ -177,20 +183,32 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     ///         alone still see the exit.
     event PositionWithdrawn(uint256 indexed tokenId, uint96 amount);
 
-    /// @notice Emitted by `selfMigrateV8` / `adminMigrateV8` when a V8
-    ///         address-keyed delegation is migrated into a V10 NFT-backed
-    ///         position. The authoritative event (with stakeBase /
-    ///         pending absorption split and `isAdmin` flag — D7/D8) is
-    ///         emitted by `StakingV10.selfConvertToNFT` /
-    ///         `StakingV10.adminConvertToNFT`; this wrapper-layer event is
-    ///         kept so off-chain indexers watching the NFT contract still
-    ///         see the mint.
-    event ConvertedFromV8(
+    /// @notice Emitted when a delegator's V8 stake is drained into migration
+    ///         credit by the admin sweep. `credited` is the total
+    ///         moved into that delegator's credit by this event.
+    event MigrationStarted(address indexed delegator, uint96 credited);
+
+    /// @notice Emitted when a node's V8 operator fee (resting balance + any open
+    ///         fee-withdrawal request) is drained into the operator's migration
+    ///         credit by the admin sweep. Keyed by `identityId` so
+    ///         per-node fee migration reconciles against the V8 vault; `operator`
+    ///         is the validated current ADMIN_KEY holder that was credited.
+    /// @dev    Reconciliation: total migration credit issued = Σ `MigrationStarted`
+    ///         (delegator stake) + Σ `OperatorFeeMigrated` (operator fees). An
+    ///         indexer must sum BOTH events or it undercounts operators.
+    event OperatorFeeMigrated(uint72 indexed identityId, address indexed operator, uint96 credited);
+
+    /// @notice Emitted when migration credit is allocated into a fresh V10
+    ///         conviction position. `creditApplied` is true when the tier-6/12
+    ///         conviction lock-credit was applied (any 6/12 migration allocation;
+    ///         universal).
+    event Allocated(
         address indexed delegator,
         uint256 indexed tokenId,
-        uint72 indexed identityId,
+        uint72 indexed targetNode,
+        uint96 amount,
         uint40 lockTier,
-        bool isAdmin
+        bool creditApplied
     );
 
     /// @notice Emitted by `finalizeMigrationBatch` when the DAO closes the
@@ -212,8 +230,11 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     error InvalidLockTier();
     error NotPositionOwner();
     error ZeroAmount();
-    /// @notice Thrown by `adminMigrateV8Batch` when the input array is empty.
-    error EmptyBatch();
+    /// @notice Thrown by `adminMigrateToCredit` when the delegator
+    ///         has no V8 stake across the given source nodes (nothing drained,
+    ///         so no credit would be created). `adminDrainBatch` SKIPS such
+    ///         entries instead of reverting.
+    error NothingToMigrate();
     /// @notice L8 — rejected at the wrapper layer when a mint-path or
     ///         redelegate call would otherwise forward a zero identity to
     ///         StakingV10 (which uses `identityId == 0` internally as the
@@ -255,7 +276,8 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     }
 
     // ========================================================================
-    // Admin gate — used by D7 `adminMigrateV8*` and D11 `finalizeMigrationBatch`
+    // Admin gate — used by the admin drains (`adminDrainBatch` /
+    // `adminMigrateToCredit` / `adminDrainOperatorFeesBatch`) and `finalizeMigrationBatch`
     // ========================================================================
 
     /// @dev Matches the ownership + multisig pattern used by other admin
@@ -286,7 +308,7 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     // Source of truth is `ConvictionStakingStorage._tiers`. The baseline
     // ladder seeded at `CSS.initialize()` is {0, 1, 3, 6, 12} mapping to
     // {1x, 1.5x, 2x, 3.5x, 6x} and {0, 30d, 90d, 180d, 360d} wall-clock
-    // lock durations — matching the roadmap in `04_TOKEN_ECONOMICS §4.1`.
+    // lock durations.
     // New tiers can be appended by the HubOwner via `CSS.addTier`; this
     // helper picks them up automatically via the storage read.
     //
@@ -499,117 +521,189 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     }
 
     // ========================================================================
-    // D7/D8/D11 — V8 → V10 migration entry points
+    // V8 → V10 "pool & allocate" migration
     // ========================================================================
     //
-    // D7 — dual migration paths:
-    //   - `selfMigrateV8(identityId, lockTier)`: user-driven. The V8
-    //     address-keyed delegation on `identityId` belonging to `msg.sender`
-    //     is drained and a fresh V10 NFT is minted to them.
-    //   - `adminMigrateV8(delegator, identityId, lockTier)`: admin-driven
-    //     straggler rescue. A V8 delegator who missed the self-migration
-    //     window is rescued by admin; NFT minted to the delegator, not
-    //     to the admin caller.
-    //   - `adminMigrateV8Batch(delegators[], identityId, lockTier)`: D11
-    //     batched admin migration for gas-efficient mass rescue.
+    // Admin-push: the protocol drains EVERY wallet's V8 stake across
+    // its source nodes into that wallet's in-protocol migration credit, via
+    // `adminDrainBatch` (bulk) / `adminMigrateToCredit` (single delegator) —
+    // both onlyOwnerOrMultiSigOwner. Users never drain themselves; they only
+    // call `allocate` to spend their pre-populated credit into V10 conviction
+    // positions (node + amount + tier), repeatably. A tier-6/12 allocation earns
+    // the conviction lock-credit (universal — no eligibility registry).
+    // Credit is non-withdrawable as credit; `allocate` is its only sink — but a
+    // tier-0 allocation carries no lock and is immediately withdrawable, so
+    // drained funds are always recoverable to the wallet in two txs. The credit
+    // ledger + drain/allocate workers live on CSS / StakingV10
+    // (onlyConvictionNFT); this wrapper owns the tokenId counter + ERC-721 mint
+    // and the owner gating.
     //
-    // D8 — both paths absorb `stakeBase + pendingWithdrawal` into the V10
-    // position via `StakingV10._convertToNFT`.
+    // There is intentionally NO self-service drain: the off-chain sweep is the
+    // only path that empties V8, so its completeness (per-chain
+    // StakingStorage.getTotalStake() == 0) is a release gate before the V8
+    // `Staking` contract is unregistered.
 
-    /// @notice Self-service V8→V10 migration. Mints an NFT to the caller
-    ///         and drains their V8 address-keyed delegation on `identityId`.
-    function selfMigrateV8(
-        uint72 identityId,
+    /// @notice Single-delegator admin drain — move `delegator`'s V8 stake across
+    ///         `sourceNodes` into THEIR migration credit (no allocation). See
+    ///         `adminDrainBatch` for the bulk sweep. Gate:
+    ///         `onlyOwnerOrMultiSigOwner`. Reverts `NothingToMigrate` if nothing
+    ///         was drained (caller-error guard on an intentional single call).
+    function adminMigrateToCredit(
+        address delegator,
+        uint72[] calldata sourceNodes
+    ) external onlyOwnerOrMultiSigOwner returns (uint96 credited) {
+        // Benign: _drainAll calls only the onlyConvictionNFT worker over trusted
+        // storage (no callback); the event after it carries no reentrancy risk.
+        // slither-disable-next-line reentrancy-events
+        credited = _drainAll(delegator, sourceNodes);
+        if (credited == 0) revert NothingToMigrate();
+        emit MigrationStarted(delegator, credited);
+    }
+
+    /// @notice Bulk admin-push drain. Each index `i` is ONE (delegator, node)
+    ///         pair — the flattened form matches the V8 storage key and the
+    ///         off-chain DelegatorsInfo enumeration, giving even per-pair gas so
+    ///         the driver packs uniform chunks. Pairs with nothing to drain are
+    ///         SKIPPED (not reverted), so a chunk mixing already-drained and
+    ///         fresh pairs still lands and re-running a chunk after a partial
+    ///         failure is safe (`drainV8ToCredit` is idempotent — a zeroed slot
+    ///         yields 0). Amounts are NOT passed in — they are read on-chain from
+    ///         V8 state, so the credit is exactly what was drained. Gate:
+    ///         `onlyOwnerOrMultiSigOwner`. Emits one `MigrationStarted` per pair
+    ///         that moved credit.
+    function adminDrainBatch(
+        address[] calldata delegators,
+        uint72[] calldata identityIds
+    ) external onlyOwnerOrMultiSigOwner {
+        uint256 n = delegators.length;
+        require(n == identityIds.length, "length mismatch");
+        for (uint256 i = 0; i < n; i++) {
+            // Benign: owner-only batch; the callee is onlyConvictionNFT over
+            // trusted protocol storage, moves plain ERC20 TRAC (no callback),
+            // and is idempotent — no value-reentrancy vector, event-after-call ok.
+            // slither-disable-next-line calls-loop,reentrancy-events
+            uint96 t = stakingV10.drainV8ToCredit(delegators[i], identityIds[i]);
+            if (t > 0) emit MigrationStarted(delegators[i], t);
+        }
+    }
+
+    /// @notice Bulk operator-fee drain — companion to `adminDrainBatch` for the
+    ///         node side. Each index `i` is ONE (node, operator) pair: the V8
+    ///         operator fee on `identityIds[i]` (resting balance + open
+    ///         withdrawal request) is moved into `operators[i]`'s migration
+    ///         credit (the SAME bucket as delegator
+    ///         stake). `operators[i]` MUST currently hold ADMIN_KEY on the node
+    ///         (validated in `StakingV10.drainOperatorFeeToCredit`, which
+    ///         REVERTS a stale/wrong address) — so a mis-resolved operator
+    ///         reverts the whole batch rather than crediting wrongly; the
+    ///         off-chain sweep re-resolves and retries. Nodes with no fee are
+    ///         SKIPPED (idempotent: a re-drained node yields 0). Amounts are
+    ///         read on-chain, never passed in. Gate: `onlyOwnerOrMultiSigOwner`.
+    ///         Emits one `OperatorFeeMigrated` per node that moved credit.
+    function adminDrainOperatorFeesBatch(
+        uint72[] calldata identityIds,
+        address[] calldata operators
+    ) external onlyOwnerOrMultiSigOwner {
+        uint256 n = identityIds.length;
+        require(n == operators.length, "length mismatch");
+        for (uint256 i = 0; i < n; i++) {
+            // Benign: owner-only batch; the callee is onlyConvictionNFT over
+            // trusted protocol storage, moves plain ERC20 TRAC (no callback),
+            // and is idempotent — no value-reentrancy vector, event-after-call ok.
+            // slither-disable-next-line calls-loop,reentrancy-events
+            uint96 t = stakingV10.drainOperatorFeeToCredit(identityIds[i], operators[i]);
+            if (t > 0) emit OperatorFeeMigrated(identityIds[i], operators[i], t);
+        }
+    }
+
+    /// @notice Self-service straggler backstop. The connected wallet drains ITS
+    ///         OWN V8 stake (keyed by `keccak256(msg.sender)`) across `sourceNodes`
+    ///         into its own migration credit. Admin-push (`adminDrainBatch`) is the
+    ///         primary path; this exists so any delegator the off-chain sweep
+    ///         missed can never be stranded. Permissionless and self-validating —
+    ///         you can only ever drain the V8 key that hashes from your own
+    ///         address, into your own credit. Works after V8 Staking is
+    ///         unregistered (the drain goes through StakingStorage directly); the
+    ///         worker's freeze gate means it is only callable once V8 Staking is
+    ///         frozen (so it cannot race live V8 reward/sharding accounting).
+    function selfMigrate(uint72[] calldata sourceNodes) external returns (uint96 credited) {
+        credited = _drainAll(msg.sender, sourceNodes);
+        if (credited == 0) revert NothingToMigrate();
+        emit MigrationStarted(msg.sender, credited);
+    }
+
+    /// @notice Self-service operator-fee backstop: the node admin (msg.sender,
+    ///         validated against ADMIN_KEY inside `drainOperatorFeeToCredit`)
+    ///         drains the node's V8 operator fee into its own migration credit.
+    ///         Same freeze-gated, post-unregister-safe properties as `selfMigrate`.
+    function selfMigrateOperatorFee(uint72 identityId) external returns (uint96 credited) {
+        credited = stakingV10.drainOperatorFeeToCredit(identityId, msg.sender);
+        if (credited == 0) revert NothingToMigrate();
+        emit OperatorFeeMigrated(identityId, msg.sender, credited);
+    }
+
+    /// @notice Spend `amount` of the caller's migration credit into a fresh V10
+    ///         conviction position on `targetNode` at `lockTier`. Repeatable
+    ///         until the credit is spent. Any tier-6/12 allocation receives the
+    ///         conviction lock-credit (universal).
+    function allocate(
+        uint72 targetNode,
+        uint96 amount,
         uint40 lockTier
     ) external returns (uint256 tokenId) {
-        if (identityId == 0) revert InvalidIdentityId();
-        // Fail-fast on unregistered tiers. Tier 0 is valid for V8→V10
-        // migration: migrants land at the rest-state tier (1x, no lock)
-        // when they want their full balance liquid post-migration.
-        // Deactivated tiers are allowed on this path (existence-only
-        // check in CSS) so stragglers can still be onboarded under the
-        // tier they originally committed to.
-        _convictionMultiplier(lockTier);
-
+        if (targetNode == 0) revert InvalidIdentityId();
+        if (amount == 0) revert ZeroAmount();
         tokenId = ++nextTokenId;
-        // CEI ordering: settle CSS state first; mint after.
-        stakingV10.selfConvertToNFT(msg.sender, tokenId, identityId, lockTier);
+        // CEI: settle CSS state (credit debit + position) first, mint last.
+        // `_mint` (not `_safeMint`) — same supported-caller rationale as
+        // `createConviction`.
+        bool creditApplied = stakingV10.allocateFromCredit(msg.sender, tokenId, targetNode, amount, lockTier);
         _mint(msg.sender, tokenId);
-
-        emit ConvertedFromV8(msg.sender, tokenId, identityId, lockTier, false);
+        emit Allocated(msg.sender, tokenId, targetNode, amount, lockTier, creditApplied);
     }
 
-    /// @notice Admin straggler-rescue V8→V10 migration for a single
-    ///         delegator. NFT minted to `delegator`. Gate:
-    ///         `onlyOwnerOrMultiSigOwner`.
-    function adminMigrateV8(
+    /// @dev Drain `delegator`'s V8 stake across `sourceNodes` into credit,
+    ///      summing the total. A node with no V8 stake contributes 0;
+    ///      idempotent (a re-drained node yields 0).
+    function _drainAll(
         address delegator,
-        uint72 identityId,
-        uint40 lockTier
-    ) external onlyOwnerOrMultiSigOwner returns (uint256 tokenId) {
-        if (identityId == 0) revert InvalidIdentityId();
-        tokenId = _adminMigrateV8Single(delegator, identityId, lockTier);
+        uint72[] calldata sourceNodes
+    ) internal returns (uint96 total) {
+        uint256 n = sourceNodes.length;
+        for (uint256 i = 0; i < n; i++) {
+            // Benign: onlyConvictionNFT callee over trusted storage, plain ERC20,
+            // idempotent (see adminDrainBatch).
+            // slither-disable-next-line calls-loop
+            total += stakingV10.drainV8ToCredit(delegator, sourceNodes[i]);
+        }
     }
 
-    /// @notice Admin batch V8→V10 migration — D11. Iterates over
-    ///         `delegators`, migrating each with the same `identityId` /
-    ///         `lockTier`. One NFT minted per delegator. Gate:
-    ///         `onlyOwnerOrMultiSigOwner`.
-    ///
-    /// @dev A per-delegator `_convertToNFT` revert (e.g. `NoV8StakeToConvert`
-    ///      on a delegator with zero V8 stake AND zero pending) bubbles
-    ///      up and reverts the whole batch — admins should pre-filter
-    ///      their input list off-chain so this doesn't happen mid-batch.
-    ///      Simpler semantics than try/catch partial-success, and matches
-    ///      the operator playbook's "snapshot then drain" model.
-    function adminMigrateV8Batch(
-        address[] calldata delegators,
-        uint72 identityId,
-        uint40 lockTier
-    ) external onlyOwnerOrMultiSigOwner returns (uint256[] memory tokenIds) {
-        if (identityId == 0) revert InvalidIdentityId();
-        uint256 n = delegators.length;
-        if (n == 0) revert EmptyBatch();
-        // Fail-fast on invalid tier BEFORE the loop so we don't half-mint.
-        _convictionMultiplier(lockTier);
+    /// @notice Set the V8→V10 conviction lock-credit (seconds). Owner-settable;
+    ///         set it before running the admin sweep. CSS caps it below the
+    ///         tier-6 lock duration so a position's expiry cannot underflow.
+    function setConvictionCreditSeconds(uint40 secondsValue) external onlyOwnerOrMultiSigOwner {
+        stakingV10.setConvictionCreditSeconds(secondsValue);
+    }
 
-        tokenIds = new uint256[](n);
-        for (uint256 i = 0; i < n; i++) {
-            tokenIds[i] = _adminMigrateV8Single(delegators[i], identityId, lockTier);
-        }
+    // ---- Migration credit views (forward to the CSS ledger) ----
+
+    function migrationCredit(address user) external view returns (uint96) {
+        return convictionStakingStorage.migrationCredit(user);
+    }
+
+    function convictionCreditSeconds() external view returns (uint40) {
+        return convictionStakingStorage.convictionCreditSeconds();
     }
 
     /// @notice DAO closer — D11. Sets the `v10LaunchEpoch` marker on
     ///         `ConvictionStakingStorage` to formally close the V10
-    ///         migration window. After this, straggler rescue is still
-    ///         possible via `adminMigrateV8`, but the launch-epoch field
-    ///         is the canonical off-chain cut-off for retroactive
+    ///         migration window. After this, late drains are still possible via
+    ///         `adminDrainBatch` / `adminMigrateToCredit`, but the launch-epoch
+    ///         field is the canonical off-chain cut-off for retroactive
     ///         reward / analytics windows.
     function finalizeMigrationBatch(uint256 v10LaunchEpoch) external onlyOwnerOrMultiSigOwner {
         stakingV10.setV10LaunchEpoch(v10LaunchEpoch);
         emit MigrationBatchFinalized(v10LaunchEpoch);
-    }
-
-    /// @dev Shared worker for single-delegator admin migration. Factored
-    ///      out so `adminMigrateV8` and `adminMigrateV8Batch` can't drift.
-    function _adminMigrateV8Single(
-        address delegator,
-        uint72 identityId,
-        uint40 lockTier
-    ) internal returns (uint256 tokenId) {
-        _convictionMultiplier(lockTier);
-        tokenId = ++nextTokenId;
-        // CEI ordering: settle CSS state first; mint to `delegator` after.
-        // `_mint` (not `_safeMint`) so the rescue still completes even
-        // when a V8 contract delegator does not implement
-        // `IERC721Receiver`. The alternative — a `_safeMint` revert —
-        // would leave that delegator's TRAC stuck in V8 with no
-        // automated migration path, which is worse than landing the
-        // V10 NFT at the same contract address that already held the
-        // V8 delegation.
-        stakingV10.adminConvertToNFT(delegator, tokenId, identityId, lockTier);
-        _mint(delegator, tokenId);
-        emit ConvertedFromV8(delegator, tokenId, identityId, lockTier, true);
     }
 
     // ========================================================================
@@ -619,8 +713,7 @@ contract DKGStakingConvictionNFT is IVersioned, ContractStatus, IInitializable, 
     // Mint/burn/transfer all flow through `_update`. For transfers, we do
     // NOT settle rewards, reset `lastClaimedEpoch`, or touch the position —
     // the NFT carries its unclaimed rewards like a bond with accrued
-    // coupon. See `V10_CONTRACTS_REDESIGN_v2.md §"NFT transfer model:
-    // accrued-interest"` and the Phase 5 decisions doc Q8.
+    // coupon (the accrued-interest NFT transfer model).
     //
     // The body is a pure `super._update` pass-through; this explicit
     // override exists to (a) document the intent and (b) satisfy the

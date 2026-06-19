@@ -25,7 +25,7 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
     // Bumped 1.1.0 -> 1.2.0: adds updateRelayCapable entry point for the
     // Network State Registry (RFC 04 v0.3 / Issue #461). Multiaddrs were
     // briefly added on a prior revision but are not stored on Profile —
-    // they live in per-round attestation KCs instead (RFC 04 §5.2).
+    // they live in per-round attestation KAs instead (RFC 04 §5.2).
     // Bumped 1.2.0 -> 1.3.0: adds recreateProfile, an admin-only recovery
     // entry point that re-attaches a Profile to an existing identityId
     // (testnet ProfileStorage-redeploy recovery). The id is reused so the

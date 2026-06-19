@@ -25,7 +25,7 @@ export {
   computeKCRootV10,
 } from './merkle.js';
 export { validatePublishRequest, type ValidationResult, type ValidationOptions } from './validation.js';
-export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateShareMetadata, generateWorkspaceMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, promoteUpdatedKaToPerCgId, restateKaPartition, restateLabelGraphForUpdate, readMaterializedVersion, shouldApplyMaterialization, writeMaterializedVersion, withMaterializationLock, compareMaterializedVersion, type MaterializedVersion, generateAssertionCreatedMetadata, generateAssertionPromotedMetadata, generateAssertionUpdatedMetadata, generateAssertionDiscardedMetadata, assertionStateQuad, assertionLayerQuad, deriveStatus, assertionLayerPointerQuad, stampLayerPointerSparql, type LifecycleMetadataOptions, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, KA_ID_PRED, RESERVED_UAL_PRED, PROV_WAS_REVISION_OF, type KaStatus, type StatusPointers, type KCMetadata, type KAMetadata, type OnChainProvenance, type ShareMetadata, type WorkspaceMetadata, type SubGraphRegistration, type AssertionCreatedMeta, type AssertionPromotedMeta, type AssertionUpdatedMeta, type AssertionDiscardedMeta } from './metadata.js';
+export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateShareMetadata, generateWorkspaceMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, promoteUpdatedKaToPerCgId, restateKaPartition, restateLabelGraphForUpdate, readMaterializedVersion, shouldApplyMaterialization, writeMaterializedVersion, withMaterializationLock, compareMaterializedVersion, type MaterializedVersion, generateAssertionCreatedMetadata, generateAssertionPromotedMetadata, generateAssertionUpdatedMetadata, generateAssertionDiscardedMetadata, assertionStateQuad, assertionLayerQuad, deriveStatus, assertionLayerPointerQuad, stampLayerPointerSparql, type LifecycleMetadataOptions, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, KA_ID_PRED, RESERVED_UAL_PRED, PROV_WAS_REVISION_OF, type KaStatus, type StatusPointers, type KCMetadata, type KAMetadata, type OnChainProvenance, type ShareMetadata, type WorkspaceMetadata, type SubGraphRegistration, type AssertionCreatedMeta, type AssertionPromotedMeta, type AssertionUpdatedMeta, type AssertionDiscardedMeta } from './metadata.js';
 export {
   DKGPublisher,
   StaleWriteError,
@@ -191,6 +191,9 @@ export {
 } from './async-lift-runner.js';
 export {
   mapLiftRequestToPublishOptions,
+  prepareAsyncPublishPayload,
+  isFailClosedInlineEncrypt,
+  type AsyncPreparedPublishPayload,
   type LiftResolvedPublishSlice,
   type LiftPublishMappingInput,
 } from './async-lift-publish-options.js';

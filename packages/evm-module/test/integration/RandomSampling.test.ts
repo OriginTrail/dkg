@@ -29,11 +29,11 @@ import {
   ContextGraphStorage,
   ContextGraphValueStorage,
 } from '../../typechain';
-import { createKnowledgeAsset } from '../helpers/kc-helpers';
+import { createKnowledgeAsset } from '../helpers/ka-helpers';
 import { sqrt } from '../helpers/math-helpers';
 import { createProfile, createProfiles } from '../helpers/profile-helpers';
 import {
-  getDefaultKCCreator,
+  getDefaultKACreator,
   getDefaultReceivingNodes,
   getDefaultPublishingNode,
   setupNodeWithStakeAndAsk,
@@ -221,11 +221,11 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
   let ParametersStorage: ParametersStorage;
   let ContextGraphStorage: ContextGraphStorage;
   let ContextGraphValueStorage: ContextGraphValueStorage;
-  // Phase 10's value-weighted picker requires every challengeable KC to live
+  // Phase 10's value-weighted picker requires every challengeable KA to live
   // inside a CG with non-zero per-epoch value at the current epoch. The V8
   // publishing flow used here does not yet wire up CG-side state (Phase 8
   // owns that — separate worktree). Bridging is handled transparently by
-  // the auto-bridge in `kc-helpers.ts`, which fires whenever the fixture has
+  // the auto-bridge in `ka-helpers.ts`, which fires whenever the fixture has
   // registered a `TestStorageOperator` Hub contract — see the
   // `setContractAddress("TestStorageOperator", ...)` call in the fixture.
 
@@ -257,7 +257,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
     await Hub.setContractAddress('HubOwner', accounts[0].address);
     // Register a sentinel signer as a Hub contract so the integration tests
     // can call `onlyContracts` methods on ContextGraphStorage and
-    // ContextGraphValueStorage directly to bridge V8-published KCs into a
+    // ContextGraphValueStorage directly to bridge V8-published KAs into a
     // default CG with non-zero per-epoch value (the input the Phase 10
     // picker reads).
     await Hub.setContractAddress('TestStorageOperator', accounts[19].address);
@@ -614,8 +614,8 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
 
   describe('Challenge Creation', () => {
     it('Should revert if an unsolved challenge already exists for this node in the current proof period', async () => {
-      // creator of the KC
-      const kcCreator = getDefaultKCCreator(accounts);
+      // creator of the KA
+      const kaCreator = getDefaultKACreator(accounts);
       // create a publishing node with stake and ask
       const nodeAsk = 200000000000000000n; // Same as 0.2 ETH
       const minStake = await ParametersStorage.minimumStake();
@@ -644,7 +644,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       }
 
       await createKnowledgeAsset(
-        kcCreator,
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -697,7 +697,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
 
     it('Should revert if the challenge for this proof period has already been solved', async () => {
       // Create profile and identity first
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const nodeAsk = 200000000000000000n; // Same as 0.2 ETH
       const minStake = await ParametersStorage.minimumStake();
       const deps = {
@@ -725,7 +725,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       }
 
       await createKnowledgeAsset(
-        kcCreator,
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -778,7 +778,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       );
     });
 
-    it('Should revert if no Knowledge Collections exist in the system', async () => {
+    it('Should revert if no Knowledge Assets exist in the system', async () => {
       // Setup a node profile
       const publishingNode = getDefaultPublishingNode(accounts);
 
@@ -804,11 +804,11 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       );
       await Ask.connect(accounts[0]).recalculateActiveSet();
 
-      // Ensure no KCs are created or they are expired (by default none are
+      // Ensure no KAs are created or they are expired (by default none are
       // created here). With Phase 10's value-weighted picker the absence of
       // any non-curated, active CG with non-zero per-epoch value surfaces as
       // a `NoEligibleContextGraph` custom-error revert, replacing the V8
-      // string `"No knowledge collections exist"`.
+      // string `"No knowledge assets exist"`.
       const createTx = RandomSampling.connect(
         publishingNode.operational,
       ).createChallenge();
@@ -821,11 +821,11 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
     });
 
     it('Should set the node challenge successfully and emit ChallengeCreated event', async () => {
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const publishingNode = getDefaultPublishingNode(accounts);
       const receivingNodes = getDefaultReceivingNodes(accounts);
 
-      // Create profiles and KC first
+      // Create profiles and KA first
       const contracts = {
         Profile,
         KnowledgeCollection,
@@ -851,7 +851,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       ).map((p) => p.identityId);
 
       await createKnowledgeAsset(
-        kcCreator,
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -889,7 +889,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       expect(challenge.knowledgeAssetId)
         .to.be.a('bigint')
         .and.to.be.equal(1n);
-      // chunkId is 0 when KC byteSize <= CHUNK_BYTE_SIZE; otherwise > 0
+      // chunkId is 0 when KA byteSize <= CHUNK_BYTE_SIZE; otherwise > 0
       expect(challenge.chunkId).to.be.a('bigint').and.to.be.greaterThanOrEqual(0n);
       expect(challenge.epoch).to.be.a('bigint').and.to.be.equal(1n);
       expect(challenge.activeProofPeriodStartBlock)
@@ -902,7 +902,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       expect(challenge.solved).to.be.false;
     });
 
-    it('Should revert if it fails to find a Knowledge Collection that is active in the current epoch', async () => {
+    it('Should revert if it fails to find a Knowledge Asset that is active in the current epoch', async () => {
       // Setup: create node profile/stake/ask
       const nodeAsk = 200000000000000000n;
       const minStake = await ParametersStorage.minimumStake();
@@ -917,8 +917,8 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       const { node: publishingNode, identityId: publishingNodeIdentityId } =
         await setupNodeWithStakeAndAsk(1, minStake, nodeAsk, deps);
 
-      // Create a KC but set its endEpoch to be in the past (e.g., epoch 0)
-      const kcCreator = getDefaultKCCreator(accounts);
+      // Create a KA but set its endEpoch to be in the past (e.g., epoch 0)
+      const kaCreator = getDefaultKACreator(accounts);
       const receivingNodes = getDefaultReceivingNodes(accounts);
       const receivingNodesIdentityIds = (
         await createProfiles(Profile, receivingNodes)
@@ -935,7 +935,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       const epochs = 1;
 
       await createKnowledgeAsset(
-        kcCreator,
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -956,9 +956,9 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
 
       // Verification: with Phase 10 the bound CG still holds value (the
       // bridge seeds a 100-epoch lifetime), so the picker walks into it,
-      // finds the only KC has expired, exhausts MAX_KC_RETRIES, and reverts
+      // finds the only KA has expired, exhausts MAX_KA_RETRIES, and reverts
       // with `NoEligibleKnowledgeAsset`. The V8 string
-      // `"Failed to find a knowledge collection that is active in the current epoch"`
+      // `"Failed to find a knowledge asset that is active in the current epoch"`
       // came from the now-deleted BFS picker.
       await expect(createTx).to.be.revertedWithCustomError(
         RandomSampling,
@@ -970,7 +970,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
   describe('Proof Submission', () => {
     it('Should revert if challenge is no longer active', async () => {
       // Setup
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const publishingNode = getDefaultPublishingNode(accounts);
       const receivingNodes = getDefaultReceivingNodes(accounts);
       const contracts = {
@@ -988,7 +988,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       ).map((p) => p.identityId);
 
       await createKnowledgeAsset(
-        kcCreator,
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -1045,7 +1045,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
 
     it("Should revert with MerkleRootMismatchError if merkle roots don't match", async () => {
       // Setup
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const publishingNode = getDefaultPublishingNode(accounts);
       const receivingNodes = getDefaultReceivingNodes(accounts);
       const contracts = {
@@ -1063,7 +1063,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       ).map((p) => p.identityId);
 
       await createKnowledgeAsset(
-        kcCreator,
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -1138,7 +1138,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
     });
 
     it('Should submit a valid proof and successfully update challenge state (solved=true)', async () => {
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const minStake = await ParametersStorage.minimumStake();
       const nodeAsk = 200000000000000000n; // Same as 0.2 ETH
       const deps = {
@@ -1167,7 +1167,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       }
 
       await createKnowledgeAsset(
-        kcCreator,
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -1218,7 +1218,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
     });
 
     it('Should submit a valid proof and successfully increment epochNodeValidProofsCount', async () => {
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const minStake = await ParametersStorage.minimumStake();
       const nodeAsk = 200000000000000000n; // Same as 0.2 ETH
       const deps = {
@@ -1247,7 +1247,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       }
 
       await createKnowledgeAsset(
-        kcCreator,
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -1301,7 +1301,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
     });
 
     it('Should submit a valid proof and successfully emit NodeEpochScoreAdded event with correct parameters', async () => {
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const minStake = await ParametersStorage.minimumStake();
       const nodeAsk = 200000000000000000n; // Same as 0.2 ETH
       const deps = {
@@ -1330,7 +1330,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       }
 
       await createKnowledgeAsset(
-        kcCreator,
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -1398,7 +1398,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
     });
 
     it('Should submit a valid proof and successfully and add score to nodeEpochProofPeriodScore', async () => {
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const minStake = await ParametersStorage.minimumStake();
       const nodeAsk = 200000000000000000n; // Same as 0.2 ETH
       const deps = {
@@ -1427,7 +1427,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       }
 
       await createKnowledgeAsset(
-        kcCreator,
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -1494,7 +1494,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
 
     it('Should succeed if submitting proof exactly on the last block of the period', async () => {
       // Setup
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const minStake = await ParametersStorage.minimumStake();
       const nodeAsk = 200000000000000000n; // 0.2 ETH
       const deps = {
@@ -1523,7 +1523,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       }
 
       await createKnowledgeAsset(
-        kcCreator,
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -1610,7 +1610,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
 
     it('Should revert if submitting proof exactly on the first block of the next period', async () => {
       // Setup
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const minStake = await ParametersStorage.minimumStake();
       const nodeAsk = 200000000000000000n; // 0.2 ETH
       const deps = {
@@ -1639,7 +1639,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       }
 
       await createKnowledgeAsset(
-        kcCreator,
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -1691,7 +1691,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
     });
 
     it('Should revert if proof for the same challenge is submitted twice', async () => {
-      const kcCreator = getDefaultKCCreator(accounts);
+      const kaCreator = getDefaultKACreator(accounts);
       const minStake = await ParametersStorage.minimumStake();
       const nodeAsk = 200000000000000000n; // Same as 0.2 ETH
       const deps = {
@@ -1720,7 +1720,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       }
 
       await createKnowledgeAsset(
-        kcCreator,
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,
@@ -1771,7 +1771,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
     });
   });
 
-  // The legacy "Optimized Knowledge Collection Search" describe block tested
+  // The legacy "Optimized Knowledge Asset Search" describe block tested
   // the V8 BFS picker (`_findActiveKnowledgeCollection`) and was removed as
   // part of Phase 10. Picker behaviour is now exercised by the Phase 10
   // unit tests in `test/unit/RandomSampling.test.ts`, including a 10K-draw
@@ -1781,9 +1781,9 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
     let nodeIdCounter = 100; // Start from high index to avoid conflicts with other tests
 
     beforeEach(async () => {
-      // Create a basic knowledge collection to initialize epoch publishing data
+      // Create a basic knowledge asset to initialize epoch publishing data
       // Use unique account indices for setup to avoid conflicts
-      const kcCreator = accounts[70]; // Use high index account
+      const kaCreator = accounts[70]; // Use high index account
       const setupNode = {
         admin: accounts[71],
         operational: accounts[72],
@@ -1823,9 +1823,9 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
         KnowledgeCollection,
       };
 
-      // Create a knowledge collection to initialize publishing data
+      // Create a knowledge asset to initialize publishing data
       await createKnowledgeAsset(
-        kcCreator,
+        kaCreator,
         setupNode,
         setupNodeId,
         receivingNodes,
@@ -2082,8 +2082,8 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
         await setupNodeWithStakeAndAsk(nodeIdCounter, nodeStake, nodeAsk, deps);
       nodeIdCounter += 2; // Account for both admin and operational accounts
 
-      // Create a knowledge collection to set up publishing factor
-      const kcCreator = accounts[90]; // Use high index to avoid conflicts
+      // Create a knowledge asset to set up publishing factor
+      const kaCreator = accounts[90]; // Use high index to avoid conflicts
       const receivingNodes = [];
       const receivingNodesIdentityIds = [];
       for (let i = 0; i < 5; i++) {
@@ -2099,7 +2099,7 @@ describe.skip('@integration RandomSampling (OBSOLETE: V8 stake pipeline)', () =>
       }
 
       await createKnowledgeAsset(
-        kcCreator,
+        kaCreator,
         publishingNode,
         publishingNodeIdentityId,
         receivingNodes,

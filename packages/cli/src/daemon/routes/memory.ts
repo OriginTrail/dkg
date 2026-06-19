@@ -57,8 +57,13 @@ const daemonRequire = createRequire(import.meta.url);
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, sparqlIri, contextGraphSharedMemoryUri, sharedMemoryReadBothFilter, contextGraphAssertionUri, contextGraphMetaUri, escapeDkgRdfLiteral, escapeSparqlLiteral } from '@origintrail-official/dkg-core';
+import {
+  DKGAgent,
+  classifySwmCatchupPeerOutcome,
+  createSwmCatchupPeerSelector,
+  loadOpWallets,
+} from '@origintrail-official/dkg-agent';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, sparqlIri, contextGraphSharedMemoryUri, sharedMemoryReadBothFilter, contextGraphAssertionUri, contextGraphMetaUri, escapeDkgRdfLiteral, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { skolemizeByEntity, findReservedSubjectPrefix, isSkolemizedUri, type PublishOptions, type PublishResult } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
@@ -513,6 +518,48 @@ function decodeReservedKaId(val: unknown): bigint | undefined {
   return n;
 }
 
+const swmCatchupPeerSelector = createSwmCatchupPeerSelector();
+
+type SwmCatchupDetailedResult = {
+  insertedTriples: number;
+  fetchedDataTriples?: number;
+  fetchedMetaTriples?: number;
+  deniedPhases?: number;
+  failedPeers?: number;
+  failedPhases?: number;
+  timedOutPhases?: number;
+  backoffWorthyFailures?: number;
+};
+
+function swmCatchupResultFromInserted(insertedTriples: number): SwmCatchupDetailedResult {
+  return { insertedTriples };
+}
+
+function swmCatchupOutcomeInput(result: SwmCatchupDetailedResult, errorMessage?: string) {
+  return {
+    insertedTriples: result.insertedTriples,
+    fetchedDataTriples: result.fetchedDataTriples,
+    fetchedMetaTriples: result.fetchedMetaTriples,
+    deniedPhases: result.deniedPhases,
+    failedPeers: result.failedPeers,
+    failedPhases: result.failedPhases,
+    timedOutPhases: result.timedOutPhases,
+    backoffWorthyFailures: result.backoffWorthyFailures,
+    errorMessage,
+  };
+}
+
+function uniquePeerIds(peerIds: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const peerId of peerIds) {
+    if (!peerId || seen.has(peerId)) continue;
+    seen.add(peerId);
+    out.push(peerId);
+  }
+  return out;
+}
+
 export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -766,37 +813,67 @@ WHERE {
         );
       });
 
-    // Discover candidate peers. The single-peer mode is opt-in; the
-    // default fan-out mode mirrors what runSyncOnConnect does on every
-    // peer:connect event, but caller-initiated rather than event-driven.
-    //
-    // Codex PR #609 R2 — route through `createCGHostEnumerator` so the
-    // hosting-peer policy stays centralized. Today's Phase-A enumerator
-    // returns all connected peers (minus self); when Phase B lands shard-
-    // aware host selection in LU-6, this call site picks it up for free
-    // instead of needing to be updated in lockstep.
-    let candidatePeers: string[];
-    if (peerIdParam) {
-      candidatePeers = [peerIdParam];
-    } else {
-      const { createCGHostEnumerator } = await import('@origintrail-official/dkg-agent');
-      const enumerator = createCGHostEnumerator({
-        getConnectedPeers: () =>
-          agent.node.libp2p.getConnections().map((c: any) => c.remotePeer.toString()),
-        getSelfPeerId: () => agent.peerId,
-      });
-      // Per-CG enumeration unioned across all requested CGs — phase A's
-      // enumerator returns the same connected-peers set for every cgId,
-      // but unioning keeps us forward-compatible with phase B's per-CG
-      // shard filtering.
-      const unioned = new Set<string>();
-      for (const cgId of cgIds) {
-        for (const p of await enumerator.enumerate(cgId)) unioned.add(p);
+    // Discover candidate peers per CG. The single-peer mode is opt-in; the
+    // default path still starts from the Phase-A host enumerator, then applies
+    // requester-side narrowing: protocol support, private-curator scope, and
+    // recent SWM outcome cache. Unknown state still gets a bounded probe so
+    // cold catchup can discover a new useful peer.
+    const { createCGHostEnumerator } = await import('@origintrail-official/dkg-agent');
+    const connectedPeerIds = () => agent.node.libp2p.getConnections().map((c: any) => c.remotePeer.toString());
+    const enumerator = createCGHostEnumerator({
+      getConnectedPeers: connectedPeerIds,
+      getSelfPeerId: () => agent.peerId,
+    });
+    const protocolChecks = new Map<string, Promise<boolean | undefined>>();
+    const hasCurrentSyncProtocol = (peerId: string): Promise<boolean | undefined> => {
+      let check = protocolChecks.get(peerId);
+      if (!check) {
+        check = Promise.resolve()
+          .then(() => agent.getPeerProtocols(peerId))
+          .then((protocols) => protocols.includes(PROTOCOL_SYNC))
+          .catch(() => undefined);
+        protocolChecks.set(peerId, check);
       }
-      candidatePeers = Array.from(unioned);
-    }
+      return check;
+    };
+    const candidatePeersForContextGraph = async (cgId: string): Promise<string[]> =>
+      peerIdParam ? [peerIdParam] : enumerator.enumerate(cgId);
+    const canUseSharedMemoryForContextGraph = async (cgId: string): Promise<boolean> => {
+      try {
+        return await agent.canUseSharedMemoryForContextGraph(cgId);
+      } catch {
+        return true;
+      }
+    };
+    const unsupportedPeersForContextGraph = async (cgId: string, peers: readonly string[]): Promise<Set<string>> => {
+      const unsupported = new Set<string>();
+      await Promise.all(peers.map(async (peerId) => {
+        const supported = await hasCurrentSyncProtocol(peerId);
+        if (supported === false) {
+          unsupported.add(peerId);
+          swmCatchupPeerSelector.record(cgId, peerId, 'unsupported');
+        }
+      }));
+      return unsupported;
+    };
+    const privateCuratorPeersForContextGraph = async (cgId: string): Promise<string[] | undefined> => {
+      let isPrivate = false;
+      try {
+        isPrivate = await agent.isPrivateContextGraph(cgId);
+      } catch {
+        return undefined;
+      }
+      if (!isPrivate) return undefined;
+      try {
+        const resolved = await agent.resolveCuratorPeerIdsForCg(cgId);
+        if (resolved.curatorIsLocal) return [];
+        return resolved.peerIds.length > 0 ? resolved.peerIds : undefined;
+      } catch {
+        return undefined;
+      }
+    };
 
-    if (candidatePeers.length === 0) {
+    if (!peerIdParam && connectedPeerIds().length === 0) {
       return jsonResponse(res, 200, {
         contextGraphIds: cgIds,
         peersAttempted: 0,
@@ -813,9 +890,9 @@ WHERE {
     // for the others got skipped on the aggregate gate).
     //
     // Now: iterate CGs serially (keeps wire load bounded across many
-    // peers × many CGs), and within each CG parallelize the per-peer
-    // sync exactly like before. Per-peer dial+request is 5-20s on
-    // devnet; serialising peers would compound to N×20s.
+    // peers × many CGs), select a narrowed per-CG peer set, and parallelize
+    // only that set. Per-peer dial+request is 5-20s on devnet; serialising
+    // the selected peers would compound to N×20s.
     type PerPeerLeg = {
       peerId: string;
       insertedTriples: number;
@@ -832,22 +909,64 @@ WHERE {
     };
     const perCgLegs: PerCgLeg[] = [];
     for (const cgId of cgIds) {
+      const canUseSharedMemory = await canUseSharedMemoryForContextGraph(cgId);
+      if (!canUseSharedMemory && !includeDurable) {
+        perCgLegs.push({
+          contextGraphId: cgId,
+          perPeer: [],
+          insertedTriples: 0,
+          durableInsertedTriples: 0,
+        });
+        continue;
+      }
+      const baseCandidatePeers = await candidatePeersForContextGraph(cgId);
+      const unsupportedPeers = await unsupportedPeersForContextGraph(cgId, baseCandidatePeers);
+      const privateCuratorPeerIds = await privateCuratorPeersForContextGraph(cgId);
+      const swmSelectedPeers = canUseSharedMemory
+        ? swmCatchupPeerSelector.select({
+            contextGraphId: cgId,
+            candidatePeers: baseCandidatePeers,
+            unsupportedPeers,
+            privateCuratorPeerIds,
+          }).selectedPeers
+        : [];
+      const durableSelectedPeers = includeDurable
+        ? uniquePeerIds(baseCandidatePeers).filter((peerId) => !unsupportedPeers.has(peerId))
+        : [];
+      const swmSelected = new Set(swmSelectedPeers);
+      const durableSelected = new Set(durableSelectedPeers);
+      const selectedPeers = uniquePeerIds([...swmSelectedPeers, ...durableSelectedPeers]);
       const settled = await Promise.allSettled(
-        candidatePeers.map(async (candidate) => {
+        selectedPeers.map(async (candidate) => {
           let swm = 0;
           let durable = 0;
           let swmError: string | undefined;
           let durableError: string | undefined;
-          try {
-            swm = await withTimeout(
-              agent.syncSharedMemoryFromPeer(candidate, [cgId]),
-              PER_PEER_SWM_BUDGET_MS,
-              `SWM catchup from ${candidate} for ${cgId}`,
-            );
-          } catch (err: any) {
-            swmError = err?.message ?? String(err);
+          if (swmSelected.has(candidate)) {
+            try {
+              const syncResult = await withTimeout(
+                typeof (agent as any).syncSharedMemoryFromPeerDetailed === 'function'
+                  ? (agent as any).syncSharedMemoryFromPeerDetailed(candidate, [cgId])
+                  : agent.syncSharedMemoryFromPeer(candidate, [cgId]).then(swmCatchupResultFromInserted),
+                PER_PEER_SWM_BUDGET_MS,
+                `SWM catchup from ${candidate} for ${cgId}`,
+              ) as SwmCatchupDetailedResult;
+              swm = Number(syncResult.insertedTriples ?? 0);
+              swmCatchupPeerSelector.record(
+                cgId,
+                candidate,
+                classifySwmCatchupPeerOutcome(swmCatchupOutcomeInput({ ...syncResult, insertedTriples: swm })),
+              );
+            } catch (err: any) {
+              swmError = err?.message ?? String(err);
+              swmCatchupPeerSelector.record(
+                cgId,
+                candidate,
+                classifySwmCatchupPeerOutcome(swmCatchupOutcomeInput({ insertedTriples: 0 }, swmError)),
+              );
+            }
           }
-          if (includeDurable) {
+          if (durableSelected.has(candidate)) {
             try {
               durable = await withTimeout(
                 (agent as any).syncFromPeer?.(candidate, [cgId]) ?? Promise.resolve(0),
@@ -864,7 +983,7 @@ WHERE {
       const perPeer: PerPeerLeg[] = settled.map((s, idx) => {
         if (s.status === 'fulfilled') {
           return {
-            peerId: candidatePeers[idx],
+            peerId: selectedPeers[idx],
             insertedTriples: s.value.insertedTriples,
             durableInsertedTriples: s.value.durableInsertedTriples,
             ...(s.value.swmError ? { swmError: s.value.swmError } : {}),
@@ -872,7 +991,7 @@ WHERE {
           };
         }
         return {
-          peerId: candidatePeers[idx],
+          peerId: selectedPeers[idx],
           insertedTriples: 0,
           durableInsertedTriples: 0,
           error: s.reason?.message ?? String(s.reason),
@@ -997,7 +1116,7 @@ WHERE {
 
     return jsonResponse(res, 200, {
       contextGraphIds: cgIds,
-      peersAttempted: candidatePeers.length,
+      peersAttempted: perPeerAggregate.size,
       includeDurable,
       totalInsertedTriples: totalInserted,
       totalDurableInsertedTriples: totalDurable,

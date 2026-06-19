@@ -6,6 +6,63 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   return Object.assign(fn, { calls });
 }
 
+// #1236 🔵: clean (all-zero, no-backoff, made-no-progress) detailed
+// sync summaries shaped to match the production `DurableSyncResult` /
+// `SharedMemorySyncResult` returns of `syncFromPeerDetailed` /
+// `syncSharedMemoryFromPeerDetailed` (see dkg-agent-types.ts and
+// dkg-agent-lifecycle.ts). `runSyncOnConnect` accounts results as
+// `number | SyncProgressSummary`; a bare `0` takes the
+// `typeof result === 'number'` happy-path branch in EVERY accounting
+// helper (madeSyncProgress → true, cleanDetailedSync → true,
+// hadBackoffWorthyFailure → false, metadataOnlySync never reached),
+// so a numeric fixture would mask accounting drift in the
+// object-branch logic. A zero-valued object exercises the real
+// object-branch accounting while preserving the "clean, no-backoff"
+// semantics those stubs intend.
+function cleanDurableSyncResult() {
+  return {
+    insertedTriples: 0,
+    deniedPhases: 0,
+    fetchedMetaTriples: 0,
+    fetchedDataTriples: 0,
+    insertedMetaTriples: 0,
+    insertedDataTriples: 0,
+    bytesReceived: 0,
+    resumedPhases: 0,
+    timedOutPhases: 0,
+    completedPhases: 0,
+    checkpointAdvances: 0,
+    emptyResponses: 0,
+    metaOnlyResponses: 0,
+    dataRejectedMissingMeta: 0,
+    rejectedKcs: 0,
+    failedPeers: 0,
+    failedPhases: 0,
+    backoffWorthyFailures: 0,
+  };
+}
+
+function cleanSharedMemorySyncResult() {
+  return {
+    insertedTriples: 0,
+    deniedPhases: 0,
+    fetchedMetaTriples: 0,
+    fetchedDataTriples: 0,
+    insertedMetaTriples: 0,
+    insertedDataTriples: 0,
+    bytesReceived: 0,
+    resumedPhases: 0,
+    timedOutPhases: 0,
+    completedPhases: 0,
+    checkpointAdvances: 0,
+    emptyResponses: 0,
+    droppedDataTriples: 0,
+    failedPeers: 0,
+    failedPhases: 0,
+    backoffWorthyFailures: 0,
+  };
+}
+
 
 
 let _fileSnapshot: string;
@@ -954,9 +1011,29 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         (agent.node.libp2p.peerStore as any).get = recorder(async () => ({
           protocols: [PROTOCOL_SYNC],
         } as any));
-        (agent as any).syncFromPeer = recorder(async () => 0);
+        // `runSyncOnConnect` calls `syncFromPeerDetailed` /
+        // `syncSharedMemoryFromPeerDetailed` (the seams `trySyncFromPeer`
+        // wires in), NOT the bare `syncFromPeer` helpers. Stub the real
+        // seams to a clean (zero, no-backoff) result so the durable round
+        // does not trip the "stop on backoff-worthy failure" early-return
+        // (added by `4b50883c6`), which would otherwise skip
+        // `refreshMetaSyncedFlags` and make this assertion pass only
+        // vacuously.
+        //
+        // #1236 🔵: return a properly-shaped DETAILED summary object
+        // (matching the production `DurableSyncResult` /
+        // `SharedMemorySyncResult` shapes), NOT a bare `0`. A bare
+        // number takes `runSyncOnConnect`'s `typeof result === 'number'`
+        // happy-path branch in EVERY accounting helper
+        // (`madeSyncProgress` → true, `cleanDetailedSync` → true,
+        // `hadBackoffWorthyFailure` → false, `metadataOnlySync` never
+        // reached), so the fixture would mask any accounting drift in
+        // the object-branch logic. A zero-valued object exercises the
+        // real object-branch accounting while preserving the intended
+        // "clean, no-backoff, made-no-progress" semantics.
+        (agent as any).syncFromPeerDetailed = recorder(async () => cleanDurableSyncResult());
+        (agent as any).syncSharedMemoryFromPeerDetailed = recorder(async () => cleanSharedMemorySyncResult());
         (agent as any).discoverContextGraphsFromStore = recorder(async () => 0);
-        (agent as any).syncSharedMemoryFromPeer = recorder(async () => 0);
 
         await (agent as any).trySyncFromPeer(remotePeer.toString());
 
@@ -997,9 +1074,22 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         (agent.node.libp2p.peerStore as any).get = recorder(async () => ({
           protocols: [PROTOCOL_SYNC],
         } as any));
-        (agent as any).syncFromPeer = recorder(async () => 0);
+        // `runSyncOnConnect` calls `syncFromPeerDetailed` /
+        // `syncSharedMemoryFromPeerDetailed` (the seams `trySyncFromPeer`
+        // wires in), NOT the bare `syncFromPeer` helpers. Stub the real
+        // seams to a clean (zero, no-backoff) result so the durable round
+        // does not trip the "stop on backoff-worthy failure" early-return
+        // (added by `4b50883c6`), which would otherwise skip
+        // `refreshMetaSyncedFlags` and leave `metaSynced` false even though
+        // the ontology confirms the CG.
+        //
+        // #1236 🔵: shaped detailed summary objects, not bare `0` (see the
+        // metaSynced-scope-only test above for the full rationale — a
+        // bare number masks accounting drift by taking the number
+        // happy-path in every `runSyncOnConnect` accounting helper).
+        (agent as any).syncFromPeerDetailed = recorder(async () => cleanDurableSyncResult());
+        (agent as any).syncSharedMemoryFromPeerDetailed = recorder(async () => cleanSharedMemorySyncResult());
         (agent as any).discoverContextGraphsFromStore = recorder(async () => 0);
-        (agent as any).syncSharedMemoryFromPeer = recorder(async () => 0);
 
         await (agent as any).trySyncFromPeer(remotePeer.toString());
 

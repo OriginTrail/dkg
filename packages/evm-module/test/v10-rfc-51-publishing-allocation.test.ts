@@ -29,14 +29,14 @@ import { createProfile } from './helpers/profile-helpers';
 import {
   getDefaultPublishingNode,
   getDefaultReceivingNodes,
-  getDefaultKCCreator,
+  getDefaultKACreator,
 } from './helpers/setup-helpers';
 import {
   buildPublishParams,
   buildUpdateParams,
   packReservedKaId,
   DEFAULT_CHAIN_ID,
-} from './helpers/v10-kc-helpers';
+} from './helpers/v10-ka-helpers';
 
 // OT-RFC-51 "Publishing Allocation" — first-pass happy-path coverage.
 //
@@ -375,7 +375,7 @@ describe('@integration OT-RFC-51 Publishing Allocation', function () {
     // ========================================================================
     // (a) createAccount with a real primary node seeds publishing allocation
     // ========================================================================
-    const creator = getDefaultKCCreator(accounts);
+    const creator = getDefaultKACreator(accounts);
     await Token.connect(accounts[0]).transfer(creator.address, COMMITTED_TRAC);
     await Token.connect(creator).approve(await NFT.getAddress(), COMMITTED_TRAC);
 
@@ -713,7 +713,7 @@ describe('@integration OT-RFC-51 Publishing Allocation', function () {
     // move mutator is what drives the score change, not a direct seed.
     const { aId, bId } = await setupThreeEqualStakeNodes();
 
-    const creator = getDefaultKCCreator(accounts);
+    const creator = getDefaultKACreator(accounts);
     await Token.connect(accounts[0]).transfer(creator.address, COMMITTED_TRAC);
     await Token.connect(creator).approve(await NFT.getAddress(), COMMITTED_TRAC);
 
@@ -841,7 +841,7 @@ describe('@integration OT-RFC-51 Publishing Allocation', function () {
     }
     await stakeV10(node2Accounts.operational, node2Id, MIN_STAKE);
 
-    const creator = getDefaultKCCreator(accounts);
+    const creator = getDefaultKACreator(accounts);
     await Token.connect(accounts[0]).transfer(creator.address, COMMITTED_TRAC);
     await Token.connect(creator).approve(await NFT.getAddress(), COMMITTED_TRAC);
 
@@ -993,7 +993,7 @@ describe('@integration OT-RFC-51 Publishing Allocation', function () {
     const { identityId: nodeAId } = await createProfile(ProfileContract, nodeA);
     await stakeV10(nodeA.operational, nodeAId, MIN_STAKE);
 
-    const creator = getDefaultKCCreator(accounts);
+    const creator = getDefaultKACreator(accounts);
     await Token.connect(accounts[0]).transfer(creator.address, COMMITTED_TRAC);
     await Token.connect(creator).approve(await NFT.getAddress(), COMMITTED_TRAC);
 
@@ -1102,7 +1102,7 @@ describe('@integration OT-RFC-51 Publishing Allocation', function () {
     await stakeV10(nodeA.operational, nodeAId, MIN_STAKE);
     await stakeV10(nodeB.operational, nodeBId, MIN_STAKE);
 
-    const creator = getDefaultKCCreator(accounts);
+    const creator = getDefaultKACreator(accounts);
     await Token.connect(accounts[0]).transfer(creator.address, COMMITTED_TRAC);
     await Token.connect(creator).approve(await NFT.getAddress(), COMMITTED_TRAC);
     await NFT.connect(creator).createAccount(COMMITTED_TRAC, nodeAId);
@@ -1248,7 +1248,7 @@ describe('@integration OT-RFC-51 Publishing Allocation', function () {
     const { identityId: nodeAId } = await createProfile(ProfileContract, nodeA);
     await stakeV10(nodeA.operational, nodeAId, MIN_STAKE);
 
-    const creator = getDefaultKCCreator(accounts);
+    const creator = getDefaultKACreator(accounts);
     await Token.connect(accounts[0]).transfer(creator.address, COMMITTED_TRAC);
     await Token.connect(creator).approve(await NFT.getAddress(), COMMITTED_TRAC);
 
@@ -1280,7 +1280,7 @@ describe('@integration OT-RFC-51 Publishing Allocation', function () {
     const { identityId: nodeAId } = await createProfile(ProfileContract, nodeA);
     await stakeV10(nodeA.operational, nodeAId, MIN_STAKE);
 
-    const creator = getDefaultKCCreator(accounts);
+    const creator = getDefaultKACreator(accounts);
     await Token.connect(accounts[0]).transfer(creator.address, COMMITTED_TRAC);
     await Token.connect(creator).approve(await NFT.getAddress(), COMMITTED_TRAC);
 

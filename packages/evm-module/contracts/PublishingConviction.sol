@@ -45,7 +45,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *     `B = committedTRAC / lockDurationEpochs`.
  *   - Two sinks drain `B` per window:
  *       1. ACTIVE: `coverPublishingCost` distributes its
- *          `discountedCost` across the published KC's epoch range via
+ *          `discountedCost` across the published KA's epoch range via
  *          `EpochStorage.addTokensToEpochRange`. The base portion drawn
  *          increments `windowSpent[id][w]`, capped at `B`.
  *       2. PASSIVE: at the end of window `w`, the unspent remainder
@@ -125,7 +125,9 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
     //           instead of recomputing `prorateActiveSink` + chronos reads on
     //           every loop iteration. Behavior-preserving: per-epoch amounts
     //           are byte-identical, so seed and move stay net-zero on K_total.
-    string private constant _VERSION = "10.0.4";
+    // 10.0.5 — KC→KA terminology: error InvalidConvictionKcEpochs → InvalidConvictionKaEpochs
+    //          (error selector change; no behavior change).
+    string private constant _VERSION = "10.0.5";
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
     /// @notice EpochStorage shard ID for the staker reward pool. Mirrors
@@ -242,8 +244,8 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
     error ZeroAgentAddress();
     error AgentCapReached(uint256 accountId, uint256 cap);
     error InvalidPublishingConvictionEpochs(uint256 configuredEpochs);
-    /// @notice `kcEpochs` was 0 or exceeded the account's `lockDurationEpochs`.
-    error InvalidConvictionKcEpochs(uint256 lockDurationEpochs, uint256 kcEpochs);
+    /// @notice `kaEpochs` was 0 or exceeded the account's `lockDurationEpochs`.
+    error InvalidConvictionKaEpochs(uint256 lockDurationEpochs, uint256 kaEpochs);
     error UnknownAccount(uint256 accountId);
     /// @notice OT-RFC-51: a designated `primaryNode` is not in the sharding table.
     error PrimaryNodeNotInShardingTable(uint72 node);
@@ -615,7 +617,7 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
 
     /**
      * @notice Charge a publishing agent's conviction allowance for
-     *         `baseCost` and fund the published KC's epoch range from
+     *         `baseCost` and fund the published KA's epoch range from
      *         the escrowed TRAC sitting in the CSS vault.
      *
      * @dev Authorization (N28-fixed):
@@ -627,13 +629,13 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
      *          accountId.
      *
      *      Behavior — preserved 1:1 from the legacy stateful NFT:
-     *        1. Reject if the publish's KC lifetime (`kcEpochs`) exceeds
+     *        1. Reject if the publish's KA lifetime (`kaEpochs`) exceeds
      *           the account's `lockDurationEpochs`.
      *        2. Lazily settle elapsed billing windows (passive sink).
      *        3. Compute `discountedCost = baseCost * (1 - discountBps/1e4)`.
      *        4. Spend order against the current window: base allowance
      *           first, then `topUpBalance` overflow.
-     *        5. Distribute the discounted cost across the KC's epoch
+     *        5. Distribute the discounted cost across the KA's epoch
      *           range via `EpochStorage.addTokensToEpochRange` —
      *           prorating the partial first and last chain epoch.
      *
@@ -644,8 +646,8 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
     function coverPublishingCost(
         address publishingAgent,
         uint96 baseCost,
-        uint40 kcStartEpoch,
-        uint40 kcEpochs
+        uint40 kaStartEpoch,
+        uint40 kaEpochs
     ) external onlyConvictionNFT returns (uint96 discountedCost) {
         uint256 accountId = publishingConvictionStorage.agentToAccountId(publishingAgent);
         if (accountId == 0) revert NoConvictionAccount(publishingAgent);
@@ -656,8 +658,8 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
         if (block.timestamp >= uint256(acct.expiresAtTimestamp)) {
             revert AccountExpired(accountId, acct.expiresAtEpoch);
         }
-        if (kcEpochs == 0 || kcEpochs > uint40(acct.lockDurationEpochs)) {
-            revert InvalidConvictionKcEpochs(uint256(acct.lockDurationEpochs), uint256(kcEpochs));
+        if (kaEpochs == 0 || kaEpochs > uint40(acct.lockDurationEpochs)) {
+            revert InvalidConvictionKaEpochs(uint256(acct.lockDurationEpochs), uint256(kaEpochs));
         }
 
         // Re-read after settle: `_settleElapsed` may have advanced
@@ -719,7 +721,7 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
             publishingConvictionStorage.increaseWindowSpent(accountId, currentBillingWindow, drawnFromEpoch);
         }
 
-        // Active sink: fund the KC's epoch range with the discounted
+        // Active sink: fund the KA's epoch range with the discounted
         // cost. MUST mirror `KnowledgeAssetsV10._distributeTokens`
         // semantics so conviction-funded and direct-spend reward curves
         // are identical (modulo the conviction discount).
@@ -729,7 +731,7 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
             uint96 fee = _feeOf(distributed, feeBps);
             uint96 net = distributed - fee;
             if (net > 0) {
-                _distributeProrated(net, kcStartEpoch, uint256(kcEpochs));
+                _distributeProrated(net, kaStartEpoch, uint256(kaEpochs));
             }
             // PCS window/topUp writes (above) are already persisted, so
             // paying the treasury last keeps effects-before-interactions.

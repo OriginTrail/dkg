@@ -35,3 +35,28 @@ export function didSyncPeerRespond(error: unknown): boolean {
 export function isSyncTransportFailure(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && (error as { syncTransportFailure?: boolean }).syncTransportFailure);
 }
+
+export function isSyncBackoffWorthyError(error: unknown): boolean {
+  if (isSyncTransportFailure(error)) return true;
+
+  const message = error instanceof Error
+    ? error.message.toLowerCase()
+    : String(error).toLowerCase();
+
+  return (
+    message.includes('too many active durable data sync session snapshots') ||
+    (message.includes('sync responder') && (
+      message.includes('queue full') ||
+      message.includes('queue wait exceeded') ||
+      message.includes('snapshot limit exceeded') ||
+      message.includes('busy')
+    )) ||
+    message.includes('stream reset') ||
+    message.includes('connection reset') ||
+    message.includes('econnreset') ||
+    message.includes('etimedout') ||
+    message.includes('send timeout') ||
+    message.includes('operation timed out') ||
+    message.includes('operation was aborted due to timeout')
+  );
+}

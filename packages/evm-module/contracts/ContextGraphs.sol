@@ -392,10 +392,10 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable {
         return publisherAccountId != 0 && publisherAccountId == authorityAccountId;
     }
 
-    // --- KC registration (Phase 8 publish flow entry point) ---
+    // --- KA registration (Phase 8 publish flow entry point) ---
 
     /**
-     * @notice Bind a Knowledge Collection to a Context Graph via the facade.
+     * @notice Bind a Knowledge Asset to a Context Graph via the facade.
      * @dev Thin wrapper over `ContextGraphStorage.registerKnowledgeAssetToContextGraph`.
      *      Exists so Phase 8's `KnowledgeAssetsV10.publish` / `publishDirect`
      *      can call the facade (stable interface) instead of reaching into
