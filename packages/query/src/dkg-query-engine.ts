@@ -1,6 +1,6 @@
 import type { TripleStore, Quad, QueryResult as StoreQueryResult } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
-import type { QueryResult, QueryOptions, QueryEngine } from './query-engine.js';
+import type { QueryResult, QueryOptions, QueryEngine, QueryProvenance } from './query-engine.js';
 import {
   contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphVerifiableMemoryUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer,
   contextGraphSubGraphUri, contextGraphMetaUri, contextGraphSharedMemoryMetaUri, assertionLifecycleUri,
@@ -231,6 +231,23 @@ export class DKGQueryEngine implements QueryEngine {
     const guard = validateReadOnlySparql(sparql);
     if (!guard.safe) {
       throw new Error(`SPARQL rejected: ${guard.reason}`);
+    }
+
+    // ── Per-row source provenance (opt-in) ────────────────────────────
+    // Rewrite a qualifying SELECT to `SELECT … ?<reserved> WHERE { GRAPH
+    // ?<reserved> { <orig> } }` and re-enter WITHOUT the flag, so the
+    // rewritten query flows through the SAME scope guard that constrains
+    // every other `GRAPH ?g` to the allowed graph set (no new access, no
+    // new scoping code). The bound source graph is then lifted out of each
+    // row into `QueryResult.provenance`. Queries that can't carry per-row
+    // provenance (aggregates, CONSTRUCT/ASK, an explicit GRAPH clause) run
+    // normally and return no `provenance`.
+    if (options?.includeProvenance) {
+      const { includeProvenance: _drop, ...rest } = options;
+      const plan = planProvenanceRewrite(sparql);
+      if (!plan) return this.query(sparql, rest);
+      const inner = await this.query(plan.rewritten, rest);
+      return liftProvenance(inner, plan.varName);
     }
 
     // ── V10 view-based routing ────────────────────────────────────────
@@ -2316,6 +2333,137 @@ function findMatchingCloseBrace(sparql: string, openIdx: number): number {
     i++;
   }
   return -1;
+}
+
+// ── Per-row source provenance (opt-in) ──────────────────────────────────
+//
+// The reserved SPARQL variable the provenance rewrite binds the source named
+// graph to. Double-underscored + namespaced so a collision with a user
+// variable is practically impossible; `planProvenanceRewrite` additionally
+// refuses to rewrite any query that already references it.
+const PROVENANCE_VAR = '__dkgSourceGraph';
+
+const PROVENANCE_LAYER_SLUG_TO_VIEW: Record<string, GetView> = {
+  _working_memory: 'working-memory',
+  _shared_memory: 'shared-working-memory',
+  _verifiable_memory: 'verifiable-memory',
+};
+
+/**
+ * Decide whether a query can carry per-row source provenance and, if so,
+ * return the rewritten query plus the variable the source graph binds to.
+ *
+ * Qualifying shape: a single non-aggregate SELECT, with no explicit GRAPH
+ * clause, that does not already use the reserved variable. The rewrite wraps
+ * the WHERE group in `GRAPH ?<reserved> { … }` and adds `?<reserved>` to the
+ * projection (unless it is already `SELECT *`). Returns `null` for every other
+ * shape — the caller then runs the query unchanged with no provenance.
+ */
+function planProvenanceRewrite(sparql: string): { rewritten: string; varName: string } | null {
+  const varName = PROVENANCE_VAR;
+  const varTok = `?${varName}`;
+  // Never rewrite a query that already binds the reserved variable.
+  if (new RegExp(`[?$]${varName}\\b`).test(sparql)) return null;
+
+  const code = stripLiteralsAndComments(sparql);
+
+  // Must be a SELECT, and SELECT must be the query form (not a keyword inside
+  // a CONSTRUCT/ASK/DESCRIBE). Sub-SELECTs (>1 SELECT) are out of scope.
+  const selectMatches = code.match(/\bSELECT\b/gi);
+  if (!selectMatches || selectMatches.length !== 1) return null;
+  const formMatch = code.match(/\b(SELECT|CONSTRUCT|ASK|DESCRIBE)\b/i);
+  if (!formMatch || formMatch[1].toUpperCase() !== 'SELECT') return null;
+
+  // Per-row provenance is meaningless once rows are aggregated/grouped.
+  if (/\bGROUP\s+BY\b/i.test(code)) return null;
+  if (/\b(COUNT|SUM|AVG|MIN|MAX|SAMPLE|GROUP_CONCAT)\s*\(/i.test(code)) return null;
+
+  // An explicit GRAPH clause means the caller is already scoping by graph;
+  // honour it and don't double-wrap.
+  if (hasGraphClause(sparql)) return null;
+
+  const braceStart = findWhereBraceStart(sparql);
+  if (braceStart === -1) return null;
+  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
+  if (braceEnd === -1) return null;
+
+  // Insert the provenance variable into the projection. Prefer just before the
+  // explicit WHERE keyword; fall back to just before the WHERE `{` for the
+  // keyword-less `SELECT ?x { … }` form. `SELECT *` already projects it.
+  const whereTok = findExplicitWhereTokenIdx(sparql);
+  const insertAt = whereTok !== -1 && whereTok < braceStart ? whereTok : braceStart;
+  const head = sparql.slice(0, insertAt);
+  const mid = sparql.slice(insertAt, braceStart + 1);
+  const inner = sparql.slice(braceStart + 1, braceEnd);
+  const tail = sparql.slice(braceEnd);
+
+  const isStar = /\bSELECT\s+(?:DISTINCT\s+|REDUCED\s+)?\*/i.test(stripLiteralsAndComments(head));
+  const projectedHead = isStar ? head : `${head.replace(/\s+$/, '')} ${varTok} `;
+
+  const rewritten = `${projectedHead}${mid} GRAPH ${varTok} { ${inner} } ${tail}`;
+  return { rewritten, varName };
+}
+
+/**
+ * Lift the reserved provenance variable out of every binding row into a
+ * parallel `provenance` array (1:1 with `bindings`), removing it from the
+ * user-facing bindings so the caller's projection is unchanged.
+ *
+ * Rows sourced from a metadata / private partition are dropped: a plain
+ * (non-GRAPH) content SELECT never unions those graphs, so surfacing them
+ * here would CHANGE the result set rather than just annotate it. The
+ * provenance rewrite's `GRAPH ?var` can otherwise bind the CG's `_meta` /
+ * `_shared_memory_meta` / `_private` graphs, which sit in the legacy- and
+ * working-memory-route allow-sets (the verifiable-memory view already
+ * excludes them). Keeping `provenance` equal to "the plain query's rows,
+ * annotated" is the invariant this preserves.
+ */
+function liftProvenance(result: QueryResult, varName: string): QueryResult {
+  const rows = result.bindings ?? [];
+  const bindings: Array<Record<string, string>> = [];
+  const provenance: QueryProvenance[] = [];
+  for (const row of rows) {
+    const { [varName]: src, ...rest } = row;
+    const sourceGraph = typeof src === 'string' ? src : '';
+    if (isNonContentProvenanceGraph(sourceGraph)) continue;
+    bindings.push(rest);
+    provenance.push(buildProvenanceHandle(sourceGraph));
+  }
+  return { ...result, bindings, provenance };
+}
+
+/**
+ * True for a source graph a plain content SELECT would not return: the CG's
+ * `_meta` / `_shared_memory_meta` (last segment ends `_meta`) or `_private`
+ * partitions, including their per-KA and sub-graph variants. Content graphs
+ * (root data, `_verifiable_memory/*`, `_shared_memory/*`, `/context/*`,
+ * sub-graph roots) are kept.
+ */
+function isNonContentProvenanceGraph(graph: string): boolean {
+  if (!graph) return false;
+  const seg = graph.slice(graph.lastIndexOf('/') + 1);
+  return seg === '_private' || seg.endsWith('_meta');
+}
+
+/**
+ * Parse a source named-graph URI into a verifiable handle. Recognises the
+ * uniform per-KA layout
+ * `did:dkg:context-graph:{cg}[/{sub}]/{_layer}/{addr}/{number}` (see
+ * `contextGraphLayerUri`); for any other graph only `sourceGraph` is set.
+ */
+function buildProvenanceHandle(sourceGraph: string | undefined): QueryProvenance {
+  if (!sourceGraph) return { sourceGraph: '' };
+  const handle: QueryProvenance = { sourceGraph };
+  const m = sourceGraph.match(
+    /^did:dkg:context-graph:(.+)\/(_working_memory|_shared_memory|_verifiable_memory)\/([^/]+)\/([^/]+)$/,
+  );
+  if (m) {
+    handle.contextGraphId = m[1];
+    handle.memoryLayer = PROVENANCE_LAYER_SLUG_TO_VIEW[m[2]];
+    handle.author = m[3];
+    handle.kaNumber = m[4];
+  }
+  return handle;
 }
 
 /**

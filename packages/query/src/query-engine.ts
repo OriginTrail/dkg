@@ -5,6 +5,38 @@ import { TrustLevel } from '@origintrail-official/dkg-core';
 export interface QueryResult {
   bindings: Array<Record<string, string>>;
   quads?: Quad[];
+  /**
+   * Per-row source provenance, aligned 1:1 with `bindings`. Populated ONLY
+   * when the caller passes `includeProvenance: true` AND the query shape
+   * supports it (a single non-aggregate SELECT with no explicit GRAPH
+   * clause). Each entry pins the named graph the row's triple was read from
+   * — which, for published per-KA partitions, encodes the on-chain UAL
+   * identity `(author, kaNumber)` and is the handle a consumer follows to
+   * the assertion seal / on-chain merkle root to verify the fact.
+   * `undefined` means the caller did not ask, or the query shape could not
+   * carry per-row provenance.
+   */
+  provenance?: QueryProvenance[];
+}
+
+/**
+ * A verifiable source handle for one result row. `sourceGraph` is always the
+ * raw named-graph URI; the remaining fields are a best-effort parse of the
+ * uniform per-KA layout `did:dkg:context-graph:{cg}[/{sub}]/{_layer}/{addr}/{number}`
+ * (see `contextGraphLayerUri`). When the row came from a non-per-KA graph
+ * (e.g. the bare CG data graph), only `sourceGraph` is set.
+ */
+export interface QueryProvenance {
+  /** The named graph the row's triple was read from. */
+  sourceGraph: string;
+  /** Context graph id (may include a `/{sub}` sub-graph segment). */
+  contextGraphId?: string;
+  /** Declared memory layer the source graph belongs to. */
+  memoryLayer?: GetView;
+  /** Author EVM address — the high half of the UAL identity. */
+  author?: string;
+  /** Per-author KA number — the low half of the UAL identity. */
+  kaNumber?: string;
 }
 
 export interface QueryOptions {
@@ -24,6 +56,17 @@ export interface QueryOptions {
    * to their selected graph set unless this is true.
    */
   includeContextGraphPartitions?: boolean;
+  /**
+   * Opt-in: return per-row source provenance in `QueryResult.provenance`.
+   * The engine wraps the query's WHERE pattern in `GRAPH ?<reserved> { … }`,
+   * lets the existing scope guard constrain it to the same allowed graph
+   * set, then lifts the bound source graph out of each row into a structured
+   * handle. Supported for a single non-aggregate SELECT with no explicit
+   * GRAPH clause; otherwise the query runs normally and `provenance` is
+   * `undefined`. Adds no access — `?<reserved>` is constrained to exactly the
+   * graphs the query could already read.
+   */
+  includeProvenance?: boolean;
   /**
    * Opt-in: allow the scoped query to explicitly reference the context
    * graph's own `_private` partition (`<cg>/_private`, or the sub-graph

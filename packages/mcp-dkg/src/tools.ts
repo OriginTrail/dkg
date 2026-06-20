@@ -23,6 +23,7 @@ import {
   bindingValue,
   bindingsToTable,
   bindingsToParagraphs,
+  renderProvenanceSources,
   escapeSparqlLiteral,
   prettyTerm,
 } from './sparql.js';
@@ -207,10 +208,14 @@ export function registerReadTools(
           .boolean()
           .optional()
           .describe('When set with view: "working-memory", include SWM in the result set (the legacy `layer: "union"` semantics).'),
+        includeProvenance: z
+          .boolean()
+          .optional()
+          .describe('Attach the verifiable source each result row came from — the source graph plus, for published facts, the on-chain UAL identity (author + KA number) you cite/verify against. Ignored for aggregates, CONSTRUCT/ASK, or queries that already use an explicit GRAPH clause.'),
         limit: z.number().optional().describe('Row cap when rendering to markdown; does NOT modify the query'),
       },
     },
-    async ({ sparql, projectId, subGraphName, view, includeSharedMemory, limit }): Promise<ToolResult> => {
+    async ({ sparql, projectId, subGraphName, view, includeSharedMemory, includeProvenance, limit }): Promise<ToolResult> => {
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
       const fullSparql = sparql.startsWith('PREFIX') ? sparql : `${PREFIXES}\n${sparql}`;
@@ -221,11 +226,21 @@ export function registerReadTools(
           subGraphName,
           view,
           includeSharedMemory,
+          includeProvenance,
         });
         const all = result.bindings ?? [];
         const capped = typeof limit === 'number' ? all.slice(0, limit) : all;
         const tail = capped.length < all.length ? `\n\n_(showing ${capped.length} of ${all.length} — raise limit to see more)_` : '';
-        return ok(`${bindingsToTable(capped)}${tail}`);
+        // When provenance was requested AND the query shape supported it, list
+        // the verifiable sources behind the shown rows so the caller can cite
+        // each fact. `result.provenance` is aligned 1:1 with `bindings`.
+        const provTail =
+          includeProvenance && result.provenance?.length
+            ? renderProvenanceSources(result.provenance.slice(0, capped.length))
+            : includeProvenance
+              ? '\n\n_(per-row provenance unavailable for this query shape — use a non-aggregate SELECT without an explicit GRAPH clause)_'
+              : '';
+        return ok(`${bindingsToTable(capped)}${tail}${provTail}`);
       } catch (e) {
         return err(`SPARQL failed: ${formatError(e)}`);
       }

@@ -19,6 +19,25 @@ export interface SparqlBinding {
 export interface SparqlResult {
   head?: { vars?: string[] };
   bindings: SparqlBinding[];
+  /**
+   * Per-row source provenance, aligned 1:1 with `bindings`. Present only when
+   * the request set `includeProvenance: true` and the query shape supported
+   * it. Each entry is the verifiable handle the row's triple came from.
+   */
+  provenance?: SparqlProvenance[];
+}
+
+export interface SparqlProvenance {
+  /** The named graph the row's triple was read from. */
+  sourceGraph: string;
+  /** Context graph id (may include a `/{sub}` sub-graph segment). */
+  contextGraphId?: string;
+  /** Declared memory layer of the source graph. */
+  memoryLayer?: 'working-memory' | 'shared-working-memory' | 'verifiable-memory';
+  /** Author EVM address — the high half of the on-chain UAL identity. */
+  author?: string;
+  /** Per-author KA number — the low half of the on-chain UAL identity. */
+  kaNumber?: string;
 }
 
 export interface QueryResponse {
@@ -407,6 +426,15 @@ export class DkgClient {
      * server actually honours to avoid documented-yet-failing inputs.
      */
     minTrust?: 'SelfAttested' | 'Endorsed' | 0 | 1;
+    /**
+     * Opt-in: ask the daemon to attach per-row source provenance
+     * (`result.provenance`, aligned 1:1 with `bindings`). Each entry is the
+     * verifiable handle the row came from — for published facts, the per-KA
+     * partition encoding the on-chain UAL identity `(author, kaNumber)`.
+     * No-op for query shapes that can't carry it (aggregates, CONSTRUCT/ASK,
+     * explicit GRAPH).
+     */
+    includeProvenance?: boolean;
   }): Promise<SparqlResult> {
     const body: Record<string, unknown> = { sparql: args.sparql };
     const contextGraphId = optionalContextGraphId(args.contextGraphId);
@@ -419,6 +447,7 @@ export class DkgClient {
     if (args.assertionName) body.assertionName = args.assertionName;
     if (args.agentAddress) body.agentAddress = args.agentAddress;
     if (args.minTrust != null) body.minTrust = args.minTrust;
+    if (args.includeProvenance != null) body.includeProvenance = args.includeProvenance;
 
     const r = await this.request<QueryResponse>('POST', '/api/query', body);
     return r.result ?? { bindings: [] };

@@ -405,6 +405,10 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     const includeSharedMemory =
       parsed.includeSharedMemory ?? parsed.includeWorkspace;
     const includeContextGraphPartitions = parsed.includeContextGraphPartitions === true;
+    // Opt-in per-row source provenance (the verifiable handle each result row
+    // came from). Returned in `result.provenance`; no-op for query shapes that
+    // can't carry it. See DKGQueryEngine `includeProvenance`.
+    const includeProvenance = parsed.includeProvenance === true;
     const view = parsed.view;
     const agentAddress = parsed.agentAddress;
     // the
@@ -586,6 +590,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         graphSuffix,
         includeSharedMemory,
         includeContextGraphPartitions,
+        includeProvenance,
         view,
         agentAddress,
         verifiedGraph,

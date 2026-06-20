@@ -393,6 +393,14 @@ export class QueryMethods extends DKGAgentBase {
        */
       includeContextGraphPartitions?: boolean;
       /**
+       * Opt-in: return per-row source provenance in `result.provenance`. The
+       * engine binds each row's source named graph (the per-KA partition that
+       * encodes the on-chain UAL identity) and lifts it into a structured
+       * handle. No-op for query shapes that can't carry it (aggregates,
+       * CONSTRUCT/ASK, explicit GRAPH). Adds no access.
+       */
+      includeProvenance?: boolean;
+      /**
        * Opt-in: allow the scoped query to reference the context graph's own
        * `_private` partition (excluded from the scope guard's allow-set by
        * default). Used by the EPCIS events query, whose SPARQL always names
@@ -647,6 +655,7 @@ export class QueryMethods extends DKGAgentBase {
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       includeContextGraphPartitions: opts.includeContextGraphPartitions,
+      includeProvenance: opts.includeProvenance,
       includePrivate: opts.includePrivate,
       view: opts.view,
       agentAddress: effectiveWmAddress,

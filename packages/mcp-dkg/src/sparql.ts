@@ -5,7 +5,7 @@
  *   - Common prefix map used everywhere in the V10 ontology.
  *   - Markdown renderers for SPARQL bindings.
  */
-import type { SparqlBinding } from './client.js';
+import type { SparqlBinding, SparqlProvenance } from './client.js';
 import { bindingValue } from './client.js';
 
 // Re-export so tool code can pull everything it needs from one module.
@@ -78,6 +78,29 @@ export function bindingsToTable(bindings: SparqlBinding[], columns?: string[]): 
     '| ' + cols.map((c) => prettyTerm(bindingValue(row[c]))).join(' | ') + ' |',
   );
   return [header, sep, ...rows].join('\n');
+}
+
+/**
+ * Render the verifiable sources behind a result set as a compact, deduplicated
+ * markdown list. `provenance` is aligned 1:1 with the rows it describes; rows
+ * sharing a source collapse to one entry. Each line cites the on-chain KA
+ * identity `(author/kaNumber)` when the source is a per-KA partition, plus the
+ * raw source graph so the caller can always resolve it.
+ */
+export function renderProvenanceSources(provenance: SparqlProvenance[]): string {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const p of provenance) {
+    if (!p?.sourceGraph || seen.has(p.sourceGraph)) continue;
+    seen.add(p.sourceGraph);
+    const id =
+      p.author && p.kaNumber
+        ? `KA \`${p.author}/${p.kaNumber}\`${p.memoryLayer ? ` (${p.memoryLayer})` : ''}`
+        : p.memoryLayer ?? 'source';
+    lines.push(`- ${id} — \`${p.sourceGraph}\``);
+  }
+  if (!lines.length) return '';
+  return `\n\n**Sources** (verifiable provenance):\n${lines.join('\n')}`;
 }
 
 /** Multi-line markdown summary per binding — better than a wide table for
