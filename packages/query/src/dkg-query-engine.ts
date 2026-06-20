@@ -239,12 +239,18 @@ export class DKGQueryEngine implements QueryEngine {
     // rewritten query flows through the SAME scope guard that constrains
     // every other `GRAPH ?g` to the allowed graph set (no new access, no
     // new scoping code). The bound source graph is then lifted out of each
-    // row into `QueryResult.provenance`. Queries that can't carry per-row
-    // provenance (aggregates, CONSTRUCT/ASK, an explicit GRAPH clause) run
-    // normally and return no `provenance`.
+    // row into `QueryResult.provenance`.
+    //
+    // Gated on `contextGraphId`: the guard that constrains the helper graph
+    // variable runs ONLY for a CG-scoped query. Without it the rewrite would
+    // turn a default-graph SELECT into an unconstrained all-named-graphs scan
+    // (cross-context exposure), so the flag is ignored for unscoped queries.
+    // Queries that can't carry per-row provenance (aggregates, solution
+    // modifiers, CONSTRUCT/ASK, an explicit GRAPH clause) also run normally
+    // and return no `provenance`.
     if (options?.includeProvenance) {
       const { includeProvenance: _drop, ...rest } = options;
-      const plan = planProvenanceRewrite(sparql);
+      const plan = options.contextGraphId ? planProvenanceRewrite(sparql) : null;
       if (!plan) return this.query(sparql, rest);
       const inner = await this.query(plan.rewritten, rest);
       return liftProvenance(inner, plan.varName);
@@ -2378,6 +2384,20 @@ function planProvenanceRewrite(sparql: string): { rewritten: string; varName: st
   if (/\bGROUP\s+BY\b/i.test(code)) return null;
   if (/\b(COUNT|SUM|AVG|MIN|MAX|SAMPLE|GROUP_CONCAT)\s*\(/i.test(code)) return null;
 
+  // Solution modifiers make the rewrite unsound, because it both ADDS a
+  // hidden projection column (the source graph) and DROPS non-content rows
+  // AFTER the engine has applied the modifier:
+  //   - DISTINCT/REDUCED would dedupe over `(…user vars…, sourceGraph)`, so
+  //     stripping the helper var can leave duplicate user rows;
+  //   - LIMIT/OFFSET/ORDER BY run over rows the plain content query never
+  //     sees (the helper var can bind `_meta`/`_private` on legacy/WM routes),
+  //     so a slot can be spent on a metadata row and the content result
+  //     differs from the same query without provenance.
+  // Leave these shapes unrevised — like aggregates — so results are identical
+  // with and without the flag.
+  if (/\b(DISTINCT|REDUCED|LIMIT|OFFSET)\b/i.test(code)) return null;
+  if (/\bORDER\s+BY\b/i.test(code)) return null;
+
   // An explicit GRAPH clause means the caller is already scoping by graph;
   // honour it and don't double-wrap.
   if (hasGraphClause(sparql)) return null;
@@ -2417,6 +2437,11 @@ function planProvenanceRewrite(sparql: string): { rewritten: string; varName: st
  * working-memory-route allow-sets (the verifiable-memory view already
  * excludes them). Keeping `provenance` equal to "the plain query's rows,
  * annotated" is the invariant this preserves.
+ *
+ * Dropping rows AFTER execution is sound only because `planProvenanceRewrite`
+ * refuses any query carrying a solution modifier (DISTINCT/REDUCED/LIMIT/
+ * OFFSET/ORDER BY) — without that guarantee, the engine could apply the
+ * modifier over the to-be-dropped metadata rows and change the content set.
  */
 function liftProvenance(result: QueryResult, varName: string): QueryResult {
   const rows = result.bindings ?? [];

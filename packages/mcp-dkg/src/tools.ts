@@ -211,7 +211,7 @@ export function registerReadTools(
         includeProvenance: z
           .boolean()
           .optional()
-          .describe('Attach the verifiable source each result row came from — the source graph plus, for published facts, the on-chain UAL identity (author + KA number) you cite/verify against. Ignored for aggregates, CONSTRUCT/ASK, or queries that already use an explicit GRAPH clause.'),
+          .describe('Attach the verifiable source each result row came from — the source graph plus, for published facts, the on-chain UAL identity (author + KA number) you cite/verify against. Needs a project-scoped plain SELECT; ignored for aggregates, DISTINCT/REDUCED, LIMIT/OFFSET/ORDER BY, CONSTRUCT/ASK, or an explicit GRAPH clause.'),
         limit: z.number().optional().describe('Row cap when rendering to markdown; does NOT modify the query'),
       },
     },
@@ -238,7 +238,7 @@ export function registerReadTools(
           includeProvenance && result.provenance?.length
             ? renderProvenanceSources(result.provenance.slice(0, capped.length))
             : includeProvenance
-              ? '\n\n_(per-row provenance unavailable for this query shape — use a non-aggregate SELECT without an explicit GRAPH clause)_'
+              ? '\n\n_(per-row provenance unavailable for this query shape — needs a project-scoped plain SELECT: no DISTINCT/REDUCED/LIMIT/OFFSET/ORDER BY, aggregates, or explicit GRAPH clause)_'
               : '';
         return ok(`${bindingsToTable(capped)}${tail}${provTail}`);
       } catch (e) {

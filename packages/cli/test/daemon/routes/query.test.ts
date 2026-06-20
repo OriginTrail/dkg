@@ -46,6 +46,20 @@ describe('/api/query error mapping (real daemon)', () => {
     expect(status).toBe(200);
   });
 
+  it('accepts includeProvenance on the real route and returns a provenance array (route parse + forward)', async () => {
+    // Proves the daemon parses `includeProvenance` and forwards it through
+    // `agent.query` to the engine (PR review 🟡): a scoped, modifier-free SELECT
+    // comes back 200 with a `provenance` array aligned to the bindings.
+    const { status, body } = await postJson(daemon, '/api/query', {
+      sparql: 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }',
+      contextGraphId: 'all',
+      includeProvenance: true,
+    });
+    expect(status).toBe(200);
+    expect(Array.isArray(body.result.provenance)).toBe(true);
+    expect(body.result.provenance.length).toBe(body.result.bindings.length);
+  });
+
   it('rejects a SPARQL mutation (INSERT/DELETE) with a 4xx, not a 500', async () => {
     // Read endpoint must refuse writes — a real, observable contract that
     // does not depend on any injected error string.

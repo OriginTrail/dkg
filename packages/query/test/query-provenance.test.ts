@@ -179,4 +179,49 @@ describe('includeProvenance — per-row source provenance', () => {
     expect(r.provenance).toBeUndefined();
     expect(r.bindings).toHaveLength(2);
   });
+
+  it('ignores the flag for unscoped queries (no contextGraphId) — no cross-context scan', async () => {
+    // Without a contextGraphId the scope guard does not run, so a GRAPH-var
+    // rewrite would scan ALL named graphs (here: two different CGs). The flag
+    // must no-op and leave the plain default-graph result unchanged.
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    await store.insert([
+      q('https://example.org/1', NAME, '"FromCgOne"', 'did:dkg:context-graph:cg-one/_verifiable_memory/0xaa/1'),
+      q('https://example.org/2', NAME, '"FromCgTwo"', 'did:dkg:context-graph:cg-two/_verifiable_memory/0xbb/2'),
+    ]);
+    const plain = await engine.query(`SELECT ?o WHERE { ?s <${NAME}> ?o }`, {});
+    const prov = await engine.query(`SELECT ?o WHERE { ?s <${NAME}> ?o }`, { includeProvenance: true });
+    expect(prov.provenance).toBeUndefined();
+    expect(prov.bindings).toEqual(plain.bindings);
+  });
+
+  it('no-ops DISTINCT — preserves dedup semantics instead of leaking the source-graph key', async () => {
+    // Same subject in two VM partitions: adding the hidden source column would
+    // make `DISTINCT ?s` return two identical ?s rows after the column is lifted.
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    await store.insert([
+      q('https://example.org/dup', NAME, '"V"', `did:dkg:context-graph:${CG}/_verifiable_memory/0xaa/1`),
+      q('https://example.org/dup', NAME, '"V"', `did:dkg:context-graph:${CG}/_verifiable_memory/0xbb/2`),
+    ]);
+    const r = await engine.query(`SELECT DISTINCT ?s WHERE { ?s <${NAME}> ?o }`, {
+      contextGraphId: CG,
+      view: 'verifiable-memory',
+      includeProvenance: true,
+    });
+    expect(r.provenance).toBeUndefined();
+    expect(r.bindings).toHaveLength(1);
+  });
+
+  it('no-ops LIMIT — content row count matches the plain query (no slot spent on metadata rows)', async () => {
+    const engine = await fixture();
+    const r = await engine.query(`SELECT ?s ?o WHERE { ?s <${NAME}> ?o } LIMIT 1`, {
+      contextGraphId: CG,
+      view: 'verifiable-memory',
+      includeProvenance: true,
+    });
+    expect(r.provenance).toBeUndefined();
+    expect(r.bindings).toHaveLength(1);
+  });
 });
