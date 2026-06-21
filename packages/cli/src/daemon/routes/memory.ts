@@ -62,7 +62,7 @@ import {
   createSwmCatchupPeerSelector,
   loadOpWallets,
 } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, escapeDkgRdfLiteral, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeDkgRdfLiteral, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
 import {
@@ -1539,7 +1539,7 @@ WHERE {
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
 
-    const { markdown, contextGraphId, sessionUri, layer, subGraphName } = parsed;
+    const { markdown, contextGraphId, sessionUri, layer, subGraphName, turnId } = parsed;
     if (!markdown || typeof markdown !== 'string') {
       return jsonResponse(res, 400, { error: 'Missing or invalid "markdown" field (string)' });
     }
@@ -1557,7 +1557,7 @@ WHERE {
       }
     }
 
-    if (layer !== 'wm') {
+    if (layer !== undefined && layer !== 'wm') {
       return jsonResponse(res, 400, {
         error: '/api/memory/turn only supports layer:"wm"; use the knowledge asset lifecycle to share or publish turns.',
       });
@@ -1565,6 +1565,9 @@ WHERE {
     const targetLayer = 'wm' as const;
     const agentDid = `did:dkg:agent:${agent.peerId}`;
     const now = new Date().toISOString();
+    if (turnId !== undefined && (typeof turnId !== 'string' || turnId.trim().length === 0)) {
+      return jsonResponse(res, 400, { error: 'Invalid "turnId": must be a non-empty string when supplied' });
+    }
 
     // 1. Store markdown in the file store
     const mdBytes = Buffer.from(markdown, 'utf-8');
@@ -1576,8 +1579,17 @@ WHERE {
     }
     const fileUri = `urn:dkg:file:${fileEntry.keccak256}`;
 
-    // Derive turn URI from agent address + timestamp for collision avoidance
-    const turnUri = `did:dkg:context-graph:${resolvedContextGraphId}/turn/${agent.peerId}-${now}`;
+    const turnIdentity = {
+      contextGraphId: resolvedContextGraphId,
+      subGraphName: subGraphName ?? null,
+      sessionUri: sessionUri ?? null,
+      turnId: typeof turnId === 'string' ? turnId.trim() : null,
+      fileHash: fileEntry.keccak256,
+      agent: requestAgentAddress,
+    };
+    const turnDigest = createHash('sha256').update(JSON.stringify(turnIdentity)).digest('hex');
+    const assertionName = `turn-${turnDigest.slice(0, 32)}`;
+    const turnUri = `did:dkg:context-graph:${resolvedContextGraphId}/turn/${assertionName}`;
 
     // 2. Run structural extraction
     let extractResult;
@@ -1606,22 +1618,21 @@ WHERE {
       }
     }
 
-    // 4. Build quads for the target graph
-    const targetGraph = contextGraphAssertionUri(resolvedContextGraphId, requestAgentAddress, `turn-${now}`, subGraphName);
-
+    // 4. Build assertion quads. assertion.write stamps the lifecycle WM graph.
+    const assertionGraphPlaceholder = '';
     const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [];
 
     // Content triples from structural extraction
     for (const t of extractResult.triples) {
-      quads.push({ ...t, graph: targetGraph });
+      quads.push({ ...t, graph: assertionGraphPlaceholder });
     }
     // Source-file linkage from extractor (rows 1 + 3)
     for (const t of extractResult.sourceFileLinkage) {
-      quads.push({ ...t, graph: targetGraph });
+      quads.push({ ...t, graph: assertionGraphPlaceholder });
     }
     // Semantic triples (if any)
     for (const t of semanticTriples) {
-      quads.push({ ...t, graph: targetGraph });
+      quads.push({ ...t, graph: assertionGraphPlaceholder });
     }
 
     // Ensure the turn is typed as a ConversationTurn
@@ -1629,7 +1640,13 @@ WHERE {
       subject: turnUri,
       predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
       object: 'http://schema.org/ConversationTurn',
-      graph: targetGraph,
+      graph: assertionGraphPlaceholder,
+    });
+    quads.push({
+      subject: turnUri,
+      predicate: 'http://schema.org/name',
+      object: JSON.stringify(turnId ? `Conversation turn ${turnId}` : 'Conversation turn'),
+      graph: assertionGraphPlaceholder,
     });
     // Persist the markdown body so the UI can display turn content
     // without fetching the source file separately
@@ -1638,28 +1655,28 @@ WHERE {
       subject: turnUri,
       predicate: 'http://schema.org/description',
       object: JSON.stringify(truncatedBody),
-      graph: targetGraph,
+      graph: assertionGraphPlaceholder,
     });
     // Source content type
     quads.push({
       subject: turnUri,
       predicate: 'http://dkg.io/ontology/sourceContentType',
       object: JSON.stringify('text/markdown'),
-      graph: targetGraph,
+      graph: assertionGraphPlaceholder,
     });
     // Agent attribution
     quads.push({
       subject: turnUri,
       predicate: 'http://schema.org/agent',
       object: agentDid,
-      graph: targetGraph,
+      graph: assertionGraphPlaceholder,
     });
     // Timestamp
     quads.push({
       subject: turnUri,
       predicate: 'http://schema.org/dateCreated',
       object: `"${now}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`,
-      graph: targetGraph,
+      graph: assertionGraphPlaceholder,
     });
 
     // Session linking (if session URI provided)
@@ -1668,22 +1685,33 @@ WHERE {
         subject: turnUri,
         predicate: 'http://schema.org/isPartOf',
         object: sessionUri,
-        graph: targetGraph,
+        graph: assertionGraphPlaceholder,
       });
       quads.push({
         subject: sessionUri,
         predicate: 'http://schema.org/hasPart',
         object: turnUri,
-        graph: targetGraph,
+        graph: assertionGraphPlaceholder,
       });
     }
 
     const literalSize = validateWritableQuadLiteralSizes("quads", quads);
     if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
 
-    // 5. Write to target layer
+    // 5. Write to WM through the named knowledge asset lifecycle.
+    let targetGraph: string;
     try {
-      await agent.store.insert(quads);
+      targetGraph = await agent.assertion.create(
+        resolvedContextGraphId,
+        assertionName,
+        subGraphName ? { subGraphName } : undefined,
+      );
+      await agent.assertion.write(
+        resolvedContextGraphId,
+        assertionName,
+        quads,
+        subGraphName ? { subGraphName } : undefined,
+      );
     } catch (err: any) {
       if (err?.code === "OVERSIZED_RDF_LITERAL") {
         return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(err));
@@ -1722,6 +1750,7 @@ WHERE {
 
     return jsonResponse(res, 200, {
       turnUri,
+      assertionName,
       fileHash: fileEntry.keccak256,
       layer: targetLayer,
       graph: targetGraph,
@@ -1751,7 +1780,14 @@ WHERE {
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
 
     const resultLimit = typeof rawLimit === 'number' && rawLimit > 0 ? Math.min(rawLimit, 100) : 20;
-    const memoryLayers: Array<'swm' | 'vm'> = parsed.memoryLayers ?? ['swm', 'vm'];
+    const requestedLayers = Array.isArray(parsed.memoryLayers)
+      ? parsed.memoryLayers
+      : ['wm', 'swm', 'vm'];
+    const invalidLayers = requestedLayers.filter((layer: unknown) => layer !== 'wm' && layer !== 'swm' && layer !== 'vm');
+    if (invalidLayers.length > 0) {
+      return jsonResponse(res, 400, { error: 'memoryLayers must contain only "wm", "swm", or "vm"' });
+    }
+    const memoryLayers = [...new Set(requestedLayers)] as Array<'wm' | 'swm' | 'vm'>;
 
     const results: Array<{
       entityUri: string;
@@ -1798,15 +1834,17 @@ WHERE {
     // still allow `\` to escape the closing quote and break out of the literal.
     const escapedQuery = escapeSparqlLiteral(query.toLowerCase());
     const cgUri = `did:dkg:context-graph:${contextGraphId}`;
-    const graphFilters = memoryLayers.map((l: string) => {
+    const graphFilters = memoryLayers.map((l) => {
+      if (l === 'wm') {
+        return `(STRSTARTS(STR(?g), "${cgUri}/_working_memory") || STRSTARTS(STR(?g), "${cgUri}/assertion/"))`;
+      }
       if (l === 'swm') return `STRSTARTS(STR(?g), "${cgUri}/_shared_memory")`;
       // #1096: VM graphs live under `/_verifiable_memory/<id>` (see
       // contextGraphVerifiableMemoryUri in dkg-core). The pre-rc.16
       // "_verified" prefix matched nothing, so memory layer "vm" could
       // never return SPARQL hits.
-      if (l === 'vm') return `STRSTARTS(STR(?g), "${cgUri}/_verifiable_memory")`;
-      return `STRSTARTS(STR(?g), "${cgUri}/")`;
-    }).join(' || ');
+      return `STRSTARTS(STR(?g), "${cgUri}/_verifiable_memory")`;
+    }).join(' || ') || 'false';
     try {
       // #1096: accept both http:// and https:// schema.org forms â€” real
       // payloads overwhelmingly use https://schema.org, which the previous

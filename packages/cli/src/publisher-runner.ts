@@ -274,12 +274,12 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     maxRetries: args.maxRetries,
     publicSnapshotStore: args.publicSnapshotStore,
     knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor
-      ? async ({ walletId, request }) => {
-          const publisher = publishers.get(walletId);
+      ? async (input) => {
+          const publisher = publishers.get(input.walletId);
           if (!publisher) {
-            throw new Error(`No publisher configured for wallet ${walletId}`);
+            throw new Error(`No publisher configured for wallet ${input.walletId}`);
           }
-          return args.knowledgeAssetVmPublishExecutor!({ walletId, request, publisher });
+          return args.knowledgeAssetVmPublishExecutor!({ ...input, publisher });
         }
       : undefined,
     publishExecutor: async ({ walletId, publishOptions }: AsyncLiftPublishExecutionInput) => {

@@ -37,6 +37,7 @@ import {
   startLiveDaemon,
   stopLiveDaemon,
   postJson,
+  getJson,
   openEventStream,
   type LiveDaemon,
   type EventStream,
@@ -153,6 +154,58 @@ describe('memory_graph_changed â€” real daemon SSE emissions', () => {
     const res = await postJson(daemon, '/api/shared-memory/write', { contextGraphId: cg, quads: QUADS });
     expect(res.status).toBe(404);
     await expectNoEmit(cg, 'shared_memory_written');
+  });
+
+  it('writes /api/memory/turn through a named WM knowledge asset when layer is omitted', async () => {
+    const cg = await freshCg();
+    const res = await postJson(daemon, '/api/memory/turn', {
+      contextGraphId: cg,
+      markdown: '# Turn\n\nUser likes lifecycle-backed memory.',
+      sessionUri: 'urn:test:session:memory-turn',
+      turnId: 'memory-turn-route-regression',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      layer: 'wm',
+      sessionUri: 'urn:test:session:memory-turn',
+    });
+    expect(res.body.assertionName).toMatch(/^turn-[0-9a-f]{32}$/);
+    expect(typeof res.body.graph).toBe('string');
+    expect(res.body.graph.length).toBeGreaterThan(0);
+
+    const frame = await stream.waitFor(isFrame(cg, 'memory_turn_written'));
+    expect(frame.data).toMatchObject({
+      contextGraphId: cg,
+      layers: ['wm'],
+      operation: 'memory_turn_written',
+      source: 'memory-turn',
+    });
+
+    const quads = await getJson(
+      daemon,
+      `/api/knowledge-assets/${encodeURIComponent(res.body.assertionName)}/wm/quads?contextGraphId=${encodeURIComponent(cg)}`,
+    );
+    expect(quads.status).toBe(200);
+    expect(JSON.stringify(quads.body)).toContain(res.body.turnUri);
+    expect(JSON.stringify(quads.body)).toContain('ConversationTurn');
+
+    const search = await postJson(daemon, '/api/memory/search', {
+      contextGraphId: cg,
+      query: 'lifecycle-backed memory',
+    });
+    expect(search.status).toBe(200);
+    expect(search.body.results.some((hit: any) => hit.entityUri === res.body.turnUri)).toBe(true);
+  });
+
+  it('rejects /api/memory/turn requests that still target SWM directly', async () => {
+    const cg = await freshCg();
+    const res = await postJson(daemon, '/api/memory/turn', {
+      contextGraphId: cg,
+      markdown: 'Do not write this directly to SWM.',
+      layer: 'swm',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/only supports layer:"wm"/);
   });
 
   it('rejects finalize:false combined with alsoShareSwm before any mutation', async () => {
