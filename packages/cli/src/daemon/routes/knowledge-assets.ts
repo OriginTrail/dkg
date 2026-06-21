@@ -14,6 +14,7 @@
 //   POST /api/knowledge-assets/:name/wm/pull-from    seed draft from SWM/VM  [TODO]
 //   POST /api/knowledge-assets/:name/swm/share       advance the SWM pointer
 //   POST /api/knowledge-assets/:name/vm/publish      mint/update on chain
+//   POST /api/knowledge-assets/:name/vm/publish-async enqueue mint/update on chain
 //
 // These delegate to the SAME agent lifecycle methods the legacy
 // `/api/assertion/*` + `/api/shared-memory/*` routes use, so behavior is
@@ -71,7 +72,7 @@ import {
   isSameAgentAddress,
   scopedTokenPromoteLane,
 } from "./shared-assertion-helpers.js";
-import { PromoteJobConflictError } from "@origintrail-official/dkg-publisher";
+import { AsyncLiftJobConflictError, PromoteJobConflictError } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
 import { validateAssertionName, contextGraphAssertionUri } from "@origintrail-official/dkg-core";
 
@@ -614,7 +615,7 @@ async function verifyDirectPublishOnChainContextGraphId(
 }
 
 export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<void> {
-  const { req, res, agent, path, url, requestToken, requestAgentAddress, emitMemoryGraphChanged } = ctx;
+  const { req, res, agent, publisherControl, path, url, requestToken, requestAgentAddress, emitMemoryGraphChanged } = ctx;
   if (path !== PREFIX && !path.startsWith(`${PREFIX}/`)) return;
   const method = req.method ?? "GET";
 
@@ -797,14 +798,16 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       preSignedAuthorAttestation,
       schemeVersion,
       alsoPublishVm,
+      awaitCuratorAck,
     } = parsed;
-    // OT-RFC-43 migration alias: the legacy one-shot publish shape posts
-    // `promote: true` (ApiClient.publishAssertion and network-sim still send
-    // { quads, finalize: true, promote: true }).
-    // Honor it as `alsoShareSwm` so those calls still promote WM→SWM — otherwise
-    // they seal WM but never promote, and a follow-up VM publish runs against an
-    // empty SWM and fails. An explicit `alsoShareSwm` wins when both are supplied.
-    const alsoShareSwm = parsed.alsoShareSwm ?? parsed.promote;
+    // No legacy alias: product callers must name the lifecycle transition.
+    // `alsoShareSwm: true` is the only accepted create-route flag for advancing
+    // a sealed WM assertion into SWM. The async/sync publish preflight relies on
+    // this explicit share step.
+    const alsoShareSwm = parsed.alsoShareSwm;
+    if (parsed.promote !== undefined) {
+      return jsonResponse(res, 400, { error: '"promote" is retired; use "alsoShareSwm" for the WM to SWM lifecycle transition' });
+    }
     if (!name) {
       return jsonResponse(res, 400, { error: 'Missing "name"' });
     }
@@ -829,6 +832,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // `"false"` string must NOT silently promote/publish.
     if (alsoShareSwm !== undefined && typeof alsoShareSwm !== "boolean") {
       return jsonResponse(res, 400, { error: '"alsoShareSwm" must be a boolean when supplied' });
+    }
+    if (awaitCuratorAck !== undefined && typeof awaitCuratorAck !== "boolean") {
+      return jsonResponse(res, 400, { error: '"awaitCuratorAck" must be a boolean when supplied' });
     }
     if (alsoPublishVm !== undefined && typeof alsoPublishVm !== "boolean" && (typeof alsoPublishVm !== "object" || alsoPublishVm === null || Array.isArray(alsoPublishVm))) {
       return jsonResponse(res, 400, { error: '"alsoPublishVm" must be a boolean or an options object when supplied' });
@@ -954,17 +960,18 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         try {
           // Carry the same resolved author into the share. The asset is already
           // sealed (finalize above), so promote shares the existing seal verbatim
-          // — passing the author keeps the whole atomic flow in one namespace and
-          // covers the seal-on-share path too.
+          // and passing the author keeps the whole atomic flow in one namespace.
           const share = await agent.assertion.promote(resolvedContextGraphId, name, {
             subGraphName,
             ...atomicAuthorLane,
+            awaitCuratorAck,
             ...(resolvedAuthorAgentAddress ? { authorAgentAddress: resolvedAuthorAgentAddress } : {}),
           });
           result.swmShared = true;
           result.promotedCount = share.promotedCount;
           result.sealed = share.sealed;
           result.publishReady = share.publishReady;
+          if (share.shareOperationId) result.shareOperationId = share.shareOperationId;
           // #1116: the one-shot finalizes BEFORE sharing, so a shared asset is
           // normally sealed ("swm-shared"). The unsealed status is only reachable
           // if a future path shares without sealing.
@@ -1322,7 +1329,13 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         }
         // #1116: surface the seal outcome. `sealed`/`publishReady` describe THIS
         // share (subset or skipSeal → false by design, not a failure).
-        return jsonResponse(res, 200, { swmShared: true, promotedCount: share.promotedCount, sealed: share.sealed, publishReady: share.publishReady });
+        return jsonResponse(res, 200, {
+          swmShared: true,
+          promotedCount: share.promotedCount,
+          sealed: share.sealed,
+          publishReady: share.publishReady,
+          ...(share.shareOperationId ? { shareOperationId: share.shareOperationId } : {}),
+        });
       } catch (e: any) {
         // #1116 D1: a default full share that can't seal (a residual capability
         // gap, no skipSeal) fails CLOSED with WM preserved — map to a 409 that
@@ -1392,6 +1405,59 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // Publish keeps its own generic-500 catch: on-chain/storage/publisher
     // failures can carry "Invalid"/"Unsafe" text and must NOT be down-classified
     // to 400 (parity with the legacy publish path).
+    if (layer === "vm" && verb === "publish-async") {
+      try {
+        if (!validateFinalizedAssertionPublishRequest(parsed, res)) return;
+        const opts = resolveFinalizedPublishOptions(ctx, parsed.options);
+        if (opts === null) return;
+        const publishOptions = opts as {
+          publishEpochs?: number;
+          clearSharedMemoryAfter?: boolean;
+          publisherNodeIdentityIdOverride?: bigint;
+        };
+        const intent = await agent.resolveFinalizedAssertionVmPublishIntent(contextGraphId, name, {
+          ...(subGraphName ? { subGraphName } : {}),
+          ...(publishOptions.publishEpochs !== undefined ? { publishEpochs: publishOptions.publishEpochs } : {}),
+          ...(publishOptions.clearSharedMemoryAfter !== undefined
+            ? { clearSharedMemoryAfter: publishOptions.clearSharedMemoryAfter }
+            : {}),
+          ...(publishOptions.publisherNodeIdentityIdOverride !== undefined
+            ? { publisherNodeIdentityIdOverride: publishOptions.publisherNodeIdentityIdOverride }
+            : {}),
+        });
+        const jobId = await publisherControl.enqueueKnowledgeAssetVmPublish(intent);
+        return jsonResponse(res, 202, {
+          jobId,
+          status: "accepted",
+          contextGraphId,
+          name,
+          shareOperationId: intent.shareOperationId,
+          rootsCount: intent.roots.length,
+          sealMerkleRoot: intent.sealMerkleRoot,
+          intentKey: intent.intentKey,
+          ...(subGraphName ? { subGraphName } : {}),
+        });
+      } catch (err: any) {
+        if (err instanceof AsyncLiftJobConflictError) {
+          return jsonResponse(res, 409, {
+            error: err.message,
+            existingJobId: err.existingJobId,
+          });
+        }
+        if (err?.code === "PUBLISH_NOT_FULL_SHARE" || err?.code === "PUBLISH_INTENT_STALE") {
+          return jsonResponse(res, 409, { code: err.code, error: err.message ?? String(err) });
+        }
+        if (
+          err.message?.includes("required") ||
+          err.message?.includes("Invalid") ||
+          err.message?.includes("must be")
+        ) {
+          return jsonResponse(res, 400, { error: err.message });
+        }
+        throw err;
+      }
+    }
+
     if (layer === "vm" && verb === "publish") {
       // #988: publish keeps its OWN generic-500 catch (NOT the outer
       // respondAssertionError) so on-chain/storage "Invalid"/"Unsafe" text isn't

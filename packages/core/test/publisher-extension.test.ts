@@ -28,10 +28,6 @@ function createTransport(): DkgPublisherExtensionTransport & { calls: Array<[str
       calls.push(['discardAssertion', args]);
       return { discarded: true };
     },
-    async share(...args) {
-      calls.push(['share', args]);
-      return { shareOperationId: 'swm-1' };
-    },
     async publish(...args) {
       calls.push(['publish', args]);
       return { kaId: '1', kas: [{ tokenId: '1', rootEntity: 'did:dkg:entity:1' }] };
@@ -92,25 +88,6 @@ describe('DkgPublisherExtension', () => {
         'memory',
         [{ subject: 'did:dkg:e:1', predicate: 'http://schema.org/name', object: '"Alpha"', graph: '' }],
         { subGraphName: 'research' },
-      ]],
-    ]);
-  });
-
-  it('can write to shared memory without creating a workspace assertion', async () => {
-    const transport = createTransport();
-    const publisher = createDkgPublisherExtension(transport);
-
-    await publisher.writeSharedMemory({
-      contextGraphId: 'cg',
-      localOnly: false,
-      quads: [{ subject: 'did:dkg:e:1', predicate: 'http://schema.org/url', object: 'https://example.org/a' }],
-    });
-
-    expect(transport.calls).toEqual([
-      ['share', [
-        'cg',
-        [{ subject: 'did:dkg:e:1', predicate: 'http://schema.org/url', object: 'https://example.org/a', graph: '' }],
-        { localOnly: false, subGraphName: undefined },
       ]],
     ]);
   });

@@ -759,6 +759,24 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
         publisherNodeIdentityIdOverride: '123',
       },
     });
+
+    calls = track({ jobId: 'job-1', status: 'accepted' });
+    await client.knowledgeAssetPublishAsync('cg', 'f', {
+      subGraphName: 'notes',
+      clearAfter: true,
+      publishEpochs: 12,
+      publisherNodeIdentityIdOverride: 123n,
+    });
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/vm/publish-async`);
+    expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
+      contextGraphId: 'cg',
+      subGraphName: 'notes',
+      options: {
+        clearSharedMemoryAfter: true,
+        publishEpochs: 12,
+        publisherNodeIdentityIdOverride: '123',
+      },
+    });
   });
 
   it('knowledgeAssetPublish rejects unsupported option keys before HTTP serialization', async () => {
@@ -813,13 +831,13 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }],
       { clearAfter: false, subGraphName: 'sg2' },
     );
-    // 1st call creates (finalize+promote); the sequence ENDS at the per-KA vm/publish route
+    // 1st call creates (finalize+share to SWM); the sequence ENDS at the per-KA vm/publish route
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets`);
     expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
       contextGraphId: 'cg',
       name: 'asset2',
       finalize: true,
-      promote: true,
+      alsoShareSwm: true,
     });
     const last = calls[calls.length - 1];
     expect(last.url).toBe(`${base}/api/knowledge-assets/asset2/vm/publish`);

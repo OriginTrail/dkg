@@ -371,8 +371,8 @@ else
 fi
 sleep "$ONCHAIN_REGISTER_SLEEP"
 
-publish_resp=$(apiA POST /api/shared-memory/publish \
-  "{\"contextGraphId\":\"$CG_ID\",\"selection\":\"all\",\"clearAfter\":false}")
+publish_resp=$(apiA POST /api/knowledge-assets/widget-info/vm/publish \
+  "{\"contextGraphId\":\"$CG_ID\",\"options\":{\"clearAfter\":false}}")
 pub_status=$(echo "$publish_resp" | jq_field status)
 pub_kcid=$(echo "$publish_resp" | jq_field kaId)
 pub_tx=$(echo "$publish_resp" | jq_field txHash)

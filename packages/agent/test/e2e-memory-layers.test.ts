@@ -479,6 +479,9 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     await expect(
       agent.publishFromFinalizedAssertion(CG_ID, 'unsealed-share'),
     ).rejects.toThrow(/not finalized/i);
+    await expect(
+      agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, 'unsealed-share'),
+    ).rejects.toMatchObject({ code: 'PUBLISH_INTENT_STALE' });
   }, 30_000);
 
   // B2: SEAL-IN-SWM round trip — the key new capability. An asset shared

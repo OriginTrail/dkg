@@ -7,17 +7,14 @@ import {
   type SourceWorkerSource,
 } from '@origintrail-official/dkg-agent';
 import {
-  createDaemonAsyncLiftJobClient,
-  createDaemonSharedMemoryWriteClient,
-  type AsyncLiftJobClient,
-  type SharedMemoryWriteClient,
+  createDaemonKnowledgeAssetLifecycleClient,
+  type KnowledgeAssetLifecycleClient,
 } from './source-worker-daemon-client.js';
 import { loadSourceWorkerConfig, type SourceWorkerConfig } from './source-worker-config.js';
 
 export interface SourceWorkerHandlerContext<TSource extends SourceWorkerSource = SourceWorkerSource> {
   config: SourceWorkerConfig<TSource>;
-  sharedMemory: SharedMemoryWriteClient;
-  asyncLift: AsyncLiftJobClient;
+  knowledgeAssets: KnowledgeAssetLifecycleClient;
 }
 
 export interface SourceWorkerHandlerModule<TSource extends SourceWorkerSource = SourceWorkerSource> {
@@ -33,13 +30,11 @@ export interface SourceWorkerHandlerModule<TSource extends SourceWorkerSource = 
 
 export async function runConfiguredSourceWorker(configPath: string, options: { once?: boolean } = {}): Promise<void> {
   const config = await loadSourceWorkerConfig<SourceWorkerSource>(configPath);
-  const sharedMemory = createDaemonSharedMemoryWriteClient(config.daemonUrl, config.daemonToken);
-  const asyncLift = createDaemonAsyncLiftJobClient(config.daemonUrl, config.daemonToken);
+  const knowledgeAssets = createDaemonKnowledgeAssetLifecycleClient(config.daemonUrl, config.daemonToken);
   const handlerModule = await loadHandlerModule(config);
   const workerDeps = await handlerModule.createSourceWorkerDeps({
     config,
-    sharedMemory,
-    asyncLift,
+    knowledgeAssets,
   });
 
   const deps: SourceWorkerDeps<SourceWorkerSource> = {
@@ -49,7 +44,7 @@ export async function runConfiguredSourceWorker(configPath: string, options: { o
     getFingerprint: workerDeps.getFingerprint,
     processSource: workerDeps.processSource,
     getJobStatus(jobId: string) {
-      return asyncLift.getJobStatus(jobId);
+      return knowledgeAssets.getJobStatus(jobId);
     },
   };
 

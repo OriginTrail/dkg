@@ -1,8 +1,8 @@
 // daemon/routes/publisher.ts
 //
-// Route handlers for publisher enqueue / jobs / stats / cancel / retry / clear.
+// Route handlers for publisher jobs / stats / cancel / retry / clear.
 //
-// Extracted verbatim from the legacy monolithic `handleRequest` —
+// Extracted verbatim from the legacy monolithic `handleRequest` â€”
 // every block is a contiguous slice of the original source with zero
 // edits to route bodies. Dispatch is driven by the surviving
 // `handle-request.ts` shell, which awaits each group handler in
@@ -37,7 +37,7 @@ import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSy
 // Namespace import: our Phase-8 install-context builder (~line 290) calls
 // `osModule.homedir()`, and the later agent-identity probe (~line 6851)
 // uses `osModule.hostname()` + `osModule.userInfo()`. v10-rc's new
-// OpenClaw config helper (~line 2535) uses a bare `homedir()` — aliased
+// OpenClaw config helper (~line 2535) uses a bare `homedir()` â€” aliased
 // below so both sites coexist without a duplicate-module import.
 import * as osModule from 'node:os';
 const { homedir } = osModule;
@@ -123,7 +123,7 @@ import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionSt
 import { FileStore } from '../../file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../../http/multipart.js';
-// Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
+// Phase 8 â€” project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
 // reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
 // format stays identical between curator/joiner/CLI paths.
@@ -140,7 +140,7 @@ import {
 } from '@origintrail-official/dkg-mcp/manifest/install';
 import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 
-// Daemon sub-module imports — every public symbol from sibling
+// Daemon sub-module imports â€” every public symbol from sibling
 // modules is pulled in here because the legacy monolithic file used
 // them all without explicit imports. Unused ones are tolerated by
 // the project's tsconfig (`noUnusedLocals` is off).
@@ -357,105 +357,6 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
   } = ctx;
 
 
-  // POST /api/publisher/enqueue
-  // Accepts both the old wrapped shape { request: LiftRequest } and the new flat shape.
-  if (req.method === "POST" && path === "/api/publisher/enqueue") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    let raw: any;
-    try {
-      raw = JSON.parse(body);
-    } catch {
-      return jsonResponse(res, 400, { error: "Invalid JSON body" });
-    }
-    const parsed =
-      raw.request && typeof raw.request === "object" ? raw.request : raw;
-    const {
-      roots,
-      namespace,
-      scope,
-      authorityProofRef,
-      priorVersion,
-      subGraphName,
-      accessPolicy,
-      allowedPeers,
-      entityProofs,
-      publishEpochs,
-      publisherNodeIdentityIdOverride,
-      seal,
-    } = parsed;
-    const rawPublishEpochs = publishEpochs ?? parsed.epochs;
-    const publishEpochsField = publishEpochs !== undefined ? "publishEpochs" : "epochs";
-    const contextGraphId = parsed.contextGraphId;
-    const shareOperationId = parsed.shareOperationId;
-    const swmId = parsed.swmId ?? parsed.workspaceId ?? "swm-main";
-    const transitionType = parsed.transitionType ?? "CREATE";
-    const authorityType =
-      parsed.authorityType ?? parsed.authority?.type ?? "owner";
-    const proofRef = authorityProofRef ?? parsed.authority?.proofRef;
-    if (
-      !contextGraphId ||
-      !shareOperationId ||
-      !Array.isArray(roots) ||
-      roots.length === 0 ||
-      !namespace ||
-      !scope ||
-      !proofRef
-    ) {
-      return jsonResponse(res, 400, {
-        error: "Missing required enqueue fields",
-      });
-    }
-    let resolvedPublishEpochs: number | undefined;
-    if (rawPublishEpochs !== undefined && rawPublishEpochs !== null) {
-      const raw = String(rawPublishEpochs).trim();
-      if (!/^[1-9]\d*$/.test(raw)) {
-        return jsonResponse(res, 400, {
-          error: `"${publishEpochsField}" must be a positive integer (string or number)`,
-        });
-      }
-      const parsedEpochs = Number(raw);
-      if (!Number.isSafeInteger(parsedEpochs)) {
-        return jsonResponse(res, 400, {
-          error: `"${publishEpochsField}" is too large to safely represent as a JavaScript integer`,
-        });
-      }
-      if (parsedEpochs > MAX_PUBLISH_EPOCHS) {
-        return jsonResponse(res, 400, {
-          error: `"${publishEpochsField}" must be less than or equal to ${MAX_PUBLISH_EPOCHS}`,
-        });
-      }
-      resolvedPublishEpochs = parsedEpochs;
-    }
-    // V10 sign-at-enqueue: callers build the EIP-712 AuthorAttestation themselves and pass it as `seal`. Sealless enqueues fall back to tentative.
-    const jobId = await publisherControl.lift({
-      swmId,
-      shareOperationId,
-      roots,
-      contextGraphId,
-      namespace,
-      scope,
-      transitionType,
-      authority: { type: authorityType, proofRef },
-      ...(priorVersion ? { priorVersion } : {}),
-      ...(subGraphName ? { subGraphName } : {}),
-      ...(accessPolicy ? { accessPolicy } : {}),
-      ...(Array.isArray(allowedPeers) && allowedPeers.length > 0 ? { allowedPeers } : {}),
-      // Strict boolean — `!!"false"` is `true`, silently inverting intent.
-      ...(typeof entityProofs === 'boolean' ? { entityProofs } : {}),
-      ...(resolvedPublishEpochs !== undefined ? { publishEpochs: resolvedPublishEpochs } : {}),
-      ...(publisherNodeIdentityIdOverride !== undefined
-        ? { publisherNodeIdentityIdOverride: String(publisherNodeIdentityIdOverride) }
-        : {}),
-      ...(seal !== undefined ? { seal } : {}),
-    } as any);
-    return jsonResponse(res, 200, {
-      jobId,
-      contextGraphId,
-      shareOperationId,
-      rootsCount: roots.length,
-    });
-  }
-
   // GET /api/publisher/jobs?status=...
   if (req.method === "GET" && path === "/api/publisher/jobs") {
     const status =
@@ -510,7 +411,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     return jsonResponse(res, 200, job);
   }
 
-  // GET /api/publisher/stats — returns the raw status map directly for backward compat
+  // GET /api/publisher/stats â€” returns the raw status map directly for backward compat
   if (req.method === "GET" && path === "/api/publisher/stats") {
     const stats = await publisherControl.getStats();
     return jsonResponse(res, 200, stats);

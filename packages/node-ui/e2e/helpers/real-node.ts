@@ -104,7 +104,7 @@ export async function seedWmEntity(cgId: string, prefix = 'wm'): Promise<SeededE
     contextGraphId: cgId,
     name: assertionName,
     quads: buildTestQuads(cgId, stamp, label),
-    promote: false,
+    alsoShareSwm: false,
   });
   if (!res.ok) throw new Error(`seedWmEntity failed: ${res.status} ${res.body}`);
   return { label, assertionName };
@@ -130,7 +130,7 @@ export async function seedSubgraphEntity(
     name: assertionName,
     quads: buildSubGraphQuads(cgId, subGraphName, stamp, label),
     subGraphName,
-    promote: true,
+    alsoShareSwm: true,
     nodeNum,
   });
   if (!res.ok) throw new Error(`seedSubgraphEntity failed: ${res.status} ${res.body}`);

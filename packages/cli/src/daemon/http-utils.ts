@@ -1155,7 +1155,7 @@ export function validateConditions(conditions: unknown, res: ServerResponse): bo
   if (!Array.isArray(conditions) || conditions.length === 0) {
     jsonResponse(res, 400, {
       error:
-        '"conditions" must be a non-empty array (use /api/shared-memory/write for unconditional writes)',
+        '"conditions" must be a non-empty array (use the knowledge asset lifecycle routes for unconditional writes)',
     });
     return false;
   }

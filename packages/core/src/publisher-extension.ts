@@ -21,10 +21,6 @@ export interface DkgPublisherExtensionWriteResult {
   written: number;
 }
 
-export interface DkgPublisherExtensionShareResult {
-  shareOperationId: string;
-}
-
 export interface DkgPublisherExtensionPublishResult {
   kaId?: string | number | bigint;
   kas?: unknown[];
@@ -56,12 +52,6 @@ export interface DkgPublisherExtensionTransport {
     assertionName: string,
     opts?: { subGraphName?: string },
   ): Promise<Record<string, unknown>>;
-
-  share(
-    contextGraphId: string,
-    quads: DkgPublisherExtensionQuad[],
-    opts?: { localOnly?: boolean; subGraphName?: string },
-  ): Promise<DkgPublisherExtensionShareResult>;
 
   publish(
     contextGraphId: string,
@@ -100,13 +90,6 @@ export interface LocalWorkspacePromoteRequest {
 export interface LocalWorkspaceDiscardRequest {
   contextGraphId: string;
   assertionName: string;
-  subGraphName?: string;
-}
-
-export interface SharedMemoryWriteRequest {
-  contextGraphId: string;
-  quads: DkgPublisherExtensionQuadInput[];
-  localOnly?: boolean;
   subGraphName?: string;
 }
 
@@ -164,17 +147,6 @@ export class DkgPublisherExtension {
     return this.transport.discardAssertion(request.contextGraphId, request.assertionName, {
       subGraphName: request.subGraphName,
     });
-  }
-
-  async writeSharedMemory(request: SharedMemoryWriteRequest): Promise<DkgPublisherExtensionShareResult> {
-    return this.transport.share(
-      request.contextGraphId,
-      normalizeDkgPublisherQuads(request.quads),
-      {
-        localOnly: request.localOnly,
-        subGraphName: request.subGraphName,
-      },
-    );
   }
 
   async publishVerifiableMemory(

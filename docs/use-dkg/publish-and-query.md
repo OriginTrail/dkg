@@ -23,14 +23,15 @@ CG="<agentAddress>/my-project"
 dkg assertion import-file notes -f ./notes.md -c "$CG"
 dkg assertion query notes -c "$CG"
 dkg context-graph register "$CG"
-dkg shared-memory publish "$CG" --name notes
+dkg assertion promote notes -c "$CG"
+dkg publisher publish-async "$CG" notes
 ```
 
 Bare context-graph IDs are scoped by the daemon before use. After `create`, use the `ID:` printed by the CLI for later commands; it has the form `<agentAddress>/my-project`.
 
 Use `dkg assertion promote notes -c "$CG"` when you want to stop at Shared Working Memory without publishing to Verifiable Memory.
 
-Use `dkg shared-memory publish "$CG" --name notes` for the high-level finalize → share → publish path. Publishing to Verifiable Memory requires an on-chain context graph, so run `dkg context-graph register "$CG"` before the publish step unless the context graph was already registered.
+Use `dkg publisher publish-async "$CG" notes` to enqueue the Verifiable Memory publish after the KA has been promoted to SWM. Publishing to Verifiable Memory requires an on-chain context graph, so run `dkg context-graph register "$CG"` before the publish step unless the context graph was already registered.
 
 ## Agent shape
 

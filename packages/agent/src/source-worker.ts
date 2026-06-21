@@ -5,6 +5,9 @@ import { basename, dirname, join } from 'node:path';
 export interface SourceWorkerJobState {
   fingerprint?: string;
   lastRunAt?: string;
+  assertionName?: string;
+  shareOperationId?: string;
+  intentKey?: string;
   lastJobIds?: string[];
   lastJobStatuses?: Record<string, string>;
   lastStatus?: string;

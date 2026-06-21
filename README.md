@@ -250,8 +250,7 @@ dkg assertion query <name> -c <cg>                   # read assertion quads from
 dkg assertion promote <name> -c <cg>                 # WM → SWM
 
 # Shared memory (team-visible) and publishing
-dkg shared-memory write <cg> ...         # write triples directly to SWM
-dkg shared-memory publish <cg>           # SWM → Verifiable Memory (costs TRAC)
+dkg assertion promote <name> -c <cg>     # share a named KA from WM to SWM
 dkg publish <cg> -f <file>               # one-shot RDF publish to a context graph
 dkg verify <batchId> --context-graph <cg> --verified-graph <id>  # propose M-of-N verification
 dkg endorse <ual> --context-graph <cg> --agent <addr>  # endorse a published KA
@@ -264,7 +263,7 @@ dkg subscribe <cg>                       # subscribe to a CG's gossip topics
 
 # Async publisher (optional, for batching)
 dkg publisher enable                     # enable the async publisher
-dkg publisher enqueue <cg> ...           # enqueue a publish job
+dkg publisher publish-async <cg> <name>  # enqueue a named KA VM publish job
 dkg publisher jobs                       # list publisher jobs
 dkg publisher stats                      # publisher throughput stats
 

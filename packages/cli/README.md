@@ -40,7 +40,7 @@ dkg status
 dkg context-graph create my-project
 dkg assertion import-file notes -f data.md -c my-project
 dkg assertion promote notes -c my-project
-dkg shared-memory publish my-project
+dkg publisher publish-async my-project notes
 
 # Query the knowledge graph
 dkg query my-project -q "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10"
@@ -252,8 +252,7 @@ modes auto-renewal can't recover from:
 | `dkg assertion import-file <name> -f <file> -c <cg>` | Import a document into Working Memory |
 | `dkg assertion promote <name> -c <cg>` | Promote a WM assertion to Shared Working Memory |
 | `dkg assertion query <name> -c <cg>` | Read assertion quads from WM |
-| `dkg shared-memory write <cg>` | Write triples directly to Shared Working Memory |
-| `dkg shared-memory publish <cg>` | Publish from SWM to Verifiable Memory (costs TRAC) |
+| `dkg publisher publish-async <cg> <name>` | Queue a named Knowledge Asset publish from SWM to Verifiable Memory |
 | `dkg publish <cg>` | One-shot RDF publish to a context graph |
 | `dkg verify <batchId>` | Propose M-of-N verification for a published batch |
 | `dkg endorse <ual>` | Endorse a published Knowledge Asset |
@@ -308,17 +307,25 @@ The handler module is loaded from the config file's directory:
 
 ```js
 export const sourceWorker = {
-  createSourceWorkerDeps({ sharedMemory, asyncLift }) {
+  createSourceWorkerDeps({ knowledgeAssets }) {
     return {
       async getFingerprint(source) {
         return source.contentHash;
       },
       async processSource(source, fingerprint) {
-        const share = await sharedMemory.share(source.contextGraphId, source.quads);
-        const jobId = await asyncLift.lift({
-          ...source.liftRequest,
-          shareOperationId: share.shareOperationId
-        });
+        const name = `source-${source.id}`;
+        const share = await knowledgeAssets.createAndShare(
+          source.contextGraphId,
+          name,
+          source.quads,
+          { subGraphName: source.subGraphName }
+        );
+        const publish = await knowledgeAssets.publishAsync(
+          source.contextGraphId,
+          name,
+          { subGraphName: source.subGraphName }
+        );
+        const jobId = publish.jobId;
         return {
           sourceId: source.id,
           skipped: false,
@@ -327,6 +334,9 @@ export const sourceWorker = {
           status: "queued",
           nextState: {
             fingerprint,
+            assertionName: name,
+            shareOperationId: share.shareOperationId,
+            intentKey: publish.intentKey,
             lastStatus: "queued",
             lastJobIds: [jobId],
             lastJobStatuses: { [jobId]: "queued" }
@@ -349,8 +359,7 @@ When the daemon is running, it exposes a local HTTP API (default: `http://localh
 - `GET /api/status`, `GET /api/info` — node status and health
 - `POST /api/agent/register`, `GET /api/agent/identity` — agent identity
 - `POST /api/context-graph/create`, `/register`, `/invite`, `GET /api/context-graph/list` — context graph management
-- `POST /api/knowledge-assets`, `/{name}/wm/write`, `/{name}/swm/share`, `/{name}/wm/discard`, `/{name}/wm/import-file`, `GET /api/knowledge-assets/{name}` — Working Memory assertions
-- `POST /api/shared-memory/write`, `/publish` — Shared Working Memory and publishing to Verifiable Memory
+- `POST /api/knowledge-assets`, `/{name}/wm/write`, `/{name}/swm/share`, `/{name}/vm/publish`, `/{name}/vm/publish-async`, `/{name}/wm/discard`, `/{name}/wm/import-file`, `GET /api/knowledge-assets/{name}` — named knowledge asset lifecycle
 - `POST /api/query`, `POST /api/query-remote` — SPARQL querying
 - `POST /api/endorse`, `POST /api/verify`, `POST /api/update` — Verifiable Memory trust operations
 - `GET /api/peers`, `GET /api/connections`, `GET /api/agents` — network introspection
@@ -368,9 +377,9 @@ The full API surface — including request bodies, response shapes, and error co
 ## Local Benchmarks
 
 The live publish/get benchmark measures four operation timings against a running
-DKG daemon: synchronous publish end-to-end latency, async publisher enqueue
-latency, async job completion/finalization latency, and SPARQL get latency for
-the published benchmark content.
+DKG daemon: synchronous publish end-to-end latency, async lifecycle publish
+request latency, async job completion/finalization latency, and SPARQL get
+latency for the published benchmark content.
 
 Prerequisites:
 

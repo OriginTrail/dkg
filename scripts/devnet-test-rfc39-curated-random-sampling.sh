@@ -114,7 +114,7 @@ CG_URI="${CG_LOCAL_ID}"
 # --- 4. Write triples to SWM -------------------------------------------------
 # Use a fairly large set of triples to encourage multi-chunk splitting.
 log "Writing 12 triples into SWM..."
-WRITE_RESP=$(api_call "$EDGE_CURATOR_NODE" POST /api/shared-memory/write "$(cat <<EOF
+WRITE_RESP=$(devnet_create_shared_ka "$EDGE_CURATOR_NODE" "$(cat <<EOF
 {
   "contextGraphId": "${CG_URI}",
   "quads": [

@@ -128,7 +128,7 @@ import {
   KA_ID_PRED, RESERVED_UAL_PRED,
   WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED,
   type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
-  type LiftRequest, type LiftRequestAuthorSeal,
+  type LiftRequest, type LiftRequestAuthorSeal, type KnowledgeAssetVmPublishRequest,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -1572,6 +1572,7 @@ export class PublishMethods extends DKGAgentBase {
       onPhase?: PhaseCallback;
       operationCtx?: OperationContext;
       precomputedUpdateAttestation?: PublishOptions['precomputedUpdateAttestation'];
+      publisherOverride?: DKGPublisher;
     },
   ): Promise<PublishResult> {
     const ctx = opts?.operationCtx ?? createOperationContext('update');
@@ -1685,7 +1686,8 @@ export class PublishMethods extends DKGAgentBase {
       updateQuads = [...nonCatalogQuads, ...catalogFloor];
     }
 
-    const result = await this.publisher.update(kaId, {
+    const publisher = opts?.publisherOverride ?? this.publisher;
+    const result = await publisher.update(kaId, {
       contextGraphId,
       quads: updateQuads,
       privateQuads,
@@ -3422,6 +3424,131 @@ export class PublishMethods extends DKGAgentBase {
    * hasn't been promoted yet, publish will see an empty/wrong quad
    * set and the merkleRoot sanity check inside `publish()` will fire.
    */
+  async resolveFinalizedAssertionVmPublishIntent(this: DKGAgent,
+    contextGraphId: string,
+    name: string,
+    opts?: {
+      subGraphName?: string;
+      publishEpochs?: number;
+      clearSharedMemoryAfter?: boolean;
+      publisherNodeIdentityIdOverride?: bigint | `${bigint}`;
+      publisherOverride?: DKGPublisher;
+    },
+  ): Promise<KnowledgeAssetVmPublishRequest> {
+    const agentAddress = this.defaultAgentAddress ?? this.peerId;
+    const publisher = opts?.publisherOverride ?? this.publisher;
+    const history = await this.assertion.history(contextGraphId, name, {
+      agentAddress,
+      ...(opts?.subGraphName ? { subGraphName: opts.subGraphName } : {}),
+    });
+    if (!history) {
+      throw new Error(
+        `publishFromFinalizedAssertion: assertion "${name}" in context graph "${contextGraphId}" is not finalized or does not exist.`,
+      );
+    }
+    if (!(await publisher.hasSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName))) {
+      throw Object.assign(
+        new Error(
+          `Cannot publish "${name}" in context graph "${contextGraphId}": it is not a complete full share ` +
+            `resident in Shared Memory. Seal and share the full asset before publishing.`,
+        ),
+        { code: 'PUBLISH_NOT_FULL_SHARE' },
+      );
+    }
+
+    const metaGraph = contextGraphMetaUri(contextGraphId);
+    const assertionUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, opts?.subGraphName);
+    const metaResult = await this.store.query(
+      `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
+    );
+    const metaQuads = metaResult.type === 'quads' ? metaResult.quads : [];
+    const seal = parseAssertionSealQuads(metaQuads, assertionUri);
+    if (!seal) {
+      throw Object.assign(
+        new Error(
+          `Cannot publish "${name}" asynchronously: the current SWM share is not sealed. ` +
+            `Finalize and share the full asset before publishing.`,
+        ),
+        { code: 'PUBLISH_INTENT_STALE' },
+      );
+    }
+
+    const latestPromote = [...history.events]
+      .reverse()
+      .find((event) => event.type === 'promoted' && event.shareOperationId);
+    const shareOperationId = latestPromote?.shareOperationId?.trim() ?? history.currentShareOperationId?.trim();
+    if (!shareOperationId) {
+      throw Object.assign(
+        new Error(
+          `Cannot publish "${name}" asynchronously: the current SWM share is missing a shareOperationId. ` +
+            `Re-share the asset through /api/knowledge-assets/${encodeURIComponent(name)}/swm/share before publishing.`,
+        ),
+        { code: 'PUBLISH_INTENT_STALE' },
+      );
+    }
+
+    const roots = [...new Set(latestPromote?.rootEntities ?? [])].sort();
+    if (roots.length === 0) {
+      throw Object.assign(
+        new Error(
+          `Cannot publish "${name}" asynchronously: the current SWM share has no recorded root entities. ` +
+            `Re-share the full asset before publishing.`,
+        ),
+        { code: 'PUBLISH_INTENT_STALE' },
+      );
+    }
+
+    const merkleBare = ethers.hexlify(seal.merkleRoot).slice(2);
+    if (!merkleBare) {
+      throw Object.assign(
+        new Error(
+          `Cannot publish "${name}" asynchronously: the current SWM share has no sealed assertion pointer. ` +
+            `Finalize and share the full asset before publishing.`,
+        ),
+        { code: 'PUBLISH_INTENT_STALE' },
+      );
+    }
+    const sealMerkleRoot = (merkleBare.startsWith('0x') ? merkleBare : `0x${merkleBare}`) as `0x${string}`;
+    const publisherOverrideString = opts?.publisherNodeIdentityIdOverride !== undefined
+      ? opts.publisherNodeIdentityIdOverride.toString() as `${bigint}`
+      : undefined;
+    const canonicalIntent = {
+      contextGraphId,
+      name,
+      subGraphName: opts?.subGraphName ?? null,
+      shareOperationId,
+      roots,
+      sealMerkleRoot: sealMerkleRoot.toLowerCase(),
+      wmCurrentAssertion: history.wmCurrentAssertion ?? null,
+      swmCurrentAssertion: history.swmCurrentAssertion ?? null,
+      vmCurrentAssertion: history.vmCurrentAssertion ?? null,
+      kaNumber: history.kaNumber ?? null,
+      reservedUal: history.reservedUal ?? null,
+      publishEpochs: opts?.publishEpochs ?? null,
+      clearSharedMemoryAfter: opts?.clearSharedMemoryAfter ?? null,
+      publisherNodeIdentityIdOverride: publisherOverrideString ?? null,
+    };
+    const intentKey = `sha256:${createHash('sha256').update(JSON.stringify(canonicalIntent)).digest('hex')}`;
+
+    return {
+      contextGraphId,
+      name,
+      ...(opts?.subGraphName ? { subGraphName: opts.subGraphName } : {}),
+      shareOperationId,
+      roots,
+      sealMerkleRoot,
+      intentKey,
+      ...(history.wmCurrentAssertion ? { wmCurrentAssertion: history.wmCurrentAssertion } : {}),
+      ...(history.swmCurrentAssertion ? { swmCurrentAssertion: history.swmCurrentAssertion } : {}),
+      ...(history.vmCurrentAssertion ? { vmCurrentAssertion: history.vmCurrentAssertion } : {}),
+      ...(history.kaNumber ? { kaNumber: history.kaNumber } : {}),
+      ...(history.reservedUal ? { reservedUal: history.reservedUal } : {}),
+      ...(opts?.publishEpochs !== undefined ? { publishEpochs: opts.publishEpochs } : {}),
+      ...(opts?.clearSharedMemoryAfter !== undefined ? { clearSharedMemoryAfter: opts.clearSharedMemoryAfter } : {}),
+      ...(publisherOverrideString !== undefined ? { publisherNodeIdentityIdOverride: publisherOverrideString } : {}),
+    };
+  }
+
   async publishFromFinalizedAssertion(this: DKGAgent,
     contextGraphId: string,
     name: string,
@@ -3433,9 +3560,11 @@ export class PublishMethods extends DKGAgentBase {
       publisherNodeIdentityIdOverride?: bigint;
       publishEpochs?: number;
       clearSharedMemoryAfter?: boolean;
+      publisherOverride?: DKGPublisher;
     },
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
     const agentAddress = opts?.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
+    const publisher = opts?.publisherOverride ?? this.publisher;
     const assertionUri = contextGraphAssertionUri(
       contextGraphId,
       agentAddress,
@@ -3496,7 +3625,7 @@ export class PublishMethods extends DKGAgentBase {
     // paths. A legitimate full-share publish has the marker (assertionPromote set
     // it on the full share); an UPDATE re-publish re-sets it via the required
     // re-promote (a confirmed publish drained SWM, so a re-publish MUST re-share).
-    if (!(await this.publisher.hasSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName))) {
+    if (!(await publisher.hasSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName))) {
       throw Object.assign(
         new Error(
           `Cannot publish "${name}" in context graph "${contextGraphId}": it is not a complete full share ` +
@@ -3576,6 +3705,7 @@ export class PublishMethods extends DKGAgentBase {
       const updateAttestation = await this._buildPrecomputedUpdateAttestationForSeal(
         packedKaId,
         seal,
+        publisher,
       );
       result = await this.update(
         packedKaId,
@@ -3586,6 +3716,7 @@ export class PublishMethods extends DKGAgentBase {
           operationCtx: opts?.operationCtx,
           onPhase: opts?.onPhase,
           precomputedUpdateAttestation: updateAttestation,
+          publisherOverride: publisher,
         },
       );
 
@@ -3596,7 +3727,7 @@ export class PublishMethods extends DKGAgentBase {
       // that mirrored the share), so SWM and VM permanently disagreed.
       if (result.status === 'confirmed') {
         try {
-          await this.publisher.clearPublishedSwmRoots(
+          await publisher.clearPublishedSwmRoots(
             contextGraphId,
             seal.rootEntities,
             opts?.subGraphName,
@@ -3718,6 +3849,7 @@ export class PublishMethods extends DKGAgentBase {
             // where it is never submitted.
             reservedKaId: recoveredReservedKaId ?? 0n,
           },
+          publisherOverride: publisher,
         },
       );
 
@@ -3875,7 +4007,7 @@ export class PublishMethods extends DKGAgentBase {
     // re-sets the marker via assertionPromote). Covers BOTH MINT and UPDATE.
     if (result.status === 'confirmed') {
       try {
-        await this.publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName);
+        await publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName);
       } catch (err) {
         this.log.warn(
           opts?.operationCtx ?? createOperationContext('publishFromSWM'),
@@ -3901,6 +4033,7 @@ export class PublishMethods extends DKGAgentBase {
     this: DKGAgent,
     kaId: bigint,
     seal: AssertionSeal,
+    publisherOverride?: DKGPublisher,
   ): Promise<NonNullable<PublishOptions['precomputedUpdateAttestation']>> {
     const typedData = buildUpdateAuthorAttestationTypedData({
       chainId: seal.chainId,
@@ -3920,7 +4053,8 @@ export class PublishMethods extends DKGAgentBase {
       r = ethers.getBytes(sig.r);
       vs = ethers.getBytes(sig.yParityAndS);
     } else {
-      const fallbackAddress = await this.publisher.publisherFallbackAuthorAddress();
+      const publisher = publisherOverride ?? this.publisher;
+      const fallbackAddress = await publisher.publisherFallbackAuthorAddress();
       if (!fallbackAddress || fallbackAddress.toLowerCase() !== seal.authorAddress.toLowerCase()) {
         throw new Error(
           `publishFromFinalizedAssertion (update path): cannot re-sign UpdateAuthorAttestation for author ` +
@@ -3928,7 +4062,7 @@ export class PublishMethods extends DKGAgentBase {
             `Use the /api/update route with a pre-signed UpdateAuthorAttestation instead.`,
         );
       }
-      const compact = await this.publisher.signAuthorAttestationAsPublisher(typedData);
+      const compact = await publisher.signAuthorAttestationAsPublisher(typedData);
       r = compact.r;
       vs = compact.vs;
     }
@@ -4084,8 +4218,8 @@ export class PublishMethods extends DKGAgentBase {
    * SWM state can promote it to canonical without re-downloading the full payload.
    *
    * #1116 (round 9) — INTENTIONALLY NOT marker-gated. This is the
-   * "publish an arbitrary caller-selected SWM slice" escape hatch (the legacy
-   * /api/shared-memory/publish path, #1087): it mints a FRESH inline seal over the
+   * "publish an arbitrary caller-selected SWM slice" internal escape hatch
+   * retained for substrate mechanics (#1087): it mints a FRESH inline seal over the
    * selected slice rather than consuming a finalized named lifecycle, so the
    * swmShareComplete full-share invariant does not apply. The marker gate lives on
    * `publishFromFinalizedAssertion` (the named-lifecycle /vm/publish path) only.
@@ -4163,6 +4297,7 @@ export class PublishMethods extends DKGAgentBase {
       preSignedAuthorAttestation?: PreSignedAuthorAttestation;
       /** Author scheme version override (defaults to AUTHOR_SCHEME_VERSION_V1). */
       schemeVersion?: number;
+      publisherOverride?: DKGPublisher;
     },
   ): Promise<PublishResult> {
    return withSpan('agent.publish_from_swm', async (span) => {
@@ -4189,8 +4324,8 @@ export class PublishMethods extends DKGAgentBase {
     const v10ACKProvider = this.createV10ACKProvider(contextGraphId);
 
     // OT-RFC-49 — inject the public `_catalog` projection for a curated CG
-    // publishing from raw SWM (the `/api/shared-memory/write` + `/publish`
-    // shortcut) that did NOT go through `assertionFinalize` — which is what
+    // publishing from raw SWM through the internal substrate shortcut that did
+    // NOT go through `assertionFinalize` — which is what
     // normally injects the catalog. Without it the reloaded payload carries no
     // catalog, the on-chain catalog commitment stays zero, and the core ACK
     // falls back to SWM-lookup and DECLINEs `NO_DATA_IN_SWM`. Run BEFORE the
@@ -4288,7 +4423,8 @@ export class PublishMethods extends DKGAgentBase {
       this.log.info(ctx, `LU-11: curated CG ${contextGraphId} — chunked path active (per-chunk SWM gossip + V2 ACK)`);
     }
 
-    const result = await this.publisher.publishFromSharedMemory(contextGraphId, selection, {
+    const publisher = options?.publisherOverride ?? this.publisher;
+    const result = await publisher.publishFromSharedMemory(contextGraphId, selection, {
       operationCtx: ctx,
       clearSharedMemoryAfter: options?.clearSharedMemoryAfter,
       onPhase: options?.onPhase,

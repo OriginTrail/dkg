@@ -537,11 +537,11 @@ function SharedMemoryTab() {
     setResult('');
     const graph = contextGraphId.startsWith('did:') ? contextGraphId : `did:dkg:context-graph:${contextGraphId}`;
     const quads = [{ subject, predicate, object: fmtObj(object), graph }];
-    const opId = addBroadcast('workspace', state.selectedNode, 'shared memory write');
+    const opId = addBroadcast('workspace', state.selectedNode, 'KA share');
     try {
-      const res = await api.share(state.selectedNode, contextGraphId, quads);
-      completeOperation(opId, 'success', res.shareOperationId);
-      setResult(`Written to shared memory.\nOperation: ${res.shareOperationId}`);
+      const res = await api.createSharedKnowledgeAsset(state.selectedNode, contextGraphId, quads);
+      completeOperation(opId, 'success', res.name);
+      setResult(`Created and shared knowledge asset.\nName: ${res.name}`);
     } catch (e: any) {
       completeOperation(opId, 'error', e.message);
       setResult(`Error: ${e.message}`);
@@ -569,8 +569,7 @@ function SharedMemoryTab() {
   return (
     <div className="tab-form">
       <div className="setup-hint">
-        Write triples to shared memory (free, no gas). Publishing to the chain is
-        done per knowledge asset from the Publish tab.
+        Create, seal, and share a named knowledge asset into shared working memory.
       </div>
 
       <div className="form-group">
