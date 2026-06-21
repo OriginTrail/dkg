@@ -374,17 +374,46 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       throw new Error(`Knowledge asset VM publish job ${claimed.jobId} is missing request metadata`);
     }
 
+    let validated!: ReturnType<typeof validateLiftPublishPayload>;
+    let prepared!: AsyncPreparedPublishPayload;
     try {
+      const resolved = await resolveLiftWorkspaceSlice({
+        store: this.store,
+        graphManager: this.graphManager,
+        request: claimed.request,
+        publicSnapshotStore: this.publicSnapshotStore,
+      });
+      validated = validateLiftPublishPayload({
+        request: claimed.request,
+        resolved: {
+          ...resolved,
+          ...this.resolvedSliceOverrides,
+        },
+      });
       await this.update(claimed.jobId, 'validated', {
-        validation: this.createKnowledgeAssetVmPublishValidation(claimed.request),
+        validation: validated.validation,
+      });
+      prepared = prepareAsyncPublishPayload({
+        request: claimed.request,
+        validation: validated.validation,
+        resolved: validated.resolved,
       });
     } catch (error) {
       return await this.recordExecutionFailure(claimed.jobId, 'claimed', error);
     }
 
     try {
-      const publishResult = await this.knowledgeAssetVmPublishExecutor({ walletId, request });
-      return await this.recordPublishResult(claimed.jobId, publishResult);
+      const publishResult = await this.knowledgeAssetVmPublishExecutor({
+        walletId,
+        request,
+        liftRequest: claimed.request,
+        validation: validated.validation,
+        resolved: validated.resolved,
+        publishOptions: prepared.publishOptions,
+      });
+      return await this.recordPublishResult(claimed.jobId, publishResult, {
+        publicByteSize: this.computePublicByteSize(prepared.publishOptions.quads),
+      });
     } catch (error) {
       const failedFromState: LiftJobState = this.isKnowledgeAssetPublishPreconditionFailure(error)
         ? 'validated'
@@ -436,20 +465,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       ...(request.publisherNodeIdentityIdOverride !== undefined
         ? { publisherNodeIdentityIdOverride: request.publisherNodeIdentityIdOverride }
         : {}),
-    };
-  }
-
-  private createKnowledgeAssetVmPublishValidation(request: LiftRequest): NonNullable<LiftJob['validation']> {
-    const canonicalRootMap = Object.fromEntries(
-      request.roots.map((root) => [root, root]),
-    ) as Record<string, string>;
-    return {
-      canonicalRoots: request.roots,
-      canonicalRootMap,
-      swmQuadCount: request.roots.length,
-      authorityProofRef: request.authority.proofRef,
-      transitionType: request.transitionType,
-      ...(request.priorVersion ? { priorVersion: request.priorVersion } : {}),
+      seal: request.seal,
     };
   }
 

@@ -96,16 +96,31 @@ describe('TripleStoreAsyncLiftPublisher', () => {
   });
 
   const kaVmPublishRequest = (overrides: Partial<Parameters<TripleStoreAsyncLiftPublisher['enqueueKnowledgeAssetVmPublish']>[0]> = {}) => {
+    const authorAddress = '0x1111111111111111111111111111111111111111';
+    const kaNumber = 7n;
     const base = {
       contextGraphId: 'music-social',
       name: 'albums',
       shareOperationId: 'share-op-1',
       roots: ['urn:album:one', 'urn:album:two'],
+      seal: {
+        merkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
+        authorAddress: authorAddress as `0x${string}`,
+        signature: {
+          r: (`0x${'34'.repeat(32)}`) as `0x${string}`,
+          vs: (`0x${'56'.repeat(32)}`) as `0x${string}`,
+        },
+        schemeVersion: 1,
+        reservedKaId: ((BigInt(authorAddress) << 96n) | kaNumber).toString() as `${bigint}`,
+      },
+      sealChainId: '31337' as `${bigint}`,
+      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
       sealMerkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
       intentKey: 'sha256:' + 'ab'.repeat(32),
       wmCurrentAssertion: '12'.repeat(32),
       swmCurrentAssertion: '12'.repeat(32),
-      kaNumber: '7',
+      kaNumber: kaNumber.toString(),
       reservedUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
     };
     return { ...base, ...overrides };
@@ -207,6 +222,19 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       subGraphName: 'research',
       shareOperationId: 'share-op-1',
       roots: ['urn:album:one', 'urn:album:two'],
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}`,
+        authorAddress: '0x1111111111111111111111111111111111111111',
+        signature: {
+          r: `0x${'34'.repeat(32)}`,
+          vs: `0x${'56'.repeat(32)}`,
+        },
+        schemeVersion: 1,
+        reservedKaId: ((BigInt('0x1111111111111111111111111111111111111111') << 96n) | 7n).toString(),
+      },
+      sealChainId: '31337',
+      sealKav10Address: '0x2222222222222222222222222222222222222222',
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
       sealMerkleRoot: `0x${'12'.repeat(32)}`,
       intentKey: 'sha256:' + 'ab'.repeat(32),
       wmCurrentAssertion: '12'.repeat(32),
@@ -258,8 +286,21 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         },
       },
     });
+    const publisherContract: Publisher = makeTestPublisher({
+      store,
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+    const share = await publisherContract.share('music-social', [
+      { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
+      { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
+    ], { publisherPeerId: 'peer-1' });
 
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId: share.shareOperationId,
       clearSharedMemoryAfter: true,
     }));
     const processed = await publisher.processNext('wallet-1');
@@ -267,14 +308,26 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(processed?.jobId).toBe(jobId);
     expect(processed?.status).toBe('finalized');
     expect(processed?.finalization?.ual).toBe('did:dkg:mock:31337/0xdef/11');
-    expect(calls).toEqual([
-      {
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
         walletId: 'wallet-1',
         request: {
           contextGraphId: 'music-social',
           name: 'albums',
-          shareOperationId: 'share-op-1',
+          shareOperationId: share.shareOperationId,
           roots: ['urn:album:one', 'urn:album:two'],
+          seal: {
+            merkleRoot: `0x${'12'.repeat(32)}`,
+            authorAddress: '0x1111111111111111111111111111111111111111',
+            signature: {
+              r: `0x${'34'.repeat(32)}`,
+              vs: `0x${'56'.repeat(32)}`,
+            },
+            schemeVersion: 1,
+          },
+          sealChainId: '31337',
+          sealKav10Address: '0x2222222222222222222222222222222222222222',
+          sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
           sealMerkleRoot: `0x${'12'.repeat(32)}`,
           intentKey: 'sha256:' + 'ab'.repeat(32),
           wmCurrentAssertion: '12'.repeat(32),
@@ -283,8 +336,22 @@ describe('TripleStoreAsyncLiftPublisher', () => {
           reservedUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
           clearSharedMemoryAfter: true,
         },
-      },
-    ]);
+        validation: {
+          canonicalRoots: ['urn:album:one', 'urn:album:two'],
+          swmQuadCount: 2,
+          transitionType: 'CREATE',
+        },
+        resolved: {
+          publisherPeerId: 'peer-1',
+        },
+        publishOptions: {
+          publisherPeerId: 'peer-1',
+          quads: [
+            { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
+            { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
+          ],
+        },
+      });
   });
 
   it('exposes the SWM share operation contract', async () => {

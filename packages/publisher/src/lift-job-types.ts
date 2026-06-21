@@ -45,6 +45,11 @@ export interface KnowledgeAssetVmPublishRequest {
   readonly subGraphName?: string;
   readonly shareOperationId: string;
   readonly roots: readonly string[];
+  /** Author seal captured with the queued SWM share snapshot. */
+  readonly seal: LiftRequestAuthorSeal;
+  readonly sealChainId: LiftJobBigInt;
+  readonly sealKav10Address: LiftJobHex;
+  readonly sealFinalizedAtIso: string;
   readonly sealMerkleRoot: LiftJobHex;
   readonly intentKey: string;
   readonly wmCurrentAssertion?: string;

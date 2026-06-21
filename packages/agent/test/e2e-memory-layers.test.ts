@@ -16,6 +16,7 @@ import { SEAL_CAPABILITY_GAP_CODE } from '../src/dkg-agent-publish.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
+import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import {
   assertionLifecycleUri,
@@ -509,6 +510,45 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     expect(intent.roots).toEqual([root]);
     expect(intent.sealMerkleRoot).toMatch(/^0x[0-9a-f]+$/);
   }, 30_000);
+
+  it('async VM publish executes the queued share snapshot after live SWM is drained', async () => {
+    const agent = await createAgent('QueuedAsyncVmPublishBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Publish E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-async-vm';
+    const root = `${ENTITY_BASE}:queued-async`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Queued Async VM"' },
+    ]);
+    const share = await agent.assertion.promote(CG_ID, name);
+    expect(share.publishReady).toBe(true);
+
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+    expect(intent.shareOperationId).toBe(share.shareOperationId);
+
+    await (agent as any).publisher.clearPublishedSwmRoots(
+      CG_ID,
+      [...intent.roots],
+      undefined,
+      createOperationContext('publishFromSWM'),
+    );
+
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
+      knowledgeAssetVmPublishExecutor: async ({ request, publishOptions }) =>
+        agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+    });
+    const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
+    const processed = await asyncPublisher.processNext('wallet-1');
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('finalized');
+
+    const history = await agent.assertion.history(CG_ID, name);
+    expect(history?.vmCurrentAssertion).toBe(intent.sealMerkleRoot.slice(2));
+    expect(history?.state).toBe('published');
+    expect(history?.memoryLayer).toBe(MemoryLayer.VerifiableMemory);
+  }, 60_000);
 
   // B2: SEAL-IN-SWM round trip — the key new capability. An asset shared
   // UNSEALED (stuck, unpublishable) is made publishable by finalize(layer:'swm')

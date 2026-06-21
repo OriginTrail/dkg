@@ -1794,46 +1794,14 @@ export async function runDaemonInner(
               log,
             }),
             publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
-            knowledgeAssetVmPublishExecutor: async ({ request, publisher }) => {
-              const currentIntent = await agent.resolveFinalizedAssertionVmPublishIntent(
-                request.contextGraphId,
-                request.name,
-                {
-                  ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
-                  ...(request.publishEpochs !== undefined ? { publishEpochs: request.publishEpochs } : {}),
-                  ...(request.clearSharedMemoryAfter !== undefined
-                    ? { clearSharedMemoryAfter: request.clearSharedMemoryAfter }
-                    : {}),
-                  ...(request.publisherNodeIdentityIdOverride !== undefined
-                    ? { publisherNodeIdentityIdOverride: BigInt(request.publisherNodeIdentityIdOverride) }
-                    : {}),
-                  ...(publisher ? { publisherOverride: publisher } : {}),
-                },
-              );
-              if (currentIntent.intentKey !== request.intentKey) {
-                throw Object.assign(
-                  new Error(
-                    `Knowledge asset VM publish intent for "${request.name}" changed after enqueue; ` +
-                      `enqueue a new job for the current SWM share.`,
-                  ),
-                  { code: "PUBLISH_INTENT_STALE" },
-                );
-              }
+            knowledgeAssetVmPublishExecutor: async ({ request, publishOptions, publisher }) => {
               const publishOpts = {
-                ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
-                ...(request.publishEpochs !== undefined ? { publishEpochs: request.publishEpochs } : {}),
-                ...(request.clearSharedMemoryAfter !== undefined
-                  ? { clearSharedMemoryAfter: request.clearSharedMemoryAfter }
-                  : {}),
-                ...(request.publisherNodeIdentityIdOverride !== undefined
-                  ? { publisherNodeIdentityIdOverride: BigInt(request.publisherNodeIdentityIdOverride) }
-                  : {}),
                 ...(publisher ? { publisherOverride: publisher } : {}),
               };
               try {
-                return await agent.publishFromFinalizedAssertion(
-                  request.contextGraphId,
-                  request.name,
+                return await agent.publishQueuedKnowledgeAssetVmPublish(
+                  request,
+                  publishOptions,
                   publishOpts,
                 );
               } catch (firstErr: any) {
@@ -1847,9 +1815,9 @@ export async function runDaemonInner(
                 await agent.ensureRegisteredForPublish(request.contextGraphId, {
                   ...(defaultAgentAddress ? { callerAgentAddress: defaultAgentAddress } : {}),
                 });
-                return await agent.publishFromFinalizedAssertion(
-                  request.contextGraphId,
-                  request.name,
+                return await agent.publishQueuedKnowledgeAssetVmPublish(
+                  request,
+                  publishOptions,
                   publishOpts,
                 );
               }

@@ -3512,6 +3512,16 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
     const sealMerkleRoot = (merkleBare.startsWith('0x') ? merkleBare : `0x${merkleBare}`) as `0x${string}`;
+    const queuedSeal: LiftRequestAuthorSeal = {
+      merkleRoot: ethers.hexlify(seal.merkleRoot) as `0x${string}`,
+      authorAddress: ethers.getAddress(seal.authorAddress) as `0x${string}`,
+      signature: {
+        r: ethers.hexlify(seal.authorAttestationR) as `0x${string}`,
+        vs: ethers.hexlify(seal.authorAttestationVS) as `0x${string}`,
+      },
+      schemeVersion: seal.authorSchemeVersion,
+      ...(seal.reservedKaId !== undefined ? { reservedKaId: seal.reservedKaId.toString() as `${bigint}` } : {}),
+    };
     const publisherOverrideString = opts?.publisherNodeIdentityIdOverride !== undefined
       ? opts.publisherNodeIdentityIdOverride.toString() as `${bigint}`
       : undefined;
@@ -3522,6 +3532,10 @@ export class PublishMethods extends DKGAgentBase {
       shareOperationId,
       roots,
       sealMerkleRoot: sealMerkleRoot.toLowerCase(),
+      seal: queuedSeal,
+      sealChainId: seal.chainId.toString(),
+      sealKav10Address: ethers.getAddress(seal.kav10Address),
+      sealFinalizedAtIso: seal.finalizedAtIso,
       wmCurrentAssertion: history.wmCurrentAssertion ?? null,
       swmCurrentAssertion: history.swmCurrentAssertion ?? null,
       vmCurrentAssertion: history.vmCurrentAssertion ?? null,
@@ -3539,6 +3553,10 @@ export class PublishMethods extends DKGAgentBase {
       ...(opts?.subGraphName ? { subGraphName: opts.subGraphName } : {}),
       shareOperationId,
       roots,
+      seal: queuedSeal,
+      sealChainId: seal.chainId.toString() as `${bigint}`,
+      sealKav10Address: ethers.getAddress(seal.kav10Address) as `0x${string}`,
+      sealFinalizedAtIso: seal.finalizedAtIso,
       sealMerkleRoot,
       intentKey,
       ...(history.wmCurrentAssertion ? { wmCurrentAssertion: history.wmCurrentAssertion } : {}),
@@ -3550,6 +3568,380 @@ export class PublishMethods extends DKGAgentBase {
       ...(opts?.clearSharedMemoryAfter !== undefined ? { clearSharedMemoryAfter: opts.clearSharedMemoryAfter } : {}),
       ...(publisherOverrideString !== undefined ? { publisherNodeIdentityIdOverride: publisherOverrideString } : {}),
     };
+  }
+
+  async publishQueuedKnowledgeAssetVmPublish(
+    this: DKGAgent,
+    request: KnowledgeAssetVmPublishRequest,
+    publishOptions: PublishOptions,
+    opts?: {
+      operationCtx?: OperationContext;
+      onPhase?: PhaseCallback;
+      publisherOverride?: DKGPublisher;
+    },
+  ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
+    const ctx = opts?.operationCtx ?? publishOptions.operationCtx ?? createOperationContext('publishFromSWM');
+    const publisher = opts?.publisherOverride ?? this.publisher;
+    const agentAddress = this.defaultAgentAddress ?? this.peerId;
+    const assertionUri = contextGraphAssertionUri(
+      request.contextGraphId,
+      agentAddress,
+      request.name,
+      request.subGraphName,
+    );
+    const lifecycleUri = assertionLifecycleUri(
+      request.contextGraphId,
+      agentAddress,
+      request.name,
+      request.subGraphName,
+    );
+    const metaGraph = contextGraphMetaUri(request.contextGraphId);
+
+    const seal: AssertionSeal = {
+      merkleRoot: ethers.getBytes(request.seal.merkleRoot),
+      authorAddress: ethers.getAddress(request.seal.authorAddress),
+      authorAttestationR: ethers.getBytes(request.seal.signature.r),
+      authorAttestationVS: ethers.getBytes(request.seal.signature.vs),
+      authorSchemeVersion: request.seal.schemeVersion,
+      chainId: BigInt(request.sealChainId),
+      kav10Address: ethers.getAddress(request.sealKav10Address),
+      finalizedAtIso: request.sealFinalizedAtIso,
+      rootEntities: [...request.roots],
+      ...(request.seal.reservedKaId !== undefined ? { reservedKaId: BigInt(request.seal.reservedKaId) } : {}),
+    };
+    const queuedMerkleRoot = ethers.hexlify(seal.merkleRoot).toLowerCase();
+    if (queuedMerkleRoot !== request.sealMerkleRoot.toLowerCase()) {
+      throw Object.assign(
+        new Error(
+          `Queued VM publish for "${request.name}" has inconsistent seal roots: ` +
+            `${request.sealMerkleRoot} != ${queuedMerkleRoot}.`,
+        ),
+        { code: 'PUBLISH_INTENT_STALE' },
+      );
+    }
+
+    if (
+      typeof this.chain.getEvmChainId === 'function' &&
+      typeof this.chain.getKnowledgeAssetsLifecycleAddress === 'function'
+    ) {
+      const liveChainId = await this.chain.getEvmChainId();
+      const liveKav10 = await this.chain.getKnowledgeAssetsLifecycleAddress();
+      if (liveChainId !== seal.chainId) {
+        throw new Error(
+          `publishQueuedKnowledgeAssetVmPublish: seal binds chainId=${seal.chainId.toString()} but daemon ` +
+            `is configured for chainId=${liveChainId.toString()}. Re-finalize the assertion against the target chain.`,
+        );
+      }
+      if (liveKav10.toLowerCase() !== seal.kav10Address.toLowerCase()) {
+        throw new Error(
+          `publishQueuedKnowledgeAssetVmPublish: seal binds KAv10=${seal.kav10Address} but daemon ` +
+            `is configured for KAv10=${liveKav10}.`,
+        );
+      }
+    }
+
+    const snapshotQuads = publishOptions.quads.map((q) => ({ ...q, graph: '' }));
+    const snapshotPrivateQuads = (publishOptions.privateQuads ?? []).map((q) => ({ ...q, graph: '' }));
+    if (snapshotQuads.length === 0 && snapshotPrivateQuads.length === 0) {
+      throw new Error(
+        `No queued shared-memory snapshot quads for context graph ${request.contextGraphId} ` +
+          `share operation ${request.shareOperationId}`,
+      );
+    }
+
+    const pointerRes = await this.store.query(
+      `SELECT ?vm ?kaNum WHERE { GRAPH <${metaGraph}> {
+        OPTIONAL { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
+        OPTIONAL { <${lifecycleUri}> <${KA_ID_PRED}> ?kaNum }
+      } } LIMIT 1`,
+    );
+    const stripLit = (v?: string) => v?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
+    const pointerRow = pointerRes.type === 'bindings' ? pointerRes.bindings[0] : undefined;
+    const vmCurrent = request.vmCurrentAssertion ?? stripLit(pointerRow?.['vm']);
+    const stampedNumberStr = request.kaNumber ?? stripLit(pointerRow?.['kaNum']);
+
+    let packedKaId: bigint | undefined;
+    if (stampedNumberStr != null && stampedNumberStr !== '') {
+      try {
+        const authorBits = BigInt(ethers.getAddress(seal.authorAddress));
+        packedKaId = (authorBits << 96n) | BigInt(stampedNumberStr);
+      } catch (err) {
+        this.log.warn(
+          ctx,
+          `Failed to re-pack queued kaId number "${stampedNumberStr}" for <${lifecycleUri}>: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
+
+    const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
+    let result: PublishResult;
+    if (vmCurrent && packedKaId !== undefined) {
+      const updateAttestation = await this._buildPrecomputedUpdateAttestationForSeal(
+        packedKaId,
+        seal,
+        publisher,
+      );
+      result = await this.update(
+        packedKaId,
+        request.contextGraphId,
+        snapshotQuads,
+        snapshotPrivateQuads,
+        {
+          operationCtx: ctx,
+          onPhase: opts?.onPhase ?? publishOptions.onPhase,
+          precomputedUpdateAttestation: updateAttestation,
+          publisherOverride: publisher,
+        },
+      );
+
+      if (result.status === 'confirmed' && request.clearSharedMemoryAfter !== false) {
+        try {
+          await publisher.clearPublishedSwmRoots(
+            request.contextGraphId,
+            [...request.roots],
+            request.subGraphName,
+            ctx,
+          );
+        } catch (err) {
+          this.log.warn(
+            ctx,
+            `Failed to clear SWM after confirmed queued update of <${lifecycleUri}>: ` +
+              (err instanceof Error ? err.message : String(err)),
+          );
+        }
+      }
+
+      if (result.status === 'confirmed' || result.status === 'tentative') {
+        try {
+          const priorBare = vmCurrent.startsWith('0x') ? vmCurrent.slice(2) : vmCurrent;
+          const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
+          await this._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
+          await this._stampPointerIfDivergedFromVm(lifecycleUri, WM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
+          await this.store.insert([
+            { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
+            { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: `"${priorBare}"`, graph: metaGraph },
+          ]);
+        } catch (err) {
+          this.log.warn(
+            ctx,
+            `Failed to stamp queued update provenance for <${lifecycleUri}>: ` +
+              (err instanceof Error ? err.message : String(err)),
+          );
+        }
+      }
+    } else {
+      const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
+      const onChainCapable =
+        typeof this.chain.getEvmChainId === 'function' &&
+        typeof this.chain.getKnowledgeAssetsLifecycleAddress === 'function';
+      if (recoveredReservedKaId === undefined && onChainCapable) {
+        throw new Error(
+          `publishQueuedKnowledgeAssetVmPublish: cannot recover the reservedKaId for <${assertionUri}>. ` +
+            `Re-finalize the assertion before publishing asynchronously.`,
+        );
+      }
+      const encryptInlinePayload = publishOptions.encryptInlinePayload ?? await this._resolveEncryptInlinePayload(
+        request.contextGraphId,
+        request.subGraphName,
+        undefined,
+        publishOptions.publishContextGraphId,
+      );
+      const encryptInlineChunked = publishOptions.encryptInlineChunked ?? await this._resolveEncryptInlineChunked(
+        request.contextGraphId,
+        request.subGraphName,
+        undefined,
+        publishOptions.publishContextGraphId,
+      );
+      result = await publisher.publish({
+        ...publishOptions,
+        contextGraphId: request.contextGraphId,
+        quads: snapshotQuads,
+        privateQuads: snapshotPrivateQuads.length > 0 ? snapshotPrivateQuads : undefined,
+        publisherPeerId: publishOptions.publisherPeerId ?? this.peerId,
+        subGraphName: request.subGraphName,
+        operationCtx: ctx,
+        onPhase: opts?.onPhase ?? publishOptions.onPhase,
+        skipContextGraphEnsure: true,
+        v10ACKProvider: publishOptions.v10ACKProvider ?? this.createV10ACKProvider(request.contextGraphId),
+        publishEpochs: request.publishEpochs ?? publishOptions.publishEpochs,
+        publisherNodeIdentityIdOverride: request.publisherNodeIdentityIdOverride !== undefined
+          ? BigInt(request.publisherNodeIdentityIdOverride)
+          : publishOptions.publisherNodeIdentityIdOverride,
+        precomputedAttestation: {
+          expectedMerkleRoot: seal.merkleRoot,
+          authorAddress: seal.authorAddress,
+          signature: { r: seal.authorAttestationR, vs: seal.authorAttestationVS },
+          schemeVersion: seal.authorSchemeVersion,
+          reservedKaId: recoveredReservedKaId ?? 0n,
+        },
+        encryptInlinePayload,
+        encryptInlineChunked,
+      });
+
+      if (result.status === 'confirmed' && result.onChainResult) {
+        try {
+          const receiptQuads = buildAssertionPublishReceiptQuads({
+            assertionUri,
+            metaGraph,
+            txHash: result.onChainResult.txHash ?? '',
+            blockNumber: BigInt(result.onChainResult.blockNumber ?? 0),
+            kaId: result.onChainResult.batchId ?? 0n,
+          });
+          await this.store.insert(receiptQuads);
+        } catch (err) {
+          this.log.warn(
+            ctx,
+            `Failed to write publish receipt for <${assertionUri}>: ` +
+              (err instanceof Error ? err.message : String(err)),
+          );
+        }
+      }
+
+      if (result.status === 'confirmed' && request.clearSharedMemoryAfter !== false) {
+        try {
+          await publisher.clearPublishedSwmRoots(request.contextGraphId, [...request.roots], request.subGraphName, ctx);
+        } catch (err) {
+          this.log.warn(
+            ctx,
+            `Failed to clear queued SWM roots after confirmed publish of <${lifecycleUri}>: ` +
+              (err instanceof Error ? err.message : String(err)),
+          );
+        }
+      }
+    }
+
+    if (result.status === 'confirmed' || result.status === 'tentative') {
+      try {
+        await this._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
+        const MEMORY_LAYER_PRED = 'http://dkg.io/ontology/memoryLayer';
+        const STATE_PRED = 'http://dkg.io/ontology/state';
+        for (const subj of [lifecycleUri, assertionUri]) {
+          await this.store.deleteByPattern({ subject: subj, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
+          await this.store.insert([
+            { subject: subj, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph },
+          ]);
+        }
+        await this.store.deleteByPattern({ subject: lifecycleUri, predicate: STATE_PRED, graph: metaGraph });
+        await this.store.insert([
+          { subject: lifecycleUri, predicate: STATE_PRED, object: '"published"', graph: metaGraph },
+        ]);
+        if (result.ual) {
+          const PUBLISHED_UAL_PRED = 'http://dkg.io/ontology/publishedUal';
+          await this.store.deleteByPattern({ subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, graph: metaGraph });
+          await this.store.insert([
+            { subject: lifecycleUri, predicate: PUBLISHED_UAL_PRED, object: `"${result.ual}"`, graph: metaGraph },
+          ]);
+        }
+        if (result.status === 'confirmed' && result.onChainResult) {
+          const ASSERTION_GRAPH_PRED = 'http://dkg.io/ontology/assertionGraph';
+          const vmKaId = packedKaId ?? seal.reservedKaId ?? result.onChainResult.kaId ?? result.kaId;
+          if (vmKaId !== undefined && vmKaId !== null) {
+            const vmKaIdBig = BigInt(vmKaId);
+            const vmAuthor = '0x' + (vmKaIdBig >> 96n).toString(16).padStart(40, '0');
+            const vmNumber = vmKaIdBig & ((1n << 96n) - 1n);
+            const vmGraph = contextGraphLayerUri(
+              request.contextGraphId,
+              MemoryLayer.VerifiableMemory,
+              vmAuthor,
+              vmNumber,
+              request.subGraphName,
+            );
+            await this.store.deleteByPattern({ subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, graph: metaGraph });
+            await this.store.insert([
+              { subject: lifecycleUri, predicate: ASSERTION_GRAPH_PRED, object: vmGraph, graph: metaGraph },
+            ]);
+            const wmGraph = contextGraphLayerUri(
+              request.contextGraphId,
+              MemoryLayer.WorkingMemory,
+              vmAuthor,
+              vmNumber,
+              request.subGraphName,
+            );
+            await this.store.deleteByPattern({ subject: wmGraph, predicate: MEMORY_LAYER_PRED, graph: metaGraph });
+            await this.store.insert([
+              { subject: wmGraph, predicate: MEMORY_LAYER_PRED, object: `"${MemoryLayer.VerifiableMemory}"`, graph: metaGraph },
+            ]);
+          }
+        }
+      } catch (err) {
+        this.log.warn(
+          ctx,
+          `Failed to stamp queued VM lifecycle marker for <${lifecycleUri}>: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
+
+    if (result.status === 'confirmed' && result.onChainResult) {
+      const rootEntities = result.kaManifest.length > 0
+        ? result.kaManifest.map((ka) => ka.rootEntity)
+        : [...request.roots];
+      const broadcastCgId = publishOptions.publishContextGraphId;
+      const keepRootCopyOnLabel = true;
+      const msg: FinalizationMessageMsg = {
+        ual: result.ual,
+        contextGraphId: request.contextGraphId,
+        kcMerkleRoot: result.merkleRoot,
+        txHash: result.onChainResult.txHash ?? '',
+        blockNumber: result.onChainResult.blockNumber ?? 0,
+        txIndex: result.onChainResult.txIndex ?? 0,
+        batchId: result.onChainResult.batchId ?? 0n,
+        startKAId: result.onChainResult.startKAId ?? 0n,
+        endKAId: result.onChainResult.endKAId ?? 0n,
+        publisherAddress: result.onChainResult.publisherAddress ?? '',
+        rootEntities,
+        timestampMs: Date.now(),
+        operationId: ctx.operationId,
+        targetContextGraphId: result.contextGraphError ? undefined : broadcastCgId,
+        subGraphName: request.subGraphName,
+        keepRootCopyOnLabel,
+      };
+      const topic = contextGraphFinalizationTopic(request.contextGraphId);
+      try {
+        await this.gossip.publish(topic, encodeFinalizationMessage(msg));
+        this.log.info(ctx, `Broadcast queued finalization for ${result.ual} to ${topic}${broadcastCgId ? ` (contextGraph=${broadcastCgId})` : ''}`);
+      } catch {
+        this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
+      }
+
+      try {
+        const gm = new GraphManager(this.store);
+        const wsMetaGraph = request.subGraphName
+          ? gm.sharedMemoryMetaUri(request.contextGraphId, request.subGraphName)
+          : contextGraphWorkspaceMetaGraphUri(request.contextGraphId);
+        const keepLiteral = `"${keepRootCopyOnLabel}"`;
+        for (const root of rootEntities.filter(isSafeIri)) {
+          await this.store.deleteByPattern({
+            subject: root,
+            predicate: KEEP_ROOT_COPY_PREDICATE,
+            graph: wsMetaGraph,
+          });
+          await this.store.insert([{
+            subject: root,
+            predicate: KEEP_ROOT_COPY_PREDICATE,
+            object: keepLiteral,
+            graph: wsMetaGraph,
+          }]);
+        }
+      } catch (err) {
+        this.log.warn(ctx, `Failed to persist keepRootCopyOnLabel signal for ${result.ual}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    if (result.status === 'confirmed') {
+      try {
+        await publisher.clearSwmShareComplete(request.contextGraphId, request.name, agentAddress, request.subGraphName);
+      } catch (err) {
+        this.log.warn(
+          ctx,
+          `Failed to clear swmShareComplete after queued publish of <${lifecycleUri}>: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
+
+    return { ...result, assertionUri, seal };
   }
 
   async publishFromFinalizedAssertion(this: DKGAgent,
