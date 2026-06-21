@@ -228,6 +228,123 @@ describe('Random Sampling E2E (Hardhat)', () => {
     if (snapshotId) await revertSnapshot(snapshotId);
   });
 
+  // Issue-liveness repro for GH #1091 — "RandomSampling: replace grindable
+  // challenge seed with commit-reveal / VRF (durable fix)."
+  // https://github.com/OriginTrail/dkg/issues/1091
+  //
+  // `_deriveChallengeSeed` mixes only PUBLIC, off-chain-recomputable inputs
+  // (`block.difficulty`/prevrandao, `blockhash(...)`, `msg.sender`), and the
+  // weighted picker `previewChallengeForSeed` is a public view. A node can
+  // therefore reconstruct the seed from public block data and PREDICT its own
+  // draw — the basis for grinding across periods until challenged only on chunks
+  // it actually stores, which defeats proof-of-storage.
+  //
+  // This test asserts the CORRECT (post-fix) behaviour, so it is RED today (the
+  // draw IS predictable from public data) and turns GREEN once the seed is made
+  // unpredictable (commit-reveal in period N for N+1, or a VRF). It uses REC2 (a
+  // staked, sharded node) so it does not disturb the REC1 prover test above.
+  it('GH #1091: a node cannot predict its own challenge from public block data (grindable seed)', async () => {
+    const provider = createProvider();
+    // This repro mutates shared Hardhat state (mines a REC2 challenge, pins
+    // prevrandao, mines blocks). Snapshot/revert around the WHOLE test so it
+    // can't leak state into the regular prover E2E that reuses the same fixture
+    // — the file's single afterAll revert is not enough once this also runs.
+    const liveSnapshot = await takeSnapshot();
+    try {
+    const ctx = getSharedContext();
+    const rec2 = new ethers.Wallet(HARDHAT_KEYS.REC2_OP, provider);
+
+    const hub = new ethers.Contract(
+      ctx.hubAddress,
+      ['function getContractAddress(string) view returns (address)'],
+      provider,
+    );
+    const rsAddress: string = await hub.getContractAddress('RandomSampling');
+    const rs = new ethers.Contract(
+      rsAddress,
+      [
+        'function createChallenge()',
+        // PR #1226 made the preview 1-arg (it reads chronos.getCurrentEpoch()
+        // internally). Was `previewChallengeForSeed(bytes32,uint256)` — calling
+        // the old 2-arg selector now hits no function and reverts.
+        'function previewChallengeForSeed(bytes32 seed) view returns (uint256 cgId, uint256 kaId, uint256 chunkId)',
+        'event ChallengeGenerated(uint72 indexed identityId, uint256 indexed contextGraphId, uint256 indexed knowledgeAssetId, uint256 chunkId, uint256 epoch, uint256 activeProofPeriodStartBlock)',
+      ],
+      rec2,
+    );
+
+    const hexN = (n: number) => '0x' + n.toString(16);
+
+    // ── PRE-prediction (the real #1091 threat): a proposer who controls
+    // `prevrandao` (or anyone, pre-v10.0.4, via the now-removed gasprice grind)
+    // can compute the draw BEFORE the createChallenge tx is mined. We simulate
+    // the proposer by pinning the next block's prevrandao to a chosen value, then
+    // computing the seed + previewing the draw with NOTHING but data known before
+    // the tx — `blockhash(N - offset)` is a PAST block, and N is the next block.
+    const chosenPrevrandao = '0x' + 'a5'.repeat(32);
+    const difficulty = BigInt(chosenPrevrandao); // prevrandao the proposer pinned for block N
+
+    let receipt: ethers.TransactionReceipt;
+    let predicted: { cgId: bigint; kaId: bigint; chunkId: bigint };
+    let challengeBlockNumber = 0;
+    // Stateful RPC mutations (pinned prevrandao + manual mining) must ALWAYS be
+    // unwound, or an exception mid-flight leaves the SHARED Hardhat node in
+    // manual-mining mode and cascades failures through the rest of the package.
+    await provider.send('hardhat_setPrevRandao', [chosenPrevrandao]);
+    await provider.send('evm_setAutomine', [false]);
+    try {
+      const blockBefore: number = await provider.getBlockNumber();
+      challengeBlockNumber = blockBefore + 1; // the block createChallenge will land in
+      const offset = (difficulty % 256n) + 1n;
+      const refBlock = await provider.send('eth_getBlockByNumber', [hexN(challengeBlockNumber - Number(offset)), false]);
+      const reconstructedSeed = ethers.solidityPackedKeccak256(
+        ['uint256', 'bytes32', 'address', 'uint8'],
+        [difficulty, refBlock.hash, rec2.address, 1],
+      );
+      // Predict the draw NOW — before createChallenge is mined. The preview
+      // reads the current epoch internally (chronos.getCurrentEpoch()); epochs
+      // span many blocks so it's stable across the single mine below.
+      predicted = await rs.previewChallengeForSeed(reconstructedSeed);
+
+      // Now mine the proposer's createChallenge into block N (with the pinned
+      // prevrandao). Send the tx (queued), then mine exactly one block.
+      const txResp = await rs.createChallenge();
+      await provider.send('evm_mine', []);
+      receipt = await txResp.wait();
+    } finally {
+      await provider.send('evm_setAutomine', [true]).catch(() => {});
+    }
+
+    expect(receipt.blockNumber, 'createChallenge landed in the prevrandao-pinned block').toBe(challengeBlockNumber);
+    // Sanity: the mined block really carried our pinned prevrandao.
+    const minedBlock = await provider.send('eth_getBlockByNumber', [hexN(challengeBlockNumber), false]);
+    expect(BigInt(minedBlock.mixHash ?? minedBlock.difficulty)).toBe(difficulty);
+
+    const parsed = receipt.logs
+      .map((l: ethers.Log) => { try { return rs.interface.parseLog(l); } catch { return null; } })
+      .find((p: ethers.LogDescription | null) => p?.name === 'ChallengeGenerated');
+    expect(parsed, 'ChallengeGenerated event must be emitted').toBeTruthy();
+    const actualCgId: bigint = parsed!.args.contextGraphId;
+    const actualKaId: bigint = parsed!.args.knowledgeAssetId;
+    const actualChunkId: bigint = parsed!.args.chunkId;
+
+    // The prediction was computed BEFORE the tx was mined, from only public /
+    // proposer-chosen inputs. Compare the FULL (cgId, kaId, chunkId) tuple so a
+    // prediction can't look successful while having picked a different CG.
+    const predictsActualDraw =
+      predicted.cgId === actualCgId && predicted.kaId === actualKaId && predicted.chunkId === actualChunkId;
+
+    // CORRECT (post-fix): the draw must NOT be predictable before the tx is mined.
+    // Today it is — `predictsActualDraw` is true — so this assertion is RED until
+    // #1091 lands a commit-reveal / VRF seed.
+    expect(predictsActualDraw, 'challenge draw was predicted before the tx was mined (grindable seed)').toBe(false);
+    } finally {
+      // Roll back ALL of this test's chain mutations so the prover E2E below
+      // (which reuses the shared fixture) starts from the same baseline.
+      await revertSnapshot(liveSnapshot);
+    }
+  }, 90_000);
+
   it('drives the prover end-to-end against the real RandomSampling.sol', async () => {
     const ctx = getSharedContext();
 

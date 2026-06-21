@@ -53,6 +53,7 @@
     "test:devnet:edge-update-flow": "vitest run --config devnet/edge-update-flow/vitest.config.ts",
     "test:devnet:greenfield-10min": "vitest run --config devnet/greenfield-10min/vitest.config.ts",
     "test:devnet:rich-scenario": "vitest run --config devnet/rich-scenario/vitest.config.ts",
+    "test:devnet:issue-liveness": "vitest run --config devnet/issue-liveness/vitest.config.ts",
     "test:all": "pnpm test && pnpm test:evm"
   },
   "devDependencies": {

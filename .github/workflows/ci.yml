@@ -617,6 +617,74 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # ------------------------------------------------------------------
+  # Multi-node devnet integration — REAL NODES, NO MOCKS. Boots a live
+  # 6-node devnet (Hardhat + four core + two edge daemons via
+  # scripts/devnet.sh, which also handles on-chain staking) and runs the
+  # cross-node regression suite in devnet/issue-liveness/: publish →
+  # StorageACK quorum → replication → late-subscriber catch-up, plus
+  # cross-node read/import contracts. The suite seeds its own data. These
+  # paths are inherently multi-node (a publisher collects ACKs from its
+  # PEERS, the 3-of-N quorum needs 4 cores, #886-style catch-up needs a
+  # node that subscribes after the publish) so they cannot run in the
+  # single-process package lanes above.
+  #
+  # Tier: TORNADO — publish/replication correctness is protocol-critical
+  # (`dkgv10-spec/CRITICALITY_CATEGORIZATION.md` §1).
+  # ------------------------------------------------------------------
+  tornado-devnet-integration:
+    name: "Tornado: devnet integration (multi-node publish/sync)"
+    needs: build
+    runs-on: ubuntu-latest
+    # Cold devnet boot (Solidity compile + 6-node bring-up + on-chain
+    # staking/bootstrap) + replication polls with generous deadlines, so a
+    # slow runner never flakes the lane on a timeout.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: build-outputs
+          path: /tmp
+      - name: Restore build outputs
+        run: tar -xzf /tmp/build-outputs.tgz
+      # Same reasoning as the node-ui e2e lane: the shared build skips the
+      # Solidity compile (DKG_SKIP_EVM_BUILD=1), and devnet.sh shells out to
+      # the DEFAULT hardhat config, so compile with the default config here
+      # in an observable step.
+      - name: Compile EVM contracts (for the devnet boot)
+        run: pnpm --filter @origintrail-official/dkg-evm-module exec hardhat compile
+      - name: Start 6-node devnet
+        run: ./scripts/devnet.sh start 6
+      - name: "Multi-node publish/sync integration tests"
+        run: pnpm test:devnet:issue-liveness
+      - name: Stop devnet
+        if: always()
+        run: ./scripts/devnet.sh stop || true
+      # On failure the daemon logs are the only window into a devnet that
+      # didn't come up. Upload them so a red run is debuggable without a
+      # local repro.
+      - name: Upload devnet logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: devnet-integration-logs
+          path: |
+            .devnet/node*/daemon.log
+            .devnet/hardhat/node.log
+            .devnet/hardhat/deploy.log
+          retention-days: 7
+          if-no-files-found: ignore
+
   kosava-supporting:
     name: "Kosava: adapters + epcis + graph-viz + mcp-server + network-sim"
     needs: build
