@@ -12,11 +12,13 @@ interface MemoryRecord {
   marker: string;
   quads: Quad[];
   shareOperationId?: string;
+  assertionName?: string;
   kaId?: string;
 }
 
 interface PublisherJob {
   contextGraphId: string;
+  assertionName: string;
   jobId: string;
   roots: string[];
   status: 'queued' | 'finalized' | 'failed';
@@ -27,6 +29,7 @@ export class LayeredDkgBenchmarkClient implements BenchmarkClient {
   readonly workingMemory = new Map<string, MemoryRecord>();
   readonly sharedWorkingMemory = new Map<string, MemoryRecord>();
   readonly verifiableMemory = new Map<string, MemoryRecord>();
+  readonly knowledgeAssets = new Map<string, { contextGraphId: string; name: string; roots: string[] }>();
   readonly publisherJobs = new Map<string, PublisherJob>();
 
   private shareSequence = 0;
@@ -50,21 +53,31 @@ export class LayeredDkgBenchmarkClient implements BenchmarkClient {
     this.workingMemory.clear();
     this.sharedWorkingMemory.clear();
     this.verifiableMemory.clear();
+    this.knowledgeAssets.clear();
     this.publisherJobs.clear();
   }
 
-  async sharedMemoryWrite(contextGraphId: string, quads: Quad[]) {
-    const working = await this.writeWorkingMemory(contextGraphId, quads);
-    const shared = await this.liftWorkingMemoryToSharedMemory(contextGraphId, uniqueSubjects(quads));
+  async createKnowledgeAsset(
+    contextGraphId: string,
+    name: string,
+    options: { quads: Quad[]; finalize: true; alsoShareSwm: true; subGraphName?: string },
+  ) {
+    const roots = uniqueSubjects(options.quads);
+    await this.writeWorkingMemory(contextGraphId, options.quads, { assertionName: name });
+    const shared = await this.liftWorkingMemoryToSharedMemory(contextGraphId, roots);
+    this.knowledgeAssets.set(assetKey(contextGraphId, name), { contextGraphId, name, roots });
     return {
+      assertionUri: `urn:benchmark:assertion:${encodeURIComponent(contextGraphId)}:${encodeURIComponent(name)}`,
+      promotedCount: roots.length,
+      publishReady: true,
       shareOperationId: shared.shareOperationId,
     };
   }
 
-  async writeWorkingMemory(contextGraphId: string, quads: Quad[]) {
+  async writeWorkingMemory(contextGraphId: string, quads: Quad[], ids: Pick<MemoryRecord, 'assertionName'> = {}) {
     const shareOperationId = `draft-${++this.draftSequence}`;
     for (const rootEntity of uniqueSubjects(quads)) {
-      const record = createMemoryRecord(contextGraphId, rootEntity, quads, { shareOperationId });
+      const record = createMemoryRecord(contextGraphId, rootEntity, quads, { shareOperationId, ...ids });
       this.workingMemory.set(rootEntity, record);
     }
     return { shareOperationId };
@@ -92,7 +105,11 @@ export class LayeredDkgBenchmarkClient implements BenchmarkClient {
     // Named-KA one-shot: stage the quads (create → write → share) then publish
     // its roots to verifiable memory. Mirrors the create → /vm/publish flow the
     // real benchmark client (ApiClient.publishAssertion) drives.
-    await this.sharedMemoryWrite(contextGraphId, quads);
+    await this.createKnowledgeAsset(contextGraphId, _name, {
+      quads,
+      finalize: true,
+      alsoShareSwm: true,
+    });
     const roots = uniqueSubjects(quads);
     const kaId = `kc-${++this.kcSequence}`;
     for (const rootEntity of roots) {
@@ -106,8 +123,12 @@ export class LayeredDkgBenchmarkClient implements BenchmarkClient {
     };
   }
 
-  async publisherEnqueue(request: Parameters<BenchmarkClient['publisherEnqueue']>[0]) {
-    for (const rootEntity of request.roots) {
+  async knowledgeAssetPublishAsync(contextGraphId: string, name: string) {
+    const asset = this.knowledgeAssets.get(assetKey(contextGraphId, name));
+    if (!asset) {
+      throw new Error(`Knowledge asset ${name} is missing from context graph ${contextGraphId}`);
+    }
+    for (const rootEntity of asset.roots) {
       if (!this.sharedWorkingMemory.has(rootEntity)) {
         throw new Error(`Root ${rootEntity} is missing from shared working memory`);
       }
@@ -115,9 +136,10 @@ export class LayeredDkgBenchmarkClient implements BenchmarkClient {
 
     const jobId = `job-${++this.jobSequence}`;
     this.publisherJobs.set(jobId, {
-      contextGraphId: request.contextGraphId,
+      contextGraphId,
+      assertionName: name,
       jobId,
-      roots: [...request.roots],
+      roots: [...asset.roots],
       status: 'queued',
     });
     return { jobId };
@@ -194,6 +216,10 @@ function createMemoryRecord(
 
 function uniqueSubjects(quads: Quad[]): string[] {
   return [...new Set(quads.map((quad) => quad.subject))];
+}
+
+function assetKey(contextGraphId: string, name: string): string {
+  return `${contextGraphId}\0${name}`;
 }
 
 function markerFromQuads(quads: Quad[]): string {

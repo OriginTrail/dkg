@@ -94,11 +94,9 @@ export default defineSuite({
       },
       {
         beforeIteration: async () => {
-          // The measured publishAssertion stages the quads internally — no separate
+          // The measured publishAssertion stages the quads internally; no separate
           // sharedMemoryWrite here, or the sync flow would double-write SWM and stop
-          // matching the canonical create/write/share/publish path (cf. analyze-* and
-          // the get/read flow). The async flow below keeps its write — it needs the
-          // returned shareOperationId for the publisher enqueue/lift path.
+          // matching the canonical create/write/share/publish path.
           syncName = `esbench-sync-${sequence++}`;
           syncPayload = createPayload(config, syncName, 1, 'sync', false);
         },
@@ -110,26 +108,16 @@ export default defineSuite({
     );
 
     let asyncPayload: BenchmarkPayload | undefined;
-    let asyncShareOperationId: string | undefined;
+    let asyncName: string | undefined;
     const asyncClient = new LayeredDkgBenchmarkClient();
     benchAsyncWithHooks(
       scene,
-      'asynchronous publish enqueue and finalization',
+      'asynchronous VM publish request and finalization',
       async () => {
-        const payload = requirePayload(asyncPayload, 'asynchronous publish enqueue and finalization');
-        if (!asyncShareOperationId) throw new Error('async setup did not produce a share operation id');
+        const payload = requirePayload(asyncPayload, 'asynchronous VM publish request and finalization');
+        if (!asyncName) throw new Error('async setup did not produce a knowledge asset name');
 
-        const queued = await asyncClient.publisherEnqueue({
-          contextGraphId: config.contextGraphId,
-          shareOperationId: asyncShareOperationId,
-          roots: [payload.rootEntity],
-          namespace: config.namespace,
-          scope: config.scope,
-          authorityProofRef: config.authorityProofRef,
-          swmId: 'swm-main',
-          transitionType: 'CREATE',
-          authorityType: 'owner',
-        });
+        const queued = await asyncClient.knowledgeAssetPublishAsync(config.contextGraphId, asyncName);
         if (!queued.jobId) throw new Error('async publisher did not return a job id');
 
         const completed = await asyncClient.publisherJob(queued.jobId);
@@ -139,13 +127,17 @@ export default defineSuite({
       },
       {
         beforeIteration: async () => {
-          asyncPayload = createPayload(config, `esbench-async-${sequence++}`, 1, 'async', false);
-          const prepared = await asyncClient.sharedMemoryWrite(config.contextGraphId, asyncPayload.quads);
-          asyncShareOperationId = prepared.shareOperationId;
+          asyncName = `esbench-async-${sequence++}`;
+          asyncPayload = createPayload(config, asyncName, 1, 'async', false);
+          await asyncClient.createKnowledgeAsset(config.contextGraphId, asyncName, {
+            quads: asyncPayload.quads,
+            finalize: true,
+            alsoShareSwm: true,
+          });
         },
         afterIteration: () => {
           asyncPayload = undefined;
-          asyncShareOperationId = undefined;
+          asyncName = undefined;
           asyncClient.clear();
         },
       },

@@ -1,19 +1,8 @@
 /**
- * Source-worker runner — REAL daemon round-trip, NO mocks.
+ * Source-worker runner - REAL daemon round-trip, NO mocks.
  *
- * The retired version replaced `globalThis.fetch` with a stub returning
- * canned `swm-1` / `job-1` bodies and asserted the OUTGOING request shapes.
- * That pinned the wire format against a double — a daemon-side rename or a
- * rejected body would keep it green.
- *
- * This version keeps everything that was already real (the runner's dynamic
- * handler import, context wiring, state-file persistence) and points
- * `daemonUrl` at a REAL edge daemon: the handler's `sharedMemory.share()`
- * lands real quads in a real context graph and `asyncLift.lift()` enqueues a
- * real job in the daemon's persistent publisher queue. The daemon ACCEPTING
- * both calls (auth header included — auth is enabled, a wrong token would
- * 401) and the state file recording the REAL daemon-issued ids is the proof
- * the old request-capture only simulated.
+ * The dynamic handler receives the lifecycle client and drives a real named KA
+ * create/share plus named async VM publish through the daemon.
  */
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -31,9 +20,6 @@ declare global {
 
 const CG = `swr-${Date.now().toString(36)}`;
 const cleanup: string[] = [];
-
-// Silence the runner's progress logging with a hand-rolled save/restore (no
-// vitest mock API — nothing under test is faked).
 const originalConsoleLog = console.log;
 
 describe('source worker runner (real daemon)', () => {
@@ -59,7 +45,7 @@ describe('source worker runner (real daemon)', () => {
     await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
   });
 
-  it('dynamically imports the handler, wires REAL daemon clients, and persists the real job state', async () => {
+  it('dynamically imports the handler, wires REAL lifecycle clients, and persists the real job state', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'source-worker-runner-'));
     cleanup.push(dir);
     const configPath = join(dir, 'worker.json');
@@ -74,29 +60,24 @@ export const namedHandler = {
       daemonToken: context.config.daemonToken,
       stateFile: context.config.stateFile,
       sourceIds: context.config.sources.map((source) => source.id),
-      hasSharedMemory: typeof context.sharedMemory.share === 'function',
-      hasAsyncLift: typeof context.asyncLift.lift === 'function',
+      hasKnowledgeAssets: typeof context.knowledgeAssets.createAndShare === 'function'
+        && typeof context.knowledgeAssets.publishAsync === 'function',
     };
     return {
       getFingerprint: async (source) => \`fp-\${source.version}\`,
       processSource: async (source, fingerprint) => {
-        const share = await context.sharedMemory.share('${CG}', [
-          { subject: 'urn:src', predicate: 'urn:hasId', object: \`"\${source.id}"\` },
+        const name = \`source-worker-\${source.id}\`;
+        const share = await context.knowledgeAssets.createAndShare('${CG}', name, [
+          { subject: 'urn:src', predicate: 'urn:hasId', object: \`"\${source.id}"\`, graph: '' },
         ], { subGraphName: 'sg-1' });
-        const jobId = await context.asyncLift.lift({
-          swmId: 'swm-live',
-          shareOperationId: share.shareOperationId,
-          roots: ['urn:src'],
-          contextGraphId: '${CG}',
-          namespace: 'ns',
-          scope: 'scope',
-          transitionType: 'CREATE',
-          authority: { type: 'owner', proofRef: 'proof' },
-        });
+        const publish = await context.knowledgeAssets.publishAsync('${CG}', name, { subGraphName: 'sg-1' });
+        const jobId = publish.jobId;
         globalThis.__sourceWorkerRunnerProcessed = {
           sourceId: source.id,
           fingerprint,
+          name,
           shareOperationId: share.shareOperationId,
+          intentKey: publish.intentKey,
           jobId,
         };
         return {
@@ -107,6 +88,9 @@ export const namedHandler = {
           status: 'queued',
           nextState: {
             fingerprint,
+            assertionName: name,
+            shareOperationId: share.shareOperationId,
+            intentKey: publish.intentKey,
             lastStatus: 'queued',
             lastJobIds: [jobId],
             lastJobStatuses: { [jobId]: 'queued' },
@@ -134,30 +118,34 @@ export const namedHandler = {
       daemonToken: daemon.token,
       stateFile: statePath,
       sourceIds: ['src-1'],
-      hasSharedMemory: true,
-      hasAsyncLift: true,
+      hasKnowledgeAssets: true,
     });
 
-    // The handler ran against the REAL daemon: real swm-* share id, real UUID
-    // job id (canned 'swm-1'/'job-1' constants would prove nothing).
     const processed = globalThis.__sourceWorkerRunnerProcessed;
     expect(processed.sourceId).toBe('src-1');
     expect(processed.fingerprint).toBe('fp-v1');
-    expect(processed.shareOperationId).toMatch(/^swm-/);
+    expect(processed.name).toBe('source-worker-src-1');
+    expect(processed.shareOperationId).toMatch(/^[0-9a-z]+-[0-9a-z]+$/);
+    expect(processed.intentKey).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(processed.jobId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 
-    // The job REALLY exists in the daemon's queue.
     const jobRes = await fetch(`${daemon.base}/api/publisher/job?id=${processed.jobId}`, {
       headers: { Authorization: `Bearer ${daemon.token}` },
     });
     expect(jobRes.status).toBe(200);
     const jobBody: any = await jobRes.json();
     expect(jobBody.job.request.contextGraphId).toBe(CG);
+    expect(jobBody.job.request.jobType).toBe('knowledge-asset-vm-publish');
+    expect(jobBody.job.request.knowledgeAssetVmPublish.name).toBe(processed.name);
+    expect(jobBody.job.request.knowledgeAssetVmPublish.shareOperationId).toBe(processed.shareOperationId);
+    expect(jobBody.job.request.knowledgeAssetVmPublish.intentKey).toBe(processed.intentKey);
 
-    // State persistence recorded the REAL ids.
     const state = JSON.parse(await readFile(statePath, 'utf8'));
     expect(state.sources['src-1']).toMatchObject({
       fingerprint: 'fp-v1',
+      assertionName: 'source-worker-src-1',
+      shareOperationId: processed.shareOperationId,
+      intentKey: processed.intentKey,
       lastStatus: 'queued',
       lastJobIds: [processed.jobId],
     });

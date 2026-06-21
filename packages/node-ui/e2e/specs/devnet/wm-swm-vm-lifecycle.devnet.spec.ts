@@ -39,7 +39,7 @@ test.describe('WM → SWM → VM API pipeline', () => {
       contextGraphId: run.cgId!,
       name,
       quads: buildTestQuads(run.cgId!, stamp, `WM Only ${stamp}`),
-      promote: false,
+      alsoShareSwm: false,
     });
     expect(res.ok).toBe(true);
   });
@@ -51,7 +51,7 @@ test.describe('WM → SWM → VM API pipeline', () => {
       contextGraphId: run.cgId!,
       name,
       quads: buildTestQuads(run.cgId!, stamp, `SWM Test ${stamp}`),
-      promote: false,
+      alsoShareSwm: false,
     });
     expect(create.ok).toBe(true);
     const promote = await promoteAssertion({ contextGraphId: run.cgId!, assertionName: name });

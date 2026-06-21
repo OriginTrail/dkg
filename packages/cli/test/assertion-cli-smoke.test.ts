@@ -206,7 +206,7 @@ describe.sequential('assertion CLI smoke', () => {
     expect(promoted.stdout).toContain('Assertion promoted to shared memory:');
     expect(promoted.stdout).toContain('Triples:        14');
     expect(promoted.stdout).toContain('urn:company:acme');
-    expect(promoted.stdout).toContain('Next:           dkg shared-memory publish research --name paper');
+    expect(promoted.stdout).toContain('Next:           dkg publisher publish-async research paper');
 
     const promotedSubgraph = await execFileAsync('node', [
       CLI_ENTRY,
@@ -219,6 +219,26 @@ describe.sequential('assertion CLI smoke', () => {
       'lab',
     ], { env });
 
-    expect(promotedSubgraph.stdout).toContain('Next:           dkg shared-memory publish research --name paper --sub-graph-name lab');
+    expect(promotedSubgraph.stdout).toContain('Next:           dkg publisher publish-async research paper --sub-graph lab');
+  }, 15000);
+
+  it('does not expose retired shared-memory or raw publisher enqueue commands', async () => {
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+
+    await expectCliFailure(['shared-memory', 'write', 'research'], env);
+    await expectCliFailure(['publisher', 'enqueue', 'research'], env);
   }, 15000);
 });
+
+async function expectCliFailure(args: string[], env: NodeJS.ProcessEnv): Promise<void> {
+  let failure: any;
+  try {
+    await execFileAsync('node', [CLI_ENTRY, ...args], { env });
+  } catch (err) {
+    failure = err;
+  }
+
+  expect(failure).toBeTruthy();
+  expect(failure.code).not.toBe(0);
+  expect(`${failure.stdout ?? ''}${failure.stderr ?? ''}`).toMatch(/unknown command|error/i);
+}

@@ -66,7 +66,6 @@ function buildStoreBackedTools(writeAgentAddress: string) {
       const quads = store.get(graphUri) ?? [];
       return executeMiniSparql(sparql, quads);
     },
-    share: async () => ({ shareOperationId: 'noop' }),
     createAssertion: async (contextGraphId: string, name: string) => {
       const graphUri = contextGraphAssertionUri(contextGraphId, writeAgentAddress, name);
       if (!store.has(graphUri)) store.set(graphUri, []);
@@ -79,7 +78,6 @@ function buildStoreBackedTools(writeAgentAddress: string) {
       store.set(graphUri, bucket);
       return { written: quads.length };
     },
-    publishFromSharedMemory: async () => ({}),
     createContextGraph: async () => {},
     listContextGraphs: async () => [{ id: 'agent-context', name: 'Agent Context' }],
   };

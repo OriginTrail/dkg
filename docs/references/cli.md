@@ -43,8 +43,7 @@ dkg assertion query <name> -c <cg>                   # read the WM draft's quads
 dkg assertion promote <name> -c <cg>                 # WM → SWM (the share operation; CLI verb retained)
 
 # Shared memory (team-visible) and publishing
-dkg shared-memory write <cg> [--name <name>] ...   # stage triples into a named WM Knowledge Asset draft (write-first; share + publish later)
-dkg shared-memory publish <cg> --name <name>   # finalize + share + publish a staged WM Knowledge Asset → Verifiable Memory (costs TRAC)
+dkg publisher publish-async <cg> <name>  # enqueue VM publish for a named KA already shared to SWM
 dkg publish <cg> -f <file>               # one-shot RDF publish to a context graph
 dkg verify <batchId> --context-graph <cg> --verified-graph <id>  # propose M-of-N verification
 dkg endorse <ual> --context-graph <cg> [--agent <addr>]  # endorse a published KA as the authenticated agent (--agent only asserts the token's agent matches)
@@ -57,7 +56,7 @@ dkg subscribe <cg>                       # subscribe to a CG's gossip topics
 
 # Async publisher (optional, for batching)
 dkg publisher enable                     # enable the async publisher
-dkg publisher enqueue <cg> --root <e> --namespace <n> --scope <s> --authority-proof-ref <ref> --share-operation-id <id>   # enqueue a publish job (flags required)
+dkg publisher publish-async <cg> <name>  # enqueue VM publish for a named KA already shared to SWM
 dkg publisher jobs                       # list publisher jobs
 dkg publisher stats                      # publisher throughput stats
 

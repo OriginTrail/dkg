@@ -273,14 +273,13 @@ SWM is for knowledge you've shared from WM and want peers to see. Agents put dat
 > Working Memory is per-agent regardless of CG visibility.
 
 - `POST /api/knowledge-assets/{name}/swm/share` — the canonical way an agent puts a named assertion into SWM (after `create` → `write`); a full share seals by default and is publish-ready. **This is the agent path** — see §5 WM and the lifecycle in §3.
+- `POST /api/knowledge-assets/{name}/swm/share-async` — enqueue the same WM→SWM share for the in-daemon worker. Use this for bulk importers that should not block on the synchronous share round.
 - `POST /api/knowledge-assets/publish` — direct explicit-quads one-shot mint, for **CLI / programmatic** callers that already hold the exact quads to publish (the ACK path carries the inline payload, no SWM stage). Body: `{ contextGraphId, quads, privateQuads?, accessPolicy?, allowedPeers?, subGraphName? }`. **Not the agent path** — agents use the named-KA lifecycle (`…/swm/share` → `…/vm/publish`).
 
-> **Note — daemon loose-write primitives.** `POST /api/shared-memory/write` and
-> `POST /api/shared-memory/conditional-write` write un-named triples directly to SWM. They are retained for
-> **non-agent producers** (bulk source-worker ingest, programmatic clients); they are **not an agent tool or
-> path**, and content written this way is un-named loose SWM that is **not publishable through the canonical
-> lifecycle** (no assertion name for `/vm/publish` to key on). Consolidating these onto the named-KA model is
-> tracked in OriginTrail/dkg#1260. Agents: always author a named knowledge asset.
+> **No loose SWM writes.** Agent-facing producers must author a named knowledge
+> asset and move it through WM→SWM→VM. The legacy loose-write SWM routes were
+> retired so shared/published data always has a lifecycle name, seal, and audit
+> record.
 
 ### Verifiable Memory (VM) — Permanent, on-chain
 
@@ -761,10 +760,10 @@ Use the job queue for bulk or long-running publishes, publishes that must surviv
 
 | Method | Route | Purpose |
 |---|---|---|
-| `POST` | `/api/publisher/enqueue` | Enqueue a publish job. Body: `{ contextGraphId, ... }`. Returns `{ jobId }`. |
+| `POST` | `/api/knowledge-assets/{name}/vm/publish-async` | Enqueue VM publish for a named KA already shared to SWM. Body: `{ contextGraphId, options? }`. Returns `202 { jobId, status: "accepted" }`. |
 | `GET`  | `/api/publisher/jobs?status=...` | List jobs, optionally filtered by status. |
 | `GET`  | `/api/publisher/job?id=...` | Fetch one job's status. |
-| `GET`  | `/api/publisher/job-payload?id=...` | Fetch a job's payload. |
+| `GET`  | `/api/publisher/job-payload?id=...` | Fetch the prepared payload for internal raw LIFT jobs. Named lifecycle publish jobs return no raw payload. |
 | `GET`  | `/api/publisher/stats` | Queue statistics (running / pending / completed / failed). |
 | `POST` | `/api/publisher/cancel` | Cancel a job. Body: `{ jobId }`. |
 | `POST` | `/api/publisher/retry` | Retry a failed job. Body: `{ jobId }`. |

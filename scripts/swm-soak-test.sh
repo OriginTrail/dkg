@@ -343,6 +343,7 @@ write_one_share() {
 import json
 print(json.dumps({
   'contextGraphId': '$cgId',
+  'name': ('swm-soak-' + ''.join(c if c.isalnum() or c in '-_.' else '-' for c in '$RUN_ID-$seq'))[:120],
   'quads': [{
     'subject': '$subject',
     'predicate': 'urn:swm-soak:sentBy',
@@ -374,9 +375,11 @@ print(json.dumps({
     'object': '\"$SOAK_COHORT_ID\"',
     'graph': '',
   }],
+  'finalize': True,
+  'alsoShareSwm': True,
 }))
 ")
-  resp=$(curl -s --max-time 30 -X POST "$API/api/shared-memory/write" \
+  resp=$(curl -s --max-time 30 -X POST "$API/api/knowledge-assets" \
     -H "Authorization: Bearer $AUTH" \
     -H "Content-Type: application/json" \
     -d "$body")
@@ -388,7 +391,7 @@ print(json.dumps({
 import json, sys
 try:
   d = json.loads(sys.stdin.read())
-  print('ok' if d.get('shareOperationId') else 'fail')
+  print('ok' if d.get('swmShared') or d.get('status') in ('swm-shared','vm-confirmed') else 'fail')
 except: print('fail')
 " 2>/dev/null)
   log "  write cg=$cgId seq=$seq → $ok"
@@ -603,7 +606,7 @@ try:
         continue
       if r.get('cgId') != '$cgId': continue
       resp = r.get('resp')
-      if isinstance(resp, dict) and resp.get('shareOperationId'):
+      if isinstance(resp, dict) and (resp.get('swmShared') or resp.get('status') in ('swm-shared', 'vm-confirmed')):
         n += 1
 except FileNotFoundError:
   pass
@@ -613,6 +616,7 @@ print(n)
 import json
 print(json.dumps({
   'contextGraphId': '$cgId',
+  'name': ('swm-soak-summary-' + ''.join(c if c.isalnum() or c in '-_.' else '-' for c in '$RUN_ID'))[:120],
   'quads': [{
     'subject': '$subject',
     'predicate': 'urn:swm-soak:writesAccepted',
@@ -639,9 +643,11 @@ print(json.dumps({
     'object': '\"$ts\"',
     'graph': '',
   }],
+  'finalize': True,
+  'alsoShareSwm': True,
 }))
 ")
-  resp=$(curl -s --max-time 30 -X POST "$API/api/shared-memory/write" \
+  resp=$(curl -s --max-time 30 -X POST "$API/api/knowledge-assets" \
     -H "Authorization: Bearer $AUTH" \
     -H "Content-Type: application/json" \
     -d "$body")
@@ -652,7 +658,7 @@ print(json.dumps({
 import json, sys
 try:
   d = json.loads(sys.stdin.read())
-  print('ok' if d.get('shareOperationId') else 'fail')
+  print('ok' if d.get('swmShared') or d.get('status') in ('swm-shared','vm-confirmed') else 'fail')
 except: print('fail')
 " 2>/dev/null)
   log "  writes-accepted-summary cg=$cgId tag=$SENDER_TAG writesAccepted=$writes_accepted → $ok"
@@ -786,7 +792,20 @@ log ""
 log "Summary:"
 writes_total=$(wc -l < "$LOG_DIR/writes.jsonl" | tr -d ' ')
 log "  total writes attempted: $writes_total"
-writes_ok=$(grep -c '"shareOperationId"' "$LOG_DIR/writes.jsonl" 2>/dev/null || echo 0)
+writes_ok=$(node -e '
+const fs = require("fs");
+let count = 0;
+try {
+  for (const line of fs.readFileSync(process.argv[1], "utf8").split(/\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const resp = JSON.parse(line).resp;
+      if (resp && (resp.swmShared || resp.status === "swm-shared" || resp.status === "vm-confirmed")) count += 1;
+    } catch {}
+  }
+} catch {}
+console.log(count);
+' "$LOG_DIR/writes.jsonl")
 log "  writes accepted by local daemon: $writes_ok"
 log ""
 log "Per-CG final inbox (delivery validation — operators cross-reference):"
@@ -924,7 +943,7 @@ try:
       cg = rec.get('cgId')
       resp = rec.get('resp')
       if not cg or not isinstance(resp, dict): continue
-      if resp.get('shareOperationId'):
+      if resp.get('swmShared') or resp.get('status') in ('swm-shared', 'vm-confirmed'):
         self_writes_accepted_by_cg[cg] = self_writes_accepted_by_cg.get(cg, 0) + 1
 except FileNotFoundError:
   pass

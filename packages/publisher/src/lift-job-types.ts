@@ -39,7 +39,27 @@ export interface LiftRequestAuthorSeal {
   readonly reservedKaId?: LiftJobBigInt;
 }
 
+export interface KnowledgeAssetVmPublishRequest {
+  readonly contextGraphId: string;
+  readonly name: string;
+  readonly subGraphName?: string;
+  readonly shareOperationId: string;
+  readonly roots: readonly string[];
+  readonly sealMerkleRoot: LiftJobHex;
+  readonly intentKey: string;
+  readonly wmCurrentAssertion?: string;
+  readonly swmCurrentAssertion?: string;
+  readonly vmCurrentAssertion?: string;
+  readonly kaNumber?: string;
+  readonly reservedUal?: string;
+  readonly publishEpochs?: number;
+  readonly clearSharedMemoryAfter?: boolean;
+  readonly publisherNodeIdentityIdOverride?: LiftJobBigInt;
+}
+
 export interface LiftRequest {
+  readonly jobType?: 'lift' | 'knowledge-asset-vm-publish';
+  readonly knowledgeAssetVmPublish?: KnowledgeAssetVmPublishRequest;
   readonly swmId: string;
   readonly shareOperationId: string;
   readonly roots: readonly string[];
@@ -63,6 +83,8 @@ export interface LiftRequest {
 }
 
 export const LIFT_REQUEST_IMMUTABLE_FIELDS = [
+  'jobType',
+  'knowledgeAssetVmPublish',
   'swmId',
   'shareOperationId',
   'roots',

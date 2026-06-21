@@ -399,8 +399,8 @@ describe('context-graph write-path validation — real daemon route wiring', () 
     expect(res.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_FOUND' });
   });
 
-  it('rejects unknown shared-memory write targets with CONTEXT_GRAPH_NOT_FOUND', async () => {
-    const res = await postJson(daemon, '/api/shared-memory/write', { contextGraphId: 'missing-cg', quads: QUADS });
+  it('rejects unknown knowledge-asset create targets with CONTEXT_GRAPH_NOT_FOUND', async () => {
+    const res = await postJson(daemon, '/api/knowledge-assets', { contextGraphId: 'missing-cg', name: 'draft', quads: QUADS });
     expect(res.status).toBe(400);
     expect(res.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_FOUND' });
   });

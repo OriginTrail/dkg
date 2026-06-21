@@ -84,6 +84,7 @@ const WORKSPACE_OWNER_PREDICATE = 'http://dkg.io/ontology/workspaceOwner';
 // finalize(layer:"swm") so a subset share — which also stamps dkg:rootEntity
 // member rows — cannot be sealed-in-SWM and published as a partial asset.
 const SWM_SHARE_COMPLETE_PRED = 'http://dkg.io/ontology/swmShareComplete';
+const SHARE_OPERATION_ID_PRED = 'http://dkg.io/ontology/shareOperationId';
 
 async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<string[]> {
   const graphs = await listGraphsByPrefix(store, `${rootGraph}/`);
@@ -2864,8 +2865,8 @@ export class DKGPublisher implements Publisher {
       // expectedMerkleRoot, wrong-signer recovery) propagate up as
       // hard errors instead of being downgraded to a "tentative"
       // result with a `On-chain tx failed` log line. These are
-      // protocol-correctness violations, not transient chain issues —
-      // /api/shared-memory/publish callers must see a 4xx for a
+      // protocol-correctness violations, not transient chain issues.
+      // Named lifecycle publish callers must see a 4xx for a
       // broken seal, not a 200 OK with `status: tentative` and
       // `kaId: 0` (which the daemon previously had to special-case).
       //
@@ -2985,7 +2986,7 @@ export class DKGPublisher implements Publisher {
             'Publish rejected: on-chain publish requires precomputedAttestation. ' +
             'RFC-001 §9.x — every published assertion must be sealed at finalize-time. ' +
             'Call agent.assertion.finalize(...) first; the daemon\'s assertion-name-aware ' +
-            '/api/shared-memory/publish path resolves the seal automatically.',
+            '/api/knowledge-assets/:name/vm/publish route resolves the seal automatically.',
           );
         }
         const effectiveAuthorAddress = options.precomputedAttestation.authorAddress;
@@ -5584,7 +5585,7 @@ export class DKGPublisher implements Publisher {
        */
       confirmBeforeCommit?: (message: Uint8Array) => Promise<{ applied: boolean; rejected?: boolean }>;
     },
-  ): Promise<{ promotedCount: number; gossipMessage?: Uint8Array; promotedAllRoots: boolean }> {
+  ): Promise<{ promotedCount: number; gossipMessage?: Uint8Array; promotedAllRoots: boolean; shareOperationId?: string }> {
     await this.ensureSubGraphRegistered(contextGraphId, opts?.subGraphName);
     const graphUri = await this.wmGraphUri(contextGraphId, agentAddress, name, opts?.subGraphName);
     const swmGraphUri = await this.swmGraphUri(contextGraphId, agentAddress, name, opts?.subGraphName);
@@ -5962,9 +5963,10 @@ export class DKGPublisher implements Publisher {
     // `promotingAllEntities` is hoisted to the top of the method (round 10) so the
     // early-return marker maintenance can use it; reuse it here.
     const isFullCompletePromote = promotingAllEntities && promotedAllRoots;
+    const lifecycleSubject = assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName);
+    const promoteMetaGraph = contextGraphMetaUri(contextGraphId);
+    await this.store.deleteByPattern({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: SHARE_OPERATION_ID_PRED });
     if (isFullCompletePromote) {
-      const lifecycleSubject = assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName);
-      const promoteMetaGraph = contextGraphMetaUri(contextGraphId);
       await this.store.deleteByPattern({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: DKG_ROOT_ENTITY_LEGACY });
       await this.store.deleteByPattern({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: DKG_ENTITY });
     }
@@ -6036,7 +6038,7 @@ export class DKGPublisher implements Publisher {
       }
     }
 
-    return { promotedCount: swmQuads.length, gossipMessage, promotedAllRoots };
+    return { promotedCount: swmQuads.length, gossipMessage, promotedAllRoots, shareOperationId: operationId };
   }
 
   async assertionDiscard(contextGraphId: string, name: string, agentAddress: string, subGraphName?: string): Promise<void> {

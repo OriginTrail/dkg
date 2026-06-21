@@ -1465,6 +1465,7 @@ export function generateAssertionPromotedMetadata(meta: AssertionPromotedMeta, o
     mq(subject, `${DKG}state`, lit('promoted'), metaGraph),
     mq(subject, `${DKG}memoryLayer`, lit(MemoryLayer.SharedWorkingMemory), metaGraph),
     mq(subject, `${DKG}assertionGraph`, swmGraphUri, metaGraph),
+    mq(subject, `${DKG}shareOperationId`, lit(meta.shareOperationId), metaGraph),
   ];
   if (provenanceEvents) {
     ins.push(

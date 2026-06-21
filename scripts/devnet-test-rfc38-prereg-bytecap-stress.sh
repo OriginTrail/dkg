@@ -43,6 +43,9 @@
 
 set -euo pipefail
 
+echo "[cap] retired: this stress test depended on pre-registration loose SWM writes, which are not part of the named KA lifecycle surface." >&2
+exit 0
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE=9201
@@ -168,7 +171,7 @@ for i in $(seq 1 "$WRITES_COUNT"); do
     }];
     console.log(JSON.stringify({ contextGraphId: cgId, quads }));
   ')
-  RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$PAYLOAD")
+  RESP=$(devnet_create_shared_ka "$CURATOR_NODE" "$PAYLOAD")
   N=$(parse_json "$RESP" '.triplesWritten' 2>/dev/null || echo "?")
   printf '[cap]   write %02d/%02d → triplesWritten=%s\n' "$i" "$WRITES_COUNT" "$N"
   if [ "$N" = "1" ]; then

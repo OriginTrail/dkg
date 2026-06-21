@@ -184,7 +184,7 @@ program
 
       if (useSharedMemory) {
         console.log(`\n\n  Staged ${result.quads.length} quads into WM assertion "${indexAssertionName}" for context graph "${targetContextGraph}".`);
-        console.log(`  Next: dkg shared-memory publish ${targetContextGraph} --name ${indexAssertionName}`);
+        console.log(`  Next: dkg assertion promote ${indexAssertionName} -c ${targetContextGraph}`);
       } else {
         console.log(`\n\n  Published ${result.quads.length} quads to context graph "${targetContextGraph}".`);
       }

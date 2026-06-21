@@ -40,9 +40,10 @@ const DIAGNOSTIC_LOG_PATTERNS = [
 function usage() {
   return `Usage: pnpm --filter @origintrail-official/dkg benchmark:swm-triple-volume -- [options]
 
-Writes many small public SWM triples to a running multi-node devnet and verifies
-that every node can count the replicated triple volume. This stresses Oxigraph
-triple/index volume rather than large literal byte externalization.
+Writes many small public SWM triples through named Knowledge Asset lifecycle
+create+seal+share calls to a running multi-node devnet and verifies that every
+node can count the replicated triple volume. This stresses Oxigraph triple/index
+volume rather than large literal byte externalization.
 
 Options:
   --ports <list>                    Comma-separated daemon API ports. Default derives from --api-port-base and --nodes.
@@ -51,7 +52,7 @@ Options:
   --context-graph-id <id>           Context graph to write/query. Default: devnet-test.
   --target-mib-per-node <MiB>       Approximate serialized N-Quad bytes to write per node. Default: 1024.
   --target-gib-per-node <GiB>       Same target in GiB; overrides --target-mib-per-node.
-  --triples-per-write <count>       Small triples per /api/shared-memory/write request. Default: 1000.
+  --triples-per-write <count>       Small triples per named KA create+share request. Default: 1000.
   --object-bytes <bytes>            Lexical bytes for generated literal objects. Default: 64.
   --predicate-count <count>         Number of predicates to rotate through. Default: 8.
   --write-concurrency <count>       Concurrent write requests. Default: 1.
@@ -363,6 +364,23 @@ function resolveInputPath(value) {
   return isAbsolute(value) ? value : resolve(INVOCATION_CWD, value);
 }
 
+function assertionNamePart(value) {
+  return String(value)
+    .trim()
+    .replace(/[<>"{}|^`\\\s/]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    || 'unknown';
+}
+
+function lifecycleAssetName(config, nodeNumber, writeNumber) {
+  return [
+    assertionNamePart(config.namespace),
+    assertionNamePart(config.runId),
+    `n${nodeNumber}`,
+    `w${writeNumber}`,
+  ].join('-').slice(0, 256);
+}
+
 function bytesFromMiB(value) {
   return Math.round(value * 1024 * 1024);
 }
@@ -516,21 +534,31 @@ async function writeBatch(config, plan, nodeIndex, writeNumber) {
   const nodeNumber = nodeIndex + 1;
   const quads = makeQuads(config, plan, nodeNumber, writeNumber);
   const estimatedNQuadBytes = estimateQuadsNQuadBytes(quads);
+  const name = lifecycleAssetName(config, nodeNumber, writeNumber);
   const startedAt = performance.now();
-  const response = await postJson(port, '/api/shared-memory/write', {
+  const response = await postJson(port, '/api/knowledge-assets', {
     contextGraphId: config.contextGraphId,
+    name,
     quads,
+    finalize: true,
+    alsoShareSwm: true,
   }, config, config.requestTimeoutMs);
+  if (Array.isArray(response.errors) && response.errors.length > 0) {
+    throw new Error(`Lifecycle create+share for ${name} returned errors: ${JSON.stringify(response.errors)}`);
+  }
   const durationMs = performance.now() - startedAt;
   return {
     port,
     nodeNumber,
     writeNumber,
+    assetName: name,
     root: quads[0].subject,
     triples: quads.length,
     estimatedNQuadBytes,
     durationMs: Number(durationMs.toFixed(2)),
-    operationId: response.operationId ?? response.shareOperationId,
+    operationId: response.assertionUri ?? name,
+    swmShared: response.swmShared === true,
+    promotedCount: response.promotedCount,
   };
 }
 

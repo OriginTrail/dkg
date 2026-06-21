@@ -12,8 +12,9 @@ post /api/context-graph/create "{\"id\":\"$CG\",\"name\":\"V10 Tri-Modal Memory 
 
 echo ""
 echo "=== Seeding knowledge entities ==="
-post /api/shared-memory/write "{
+post /api/knowledge-assets "{
   \"contextGraphId\":\"$CG\",
+  \"name\":\"seed-demo-entities\",
   \"quads\":[
     {\"subject\":\"urn:entity:branimir\",\"predicate\":\"http://www.w3.org/1999/02/22-rdf-syntax-ns#type\",\"object\":\"http://schema.org/Person\",\"graph\":\"\"},
     {\"subject\":\"urn:entity:branimir\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"Branimir\\\"\",\"graph\":\"\"},
@@ -67,8 +68,10 @@ post /api/shared-memory/write "{
     {\"subject\":\"urn:concept:memory-explorer-ui\",\"predicate\":\"http://www.w3.org/1999/02/22-rdf-syntax-ns#type\",\"object\":\"http://schema.org/SoftwareApplication\",\"graph\":\"\"},
     {\"subject\":\"urn:concept:memory-explorer-ui\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"Memory Explorer UI\\\"\",\"graph\":\"\"},
     {\"subject\":\"urn:concept:memory-explorer-ui\",\"predicate\":\"http://schema.org/description\",\"object\":\"\\\"React-based project view with Timeline (conversation turns + dated events), Knowledge Assets (concepts, code, people), and Graph visualization. Trust indicated by colored left borders and status badges.\\\"\",\"graph\":\"\"}
-  ]
-}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'  {d.get(\"triplesWritten\",d.get(\"error\"))} triples')"
+  ],
+  \"finalize\":true,
+  \"alsoShareSwm\":true
+}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'  {d.get(\"written\", d.get(\"error\"))} triples')"
 
 echo ""
 echo "=== Seeding conversation turns (real chat history) ==="
@@ -76,7 +79,7 @@ echo "=== Seeding conversation turns (real chat history) ==="
 turn() {
   local n="$1"; shift
   local md="$1"
-  post /api/memory/turn "{\"contextGraphId\":\"$CG\",\"markdown\":$(python3 -c "import json; print(json.dumps('''$md'''))"),\"layer\":\"swm\"}" \
+  post /api/memory/turn "{\"contextGraphId\":\"$CG\",\"markdown\":$(python3 -c "import json; print(json.dumps('''$md'''))"),\"layer\":\"wm\"}" \
     | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'  Turn $n: {d.get(\"totalQuads\",0)} quads')"
   sleep 0.15
 }

@@ -65,7 +65,7 @@ ON_CHAIN_ID=$(printf '%s' "$CREATE_RESP" | node -e 'let d="";process.stdin.on("d
 log "Public CG onChainId=$ON_CHAIN_ID"
 
 log "Writing public quads to SWM..."
-WRITE_RESP=$(api_call "$EDGE_CURATOR_NODE" POST /api/shared-memory/write "$(cat <<EOF
+WRITE_RESP=$(devnet_create_shared_ka "$EDGE_CURATOR_NODE" "$(cat <<EOF
 { "contextGraphId": "${CG_LOCAL_ID}",
   "quads": [
     { "subject": "urn:lu5pub:${STAMP}/a", "predicate": "http://schema.org/name", "object": "\"PublicA\"", "graph": "" },

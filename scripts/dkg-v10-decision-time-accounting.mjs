@@ -3,7 +3,7 @@
 // Decision pointer on the V10 session.
 //
 // Pipe into:
-//   dkg shared-memory write <graph> --file - --format nquads
+//   POST /api/knowledge-assets + /wm/write
 
 const GRAPH =
   '<did:dkg:context-graph:0x1Fe3D11Cf77b71528A66BDCEF97BdaB79327ee62/dkg-v10-smart-contracts>';

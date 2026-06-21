@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
 import { EVMChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
-import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { loadNetworkConfig, resolveReadyChainConfig, type DkgConfig } from './config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
@@ -47,6 +47,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
   log: (message: string) => void;
   ackTransportFactory?: () => ACKTransportFactory;
   publishEncryptionFactory?: PublishEncryptionFactory;
+  knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
 }): Promise<PublisherRuntime | null> {
   if (!args.config.publisher?.enabled) {
     return null;
@@ -64,6 +65,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       config: args.config,
       ackTransportFactory: args.ackTransportFactory,
       publishEncryptionFactory: args.publishEncryptionFactory,
+      knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor,
     });
     await runtime.runner.start();
     args.log(`Async publisher runner started (${runtime.walletIds.length} wallet${runtime.walletIds.length === 1 ? '' : 's'})`);
@@ -96,6 +98,7 @@ interface PublisherRuntimeBaseArgs {
   ackTransportFactory?: () => ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   publishEncryptionFactory?: PublishEncryptionFactory;
+  knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   closeStoreOnStop: boolean;
 }
@@ -186,6 +189,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   ackTransportFactory?: () => ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   publishEncryptionFactory?: PublishEncryptionFactory;
+  knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
 }): Promise<PublisherRuntime> {
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
@@ -198,6 +202,7 @@ export async function createPublisherRuntimeFromAgent(args: {
     ackTransportFactory: args.ackTransportFactory,
     v10ACKProviderFactory: args.v10ACKProviderFactory,
     publishEncryptionFactory: args.publishEncryptionFactory,
+    knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor,
     publicSnapshotStore: createPublicSnapshotStore(args.dataDir, args.config),
     closeStoreOnStop: false,
   });
@@ -268,6 +273,15 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     chainRecoveryResolver: hasChainRecovery ? createChainRecoveryResolver(publishers) : undefined,
     maxRetries: args.maxRetries,
     publicSnapshotStore: args.publicSnapshotStore,
+    knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor
+      ? async ({ walletId, request }) => {
+          const publisher = publishers.get(walletId);
+          if (!publisher) {
+            throw new Error(`No publisher configured for wallet ${walletId}`);
+          }
+          return args.knowledgeAssetVmPublishExecutor!({ walletId, request, publisher });
+        }
+      : undefined,
     publishExecutor: async ({ walletId, publishOptions }: AsyncLiftPublishExecutionInput) => {
       const publisher = publishers.get(walletId);
       if (!publisher) {

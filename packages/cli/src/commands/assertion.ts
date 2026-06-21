@@ -221,7 +221,7 @@ assertionCmd
       if (Array.isArray(result.rootEntities) && result.rootEntities.length > 0) {
         console.log(`  Root entities:  ${result.rootEntities.join(', ')}`);
       }
-      console.log(`  Next:           dkg shared-memory publish ${opts.contextGraph} --name ${name}${opts.subGraphName ? ` --sub-graph-name ${opts.subGraphName}` : ''}`);
+      console.log(`  Next:           dkg publisher publish-async ${opts.contextGraph} ${name}${opts.subGraphName ? ` --sub-graph ${opts.subGraphName}` : ''}`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);

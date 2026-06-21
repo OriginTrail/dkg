@@ -95,6 +95,22 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     authority: { type: 'owner', proofRef: 'proof:owner:1' },
   });
 
+  const kaVmPublishRequest = (overrides: Partial<Parameters<TripleStoreAsyncLiftPublisher['enqueueKnowledgeAssetVmPublish']>[0]> = {}) => {
+    const base = {
+      contextGraphId: 'music-social',
+      name: 'albums',
+      shareOperationId: 'share-op-1',
+      roots: ['urn:album:one', 'urn:album:two'],
+      sealMerkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
+      intentKey: 'sha256:' + 'ab'.repeat(32),
+      wmCurrentAssertion: '12'.repeat(32),
+      swmCurrentAssertion: '12'.repeat(32),
+      kaNumber: '7',
+      reservedUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+    };
+    return { ...base, ...overrides };
+  };
+
   beforeEach(() => {
     store = new OxigraphStore();
     now = 1_000;
@@ -114,6 +130,25 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         options.recoveryResult === undefined ? undefined : async () => options.recoveryResult ?? null,
       ...options.config,
     });
+  }
+
+  function confirmedPublishResult() {
+    return {
+      kaId: 11n,
+      ual: 'did:dkg:mock:31337/0xdef/11',
+      merkleRoot: new Uint8Array([0xde, 0xf0]),
+      kaManifest: [],
+      status: 'confirmed' as const,
+      onChainResult: {
+        batchId: 11n,
+        startKAId: 11n,
+        endKAId: 11n,
+        txHash: '0xdef',
+        blockNumber: 77,
+        blockTimestamp: 1700000077,
+        publisherAddress: '0x2222222222222222222222222222222222222222',
+      },
+    };
   }
 
   async function readLockExpiresAt(walletId: string): Promise<number> {
@@ -152,7 +187,107 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.retries.maxRetries).toBe(10);
   });
 
-  it('exposes the renamed shared-memory publisher contract', async () => {
+  it('enqueues named knowledge asset VM publish jobs', async () => {
+    const publisher = createPublisher();
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      subGraphName: 'research',
+      publishEpochs: 3,
+      clearSharedMemoryAfter: false,
+      publisherNodeIdentityIdOverride: '42',
+    }));
+    const job = await publisher.getStatus(jobId);
+
+    expect(jobId).toBe('job-1');
+    expect(job?.status).toBe('accepted');
+    expect(job?.request.jobType).toBe('knowledge-asset-vm-publish');
+    expect(job?.request.knowledgeAssetVmPublish).toEqual({
+      contextGraphId: 'music-social',
+      name: 'albums',
+      subGraphName: 'research',
+      shareOperationId: 'share-op-1',
+      roots: ['urn:album:one', 'urn:album:two'],
+      sealMerkleRoot: `0x${'12'.repeat(32)}`,
+      intentKey: 'sha256:' + 'ab'.repeat(32),
+      wmCurrentAssertion: '12'.repeat(32),
+      swmCurrentAssertion: '12'.repeat(32),
+      kaNumber: '7',
+      reservedUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+      publishEpochs: 3,
+      clearSharedMemoryAfter: false,
+      publisherNodeIdentityIdOverride: '42',
+    });
+    expect(job?.request.scope).toBe('vm-publish');
+    expect(job?.request.shareOperationId).toBe('share-op-1');
+    expect(job?.request.roots).toEqual(['urn:album:one', 'urn:album:two']);
+  });
+
+  it('rejects duplicate active knowledge asset VM publish jobs', async () => {
+    const publisher = createPublisher();
+
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      subGraphName: 'research',
+    }));
+
+    await expect(
+      publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+        subGraphName: 'research',
+      })),
+    ).resolves.toBe('job-1');
+
+    await expect(
+      publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+        subGraphName: 'research',
+        shareOperationId: 'share-op-2',
+        intentKey: 'sha256:' + 'cd'.repeat(32),
+      })),
+    ).rejects.toMatchObject({
+      name: 'AsyncLiftJobConflictError',
+      code: 'ASYNC_LIFT_JOB_CONFLICT',
+      existingJobId: 'job-1',
+    });
+  });
+
+  it('processes knowledge asset VM publish jobs through the lifecycle executor', async () => {
+    const calls: unknown[] = [];
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishExecutor: async (input) => {
+          calls.push(input);
+          return confirmedPublishResult();
+        },
+      },
+    });
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      clearSharedMemoryAfter: true,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('finalized');
+    expect(processed?.finalization?.ual).toBe('did:dkg:mock:31337/0xdef/11');
+    expect(calls).toEqual([
+      {
+        walletId: 'wallet-1',
+        request: {
+          contextGraphId: 'music-social',
+          name: 'albums',
+          shareOperationId: 'share-op-1',
+          roots: ['urn:album:one', 'urn:album:two'],
+          sealMerkleRoot: `0x${'12'.repeat(32)}`,
+          intentKey: 'sha256:' + 'ab'.repeat(32),
+          wmCurrentAssertion: '12'.repeat(32),
+          swmCurrentAssertion: '12'.repeat(32),
+          kaNumber: '7',
+          reservedUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+          clearSharedMemoryAfter: true,
+        },
+      },
+    ]);
+  });
+
+  it('exposes the SWM share operation contract', async () => {
     const publisherContract: Publisher = makeTestPublisher({
       store,
       chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
@@ -1240,6 +1375,44 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.recovery?.action).toBe('finalized_from_chain');
     expect(job?.recovery?.recoveredFromStatus).toBe('included');
     expect(job?.timestamps?.failedAt).toBeUndefined();
+  });
+
+  it('fails included knowledge asset VM publish jobs as clearable lifecycle recovery failures', async () => {
+    const publisher = createPublisher({
+      config: {
+        recoveryLookupTimeoutMs: 50,
+      },
+    });
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRootMap: {},
+        swmQuadCount: 2,
+        authorityProofRef: 'knowledge-asset-lifecycle',
+        transitionType: 'CREATE',
+      },
+    });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash: '0xkavm', walletId: 'wallet-1' },
+    });
+    await publisher.update(jobId, 'included', {
+      inclusion: { txHash: '0xkavm', blockNumber: 99 },
+    });
+
+    now += 100;
+    const recovered = await publisher.recover();
+    const job = await publisher.getStatus(jobId);
+
+    expect(recovered).toBe(1);
+    expect(job?.status).toBe('failed');
+    expect(job?.failure?.code).toBe('recovery_state_inconsistent');
+    expect(job?.failure?.resolution).toBe('fail_job');
+
+    expect(await publisher.clear('failed')).toBe(1);
+    expect(await publisher.getStatus(jobId)).toBeNull();
   });
 
   it('supports pause, resume, cancel, retry, and clear', async () => {

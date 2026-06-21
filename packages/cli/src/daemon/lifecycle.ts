@@ -1794,6 +1794,66 @@ export async function runDaemonInner(
               log,
             }),
             publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
+            knowledgeAssetVmPublishExecutor: async ({ request, publisher }) => {
+              const currentIntent = await agent.resolveFinalizedAssertionVmPublishIntent(
+                request.contextGraphId,
+                request.name,
+                {
+                  ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
+                  ...(request.publishEpochs !== undefined ? { publishEpochs: request.publishEpochs } : {}),
+                  ...(request.clearSharedMemoryAfter !== undefined
+                    ? { clearSharedMemoryAfter: request.clearSharedMemoryAfter }
+                    : {}),
+                  ...(request.publisherNodeIdentityIdOverride !== undefined
+                    ? { publisherNodeIdentityIdOverride: BigInt(request.publisherNodeIdentityIdOverride) }
+                    : {}),
+                  ...(publisher ? { publisherOverride: publisher } : {}),
+                },
+              );
+              if (currentIntent.intentKey !== request.intentKey) {
+                throw Object.assign(
+                  new Error(
+                    `Knowledge asset VM publish intent for "${request.name}" changed after enqueue; ` +
+                      `enqueue a new job for the current SWM share.`,
+                  ),
+                  { code: "PUBLISH_INTENT_STALE" },
+                );
+              }
+              const publishOpts = {
+                ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
+                ...(request.publishEpochs !== undefined ? { publishEpochs: request.publishEpochs } : {}),
+                ...(request.clearSharedMemoryAfter !== undefined
+                  ? { clearSharedMemoryAfter: request.clearSharedMemoryAfter }
+                  : {}),
+                ...(request.publisherNodeIdentityIdOverride !== undefined
+                  ? { publisherNodeIdentityIdOverride: BigInt(request.publisherNodeIdentityIdOverride) }
+                  : {}),
+                ...(publisher ? { publisherOverride: publisher } : {}),
+              };
+              try {
+                return await agent.publishFromFinalizedAssertion(
+                  request.contextGraphId,
+                  request.name,
+                  publishOpts,
+                );
+              } catch (firstErr: any) {
+                if (
+                  firstErr?.code !== "CG_NOT_REGISTERED" &&
+                  !/not registered on-chain/i.test(firstErr?.message ?? String(firstErr))
+                ) {
+                  throw firstErr;
+                }
+                const defaultAgentAddress = agent.getDefaultAgentAddress();
+                await agent.ensureRegisteredForPublish(request.contextGraphId, {
+                  ...(defaultAgentAddress ? { callerAgentAddress: defaultAgentAddress } : {}),
+                });
+                return await agent.publishFromFinalizedAssertion(
+                  request.contextGraphId,
+                  request.name,
+                  publishOpts,
+                );
+              }
+            },
             log,
           });
           publisherRuntime = runtime;
@@ -2643,21 +2703,6 @@ export async function runDaemonInner(
         subGraphName?: string;
       },
     ) => agent.query(sparql, opts),
-    share: (
-      contextGraphId: string,
-      quads: any[],
-      opts?: { localOnly?: boolean; subGraphName?: string },
-    ) => agent.share(contextGraphId, quads, opts).then((result: any) => {
-      emitMemoryGraphChanged({
-        contextGraphId,
-        layers: ["swm"],
-        subGraphName: opts?.subGraphName,
-        operation: "shared_memory_written",
-        source: opts?.localOnly ? "agent_tool_local" : "agent_tool",
-        counts: { triples: quads.length },
-      });
-      return result;
-    }),
     createAssertion: async (
       contextGraphId: string,
       name: string,
@@ -2698,40 +2743,6 @@ export async function runDaemonInner(
         counts: { triples: quads.length },
       });
       return { written: quads.length };
-    },
-    publishFromSharedMemory: (
-      contextGraphId: string,
-      selection: "all" | { rootEntities: string[] },
-      opts?: { clearSharedMemoryAfter?: boolean; subGraphName?: string },
-    ) => {
-      const publishOpts = {
-        ...opts,
-        clearSharedMemoryAfter: opts?.clearSharedMemoryAfter ?? false,
-      };
-      return agent.publishFromSharedMemory(contextGraphId, selection, publishOpts).then((result: any) => {
-        const clearAfter = publishOpts.clearSharedMemoryAfter;
-        const publishedSwmCleaned = result?.status === "confirmed";
-        const rootCount = Array.isArray(result?.kaManifest)
-          ? result.kaManifest.length
-          : undefined;
-        const publicTripleCount = Array.isArray(result?.publicQuads)
-          ? result.publicQuads.length
-          : undefined;
-        emitMemoryGraphChanged({
-          contextGraphId,
-          layers: publishedSwmCleaned ? ["swm", "vm"] : ["vm"],
-          subGraphName: opts?.subGraphName,
-          operation: "shared_memory_published",
-          source: "agent_tool",
-          clearSharedMemoryAfter: clearAfter,
-          status: typeof result?.status === "string" ? result.status : undefined,
-          counts: {
-            roots: rootCount,
-            triples: publicTripleCount,
-          },
-        });
-        return result;
-      });
     },
     createContextGraph: (opts: {
       id: string;

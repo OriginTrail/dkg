@@ -1,32 +1,42 @@
-import type { LiftRequest } from '@origintrail-official/dkg-publisher';
 import type { AssetPartitionQuad } from '@origintrail-official/dkg-core';
 import type { SourceWorkerJobFailureDetails, SourceWorkerJobStatusResult } from '@origintrail-official/dkg-agent';
 
-export interface SharedMemoryWriteResult {
-  shareOperationId: string;
-}
-
-export interface SharedMemoryWriteClient {
-  share(contextGraphId: string, quads: AssetPartitionQuad[], options?: { subGraphName?: string }): Promise<SharedMemoryWriteResult>;
-}
-
-export interface AsyncLiftJobClient {
-  lift(request: LiftRequest): Promise<string>;
+export interface KnowledgeAssetLifecycleClient {
+  createAndShare(
+    contextGraphId: string,
+    name: string,
+    quads: AssetPartitionQuad[],
+    options?: { subGraphName?: string },
+  ): Promise<{ promotedCount: number; publishReady?: boolean; shareOperationId?: string }>;
+  publishAsync(contextGraphId: string, name: string, options?: { subGraphName?: string }): Promise<{
+    jobId: string;
+    shareOperationId?: string;
+    rootsCount?: number;
+    intentKey?: string;
+  }>;
   getJobStatus(jobId: string): Promise<SourceWorkerJobStatusResult>;
 }
 
-export function createDaemonSharedMemoryWriteClient(daemonUrl: string, token: string): SharedMemoryWriteClient {
+export function createDaemonKnowledgeAssetLifecycleClient(
+  daemonUrl: string,
+  token: string,
+): KnowledgeAssetLifecycleClient {
   return {
-    async share(contextGraphId: string, quads: AssetPartitionQuad[], options: { subGraphName?: string } = {}): Promise<SharedMemoryWriteResult> {
-      const response = await fetch(`${daemonUrl}/api/shared-memory/write`, {
+    async createAndShare(
+      contextGraphId: string,
+      name: string,
+      quads: AssetPartitionQuad[],
+      options: { subGraphName?: string } = {},
+    ): Promise<{ promotedCount: number; publishReady?: boolean; shareOperationId?: string }> {
+      const response = await fetch(`${daemonUrl}/api/knowledge-assets`, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
+        headers: jsonHeaders(token),
         body: JSON.stringify({
           contextGraphId,
+          name,
           quads,
+          finalize: true,
+          alsoShareSwm: true,
           subGraphName: options.subGraphName,
         }),
       });
@@ -34,30 +44,40 @@ export function createDaemonSharedMemoryWriteClient(daemonUrl: string, token: st
       if (!response.ok) {
         throw new Error((payload as { error?: string }).error ?? `HTTP ${response.status}`);
       }
-      return { shareOperationId: (payload as { shareOperationId?: string }).shareOperationId ?? '' };
+      return {
+        promotedCount: numberField((payload as { promotedCount?: unknown }).promotedCount) ?? 0,
+        publishReady: booleanField((payload as { publishReady?: unknown }).publishReady),
+        shareOperationId: stringField((payload as { shareOperationId?: unknown }).shareOperationId),
+      };
     },
-  };
-}
 
-export function createDaemonAsyncLiftJobClient(daemonUrl: string, token: string): AsyncLiftJobClient {
-  return {
-    async lift(request: LiftRequest): Promise<string> {
-      const response = await fetch(`${daemonUrl}/api/publisher/enqueue`, {
+    async publishAsync(
+      contextGraphId: string,
+      name: string,
+      options: { subGraphName?: string } = {},
+    ): Promise<{ jobId: string; shareOperationId?: string; rootsCount?: number; intentKey?: string }> {
+      const response = await fetch(`${daemonUrl}/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish-async`, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(request),
+        headers: jsonHeaders(token),
+        body: JSON.stringify({
+          contextGraphId,
+          subGraphName: options.subGraphName,
+        }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error((payload as { error?: string }).error ?? `HTTP ${response.status}`);
       }
       const jobId = (payload as { jobId?: string }).jobId;
-      if (!jobId) throw new Error('Async publisher enqueue did not return a job id');
-      return jobId;
+      if (!jobId) throw new Error('Knowledge asset async publish did not return a job id');
+      return {
+        jobId,
+        shareOperationId: stringField((payload as { shareOperationId?: unknown }).shareOperationId),
+        rootsCount: numberField((payload as { rootsCount?: unknown }).rootsCount),
+        intentKey: stringField((payload as { intentKey?: unknown }).intentKey),
+      };
     },
+
     async getJobStatus(jobId: string): Promise<SourceWorkerJobStatusResult> {
       const response = await fetch(`${daemonUrl}/api/publisher/job?id=${encodeURIComponent(jobId)}`, {
         headers: {
@@ -79,8 +99,23 @@ export function createDaemonAsyncLiftJobClient(daemonUrl: string, token: string)
   };
 }
 
+function jsonHeaders(token: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${token}`,
+    'Content-Type': 'application/json',
+  };
+}
+
 function stringField(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function numberField(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function booleanField(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
 }
 
 function recordField(value: unknown): Record<string, unknown> | undefined {

@@ -118,6 +118,7 @@ export {
   type LiftJobChainRecoverableState,
   type LiftJobHex,
   type LiftJobBigInt,
+  type KnowledgeAssetVmPublishRequest,
   type LiftJobTimeoutMetadata,
   type LiftJobFailurePolicy,
   type LiftAuthorityProof,
@@ -166,9 +167,11 @@ export {
   isTimeoutLiftJobFailure,
 } from './lift-job.js';
 export {
+  AsyncLiftJobConflictError,
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
+  type AsyncKnowledgeAssetVmPublishExecutionInput,
   type AsyncLiftPublishExecutionInput,
   type AsyncLiftPublisherRecoveryResult,
   type AsyncLiftPublisherRecoveryResolver,

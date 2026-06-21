@@ -269,7 +269,7 @@ program
   .description('Run a SPARQL query against a context graph (or all)')
   .option('-q, --sparql <query>', 'SPARQL query string')
   .option('-f, --file <path>', 'File containing SPARQL query')
-  .option('--include-shared-memory', 'Include shared (unpublished) memory in the query — use for data written via `dkg index` / `dkg shared-memory write` before on-chain registration')
+  .option('--include-shared-memory', 'Include shared (unpublished) memory in the query - use for data promoted through the KA lifecycle before on-chain registration')
   .action(async (contextGraph: string | undefined, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();

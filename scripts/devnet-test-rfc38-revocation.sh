@@ -69,6 +69,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=devnet-publish-helpers.sh
+source "$SCRIPT_DIR/devnet-publish-helpers.sh"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE=9201
 CURATOR_NODE=5
@@ -169,7 +172,7 @@ PRE_QUADS=$(STAMP="$STAMP" CG_ID="$CG_ID" node -e '
   }
   console.log(JSON.stringify({ contextGraphId: cgId, quads }));
 ')
-WRITE_PRE=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$PRE_QUADS")
+WRITE_PRE=$(devnet_create_shared_ka "$CURATOR_NODE" "$PRE_QUADS")
 [ "$(parse_json "$WRITE_PRE" '.triplesWritten')" = "3" ] || fail "pre-write expected 3 triples: $WRITE_PRE"
 log "✓ pre-revocation: 3 triples written by curator"
 sleep 3
@@ -271,7 +274,7 @@ POST_QUADS=$(STAMP="$STAMP" CG_ID="$CG_ID" node -e '
   }
   console.log(JSON.stringify({ contextGraphId: cgId, quads }));
 ')
-WRITE_POST=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$POST_QUADS")
+WRITE_POST=$(devnet_create_shared_ka "$CURATOR_NODE" "$POST_QUADS")
 [ "$(parse_json "$WRITE_POST" '.triplesWritten')" = "3" ] || fail "post-write expected 3 triples: $WRITE_POST"
 log "✓ post-revocation: 3 NEW triples written by curator"
 sleep 8

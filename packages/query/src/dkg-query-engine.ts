@@ -183,9 +183,9 @@ export function resolveViewGraphs(
       // already part of VM pre-PR2.
       //
       // Dropping the root graph here was a behavioural break for
-      // existing callers (memory-search flows, the daemon's
-      // `/api/query?view=verifiable-memory` route after
-      // `/api/shared-memory/publish`): a successful publish would
+      // existing callers (memory-search flows and the daemon's
+      // `/api/query?view=verifiable-memory` route after named VM publish):
+      // a successful publish would
       // silently disappear from VM until a separate `verify()` wrote
       // into `_verifiable_memory/{vmId}`. Restoring the root graph keeps
       // confirmed publisher-side data immediately queryable via VM

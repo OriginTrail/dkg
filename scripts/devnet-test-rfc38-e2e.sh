@@ -34,7 +34,7 @@
 #     • Asserts: ok=true, actualRoot==expectedRoot.
 #     • Forges a tampered quads array, calls verify-batch again,
 #       asserts: ok=false with reason=root-mismatch.
-#     • Reports the failed batch via POST /api/shared-memory/report-batch-rejection
+#     • Reports the failed batch via POST /api/knowledge-assets/batch-rejections/report
 #       — asserts: returns rejection record with a populated digest.
 #
 #   ACT 4 (LU-9 member-attestation — outsider verification path)
@@ -198,7 +198,7 @@ QUADS_PAYLOAD=$(node -e "
 ")
 
 log "Curator writes 12 SWM triples..."
-WRITE_RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$QUADS_PAYLOAD")
+WRITE_RESP=$(devnet_create_shared_ka "$CURATOR_NODE" "$QUADS_PAYLOAD")
 WRITTEN=$(parse_json "$WRITE_RESP" '.triplesWritten')
 [ "$WRITTEN" = "12" ] || fail "expected 12 triples written, got '$WRITTEN' — response: $WRITE_RESP"
 log "✓ 12 triples written to curator's SWM (op=$(parse_json "$WRITE_RESP" '.shareOperationId'))"
@@ -369,7 +369,7 @@ REPORT_BODY=$(VERIFY_BAD="$VERIFY_BAD" CG_ID="$CG_ID" PUBLISH_KC="$PUBLISH_KC" n
     verifyResult
   }));
 ")
-REPORT_RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/report-batch-rejection "$REPORT_BODY")
+REPORT_RESP=$(api_call "$CURATOR_NODE" POST /api/knowledge-assets/batch-rejections/report "$REPORT_BODY")
 log "report-batch-rejection response: $REPORT_RESP"
 RR_DIGEST=$(parse_json "$REPORT_RESP" '.record.digest')
 [[ "$RR_DIGEST" =~ ^0x[0-9a-fA-F]{64}$ ]] || fail "rejection record digest missing/invalid: '$RR_DIGEST'"

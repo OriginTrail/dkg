@@ -78,9 +78,8 @@ export const ASSERTION_SEAL_PREDICATES = {
 } as const;
 
 /**
- * Predicates written by `/api/shared-memory/publish` after a
- * successful on-chain publish. These are receipts; they don't
- * affect the seal's validity.
+ * Predicates written by named VM publish lifecycle routes after a successful
+ * on-chain publish. These are receipts; they don't affect the seal's validity.
  */
 export const ASSERTION_PUBLISH_RECEIPT_PREDICATES = {
   /** Transaction hash of the KAv10 publish (string literal). */

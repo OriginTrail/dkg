@@ -2,9 +2,7 @@
  * GH #306 / #787 — write routes must reject malformed (string-shaped) quads with
  * an actionable 4xx instead of crashing with a TypeError → HTTP 500.
  *
- *   #787 — POST /api/shared-memory/write with N-Quad *string* quads → was 500
- *          ("Cannot read properties of undefined (reading 'toLowerCase')").
- *          https://github.com/OriginTrail/dkg/issues/787
+ *   #787 — the retired POST /api/shared-memory/write route must stay removed.
  *   #306 — POST /api/knowledge-assets/{name}/wm/write with string quads → was 500
  *          ("Cannot use 'in' operator to search for 'graph' in <s> <p> <o> .").
  *          https://github.com/OriginTrail/dkg/issues/306
@@ -37,21 +35,12 @@ afterAll(async () => {
   await stopLiveDaemon(daemon);
 });
 
-describe('GH #787 — POST /api/shared-memory/write quad-shape validation', () => {
-  it('returns 4xx (not 500) for N-Quad string-shaped quads', async () => {
+describe('GH #787 — retired shared-memory write route', () => {
+  it('returns route-not-found (not 500) for N-Quad string-shaped quads', async () => {
     const { status } = await postJson(daemon!, '/api/shared-memory/write', {
       contextGraphId: CG, quads: ['<http://example.org/s787> <http://example.org/p> "v" .'],
     });
-    expect(status).not.toBe(500);
-    expect(status).toBeGreaterThanOrEqual(400);
-    expect(status).toBeLessThan(500);
-  });
-
-  it('accepts well-formed object quads (regression: valid SWM write still succeeds)', async () => {
-    const { status, body } = await postJson(daemon!, '/api/shared-memory/write', {
-      contextGraphId: CG, quads: [{ subject: 'urn:wq:s787', predicate: 'http://schema.org/name', object: '"ok787"' }],
-    });
-    expect(status, JSON.stringify(body)).toBe(200);
+    expect(status).toBe(404);
   });
 
   it('returns 400 for oversized RDF literals before SWM write', async () => {

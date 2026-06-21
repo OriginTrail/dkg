@@ -14,6 +14,7 @@ import {
   type LiftJobFinalizationMetadata,
   type LiftJobRecoveryMetadata,
   type LiftJobState,
+  type KnowledgeAssetVmPublishRequest,
   type LiftRequest,
 } from './lift-job.js';
 import type {
@@ -21,6 +22,7 @@ import type {
   AsyncLiftPublisherConfig,
   AsyncLiftPublisherRecoveryResolver,
 } from './async-lift-publisher-types.js';
+import { AsyncLiftJobConflictError } from './async-lift-publisher-types.js';
 import {
   mapPublishExceptionToLiftJobFailure,
   mapPublishResultToLiftJobSuccess,
@@ -71,6 +73,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private readonly idGenerator: () => string;
   private readonly chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
+  private readonly knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
   private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   private readonly publicSnapshotStore?: AsyncLiftPublisherConfig['publicSnapshotStore'];
   private readonly graphManager: GraphManager;
@@ -90,6 +93,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
     this.chainRecoveryResolver = config.chainRecoveryResolver;
     this.publishExecutor = config.publishExecutor;
+    this.knowledgeAssetVmPublishExecutor = config.knowledgeAssetVmPublishExecutor;
     this.resolvedSliceOverrides = config.resolvedSliceOverrides;
     this.publicSnapshotStore = config.publicSnapshotStore;
     this.graphManager = new GraphManager(store);
@@ -113,6 +117,42 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     await this.writeJob(job);
     await this.stampCanonicalAnchorsInWorkspace(request);
     return jobId;
+  }
+
+  async enqueueKnowledgeAssetVmPublish(request: KnowledgeAssetVmPublishRequest): Promise<string> {
+    return this.withClaimLock(async () => {
+      await this.ensureGraph();
+      if (!request.shareOperationId.trim()) {
+        throw new Error('Knowledge asset VM publish requires a shareOperationId');
+      }
+      if (request.roots.length === 0) {
+        throw new Error('Knowledge asset VM publish requires at least one shared root');
+      }
+      const existing = await this.findActiveKnowledgeAssetVmPublishJob(request);
+      if (existing?.compatible) {
+        return existing.job.jobId;
+      }
+      if (existing?.job) {
+        throw new AsyncLiftJobConflictError(
+          `Knowledge asset VM publish is already queued for "${request.name}" in context graph "${request.contextGraphId}" with a different share intent`,
+          existing.job.jobId,
+        );
+      }
+      const liftRequest = this.createKnowledgeAssetVmPublishLiftRequest(request);
+      const now = this.now();
+      const jobId = this.idGenerator();
+      const job: LiftJobAccepted = {
+        jobId,
+        jobSlug: createJobSlug(liftRequest),
+        request: liftRequest,
+        status: 'accepted',
+        timestamps: { acceptedAt: now, updatedAt: now },
+        retries: { retryCount: 0, maxRetries: this.maxRetries },
+        controlPlane: { jobRef: jobSubject(jobId) },
+      };
+      await this.writeJob(job);
+      return jobId;
+    });
   }
 
   // Adapt the lift's canonicalization to the SWM partition: for every
@@ -223,6 +263,9 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (!job) {
       return null;
     }
+    if (job.request.jobType === 'knowledge-asset-vm-publish') {
+      return null;
+    }
 
     const resolved = await resolveLiftWorkspaceSlice({
       store: this.store,
@@ -259,10 +302,6 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   }
 
   async processNext(walletId: string): Promise<LiftJob | null> {
-    if (!this.publishExecutor) {
-      throw new Error('Async lift publisher processNext requires a configured publishExecutor');
-    }
-
     const claimed = await this.claimNext(walletId);
     if (!claimed) {
       return null;
@@ -270,6 +309,12 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
     let failureState: LiftJobState = claimed.status;
     try {
+      if (claimed.request.jobType === 'knowledge-asset-vm-publish') {
+        return await this.processKnowledgeAssetVmPublish(claimed, walletId);
+      }
+      if (!this.publishExecutor) {
+        throw new Error('Async lift publisher processNext requires a configured publishExecutor');
+      }
       const resolved = await resolveLiftWorkspaceSlice({
         store: this.store,
         graphManager: this.graphManager,
@@ -318,6 +363,112 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     } catch (error) {
       return await this.recordExecutionFailure(claimed.jobId, failureState, error);
     }
+  }
+
+  private async processKnowledgeAssetVmPublish(claimed: LiftJob, walletId: string): Promise<LiftJob> {
+    if (!this.knowledgeAssetVmPublishExecutor) {
+      throw new Error('Async knowledge asset VM publish requires a configured knowledgeAssetVmPublishExecutor');
+    }
+    const request = claimed.request.knowledgeAssetVmPublish;
+    if (!request) {
+      throw new Error(`Knowledge asset VM publish job ${claimed.jobId} is missing request metadata`);
+    }
+
+    try {
+      await this.update(claimed.jobId, 'validated', {
+        validation: this.createKnowledgeAssetVmPublishValidation(claimed.request),
+      });
+    } catch (error) {
+      return await this.recordExecutionFailure(claimed.jobId, 'claimed', error);
+    }
+
+    try {
+      const publishResult = await this.knowledgeAssetVmPublishExecutor({ walletId, request });
+      return await this.recordPublishResult(claimed.jobId, publishResult);
+    } catch (error) {
+      const failedFromState: LiftJobState = this.isKnowledgeAssetPublishPreconditionFailure(error)
+        ? 'validated'
+        : 'broadcast';
+      return await this.recordExecutionFailure(claimed.jobId, failedFromState, error);
+    }
+  }
+
+  private async findActiveKnowledgeAssetVmPublishJob(
+    request: KnowledgeAssetVmPublishRequest,
+  ): Promise<{ job: LiftJob; compatible: boolean } | null> {
+    const jobs = await this.list();
+    for (const job of jobs) {
+      if (job.status === 'finalized') continue;
+      if (job.status === 'failed' && job.failure?.retryable !== true) continue;
+      if (job.request.jobType !== 'knowledge-asset-vm-publish') continue;
+      const publish = job.request.knowledgeAssetVmPublish;
+      if (!publish) continue;
+      const sameName = publish.contextGraphId === request.contextGraphId
+        && publish.name === request.name
+        && (publish.subGraphName ?? '') === (request.subGraphName ?? '');
+      if (!sameName) continue;
+      return { job, compatible: publish.intentKey === request.intentKey };
+    }
+    return null;
+  }
+
+  private createKnowledgeAssetVmPublishLiftRequest(
+    request: KnowledgeAssetVmPublishRequest,
+  ): LiftRequest {
+    const subGraphPart = request.subGraphName ? `:${request.subGraphName}` : '';
+    const operationKey = `${request.contextGraphId}:${request.name}${subGraphPart}:${request.shareOperationId}`;
+    return {
+      jobType: 'knowledge-asset-vm-publish',
+      knowledgeAssetVmPublish: request,
+      swmId: request.shareOperationId,
+      shareOperationId: request.shareOperationId,
+      roots: request.roots,
+      contextGraphId: request.contextGraphId,
+      namespace: 'knowledge-assets',
+      scope: 'vm-publish',
+      transitionType: 'CREATE',
+      authority: {
+        type: 'owner',
+        proofRef: `urn:dkg:knowledge-assets:${operationKey}:vm-publish`,
+      },
+      ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
+      ...(request.publishEpochs !== undefined ? { publishEpochs: request.publishEpochs } : {}),
+      ...(request.publisherNodeIdentityIdOverride !== undefined
+        ? { publisherNodeIdentityIdOverride: request.publisherNodeIdentityIdOverride }
+        : {}),
+    };
+  }
+
+  private createKnowledgeAssetVmPublishValidation(request: LiftRequest): NonNullable<LiftJob['validation']> {
+    const canonicalRootMap = Object.fromEntries(
+      request.roots.map((root) => [root, root]),
+    ) as Record<string, string>;
+    return {
+      canonicalRoots: request.roots,
+      canonicalRootMap,
+      swmQuadCount: request.roots.length,
+      authorityProofRef: request.authority.proofRef,
+      transitionType: request.transitionType,
+      ...(request.priorVersion ? { priorVersion: request.priorVersion } : {}),
+    };
+  }
+
+  private isKnowledgeAssetPublishPreconditionFailure(error: unknown): boolean {
+    const anyError = error as { code?: unknown; message?: unknown };
+    if (
+      anyError?.code === 'PUBLISH_NOT_FULL_SHARE' ||
+      anyError?.code === 'PUBLISH_INTENT_STALE' ||
+      anyError?.code === 'CG_NOT_REGISTERED'
+    ) {
+      return true;
+    }
+    const message = String(anyError?.message ?? error);
+    return /is not finalized/i.test(message)
+      || /No quads in shared memory/i.test(message)
+      || /has no private payload/i.test(message)
+      || /not a complete full share/i.test(message)
+      || /cannot recover .*reservedKaId/i.test(message)
+      || /seal binds/i.test(message);
   }
 
   async recordPublishResult(
@@ -424,7 +575,11 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         continue;
       }
 
-      if ((job.status === 'broadcast' || job.status === 'included') && this.chainRecoveryResolver) {
+      if (
+        (job.status === 'broadcast' || job.status === 'included') &&
+        this.chainRecoveryResolver &&
+        job.request.jobType !== 'knowledge-asset-vm-publish'
+      ) {
         const resolved = await this.chainRecoveryResolver(job);
         if (resolved) {
           await this.releaseWalletLockForJob(job);
@@ -442,6 +597,15 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         continue;
       }
 
+      if (job.status === 'included' && job.request.jobType === 'knowledge-asset-vm-publish') {
+        if (this.hasInconclusiveRecoveryTimedOut(job)) {
+          await this.releaseWalletLockForJob(job);
+          await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(job));
+          recovered += 1;
+        }
+        continue;
+      }
+
       if (job.status === 'broadcast') {
         await this.releaseWalletLockForJob(job);
         await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', 'broadcast', getRecoveryTxHash(job)));
@@ -454,6 +618,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (this.chainRecoveryResolver) {
       const retryRecoveryJobs = (await this.list({ status: 'failed' }))
         .filter(isFailedJob)
+        .filter((job) => job.request.jobType !== 'knowledge-asset-vm-publish')
         .filter((job) => job.failure.resolution === 'retry_recovery' && 'broadcast' in job && job.broadcast);
 
       for (const job of retryRecoveryJobs) {
@@ -972,6 +1137,20 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     return this.mergeJob(job, 'failed', { failure: failure as any });
   }
 
+  private failKnowledgeAssetInconclusiveRecovery(job: LiftJobIncluded): LiftJob {
+    const failure = createLiftJobFailureMetadata({
+      failedFromState: job.status,
+      code: 'recovery_state_inconsistent',
+      message:
+        `Named knowledge asset VM publish job ${job.jobId} reached included state, but generic chain ` +
+        `recovery cannot safely perform lifecycle finalization for this job type. Inspect the on-chain ` +
+        `transaction and re-run the named lifecycle publish if needed.`,
+      errorPayloadRef: `urn:dkg:publisher:error:${job.jobId}:ka-recovery-inconclusive`,
+    });
+
+    return this.mergeJob(job, 'failed', { failure: failure as any });
+  }
+
   private async finalizeNoopPublish(jobId: string): Promise<LiftJob> {
     const current = await this.getRequiredJob(jobId);
     await this.assertActiveClaimLock(current);
@@ -989,6 +1168,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
   private async promoteFinalizedPrivateStaging(job: LiftJob): Promise<void> {
     if (job.status !== 'finalized' || !job.validation) return;
+    if (job.request.jobType === 'knowledge-asset-vm-publish') return;
 
     const privateStore = new PrivateContentStore(this.store, this.graphManager);
     for (const sourceRoot of job.request.roots) {
