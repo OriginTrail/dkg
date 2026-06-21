@@ -3487,7 +3487,10 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    const roots = [...new Set(latestPromote?.rootEntities ?? [])].sort();
+    const roots = [...new Set([
+      ...(latestPromote?.rootEntities ?? []),
+      ...(latestPromote?.rootEntities?.length ? [] : seal.rootEntities),
+    ])].sort();
     if (roots.length === 0) {
       throw Object.assign(
         new Error(

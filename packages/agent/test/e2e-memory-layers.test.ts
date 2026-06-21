@@ -11,7 +11,7 @@
  */
 import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
-import { DKGAgent } from '../src/index.js';
+import { DKGAgent, type DKGAgentConfig } from '../src/index.js';
 import { SEAL_CAPABILITY_GAP_CODE } from '../src/dkg-agent-publish.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
@@ -53,10 +53,11 @@ function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 const CG_ID = 'memory-layers-e2e';
 const ENTITY_BASE = 'urn:mem:entity';
 
-async function createAgent(name: string) {
+async function createAgent(name: string, overrides: Partial<DKGAgentConfig> = {}) {
   const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
   const agent = await DKGAgent.create({
-      kaNumberAllocator: makeTestKaNumberAllocator(),
+    ...overrides,
+    kaNumberAllocator: makeTestKaNumberAllocator(),
     name,
     listenPort: 0,
     chainAdapter: chain,
@@ -482,6 +483,31 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     await expect(
       agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, 'unsealed-share'),
     ).rejects.toMatchObject({ code: 'PUBLISH_INTENT_STALE' });
+  }, 30_000);
+
+  it('async publish intent resolves roots when provenance events are disabled', async () => {
+    const agent = await createAgent('LiteProvenanceAsyncIntentBot', { metadataProvenanceEvents: false });
+    await agent.createContextGraph({ id: CG_ID, name: 'Lite Provenance Async Intent E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'lite-provenance-async';
+    const root = `${ENTITY_BASE}:lite-provenance`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Lite Provenance Async"' },
+    ]);
+    const share = await agent.assertion.promote(CG_ID, name);
+    expect(share.sealed).toBe(true);
+    expect(share.publishReady).toBe(true);
+
+    const history = await agent.assertion.history(CG_ID, name);
+    expect(history?.events).toEqual([]);
+    expect(history?.currentShareOperationId).toBe(share.shareOperationId);
+
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+    expect(intent.shareOperationId).toBe(share.shareOperationId);
+    expect(intent.roots).toEqual([root]);
+    expect(intent.sealMerkleRoot).toMatch(/^0x[0-9a-f]+$/);
   }, 30_000);
 
   // B2: SEAL-IN-SWM round trip — the key new capability. An asset shared
