@@ -2,7 +2,7 @@
 //
 // Route handlers for shared-memory / workspace write + publish + conditional-write, memory turn/search.
 //
-// Extracted verbatim from the legacy monolithic `handleRequest` â€”
+// Extracted verbatim from the legacy monolithic `handleRequest` --
 // every block is a contiguous slice of the original source with zero
 // edits to route bodies. Dispatch is driven by the surviving
 // `handle-request.ts` shell, which awaits each group handler in
@@ -37,7 +37,7 @@ import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSy
 // Namespace import: our Phase-8 install-context builder (~line 290) calls
 // `osModule.homedir()`, and the later agent-identity probe (~line 6851)
 // uses `osModule.hostname()` + `osModule.userInfo()`. v10-rc's new
-// OpenClaw config helper (~line 2535) uses a bare `homedir()` â€” aliased
+// OpenClaw config helper (~line 2535) uses a bare `homedir()` -- aliased
 // below so both sites coexist without a duplicate-module import.
 import * as osModule from 'node:os';
 const { homedir } = osModule;
@@ -130,7 +130,7 @@ import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionSt
 import { FileStore } from '../../file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../../http/multipart.js';
-// Phase 8 â€” project-manifest publish + install (UI-driven onboarding flow).
+// Phase 8 -- project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
 // reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
 // format stays identical between curator/joiner/CLI paths.
@@ -147,7 +147,7 @@ import {
 } from '@origintrail-official/dkg-mcp/manifest/install';
 import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 
-// Daemon sub-module imports â€” every public symbol from sibling
+// Daemon sub-module imports -- every public symbol from sibling
 // modules is pulled in here because the legacy monolithic file used
 // them all without explicit imports. Unused ones are tolerated by
 // the project's tsconfig (`noUnusedLocals` is off).
@@ -351,13 +351,13 @@ import { authorizeAgentScopedAuthorClaim, isSameAgentAddress } from './shared-as
  * path (it recovers the address from the EIP-712 digest and fails closed
  * if the recovered signer doesn't match the claimed address).
  *
- * RFC-001 Â§9.x â€” Phase C â€” pre-signed attestations are a finalize-time
+ * RFC-001 Section 9.x -- Phase C -- pre-signed attestations are a finalize-time
  * concern. The publish layer no longer accepts them; they're consumed
  * here and stamped into the seal.
  */
 type PreSignedAuthorAttestation = {
   address: string;
-  // OT-RFC-43 Â§F2 â€” the packed reservedKaId the author signed over. Required so
+  // OT-RFC-43 Section F2 -- the packed reservedKaId the author signed over. Required so
   // the daemon honours the author's reserved slot (the digest binds it) rather
   // than re-allocating; threaded into agent.assertion.finalize.
   reservedKaId: bigint;
@@ -406,13 +406,13 @@ export function validatePreSignedAuthorAttestation(
     });
     return undefined;
   }
-  // OT-RFC-43 Â§F2 â€” the AuthorAttestation digest binds the packed reservedKaId,
+  // OT-RFC-43 Section F2 -- the AuthorAttestation digest binds the packed reservedKaId,
   // so the caller MUST forward the exact id they signed over. It travels as a
   // decimal string (uint256-safe over JSON); accept an integer number too.
   const reservedKaId = decodeReservedKaId(obj.reservedKaId);
   if (reservedKaId === undefined) {
     jsonResponse(res, 400, {
-      error: '"preSignedAuthorAttestation.reservedKaId" must be the packed KA id the author signed over, as a non-negative decimal string (OT-RFC-43 Â§F2)',
+      error: '"preSignedAuthorAttestation.reservedKaId" must be the packed KA id the author signed over, as a non-negative decimal string (OT-RFC-43 Section F2)',
     });
     return undefined;
   }
@@ -641,19 +641,19 @@ WHERE {
 
   // POST /api/shared-memory/catchup
   //
-  // OT-RFC-38 LU-7 â€” explicit SWMCatchupRequest endpoint. Pulls the
+  // OT-RFC-38 LU-7 -- explicit SWMCatchupRequest endpoint. Pulls the
   // remote SWM state for one or more context graphs from connected
   // peers, applying everything authorized into the local triple store.
   //
   // Body: { contextGraphId: string | string[], peerId?: string }
   //   - peerId: optional. When set, sync only from this specific peer.
   //     When omitted, iterate ALL currently-connected libp2p peers and
-  //     try each â€” first peer that authorises serves the request,
+  //     try each -- first peer that authorises serves the request,
   //     subsequent peers' decisions are independent.
   //
   // Returns: per-peer outcome with inserted/fetched counters.
   //
-  // Auth model (per SPEC_CG_HOSTING_MEMBERSHIP Â§5.6.4):
+  // Auth model (per SPEC_CG_HOSTING_MEMBERSHIP Section 5.6.4):
   //   - Public CGs (accessPolicy == 0): the responder's sync handler
   //     accepts anonymous catchup (no `authorizePrivateSyncRequest`
   //     gate). Any reachable peer can backfill SWM.
@@ -682,13 +682,13 @@ WHERE {
     if (cgIds.length === 0) {
       return jsonResponse(res, 400, {
         error:
-          'Missing "contextGraphId" â€” pass a single context graph id string or an array of ids',
+          'Missing "contextGraphId" -- pass a single context graph id string or an array of ids',
       });
     }
 
     // OT-RFC-38 LU-7: SWMCatchupRequest is SWM-only. The durable
     // (knowledge-collection) layer has its own publish-time
-    // commitâ†’fanoutâ†’ACK protocol and a separate sync substrate; it's
+    // commit->fanout->ACK protocol and a separate sync substrate; it's
     // out of scope for the catchup endpoint and would otherwise compound
     // the request budget (240s vs 120s). Opt-in via includeDurable=true
     // for callers that want the full data leg in the same call.
@@ -920,7 +920,7 @@ WHERE {
       });
     }
 
-    // OT-RFC-38 LU-6 â€” per-CG host-catchup fallback. For each CG
+    // OT-RFC-38 LU-6 -- per-CG host-catchup fallback. For each CG
     // whose standard sync inserted 0 triples, fall back to fetching
     // opaque ciphertext envelopes from connected core hosts and
     // re-applying them through the local sender-key decryptor.
@@ -1056,7 +1056,7 @@ WHERE {
     });
   }
 
-  // OT-RFC-38 LU-6 â€” dedicated host-catchup endpoint.
+  // OT-RFC-38 LU-6 -- dedicated host-catchup endpoint.
   //
   // POST /api/shared-memory/host-catchup
   // Body: { contextGraphId: string, peerId?: string, sinceSeqno?: number, maxRounds?: number }
@@ -1065,7 +1065,7 @@ WHERE {
   // hosting the curated CG's SWM substrate and re-applies each
   // through the local agent so the existing Sender-Key decrypt
   // path runs verbatim. Distinct from the "fallback" leg embedded
-  // in /catchup above â€” exposed so operators can debug host
+  // in /catchup above -- exposed so operators can debug host
   // hosting independently (e.g. to confirm a specific core has
   // stored ciphertext for a CG).
   if (req.method === 'POST' && path === '/api/shared-memory/host-catchup') {
@@ -1107,7 +1107,7 @@ WHERE {
     }
   }
 
-  // OT-RFC-38 LU-6 â€” host-mode store diagnostics.
+  // OT-RFC-38 LU-6 -- host-mode store diagnostics.
   // GET /api/shared-memory/host-mode/stats
   // Returns { enabled, cgCount, totalBytes, totalEntries, subscribedCgIds }.
   if (req.method === 'GET' && path === '/api/shared-memory/host-mode/stats') {
@@ -1122,7 +1122,7 @@ WHERE {
     }
   }
 
-  // OT-RFC-38 LU-6 â€” explicit host-mode subscribe.
+  // OT-RFC-38 LU-6 -- explicit host-mode subscribe.
   // POST /api/shared-memory/host-mode/subscribe { contextGraphId }
   // Tells a core to start hosting the curated CG's encrypted SWM
   // substrate WITHOUT requiring the core to become a CG member.
@@ -1147,10 +1147,10 @@ WHERE {
     }
   }
 
-  // Tiny local helper â€” kept inline to avoid adding a new import for
+  // Tiny local helper -- kept inline to avoid adding a new import for
   // a single use; the existing route module already has utilities
   // for hex/bytes interop scattered across the file but none are
-  // strictly typed `bytes32`. 64-char hex (no 0x) â†’ 32-byte buffer.
+  // strictly typed `bytes32`. 64-char hex (no 0x) -> 32-byte buffer.
   function hexToBytes32(h: string): Uint8Array {
     const clean = h.startsWith('0x') ? h.slice(2) : h;
     if (clean.length !== 64) throw new Error('expected 32-byte hex');
@@ -1161,9 +1161,9 @@ WHERE {
 
   // POST /api/shared-memory/verify-batch
   //
-  // OT-RFC-38 LU-8 â€” Member post-decrypt batch verification.
+  // OT-RFC-38 LU-8 -- Member post-decrypt batch verification.
   //
-  // SPEC_CG_HOSTING_MEMBERSHIP Â§5.3.1: members re-derive the plaintext
+  // SPEC_CG_HOSTING_MEMBERSHIP Section 5.3.1: members re-derive the plaintext
   // merkle root from a reconstructed batch and compare to the on-chain
   // anchor. This endpoint exposes the recompute step.
   //
@@ -1349,7 +1349,7 @@ WHERE {
 
   // POST /api/attestation/mint
   //
-  // OT-RFC-38 LU-9 â€” Member-attested verification token.
+  // OT-RFC-38 LU-9 -- Member-attested verification token.
   //
   // Body: {
   //   contextGraphId: string,            // local CG id (numeric on-chain id resolved server-side)
@@ -1384,7 +1384,7 @@ WHERE {
     const chainId = chain?.chainId ?? parsed.chainId ?? '31337';
     if (!kavAddress || !/^0x[0-9a-fA-F]{40}$/.test(String(kavAddress))) {
       return jsonResponse(res, 400, {
-        error: 'cannot determine KAV10 address â€” pass `kavAddress` explicitly',
+        error: 'cannot determine KAV10 address -- pass `kavAddress` explicitly',
       });
     }
 
@@ -1394,15 +1394,15 @@ WHERE {
     // subscription metadata couldn't resolve the on-chain id. That
     // silently minted an attestation token bound to ContextGraphId=0
     // (the sentinel for "no on-chain CG") even though a real KC for
-    // this batch already exists on-chain â€” outsiders verifying the
+    // this batch already exists on-chain -- outsiders verifying the
     // token would see it pass cryptographic checks but reject as
     // wrong-domain, with no diagnostic linking back to the actual CG.
     // Three resolution layers, all fail-closed:
     //   1. Caller-supplied `onChainContextGraphId` (explicit override).
-    //   2. Chain-truth via `chain.getKAContextGraphId(batchId)` â€”
-    //      authoritative because the KC â†” CG binding is on-chain.
+    //   2. Chain-truth via `chain.getKAContextGraphId(batchId)` --
+    //      authoritative because the KC <-> CG binding is on-chain.
     //   3. Local CG listing (last-resort, may be stale post-event-replay).
-    // If none resolve, reject with 400 â€” minting against id=0 is never
+    // If none resolve, reject with 400 -- minting against id=0 is never
     // correct.
     let onChainCgId: string | undefined;
     if (typeof parsed.onChainContextGraphId === 'string' && /^\d+$/.test(parsed.onChainContextGraphId)) {
@@ -1459,7 +1459,7 @@ WHERE {
           attestedAt: Math.floor(Date.now() / 1000),
         },
         sign: async (digest) => {
-          // Convert (r, vs) â†’ compact 65-byte hex via ethers.Signature.
+          // Convert (r, vs) -> compact 65-byte hex via ethers.Signature.
           const sigParts = await chain.signMessage(digest);
           const r = '0x' + Array.from(sigParts.r as Uint8Array).map((b: number) => b.toString(16).padStart(2, '0')).join('');
           const vs = '0x' + Array.from(sigParts.vs as Uint8Array).map((b: number) => b.toString(16).padStart(2, '0')).join('');
@@ -1476,14 +1476,14 @@ WHERE {
 
   // POST /api/attestation/verify
   //
-  // OT-RFC-38 LU-9 â€” outsider-side verification.
+  // OT-RFC-38 LU-9 -- outsider-side verification.
   //
   // Body: {
   //   attestation: MemberAttestation,
   //   candidateLeafHex?: string,        // optional 0x-prefixed bytes for leaf check
   //   chainCheckMembership?: boolean    // if true, the daemon attempts a chain-side
   //                                     // membership lookup (Phase B); currently
-  //                                     // always returns "unknown" â€” surfaces the
+  //                                     // always returns "unknown" -- surfaces the
   //                                     // gap honestly.
   // }
   if (req.method === "POST" && path === "/api/attestation/verify") {
@@ -1506,7 +1506,7 @@ WHERE {
     }
 
     const { verifyMemberAttestation } = await import('@origintrail-official/dkg-agent');
-    // Codex PR #609 R2 #3 â€” only supply a membership resolver when
+    // Codex PR #609 R2 #3 -- only supply a membership resolver when
     // the caller explicitly opted into `chainCheckMembership`.
     // Previously we always passed a stub, which made every response
     // carry `membership: "unknown"` and erased the distinction
@@ -1526,14 +1526,14 @@ WHERE {
     return jsonResponse(res, 200, result);
   }
 
-  // POST /api/memory/turn â€” ingest a conversation turn as a tri-modal Knowledge Asset.
+  // POST /api/memory/turn -- ingest a conversation turn as a tri-modal Knowledge Asset.
   //
   // Streamlined path for agent memory: accepts a markdown conversation turn,
   // stores it in the file store, runs structural + optional semantic extraction,
   // and writes the resulting triples to WM. Use the knowledge asset lifecycle
   // routes to share or publish turns.
   //
-  // Spec: 21_TRI_MODAL_MEMORY.md Â§8
+  // Spec: 21_TRI_MODAL_MEMORY.md Section 8
   if (req.method === 'POST' && path === '/api/memory/turn') {
     const body = await readBody(req);
     const parsed = safeParseJson(body, res);
@@ -1614,7 +1614,7 @@ WHERE {
         );
         semanticTriples = llmResult.triples;
       } catch {
-        // Semantic extraction is best-effort â€” structural extraction alone is sufficient
+        // Semantic extraction is best-effort -- structural extraction alone is sufficient
       }
     }
 
@@ -1762,12 +1762,12 @@ WHERE {
     });
   }
 
-  // POST /api/memory/search â€” tri-modal search across text, graph, and vector stores.
+  // POST /api/memory/search -- tri-modal search across text, graph, and vector stores.
   //
   // Fans out the query to SPARQL (triple store), text search (file store),
   // and vector similarity (vector store), then merges and deduplicates results.
   //
-  // Spec: 21_TRI_MODAL_MEMORY.md Â§7
+  // Spec: 21_TRI_MODAL_MEMORY.md Section 7
   if (req.method === 'POST' && path === '/api/memory/search') {
     const body = await readBody(req);
     const parsed = safeParseJson(body, res);
@@ -1830,7 +1830,7 @@ WHERE {
 
     // Fan-out 2: SPARQL text search (scoped to the requested CG + layers).
     // escapeSparqlLiteral escapes backslashes, quotes, and CR/LF/TAB per the
-    // SPARQL STRING_LITERAL2 grammar â€” a simple `replace(/"/g, '\\"')` would
+    // SPARQL STRING_LITERAL2 grammar -- a simple `replace(/"/g, '\\"')` would
     // still allow `\` to escape the closing quote and break out of the literal.
     const escapedQuery = escapeSparqlLiteral(query.toLowerCase());
     const cgUri = `did:dkg:context-graph:${contextGraphId}`;
@@ -1846,7 +1846,7 @@ WHERE {
       return `STRSTARTS(STR(?g), "${cgUri}/_verifiable_memory")`;
     }).join(' || ') || 'false';
     try {
-      // #1096: accept both http:// and https:// schema.org forms â€” real
+      // #1096: accept both http:// and https:// schema.org forms -- real
       // payloads overwhelmingly use https://schema.org, which the previous
       // http-only property path silently excluded.
       const sparqlResult = await agent.store.query(`

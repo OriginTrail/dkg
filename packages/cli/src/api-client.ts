@@ -11,7 +11,7 @@ export type QueryResult =
 export interface PreSignedAuthorAttestationPayload {
   address: string;
   /**
-   * OT-RFC-43 Â§F2 â€” the packed reservedKaId the author signed the
+   * OT-RFC-43 Section F2 -- the packed reservedKaId the author signed the
    * AuthorAttestation over, as a decimal string (uint256-safe over JSON).
    * Required: the digest binds it, so the daemon honours the author's
    * reserved slot rather than re-allocating.
@@ -91,7 +91,7 @@ function assertCreateFinalizeFieldsHaveQuads(args: {
     args.preSignedAuthorAttestation != null ||
     args.schemeVersion !== undefined;
   // These fields only take effect at finalize, so they require both non-empty
-  // quads AND finalize !== false â€” mirrors the daemon create-route guard.
+  // quads AND finalize !== false -- mirrors the daemon create-route guard.
   const willFinalize = Array.isArray(args.quads) && args.quads.length > 0 && args.finalize !== false;
   if (hasFinalizeOnlyField && !willFinalize) {
     throw new Error('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads and finalize !== false');
@@ -103,7 +103,7 @@ function assertCreateFinalizeFieldsHaveQuads(args: {
  * `RandomSamplingStatus` from `@origintrail-official/dkg-agent` but
  * lives here so the CLI doesn't take a runtime dep on the agent
  * package (only types). The `loop.lastOutcome` is intentionally
- * `unknown` â€” the CLI prints it as JSON; the structured discrimination
+ * `unknown` -- the CLI prints it as JSON; the structured discrimination
  * is the prover's concern, not the CLI's.
  */
 export interface RandomSamplingStatusResponse {
@@ -491,16 +491,16 @@ export class ApiClient {
    * promoting in the same call. Maps directly to the extended
    * `POST /api/knowledge-assets` body.
    *
-   * RFC-001 Â§9.x â€” the assertion lifecycle is the canonical entry
+   * RFC-001 Section 9.x -- the assertion lifecycle is the canonical entry
    * point for staging content for VM publish.
    */
-  // â”€â”€ OT-RFC-43 Â§10.5 â€” GitHub-shaped Knowledge Asset SDK â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- OT-RFC-43 Section 10.5 -- GitHub-shaped Knowledge Asset SDK ------------------
   // Layer-explicit wrappers over /api/knowledge-assets/... (the clean product surface).
 
   /**
    * Create a KA + open a WM draft. Pass `quads` to write them atomically; by
    * default the draft is also sealed (finalized). Pass `finalize: false` to
-   * write a draft WITHOUT sealing â€” an editable WM-only assertion that never
+   * write a draft WITHOUT sealing -- an editable WM-only assertion that never
    * touches the chain (the only lifecycle available to local-only /
    * on-chain-unregistered CGs).
    */
@@ -581,7 +581,7 @@ export class ApiClient {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/pull-from`, { contextGraphId, layer, ...(options ?? {}) });
   }
 
-  /** Advance the SWM pointer (WM â†’ SWM; git push origin <branch>). */
+  /** Advance the SWM pointer (WM -> SWM; git push origin <branch>). */
   async knowledgeAssetShare(
     contextGraphId: string,
     name: string,
@@ -692,7 +692,7 @@ export class ApiClient {
   }
 
   /**
-   * Finalize a previously-created assertion. RFC-001 Â§9.x â€” computes
+   * Finalize a previously-created assertion. RFC-001 Section 9.x -- computes
    * the canonical merkleRoot, builds the EIP-712 AuthorAttestation,
    * signs (custodial / pre-signed / publisher fallback), and stamps
    * the seal triples to `_meta`.
@@ -783,9 +783,9 @@ export class ApiClient {
   }
 
   /**
-   * High-level convenience: create â†’ write â†’ finalize â†’ promote â†’
+   * High-level convenience: create -> write -> finalize -> promote ->
    * publish, all in two HTTP round-trips. The composite mirrors what
-   * a typical OpenClaw/Hermes client does â€” stage content, commit it,
+   * a typical OpenClaw/Hermes client does -- stage content, commit it,
    * push it on-chain. Use this unless you need fine-grained control
    * over the individual steps.
    */
@@ -857,12 +857,12 @@ export class ApiClient {
     };
   }
 
-  // â”€â”€â”€ Publishing Conviction Account (PCA) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // --- Publishing Conviction Account (PCA) ----------------------------
 
   async createPca(request: {
     tokens: string;
     // OT-RFC-51: the node identityId this PCA's committed TRAC funds. Required
-    // â€” a PCA created with no node seeds publishing allocation to nobody.
+    // -- a PCA created with no node seeds publishing allocation to nobody.
     primaryNode: string;
   }): Promise<{
     accountId: string;
@@ -1059,7 +1059,7 @@ export class ApiClient {
     return this.post('/api/publisher/clear', { status });
   }
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ EPCIS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ------------------------- EPCIS -------------------------------------
 
   async captureEpcis(request: {
     epcisDocument: unknown;
@@ -1142,7 +1142,7 @@ export class ApiClient {
   }
 
   /**
-   * Run SPARQL via the daemon. `opts` covers the full /api/query surface â€”
+   * Run SPARQL via the daemon. `opts` covers the full /api/query surface --
    * memory-layer routing (`view`, `graphSuffix`, `verifiedGraph`,
    * `subGraphName`, `includeSharedMemory`, `includeContextGraphPartitions`,
    * `agentAddress`, `assertionName`), and P-13's `minTrust` (only meaningful
@@ -1419,7 +1419,7 @@ export class ApiClient {
      * Atomic combined-flow flag. When `true`, the daemon registers the
      * CG on-chain in the same call after the local create step
      * succeeds. Required when `pcaAccountId` is supplied (a standalone
-     * `createContextGraph` does NOT persist PCA ids â€” Codex PR #502
+     * `createContextGraph` does NOT persist PCA ids -- Codex PR #502
      * round-3).
      */
     register?: boolean;
@@ -1428,7 +1428,7 @@ export class ApiClient {
      * the combined-flow path. Only meaningful together with
      * `register: true`. The agent otherwise defaults
      * `publishPolicy = curated (0)` for curated/private CGs and
-     * `publishPolicy = open (1)` for public CGs â€” which makes the
+     * `publishPolicy = open (1)` for public CGs -- which makes the
      * valid `{ accessPolicy: 0 (public), publishPolicy: 0 (curated),
      * pcaAccountId }` combo unreachable unless the caller can pin
      * `publishPolicy` explicitly. Codex PR #502 round-10 (raised by
@@ -1530,7 +1530,7 @@ export class ApiClient {
    * the local agent produced; does NOT forward over P2P. To deliver it
    * to the curator, follow up with `requestJoin(...)` and the
    * `curatorPeerId` from the V10 invite. PR #448 split sign vs forward
-   * to fix a duplicate-forward bug â€” see daemon route comment.
+   * to fix a duplicate-forward bug -- see daemon route comment.
    *
    * The `delegation` shape mirrors `SignedAgentDelegation` from
    * `@dkg/agent`: `version` is part of the digest grammar (see
@@ -1657,7 +1657,7 @@ export class ApiClient {
     /**
      * Optional. If supplied it MUST match the address resolved from
      * the bearer token; the daemon rejects any mismatch with 403.
-     * Prefer omitting and relying on the token â€” see A-12 review on
+     * Prefer omitting and relying on the token -- see A-12 review on
      * /api/endorse for the provenance-forgery rationale.
      */
     agentAddress?: string;

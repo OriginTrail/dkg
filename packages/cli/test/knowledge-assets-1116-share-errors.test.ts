@@ -41,6 +41,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     assertion: Record<string, unknown>,
     agentOverrides: Record<string, unknown> = {},
     routeOverrides: { requestToken?: string; requestAgentAddress?: string } = {},
+    publisherControl: Record<string, unknown> = {},
   ) {
     const agent = {
       async listContextGraphs() {
@@ -68,7 +69,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
           req,
           res,
           agent,
-          publisherControl: {},
+          publisherControl,
           publisherRuntime: null,
           config: {},
           startedAt: Date.now(),
@@ -296,6 +297,49 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
 
     const res = await post('swm/share', { contextGraphId: CG_ID });
     expect(res.status).toBeGreaterThanOrEqual(500);
+  });
+
+  it('vm/publish-async preflights the immutable share snapshot before enqueue', async () => {
+    let enqueueCalls = 0;
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => ({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        shareOperationId: 'missing-share-op',
+        roots: ['urn:test:root'],
+        seal: {
+          merkleRoot: `0x${'12'.repeat(32)}`,
+          authorAddress: '0x1111111111111111111111111111111111111111',
+          signature: {
+            r: `0x${'34'.repeat(32)}`,
+            vs: `0x${'56'.repeat(32)}`,
+          },
+          schemeVersion: 1,
+        },
+        sealChainId: '31337',
+        sealKav10Address: '0x2222222222222222222222222222222222222222',
+        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+        sealMerkleRoot: `0x${'12'.repeat(32)}`,
+        intentKey: `sha256:${'ab'.repeat(32)}`,
+      }),
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {
+        throw Object.assign(
+          new Error('share snapshot missing; re-share before enqueue'),
+          { code: 'PUBLISH_INTENT_STALE' },
+        );
+      },
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        enqueueCalls += 1;
+        return 'job-should-not-exist';
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PUBLISH_INTENT_STALE');
+    expect(String(res.body.error)).toContain('re-share');
+    expect(enqueueCalls).toBe(0);
   });
 
   // #1116 (round 5, FIX 1): the seal-less SWM reconstruction is reachable via the

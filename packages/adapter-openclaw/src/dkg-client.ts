@@ -32,7 +32,7 @@ export class DkgDaemonHttpError extends Error {
  * Build a {@link DkgDaemonHttpError} from a non-2xx daemon response. Attempts to
  * parse `text` as JSON for the typed `body`; a non-JSON body leaves `body`
  * undefined (the raw text still appears in the message). The message format is
- * fixed â€” do NOT change it without auditing the `responded ` substring checks.
+ * fixed -- do NOT change it without auditing the `responded ` substring checks.
  */
 function daemonHttpError(message: string, status: number, text: string): DkgDaemonHttpError {
   let body: unknown;
@@ -48,7 +48,7 @@ export interface DkgClientOptions {
   /** Bearer token for daemon API auth. If omitted, tries `<dkgHome>/auth.token`. */
   apiToken?: string;
   /**
-   * T70 â€” DKG home directory used to read `auth.token` when `apiToken` is
+   * T70 -- DKG home directory used to read `auth.token` when `apiToken` is
    * not supplied. Caller (typically `DkgNodePlugin.register`) passes the
    * runtime-resolved home (`resolveDkgHome({daemonUrl})`) so the constructor
    * fallback reads from the right place when the active daemon is in
@@ -171,7 +171,7 @@ export interface LocalAgentIntegrationRecord extends LocalAgentIntegrationPayloa
 }
 
 /**
- * T63 â€” Shape of `/api/agent/identity` response.
+ * T63 -- Shape of `/api/agent/identity` response.
  *
  * Mirrors the daemon route handler at
  * `packages/cli/src/daemon/routes/agent-chat.ts:391`. `agentAddress` is the
@@ -273,7 +273,7 @@ function isChatTurnStoreNotFoundError(err: unknown): boolean {
 export interface PreSignedAuthorAttestationPayload {
   address: string;
   /**
-   * OT-RFC-43 Â§F2 â€” the packed reservedKaId the author signed the
+   * OT-RFC-43 Section F2 -- the packed reservedKaId the author signed the
    * AuthorAttestation over, as a decimal string (uint256-safe over JSON).
    * Required: the daemon binds it into the digest and honours the reserved slot.
    */
@@ -324,7 +324,7 @@ function assertCreateFinalizeFieldsHaveQuads(args: {
     args.preSignedAuthorAttestation != null ||
     args.schemeVersion !== undefined;
   // These fields only take effect at finalize, so they require both non-empty
-  // quads AND finalize !== false â€” mirrors the daemon create-route guard.
+  // quads AND finalize !== false -- mirrors the daemon create-route guard.
   const willFinalize = Array.isArray(args.quads) && args.quads.length > 0 && args.finalize !== false;
   if (hasFinalizeOnlyField && !willFinalize) {
     throw new Error('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads and finalize !== false');
@@ -440,7 +440,7 @@ export class DkgDaemonClient {
 
   /**
    * Run a SPARQL query against the daemon. Forwards the full V10 field set
-   * the `/api/query` route accepts â€” `view` (`'working-memory' | 'shared-working-memory' | 'verifiable-memory'`),
+   * the `/api/query` route accepts -- `view` (`'working-memory' | 'shared-working-memory' | 'verifiable-memory'`),
    * `agentAddress` (required for WM reads), `assertionName` (scopes WM reads
    * to a single per-agent assertion), `subGraphName`, `verifiedGraph`,
    * `graphSuffix`, `includeSharedMemory`.
@@ -460,7 +460,7 @@ export class DkgDaemonClient {
        * P-13: minimum trust level. Only meaningful for
        * `view: "verifiable-memory"`; ignored (silently) on WM/SWM views.
        *
-       * The daemon implements only `SelfAttested` / `Endorsed` today â€”
+       * The daemon implements only `SelfAttested` / `Endorsed` today --
        * higher tiers (Q-1 follow-up) are rejected with HTTP 400, so the
        * public client surface only advertises the implementable values.
        * See `packages/query/src/query-engine.ts QueryOptions.minTrust`.
@@ -512,7 +512,7 @@ export class DkgDaemonClient {
   }
 
   // ---------------------------------------------------------------------------
-  // Working Memory â€” assertion lifecycle
+  // Working Memory -- assertion lifecycle
   // ---------------------------------------------------------------------------
 
   /**
@@ -544,7 +544,7 @@ export class DkgDaemonClient {
 
   /**
    * Append quads into an existing Working Memory assertion. The assertion
-   * must have been created first â€” callers that create-then-write in a
+   * must have been created first -- callers that create-then-write in a
    * single call should use `ensureAssertion` + `writeAssertion` together,
    * with `createAssertion` swallowing duplicates.
    */
@@ -596,7 +596,7 @@ export class DkgDaemonClient {
 
   /**
    * Dump all quads from a single Working Memory assertion's graph. This is
-   * not a SPARQL endpoint â€” the daemon returns every quad in the assertion
+   * not a SPARQL endpoint -- the daemon returns every quad in the assertion
    * as `{ quads, count }`. For ad-hoc SPARQL use `query()` with
    * `view: 'working-memory'` + `assertionName` instead.
    */
@@ -1155,11 +1155,11 @@ export class DkgDaemonClient {
     return res.json() as Promise<T>;
   }
 
-  // â”€â”€ OT-RFC-43 Â§10.5 â€” GitHub-shaped Knowledge Asset client â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- OT-RFC-43 Section 10.5 -- GitHub-shaped Knowledge Asset client --------------
   // Layer-explicit wrappers over the clean /api/knowledge-assets/... surface.
   // One file = one Knowledge Asset (Design B / OT-RFC-44), carrying any number
-  // of member entities. WM â†’ SWM â†’ VM via the git-shaped verbs write â†’
-  // finalize â†’ share â†’ publish.
+  // of member entities. WM -> SWM -> VM via the git-shaped verbs write ->
+  // finalize -> share -> publish.
 
   /**
    * Create a KA + open its WM draft. Pass `quads` to atomically write+seal.
@@ -1167,7 +1167,7 @@ export class DkgDaemonClient {
    * the draft will seal (quads present and `finalize !== false`), so the
    * one-shot seals AND shares to SWM. Pass `alsoShareSwm: false` to stop at a
    * sealed WM draft, or `finalize: false` to keep an unsealed editable WM draft.
-   * (The bare daemon route is a primitive â€” seal-only â€” and never auto-shares;
+   * (The bare daemon route is a primitive -- seal-only -- and never auto-shares;
    * the default-share lives here in the client.)
    */
   async createKnowledgeAsset(
@@ -1178,7 +1178,7 @@ export class DkgDaemonClient {
       quads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
       /**
        * Seal the draft after writing `quads` (default true). `false` keeps an
-       * editable WM draft that never touches the chain â€” the only lifecycle
+       * editable WM draft that never touches the chain -- the only lifecycle
        * available to local-only / on-chain-unregistered CGs. Cannot be combined
        * with `alsoShareSwm`/`alsoPublishVm` (those require a sealed assertion).
        */
@@ -1237,10 +1237,10 @@ export class DkgDaemonClient {
     quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
     opts?: { subGraphName?: string },
   ): Promise<{ written: number }> {
-    // Strip any per-quad `graph` at the client (CONTRACT Â§A): the write wire
+    // Strip any per-quad `graph` at the client (CONTRACT Section A): the write wire
     // shape is `{subject, predicate, object}` only and the daemon pins every
-    // quad to the per-KA WM graph (Â§0 invariant 2), so a caller-supplied or
-    // normalizer-emitted `graph` is dropped here â€” not just in the tool schema.
+    // quad to the per-KA WM graph (Section 0 invariant 2), so a caller-supplied or
+    // normalizer-emitted `graph` is dropped here -- not just in the tool schema.
     const wireQuads = quads.map((q) => ({
       subject: q.subject,
       predicate: q.predicate,
@@ -1253,7 +1253,7 @@ export class DkgDaemonClient {
     });
   }
 
-  /** Seal the WM draft â€” computes the merkle root + signs the seal (git commit). */
+  /** Seal the WM draft -- computes the merkle root + signs the seal (git commit). */
   async knowledgeAssetFinalize(
     contextGraphId: string,
     name: string,
@@ -1300,13 +1300,13 @@ export class DkgDaemonClient {
     });
   }
 
-  /** Advance the SWM pointer (WM â†’ SWM; git push origin <branch>). */
+  /** Advance the SWM pointer (WM -> SWM; git push origin <branch>). */
   async knowledgeAssetShare(
     contextGraphId: string,
     name: string,
     opts?: { subGraphName?: string; entities?: string[] | 'all'; skipSeal?: boolean },
   ): Promise<{ swmShared: boolean; promotedCount: number; sealed: boolean; publishReady: boolean }> {
-    // Only include the optional fields when actually set â€” don't spread the whole
+    // Only include the optional fields when actually set -- don't spread the whole
     // opts object (which would carry `entities: undefined` / `subGraphName:
     // undefined` keys). Parity with MCP's knowledgeAssetShare body construction.
     const body: Record<string, unknown> = {
@@ -1319,7 +1319,7 @@ export class DkgDaemonClient {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, body);
   }
 
-  /** Publish to VM â€” mint or update on chain (git push origin main). */
+  /** Publish to VM -- mint or update on chain (git push origin main). */
   async knowledgeAssetPublish(
     contextGraphId: string,
     name: string,

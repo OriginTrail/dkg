@@ -123,12 +123,16 @@ devnet_create_shared_ka() {
         try {
           const j = JSON.parse(d);
           if (j.error || (Array.isArray(j.errors) && j.errors.length > 0)) process.exit(1);
+          if (j.swmShared !== true) process.exit(1);
+          if (j.publishReady !== true) process.exit(1);
+          if (typeof j.shareOperationId !== "string" || j.shareOperationId.trim().length === 0) process.exit(1);
+          if (Number(j.promotedCount || 0) <= 0) process.exit(1);
         } catch {
           process.exit(1);
         }
       });
     '; then
-      printf '%s\n' "$resp" >&2
+      printf 'devnet_create_shared_ka: /api/knowledge-assets did not return a publish-ready SWM share\n%s\n' "$resp" >&2
       return 1
     fi
     responses=$(node -e 'const arr=JSON.parse(process.argv[1]); arr.push(JSON.parse(process.argv[2])); console.log(JSON.stringify(arr));' "$responses" "$resp")

@@ -42,7 +42,7 @@
 set -euo pipefail
 
 echo "[curator-converge] retired: this scenario depended on removed loose SWM in-place update routes; replace with named KA update lifecycle coverage before re-enabling." >&2
-exit 0
+exit 2
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
