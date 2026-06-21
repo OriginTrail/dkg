@@ -565,7 +565,7 @@ describe('DkgDaemonClient', () => {
     const [url, opts] = fetchCalls[0];
     expect(url).toBe('http://localhost:9200/api/knowledge-assets/notes/wm/import-file');
     expect(opts?.method).toBe('POST');
-    // `body` must be a FormData â€” Node's fetch sets the multipart boundary automatically.
+    // `body` must be a FormData -- Node's fetch sets the multipart boundary automatically.
     expect(opts?.body).toBeInstanceOf(FormData);
     const form = opts?.body as FormData;
     expect(form.get('contextGraphId')).toBe('ctx');
@@ -796,7 +796,7 @@ describe('DkgDaemonClient', () => {
     expect(body.id).toBe('my-research');
     expect(body.name).toBe('My Research');
     expect(body.description).toBe('A research context graph');
-    // No accessPolicy/allowedAgents passed when caller omits opts â€” the
+    // No accessPolicy/allowedAgents passed when caller omits opts -- the
     // tool handler decides the default privacy-mode. The client itself
     // is parameter-passing only.
     expect(body.accessPolicy).toBeUndefined();
@@ -842,7 +842,7 @@ describe('DkgDaemonClient', () => {
 
     const body = JSON.parse(fetchCalls[0][1]?.body as string);
     expect(body.accessPolicy).toBe(1);
-    // Empty array is dropped â€” daemon distinguishes "no allowlist" from
+    // Empty array is dropped -- daemon distinguishes "no allowlist" from
     // "empty allowlist". Sending [] would unhelpfully pin an empty
     // allowlist when the agent's creator-auto-include logic should
     // populate it.
@@ -958,7 +958,7 @@ describe('DkgDaemonClient', () => {
     expect(token === undefined || typeof token === 'string').toBe(true);
   });
 
-  // â”€â”€ OT-RFC-43 Â§10.5 â€” GitHub-shaped Knowledge Asset client â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // -- OT-RFC-43 Section 10.5 -- GitHub-shaped Knowledge Asset client --------------
   describe('knowledge-assets surface', () => {
     const ok = (body: unknown = {}) =>
       fetchResponses.push(new Response(JSON.stringify(body), { status: 200 }));
@@ -987,7 +987,7 @@ describe('DkgDaemonClient', () => {
     });
 
     it('createKnowledgeAsset omits finalize when unspecified, but defaults alsoShareSwm:true (seal+share)', async () => {
-      // #1116 D5: quads present + finalize unspecified â‡’ the draft seals (server
+      // #1116 D5: quads present + finalize unspecified => the draft seals (server
       // default), so the combined CLIENT function also defaults alsoShareSwm to
       // true. `finalize` is still omitted (the server defaults it to seal).
       ok({ name: 'f', status: 'swm-shared' });
@@ -998,9 +998,9 @@ describe('DkgDaemonClient', () => {
       expect(body().alsoShareSwm).toBe(true);
     });
 
-    it('createKnowledgeAsset does NOT default alsoShareSwm when finalize:false (no seal â‡’ no share)', async () => {
+    it('createKnowledgeAsset does NOT default alsoShareSwm when finalize:false (no seal => no share)', async () => {
       // #1116 D5: an unsealed draft can't be shared, so the client must NOT
-      // default-on alsoShareSwm â€” the route guard would otherwise reject it.
+      // default-on alsoShareSwm -- the route guard would otherwise reject it.
       ok({ name: 'f', status: 'draft-open' });
       await client.createKnowledgeAsset('cg-1', 'f', {
         finalize: false,
@@ -1010,14 +1010,14 @@ describe('DkgDaemonClient', () => {
     });
 
     it('createKnowledgeAsset does NOT default alsoShareSwm without quads', async () => {
-      // No quads â‡’ nothing to seal â‡’ no auto-share default.
+      // No quads => nothing to seal => no auto-share default.
       ok({ name: 'f', status: 'draft-open' });
       await client.createKnowledgeAsset('cg-1', 'f');
       expect(body()).not.toHaveProperty('alsoShareSwm');
     });
 
     it('createKnowledgeAsset honors an explicit alsoShareSwm:false over the seal-default', async () => {
-      // An explicit false must win â€” stop at a sealed WM draft.
+      // An explicit false must win -- stop at a sealed WM draft.
       ok({ name: 'f', status: 'wm-sealed' });
       await client.createKnowledgeAsset('cg-1', 'f', {
         quads: [{ subject: 's', predicate: 'p', object: 'o', graph: '' }],
@@ -1044,9 +1044,9 @@ describe('DkgDaemonClient', () => {
       expect(body().quads).toHaveLength(1);
     });
 
-    it('knowledgeAssetWrite strips any per-quad `graph` at the client (CONTRACT Â§A)', async () => {
+    it('knowledgeAssetWrite strips any per-quad `graph` at the client (CONTRACT Section A)', async () => {
       ok({ written: 1 });
-      // Even a NON-EMPTY graph must be dropped before the POST â€” the daemon pins
+      // Even a NON-EMPTY graph must be dropped before the POST -- the daemon pins
       // every quad to the per-KA WM graph, so the write wire shape is
       // {subject,predicate,object} only. Stripping at the client (not just the
       // tool schema) defends a hand-built or normalizer-emitted `graph`.

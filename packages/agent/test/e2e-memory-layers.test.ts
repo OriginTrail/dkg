@@ -550,11 +550,121 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     expect(history?.memoryLayer).toBe(MemoryLayer.VerifiableMemory);
   }, 60_000);
 
-  // B2: SEAL-IN-SWM round trip — the key new capability. An asset shared
-  // UNSEALED (stuck, unpublishable) is made publishable by finalize(layer:'swm')
-  // WITHOUT recreating it: pull-from reconstructs a transient WM draft, finalize
-  // seals it, then the transient WM draft is dropped so the asset is left PURELY
-  // in SWM (now sealed) and publishes.
+  it('async VM publish with clearAfter false clears published roots but leaves unrelated SWM content', async () => {
+    const agent = await createAgent('QueuedAsyncVmPublishCleanupBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Cleanup E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const publishedName = 'queued-async-cleanup-published';
+    const retainedName = 'queued-async-cleanup-retained';
+    const publishedRoot = `${ENTITY_BASE}:queued-cleanup-published`;
+    const retainedRoot = `${ENTITY_BASE}:queued-cleanup-retained`;
+    await agent.assertion.create(CG_ID, publishedName);
+    await agent.assertion.write(CG_ID, publishedName, [
+      { subject: publishedRoot, predicate: 'http://schema.org/name', object: '"Published root"' },
+    ]);
+    const publishedShare = await agent.assertion.promote(CG_ID, publishedName);
+    expect(publishedShare.publishReady).toBe(true);
+
+    await agent.assertion.create(CG_ID, retainedName);
+    await agent.assertion.write(CG_ID, retainedName, [
+      { subject: retainedRoot, predicate: 'http://schema.org/name', object: '"Retained root"' },
+    ]);
+    const retainedShare = await agent.assertion.promote(CG_ID, retainedName);
+    expect(retainedShare.publishReady).toBe(true);
+
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, publishedName, {
+      clearSharedMemoryAfter: false,
+    });
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
+      knowledgeAssetVmPublishExecutor: async ({ request, publishOptions }) =>
+        agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+    });
+    const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
+    const processed = await asyncPublisher.processNext('wallet-1');
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('finalized');
+
+    const publishedSwm = await agent.query(
+      `SELECT ?name WHERE { <${publishedRoot}> <http://schema.org/name> ?name }`,
+      { contextGraphId: CG_ID, graphSuffix: '_shared_memory' },
+    );
+    expect(publishedSwm.bindings).toHaveLength(0);
+
+    const retainedSwm = await agent.query(
+      `SELECT ?name WHERE { <${retainedRoot}> <http://schema.org/name> ?name }`,
+      { contextGraphId: CG_ID, graphSuffix: '_shared_memory' },
+    );
+    expect(retainedSwm.bindings).toHaveLength(1);
+  }, 60_000);
+
+  it('async VM publish updates a sub-graph KA in the sub-graph VM graph', async () => {
+    const agent = await createAgent('QueuedAsyncVmSubgraphUpdateBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Subgraph Update E2E' });
+    await agent.registerContextGraph(CG_ID);
+    const subGraphName = 'async-update';
+    await agent.createSubGraph(CG_ID, subGraphName);
+
+    const name = 'queued-async-subgraph-update';
+    const root = `${ENTITY_BASE}:queued-subgraph-update`;
+    await agent.assertion.create(CG_ID, name, { subGraphName });
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Subgraph v1"' },
+    ], { subGraphName });
+    const firstShare = await agent.assertion.promote(CG_ID, name, { subGraphName });
+    expect(firstShare.publishReady).toBe(true);
+    const firstPublish = await agent.publishFromFinalizedAssertion(CG_ID, name, { subGraphName });
+    expect(firstPublish.status).toBe('confirmed');
+
+    const reopened = await agent.assertion.pullFrom(CG_ID, name, 'vm', {
+      subGraphName,
+      onConflict: 'replace',
+    });
+    expect(reopened.seeded).toBe(1);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Subgraph v2"' },
+    ], { subGraphName });
+    await agent.assertion.finalize(CG_ID, name, { subGraphName });
+    const updateShare = await agent.assertion.promote(CG_ID, name, { subGraphName });
+    expect(updateShare.publishReady).toBe(true);
+
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name, { subGraphName });
+    expect(intent.vmCurrentAssertion).toBeDefined();
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
+      knowledgeAssetVmPublishExecutor: async ({ request, publishOptions }) =>
+        agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+    });
+    const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
+    const processed = await asyncPublisher.processNext('wallet-1');
+    expect(processed?.jobId).toBe(jobId);
+
+    if (processed?.status !== 'finalized') {
+      throw new Error(`Expected queued sub-graph update to finalize: ${JSON.stringify((processed as any)?.failure)}`);
+    }
+
+    const subgraphVm = await agent.query(
+      `SELECT ?name WHERE { <${root}> <http://schema.org/name> ?name }`,
+      { contextGraphId: CG_ID, subGraphName },
+    );
+    expect(subgraphVm.bindings.map((row) => row['name'])).toContain('"Subgraph v2"');
+
+    const rootVm = await agent.query(
+      `SELECT ?name WHERE { <${root}> <http://schema.org/name> ?name }`,
+      { contextGraphId: CG_ID },
+    );
+    expect(rootVm.bindings.map((row) => row['name'])).not.toContain('"Subgraph v2"');
+
+    const history = await agent.assertion.history(CG_ID, name, { subGraphName });
+    expect(history?.state).toBe('published');
+    expect(history?.memoryLayer).toBe(MemoryLayer.VerifiableMemory);
+    expect(history?.vmCurrentAssertion).toBe(intent.sealMerkleRoot.slice(2));
+  }, 120_000);
+
+  // B2: SEAL-IN-SWM round trip. An asset shared UNSEALED (stuck, unpublishable)
+  // is made publishable by finalize(layer:'swm') WITHOUT recreating it:
+  // pull-from reconstructs a transient WM draft, finalize seals it, then the
+  // transient WM draft is dropped so the asset is left PURELY in SWM (now
+  // sealed) and publishes.
   it('finalize(layer:swm) seals a stuck unsealed SWM asset, empties the WM draft, and makes it publishable', async () => {
     const agent = await createAgent('SealInSwmBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Seal-in-SWM E2E' });
@@ -571,17 +681,17 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     expect(share.sealed).toBe(false);
     const wmAfterShare = await agent.assertion.query(CG_ID, name);
     expect(wmAfterShare.length).toBe(0); // WM emptied by promote
-    // Unsealed ⇒ not yet publishable.
+    // Unsealed => not yet publishable.
     await expect(
       agent.publishFromFinalizedAssertion(CG_ID, name),
     ).rejects.toThrow(/not finalized/i);
 
-    // Seal in SWM — reconstruct from SWM, finalize, drop the transient WM draft.
+    // Seal in SWM: reconstruct from SWM, finalize, drop the transient WM draft.
     const seal = await agent.assertion.finalize(CG_ID, name, { layer: 'swm' });
     expect(seal.merkleRoot).toBeDefined();
     expect(seal.authorAddress).toBeDefined();
 
-    // Post-condition #1: the asset is left PURELY in SWM — the WM draft is empty
+    // Post-condition #1: the asset is left PURELY in SWM: the WM draft is empty
     // again (the transient reconstruction draft was dropped).
     const wmAfterSeal = await agent.assertion.query(CG_ID, name);
     expect(wmAfterSeal.length).toBe(0);

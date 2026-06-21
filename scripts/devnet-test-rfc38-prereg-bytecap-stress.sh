@@ -44,7 +44,7 @@
 set -euo pipefail
 
 echo "[cap] retired: this stress test depended on pre-registration loose SWM writes, which are not part of the named KA lifecycle surface." >&2
-exit 0
+exit 2
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"

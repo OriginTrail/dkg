@@ -1843,25 +1843,15 @@ export class DKGPublisher implements Publisher {
     }
 
     // SWM cleanup: ALWAYS remove published triples from SWM after chain confirmation.
-    // Published triples must not linger in SWM — they live in LTM now.
+    // Published triples must not linger in SWM; they live in LTM now.
     // clearSharedMemoryAfter controls only whether the REMAINING unpublished triples are also cleared.
     if (publishResult.status === 'confirmed') {
-      const swmOwnershipKey = options?.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
       const kaMap = skolemizeByEntity(quads);
       await this.clearPublishedSwmRoots(contextGraphId, [...kaMap.keys()], options?.subGraphName, ctx);
       // If clearSharedMemoryAfter is explicitly true, also clear any remaining unpublished content.
       // Default is false: unpublished entities stay in SWM for future publishes.
       if (options?.clearSharedMemoryAfter === true) {
-        const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, options?.subGraphName);
-        let remainingCount = 0;
-        for (const g of await this.swmGraphsUnder(swmGraph)) {
-          remainingCount += await this.store.deleteByPattern({ graph: g });
-        }
-        const remainingMetaCount = await this.store.deleteByPattern({ graph: swmMetaGraph });
-        if (remainingCount > 0 || remainingMetaCount > 0) {
-          this.log.info(ctx, `Cleared remaining SWM content: ${remainingCount} triples, ${remainingMetaCount} meta`);
-        }
-        this.sharedMemoryOwnedEntities.delete(swmOwnershipKey);
+        await this.clearRemainingSharedMemory(contextGraphId, options?.subGraphName, ctx);
       }
     }
 
@@ -3447,12 +3437,6 @@ export class DKGPublisher implements Publisher {
   }
 
   async update(kaId: bigint, options: PublishOptions): Promise<PublishResult> {
-    if (options.subGraphName) {
-      throw new Error(
-        'Updating sub-graph KCs is not yet supported. The update path does not resolve sub-graph data/private graphs. ' +
-        'Publish a new KC instead, or remove and recreate the sub-graph.',
-      );
-    }
     const { contextGraphId, quads, privateQuads = [], operationCtx, onPhase } = options;
     // Round 12 Bug 34: `update()` is a Bucket A public write entry
     // point (accepts user-authored quads) that Round 9 missed. Apply
@@ -3469,6 +3453,7 @@ export class DKGPublisher implements Publisher {
     rejectOversizedRdfLiterals(quads, 'update.quads');
     if (privateQuads.length > 0) rejectOversizedRdfLiterals(privateQuads, 'update.privateQuads');
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
+    await this.ensureSubGraphRegistered(contextGraphId, options.subGraphName);
     let publisherContextGraphId: bigint | undefined;
     try {
       const parsed = BigInt(options.publishContextGraphId ?? contextGraphId);
@@ -3517,6 +3502,7 @@ export class DKGPublisher implements Publisher {
       MemoryLayer.VerifiableMemory,
       '0x' + (kaId >> 96n).toString(16).padStart(40, '0'),
       kaId & ((1n << 96n) - 1n),
+      options.subGraphName,
     );
 
     onPhase?.('prepare', 'start');
@@ -3600,7 +3586,7 @@ export class DKGPublisher implements Publisher {
       const DKG_ONT = 'http://dkg.io/ontology/';
       const priorRootEntities = new Set<string>();
       try {
-        const labelMetaForPriors = this.graphManager.metaGraphUri(contextGraphId);
+        const labelMetaForPriors = contextGraphMetaUri(contextGraphId, options.subGraphName);
         let ualForPriors = await resolveUalByBatchId(this.store, labelMetaForPriors, kaId);
         if (!ualForPriors) {
           // Same local-only deterministic-UAL fallback as the restate
@@ -3674,7 +3660,7 @@ export class DKGPublisher implements Publisher {
       // when `resolveKaUal` would throw. For the on-chain path we still
       // let `resolveKaUal` throw (failing the update) — which is the
       // correct behavior when chain-truth is required but unavailable.
-      const labelMeta = this.graphManager.metaGraphUri(contextGraphId);
+      const labelMeta = contextGraphMetaUri(contextGraphId, options.subGraphName);
       let ualForRestate = await resolveUalByBatchId(this.store, labelMeta, kaId);
       if (!ualForRestate) {
         if (localOnlyUpdate && publisherAddress) {
@@ -5211,6 +5197,25 @@ export class DKGPublisher implements Publisher {
     if (ownerDeletedTotal > 0) {
       this.log.info(ctx, `Cleared ${ownerDeletedTotal} published SWM triple(s) after confirmed publish`);
     }
+  }
+
+  async clearRemainingSharedMemory(
+    contextGraphId: string,
+    subGraphName: string | undefined,
+    ctx: OperationContext,
+  ): Promise<void> {
+    const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
+    const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
+    const swmOwnershipKey = subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
+    let remainingCount = 0;
+    for (const graph of await this.swmGraphsUnder(swmGraph)) {
+      remainingCount += await this.store.deleteByPattern({ graph });
+    }
+    const remainingMetaCount = await this.store.deleteByPattern({ graph: swmMetaGraph });
+    if (remainingCount > 0 || remainingMetaCount > 0) {
+      this.log.info(ctx, `Cleared remaining SWM content: ${remainingCount} triples, ${remainingMetaCount} meta`);
+    }
+    this.sharedMemoryOwnedEntities.delete(swmOwnershipKey);
   }
 
   async assertionCreate(

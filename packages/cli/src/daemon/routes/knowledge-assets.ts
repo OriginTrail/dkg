@@ -1425,6 +1425,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             ? { publisherNodeIdentityIdOverride: publishOptions.publisherNodeIdentityIdOverride }
             : {}),
         });
+        await agent.preflightKnowledgeAssetVmPublishSnapshot(intent);
         const jobId = await publisherControl.enqueueKnowledgeAssetVmPublish(intent);
         return jsonResponse(res, 202, {
           jobId,

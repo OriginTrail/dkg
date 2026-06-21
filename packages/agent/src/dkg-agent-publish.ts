@@ -1573,6 +1573,7 @@ export class PublishMethods extends DKGAgentBase {
       operationCtx?: OperationContext;
       precomputedUpdateAttestation?: PublishOptions['precomputedUpdateAttestation'];
       publisherOverride?: DKGPublisher;
+      subGraphName?: string;
     },
   ): Promise<PublishResult> {
     const ctx = opts?.operationCtx ?? createOperationContext('update');
@@ -1622,7 +1623,7 @@ export class PublishMethods extends DKGAgentBase {
     // same-CG update as an explicit remap.
     const updateEncryptInlinePayload = await this._resolveEncryptInlinePayload(
       contextGraphId,
-      undefined,
+      opts?.subGraphName,
       undefined,
       undefined,
       updateOnChainId
@@ -1643,7 +1644,7 @@ export class PublishMethods extends DKGAgentBase {
     const updateEncryptInlineChunked = isCuratedUpdate
       ? await this._resolveEncryptInlineChunked(
           contextGraphId,
-          undefined,
+          opts?.subGraphName,
           undefined,
           undefined,
           updateOnChainId
@@ -1695,6 +1696,7 @@ export class PublishMethods extends DKGAgentBase {
       publishContextGraphId: updateOnChainId ?? undefined,
       operationCtx: ctx,
       onPhase,
+      subGraphName: opts?.subGraphName,
       precomputedUpdateAttestation: opts?.precomputedUpdateAttestation,
       trustedNonManifestCatalogTriples: shouldInjectCuratedCatalogFloor
         ? generatedPrivateCatalogTripleKeys(contextGraphId)
@@ -3570,6 +3572,60 @@ export class PublishMethods extends DKGAgentBase {
     };
   }
 
+  async preflightKnowledgeAssetVmPublishSnapshot(
+    this: DKGAgent,
+    request: KnowledgeAssetVmPublishRequest,
+  ): Promise<void> {
+    const operationKey = `${request.contextGraphId}:${request.name}${request.subGraphName ? `:${request.subGraphName}` : ''}:${request.shareOperationId}`;
+    const liftRequest: LiftRequest = {
+      jobType: 'knowledge-asset-vm-publish',
+      knowledgeAssetVmPublish: request,
+      swmId: request.shareOperationId,
+      shareOperationId: request.shareOperationId,
+      roots: request.roots,
+      contextGraphId: request.contextGraphId,
+      namespace: 'knowledge-assets',
+      scope: 'vm-publish',
+      transitionType: 'CREATE',
+      authority: {
+        type: 'owner',
+        proofRef: `urn:dkg:knowledge-assets:${operationKey}:vm-publish`,
+      },
+      ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
+      ...(request.publishEpochs !== undefined ? { publishEpochs: request.publishEpochs } : {}),
+      ...(request.publisherNodeIdentityIdOverride !== undefined
+        ? { publisherNodeIdentityIdOverride: request.publisherNodeIdentityIdOverride }
+        : {}),
+      seal: request.seal,
+    };
+    try {
+      const resolved = await resolveLiftWorkspaceSlice({
+        store: this.store,
+        graphManager: new GraphManager(this.store),
+        request: liftRequest,
+        publicSnapshotStore: this.publicSnapshotStore,
+      });
+      validateLiftPublishPayload({
+        request: liftRequest,
+        resolved,
+      });
+      if (resolved.quads.length === 0 && (resolved.privateQuads ?? []).length === 0) {
+        throw new Error(
+          `No queued shared-memory snapshot quads for context graph ${request.contextGraphId} ` +
+            `share operation ${request.shareOperationId}`,
+        );
+      }
+    } catch (err) {
+      const wrapped = new Error(
+        `Cannot enqueue VM publish for "${request.name}" because share snapshot ` +
+          `${request.shareOperationId} is unavailable or stale. Re-share the knowledge asset before enqueueing: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+      (wrapped as Error & { code?: string }).code = 'PUBLISH_INTENT_STALE';
+      throw wrapped;
+    }
+  }
+
   async publishQueuedKnowledgeAssetVmPublish(
     this: DKGAgent,
     request: KnowledgeAssetVmPublishRequest,
@@ -3676,6 +3732,34 @@ export class PublishMethods extends DKGAgentBase {
 
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
     let result: PublishResult;
+    const clearPublishedRoots = async (label: string): Promise<void> => {
+      try {
+        await publisher.clearPublishedSwmRoots(
+          request.contextGraphId,
+          [...request.roots],
+          request.subGraphName,
+          ctx,
+        );
+      } catch (err) {
+        this.log.warn(
+          ctx,
+          `Failed to clear published SWM roots after confirmed queued ${label} of <${lifecycleUri}>: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    };
+    const clearRemainingSharedMemory = async (): Promise<void> => {
+      try {
+        await publisher.clearRemainingSharedMemory(request.contextGraphId, request.subGraphName, ctx);
+      } catch (err) {
+        this.log.warn(
+          ctx,
+          `Failed to clear remaining SWM after confirmed queued publish of <${lifecycleUri}>: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    };
+
     if (vmCurrent && packedKaId !== undefined) {
       const updateAttestation = await this._buildPrecomputedUpdateAttestationForSeal(
         packedKaId,
@@ -3692,23 +3776,14 @@ export class PublishMethods extends DKGAgentBase {
           onPhase: opts?.onPhase ?? publishOptions.onPhase,
           precomputedUpdateAttestation: updateAttestation,
           publisherOverride: publisher,
+          subGraphName: request.subGraphName,
         },
       );
 
-      if (result.status === 'confirmed' && request.clearSharedMemoryAfter !== false) {
-        try {
-          await publisher.clearPublishedSwmRoots(
-            request.contextGraphId,
-            [...request.roots],
-            request.subGraphName,
-            ctx,
-          );
-        } catch (err) {
-          this.log.warn(
-            ctx,
-            `Failed to clear SWM after confirmed queued update of <${lifecycleUri}>: ` +
-              (err instanceof Error ? err.message : String(err)),
-          );
+      if (result.status === 'confirmed') {
+        await clearPublishedRoots('update');
+        if (request.clearSharedMemoryAfter === true) {
+          await clearRemainingSharedMemory();
         }
       }
 
@@ -3798,15 +3873,10 @@ export class PublishMethods extends DKGAgentBase {
         }
       }
 
-      if (result.status === 'confirmed' && request.clearSharedMemoryAfter !== false) {
-        try {
-          await publisher.clearPublishedSwmRoots(request.contextGraphId, [...request.roots], request.subGraphName, ctx);
-        } catch (err) {
-          this.log.warn(
-            ctx,
-            `Failed to clear queued SWM roots after confirmed publish of <${lifecycleUri}>: ` +
-              (err instanceof Error ? err.message : String(err)),
-          );
+      if (result.status === 'confirmed') {
+        await clearPublishedRoots('publish');
+        if (request.clearSharedMemoryAfter === true) {
+          await clearRemainingSharedMemory();
         }
       }
     }
@@ -4112,6 +4182,7 @@ export class PublishMethods extends DKGAgentBase {
           onPhase: opts?.onPhase,
           precomputedUpdateAttestation: updateAttestation,
           publisherOverride: publisher,
+          subGraphName: opts?.subGraphName,
         },
       );
 

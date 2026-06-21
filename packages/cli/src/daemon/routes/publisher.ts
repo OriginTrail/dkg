@@ -2,7 +2,7 @@
 //
 // Route handlers for publisher jobs / stats / cancel / retry / clear.
 //
-// Extracted verbatim from the legacy monolithic `handleRequest` â€”
+// Extracted verbatim from the legacy monolithic `handleRequest` --
 // every block is a contiguous slice of the original source with zero
 // edits to route bodies. Dispatch is driven by the surviving
 // `handle-request.ts` shell, which awaits each group handler in
@@ -37,7 +37,7 @@ import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSy
 // Namespace import: our Phase-8 install-context builder (~line 290) calls
 // `osModule.homedir()`, and the later agent-identity probe (~line 6851)
 // uses `osModule.hostname()` + `osModule.userInfo()`. v10-rc's new
-// OpenClaw config helper (~line 2535) uses a bare `homedir()` â€” aliased
+// OpenClaw config helper (~line 2535) uses a bare `homedir()` -- aliased
 // below so both sites coexist without a duplicate-module import.
 import * as osModule from 'node:os';
 const { homedir } = osModule;
@@ -123,7 +123,7 @@ import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionSt
 import { FileStore } from '../../file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../../http/multipart.js';
-// Phase 8 â€” project-manifest publish + install (UI-driven onboarding flow).
+// Phase 8 -- project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
 // reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
 // format stays identical between curator/joiner/CLI paths.
@@ -140,7 +140,7 @@ import {
 } from '@origintrail-official/dkg-mcp/manifest/install';
 import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 
-// Daemon sub-module imports â€” every public symbol from sibling
+// Daemon sub-module imports -- every public symbol from sibling
 // modules is pulled in here because the legacy monolithic file used
 // them all without explicit imports. Unused ones are tolerated by
 // the project's tsconfig (`noUnusedLocals` is off).
@@ -411,7 +411,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     return jsonResponse(res, 200, job);
   }
 
-  // GET /api/publisher/stats â€” returns the raw status map directly for backward compat
+  // GET /api/publisher/stats -- returns the raw status map directly for backward compat
   if (req.method === "GET" && path === "/api/publisher/stats") {
     const stats = await publisherControl.getStats();
     return jsonResponse(res, 200, stats);

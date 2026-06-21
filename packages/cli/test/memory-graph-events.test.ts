@@ -1,4 +1,4 @@
-// memory_graph_changed emissions â€” NO MOCKS, real end-to-end SSE pipeline.
+// memory_graph_changed emissions -- NO MOCKS, real end-to-end SSE pipeline.
 //
 // The mutation routes call `ctx.emitMemoryGraphChanged(event)` after each
 // create / write / finalize / promote / shared-memory write so the node-ui
@@ -8,10 +8,10 @@
 // its captured calls, these tests SUBSCRIBE to the real `/api/events` SSE
 // stream of a real edge daemon (startLiveDaemon vs the shared Hardhat node),
 // drive the real routes over HTTP, and assert on the frames that actually
-// arrive â€” the real emit pipeline, no fabricated daemon behaviour.
+// arrive -- the real emit pipeline, no fabricated daemon behaviour.
 //
 // Real-daemon facts pinned while writing this (the mock hid all of them):
-//   - finalize (auto-finalize on create-with-quads, and POST â€¦/wm/finalize)
+//   - finalize (auto-finalize on create-with-quads, and POST .../wm/finalize)
 //     binds the author signature to the on-chain CG id, so it 500s unless the
 //     context graph is REGISTERED on-chain first; create / wm/write / swm/share
 //     / shared-memory write / finalize:false all work pre-registration.
@@ -20,7 +20,7 @@
 //   - the `assertion_finalized` frame carries no `counts`; the write/promote
 //     frames carry `counts.triples`.
 //
-// DEVNET-TIER (documented, NOT faked here â€” needs real core peers):
+// DEVNET-TIER (documented, NOT faked here -- needs real core peers):
 //   - the confirmed selective-publish SWM+VM emission and the publish remap
 //     paths: a confirmed publish mints on-chain + needs StorageACK quorum from
 //     connected core peers, which a single edge daemon cannot reach.
@@ -45,7 +45,7 @@ import {
 
 const QUADS = [{ subject: 'urn:root', predicate: 'http://schema.org/name', object: '"v1"' }];
 
-describe('memory_graph_changed â€” real daemon SSE emissions', () => {
+describe('memory_graph_changed -- real daemon SSE emissions', () => {
   let daemon: LiveDaemon;
   let stream: EventStream;
   let cgCounter = 0;
@@ -99,7 +99,7 @@ describe('memory_graph_changed â€” real daemon SSE emissions', () => {
     expect(typeof frame.data.timestamp).toBe('string');
   });
 
-  it('emits an assertion_written refresh after POST â€¦/wm/write', async () => {
+  it('emits an assertion_written refresh after POST .../wm/write', async () => {
     const cg = await freshCg();
     const res = await postJson(daemon, '/api/knowledge-assets/draft/wm/write', { contextGraphId: cg, quads: QUADS });
     expect(res.status).toBe(200);
@@ -108,7 +108,7 @@ describe('memory_graph_changed â€” real daemon SSE emissions', () => {
     expect(frame.data).toMatchObject({ contextGraphId: cg, layers: ['wm'], operation: 'assertion_written', source: 'api', counts: { triples: 1 } });
   });
 
-  it('auto-finalizes a create-with-quads on a registered CG â€” writes AND seals, emits assertion_finalized', async () => {
+  it('auto-finalizes a create-with-quads on a registered CG -- writes AND seals, emits assertion_finalized', async () => {
     const cg = await freshCg(true);
     const res = await postJson(daemon, '/api/knowledge-assets', { contextGraphId: cg, name: 'sealed', quads: QUADS });
     expect(res.status).toBe(201);
@@ -118,7 +118,7 @@ describe('memory_graph_changed â€” real daemon SSE emissions', () => {
     expect(frame.data).toMatchObject({ contextGraphId: cg, layers: ['wm'], operation: 'assertion_finalized', source: 'api' });
   });
 
-  it('honors finalize:false â€” writes quads but does NOT seal (assertion_written, no assertion_finalized)', async () => {
+  it('honors finalize:false -- writes quads but does NOT seal (assertion_written, no assertion_finalized)', async () => {
     const cg = await freshCg();
     const res = await postJson(daemon, '/api/knowledge-assets', { contextGraphId: cg, name: 'draft', quads: QUADS, finalize: false });
     expect(res.status).toBe(201);
@@ -128,7 +128,7 @@ describe('memory_graph_changed â€” real daemon SSE emissions', () => {
     expect(stream.events.some(isFrame(cg, 'assertion_finalized'))).toBe(false);
   });
 
-  it('emits an assertion_finalized refresh on POST â€¦/wm/finalize (registered CG)', async () => {
+  it('emits an assertion_finalized refresh on POST .../wm/finalize (registered CG)', async () => {
     const cg = await freshCg(true);
     await postJson(daemon, '/api/knowledge-assets/draft/wm/write', { contextGraphId: cg, quads: QUADS });
     const res = await postJson(daemon, '/api/knowledge-assets/draft/wm/finalize', { contextGraphId: cg });
@@ -230,7 +230,7 @@ describe('memory_graph_changed â€” real daemon SSE emissions', () => {
     expect(res.body.error).toMatch(/requires explicit `quads`/);
   });
 
-  it('accepts explicit verify-batch quads over the small request limit (â‰ˆ270 KB, not 413)', async () => {
+  it('accepts explicit verify-batch quads over the small request limit (~270 KB, not 413)', async () => {
     const cg = await freshCg();
     const largeLiteral = `"${'x'.repeat(270 * 1024)}"`;
     const res = await postJson(daemon, '/api/shared-memory/verify-batch', {

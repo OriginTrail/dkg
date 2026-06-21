@@ -41,9 +41,13 @@ api_call() {
     BODY="$data" node -e '
       const body = JSON.parse(process.env.BODY);
       console.log(JSON.stringify({
-        status: "wm-sealed",
+        status: "swm-shared",
         name: body.name,
         written: Array.isArray(body.quads) ? body.quads.length : 0,
+        promotedCount: Array.isArray(body.quads) ? body.quads.length : 0,
+        swmShared: true,
+        sealed: true,
+        publishReady: true,
         shareOperationId: "share-" + body.name,
       }));
     '
@@ -87,6 +91,11 @@ const publishCalls = calls.filter((call) =>
 );
 if (createCalls.length !== 2) throw new Error('expected 2 KA create calls, got ' + createCalls.length);
 if (publishCalls.length !== 2) throw new Error('expected 2 KA publish calls, got ' + publishCalls.length);
+for (const call of createCalls) {
+  if (call.data.finalize !== true || call.data.alsoShareSwm !== true) {
+    throw new Error('create helper must request finalize+SWM share: ' + JSON.stringify(call));
+  }
+}
 if (calls.some((call) => call.path.includes('/shared-memory') || call.path.includes('/api/publisher/enqueue'))) {
   throw new Error('legacy route used: ' + JSON.stringify(calls));
 }

@@ -3,9 +3,10 @@ import type { DKGAgent } from '../../src/index.js';
 import type { V10ACKProvider } from '@origintrail-official/dkg-publisher';
 import {
   createProvider,
+  getSharedContext,
   HARDHAT_KEYS,
 } from '../../../chain/test/evm-test-context.js';
-import { hardhatACKProvider } from '../../../publisher/test/_helpers/acks.js';
+import { hardhatACKProvider, makeHardhatUpdateACKProvider } from '../../../publisher/test/_helpers/acks.js';
 import { wrapPublisherForTest } from '../../../publisher/test/_helpers/seal.js';
 
 type Kav10Chain = {
@@ -31,9 +32,18 @@ export async function installHardhatACKProvider(
   const effectiveChain = chain ?? internals.chain;
   const kav10Address = await effectiveChain.getKnowledgeAssetsLifecycleAddress();
   const v10ACKProvider = hardhatACKProvider(kav10Address);
+  const v10UpdateACKProvider = makeHardhatUpdateACKProvider(
+    getSharedContext(),
+    effectiveChain as any,
+    [HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC2_OP, HARDHAT_KEYS.REC3_OP],
+  );
 
   Object.defineProperty(agent, 'createV10ACKProvider', {
     value: () => v10ACKProvider,
+    configurable: true,
+  });
+  Object.defineProperty(agent, 'createV10UpdateACKProvider', {
+    value: () => v10UpdateACKProvider,
     configurable: true,
   });
 
