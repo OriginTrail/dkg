@@ -58,7 +58,7 @@
   },
   "devDependencies": {
     "@origintrail-official/dkg": "workspace:*",
-    "@types/node": "^22",
+    "@types/node": "^26",
     "@vitest/coverage-v8": "^4.0.18",
     "esbench": "^0.8.1",
     "knip": "^6.6.1",
