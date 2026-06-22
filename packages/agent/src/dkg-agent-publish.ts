@@ -113,6 +113,7 @@ import {
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject,
   canonicalPublishPayload,
   generatedPrivateCatalogTripleKeys,
+  createKnowledgeAssetVmPublishLiftRequest,
   resolveLiftWorkspaceSlice,
   validateLiftPublishPayload,
   subtractFinalizedExactQuads,
@@ -3576,28 +3577,7 @@ export class PublishMethods extends DKGAgentBase {
     this: DKGAgent,
     request: KnowledgeAssetVmPublishRequest,
   ): Promise<void> {
-    const operationKey = `${request.contextGraphId}:${request.name}${request.subGraphName ? `:${request.subGraphName}` : ''}:${request.shareOperationId}`;
-    const liftRequest: LiftRequest = {
-      jobType: 'knowledge-asset-vm-publish',
-      knowledgeAssetVmPublish: request,
-      swmId: request.shareOperationId,
-      shareOperationId: request.shareOperationId,
-      roots: request.roots,
-      contextGraphId: request.contextGraphId,
-      namespace: 'knowledge-assets',
-      scope: 'vm-publish',
-      transitionType: 'CREATE',
-      authority: {
-        type: 'owner',
-        proofRef: `urn:dkg:knowledge-assets:${operationKey}:vm-publish`,
-      },
-      ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
-      ...(request.publishEpochs !== undefined ? { publishEpochs: request.publishEpochs } : {}),
-      ...(request.publisherNodeIdentityIdOverride !== undefined
-        ? { publisherNodeIdentityIdOverride: request.publisherNodeIdentityIdOverride }
-        : {}),
-      seal: request.seal,
-    };
+    const liftRequest: LiftRequest = createKnowledgeAssetVmPublishLiftRequest(request);
     try {
       const resolved = await resolveLiftWorkspaceSlice({
         store: this.store,
@@ -3816,18 +3796,20 @@ export class PublishMethods extends DKGAgentBase {
             `Re-finalize the assertion before publishing asynchronously.`,
         );
       }
-      const encryptInlinePayload = publishOptions.encryptInlinePayload ?? await this._resolveEncryptInlinePayload(
+      const resolvedEncryptInlinePayload = await this._resolveEncryptInlinePayload(
         request.contextGraphId,
         request.subGraphName,
         undefined,
         publishOptions.publishContextGraphId,
       );
-      const encryptInlineChunked = publishOptions.encryptInlineChunked ?? await this._resolveEncryptInlineChunked(
+      const resolvedEncryptInlineChunked = await this._resolveEncryptInlineChunked(
         request.contextGraphId,
         request.subGraphName,
         undefined,
         publishOptions.publishContextGraphId,
       );
+      const encryptInlinePayload = resolvedEncryptInlinePayload ?? publishOptions.encryptInlinePayload;
+      const encryptInlineChunked = resolvedEncryptInlineChunked ?? publishOptions.encryptInlineChunked;
       result = await publisher.publish({
         ...publishOptions,
         contextGraphId: request.contextGraphId,

@@ -5606,11 +5606,21 @@ export class DKGPublisher implements Publisher {
     // (Member-row REPLACE stays at the success path — it only matters when quads
     // are actually promoted; the MARKER is the cross-cutting invariant.)
     const promotingAllEntities = !opts?.entities || opts.entities === 'all';
+    const lifecycleSubject = assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName);
+    const promoteMetaGraph = contextGraphMetaUri(contextGraphId);
+    const clearCurrentShareOperationId = async (): Promise<void> => {
+      await this.store.deleteByPattern({
+        graph: promoteMetaGraph,
+        subject: lifecycleSubject,
+        predicate: SHARE_OPERATION_ID_PRED,
+      });
+    };
     const maintainMarker = async (isFullCompletePromote: boolean): Promise<void> => {
       if (isFullCompletePromote) {
         await this.markSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName);
       } else {
         await this.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName);
+        await clearCurrentShareOperationId();
       }
     };
 
@@ -5640,12 +5650,11 @@ export class DKGPublisher implements Publisher {
       // `assertionCreate` are not consulted: they fire for empty-write
       // flows where promoting nothing is legitimate.
       await this.assertAssertionDataPersisted(contextGraphId, graphUri);
-      // No roots to promote ⇒ none were foreign-skipped. promotedAllRoots:true ⇒
-      // isFull == promotingAllEntities (a subset of an empty draft still CLEARS a
-      // stale marker; a full empty share SETS it — harmless, finalize finds no
-      // members). Maintain the marker before returning (round 10).
-      await maintainMarker(promotingAllEntities);
-      return { promotedCount: 0, promotedAllRoots: true };
+      // No roots to promote is a no-op, not a fresh full share. Clear any prior
+      // marker and current share intent so an empty WM retry cannot re-arm async
+      // VM publish with an old shareOperationId.
+      await maintainMarker(false);
+      return { promotedCount: 0, promotedAllRoots: false };
     }
 
     let quadsToPromote = result.quads;
@@ -5740,15 +5749,12 @@ export class DKGPublisher implements Publisher {
       );
     }
 
-    // Nothing left after the reserved-subject / selective-entity filters ⇒
-    // no roots were foreign-skipped. round 10 (reviewer 🔴): a SUBSET share whose
-    // selection matched ZERO current quads reaches here — it MUST clear a stale
-    // full-share marker (isFull == promotingAllEntities, which is false for a
-    // subset) before returning, else finalize(layer:"swm") passes its gate against
-    // the OLD SWM contents.
+    // Nothing left after reserved-subject or selective-entity filtering is also
+    // a no-op. It must clear stale full-share state rather than act like a fresh
+    // complete share.
     if (quadsToPromote.length === 0) {
-      await maintainMarker(promotingAllEntities);
-      return { promotedCount: 0, promotedAllRoots: true };
+      await maintainMarker(false);
+      return { promotedCount: 0, promotedAllRoots: false };
     }
 
     const operationId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -5892,16 +5898,17 @@ export class DKGPublisher implements Publisher {
     // the SWM copy is missing part of the sealed set, so the seal exists but the
     // asset is NOT publish-ready (publishFromFinalizedAssertion would recompute a
     // different merkleRoot over the partial SWM slice and fail the seal guard).
-    // The agent's promote() threads this into `publishReady`.
-    const promotedAllRoots = skippedRoots.size === 0;
+    // The agent's promote() threads this into `publishReady`. A no-op with roots
+    // but no effective quads is not a complete share and must not stamp a fresh
+    // shareOperationId for async VM publish.
+    const promotedAllRoots = skippedRoots.size === 0 && effectiveQuads.length > 0;
 
-    if (effectiveRoots.length === 0) {
-      // Every requested root was foreign-skipped — nothing promoted, and the
-      // sealed set is definitively not fully present in SWM. promotedAllRoots is
-      // false here (skippedRoots.size > 0), so isFull is false ⇒ CLEAR the marker
-      // (round 10): a fully-foreign-skipped share is never a complete full share.
-      await maintainMarker(promotingAllEntities && promotedAllRoots);
-      return { promotedCount: 0, promotedAllRoots };
+    if (effectiveRoots.length === 0 || effectiveQuads.length === 0) {
+      // Nothing is actually promoted, either because every root was skipped or
+      // because the remaining root set has no publishable quads. This is never a
+      // complete full share.
+      await maintainMarker(false);
+      return { promotedCount: 0, promotedAllRoots: false };
     }
 
     // Delete-then-insert for existing SWM entities (upsert), matching
@@ -5968,9 +5975,7 @@ export class DKGPublisher implements Publisher {
     // `promotingAllEntities` is hoisted to the top of the method (round 10) so the
     // early-return marker maintenance can use it; reuse it here.
     const isFullCompletePromote = promotingAllEntities && promotedAllRoots;
-    const lifecycleSubject = assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName);
-    const promoteMetaGraph = contextGraphMetaUri(contextGraphId);
-    await this.store.deleteByPattern({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: SHARE_OPERATION_ID_PRED });
+    await clearCurrentShareOperationId();
     if (isFullCompletePromote) {
       await this.store.deleteByPattern({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: DKG_ROOT_ENTITY_LEGACY });
       await this.store.deleteByPattern({ graph: promoteMetaGraph, subject: lifecycleSubject, predicate: DKG_ENTITY });

@@ -18,8 +18,18 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { ethers } from 'ethers';
+import { NoChainAdapter } from '@origintrail-official/dkg-chain';
+import { generateEd25519Keypair, TypedEventBus } from '@origintrail-official/dkg-core';
+import { DKGPublisher } from '@origintrail-official/dkg-publisher';
+import { createTripleStore } from '@origintrail-official/dkg-storage';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { daemonState } from '../src/daemon/state.js';
+import { addPublisherWallet } from '../src/publisher-wallets.js';
+import { createPublisherRuntimeFromAgent } from '../src/publisher-runner.js';
 
 const CG_ID = 'issue-1116-cg';
 const ASSERTION_NAME = 'seal-asset';
@@ -340,6 +350,100 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.code).toBe('PUBLISH_INTENT_STALE');
     expect(String(res.body.error)).toContain('re-share');
     expect(enqueueCalls).toBe(0);
+  });
+
+  it('vm/publish-async enqueue is processable by createPublisherRuntimeFromAgent', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-ka-vm-runtime-'));
+    const wallet = ethers.Wallet.createRandom();
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const keypair = await generateEd25519Keypair();
+    await addPublisherWallet(dataDir, wallet.privateKey);
+
+    const writer = new DKGPublisher({
+      store,
+      chain: new NoChainAdapter(),
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: wallet.privateKey,
+    });
+    const share = await writer.share(CG_ID, [
+      {
+        subject: 'urn:test:runtime-root',
+        predicate: 'http://schema.org/name',
+        object: '"Runtime Root"',
+        graph: '',
+      },
+    ], { publisherPeerId: 'peer-1' });
+
+    const intent = {
+      contextGraphId: CG_ID,
+      name: ASSERTION_NAME,
+      shareOperationId: share.shareOperationId,
+      roots: ['urn:test:runtime-root'],
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+        authorAddress: '0x1111111111111111111111111111111111111111' as `0x${string}`,
+        signature: {
+          r: `0x${'34'.repeat(32)}` as `0x${string}`,
+          vs: `0x${'56'.repeat(32)}` as `0x${string}`,
+        },
+        schemeVersion: 1,
+      },
+      sealChainId: '31337' as `${bigint}`,
+      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+      intentKey: `sha256:${'cd'.repeat(32)}`,
+    };
+    const executorCalls: any[] = [];
+    const preflighted: any[] = [];
+    const runtime = await createPublisherRuntimeFromAgent({
+      dataDir,
+      store,
+      keypair,
+      chainBase: undefined,
+      pollIntervalMs: 10,
+      errorBackoffMs: 10,
+      knowledgeAssetVmPublishExecutor: async (input) => {
+        executorCalls.push(input);
+        return {
+          status: 'tentative',
+          ual: 'did:dkg:local/runtime-route',
+          merkleRoot: ethers.getBytes(input.request.sealMerkleRoot),
+          kaManifest: [],
+        } as any;
+      },
+    });
+
+    try {
+      await startWith({}, {
+        resolveFinalizedAssertionVmPublishIntent: async () => intent,
+        preflightKnowledgeAssetVmPublishSnapshot: async (request: unknown) => {
+          preflighted.push(request);
+        },
+      }, runtime.publisher as any);
+
+      const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+      expect(res.status).toBe(202);
+      expect(res.body.status).toBe('accepted');
+      expect(res.body.shareOperationId).toBe(share.shareOperationId);
+      expect(preflighted).toEqual([intent]);
+
+      const processed = await runtime.publisher.processNext(wallet.address);
+      expect(processed?.jobId).toBe(res.body.jobId);
+      expect(processed?.status).toBe('finalized');
+      expect(executorCalls).toHaveLength(1);
+      expect(executorCalls[0].request).toMatchObject({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        shareOperationId: share.shareOperationId,
+        roots: ['urn:test:runtime-root'],
+      });
+      expect(typeof executorCalls[0].publisher.publish).toBe('function');
+    } finally {
+      await runtime.stop();
+      await store.close();
+    }
   });
 
   // #1116 (round 5, FIX 1): the seal-less SWM reconstruction is reachable via the

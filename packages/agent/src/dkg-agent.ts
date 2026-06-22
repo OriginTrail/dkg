@@ -2087,7 +2087,7 @@ export class DKGAgent extends DKGAgentBase {
         // different merkleRoot and fail the seal guard. The seal still EXISTS
         // (`sealed:true`), but the asset is NOT publish-ready. The single-author
         // happy path skips no roots ⇒ promotedAllRoots:true ⇒ publishReady:true.
-        const publishReady = promotingAllEntities && sealed && promotedAllRoots;
+        const publishReady = promotingAllEntities && sealed && promotedAllRoots && promotedCount > 0 && !!shareOperationId;
         return { promotedCount, sealed, publishReady, ...(shareOperationId ? { shareOperationId } : {}) };
       },
       async discard(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<void> {
