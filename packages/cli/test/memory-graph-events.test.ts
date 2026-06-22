@@ -197,6 +197,39 @@ describe('memory_graph_changed -- real daemon SSE emissions', () => {
     expect(search.body.results.some((hit: any) => hit.entityUri === res.body.turnUri)).toBe(true);
   });
 
+  it('creates distinct /api/memory/turn KAs for repeated identical markdown when turnId is omitted', async () => {
+    const cg = await freshCg();
+    const payload = {
+      contextGraphId: cg,
+      markdown: '# Turn\n\nRepeated identical markdown.',
+      sessionUri: 'urn:test:session:memory-turn-repeat',
+    };
+
+    const first = await postJson(daemon, '/api/memory/turn', payload);
+    const second = await postJson(daemon, '/api/memory/turn', payload);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(first.body.turnId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(second.body.turnId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(second.body.turnId).not.toBe(first.body.turnId);
+    expect(second.body.assertionName).not.toBe(first.body.assertionName);
+    expect(second.body.turnUri).not.toBe(first.body.turnUri);
+
+    const firstQuads = await getJson(
+      daemon,
+      `/api/knowledge-assets/${encodeURIComponent(first.body.assertionName)}/wm/quads?contextGraphId=${encodeURIComponent(cg)}`,
+    );
+    const secondQuads = await getJson(
+      daemon,
+      `/api/knowledge-assets/${encodeURIComponent(second.body.assertionName)}/wm/quads?contextGraphId=${encodeURIComponent(cg)}`,
+    );
+    expect(firstQuads.status).toBe(200);
+    expect(secondQuads.status).toBe(200);
+    expect(JSON.stringify(firstQuads.body)).toContain(first.body.turnUri);
+    expect(JSON.stringify(secondQuads.body)).toContain(second.body.turnUri);
+  });
+
   it('rejects /api/memory/turn requests that still target SWM directly', async () => {
     const cg = await freshCg();
     const res = await postJson(daemon, '/api/memory/turn', {

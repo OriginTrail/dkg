@@ -44,10 +44,27 @@ export function createDaemonKnowledgeAssetLifecycleClient(
       if (!response.ok) {
         throw new Error((payload as { error?: string }).error ?? `HTTP ${response.status}`);
       }
+      const errors = Array.isArray((payload as { errors?: unknown }).errors)
+        ? (payload as { errors: unknown[] }).errors
+        : [];
+      if (errors.length > 0) {
+        throw new Error(`Knowledge asset create/share returned partial lifecycle errors: ${JSON.stringify(errors)}`);
+      }
+      const promotedCount = numberField((payload as { promotedCount?: unknown }).promotedCount) ?? 0;
+      const publishReady = booleanField((payload as { publishReady?: unknown }).publishReady);
+      const shareOperationId = stringField((payload as { shareOperationId?: unknown }).shareOperationId);
+      const swmShared = booleanField((payload as { swmShared?: unknown }).swmShared);
+      if (swmShared !== true || publishReady !== true || promotedCount <= 0 || !shareOperationId) {
+        throw new Error(
+          `Knowledge asset create/share did not produce a publish-ready SWM share ` +
+            `(swmShared=${String(swmShared)}, publishReady=${String(publishReady)}, ` +
+            `promotedCount=${promotedCount}, shareOperationId=${shareOperationId ?? 'missing'})`,
+        );
+      }
       return {
-        promotedCount: numberField((payload as { promotedCount?: unknown }).promotedCount) ?? 0,
-        publishReady: booleanField((payload as { publishReady?: unknown }).publishReady),
-        shareOperationId: stringField((payload as { shareOperationId?: unknown }).shareOperationId),
+        promotedCount,
+        publishReady,
+        shareOperationId,
       };
     },
 
