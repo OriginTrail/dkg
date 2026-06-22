@@ -1406,7 +1406,7 @@ echo "--- 22b: Enqueue named KA VM publish job ---"
 PQ_ENQUEUE=$(ka_publish_async 9201 "$CONTEXT_GRAPH" "$PQ_NAME")
 PQ_JOB_ID=$(json_get "$PQ_ENQUEUE" jobId)
 echo "  Enqueue jobId=$PQ_JOB_ID"
-[[ "$PQ_JOB_ID" != "__NONE__" && "$PQ_JOB_ID" != "__ERR__" ]] && ok "Named KA VM publish job enqueued: $PQ_JOB_ID" || warn "Enqueue response: ${PQ_ENQUEUE:0:200}"
+[[ "$PQ_JOB_ID" != "__NONE__" && "$PQ_JOB_ID" != "__ERR__" && -n "$PQ_JOB_ID" ]] && ok "Named KA VM publish job enqueued: $PQ_JOB_ID" || fail "Named KA VM publish enqueue failed: ${PQ_ENQUEUE:0:200}"
 
 if [[ "$PQ_JOB_ID" != "__NONE__" && "$PQ_JOB_ID" != "__ERR__" && -n "$PQ_JOB_ID" ]]; then
   echo "--- 22c: Poll job status ---"
@@ -1470,9 +1470,7 @@ except Exception:
   echo "  Cleared: $PQ_CLEARED jobs"
   [[ "$PQ_CLEARED" != "__ERR__" ]] && ok "Publisher clear returned ($PQ_CLEARED)" || warn "Publisher clear: $PQ_CLEAR"
 else
-  # P2-2: silent no-op was confusing when 22a succeeds but the job id is
-  # missing. Emit an explicit [SKIP] so the test log carries the reason.
-  skip "22c-22f skipped: publisher enqueue did not return a usable jobId (PQ_JOB_ID=$PQ_JOB_ID)"
+  fail "22c-22f skipped: publisher enqueue did not return a usable jobId (PQ_JOB_ID=$PQ_JOB_ID)"
 fi
 
 #------------------------------------------------------------

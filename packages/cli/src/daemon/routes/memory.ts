@@ -1568,6 +1568,8 @@ WHERE {
     if (turnId !== undefined && (typeof turnId !== 'string' || turnId.trim().length === 0)) {
       return jsonResponse(res, 400, { error: 'Invalid "turnId": must be a non-empty string when supplied' });
     }
+    const normalizedTurnId = typeof turnId === 'string' ? turnId.trim() : undefined;
+    const effectiveTurnId = normalizedTurnId ?? randomUUID();
 
     // 1. Store markdown in the file store
     const mdBytes = Buffer.from(markdown, 'utf-8');
@@ -1583,7 +1585,7 @@ WHERE {
       contextGraphId: resolvedContextGraphId,
       subGraphName: subGraphName ?? null,
       sessionUri: sessionUri ?? null,
-      turnId: typeof turnId === 'string' ? turnId.trim() : null,
+      turnId: effectiveTurnId,
       fileHash: fileEntry.keccak256,
       agent: requestAgentAddress,
     };
@@ -1645,7 +1647,7 @@ WHERE {
     quads.push({
       subject: turnUri,
       predicate: 'http://schema.org/name',
-      object: JSON.stringify(turnId ? `Conversation turn ${turnId}` : 'Conversation turn'),
+      object: JSON.stringify(`Conversation turn ${effectiveTurnId}`),
       graph: assertionGraphPlaceholder,
     });
     // Persist the markdown body so the UI can display turn content
@@ -1759,6 +1761,7 @@ WHERE {
       totalQuads: quads.length,
       embeddingId,
       sessionUri: sessionUri ?? null,
+      turnId: effectiveTurnId,
     });
   }
 
