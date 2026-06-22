@@ -1,5 +1,10 @@
 import type { QueryResult } from '@origintrail-official/dkg-storage';
-import type { LiftJob, LiftJobHex } from './lift-job.js';
+import type {
+  KnowledgeAssetVmPublishRequest,
+  LiftJob,
+  LiftJobHex,
+  LiftRequest,
+} from './lift-job.js';
 export {
   CONTROL_CLAIM_TOKEN,
   CONTROL_LOCKED_JOB,
@@ -45,4 +50,32 @@ export function getRecoveryTxHash(job: LiftJob): LiftJobHex | undefined {
 
 export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
   return job.status === 'failed' && 'failure' in job;
+}
+
+export function createKnowledgeAssetVmPublishLiftRequest(
+  request: KnowledgeAssetVmPublishRequest,
+): LiftRequest {
+  const subGraphPart = request.subGraphName ? `:${request.subGraphName}` : '';
+  const operationKey = `${request.contextGraphId}:${request.name}${subGraphPart}:${request.shareOperationId}`;
+  return {
+    jobType: 'knowledge-asset-vm-publish',
+    knowledgeAssetVmPublish: request,
+    swmId: request.shareOperationId,
+    shareOperationId: request.shareOperationId,
+    roots: request.roots,
+    contextGraphId: request.contextGraphId,
+    namespace: 'knowledge-assets',
+    scope: 'vm-publish',
+    transitionType: 'CREATE',
+    authority: {
+      type: 'owner',
+      proofRef: `urn:dkg:knowledge-assets:${operationKey}:vm-publish`,
+    },
+    ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
+    ...(request.publishEpochs !== undefined ? { publishEpochs: request.publishEpochs } : {}),
+    ...(request.publisherNodeIdentityIdOverride !== undefined
+      ? { publisherNodeIdentityIdOverride: request.publisherNodeIdentityIdOverride }
+      : {}),
+    seal: request.seal,
+  };
 }

@@ -550,6 +550,36 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     expect(history?.memoryLayer).toBe(MemoryLayer.VerifiableMemory);
   }, 60_000);
 
+  it('no-op SWM share after VM publish does not re-arm async publish intent', async () => {
+    const agent = await createAgent('NoopShareDoesNotRearmAsyncIntentBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'No-op Share Async Intent E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'noop-share-after-publish';
+    const root = `${ENTITY_BASE}:noop-share-after-publish`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"No-op Share After Publish"' },
+    ]);
+    const share = await agent.assertion.promote(CG_ID, name);
+    expect(share.publishReady).toBe(true);
+
+    const publish = await agent.publishFromFinalizedAssertion(CG_ID, name);
+    expect(publish.status).toBe('confirmed');
+
+    const author = agent.defaultAgentAddress ?? agent.peerId;
+    const noopShare = await (agent as any).publisher.assertionPromote(CG_ID, name, author);
+    expect(noopShare.promotedCount).toBe(0);
+    expect(noopShare.promotedAllRoots).toBe(false);
+    expect(noopShare.shareOperationId).toBeUndefined();
+
+    const history = await agent.assertion.history(CG_ID, name);
+    expect(history?.currentShareOperationId).not.toBe(share.shareOperationId);
+    await expect(
+      agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name),
+    ).rejects.toMatchObject({ code: 'PUBLISH_NOT_FULL_SHARE' });
+  }, 60_000);
+
   it('async VM publish with clearAfter false clears published roots but leaves unrelated SWM content', async () => {
     const agent = await createAgent('QueuedAsyncVmPublishCleanupBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Cleanup E2E' });

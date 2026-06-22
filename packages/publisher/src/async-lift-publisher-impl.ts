@@ -44,6 +44,7 @@ import {
   PAYLOAD_PREDICATE,
   STATUS_PREDICATE,
   compareAcceptedJobs,
+  createKnowledgeAssetVmPublishLiftRequest,
   createJobSlug,
   expectBindings,
   getRecoveryTxHash,
@@ -138,7 +139,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
           existing.job.jobId,
         );
       }
-      const liftRequest = this.createKnowledgeAssetVmPublishLiftRequest(request);
+      const liftRequest = createKnowledgeAssetVmPublishLiftRequest(request);
       const now = this.now();
       const jobId = this.idGenerator();
       const job: LiftJobAccepted = {
@@ -439,34 +440,6 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       return { job, compatible: publish.intentKey === request.intentKey };
     }
     return null;
-  }
-
-  private createKnowledgeAssetVmPublishLiftRequest(
-    request: KnowledgeAssetVmPublishRequest,
-  ): LiftRequest {
-    const subGraphPart = request.subGraphName ? `:${request.subGraphName}` : '';
-    const operationKey = `${request.contextGraphId}:${request.name}${subGraphPart}:${request.shareOperationId}`;
-    return {
-      jobType: 'knowledge-asset-vm-publish',
-      knowledgeAssetVmPublish: request,
-      swmId: request.shareOperationId,
-      shareOperationId: request.shareOperationId,
-      roots: request.roots,
-      contextGraphId: request.contextGraphId,
-      namespace: 'knowledge-assets',
-      scope: 'vm-publish',
-      transitionType: 'CREATE',
-      authority: {
-        type: 'owner',
-        proofRef: `urn:dkg:knowledge-assets:${operationKey}:vm-publish`,
-      },
-      ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
-      ...(request.publishEpochs !== undefined ? { publishEpochs: request.publishEpochs } : {}),
-      ...(request.publisherNodeIdentityIdOverride !== undefined
-        ? { publisherNodeIdentityIdOverride: request.publisherNodeIdentityIdOverride }
-        : {}),
-      seal: request.seal,
-    };
   }
 
   private isKnowledgeAssetPublishPreconditionFailure(error: unknown): boolean {

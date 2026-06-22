@@ -24,6 +24,8 @@ describe('LiftJob request and record types', () => {
     expect(LIFT_TRANSITION_TYPES).toEqual(['CREATE', 'MUTATE', 'REVOKE']);
     expect(LIFT_AUTHORITY_TYPES).toEqual(['owner', 'multisig', 'quorum', 'capability']);
     expect(LIFT_REQUEST_IMMUTABLE_FIELDS).toEqual([
+      'jobType',
+      'knowledgeAssetVmPublish',
       'swmId',
       'shareOperationId',
       'roots',
