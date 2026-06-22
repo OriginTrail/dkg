@@ -37,6 +37,9 @@ import { batchEntityQuads } from '../batching.js';
 import {
   runDaemon,
   checkForNpmVersionUpdate,
+  resolveLatestNpmVersion,
+  isValidSemver,
+  isPrerelease,
   performNpmUpdate,
   performNpmUpdateEdge,
   getCurrentCliVersion,
@@ -97,6 +100,51 @@ import {
   runDaemonSupervisor,
   runForegroundSupervisor,
 } from '../cli-supervisor.js';
+
+/**
+ * Decide whether an EXPLICIT `dkg update <target>` is allowed under the node's
+ * stable-only policy. Resolves a dist-tag to its concrete version first, then:
+ *   - allowPre (config or --allow-prerelease) → always ok
+ *   - prerelease target under stable-only → refuse
+ *   - dist-tag that can't be resolved (registry error) → refuse (fail CLOSED,
+ *     matching the no-arg path; otherwise a transient blip could let a
+ *     stable-only node install an RC that `latest` happens to point at)
+ * Extracted + dep-injected so it is unit-testable. Returns ok, or a reason.
+ */
+export async function resolveExplicitUpdateTarget(
+  target: string,
+  allowPre: boolean,
+  deps: {
+    resolveLatestNpmVersion: (
+      log: (m: string) => void,
+      allowPrerelease: boolean,
+      channel?: string,
+    ) => Promise<{ version: string | null; error?: boolean }>;
+    log: (m: string) => void;
+  },
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (allowPre) return { ok: true };
+  let resolved = target;
+  if (!isValidSemver(resolved)) {
+    // Non-semver target → treat as a dist-tag and resolve it (allowPrerelease=true
+    // so a prerelease target is visible to be rejected).
+    const r = await deps.resolveLatestNpmVersion(deps.log, true, resolved);
+    if (r.error) {
+      return {
+        ok: false,
+        reason: `could not resolve dist-tag "${target}" against the npm registry (transient error). On a stable-only node a dist-tag must be confirmed non-prerelease before install — retry, pass an explicit version, or use --allow-prerelease`,
+      };
+    }
+    if (r.version) resolved = r.version;
+  }
+  if (isValidSemver(resolved) && isPrerelease(resolved)) {
+    return {
+      ok: false,
+      reason: `target "${resolved}" is a pre-release and this node has allowPrerelease=false — re-run with --allow-prerelease to override`,
+    };
+  }
+  return { ok: true };
+}
 
 export function registerMaintenanceCommands(program: Command): void {
 // ─── dkg update ──────────────────────────────────────────────────────
@@ -190,6 +238,19 @@ program
       let version = versionOrRef ?? null;
       if (version) {
         version = version.replace(/^refs\/tags\/v?/, '').replace(/^v/, '');
+      }
+      // An EXPLICIT target (version or dist-tag) must still honour the
+      // stable-only policy: `dkg update 10.1.0-rc.1` or `dkg update latest`
+      // (when latest points at an RC) must NOT bypass allowPrerelease:false.
+      if (version) {
+        const gate = await resolveExplicitUpdateTarget(version, allowPre, {
+          resolveLatestNpmVersion,
+          log: logFn,
+        });
+        if (!gate.ok) {
+          console.error(`[dkg update] Refusing to update: ${gate.reason}.`);
+          process.exit(1);
+        }
       }
       if (!version) {
         console.log('Checking NPM registry for updates...');

@@ -2822,6 +2822,10 @@ export async function runDaemonInner(
         if (!autoUpdateEnabled) return "disabled";
         if (daemonState.isUpdating) return "updating";
         if (daemonState.lastUpdateCheck.checkedAt === 0) return "unknown";
+        // A pinned channel with no acceptable target is NOT healthy "latest" —
+        // surface it distinctly so central monitoring can flag an unpublished /
+        // rejected channel instead of seeing a falsely-current node.
+        if (daemonState.lastUpdateCheck.channelTargetMissing) return "channel-missing";
         return daemonState.lastUpdateCheck.upToDate ? "latest" : "behind";
       },
     });

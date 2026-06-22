@@ -1381,6 +1381,27 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     const result = await checkForNpmVersionUpdate(() => {}, true);
     expect(result.status).toBe('up-to-date'); // not 'available' on garbage
   });
+
+  it('default path: a garbage `latest` must NOT mask a valid `beta` candidate', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    fetchImpl = async () => makeRegistryResponse({ latest: 'garbage', beta: '9.0.0-beta.4' });
+    const result = await checkForNpmVersionUpdate(() => {}, true);
+    // current is 9.0.0-beta.3 → the valid beta.4 must be selected, not dropped.
+    expect(result.status).toBe('available');
+    expect(result.version).toBe('9.0.0-beta.4');
+  });
+
+  it('channel mainnet: a STABLE +build target is "available" over the current rc (not falsely up-to-date)', async () => {
+    const { checkForNpmVersionUpdate } = await import('../src/daemon.js');
+    readFileImpl = async (p: any) => {
+      if (String(p).endsWith('.current-version')) return '10.0.0-rc.19';
+      throw new Error('ENOENT');
+    };
+    fetchImpl = async () => makeRegistryResponse({ mainnet: '10.0.0+mainnet-build.1' });
+    const result = await checkForNpmVersionUpdate(() => {}, false, 'mainnet');
+    expect(result.status).toBe('available');
+    expect(result.version).toBe('10.0.0+mainnet-build.1');
+  });
 });
 
 describe('deriveUpdateCheckState (runCheck → /api/status mapping)', () => {
@@ -1822,6 +1843,14 @@ describe('compareSemver', () => {
   it('ignores build metadata for ordering', () => {
     expect(compareSemver('1.2.3-alpha+1', '1.2.3-alpha+2')).toBe(0);
     expect(compareSemver('9.0.0+build.1', '9.0.0+build.2')).toBe(0);
+  });
+
+  it('treats HYPHENATED build metadata as stable, not prerelease (PR #1295 regression)', () => {
+    // The hyphen lives in +build metadata → 10.0.0+mainnet-build.1 is a STABLE
+    // 10.0.0 and must outrank 10.0.0-rc.19, not read as "not newer".
+    expect(compareSemver('10.0.0+mainnet-build.1', '10.0.0-rc.19')).toBeGreaterThan(0);
+    expect(compareSemver('10.0.0-rc.19', '10.0.0+mainnet-build.1')).toBeLessThan(0);
+    expect(compareSemver('10.0.0+mainnet-build.1', '10.0.0')).toBe(0);
   });
 
   it('handles dev suffix with numeric comparison', () => {

@@ -366,9 +366,14 @@ export async function resolveLatestNpmVersion(
       return { version: null, error: false };
     }
 
-    const candidates = [stable, tags.dev, tags.beta, tags.next].filter(
+    // Filter to VALID semver BEFORE sorting: a single malformed tag (e.g.
+    // latest="garbage") must not sort ahead of and mask a valid candidate
+    // (e.g. beta="9.0.0-beta.4") — compareSemver on garbage returns NaN, which
+    // makes the sort order undefined. Filtering invalid values never changes
+    // selection among valid ones.
+    const candidates = ([stable, tags.dev, tags.beta, tags.next].filter(
       Boolean,
-    ) as string[];
+    ) as string[]).filter(isValidSemver);
     if (candidates.length === 0) return { version: null, error: false };
     candidates.sort((a, b) => compareSemver(b, a));
     return { version: candidates[0] };
@@ -381,19 +386,23 @@ export async function resolveLatestNpmVersion(
 }
 
 export function compareSemver(a: string, b: string): number {
-  const pa = a.replace(/^v/, "").split(/[-+]/)[0].split(".").map(Number);
-  const pb = b.replace(/^v/, "").split(/[-+]/)[0].split(".").map(Number);
+  // Build metadata (everything from `+`) is ignored for precedence (semver §10),
+  // so strip it FIRST. Detecting the prerelease via the raw string's `-` is
+  // wrong: `10.0.0+mainnet-build.1` is a STABLE version whose hyphen lives in
+  // build metadata — treating it as a prerelease made it sort BELOW
+  // `10.0.0-rc.19` and read as "not newer".
+  const core = (v: string) => v.replace(/^v/, "").split("+")[0];
+  const ca = core(a);
+  const cb = core(b);
+  const pa = ca.split("-")[0].split(".").map(Number);
+  const pb = cb.split("-")[0].split(".").map(Number);
   for (let i = 0; i < 3; i++) {
     if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
   }
-  const stripBuild = (s: string) => s.replace(/\+.*$/, "");
-  const preA = a.includes("-")
-    ? stripBuild(a.split("-").slice(1).join("-"))
-    : "";
-  const preB = b.includes("-")
-    ? stripBuild(b.split("-").slice(1).join("-"))
-    : "";
-  if (!preA && preB) return 1;
+  const prerelease = (v: string) => (v.includes("-") ? v.slice(v.indexOf("-") + 1) : "");
+  const preA = prerelease(ca);
+  const preB = prerelease(cb);
+  if (!preA && preB) return 1; // stable outranks its own prerelease
   if (preA && !preB) return -1;
   return preA.localeCompare(preB, undefined, { numeric: true });
 }
