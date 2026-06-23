@@ -1260,11 +1260,11 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *   * `epoch == expiryEpoch` with
      *     `effBoosted > effBase`         → one binary search into the
      *                                      epoch's checkpoint array gives
-     *                                      scorePerStake at the exact
+     *                                      scorePerStake strictly before the
      *                                      expiry second; integrate the
      *                                      left half at boosted rate and
      *                                      the right half at base rate.
-     *                                      `scoreAtExpiry` below the
+     *                                      `scoreBeforeExpiry` below the
      *                                      delegator cursor collapses
      *                                      back to the base-rate path.
      */
@@ -1294,15 +1294,15 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             //      search.
             return (effBase * (current - lastSettled)) / SCALE18;
         }
-        uint256 scoreAtExpiry = randomSamplingStorage.findScorePerStakeAt(
+        uint256 scoreBeforeExpiry = randomSamplingStorage.findScorePerStakeAt(
             identityId,
             epoch,
-            uint40(expiryTs)
+            uint40(expiryTs - 1)
         );
-        if (scoreAtExpiry > lastSettled) {
+        if (scoreBeforeExpiry > lastSettled) {
             return
-                (effBoosted * (scoreAtExpiry - lastSettled)) / SCALE18 +
-                (effBase * (current - scoreAtExpiry)) / SCALE18;
+                (effBoosted * (scoreBeforeExpiry - lastSettled)) / SCALE18 +
+                (effBase * (current - scoreBeforeExpiry)) / SCALE18;
         }
         return (effBase * (current - lastSettled)) / SCALE18;
     }
