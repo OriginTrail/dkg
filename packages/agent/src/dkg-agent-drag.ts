@@ -23,7 +23,7 @@ import {
   type CitationChainReads,
   type PreparedKaCitation,
 } from './drag/citation.js';
-import { PROTOCOL_DRAG_ANSWER } from '@origintrail-official/dkg-core';
+import { PROTOCOL_DRAG_ANSWER, validateContextGraphId } from '@origintrail-official/dkg-core';
 import type { VerifiableCitation, CitationTriple, CitationChecks } from '@origintrail-official/dkg-core';
 
 /** Per-KA VM graph: `…/_verifiable_memory/<author>/<number>` → {author, number}. */
@@ -170,6 +170,13 @@ export class DragMethods extends DKGAgentBase {
       return empty('No searchable keywords in the question.');
     }
 
+    // Validate the CG id before it is ever interpolated into a SPARQL literal
+    // (defense-in-depth + parity with the query routes).
+    const idCheck = validateContextGraphId(args.contextGraphId);
+    if (!idCheck.valid) {
+      return empty(`Invalid context graph id: ${idCheck.reason ?? 'rejected'}.`);
+    }
+
     // Resolve the CG's on-chain numeric id (needed by the KA extractor).
     const onChainIdStr = await this.getContextGraphOnChainId(args.contextGraphId).catch(() => null);
     if (!onChainIdStr || !/^\d+$/.test(onChainIdStr) || BigInt(onChainIdStr) === 0n) {
@@ -289,10 +296,16 @@ export class DragMethods extends DKGAgentBase {
     if (!sendResult.delivered) {
       throw new Error(`dRAG remote to ${peerId.slice(-8)} not delivered (queued): ${sendResult.error ?? 'unknown'}`);
     }
-    const decoded = JSON.parse(new TextDecoder().decode(sendResult.response)) as
-      | DragAnswerResult
-      | { error: string };
-    if ('error' in decoded) throw new Error(`peer ${peerId.slice(-8)}: ${decoded.error}`);
+    const decoded: unknown = JSON.parse(new TextDecoder().decode(sendResult.response));
+    if (decoded && typeof decoded === 'object' && 'error' in decoded) {
+      throw new Error(`peer ${peerId.slice(-8)}: ${String((decoded as { error: unknown }).error)}`);
+    }
+    // Validate the shape up front so a single malformed / version-skewed peer
+    // cannot throw deep in the aggregator and discard every honest peer's
+    // citations — a bad response becomes a clean per-node error instead.
+    if (!isValidDragAnswerResult(decoded)) {
+      throw new Error(`peer ${peerId.slice(-8)} returned a malformed dRAG response`);
+    }
     return decoded;
   }
 
@@ -324,31 +337,42 @@ export class DragMethods extends DKGAgentBase {
     },
   ): Promise<DragNetworkAnswerResult> {
     const keywords = extractKeywords(args.question);
+    // Bind the answer to the asked CG: only credit a citation whose KA belongs
+    // to THIS on-chain CG — defends the cross-CG scope-swap (a peer could
+    // otherwise return a genuinely-verifiable fact drawn from a DIFFERENT KA).
+    const askedCgIdStr = await this.getContextGraphOnChainId(args.contextGraphId).catch(() => null);
+    const askedCgId =
+      askedCgIdStr && /^\d+$/.test(askedCgIdStr) && BigInt(askedCgIdStr) > 0n ? BigInt(askedCgIdStr) : null;
+
     const discovered = await this.discovery
       .findNodesServingCG(args.contextGraphId)
       .catch((): string[] => []);
-    const servingPeers = Array.from(new Set([...discovered, ...(args.peers ?? [])]));
+    const allPeers = Array.from(new Set([...discovered, ...(args.peers ?? [])]));
     const myPeerId = this.peerId ?? 'local';
-    const includeSelf = args.includeSelf ?? servingPeers.includes(myPeerId);
-    const remotePeers = servingPeers.filter((p) => p !== myPeerId);
+    const includeSelf = args.includeSelf ?? allPeers.includes(myPeerId);
+    // Cap the fan-out so a caller-supplied peer list can't make this node a
+    // reflector dialing arbitrary peers; bound concurrency below.
+    const remoteAll = allPeers.filter((p) => p !== myPeerId);
+    const remotePeers = remoteAll.slice(0, MAX_FANOUT_PEERS);
+    const truncatedPeers = remoteAll.length - remotePeers.length;
 
     type NodeResult = { peerId: string; result?: DragAnswerResult; error?: string };
-    const tasks: Promise<NodeResult>[] = [];
+    const thunks: Array<() => Promise<NodeResult>> = [];
     if (includeSelf) {
-      tasks.push(
+      thunks.push(() =>
         this.dragAnswerLocal(args)
           .then((result) => ({ peerId: myPeerId, result }))
           .catch((e) => ({ peerId: myPeerId, error: e instanceof Error ? e.message : String(e) })),
       );
     }
     for (const peer of remotePeers) {
-      tasks.push(
+      thunks.push(() =>
         this.dragAnswerRemote(peer, args)
           .then((result) => ({ peerId: peer, result }))
           .catch((e) => ({ peerId: peer, error: e instanceof Error ? e.message : String(e) })),
       );
     }
-    const nodeResults = await Promise.all(tasks);
+    const nodeResults = await runWithConcurrency(thunks, FANOUT_CONCURRENCY);
 
     // Re-verify against OUR chain (trustless aggregation).
     const chain: CitationChainReads = {
@@ -357,16 +381,17 @@ export class DragMethods extends DKGAgentBase {
       getLatestMerkleRootAuthor: (kaId) => this.chain.getLatestMerkleRootAuthor!(kaId),
     };
 
-    const seen = new Set<string>();
     const citations: VerifiableCitation[] = [];
     const facts: DragFact[] = [];
     const kaIndex = new Map<string, number>();
+    const factIndex = new Map<string, number>(); // factKey -> index into `citations`
     const perNode: DragPerNode[] = [];
     const maxCitations = Math.min(Math.max(args.maxCitations ?? 12, 1), 50);
-    // Verify each unique citation ONCE (the asker's own chain check); reuse the
-    // verdict for the same fact offered by another node, so a corroborating node
-    // is credited for verified facts even after the answer-level dedup.
+    // Verdict cache keyed on the PROOF (not just the fact), so distinct proofs for
+    // the same fact are each verified — a bad proof can't poison an honest one.
     const verdictCache = new Map<string, CitationChecks>();
+    const kaScopeCache = new Map<string, boolean>(); // kaId -> belongs to asked CG?
+    let droppedOffScope = 0;
 
     for (const nr of nodeResults) {
       if (nr.error || !nr.result) {
@@ -374,26 +399,67 @@ export class DragMethods extends DKGAgentBase {
         continue;
       }
       let nodeVerified = 0;
+      let processed = 0;
       for (const c of nr.result.citations) {
-        const key = `${c.kaId}|${c.triple.subject}|${c.triple.predicate}|${c.triple.object}`;
-        let checks = verdictCache.get(key);
-        if (!checks) {
-          checks = await verifyVerifiableCitation(c, { chain }).catch(
-            (): CitationChecks => ({ merkle: false, onChain: false, authorSig: false, verified: false }),
-          );
-          verdictCache.set(key, checks);
-        }
-        if (checks.verified) nodeVerified++;
-        if (!seen.has(key) && citations.length < maxCitations) {
-          seen.add(key);
-          // Stamp the (first) serving node + the asker's independent verdict.
-          citations.push({ ...c, servingNode: nr.peerId, checks });
-          let idx = kaIndex.get(c.kaId);
-          if (idx === undefined) {
-            idx = kaIndex.size + 1;
-            kaIndex.set(c.kaId, idx);
+        // Cap per-peer work so one peer's large response can't exhaust the
+        // asker's chain-RPC budget before the dedup gate.
+        if (processed >= MAX_CITATIONS_PER_PEER) break;
+        processed++;
+        try {
+          // CG-scope binding — only credit KAs that belong to the asked CG.
+          if (askedCgId !== null && typeof this.chain.getKAContextGraphId === 'function') {
+            let inScope = kaScopeCache.get(c.kaId);
+            if (inScope === undefined) {
+              inScope = await this.chain
+                .getKAContextGraphId(BigInt(c.kaId))
+                .then((id) => id === askedCgId)
+                .catch(() => false);
+              kaScopeCache.set(c.kaId, inScope);
+            }
+            if (!inScope) {
+              droppedOffScope++;
+              continue;
+            }
           }
-          facts.push({ subject: c.triple.subject, predicate: c.triple.predicate, object: c.triple.object, source: idx });
+
+          const proofKey = `${c.kaId}|${c.triple.subject}|${c.triple.predicate}|${c.triple.object}|${c.proof.leaf}|${c.proof.chunkId}`;
+          let checks = verdictCache.get(proofKey);
+          if (!checks) {
+            checks = await verifyVerifiableCitation(c, { chain }).catch(
+              (): CitationChecks => ({ merkle: false, onChain: false, authorSig: false, verified: false }),
+            );
+            verdictCache.set(proofKey, checks);
+          }
+          if (checks.verified) nodeVerified++;
+
+          // Never trust the remote's contextGraphId/ual for scope — stamp the
+          // asker-derived CG + the asker's own verdict.
+          const recited: VerifiableCitation = {
+            ...c,
+            contextGraphId: askedCgId !== null ? askedCgId.toString() : c.contextGraphId,
+            servingNode: nr.peerId,
+            checks,
+          };
+          const factKey = `${c.kaId}|${c.triple.subject}|${c.triple.predicate}|${c.triple.object}`;
+          const existingIdx = factIndex.get(factKey);
+          if (existingIdx === undefined) {
+            if (citations.length < maxCitations) {
+              factIndex.set(factKey, citations.length);
+              citations.push(recited);
+              let idx = kaIndex.get(c.kaId);
+              if (idx === undefined) {
+                idx = kaIndex.size + 1;
+                kaIndex.set(c.kaId, idx);
+              }
+              facts.push({ subject: c.triple.subject, predicate: c.triple.predicate, object: c.triple.object, source: idx });
+            }
+          } else if (!citations[existingIdx].checks.verified && checks.verified) {
+            // Upgrade a previously-unverified fact to a verified corroboration.
+            citations[existingIdx] = recited;
+          }
+        } catch {
+          // Skip a single malformed citation — never let it abort the answer.
+          continue;
         }
       }
       perNode.push({ peerId: nr.peerId, factsCited: nr.result.citations.length, verified: nodeVerified });
@@ -401,7 +467,15 @@ export class DragMethods extends DKGAgentBase {
 
     const verified = citations.filter((c) => c.checks.verified).length;
     const nodesAnswered = perNode.filter((p) => !p.error).length;
-    const answer = renderNetworkAnswer(args.question, facts, citations, kaIndex, perNode);
+    const answer = renderNetworkAnswer(args.question, facts, citations, kaIndex, perNode, {
+      truncatedPeers,
+      droppedOffScope,
+      // Scope is enforced only when the asker can resolve the CG's on-chain id
+      // (synced network-wide via the ontology system CG). If it cannot, the
+      // facts are still cryptographically verified but their CG provenance is
+      // unconfirmed — surface that rather than failing open silently.
+      scopeEnforced: askedCgId !== null,
+    });
 
     return {
       question: args.question,
@@ -412,9 +486,50 @@ export class DragMethods extends DKGAgentBase {
       citations,
       facts,
       perNode,
-      stats: { keywords, servingNodes: servingPeers.length, nodesAnswered, factsCited: citations.length, verified },
+      stats: { keywords, servingNodes: allPeers.length, nodesAnswered, factsCited: citations.length, verified },
     };
   }
+}
+
+const MAX_FANOUT_PEERS = 24;
+const MAX_CITATIONS_PER_PEER = 64;
+const FANOUT_CONCURRENCY = 8;
+
+/** Run thunks with a bounded number in flight; preserves input order. Thunks must not throw. */
+async function runWithConcurrency<T>(thunks: Array<() => Promise<T>>, limit: number): Promise<T[]> {
+  const results: T[] = new Array(thunks.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < thunks.length) {
+      const i = next++;
+      results[i] = await thunks[i]();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(limit, 1), thunks.length) }, () => worker()));
+  return results;
+}
+
+function isValidCitation(c: unknown): c is VerifiableCitation {
+  if (!c || typeof c !== 'object') return false;
+  const x = c as Record<string, unknown>;
+  const t = x.triple as Record<string, unknown> | undefined;
+  const p = x.proof as Record<string, unknown> | undefined;
+  const oc = x.onChain as Record<string, unknown> | undefined;
+  return (
+    typeof x.kaId === 'string' &&
+    !!t && typeof t.subject === 'string' && typeof t.predicate === 'string' && typeof t.object === 'string' &&
+    !!p && typeof p.content === 'string' && typeof p.leaf === 'string' && Array.isArray(p.siblings) &&
+    typeof p.chunkId === 'number' && typeof p.leafCount === 'number' &&
+    !!oc && typeof oc.merkleRoot === 'string' && typeof oc.author === 'string' &&
+    !!x.checks && typeof x.checks === 'object'
+  );
+}
+
+/** A peer's dRAG reply is usable only if it carries a well-formed citation array. */
+function isValidDragAnswerResult(d: unknown): d is DragAnswerResult {
+  if (!d || typeof d !== 'object') return false;
+  const x = d as Record<string, unknown>;
+  return Array.isArray(x.citations) && x.citations.every(isValidCitation);
 }
 
 /** Render a human-readable, audit-flagged answer (no LLM). */
@@ -472,6 +587,11 @@ function renderNetworkAnswer(
   citations: VerifiableCitation[],
   kaIndex: Map<string, number>,
   perNode: DragPerNode[],
+  notes: { truncatedPeers: number; droppedOffScope: number; scopeEnforced: boolean } = {
+    truncatedPeers: 0,
+    droppedOffScope: 0,
+    scopeEnforced: true,
+  },
 ): string {
   const answered = perNode.filter((p) => !p.error).length;
   if (facts.length === 0) {
@@ -492,6 +612,15 @@ function renderNetworkAnswer(
         ? `- @${p.peerId.slice(0, 12)} — error: ${p.error}`
         : `- @${p.peerId.slice(0, 12)} — ${p.factsCited} fact${p.factsCited === 1 ? '' : 's'} offered, ${p.verified} verified`,
     );
+  }
+  if (notes.droppedOffScope > 0) {
+    lines.push(`(${notes.droppedOffScope} citation${notes.droppedOffScope === 1 ? '' : 's'} dropped: KA not in the requested context graph)`);
+  }
+  if (notes.truncatedPeers > 0) {
+    lines.push(`(fan-out capped at ${MAX_FANOUT_PEERS} peers; ${notes.truncatedPeers} additional serving node${notes.truncatedPeers === 1 ? '' : 's'} not queried)`);
+  }
+  if (!notes.scopeEnforced) {
+    lines.push('(⚠ context-graph scope NOT enforced: could not resolve the CG on-chain id — facts are cryptographically verified but their CG provenance is unconfirmed)');
   }
   return `${base}\n${lines.join('\n')}`;
 }

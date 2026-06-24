@@ -103,10 +103,10 @@ async function buildSignedCitation(
   return { citation, root };
 }
 
-function mockChain(root: Uint8Array, author: string): CitationChainReads {
+function mockChain(root: Uint8Array, author: string, leafCount = 0): CitationChainReads {
   return {
     getLatestMerkleRoot: async () => root,
-    getMerkleLeafCount: async () => 0,
+    getMerkleLeafCount: async () => leafCount,
     getLatestMerkleRootAuthor: async () => author,
   };
 }
@@ -136,11 +136,23 @@ describe('dRAG citation — verifyVerifiableCitation', () => {
     expect(checks).toMatchObject({ merkle: true, authorSig: true, verified: true });
   });
 
-  it('verifies against a live chain (re-anchor root + author)', async () => {
+  it('verifies against a live chain (re-anchor root + leaf count + author)', async () => {
     const wallet = ethers.Wallet.createRandom();
     const { citation, root } = await buildSignedCitation(wallet as unknown as ethers.Wallet, TRIPLES, 1);
-    const checks = await verifyVerifiableCitation(citation, { chain: mockChain(root, wallet.address) });
+    const checks = await verifyVerifiableCitation(citation, {
+      chain: mockChain(root, wallet.address, citation.proof.leafCount),
+    });
     expect(checks).toEqual({ merkle: true, onChain: true, authorSig: true, verified: true });
+  });
+
+  it('fails on-chain when the live leaf count disagrees with the carried proof', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const { citation, root } = await buildSignedCitation(wallet as unknown as ethers.Wallet, TRIPLES, 0);
+    const checks = await verifyVerifiableCitation(citation, {
+      chain: mockChain(root, wallet.address, citation.proof.leafCount + 1),
+    });
+    expect(checks.onChain).toBe(false);
+    expect(checks.verified).toBe(false);
   });
 
   it('fails when the live chain root disagrees (stale / forged anchor)', async () => {

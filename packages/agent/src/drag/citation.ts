@@ -354,11 +354,15 @@ export async function verifyVerifiableCitation(
   let onChain: boolean | null = citation.checks.onChain;
   let expectedAuthor = citation.onChain.author;
   if (opts?.chain) {
-    const [liveRoot, liveAuthor] = await Promise.all([
+    const [liveRoot, liveLeafCount, liveAuthor] = await Promise.all([
       opts.chain.getLatestMerkleRoot(BigInt(citation.kaId)),
+      opts.chain.getMerkleLeafCount(BigInt(citation.kaId)),
       opts.chain.getLatestMerkleRootAuthor(BigInt(citation.kaId)),
     ]);
-    onChain = eqHex(bytesToHex0x(liveRoot), citation.onChain.merkleRoot);
+    // Re-anchor BOTH the root and the leaf count to the live chain — the pure
+    // verifier checks proof.leafCount against itself (tautological), so the
+    // chain read is what actually validates the carried leaf count.
+    onChain = eqHex(bytesToHex0x(liveRoot), citation.onChain.merkleRoot) && liveLeafCount === citation.proof.leafCount;
     expectedAuthor = liveAuthor;
   }
 

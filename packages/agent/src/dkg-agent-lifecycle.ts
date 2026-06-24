@@ -34,7 +34,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri, RateLimiter,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -727,8 +727,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // graph with grounded, verifiable citations. ACL = the SAME on-chain
     // public gate as query-remote (isContextGraphPublicOnChain, fail-closed),
     // so a private/curated/unregistered CG is never answered remotely.
-    this.messenger.register(PROTOCOL_DRAG_ANSWER, async (data) => {
+    //
+    // libp2p peers carry no daemon token, so this verb is unauthenticated —
+    // it is therefore (a) per-peer rate limited and (b) bounded to a SMALL
+    // remote-path cost ceiling (the answer body runs a store scan + chain reads
+    // per KA), to deny the amplification-DoS the local path would otherwise expose.
+    const dragAnswerRateLimiter = new RateLimiter({ maxPerWindow: 30, windowMs: 60_000 });
+    const DRAG_REMOTE_MAX_KAS = 15;
+    const DRAG_REMOTE_MAX_CITATIONS = 15;
+    this.messenger.register(PROTOCOL_DRAG_ANSWER, async (data, peerId) => {
       const encode = (obj: unknown) => new TextEncoder().encode(JSON.stringify(obj));
+      if (peerId && !dragAnswerRateLimiter.allow(peerId)) {
+        return encode({ error: 'dRAG: rate limited' });
+      }
       let req: { question?: string; contextGraphId?: string; maxCitations?: number; maxKas?: number };
       try {
         req = JSON.parse(new TextDecoder().decode(data));
@@ -751,8 +762,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const result = await this.dragAnswerLocal({
           question,
           contextGraphId,
-          maxCitations: req.maxCitations,
-          maxKas: req.maxKas,
+          // Clamp the remote path well below the local ceilings (50/100): a peer
+          // pays for an answer, not for an unbounded scan.
+          maxCitations: Math.min(req.maxCitations ?? DRAG_REMOTE_MAX_CITATIONS, DRAG_REMOTE_MAX_CITATIONS),
+          maxKas: Math.min(req.maxKas ?? DRAG_REMOTE_MAX_KAS, DRAG_REMOTE_MAX_KAS),
         });
         return encode(result);
       } catch (e) {
