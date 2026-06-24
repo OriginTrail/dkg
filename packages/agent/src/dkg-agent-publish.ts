@@ -98,6 +98,7 @@ import {
   sharedMemoryReadBothFilter,
   partitionCatalogQuads,
 } from '@origintrail-official/dkg-core';
+import { normalizeLargeRdfLiteralsForBlazegraph } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
@@ -1267,6 +1268,10 @@ export class PublishMethods extends DKGAgentBase {
   ): Promise<PublishResult> {
     const ctx = opts?.operationCtx ?? createOperationContext('publish');
     const onPhase = opts?.onPhase;
+    quads = normalizeLargeRdfLiteralsForBlazegraph(quads).quads as Quad[];
+    if (privateQuads) {
+      privateQuads = normalizeLargeRdfLiteralsForBlazegraph(privateQuads).quads as Quad[];
+    }
     this.log.info(ctx, `Starting publish to context graph "${contextGraphId}" with ${quads.length} triples`);
 
     const isSystem = contextGraphId === SYSTEM_CONTEXT_GRAPHS.AGENTS || contextGraphId === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY;
@@ -2567,6 +2572,10 @@ export class PublishMethods extends DKGAgentBase {
       privateQuads?: Quad[];
     },
   ): Promise<PublishOptions['precomputedAttestation']> {
+    quads = normalizeLargeRdfLiteralsForBlazegraph(quads).quads as Quad[];
+    const normalizedPrivateQuads = opts?.privateQuads
+      ? normalizeLargeRdfLiteralsForBlazegraph(opts.privateQuads).quads as Quad[]
+      : undefined;
     if (
       opts?.authorAgentAddress != null &&
       opts?.preSignedAuthorAttestation != null
@@ -2595,7 +2604,7 @@ export class PublishMethods extends DKGAgentBase {
     // KC merkle. The order MUST follow the publisher's manifest
     // iteration over `kaMap`, which is the insertion order — same map
     // we built two lines up.
-    const privateQuads = opts?.privateQuads ?? [];
+    const privateQuads = normalizedPrivateQuads ?? [];
     const privateRoots: Uint8Array[] = [];
     for (const rootEntity of kaMap.keys()) {
       if (privateQuads.length === 0) break;

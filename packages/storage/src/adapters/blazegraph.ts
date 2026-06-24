@@ -10,6 +10,10 @@ import type {
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { buildBlankNodeSafeDelete } from './sparql-http.js';
+import {
+  BLAZEGRAPH_MUTF8_LIMIT,
+  javaModifiedUtf8Length,
+} from '@origintrail-official/dkg-core';
 
 /**
  * BlazegraphStore — TripleStore adapter backed by a remote Blazegraph
@@ -335,43 +339,6 @@ function escapeString(s: string): string {
 // =====================================================================
 // Oversized-literal guard
 // =====================================================================
-
-/**
- * Java Modified UTF-8 byte length of a string.
- *
- * Blazegraph uses `DataOutputStream.writeUTF()` for index keys, which
- * encodes strings in Java's Modified UTF-8 (MUTF-8).  The key
- * differences from standard UTF-8:
- *   - U+0000 (NUL) is encoded as 2 bytes (0xC0, 0x80) instead of 1
- *   - Supplementary codepoints (U+10000–U+10FFFF) are encoded as a
- *     UTF-16 surrogate pair, each surrogate taking 3 MUTF-8 bytes =
- *     6 bytes total (vs 4 in standard UTF-8)
- *
- * `writeUTF()` hard-caps the encoded length at 65 535 bytes.
- * Exceeding this triggers `java.io.UTFDataFormatException` and causes
- * the entire batch to fail with HTTP 500.
- */
-const BLAZEGRAPH_MUTF8_LIMIT = 65_535;
-
-function javaModifiedUtf8Length(str: string): number {
-  let len = 0;
-  for (let i = 0; i < str.length; i++) {
-    const code = str.charCodeAt(i);
-    if (code === 0) {
-      len += 2;
-    } else if (code <= 0x7f) {
-      len += 1;
-    } else if (code <= 0x7ff) {
-      len += 2;
-    } else if (code >= 0xd800 && code <= 0xdbff) {
-      // High surrogate — the low surrogate at i+1 will add another 3
-      len += 3;
-    } else {
-      len += 3;
-    }
-  }
-  return len;
-}
 
 /**
  * Check quads for literal objects that would exceed Blazegraph's

@@ -27,8 +27,10 @@
 import type { RequestContext } from "./context.js";
 import {
   isPayloadTooLargeError,
+  isRdfLiteralSizeError,
   jsonResponse,
   payloadTooLargeResponseBody,
+  rdfLiteralSizeResponseBody,
   readBody,
   safeParseJson,
   validateEntities,
@@ -649,6 +651,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     } catch (e: any) {
       if (isPayloadTooLargeError(e)) {
         return jsonResponse(res, 413, payloadTooLargeResponseBody(e));
+      }
+      if (isRdfLiteralSizeError(e)) {
+        return jsonResponse(res, 400, rdfLiteralSizeResponseBody(e));
       }
       return jsonResponse(res, 500, { error: e?.message ?? String(e) });
     }

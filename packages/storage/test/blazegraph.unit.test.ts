@@ -3,6 +3,10 @@
  * no live Blazegraph required).
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import {
+  javaModifiedUtf8Length,
+  normalizeLargeRdfLiteralsForBlazegraph,
+} from '@origintrail-official/dkg-core';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 
 describe('BlazegraphStore (mocked HTTP)', () => {
@@ -310,6 +314,29 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(fetchCalls).toHaveLength(1);
     const body = String(fetchCalls[0][1]?.body);
     expect(body).toContain('http://s1');
+  });
+
+  it('insert accepts producer-chunked schema:text that started as a 140KB literal', async () => {
+    setFetch(async () => new Response(null, { status: 200 }));
+    const s = new BlazegraphStore(baseUrl);
+    const root = 'urn:bg-unit:computer-history';
+    const oversizedText = 'x'.repeat(140_951);
+    expect(javaModifiedUtf8Length(JSON.stringify(oversizedText))).toBe(140_953);
+
+    const normalized = normalizeLargeRdfLiteralsForBlazegraph([
+      {
+        subject: root,
+        predicate: 'http://schema.org/text',
+        object: JSON.stringify(oversizedText),
+        graph: 'did:dkg:context-graph:0x599BF63E/computer-history',
+      },
+    ]);
+
+    await s.insert(normalized.quads as any);
+    expect(fetchCalls).toHaveLength(1);
+    const body = String(fetchCalls[0][1]?.body);
+    expect(body).toContain('http://dkg.io/ontology/hasTextChunk');
+    expect(body).not.toContain(oversizedText);
   });
 
   it('insert keeps non-literal quads regardless of size', async () => {

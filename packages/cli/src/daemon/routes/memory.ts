@@ -226,6 +226,8 @@ import {
   shortId,
   sleep,
   deriveBlockExplorerUrl,
+  isRdfLiteralSizeError,
+  rdfLiteralSizeResponseBody,
 } from '../http-utils.js';
 import {
   normalizeRepo,
@@ -1695,6 +1697,9 @@ WHERE {
       ) {
         return jsonResponse(res, 400, { error: err.message });
       }
+      if (isRdfLiteralSizeError(err)) {
+        return jsonResponse(res, 400, rdfLiteralSizeResponseBody(err));
+      }
       // Strict curator-ack gate (OT-RFC-49 curator-leader): the write was NOT
       // persisted because the curator (the authoritative replica) did not
       // confirm it. Surface a distinct, actionable status instead of a generic
@@ -2256,6 +2261,9 @@ WHERE {
       });
     } catch (err: any) {
       tracker.fail(ctx, err);
+      if (isRdfLiteralSizeError(err)) {
+        return jsonResponse(res, 400, rdfLiteralSizeResponseBody(err));
+      }
       if (
         err.name === "StaleWriteError" ||
         err.message?.includes("stale") ||

@@ -67,6 +67,19 @@ export function payloadTooLargeResponseBody(err: unknown): Record<string, unknow
   return body;
 }
 
+export function isRdfLiteralSizeError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const shaped = err as { name?: unknown; code?: unknown };
+  return shaped.name === 'RdfLiteralSizeError' || shaped.code === 'RDF_LITERAL_TOO_LARGE';
+}
+
+export function rdfLiteralSizeResponseBody(err: unknown): Record<string, unknown> {
+  return {
+    error: err instanceof Error ? err.message : String(err ?? 'RDF literal exceeds size limit'),
+    code: 'RDF_LITERAL_TOO_LARGE',
+  };
+}
+
 export async function resolveNameToPeerId(
   agent: DKGAgent,
   nameOrId: string,

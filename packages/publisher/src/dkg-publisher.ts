@@ -3,6 +3,7 @@ import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams }
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter } from '@origintrail-official/dkg-core';
+import { normalizeLargeRdfLiteralsForBlazegraph } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
@@ -374,6 +375,10 @@ function rejectReservedSubjectPrefixes(quads: Quad[]): void {
 function rejectUserAuthoredProtocolMetadata(quads: Quad[]): void {
   rejectReservedSubjectPrefixes(quads);
   assertNoUserAuthoredTrustLevelQuads(quads);
+}
+
+function normalizeProducerRdfLiterals(quads: Quad[]): Quad[] {
+  return normalizeLargeRdfLiteralsForBlazegraph(quads).quads as Quad[];
 }
 
 async function stampTrustLevel(
@@ -866,17 +871,15 @@ export class DKGPublisher implements Publisher {
     quads: Quad[],
     options: ShareOptions,
   ): Promise<ShareResult> {
-    // Round 9 Bug 25: reject user-authored quads with reserved URN
-    // prefixes at the TOP of the Bucket A entry point, before any
-    // other processing (lock acquisition, partitioning, etc.) per
-    // spec `19_MARKDOWN_CONTENT_TYPE.md §10.2`. Short-circuit so a
-    // reserved-namespace violation cannot be masked by a lock timeout
-    // or subject-level validation error downstream.
-    rejectUserAuthoredProtocolMetadata(quads);
-    const subjects = [...new Set(quads.map(q => q.subject))];
+    // Normalize oversized text literals and reject reserved/protocol
+    // metadata before lock acquisition or subject-level validation, so
+    // malformed producer data cannot poison SWM or VM replication.
+    const normalizedQuads = normalizeProducerRdfLiterals(quads);
+    rejectUserAuthoredProtocolMetadata(normalizedQuads);
+    const subjects = [...new Set(normalizedQuads.map(q => q.subject))];
     const lockPrefix = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
     const lockKeys = subjects.map(s => `${lockPrefix}\0${s}`);
-    return this.withWriteLocks(lockKeys, () => this._shareImpl(contextGraphId, quads, options));
+    return this.withWriteLocks(lockKeys, () => this._shareImpl(contextGraphId, normalizedQuads, options));
   }
 
   /** @deprecated Use share() */
@@ -1156,12 +1159,11 @@ export class DKGPublisher implements Publisher {
     quads: Quad[],
     options: ConditionalShareOptions,
   ): Promise<ShareResult> {
-    // Round 9 Bug 25: reject user-authored quads with reserved URN
-    // prefixes at the TOP of the Bucket A entry point, before the
-    // CAS condition check (which could otherwise mask the namespace
-    // violation with a StaleWriteError). Short-circuit per
-    // `19_MARKDOWN_CONTENT_TYPE.md §10.2`.
-    rejectUserAuthoredProtocolMetadata(quads);
+    // Normalize oversized text literals and reject reserved/protocol
+    // metadata before the CAS condition check, so producer data issues
+    // cannot be masked by a StaleWriteError.
+    const normalizedQuads = normalizeProducerRdfLiterals(quads);
+    rejectUserAuthoredProtocolMetadata(normalizedQuads);
     for (const cond of options.conditions) {
       assertSafeIri(cond.subject);
       assertSafeIri(cond.predicate);
@@ -1171,11 +1173,11 @@ export class DKGPublisher implements Publisher {
     }
 
     const conditionSubjects = options.conditions.map(c => c.subject);
-    const quadSubjects = [...new Set(quads.map(q => q.subject))];
+    const quadSubjects = [...new Set(normalizedQuads.map(q => q.subject))];
     const lockPrefix = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
     const lockKeys = [...new Set([...conditionSubjects, ...quadSubjects])].map(s => `${lockPrefix}\0${s}`);
 
-    return this.withWriteLocks(lockKeys, () => this._executeConditionalWrite(contextGraphId, quads, options));
+    return this.withWriteLocks(lockKeys, () => this._executeConditionalWrite(contextGraphId, normalizedQuads, options));
   }
 
   /** @deprecated Use conditionalShare() */
@@ -1756,6 +1758,14 @@ export class DKGPublisher implements Publisher {
         targetGraphUri: sgUri,
       };
     }
+
+    options = {
+      ...options,
+      quads: normalizeProducerRdfLiterals(options.quads),
+      ...(options.privateQuads
+        ? { privateQuads: normalizeProducerRdfLiterals(options.privateQuads) }
+        : {}),
+    };
 
     const {
       contextGraphId,
@@ -5089,9 +5099,9 @@ export class DKGPublisher implements Publisher {
   ): Promise<void> {
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
     const graphUri = await this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
-    const quads = input.map((t) => ({
+    const quads = normalizeProducerRdfLiterals(input.map((t) => ({
       subject: t.subject, predicate: t.predicate, object: t.object, graph: graphUri,
-    }));
+    })));
     // Round 9 Bug 25: reject user-authored quads whose subject is in a
     // protocol-reserved URN namespace. See RESERVED_SUBJECT_PREFIXES above.
     rejectUserAuthoredProtocolMetadata(quads);
