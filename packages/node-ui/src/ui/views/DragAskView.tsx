@@ -34,11 +34,20 @@ function shortPred(p: string): string {
   return m ? m[1] : p;
 }
 
+function retrievalLabel(r: string): string {
+  if (!r || r === 'none') return '';
+  if (r === 'keyword') return '🔤 keyword';
+  if (r.includes('hashing')) return '🔤 lexical';
+  if (r.startsWith('vector:')) return '🧠 semantic';
+  return r;
+}
+
 export function DragAskView() {
   const activeProjectId = useProjectsStore((s) => s.activeProjectId);
   const [question, setQuestion] = useState('Which suppliers were flagged in the 2026 Q1 audit, and why?');
   const [cg, setCg] = useState(activeProjectId ?? '');
   const [scope, setScope] = useState<'local' | 'network'>('local');
+  const [retrieval, setRetrieval] = useState(''); // '' = node default; else keyword|hashing|local
   const [pay, setPay] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -48,7 +57,7 @@ export function DragAskView() {
     setLoading(true);
     setError(null);
     try {
-      setResult(await answerQuestion({ question, contextGraphId: cg.trim(), scope, pay }));
+      setResult(await answerQuestion({ question, contextGraphId: cg.trim(), scope, pay, embedder: retrieval || undefined }));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setResult(null);
@@ -90,6 +99,18 @@ export function DragAskView() {
             <button className={scope === 'local' ? 'active' : ''} onClick={() => setScope('local')}>This node</button>
             <button className={scope === 'network' ? 'active' : ''} onClick={() => setScope('network')}>Across network</button>
           </div>
+          <select
+            className="v10-drag-cg"
+            style={{ flex: '0 0 auto', minWidth: 'auto' }}
+            value={retrieval}
+            onChange={(e) => setRetrieval(e.target.value)}
+            title="Retrieval method (this node only)"
+          >
+            <option value="">retrieval: default</option>
+            <option value="keyword">keyword (substring)</option>
+            <option value="hashing">lexical (hashing)</option>
+            <option value="local">semantic (MiniLM)</option>
+          </select>
           <label className="v10-drag-pay">
             <input type="checkbox" checked={pay} onChange={(e) => setPay(e.target.checked)} /> charge 0.01 USDC (x402)
           </label>
@@ -117,6 +138,9 @@ export function DragAskView() {
                 ? `network · ${result.perNode?.filter((p) => !p.error).length ?? 0} node(s)`
                 : 'this node'}
             </span>
+            {retrievalLabel(String(result.stats.retrieval ?? '')) && (
+              <span className="v10-drag-chip">{retrievalLabel(String(result.stats.retrieval ?? ''))}</span>
+            )}
             {result.settlement?.ok && (
               <span className="v10-drag-chip paid">paid {result.settlement.amount} {result.settlement.asset} · x402</span>
             )}
