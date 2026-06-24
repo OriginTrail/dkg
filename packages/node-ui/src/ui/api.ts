@@ -127,6 +127,83 @@ async function put<T>(path: string, body: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// ── dRAG answering (OT-RFC-55) ──────────────────────────────────────────────
+
+export interface DragCitation {
+  kaId: string;
+  contextGraphId: string;
+  servingNode: string;
+  ual: string;
+  triple: { subject: string; predicate: string; object: string };
+  onChain: { merkleRoot: string; author: string; chainId: string };
+  checks: { merkle: boolean; onChain: boolean | null; authorSig: boolean | null; verified: boolean };
+}
+
+export interface DragPerNode { peerId: string; factsCited: number; verified: number; error?: string }
+
+export interface DragAnswer {
+  question: string;
+  contextGraphId: string;
+  scope: string;
+  answer: string;
+  llm: boolean;
+  citations: DragCitation[];
+  facts: Array<{ subject: string; predicate: string; object: string; source: number }>;
+  perNode?: DragPerNode[];
+  settlement?: { ok: boolean; asset: string; amount: string; payTo: string; txRef?: string };
+  stats: { keywords: string[]; verified: number; factsCited: number; [k: string]: unknown };
+}
+
+export interface DragAnswerRequest {
+  question: string;
+  contextGraphId: string;
+  scope?: 'local' | 'network';
+  /** Demo the x402 paywall: the call performs the 402 → pay → 200 round-trip. */
+  pay?: boolean;
+}
+
+async function rawAnswer(body: unknown, xPayment?: string): Promise<{ status: number; body: any }> {
+  const res = await fetch(`${BASE}/api/answer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders(), ...(xPayment ? { 'X-PAYMENT': xPayment } : {}) },
+    body: JSON.stringify(body),
+  });
+  const parsed = await res.json().catch(() => ({}));
+  return { status: res.status, body: parsed };
+}
+
+/**
+ * Ask a dRAG question. When `pay` is set, exercises the x402 wire format end to
+ * end: a first request returns HTTP 402 + a challenge, then we attach an
+ * `X-PAYMENT` header and retry to get the answer + a settlement receipt.
+ */
+export async function answerQuestion(req: DragAnswerRequest): Promise<DragAnswer> {
+  const base: Record<string, unknown> = { question: req.question, contextGraphId: req.contextGraphId };
+  if (req.scope) base.scope = req.scope;
+
+  if (!req.pay) {
+    const { status, body } = await rawAnswer(base);
+    if (status !== 200) throw new HttpError(status, body?.error ?? `HTTP ${status}`, body);
+    return body as DragAnswer;
+  }
+
+  const priced = { ...base, simulatePrice: '0.01 USDC' };
+  const first = await rawAnswer(priced);
+  if (first.status === 200) return first.body as DragAnswer; // node charges nothing
+  if (first.status !== 402 || !first.body?.accepts?.[0]) {
+    throw new HttpError(first.status, first.body?.error ?? `HTTP ${first.status}`, first.body);
+  }
+  const ch = first.body.accepts[0];
+  const xPayment = btoa(JSON.stringify({
+    x402Version: 1, scheme: ch.scheme, network: ch.network, asset: ch.asset,
+    amount: ch.amount, payTo: ch.payTo, nonce: ch.nonce,
+    from: '0xA9e1000000000000000000000000000000DEMO00',
+  }));
+  const paid = await rawAnswer(priced, xPayment);
+  if (paid.status !== 200) throw new HttpError(paid.status, paid.body?.error ?? `HTTP ${paid.status}`, paid.body);
+  return paid.body as DragAnswer;
+}
+
 async function del<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { method: 'DELETE', headers: authHeaders() });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);

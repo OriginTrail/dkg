@@ -5,6 +5,7 @@ import { ProjectView } from '../../views/ProjectView.js';
 import { ContextGraphPrimerView } from '../../views/ContextGraphPrimerView.js';
 import { MemoryLayerView } from '../../views/MemoryLayerView.js';
 import { MemoryStackView } from '../../views/MemoryStackView.js';
+import { DragAskView } from '../../views/DragAskView.js';
 import { authHeaders, fileUrl } from '../../api.js';
 import { DOC_TAB_PREFIX, decodeDocTabId } from '../../lib/doc-tab-id.js';
 import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../../lib/contextGraphPrimer.js';
@@ -297,6 +298,8 @@ function ViewContainer() {
   }
 
   if (activeTabId === 'memory-stack') return <MemoryStackView />;
+
+  if (activeTabId === 'drag-ask') return <DragAskView />;
 
   if (activeTabId === CONTEXT_GRAPH_PRIMER_TAB_ID) return <ContextGraphPrimerView />;
 

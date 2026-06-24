@@ -229,6 +229,13 @@ export function PanelLeft() {
             <span>▦</span> Dashboard
           </div>
 
+          <div
+            className={`v10-tree-dashboard ${activeTabId === 'drag-ask' ? 'active' : ''}`}
+            onClick={() => openTab({ id: 'drag-ask', label: 'dRAG Ask', closable: true })}
+          >
+            <span>✦</span> dRAG Ask
+          </div>
+
           {/* Empty-state card hoisted ABOVE the collapsible sections so it
               stays visible if both sections are collapsed. */}
           {contextGraphs.length === 0 && stage <= 1 && (
