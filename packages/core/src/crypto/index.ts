@@ -127,3 +127,15 @@ export {
 } from './v10-publish-payload.js';
 
 export { resolveRootEntities, type Quad as RootEntityQuad } from './root-entity.js';
+
+export {
+  bytesToHex0x,
+  hex0xToBytes,
+  citationProofToMaterial,
+  verifyCitationProof,
+  type CitationTriple,
+  type CitationProof,
+  type CitationSeal,
+  type CitationChecks,
+  type VerifiableCitation,
+} from './citation.js';
