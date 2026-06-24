@@ -39,7 +39,10 @@ function summarize(r: DragAnswerResult): string {
     r.scope === 'network'
       ? ` · network: ${r.stats.nodesAnswered ?? 0}/${r.stats.servingNodes ?? 0} serving nodes`
       : '';
-  const header = `> ${trust} · context graph \`${r.contextGraphId}\`${r.llm ? ' · LLM-synthesised' : ' · keyword-grounded'}${net}\n`;
+  const paid = r.settlement?.ok
+    ? ` · paid ${r.settlement.amount} ${r.settlement.asset} (x402)`
+    : '';
+  const header = `> ${trust} · context graph \`${r.contextGraphId}\`${r.llm ? ' · LLM-synthesised' : ' · keyword-grounded'}${net}${paid}\n`;
   return `${header}\n${r.answer}`;
 }
 

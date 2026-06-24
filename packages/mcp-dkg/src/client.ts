@@ -47,6 +47,8 @@ export interface DragAnswerResult {
   citations: DragCitation[];
   facts: Array<{ subject: string; predicate: string; object: string; source: number }>;
   perNode?: Array<{ peerId: string; factsCited: number; verified: number; error?: string }>;
+  /** x402 settlement receipt, present when the answer was paid for. */
+  settlement?: { ok: boolean; asset: string; amount: string; payTo: string; txRef?: string };
   stats: {
     keywords: string[];
     factsCited: number;
