@@ -26,6 +26,29 @@ export interface QueryResponse {
   phases?: Record<string, number>;
 }
 
+/** A verifiable citation in a dRAG answer (subset surfaced to the MCP layer). */
+export interface DragCitation {
+  ual: string;
+  kaId: string;
+  contextGraphId: string;
+  servingNode: string;
+  triple: { subject: string; predicate: string; object: string };
+  onChain: { merkleRoot: string; author: string; chainId: string };
+  checks: { merkle: boolean; onChain: boolean | null; authorSig: boolean | null; verified: boolean };
+}
+
+/** Response of POST /api/answer (dRAG single-node, OT-RFC-55). */
+export interface DragAnswerResult {
+  question: string;
+  contextGraphId: string;
+  scope: string;
+  answer: string;
+  llm: boolean;
+  citations: DragCitation[];
+  facts: Array<{ subject: string; predicate: string; object: string; source: number }>;
+  stats: { keywords: string[]; kasMatched: number; factsCited: number; verified: number };
+}
+
 export interface ProjectRow {
   id: string;
   name?: string;
@@ -431,6 +454,24 @@ export class DkgClient {
 
     const r = await this.request<QueryResponse>('POST', '/api/query', body);
     return r.result ?? { bindings: [] };
+  }
+
+  /**
+   * dRAG single-node grounded answer (OT-RFC-55). Returns a keyword/structural
+   * answer over one Context Graph's verifiable memory, with a verifiable
+   * citation per cited fact. POST /api/answer.
+   */
+  async answer(args: {
+    question: string;
+    contextGraphId?: string;
+    maxCitations?: number;
+    maxKas?: number;
+  }): Promise<DragAnswerResult> {
+    const body: Record<string, unknown> = { question: args.question };
+    if (args.contextGraphId) body.contextGraphId = args.contextGraphId;
+    if (args.maxCitations != null) body.maxCitations = args.maxCitations;
+    if (args.maxKas != null) body.maxKas = args.maxKas;
+    return this.request<DragAnswerResult>('POST', '/api/answer', body);
   }
 
   /**

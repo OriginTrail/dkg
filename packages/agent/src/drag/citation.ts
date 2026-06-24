@@ -152,32 +152,39 @@ async function loadSealByMerkleRoot(
   contextGraphIdStr: string,
   merkleRoot: Uint8Array,
 ): Promise<AssertionSeal | undefined> {
-  const metaGraph = contextGraphMetaUri(contextGraphName, contextGraphIdStr);
   const rootLexical = bytesToHex0x(merkleRoot).slice(2).toLowerCase(); // xsd:hexBinary lexical (no 0x)
-  const sel = await store.query(
-    `SELECT DISTINCT ?s WHERE {
-       GRAPH <${metaGraph}> {
-         ?s <http://dkg.io/ontology/assertionMerkleRoot> ?r .
-         FILTER(LCASE(STR(?r)) = "${rootLexical}")
-       }
-     } LIMIT 8`,
+  // The seal is written by finalize to the NAME-only `_meta` graph
+  // (`contextGraphMetaUri(name)`); the cgId-scoped meta is checked as a
+  // fallback in case a future remap relocates it.
+  const metaGraphs = Array.from(
+    new Set([contextGraphMetaUri(contextGraphName), contextGraphMetaUri(contextGraphName, contextGraphIdStr)]),
   );
-  const subjects =
-    sel.type === 'bindings'
-      ? sel.bindings.map((b) => stripAngle(b['s'] ?? '')).filter((s) => s.length > 0)
-      : [];
-  for (const subj of subjects) {
-    const c = await store.query(
-      `CONSTRUCT { <${subj}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${subj}> ?p ?o } }`,
+  for (const metaGraph of metaGraphs) {
+    const sel = await store.query(
+      `SELECT DISTINCT ?s WHERE {
+         GRAPH <${metaGraph}> {
+           ?s <http://dkg.io/ontology/assertionMerkleRoot> ?r .
+           FILTER(LCASE(STR(?r)) = "${rootLexical}")
+         }
+       } LIMIT 8`,
     );
-    const quads = c.type === 'quads' ? c.quads : [];
-    let seal: AssertionSeal | undefined;
-    try {
-      seal = parseAssertionSealQuads(quads, subj);
-    } catch {
-      seal = undefined; // partial/corrupt seal — skip, fall back to on-chain author
+    const subjects =
+      sel.type === 'bindings'
+        ? sel.bindings.map((b) => stripAngle(b['s'] ?? '')).filter((s) => s.length > 0)
+        : [];
+    for (const subj of subjects) {
+      const c = await store.query(
+        `CONSTRUCT { <${subj}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${subj}> ?p ?o } }`,
+      );
+      const quads = c.type === 'quads' ? c.quads : [];
+      let seal: AssertionSeal | undefined;
+      try {
+        seal = parseAssertionSealQuads(quads, subj);
+      } catch {
+        seal = undefined; // partial/corrupt seal — skip, fall back to on-chain author
+      }
+      if (seal && eqHex(bytesToHex0x(seal.merkleRoot), bytesToHex0x(merkleRoot))) return seal;
     }
-    if (seal && eqHex(bytesToHex0x(seal.merkleRoot), bytesToHex0x(merkleRoot))) return seal;
   }
   return undefined;
 }
@@ -185,42 +192,55 @@ async function loadSealByMerkleRoot(
 // ── producer ──────────────────────────────────────────────────────────────────
 
 /**
- * Build a {@link VerifiableCitation} for one cited triple of a locally-held KA.
- * The returned citation re-anchors to the live on-chain Merkle root and carries
- * the author seal when resolvable.
+ * The per-KA work that does NOT depend on the specific cited triple: extract the
+ * canonical leaf set, read the on-chain commitment + author, load + recover the
+ * author seal. Prepared once per KA, then reused to cite many triples of that KA
+ * via {@link citeTriple} — avoiding redundant store extraction + chain reads.
+ *
+ * `triples` are the KA's canonical public triples (the exact forms the Merkle
+ * leaves are built from); cite only triples drawn from this set so the leaf
+ * always matches.
  */
-export async function buildVerifiableCitation(
-  deps: BuildCitationDeps,
-  args: { contextGraphId: bigint; kaId: bigint; triple: CitationTriple },
-): Promise<VerifiableCitation> {
-  const { store, chain, servingNode } = deps;
-  const { contextGraphId, kaId, triple } = args;
+export interface PreparedKaCitation {
+  ual: string;
+  contextGraphIdStr: string;
+  kaIdStr: string;
+  servingNode: string;
+  /** Canonical N-Triple content bytes of each public triple (unsorted). */
+  contents: Uint8Array[];
+  privateRoots: Uint8Array[];
+  /** The KA's canonical public triples (cite only from this set). */
+  triples: CitationTriple[];
+  merkleRoot: Uint8Array;
+  merkleLeafCount: number;
+  author: string;
+  chainId: bigint;
+  seal?: CitationSeal;
+  /** Per-KA author verdict (same for every triple of the KA). */
+  authorSig: boolean | null;
+}
 
-  // 1. Resolve the KA's canonical V10 public leaf set + private sub-roots.
+/**
+ * Resolve everything a citation needs for ALL triples of one KA: extract the
+ * canonical leaf set, read the on-chain commitment + author, and recover the
+ * author seal once.
+ */
+export async function prepareKaCitation(
+  deps: BuildCitationDeps,
+  args: { contextGraphId: bigint; kaId: bigint },
+): Promise<PreparedKaCitation> {
+  const { store, chain, servingNode } = deps;
+  const { contextGraphId, kaId } = args;
+
   const kc = await extractV10KCFromStore(store, contextGraphId, kaId);
   const contents = kc.triples.map((t) => tripleContentV10(t.subject, t.predicate, t.object));
 
-  // 2. Locate the cited triple's leaf index (== on-chain chunkId).
-  const citedContent = tripleContentV10(triple.subject, triple.predicate, triple.object);
-  const chunkId = findLeafIndex(contents, kc.privateRoots, citedContent);
-  if (chunkId < 0) throw new CitedTripleNotInKAError(kaId, triple);
-
-  // 3. Read the on-chain commitment.
   const [merkleRoot, merkleLeafCount, author] = await Promise.all([
     chain.getLatestMerkleRoot(kaId),
     chain.getMerkleLeafCount(kaId),
     chain.getLatestMerkleRootAuthor(kaId),
   ]);
 
-  // 4. Build proof material. buildV10ProofMaterial THROWS unless the recomputed
-  //    structured root + leaf count equal the on-chain commitment — so a returned
-  //    material is simultaneously Merkle-valid AND on-chain-anchored.
-  const material = buildV10ProofMaterial(contents, kc.privateRoots, chunkId, {
-    merkleRoot,
-    merkleLeafCount,
-  });
-
-  // 5. Best-effort off-chain author seal.
   let seal: CitationSeal | undefined;
   let authorSig: boolean | null;
   const loaded = await loadSealByMerkleRoot(
@@ -238,27 +258,50 @@ export async function buildVerifiableCitation(
       recovered = '';
     }
     authorSig =
-      isNonZeroAddress(recovered) &&
-      eqHex(recovered, author) &&
-      eqHex(seal.merkleRoot, bytesToHex0x(merkleRoot));
+      isNonZeroAddress(recovered) && eqHex(recovered, author) && eqHex(seal.merkleRoot, bytesToHex0x(merkleRoot));
   } else {
-    // Chain verified the EIP-712 author sig at publish; we just can't re-derive
-    // it off-chain without the seal. Authorship still rests on the on-chain author.
     authorSig = isNonZeroAddress(author) ? null : false;
   }
 
-  const checks: CitationChecks = {
-    merkle: true,
-    onChain: bytesEqual(material.merkleRoot, merkleRoot),
-    authorSig,
-    verified: bytesEqual(material.merkleRoot, merkleRoot) && authorSig !== false,
-  };
-
   return {
     ual: kc.ual,
-    kaId: kaId.toString(),
-    contextGraphId: contextGraphId.toString(),
+    contextGraphIdStr: contextGraphId.toString(),
+    kaIdStr: kaId.toString(),
     servingNode,
+    contents,
+    privateRoots: kc.privateRoots,
+    triples: kc.triples.map((t) => ({ subject: t.subject, predicate: t.predicate, object: t.object })),
+    merkleRoot,
+    merkleLeafCount,
+    author,
+    chainId: seal ? BigInt(seal.chainId) : deps.chainId,
+    seal,
+    authorSig,
+  };
+}
+
+/**
+ * Build a {@link VerifiableCitation} for one triple of an already-{@link prepareKaCitation prepared}
+ * KA. Pure (no async): builds the V10 Merkle proof and asserts it re-anchors to
+ * the prepared on-chain root. Throws {@link CitedTripleNotInKAError} if the
+ * triple is not a public leaf of the KA.
+ */
+export function citeTriple(prepared: PreparedKaCitation, triple: CitationTriple): VerifiableCitation {
+  const citedContent = tripleContentV10(triple.subject, triple.predicate, triple.object);
+  const chunkId = findLeafIndex(prepared.contents, prepared.privateRoots, citedContent);
+  if (chunkId < 0) throw new CitedTripleNotInKAError(BigInt(prepared.kaIdStr), triple);
+
+  const material = buildV10ProofMaterial(prepared.contents, prepared.privateRoots, chunkId, {
+    merkleRoot: prepared.merkleRoot,
+    merkleLeafCount: prepared.merkleLeafCount,
+  });
+  const onChainOk = bytesEqual(material.merkleRoot, prepared.merkleRoot);
+
+  return {
+    ual: prepared.ual,
+    kaId: prepared.kaIdStr,
+    contextGraphId: prepared.contextGraphIdStr,
+    servingNode: prepared.servingNode,
     triple,
     proof: {
       content: bytesToHex0x(material.content),
@@ -268,13 +311,30 @@ export async function buildVerifiableCitation(
       leafCount: material.leafCount,
     },
     onChain: {
-      merkleRoot: bytesToHex0x(merkleRoot),
-      author,
-      chainId: (seal ? BigInt(seal.chainId) : deps.chainId).toString(),
+      merkleRoot: bytesToHex0x(prepared.merkleRoot),
+      author: prepared.author,
+      chainId: prepared.chainId.toString(),
     },
-    seal,
-    checks,
+    seal: prepared.seal,
+    checks: {
+      merkle: true,
+      onChain: onChainOk,
+      authorSig: prepared.authorSig,
+      verified: onChainOk && prepared.authorSig !== false,
+    },
   };
+}
+
+/**
+ * Build a {@link VerifiableCitation} for one cited triple of a locally-held KA
+ * (convenience: {@link prepareKaCitation} + {@link citeTriple} for a single fact).
+ */
+export async function buildVerifiableCitation(
+  deps: BuildCitationDeps,
+  args: { contextGraphId: bigint; kaId: bigint; triple: CitationTriple },
+): Promise<VerifiableCitation> {
+  const prepared = await prepareKaCitation(deps, args);
+  return citeTriple(prepared, args.triple);
 }
 
 // ── verifier ────────────────────────────────────────────────────────────────
