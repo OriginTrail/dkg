@@ -19,10 +19,12 @@ import type { DKGAgent } from './dkg-agent.js';
 import {
   prepareKaCitation,
   citeTriple,
+  verifyVerifiableCitation,
   type CitationChainReads,
   type PreparedKaCitation,
 } from './drag/citation.js';
-import type { VerifiableCitation, CitationTriple } from '@origintrail-official/dkg-core';
+import { PROTOCOL_DRAG_ANSWER } from '@origintrail-official/dkg-core';
+import type { VerifiableCitation, CitationTriple, CitationChecks } from '@origintrail-official/dkg-core';
 
 /** Per-KA VM graph: `…/_verifiable_memory/<author>/<number>` → {author, number}. */
 const VM_GRAPH_RE = /\/_verifiable_memory\/(0x[0-9a-fA-F]{40})\/(\d+)$/;
@@ -55,6 +57,28 @@ export interface DragAnswerResult {
   citations: VerifiableCitation[];
   facts: DragFact[];
   stats: { keywords: string[]; kasMatched: number; factsCited: number; verified: number };
+}
+
+export interface DragPerNode {
+  peerId: string;
+  /** Facts the node returned (before dedup). */
+  factsCited: number;
+  /** Of those, how many the ASKER re-verified against the chain. */
+  verified: number;
+  error?: string;
+}
+
+export interface DragNetworkAnswerResult {
+  question: string;
+  contextGraphId: string;
+  scope: 'network';
+  answer: string;
+  llm: boolean;
+  /** Deduped citations, each RE-VERIFIED by the asker against its own chain. */
+  citations: VerifiableCitation[];
+  facts: DragFact[];
+  perNode: DragPerNode[];
+  stats: { keywords: string[]; servingNodes: number; nodesAnswered: number; factsCited: number; verified: number };
 }
 
 /** Extract content keywords from a question (lowercase, drop stopwords + short tokens). */
@@ -242,6 +266,155 @@ export class DragMethods extends DKGAgentBase {
       stats: { keywords, kasMatched, factsCited: citations.length, verified },
     };
   }
+
+  /**
+   * Ask ONE peer to answer `question` over a public context graph it serves.
+   * JSON over the dRAG-answer libp2p protocol; the peer runs its own
+   * `dragAnswerLocal` and returns grounded, verifiable citations.
+   */
+  async dragAnswerRemote(
+    this: DKGAgent,
+    peerId: string,
+    args: { question: string; contextGraphId: string; maxCitations?: number; maxKas?: number },
+  ): Promise<DragAnswerResult> {
+    const payload = new TextEncoder().encode(
+      JSON.stringify({
+        question: args.question,
+        contextGraphId: args.contextGraphId,
+        maxCitations: args.maxCitations,
+        maxKas: args.maxKas,
+      }),
+    );
+    const sendResult = await this.messenger.sendReliable(peerId, PROTOCOL_DRAG_ANSWER, payload);
+    if (!sendResult.delivered) {
+      throw new Error(`dRAG remote to ${peerId.slice(-8)} not delivered (queued): ${sendResult.error ?? 'unknown'}`);
+    }
+    const decoded = JSON.parse(new TextDecoder().decode(sendResult.response)) as
+      | DragAnswerResult
+      | { error: string };
+    if ('error' in decoded) throw new Error(`peer ${peerId.slice(-8)}: ${decoded.error}`);
+    return decoded;
+  }
+
+  /**
+   * Answer `question` over a PUBLIC context graph by fanning out across the peers
+   * that serve it (resolved from the agents-CG phonebook), aggregating their
+   * grounded citations, and — crucially — RE-VERIFYING every citation against
+   * THIS node's own chain. The asker therefore trusts no serving node's
+   * self-reported verdict; a fabricated or tampered citation fails the asker's
+   * independent check. The asker need not hold the CG itself.
+   */
+  async dragAnswerNetwork(
+    this: DKGAgent,
+    args: {
+      question: string;
+      contextGraphId: string;
+      maxCitations?: number;
+      maxKas?: number;
+      /** Also answer locally if this node serves the CG (default: auto-detect). */
+      includeSelf?: boolean;
+      /**
+       * Explicit serving peerIds to fan out to, UNION'd with the phonebook
+       * discovery. Useful when the caller already knows serving nodes, or when
+       * an advertisement has not yet gossiped into this node's agents-CG (the
+       * phonebook integrates fresh `contextGraphsServed` updates on a heartbeat
+       * cadence, so discovery can lag a just-created CG).
+       */
+      peers?: string[];
+    },
+  ): Promise<DragNetworkAnswerResult> {
+    const keywords = extractKeywords(args.question);
+    const discovered = await this.discovery
+      .findNodesServingCG(args.contextGraphId)
+      .catch((): string[] => []);
+    const servingPeers = Array.from(new Set([...discovered, ...(args.peers ?? [])]));
+    const myPeerId = this.peerId ?? 'local';
+    const includeSelf = args.includeSelf ?? servingPeers.includes(myPeerId);
+    const remotePeers = servingPeers.filter((p) => p !== myPeerId);
+
+    type NodeResult = { peerId: string; result?: DragAnswerResult; error?: string };
+    const tasks: Promise<NodeResult>[] = [];
+    if (includeSelf) {
+      tasks.push(
+        this.dragAnswerLocal(args)
+          .then((result) => ({ peerId: myPeerId, result }))
+          .catch((e) => ({ peerId: myPeerId, error: e instanceof Error ? e.message : String(e) })),
+      );
+    }
+    for (const peer of remotePeers) {
+      tasks.push(
+        this.dragAnswerRemote(peer, args)
+          .then((result) => ({ peerId: peer, result }))
+          .catch((e) => ({ peerId: peer, error: e instanceof Error ? e.message : String(e) })),
+      );
+    }
+    const nodeResults = await Promise.all(tasks);
+
+    // Re-verify against OUR chain (trustless aggregation).
+    const chain: CitationChainReads = {
+      getLatestMerkleRoot: (kaId) => this.chain.getLatestMerkleRoot!(kaId),
+      getMerkleLeafCount: (kaId) => this.chain.getMerkleLeafCount!(kaId),
+      getLatestMerkleRootAuthor: (kaId) => this.chain.getLatestMerkleRootAuthor!(kaId),
+    };
+
+    const seen = new Set<string>();
+    const citations: VerifiableCitation[] = [];
+    const facts: DragFact[] = [];
+    const kaIndex = new Map<string, number>();
+    const perNode: DragPerNode[] = [];
+    const maxCitations = Math.min(Math.max(args.maxCitations ?? 12, 1), 50);
+    // Verify each unique citation ONCE (the asker's own chain check); reuse the
+    // verdict for the same fact offered by another node, so a corroborating node
+    // is credited for verified facts even after the answer-level dedup.
+    const verdictCache = new Map<string, CitationChecks>();
+
+    for (const nr of nodeResults) {
+      if (nr.error || !nr.result) {
+        perNode.push({ peerId: nr.peerId, factsCited: 0, verified: 0, error: nr.error ?? 'no result' });
+        continue;
+      }
+      let nodeVerified = 0;
+      for (const c of nr.result.citations) {
+        const key = `${c.kaId}|${c.triple.subject}|${c.triple.predicate}|${c.triple.object}`;
+        let checks = verdictCache.get(key);
+        if (!checks) {
+          checks = await verifyVerifiableCitation(c, { chain }).catch(
+            (): CitationChecks => ({ merkle: false, onChain: false, authorSig: false, verified: false }),
+          );
+          verdictCache.set(key, checks);
+        }
+        if (checks.verified) nodeVerified++;
+        if (!seen.has(key) && citations.length < maxCitations) {
+          seen.add(key);
+          // Stamp the (first) serving node + the asker's independent verdict.
+          citations.push({ ...c, servingNode: nr.peerId, checks });
+          let idx = kaIndex.get(c.kaId);
+          if (idx === undefined) {
+            idx = kaIndex.size + 1;
+            kaIndex.set(c.kaId, idx);
+          }
+          facts.push({ subject: c.triple.subject, predicate: c.triple.predicate, object: c.triple.object, source: idx });
+        }
+      }
+      perNode.push({ peerId: nr.peerId, factsCited: nr.result.citations.length, verified: nodeVerified });
+    }
+
+    const verified = citations.filter((c) => c.checks.verified).length;
+    const nodesAnswered = perNode.filter((p) => !p.error).length;
+    const answer = renderNetworkAnswer(args.question, facts, citations, kaIndex, perNode);
+
+    return {
+      question: args.question,
+      contextGraphId: args.contextGraphId,
+      scope: 'network',
+      answer,
+      llm: false,
+      citations,
+      facts,
+      perNode,
+      stats: { keywords, servingNodes: servingPeers.length, nodesAnswered, factsCited: citations.length, verified },
+    };
+  }
 }
 
 /** Render a human-readable, audit-flagged answer (no LLM). */
@@ -290,4 +463,35 @@ function renderAnswer(
     lines.push(`     root: ${shortHex(c.onChain.merkleRoot)}  author: ${c.onChain.author}`);
   }
   return lines.join('\n');
+}
+
+/** Render a cross-node answer with a per-node trust breakdown (no LLM). */
+function renderNetworkAnswer(
+  question: string,
+  facts: DragFact[],
+  citations: VerifiableCitation[],
+  kaIndex: Map<string, number>,
+  perNode: DragPerNode[],
+): string {
+  const answered = perNode.filter((p) => !p.error).length;
+  if (facts.length === 0) {
+    return (
+      `No verifiable facts found across the network for "${question}" ` +
+      `(${answered}/${perNode.length} serving node${perNode.length === 1 ? '' : 's'} answered).`
+    );
+  }
+  const base = renderAnswer(question, facts, citations, kaIndex);
+  const lines: string[] = ['', '## Network'];
+  lines.push(
+    `Assembled across ${answered} of ${perNode.length} serving node${perNode.length === 1 ? '' : 's'}; ` +
+      `every citation re-verified independently against the chain by this node.`,
+  );
+  for (const p of perNode) {
+    lines.push(
+      p.error
+        ? `- @${p.peerId.slice(0, 12)} — error: ${p.error}`
+        : `- @${p.peerId.slice(0, 12)} — ${p.factsCited} fact${p.factsCited === 1 ? '' : 's'} offered, ${p.verified} verified`,
+    );
+  }
+  return `${base}\n${lines.join('\n')}`;
 }

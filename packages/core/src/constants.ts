@@ -52,6 +52,11 @@ export const PROTOCOL_ACCESS = '/dkg/10.0.1/private-access';
 // at the app layer so this is semantically safe (see
 // docs/messenger.md "Response caching policy").
 export const PROTOCOL_QUERY_REMOTE = '/dkg/10.0.1/query-remote';
+// OT-RFC-55 dRAG (P3): a peer asks this node to answer a question over a PUBLIC
+// context graph and return grounded, verifiable citations. Same JSON-over-
+// messenger pattern as PROTOCOL_QUERY_REMOTE; the serving node answers only for
+// CGs whose live on-chain accessPolicy is public (fail-closed).
+export const PROTOCOL_DRAG_ANSWER = '/dkg/10.0.1/drag-answer';
 // rc.9 PR-8: bumped from /dkg/10.0.0/swm-sender-key to opt into the
 // Universal Messenger substrate (same rationale as PROTOCOL_ACCESS).
 // SWM sender-key send sites in dkg-agent.ts route through

@@ -35,7 +35,11 @@ function summarize(r: DragAnswerResult): string {
     verified === factsCited
       ? `All ${factsCited} citation${factsCited === 1 ? '' : 's'} verified against the chain ✓`
       : `${verified}/${factsCited} citations verified against the chain`;
-  const header = `> ${trust} · context graph \`${r.contextGraphId}\`${r.llm ? ' · LLM-synthesised' : ' · keyword-grounded'}\n`;
+  const net =
+    r.scope === 'network'
+      ? ` · network: ${r.stats.nodesAnswered ?? 0}/${r.stats.servingNodes ?? 0} serving nodes`
+      : '';
+  const header = `> ${trust} · context graph \`${r.contextGraphId}\`${r.llm ? ' · LLM-synthesised' : ' · keyword-grounded'}${net}\n`;
   return `${header}\n${r.answer}`;
 }
 
@@ -60,6 +64,15 @@ export function registerAnswerTool(server: McpServer, client: DkgClient, config:
           .string()
           .optional()
           .describe('Context graph to answer over. Defaults to the pinned project.'),
+        scope: z
+          .enum(['local', 'network'])
+          .optional()
+          .describe(
+            'Where to answer from. "local" (default) = this node\'s copy of the ' +
+              'context graph. "network" = fan out to every node serving the (public) ' +
+              'context graph and aggregate their citations, each re-verified against ' +
+              'the chain — use it to answer over knowledge this node may not hold.',
+          ),
         maxCitations: z
           .number()
           .int()
@@ -69,7 +82,7 @@ export function registerAnswerTool(server: McpServer, client: DkgClient, config:
           .describe('Cap on cited facts (default 12).'),
       },
     },
-    async ({ question, projectId, maxCitations }): Promise<ToolResult> => {
+    async ({ question, projectId, scope, maxCitations }): Promise<ToolResult> => {
       const cg = resolveProject(projectId, config);
       if (!cg) {
         return err(
@@ -77,7 +90,7 @@ export function registerAnswerTool(server: McpServer, client: DkgClient, config:
         );
       }
       try {
-        const result = await client.answer({ question, contextGraphId: cg, maxCitations });
+        const result = await client.answer({ question, contextGraphId: cg, scope, maxCitations });
         return ok(summarize(result));
       } catch (e) {
         return err(`dkg_answer failed: ${formatError(e)}`);

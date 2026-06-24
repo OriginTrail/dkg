@@ -37,7 +37,7 @@ export interface DragCitation {
   checks: { merkle: boolean; onChain: boolean | null; authorSig: boolean | null; verified: boolean };
 }
 
-/** Response of POST /api/answer (dRAG single-node, OT-RFC-55). */
+/** Response of POST /api/answer (dRAG, OT-RFC-55). `scope: "network"` adds `perNode`. */
 export interface DragAnswerResult {
   question: string;
   contextGraphId: string;
@@ -46,7 +46,15 @@ export interface DragAnswerResult {
   llm: boolean;
   citations: DragCitation[];
   facts: Array<{ subject: string; predicate: string; object: string; source: number }>;
-  stats: { keywords: string[]; kasMatched: number; factsCited: number; verified: number };
+  perNode?: Array<{ peerId: string; factsCited: number; verified: number; error?: string }>;
+  stats: {
+    keywords: string[];
+    factsCited: number;
+    verified: number;
+    kasMatched?: number;
+    servingNodes?: number;
+    nodesAnswered?: number;
+  };
 }
 
 export interface ProjectRow {
@@ -464,11 +472,13 @@ export class DkgClient {
   async answer(args: {
     question: string;
     contextGraphId?: string;
+    scope?: 'local' | 'network';
     maxCitations?: number;
     maxKas?: number;
   }): Promise<DragAnswerResult> {
     const body: Record<string, unknown> = { question: args.question };
     if (args.contextGraphId) body.contextGraphId = args.contextGraphId;
+    if (args.scope) body.scope = args.scope;
     if (args.maxCitations != null) body.maxCitations = args.maxCitations;
     if (args.maxKas != null) body.maxKas = args.maxKas;
     return this.request<DragAnswerResult>('POST', '/api/answer', body);

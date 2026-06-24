@@ -34,13 +34,21 @@ export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
       jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "projectId")' });
       return;
     }
+    const scope = parsed.scope === 'network' ? 'network' : 'local';
+    const common = {
+      question,
+      contextGraphId,
+      maxCitations: typeof parsed.maxCitations === 'number' ? parsed.maxCitations : undefined,
+      maxKas: typeof parsed.maxKas === 'number' ? parsed.maxKas : undefined,
+    };
+    const peers = Array.isArray(parsed.peers)
+      ? parsed.peers.filter((p): p is string => typeof p === 'string')
+      : undefined;
     try {
-      const result = await agent.dragAnswerLocal({
-        question,
-        contextGraphId,
-        maxCitations: typeof parsed.maxCitations === 'number' ? parsed.maxCitations : undefined,
-        maxKas: typeof parsed.maxKas === 'number' ? parsed.maxKas : undefined,
-      });
+      const result =
+        scope === 'network'
+          ? await agent.dragAnswerNetwork({ ...common, peers })
+          : await agent.dragAnswerLocal(common);
       jsonResponse(res, 200, result);
     } catch (e) {
       jsonResponse(res, 500, { error: e instanceof Error ? e.message : String(e) });

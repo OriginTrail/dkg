@@ -12,7 +12,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_DRAG_ANSWER, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
@@ -722,6 +722,42 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         toBytes: () => new Uint8Array(),
       };
       return queryRemoteHandler.handler(data, peerIdObj);
+    });
+    // OT-RFC-55 dRAG (P3): answer a peer's NL question over a PUBLIC context
+    // graph with grounded, verifiable citations. ACL = the SAME on-chain
+    // public gate as query-remote (isContextGraphPublicOnChain, fail-closed),
+    // so a private/curated/unregistered CG is never answered remotely.
+    this.messenger.register(PROTOCOL_DRAG_ANSWER, async (data) => {
+      const encode = (obj: unknown) => new TextEncoder().encode(JSON.stringify(obj));
+      let req: { question?: string; contextGraphId?: string; maxCitations?: number; maxKas?: number };
+      try {
+        req = JSON.parse(new TextDecoder().decode(data));
+      } catch {
+        return encode({ error: 'invalid dRAG request payload' });
+      }
+      const question = req.question;
+      const contextGraphId = req.contextGraphId;
+      if (typeof question !== 'string' || !question || typeof contextGraphId !== 'string' || !contextGraphId) {
+        return encode({ error: 'dRAG request requires question + contextGraphId' });
+      }
+      try {
+        const isPublic = await this.isContextGraphPublicOnChain(
+          contextGraphId,
+          createOperationContext('query'),
+        );
+        if (!isPublic) {
+          return encode({ error: `context graph "${contextGraphId}" is not public — dRAG fan-out is public-only in V1` });
+        }
+        const result = await this.dragAnswerLocal({
+          question,
+          contextGraphId,
+          maxCitations: req.maxCitations,
+          maxKas: req.maxKas,
+        });
+        return encode(result);
+      } catch (e) {
+        return encode({ error: e instanceof Error ? e.message : String(e) });
+      }
     });
     // PROTOCOL_SWM_SENDER_KEY migrated onto the substrate in rc.9 PR-8.
     // messenger.register handles envelope unwrap + receiver dedup
