@@ -71,6 +71,7 @@ export {
   type PolicyApprovalBinding,
 } from './ccl-policy.js';
 export { DKGAgent } from './dkg-agent.js';
+export type { EntityRetriever, RetrievedAnchor } from './drag/retriever.js';
 export {
   verifyBatch,
   buildBatchRejectionRecord,

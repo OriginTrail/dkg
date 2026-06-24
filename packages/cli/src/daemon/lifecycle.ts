@@ -144,7 +144,8 @@ import {
 } from '../../scripts/markitdown-bundle-validation.mjs';
 import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from '../extraction-status.js';
 import { FileStore } from '../file-store.js';
-import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../vector-store.js';
+import { VectorStore, OpenAIEmbeddingProvider, HashingEmbeddingProvider, LocalEmbeddingProvider, type EmbeddingProvider } from '../vector-store.js';
+import { VectorEntityRetriever } from './drag-retriever.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../http/multipart.js';
 // Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
@@ -2707,6 +2708,25 @@ export async function runDaemonInner(
       apiKey: config.llm.apiKey,
       baseURL: config.llm.baseURL,
     });
+  }
+
+  // OT-RFC-55 Phase 1: attach a semantic entry-point retriever to the agent so
+  // dRAG uses embed→ANN→anchor→graph-expand instead of keyword scans (both the
+  // local route AND the network serving handler). Embedder selection:
+  //   DKG_DRAG_EMBEDDER=local   → offline MiniLM (needs `npm i @huggingface/transformers`)
+  //   DKG_DRAG_EMBEDDER=hashing → zero-dep lexical (offline default / control)
+  //   DKG_DRAG_EMBEDDER=openai  → the configured OpenAI-compatible model
+  //   (unset)                   → configured OpenAI model if any, else hashing.
+  // Default is KEYWORD (predictable) unless a real semantic model is configured
+  // — lexical hashing can rank wrong, so it is an explicit contrast control
+  // (request `embedder:"hashing"`), never the silent default.
+  const dragEmbedderKind = process.env.DKG_DRAG_EMBEDDER;
+  let dragEmbedder: EmbeddingProvider | null = null;
+  if (dragEmbedderKind === 'local') dragEmbedder = new LocalEmbeddingProvider();
+  else if (dragEmbedderKind === 'hashing') dragEmbedder = new HashingEmbeddingProvider();
+  else dragEmbedder = embeddingProvider; // configured OpenAI-compatible model, or null → keyword default
+  if (dragEmbedder) {
+    agent.attachEntityRetriever(new VectorEntityRetriever(vectorStore, dragEmbedder, agent.store));
   }
 
   // In-memory extraction job status tracker. Synchronous extractions (the V10.0

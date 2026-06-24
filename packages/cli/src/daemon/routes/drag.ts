@@ -18,6 +18,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { RequestContext } from './context.js';
+import type { EntityRetriever } from '@origintrail-official/dkg-agent';
 import { jsonResponse, readBody } from '../http-utils.js';
 import {
   MockPaymentVerifier,
@@ -27,10 +28,31 @@ import {
   type PaymentVerifier,
   type SettlementReceipt,
 } from '../payment.js';
+import { HashingEmbeddingProvider, LocalEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
+import { VectorEntityRetriever } from '../drag-retriever.js';
 
 // V1 default verifier. The real Coinbase/USDC facilitator drops in behind this
 // same interface (config-gated) without touching the route.
 const dragPaymentVerifier: PaymentVerifier = new MockPaymentVerifier();
+
+// Cache retrievers by embedder model so an overridden embedder (esp. the local
+// model) is loaded once, not per request.
+const retrieverCache = new Map<string, VectorEntityRetriever>();
+
+function resolveRetriever(kind: string, ctx: RequestContext): EntityRetriever | undefined {
+  let embedder: EmbeddingProvider | null;
+  if (kind === 'hashing') embedder = new HashingEmbeddingProvider();
+  else if (kind === 'local') embedder = new LocalEmbeddingProvider();
+  else if (kind === 'openai') embedder = ctx.embeddingProvider;
+  else embedder = null;
+  if (!embedder) return undefined;
+  let r = retrieverCache.get(embedder.model);
+  if (!r) {
+    r = new VectorEntityRetriever(ctx.vectorStore, embedder, ctx.agent.store);
+    retrieverCache.set(embedder.model, r);
+  }
+  return r;
+}
 
 export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, agent, path, opWallets } = ctx;
@@ -98,11 +120,18 @@ export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
     const peers = Array.isArray(parsed.peers)
       ? parsed.peers.filter((p): p is string => typeof p === 'string')
       : undefined;
+    // Optional per-request retrieval override (local scope) for A/B comparison:
+    // "keyword" | "hashing" | "local" | "openai". Omit to use the node's default.
+    const embedderKind = typeof parsed.embedder === 'string' ? parsed.embedder : undefined;
+    let retriever: EntityRetriever | undefined;
+    let forceKeyword = false;
+    if (embedderKind === 'keyword') forceKeyword = true;
+    else if (embedderKind && embedderKind !== 'auto') retriever = resolveRetriever(embedderKind, ctx);
     try {
       const result =
         scope === 'network'
           ? await agent.dragAnswerNetwork({ ...common, peers })
-          : await agent.dragAnswerLocal(common);
+          : await agent.dragAnswerLocal(common, { retriever, forceKeyword });
       jsonResponse(res, 200, settlement ? { ...result, settlement } : result);
     } catch (e) {
       jsonResponse(res, 500, { error: e instanceof Error ? e.message : String(e) });

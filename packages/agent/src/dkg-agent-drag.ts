@@ -25,6 +25,7 @@ import {
 } from './drag/citation.js';
 import { PROTOCOL_DRAG_ANSWER, validateContextGraphId } from '@origintrail-official/dkg-core';
 import type { VerifiableCitation, CitationTriple, CitationChecks } from '@origintrail-official/dkg-core';
+import type { EntityRetriever, RetrievedAnchor } from './drag/retriever.js';
 
 /** Per-KA VM graph: `…/_verifiable_memory/<author>/<number>` → {author, number}. */
 const VM_GRAPH_RE = /\/_verifiable_memory\/(0x[0-9a-fA-F]{40})\/(\d+)$/;
@@ -56,7 +57,7 @@ export interface DragAnswerResult {
   /** Per-fact verifiable citations — independently auditable against the chain. */
   citations: VerifiableCitation[];
   facts: DragFact[];
-  stats: { keywords: string[]; kasMatched: number; factsCited: number; verified: number };
+  stats: { keywords: string[]; kasMatched: number; factsCited: number; verified: number; retrieval: string };
 }
 
 export interface DragPerNode {
@@ -137,6 +138,10 @@ function objectMatchesKeyword(object: string, keywords: string[]): boolean {
   return keywords.some((kw) => lc.includes(kw));
 }
 
+function isLiteralObject(object: string): boolean {
+  return object.startsWith('"');
+}
+
 export class DragMethods extends DKGAgentBase {
   /**
    * Answer `question` over one Context Graph's verifiable memory on THIS node,
@@ -150,12 +155,16 @@ export class DragMethods extends DKGAgentBase {
       maxCitations?: number;
       maxKas?: number;
     },
+    opts?: { retriever?: EntityRetriever; forceKeyword?: boolean },
   ): Promise<DragAnswerResult> {
     const maxCitations = Math.min(Math.max(args.maxCitations ?? 12, 1), 50);
     const maxKas = Math.min(Math.max(args.maxKas ?? 25, 1), 100);
     const keywords = extractKeywords(args.question);
+    // Vector retrieval if a retriever is available (per-request override, then
+    // the daemon-attached one); else keyword. `forceKeyword` is the A/B control.
+    const retriever = opts?.forceKeyword ? undefined : opts?.retriever ?? this.entityRetriever;
 
-    const empty = (note: string): DragAnswerResult => ({
+    const empty = (note: string, retrieval: string): DragAnswerResult => ({
       question: args.question,
       contextGraphId: args.contextGraphId,
       scope: 'local',
@@ -163,54 +172,80 @@ export class DragMethods extends DKGAgentBase {
       llm: false,
       citations: [],
       facts: [],
-      stats: { keywords, kasMatched: 0, factsCited: 0, verified: 0 },
+      stats: { keywords, kasMatched: 0, factsCited: 0, verified: 0, retrieval },
     });
 
-    if (keywords.length === 0) {
-      return empty('No searchable keywords in the question.');
-    }
-
-    // Validate the CG id before it is ever interpolated into a SPARQL literal
-    // (defense-in-depth + parity with the query routes).
+    // Validate the CG id before it is ever interpolated into a SPARQL literal.
     const idCheck = validateContextGraphId(args.contextGraphId);
-    if (!idCheck.valid) {
-      return empty(`Invalid context graph id: ${idCheck.reason ?? 'rejected'}.`);
-    }
+    if (!idCheck.valid) return empty(`Invalid context graph id: ${idCheck.reason ?? 'rejected'}.`, 'none');
 
     // Resolve the CG's on-chain numeric id (needed by the KA extractor).
     const onChainIdStr = await this.getContextGraphOnChainId(args.contextGraphId).catch(() => null);
     if (!onChainIdStr || !/^\d+$/.test(onChainIdStr) || BigInt(onChainIdStr) === 0n) {
       return empty(
         `Context graph "${args.contextGraphId}" is not registered on-chain — verifiable citations require an anchored CG.`,
+        'none',
       );
     }
     const cgOnChainId = BigInt(onChainIdStr);
-
-    // 1. Find candidate per-KA VM graphs whose public literals match a keyword.
     const vmPrefix = `did:dkg:context-graph:${args.contextGraphId}/_verifiable_memory/`;
-    const kwFilter = keywords
-      .map((kw) => `CONTAINS(LCASE(STR(?o)), "${kw.replace(/["\\]/g, '')}")`)
-      .join(' || ');
-    const sparql = `SELECT DISTINCT ?g WHERE {
-      GRAPH ?g {
-        ?s ?p ?o .
-        FILTER(isLiteral(?o))
-        FILTER(${kwFilter})
+
+    // ── Resolve "selections" = which (graph, entity?) to ground on. ──
+    // Vector path yields entity-scoped selections (cite that entity's facts);
+    // keyword path yields graph-only selections (cite keyword-matching triples).
+    type Selection = { sourceGraph: string; entityUri?: string };
+    let selections: Selection[] = [];
+    let retrieval: string;
+
+    if (retriever) {
+      retrieval = `vector:${retriever.model}`;
+      const anchors = await retriever
+        .retrieve(args.question, args.contextGraphId, maxKas)
+        .catch((): RetrievedAnchor[] => []);
+      const seen = new Set<string>();
+      const anchorEntities: string[] = [];
+      for (const a of anchors) {
+        const key = `${a.sourceGraph}|${a.entityUri}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        selections.push({ sourceGraph: a.sourceGraph, entityUri: a.entityUri });
+        anchorEntities.push(a.entityUri);
       }
-      FILTER(STRSTARTS(STR(?g), "${vmPrefix}"))
-    } LIMIT ${maxKas}`;
-
-    const result = await this.store.query(sparql);
-    const graphs =
-      result.type === 'bindings'
-        ? result.bindings.map((b) => (b['g'] ?? '').replace(/^<|>$/g, '')).filter(Boolean)
-        : [];
-
-    if (graphs.length === 0) {
-      return empty(`No verifiable facts found for: ${keywords.join(', ')}.`);
+      // 1-hop graph expansion: follow the anchors' object-IRIs to neighbour
+      // entities that are themselves subjects in this CG's verifiable memory —
+      // the "graph" in GraphRAG (semantic anchor → related entities).
+      if (anchorEntities.length > 0) {
+        for (const n of await this.dragExpandNeighbours(anchorEntities, vmPrefix, maxKas)) {
+          const key = `${n.sourceGraph}|${n.entityUri}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            selections.push(n);
+          }
+        }
+      }
+      if (selections.length === 0) {
+        return empty(`No semantically-relevant entities found for "${args.question}".`, retrieval);
+      }
+    } else {
+      retrieval = 'keyword';
+      if (keywords.length === 0) return empty('No searchable keywords in the question.', retrieval);
+      const kwFilter = keywords
+        .map((kw) => `CONTAINS(LCASE(STR(?o)), "${kw.replace(/["\\]/g, '')}")`)
+        .join(' || ');
+      const sparql = `SELECT DISTINCT ?g WHERE {
+        GRAPH ?g { ?s ?p ?o . FILTER(isLiteral(?o)) FILTER(${kwFilter}) }
+        FILTER(STRSTARTS(STR(?g), "${vmPrefix}"))
+      } LIMIT ${maxKas}`;
+      const result = await this.store.query(sparql);
+      const graphs =
+        result.type === 'bindings'
+          ? result.bindings.map((b) => (b['g'] ?? '').replace(/^<|>$/g, '')).filter(Boolean)
+          : [];
+      if (graphs.length === 0) return empty(`No verifiable facts found for: ${keywords.join(', ')}.`, retrieval);
+      selections = graphs.map((g) => ({ sourceGraph: g }));
     }
 
-    // 2. Per candidate KA: prepare once, cite matching canonical triples.
+    // ── Shared citation loop: per KA prepare once, cite the chosen triples. ──
     const chain: CitationChainReads = {
       getLatestMerkleRoot: (kaId) => this.chain.getLatestMerkleRoot!(kaId),
       getMerkleLeafCount: (kaId) => this.chain.getMerkleLeafCount!(kaId),
@@ -221,34 +256,41 @@ export class DragMethods extends DKGAgentBase {
 
     const citations: VerifiableCitation[] = [];
     const facts: DragFact[] = [];
-    const kaIndex = new Map<string, number>(); // kaId -> 1-based source index
+    const kaIndex = new Map<string, number>();
+    const preparedCache = new Map<string, PreparedKaCitation>();
+    const seenFact = new Set<string>();
     let kasMatched = 0;
 
-    for (const g of graphs) {
+    for (const sel of selections) {
       if (citations.length >= maxCitations) break;
-      const m = g.match(VM_GRAPH_RE);
+      const m = sel.sourceGraph.match(VM_GRAPH_RE);
       if (!m) continue;
-      const author = m[1];
-      const number = BigInt(m[2]);
-      const kaId = (BigInt(author) << 96n) | number;
-
-      let prepared: PreparedKaCitation;
-      try {
-        prepared = await prepareKaCitation(deps, { contextGraphId: cgOnChainId, kaId });
-      } catch {
-        continue; // KA not fully synced / not anchored — skip, don't fabricate
+      const kaId = (BigInt(m[1]) << 96n) | BigInt(m[2]);
+      const kaKey = kaId.toString();
+      let prepared = preparedCache.get(kaKey);
+      if (!prepared) {
+        try {
+          prepared = await prepareKaCitation(deps, { contextGraphId: cgOnChainId, kaId });
+        } catch {
+          continue; // KA not fully synced / not anchored — skip, don't fabricate
+        }
+        preparedCache.set(kaKey, prepared);
+        kasMatched++;
       }
-      kasMatched++;
-
-      const matched = prepared.triples.filter((t) => objectMatchesKeyword(t.object, keywords));
-      for (const triple of matched) {
+      const chosen = sel.entityUri
+        ? prepared.triples.filter((t) => t.subject === sel.entityUri && isLiteralObject(t.object))
+        : prepared.triples.filter((t) => objectMatchesKeyword(t.object, keywords));
+      for (const triple of chosen) {
         if (citations.length >= maxCitations) break;
+        const fk = `${kaKey}|${triple.subject}|${triple.predicate}|${triple.object}`;
+        if (seenFact.has(fk)) continue;
         let citation: VerifiableCitation;
         try {
           citation = citeTriple(prepared, triple as CitationTriple);
         } catch {
           continue;
         }
+        seenFact.add(fk);
         let idx = kaIndex.get(citation.kaId);
         if (idx === undefined) {
           idx = kaIndex.size + 1;
@@ -270,8 +312,47 @@ export class DragMethods extends DKGAgentBase {
       llm: false,
       citations,
       facts,
-      stats: { keywords, kasMatched, factsCited: citations.length, verified },
+      stats: { keywords, kasMatched, factsCited: citations.length, verified, retrieval },
     };
+  }
+
+  /** Attach (or clear) the semantic entry-point retriever used by `dragAnswerLocal`. */
+  attachEntityRetriever(this: DKGAgent, retriever: EntityRetriever | null): void {
+    this.entityRetriever = retriever ?? undefined;
+  }
+
+  /**
+   * 1-hop graph expansion: neighbour entities reachable from `anchors` via an
+   * IRI object, that are themselves subjects in this CG's verifiable memory.
+   * This is the relationship-following step that turns vector-RAG into GraphRAG.
+   */
+  async dragExpandNeighbours(
+    this: DKGAgent,
+    anchors: string[],
+    vmPrefix: string,
+    limit: number,
+  ): Promise<Array<{ sourceGraph: string; entityUri: string }>> {
+    const values = anchors
+      .slice(0, 24)
+      .filter((a) => !/[<>"{}\\^`\s]/.test(a))
+      .map((a) => `<${a}>`)
+      .join(' ');
+    if (!values) return [];
+    const sparql = `SELECT DISTINCT ?neighbour ?ng WHERE {
+      VALUES ?anchor { ${values} }
+      GRAPH ?ag { ?anchor ?p ?neighbour . FILTER(isIRI(?neighbour)) FILTER(?neighbour != ?anchor) }
+      GRAPH ?ng { ?neighbour ?p2 ?o2 }
+      FILTER(STRSTARTS(STR(?ag), "${vmPrefix}"))
+      FILTER(STRSTARTS(STR(?ng), "${vmPrefix}"))
+    } LIMIT ${limit}`;
+    const r = await this.store.query(sparql).catch(() => null);
+    if (!r || r.type !== 'bindings') return [];
+    return r.bindings
+      .map((b) => ({
+        entityUri: (b['neighbour'] ?? '').replace(/^<|>$/g, ''),
+        sourceGraph: (b['ng'] ?? '').replace(/^<|>$/g, ''),
+      }))
+      .filter((x) => x.entityUri.length > 0 && x.sourceGraph.length > 0);
   }
 
   /**
