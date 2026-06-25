@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, normalizeLargeRdfLiteralsForBlazegraph, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
@@ -412,6 +412,10 @@ function rejectUserAuthoredProtocolMetadata(quads: Quad[]): void {
 
 function rejectOversizedRdfLiterals(quads: Quad[], label: string): void {
   assertQuadLiteralsMutf8Safe(quads, { label });
+}
+
+function normalizePublicRdfLiterals(quads: Quad[], label: string): Quad[] {
+  return normalizeLargeRdfLiteralsForBlazegraph(quads, { label }).quads as Quad[];
 }
 
 async function stampTrustLevel(
@@ -1074,7 +1078,7 @@ export class DKGPublisher implements Publisher {
     // reserved-namespace violation cannot be masked by a lock timeout
     // or subject-level validation error downstream.
     rejectUserAuthoredProtocolMetadata(quads);
-    rejectOversizedRdfLiterals(quads, 'share.quads');
+    quads = normalizePublicRdfLiterals(quads, 'share.quads');
     const subjects = [...new Set(quads.map(q => q.subject))];
     const lockPrefix = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
     const lockKeys = subjects.map(s => `${lockPrefix}\0${s}`);
@@ -1364,12 +1368,17 @@ export class DKGPublisher implements Publisher {
     // violation with a StaleWriteError). Short-circuit per
     // `19_MARKDOWN_CONTENT_TYPE.md §10.2`.
     rejectUserAuthoredProtocolMetadata(quads);
-    rejectOversizedRdfLiterals(quads, 'conditionalShare.quads');
+    quads = normalizePublicRdfLiterals(quads, 'conditionalShare.quads');
     for (const cond of options.conditions) {
       assertSafeIri(cond.subject);
       assertSafeIri(cond.predicate);
       if (cond.expectedValue !== null) {
         assertSafeRdfTerm(cond.expectedValue);
+        assertQuadLiteralsMutf8Safe([{
+          subject: cond.subject,
+          predicate: cond.predicate,
+          object: cond.expectedValue,
+        }], { label: 'conditionalShare.conditions' });
       }
     }
 
@@ -1972,7 +1981,7 @@ export class DKGPublisher implements Publisher {
       };
     }
 
-    const {
+    let {
       contextGraphId,
       quads,
       privateQuads = [],
@@ -1996,7 +2005,7 @@ export class DKGPublisher implements Publisher {
       rejectUserAuthoredProtocolMetadata(quads);
       if (privateQuads.length > 0) rejectUserAuthoredProtocolMetadata(privateQuads);
     }
-    rejectOversizedRdfLiterals(quads, 'publish.quads');
+    quads = normalizePublicRdfLiterals(quads, 'publish.quads');
     if (privateQuads.length > 0) rejectOversizedRdfLiterals(privateQuads, 'publish.privateQuads');
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
     const effectiveAccessPolicy = accessPolicy ?? (privateQuads.length > 0 ? 'ownerOnly' : 'public');
@@ -3452,7 +3461,7 @@ export class DKGPublisher implements Publisher {
         'Publish a new KC instead, or remove and recreate the sub-graph.',
       );
     }
-    const { contextGraphId, quads, privateQuads = [], operationCtx, onPhase } = options;
+    let { contextGraphId, quads, privateQuads = [], operationCtx, onPhase } = options;
     // Round 12 Bug 34: `update()` is a Bucket A public write entry
     // point (accepts user-authored quads) that Round 9 missed. Apply
     // the same reserved-namespace guard as `publish()` / `assertionWrite`
@@ -3465,7 +3474,7 @@ export class DKGPublisher implements Publisher {
       rejectUserAuthoredProtocolMetadata(quads);
       if (privateQuads.length > 0) rejectUserAuthoredProtocolMetadata(privateQuads);
     }
-    rejectOversizedRdfLiterals(quads, 'update.quads');
+    quads = normalizePublicRdfLiterals(quads, 'update.quads');
     if (privateQuads.length > 0) rejectOversizedRdfLiterals(privateQuads, 'update.privateQuads');
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
     let publisherContextGraphId: bigint | undefined;
@@ -5354,8 +5363,8 @@ export class DKGPublisher implements Publisher {
     // Round 9 Bug 25: reject user-authored quads whose subject is in a
     // protocol-reserved URN namespace. See RESERVED_SUBJECT_PREFIXES above.
     rejectUserAuthoredProtocolMetadata(quads);
-    rejectOversizedRdfLiterals(quads, 'assertionWrite.quads');
-    await this.store.insert(quads);
+    const normalizedQuads = normalizePublicRdfLiterals(quads, 'assertionWrite.quads');
+    await this.store.insert(normalizedQuads);
   }
 
   async assertionQuery(

@@ -200,7 +200,7 @@ import {
   isPublishQuad,
   isWritableQuad,
   validateQuadObjectTerms,
-  validateWritableQuadLiteralSizes,
+  normalizeWritableQuadLiterals,
   oversizedRdfLiteralResponseBody,
   parsePublishRequestBody,
   jsonResponse,
@@ -639,7 +639,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     const graph = `did:dkg:context-graph:${resolvedContextGraphId}/meta/query-catalog`;
     try {
       assertSafeIri(graph);
-      const normalized = quads.map((quad: unknown, index: number) => {
+      let normalized = quads.map((quad: unknown, index: number) => {
         if (!quad || typeof quad !== "object" || Array.isArray(quad)) {
           throw new Error(`quads[${index}] must be an object`);
         }
@@ -670,8 +670,9 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
         };
       });
 
-      const literalSize = validateWritableQuadLiteralSizes("quads", normalized);
-      if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
+      const normalizedQuads = normalizeWritableQuadLiterals("quads", normalized);
+      if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
+      normalized = normalizedQuads.quads;
       await agent.store.insert(normalized);
       return jsonResponse(res, 200, {
         ok: true,
@@ -1629,7 +1630,7 @@ WHERE {
     const body = await readBody(req);
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
-    const { quads, subGraphName } = parsed;
+    let { quads, subGraphName } = parsed;
     const localOnly = parsed.localOnly === true;
     if (
       parsed.localOnly !== undefined &&
@@ -1661,8 +1662,9 @@ WHERE {
       const objErr = validateQuadObjectTerms("quads", quads);
       if (objErr) return jsonResponse(res, 400, { error: objErr });
     }
-    const literalSize = validateWritableQuadLiteralSizes("quads", quads);
-    if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
+    const normalizedQuads = normalizeWritableQuadLiterals("quads", quads);
+    if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
+    quads = normalizedQuads.quads;
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,
       contextGraphId,
@@ -2251,7 +2253,7 @@ WHERE {
     const body = await readBody(req);
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
-    const { quads, conditions, subGraphName } = parsed;
+    let { quads, conditions, subGraphName } = parsed;
     const contextGraphId = parsed.contextGraphId;
     if (!quads?.length)
       return jsonResponse(res, 400, { error: 'Missing "quads"' });
@@ -2265,8 +2267,9 @@ WHERE {
       const objErr = validateQuadObjectTerms("quads", quads);
       if (objErr) return jsonResponse(res, 400, { error: objErr });
     }
-    const literalSize = validateWritableQuadLiteralSizes("quads", quads);
-    if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
+    const normalizedQuads = normalizeWritableQuadLiterals("quads", quads);
+    if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
+    quads = normalizedQuads.quads;
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,
       contextGraphId,
@@ -2462,14 +2465,15 @@ WHERE {
       });
     }
 
-    const literalSize = validateWritableQuadLiteralSizes("quads", quads);
-    if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
+    const normalizedQuads = normalizeWritableQuadLiterals("quads", quads);
+    if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
+    const quadsToWrite = normalizedQuads.quads;
 
     // 5. Write to target layer
     try {
       if (targetLayer === 'swm') {
         // agent.share sets the graph field itself — pass quads with empty graph
-        const shareQuads = quads.map(({ subject, predicate, object }) => ({ subject, predicate, object, graph: '' }));
+        const shareQuads = quadsToWrite.map(({ subject, predicate, object }) => ({ subject, predicate, object, graph: '' }));
         const ctx = createOperationContext('share');
         tracker.start(ctx, { contextGraphId: resolvedContextGraphId, details: { tripleCount: shareQuads.length, source: 'memory-turn', subGraphName } });
         try {
@@ -2487,7 +2491,7 @@ WHERE {
           throw err;
         }
       } else {
-        await agent.store.insert(quads);
+        await agent.store.insert(quadsToWrite);
       }
     } catch (err: any) {
       if (err?.code === "OVERSIZED_RDF_LITERAL") {
@@ -2501,7 +2505,7 @@ WHERE {
       subGraphName,
       operation: "memory_turn_written",
       source: "memory-turn",
-      counts: { triples: quads.length },
+      counts: { triples: quadsToWrite.length },
     });
 
     // 6. Generate embedding (best-effort, non-blocking for response)
@@ -2532,7 +2536,7 @@ WHERE {
       graph: targetGraph,
       structuralTripleCount: extractResult.triples.length,
       semanticTripleCount: semanticTriples.length,
-      totalQuads: quads.length,
+      totalQuads: quadsToWrite.length,
       embeddingId,
       sessionUri: sessionUri ?? null,
     });

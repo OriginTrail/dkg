@@ -25,6 +25,7 @@ import {
   validateAssertionName,
   PayloadTooLargeError,
   assertQuadLiteralsMutf8Safe,
+  normalizeLargeRdfLiteralsForBlazegraph,
   IMPORTED_ARTIFACT_MAX_PAGE_BYTES,
   isDkgContentHash,
   verifyDkgContentHash,
@@ -42,6 +43,7 @@ import {
   normalizeContextGraphIdOrUri,
   resolveRequiredWriteContextGraphId,
   oversizedRdfLiteralResponseBody,
+  normalizeWritableQuadLiterals,
   SMALL_BODY_BYTES,
   MAX_UPLOAD_BYTES,
   type ImportFileExtractionPayload,
@@ -637,7 +639,11 @@ export async function handleKaSemanticEnrichmentWrite(ctx: RequestContext): Prom
       generationMethod,
       semanticQuads,
     });
-    const quads = [...semanticQuads, ...provenanceQuads];
+    const normalizedQuads = normalizeWritableQuadLiterals("semanticQuads", [...semanticQuads, ...provenanceQuads]);
+    if (!normalizedQuads.ok) {
+      return jsonResponse(res, 400, normalizedQuads.body);
+    }
+    const quads = normalizedQuads.quads;
     const targetAssertionUri = contextGraphAssertionUri(
       artifact.contextGraphId,
       artifact.assertionAgentAddress,
@@ -1840,9 +1846,17 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
       });
     }
     try {
-      assertQuadLiteralsMutf8Safe([...dataGraphQuads, ...metaQuads], {
+      const normalizedImportQuads = normalizeLargeRdfLiteralsForBlazegraph([...dataGraphQuads, ...metaQuads], {
         label: 'import-file.quads',
       });
+      const normalizedGraphQuads = normalizedImportQuads.quads as Array<{
+        subject: string;
+        predicate: string;
+        object: string;
+        graph: string;
+      }>;
+      dataGraphQuads = normalizedGraphQuads.filter((q) => q.graph === assertionGraph);
+      metaQuads.splice(0, metaQuads.length, ...normalizedGraphQuads.filter((q) => q.graph === metaGraph));
     } catch (err: any) {
       if (err?.code === "OVERSIZED_RDF_LITERAL") {
         const oversizedBody = oversizedRdfLiteralResponseBody(err);

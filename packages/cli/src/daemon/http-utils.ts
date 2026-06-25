@@ -9,6 +9,8 @@ import {
   PayloadTooLargeError,
   assertQuadLiteralsMutf8Safe,
   isOversizedRdfLiteralError,
+  normalizeLargeRdfLiteralsForBlazegraph,
+  type RdfTextLiteralRewrite,
   validateContextGraphId,
   validateSubGraphName,
   isSafeIri,
@@ -36,6 +38,7 @@ export interface PublishRequestBody {
   contextGraphId: string;
   quads: PublishQuad[];
   privateQuads?: PublishQuad[];
+  literalRewrites?: RdfTextLiteralRewrite[];
   accessPolicy?: PublishAccessPolicy;
   allowedPeers?: string[];
   subGraphName?: string;
@@ -113,6 +116,8 @@ export function respondWithDaemonError(res: ServerResponse, err: any): void {
     (typeof err?.message === 'string' && err.message.includes('reserved namespace'))
   ) {
     jsonResponse(res, 400, { error: err.message });
+  } else if (isOversizedRdfLiteralError(err)) {
+    jsonResponse(res, 400, oversizedRdfLiteralResponseBody(err));
   } else if (isNoFundedPublisherWalletLike(err)) {
     // Funded-wallet selection found no operational wallet with gas + TRAC — a
     // user-actionable funding condition (4xx), not a server bug.
@@ -209,6 +214,21 @@ export function validateWritableQuadLiteralSizes(
   try {
     assertQuadLiteralsMutf8Safe(quads, { label });
     return { ok: true };
+  } catch (err) {
+    if (isOversizedRdfLiteralError(err)) {
+      return { ok: false, body: oversizedRdfLiteralResponseBody(err) };
+    }
+    throw err;
+  }
+}
+
+export function normalizeWritableQuadLiterals<T extends { subject: string; predicate: string; object: string; graph?: string }>(
+  label: string,
+  quads: T[],
+): { ok: true; quads: T[]; rewrites: RdfTextLiteralRewrite[] } | { ok: false; body: Record<string, unknown> } {
+  try {
+    const result = normalizeLargeRdfLiteralsForBlazegraph(quads, { label });
+    return { ok: true, quads: result.quads as T[], rewrites: result.rewrites };
   } catch (err) {
     if (isOversizedRdfLiteralError(err)) {
       return { ok: false, body: oversizedRdfLiteralResponseBody(err) };
@@ -407,9 +427,9 @@ export function parsePublishRequestBody(
   }
   const quadObjectError = validateQuadObjectTerms("quads", quads);
   if (quadObjectError) return { ok: false, error: quadObjectError };
-  const quadSize = validateWritableQuadLiteralSizes("quads", quads);
-  if (!quadSize.ok) {
-    return { ok: false, error: String(quadSize.body.error ?? 'Oversized RDF literal'), body: quadSize.body };
+  const normalizedQuads = normalizeWritableQuadLiterals("quads", quads);
+  if (!normalizedQuads.ok) {
+    return { ok: false, error: String(normalizedQuads.body.error ?? 'Oversized RDF literal'), body: normalizedQuads.body };
   }
 
   if (
@@ -501,8 +521,9 @@ export function parsePublishRequestBody(
     ok: true,
     value: {
       contextGraphId,
-      quads,
+      quads: normalizedQuads.quads,
       privateQuads,
+      ...(normalizedQuads.rewrites.length > 0 ? { literalRewrites: normalizedQuads.rewrites } : {}),
       accessPolicy,
       allowedPeers,
       subGraphName: subGraphName as string | undefined,

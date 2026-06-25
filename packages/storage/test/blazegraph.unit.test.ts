@@ -3,6 +3,10 @@
  * no live Blazegraph required).
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import {
+  DKG_CHUNK_VALUE,
+  normalizeLargeRdfLiteralsForBlazegraph,
+} from '@origintrail-official/dkg-core';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 
 describe('BlazegraphStore (mocked HTTP)', () => {
@@ -298,6 +302,27 @@ describe('BlazegraphStore (mocked HTTP)', () => {
       { subject: 'http://s2', predicate: 'http://p', object: oversized, graph: 'http://g' },
     ])).rejects.toMatchObject({ code: 'OVERSIZED_RDF_LITERAL' });
     expect(fetchCalls).toHaveLength(0);
+  });
+
+  it('insert accepts producer-normalized chunked schema:text payloads', async () => {
+    setFetch(async () => new Response(null, { status: 200 }));
+    const s = new BlazegraphStore(baseUrl);
+    const original = 'x'.repeat(70_000);
+    const normalized = normalizeLargeRdfLiteralsForBlazegraph([
+      {
+        subject: 'http://s-chunked',
+        predicate: 'http://schema.org/text',
+        object: JSON.stringify(original),
+        graph: 'http://g',
+      },
+    ]);
+
+    await s.insert(normalized.quads);
+
+    expect(fetchCalls).toHaveLength(1);
+    const body = String(fetchCalls[0][1]?.body);
+    expect(body).toContain(DKG_CHUNK_VALUE);
+    expect(body).not.toContain(original);
   });
 
   it('insert allows 25KB ASCII literal (under MUTF-8 limit)', async () => {

@@ -1,5 +1,9 @@
 import { createServer, type Server } from 'node:http';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import {
+  DKG_CHUNK_VALUE,
+  normalizeLargeRdfLiteralsForBlazegraph,
+} from '@origintrail-official/dkg-core';
 import { SparqlHttpStore, createTripleStore, type Quad, type SparqlHttpSlowQueryEvent } from '../src/index.js';
 
 let server: Server;
@@ -113,6 +117,25 @@ describe('SparqlHttpStore (test server)', () => {
       code: 'OVERSIZED_RDF_LITERAL',
     });
     expect(insertedQuads).toHaveLength(0);
+  });
+
+  it('accepts producer-normalized chunked schema:text payloads', async () => {
+    insertedQuads.length = 0;
+    const original = 'x'.repeat(70_000);
+    const normalized = normalizeLargeRdfLiteralsForBlazegraph([
+      {
+        subject: 'http://ex.org/chunked',
+        predicate: 'http://schema.org/text',
+        object: JSON.stringify(original),
+        graph: 'http://ex.org/g',
+      },
+    ]);
+
+    await store.insert(normalized.quads);
+
+    expect(insertedQuads).toHaveLength(1);
+    expect(insertedQuads[0]).toContain(DKG_CHUNK_VALUE);
+    expect(insertedQuads[0]).not.toContain(original);
   });
 
   it('query SELECT sends query to query endpoint and parses bindings', async () => {
