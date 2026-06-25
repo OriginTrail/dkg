@@ -62,10 +62,23 @@ export function jobSubject(jobId: string): string {
   return `urn:dkg:promote-queue:job:${jobId}`;
 }
 
-type PromoteUniquenessInput = Pick<PromoteRequest, 'contextGraphId' | 'subGraphName' | 'assertionName' | 'agentAddress'>;
+export type PromoteUniquenessInput = Pick<PromoteRequest, 'contextGraphId' | 'subGraphName' | 'assertionName' | 'agentAddress'>;
 
-function normalizedAgentLane(agentAddress?: string): string {
-  return agentAddress?.trim().toLowerCase() ?? '';
+export type PromoteLaneConflictScope = {
+  legacyKey: string;
+  lane: {
+    value: string;
+    missingMatchesAnyLane: boolean;
+  };
+};
+
+/**
+ * Canonical queue lane used for conflict keys. EVM agent lanes are
+ * case-insensitive, but peer/DID-style fallback lanes are not safe to lowercase.
+ */
+export function normalizePromoteAgentLane(agentAddress?: string): string {
+  const lane = agentAddress?.trim() ?? '';
+  return /^0x[0-9a-fA-F]{40}$/.test(lane) ? lane.toLowerCase() : lane;
 }
 
 export function legacyUniquenessKey(request: PromoteUniquenessInput): string {
@@ -76,24 +89,34 @@ export function legacyUniquenessKey(request: PromoteUniquenessInput): string {
 }
 
 export function uniquenessKey(request: PromoteUniquenessInput): string {
-  return `${legacyUniquenessKey(request)}\u001f${normalizedAgentLane(request.agentAddress)}`;
+  return `${legacyUniquenessKey(request)}\u001f${normalizePromoteAgentLane(request.agentAddress)}`;
 }
 
 export function uniquenessLookupKeys(request: PromoteUniquenessInput): string[] {
-  return Array.from(new Set([uniquenessKey(request), legacyUniquenessKey(request)]));
+  const preCanonicalLaneKey = `${legacyUniquenessKey(request)}\u001f${request.agentAddress?.trim().toLowerCase() ?? ''}`;
+  const currentDefaultLaneKey = `${legacyUniquenessKey(request)}\u001f`;
+  return Array.from(new Set([uniquenessKey(request), preCanonicalLaneKey, currentDefaultLaneKey, legacyUniquenessKey(request)]));
 }
 
-export function requestsShareUniquenessKey(
-  a: PromoteUniquenessInput,
-  b: PromoteUniquenessInput,
+export function promoteLaneConflictScope(
+  request: PromoteUniquenessInput,
   opts: { missingAgentAddressMatchesAnyLane?: boolean } = {},
-): boolean {
-  if (legacyUniquenessKey(a) !== legacyUniquenessKey(b)) return false;
-  const aLane = normalizedAgentLane(a.agentAddress);
-  const bLane = normalizedAgentLane(b.agentAddress);
-  return opts.missingAgentAddressMatchesAnyLane
-    ? aLane === '' || bLane === '' || aLane === bLane
-    : aLane === bLane;
+): PromoteLaneConflictScope {
+  const value = normalizePromoteAgentLane(request.agentAddress);
+  return {
+    legacyKey: legacyUniquenessKey(request),
+    lane: {
+      value,
+      missingMatchesAnyLane: value === '' && opts.missingAgentAddressMatchesAnyLane === true,
+    },
+  };
+}
+
+export function promoteLaneScopesConflict(a: PromoteLaneConflictScope, b: PromoteLaneConflictScope): boolean {
+  if (a.legacyKey !== b.legacyKey) return false;
+  return a.lane.value === b.lane.value
+    || a.lane.missingMatchesAnyLane
+    || b.lane.missingMatchesAnyLane;
 }
 
 export function quad(subject: string, predicate: string, object: string, graph: string): Quad {

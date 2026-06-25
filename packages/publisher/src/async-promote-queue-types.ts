@@ -73,7 +73,7 @@ export interface PromoteRequest {
   subGraphName?: string;
   assertionName: string;
   entities: readonly string[] | 'all';
-  /** Storage namespace used to locate the WM draft. */
+  /** Worker-facing storage namespace used to locate the WM draft; conflict keys canonicalize separately. */
   agentAddress?: string;
   /** Signing author used by finalize/seal during promote replay. */
   authorAgentAddress?: string;

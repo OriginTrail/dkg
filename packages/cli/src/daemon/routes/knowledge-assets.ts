@@ -447,20 +447,15 @@ function classifyVmPublish(pub: unknown): { httpStatus: 200 | 207 | 502; reason?
   };
 }
 
-// Reject finalized-publish request shapes that don't make sense once the URL
-// name + seal already select the assertion and encode the author (PR #971).
-// The seal commits to the whole assertion content + author, so assertionName /
-// author overrides / partial selection on vm/publish are user errors, not
-// silently-ignored fields.
-function validateFinalizedAssertionPublishRequest(
-  parsed: Record<string, unknown>,
+// Reject finalized-publish fields that don't make sense once the URL name +
+// seal already select the assertion and encode the author (PR #971). The seal
+// commits to the whole assertion content + author, so assertionName / author
+// overrides / partial selection are user errors, not silently-ignored fields.
+function validateFinalizedAssertionPublishShape(
+  source: Record<string, unknown>,
   res: RequestContext["res"],
 ): boolean {
-  const nested = parsed.options && typeof parsed.options === "object" && !Array.isArray(parsed.options)
-    ? parsed.options as Record<string, unknown>
-    : undefined;
-  const assertionName = parsed.assertionName ?? nested?.assertionName;
-  if (assertionName !== undefined) {
+  if (source.assertionName !== undefined) {
     jsonResponse(res, 400, {
       error:
         '"assertionName" is not accepted on /api/knowledge-assets/:name/vm/publish — the URL name selects the assertion.',
@@ -468,10 +463,8 @@ function validateFinalizedAssertionPublishRequest(
     return false;
   }
   const hasAuthorOverride =
-    parsed.authorAgentAddress != null ||
-    parsed.preSignedAuthorAttestation != null ||
-    nested?.authorAgentAddress != null ||
-    nested?.preSignedAuthorAttestation != null;
+    source.authorAgentAddress != null ||
+    source.preSignedAuthorAttestation != null;
   if (hasAuthorOverride) {
     jsonResponse(res, 400, {
       error:
@@ -479,8 +472,7 @@ function validateFinalizedAssertionPublishRequest(
     });
     return false;
   }
-  const selection = parsed.selection ?? nested?.selection;
-  if (selection !== undefined && selection !== "all") {
+  if (source.selection !== undefined && source.selection !== "all") {
     jsonResponse(res, 400, {
       error:
         '"selection" must be omitted or "all" on vm/publish — the seal commits to the entire assertion content.',
@@ -488,6 +480,29 @@ function validateFinalizedAssertionPublishRequest(
     return false;
   }
   return true;
+}
+
+function publishIntegerString(
+  value: unknown,
+  field: string,
+  res: RequestContext["res"],
+  opts: { positive: boolean },
+): string | null {
+  if (typeof value !== "string" && typeof value !== "number") {
+    jsonResponse(res, 400, { error: `"${field}" must be a ${opts.positive ? "positive " : "non-negative "}integer (string or number)` });
+    return null;
+  }
+  if (typeof value === "number" && (!Number.isSafeInteger(value) || (opts.positive ? value <= 0 : value < 0))) {
+    jsonResponse(res, 400, { error: `"${field}" must be a ${opts.positive ? "positive " : "non-negative "}safe integer (string or number)` });
+    return null;
+  }
+  const v = typeof value === "string" ? value.trim() : String(value);
+  const pattern = opts.positive ? /^[1-9]\d*$/ : /^\d+$/;
+  if (!pattern.test(v)) {
+    jsonResponse(res, 400, { error: `"${field}" must be a ${opts.positive ? "positive " : "non-negative "}integer (string or number)` });
+    return null;
+  }
+  return v;
 }
 
 // Validate + normalize the finalized-publish options BEFORE they reach
@@ -508,23 +523,15 @@ function resolveFinalizedPublishOptions(
 
   let resolvedPublisherIdentityOverride: bigint | undefined;
   if (publisherNodeIdentityIdOverride !== undefined && publisherNodeIdentityIdOverride !== null) {
-    const v = String(publisherNodeIdentityIdOverride);
-    if (!/^\d+$/.test(v)) {
-      jsonResponse(res, 400, {
-        error: '"publisherNodeIdentityIdOverride" must be a non-negative integer (string or number)',
-      });
-      return null;
-    }
+    const v = publishIntegerString(publisherNodeIdentityIdOverride, "publisherNodeIdentityIdOverride", res, { positive: false });
+    if (v === null) return null;
     resolvedPublisherIdentityOverride = BigInt(v);
   }
 
   let resolvedPublishEpochs: number | undefined;
   if (rawPublishEpochs !== undefined && rawPublishEpochs !== null) {
-    const v = String(rawPublishEpochs).trim();
-    if (!/^[1-9]\d*$/.test(v)) {
-      jsonResponse(res, 400, { error: `"${publishEpochsField}" must be a positive integer (string or number)` });
-      return null;
-    }
+    const v = publishIntegerString(rawPublishEpochs, publishEpochsField, res, { positive: true });
+    if (v === null) return null;
     const n = Number(v);
     if (!Number.isSafeInteger(n)) {
       jsonResponse(res, 400, { error: `"${publishEpochsField}" is too large to safely represent as a JavaScript integer` });
@@ -553,6 +560,26 @@ function resolveFinalizedPublishOptions(
       ? { publisherNodeIdentityIdOverride: resolvedPublisherIdentityOverride }
       : {}),
   };
+}
+
+function resolveInlineVmPublishOptions(
+  ctx: RequestContext,
+  source: Record<string, unknown>,
+): Record<string, unknown> | null {
+  if (!validateFinalizedAssertionPublishShape(source, ctx.res)) return null;
+  return resolveFinalizedPublishOptions(ctx, source);
+}
+
+function resolveStandaloneVmPublishOptions(
+  ctx: RequestContext,
+  source: Record<string, unknown>,
+): Record<string, unknown> | null {
+  if (!validateFinalizedAssertionPublishShape(source, ctx.res)) return null;
+  const raw = source.options;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    if (!validateFinalizedAssertionPublishShape(raw as Record<string, unknown>, ctx.res)) return null;
+  }
+  return resolveFinalizedPublishOptions(ctx, raw);
 }
 
 async function verifyDirectPublishOnChainContextGraphId(
@@ -845,6 +872,13 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // request-shape error into orphaned state.
     const alsoPublishVmRequested =
       alsoPublishVm === true || (typeof alsoPublishVm === "object" && alsoPublishVm !== null);
+    const alsoPublishVmOptions = alsoPublishVmRequested
+      ? resolveInlineVmPublishOptions(
+          ctx,
+          typeof alsoPublishVm === "object" && alsoPublishVm !== null ? alsoPublishVm : {},
+        )
+      : {};
+    if (alsoPublishVmOptions === null) return;
     if (!shouldFinalize && (alsoShareSwm === true || alsoPublishVmRequested)) {
       return jsonResponse(res, 400, {
         error: '"alsoShareSwm"/"alsoPublishVm" require a finalized assertion (non-empty "quads" and "finalize" !== false)',
@@ -950,10 +984,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       }
       if (alsoPublishVm === true || (typeof alsoPublishVm === "object" && alsoPublishVm !== null)) {
         try {
-          const opts = typeof alsoPublishVm === "object" && alsoPublishVm ? alsoPublishVm : {};
           const pub: any = await agent.publishFromFinalizedAssertion(resolvedContextGraphId, name, {
             subGraphName,
-            ...opts,
+            ...alsoPublishVmOptions,
             ...atomicAuthorLane,
           });
           result.kaId = pub?.kaId;
@@ -1372,8 +1405,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       try {
         // Validate the request shape + normalize options BEFORE the publish (PR
         // #971): this is a standalone request, so a 400 here mutates nothing.
-        if (!validateFinalizedAssertionPublishRequest(parsed, res)) return;
-        const opts = resolveFinalizedPublishOptions(ctx, parsed.options);
+        const opts = resolveStandaloneVmPublishOptions(ctx, parsed);
         if (opts === null) return;
         // #1116: registration moved from seal-time to publish-time, but it must
         // run AFTER the local preconditions, not before — otherwise a doomed

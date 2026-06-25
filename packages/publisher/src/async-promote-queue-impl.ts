@@ -40,6 +40,7 @@ import {
 import {
   ACTIVE_PROMOTE_STATES,
   DEFAULT_PROMOTE_CONTROL_GRAPH_URI,
+  PROMOTE_ASSERTION_NAME,
   PROMOTE_CONTEXT_GRAPH_ID,
   PROMOTE_PAYLOAD,
   PROMOTE_STATE,
@@ -49,12 +50,23 @@ import {
   expectBindings,
   jobSubject,
   literal,
+  normalizePromoteAgentLane,
   parseJobPayload,
-  requestsShareUniquenessKey,
+  promoteLaneConflictScope,
+  promoteLaneScopesConflict,
   serializeJob,
   uniquenessKey,
   uniquenessLookupKeys,
+  type PromoteUniquenessInput,
 } from './async-promote-queue-utils.js';
+
+type PromoteConflictLookup = {
+  request: PromoteUniquenessInput;
+  lookupQuery:
+    | { kind: 'uniquenessKeys'; keys: string[] }
+    | { kind: 'assertionWildcard' };
+  laneScope: ReturnType<typeof promoteLaneConflictScope>;
+};
 
 export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
   /**
@@ -96,16 +108,17 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
 
   async enqueue(request: PromoteRequest): Promise<string> {
     this.validateRequest(request);
+    const requestSnapshot = this.snapshotRequest(request);
     return this.withMutationLock(async () => {
       await this.ensureGraph();
-      await this.assertNoActiveConflict(request);
+      await this.assertNoActiveConflict(this.conflictLookupForRequest(requestSnapshot));
 
       const now = this.now();
       const jobId = this.idGenerator();
       this.validateJobId(jobId);
       const job: PromoteJob = {
         jobId,
-        request: this.normalizeRequest(request),
+        request: requestSnapshot,
         state: 'queued',
         enqueuedAt: now,
         updatedAt: now,
@@ -172,18 +185,22 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
           `Cannot recover job in state '${job.state}'. Only 'failed' jobs can be recovered.`,
         );
       }
+      const now = this.now();
+      if (await this.abandonIfMissingStorageLane(job, now)) {
+        throw new Error(`Cannot recover job ${jobId}: ${this.missingStorageLaneReason()}`);
+      }
       if (this.requiresManualInspection(job)) {
         throw new Error(
           `Cannot recover job ${jobId}: ${job.reason ?? job.attempt.lastError?.message ?? 'manual inspection required'}`,
         );
       }
-      await this.assertNoActiveConflict(job.request, job.jobId);
+      await this.assertNoActiveConflict(this.conflictLookupForStoredJob(job), job.jobId);
       const recovered: PromoteJob = {
         jobId: job.jobId,
-        request: job.request,
+        request: this.snapshotRequest(job.request),
         state: 'queued',
         enqueuedAt: job.enqueuedAt,
-        updatedAt: this.now(),
+        updatedAt: now,
         attempt: { count: 0, maxRetries: job.attempt.maxRetries },
         // Explicit operator recovery is the right place to upgrade a
         // legacy row to the current persistence format: the operator
@@ -215,9 +232,14 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
         if (j.state === 'failed_retrying' && (j.attempt.nextRetryAt ?? 0) <= now) return true;
         return false;
       });
+      const claimableCandidates: PromoteJob[] = [];
+      for (const candidate of candidates) {
+        if (await this.abandonIfMissingStorageLane(candidate, now)) continue;
+        claimableCandidates.push(candidate);
+      }
 
       const running = await this.list({ state: ['running'] });
-      const eligible = candidates.filter((candidate) =>
+      const eligible = claimableCandidates.filter((candidate) =>
         !running.some((active) => active.jobId !== candidate.jobId && this.jobsShareClaimLane(active, candidate)),
       );
       if (eligible.length === 0) return null;
@@ -377,9 +399,14 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
       const expiresAt = job.lease?.expiresAt ?? 0;
       if (expiresAt > now) continue; // lease still valid; worker is fine
 
-      const conflicting = await this.findActiveConflict(job.request, job.jobId);
+      if (await this.abandonIfMissingStorageLane(job, now)) {
+        abandoned += 1;
+        continue;
+      }
+
+      const conflicting = await this.findActiveConflict(this.conflictLookupForStoredJob(job), job.jobId);
       if (conflicting) {
-        await this.abandonStartupRecovery(
+        await this.abandonForManualInspection(
           job,
           now,
           `recovery conflict: active promote job ${conflicting.jobId} already owns this assertion`,
@@ -401,13 +428,10 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
       // to the manual-recovery path below.
       const formatVersion = job.formatVersion ?? 0;
       const hasRecoverableCommitMarker = formatVersion >= ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION;
-      const missingStorageLaneForAuthorOnlyJob =
-        formatVersion < ASYNC_PROMOTE_QUEUE_FORMAT_VERSION &&
-        job.request.agentAddress === undefined &&
-        job.request.authorAgentAddress !== undefined;
-      if (hasRecoverableCommitMarker && !missingStorageLaneForAuthorOnlyJob && swmInserted === false && promoteStarted !== true) {
+      if (hasRecoverableCommitMarker && swmInserted === false && promoteStarted !== true) {
         const reclaimedJob: PromoteJob = {
           ...job,
+          request: this.snapshotRequest(job.request),
           state: 'queued',
           updatedAt: now,
           reason: undefined,
@@ -431,15 +455,11 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
       // safe to re-run automatically.
       const legacyReason = !hasRecoverableCommitMarker
         ? `legacy promote job (formatVersion=${formatVersion}); needs operator inspection — recovery refuses to reclaim pre-v${ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION} rows that may have started promote without writing a marker`
-        : missingStorageLaneForAuthorOnlyJob
-          ? `missing storage lane for pre-v${ASYNC_PROMOTE_QUEUE_FORMAT_VERSION} author-scoped promote job; needs operator inspection`
         : null;
       const legacyMessage = !hasRecoverableCommitMarker
         ? `Legacy promote job (formatVersion=${formatVersion}) found in recovery; daemon refuses automatic reclaim because pre-v${ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION} workers may have entered assertionPromote without recording promoteStarted`
-        : missingStorageLaneForAuthorOnlyJob
-          ? `Pre-v${ASYNC_PROMOTE_QUEUE_FORMAT_VERSION} promote job carries authorAgentAddress without agentAddress; daemon refuses automatic reclaim because it cannot prove the WM storage lane`
         : null;
-      await this.abandonStartupRecovery(
+      await this.abandonForManualInspection(
         job,
         now,
         legacyReason
@@ -486,8 +506,11 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
     if (request.subGraphName !== undefined && typeof request.subGraphName !== 'string') {
       throw new Error('subGraphName must be a string when provided');
     }
-    if (request.agentAddress !== undefined && typeof request.agentAddress !== 'string') {
-      throw new Error('agentAddress must be a string when provided');
+    if (
+      request.agentAddress !== undefined &&
+      (typeof request.agentAddress !== 'string' || normalizePromoteAgentLane(request.agentAddress) === '')
+    ) {
+      throw new Error('agentAddress must be a non-empty string when provided');
     }
     if (request.authorAgentAddress !== undefined && typeof request.authorAgentAddress !== 'string') {
       throw new Error('authorAgentAddress must be a string when provided');
@@ -519,23 +542,24 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
     }
   }
 
-  /** Freeze entity arrays so downstream callers can't mutate the persisted job. */
-  private normalizeRequest(request: PromoteRequest): PromoteRequest {
-    const normalized: PromoteRequest = {
+  /** Snapshot caller-owned input before the first await, preserving the worker-facing storage lane string. */
+  private snapshotRequest(request: PromoteRequest): PromoteRequest {
+    const copied: PromoteRequest = {
       contextGraphId: request.contextGraphId,
       assertionName: request.assertionName,
       entities: request.entities === 'all' ? 'all' : Object.freeze([...request.entities]),
     };
     if (request.subGraphName !== undefined) {
-      normalized.subGraphName = request.subGraphName;
+      copied.subGraphName = request.subGraphName;
     }
-    if (request.agentAddress !== undefined) {
-      normalized.agentAddress = request.agentAddress;
+    const agentAddress = request.agentAddress?.trim();
+    if (agentAddress !== undefined && agentAddress !== '') {
+      copied.agentAddress = agentAddress;
     }
     if (request.authorAgentAddress !== undefined) {
-      normalized.authorAgentAddress = request.authorAgentAddress;
+      copied.authorAgentAddress = request.authorAgentAddress;
     }
-    return normalized;
+    return copied;
   }
 
   private async ensureGraph(): Promise<void> {
@@ -581,49 +605,76 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
   }
 
   private async assertNoActiveConflict(
-    request: Pick<PromoteRequest, 'contextGraphId' | 'subGraphName' | 'assertionName' | 'agentAddress'>,
+    lookup: PromoteConflictLookup,
     excludeJobId?: string,
   ): Promise<void> {
-    const existing = await this.findActiveConflict(request, excludeJobId);
+    const existing = await this.findActiveConflict(lookup, excludeJobId);
     if (existing) {
       throw new PromoteJobConflictError(existing.jobId, {
-        contextGraphId: request.contextGraphId,
-        subGraphName: request.subGraphName,
-        assertionName: request.assertionName,
-        agentAddress: request.agentAddress,
+        contextGraphId: lookup.request.contextGraphId,
+        subGraphName: lookup.request.subGraphName,
+        assertionName: lookup.request.assertionName,
+        agentAddress: lookup.request.agentAddress,
       });
     }
   }
 
   private async findActiveConflict(
-    request: Pick<PromoteRequest, 'contextGraphId' | 'subGraphName' | 'assertionName' | 'agentAddress'>,
+    lookup: PromoteConflictLookup,
     excludeJobId?: string,
   ): Promise<PromoteJob | null> {
-    const keyFilter = uniquenessLookupKeys(request).map((key) => literal(key)).join(', ');
-    const result = await this.store.query(
-      `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${PROMOTE_UNIQUENESS_KEY}> ?key ; <${PROMOTE_PAYLOAD}> ?payload . FILTER (?key IN (${keyFilter})) } }`,
-    );
+    const result = lookup.lookupQuery.kind === 'assertionWildcard'
+      ? await this.store.query(
+          `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${PROMOTE_CONTEXT_GRAPH_ID}> ${literal(lookup.request.contextGraphId)} ; <${PROMOTE_ASSERTION_NAME}> ${literal(lookup.request.assertionName)} ; <${PROMOTE_PAYLOAD}> ?payload . } }`,
+        )
+      : await this.store.query(
+          `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${PROMOTE_UNIQUENESS_KEY}> ?key ; <${PROMOTE_PAYLOAD}> ?payload . FILTER (?key IN (${lookup.lookupQuery.keys.map((key) => literal(key)).join(', ')})) } }`,
+        );
     const rows = expectBindings(result);
     for (const row of rows) {
       const job = parseJobPayload(row['payload']);
       if (job?.jobId === excludeJobId) continue;
-      if (job && ACTIVE_PROMOTE_STATES.includes(job.state) && this.storedJobConflictsWithRequest(job, request)) return job;
+      if (job && ACTIVE_PROMOTE_STATES.includes(job.state) && this.jobConflictsWithRequest(job, lookup)) return job;
     }
     return null;
   }
 
   private jobsShareClaimLane(active: PromoteJob, candidate: PromoteJob): boolean {
-    return requestsShareUniquenessKey(active.request, candidate.request, {
-      missingAgentAddressMatchesAnyLane:
-        this.usesLegacyWildcardLane(active) || this.usesLegacyWildcardLane(candidate),
-    });
+    return promoteLaneScopesConflict(
+      this.laneConflictScopeForStoredJob(active),
+      this.laneConflictScopeForStoredJob(candidate),
+    );
   }
 
-  private storedJobConflictsWithRequest(
-    job: PromoteJob,
-    request: Pick<PromoteRequest, 'contextGraphId' | 'subGraphName' | 'assertionName' | 'agentAddress'>,
-  ): boolean {
-    return requestsShareUniquenessKey(job.request, request, {
+  private conflictLookupForRequest(request: PromoteUniquenessInput): PromoteConflictLookup {
+    return this.buildConflictLookup(request, false);
+  }
+
+  private conflictLookupForStoredJob(job: PromoteJob): PromoteConflictLookup {
+    return this.buildConflictLookup(job.request, this.usesLegacyWildcardLane(job));
+  }
+
+  private buildConflictLookup(request: PromoteUniquenessInput, missingLaneMatchesAnyLane: boolean): PromoteConflictLookup {
+    return {
+      request,
+      lookupQuery: missingLaneMatchesAnyLane
+        ? { kind: 'assertionWildcard' }
+        : { kind: 'uniquenessKeys', keys: uniquenessLookupKeys(request) },
+      laneScope: promoteLaneConflictScope(request, {
+        missingAgentAddressMatchesAnyLane: missingLaneMatchesAnyLane,
+      }),
+    };
+  }
+
+  private jobConflictsWithRequest(job: PromoteJob, lookup: PromoteConflictLookup): boolean {
+    return promoteLaneScopesConflict(
+      this.laneConflictScopeForStoredJob(job),
+      lookup.laneScope,
+    );
+  }
+
+  private laneConflictScopeForStoredJob(job: PromoteJob): ReturnType<typeof promoteLaneConflictScope> {
+    return promoteLaneConflictScope(job.request, {
       missingAgentAddressMatchesAnyLane: this.usesLegacyWildcardLane(job),
     });
   }
@@ -632,7 +683,32 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue {
     return (job.formatVersion ?? 0) < ASYNC_PROMOTE_QUEUE_FORMAT_VERSION && job.request.agentAddress === undefined;
   }
 
-  private async abandonStartupRecovery(
+  private missingStorageLaneForAuthorOnlyJob(job: PromoteJob): boolean {
+    return (job.formatVersion ?? 0) < ASYNC_PROMOTE_QUEUE_FORMAT_VERSION
+      && job.request.agentAddress === undefined
+      && job.request.authorAgentAddress !== undefined;
+  }
+
+  private missingStorageLaneReason(): string {
+    return `missing storage lane for pre-v${ASYNC_PROMOTE_QUEUE_FORMAT_VERSION} author-scoped promote job; needs operator inspection`;
+  }
+
+  private missingStorageLaneMessage(): string {
+    return `Pre-v${ASYNC_PROMOTE_QUEUE_FORMAT_VERSION} promote job carries authorAgentAddress without agentAddress; daemon refuses automatic reclaim because it cannot prove the WM storage lane`;
+  }
+
+  private async abandonIfMissingStorageLane(job: PromoteJob, now: number): Promise<boolean> {
+    if (!this.missingStorageLaneForAuthorOnlyJob(job)) return false;
+    await this.abandonForManualInspection(
+      job,
+      now,
+      this.missingStorageLaneReason(),
+      this.missingStorageLaneMessage(),
+    );
+    return true;
+  }
+
+  private async abandonForManualInspection(
     job: PromoteJob,
     now: number,
     reason: string,

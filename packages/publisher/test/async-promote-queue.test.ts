@@ -89,6 +89,11 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     await (createQueue() as unknown as { writeJob(job: PromoteJob): Promise<void> }).writeJob(job);
   }
 
+  async function insertRawStoredJob(job: PromoteJob, key: string): Promise<void> {
+    await store.insert(serializeJob(job, DEFAULT_PROMOTE_CONTROL_GRAPH_URI));
+    await rewriteStoredUniquenessKey(job.jobId, key);
+  }
+
   // ---------------------------------------------------------------------------
   // §3.1 enqueue
   // ---------------------------------------------------------------------------
@@ -135,6 +140,7 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     await expect(queue.enqueue(makeRequest({ assertionName: '' }))).rejects.toThrow(/assertionName/);
     await expect(queue.enqueue(makeRequest({ contextGraphId: '' }))).rejects.toThrow(/contextGraphId/);
     await expect(queue.enqueue(makeRequest({ entities: [] }))).rejects.toThrow(/entities array must not be empty/);
+    await expect(queue.enqueue(makeRequest({ agentAddress: '   ' }))).rejects.toThrow(/agentAddress must be a non-empty string/);
   });
 
   it('3. enqueue() rejects with PromoteJobConflictError when (cgId, subGraphName, assertionName) has an active job', async () => {
@@ -160,21 +166,106 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     const agentAUpper = `0x${'AA'.repeat(20)}`;
     const agentB = `0x${'bb'.repeat(20)}`;
 
-    const first = await queue.enqueue(makeRequest({ agentAddress: agentA }));
+    const first = await queue.enqueue(makeRequest({ agentAddress: `  ${agentAUpper}  ` }));
+    expect((await queue.getStatus(first))?.request.agentAddress).toBe(agentAUpper);
 
     // Same cg/subgraph/name, different storage lane -> independent work.
     const second = await queue.enqueue(makeRequest({ agentAddress: agentB }));
     expect(second).toBe('job-2');
+    expect((await queue.getStatus(second))?.request.agentAddress).toBe(agentB);
 
     // Same lane with different address casing -> same active resource.
-    await expect(queue.enqueue(makeRequest({ agentAddress: agentAUpper }))).rejects.toMatchObject({
+    await expect(queue.enqueue(makeRequest({ agentAddress: agentA }))).rejects.toMatchObject({
       name: 'PromoteJobConflictError',
       existingJobId: first,
+      key: { agentAddress: agentA },
     });
 
     // Default daemon lane is also independent from explicit agent lanes.
     const third = await queue.enqueue(makeRequest());
     expect(third).toBe('job-3');
+
+    const peerLane = '12D3KooWCaseSensitiveLane';
+    const peerLaneJob = await queue.enqueue(makeRequest({
+      assertionName: 'peer-lane',
+      agentAddress: ` ${peerLane} `,
+    }));
+    expect((await queue.getStatus(peerLaneJob))?.request.agentAddress).toBe(peerLane);
+
+    await expect(queue.enqueue(makeRequest({
+      assertionName: 'peer-lane',
+      agentAddress: peerLane,
+    }))).rejects.toMatchObject({
+      name: 'PromoteJobConflictError',
+      existingJobId: peerLaneJob,
+      key: { agentAddress: peerLane },
+    });
+
+    const peerLaneCaseVariant = await queue.enqueue(makeRequest({
+      assertionName: 'peer-lane',
+      agentAddress: peerLane.toLowerCase(),
+    }));
+    expect(peerLaneCaseVariant).toBe('job-5');
+  });
+
+  it('3e. enqueue() still detects active rows stored with the pre-canonical lowercased lane key', async () => {
+    const queue = createQueue();
+    const peerLane = '12D3KooWCaseSensitiveLane';
+    const request = makeRequest({ assertionName: 'old-peer-lane', agentAddress: peerLane });
+    const oldLowercaseKey = `${legacyUniquenessKey(request)}\u001f${peerLane.toLowerCase()}`;
+
+    await insertRawStoredJob({
+      jobId: 'old-key-peer-lane',
+      request,
+      state: 'queued',
+      enqueuedAt: now,
+      updatedAt: now,
+      attempt: { count: 0, maxRetries: 5 },
+      formatVersion: ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
+    }, oldLowercaseKey);
+
+    await expect(queue.enqueue(request)).rejects.toMatchObject({
+      name: 'PromoteJobConflictError',
+      existingJobId: 'old-key-peer-lane',
+      key: { agentAddress: peerLane },
+    });
+  });
+
+  it('3f. enqueue() snapshots caller-owned requests before async conflict checks and persistence', async () => {
+    const queue = createQueue();
+    const agentUpper = `0x${'AA'.repeat(20)}`;
+    const mutatedAgent = `0x${'bb'.repeat(20)}`;
+    const entities = ['urn:entity:original'];
+    const request = makeRequest({
+      assertionName: 'mutable-enqueue-input',
+      agentAddress: agentUpper,
+      entities,
+    });
+
+    const enqueueing = queue.enqueue(request);
+    request.agentAddress = mutatedAgent;
+    entities.push('urn:entity:mutated');
+    const jobId = await enqueueing;
+
+    const job = await queue.getStatus(jobId);
+    expect(job?.request.agentAddress).toBe(agentUpper);
+    expect(job?.request.entities).toEqual(['urn:entity:original']);
+
+    await expect(queue.enqueue(makeRequest({
+      assertionName: 'mutable-enqueue-input',
+      agentAddress: agentUpper,
+      entities: ['urn:entity:replacement'],
+    }))).rejects.toMatchObject({
+      name: 'PromoteJobConflictError',
+      existingJobId: jobId,
+    });
+
+    const independent = await queue.enqueue(makeRequest({
+      assertionName: 'mutable-enqueue-input',
+      agentAddress: mutatedAgent,
+      entities: ['urn:entity:mutated-lane'],
+    }));
+    expect(independent).toBe('job-2');
   });
 
   it('3d. enqueue() treats legacy no-agent active jobs as conflicting with explicit upgraded lanes', async () => {
@@ -397,6 +488,48 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     expect(claimedB?.request.agentAddress).toBe(agentB);
   });
 
+  it('13e. claimNext() preserves the worker-facing storage lane from old queued payloads', async () => {
+    const queue = createQueue();
+    const agentUpper = `0x${'AA'.repeat(20)}`;
+    await insertRawStoredJob({
+      jobId: 'old-mixed-case-lane',
+      request: makeRequest({ agentAddress: agentUpper }),
+      state: 'queued',
+      enqueuedAt: now,
+      updatedAt: now,
+      attempt: { count: 0, maxRetries: 5 },
+      formatVersion: ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
+    }, uniquenessKey(makeRequest({ agentAddress: agentUpper })));
+
+    const claimed = await queue.claimNext('worker-1');
+
+    expect(claimed?.jobId).toBe('old-mixed-case-lane');
+    expect(claimed?.request.agentAddress).toBe(agentUpper);
+    expect((await queue.getStatus('old-mixed-case-lane'))?.request.agentAddress).toBe(agentUpper);
+  });
+
+  it('13f. claimNext() parks pre-v3 author-only rows that have no storage lane', async () => {
+    const queue = createQueue();
+    const legacyAuthorOnly: PromoteJob = {
+      jobId: 'queued-v2-author-only',
+      request: makeRequest({ authorAgentAddress: `0x${'aa'.repeat(20)}` }),
+      state: 'queued',
+      enqueuedAt: now,
+      updatedAt: now,
+      attempt: { count: 0, maxRetries: 5 },
+      formatVersion: 2,
+    };
+    await insertRawStoredJob(legacyAuthorOnly, `${legacyUniquenessKey(legacyAuthorOnly.request)}\u001f`);
+
+    const claimed = await queue.claimNext('worker-1');
+
+    expect(claimed).toBeNull();
+    const parked = await queue.getStatus('queued-v2-author-only');
+    expect(parked?.state).toBe('failed');
+    expect(parked?.reason).toMatch(/missing storage lane/i);
+    expect(parked?.attempt.lastError?.message).toMatch(/cannot prove the WM storage lane/);
+  });
+
   it('13c. claimNext() does not claim an explicit lane while a legacy no-agent job is running', async () => {
     const queue = createQueue();
     const legacyRequest = makeRequest();
@@ -425,6 +558,28 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     );
 
     expect(await queue.claimNext('worker-2')).toBeNull();
+  });
+
+  it('13f. enqueue() treats rewritten legacy no-agent rows as wildcard conflicts', async () => {
+    const queue = createQueue();
+    const legacyRequest = makeRequest();
+    const legacyJobId = await queue.enqueue(legacyRequest);
+    await rewriteStoredJob({
+      ...(await queue.getStatus(legacyJobId))!,
+      formatVersion: 2,
+    });
+    await rewriteStoredUniquenessKey(legacyJobId, legacyUniquenessKey(legacyRequest));
+
+    const claimed = await queue.claimNext('worker-legacy');
+    expect(claimed?.jobId).toBe(legacyJobId);
+    expect(claimed?.formatVersion).toBe(2);
+    expect((await queue.getStatus(legacyJobId))?.request.agentAddress).toBeUndefined();
+    await rewriteStoredUniquenessKey(legacyJobId, `${legacyUniquenessKey(legacyRequest)}\u001f`);
+
+    await expect(queue.enqueue(makeRequest({ agentAddress: `0x${'aa'.repeat(20)}` }))).rejects.toMatchObject({
+      name: 'PromoteJobConflictError',
+      existingJobId: legacyJobId,
+    });
   });
 
   it('13d. claimNext() can claim a current default-lane job and explicit agent-lane job concurrently', async () => {
@@ -720,6 +875,69 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     expect((await queue.getStatus(second))?.state).toBe('queued');
   });
 
+  it('24c. recover(jobId) treats v2 no-agent rows as wildcard conflicts against active explicit lanes', async () => {
+    const queue = createQueue();
+    const failedLegacyJob: PromoteJob = {
+      jobId: 'failed-v2-wildcard',
+      request: makeRequest(),
+      state: 'failed',
+      enqueuedAt: now,
+      updatedAt: now,
+      attempt: { count: 1, maxRetries: 5 },
+      formatVersion: 2,
+    };
+    await insertRawStoredJob(failedLegacyJob, `${legacyUniquenessKey(failedLegacyJob.request)}\u001f`);
+    await insertRawStoredJob({
+      jobId: 'active-explicit-lane',
+      request: makeRequest({ agentAddress: `0x${'aa'.repeat(20)}` }),
+      state: 'queued',
+      enqueuedAt: now + 1,
+      updatedAt: now + 1,
+      attempt: { count: 0, maxRetries: 5 },
+      formatVersion: ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
+    }, uniquenessKey(makeRequest({ agentAddress: `0x${'aa'.repeat(20)}` })));
+
+    await expect(queue.recover('failed-v2-wildcard')).rejects.toMatchObject({
+      name: 'PromoteJobConflictError',
+      existingJobId: 'active-explicit-lane',
+    });
+    expect((await queue.getStatus('failed-v2-wildcard'))?.state).toBe('failed');
+  });
+
+  it('24d. recover(jobId) refuses pre-v3 author-only rows that have no storage lane', async () => {
+    const queue = createQueue();
+    const rows: Array<{ jobId: string; reason: string }> = [
+      { jobId: 'failed-v2-author-only', reason: 'transient old failure' },
+      { jobId: 'failed-v2-author-only-conflict', reason: 'recovery conflict: active promote job already owns this assertion' },
+    ];
+
+    for (const [index, row] of rows.entries()) {
+      const request = makeRequest({
+        assertionName: `legacy-author-only-${index}`,
+        authorAgentAddress: `0x${'aa'.repeat(20)}`,
+      });
+      await insertRawStoredJob({
+        jobId: row.jobId,
+        request,
+        state: 'failed',
+        enqueuedAt: now + index,
+        updatedAt: now + index,
+        reason: row.reason,
+        attempt: { count: 1, maxRetries: 5 },
+        formatVersion: 2,
+      }, `${legacyUniquenessKey(request)}\u001f`);
+    }
+
+    for (const row of rows) {
+      await expect(queue.recover(row.jobId)).rejects.toThrow(/missing storage lane/i);
+      const parked = await queue.getStatus(row.jobId);
+      expect(parked?.state).toBe('failed');
+      expect(parked?.formatVersion).toBe(2);
+      expect(parked?.reason).toMatch(/missing storage lane/i);
+      expect(parked?.attempt.lastError?.message).toMatch(/cannot prove the WM storage lane/);
+    }
+  });
+
   it('25. recoverOnStartup() abandons running jobs whose lease expired AND swmInserted=true (partial-promote ambiguity)', async () => {
     const queue = createQueue({ leaseMs: 10_000 });
     const jobId = await queue.enqueue(makeRequest());
@@ -999,6 +1217,48 @@ describe('TripleStoreAsyncPromoteQueue', () => {
     expect((await queue.getStatus(jobId))?.reason).toMatch(/recovery conflict/i);
     expect((await queue.getStatus('corrupt-duplicate'))?.state).toBe('queued');
     expect(claimed?.state).toBe('running');
+  });
+
+  it('27c. recoverOnStartup() treats v2 no-agent rows as wildcard conflicts against active explicit lanes', async () => {
+    const queue = createQueue({ leaseMs: 10_000 });
+    const jobId = await queue.enqueue(makeRequest());
+    const claimed = await queue.claimNext('worker-legacy');
+    await (queue as unknown as { writeJob(job: PromoteJob): Promise<void> }).writeJob({
+      ...claimed!,
+      request: {
+        contextGraphId: claimed!.request.contextGraphId,
+        subGraphName: claimed!.request.subGraphName,
+        assertionName: claimed!.request.assertionName,
+        entities: claimed!.request.entities,
+      },
+      formatVersion: 2,
+      commitMarker: {
+        promoteStarted: false,
+        swmInserted: false,
+        wmCleaned: false,
+        lifecycleStamped: false,
+        gossiped: false,
+      },
+    });
+    await insertRawStoredJob({
+      jobId: 'active-explicit-during-recovery',
+      request: makeRequest({ agentAddress: `0x${'aa'.repeat(20)}` }),
+      state: 'queued',
+      enqueuedAt: now + 1,
+      updatedAt: now + 1,
+      attempt: { count: 0, maxRetries: 5 },
+      formatVersion: ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,
+    }, uniquenessKey(makeRequest({ agentAddress: `0x${'aa'.repeat(20)}` })));
+
+    advance(60_000);
+    const summary = await queue.recoverOnStartup();
+
+    expect(summary.reclaimed).toBe(0);
+    expect(summary.abandoned).toBe(1);
+    const job = await queue.getStatus(jobId);
+    expect(job?.state).toBe('failed');
+    expect(job?.reason).toMatch(/recovery conflict/i);
+    expect((await queue.getStatus('active-explicit-during-recovery'))?.state).toBe('queued');
   });
 
   it('29. recoverOnStartup() returns counts of {reclaimed, abandoned}', async () => {
