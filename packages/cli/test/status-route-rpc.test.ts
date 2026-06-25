@@ -22,7 +22,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { noteRpcFailover, noteRpcExhaustion, getRpcFailoverStats } from '@origintrail-official/dkg-chain';
+import { noteRpcFailover, noteRpcExhaustion, getRpcFailoverStats, ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import { loadNetworkConfig } from '../src/config.js';
@@ -254,7 +254,7 @@ describe('/api/status selected overlay details', () => {
         ),
         status: 503,
       },
-      { err: Object.assign(new Error('tx 0xabc timed out waiting for a receipt'), { code: 'TIMEOUT' }), status: 504 },
+      { err: new ChainRpcTransportError('TIMEOUT', 'tx 0xabc timed out waiting for a receipt'), status: 504 },
     ];
 
     for (const { err, status } of cases) {

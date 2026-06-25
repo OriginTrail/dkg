@@ -345,9 +345,12 @@ export function classifyChainRpcTransportStatus(
  * retryable 503/504 (via {@link classifyChainRpcTransportStatus}), writes the
  * response, and returns true. Returns false (writing nothing) for any
  * non-transport error so the caller falls through to its own mapping.
- * `extraBody` merges route-specific fields into the response body (e.g. the
- * identity route's `{ identityId, hasIdentity }`). Use this instead of
- * repeating the classify→jsonResponse branch in every chain-write catch.
+ * `extraBody` adds route-specific fields to the response body (e.g. the identity
+ * route's `{ identityId, hasIdentity }`). The canonical transport fields
+ * (`error`, `code`, `txHash`) are merged LAST so a caller can never shadow them
+ * — `extraBody` may only ADD fields, keeping this responder the single source of
+ * truth for the transport response shape. Use this instead of repeating the
+ * classify→jsonResponse branch in every chain-write catch.
  */
 export function respondIfChainRpcTransportError(
   res: ServerResponse,
@@ -356,7 +359,7 @@ export function respondIfChainRpcTransportError(
 ): boolean {
   const transport = classifyChainRpcTransportStatus(err);
   if (!transport) return false;
-  jsonResponse(res, transport.status, extraBody ? { ...transport.body, ...extraBody } : transport.body);
+  jsonResponse(res, transport.status, extraBody ? { ...extraBody, ...transport.body } : transport.body);
   return true;
 }
 

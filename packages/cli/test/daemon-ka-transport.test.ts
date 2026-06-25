@@ -7,6 +7,7 @@
 // Driven in-process via handleKnowledgeAssetsRoutes with a stub agent — no
 // daemon / storage / native deps.
 import { describe, it, expect } from 'vitest';
+import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
@@ -53,9 +54,9 @@ function exhaustion() {
   return e;
 }
 function timeoutErr() {
-  const e: any = new Error('tx 0xabc timed out waiting for a receipt after 180000ms');
-  e.code = 'TIMEOUT';
-  return e;
+  // The adapter throws a ChainRpcTransportError instance for a receipt-wait
+  // timeout; the guard recognises TIMEOUT via the instance, not a bare code.
+  return new ChainRpcTransportError('TIMEOUT', 'tx 0xabc timed out waiting for a receipt after 180000ms');
 }
 function revert() {
   const e: any = new Error('execution reverted');

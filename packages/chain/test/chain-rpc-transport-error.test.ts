@@ -34,15 +34,23 @@ describe('ChainRpcTransportError (typed transport boundary)', () => {
   });
 });
 
-describe('isChainRpcTransportError (code-based guard)', () => {
-  it('is true for every transport code, regardless of constructor', () => {
+describe('isChainRpcTransportError (instance + namespaced-code guard)', () => {
+  it('is true for any ChainRpcTransportError INSTANCE, including our wrapped timeout', () => {
     for (const code of ['RPC_ENDPOINTS_EXHAUSTED', 'RPC_RECEIPT_LOOKUP_FAILED', 'TIMEOUT'] as const) {
-      // A real typed instance...
       expect(isChainRpcTransportError(new ChainRpcTransportError(code, 'm'))).toBe(true);
-      // ...AND a plain ethers-/CLI-shaped object with the same code (the guard is
-      // code-based, NOT instanceof, so an ethers TIMEOUT is still recognised).
-      expect(isChainRpcTransportError({ code, message: 'm' })).toBe(true);
     }
+  });
+
+  it('is true for a plain object carrying a chain-NAMESPACED code (survives a re-wrap that keeps .code)', () => {
+    expect(isChainRpcTransportError({ code: 'RPC_ENDPOINTS_EXHAUSTED', message: 'm' })).toBe(true);
+    expect(isChainRpcTransportError({ code: 'RPC_RECEIPT_LOOKUP_FAILED', message: 'm' })).toBe(true);
+  });
+
+  it('is FALSE for a bare generic `code: TIMEOUT` that is not our instance (a real boundary, not a global code convention)', () => {
+    // A timeout stamped by an unrelated daemon/CLI subsystem must NOT be
+    // misclassified as a chain-RPC transport error — only our own (instance)
+    // timeouts count. This is the #1332 review fix.
+    expect(isChainRpcTransportError({ code: 'TIMEOUT', message: 'some other op timed out' })).toBe(false);
   });
 
   it('is false for on-chain reverts / app errors / non-objects (preserves #988)', () => {

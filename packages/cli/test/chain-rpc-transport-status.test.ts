@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, it, expect } from 'vitest';
+import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import { classifyChainRpcTransportStatus } from '../src/daemon/http-utils.js';
 
 describe('classifyChainRpcTransportStatus (W2 shared transport-status helper)', () => {
@@ -15,8 +16,13 @@ describe('classifyChainRpcTransportStatus (W2 shared transport-status helper)', 
     expect(r?.body).toMatchObject({ code: 'RPC_RECEIPT_LOOKUP_FAILED', txHash: '0xabc' });
   });
 
-  it('maps TIMEOUT -> 504', () => {
-    expect(classifyChainRpcTransportStatus({ code: 'TIMEOUT', message: 'm' })?.status).toBe(504);
+  it('maps a ChainRpcTransportError TIMEOUT instance -> 504', () => {
+    // TIMEOUT is recognised via the instance (not a bare code) — #1332 review.
+    expect(classifyChainRpcTransportStatus(new ChainRpcTransportError('TIMEOUT', 'm'))?.status).toBe(504);
+  });
+
+  it('does NOT classify a bare generic `code: TIMEOUT` (not our instance)', () => {
+    expect(classifyChainRpcTransportStatus({ code: 'TIMEOUT', message: 'some other op timed out' })).toBeUndefined();
   });
 
   it('returns undefined for on-chain reverts / app errors (preserves the #988 contract)', () => {

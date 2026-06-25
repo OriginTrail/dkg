@@ -22,10 +22,15 @@ export type ChainRpcTransportCode =
   | 'RPC_RECEIPT_LOOKUP_FAILED'
   | 'TIMEOUT';
 
-const TRANSPORT_CODES: ReadonlySet<string> = new Set<ChainRpcTransportCode>([
+// Chain-NAMESPACED transport codes — only the chain failover stack ever stamps
+// these, so a code match alone is a reliable signal even if the error crossed a
+// re-wrap boundary that preserved `.code`. `TIMEOUT` is deliberately NOT here:
+// it is a generic, globally-used code, so a bare `code: 'TIMEOUT'` from an
+// unrelated subsystem must NOT satisfy the guard — our OWN chain-RPC timeouts
+// are `ChainRpcTransportError` instances, recognised by `instanceof` instead.
+const NAMESPACED_TRANSPORT_CODES: ReadonlySet<string> = new Set<ChainRpcTransportCode>([
   'RPC_ENDPOINTS_EXHAUSTED',
   'RPC_RECEIPT_LOOKUP_FAILED',
-  'TIMEOUT',
 ]);
 
 /**
@@ -65,16 +70,25 @@ export class ChainRpcTransportError extends Error {
 }
 
 /**
- * True for ANY error carrying one of the three transport codes — whether it is
- * a {@link ChainRpcTransportError}, an ethers-stamped `TIMEOUT`, or the CLI
- * stack's own throw. This is the single predicate the HTTP classifier and the
- * CLI use to decide "transient transport failure → retryable".
+ * True for a chain-RPC TRANSPORT failure, as a REAL boundary rather than a
+ * global stringly-typed code convention:
+ *   - any {@link ChainRpcTransportError} INSTANCE — the chain/CLI failover
+ *     stack's own throws, including our wrapped RPC/receipt timeouts; OR
+ *   - an error carrying a chain-NAMESPACED code (`RPC_ENDPOINTS_EXHAUSTED` /
+ *     `RPC_RECEIPT_LOOKUP_FAILED`), which survives a re-wrap that preserves
+ *     `.code` and is never produced outside the chain failover stack.
+ * A bare `code: 'TIMEOUT'` from an unrelated subsystem does NOT satisfy this
+ * (our own timeouts are instances), and on-chain reverts
+ * (`CALL_EXCEPTION`/`INSUFFICIENT_FUNDS`) are never matched (the #988 contract).
+ * The single predicate the HTTP classifier uses to map a transient transport
+ * failure to a retryable 503/504.
  */
 export function isChainRpcTransportError(err: unknown): err is ChainRpcTransportErrorLike {
+  if (err instanceof ChainRpcTransportError) return true;
   return (
     !!err &&
     typeof err === 'object' &&
     typeof (err as { code?: unknown }).code === 'string' &&
-    TRANSPORT_CODES.has((err as { code: string }).code)
+    NAMESPACED_TRANSPORT_CODES.has((err as { code: string }).code)
   );
 }

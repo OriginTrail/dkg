@@ -9,6 +9,7 @@
 // tests drive different handlers. Driven in-process via handleMemoryRoutes with
 // a stub agent — no daemon / storage / native deps.
 import { describe, it, expect } from 'vitest';
+import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
@@ -72,9 +73,9 @@ function exhaustion() {
   return e;
 }
 function timeoutErr() {
-  const e: any = new Error('register tx 0xabc timed out waiting for a receipt after 180000ms');
-  e.code = 'TIMEOUT';
-  return e;
+  // The adapter throws a ChainRpcTransportError instance for a receipt-wait
+  // timeout; the guard recognises TIMEOUT via the instance, not a bare code.
+  return new ChainRpcTransportError('TIMEOUT', 'register tx 0xabc timed out waiting for a receipt after 180000ms');
 }
 function insufficientFunds() {
   const e: any = new Error('insufficient funds for intrinsic transaction cost');
