@@ -5,6 +5,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  DKG_CHUNK_INDEX,
+  DKG_CHUNK_VALUE,
+  DKG_HAS_TEXT_BODY,
+  DKG_HAS_TEXT_CHUNK,
   contextGraphAssertionUri,
   contextGraphMetaUri,
   contextGraphSharedMemoryUri,
@@ -19,6 +23,27 @@ const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
 
 type Quad = { subject: string; predicate: string; object: string };
+
+function reconstructChunkedText(quads: readonly Quad[], subject: string): string {
+  const bodySubject = quads.find((quad) =>
+    quad.subject === subject &&
+    quad.predicate === DKG_HAS_TEXT_BODY
+  )?.object;
+  if (!bodySubject) throw new Error(`Missing chunked text body for ${subject}`);
+  return quads
+    .filter((quad) => quad.subject === bodySubject && quad.predicate === DKG_HAS_TEXT_CHUNK)
+    .map((link) => {
+      const chunkQuads = quads.filter((quad) => quad.subject === link.object);
+      const indexTerm = chunkQuads.find((quad) => quad.predicate === DKG_CHUNK_INDEX)?.object;
+      const valueTerm = chunkQuads.find((quad) => quad.predicate === DKG_CHUNK_VALUE)?.object;
+      const index = Number(/^"(\d+)"/.exec(indexTerm ?? '')?.[1] ?? NaN);
+      if (!Number.isInteger(index) || !valueTerm) throw new Error(`Invalid chunk ${link.object}`);
+      return { index, value: JSON.parse(valueTerm) as string };
+    })
+    .sort((a, b) => a.index - b.index)
+    .map((chunk) => chunk.value)
+    .join('');
+}
 
 function sha256Hash(bytes: Buffer): string {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
@@ -1888,6 +1913,41 @@ describe('import artifact daemon routes', () => {
     expect(events).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ operation: 'assertion_created', layers: ['wm'] }),
     ]));
+  });
+
+  it('chunks oversized semantic enrichment schema:text before assertion write', async () => {
+    const entry = await fileStore.put(Buffer.from('# Imported\n'), 'text/markdown');
+    const contextGraphId = 'cg-semantic-enrichment-large-text';
+    const assertionName = 'imported-large-text';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:test', assertionName);
+    const largeText = 'x'.repeat(60_000);
+    const { agent, writes } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: entry.keccak256,
+      markdownHash: entry.keccak256,
+      markdownForm: `urn:dkg:file:${entry.keccak256}`,
+    });
+    await startRoutes({ agent });
+
+    const result = await post('/api/knowledge-assets/semantic-enrichment/write', {
+      contextGraphId,
+      assertionUri,
+      semanticQuads: [
+        { subject: 'urn:doc:semantic-large', predicate: 'http://schema.org/text', object: `"${largeText}"` },
+      ],
+    });
+
+    expect(result.status).toBe(200);
+    expect(writes).toHaveLength(1);
+    const written = writes[0]!.quads;
+    expect(written.some((quad) =>
+      quad.subject === 'urn:doc:semantic-large' &&
+      quad.predicate === 'http://schema.org/text'
+    )).toBe(false);
+    expect(written.some((quad) => quad.predicate === DKG_CHUNK_VALUE)).toBe(true);
+    expect(reconstructChunkedText(written, 'urn:doc:semantic-large')).toBe(largeText);
   });
 
   it('rejects semantic enrichment of imported assertions owned by another agent', async () => {

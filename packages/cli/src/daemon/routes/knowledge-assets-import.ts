@@ -1849,12 +1849,17 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
       const normalizedImportQuads = normalizeLargeRdfLiteralsForBlazegraph([...dataGraphQuads, ...metaQuads], {
         label: 'import-file.quads',
       });
-      const normalizedGraphQuads = normalizedImportQuads.quads as Array<{
-        subject: string;
-        predicate: string;
-        object: string;
-        graph: string;
-      }>;
+      const normalizedGraphQuads = normalizedImportQuads.quads.map((q) => {
+        if (q.graph === undefined) {
+          throw new Error('import-file.quads normalization produced a quad without graph');
+        }
+        return {
+          subject: q.subject,
+          predicate: q.predicate,
+          object: q.object,
+          graph: q.graph,
+        };
+      });
       dataGraphQuads = normalizedGraphQuads.filter((q) => q.graph === assertionGraph);
       metaQuads.splice(0, metaQuads.length, ...normalizedGraphQuads.filter((q) => q.graph === metaGraph));
     } catch (err: any) {
