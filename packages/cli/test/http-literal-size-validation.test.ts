@@ -235,7 +235,7 @@ describe('HTTP RDF literal size validation', () => {
 
       expect(prepared.ok).toBe(false);
       if (!prepared.ok) {
-        expect(prepared.body.error).toContain('well-formed quoted literal term');
+        expect(prepared.body.error).toContain('quoted literal term');
       }
     }
   });

@@ -304,8 +304,8 @@ export function validateQuadObjectTerms(
   });
   if (badIndex === -1) return null;
   const expected = allowBlankNodes
-    ? "a well-formed quoted literal term, blank node, or absolute IRI"
-    : "a well-formed quoted literal term or absolute IRI";
+    ? "a quoted literal term, blank node, or absolute IRI"
+    : "a quoted literal term or absolute IRI";
   return `Invalid "${label}[${badIndex}].object": RDF object must be ${expected}`;
 }
 
