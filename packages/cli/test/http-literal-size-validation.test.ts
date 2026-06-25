@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   DKG_CHUNK_VALUE,
   DKG_HAS_TEXT_BODY,
+  normalizeLargeRdfLiteralsForBlazegraph,
 } from '@origintrail-official/dkg-core';
 import {
   buildImportFileResponse,
   parsePublishRequestBody,
+  preparePublicWriteQuads,
   validateWritableQuadLiteralSizes,
 } from '../src/daemon/http-utils.js';
 
@@ -85,6 +87,64 @@ describe('HTTP RDF literal size validation', () => {
         actualBytes: 60_002,
         limitBytes: 60_000,
       });
+    }
+  });
+
+  it('keeps import-file chunk quads in their source data or metadata graph', () => {
+    const dataGraph = 'did:dkg:context-graph:test/_working_memory/0xabc/1';
+    const metaGraph = 'did:dkg:context-graph:test/_meta';
+    const normalized = normalizeLargeRdfLiteralsForBlazegraph([
+      {
+        subject: 'http://example.org/import-root',
+        predicate: 'http://schema.org/text',
+        object: OVERSIZED_LITERAL,
+        graph: dataGraph,
+      },
+      {
+        subject: 'http://example.org/import-meta',
+        predicate: 'http://schema.org/name',
+        object: '"metadata"',
+        graph: metaGraph,
+      },
+    ], { label: 'import-file.quads' });
+
+    const dataQuads = normalized.quads.filter((quad) => quad.graph === dataGraph);
+    const metaQuads = normalized.quads.filter((quad) => quad.graph === metaGraph);
+    expect(dataQuads.some((quad) => quad.predicate === DKG_CHUNK_VALUE)).toBe(true);
+    expect(dataQuads.some((quad) => quad.predicate === 'http://schema.org/text')).toBe(false);
+    expect(metaQuads).toEqual([{
+      subject: 'http://example.org/import-meta',
+      predicate: 'http://schema.org/name',
+      object: '"metadata"',
+      graph: metaGraph,
+    }]);
+  });
+
+  it('prepares semantic enrichment quads without moving provenance quads', () => {
+    const graph = 'did:dkg:context-graph:test/_working_memory/0xabc/semantic';
+    const prepared = preparePublicWriteQuads('semanticQuads', [
+      {
+        subject: 'http://example.org/semantic',
+        predicate: 'http://schema.org/text',
+        object: OVERSIZED_LITERAL,
+        graph,
+      },
+      {
+        subject: 'http://example.org/provenance',
+        predicate: 'http://dkg.io/ontology/generatedBy',
+        object: '"semantic-enrichment"',
+        graph,
+      },
+    ]);
+
+    expect(prepared.ok).toBe(true);
+    if (prepared.ok) {
+      expect(prepared.value.quads.some((quad) => quad.predicate === DKG_CHUNK_VALUE)).toBe(true);
+      expect(prepared.value.quads.some((quad) =>
+        quad.subject === 'http://example.org/provenance' &&
+        quad.predicate === 'http://dkg.io/ontology/generatedBy'
+      )).toBe(true);
+      expect(prepared.value.rewrites).toHaveLength(1);
     }
   });
 

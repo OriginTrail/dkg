@@ -200,7 +200,7 @@ import {
   isPublishQuad,
   isWritableQuad,
   validateQuadObjectTerms,
-  normalizeWritableQuadLiterals,
+  preparePublicWriteQuads,
   oversizedRdfLiteralResponseBody,
   parsePublishRequestBody,
   jsonResponse,
@@ -670,9 +670,12 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
         };
       });
 
-      const normalizedQuads = normalizeWritableQuadLiterals("quads", normalized);
+      const normalizedQuads = preparePublicWriteQuads("quads", normalized);
       if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
-      normalized = normalizedQuads.quads;
+      normalized = normalizedQuads.value.quads.map((quad) => ({
+        ...quad,
+        graph: quad.graph ?? graph,
+      }));
       await agent.store.insert(normalized);
       return jsonResponse(res, 200, {
         ok: true,
@@ -1662,9 +1665,9 @@ WHERE {
       const objErr = validateQuadObjectTerms("quads", quads);
       if (objErr) return jsonResponse(res, 400, { error: objErr });
     }
-    const normalizedQuads = normalizeWritableQuadLiterals("quads", quads);
+    const normalizedQuads = preparePublicWriteQuads("quads", quads);
     if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
-    quads = normalizedQuads.quads;
+    quads = normalizedQuads.value.quads;
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,
       contextGraphId,
@@ -2267,9 +2270,9 @@ WHERE {
       const objErr = validateQuadObjectTerms("quads", quads);
       if (objErr) return jsonResponse(res, 400, { error: objErr });
     }
-    const normalizedQuads = normalizeWritableQuadLiterals("quads", quads);
+    const normalizedQuads = preparePublicWriteQuads("quads", quads);
     if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
-    quads = normalizedQuads.quads;
+    quads = normalizedQuads.value.quads;
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,
       contextGraphId,
@@ -2465,9 +2468,12 @@ WHERE {
       });
     }
 
-    const normalizedQuads = normalizeWritableQuadLiterals("quads", quads);
+    const normalizedQuads = preparePublicWriteQuads("quads", quads);
     if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
-    const quadsToWrite = normalizedQuads.quads;
+    const quadsToWrite = normalizedQuads.value.quads.map((quad) => ({
+      ...quad,
+      graph: quad.graph ?? targetGraph,
+    }));
 
     // 5. Write to target layer
     try {

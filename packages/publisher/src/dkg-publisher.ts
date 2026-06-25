@@ -415,7 +415,16 @@ function rejectOversizedRdfLiterals(quads: Quad[], label: string): void {
 }
 
 function normalizePublicRdfLiterals(quads: Quad[], label: string): Quad[] {
-  return normalizeLargeRdfLiteralsForBlazegraph(quads, { label }).quads as Quad[];
+  return normalizeLargeRdfLiteralsForBlazegraph(quads, { label }).quads.map(toQuad);
+}
+
+function toQuad(quad: { subject: string; predicate: string; object: string; graph?: string }): Quad {
+  return {
+    subject: quad.subject,
+    predicate: quad.predicate,
+    object: quad.object,
+    graph: quad.graph ?? '',
+  };
 }
 
 async function stampTrustLevel(

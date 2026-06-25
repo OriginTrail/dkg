@@ -222,13 +222,18 @@ export function validateWritableQuadLiteralSizes(
   }
 }
 
-export function normalizeWritableQuadLiterals<T extends { subject: string; predicate: string; object: string; graph?: string }>(
+export interface PreparedPublicWriteQuads {
+  readonly quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>;
+  readonly rewrites: RdfTextLiteralRewrite[];
+}
+
+export function preparePublicWriteQuads(
   label: string,
-  quads: T[],
-): { ok: true; quads: T[]; rewrites: RdfTextLiteralRewrite[] } | { ok: false; body: Record<string, unknown> } {
+  quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
+): { ok: true; value: PreparedPublicWriteQuads } | { ok: false; body: Record<string, unknown> } {
   try {
     const result = normalizeLargeRdfLiteralsForBlazegraph(quads, { label });
-    return { ok: true, quads: result.quads as T[], rewrites: result.rewrites };
+    return { ok: true, value: { quads: result.quads, rewrites: result.rewrites } };
   } catch (err) {
     if (isOversizedRdfLiteralError(err)) {
       return { ok: false, body: oversizedRdfLiteralResponseBody(err) };
@@ -427,10 +432,16 @@ export function parsePublishRequestBody(
   }
   const quadObjectError = validateQuadObjectTerms("quads", quads);
   if (quadObjectError) return { ok: false, error: quadObjectError };
-  const normalizedQuads = normalizeWritableQuadLiterals("quads", quads);
+  const normalizedQuads = preparePublicWriteQuads("quads", quads);
   if (!normalizedQuads.ok) {
     return { ok: false, error: String(normalizedQuads.body.error ?? 'Oversized RDF literal'), body: normalizedQuads.body };
   }
+  const publishQuads = normalizedQuads.value.quads.map((quad) => ({
+    subject: quad.subject,
+    predicate: quad.predicate,
+    object: quad.object,
+    graph: quad.graph ?? '',
+  }));
 
   if (
     privateQuads !== undefined &&
@@ -521,9 +532,9 @@ export function parsePublishRequestBody(
     ok: true,
     value: {
       contextGraphId,
-      quads: normalizedQuads.quads,
+      quads: publishQuads,
       privateQuads,
-      ...(normalizedQuads.rewrites.length > 0 ? { literalRewrites: normalizedQuads.rewrites } : {}),
+      ...(normalizedQuads.value.rewrites.length > 0 ? { literalRewrites: normalizedQuads.value.rewrites } : {}),
       accessPolicy,
       allowedPeers,
       subGraphName: subGraphName as string | undefined,

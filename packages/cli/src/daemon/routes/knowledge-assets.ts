@@ -41,7 +41,7 @@ import {
   respondIfReconcileUnavailable,
   respondIfChainRpcTransportError,
   sanitizeRpcMessage,
-  normalizeWritableQuadLiterals,
+  preparePublicWriteQuads,
   normalizeContextGraphIdOrUri,
   resolveRequiredWriteContextGraphId,
   isNoFundedPublisherWalletLike,
@@ -828,9 +828,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       }
       const objErr = validateQuadObjectTerms("quads", quads);
       if (objErr) return jsonResponse(res, 400, { error: objErr });
-      const normalizedQuads = normalizeWritableQuadLiterals("quads", quads);
+      const normalizedQuads = preparePublicWriteQuads("quads", quads);
       if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
-      quadsToWrite = normalizedQuads.quads;
+      quadsToWrite = normalizedQuads.value.quads;
     }
     const shouldFinalize = hasQuads && finalize !== false;
     // #1116 D5: the create ROUTE stays a primitive — create+write+seal, with
@@ -1149,7 +1149,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // literal nor an absolute IRI before they reach (and crash) the parser.
         const wmObjErr = validateQuadObjectTerms("quads", parsed.quads);
         if (wmObjErr) return jsonResponse(res, 400, { error: wmObjErr });
-        const normalizedQuads = normalizeWritableQuadLiterals("quads", parsed.quads);
+        const normalizedQuads = preparePublicWriteQuads("quads", parsed.quads);
         if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
         // A bare write to a name that was never created used to fall through to
         // the legacy `/assertion/{addr}/{name}` graph and produce a KA that is
@@ -1176,9 +1176,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             ...writeAuthorLane,
           });
         }
-        await agent.assertion.write(contextGraphId, name, normalizedQuads.quads, { subGraphName, ...writeAuthorLane });
-        emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm"], subGraphName, operation: "assertion_written", source: "api", counts: { triples: normalizedQuads.quads.length } });
-        return jsonResponse(res, 200, { written: normalizedQuads.quads.length });
+        await agent.assertion.write(contextGraphId, name, normalizedQuads.value.quads, { subGraphName, ...writeAuthorLane });
+        emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm"], subGraphName, operation: "assertion_written", source: "api", counts: { triples: normalizedQuads.value.quads.length } });
+        return jsonResponse(res, 200, { written: normalizedQuads.value.quads.length });
       }
       if (verb === "finalize") {
         const finalizeOptions = resolveFinalizeOptions(parsed, res, writePreflightCallerAgentAddress);

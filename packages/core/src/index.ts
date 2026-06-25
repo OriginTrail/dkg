@@ -232,14 +232,12 @@ export {
   assertRdfLiteralMutf8Safe,
   assertQuadLiteralsMutf8Safe,
   normalizeLargeRdfLiteralsForBlazegraph,
-  reconstructChunkedTextBodies,
   type RdfLiteralSizeContext,
   type QuadLiteralLike,
   type ParsedRdfLiteralTerm,
   type RdfTextLiteralRewrite,
   type RdfLiteralNormalizationResult,
   type RdfLiteralNormalizationOptions,
-  type ReconstructedChunkedTextBody,
 } from './rdf-literal-size.js';
 export {
   DKGError,

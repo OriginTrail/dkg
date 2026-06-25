@@ -243,8 +243,8 @@ export function assertQuadLiteralsMutf8Safe(
   }
 }
 
-export function normalizeLargeRdfLiteralsForBlazegraph<T extends QuadLiteralLike>(
-  quads: readonly T[],
+export function normalizeLargeRdfLiteralsForBlazegraph(
+  quads: readonly QuadLiteralLike[],
   options: RdfLiteralNormalizationOptions = {},
 ): RdfLiteralNormalizationResult {
   const maxBytes = options.maxBytes ?? DKG_RDF_LITERAL_SAFE_MUTF8_BYTES;
@@ -252,7 +252,7 @@ export function normalizeLargeRdfLiteralsForBlazegraph<T extends QuadLiteralLike
   validateNormalizationLimits(maxBytes, chunkMaxBytes);
 
   const textPredicates = new Set(options.textPredicates ?? SCHEMA_TEXT_PREDICATES);
-  const normalized: T[] = [];
+  const normalized: QuadLiteralLike[] = [];
   const rewrites: RdfTextLiteralRewrite[] = [];
 
   for (let i = 0; i < quads.length; i++) {
@@ -297,7 +297,7 @@ export function normalizeLargeRdfLiteralsForBlazegraph<T extends QuadLiteralLike
       originalMutf8Bytes: literalBytes,
       lexicalSha256,
       literalTermSha256,
-    }) as T[];
+    });
     normalized.push(...bodyQuads);
     rewrites.push({
       subject: quad.subject,

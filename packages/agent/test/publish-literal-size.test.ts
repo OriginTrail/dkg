@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   DKG_CHUNK_VALUE,
   DKG_HAS_TEXT_BODY,
+  normalizeLargeRdfLiteralsForBlazegraph,
 } from '@origintrail-official/dkg-core';
+import { canonicalPublishPayload } from '@origintrail-official/dkg-publisher';
 import { PublishMethods } from '../src/dkg-agent-publish.js';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 
@@ -99,5 +101,47 @@ describe('agent publish literal size validation', () => {
       maxBytes: 60_000,
       predicate: 'http://schema.org/name',
     });
+  });
+
+  it('builds selection precomputed attestations over chunked public text quads', async () => {
+    const authorAddress = '0x000000000000000000000000000000000000dEaD';
+    const agentStub = {
+      chain: {
+        getEvmChainId: vi.fn(async () => 31337n),
+        getKnowledgeAssetsLifecycleAddress: vi.fn(async () => '0x000000000000000000000000000000000000c0de'),
+      },
+      getContextGraphOnChainId: vi.fn(async () => 42n),
+      isPrivateContextGraph: vi.fn(async () => false),
+      publisher: {
+        publisherFallbackAuthorAddress: vi.fn(async () => authorAddress),
+        signAuthorAttestationAsPublisher: vi.fn(async () => ({
+          r: new Uint8Array(32).fill(1),
+          vs: new Uint8Array(32).fill(2),
+        })),
+      },
+      kaNumberAllocator: {
+        reconcile: vi.fn(),
+        markReconciled: vi.fn(),
+        allocate: vi.fn(() => ({ number: 7n })),
+      },
+      reconciledKaAuthors: new Set<string>(),
+    };
+
+    const attestation =
+      await PublishMethods.prototype._buildPrecomputedAttestationForSelection.call(
+        agentStub as never,
+        'computer-history',
+        [OVERSIZED_TEXT_QUAD],
+      );
+
+    const chunkedQuads = normalizeLargeRdfLiteralsForBlazegraph(
+      [OVERSIZED_TEXT_QUAD],
+      { label: 'test.expected' },
+    ).quads.map((quad) => ({ ...quad, graph: quad.graph ?? '' }));
+    const expectedChunkedRoot = canonicalPublishPayload(chunkedQuads, []).kcMerkleRoot;
+    const unchunkedRoot = canonicalPublishPayload([OVERSIZED_TEXT_QUAD], []).kcMerkleRoot;
+
+    expect(Array.from(attestation?.expectedMerkleRoot ?? [])).toEqual(Array.from(expectedChunkedRoot));
+    expect(Array.from(attestation?.expectedMerkleRoot ?? [])).not.toEqual(Array.from(unchunkedRoot));
   });
 });

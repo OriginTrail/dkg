@@ -43,7 +43,7 @@ import {
   normalizeContextGraphIdOrUri,
   resolveRequiredWriteContextGraphId,
   oversizedRdfLiteralResponseBody,
-  normalizeWritableQuadLiterals,
+  preparePublicWriteQuads,
   SMALL_BODY_BYTES,
   MAX_UPLOAD_BYTES,
   type ImportFileExtractionPayload,
@@ -639,11 +639,11 @@ export async function handleKaSemanticEnrichmentWrite(ctx: RequestContext): Prom
       generationMethod,
       semanticQuads,
     });
-    const normalizedQuads = normalizeWritableQuadLiterals("semanticQuads", [...semanticQuads, ...provenanceQuads]);
+    const normalizedQuads = preparePublicWriteQuads("semanticQuads", [...semanticQuads, ...provenanceQuads]);
     if (!normalizedQuads.ok) {
       return jsonResponse(res, 400, normalizedQuads.body);
     }
-    const quads = normalizedQuads.quads;
+    const quads = normalizedQuads.value.quads;
     const targetAssertionUri = contextGraphAssertionUri(
       artifact.contextGraphId,
       artifact.assertionAgentAddress,
