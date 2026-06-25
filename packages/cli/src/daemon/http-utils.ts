@@ -261,18 +261,29 @@ export function preparePublicWriteQuads(
  * word `hello` or a number `123`) slips past them and crashes the RDF parser
  * with an uncaught "No scheme found in an absolute IRI" → HTTP 500 instead of an
  * actionable 400. Operates on any `{ object: string }` (PublishQuad or writable
- * quad alike).
+ * quad alike). Blank-node object terms are valid only for public write paths that
+ * subsequently skolemize them; callers that persist quads without normalization
+ * should set `allowBlankNodes: false`.
  */
 export function validateQuadObjectTerms(
   label: string,
   quads: ReadonlyArray<{ object: string }>,
+  options: { allowBlankNodes?: boolean } = {},
 ): string | null {
+  const allowBlankNodes = options.allowBlankNodes ?? true;
   const badIndex = quads.findIndex((q) => {
     const object = q.object.trim();
-    return !object.startsWith('"') && !isSafeBlankNode(object) && !isSafeIri(object);
+    return (
+      !object.startsWith('"') &&
+      !(allowBlankNodes && isSafeBlankNode(object)) &&
+      !isSafeIri(object)
+    );
   });
   if (badIndex === -1) return null;
-  return `Invalid "${label}[${badIndex}].object": RDF object must be a quoted literal term, blank node, or absolute IRI`;
+  const expected = allowBlankNodes
+    ? "a quoted literal term, blank node, or absolute IRI"
+    : "a quoted literal term or absolute IRI";
+  return `Invalid "${label}[${badIndex}].object": RDF object must be ${expected}`;
 }
 
 function isSafeBlankNode(term: string): boolean {
@@ -467,7 +478,9 @@ export function parsePublishRequestBody(
     };
   }
   if (privateQuads !== undefined) {
-    const privateQuadObjectError = validateQuadObjectTerms("privateQuads", privateQuads);
+    const privateQuadObjectError = validateQuadObjectTerms("privateQuads", privateQuads, {
+      allowBlankNodes: false,
+    });
     if (privateQuadObjectError) return { ok: false, error: privateQuadObjectError };
     const privateQuadSize = validateWritableQuadLiteralSizes("privateQuads", privateQuads);
     if (!privateQuadSize.ok) {

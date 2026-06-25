@@ -120,6 +120,38 @@ describe('HTTP RDF literal size validation', () => {
     }
   });
 
+  it('rejects blank-node private publish object terms because private quads are not skolemized', () => {
+    const parsed = parsePublishRequestBody(JSON.stringify({
+      contextGraphId: 'literal-size-cg',
+      quads: [{
+        subject: 'http://example.org/root',
+        predicate: 'http://schema.org/name',
+        object: '"safe"',
+        graph: 'http://example.org/g',
+      }],
+      privateQuads: [
+        {
+          subject: 'http://example.org/root',
+          predicate: 'http://schema.org/hasPart',
+          object: '_:secret',
+          graph: 'http://example.org/g',
+        },
+        {
+          subject: '_:secret',
+          predicate: 'http://schema.org/name',
+          object: '"hidden"',
+          graph: 'http://example.org/g',
+        },
+      ],
+    }));
+
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.error).toContain('Invalid "privateQuads[0].object"');
+      expect(parsed.error).toContain('quoted literal term or absolute IRI');
+    }
+  });
+
   it('returns structured validation failure for reject-only private/writable guards', () => {
     const result = validateWritableQuadLiteralSizes('quads', [{
       subject: 'http://example.org/s',
