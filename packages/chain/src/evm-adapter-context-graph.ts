@@ -238,7 +238,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   async isContextGraphActiveOnChain(contextGraphId: bigint): Promise<boolean> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    return Boolean(await cgs.isContextGraphActive(contextGraphId));
+    return Boolean(await this.contractReadWithFailover(
+      'cgStorage.isContextGraphActive', cgs, (c) => c.isContextGraphActive(contextGraphId),
+    ));
   }
 
   async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
@@ -470,7 +472,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
     // Unreachable below (kept for type-completeness until the mirror is removed);
     // the unsupported-mirror guard above throws before any on-chain side effect.
-    const v10ChainId = (await this.provider.getNetwork()).chainId;
+    const v10ChainId = (await this.readWithFailover('getNetwork (chainId)', (p) => p.getNetwork())).chainId;
     const v10KavAddress = await this.contracts.knowledgeAssetsLifecycle!.getAddress();
     const authorTypedData = buildAuthorAttestationTypedData({
       chainId: v10ChainId,
@@ -514,21 +516,27 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   async getKAContextGraphId(kaId: bigint): Promise<bigint> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    const cgId: bigint = await cgs.kaToContextGraph(kaId);
+    const cgId: bigint = await this.contractReadWithFailover(
+      'cgStorage.kaToContextGraph', cgs, (c) => c.kaToContextGraph(kaId),
+    );
     return BigInt(cgId);
   }
 
   async getContextGraphKCCount(contextGraphId: bigint): Promise<bigint> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    const count: bigint = await cgs.getContextGraphKaCount(contextGraphId);
+    const count: bigint = await this.contractReadWithFailover(
+      'cgStorage.getContextGraphKaCount', cgs, (c) => c.getContextGraphKaCount(contextGraphId),
+    );
     return BigInt(count);
   }
 
   async getContextGraphKCAt(contextGraphId: bigint, index: bigint): Promise<bigint> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    const kaId: bigint = await cgs.getContextGraphKaAt(contextGraphId, index);
+    const kaId: bigint = await this.contractReadWithFailover(
+      'cgStorage.getContextGraphKaAt', cgs, (c) => c.getContextGraphKaAt(contextGraphId, index),
+    );
     return BigInt(kaId);
   }
 
@@ -544,11 +552,15 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     await this.init();
     const cgs = this.requireContextGraphStorage();
     try {
-      const raw: bigint = BigInt(await cgs.getAccessPolicy(contextGraphId));
+      const raw: bigint = BigInt(await this.contractReadWithFailover(
+        'cgStorage.getAccessPolicy', cgs, (c) => c.getAccessPolicy(contextGraphId),
+      ));
       return Number(raw);
     } catch (primaryErr) {
       try {
-        const cg = await cgs.getContextGraph(contextGraphId);
+        const cg = await this.contractReadWithFailover(
+          'cgStorage.getContextGraph', cgs, (c) => c.getContextGraph(contextGraphId),
+        );
         const raw =
           cg?.accessPolicy
           ?? (Array.isArray(cg) ? cg[5] : undefined);
@@ -581,7 +593,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   }> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    const result = await cgs.getPublishPolicy(contextGraphId);
+    const result = await this.contractReadWithFailover(
+      'cgStorage.getPublishPolicy', cgs, (c) => c.getPublishPolicy(contextGraphId),
+    );
     // Ethers v6 returns named tuple as both array and object access;
     // destructure positionally to stay robust against ABI naming
     // changes.
@@ -609,7 +623,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   async getContextGraphParticipantAgents(contextGraphId: bigint): Promise<string[]> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    const raw: string[] = await cgs.getParticipantAgents(contextGraphId);
+    const raw: string[] = await this.contractReadWithFailover(
+      'cgStorage.getParticipantAgents', cgs, (c) => c.getParticipantAgents(contextGraphId),
+    );
     return raw.map((addr: string) => ethers.getAddress(addr));
   }
 
@@ -633,7 +649,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   async getContextGraphNameHash(contextGraphId: bigint): Promise<string | null> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    const raw: string = await cgs.getNameHash(contextGraphId);
+    const raw: string = await this.contractReadWithFailover(
+      'cgStorage.getNameHash', cgs, (c) => c.getNameHash(contextGraphId),
+    );
     if (!raw || raw === ethers.ZeroHash) return null;
     return raw.toLowerCase();
   }

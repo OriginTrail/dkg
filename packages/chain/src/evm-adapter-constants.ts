@@ -44,6 +44,21 @@ export const MAX_PROBE_AGE_MS = 30_000;
 
 export const RPC_READ_STALL_TIMEOUT_MS = 4_000;
 
+/**
+ * Per-attempt deadline for WIDE `eth_getLogs` reads (the `evm-adapter-events.ts`
+ * `queryFilter` scans, which run over `[fromBlock ?? 0, toBlock]` — up to the
+ * event poller's 9,000-block window, and the full chain on a cold-start
+ * backfill). These legitimately take tens of seconds on a busy/slow chain, so
+ * the 4s `RPC_READ_STALL_TIMEOUT_MS` point-read cap would abort a healthy scan
+ * and fail it over across every endpoint → spurious `RPC_ENDPOINTS_EXHAUSTED`
+ * (which, in the poller, escapes before the cursor advances → a permanent
+ * stall). 30s still hard-bounds a genuinely hung backend on a multi-RPC node;
+ * it is passed as `multiAttemptTimeoutMs`, so single-RPC stays uncapped (#894).
+ * Larger than `KA_HIGH_WATER_PAGE_TIMEOUT_MS` (15s) because that bounds smaller
+ * 2,000-block pages, whereas this covers the wider 9,000-block poller window.
+ */
+export const RPC_LOG_SCAN_TIMEOUT_MS = 30_000;
+
 export const RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS = 10_000;
 
 export const RPC_BROADCAST_ATTEMPT_TIMEOUT_MS = 10_000;
@@ -53,6 +68,23 @@ export const RPC_RECEIPT_ATTEMPT_TIMEOUT_MS = 5_000;
 export const RPC_RECEIPT_POLL_INTERVAL_MS = 2_000;
 
 export const RPC_RECEIPT_TIMEOUT_MS = 180_000;
+
+/**
+ * Bounded "retry the whole endpoint set" for the BROADCAST phase (S2). After a
+ * full per-endpoint broadcast pass exhausts with a retryable error (e.g. a brief
+ * window where ALL endpoints 429), `sendSignedTransactionAndWait` re-broadcasts
+ * the SAME already-signed/already-WAL-checkpointed tx up to this many extra full
+ * passes, with `RPC_ENDPOINT_SET_RETRY_BACKOFF_MS` between passes, before
+ * surfacing `RPC_ENDPOINTS_EXHAUSTED`. Default `1` (one extra pass) keeps the
+ * "ride out a brief all-down blip" property without per-endpoint latency; `0`
+ * fails fast on the first full-pass exhaustion. Re-broadcasting the identical
+ * signed tx is idempotent (`isKnownTransactionError`), so this cannot double-
+ * submit or change the nonce — it is scoped to broadcast ONLY (receipt waiting
+ * owns its own deadline), so total lock-hold stays bounded.
+ */
+export const RPC_ENDPOINT_SET_RETRIES = 1;
+
+export const RPC_ENDPOINT_SET_RETRY_BACKOFF_MS = 500;
 
 export const ADMIN_KEY_PURPOSE = 1;
 

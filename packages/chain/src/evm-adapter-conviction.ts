@@ -39,7 +39,9 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     if (!this.contracts.dkgPublishingConvictionNFT) return 0n;
     if (!ethers.isAddress(agent)) return 0n;
     try {
-      const id: bigint = await this.contracts.dkgPublishingConvictionNFT.agentToAccountId(agent);
+      const id: bigint = await this.contractReadWithFailover(
+        'pcaNFT.agentToAccountId', this.contracts.dkgPublishingConvictionNFT, (c) => c.agentToAccountId(agent),
+      );
       return BigInt(id);
     } catch (err: any) {
       if (err?.code === 'CALL_EXCEPTION') return 0n;
@@ -56,7 +58,9 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       // (committedTRAC, createdAtEpoch, expiresAtEpoch, createdAtTimestamp,
       //  expiresAtTimestamp, lockDurationEpochs, discountBps,
       //  lastSettledWindow, fullySwept). Pull index 5.
-      const tuple = await this.contracts.dkgPublishingConvictionNFT.accounts(accountId);
+      const tuple = await this.contractReadWithFailover(
+        'pcaNFT.accounts', this.contracts.dkgPublishingConvictionNFT, (c) => c.accounts(accountId),
+      );
       const lock = tuple[5];
       return Number(lock);
     } catch (err: any) {
@@ -110,7 +114,7 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       // wall clock first to mirror the contract exactly — otherwise the SDK
       // would coerce, then fall through to full-price direct spend.
       if (info.expiresAtTimestamp > 0) {
-        const latestBlock = await this.provider.getBlock('latest');
+        const latestBlock = await this.readWithFailover('conviction getBlock', (p) => p.getBlock('latest'));
         const nowTs = latestBlock ? Number(latestBlock.timestamp) : Math.floor(Date.now() / 1000);
         if (nowTs >= info.expiresAtTimestamp) return false;
       }
@@ -124,10 +128,12 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       if (!this.contracts.chronos) {
         this.contracts.chronos = await this.resolveContract('Chronos');
       }
-      const currentEpoch: bigint = BigInt(await this.contracts.chronos.getCurrentEpoch());
-      const remaining: bigint = await this.contracts.dkgPublishingConvictionNFT.getRemainingAllowance(
-        accountId,
-        currentEpoch,
+      const currentEpoch: bigint = BigInt(await this.contractReadWithFailover(
+        'chronos.getCurrentEpoch', this.contracts.chronos, (c) => c.getCurrentEpoch(),
+      ));
+      const remaining: bigint = await this.contractReadWithFailover(
+        'pcaNFT.getRemainingAllowance', this.contracts.dkgPublishingConvictionNFT,
+        (c) => c.getRemainingAllowance(accountId, currentEpoch),
       );
       return BigInt(remaining) >= discountedCost;
     } catch (err: any) {
@@ -139,7 +145,9 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
   async getPublishingConvictionAccountOwner(accountId: bigint): Promise<string> {
     await this.init();
     const nft = await this.resolveContract('DKGPublishingConvictionNFT');
-    const owner = await nft.ownerOf(accountId);
+    const owner = await this.contractReadWithFailover(
+      'pcaNFT.ownerOf', nft, (c) => c.ownerOf(accountId),
+    );
     return ethers.getAddress(owner);
   }
 
@@ -203,7 +211,9 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       // createAccount() does transferFrom(msg.sender → stakingStorage,
       // committedTRAC) — the signer must allow the NFT to pull the TRAC.
       if (this.contracts.token) {
-        const allowance: bigint = await this.contracts.token.allowance(this.signer.address, nftAddress);
+        const allowance: bigint = await this.contractReadWithFailover(
+          'token.allowance', this.contracts.token, (c) => c.allowance(this.signer.address, nftAddress),
+        );
         if (allowance < committedTRAC) {
           await this.sendContractTransaction(
             this.contracts.token,
@@ -259,7 +269,9 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     // for a genuine account-missing revert so the route can disambiguate.
     if (!this.contracts.dkgPublishingConvictionNFT) throw new PcaUnavailableError();
     try {
-      const t = await this.contracts.dkgPublishingConvictionNFT.getAccountInfo(accountId);
+      const t = await this.contractReadWithFailover(
+        'pcaNFT.getAccountInfo', this.contracts.dkgPublishingConvictionNFT, (c) => c.getAccountInfo(accountId),
+      );
       return {
         owner: ethers.getAddress(t[0]),
         committedTRAC: BigInt(t[1]),
@@ -286,7 +298,9 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       const nft = this.requireConvictionNFT();
       const nftAddress = await nft.getAddress();
       if (this.contracts.token) {
-        const allowance: bigint = await this.contracts.token.allowance(this.signer.address, nftAddress);
+        const allowance: bigint = await this.contractReadWithFailover(
+          'token.allowance', this.contracts.token, (c) => c.allowance(this.signer.address, nftAddress),
+        );
         if (allowance < amount) {
           await this.sendContractTransaction(
             this.contracts.token,
@@ -358,7 +372,9 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     if (!this.contracts.dkgPublishingConvictionNFT) return false;
     if (!ethers.isAddress(agent)) return false;
     try {
-      return Boolean(await this.contracts.dkgPublishingConvictionNFT.isAgent(accountId, agent));
+      return Boolean(await this.contractReadWithFailover(
+        'pcaNFT.isAgent', this.contracts.dkgPublishingConvictionNFT, (c) => c.isAgent(accountId, agent),
+      ));
     } catch (err: any) {
       if (err?.code === 'CALL_EXCEPTION') return false;
       throw err;

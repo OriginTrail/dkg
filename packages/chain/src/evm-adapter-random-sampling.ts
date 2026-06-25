@@ -75,7 +75,9 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
     await this.init();
 
     const identityStorage = await this.getIdentityStorage();
-    const identityId: bigint = await identityStorage.getIdentityId(this.signer.address);
+    const identityId: bigint = await this.contractReadWithFailover(
+      'identityStorage.getIdentityId', identityStorage, (c) => c.getIdentityId(this.signer.address),
+    );
 
     return this.withHubStaleRetry(async () => {
       const { rs, rss } = await this.getRandomSampling();
@@ -126,7 +128,9 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
         );
       }
 
-      const challengeRaw = await rss.getNodeChallenge(identityId);
+      const challengeRaw = await this.contractReadWithFailover(
+        'rss.getNodeChallenge', rss, (c) => c.getNodeChallenge(identityId),
+      );
       const challenge = this.toNodeChallenge(challengeRaw);
       if (!challenge) {
         throw new Error(
@@ -282,7 +286,9 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
   async getNodeChallenge(identityId: bigint): Promise<NodeChallenge | null> {
     await this.init();
     const { rss } = await this.getRandomSampling();
-    const raw = await rss.getNodeChallenge(identityId);
+    const raw = await this.contractReadWithFailover(
+      'rss.getNodeChallenge', rss, (c) => c.getNodeChallenge(identityId),
+    );
     return this.toNodeChallenge(raw);
   }
 
@@ -293,7 +299,9 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
   ): Promise<bigint> {
     await this.init();
     const { rss } = await this.getRandomSampling();
-    const score: bigint = await rss.getNodeEpochProofPeriodScore(identityId, epoch, periodStartBlock);
+    const score: bigint = await this.contractReadWithFailover(
+      'rss.getNodeEpochProofPeriodScore', rss, (c) => c.getNodeEpochProofPeriodScore(identityId, epoch, periodStartBlock),
+    );
     return BigInt(score);
   }
 }

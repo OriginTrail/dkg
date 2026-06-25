@@ -248,6 +248,49 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
     expect(stale.getMaxKaNumberForAuthor.staticCall.calls).toEqual([]);
   });
 
+  // R1 bespoke-loop boundary (base:2068): the view staticCall is NOT routed
+  // through readWithFailover because its error shapes are overloaded — a
+  // TRANSIENT error must fail over to the next endpoint, but a DETERMINISTIC
+  // absent-view (BAD_DATA/CALL_EXCEPTION) must NOT fail over (it's the same on
+  // every endpoint) and instead fall through to the pre-10.0.4 scan.
+  it('bespoke staticCall loop: a TRANSIENT 429 fails over to the next endpoint and answers from the view (no scan)', async () => {
+    const queryFilter = recorder(async () => []);
+    let attempt = 0;
+    const storage: any = {
+      getMaxKaNumberForAuthor: viewMock(async () => {
+        attempt += 1;
+        if (attempt === 1) { const e: any = new Error('429 too many requests'); e.status = 429; throw e; }
+        return 5n;
+      }),
+      filters: { KnowledgeAssetCreated: recorder(() => 'F') },
+      queryFilter,
+    };
+    const a = makeAdapter(storage, 100_000);
+    (a as any).providers = [{}, {}]; // two endpoints → the view read fails over
+    expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(5n); // served by endpoint #2
+    expect(storage.getMaxKaNumberForAuthor.staticCall.calls).toHaveLength(2); // failed over once
+    expect(queryFilter.calls).toEqual([]); // the view answered → NEVER scans logs
+  });
+
+  it('bespoke staticCall loop: an ABSENT-view (BAD_DATA) is deterministic across endpoints — no failover, straight to the scan', async () => {
+    const badData: any = new Error(EMPTY_VIEW_RESULT);
+    badData.code = 'BAD_DATA';
+    const queryFilter = recorder(async () => []);
+    const storage: any = {
+      target: '0x5555555555555555555555555555555555555555',
+      getMaxKaNumberForAuthor: viewMock(async () => { throw badData; }),
+      filters: { KnowledgeAssetCreated: recorder(() => 'F') },
+      queryFilter,
+    };
+    const a = makeAdapter(storage, 3_000);
+    const backend = () => ({ getBlockNumber: recorder(async () => 3_000), getCode: recorder(async () => '0x6000') });
+    (a as any).providers = [backend(), backend()];
+    expect(await a.getMaxKaNumberForAuthor(AUTHOR)).toBe(-1n); // degraded to the (empty) scan
+    // Absent-view is deterministic → BREAK after ONE attempt, never consult endpoint #2.
+    expect(storage.getMaxKaNumberForAuthor.staticCall.calls).toHaveLength(1);
+    expect(queryFilter.calls.length).toBeGreaterThan(0); // the scan ran instead
+  });
+
   it('rethrows malformed BAD_DATA instead of treating every decode failure as an absent view', async () => {
     const err: any = new Error(
       'could not decode result data (value="0x1234", info={ method: "getMaxKaNumberForAuthor", signature: "getMaxKaNumberForAuthor(address)" }, code=BAD_DATA, version=6.16.0)',
@@ -752,9 +795,18 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
       };
       const a = makeAdapter(storage, head);
       const code = (block?: number) => (block === undefined || block >= deployBlock ? '0x6000' : '0x');
-      // b0 is reachable (head ok) but HANGS on getCode; the deploy-block search
-      // must time out its attempts and fail over to b1 rather than stalling.
-      const b0 = { getBlockNumber: recorder(async () => head), getCode: recorder(() => new Promise<string>(() => {})) };
+      // b0 is reachable (head ok) and serves the STANDALONE bytecode probe
+      // (block===undefined → readWithFailover, R1) but HANGS on the deploy-block
+      // SEARCH reads (block!==undefined); the search must time out its 3×4s
+      // attempts and fail over to b1 rather than stalling. (Hanging the
+      // standalone probe too would add a 4s readWithFailover hop and push the
+      // total past the 13s advance — out of scope for this "search fails over"
+      // assertion.)
+      const b0 = {
+        getBlockNumber: recorder(async () => head),
+        getCode: recorder((_a: string, block?: number) =>
+          block === undefined ? Promise.resolve('0x6000') : new Promise<string>(() => {})),
+      };
       const b1 = { getBlockNumber: recorder(async () => head), getCode: recorder(async (_a: string, block?: number) => code(block)) };
       (a as any).providers = [b0, b1];
 
@@ -1008,8 +1060,15 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
       queryFilter,
     };
     const a = makeAdapter(storage, 0);
-    // backend 0: completely down — getBlockNumber itself fails (a real, non-historical error)
-    const downBackend = { getBlockNumber: recorder(async () => { throw new Error('503 node is down'); }), getCode: recorder(() => undefined) };
+    // backend 0: completely down — getBlockNumber AND getCode fail (a real,
+    // non-historical error). R1: the standalone bytecode probe now consults
+    // getCode via readWithFailover, so a down node must THROW (not return
+    // undefined, which would be read as a valid empty result and short-circuit
+    // before failover to the pruned-but-reachable backend).
+    const downBackend = {
+      getBlockNumber: recorder(async () => { throw new Error('503 node is down'); }),
+      getCode: recorder(async () => { throw new Error('503 node is down'); }),
+    };
     // backend 1: reachable but pruned — historical getCode unavailable
     const prunedBackend = {
       getBlockNumber: recorder(async () => head),

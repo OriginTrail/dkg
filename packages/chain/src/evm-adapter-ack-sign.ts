@@ -37,7 +37,11 @@ export class AckSignMethods extends EVMChainAdapterBase {
         'Verify cannot enforce ACK quorum without a real chain read — fix the adapter wiring or pass an explicit override.',
       );
     }
-    const value = Number(await this.contracts.parametersStorage.minimumRequiredSignatures());
+    const value = Number(await this.contractReadWithFailover(
+      'parametersStorage.minimumRequiredSignatures',
+      this.contracts.parametersStorage,
+      (c) => c.minimumRequiredSignatures(),
+    ));
     this.cachedMinRequiredSignatures = { value, cachedAt: now };
     return value;
   }
@@ -52,7 +56,9 @@ export class AckSignMethods extends EVMChainAdapterBase {
         'Verify path cannot enforce sharding-table eligibility without it.',
       );
     }
-    return Boolean(await storage.nodeExists(identityId));
+    return Boolean(await this.contractReadWithFailover(
+      'shardingTableStorage.nodeExists', storage, (c) => c.nodeExists(identityId),
+    ));
   }
 
   /**
@@ -80,16 +86,18 @@ export class AckSignMethods extends EVMChainAdapterBase {
       if (!identityStorage) return { valid: false, reason: 'rpc-error' };
 
       const keyHash = ethers.keccak256(ethers.solidityPacked(['address'], [recoveredAddress]));
-      const hasPurpose: boolean = await identityStorage.keyHasPurpose(
-        claimedIdentityId,
-        keyHash,
-        OPERATIONAL_KEY_PURPOSE,
+      const hasPurpose: boolean = await this.contractReadWithFailover(
+        'identityStorage.keyHasPurpose', identityStorage,
+        (c) => c.keyHasPurpose(claimedIdentityId, keyHash, OPERATIONAL_KEY_PURPOSE),
       );
       if (!hasPurpose) return { valid: false, reason: 'key-not-registered' };
 
       const shardingTableStorage = await this.resolveContract('ShardingTableStorage');
       if (!shardingTableStorage) return { valid: false, reason: 'rpc-error' };
-      const inST: boolean = Boolean(await shardingTableStorage.nodeExists(claimedIdentityId));
+      const inST: boolean = Boolean(await this.contractReadWithFailover(
+        'shardingTableStorage.nodeExists', shardingTableStorage,
+        (c) => c.nodeExists(claimedIdentityId),
+      ));
       if (!inST) return { valid: false, reason: 'not-in-sharding-table' };
       return { valid: true };
     } catch {
@@ -122,7 +130,10 @@ export class AckSignMethods extends EVMChainAdapterBase {
     if (!identityStorage) return false;
 
     const keyHash = ethers.keccak256(ethers.solidityPacked(['address'], [recoveredAddress]));
-    return identityStorage.keyHasPurpose(claimedIdentityId, keyHash, OPERATIONAL_KEY_PURPOSE);
+    return this.contractReadWithFailover(
+      'identityStorage.keyHasPurpose', identityStorage,
+      (c) => c.keyHasPurpose(claimedIdentityId, keyHash, OPERATIONAL_KEY_PURPOSE),
+    );
   }
 
   async signACKDigest(digest: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array } | undefined> {

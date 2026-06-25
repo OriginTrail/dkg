@@ -1625,9 +1625,13 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
   it('getEvmChainId issues exactly one provider.getNetwork call across repeat reads', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     const getNetwork = recorder(async () => ({ chainId: 31337n }));
-    (a as unknown as { provider: { getNetwork: () => Promise<{ chainId: bigint }> } }).provider = {
+    // R1: getEvmChainId now reads via readWithFailover over this.providers[]
+    // (was this.provider.getNetwork). Mock this.providers[0]; the TTL-cache /
+    // dedup / no-cache-on-failure behaviour is unchanged (the cache wraps
+    // readWithFailover), so the assertions below are preserved verbatim.
+    (a as unknown as { providers: Array<{ getNetwork: () => Promise<{ chainId: bigint }> }> }).providers = [{
       getNetwork: getNetwork as unknown as () => Promise<{ chainId: bigint }>,
-    };
+    }];
 
     expect(await a.getEvmChainId()).toBe(31337n);
     expect(await a.getEvmChainId()).toBe(31337n);
@@ -1669,9 +1673,13 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
     const a = new EVMChainAdapter(minimalConfig());
     let returned = 31337n;
     const getNetwork = recorder(async () => ({ chainId: returned }));
-    (a as unknown as { provider: { getNetwork: () => Promise<{ chainId: bigint }> } }).provider = {
+    // R1: getEvmChainId now reads via readWithFailover over this.providers[]
+    // (was this.provider.getNetwork). Mock this.providers[0]; the TTL-cache /
+    // dedup / no-cache-on-failure behaviour is unchanged (the cache wraps
+    // readWithFailover), so the assertions below are preserved verbatim.
+    (a as unknown as { providers: Array<{ getNetwork: () => Promise<{ chainId: bigint }> }> }).providers = [{
       getNetwork: getNetwork as unknown as () => Promise<{ chainId: bigint }>,
-    };
+    }];
 
     expect(await a.getEvmChainId()).toBe(31337n);
     expect(getNetwork.calls).toHaveLength(1);
@@ -1689,9 +1697,13 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
   it('invalidatePublishPreflightCache forces a fresh read on next call', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     const getNetwork = recorder(async () => ({ chainId: 31337n }));
-    (a as unknown as { provider: { getNetwork: () => Promise<{ chainId: bigint }> } }).provider = {
+    // R1: getEvmChainId now reads via readWithFailover over this.providers[]
+    // (was this.provider.getNetwork). Mock this.providers[0]; the TTL-cache /
+    // dedup / no-cache-on-failure behaviour is unchanged (the cache wraps
+    // readWithFailover), so the assertions below are preserved verbatim.
+    (a as unknown as { providers: Array<{ getNetwork: () => Promise<{ chainId: bigint }> }> }).providers = [{
       getNetwork: getNetwork as unknown as () => Promise<{ chainId: bigint }>,
-    };
+    }];
 
     await a.getEvmChainId();
     await a.getEvmChainId();
@@ -1709,9 +1721,13 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
       if (attempts === 1) throw new Error('rate limited');
       return { chainId: 31337n };
     });
-    (a as unknown as { provider: { getNetwork: () => Promise<{ chainId: bigint }> } }).provider = {
+    // R1: getEvmChainId now reads via readWithFailover over this.providers[]
+    // (was this.provider.getNetwork). Mock this.providers[0]; the TTL-cache /
+    // dedup / no-cache-on-failure behaviour is unchanged (the cache wraps
+    // readWithFailover), so the assertions below are preserved verbatim.
+    (a as unknown as { providers: Array<{ getNetwork: () => Promise<{ chainId: bigint }> }> }).providers = [{
       getNetwork: getNetwork as unknown as () => Promise<{ chainId: bigint }>,
-    };
+    }];
 
     await expect(a.getEvmChainId()).rejects.toThrow('rate limited');
     // Second call should retry — failure was not memoised.
@@ -2567,17 +2583,24 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     (a as any).provider.getBalance = recorder(async (addr: string) =>
       nativeByAddr.get(String(addr).toLowerCase()) ?? ABUNDANT_WEI);
 
+    // R1: readTracBalance now reads via contractReadWithFailover → withRunner
+    // does `token.connect(p).balanceOf(addr)`, so the CONNECTED contract (what
+    // token.connect returns) must expose balanceOf — not just the top-level
+    // token. (Native getBalance still works: the helper mutates
+    // this.provider.getBalance and this.provider === this.providers[0], so the
+    // shared object is what readWithFailover reads.)
+    const balanceOf = recorder(async (addr: string) =>
+      tracByAddr.get(String(addr).toLowerCase()) ?? ABUNDANT_WEI);
     const tokenWithSigner = {
       allowance: recorder(async (owner: string, _spender: string) => {
         return allowanceByOwner.get(owner.toLowerCase()) ?? 0n;
       }),
       approve: recorder(() => undefined),
+      balanceOf,
     };
     (a as any).contracts.token = {
       connect: recorder(() => tokenWithSigner),
-      // Read path (`readTracBalance`) calls this.contracts.token.balanceOf.
-      balanceOf: recorder(async (addr: string) =>
-        tracByAddr.get(String(addr).toLowerCase()) ?? ABUNDANT_WEI),
+      balanceOf, // kept for any direct (non-connected) top-level reader
     };
 
     const populateSpy = recorder(async () => ({
@@ -2684,7 +2707,11 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     expect(approveSender).toBe(walletB);
 
     expect(signSpy.calls).toHaveLength(1);
-    expect(signSpy.calls[0][0]).toBe(walletB);
+    // R1/OBS-1: populateAndSignAcrossProviders signs on the per-provider runner
+    // (signer.connect(providers[i])) — same key/ADDRESS as walletB, new object.
+    // Assert the signer ADDRESS, not object identity (#870 "publish signed by
+    // walletB, no mid-flight rotation" invariant is preserved).
+    expect((signSpy.calls[0][0] as ethers.Wallet).address).toBe(walletB.address);
   });
 
   it('publish path: when publisherAddress is omitted, round-robin signer is also the approve signer (no mid-flight rotation)', async () => {
@@ -2710,7 +2737,8 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     expect(approveMethod).toBe('approve');
     expect(approveArgs).toEqual([PARITY_KA_ADDRESS, 1n]);
     expect(approveSender).toBe(walletA);
-    expect(signSpy.calls[0][0]).toBe(walletA);
+    // R1/OBS-1: signer reconnected per-provider — assert ADDRESS not identity.
+    expect((signSpy.calls[0][0] as ethers.Wallet).address).toBe(walletA.address);
   });
 
   it('update path: approve fires from the on-chain publisher wallet, NOT a round-robin pick from the pool', async () => {
@@ -2741,11 +2769,13 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     (a as any).resolveCurrentTokenAmount = recorder(async () => 0n);
     (a as any).computeUpdateNewTokenAmount = recorder(async () => 0n);
     (a as any).getIdentityId = recorder(async () => 0n);
-    // `provider.getNetwork()` is called for chainId; stub it so the update
-    // path doesn't try to hit the placeholder RPC.
-    (a as any).provider = {
-      getNetwork: recorder(async () => ({ chainId: 31337n })),
-    };
+    // `provider.getNetwork()` is called for chainId; stub it so the update path
+    // doesn't hit the placeholder RPC. R1: getEvmChainId reads via
+    // readWithFailover over this.providers[0] (=== this.provider), so MUTATE
+    // getNetwork on the shared object — REPLACING this.provider would orphan
+    // this.providers[0] (and the helper's getBalance mock) and the read would
+    // dial the dead RPC instead.
+    (a as any).provider.getNetwork = recorder(async () => ({ chainId: 31337n }));
 
     const updateParams: any = {
       kaId,
@@ -2789,7 +2819,11 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     expect(approveLabel).toBe('approve V10 update TRAC');
 
     expect(signSpy.calls).toHaveLength(1);
-    expect(signSpy.calls[0][0]).toBe(walletB);
+    // R1/OBS-1: populateAndSignAcrossProviders signs on the per-provider runner
+    // (signer.connect(providers[i])) — same key/ADDRESS as walletB, new object.
+    // Assert the signer ADDRESS, not object identity (#870 "publish signed by
+    // walletB, no mid-flight rotation" invariant is preserved).
+    expect((signSpy.calls[0][0] as ethers.Wallet).address).toBe(walletB.address);
   });
 
 // -----------------------------------------------------------------------------
@@ -3438,6 +3472,61 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     expect(populate.calls).toHaveLength(2); // initial + one forced retry, then give up
     expect(ensureSpy.calls).toHaveLength(1);
     expect(signSpy.calls).toEqual([]);
+  });
+
+  it('C6 (G-OBS1b): forces EXACTLY ONE approve across a provider-failover × TooLowAllowance interleaving (shared OUTER latch, not per-provider)', async () => {
+    // The case a PER-PROVIDER latch would double-fire: the inner per-provider
+    // populate loop fails over on provider #1's RETRYABLE 429, then provider #2
+    // reverts TooLowAllowance (non-retryable → propagates to the OUTER recovery),
+    // which fires ONE forced approve and re-runs the WHOLE inner loop (now
+    // succeeds). The forcedReapprove latch lives at the recovery OUTER scope, so
+    // it fires exactly once no matter how many endpoints the inner loop tried —
+    // immediate failover introduces ZERO extra approve txs (INV-1 + G-OBS1b).
+    const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
+    (a as any).providers = [{}, {}]; // two endpoints so the inner loop fails over
+    const r429 = () => { const e = new Error('429 too many requests'); (e as any).status = 429; return e; };
+    let call = 0;
+    const populate = recorder(async () => {
+      call += 1;
+      if (call === 1) throw r429();                   // provider[0], pass 1 → retryable → fail over
+      if (call === 2) throw tooLowAllowanceRevert();  // provider[1], pass 1 → non-retryable → propagate
+      return { to: V10_KA_ADDRESS, data: '0xabcd' };  // provider[0], pass 2 (post-approve) → succeeds
+    });
+    const kaContract = { publish: { populateTransaction: populate } };
+
+    const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
+      signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
+    );
+
+    expect(result).toEqual({ signedTx: '0xsigned', txHash: '0xhash' });
+    expect(ensureSpy.calls).toHaveLength(1);  // EXACTLY ONE forced approve across the failover
+    expect(ensureSpy.calls[0][4]).toBe(true); // force=true
+    expect(signSpy.calls).toHaveLength(1);    // publish signed exactly once (INV-1)
+    expect(populate.calls).toHaveLength(3);   // p0(429) → p1(TooLow) → [approve] → p0(ok)
+  });
+
+  it('OBS-1: a RETRYABLE populate failure fails over to the next provider and signs exactly once (no double-sign)', async () => {
+    // Plain OBS-1 populate failover (no allowance recovery): provider #1's
+    // populate is rate-limited, provider #2 populates fine → signed once on #2.
+    const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
+    (a as any).providers = [{}, {}];
+    const r429 = () => { const e = new Error('429 too many requests'); (e as any).status = 429; return e; };
+    let call = 0;
+    const populate = recorder(async () => {
+      call += 1;
+      if (call === 1) throw r429();                  // provider[0] → fail over
+      return { to: V10_KA_ADDRESS, data: '0xabcd' }; // provider[1] → populates
+    });
+    const kaContract = { publish: { populateTransaction: populate } };
+
+    const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
+      signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
+    );
+
+    expect(result).toEqual({ signedTx: '0xsigned', txHash: '0xhash' });
+    expect(populate.calls).toHaveLength(2); // p0(429) → p1(ok)
+    expect(signSpy.calls).toHaveLength(1);  // signed once, on the healthy provider
+    expect(ensureSpy.calls).toEqual([]);    // no TooLowAllowance → no forced approve
   });
 
   it('enriches the SECOND raw TooLowAllowance before throwing the one-shot failure', async () => {

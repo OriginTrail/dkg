@@ -69,16 +69,34 @@ export function resolveRpcUrls(rpcUrl: string, rpcUrls?: string[]): string[] {
 }
 
 /**
- * Build a `FetchRequest` whose retry loop gives up after
- * `RPC_REQUEST_MAX_RETRIES` retries. A bare string URL would use ethers'
- * unbounded default; we install a bounded `retryFunc` instead. The bound is
- * evaluated from `attempt` (per-request), so every request — no matter how
- * long the node has been running — gets the same fresh retry budget.
+ * Build a `FetchRequest` whose retry loop gives up after `maxRetries` retries.
+ * A bare string URL would use ethers' unbounded default; we install a bounded
+ * `retryFunc` instead. The bound is evaluated from `attempt` (per-request), so
+ * every request — no matter how long the node has been running — gets the same
+ * fresh retry budget.
+ *
+ * `maxRetries` is chosen by the adapter from the configured endpoint count
+ * (`evm-adapter-base.ts` constructor):
+ *   - **Multi-RPC (≥2 endpoints): `0`** — the FIRST retryable failure (429/5xx/
+ *     network) propagates immediately so the adapter's explicit per-provider
+ *     read/write failover loops advance to the NEXT endpoint at once, instead of
+ *     burning ~7.5s of same-endpoint backoff on an endpoint we already know is
+ *     failing. With ≥2 endpoints the failover loop IS the resilience.
+ *   - **Single-RPC: `RPC_REQUEST_MAX_RETRIES` (5)** — unchanged. There is
+ *     nowhere to fail over to, so the bounded same-endpoint retry is the only
+ *     resilience and rides out a transient blip while still surfacing a
+ *     perpetual error as a bounded `RPC_ENDPOINTS_EXHAUSTED`→503 (#894).
+ *
+ * `maxRetries = 0` makes `retryFunc` return `false` on attempt 0 with NO sleep,
+ * so the failure surfaces synchronously to the failover loop.
  */
-export function boundedRetryFetchRequest(url: string): FetchRequest {
+export function boundedRetryFetchRequest(
+  url: string,
+  maxRetries: number = RPC_REQUEST_MAX_RETRIES,
+): FetchRequest {
   const req = new FetchRequest(url);
   req.retryFunc = async (_req, _response, attempt) => {
-    if (attempt >= RPC_REQUEST_MAX_RETRIES) return false;
+    if (attempt >= maxRetries) return false;
     await sleep(Math.min(500 * (attempt + 1), RPC_REQUEST_RETRY_BACKOFF_CAP_MS));
     return true;
   };

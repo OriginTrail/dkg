@@ -61,7 +61,9 @@ export class PublishMethods extends EVMChainAdapterBase {
     const kaAddress = await ka.getAddress();
 
     if (this.contracts.token && params.tokenAmount > 0n) {
-      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, kaAddress);
+      const currentAllowance: bigint = await this.contractReadWithFailover(
+        'token.allowance', this.contracts.token, (c) => c.allowance(this.signer.address, kaAddress),
+      );
       if (currentAllowance < params.tokenAmount) {
         await this.sendContractTransaction(
           this.contracts.token,
@@ -180,12 +182,18 @@ export class PublishMethods extends EVMChainAdapterBase {
       let onChainPublisher: string | undefined;
       if (this.contracts.knowledgeAssetStorage) {
         try {
-          onChainPublisher = await this.contracts.knowledgeAssetStorage.getLatestMerkleRootPublisher(batchId);
+          onChainPublisher = await this.contractReadWithFailover(
+            'kas.getLatestMerkleRootPublisher', this.contracts.knowledgeAssetStorage,
+            (c) => c.getLatestMerkleRootPublisher(batchId),
+          );
         } catch { /* not found in V10 storage */ }
       }
       if ((!onChainPublisher || onChainPublisher === ethers.ZeroAddress) && this.contracts.knowledgeAssetsStorage) {
         try {
-          onChainPublisher = await this.contracts.knowledgeAssetsStorage.getBatchPublisher(batchId);
+          onChainPublisher = await this.contractReadWithFailover(
+            'kasV9.getBatchPublisher', this.contracts.knowledgeAssetsStorage,
+            (c) => c.getBatchPublisher(batchId),
+          );
         } catch { /* not found in V9 storage */ }
       }
       if (!onChainPublisher || onChainPublisher.toLowerCase() !== publisherAddress.toLowerCase()) {
@@ -208,7 +216,9 @@ export class PublishMethods extends EVMChainAdapterBase {
     if (!this.contracts.askStorage) {
       throw new Error('AskStorage not available');
     }
-    const ask = await this.contracts.askStorage.getStakeWeightedAverageAsk();
+    const ask = await this.contractReadWithFailover(
+      'askStorage.getStakeWeightedAverageAsk', this.contracts.askStorage, (c) => c.getStakeWeightedAverageAsk(),
+    );
     return (BigInt(ask) * publicByteSize * BigInt(epochs)) / 1024n;
   }
 
@@ -225,9 +235,13 @@ export class PublishMethods extends EVMChainAdapterBase {
     if (!this.contracts.knowledgeAssetsStorage) return false;
 
     const storage = this.contracts.knowledgeAssetsStorage;
-    const count = await storage.getPublisherRangesCount(publisherAddress);
+    const count = await this.contractReadWithFailover(
+      'kasV9.getPublisherRangesCount', storage, (c) => c.getPublisherRangesCount(publisherAddress),
+    );
     for (let i = 0; i < Number(count); i++) {
-      const [startId, endId] = await storage.getPublisherRange(publisherAddress, i);
+      const [startId, endId] = await this.contractReadWithFailover(
+        'kasV9.getPublisherRange', storage, (c) => c.getPublisherRange(publisherAddress, i),
+      );
       if (startId <= startKAId && endId >= endKAId) return true;
     }
     return false;
@@ -394,7 +408,9 @@ export class PublishMethods extends EVMChainAdapterBase {
     const kas = this.contracts.knowledgeAssetStorage;
     if (!kas) return 0n;
     try {
-      return BigInt(await kas.getTokenAmount(kaId));
+      return BigInt(await this.contractReadWithFailover(
+        'kas.getTokenAmount', kas, (c) => c.getTokenAmount(kaId),
+      ));
     } catch {
       // KA not yet in storage (would fail later on-chain anyway) — return 0.
       return 0n;
@@ -412,7 +428,9 @@ export class PublishMethods extends EVMChainAdapterBase {
     let endEpoch = 0n;
     if (kas) {
       try {
-        const ctx = await kas.getKnowledgeAssetUpdateContext(params.kaId);
+        const ctx = await this.contractReadWithFailover(
+          'kas.getKnowledgeAssetUpdateContext', kas, (c) => c.getKnowledgeAssetUpdateContext(params.kaId),
+        );
         // Tuple shape from `DKGKnowledgeAssets.getKnowledgeAssetUpdateContext`:
         // (preUpdateMerkleRootCount, minted, byteSize, endEpoch, tokenAmount, isImmutable, preUpdateMerkleLeafCount)
         currentByteSize = BigInt(ctx[2]);
@@ -433,7 +451,9 @@ export class PublishMethods extends EVMChainAdapterBase {
     }
     if (this.contracts.chronos) {
       try {
-        currentEpoch = BigInt(await this.contracts.chronos.getCurrentEpoch());
+        currentEpoch = BigInt(await this.contractReadWithFailover(
+          'chronos.getCurrentEpoch', this.contracts.chronos, (c) => c.getCurrentEpoch(),
+        ));
       } catch (err) {
         throw new Error(
           `Failed to read Chronos currentEpoch for update tokenAmount sizing: ${(err as Error).message}`,
@@ -445,7 +465,9 @@ export class PublishMethods extends EVMChainAdapterBase {
     let growthCost = 0n;
     if (params.newByteSize > currentByteSize && this.contracts.askStorage) {
       try {
-        const ask = BigInt(await this.contracts.askStorage.getStakeWeightedAverageAsk());
+        const ask = BigInt(await this.contractReadWithFailover(
+          'askStorage.getStakeWeightedAverageAsk', this.contracts.askStorage, (c) => c.getStakeWeightedAverageAsk(),
+        ));
         const byteSizeGrowth = params.newByteSize - currentByteSize;
         if (remainingEpochs > 0n) {
           growthCost = (ask * byteSizeGrowth * remainingEpochs) / 1024n;
@@ -497,7 +519,7 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     const kas = this.contracts.knowledgeAssetStorage;
     const kav10Address = await this.contracts.knowledgeAssetsLifecycle.getAddress();
-    const evmChainId = BigInt((await this.provider.getNetwork()).chainId);
+    const evmChainId = BigInt((await this.readWithFailover('getNetwork (chainId)', (p) => p.getNetwork())).chainId);
 
     const currentTokenAmount = await this.resolveCurrentTokenAmount(params.kaId);
 
@@ -517,7 +539,10 @@ export class PublishMethods extends EVMChainAdapterBase {
     if (this.contracts.contextGraphStorage) {
       try {
         contextGraphId = BigInt(
-          await this.contracts.contextGraphStorage.kaToContextGraph(params.kaId),
+          await this.contractReadWithFailover(
+            'cgStorage.kaToContextGraph', this.contracts.contextGraphStorage,
+            (c) => c.kaToContextGraph(params.kaId),
+          ),
         );
       } catch { /* use 0 */ }
     }
@@ -525,7 +550,9 @@ export class PublishMethods extends EVMChainAdapterBase {
     let preUpdateMerkleRootCount = 0n;
     if (kas) {
       try {
-        const roots: unknown[] = await kas.getMerkleRoots(params.kaId);
+        const roots: unknown[] = await this.contractReadWithFailover(
+          'kas.getMerkleRoots', kas, (c) => c.getMerkleRoots(params.kaId),
+        );
         preUpdateMerkleRootCount = BigInt(roots.length);
       } catch { /* use 0 */ }
     }
@@ -584,7 +611,10 @@ export class PublishMethods extends EVMChainAdapterBase {
     if (this.contracts.contextGraphStorage) {
       try {
         contextGraphId = BigInt(
-          await this.contracts.contextGraphStorage.kaToContextGraph(params.kaId),
+          await this.contractReadWithFailover(
+            'cgStorage.kaToContextGraph', this.contracts.contextGraphStorage,
+            (c) => c.kaToContextGraph(params.kaId),
+          ),
         );
       } catch { /* use 0 */ }
     }
@@ -592,7 +622,9 @@ export class PublishMethods extends EVMChainAdapterBase {
     let preUpdateMerkleRootCount = 0n;
     if (kas) {
       try {
-        const roots: unknown[] = await kas.getMerkleRoots(params.kaId);
+        const roots: unknown[] = await this.contractReadWithFailover(
+          'kas.getMerkleRoots', kas, (c) => c.getMerkleRoots(params.kaId),
+        );
         preUpdateMerkleRootCount = BigInt(roots.length);
       } catch { /* use 0 */ }
     }
@@ -627,7 +659,9 @@ export class PublishMethods extends EVMChainAdapterBase {
     const kas = this.contracts.knowledgeAssetStorage;
     if (kas) {
       try {
-        const onChainPublisher: string = await kas.getLatestMerkleRootPublisher(params.kaId);
+        const onChainPublisher: string = await this.contractReadWithFailover(
+          'kas.getLatestMerkleRootPublisher', kas, (c) => c.getLatestMerkleRootPublisher(params.kaId),
+        );
         if (onChainPublisher && onChainPublisher !== ethers.ZeroAddress) {
           signer = this.signerPool.find(
             (s) => s.address.toLowerCase() === onChainPublisher.toLowerCase(),
@@ -648,7 +682,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     const ka = this.contracts.knowledgeAssetsLifecycle.connect(signer) as Contract;
 
     const kav10Address = await this.contracts.knowledgeAssetsLifecycle.getAddress();
-    const evmChainId = (await this.provider.getNetwork()).chainId;
+    const evmChainId = (await this.readWithFailover('getNetwork (chainId)', (p) => p.getNetwork())).chainId;
 
     const identityId = params.publisherNodeIdentityId ?? await this.getIdentityId();
 
@@ -689,7 +723,9 @@ export class PublishMethods extends EVMChainAdapterBase {
     let contextGraphId = 0n;
     if (contextGraphStorage) {
       try {
-        contextGraphId = BigInt(await contextGraphStorage.kaToContextGraph(params.kaId));
+        contextGraphId = BigInt(await this.contractReadWithFailover(
+          'cgStorage.kaToContextGraph', contextGraphStorage, (c) => c.kaToContextGraph(params.kaId),
+        ));
       } catch { /* use 0 */ }
     }
 
@@ -697,7 +733,9 @@ export class PublishMethods extends EVMChainAdapterBase {
     let preUpdateMerkleRootCount = 0n;
     if (kas) {
       try {
-        const roots: unknown[] = await kas.getMerkleRoots(params.kaId);
+        const roots: unknown[] = await this.contractReadWithFailover(
+          'kas.getMerkleRoots', kas, (c) => c.getMerkleRoots(params.kaId),
+        );
         preUpdateMerkleRootCount = BigInt(roots.length);
       } catch { /* use 0 */ }
     }

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Observability for multi-RPC WRITE failover. Records + logs the per-provider
- * failovers in the EVM adapter's write loops (and the CLI stack in
- * `cli-rpc.ts`), under three invariants the callers depend on:
+ * Observability for multi-RPC failover. Records + logs the per-provider
+ * failovers in BOTH the EVM adapter's write loops AND its read-failover loop
+ * (`readWithFailover` / `contractReadWithFailover` / the V10 populate loop),
+ * plus the CLI stack in `cli-rpc.ts`, under three invariants the callers
+ * depend on:
  *
  *  1. Dedup-gated logging — at most one line per `host|errorClass` per
  *     `DEFAULT_DEDUP_WINDOW_MS` (5 min) with a suppressed-count rollup, so a
@@ -17,8 +19,10 @@
  *
  * Counters are a PROCESS-WIDE singleton: the daemon builds one adapter per
  * agent + per publisher wallet, and `/api/status` reads the aggregate via a
- * direct getter import. Scope is WRITE failover only — read failover is
- * internal to the ethers FallbackProvider.
+ * direct getter import. Scope covers BOTH read and write failover — reads route
+ * through the adapter's explicit `readWithFailover` loop (the ethers
+ * `FallbackProvider` was removed; see `evm-adapter-base.ts`), so both halves
+ * funnel their per-hop failovers and exhaustions through this module.
  */
 
 import { errorCode, errorMessage, errorStatus } from './evm-adapter-errors.js';

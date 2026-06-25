@@ -116,6 +116,15 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'getTransactionReceiptWithFailover',
   'waitForReceiptWithFailover',
   'signPopulatedTransaction',
+  // R1 immediate-RPC-failover read/populate plumbing: the per-provider read
+  // failover loop, its contract-view wrapper, the `.connect()` runner helper,
+  // and the populate+sign-across-providers loop. Protected EVM-only helpers over
+  // `this.providers[]` (the mock has no RPC provider pool), not ChainAdapter
+  // contract methods — same category as the write-failover helpers above.
+  'readWithFailover',
+  'contractReadWithFailover',
+  'withRunner',
+  'populateAndSignAcrossProviders',
   'sendSignedTransactionAndWait',
   'sendPopulatedTransaction',
   'sendContractTransaction',
