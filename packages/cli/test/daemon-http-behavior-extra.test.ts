@@ -816,7 +816,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
     // The adapter throws a ChainRpcTransportError instance for a receipt-wait
     // timeout; the guard recognises TIMEOUT via the instance, not a bare code.
     const timeoutError = new ChainRpcTransportError(
-      'TIMEOUT',
+      'RPC_TIMEOUT',
       `register context graph tx ${txHash} timed out waiting for a receipt after 180000ms`,
       { txHash },
     );

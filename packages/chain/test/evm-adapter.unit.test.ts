@@ -26,6 +26,7 @@ import {
   type ApprovalPolicy,
 } from '../src/chain-adapter.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
+import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 
 // Isolate the process-wide RPC failover stats + dedup window before EVERY test
 // so a failover/exhaustion warning emitted by one test can't suppress (via the
@@ -921,10 +922,11 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       })();
       await vi.advanceTimersByTimeAsync(180_001);
 
-      await expect(thrown).resolves.toMatchObject({
-        code: 'TIMEOUT',
-        txHash,
-      });
+      const timeoutErr = await thrown;
+      expect(timeoutErr).toMatchObject({ code: 'RPC_TIMEOUT', txHash });
+      // The production receipt-wait timeout emitter must throw a recognised
+      // chain-transport error (so the daemon maps it to 504), not a bare shape.
+      expect(isChainRpcTransportError(timeoutErr)).toBe(true);
       expect(populateTransaction.calls).toHaveLength(1);
       expect(signPopulatedTransaction.calls).toHaveLength(1);
       expect(provider.broadcastTransaction.calls).toContainEqual([signedTx]);

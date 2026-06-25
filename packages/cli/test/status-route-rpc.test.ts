@@ -254,7 +254,7 @@ describe('/api/status selected overlay details', () => {
         ),
         status: 503,
       },
-      { err: new ChainRpcTransportError('TIMEOUT', 'tx 0xabc timed out waiting for a receipt'), status: 504 },
+      { err: new ChainRpcTransportError('RPC_TIMEOUT', 'tx 0xabc timed out waiting for a receipt'), status: 504 },
     ];
 
     for (const { err, status } of cases) {

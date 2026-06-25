@@ -7,35 +7,32 @@
  * Previously these were bare `new Error(...)` objects with ad-hoc
  * `(err as any).code = 'RPC_ENDPOINTS_EXHAUSTED'` casts and `rpcUrls`/`txHash`
  * fields scattered across packages — an implicit, stringly-typed cross-package
- * contract. This gives it one name, one factory, and one type guard for:
+ * contract. This gives it one name, one factory, and ONE structural type guard
+ * over a single set of chain-NAMESPACED codes:
  *   - `RPC_ENDPOINTS_EXHAUSTED`   — every configured RPC failed over (writes)
  *   - `RPC_RECEIPT_LOOKUP_FAILED` — receipt lookup failed on every endpoint
- *   - `TIMEOUT`                   — receipt wait / bounded RPC request timed out
+ *   - `RPC_TIMEOUT`               — receipt wait / bounded RPC request timed out
  *
- * The guard ({@link isChainRpcTransportError}) is a REAL boundary, not a global
- * code convention. It recognises EITHER a `ChainRpcTransportError` INSTANCE (the
- * chain/CLI failover stack's own throws, including its wrapped timeouts) OR an
- * error carrying one of the chain-NAMESPACED codes (`RPC_ENDPOINTS_EXHAUSTED`/
- * `RPC_RECEIPT_LOOKUP_FAILED`) — which survive a re-wrap that preserves `.code`
- * and are never stamped outside the chain layer. A bare generic `code: 'TIMEOUT'`
- * from an unrelated subsystem is intentionally NOT recognised: only our own
- * (instance) timeouts map to the daemon's 504. On-chain reverts never match.
+ * All three are chain-OWNED, namespaced codes — only the chain/CLI failover
+ * stack ever stamps them — so the guard is ONE simple structural check (`code`),
+ * with no `instanceof`/prototype coupling and identical behaviour for every
+ * transport case (each survives a plain-object re-wrap that preserves `.code`).
+ * In particular the timeout case uses the internal `RPC_TIMEOUT` (NOT the
+ * generic, globally-used `TIMEOUT`) so a bare `code: 'TIMEOUT'` stamped by ethers
+ * or any unrelated subsystem does NOT satisfy this boundary; the daemon's HTTP
+ * layer maps `RPC_TIMEOUT` back to the public/legacy `code: 'TIMEOUT'` 504 body.
+ * On-chain reverts (`CALL_EXCEPTION`/`INSUFFICIENT_FUNDS`) never match (#988).
  */
 
 export type ChainRpcTransportCode =
   | 'RPC_ENDPOINTS_EXHAUSTED'
   | 'RPC_RECEIPT_LOOKUP_FAILED'
-  | 'TIMEOUT';
+  | 'RPC_TIMEOUT';
 
-// Chain-NAMESPACED transport codes — only the chain failover stack ever stamps
-// these, so a code match alone is a reliable signal even if the error crossed a
-// re-wrap boundary that preserved `.code`. `TIMEOUT` is deliberately NOT here:
-// it is a generic, globally-used code, so a bare `code: 'TIMEOUT'` from an
-// unrelated subsystem must NOT satisfy the guard — our OWN chain-RPC timeouts
-// are `ChainRpcTransportError` instances, recognised by `instanceof` instead.
-const NAMESPACED_TRANSPORT_CODES: ReadonlySet<string> = new Set<ChainRpcTransportCode>([
+const TRANSPORT_CODES: ReadonlySet<string> = new Set<ChainRpcTransportCode>([
   'RPC_ENDPOINTS_EXHAUSTED',
   'RPC_RECEIPT_LOOKUP_FAILED',
+  'RPC_TIMEOUT',
 ]);
 
 /**
@@ -75,25 +72,21 @@ export class ChainRpcTransportError extends Error {
 }
 
 /**
- * True for a chain-RPC TRANSPORT failure, as a REAL boundary rather than a
- * global stringly-typed code convention:
- *   - any {@link ChainRpcTransportError} INSTANCE — the chain/CLI failover
- *     stack's own throws, including our wrapped RPC/receipt timeouts; OR
- *   - an error carrying a chain-NAMESPACED code (`RPC_ENDPOINTS_EXHAUSTED` /
- *     `RPC_RECEIPT_LOOKUP_FAILED`), which survives a re-wrap that preserves
- *     `.code` and is never produced outside the chain failover stack.
- * A bare `code: 'TIMEOUT'` from an unrelated subsystem does NOT satisfy this
- * (our own timeouts are instances), and on-chain reverts
- * (`CALL_EXCEPTION`/`INSUFFICIENT_FUNDS`) are never matched (the #988 contract).
+ * True for a chain-RPC TRANSPORT failure — ONE simple structural check over the
+ * chain-NAMESPACED codes (`RPC_ENDPOINTS_EXHAUSTED` / `RPC_RECEIPT_LOOKUP_FAILED`
+ * / `RPC_TIMEOUT`). Every {@link ChainRpcTransportError} carries one of these, so
+ * instances match too, and the same check survives a re-wrap that preserves
+ * `.code`. A bare generic `code: 'TIMEOUT'` from an unrelated subsystem does NOT
+ * match (the chain timeout code is the namespaced `RPC_TIMEOUT`), and on-chain
+ * reverts (`CALL_EXCEPTION`/`INSUFFICIENT_FUNDS`) never match (the #988 contract).
  * The single predicate the HTTP classifier uses to map a transient transport
  * failure to a retryable 503/504.
  */
 export function isChainRpcTransportError(err: unknown): err is ChainRpcTransportErrorLike {
-  if (err instanceof ChainRpcTransportError) return true;
   return (
     !!err &&
     typeof err === 'object' &&
     typeof (err as { code?: unknown }).code === 'string' &&
-    NAMESPACED_TRANSPORT_CODES.has((err as { code: string }).code)
+    TRANSPORT_CODES.has((err as { code: string }).code)
   );
 }

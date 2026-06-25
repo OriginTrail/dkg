@@ -329,12 +329,14 @@ export function classifyChainRpcTransportStatus(
       },
     };
   }
-  // code === "TIMEOUT"
+  // code === "RPC_TIMEOUT" — the internal, chain-namespaced timeout code. Expose
+  // the public/legacy `code: "TIMEOUT"` in the 504 body (clients key on that),
+  // keeping the wire contract stable while the boundary stays namespaced internally.
   return {
     status: 504,
     body: {
       error: msg || "Chain transaction timed out.",
-      code,
+      code: "TIMEOUT",
       ...(txHash ? { txHash } : {}),
     },
   };

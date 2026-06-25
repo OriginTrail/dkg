@@ -81,7 +81,7 @@ describe('daemon /api/pca V10 caller contract', () => {
       createPublishingConvictionAccount: async () => {
         // The adapter throws a ChainRpcTransportError instance for a receipt-wait
         // timeout; the guard recognises TIMEOUT via the instance, not a bare code.
-        throw new ChainRpcTransportError('TIMEOUT', 'tx 0xabc timed out waiting for a receipt after 180000ms');
+        throw new ChainRpcTransportError('RPC_TIMEOUT', 'tx 0xabc timed out waiting for a receipt after 180000ms');
       },
     };
     const { res, done } = runCtx('POST', '/api/pca', agent, { tokens: '100', primaryNode: '42' });

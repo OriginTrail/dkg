@@ -19,6 +19,7 @@ describe('cli-rpc classifier consolidation (W4)', () => {
     { code: 'INSUFFICIENT_FUNDS' },
     { status: 429 },
     { code: 'TIMEOUT' },
+    { code: 'RPC_TIMEOUT' }, // the chain-namespaced timeout must also be retryable (fail over)
     { code: 'BAD_DATA' },
     { message: 'intrinsic gas too low' },
     { message: 'exceeds block gas limit' },

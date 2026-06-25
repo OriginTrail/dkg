@@ -34,22 +34,21 @@ describe('ChainRpcTransportError (typed transport boundary)', () => {
   });
 });
 
-describe('isChainRpcTransportError (instance + namespaced-code guard)', () => {
-  it('is true for any ChainRpcTransportError INSTANCE, including our wrapped timeout', () => {
-    for (const code of ['RPC_ENDPOINTS_EXHAUSTED', 'RPC_RECEIPT_LOOKUP_FAILED', 'TIMEOUT'] as const) {
+describe('isChainRpcTransportError (one structural namespaced-code guard)', () => {
+  // The boundary is a single structural check over the three chain-NAMESPACED
+  // codes — same model for every transport case (no instanceof/prototype
+  // coupling), so instances AND plain-object re-wraps that keep `.code` match.
+  it('is true for every transport case — instance OR plain object — uniformly', () => {
+    for (const code of ['RPC_ENDPOINTS_EXHAUSTED', 'RPC_RECEIPT_LOOKUP_FAILED', 'RPC_TIMEOUT'] as const) {
       expect(isChainRpcTransportError(new ChainRpcTransportError(code, 'm'))).toBe(true);
+      expect(isChainRpcTransportError({ code, message: 'm' })).toBe(true);
     }
   });
 
-  it('is true for a plain object carrying a chain-NAMESPACED code (survives a re-wrap that keeps .code)', () => {
-    expect(isChainRpcTransportError({ code: 'RPC_ENDPOINTS_EXHAUSTED', message: 'm' })).toBe(true);
-    expect(isChainRpcTransportError({ code: 'RPC_RECEIPT_LOOKUP_FAILED', message: 'm' })).toBe(true);
-  });
-
-  it('is FALSE for a bare generic `code: TIMEOUT` that is not our instance (a real boundary, not a global code convention)', () => {
-    // A timeout stamped by an unrelated daemon/CLI subsystem must NOT be
-    // misclassified as a chain-RPC transport error — only our own (instance)
-    // timeouts count. This is the #1332 review fix.
+  it('is FALSE for a bare generic `code: TIMEOUT` (the chain timeout code is the namespaced RPC_TIMEOUT)', () => {
+    // A timeout stamped by ethers or an unrelated subsystem uses the generic
+    // `TIMEOUT`, which must NOT satisfy the chain-transport boundary — only the
+    // namespaced RPC_TIMEOUT does. This is the #1332 review fix.
     expect(isChainRpcTransportError({ code: 'TIMEOUT', message: 'some other op timed out' })).toBe(false);
   });
 

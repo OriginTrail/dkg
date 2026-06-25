@@ -812,7 +812,7 @@ export class EVMChainAdapterBase {
       await sleep(RPC_RECEIPT_POLL_INTERVAL_MS);
     }
     throw new ChainRpcTransportError(
-      'TIMEOUT',
+      'RPC_TIMEOUT',
       `${label} tx ${txHash} timed out waiting for a receipt after ${RPC_RECEIPT_TIMEOUT_MS}ms` +
       (lastError ? ` (last RPC error: ${errorMessage(lastError)})` : ''),
       { cause: lastError, txHash },

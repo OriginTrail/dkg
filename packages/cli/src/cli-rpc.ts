@@ -19,7 +19,7 @@ function cliWithTimeout<T>(promise: Promise<T>, ms: number, label: string): Prom
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      reject(new ChainRpcTransportError('TIMEOUT', `${label} timed out after ${ms}ms`));
+      reject(new ChainRpcTransportError('RPC_TIMEOUT', `${label} timed out after ${ms}ms`));
     }, ms);
   });
   return Promise.race([promise, timeout]).finally(() => {

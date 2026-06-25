@@ -75,7 +75,7 @@ function exhaustion() {
 function timeoutErr() {
   // The adapter throws a ChainRpcTransportError instance for a receipt-wait
   // timeout; the guard recognises TIMEOUT via the instance, not a bare code.
-  return new ChainRpcTransportError('TIMEOUT', 'register tx 0xabc timed out waiting for a receipt after 180000ms');
+  return new ChainRpcTransportError('RPC_TIMEOUT', 'register tx 0xabc timed out waiting for a receipt after 180000ms');
 }
 function insufficientFunds() {
   const e: any = new Error('insufficient funds for intrinsic transaction cost');
