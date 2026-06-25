@@ -23,6 +23,7 @@ import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isKnownTransactionError, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { noteRpcFailover, noteRpcExhaustion, rpcHost } from './rpc-failover-log.js';
+import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
@@ -748,18 +749,15 @@ export class EVMChainAdapterBase {
       }
     }
     if (lastRetryable) noteRpcExhaustion(`${label} broadcast`, this.rpcUrls);
-    // Stamp the synthetic transport code (mirroring the preparation loop and
-    // the CLI broadcast path) so a broadcast-time all-endpoints-exhausted
-    // failure is mapped to a retryable 503 at the HTTP boundary, not a generic
-    // 500. Without this, an exhaustion that occurs during broadcast (after a
-    // provider populated/signed successfully) would surface code-less.
-    const broadcastExhausted = new Error(
+    // Typed transport error (mirroring the preparation loop + CLI path) so a
+    // broadcast-time all-endpoints-exhausted failure maps to a retryable 503 at
+    // the HTTP boundary, not a generic 500 — an exhaustion after a provider
+    // populated/signed would otherwise surface code-less.
+    throw new ChainRpcTransportError(
+      'RPC_ENDPOINTS_EXHAUSTED',
       `${label} broadcast failed on all configured RPC endpoints for tx ${txHash}: ${errorMessage(lastRetryable)}`,
-      { cause: lastRetryable },
+      { cause: lastRetryable, rpcUrls: this.rpcUrls },
     );
-    (broadcastExhausted as any).code = 'RPC_ENDPOINTS_EXHAUSTED';
-    (broadcastExhausted as any).rpcUrls = [...this.rpcUrls];
-    throw broadcastExhausted;
   }
 
   protected async getTransactionReceiptWithFailover(txHash: string): Promise<ethers.TransactionReceipt | null> {
@@ -785,13 +783,11 @@ export class EVMChainAdapterBase {
     }
     if (lastRetryable && !sawNonErrorResponse) {
       noteRpcExhaustion('receipt lookup', this.rpcUrls);
-      const err = new Error(
+      throw new ChainRpcTransportError(
+        'RPC_RECEIPT_LOOKUP_FAILED',
         `Receipt lookup for tx ${txHash} failed on all configured RPC endpoints: ${errorMessage(lastRetryable)}`,
-        { cause: lastRetryable },
+        { cause: lastRetryable, txHash },
       );
-      (err as any).code = 'RPC_RECEIPT_LOOKUP_FAILED';
-      (err as any).txHash = txHash;
-      throw err;
     }
     return null;
   }
@@ -815,14 +811,12 @@ export class EVMChainAdapterBase {
       }
       await sleep(RPC_RECEIPT_POLL_INTERVAL_MS);
     }
-    const err = new Error(
+    throw new ChainRpcTransportError(
+      'TIMEOUT',
       `${label} tx ${txHash} timed out waiting for a receipt after ${RPC_RECEIPT_TIMEOUT_MS}ms` +
       (lastError ? ` (last RPC error: ${errorMessage(lastError)})` : ''),
-      { cause: lastError },
+      { cause: lastError, txHash },
     );
-    (err as any).code = 'TIMEOUT';
-    (err as any).txHash = txHash;
-    throw err;
   }
 
   protected async signPopulatedTransaction(
@@ -1051,10 +1045,10 @@ export class EVMChainAdapterBase {
         // is surfaced to HTTP clients via response paths that echo err.message
         // (e.g. the create+publish 207 tail), so never embed full RPC URLs.
         `(${this.rpcUrls.map(rpcHost).join(', ')}): ${errorMessage(lastRetryable)}`;
-    const err = new Error(message, { cause: lastRetryable });
-    (err as any).code = 'RPC_ENDPOINTS_EXHAUSTED';
-    (err as any).rpcUrls = [...this.rpcUrls];
-    throw err;
+    throw new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', message, {
+      cause: lastRetryable,
+      rpcUrls: this.rpcUrls,
+    });
   }
 
   /**
@@ -1628,13 +1622,11 @@ export class EVMChainAdapterBase {
       // non-RPC error (e.g. a genuine "contract not in Hub" misconfig) keeps
       // its original shape.
       if (isRetryableRpcError(err)) {
-        const wrapped = new Error(
+        throw new ChainRpcTransportError(
+          'RPC_ENDPOINTS_EXHAUSTED',
           `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.map(rpcHost).join(', ')}): ${errorMessage(err)}`,
-          { cause: err },
+          { cause: err, rpcUrls: this.rpcUrls },
         );
-        (wrapped as any).code = 'RPC_ENDPOINTS_EXHAUSTED';
-        (wrapped as any).rpcUrls = [...this.rpcUrls];
-        throw wrapped;
       }
       throw err;
     }

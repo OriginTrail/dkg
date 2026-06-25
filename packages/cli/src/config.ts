@@ -1132,17 +1132,21 @@ export function resolveChainConfig(
     type: cfg?.type ?? net?.type ?? 'evm',
   };
   const primaryRpcUrl = cfg?.rpcUrl ?? net?.rpcUrl;
-  // Don't inherit the network's PUBLIC backups behind an operator-pinned LOCAL
-  // (loopback) primary — that would build a cross-chain FallbackProvider
-  // (e.g. local Hardhat 31337 + public Base Sepolia 84532) which ethers
-  // rejects at init. Explicit operator rpcUrls always win; a non-loopback
-  // private primary still inherits the public backups for failover.
-  const operatorPinnedLoopbackPrimary =
+  // Don't inherit the network's PUBLIC backups when the operator is on a
+  // DIFFERENT chain than the overlay — either a loopback/local primary (Hardhat
+  // /devnet) OR a pinned `chainId` that differs from the network's. Both build
+  // a cross-chain FallbackProvider (e.g. local 31337 + public Base Sepolia
+  // 84532), which ethers rejects at init. A non-loopback private primary on the
+  // SAME chain still inherits the public backups for failover; explicit
+  // operator `rpcUrls` always win.
+  const operatorPinnedDifferentChain =
     cfg?.rpcUrls === undefined &&
-    typeof cfg?.rpcUrl === 'string' &&
-    isLoopbackRpcUrl(cfg.rpcUrl);
+    (
+      (typeof cfg?.rpcUrl === 'string' && isLoopbackRpcUrl(cfg.rpcUrl)) ||
+      (cfg?.chainId !== undefined && net?.chainId !== undefined && cfg.chainId !== net.chainId)
+    );
   const backupRpcUrls =
-    cfg?.rpcUrls ?? (operatorPinnedLoopbackPrimary ? [] : net?.rpcUrls) ?? [];
+    cfg?.rpcUrls ?? (operatorPinnedDifferentChain ? [] : net?.rpcUrls) ?? [];
   const orderedRpcUrls: string[] = [];
   for (const candidate of [primaryRpcUrl, ...backupRpcUrls]) {
     if (typeof candidate !== 'string') continue;

@@ -5,6 +5,7 @@ import {
   isKnownTransactionError,
   noteRpcFailover,
   noteRpcExhaustion,
+  ChainRpcTransportError,
 } from '@origintrail-official/dkg-chain';
 import { cliSleep, cliErrorMessage } from './cli-helpers.js';
 
@@ -18,9 +19,7 @@ function cliWithTimeout<T>(promise: Promise<T>, ms: number, label: string): Prom
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      const err = new Error(`${label} timed out after ${ms}ms`);
-      (err as any).code = 'TIMEOUT';
-      reject(err);
+      reject(new ChainRpcTransportError('TIMEOUT', `${label} timed out after ${ms}ms`));
     }, ms);
   });
   return Promise.race([promise, timeout]).finally(() => {
@@ -92,12 +91,11 @@ async function getCliReceiptWithFailover(
   }
   if (lastRetryable && !sawNonErrorResponse) {
     if (urls) noteRpcExhaustion('cli receipt lookup', urls);
-    const err = new Error(
+    throw new ChainRpcTransportError(
+      'RPC_RECEIPT_LOOKUP_FAILED',
       `Receipt lookup for transaction ${txHash} failed on all configured RPC endpoints: ${cliErrorMessage(lastRetryable)}`,
-      { cause: lastRetryable },
+      { cause: lastRetryable, txHash },
     );
-    (err as any).code = 'RPC_RECEIPT_LOOKUP_FAILED';
-    throw err;
   }
   return null;
 }
@@ -140,13 +138,14 @@ async function sendCliRawTransactionWithFailover(
   }
   if (lastError) {
     if (urls) noteRpcExhaustion('cli broadcast', urls);
-    // Stamp the same synthetic code the chain adapter uses so CLI callers
-    // (and any future daemon-route mapping over CLI flows) can distinguish a
-    // transient all-endpoints-exhausted failure from a deterministic revert.
-    const err = new Error(`Broadcast failed on all configured RPC endpoints: ${cliErrorMessage(lastError)}`, { cause: lastError });
-    (err as any).code = 'RPC_ENDPOINTS_EXHAUSTED';
-    if (urls) (err as any).rpcUrls = [...urls];
-    throw err;
+    // The typed transport error mirrors the chain adapter so CLI callers (and
+    // any daemon-route mapping over CLI flows) can distinguish a transient
+    // all-endpoints-exhausted failure from a deterministic revert.
+    throw new ChainRpcTransportError(
+      'RPC_ENDPOINTS_EXHAUSTED',
+      `Broadcast failed on all configured RPC endpoints: ${cliErrorMessage(lastError)}`,
+      { cause: lastError, ...(urls ? { rpcUrls: urls } : {}) },
+    );
   }
 
   const deadline = Date.now() + CLI_RPC_RECEIPT_TIMEOUT_MS;

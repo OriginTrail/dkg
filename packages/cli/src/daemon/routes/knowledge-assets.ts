@@ -39,7 +39,7 @@ import {
   isWritableQuad,
   validateQuadObjectTerms,
   respondIfReconcileUnavailable,
-  classifyChainRpcTransportStatus,
+  respondIfChainRpcTransportError,
   sanitizeRpcMessage,
   validateWritableQuadLiteralSizes,
   normalizeContextGraphIdOrUri,
@@ -178,11 +178,7 @@ function respondAssertionError(res: RequestContext["res"], e: any): void {
   // 4xx/500 mapping below. Code-keyed check precedes the message-keyed 400
   // branch so an exhaustion message that happens to contain "not found"
   // (e.g. "header not found") is not mis-mapped to a 400.
-  const transport = classifyChainRpcTransportStatus(e);
-  if (transport) {
-    jsonResponse(res, transport.status, transport.body);
-    return;
-  }
+  if (respondIfChainRpcTransportError(res, e)) return;
   const msg = e?.message ?? String(e);
   if (
     e?.name === "ReservedNamespaceError" ||
@@ -685,8 +681,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       // A transient chain-RPC transport exhaustion on the direct explicit-quads
       // mint is retryable (503/504), not a hard 500 — parity with /vm/publish
       // and /api/context-graph/register. Code-keyed, so on-chain reverts stay 500.
-      const transport = classifyChainRpcTransportStatus(e);
-      if (transport) return jsonResponse(res, transport.status, transport.body);
+      if (respondIfChainRpcTransportError(res, e)) return;
       return jsonResponse(res, 500, { error: e?.message ?? String(e) });
     }
   }
@@ -1283,10 +1278,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             // A transient RPC outage during the pre-publish auto-registration
             // is retryable (503/504), NOT a permanent client error (400) — a
             // 400 would tell retry-aware clients to give up on a flaky RPC.
-            const transport = classifyChainRpcTransportStatus(regErr);
-            if (transport) {
-              return jsonResponse(res, transport.status, transport.body);
-            }
+            if (respondIfChainRpcTransportError(res, regErr)) return;
             return jsonResponse(res, 400, buildAutoRegisterFailureBody(contextGraphId, regErr));
           }
           pub = await agent.publishFromFinalizedAssertion(contextGraphId, name, { subGraphName, ...opts });
@@ -1345,10 +1337,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // on-chain revert (CALL_EXCEPTION, no transport code) still keeps the
         // generic 500 below (the #988 "publish never down-classifies on-chain
         // errors" parity contract).
-        const transport = classifyChainRpcTransportStatus(e);
-        if (transport) {
-          return jsonResponse(res, transport.status, transport.body);
-        }
+        if (respondIfChainRpcTransportError(res, e)) return;
         return jsonResponse(res, 500, { error: msg });
       }
     }

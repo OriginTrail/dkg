@@ -225,7 +225,7 @@ import {
   shortId,
   sleep,
   deriveBlockExplorerUrl,
-  classifyChainRpcTransportStatus,
+  respondIfChainRpcTransportError,
 } from '../http-utils.js';
 import {
   normalizeRepo,
@@ -1052,15 +1052,9 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       });
     } catch (err: any) {
       // A transient chain-RPC transport failure during on-chain identity
-      // creation is retryable (503/504), not a hard 500.
-      const transport = classifyChainRpcTransportStatus(err);
-      if (transport) {
-        return jsonResponse(res, transport.status, {
-          ...transport.body,
-          identityId: "0",
-          hasIdentity: false,
-        });
-      }
+      // creation is retryable (503/504), not a hard 500. The extra body fields
+      // preserve the route's identity contract on the retryable response.
+      if (respondIfChainRpcTransportError(res, err, { identityId: "0", hasIdentity: false })) return;
       return jsonResponse(res, 500, {
         error: err.message,
         identityId: "0",

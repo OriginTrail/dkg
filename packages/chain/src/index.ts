@@ -18,6 +18,12 @@ export {
 } from './evm-adapter.js';
 export { NoChainAdapter } from './no-chain-adapter.js';
 export {
+  ChainRpcTransportError,
+  isChainRpcTransportError,
+  type ChainRpcTransportCode,
+  type ChainRpcTransportErrorLike,
+} from './chain-rpc-transport-error.js';
+export {
   // Surfaced for the daemon /api/status counter + the CLI failover loop.
   // Test-only hooks (_reset*/_set*Clock) and internal helpers
   // (classifyRpcFailoverError/rpcHost) are intentionally NOT re-exported from
