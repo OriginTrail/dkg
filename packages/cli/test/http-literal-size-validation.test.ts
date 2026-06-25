@@ -137,7 +137,7 @@ describe('HTTP RDF literal size validation', () => {
           graph: 'http://example.org/g',
         },
         {
-          subject: '_:secret',
+          subject: 'http://example.org/root/secret',
           predicate: 'http://schema.org/name',
           object: '"hidden"',
           graph: 'http://example.org/g',
@@ -149,6 +149,30 @@ describe('HTTP RDF literal size validation', () => {
     if (!parsed.ok) {
       expect(parsed.error).toContain('Invalid "privateQuads[0].object"');
       expect(parsed.error).toContain('quoted literal term or absolute IRI');
+    }
+  });
+
+  it('rejects blank-node private publish subjects even when public quads link to the same blank node', () => {
+    const parsed = parsePublishRequestBody(JSON.stringify({
+      contextGraphId: 'literal-size-cg',
+      quads: [{
+        subject: 'http://example.org/root',
+        predicate: 'http://schema.org/hasPart',
+        object: '_:secret',
+        graph: 'http://example.org/g',
+      }],
+      privateQuads: [{
+        subject: '_:secret',
+        predicate: 'http://schema.org/name',
+        object: '"hidden"',
+        graph: 'http://example.org/g',
+      }],
+    }));
+
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.error).toContain('Invalid "privateQuads[0].subject"');
+      expect(parsed.error).toContain('must not be a blank node');
     }
   });
 

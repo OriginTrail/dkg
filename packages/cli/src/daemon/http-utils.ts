@@ -286,6 +286,15 @@ export function validateQuadObjectTerms(
   return `Invalid "${label}[${badIndex}].object": RDF object must be ${expected}`;
 }
 
+function validateNoBlankNodeSubjects(
+  label: string,
+  quads: ReadonlyArray<{ subject: string }>,
+): string | null {
+  const badIndex = quads.findIndex((q) => q.subject.trim().startsWith("_:"));
+  if (badIndex === -1) return null;
+  return `Invalid "${label}[${badIndex}].subject": RDF subject must not be a blank node`;
+}
+
 function isSafeBlankNode(term: string): boolean {
   return /^_:[A-Za-z][A-Za-z0-9_-]*$/.test(term);
 }
@@ -478,6 +487,8 @@ export function parsePublishRequestBody(
     };
   }
   if (privateQuads !== undefined) {
+    const privateQuadSubjectError = validateNoBlankNodeSubjects("privateQuads", privateQuads);
+    if (privateQuadSubjectError) return { ok: false, error: privateQuadSubjectError };
     const privateQuadObjectError = validateQuadObjectTerms("privateQuads", privateQuads, {
       allowBlankNodes: false,
     });
