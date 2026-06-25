@@ -21,7 +21,10 @@ export function skolemizeByEntity(quads: Quad[]): Map<string, Quad[]> {
   // Phase 1: Find root entities (non-blank, non-skolemized unique subjects)
   const rootEntities = new Set<string>();
   for (const q of quads) {
-    if (!isBlankNode(q.subject) && !isSkolemizedUri(q.subject)) {
+    if (isSkolemizedUri(q.subject)) {
+      const root = rootEntityFromSkolemized(q.subject);
+      if (root) rootEntities.add(root);
+    } else if (!isBlankNode(q.subject)) {
       rootEntities.add(q.subject);
     }
   }
@@ -31,8 +34,11 @@ export function skolemizeByEntity(quads: Quad[]): Map<string, Quad[]> {
   // Heuristic: a blank node belongs to the root entity that references it as an object.
   const blankToRoot = new Map<string, string>();
   for (const q of quads) {
-    if (rootEntities.has(q.subject) && isBlankNode(q.object)) {
-      blankToRoot.set(q.object, q.subject);
+    const subjectRoot = isSkolemizedUri(q.subject)
+      ? rootEntityFromSkolemized(q.subject)
+      : rootEntities.has(q.subject) ? q.subject : null;
+    if (subjectRoot && isBlankNode(q.object)) {
+      blankToRoot.set(q.object, subjectRoot);
     }
   }
 
@@ -77,7 +83,7 @@ export function skolemizeByEntity(quads: Quad[]): Map<string, Quad[]> {
     if (isSkolemizedUri(q.subject)) {
       const root = rootEntityFromSkolemized(q.subject);
       if (root && rootQuadsMap.has(root)) {
-        rootQuadsMap.get(root)!.push(q);
+        rootQuadsMap.get(root)!.push(...skolemize(root, [q]));
       }
     }
   }

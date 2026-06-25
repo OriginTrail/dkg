@@ -227,22 +227,23 @@ export function validateWritableQuadLiteralSizes(
 }
 
 export interface PreparedPublicWriteQuads {
-  readonly quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>;
+  readonly quads: PublishQuad[];
   readonly rewrites: RdfTextLiteralRewrite[];
 }
 
+/**
+ * Canonical HTTP-facing public-write preparation. Route handlers that must know
+ * the normalized quad count or return rewrite metadata call this once and pass
+ * its explicit storage quads onward; writer boundaries still run the same
+ * publisher-owned normalizer as an idempotent SDK/backstop path.
+ */
 export function preparePublicWriteQuads(
   label: string,
   quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
 ): { ok: true; value: PreparedPublicWriteQuads } | { ok: false; body: Record<string, unknown> } {
   try {
     const result = prepareCanonicalPublicWriteQuads(quads, { label });
-    const normalizedQuads = result.quads.map((quad) => (
-      quad.graph
-        ? quad
-        : { subject: quad.subject, predicate: quad.predicate, object: quad.object }
-    ));
-    return { ok: true, value: { quads: normalizedQuads, rewrites: result.rewrites } };
+    return { ok: true, value: { quads: result.quads, rewrites: result.rewrites } };
   } catch (err) {
     if (isOversizedRdfLiteralError(err)) {
       return { ok: false, body: oversizedRdfLiteralResponseBody(err) };
@@ -453,7 +454,7 @@ export function parsePublishRequestBody(
     subject: quad.subject,
     predicate: quad.predicate,
     object: quad.object,
-    graph: quad.graph ?? '',
+    graph: quad.graph,
   }));
 
   if (

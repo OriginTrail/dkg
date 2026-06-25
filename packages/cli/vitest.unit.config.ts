@@ -65,6 +65,8 @@ export default defineConfig({
           // #761 — context graph write-target validation (from main).
           'test/context-graph-write-path-validation.test.ts',
           'test/http-literal-size-validation.test.ts',
+          'test/no-funded-publisher-wallet-helpers.test.ts',
+          'test/daemon-ka-transport.test.ts',
           'test/epcis-route-readiness.test.ts',
           // Notifications-pane redesign (A3) — assertion_activity emitter
           // helper. Pure logic + a tmp SQLite DashboardDB, no hardhat.

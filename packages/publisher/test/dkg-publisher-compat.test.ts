@@ -10,6 +10,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/dkg-publisher.js';
+import { skolemizeByEntity } from '../src/auto-partition.js';
+import { preparePublicWriteQuads } from '../src/public-write-normalization.js';
 
 function q(s: string, p: string, o: string): Quad {
   return {
@@ -336,6 +338,46 @@ describe('DKGPublisher compatibility aliases', () => {
       quad.predicate === 'http://schema.org/text'
     )).toBe(false);
     expect(reconstructPlainChunkedText(quads, root)).toBe('x'.repeat(60_000));
+  });
+
+  it('preserves already-skolemized quads when normal roots are present', () => {
+    const externalSkolemized = q(
+      'http://example.org/external/.well-known/genid/body',
+      'http://schema.org/name',
+      '"kept"',
+    );
+
+    const prepared = preparePublicWriteQuads([
+      q('http://example.org/root', 'http://schema.org/name', '"root"'),
+      externalSkolemized,
+    ]).quads;
+
+    expect(prepared).toContainEqual(externalSkolemized);
+    expect(prepared).toHaveLength(2);
+  });
+
+  it('indexes already-skolemized subjects even when their root subject is absent', () => {
+    const root = 'http://example.org/external';
+    const externalSkolemized = q(
+      `${root}/.well-known/genid/body`,
+      'http://schema.org/hasPart',
+      '_:nested',
+    );
+
+    const partitioned = skolemizeByEntity([
+      q('http://example.org/root', 'http://schema.org/name', '"root"'),
+      externalSkolemized,
+      q('_:nested', 'http://schema.org/name', '"kept"'),
+    ]);
+
+    expect(partitioned.get(root)).toContainEqual({
+      ...externalSkolemized,
+      object: `${root}/.well-known/genid/nested`,
+    });
+    expect(partitioned.get(root)).toContainEqual({
+      ...q('_:nested', 'http://schema.org/name', '"kept"'),
+      subject: `${root}/.well-known/genid/nested`,
+    });
   });
 
   it('rejects oversized private literals before publish canonicalization', async () => {

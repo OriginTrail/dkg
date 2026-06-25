@@ -195,6 +195,29 @@ describe('HTTP RDF literal size validation', () => {
     }
   });
 
+  it('preserves empty graph on normalized public-write quads', () => {
+    const prepared = preparePublicWriteQuads('quads', [{
+      subject: 'http://example.org/empty-graph',
+      predicate: 'http://schema.org/text',
+      object: OVERSIZED_LITERAL,
+      graph: '',
+    }]);
+
+    expect(prepared.ok).toBe(true);
+    if (prepared.ok) {
+      expect(prepared.value.quads.length).toBeGreaterThan(1);
+      expect(prepared.value.quads.every((quad) =>
+        Object.prototype.hasOwnProperty.call(quad, 'graph')
+      )).toBe(true);
+      expect(prepared.value.quads.every((quad) => quad.graph === '')).toBe(true);
+      expect(prepared.value.rewrites[0]).toMatchObject({
+        subject: 'http://example.org/empty-graph',
+        predicate: 'http://schema.org/text',
+        graph: '',
+      });
+    }
+  });
+
   it('preserves oversized literal fields in import-file extraction responses', () => {
     expect(buildImportFileResponse({
       assertionUri: 'http://example.org/assertion',

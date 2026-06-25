@@ -672,10 +672,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
 
       const normalizedQuads = preparePublicWriteQuads("quads", normalized);
       if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
-      normalized = normalizedQuads.value.quads.map((quad) => ({
-        ...quad,
-        graph: quad.graph ?? graph,
-      }));
+      normalized = normalizedQuads.value.quads;
       await agent.store.insert(normalized);
       return jsonResponse(res, 200, {
         ok: true,
@@ -2470,10 +2467,7 @@ WHERE {
 
     const normalizedQuads = preparePublicWriteQuads("quads", quads);
     if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
-    const quadsToWrite = normalizedQuads.value.quads.map((quad) => ({
-      ...quad,
-      graph: quad.graph ?? targetGraph,
-    }));
+    const quadsToWrite = normalizedQuads.value.quads;
 
     // 5. Write to target layer
     try {

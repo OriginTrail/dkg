@@ -10,6 +10,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { OversizedRdfLiteralError } from '@origintrail-official/dkg-core';
 import {
   isNoFundedPublisherWalletLike,
   noFundedPublisherWalletBody,
@@ -89,6 +90,27 @@ describe('respondWithDaemonError', () => {
     respondWithDaemonError(res, new Error('database connection lost'));
     expect(res.statusCode).toBe(500);
     expect(JSON.parse(res.body).code).toBeUndefined();
+  });
+
+  it('maps oversized RDF literal errors to HTTP 400 with structured details', () => {
+    const res = mockRes();
+    respondWithDaemonError(res, new OversizedRdfLiteralError({
+      actualBytes: 60_002,
+      maxBytes: 60_000,
+      label: 'quads[0].object',
+      subject: 'http://example.org/s',
+      predicate: 'http://schema.org/name',
+      graph: 'http://example.org/g',
+    }));
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toMatchObject({
+      code: 'OVERSIZED_RDF_LITERAL',
+      actualBytes: 60_002,
+      limitBytes: 60_000,
+      subject: 'http://example.org/s',
+      predicate: 'http://schema.org/name',
+      graph: 'http://example.org/g',
+    });
   });
 
   it('is a no-op once the response has already been sent', () => {

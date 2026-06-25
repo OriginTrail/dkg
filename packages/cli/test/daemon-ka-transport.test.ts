@@ -8,6 +8,7 @@
 // daemon / storage / native deps.
 import { describe, it, expect } from 'vitest';
 import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
+import { DKG_CHUNK_VALUE, DKG_HAS_TEXT_BODY } from '@origintrail-official/dkg-core';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
@@ -66,6 +67,43 @@ function revert() {
 
 describe('knowledge-assets publish routes — transport-status mapping (#1329)', () => {
   describe('POST /api/knowledge-assets/publish (direct explicit-quads mint)', () => {
+    it('returns literalRewrites after oversized schema:text normalization on success', async () => {
+      const root = 'http://example.org/direct-oversized';
+      const oversized = `"${'x'.repeat(60_000)}"`;
+      let publishedQuads: any[] = [];
+      const agent = publishAgent({
+        publish: async (_cg: string, quads: any[]) => {
+          publishedQuads = quads;
+          return {
+            status: 'confirmed',
+            kaId: '42',
+            kaManifest: [{ tokenId: '42', rootEntity: root }],
+          };
+        },
+      });
+
+      const { res, done } = runKaCtx('POST', '/api/knowledge-assets/publish', agent, {
+        contextGraphId: 'cg-1',
+        quads: [{ subject: root, predicate: 'http://schema.org/text', object: oversized, graph: '' }],
+      });
+
+      await done;
+      const body = JSON.parse(res.body);
+
+      expect(res.statusCode).toBe(200);
+      expect(body.literalRewrites).toHaveLength(1);
+      expect(body.literalRewrites[0]).toMatchObject({
+        subject: root,
+        predicate: 'http://schema.org/text',
+        graph: '',
+        originalMutf8Bytes: 60_002,
+      });
+      expect(publishedQuads.some((quad) => quad.predicate === 'http://schema.org/text')).toBe(false);
+      expect(publishedQuads.some((quad) => quad.predicate === DKG_HAS_TEXT_BODY)).toBe(true);
+      expect(publishedQuads.some((quad) => quad.predicate === DKG_CHUNK_VALUE)).toBe(true);
+      expect(publishedQuads.every((quad) => quad.graph === '')).toBe(true);
+    });
+
     it('→ 503 on RPC_ENDPOINTS_EXHAUSTED, with a sanitized body (no URL/key leak)', async () => {
       const agent = publishAgent({ publish: async () => { throw exhaustion(); } });
       const { res, done } = runKaCtx('POST', '/api/knowledge-assets/publish', agent, { contextGraphId: 'cg-1', quads: QUADS });
