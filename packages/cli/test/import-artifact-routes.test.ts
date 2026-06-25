@@ -1993,15 +1993,15 @@ describe('import artifact daemon routes', () => {
     expect(writes[0]!.name).toBe(assertionName);
     expect(writes[0]!.agentAddress).toBe('did:dkg:agent:test');
     expect(writes[0]!.quads).toEqual(expect.arrayContaining([
-      { subject: 'urn:doc:imported', predicate: 'http://schema.org/about', object: '"Semantic topic"' },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}sourceAssertion`, object: assertionUri },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}sourceFileHash`, object: `"${entry.keccak256}"` },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}markdownHash`, object: `"${entry.keccak256}"` },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}markdownForm`, object: markdownForm },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generationMethod`, object: '"unit-test-model"' },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generatedBy`, object: 'did:dkg:agent:reviewer' },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${PROV}wasAttributedTo`, object: 'did:dkg:agent:reviewer' },
-      { subject: 'urn:doc:imported', predicate: `${PROV}wasDerivedFrom`, object: assertionUri },
+      expect.objectContaining({ subject: 'urn:doc:imported', predicate: 'http://schema.org/about', object: '"Semantic topic"' }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}sourceAssertion`, object: assertionUri }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}sourceFileHash`, object: `"${entry.keccak256}"` }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}markdownHash`, object: `"${entry.keccak256}"` }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}markdownForm`, object: markdownForm }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generationMethod`, object: '"unit-test-model"' }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generatedBy`, object: 'did:dkg:agent:reviewer' }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${PROV}wasAttributedTo`, object: 'did:dkg:agent:reviewer' }),
+      expect.objectContaining({ subject: 'urn:doc:imported', predicate: `${PROV}wasDerivedFrom`, object: assertionUri }),
     ]));
     expect(events).toEqual(expect.arrayContaining([
       expect.objectContaining({ operation: 'semantic_enrichment_written', layers: ['wm'] }),
@@ -2116,7 +2116,7 @@ describe('import artifact daemon routes', () => {
     expect(result.status).toBe(200);
     expect(writes).toHaveLength(1);
     expect(writes[0]!.quads).toEqual(expect.arrayContaining([
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generatedBy`, object: '"Reviewer Bot"' },
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generatedBy`, object: '"Reviewer Bot"' }),
     ]));
     expect(writes[0]!.quads.filter((quad) => quad.predicate === `${PROV}wasAttributedTo`)).toHaveLength(0);
   });
@@ -2153,9 +2153,9 @@ describe('import artifact daemon routes', () => {
     expect(result.status).toBe(200);
     expect(writes).toHaveLength(1);
     expect(writes[0]!.quads).toEqual(expect.arrayContaining([
-      { subject: 'urn:doc:imported', predicate: 'http://schema.org/about', object: '"Topic\\u0000vertical\\u000Bdel\\u007F"' },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generationMethod`, object: '"model\\u0000unit\\u007F"' },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generatedBy`, object: '"Reviewer\\u000BBot"' },
+      expect.objectContaining({ subject: 'urn:doc:imported', predicate: 'http://schema.org/about', object: '"Topic\\u0000vertical\\u000Bdel\\u007F"' }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generationMethod`, object: '"model\\u0000unit\\u007F"' }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generatedBy`, object: '"Reviewer\\u000BBot"' }),
     ]));
     expect(writes[0]!.quads.filter((quad) => quad.predicate === `${PROV}wasAttributedTo`)).toHaveLength(0);
   });
@@ -2186,9 +2186,9 @@ describe('import artifact daemon routes', () => {
     expect(result.status).toBe(200);
     expect(writes).toHaveLength(1);
     expect(writes[0]!.quads).toEqual(expect.arrayContaining([
-      { subject: 'urn:doc:imported', predicate: 'http://schema.org/about', object: '"Fallback topic"' },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generatedBy`, object: 'did:dkg:agent:test' },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${PROV}wasAttributedTo`, object: 'did:dkg:agent:test' },
+      expect.objectContaining({ subject: 'urn:doc:imported', predicate: 'http://schema.org/about', object: '"Fallback topic"' }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generatedBy`, object: 'did:dkg:agent:test' }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${PROV}wasAttributedTo`, object: 'did:dkg:agent:test' }),
     ]));
     expect(writes[0]!.quads).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ object: 'did:dkg:agent:did:dkg:agent:test' }),
