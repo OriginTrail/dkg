@@ -235,6 +235,7 @@ export {
   DKG_CHUNK_INDEX,
   DKG_CHUNK_VALUE,
   parseRdfLiteralTerm,
+  rdfLiteralTerm,
   normalizeLargeRdfLiteralsForBlazegraph,
   type ParsedRdfLiteralTerm,
   type RdfTextLiteralRewrite,

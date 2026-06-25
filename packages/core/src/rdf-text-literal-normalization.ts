@@ -8,6 +8,11 @@ import {
   rdfLiteralTermMutf8ByteLength,
   type QuadLiteralLike,
 } from './rdf-literal-size.js';
+import {
+  parseRdfLiteralTerm,
+  rdfLiteralTerm,
+  type ParsedRdfLiteralTerm,
+} from './rdf-literal-codec.js';
 import { isSafeIri } from './sparql-safe.js';
 
 export const RDF_TYPE_IRI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -34,13 +39,6 @@ export const DKG_TEXT_DATATYPE = 'http://dkg.io/ontology/textDatatype';
 export const DKG_CHUNK_INDEX = 'http://dkg.io/ontology/chunkIndex';
 export const DKG_CHUNK_VALUE = 'http://dkg.io/ontology/chunkValue';
 
-export interface ParsedRdfLiteralTerm {
-  readonly lexical: string;
-  readonly suffix: string;
-  readonly language?: string;
-  readonly datatype?: string;
-}
-
 export interface RdfTextLiteralRewrite {
   readonly subject: string;
   readonly predicate: string;
@@ -63,37 +61,6 @@ export interface RdfLiteralNormalizationOptions {
   readonly chunkMaxBytes?: number;
   readonly textPredicates?: Iterable<string>;
   readonly label?: string;
-}
-
-export function parseRdfLiteralTerm(term: string): ParsedRdfLiteralTerm | null {
-  if (!term.startsWith('"')) return null;
-  let escaped = false;
-  for (let i = 1; i < term.length; i++) {
-    const ch = term[i]!;
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (ch === '\\') {
-      escaped = true;
-      continue;
-    }
-    if (ch !== '"') continue;
-
-    try {
-      const body = term.slice(1, i);
-      const suffix = term.slice(i + 1);
-      const metadata = parseLiteralSuffix(suffix);
-      return {
-        lexical: decodeRdfLiteralBody(body),
-        suffix,
-        ...metadata,
-      };
-    } catch {
-      return null;
-    }
-  }
-  return null;
 }
 
 export function normalizeLargeRdfLiteralsForBlazegraph(
@@ -290,72 +257,6 @@ function serializedLiteralBodyMutf8ByteLength(value: string): number {
   return javaModifiedUtf8ByteLength(serialized.slice(1, -1));
 }
 
-function parseLiteralSuffix(suffix: string): { language?: string; datatype?: string } {
-  if (suffix === '') return {};
-  const language = /^@([A-Za-z]+(?:-[A-Za-z0-9]+)*)$/.exec(suffix);
-  if (language) return { language: language[1] };
-  const datatype = /^\^\^<([^<>"{}|\\^`\x00-\x20>]+)>$/.exec(suffix);
-  if (datatype) return { datatype: datatype[1] };
-  throw new Error(`Invalid RDF literal suffix: ${suffix.slice(0, 80)}`);
-}
-
-function decodeRdfLiteralBody(body: string): string {
-  let out = '';
-  for (let i = 0; i < body.length; i++) {
-    const ch = body[i]!;
-    if (ch !== '\\') {
-      out += ch;
-      continue;
-    }
-    i += 1;
-    if (i >= body.length) throw new Error('Invalid trailing RDF literal escape');
-    const escaped = body[i]!;
-    switch (escaped) {
-      case 't':
-        out += '\t';
-        break;
-      case 'b':
-        out += '\b';
-        break;
-      case 'n':
-        out += '\n';
-        break;
-      case 'r':
-        out += '\r';
-        break;
-      case 'f':
-        out += '\f';
-        break;
-      case '"':
-      case "'":
-      case '\\':
-        out += escaped;
-        break;
-      case 'u': {
-        const hex = body.slice(i + 1, i + 5);
-        if (!/^[0-9a-fA-F]{4}$/.test(hex)) throw new Error('Invalid RDF \\u escape');
-        out += String.fromCharCode(parseInt(hex, 16));
-        i += 4;
-        break;
-      }
-      case 'U': {
-        const hex = body.slice(i + 1, i + 9);
-        if (!/^[0-9a-fA-F]{8}$/.test(hex)) throw new Error('Invalid RDF \\U escape');
-        out += String.fromCodePoint(parseInt(hex, 16));
-        i += 8;
-        break;
-      }
-      default:
-        throw new Error(`Invalid RDF literal escape: \\${escaped}`);
-    }
-  }
-  return out;
-}
-
-function rdfLiteralTerm(lexical: string, suffix = ''): string {
-  return `${JSON.stringify(lexical)}${suffix}`;
-}
-
 function xsdInteger(value: number): string {
   return `"${value}"^^<${XSD_INTEGER_IRI}>`;
 }
@@ -367,3 +268,9 @@ function sha256Hex(value: string): string {
 function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).length;
 }
+
+export {
+  parseRdfLiteralTerm,
+  rdfLiteralTerm,
+  type ParsedRdfLiteralTerm,
+} from './rdf-literal-codec.js';

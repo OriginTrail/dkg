@@ -37,11 +37,10 @@ import {
   validateRequiredContextGraphId,
   parsePublishRequestBody,
   isWritableQuad,
-  validateQuadObjectTerms,
   respondIfReconcileUnavailable,
   respondIfChainRpcTransportError,
   sanitizeRpcMessage,
-  preparePublicWriteQuads,
+  prepareValidatedPublicWriteQuads,
   normalizeContextGraphIdOrUri,
   resolveRequiredWriteContextGraphId,
   isNoFundedPublisherWalletLike,
@@ -826,9 +825,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       if (!quads.every(isWritableQuad)) {
         return jsonResponse(res, 400, { error: '"quads" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted' });
       }
-      const objErr = validateQuadObjectTerms("quads", quads);
-      if (objErr) return jsonResponse(res, 400, { error: objErr });
-      const normalizedQuads = preparePublicWriteQuads("quads", quads);
+      const normalizedQuads = prepareValidatedPublicWriteQuads("quads", quads);
       if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
       quadsToWrite = normalizedQuads.value.quads;
     }
@@ -1145,11 +1142,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         if (!parsed.quads.every(isWritableQuad)) {
           return jsonResponse(res, 400, { error: '"quads" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted' });
         }
-        // GH #306/#787 (follow-up) — reject objects that are neither a quoted
-        // literal nor an absolute IRI before they reach (and crash) the parser.
-        const wmObjErr = validateQuadObjectTerms("quads", parsed.quads);
-        if (wmObjErr) return jsonResponse(res, 400, { error: wmObjErr });
-        const normalizedQuads = preparePublicWriteQuads("quads", parsed.quads);
+        // Validate object terms and chunk oversized schema:text literals before
+        // the write path sees these public-write quads.
+        const normalizedQuads = prepareValidatedPublicWriteQuads("quads", parsed.quads);
         if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
         // A bare write to a name that was never created used to fall through to
         // the legacy `/assertion/{addr}/{name}` graph and produce a KA that is

@@ -65,6 +65,7 @@ export default defineConfig({
           // #761 — context graph write-target validation (from main).
           'test/context-graph-write-path-validation.test.ts',
           'test/http-literal-size-validation.test.ts',
+          'test/daemon-memory-turn-literal-size.test.ts',
           'test/no-funded-publisher-wallet-helpers.test.ts',
           'test/daemon-ka-transport.test.ts',
           'test/epcis-route-readiness.test.ts',

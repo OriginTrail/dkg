@@ -199,8 +199,7 @@ import {
   resolveNameToPeerId,
   isPublishQuad,
   isWritableQuad,
-  validateQuadObjectTerms,
-  preparePublicWriteQuads,
+  prepareValidatedPublicWriteQuads,
   oversizedRdfLiteralResponseBody,
   parsePublishRequestBody,
   jsonResponse,
@@ -670,7 +669,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
         };
       });
 
-      const normalizedQuads = preparePublicWriteQuads("quads", normalized);
+      const normalizedQuads = prepareValidatedPublicWriteQuads("quads", normalized);
       if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
       normalized = normalizedQuads.value.quads;
       await agent.store.insert(normalized);
@@ -1655,16 +1654,13 @@ WHERE {
     // of crashing the SWM write path with a TypeError (HTTP 500).
     if (!Array.isArray(quads) || !quads.every(isWritableQuad))
       return jsonResponse(res, 400, { error: '"quads" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted' });
-    // GH #306/#787 (follow-up) — also reject objects that are neither a quoted
-    // literal nor an absolute IRI; otherwise they slip past the shape guard and
-    // crash the RDF parser ("No scheme found in an absolute IRI") with HTTP 500.
+    // Validate object terms and chunk oversized schema:text literals before
+    // storage/share sees these public-write quads.
     {
-      const objErr = validateQuadObjectTerms("quads", quads);
-      if (objErr) return jsonResponse(res, 400, { error: objErr });
+      const normalizedQuads = prepareValidatedPublicWriteQuads("quads", quads);
+      if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
+      quads = normalizedQuads.value.quads;
     }
-    const normalizedQuads = preparePublicWriteQuads("quads", quads);
-    if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
-    quads = normalizedQuads.value.quads;
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,
       contextGraphId,
@@ -2260,16 +2256,13 @@ WHERE {
     // GH #787 / #306 — reject string-shaped / malformed quads (4xx, not a 500 crash).
     if (!Array.isArray(quads) || !quads.every(isWritableQuad))
       return jsonResponse(res, 400, { error: '"quads" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted' });
-    // GH #306/#787 (follow-up) — also reject objects that are neither a quoted
-    // literal nor an absolute IRI; otherwise they slip past the shape guard and
-    // crash the RDF parser ("No scheme found in an absolute IRI") with HTTP 500.
+    // Validate object terms and chunk oversized schema:text literals before
+    // storage/share sees these public-write quads.
     {
-      const objErr = validateQuadObjectTerms("quads", quads);
-      if (objErr) return jsonResponse(res, 400, { error: objErr });
+      const normalizedQuads = prepareValidatedPublicWriteQuads("quads", quads);
+      if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
+      quads = normalizedQuads.value.quads;
     }
-    const normalizedQuads = preparePublicWriteQuads("quads", quads);
-    if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
-    quads = normalizedQuads.value.quads;
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,
       contextGraphId,
@@ -2465,7 +2458,7 @@ WHERE {
       });
     }
 
-    const normalizedQuads = preparePublicWriteQuads("quads", quads);
+    const normalizedQuads = prepareValidatedPublicWriteQuads("quads", quads);
     if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
     const quadsToWrite = normalizedQuads.value.quads;
 

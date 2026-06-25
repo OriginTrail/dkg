@@ -356,6 +356,35 @@ describe('DKGPublisher compatibility aliases', () => {
     expect(prepared).toHaveLength(2);
   });
 
+  it('uses a blank node inferred root when skolemizing shared blank-node object links', () => {
+    const rootA = 'http://example.org/root-a';
+    const rootB = 'http://example.org/root-b';
+    const shared = `${rootA}/.well-known/genid/shared`;
+    const wrongShared = `${rootB}/.well-known/genid/shared`;
+
+    const prepared = preparePublicWriteQuads([
+      q(rootA, 'http://schema.org/hasPart', '_:shared'),
+      q(rootB, 'http://schema.org/hasPart', '_:shared'),
+      q('_:shared', 'http://schema.org/name', '"Shared"'),
+    ]).quads;
+
+    expect(prepared).toContainEqual({
+      ...q(rootA, 'http://schema.org/hasPart', '_:shared'),
+      object: shared,
+    });
+    expect(prepared).toContainEqual({
+      ...q(rootB, 'http://schema.org/hasPart', '_:shared'),
+      object: shared,
+    });
+    expect(prepared).toContainEqual({
+      ...q('_:shared', 'http://schema.org/name', '"Shared"'),
+      subject: shared,
+    });
+    expect(prepared.some((quad) =>
+      quad.subject === wrongShared || quad.object === wrongShared
+    )).toBe(false);
+  });
+
   it('indexes already-skolemized subjects even when their root subject is absent', () => {
     const root = 'http://example.org/external';
     const externalSkolemized = q(

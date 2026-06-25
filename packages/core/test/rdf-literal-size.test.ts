@@ -281,6 +281,47 @@ describe('rdf literal Java MUTF-8 sizing', () => {
     });
   });
 
+  it('rejects raw control characters in quoted RDF literal source', () => {
+    expect(parseRdfLiteralTerm('"bad\nbody"')).toBeNull();
+    expect(parseRdfLiteralTerm('"bad\rbody"')).toBeNull();
+    expect(parseRdfLiteralTerm(`"bad${String.fromCharCode(1)}body"`)).toBeNull();
+
+    const rawNewlineLiteral = `"${'x'.repeat(250)}\n${'y'.repeat(250)}"`;
+    expect(() =>
+      normalizeLargeRdfLiteralsForBlazegraph([
+        {
+          subject: 'http://example.org/raw-control',
+          predicate: 'http://schema.org/text',
+          object: rawNewlineLiteral,
+          graph: 'did:dkg:context-graph:test',
+        },
+      ], { maxBytes: 200, chunkMaxBytes: 100 }),
+    ).toThrow(/Blazegraph-compatible safe limit/);
+  });
+
+  it('chunks escaped control sequences and reconstructs their lexical value', () => {
+    const escapedLiteral = `"${'line\\nbreak '.repeat(80)}"@en`;
+    expect(parseRdfLiteralTerm('"line\\nbreak"')?.lexical).toBe('line\nbreak');
+
+    const normalized = normalizeLargeRdfLiteralsForBlazegraph([
+      {
+        subject: 'http://example.org/escaped-controls',
+        predicate: 'http://schema.org/text',
+        object: escapedLiteral,
+        graph: 'did:dkg:context-graph:test',
+      },
+    ], { maxBytes: 300, chunkMaxBytes: 120 });
+
+    const reconstructed = reconstructChunkedTextBodies(normalized.quads, {
+      subject: 'http://example.org/escaped-controls',
+    });
+    expect(reconstructed).toHaveLength(1);
+    expect(reconstructed[0]).toMatchObject({
+      lexical: 'line\nbreak '.repeat(80),
+      language: 'en',
+    });
+  });
+
   it('normalizes idempotently and keeps generated literals below the safe limit', () => {
     const oversized = JSON.stringify('x'.repeat(1_000));
     const first = normalizeLargeRdfLiteralsForBlazegraph([

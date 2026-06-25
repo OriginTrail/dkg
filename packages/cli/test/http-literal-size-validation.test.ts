@@ -8,6 +8,7 @@ import {
   buildImportFileResponse,
   parsePublishRequestBody,
   preparePublicWriteQuads,
+  prepareValidatedPublicWriteQuads,
   validateWritableQuadLiteralSizes,
 } from '../src/daemon/http-utils.js';
 
@@ -190,6 +191,52 @@ describe('HTTP RDF literal size validation', () => {
         actualBytes: 60_002,
         limitBytes: 60_000,
       });
+    }
+  });
+
+  it('prepares validated public-write quads with explicit normalized count', () => {
+    const prepared = prepareValidatedPublicWriteQuads('quads', [{
+      subject: 'http://example.org/s',
+      predicate: 'http://schema.org/text',
+      object: OVERSIZED_LITERAL,
+      graph: 'http://example.org/g',
+    }]);
+
+    expect(prepared.ok).toBe(true);
+    if (prepared.ok) {
+      expect(prepared.value.rewrites).toHaveLength(1);
+      expect(prepared.value.quads.some((quad) => quad.predicate === DKG_CHUNK_VALUE)).toBe(true);
+      expect(prepared.value.totalQuads).toBe(prepared.value.quads.length);
+    }
+  });
+
+  it('returns structured object-term validation failures from the validated public-write helper', () => {
+    const prepared = prepareValidatedPublicWriteQuads('quads', [{
+      subject: 'http://example.org/s',
+      predicate: 'http://schema.org/name',
+      object: 'not-a-valid-rdf-object',
+      graph: 'http://example.org/g',
+    }]);
+
+    expect(prepared.ok).toBe(false);
+    if (!prepared.ok) {
+      expect(prepared.body.error).toContain('Invalid "quads[0].object"');
+    }
+  });
+
+  it('rejects small malformed quoted literal terms before storage routes see them', () => {
+    for (const object of ['"bad\nliteral"', ' "ok"', '"ok"\n']) {
+      const prepared = prepareValidatedPublicWriteQuads('quads', [{
+        subject: 'http://example.org/s',
+        predicate: 'http://schema.org/name',
+        object,
+        graph: 'http://example.org/g',
+      }]);
+
+      expect(prepared.ok).toBe(false);
+      if (!prepared.ok) {
+        expect(prepared.body.error).toContain('well-formed quoted literal term');
+      }
     }
   });
 

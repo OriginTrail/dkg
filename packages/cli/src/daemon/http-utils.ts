@@ -9,6 +9,7 @@ import {
   PayloadTooLargeError,
   assertQuadLiteralsMutf8Safe,
   isOversizedRdfLiteralError,
+  parseRdfLiteralTerm,
   type RdfTextLiteralRewrite,
   validateContextGraphId,
   validateSubGraphName,
@@ -231,6 +232,10 @@ export interface PreparedPublicWriteQuads {
   readonly rewrites: RdfTextLiteralRewrite[];
 }
 
+export interface PreparedValidatedPublicWriteQuads extends PreparedPublicWriteQuads {
+  readonly totalQuads: number;
+}
+
 /**
  * Canonical HTTP-facing public-write preparation. Route handlers that must know
  * the normalized quad count or return rewrite metadata call this once and pass
@@ -250,6 +255,23 @@ export function preparePublicWriteQuads(
     }
     throw err;
   }
+}
+
+export function prepareValidatedPublicWriteQuads(
+  label: string,
+  quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
+): { ok: true; value: PreparedValidatedPublicWriteQuads } | { ok: false; body: Record<string, unknown> } {
+  const objectError = validateQuadObjectTerms(label, quads);
+  if (objectError) return { ok: false, body: { error: objectError } };
+  const prepared = preparePublicWriteQuads(label, quads);
+  if (!prepared.ok) return prepared;
+  return {
+    ok: true,
+    value: {
+      ...prepared.value,
+      totalQuads: prepared.value.quads.length,
+    },
+  };
 }
 
 /**
@@ -272,17 +294,18 @@ export function validateQuadObjectTerms(
 ): string | null {
   const allowBlankNodes = options.allowBlankNodes ?? true;
   const badIndex = quads.findIndex((q) => {
-    const object = q.object.trim();
+    const object = q.object;
+    if (object.trim() !== object) return true;
+    if (object.startsWith('"')) return parseRdfLiteralTerm(object) === null;
     return (
-      !object.startsWith('"') &&
       !(allowBlankNodes && isSafeBlankNode(object)) &&
       !isSafeIri(object)
     );
   });
   if (badIndex === -1) return null;
   const expected = allowBlankNodes
-    ? "a quoted literal term, blank node, or absolute IRI"
-    : "a quoted literal term or absolute IRI";
+    ? "a well-formed quoted literal term, blank node, or absolute IRI"
+    : "a well-formed quoted literal term or absolute IRI";
   return `Invalid "${label}[${badIndex}].object": RDF object must be ${expected}`;
 }
 
@@ -464,9 +487,7 @@ export function parsePublishRequestBody(
       error: 'Missing or invalid "quads" (must be a non-empty quad array)',
     };
   }
-  const quadObjectError = validateQuadObjectTerms("quads", quads);
-  if (quadObjectError) return { ok: false, error: quadObjectError };
-  const normalizedQuads = preparePublicWriteQuads("quads", quads);
+  const normalizedQuads = prepareValidatedPublicWriteQuads("quads", quads);
   if (!normalizedQuads.ok) {
     return { ok: false, error: String(normalizedQuads.body.error ?? 'Oversized RDF literal'), body: normalizedQuads.body };
   }
