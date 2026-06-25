@@ -746,6 +746,19 @@ describe('resolveChainConfig (field-level merge)', () => {
     expect(sameChainId?.rpcUrls).toEqual(fullNetworkChain.rpcUrls);
   });
 
+  it('STILL inherits backups when only chainId differs and the operator did NOT pin an rpcUrl (#1332 review)', () => {
+    // A chainId override with NO custom rpcUrl leaves the primary as the network
+    // RPC (same chain as the backups) — there is no cross-chain FallbackProvider
+    // to avoid, so suppressing the backups would needlessly drop failover. The
+    // suppression must trigger only when the operator pins their OWN primary.
+    const merged = resolveChainConfig(
+      { chain: { chainId: 'evm:31337' } },
+      { chain: fullNetworkChain },
+    );
+    expect(merged?.rpcUrl).toBe(fullNetworkChain.rpcUrl);
+    expect(merged?.rpcUrls).toEqual(fullNetworkChain.rpcUrls);
+  });
+
   it('overrides hub independently of rpcUrl (multichain forward-compat)', () => {
     const merged = resolveChainConfig(
       { chain: { hubAddress: '0xOPERATORHUB0000000000000000000000000000' } },

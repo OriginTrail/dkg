@@ -28,10 +28,17 @@ const TRANSPORT_CODES: ReadonlySet<string> = new Set<ChainRpcTransportCode>([
   'TIMEOUT',
 ]);
 
-/** Shape any transport-coded error presents to consumers (HTTP classifier, CLI). */
+/**
+ * Shape any transport-coded error presents to consumers (HTTP classifier, CLI).
+ * Only `code` is guaranteed by {@link isChainRpcTransportError} (that is all the
+ * guard verifies); `message`/`rpcUrls`/`txHash` are best-effort and optional, so
+ * consumers must read them defensively (a real {@link ChainRpcTransportError}
+ * and ethers errors always carry a string `message`, but the guard does not
+ * require one — keeping the narrowing sound).
+ */
 export interface ChainRpcTransportErrorLike {
   code: ChainRpcTransportCode;
-  message: string;
+  message?: string;
   rpcUrls?: string[];
   txHash?: string;
 }
