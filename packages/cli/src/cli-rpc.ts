@@ -6,6 +6,7 @@ import {
   noteRpcFailover,
   noteRpcExhaustion,
   ChainRpcTransportError,
+  createRpcTimeoutError,
 } from '@origintrail-official/dkg-chain';
 import { cliSleep, cliErrorMessage } from './cli-helpers.js';
 
@@ -19,7 +20,7 @@ function cliWithTimeout<T>(promise: Promise<T>, ms: number, label: string): Prom
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      reject(new ChainRpcTransportError('RPC_TIMEOUT', `${label} timed out after ${ms}ms`));
+      reject(createRpcTimeoutError(`${label} timed out after ${ms}ms`));
     }, ms);
   });
   return Promise.race([promise, timeout]).finally(() => {

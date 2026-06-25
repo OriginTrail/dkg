@@ -20,6 +20,7 @@ export { NoChainAdapter } from './no-chain-adapter.js';
 export {
   ChainRpcTransportError,
   isChainRpcTransportError,
+  createRpcTimeoutError,
   type ChainRpcTransportCode,
   type ChainRpcTransportErrorLike,
 } from './chain-rpc-transport-error.js';

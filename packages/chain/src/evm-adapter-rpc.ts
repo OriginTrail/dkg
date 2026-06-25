@@ -9,7 +9,7 @@
  */
 import { ethers, FetchRequest } from 'ethers';
 import { enrichEvmError, errorCode, errorMessage, errorStatus } from './evm-adapter-errors.js';
-import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
+import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
 
 /**
  * Per-request retry bound for ethers' built-in `FetchRequest`. ethers v6
@@ -47,7 +47,7 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): 
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      reject(new ChainRpcTransportError('RPC_TIMEOUT', `${label} timed out after ${ms}ms`));
+      reject(createRpcTimeoutError(`${label} timed out after ${ms}ms`));
     }, ms);
   });
   return Promise.race([promise, timeout]).finally(() => {

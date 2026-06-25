@@ -24,16 +24,18 @@
  * On-chain reverts (`CALL_EXCEPTION`/`INSUFFICIENT_FUNDS`) never match (#988).
  */
 
-export type ChainRpcTransportCode =
-  | 'RPC_ENDPOINTS_EXHAUSTED'
-  | 'RPC_RECEIPT_LOOKUP_FAILED'
-  | 'RPC_TIMEOUT';
-
-const TRANSPORT_CODES: ReadonlySet<string> = new Set<ChainRpcTransportCode>([
+// SINGLE SOURCE OF TRUTH for the chain-NAMESPACED transport codes. The union
+// type AND the guard's Set both derive from this tuple, so a code can never be
+// added/removed in one place and missed in the other.
+export const CHAIN_RPC_TRANSPORT_CODES = [
   'RPC_ENDPOINTS_EXHAUSTED',
   'RPC_RECEIPT_LOOKUP_FAILED',
   'RPC_TIMEOUT',
-]);
+] as const;
+
+export type ChainRpcTransportCode = (typeof CHAIN_RPC_TRANSPORT_CODES)[number];
+
+const TRANSPORT_CODES: ReadonlySet<string> = new Set(CHAIN_RPC_TRANSPORT_CODES);
 
 /**
  * Shape any transport-coded error presents to consumers (HTTP classifier, CLI).
@@ -46,15 +48,17 @@ const TRANSPORT_CODES: ReadonlySet<string> = new Set<ChainRpcTransportCode>([
 export interface ChainRpcTransportErrorLike {
   code: ChainRpcTransportCode;
   message?: string;
-  rpcUrls?: string[];
+  rpcUrls?: readonly string[];
   txHash?: string;
 }
 
 export class ChainRpcTransportError extends Error {
   readonly code: ChainRpcTransportCode;
 
-  /** Configured endpoints involved. HOST-ONLY callers must reduce before logging/echoing. */
-  readonly rpcUrls?: string[];
+  /** Configured endpoints involved. HOST-ONLY callers must reduce before logging/echoing.
+   *  Exposed as a `readonly` array AND frozen on capture, so a consumer can neither
+   *  reassign nor mutate (`err.rpcUrls.push(...)`) this cross-package boundary's context. */
+  readonly rpcUrls?: readonly string[];
 
   readonly txHash?: string;
 
@@ -66,9 +70,22 @@ export class ChainRpcTransportError extends Error {
     super(message, opts?.cause !== undefined ? { cause: opts.cause } : undefined);
     this.name = 'ChainRpcTransportError';
     this.code = code;
-    if (opts?.rpcUrls) this.rpcUrls = [...opts.rpcUrls];
+    if (opts?.rpcUrls) this.rpcUrls = Object.freeze([...opts.rpcUrls]);
     if (opts?.txHash) this.txHash = opts.txHash;
   }
+}
+
+/**
+ * Shared factory for the chain-RPC TIMEOUT transport error, so the chain-side
+ * `withTimeout`, the receipt-wait deadline, and the CLI `cliWithTimeout` all emit
+ * the SAME `RPC_TIMEOUT` (never the generic `TIMEOUT`) from ONE place — the
+ * namespaced-code invariant is not duplicated across emitters.
+ */
+export function createRpcTimeoutError(
+  message: string,
+  opts?: { cause?: unknown; txHash?: string },
+): ChainRpcTransportError {
+  return new ChainRpcTransportError('RPC_TIMEOUT', message, opts);
 }
 
 /**

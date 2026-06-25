@@ -23,7 +23,7 @@ import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isKnownTransactionError, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { noteRpcFailover, noteRpcExhaustion, rpcHost } from './rpc-failover-log.js';
-import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
+import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
@@ -811,8 +811,7 @@ export class EVMChainAdapterBase {
       }
       await sleep(RPC_RECEIPT_POLL_INTERVAL_MS);
     }
-    throw new ChainRpcTransportError(
-      'RPC_TIMEOUT',
+    throw createRpcTimeoutError(
       `${label} tx ${txHash} timed out waiting for a receipt after ${RPC_RECEIPT_TIMEOUT_MS}ms` +
       (lastError ? ` (last RPC error: ${errorMessage(lastError)})` : ''),
       { cause: lastError, txHash },

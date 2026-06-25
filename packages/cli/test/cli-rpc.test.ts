@@ -5,7 +5,7 @@ import {
   isCliKnownTransactionError,
   sendCliRawTransactionWithFailover,
 } from '../src/cli-rpc.js';
-import { isRetryableRpcError, isKnownTransactionError } from '@origintrail-official/dkg-chain';
+import { isRetryableRpcError, isKnownTransactionError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 
 describe('cli-rpc classifier consolidation (W4)', () => {
   // Each case is a fresh object so the in-place enrichEvmError mutation that
@@ -77,5 +77,30 @@ describe('cli-rpc classifier consolidation (W4)', () => {
     ).rejects.toMatchObject({ code: 'CALL_EXCEPTION' });
     // Only the first provider was tried — a revert is not retried on the backup.
     expect(calls).toBe(1);
+  });
+
+  it('emits a structured RPC_RECEIPT_LOOKUP_FAILED (with the original txHash) when receipt lookup fails on every provider after a successful broadcast', async () => {
+    // #1332 review: drives the REAL CLI receipt emitter end-to-end (broadcast OK,
+    // then retryable receipt failures on all providers) so a regression that drops
+    // txHash or changes the emitted shape fails loudly, not just the synthetic
+    // classifier inputs.
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const provider = () => ({
+      broadcastTransaction: async () => ({ hash: '0xignored' }),
+      getTransactionReceipt: async () => {
+        const e: any = new Error('receipt RPC down');
+        e.code = 'SERVER_ERROR';
+        throw e;
+      },
+    }) as any;
+    const err = await sendCliRawTransactionWithFailover(
+      [provider(), provider()],
+      '0xsigned',
+      '0xdeadbeef',
+      ['https://a.example', 'https://b.example'],
+    ).catch((e) => e);
+    expect(err.code).toBe('RPC_RECEIPT_LOOKUP_FAILED');
+    expect(err.txHash).toBe('0xdeadbeef');
+    expect(isChainRpcTransportError(err)).toBe(true);
   });
 });
