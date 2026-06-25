@@ -7,14 +7,19 @@
  * Previously these were bare `new Error(...)` objects with ad-hoc
  * `(err as any).code = 'RPC_ENDPOINTS_EXHAUSTED'` casts and `rpcUrls`/`txHash`
  * fields scattered across packages — an implicit, stringly-typed cross-package
- * contract. This gives it one name, one factory, and one type guard:
+ * contract. This gives it one name, one factory, and one type guard for:
  *   - `RPC_ENDPOINTS_EXHAUSTED`   — every configured RPC failed over (writes)
  *   - `RPC_RECEIPT_LOOKUP_FAILED` — receipt lookup failed on every endpoint
  *   - `TIMEOUT`                   — receipt wait / bounded RPC request timed out
  *
- * The guard is CODE-based (not `instanceof`) on purpose: a `TIMEOUT` can also be
- * stamped by ethers' own request timeout, and the CLI stack throws its own
- * instances — all must be recognised by the daemon's 503/504 mapping.
+ * The guard ({@link isChainRpcTransportError}) is a REAL boundary, not a global
+ * code convention. It recognises EITHER a `ChainRpcTransportError` INSTANCE (the
+ * chain/CLI failover stack's own throws, including its wrapped timeouts) OR an
+ * error carrying one of the chain-NAMESPACED codes (`RPC_ENDPOINTS_EXHAUSTED`/
+ * `RPC_RECEIPT_LOOKUP_FAILED`) — which survive a re-wrap that preserves `.code`
+ * and are never stamped outside the chain layer. A bare generic `code: 'TIMEOUT'`
+ * from an unrelated subsystem is intentionally NOT recognised: only our own
+ * (instance) timeouts map to the daemon's 504. On-chain reverts never match.
  */
 
 export type ChainRpcTransportCode =

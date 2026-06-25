@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
-import { NoChainAdapter } from '@origintrail-official/dkg-chain';
+import { NoChainAdapter, ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import { handlePcaRoutes } from '../src/daemon/routes/pca.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
@@ -79,9 +79,9 @@ describe('daemon /api/pca V10 caller contract', () => {
   it('POST /api/pca → 504 when the on-chain create reports a bounded chain timeout', async () => {
     const agent = {
       createPublishingConvictionAccount: async () => {
-        const err: any = new Error('tx 0xabc timed out waiting for a receipt after 180000ms');
-        err.code = 'TIMEOUT';
-        throw err;
+        // The adapter throws a ChainRpcTransportError instance for a receipt-wait
+        // timeout; the guard recognises TIMEOUT via the instance, not a bare code.
+        throw new ChainRpcTransportError('TIMEOUT', 'tx 0xabc timed out waiting for a receipt after 180000ms');
       },
     };
     const { res, done } = runCtx('POST', '/api/pca', agent, { tokens: '100', primaryNode: '42' });

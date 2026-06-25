@@ -44,6 +44,7 @@
  */
 
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
+import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -812,11 +813,13 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
   it('returns 504 when context graph register reports a bounded chain timeout', async () => {
     const contextGraphId = 'timeout-register-' + Math.random().toString(36).slice(2, 8);
     const txHash = '0x' + '77'.repeat(32);
-    const timeoutError = new Error(
+    // The adapter throws a ChainRpcTransportError instance for a receipt-wait
+    // timeout; the guard recognises TIMEOUT via the instance, not a bare code.
+    const timeoutError = new ChainRpcTransportError(
+      'TIMEOUT',
       `register context graph tx ${txHash} timed out waiting for a receipt after 180000ms`,
+      { txHash },
     );
-    (timeoutError as Error & { code?: string; txHash?: string }).code = 'TIMEOUT';
-    (timeoutError as Error & { code?: string; txHash?: string }).txHash = txHash;
 
     let routeServer: Server | null = null;
     try {
