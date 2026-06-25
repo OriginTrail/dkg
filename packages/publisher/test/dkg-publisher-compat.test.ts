@@ -90,6 +90,34 @@ describe('DKGPublisher compatibility aliases', () => {
     expect(reconstructPlainChunkedText(result.quads, root)).toBe('x'.repeat(60_000));
   });
 
+  it('chunks oversized schema:text literals on linked blank nodes before shared-memory writes', async () => {
+    const { publisher, store } = await makePublisher();
+    const oversized = `"${'x'.repeat(60_000)}"`;
+    const root = 'urn:compat:share-blank-root';
+    const child = `${root}/.well-known/genid/body`;
+
+    await publisher.share('test', [
+      q(root, 'http://schema.org/hasPart', '_:body'),
+      q('_:body', 'http://schema.org/text', oversized),
+    ], { publisherPeerId: 'test-peer', localOnly: true });
+
+    const result = await store.query(
+      'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <did:dkg:context-graph:test/_shared_memory> { ?s ?p ?o } }',
+    );
+    expect(result.type).toBe('quads');
+    if (result.type !== 'quads') return;
+    expect(result.quads.some((quad) =>
+      quad.subject === child &&
+      quad.predicate === 'http://schema.org/text'
+    )).toBe(false);
+    expect(result.quads.some((quad) =>
+      quad.subject === root &&
+      quad.predicate === 'http://schema.org/hasPart' &&
+      quad.object === child
+    )).toBe(true);
+    expect(reconstructPlainChunkedText(result.quads, child)).toBe('x'.repeat(60_000));
+  });
+
   it('rejects oversized non-text RDF literals at shared-memory producer boundary', async () => {
     const { publisher } = await makePublisher();
     const oversized = `"${'x'.repeat(60_000)}"`;
@@ -137,6 +165,36 @@ describe('DKGPublisher compatibility aliases', () => {
     });
   });
 
+  it('chunks oversized schema:text literals during conditionalShare writes', async () => {
+    const { publisher, store } = await makePublisher();
+    const oversized = `"${'x'.repeat(60_000)}"`;
+    const root = 'urn:compat:cas-chunked';
+
+    await publisher.conditionalShare('test', [
+      q(root, 'http://schema.org/text', oversized),
+    ], {
+      publisherPeerId: 'test-peer',
+      localOnly: true,
+      conditions: [{
+        subject: root,
+        predicate: 'http://schema.org/name',
+        expectedValue: null,
+      }],
+    });
+
+    const result = await store.query(
+      'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <did:dkg:context-graph:test/_shared_memory> { ?s ?p ?o } }',
+    );
+    expect(result.type).toBe('quads');
+    if (result.type !== 'quads') return;
+    expect(result.quads.some((quad) =>
+      quad.subject === root &&
+      quad.predicate === 'http://schema.org/text'
+    )).toBe(false);
+    expect(result.quads.some((quad) => quad.predicate === DKG_CHUNK_VALUE)).toBe(true);
+    expect(reconstructPlainChunkedText(result.quads, root)).toBe('x'.repeat(60_000));
+  });
+
   it('chunks oversized schema:text literals during direct publish', async () => {
     const { publisher, store } = await makePublisher();
     const oversized = `"${'x'.repeat(60_000)}"`;
@@ -159,6 +217,39 @@ describe('DKGPublisher compatibility aliases', () => {
       quad.predicate === 'http://schema.org/text'
     )).toBe(false);
     expect(reconstructPlainChunkedText(result.quads, root)).toBe('x'.repeat(60_000));
+  });
+
+  it('chunks oversized schema:text literals on linked blank nodes during direct publish', async () => {
+    const { publisher, store } = await makePublisher();
+    const oversized = `"${'x'.repeat(60_000)}"`;
+    const root = 'urn:compat:publish-blank-root';
+    const child = `${root}/.well-known/genid/body`;
+
+    await publisher.publish({
+      contextGraphId: 'test',
+      publisherPeerId: 'test-peer',
+      quads: [
+        q(root, 'http://schema.org/hasPart', '_:body'),
+        q('_:body', 'http://schema.org/text', oversized),
+      ],
+      skipContextGraphEnsure: true,
+    });
+
+    const result = await store.query(
+      'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <did:dkg:context-graph:test> { ?s ?p ?o } }',
+    );
+    expect(result.type).toBe('quads');
+    if (result.type !== 'quads') return;
+    expect(result.quads.some((quad) =>
+      quad.subject === child &&
+      quad.predicate === 'http://schema.org/text'
+    )).toBe(false);
+    expect(result.quads.some((quad) =>
+      quad.subject === root &&
+      quad.predicate === 'http://schema.org/hasPart' &&
+      quad.object === child
+    )).toBe(true);
+    expect(reconstructPlainChunkedText(result.quads, child)).toBe('x'.repeat(60_000));
   });
 
   it('chunks oversized schema:text literals during update', async () => {
@@ -188,6 +279,44 @@ describe('DKGPublisher compatibility aliases', () => {
       quad.predicate === 'http://schema.org/text'
     )).toBe(false);
     expect(reconstructPlainChunkedText(result.quads, root)).toBe('x'.repeat(60_000));
+  });
+
+  it('chunks oversized schema:text literals on linked blank nodes during update', async () => {
+    const { publisher, store } = await makePublisher();
+    const root = 'urn:compat:update-blank-root';
+    const child = `${root}/.well-known/genid/body`;
+    const original = await publisher.publish({
+      contextGraphId: 'test',
+      publisherPeerId: 'test-peer',
+      quads: [q(root, 'http://schema.org/name', '"Before"')],
+      skipContextGraphEnsure: true,
+    });
+
+    await publisher.update(original.kaId, {
+      contextGraphId: 'test',
+      publisherPeerId: 'test-peer',
+      quads: [
+        q(root, 'http://schema.org/hasPart', '_:body'),
+        q('_:body', 'http://schema.org/text', `"${'x'.repeat(60_000)}"`),
+      ],
+      skipContextGraphEnsure: true,
+    });
+
+    const result = await store.query(
+      'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }',
+    );
+    expect(result.type).toBe('quads');
+    if (result.type !== 'quads') return;
+    expect(result.quads.some((quad) =>
+      quad.subject === child &&
+      quad.predicate === 'http://schema.org/text'
+    )).toBe(false);
+    expect(result.quads.some((quad) =>
+      quad.subject === root &&
+      quad.predicate === 'http://schema.org/hasPart' &&
+      quad.object === child
+    )).toBe(true);
+    expect(reconstructPlainChunkedText(result.quads, child)).toBe('x'.repeat(60_000));
   });
 
   it('chunks oversized schema:text literals during assertion write', async () => {

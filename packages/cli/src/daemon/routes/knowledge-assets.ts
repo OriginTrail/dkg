@@ -673,16 +673,16 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     const parsed = parsePublishRequestBody(rawBody);
     if (!parsed.ok) return jsonResponse(res, 400, parsed.body ?? { error: parsed.error });
     const raw = JSON.parse(rawBody) as Record<string, unknown>;
+    const { body: publishBody, literalRewrites } = parsed.value;
     const {
       contextGraphId,
       quads,
       privateQuads,
-      literalRewrites,
       accessPolicy,
       allowedPeers,
       subGraphName,
       onChainContextGraphId,
-    } = parsed.value;
+    } = publishBody;
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,
       contextGraphId,

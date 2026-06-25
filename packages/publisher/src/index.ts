@@ -3,6 +3,12 @@ export { skolemize, isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } fro
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 export { skolemizeByEntity, autoPartition } from './auto-partition.js';
 export {
+  preparePublicWriteQuads,
+  toPublicWriteQuad,
+  type PreparedPublicWriteQuads,
+  type PublicWriteNormalizationOptions,
+} from './public-write-normalization.js';
+export {
   canonicalPublishPayload,
   type CanonicalPublishPayload,
   type CanonicalManifestEntry,

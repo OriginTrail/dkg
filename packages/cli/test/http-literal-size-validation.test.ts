@@ -33,15 +33,62 @@ describe('HTTP RDF literal size validation', () => {
         predicate: 'http://schema.org/text',
         originalMutf8Bytes: 60_002,
       });
-      expect(parsed.value.quads.some((quad) =>
+      expect(parsed.value.body.quads.some((quad) =>
         quad.subject === 'http://example.org/s' &&
         quad.predicate === 'http://schema.org/text'
       )).toBe(false);
-      expect(parsed.value.quads.some((quad) =>
+      expect(parsed.value.body.quads.some((quad) =>
         quad.subject === 'http://example.org/s' &&
         quad.predicate === DKG_HAS_TEXT_BODY
       )).toBe(true);
-      expect(parsed.value.quads.some((quad) => quad.predicate === DKG_CHUNK_VALUE)).toBe(true);
+      expect(parsed.value.body.quads.some((quad) => quad.predicate === DKG_CHUNK_VALUE)).toBe(true);
+    }
+  });
+
+  it('normalizes linked blank-node schema:text literals and derives rewrite metadata server-side', () => {
+    const parsed = parsePublishRequestBody(JSON.stringify({
+      contextGraphId: 'literal-size-cg',
+      literalRewrites: [{ subject: 'client-supplied', predicate: 'ignored' }],
+      quads: [
+        {
+          subject: 'http://example.org/root',
+          predicate: 'http://schema.org/hasPart',
+          object: '_:body',
+          graph: 'http://example.org/g',
+        },
+        {
+          subject: '_:body',
+          predicate: 'http://schema.org/text',
+          object: OVERSIZED_LITERAL,
+          graph: 'http://example.org/g',
+        },
+      ],
+    }));
+
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      const child = 'http://example.org/root/.well-known/genid/body';
+      expect(parsed.value.literalRewrites).toHaveLength(1);
+      expect(parsed.value.literalRewrites[0]).toMatchObject({
+        subject: child,
+        predicate: 'http://schema.org/text',
+        originalMutf8Bytes: 60_002,
+      });
+      expect(parsed.value.literalRewrites[0]?.subject).not.toBe('client-supplied');
+      expect(parsed.value.body.quads.some((quad) =>
+        quad.subject === 'http://example.org/root' &&
+        quad.predicate === 'http://schema.org/hasPart' &&
+        quad.object === child
+      )).toBe(true);
+      expect(parsed.value.body.quads.some((quad) =>
+        quad.subject === child &&
+        quad.predicate === 'http://schema.org/text'
+      )).toBe(false);
+      expect(parsed.value.body.quads.some((quad) =>
+        quad.subject === child &&
+        quad.predicate === DKG_HAS_TEXT_BODY
+      )).toBe(true);
+      expect(parsed.value.body.quads.some((quad) => quad.predicate === DKG_CHUNK_VALUE)).toBe(true);
     }
   });
 

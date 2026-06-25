@@ -206,6 +206,15 @@ export {
   DKG_RDF_LITERAL_SAFE_MUTF8_BYTES,
   OVERSIZED_RDF_LITERAL_ERROR_CODE,
   OversizedRdfLiteralError,
+  javaModifiedUtf8ByteLength,
+  rdfLiteralTermMutf8ByteLength,
+  isOversizedRdfLiteralError,
+  assertRdfLiteralMutf8Safe,
+  assertQuadLiteralsMutf8Safe,
+  type RdfLiteralSizeContext,
+  type QuadLiteralLike,
+} from './rdf-literal-size.js';
+export {
   RDF_TYPE_IRI,
   XSD_INTEGER_IRI,
   XSD_STRING_IRI,
@@ -225,20 +234,13 @@ export {
   DKG_TEXT_DATATYPE,
   DKG_CHUNK_INDEX,
   DKG_CHUNK_VALUE,
-  javaModifiedUtf8ByteLength,
-  rdfLiteralTermMutf8ByteLength,
   parseRdfLiteralTerm,
-  isOversizedRdfLiteralError,
-  assertRdfLiteralMutf8Safe,
-  assertQuadLiteralsMutf8Safe,
   normalizeLargeRdfLiteralsForBlazegraph,
-  type RdfLiteralSizeContext,
-  type QuadLiteralLike,
   type ParsedRdfLiteralTerm,
   type RdfTextLiteralRewrite,
   type RdfLiteralNormalizationResult,
   type RdfLiteralNormalizationOptions,
-} from './rdf-literal-size.js';
+} from './rdf-text-literal-normalization.js';
 export {
   DKGError,
   DKGUserError,

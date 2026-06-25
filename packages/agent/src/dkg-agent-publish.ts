@@ -98,7 +98,6 @@ import {
   sharedMemoryReadBothFilter,
   partitionCatalogQuads,
   assertQuadLiteralsMutf8Safe,
-  normalizeLargeRdfLiteralsForBlazegraph,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
@@ -110,6 +109,7 @@ import {
   resolveWorkspaceAgentRecipients,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject,
   canonicalPublishPayload,
+  preparePublicWriteQuads,
   generatedPrivateCatalogTripleKeys,
   resolveLiftWorkspaceSlice,
   validateLiftPublishPayload,
@@ -428,16 +428,7 @@ function rejectOversizedRdfLiterals(quads: Quad[] | undefined, label: string): v
 }
 
 function normalizePublicRdfLiterals(quads: Quad[], label: string): Quad[] {
-  return normalizeLargeRdfLiteralsForBlazegraph(quads, { label }).quads.map(toQuad);
-}
-
-function toQuad(quad: { subject: string; predicate: string; object: string; graph?: string }): Quad {
-  return {
-    subject: quad.subject,
-    predicate: quad.predicate,
-    object: quad.object,
-    graph: quad.graph ?? '',
-  };
+  return preparePublicWriteQuads(quads, { label }).quads;
 }
 
 export class PublishMethods extends DKGAgentBase {

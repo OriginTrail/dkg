@@ -1,27 +1,29 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
+  DKG_RDF_LITERAL_SAFE_MUTF8_BYTES,
+  OVERSIZED_RDF_LITERAL_ERROR_CODE,
+  assertQuadLiteralsMutf8Safe,
+  assertRdfLiteralMutf8Safe,
+  javaModifiedUtf8ByteLength,
+  rdfLiteralTermMutf8ByteLength,
+  type QuadLiteralLike,
+} from '../src/rdf-literal-size.js';
+import {
   DKG_CHUNK_INDEX,
   DKG_CHUNK_VALUE,
   DKG_HAS_TEXT_BODY,
   DKG_HAS_TEXT_CHUNK,
-  DKG_RDF_LITERAL_SAFE_MUTF8_BYTES,
   DKG_TEXT_CHUNK_COUNT,
   DKG_TEXT_CONTENT_SHA256,
   DKG_TEXT_DATATYPE,
   DKG_TEXT_LANGUAGE,
   DKG_TEXT_LITERAL_TERM_SHA256,
   DKG_TEXT_SOURCE_PREDICATE,
-  OVERSIZED_RDF_LITERAL_ERROR_CODE,
   XSD_STRING_IRI,
-  assertQuadLiteralsMutf8Safe,
-  assertRdfLiteralMutf8Safe,
-  javaModifiedUtf8ByteLength,
   normalizeLargeRdfLiteralsForBlazegraph,
   parseRdfLiteralTerm,
-  rdfLiteralTermMutf8ByteLength,
-  type QuadLiteralLike,
-} from '../src/rdf-literal-size.js';
+} from '../src/rdf-text-literal-normalization.js';
 
 interface ReconstructedChunkedTextBody {
   readonly subject: string;

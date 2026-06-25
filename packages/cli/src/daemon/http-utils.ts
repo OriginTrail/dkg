@@ -9,7 +9,6 @@ import {
   PayloadTooLargeError,
   assertQuadLiteralsMutf8Safe,
   isOversizedRdfLiteralError,
-  normalizeLargeRdfLiteralsForBlazegraph,
   type RdfTextLiteralRewrite,
   validateContextGraphId,
   validateSubGraphName,
@@ -19,6 +18,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { enrichEvmError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import type { DKGAgent, ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
+import { preparePublicWriteQuads as prepareCanonicalPublicWriteQuads } from '@origintrail-official/dkg-publisher';
 import type { DkgConfig } from '../config.js';
 import { enforceSignedRequestPostBody } from '../auth.js';
 
@@ -38,11 +38,15 @@ export interface PublishRequestBody {
   contextGraphId: string;
   quads: PublishQuad[];
   privateQuads?: PublishQuad[];
-  literalRewrites?: RdfTextLiteralRewrite[];
   accessPolicy?: PublishAccessPolicy;
   allowedPeers?: string[];
   subGraphName?: string;
   onChainContextGraphId?: string;
+}
+
+export interface ParsedPublishRequest {
+  readonly body: PublishRequestBody;
+  readonly literalRewrites: RdfTextLiteralRewrite[];
 }
 
 import type { CorsAllowlist } from './state.js';
@@ -232,8 +236,13 @@ export function preparePublicWriteQuads(
   quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
 ): { ok: true; value: PreparedPublicWriteQuads } | { ok: false; body: Record<string, unknown> } {
   try {
-    const result = normalizeLargeRdfLiteralsForBlazegraph(quads, { label });
-    return { ok: true, value: { quads: result.quads, rewrites: result.rewrites } };
+    const result = prepareCanonicalPublicWriteQuads(quads, { label });
+    const normalizedQuads = result.quads.map((quad) => (
+      quad.graph
+        ? quad
+        : { subject: quad.subject, predicate: quad.predicate, object: quad.object }
+    ));
+    return { ok: true, value: { quads: normalizedQuads, rewrites: result.rewrites } };
   } catch (err) {
     if (isOversizedRdfLiteralError(err)) {
       return { ok: false, body: oversizedRdfLiteralResponseBody(err) };
@@ -259,10 +268,14 @@ export function validateQuadObjectTerms(
 ): string | null {
   const badIndex = quads.findIndex((q) => {
     const object = q.object.trim();
-    return !object.startsWith('"') && !isSafeIri(object);
+    return !object.startsWith('"') && !isSafeBlankNode(object) && !isSafeIri(object);
   });
   if (badIndex === -1) return null;
-  return `Invalid "${label}[${badIndex}].object": RDF object must be a quoted literal term or absolute IRI`;
+  return `Invalid "${label}[${badIndex}].object": RDF object must be a quoted literal term, blank node, or absolute IRI`;
+}
+
+function isSafeBlankNode(term: string): boolean {
+  return /^_:[A-Za-z][A-Za-z0-9_-]*$/.test(term);
 }
 
 /**
@@ -396,7 +409,7 @@ export function respondIfChainRpcTransportError(
 
 export function parsePublishRequestBody(
   body: string,
-): { ok: true; value: PublishRequestBody } | { ok: false; error: string; body?: Record<string, unknown> } {
+): { ok: true; value: ParsedPublishRequest } | { ok: false; error: string; body?: Record<string, unknown> } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(body);
@@ -531,14 +544,16 @@ export function parsePublishRequestBody(
   return {
     ok: true,
     value: {
-      contextGraphId,
-      quads: publishQuads,
-      privateQuads,
-      ...(normalizedQuads.value.rewrites.length > 0 ? { literalRewrites: normalizedQuads.value.rewrites } : {}),
-      accessPolicy,
-      allowedPeers,
-      subGraphName: subGraphName as string | undefined,
-      onChainContextGraphId: normalizedOnChainContextGraphId,
+      body: {
+        contextGraphId,
+        quads: publishQuads,
+        privateQuads,
+        accessPolicy,
+        allowedPeers,
+        subGraphName: subGraphName as string | undefined,
+        onChainContextGraphId: normalizedOnChainContextGraphId,
+      },
+      literalRewrites: normalizedQuads.value.rewrites,
     },
   };
 }

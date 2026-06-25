@@ -22,7 +22,7 @@ import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-asse
 const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
 
-type Quad = { subject: string; predicate: string; object: string };
+type Quad = { subject: string; predicate: string; object: string; graph?: string };
 
 function reconstructChunkedText(quads: readonly Quad[], subject: string): string {
   const bodySubject = quads.find((quad) =>
@@ -136,6 +136,26 @@ describe('import artifact daemon routes', () => {
     return { status: res.status, body: await res.json() };
   }
 
+  async function postMultipart(
+    path: string,
+    parts: Array<
+      | { name: string; value: string }
+      | { name: string; filename: string; contentType: string; value: string | Uint8Array }
+    >,
+  ) {
+    const form = new FormData();
+    for (const part of parts) {
+      if ('filename' in part) {
+        const bytes = typeof part.value === 'string' ? part.value : new Uint8Array(part.value);
+        form.append(part.name, new Blob([bytes], { type: part.contentType }), part.filename);
+      } else {
+        form.append(part.name, part.value);
+      }
+    }
+    const res = await fetch(`${baseUrl}${path}`, { method: 'POST', body: form });
+    return { status: res.status, body: await res.json() };
+  }
+
   async function get(path: string) {
     const res = await fetch(`${baseUrl}${path}`);
     return { status: res.status, body: await res.json() };
@@ -193,6 +213,7 @@ describe('import artifact daemon routes', () => {
       agentAddress?: string;
       subGraphName?: string;
     }> = [];
+    const insertedQuads: Quad[] = [];
     const queries: string[] = [];
     const queryQuads = args.queryQuads ?? [
       { subject: 'urn:z', predicate: 'urn:p', object: 'urn:o' },
@@ -253,6 +274,14 @@ describe('import artifact daemon routes', () => {
           if (args.publisherDiscardError) throw args.publisherDiscardError;
           discards.push({ contextGraphId, name, agentAddress, subGraphName });
         },
+        async wmGraphUri(
+          contextGraphId: string,
+          agentAddress: string,
+          name: string,
+          subGraphName?: string,
+        ) {
+          return contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
+        },
       },
       ...(args.onChainPolicy
         ? {
@@ -277,8 +306,20 @@ describe('import artifact daemon routes', () => {
         async hasGraph() {
           return Boolean(args.targetGraphExists);
         },
+        async insert(quads: Quad[]) {
+          insertedQuads.push(...quads);
+        },
+        async deleteByPattern() {
+          return 0;
+        },
+        async dropGraph() {
+          return undefined;
+        },
         async query(sparql: string) {
           queries.push(sparql);
+          if (sparql.includes('CONSTRUCT')) {
+            return { type: 'quads', quads: [] };
+          }
           if (sparql.includes('SELECT ?p ?o')) {
             return { type: 'bindings', bindings: [] };
           }
@@ -334,7 +375,7 @@ describe('import artifact daemon routes', () => {
         },
       },
     };
-    return { agent, created, writes, discards, queries };
+    return { agent, created, writes, discards, queries, insertedQuads };
   }
 
   it('resolves and safely reads a completed Markdown import artifact by content hash', async () => {
@@ -384,6 +425,61 @@ describe('import artifact daemon routes', () => {
       bytes: Buffer.byteLength('# Imported\n\nHello DKG.\n'),
       markdown: '# Imported\n\nHello DKG.\n',
     });
+  });
+
+  it('wm/import-file chunks oversized schema:text through handleKaImportFile', async () => {
+    const contextGraphId = 'cg-import-file-large-text';
+    const assertionName = 'large-text-import';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:test', assertionName);
+    const { agent, insertedQuads } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: `keccak256:${'0'.repeat(64)}`,
+      markdownHash: `keccak256:${'1'.repeat(64)}`,
+      markdownForm: `urn:dkg:file:keccak256:${'1'.repeat(64)}`,
+    });
+    await startRoutes({ agent });
+
+    const largeText = 'x'.repeat(60_000);
+    const markdown = [
+      '---',
+      'id: route-large-text',
+      `text: "${largeText}"`,
+      '---',
+      '',
+      '# Large Text',
+      '',
+    ].join('\n');
+
+    const result = await postMultipart(`/api/knowledge-assets/${assertionName}/wm/import-file`, [
+      { name: 'contextGraphId', value: contextGraphId },
+      { name: 'file', filename: 'large.md', contentType: 'text/markdown', value: markdown },
+    ]);
+
+    expect(result.status).toBe(200);
+    expect(result.body.assertionUri).toBe(assertionUri);
+    const assertionGraph = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:test', assertionName);
+    const dataQuads = insertedQuads.filter((quad) => quad.graph === assertionGraph);
+    expect(dataQuads.some((quad) =>
+      quad.subject === assertionUri &&
+      quad.predicate === 'http://schema.org/text'
+    )).toBe(false);
+    expect(dataQuads.some((quad) => quad.predicate === DKG_CHUNK_VALUE)).toBe(true);
+    expect(reconstructChunkedText(dataQuads, assertionUri)).toBe(largeText);
+
+    const chunkQuads = insertedQuads.filter((quad) =>
+      quad.predicate === DKG_HAS_TEXT_BODY ||
+      quad.predicate === DKG_HAS_TEXT_CHUNK ||
+      quad.predicate === DKG_CHUNK_INDEX ||
+      quad.predicate === DKG_CHUNK_VALUE
+    );
+    expect(chunkQuads.length).toBeGreaterThan(0);
+    expect(chunkQuads.every((quad) => quad.graph === assertionGraph)).toBe(true);
+    expect(insertedQuads.some((quad) =>
+      quad.graph === contextGraphMetaUri(contextGraphId) &&
+      quad.predicate === DKG_CHUNK_VALUE
+    )).toBe(false);
   });
 
   it('reads a generic source artifact as bounded base64 bytes', async () => {

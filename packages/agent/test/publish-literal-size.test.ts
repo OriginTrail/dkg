@@ -2,9 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   DKG_CHUNK_VALUE,
   DKG_HAS_TEXT_BODY,
-  normalizeLargeRdfLiteralsForBlazegraph,
 } from '@origintrail-official/dkg-core';
-import { canonicalPublishPayload } from '@origintrail-official/dkg-publisher';
+import { canonicalPublishPayload, preparePublicWriteQuads } from '@origintrail-official/dkg-publisher';
 import { PublishMethods } from '../src/dkg-agent-publish.js';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 
@@ -19,6 +18,21 @@ const OVERSIZED_NAME_QUAD: Quad = {
   ...OVERSIZED_TEXT_QUAD,
   predicate: 'http://schema.org/name',
 };
+
+const LINKED_BLANK_OVERSIZED_TEXT_QUADS: Quad[] = [
+  {
+    subject: 'http://example.org/root',
+    predicate: 'http://schema.org/hasPart',
+    object: '_:body',
+    graph: 'http://example.org/graph',
+  },
+  {
+    subject: '_:body',
+    predicate: 'http://schema.org/text',
+    object: `"${'x'.repeat(60_000)}"`,
+    graph: 'http://example.org/graph',
+  },
+];
 
 describe('agent publish literal size validation', () => {
   it('rejects publishAsync private quads before workspace staging', async () => {
@@ -134,14 +148,59 @@ describe('agent publish literal size validation', () => {
         [OVERSIZED_TEXT_QUAD],
       );
 
-    const chunkedQuads = normalizeLargeRdfLiteralsForBlazegraph(
+    const chunkedQuads = preparePublicWriteQuads(
       [OVERSIZED_TEXT_QUAD],
       { label: 'test.expected' },
-    ).quads.map((quad) => ({ ...quad, graph: quad.graph ?? '' }));
+    ).quads;
     const expectedChunkedRoot = canonicalPublishPayload(chunkedQuads, []).kcMerkleRoot;
     const unchunkedRoot = canonicalPublishPayload([OVERSIZED_TEXT_QUAD], []).kcMerkleRoot;
 
     expect(Array.from(attestation?.expectedMerkleRoot ?? [])).toEqual(Array.from(expectedChunkedRoot));
     expect(Array.from(attestation?.expectedMerkleRoot ?? [])).not.toEqual(Array.from(unchunkedRoot));
+  });
+
+  it('builds selection precomputed attestations over skolemized linked blank-node text chunks', async () => {
+    const authorAddress = '0x000000000000000000000000000000000000dEaD';
+    const agentStub = {
+      chain: {
+        getEvmChainId: vi.fn(async () => 31337n),
+        getKnowledgeAssetsLifecycleAddress: vi.fn(async () => '0x000000000000000000000000000000000000c0de'),
+      },
+      getContextGraphOnChainId: vi.fn(async () => 42n),
+      isPrivateContextGraph: vi.fn(async () => false),
+      publisher: {
+        publisherFallbackAuthorAddress: vi.fn(async () => authorAddress),
+        signAuthorAttestationAsPublisher: vi.fn(async () => ({
+          r: new Uint8Array(32).fill(1),
+          vs: new Uint8Array(32).fill(2),
+        })),
+      },
+      kaNumberAllocator: {
+        reconcile: vi.fn(),
+        markReconciled: vi.fn(),
+        allocate: vi.fn(() => ({ number: 7n })),
+      },
+      reconciledKaAuthors: new Set<string>(),
+    };
+
+    const attestation =
+      await PublishMethods.prototype._buildPrecomputedAttestationForSelection.call(
+        agentStub as never,
+        'computer-history',
+        LINKED_BLANK_OVERSIZED_TEXT_QUADS,
+      );
+
+    const prepared = preparePublicWriteQuads(LINKED_BLANK_OVERSIZED_TEXT_QUADS, { label: 'test.expected' }).quads;
+    const child = 'http://example.org/root/.well-known/genid/body';
+    expect(prepared.some((quad) =>
+      quad.subject === child &&
+      quad.predicate === DKG_HAS_TEXT_BODY
+    )).toBe(true);
+    expect(prepared.some((quad) =>
+      quad.subject === child &&
+      quad.predicate === 'http://schema.org/text'
+    )).toBe(false);
+    const expectedChunkedRoot = canonicalPublishPayload(prepared, []).kcMerkleRoot;
+    expect(Array.from(attestation?.expectedMerkleRoot ?? [])).toEqual(Array.from(expectedChunkedRoot));
   });
 });
