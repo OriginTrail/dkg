@@ -664,13 +664,13 @@ importers:
     dependencies:
       '@modelcontextprotocol/sdk':
         specifier: ^1
-        version: 1.27.1(zod@3.25.76)
+        version: 1.27.1(zod@4.4.3)
       yaml:
         specifier: ^2.6.0
         version: 2.8.3
       zod:
-        specifier: ^3.25
-        version: 3.25.76
+        specifier: ^4.4
+        version: 4.4.3
     devDependencies:
       vitest:
         specifier: ^4.0.18
@@ -711,7 +711,7 @@ importers:
     dependencies:
       '@openuidev/react-lang':
         specifier: ^0.2.3
-        version: 0.2.3(@modelcontextprotocol/sdk@1.27.1(zod@3.25.76))(react@19.2.4)(zod@3.25.76)
+        version: 0.2.3(@modelcontextprotocol/sdk@1.27.1(zod@4.4.3))(react@19.2.4)(zod@4.4.3)
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
@@ -743,8 +743,8 @@ importers:
         specifier: ^4.0.2
         version: 4.0.2
       zod:
-        specifier: ^3.25.76
-        version: 3.25.76
+        specifier: ^4.4.3
+        version: 4.4.3
       zustand:
         specifier: ^5.0.12
         version: 5.0.12(@types/react@19.2.14)(react@19.2.4)
@@ -6622,9 +6622,6 @@ packages:
     peerDependencies:
       zod: ^3.25 || ^4
 
-  zod@3.25.76:
-    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
-
   zod@4.4.3:
     resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
 
@@ -7740,7 +7737,7 @@ snapshots:
       race-signal: 2.0.0
       uint8arraylist: 2.4.8
 
-  '@modelcontextprotocol/sdk@1.27.1(zod@3.25.76)':
+  '@modelcontextprotocol/sdk@1.27.1(zod@4.4.3)':
     dependencies:
       '@hono/node-server': 1.19.13(hono@4.12.18)
       ajv: 8.18.0
@@ -7757,8 +7754,8 @@ snapshots:
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
       raw-body: 3.0.2
-      zod: 3.25.76
-      zod-to-json-schema: 3.25.1(zod@3.25.76)
+      zod: 4.4.3
+      zod-to-json-schema: 3.25.1(zod@4.4.3)
     transitivePeerDependencies:
       - supports-color
 
@@ -7929,19 +7926,19 @@ snapshots:
       '@nomicfoundation/solidity-analyzer-linux-x64-musl': 0.1.2
       '@nomicfoundation/solidity-analyzer-win32-x64-msvc': 0.1.2
 
-  '@openuidev/lang-core@0.2.2(@modelcontextprotocol/sdk@1.27.1(zod@3.25.76))(zod@3.25.76)':
+  '@openuidev/lang-core@0.2.2(@modelcontextprotocol/sdk@1.27.1(zod@4.4.3))(zod@4.4.3)':
     dependencies:
-      zod: 3.25.76
+      zod: 4.4.3
     optionalDependencies:
-      '@modelcontextprotocol/sdk': 1.27.1(zod@3.25.76)
+      '@modelcontextprotocol/sdk': 1.27.1(zod@4.4.3)
 
-  '@openuidev/react-lang@0.2.3(@modelcontextprotocol/sdk@1.27.1(zod@3.25.76))(react@19.2.4)(zod@3.25.76)':
+  '@openuidev/react-lang@0.2.3(@modelcontextprotocol/sdk@1.27.1(zod@4.4.3))(react@19.2.4)(zod@4.4.3)':
     dependencies:
-      '@openuidev/lang-core': 0.2.2(@modelcontextprotocol/sdk@1.27.1(zod@3.25.76))(zod@3.25.76)
+      '@openuidev/lang-core': 0.2.2(@modelcontextprotocol/sdk@1.27.1(zod@4.4.3))(zod@4.4.3)
       react: 19.2.4
-      zod: 3.25.76
+      zod: 4.4.3
     optionalDependencies:
-      '@modelcontextprotocol/sdk': 1.27.1(zod@3.25.76)
+      '@modelcontextprotocol/sdk': 1.27.1(zod@4.4.3)
 
   '@openzeppelin/contracts@5.4.0': {}
 
@@ -13224,11 +13221,9 @@ snapshots:
     dependencies:
       ethers: 5.8.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
 
-  zod-to-json-schema@3.25.1(zod@3.25.76):
+  zod-to-json-schema@3.25.1(zod@4.4.3):
     dependencies:
-      zod: 3.25.76
-
-  zod@3.25.76: {}
+      zod: 4.4.3
 
   zod@4.4.3: {}
 
