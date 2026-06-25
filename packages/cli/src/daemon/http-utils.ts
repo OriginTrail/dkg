@@ -316,30 +316,34 @@ export function classifyChainRpcTransportStatus(
   const { code } = err;
   const msg = sanitizeRpcMessage(typeof err.message === "string" ? err.message : "");
   const txHash = typeof err.txHash === "string" && err.txHash ? err.txHash : "";
-  if (code === "RPC_ENDPOINTS_EXHAUSTED") {
-    return { status: 503, body: { error: msg || "Configured chain RPC endpoints were exhausted.", code } };
+  // Exhaustive over ChainRpcTransportCode: a new code added to the boundary
+  // without a case here is a COMPILE error (the `never` default), so the
+  // classifier can never silently inherit timeout/504 semantics for a new code.
+  switch (code) {
+    case "RPC_ENDPOINTS_EXHAUSTED":
+      return { status: 503, body: { error: msg || "Configured chain RPC endpoints were exhausted.", code } };
+    case "RPC_RECEIPT_LOOKUP_FAILED":
+      return {
+        status: 503,
+        body: {
+          error: msg || "Transaction receipt lookup failed on all configured chain RPC endpoints.",
+          code,
+          ...(txHash ? { txHash } : {}),
+        },
+      };
+    case "RPC_TIMEOUT":
+      // Internal, chain-namespaced timeout code. Expose the public/legacy
+      // `code: "TIMEOUT"` in the 504 body (clients key on that), keeping the
+      // wire contract stable while the boundary stays namespaced internally.
+      return {
+        status: 504,
+        body: { error: msg || "Chain transaction timed out.", code: "TIMEOUT", ...(txHash ? { txHash } : {}) },
+      };
+    default: {
+      const _exhaustive: never = code;
+      return _exhaustive;
+    }
   }
-  if (code === "RPC_RECEIPT_LOOKUP_FAILED") {
-    return {
-      status: 503,
-      body: {
-        error: msg || "Transaction receipt lookup failed on all configured chain RPC endpoints.",
-        code,
-        ...(txHash ? { txHash } : {}),
-      },
-    };
-  }
-  // code === "RPC_TIMEOUT" — the internal, chain-namespaced timeout code. Expose
-  // the public/legacy `code: "TIMEOUT"` in the 504 body (clients key on that),
-  // keeping the wire contract stable while the boundary stays namespaced internally.
-  return {
-    status: 504,
-    body: {
-      error: msg || "Chain transaction timed out.",
-      code: "TIMEOUT",
-      ...(txHash ? { txHash } : {}),
-    },
-  };
 }
 
 /**

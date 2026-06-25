@@ -4,6 +4,7 @@ import {
   ChainRpcTransportError,
   isChainRpcTransportError,
 } from '../src/chain-rpc-transport-error.js';
+import { withTimeout } from '../src/evm-adapter-rpc.js';
 
 describe('ChainRpcTransportError (typed transport boundary)', () => {
   it('carries code + message + optional rpcUrls/txHash and is an Error', () => {
@@ -59,5 +60,18 @@ describe('isChainRpcTransportError (one structural namespaced-code guard)', () =
     expect(isChainRpcTransportError('TIMEOUT')).toBe(false); // a bare string, not a coded error
     expect(isChainRpcTransportError(undefined)).toBe(false);
     expect(isChainRpcTransportError(null)).toBe(false);
+  });
+});
+
+describe('production timeout emitters throw a recognised RPC_TIMEOUT', () => {
+  // #1332 review: the chain-side `withTimeout` is a SEPARATE emitter from
+  // cliWithTimeout / the receipt-wait deadline. Drive it directly so a regression
+  // back to a bare `code: 'TIMEOUT'` shape (which the guard would reject) fails
+  // loudly instead of silently dropping every per-attempt timeout from the boundary.
+  it('withTimeout(..., 1, ...) rejects with a ChainRpcTransportError RPC_TIMEOUT the guard accepts', async () => {
+    const err = await withTimeout(new Promise<never>(() => {}), 1, 'chain probe').catch((e) => e);
+    expect(err).toBeInstanceOf(ChainRpcTransportError);
+    expect((err as ChainRpcTransportError).code).toBe('RPC_TIMEOUT');
+    expect(isChainRpcTransportError(err)).toBe(true);
   });
 });
