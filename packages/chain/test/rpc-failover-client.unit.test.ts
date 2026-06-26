@@ -41,6 +41,9 @@ import {
 import {
   RPC_READ_STALL_TIMEOUT_MS,
   RPC_LOG_SCAN_TIMEOUT_MS,
+  RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
+  RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
+  RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
 } from '../src/evm-adapter-constants.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 
@@ -353,5 +356,96 @@ describe('RpcFailoverClient.populateAndSign — #870 signer propagation + estima
     expect(thrown.rpcUrls).toEqual(URLS);
     expect(thrown.message).toContain('primary.example'); // host-only aggregate
     expect(thrown.message).not.toContain('https://');
+  });
+});
+
+// ── write-path per-attempt timeout (C6 regression: HUNG provider) ─────────────
+// The write loops cap each attempt with a FIXED-constant `withTimeout` (NOT the
+// policy-driven read matrix; these caps apply on BOTH single- and multi-RPC): a
+// HUNG backend must ABORT at the cap (→ a retryable RPC_TIMEOUT) and fail over /
+// exhaust, never hang the publish path. The other write tests above only drive
+// IMMEDIATE rejections (429), so without these a regression that dropped or
+// miswired a write deadline would stall against a stalled RPC while the suite
+// stayed green. Fake timers throughout — no real 10s/5s sleeps; the hung provider
+// is a never-settling promise.
+describe('RpcFailoverClient — write-path per-attempt timeout (hung provider, fixed caps, C6)', () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  const hung = <T>() => recorder(() => new Promise<T>(() => {})); // never settles
+  // Minimal signer double: `.connect(p)` yields a per-provider signer carrying the
+  // same address (a reconnected Wallet) — enough for populateAndSign to sign.
+  const SIGNER_ADDR = '0x' + 'ef'.repeat(20);
+  const makeSigner = () => ({ address: SIGNER_ADDR, connect: () => ({ address: SIGNER_ADDR }) }) as any;
+
+  it('broadcast: a HUNG primary aborts at RPC_BROADCAST_ATTEMPT_TIMEOUT_MS and fails over to a healthy backup', async () => {
+    vi.useFakeTimers();
+    const primary = { broadcastTransaction: hung<void>() };
+    const backup = { broadcastTransaction: recorder(async () => undefined) };
+    const client = makeClient([primary, backup], URLS);
+
+    const p = client.broadcast('0xsigned', '0xhash', 'unit write');
+    await vi.advanceTimersByTimeAsync(RPC_BROADCAST_ATTEMPT_TIMEOUT_MS + 1_000);
+    await expect(p).resolves.toBeUndefined(); // backup broadcast succeeded after the primary aborted
+    expect(primary.broadcastTransaction.calls).toHaveLength(1); // attempted once, then aborted at the cap
+    expect(backup.broadcastTransaction.calls).toHaveLength(1); // failover happened
+  });
+
+  it('broadcast: a HUNG single-RPC aborts at the cap → RPC_ENDPOINTS_EXHAUSTED (does NOT hang)', async () => {
+    vi.useFakeTimers();
+    const only = { broadcastTransaction: hung<void>() };
+    const client = makeClient([only], ['https://only.example']);
+
+    const settled = client.broadcast('0xsigned', '0xhash', 'unit write').then(() => 'OK', (e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(RPC_BROADCAST_ATTEMPT_TIMEOUT_MS + 1_000);
+    const outcome: any = await settled;
+    expect(outcome.code).toBe('RPC_ENDPOINTS_EXHAUSTED'); // the fixed cap fires even with one endpoint
+    expect(only.broadcastTransaction.calls).toHaveLength(1);
+  });
+
+  it('getReceipt: a HUNG primary aborts at RPC_RECEIPT_ATTEMPT_TIMEOUT_MS and fails over, returning the backup receipt', async () => {
+    vi.useFakeTimers();
+    const receipt = { status: 1, hash: '0xhash' };
+    const primary = { getTransactionReceipt: hung<unknown>() };
+    const backup = { getTransactionReceipt: recorder(async () => receipt) };
+    const client = makeClient([primary, backup], URLS);
+
+    const p = client.getReceipt('0xhash');
+    await vi.advanceTimersByTimeAsync(RPC_RECEIPT_ATTEMPT_TIMEOUT_MS + 1_000);
+    await expect(p).resolves.toBe(receipt);
+    expect(primary.getTransactionReceipt.calls).toHaveLength(1);
+    expect(backup.getTransactionReceipt.calls).toHaveLength(1);
+  });
+
+  it('getReceipt: a HUNG single-RPC aborts at the cap → RPC_RECEIPT_LOOKUP_FAILED (distinct from exhaustion, does NOT hang)', async () => {
+    vi.useFakeTimers();
+    const only = { getTransactionReceipt: hung<unknown>() };
+    const client = makeClient([only], ['https://only.example']);
+
+    const settled = client.getReceipt('0xCAFE').then((r) => r, (e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(RPC_RECEIPT_ATTEMPT_TIMEOUT_MS + 1_000);
+    const outcome: any = await settled;
+    expect(outcome.code).toBe('RPC_RECEIPT_LOOKUP_FAILED'); // a timed-out lookup is "transport down", not exhaustion
+    expect(outcome.txHash).toBe('0xCAFE');
+    expect(only.getTransactionReceipt.calls).toHaveLength(1);
+  });
+
+  it('populateAndSign: a HUNG populateTransaction aborts at RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS and fails over to sign on the backup', async () => {
+    vi.useFakeTimers();
+    let attempt = 0;
+    const populateTransaction = recorder(() => {
+      attempt += 1;
+      return attempt === 1
+        ? new Promise<any>(() => {})                    // primary hangs forever
+        : Promise.resolve({ to: '0xTO', data: '0x' });  // backup populates
+    });
+    const contract = { connect: () => ({ doWrite: { populateTransaction } }) } as any;
+    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const client = makeClient([{}, {}], URLS, signPopulated as SignPopulatedFn);
+
+    const p = client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'V10 publish');
+    await vi.advanceTimersByTimeAsync(RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS + 1_000);
+    await expect(p).resolves.toEqual({ signedTx: '0xS', txHash: '0xH' });
+    expect(populateTransaction.calls).toHaveLength(2); // primary hung → timed out → backup populated
+    expect(signPopulated.calls).toHaveLength(1); // signed exactly once, on the backup (single-sign invariant holds)
   });
 });

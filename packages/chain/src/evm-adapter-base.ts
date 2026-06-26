@@ -336,11 +336,11 @@ export class EVMChainAdapterBase {
   protected readonly rpcUrls: string[];
 
   /**
-   * The pure per-endpoint RPC transport mechanism (#1336). Owns the read
-   * failover loop + the named timeout-policy matrix + typed exhaustion;
-   * constructed in the constructor with LIVE thunks over `this.providers` /
-   * `this.rpcUrls` and the `signPopulatedTransaction` callback, so it never holds
-   * a back-reference to the adapter and never owns tx-safety state.
+   * The pure per-endpoint RPC transport mechanism. Owns the read-failover loop +
+   * the named timeout-policy matrix + typed exhaustion; constructed with a LIVE
+   * endpoint thunk over `this.providers` / `this.rpcUrls` and the
+   * `signPopulatedTransaction` callback, so it never holds a back-reference to
+   * the adapter and never owns tx-safety state.
    */
   protected readonly rpcFailover: RpcFailoverClient;
 
@@ -649,17 +649,15 @@ export class EVMChainAdapterBase {
     // failover surface.
     this.provider = this.primaryProvider;
     // Construct the transport client AFTER `this.providers`/`this.rpcUrls` are
-    // set (above). The three capabilities are LIVE thunks / a callback (PLAN §0
-    // D1/D2): reading `providers`/`rpcUrls` live keeps tests that reassign
-    // `(a as any).providers` working, and routing signing through
-    // `signPopulatedTransaction` keeps that pure helper (with the #870 signer
-    // stub) on the adapter. No failover read can run before this point — the
-    // constructor below only builds Wallets/Contracts and a lazily-resolved
-    // HubResolutionCache.
+    // set (above). The endpoint thunk reads `providers`/`rpcUrls` live (so a
+    // reassignment of `(a as any).providers` is observed) and signing routes back
+    // to `signPopulatedTransaction` so that helper stays on the adapter. No
+    // failover read can run before this point — the constructor below only builds
+    // Wallets/Contracts and a lazily-resolved HubResolutionCache.
     this.rpcFailover = new RpcFailoverClient(
-      // Mapped at CALL time inside the thunk (NOT captured), so a test that
-      // reassigns `(a as any).providers` / `(a as any).rpcUrls` after construction
-      // still propagates live (D1). `providers`/`rpcUrls` are built in lockstep
+      // Mapped at CALL time inside the thunk (NOT captured), so a reassignment of
+      // `(a as any).providers` / `(a as any).rpcUrls` after construction still
+      // propagates live. `providers`/`rpcUrls` are built in lockstep
       // (`providers = rpcUrls.map(...)`), so index i pairs provider[i]↔rpcUrl[i].
       () => this.providers.map((provider, i) => ({ provider, rpcUrl: this.rpcUrls[i] })),
       (signer, populated) => this.signPopulatedTransaction(signer, populated),
@@ -772,11 +770,9 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * TEMPORARY/RETAINED delegator (P2 of #1336, PLAN §0 D3): the per-endpoint
-   * broadcast loop now lives in `this.rpcFailover.broadcast`. This pass-through is
-   * KEPT so the tx-orchestration calls it BY NAME — `sendSignedTransactionAndWait`'s
-   * set-retry loop intercepts here, and the `write-tx-safety` pass-count spy binds
-   * to this method (not the module). Tx-safety state stays on the adapter.
+   * Thin delegator to `this.rpcFailover.broadcast` — the per-endpoint broadcast
+   * loop. `sendSignedTransactionAndWait`'s set-retry loop calls this method; it
+   * only forwards an already-signed tx, so no tx-safety state crosses here.
    */
   protected broadcastSignedTransactionWithFailover(
     signedTx: string,
@@ -787,20 +783,19 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * RETAINED delegator (P2 of #1336, PLAN §0 D3): the per-endpoint receipt loop
-   * now lives in `this.rpcFailover.getReceipt`. Kept so `waitForReceiptWithFailover`
-   * + the `publish.ts` callers + the `evm-adapter.unit` spies bind BY NAME.
+   * Thin delegator to `this.rpcFailover.getReceipt` — the per-endpoint receipt
+   * loop. Used by `waitForReceiptWithFailover` and the `publish.ts` callers.
    */
   protected getTransactionReceiptWithFailover(txHash: string): Promise<ethers.TransactionReceipt | null> {
     return this.rpcFailover.getReceipt(txHash);
   }
 
   /**
-   * Common point-view CONTRACT read (refactor #2) — the chain-concept surface the
-   * domain mixins call: a `contract`, a `label`, a string `method` name, and its
-   * args, run with the default `pointRead` policy + the `isContractViewRetryable`
-   * classifier. The untyped ethers `Contract` resolves the string method through
-   * `any`, so this loses NO static checking versus a `c.method(...)` lambda.
+   * Common point-view CONTRACT read — the chain-concept surface the domain mixins
+   * call: a `contract`, a `label`, a string `method` name, and its args, run with
+   * the default `pointRead` policy + the `isContractViewRetryable` classifier. The
+   * untyped ethers `Contract` resolves the string method through `any`, so this
+   * loses NO static checking versus a `c.method(...)` lambda.
    */
   protected readContract<T = any>(
     contract: Contract,
@@ -1034,13 +1029,12 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * RETAINED delegator (P2 of #1336, PLAN §0 D3): the per-endpoint populate+sign
-   * loop now lives in `this.rpcFailover.populateAndSign` (which reaches the pure
-   * `signPopulatedTransaction` via the injected callback — PLAN §0 D2). Kept so
-   * `populateAndSignV10WithAllowanceRecovery` (the `forcedReapprove` latch owner)
-   * and `sendContractTransaction` call it BY NAME, and the `evm-adapter.unit`
-   * spies bind here. STRICTLY pre-broadcast — the caller still owns the WAL split
-   * and broadcasts the single returned tx.
+   * Thin delegator to `this.rpcFailover.populateAndSign` — the per-endpoint
+   * populate+sign loop (which reaches `signPopulatedTransaction` via the injected
+   * callback). Called by `populateAndSignV10WithAllowanceRecovery` (the
+   * `forcedReapprove` latch owner) and `sendContractTransaction`. STRICTLY
+   * pre-broadcast — the caller owns the WAL split and broadcasts the single
+   * returned tx.
    */
   protected populateAndSignAcrossProviders(
     contract: Contract,

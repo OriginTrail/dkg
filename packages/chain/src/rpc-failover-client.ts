@@ -2,38 +2,31 @@
 
 /**
  * `RpcFailoverClient` — the pure per-endpoint RPC transport mechanism extracted
- * from `EVMChainAdapterBase` (#1336, follow-up to #1335). It owns the read
- * failover loop, the contract rebind helper, the contract-view retryable
- * classifier, the named timeout-policy matrix, and the typed-exhaustion /
- * host-only-logging concerns — so they leave the 3,000-line base class and
- * become directly unit-testable.
+ * from `EVMChainAdapterBase`. It owns the read-failover loop, the contract
+ * rebind helper, the contract-view retryable classifier, the named
+ * timeout-policy matrix, and the typed-exhaustion / host-only-logging concerns.
  *
- * THE SAFETY BOUNDARY: this module holds NO transaction-safety state. There is
- * no WAL, no per-wallet serializer, and no approval latch here; the adapter's
- * tx-orchestration owns all of that and calls into this surface. The module
- * never sees the adapter — it is constructed with exactly two injected
- * capabilities (PLAN §0 D1/D2):
- *   1. `getEndpoints()` — a LIVE thunk over the adapter's RPC endpoints, each a
- *      `{ provider, rpcUrl }` pair (read live so tests that reassign
- *      `(a as any).providers` still propagate, and so a mid-flight rebind of the
- *      pool is observed). One object per endpoint keeps the `provider ↔ rpcUrl`
- *      pairing explicit inside every failover loop instead of an index invariant
- *      across two parallel arrays. The `rpcUrl` is host-only-reduced before it
- *      reaches any log or error message.
- *   2. `signPopulated`  — the adapter's `signPopulatedTransaction` reached via a
- *      callback (it STAYS on the adapter — it carries the #870 signer stub and
- *      is pure, so its placement is a deliberate choice). Used by `populateAndSign`;
- *      the read family never signs.
+ * SAFETY BOUNDARY: this module holds NO transaction-safety state — no WAL, no
+ * per-wallet serializer, no approval latch. The adapter's tx-orchestration owns
+ * all of that and calls into this surface. The module never references the
+ * adapter; it is constructed with exactly two capabilities:
+ *   1. `getEndpoints()` — a LIVE thunk over the RPC endpoints, each a
+ *      `{ provider, rpcUrl }` pair. One object per endpoint keeps the
+ *      `provider ↔ rpcUrl` pairing explicit inside every failover loop (not an
+ *      index invariant across two parallel arrays); reading it live lets a
+ *      mid-flight rebind of the pool take effect. The `rpcUrl` is
+ *      host-only-reduced before it reaches any log or error message.
+ *   2. `signPopulated` — signing is reached ONLY through this injected callback;
+ *      this module holds no signer state. Used by `populateAndSign`; the read
+ *      family never signs.
  *
- * Surface: the read family (`read` / `readContract`, backed by the shared private
- * `runAcrossProviders` core, plus the policy matrix) and the write transport
- * (`populateAndSign` / `broadcast` / `getReceipt`). Each write method is kept
- * EXPLICIT and separate (PLAN §0 D8) — NOT folded into `runAcrossProviders` —
- * so its tx-critical divergences (the `isKnownTransactionError` idempotent
- * short-circuit; the estimate-failover-only-if-more-providers nuance; the
- * `sawNonErrorResponse`/null/`RPC_RECEIPT_LOOKUP_FAILED` shape) stay visible and
- * individually testable. The adapter's tx-orchestration calls these; the module
- * still owns NO tx-safety state (no WAL, no serializer, no approval latch).
+ * The read family (`read` / `readContract`) shares one private
+ * `runAcrossProviders` core; the write transport (`populateAndSign` /
+ * `broadcast` / `getReceipt`) is kept as explicit separate methods so each
+ * tx-critical divergence stays visible: the broadcast `isKnownTransactionError`
+ * idempotent short-circuit, the estimate-failover-only-if-more-providers nuance,
+ * and `getReceipt`'s `sawNonErrorResponse` / null / `RPC_RECEIPT_LOOKUP_FAILED`
+ * shape.
  */
 
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
@@ -62,10 +55,9 @@ export interface RpcEndpoint {
 }
 
 /**
- * Named per-attempt timeout policy for a failover read (refactor #3) — replaces
- * the two raw knobs (`attemptTimeoutMs` / `multiAttemptTimeoutMs`) so callers
- * pick an intent, not a millisecond value, and can't misuse the matrix. The
- * exact cap each policy yields is in {@link resolveCapMs}.
+ * Named per-attempt timeout policy for a failover read: callers pick an intent,
+ * not a millisecond value. The exact cap each policy yields is in
+ * {@link resolveCapMs}.
  *   - `pointRead`           — a single `eth_call` / point provider read.
  *   - `wideLogScan`         — a multi-thousand-block `eth_getLogs` scan.
  *   - `failOpenFundingRead` — a fail-open funding/allowance read that must never
@@ -81,9 +73,8 @@ export interface ReadOpts {
 }
 
 /**
- * The adapter's `signPopulatedTransaction`, injected as a callback (PLAN §0 D2).
- * It STAYS on the adapter (it carries the #870 signer-address stub) and the
- * module's write transport reaches it only through this thunk. Used by P2's
+ * The adapter's transaction-signing helper, injected as a callback so signing is
+ * reached only through this thunk and the module holds no signer state. Used by
  * `populateAndSign`.
  */
 export type SignPopulatedFn = (
@@ -97,8 +88,7 @@ export type SignPopulatedFn = (
  * ("could not decode result data") is a DETERMINISTIC client-side decode of an
  * empty / wrong-shape return for the ABI type — not an RPC outage — so failing
  * over would re-hit the same decode on every endpoint and mask it as
- * `RPC_ENDPOINTS_EXHAUSTED`. The pre-PR FallbackProvider never failed over on a
- * post-decode error; this restores that. (Direct provider reads —
+ * `RPC_ENDPOINTS_EXHAUSTED`; it is rethrown instead. (Direct provider reads —
  * getCode/getBalance/getNetwork — never produce BAD_DATA, so they keep the
  * unmodified `isRetryableRpcError`.)
  */
@@ -107,9 +97,7 @@ export function isContractViewRetryable(err: unknown): boolean {
 }
 
 /**
- * The timeout-policy matrix (refactor #3) — the EXACT semantic of the former
- * `capMs = attemptTimeoutMs ?? (providers>1 ? (multiAttemptTimeoutMs ?? 4s) : undefined)`
- * expression (evm-adapter-base.ts:878–881), re-expressed as three named buckets:
+ * The timeout-policy matrix — the per-attempt cap each named policy yields:
  *
  *   | policy              | multi-RPC cap            | single-RPC cap          |
  *   |---------------------|--------------------------|-------------------------|
@@ -182,25 +170,22 @@ export class RpcFailoverClient {
     );
   }
 
-  // --- write transport (called BY the adapter's tx-orchestration through the
-  // D3 thin delegators; this layer owns NO WAL / serializer / approval latch —
-  // it only runs the bare per-endpoint loop and returns/raises) ---
+  // --- write transport (called by the adapter's tx-orchestration; this layer
+  // owns NO WAL / serializer / approval latch — it only runs the bare
+  // per-endpoint loop and returns/raises) ---
 
   /**
-   * Per-endpoint populate+sign loop (PLAN §0 D8: explicit, NOT the read core).
-   * Reached by the adapter's `populateAndSignAcrossProviders` delegator (shared
-   * by `sendContractTransaction` and the V10 publish/update path). Iterates the
-   * bare endpoints (signer + contract rebound to each), populates
-   * (gas/nonce/chainId reads, optional OOG-buffer gas estimate) + signs via the
-   * injected `signPopulated` callback (#870 stub stays on the adapter, PLAN §0
-   * D2), and returns the FIRST successful `{signedTx,txHash}`. Advances ONLY on
-   * `isRetryableRpcError`; a non-retryable error (a decoded revert — e.g.
-   * `TooLowAllowance`) propagates AT ONCE so the caller can react. Exhaustion →
-   * typed `RPC_ENDPOINTS_EXHAUSTED`.
+   * Per-endpoint populate+sign loop, shared by the non-V10 and V10 publish/update
+   * write paths. Iterates the bare endpoints (signer + contract rebound to each),
+   * populates (gas/nonce/chainId reads, optional OOG-buffer gas estimate) + signs
+   * via the injected `signPopulated` callback, and returns the FIRST successful
+   * `{signedTx,txHash}`. Advances ONLY on `isRetryableRpcError`; a non-retryable
+   * error (a decoded revert — e.g. `TooLowAllowance`) propagates AT ONCE so the
+   * caller can react. Exhaustion → typed `RPC_ENDPOINTS_EXHAUSTED`.
    *
    * STRICTLY pre-broadcast: signs once on the winning provider, does NOT broadcast
-   * or fire the WAL — the caller broadcasts the single returned tx. This keeps the
-   * WAL split intact (onBroadcast between sign and broadcast).
+   * or fire the WAL — the caller broadcasts the single returned tx, keeping the
+   * WAL checkpoint between sign and broadcast intact.
    */
   async populateAndSign(
     contract: Contract,
@@ -266,8 +251,7 @@ export class RpcFailoverClient {
     // any message-inspecting caller keeps seeing it). Multiple providers → the
     // HOST-ONLY aggregate (never full URLs — a configured rpcUrl may carry an API
     // key and this message reaches HTTP clients via response paths that echo
-    // err.message, e.g. the create+publish 207 tail). Asserted by
-    // evm-adapter.unit.test.ts.
+    // err.message, e.g. the create+publish 207 tail).
     const message = endpoints.length <= 1
       ? errorMessage(lastRetryable)
       : `${label} transaction preparation failed on all configured RPC endpoints ` +
@@ -362,13 +346,13 @@ export class RpcFailoverClient {
   }
 
   /**
-   * The shared read-family core (PLAN §0 D8): one per-endpoint loop backing both
-   * `read` and `readContract`. The per-attempt `withTimeout` is a hard deadline
-   * that ABORTS and fails over a hung backend; the cap comes from the named
-   * `policy` via {@link resolveCapMs} (multi-RPC caps the attempt; single-RPC is
-   * uncapped for `pointRead`/`wideLogScan` — #894, nothing to fail over to —
-   * UNLESS `failOpenFundingRead`, which caps every attempt). The `endpoints` are
-   * read LIVE from the injected thunk so a test or a mid-flight reassignment is
+   * The shared read-family core: one per-endpoint loop backing both `read` and
+   * `readContract`. The per-attempt `withTimeout` is a hard deadline that ABORTS
+   * and fails over a hung backend; the cap comes from the named `policy` via
+   * {@link resolveCapMs} (multi-RPC caps the attempt; single-RPC is uncapped for
+   * `pointRead`/`wideLogScan` — #894, nothing to fail over to — UNLESS
+   * `failOpenFundingRead`, which caps every attempt). The `endpoints` are read
+   * LIVE from the injected thunk so a mid-flight reassignment of the pool is
    * observed.
    */
   private async runAcrossProviders<T>(
