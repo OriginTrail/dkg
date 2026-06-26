@@ -64,7 +64,8 @@ function withTimeout(promise, label, nodeName) {
 export function makeNodeClient(baseUrl, token) {
   async function req(method, path, body, { acceptStatuses } = {}) {
     const headers = { 'Content-Type': 'application/json' };
-    if (token) headers['Authorization'] = `Bearer ${token}`;
+    // trim: a pasted token can carry a trailing newline/space which makes the node reject it
+    if (token) headers['Authorization'] = `Bearer ${String(token).trim()}`;
     const opts = { method, headers };
     if (body !== undefined) opts.body = JSON.stringify(body);
     const res = await fetch(`${baseUrl}${path}`, opts);
@@ -156,6 +157,17 @@ export function defineChainPublishSuite(config) {
       for (let currentIndex = 0; currentIndex < nodesToRun.length; currentIndex++) {
         const { name, hostname, token } = nodesToRun[currentIndex];
 
+        // Token preflight — prints WHETHER a real token reached the harness, never
+        // the value itself (Jenkins masks the secret; we only echo its state/length).
+        const trimmedToken = token ? String(token).trim() : '';
+        const looksPlaceholder = /REPLACE|CHANGE-?ME|placeholder|TODO|XXXX|FROM_OT/i.test(trimmedToken);
+        const tokenState = !trimmedToken
+          ? '❌ MISSING — the Jenkins credential env var is empty / not bound to this stage'
+          : looksPlaceholder
+            ? '❌ PLACEHOLDER — the credential still holds the placeholder text, not the real token (click "Change Password" in the credential, paste the token, Save)'
+            : `✅ present (length ${trimmedToken.length})`;
+        console.log(`🔑 ${name} bearer token: ${tokenState}`);
+
         let publishSuccess = 0, publishFail = 0;
         let querySuccess = 0, queryFail = 0;
         let swmGetSuccess = 0, swmGetFail = 0;
@@ -184,8 +196,13 @@ export function defineChainPublishSuite(config) {
           );
           if (CG_REGISTER && (cg.registerError || cg.registered !== true || !cg.onChainId)) {
             console.log(`⚠️  Context graph "${contextGraphId}" on ${name}: on-chain registration incomplete (registered=${cg.registered}, onChainId=${cg.onChainId ?? 'none'}${cg.registerError ? `, ${cg.registerError}` : ''})`);
+          } else if (cg.onChainId) {
+            console.log(`Context graph "${contextGraphId}" ready on ${name} (on-chain ${cg.onChainId}, open/public)`);
           } else {
-            console.log(`Context graph "${contextGraphId}" ready on ${name}${cg.onChainId ? ` (on-chain ${cg.onChainId})` : ''}`);
+            // register:false path — CG exists locally as open/public; the node's
+            // VM-publish route auto-registers it on-chain on the first publish
+            // (idempotent: skips if already registered), then every run reuses it.
+            console.log(`Context graph "${contextGraphId}" ready on ${name} (open/public, local) — auto-registers on first publish, reused thereafter`);
           }
         } catch (error) {
           console.log(`Context graph setup on ${name}: ${error.message} (may already exist, continuing)`);
