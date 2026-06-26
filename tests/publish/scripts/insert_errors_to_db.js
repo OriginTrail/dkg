@@ -112,6 +112,9 @@ for (const file of files) {
         password: process.env.DB_PASSWORD_PUBLISH,
         database: process.env.DB_NAME_PUBLISH,
         port: 5432,
+        connectionTimeoutMillis: 15000,
+        statement_timeout: 60000,
+        query_timeout: 60000,
     });
 
     try {
