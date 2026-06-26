@@ -72,6 +72,7 @@ export {
 } from './ccl-policy.js';
 export { DKGAgent } from './dkg-agent.js';
 export type { EntityRetriever, RetrievedAnchor } from './drag/retriever.js';
+export type { DragFact, DragAnswerResult, DragNetworkAnswerResult, DragPerNode } from './dkg-agent-drag.js';
 export {
   verifyBatch,
   buildBatchRejectionRecord,

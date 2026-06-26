@@ -35,10 +35,23 @@ import {
 import type { EmbeddingProvider } from '../../vector-store.js';
 import { VectorEntityRetriever } from '../drag-retriever.js';
 import { buildEmbedder, resolveSemanticEmbedder, type EmbedderKind } from '../drag-embedder.js';
+import { synthesizeAnswer } from '../drag-synthesize.js';
 
 // V1 default verifier. The real Coinbase/USDC facilitator drops in behind this
 // same interface (config-gated) without touching the route.
 const dragPaymentVerifier: PaymentVerifier = new MockPaymentVerifier();
+
+// ── observability: lightweight in-process counters (GET /api/answer/metrics) ──
+const dragMetrics = {
+  answersServed: 0,
+  byMode: { keyword: 0, semantic: 0, network: 0 },
+  citationsVerified: 0,
+  retrievalDegraded: 0,
+  synthesized: 0,
+};
+export function getDragMetrics(): typeof dragMetrics {
+  return JSON.parse(JSON.stringify(dragMetrics));
+}
 
 // Cache retrievers by embedder model so a model (esp. the local one) loads once.
 const retrieverCache = new Map<string, VectorEntityRetriever>();
@@ -55,6 +68,12 @@ function retrieverFor(embedder: EmbeddingProvider | null, ctx: RequestContext): 
 
 export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, agent, path, opWallets, config } = ctx;
+
+  // GET /api/answer/metrics — dRAG observability counters.
+  if (req.method === 'GET' && path === '/api/answer/metrics') {
+    jsonResponse(res, 200, getDragMetrics());
+    return;
+  }
 
   if (req.method === 'POST' && path === '/api/answer') {
     let parsed: Record<string, unknown>;
@@ -134,11 +153,36 @@ export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
     };
     const scope = parsed.scope === 'network' ? 'network' : 'local';
     const peers = Array.isArray(parsed.peers) ? parsed.peers.filter((p): p is string => typeof p === 'string') : undefined;
+    const t0 = Date.now();
     try {
       const result =
         scope === 'network'
           ? await agent.dragAnswerNetwork({ ...common, peers })
           : await agent.dragAnswerLocal(common, { retriever, forceKeyword });
+
+      // Optional grounded prose synthesis (opt-in; local scope; LLM configured).
+      // NEVER mutates facts/citations — those stay the authoritative answer.
+      let synthesized = false;
+      if (parsed.synthesize === true && scope === 'local' && config.llm && result.facts.length > 0) {
+        const prose = await synthesizeAnswer(question, result.facts, config.llm);
+        if (prose) {
+          result.answer = prose;
+          result.llm = true;
+          synthesized = true;
+        }
+      }
+
+      result.stats.latencyMs = Date.now() - t0;
+
+      // observability counters
+      dragMetrics.answersServed++;
+      if (scope === 'network') dragMetrics.byMode.network++;
+      else if ('retrieval' in result.stats && String(result.stats.retrieval).startsWith('vector:')) dragMetrics.byMode.semantic++;
+      else dragMetrics.byMode.keyword++;
+      dragMetrics.citationsVerified += result.stats.verified ?? 0;
+      if ('retrievalDegraded' in result.stats && result.stats.retrievalDegraded) dragMetrics.retrievalDegraded++;
+      if (synthesized) dragMetrics.synthesized++;
+
       jsonResponse(res, 200, settlement ? { ...result, settlement } : result);
     } catch (e) {
       jsonResponse(res, 500, { error: e instanceof Error ? e.message : String(e) });

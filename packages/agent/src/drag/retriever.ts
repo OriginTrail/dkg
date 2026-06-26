@@ -25,6 +25,12 @@ export interface EntityRetriever {
   /** The embedding model id (e.g. `Xenova/all-MiniLM-L6-v2`, `hashing-v1`) — surfaced for honesty about which path ran. */
   readonly model: string;
   /**
+   * Set by the last {@link retrieve} call when the embedder could not run (e.g.
+   * the optional local model is not installed). Lets the answer distinguish
+   * "semantic unavailable on this node" from a genuine "no matches" empty.
+   */
+  degraded?: boolean;
+  /**
    * Embed `question`, ANN-search the context graph's indexed verifiable-memory
    * entities, and return up to `limit` ranked anchors. Implementations index
    * lazily (build-then-search on first use) and keep the index fresh.

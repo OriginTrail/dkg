@@ -19,6 +19,9 @@ export interface QueryableStore {
 
 export class VectorEntityRetriever implements EntityRetriever {
   readonly model: string;
+  /** Set true when the embedder could not run (e.g. local model not installed) — lets the answer distinguish "no model" from "no matches". */
+  degraded = false;
+  private readonly warming = new Set<string>();
 
   constructor(
     private readonly vectorStore: VectorStore,
@@ -29,12 +32,22 @@ export class VectorEntityRetriever implements EntityRetriever {
   }
 
   async retrieve(question: string, cgName: string, limit: number): Promise<RetrievedAnchor[]> {
+    this.degraded = false;
     await this.ensureIndexed(cgName);
-    const queryVec = await this.embedder.embed(question);
+    let queryVec: number[];
+    try {
+      queryVec = await this.embedder.embed(question);
+    } catch {
+      this.degraded = true; // embedder unavailable — surface it rather than a silent empty
+      return [];
+    }
     const results = await this.vectorStore.search(queryVec, {
       contextGraphId: cgName,
       memoryLayers: ['vm'],
       limit,
+      // Conservative absolute floor only (drop near-orthogonal noise). NOT a
+      // tuned precision cutoff — top-K + the consumer's reasoning handle ranking;
+      // see the dRAG guide's "retrieval precision is a known limitation" note.
       minSimilarity: 0.05,
     });
     return results.map((r) => ({ sourceGraph: r.sourceUri, entityUri: r.entityUri, score: r.similarity }));
@@ -46,10 +59,14 @@ export class VectorEntityRetriever implements EntityRetriever {
    * throws; indexing is incremental so this is cheap when nothing is new.
    */
   async warm(cgName: string): Promise<void> {
+    if (this.warming.has(cgName)) return; // coalesce concurrent warms (write bursts)
+    this.warming.add(cgName);
     try {
       await this.ensureIndexed(cgName);
     } catch {
       /* best effort */
+    } finally {
+      this.warming.delete(cgName);
     }
   }
 

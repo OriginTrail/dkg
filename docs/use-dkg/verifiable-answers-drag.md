@@ -19,7 +19,8 @@ POST /api/answer
   "contextGraphId": "my-cg",
   "scope": "local",            // "local" (this node) | "network" (fan out)
   "retrieval": "semantic",     // "default" | "keyword" | "semantic"
-  "maxCitations": 12
+  "maxCitations": 12,
+  "synthesize": false          // optional: compose grounded prose (needs an LLM)
 }
 ```
 
@@ -104,6 +105,26 @@ wire format (`402 → X-PAYMENT → 200 + receipt`) and a pluggable
 and the live facilitator are deferred. The `simulatePrice` request knob is a
 dev/test affordance honoured only under `config.drag.experimentalOverrides`.
 
+## Grounded synthesis (optional)
+
+By default the answer is a **structured digest** of the cited facts — the ideal
+machine-readable shape for a consuming agent. Set `"synthesize": true` (and
+configure `config.llm`) to additionally compose a short **prose** answer. The
+model is instructed to use *only* the supplied verified facts and add nothing,
+and synthesis **never mutates `facts`/`citations`** — those remain the
+authoritative, chain-verified result. If the LLM is unreachable, the request
+falls back to the structured digest. Default off.
+
+## Observability
+
+- `GET /api/answer/metrics` — in-process counters: `answersServed`, `byMode`
+  (keyword/semantic/network), `citationsVerified`, `retrievalDegraded`,
+  `synthesized`.
+- Each answer carries `stats.latencyMs`.
+- `stats.retrievalDegraded: true` means semantic retrieval was requested but **no
+  embedding model was reachable** — an actionable signal that is distinct from a
+  genuine "no matches" empty result. Configure `config.drag.embedder` to fix it.
+
 ## How it works under the hood
 
 1. **Index** (semantic only): each entity in the CG's verifiable memory is
@@ -129,3 +150,10 @@ correctness.
   the same interface.
 - Cross-node `semantic` requires each serving node to have a model configured;
   decentralized semantic routing over the public catalog is a later phase.
+- **Retrieval precision is a known limitation.** Retrieval returns a ranked
+  top-K (with only a conservative absolute floor, not a tuned similarity cutoff),
+  so on small or ambiguous graphs a weakly-related entity can appear among the
+  results. This is by design — the index is an untrusted hint and every returned
+  fact is verifiable, so the consuming agent (or the optional synthesis step)
+  reasons over proven facts rather than trusting the ranker. Tuned re-ranking is
+  a later refinement.

@@ -57,7 +57,17 @@ export interface DragAnswerResult {
   /** Per-fact verifiable citations — independently auditable against the chain. */
   citations: VerifiableCitation[];
   facts: DragFact[];
-  stats: { keywords: string[]; kasMatched: number; factsCited: number; verified: number; retrieval: string };
+  stats: {
+    keywords: string[];
+    kasMatched: number;
+    factsCited: number;
+    verified: number;
+    retrieval: string;
+    /** True when semantic retrieval was requested but the embedder could not run (no model) — distinguishes "unavailable" from "no matches". */
+    retrievalDegraded?: boolean;
+    /** End-to-end answer latency in ms (set by the route for observability). */
+    latencyMs?: number;
+  };
 }
 
 export interface DragPerNode {
@@ -79,7 +89,15 @@ export interface DragNetworkAnswerResult {
   citations: VerifiableCitation[];
   facts: DragFact[];
   perNode: DragPerNode[];
-  stats: { keywords: string[]; servingNodes: number; nodesAnswered: number; factsCited: number; verified: number };
+  stats: {
+    keywords: string[];
+    servingNodes: number;
+    nodesAnswered: number;
+    factsCited: number;
+    verified: number;
+    /** End-to-end answer latency in ms (set by the route for observability). */
+    latencyMs?: number;
+  };
 }
 
 /** Extract content keywords from a question (lowercase, drop stopwords + short tokens). */
@@ -164,7 +182,7 @@ export class DragMethods extends DKGAgentBase {
     // the daemon-attached one); else keyword. `forceKeyword` is the A/B control.
     const retriever = opts?.forceKeyword ? undefined : opts?.retriever ?? this.entityRetriever;
 
-    const empty = (note: string, retrieval: string): DragAnswerResult => ({
+    const empty = (note: string, retrieval: string, retrievalDegraded = false): DragAnswerResult => ({
       question: args.question,
       contextGraphId: args.contextGraphId,
       scope: 'local',
@@ -172,7 +190,7 @@ export class DragMethods extends DKGAgentBase {
       llm: false,
       citations: [],
       facts: [],
-      stats: { keywords, kasMatched: 0, factsCited: 0, verified: 0, retrieval },
+      stats: { keywords, kasMatched: 0, factsCited: 0, verified: 0, retrieval, ...(retrievalDegraded ? { retrievalDegraded } : {}) },
     });
 
     // Validate the CG id before it is ever interpolated into a SPARQL literal.
@@ -224,6 +242,14 @@ export class DragMethods extends DKGAgentBase {
         }
       }
       if (selections.length === 0) {
+        if (retriever.degraded === true) {
+          return empty(
+            `Semantic retrieval is unavailable on this node — no embedding model is reachable. ` +
+              `Configure config.drag.embedder (e.g. a local Ollama via embedderBaseURL) or install the optional local model.`,
+            retrieval,
+            true,
+          );
+        }
         return empty(`No semantically-relevant entities found for "${args.question}".`, retrieval);
       }
     } else {
