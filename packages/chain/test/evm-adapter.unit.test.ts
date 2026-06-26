@@ -36,6 +36,19 @@ beforeEach(() => {
   _resetRpcFailoverStatsForTest();
 });
 
+// Round-2 review split withRunner → rebindContract (contract.connect(p), NO
+// test-double fallback) so production handles MUST be .connect-able (they are —
+// real ethers Contracts). These unit tests mock this.contracts.* as plain method
+// objects; `connectable` makes a mock satisfy that boundary with a single-provider
+// NO-OP self-rebind (connect returns the mock), so the REAL rebindContract runs
+// (a genuine rebindContract regression would still be caught). Idempotent —
+// leaves a MEANINGFUL .connect (e.g. token → tokenWithSigner) untouched.
+function connectable<T>(mock: T): T {
+  const m = mock as { connect?: unknown };
+  if (m && typeof m.connect !== 'function') m.connect = () => mock;
+  return mock;
+}
+
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const OTHER_PK = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b63b91100';
 const ADMIN_PK = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
@@ -265,10 +278,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       publishAuthorityAccountId: 0n,
     }));
     (a as any).init = async () => undefined;
-    (a as any).contracts.contextGraphStorage = {
+    (a as any).contracts.contextGraphStorage = connectable({
       getAccessPolicy,
       getContextGraph,
-    };
+    });
 
     await expect(a.getContextGraphAccessPolicy(6n)).resolves.toBe(1);
     expect(getAccessPolicy.calls.at(-1)).toEqual([6n]);
@@ -278,7 +291,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
   it('parses accessPolicy from tuple fallback results', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     (a as any).init = async () => undefined;
-    (a as any).contracts.contextGraphStorage = {
+    (a as any).contracts.contextGraphStorage = connectable({
       getAccessPolicy: recorder(async () => {
         throw new Error('selector unavailable');
       }),
@@ -293,7 +306,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
         ethers.ZeroAddress,
         0n,
       ]),
-    };
+    });
 
     await expect(a.getContextGraphAccessPolicy(7n)).resolves.toBe(0);
   });
@@ -302,11 +315,11 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const a = new EVMChainAdapter(minimalConfig());
     const rpcError = new Error('rpc unavailable');
     (a as any).init = async () => undefined;
-    (a as any).contracts.contextGraphStorage = {
+    (a as any).contracts.contextGraphStorage = connectable({
       isContextGraphActive: recorder(async () => {
         throw rpcError;
       }),
-    };
+    });
 
     await expect(a.isContextGraphActiveOnChain(8n)).rejects.toThrow('rpc unavailable');
   });
@@ -315,7 +328,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const a = new EVMChainAdapter(minimalConfig());
     const isContextGraphActive = recorder(async (_id: bigint) => false);
     (a as any).init = async () => undefined;
-    (a as any).contracts.contextGraphStorage = { isContextGraphActive };
+    (a as any).contracts.contextGraphStorage = connectable({ isContextGraphActive });
 
     await expect(a.isContextGraphActiveOnChain(9n)).resolves.toBe(false);
     expect(isContextGraphActive.calls.at(-1)).toEqual([9n]);
@@ -338,11 +351,11 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       if (name === 'Token') throw new Error('Hub.Token should not be resolved when tokenAddress is configured');
       return contractAddress;
     });
-    (a as any).contracts.hub = {
+    (a as any).contracts.hub = connectable({
       getContractAddress,
       getAssetStorageAddress: recorder(async () => assetStorageAddress),
       on: recorder(async () => undefined),
-    };
+    });
 
     await (a as any).init();
 
@@ -1026,12 +1039,12 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const a = new EVMChainAdapter(minimalConfig({ additionalKeys: [OTHER_PK] }));
     const [firstAddress, secondAddress] = a.getSignerAddresses();
     (a as any).init = async () => undefined;
-    (a as any).contracts.contextGraphs = {
+    (a as any).contracts.contextGraphs = connectable({
       isAuthorizedPublisher: recorder(async () => {
         await Promise.resolve();
         return true;
       }),
-    };
+    });
 
     const [firstReserved, secondReserved] = await Promise.all([
       a.getAuthorizedPublisherAddress(1n),
@@ -1656,9 +1669,9 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
     const minimumRequiredSignatures = recorder(async () => 3n);
     (a as unknown as { init: () => Promise<void> }).init = async () => undefined;
     (a as unknown as { contracts: { parametersStorage: { minimumRequiredSignatures: () => Promise<bigint> } } }).contracts = {
-      parametersStorage: {
+      parametersStorage: connectable({
         minimumRequiredSignatures: minimumRequiredSignatures as unknown as () => Promise<bigint>,
-      },
+      }),
     };
 
     expect(await a.getMinimumRequiredSignatures()).toBe(3);
@@ -2030,10 +2043,12 @@ const V10_KA_ADDRESS = '0x' + 'aa'.repeat(20);
 // `allowance(...)` and connects it to the signer. `approve` itself goes through
 // the (stubbed) `sendContractTransaction`, so the recorder just needs to exist.
 function makeStubToken(allowance: bigint) {
-  const tokenWithSigner = {
+  // tokenWithSigner is read via contractReadWithFailover after token→signer
+  // rebind, so it too must be .connect-able (self no-op rebind).
+  const tokenWithSigner = connectable({
     allowance: recorder(async (..._a: unknown[]) => allowance),
     approve: recorder(() => undefined),
-  };
+  });
   const tokenRoot = {
     connect: recorder((..._a: unknown[]) => tokenWithSigner),
   };
@@ -2590,13 +2605,13 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     // shared object is what readWithFailover reads.)
     const balanceOf = recorder(async (addr: string) =>
       tracByAddr.get(String(addr).toLowerCase()) ?? ABUNDANT_WEI);
-    const tokenWithSigner = {
+    const tokenWithSigner = connectable({
       allowance: recorder(async (owner: string, _spender: string) => {
         return allowanceByOwner.get(owner.toLowerCase()) ?? 0n;
       }),
       approve: recorder(() => undefined),
       balanceOf,
-    };
+    });
     (a as any).contracts.token = {
       connect: recorder(() => tokenWithSigner),
       balanceOf, // kept for any direct (non-connected) top-level reader
@@ -2606,19 +2621,19 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
       to: PARITY_KA_ADDRESS,
       data: '0xdeadbeef',
     }));
-    const kavContract = {
+    const kavContract = connectable({
       getAddress: recorder(async () => PARITY_KA_ADDRESS),
       publish: { populateTransaction: populateSpy },
       update: { populateTransaction: populateSpy },
-    };
+    });
     (a as any).contracts.knowledgeAssetsLifecycle = {
       connect: recorder(() => kavContract),
       getAddress: recorder(async () => PARITY_KA_ADDRESS),
     };
 
-    (a as any).contracts.contextGraphs = {
+    (a as any).contracts.contextGraphs = connectable({
       isAuthorizedPublisher: recorder(async () => true),
-    };
+    });
 
     const sendSpy = recorder(async (..._a: unknown[]) => ({} as unknown));
     (a as any).sendContractTransaction = sendSpy;
@@ -2758,13 +2773,13 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
 
     // Injected DI seams the update path needs in addition to the publish ones.
     const kaId = 42n;
-    (a as any).contracts.knowledgeAssetStorage = {
+    (a as any).contracts.knowledgeAssetStorage = connectable({
       getLatestMerkleRootPublisher: recorder(async () => walletB.address),
       getMerkleRoots: recorder(async () => []),
-    };
-    (a as any).contracts.contextGraphStorage = {
+    });
+    (a as any).contracts.contextGraphStorage = connectable({
       kaToContextGraph: recorder(async () => 0n),
-    };
+    });
     (a as any).resolveCurrentTokenAmount = recorder(async () => 0n);
     (a as any).computeUpdateNewTokenAmount = recorder(async () => 0n);
     (a as any).getIdentityId = recorder(async () => 0n);
@@ -2912,7 +2927,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
 
   it('still throws "no authorized publisher" when no wallet is authorized (unchanged)', async () => {
     const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
-    (a as any).contracts.contextGraphs = { isAuthorizedPublisher: recorder(async () => false) };
+    (a as any).contracts.contextGraphs = connectable({ isAuthorizedPublisher: recorder(async () => false) });
     await expect((a as any).nextAuthorizedSigner(CG)).rejects.toThrow(/No authorized publisher wallet/);
   });
 
@@ -3251,10 +3266,10 @@ describe('isTooLowAllowanceError (#888)', () => {
 function makeV10AdapterWithAllowanceSequence(values: bigint[]) {
   const a = new EVMChainAdapter(minimalConfig());
   let i = 0;
-  const tokenWithSigner = {
+  const tokenWithSigner = connectable({
     allowance: recorder(async () => values[Math.min(i++, values.length - 1)]),
     approve: recorder(() => undefined),
-  };
+  });
   const tokenRoot = { connect: recorder(() => tokenWithSigner) };
   (a as any).contracts.token = tokenRoot;
   const sendSpy = recorder(async (..._a: unknown[]) => ({} as unknown));
@@ -3341,7 +3356,7 @@ describe('ensureV10ApproveTrac — forced re-approve + visibility poll (#888)', 
     try {
       const a = new EVMChainAdapter(minimalConfig());
       // allowance() returns a promise that never settles — a hung RPC read.
-      const token = { allowance: recorder(() => new Promise<bigint>(() => {})) };
+      const token = connectable({ allowance: recorder(() => new Promise<bigint>(() => {})) });
       const done = recorder(() => undefined);
       const poll = (a as any)
         .confirmAllowanceVisible(token, '0xowner', V10_KA_ADDRESS, 1n)
@@ -3406,7 +3421,7 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
       const populate = recorder(async () => (
         populateQueue.shift() ?? (async () => ({ to: V10_KA_ADDRESS, data: '0xabcd' }))
       )());
-      const kaContract = { [method]: { populateTransaction: populate } };
+      const kaContract = connectable({ [method]: { populateTransaction: populate } });
 
       const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
         signer,
@@ -3438,7 +3453,7 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     const populate = recorder(async () => (
       populateQueue.shift() ?? (async () => ({ to: V10_KA_ADDRESS, data: '0xabcd' }))
     )());
-    const kaContract = { publish: { populateTransaction: populate } };
+    const kaContract = connectable({ publish: { populateTransaction: populate } });
 
     const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
       signer,
@@ -3460,7 +3475,7 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
   it('propagates a SECOND consecutive TooLowAllowance (recovery is one-shot, no infinite loop)', async () => {
     const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
     const populate = recorder(async () => { throw tooLowAllowanceRevert(); });
-    const kaContract = { publish: { populateTransaction: populate } };
+    const kaContract = connectable({ publish: { populateTransaction: populate } });
 
     await expect(
       (a as any).populateAndSignV10WithAllowanceRecovery(
@@ -3491,7 +3506,7 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
       if (call === 2) throw tooLowAllowanceRevert();  // provider[1], pass 1 → non-retryable → propagate
       return { to: V10_KA_ADDRESS, data: '0xabcd' };  // provider[0], pass 2 (post-approve) → succeeds
     });
-    const kaContract = { publish: { populateTransaction: populate } };
+    const kaContract = connectable({ publish: { populateTransaction: populate } });
 
     const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
       signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
@@ -3516,7 +3531,7 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
       if (call === 1) throw r429();                  // provider[0] → fail over
       return { to: V10_KA_ADDRESS, data: '0xabcd' }; // provider[1] → populates
     });
-    const kaContract = { publish: { populateTransaction: populate } };
+    const kaContract = connectable({ publish: { populateTransaction: populate } });
 
     const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
       signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
@@ -3531,7 +3546,7 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
   it('enriches the SECOND raw TooLowAllowance before throwing the one-shot failure', async () => {
     const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
     const populate = recorder(async () => { throw rawTooLowAllowanceRevert(); });
-    const kaContract = { publish: { populateTransaction: populate } };
+    const kaContract = connectable({ publish: { populateTransaction: populate } });
 
     let thrown: any;
     try {
@@ -3554,7 +3569,7 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
   it('propagates an unrelated revert immediately without forcing a re-approve', async () => {
     const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
     const populate = recorder(async () => { throw new Error('execution reverted: NotBatchPublisher()'); });
-    const kaContract = { update: { populateTransaction: populate } };
+    const kaContract = connectable({ update: { populateTransaction: populate } });
 
     await expect(
       (a as any).populateAndSignV10WithAllowanceRecovery(

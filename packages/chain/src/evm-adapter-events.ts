@@ -26,6 +26,26 @@ export class EventsMethods extends EVMChainAdapterBase {
   // Events
   // =====================================================================
 
+  /**
+   * A WIDE `eth_getLogs` scan with read-failover, baking in `LOG_SCAN_OPTS` so
+   * the wide-log multi-RPC timeout is owned HERE once (not by per-call-site
+   * discipline). Used by every `listenForEvents` branch below.
+   */
+  private queryFilterWithFailover(
+    contract: ethers.Contract,
+    label: string,
+    eventFilter: ethers.ContractEventName,
+    fromBlock: ethers.BlockTag,
+    toBlock?: ethers.BlockTag,
+  ): Promise<(ethers.Log | ethers.EventLog)[]> {
+    return this.contractReadWithFailover(
+      label,
+      contract,
+      (c) => c.queryFilter(eventFilter, fromBlock, toBlock),
+      LOG_SCAN_OPTS,
+    );
+  }
+
   async *listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent> {
     await this.init();
 
@@ -39,10 +59,8 @@ export class EventsMethods extends EVMChainAdapterBase {
           continue;
         }
         const eventFilter = storage.filters.KnowledgeBatchCreated();
-        const logs = await this.contractReadWithFailover(
-          'kasV9.queryFilter(KnowledgeBatchCreated)', storage,
-          (c) => c.queryFilter(eventFilter, filter.fromBlock ?? 0, filter.toBlock),
-          LOG_SCAN_OPTS,
+        const logs = await this.queryFilterWithFailover(
+          storage, 'kasV9.queryFilter(KnowledgeBatchCreated)', eventFilter, filter.fromBlock ?? 0, filter.toBlock,
         );
 
         for (const log of logs) {
@@ -70,10 +88,8 @@ export class EventsMethods extends EVMChainAdapterBase {
         const cgStorage = this.contracts.contextGraphStorage;
         if (cgStorage) {
           const eventFilter = cgStorage.filters.ContextGraphExpanded();
-          const logs = await this.contractReadWithFailover(
-            'cgStorage.queryFilter(ContextGraphExpanded)', cgStorage,
-            (c) => c.queryFilter(eventFilter, filter.fromBlock ?? 0, filter.toBlock),
-            LOG_SCAN_OPTS,
+          const logs = await this.queryFilterWithFailover(
+            cgStorage, 'cgStorage.queryFilter(ContextGraphExpanded)', eventFilter, filter.fromBlock ?? 0, filter.toBlock,
           );
 
           for (const log of logs) {
@@ -102,10 +118,8 @@ export class EventsMethods extends EVMChainAdapterBase {
         const cgStorage = this.contracts.contextGraphStorage;
         if (cgStorage) {
           const eventFilter = cgStorage.filters.KnowledgeAssetRegisteredToContextGraph();
-          const logs = await this.contractReadWithFailover(
-            'cgStorage.queryFilter(KnowledgeAssetRegisteredToContextGraph)', cgStorage,
-            (c) => c.queryFilter(eventFilter, filter.fromBlock ?? 0, filter.toBlock),
-            LOG_SCAN_OPTS,
+          const logs = await this.queryFilterWithFailover(
+            cgStorage, 'cgStorage.queryFilter(KnowledgeAssetRegisteredToContextGraph)', eventFilter, filter.fromBlock ?? 0, filter.toBlock,
           );
 
           for (const log of logs) {
@@ -153,9 +167,8 @@ export class EventsMethods extends EVMChainAdapterBase {
             : 'KnowledgeAssetCreated';
 
           const kcFilter = kaStorage.filters[createEventName]();
-          const kcLogs = await this.contractReadWithFailover(
-            'kas.queryFilter(KnowledgeAssetCreated)', kaStorage, (c) => c.queryFilter(kcFilter, fromB, toB),
-            LOG_SCAN_OPTS,
+          const kcLogs = await this.queryFilterWithFailover(
+            kaStorage, 'kas.queryFilter(KnowledgeAssetCreated)', kcFilter, fromB, toB,
           );
 
           // Legacy mint range. `KnowledgeAssetsMinted` is still declared on the
@@ -165,9 +178,8 @@ export class EventsMethods extends EVMChainAdapterBase {
           const mintByTx = new Map<string, { publisherAddress: string; startKAId: string; endKAId: string }>();
           if (hasEvent('KnowledgeAssetsMinted')) {
             const mintFilter = kaStorage.filters.KnowledgeAssetsMinted();
-            const mintLogs = await this.contractReadWithFailover(
-              'kas.queryFilter(KnowledgeAssetsMinted)', kaStorage, (c) => c.queryFilter(mintFilter, fromB, toB),
-              LOG_SCAN_OPTS,
+            const mintLogs = await this.queryFilterWithFailover(
+              kaStorage, 'kas.queryFilter(KnowledgeAssetsMinted)', mintFilter, fromB, toB,
             );
             for (const ml of mintLogs) {
               const mp = kaStorage.interface.parseLog({ topics: [...ml.topics], data: ml.data });
@@ -190,9 +202,8 @@ export class EventsMethods extends EVMChainAdapterBase {
           if (isGreenfield) {
             try {
               const transferFilter = kaStorage.filters.Transfer(ethers.ZeroAddress);
-              const transferLogs = await this.contractReadWithFailover(
-                'kas.queryFilter(Transfer)', kaStorage, (c) => c.queryFilter(transferFilter, fromB, toB),
-                LOG_SCAN_OPTS,
+              const transferLogs = await this.queryFilterWithFailover(
+                kaStorage, 'kas.queryFilter(Transfer)', transferFilter, fromB, toB,
               );
               for (const tl of transferLogs) {
                 const tp = kaStorage.interface.parseLog({ topics: [...tl.topics], data: tl.data });
@@ -252,10 +263,8 @@ export class EventsMethods extends EVMChainAdapterBase {
         const registry = this.contracts.contextGraphNameRegistry;
         if (registry) {
           const eventFilter = registry.filters.NameClaimed();
-          const logs = await this.contractReadWithFailover(
-            'cgNameRegistry.queryFilter(NameClaimed)', registry,
-            (c) => c.queryFilter(eventFilter, filter.fromBlock ?? 0, filter.toBlock),
-            LOG_SCAN_OPTS,
+          const logs = await this.queryFilterWithFailover(
+            registry, 'cgNameRegistry.queryFilter(NameClaimed)', eventFilter, filter.fromBlock ?? 0, filter.toBlock,
           );
           for (const log of logs) {
             const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
@@ -279,10 +288,8 @@ export class EventsMethods extends EVMChainAdapterBase {
         const cgStorage = this.contracts.contextGraphStorage;
         if (cgStorage) {
           const eventFilter = cgStorage.filters.ContextGraphCreated();
-          const logs = await this.contractReadWithFailover(
-            'cgStorage.queryFilter(ContextGraphCreated)', cgStorage,
-            (c) => c.queryFilter(eventFilter, filter.fromBlock ?? 0, filter.toBlock),
-            LOG_SCAN_OPTS,
+          const logs = await this.queryFilterWithFailover(
+            cgStorage, 'cgStorage.queryFilter(ContextGraphCreated)', eventFilter, filter.fromBlock ?? 0, filter.toBlock,
           );
           for (const log of logs) {
             const parsed = cgStorage.interface.parseLog({ topics: [...log.topics], data: log.data });
@@ -316,10 +323,8 @@ export class EventsMethods extends EVMChainAdapterBase {
         const profileStorage = this.contracts.profileStorage;
         if (profileStorage) {
           const eventFilter = profileStorage.filters.RelayCapabilityUpdated();
-          const logs = await this.contractReadWithFailover(
-            'profileStorage.queryFilter(RelayCapabilityUpdated)', profileStorage,
-            (c) => c.queryFilter(eventFilter, filter.fromBlock ?? 0, filter.toBlock),
-            LOG_SCAN_OPTS,
+          const logs = await this.queryFilterWithFailover(
+            profileStorage, 'profileStorage.queryFilter(RelayCapabilityUpdated)', eventFilter, filter.fromBlock ?? 0, filter.toBlock,
           );
           for (const log of logs) {
             const parsed = profileStorage.interface.parseLog({ topics: [...log.topics], data: log.data });

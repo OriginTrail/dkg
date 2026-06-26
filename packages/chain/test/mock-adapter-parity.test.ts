@@ -76,6 +76,7 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'getContract',            // resolves a Contract from the Hub — not applicable off-chain
   'getBlockNumber',         // the mock exposes its own block counter differently (advanceBlock)
   'getProvider',            // returns a JsonRpcProvider; mock has none
+  'getReadProvider',        // @deprecated bare-primary accessor; mock has no RPC provider
   'getSignerAddress',       // mock exposes `signerAddress` as a field
   'getSignerAddresses',     // pool not applicable to mock
   'getAuthorizedPublisherAddress', // pool-specific signer selection; mock has one signerAddress
@@ -116,13 +117,16 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'waitForReceiptWithFailover',
   'signPopulatedTransaction',
   // R1 immediate-RPC-failover read/populate plumbing: the per-provider read
-  // failover loop, its contract-view wrapper, the `.connect()` runner helper,
-  // and the populate+sign-across-providers loop. Protected EVM-only helpers over
-  // `this.providers[]` (the mock has no RPC provider pool), not ChainAdapter
-  // contract methods — same category as the write-failover helpers above.
+  // failover loop, its contract-view wrapper, the event-log scan wrapper, the
+  // contract/signer rebind helpers, and the populate+sign-across-providers loop.
+  // Protected EVM-only helpers over `this.providers[]` (the mock has no RPC
+  // provider pool), not ChainAdapter contract methods — same category as the
+  // write-failover helpers above.
   'readWithFailover',
   'contractReadWithFailover',
-  'withRunner',
+  'queryFilterWithFailover',
+  'rebindContract',
+  'rebindSigner',
   'populateAndSignAcrossProviders',
   'sendSignedTransactionAndWait',
   'sendPopulatedTransaction',

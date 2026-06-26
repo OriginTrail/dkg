@@ -17,6 +17,16 @@ import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { computeUpdateACKDigest } from '@origintrail-official/dkg-core';
 
+// Round-2 review split withRunner → rebindContract (contract.connect(p), no
+// test-double fallback). These tests mock this.contracts.* as plain method
+// objects; `connectable` makes a mock satisfy that boundary with a
+// single-provider NO-OP self-rebind, so the REAL rebindContract runs.
+function connectable<T>(mock: T): T {
+  const m = mock as { connect?: unknown };
+  if (m && typeof m.connect !== 'function') m.connect = () => mock;
+  return mock;
+}
+
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const ADMIN_PK = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
 const KAV10_ADDRESS = '0x000000000000000000000000000000000000c10a';
@@ -48,19 +58,19 @@ function makeStubbedAdapter(opts: {
   (a as any).initialized = true;
   // R1: getEvmChainId reads chainId via readWithFailover over this.providers[0]
   // (=== this.provider in prod). Set the mock on BOTH so the digest's chainId
-  // read resolves to the stub instead of dialling the placeholder RPC. (The
-  // contract stubs below have no `.connect`, so contractReadWithFailover's
-  // withRunner uses them directly — no change needed there.)
+  // read resolves to the stub instead of dialling the placeholder RPC.
   const provider = { getNetwork: async () => ({ chainId: TEST_CHAIN_ID }) };
   (a as any).provider = provider;
   (a as any).providers = [provider];
-  (a as any).contracts.knowledgeAssetsLifecycle = {
+  // The contract view reads go through contractReadWithFailover → rebindContract
+  // (contract.connect(p)), so the contract stubs must be .connect-able.
+  (a as any).contracts.knowledgeAssetsLifecycle = connectable({
     getAddress: async () => KAV10_ADDRESS,
-  };
-  (a as any).contracts.contextGraphStorage = {
+  });
+  (a as any).contracts.contextGraphStorage = connectable({
     kaToContextGraph: async () => opts.contextGraphId,
-  };
-  (a as any).contracts.knowledgeAssetStorage = {
+  });
+  (a as any).contracts.knowledgeAssetStorage = connectable({
     getMerkleRoots: async () => new Array(Number(opts.preUpdateMerkleRootCount)).fill('0x00'),
     getTokenAmount: async () => opts.currentTokenAmount,
     // (preUpdateMerkleRootCount, minted, byteSize, endEpoch, tokenAmount, isImmutable, preUpdateMerkleLeafCount)
@@ -73,7 +83,7 @@ function makeStubbedAdapter(opts: {
       false,
       0n,
     ],
-  };
+  });
   return a;
 }
 

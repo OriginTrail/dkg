@@ -222,51 +222,62 @@ describe('readWithFailover — per-attempt cap (log-scan stall fix)', () => {
 // and mask it as RPC_ENDPOINTS_EXHAUSTED (the pre-PR FallbackProvider never failed
 // over on a post-decode error). So BAD_DATA must surface DIRECTLY (no failover),
 // while a real transient (429) still fails over; opts.isRetryable overrides it.
-describe('contractReadWithFailover — view classifier (BAD_DATA non-retryable) + opts.isRetryable override', () => {
+describe('contractReadWithFailover — per-provider rebinding + view classifier (B-2, #2/#3)', () => {
   const badDataError = () => {
     const e: any = new Error('could not decode result data (value="0x", code=BAD_DATA)');
     e.code = 'BAD_DATA';
     return e;
   };
+  // A contract whose `.connect(provider)` returns a PROVIDER-SPECIFIC view double
+  // (round-2 rebindContract = contract.connect(p), no fallback). This PROVES the
+  // failover loop rebinds to the BACKUP provider's contract — a regression that
+  // re-ran the primary-bound contract would call primaryView twice, never backupView.
+  const perProviderContract = (byProvider: (p: unknown) => { view: ReturnType<typeof recorder> }) =>
+    ({ connect: (p: unknown) => byProvider(p) }) as any;
 
-  it('a BAD_DATA view decode is NON-retryable → surfaces DIRECTLY, NO failover (not masked as RPC_ENDPOINTS_EXHAUSTED)', async () => {
+  it('a BAD_DATA view decode is NON-retryable → surfaces DIRECTLY, NO failover (backup-connected view never called)', async () => {
     const a = freshAdapter(minimalConfig({ rpcUrl: 'https://primary.example', rpcUrls: ['https://backup.example'] }));
-    (a as any).providers = [{}, {}];
+    const p0 = {}; const p1 = {};
+    (a as any).providers = [p0, p1];
     const bad = badDataError();
-    const view = recorder(async () => { throw bad; });
-    const contract = { view }; // no .connect → withRunner uses it as-is (same recorder per provider)
+    const primaryView = recorder(async () => { throw bad; });
+    const backupView = recorder(async () => 'BACKUP-RESULT');
+    const contract = perProviderContract((p) => (p === p0 ? { view: primaryView } : { view: backupView }));
 
     await expect((a as any).contractReadWithFailover('someView', contract, (c: any) => c.view()))
       .rejects.toBe(bad); // the ORIGINAL BAD_DATA, NOT a ChainRpcTransportError/RPC_ENDPOINTS_EXHAUSTED
-    expect(view.calls).toHaveLength(1); // deterministic → NO failover, backup never consulted
+    expect(primaryView.calls).toHaveLength(1); // primary-connected view called once
+    expect(backupView.calls).toEqual([]);      // deterministic → backup-connected view NEVER consulted
   });
 
-  it('a real transient (429) on the SAME view path IS retryable → fails over to the next endpoint', async () => {
+  it('a real transient (429) IS retryable → REBINDS to and is served by the BACKUP provider\'s view', async () => {
     const a = freshAdapter(minimalConfig({ rpcUrl: 'https://primary.example', rpcUrls: ['https://backup.example'] }));
-    (a as any).providers = [{}, {}];
-    let n = 0;
-    const view = recorder(async () => {
-      n += 1;
-      if (n === 1) { const e: any = new Error('429 too many requests'); e.status = 429; throw e; }
-      return 'OK';
-    });
-    const contract = { view };
+    const p0 = {}; const p1 = {};
+    (a as any).providers = [p0, p1];
+    const primaryView = recorder(async () => { const e: any = new Error('429 too many requests'); e.status = 429; throw e; });
+    const backupView = recorder(async () => 'BACKUP-RESULT');
+    const contract = perProviderContract((p) => (p === p0 ? { view: primaryView } : { view: backupView }));
 
-    await expect((a as any).contractReadWithFailover('someView', contract, (c: any) => c.view())).resolves.toBe('OK');
-    expect(view.calls).toHaveLength(2); // 429 is a genuine transient → failed over
+    await expect((a as any).contractReadWithFailover('someView', contract, (c: any) => c.view())).resolves.toBe('BACKUP-RESULT');
+    // B-2: the loop rebound to the BACKUP provider's contract — proven by the
+    // result coming from backupView, and primaryView hit exactly once (not twice).
+    expect(primaryView.calls).toHaveLength(1);
+    expect(backupView.calls).toHaveLength(1);
   });
 
-  it('an explicit opts.isRetryable OVERRIDES the isContractViewRetryable default (BAD_DATA then treated retryable → fails over)', async () => {
+  it('an explicit opts.isRetryable OVERRIDES the isContractViewRetryable default (BAD_DATA → rebinds to the BACKUP view)', async () => {
     const a = freshAdapter(minimalConfig({ rpcUrl: 'https://primary.example', rpcUrls: ['https://backup.example'] }));
-    (a as any).providers = [{}, {}];
-    let n = 0;
-    const view = recorder(async () => { n += 1; if (n === 1) throw badDataError(); return 'OK'; });
-    const contract = { view };
+    const p0 = {}; const p1 = {};
+    (a as any).providers = [p0, p1];
+    const primaryView = recorder(async () => { throw badDataError(); });
+    const backupView = recorder(async () => 'BACKUP-RESULT');
+    const contract = perProviderContract((p) => (p === p0 ? { view: primaryView } : { view: backupView }));
 
     await expect(
       (a as any).contractReadWithFailover('someView', contract, (c: any) => c.view(), { isRetryable: () => true }),
-    ).resolves.toBe('OK');
-    expect(view.calls).toHaveLength(2); // default overridden → BAD_DATA failed over
+    ).resolves.toBe('BACKUP-RESULT');
+    expect(primaryView.calls).toHaveLength(1);
+    expect(backupView.calls).toHaveLength(1); // default overridden → BAD_DATA failed over to the backup view
   });
 
   it('readWithFailover honours a custom opts.isRetryable that makes a normally-retryable 429 NON-retryable (surfaces it, no failover)', async () => {
@@ -281,5 +292,88 @@ describe('contractReadWithFailover — view classifier (BAD_DATA non-retryable) 
       .rejects.toBe(err429);
     expect(primary.read.calls).toHaveLength(1);
     expect(backup.read.calls).toEqual([]);
+  });
+});
+
+// B-5 (#894 guard): the CONSTRUCTOR wires the per-endpoint FetchRequest retry
+// budget from the endpoint count — SINGLE-RPC keeps the bounded retry (its only
+// resilience; nothing to fail over to), MULTI-RPC uses 0 (the explicit adapter
+// failover advances on the first error). A regression to perEndpointRetries=0
+// for a single endpoint would surface RPC_ENDPOINTS_EXHAUSTED on the first 429.
+// We inspect the constructed provider's real retryFunc directly (deterministic +
+// fast) rather than driving ~7.5s of real loopback backoff — the behavioural
+// real-429 path is already covered by evm-adapter.unit.test.ts's perpetual-429
+// block; this pins the wiring robustly.
+describe('constructor RPC-retry budget wiring (#894 single-RPC vs multi-RPC, B-5)', () => {
+  afterEach(() => { vi.useRealTimers(); });
+  const retryFuncOf = (a: EVMChainAdapter) =>
+    (a.getProvider() as unknown as {
+      _getConnection: () => { retryFunc?: (r: unknown, x: unknown, n: number) => Promise<boolean> };
+    })._getConnection().retryFunc!;
+
+  it('SINGLE-RPC: the one provider keeps the bounded retry budget (retries, NOT 0)', async () => {
+    const a = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://only.example' }));
+    try {
+      const retry = retryFuncOf(a);
+      expect(typeof retry).toBe('function');
+      vi.useFakeTimers();
+      const p0 = retry({}, {}, 0); await vi.advanceTimersByTimeAsync(2_000); expect(await p0).toBe(true);  // retries
+      const p4 = retry({}, {}, 4); await vi.advanceTimersByTimeAsync(2_000); expect(await p4).toBe(true);  // ...through the budget
+      expect(await retry({}, {}, 5)).toBe(false); // bounded → eventually RPC_ENDPOINTS_EXHAUSTED (#894)
+    } finally {
+      a.destroy();
+    }
+  });
+
+  it('MULTI-RPC: each provider gives up at attempt 0 (retries=0) so the explicit failover advances at once', async () => {
+    const a = new EVMChainAdapter(minimalConfig({ rpcUrl: 'https://a.example', rpcUrls: ['https://b.example'] }));
+    try {
+      expect(await retryFuncOf(a)({}, {}, 0)).toBe(false);
+    } finally {
+      a.destroy();
+    }
+  });
+});
+
+// B-6: listenForEvents' wide eth_getLogs reads go through queryFilterWithFailover,
+// which bakes in LOG_SCAN_OPTS (multiAttemptTimeoutMs = RPC_LOG_SCAN_TIMEOUT_MS,
+// 30s) so a slow-but-healthy getLogs (a 9000-block poller range) isn't aborted by
+// the 4s point-read cap. Exercises the REAL events.ts path (not readWithFailover
+// directly) so dropping LOG_SCAN_OPTS from a branch would re-introduce the stall.
+describe('listenForEvents — wide getLogs honours the 30s LOG_SCAN cap (B-6)', () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('a queryFilter that resolves at >4s but <30s COMPLETES (not aborted at the 4s point-read cap)', async () => {
+    vi.useFakeTimers();
+    const a = freshAdapter(minimalConfig({ rpcUrl: 'https://primary.example', rpcUrls: ['https://backup.example'] }));
+    (a as any).initialized = true; // listenForEvents awaits init() first
+    (a as any).providers = [{}, {}]; // MULTI-RPC → the per-attempt cap applies
+    const log = {
+      topics: ['0x' + '00'.repeat(32)], data: '0x', blockNumber: 1,
+      transactionHash: '0x' + '11'.repeat(32), transactionIndex: 0,
+    };
+    const parsed = { args: { batchId: 1n, publisher: '0x' + '22'.repeat(20), merkleRoot: '0x' + '33'.repeat(32), startKAId: 1n, endKAId: 1n } };
+    // A wide getLogs that takes 5s (>4s point-read cap, <30s LOG_SCAN cap).
+    const queryFilter = recorder(() => new Promise((resolve) => { setTimeout(() => resolve([log]), 5_000); }));
+    const storage: any = {
+      connect: () => storage, // rebindContract(storage, p) = storage.connect(p)
+      filters: { KnowledgeBatchCreated: () => 'F' },
+      interface: { parseLog: () => parsed },
+      queryFilter,
+    };
+    (a as any).contracts.knowledgeAssetsStorage = storage;
+
+    const collected: Array<{ type: string }> = [];
+    const done = (async () => {
+      for await (const ev of a.listenForEvents({ eventTypes: ['KnowledgeBatchCreated'], fromBlock: 0 } as any)) {
+        collected.push(ev as { type: string });
+      }
+    })();
+    await vi.advanceTimersByTimeAsync(6_000); // past the 5s getLogs, under the 30s LOG_SCAN cap
+    await done;
+
+    expect(queryFilter.calls).toHaveLength(1); // completed on the first endpoint, NOT aborted+failed-over
+    expect(collected).toHaveLength(1);
+    expect(collected[0].type).toBe('KnowledgeBatchCreated');
   });
 });
