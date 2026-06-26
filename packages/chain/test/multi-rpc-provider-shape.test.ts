@@ -23,7 +23,7 @@ describe('multi-RPC provider shape (backwards compatibility)', () => {
       privateKey: PK,
       allowNoAdminSigner: true,
     });
-    const read = a.getReadProvider();
+    const read = a.getProvider();
     expect(read).toBeInstanceOf(JsonRpcProvider);
     expect(read).not.toBeInstanceOf(FallbackProvider);
     expect(a.getRpcUrls()).toEqual(['http://127.0.0.1:1']);
@@ -37,9 +37,11 @@ describe('multi-RPC provider shape (backwards compatibility)', () => {
       privateKey: PK,
       allowNoAdminSigner: true,
     });
-    // R1: getReadProvider() is the bare PRIMARY JsonRpcProvider — the
-    // FallbackProvider is gone; reads fail over explicitly via readWithFailover.
-    const read = a.getReadProvider();
+    // R1: getProvider() is the bare PRIMARY JsonRpcProvider — the
+    // FallbackProvider is gone; reads fail over explicitly via readWithFailover
+    // over this.providers[] (getReadProvider() was removed as obsolete: there is
+    // no single read provider anymore).
+    const read = a.getProvider();
     expect(read).toBeInstanceOf(JsonRpcProvider);
     expect(read).not.toBeInstanceOf(FallbackProvider);
     // All endpoints stay configured, primary first — the failover topology now
@@ -61,7 +63,7 @@ describe('multi-RPC provider shape (backwards compatibility)', () => {
       allowNoAdminSigner: true,
     });
     // Collapses to a single unique endpoint -> no FallbackProvider.
-    expect(a.getReadProvider()).not.toBeInstanceOf(FallbackProvider);
+    expect(a.getProvider()).not.toBeInstanceOf(FallbackProvider);
     expect(a.getRpcUrls()).toEqual(['http://127.0.0.1:1']);
   });
 });

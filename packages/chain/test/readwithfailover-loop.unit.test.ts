@@ -214,3 +214,72 @@ describe('readWithFailover — per-attempt cap (log-scan stall fix)', () => {
     expect(only.read.calls).toHaveLength(1);
   });
 });
+
+// #2 review fix: contractReadWithFailover DEFAULTS its failover classifier to
+// isContractViewRetryable = isRetryableRpcError MINUS BAD_DATA. A contract VIEW's
+// BAD_DATA ("could not decode result data") is a DETERMINISTIC client-side decode,
+// not an RPC outage — failing over would re-hit the same decode on every endpoint
+// and mask it as RPC_ENDPOINTS_EXHAUSTED (the pre-PR FallbackProvider never failed
+// over on a post-decode error). So BAD_DATA must surface DIRECTLY (no failover),
+// while a real transient (429) still fails over; opts.isRetryable overrides it.
+describe('contractReadWithFailover — view classifier (BAD_DATA non-retryable) + opts.isRetryable override', () => {
+  const badDataError = () => {
+    const e: any = new Error('could not decode result data (value="0x", code=BAD_DATA)');
+    e.code = 'BAD_DATA';
+    return e;
+  };
+
+  it('a BAD_DATA view decode is NON-retryable → surfaces DIRECTLY, NO failover (not masked as RPC_ENDPOINTS_EXHAUSTED)', async () => {
+    const a = freshAdapter(minimalConfig({ rpcUrl: 'https://primary.example', rpcUrls: ['https://backup.example'] }));
+    (a as any).providers = [{}, {}];
+    const bad = badDataError();
+    const view = recorder(async () => { throw bad; });
+    const contract = { view }; // no .connect → withRunner uses it as-is (same recorder per provider)
+
+    await expect((a as any).contractReadWithFailover('someView', contract, (c: any) => c.view()))
+      .rejects.toBe(bad); // the ORIGINAL BAD_DATA, NOT a ChainRpcTransportError/RPC_ENDPOINTS_EXHAUSTED
+    expect(view.calls).toHaveLength(1); // deterministic → NO failover, backup never consulted
+  });
+
+  it('a real transient (429) on the SAME view path IS retryable → fails over to the next endpoint', async () => {
+    const a = freshAdapter(minimalConfig({ rpcUrl: 'https://primary.example', rpcUrls: ['https://backup.example'] }));
+    (a as any).providers = [{}, {}];
+    let n = 0;
+    const view = recorder(async () => {
+      n += 1;
+      if (n === 1) { const e: any = new Error('429 too many requests'); e.status = 429; throw e; }
+      return 'OK';
+    });
+    const contract = { view };
+
+    await expect((a as any).contractReadWithFailover('someView', contract, (c: any) => c.view())).resolves.toBe('OK');
+    expect(view.calls).toHaveLength(2); // 429 is a genuine transient → failed over
+  });
+
+  it('an explicit opts.isRetryable OVERRIDES the isContractViewRetryable default (BAD_DATA then treated retryable → fails over)', async () => {
+    const a = freshAdapter(minimalConfig({ rpcUrl: 'https://primary.example', rpcUrls: ['https://backup.example'] }));
+    (a as any).providers = [{}, {}];
+    let n = 0;
+    const view = recorder(async () => { n += 1; if (n === 1) throw badDataError(); return 'OK'; });
+    const contract = { view };
+
+    await expect(
+      (a as any).contractReadWithFailover('someView', contract, (c: any) => c.view(), { isRetryable: () => true }),
+    ).resolves.toBe('OK');
+    expect(view.calls).toHaveLength(2); // default overridden → BAD_DATA failed over
+  });
+
+  it('readWithFailover honours a custom opts.isRetryable that makes a normally-retryable 429 NON-retryable (surfaces it, no failover)', async () => {
+    const a = freshAdapter(minimalConfig({ rpcUrl: 'https://primary.example', rpcUrls: ['https://backup.example'] }));
+    const err429 = (() => { const e: any = new Error('429 too many requests'); e.status = 429; return e; })();
+    const primary = { read: recorder(async () => { throw err429; }) };
+    const backup = { read: recorder(async () => 'BACKUP') };
+    (a as any).providers = [primary, backup];
+
+    // Custom classifier: nothing is retryable → the 429 surfaces directly, no failover.
+    await expect((a as any).readWithFailover('t', (p: any) => p.read(), { isRetryable: () => false }))
+      .rejects.toBe(err429);
+    expect(primary.read.calls).toHaveLength(1);
+    expect(backup.read.calls).toEqual([]);
+  });
+});

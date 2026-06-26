@@ -204,7 +204,6 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const a = new EVMChainAdapter(minimalConfig());
     expect(a.getProvider()).toBeDefined();
     expect(typeof a.getProvider().getBlockNumber).toBe('function');
-    expect(a.getReadProvider()).toBeDefined();
   });
 
   it('issues un-batched JSON-RPC requests (batchMaxCount=1) so a rate-limited read rejects on its own awaited promise — issue #939', async () => {

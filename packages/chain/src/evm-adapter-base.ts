@@ -307,6 +307,21 @@ async function contractAddress(contract: Contract): Promise<string> {
   throw new Error('DKGKnowledgeAssets address is unavailable from the resolved contract handle.');
 }
 
+/**
+ * Failover classifier for CONTRACT VIEW reads (`contractReadWithFailover`'s
+ * default): the generic `isRetryableRpcError` transient set MINUS `BAD_DATA`.
+ * A view `BAD_DATA` ("could not decode result data") is a DETERMINISTIC
+ * client-side decode of an empty / wrong-shape return for the ABI type — not an
+ * RPC outage — so failing over would re-hit the same decode on every endpoint
+ * and mask it as `RPC_ENDPOINTS_EXHAUSTED`. The pre-PR FallbackProvider never
+ * failed over on a post-decode error; this restores that. (Direct provider reads
+ * — getCode/getBalance/getNetwork — never produce BAD_DATA, so they keep the
+ * unmodified `isRetryableRpcError`.)
+ */
+function isContractViewRetryable(err: unknown): boolean {
+  return isRetryableRpcError(err) && errorCode(err) !== 'BAD_DATA';
+}
+
 export class EVMChainAdapterBase {
   /** See `ChainAdapter.deploymentId`. */
   get deploymentId(): string {
@@ -866,8 +881,21 @@ export class EVMChainAdapterBase {
   protected async readWithFailover<T>(
     label: string,
     fn: (provider: JsonRpcProvider) => Promise<T>,
-    opts?: { attemptTimeoutMs?: number; multiAttemptTimeoutMs?: number },
+    opts?: {
+      attemptTimeoutMs?: number;
+      multiAttemptTimeoutMs?: number;
+      // Classifier for "should this error fail over to the next endpoint?".
+      // Defaults to the generic RPC-transient check; callers override it for
+      // reads whose error shapes carry domain meaning that must NOT be treated as
+      // a failover-worthy transient — e.g. a contract VIEW's `BAD_DATA` decode
+      // (deterministic, see `contractReadWithFailover`) or
+      // `getMaxKaNumberForAuthor`'s absent-view shapes. A non-retryable error is
+      // rethrown AT ONCE (the caller's own catch then classifies it), never
+      // failed over or masked as `RPC_ENDPOINTS_EXHAUSTED`.
+      isRetryable?: (err: unknown) => boolean;
+    },
   ): Promise<T> {
+    const isRetryable = opts?.isRetryable ?? isRetryableRpcError;
     let lastRetryable: unknown;
     for (let i = 0; i < this.providers.length; i += 1) {
       const isLast = i === this.providers.length - 1;
@@ -889,7 +917,7 @@ export class EVMChainAdapterBase {
           ? attempt
           : withTimeout(attempt, capMs, `${label} via RPC #${i + 1}`));
       } catch (err) {
-        if (!isRetryableRpcError(err)) throw err;
+        if (!isRetryable(err)) throw err;
         lastRetryable = err;
         if (!isLast) {
           noteRpcFailover(label, this.rpcUrls[i], err, this.rpcUrls[i + 1]);
@@ -915,37 +943,63 @@ export class EVMChainAdapterBase {
   }
 
   /**
+   * Reconnect a Contract / Wallet `handle` to `runner` so a per-endpoint read or
+   * populate executes against that runner (the failover mechanism). A production
+   * handle is always an ethers `Contract` / `Wallet`, both of which expose
+   * `.connect`, so it is rebound. A bare TEST DOUBLE may omit `.connect`; the
+   * guarded fallback — the ONLY branch that returns the handle un-rebound —
+   * passes the stub through so the read still executes against it. The
+   * `T extends Contract | Wallet` bound + the single explicit `connect` assertion
+   * (no cast through `unknown`) keep this off the arbitrary-`any` boundary.
+   */
+  protected withRunner<T extends Contract | Wallet>(handle: T, runner: JsonRpcProvider | Wallet): T {
+    // Production: an ethers Contract / Wallet — both expose `.connect`, which
+    // rebinds to `runner`. Their `connect()` return types (BaseContract / a
+    // wallet subtype) and param types (ContractRunner vs Provider) differ and are
+    // not statically `T`, so the handle is only PROBED for `.connect` (a concrete
+    // shape, NOT widened to `any` or cast through `unknown`) and the rebound
+    // result is asserted back to `T`.
+    const rebind = (handle as { connect?: (runner: never) => unknown }).connect;
+    if (typeof rebind !== 'function') {
+      // Bare TEST DOUBLE without `.connect` — the ONLY branch that returns the
+      // handle un-rebound — so the read still executes against the stub.
+      return handle;
+    }
+    return rebind.call(handle, runner as never) as T;
+  }
+
+  /**
    * Convenience wrapper over `readWithFailover` for a CONTRACT VIEW read: runs
    * `fn` against `contract` reconnected to each provider in turn (so the view
    * call executes on the bare per-provider runner, with failover), leaving the
-   * boot-bound `this.contracts.*` handle untouched. The `.connect(p) as Contract`
-   * cast (ethers' `BaseContract.connect` loses the dynamic-method index
-   * signature) lives here once instead of at every call site. Same purity
-   * contract as `readWithFailover` — `fn` MUST be a pure view read, never a
-   * state-changing send (writes go through the dedicated write loops).
+   * boot-bound `this.contracts.*` handle untouched (the `.connect` cast — ethers'
+   * `BaseContract.connect` loses the dynamic-method index signature — lives in
+   * `withRunner` once instead of at every call site). Same purity contract as
+   * `readWithFailover` — `fn` MUST be a pure view read, never a state-changing
+   * send (writes go through the dedicated write loops).
+   *
+   * The default failover classifier is `isContractViewRetryable` (generic
+   * RPC-transient MINUS `BAD_DATA`): a view `BAD_DATA` ("could not decode result
+   * data") is a DETERMINISTIC client-side decode, not an RPC outage, so failing
+   * over would just re-hit the same decode on every endpoint and mask it as
+   * `RPC_ENDPOINTS_EXHAUSTED`. Pre-PR these reads went through the FallbackProvider,
+   * which never failed over on a post-decode error; this restores that. A caller
+   * may pass its own `isRetryable` to override.
    */
-  /**
-   * Reconnect a contract / signer `handle` to `runner` so a per-endpoint
-   * read or populate executes against that runner (the failover mechanism).
-   * Every production handle is an ethers `Contract` / `Wallet` with `.connect`;
-   * if a handle cannot be rebound (no `.connect`), degrade GRACEFULLY to the
-   * handle AS-IS rather than throwing. In production that path is never taken;
-   * it only applies to bare test doubles, where it lets the read still execute
-   * against the stub.
-   */
-  protected withRunner<T>(handle: T, runner: JsonRpcProvider | Wallet): T {
-    return typeof (handle as { connect?: unknown })?.connect === 'function'
-      ? (handle as unknown as { connect(r: unknown): T }).connect(runner)
-      : handle;
-  }
-
   protected contractReadWithFailover<T>(
     label: string,
     contract: Contract,
     fn: (c: Contract) => Promise<T>,
-    opts?: { attemptTimeoutMs?: number; multiAttemptTimeoutMs?: number },
+    opts?: {
+      attemptTimeoutMs?: number;
+      multiAttemptTimeoutMs?: number;
+      isRetryable?: (err: unknown) => boolean;
+    },
   ): Promise<T> {
-    return this.readWithFailover(label, (p) => fn(this.withRunner(contract, p)), opts);
+    return this.readWithFailover(label, (p) => fn(this.withRunner(contract, p)), {
+      ...opts,
+      isRetryable: opts?.isRetryable ?? isContractViewRetryable,
+    });
   }
 
   protected async waitForReceiptWithFailover(
@@ -2064,42 +2118,35 @@ export class EVMChainAdapterBase {
     let bareRevert: unknown;
     const getMax = (storage as any).getMaxKaNumberForAuthor;
     if (typeof getMax?.staticCall === 'function') {
-      // This view read is NOT routed through `readWithFailover` because its
-      // error shapes are semantically overloaded: a `BAD_DATA`/`CALL_EXCEPTION`
-      // here means "the deployed contract lacks the selector (pre-10.0.4)",
-      // which `isRetryableRpcError` would mis-classify as a transient (BAD_DATA
-      // is generically retryable) and fail over on — turning a deterministic
-      // absent-view answer into a spurious `RPC_ENDPOINTS_EXHAUSTED`. So we run
-      // an explicit per-endpoint loop that distinguishes the two: absent-view
-      // shapes are DETERMINISTIC across endpoints (don't fail over — hand to the
-      // pre-10.0.4 classification below), and ONLY a genuine transient RPC error
-      // advances to the next endpoint.
-      for (let i = 0; i < this.providers.length; i += 1) {
-        const isLast = i === this.providers.length - 1;
-        try {
-          const connectedGetMax =
-            (this.withRunner(storage, this.providers[i]) as Contract).getMaxKaNumberForAuthor;
-          const max = await connectedGetMax.staticCall(normalized);
-          return BigInt(max);
-        } catch (err) {
-          // Ordering invariant: isKaHighWaterViewUnavailable runs first and calls
-          // enrichEvmError(err), which only rewrites a message carrying decodable
-          // `data=0x…` + the literal "unknown custom error" — neither present on a
-          // bare "missing revert data" (data=null) error — so it leaves the shape
-          // isKaHighWaterBareRevert keys on untouched. Preserve that if
-          // enrichEvmError's rewrite rules change.
-          if (isKaHighWaterViewUnavailable(err)) {
-            break; // unambiguous absent-view shape → fall through to the bounded scan
-          }
-          if (isKaHighWaterBareRevert(err)) {
-            bareRevert = err; // confirm against the deployed bytecode below
-            break;
-          }
-          if (isRetryableRpcError(err) && !isLast) {
-            noteRpcFailover('getMaxKaNumberForAuthor staticCall', this.rpcUrls[i], err, this.rpcUrls[i + 1]);
-            continue; // genuine transient → fail over to the next endpoint
-          }
-          throw err; // decoded revert, or a transient on the last endpoint → never crawl
+      try {
+        // Route through `readWithFailover` (which gives the per-attempt stall
+        // timeout + endpoint failover for free) with a CUSTOM classifier: the
+        // absent-view shapes (`BAD_DATA` empty-`0x`, bare `CALL_EXCEPTION`) are
+        // DETERMINISTIC across endpoints and mean "pre-10.0.4 contract lacks the
+        // selector", so they are NON-retryable here — `readWithFailover` rethrows
+        // them straight to the catch below (→ scan / bytecode-confirm) instead of
+        // failing over and masking them as `RPC_ENDPOINTS_EXHAUSTED`. ONLY a
+        // genuine transient advances to the next endpoint. `isKaHighWaterViewUnavailable`
+        // runs FIRST (it enriches the error) so the ordering invariant the catch
+        // below also relies on is preserved.
+        const max = await this.readWithFailover(
+          'DKGKnowledgeAssets.getMaxKaNumberForAuthor',
+          (p) => (this.withRunner(storage, p) as Contract).getMaxKaNumberForAuthor.staticCall(normalized),
+          {
+            isRetryable: (err) =>
+              isRetryableRpcError(err)
+              && !isKaHighWaterViewUnavailable(err)
+              && !isKaHighWaterBareRevert(err),
+          },
+        );
+        return BigInt(max);
+      } catch (err) {
+        if (isKaHighWaterViewUnavailable(err)) {
+          // Unambiguous absent-view shape → fall through to the bounded scan.
+        } else if (isKaHighWaterBareRevert(err)) {
+          bareRevert = err; // confirm against the deployed bytecode below
+        } else {
+          throw err; // transient exhaustion / decoded revert → never crawl
         }
       }
     }
@@ -2861,10 +2908,6 @@ export class EVMChainAdapterBase {
 
   getProvider(): JsonRpcProvider {
     return this.primaryProvider;
-  }
-
-  getReadProvider(): JsonRpcProvider {
-    return this.provider;
   }
 
   getRpcUrls(): string[] {
