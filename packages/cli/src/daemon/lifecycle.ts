@@ -144,8 +144,9 @@ import {
 } from '../../scripts/markitdown-bundle-validation.mjs';
 import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionStatusRecord } from '../extraction-status.js';
 import { FileStore } from '../file-store.js';
-import { VectorStore, OpenAIEmbeddingProvider, HashingEmbeddingProvider, LocalEmbeddingProvider, type EmbeddingProvider } from '../vector-store.js';
+import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../vector-store.js';
 import { VectorEntityRetriever } from './drag-retriever.js';
+import { defaultDragEmbedder } from './drag-embedder.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../http/multipart.js';
 // Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
@@ -2717,14 +2718,10 @@ export async function runDaemonInner(
   //   DKG_DRAG_EMBEDDER=hashing → zero-dep lexical (offline default / control)
   //   DKG_DRAG_EMBEDDER=openai  → the configured OpenAI-compatible model
   //   (unset)                   → configured OpenAI model if any, else hashing.
-  // Default is KEYWORD (predictable) unless a real semantic model is configured
-  // — lexical hashing can rank wrong, so it is an explicit contrast control
-  // (request `embedder:"hashing"`), never the silent default.
-  const dragEmbedderKind = process.env.DKG_DRAG_EMBEDDER;
-  let dragEmbedder: EmbeddingProvider | null = null;
-  if (dragEmbedderKind === 'local') dragEmbedder = new LocalEmbeddingProvider();
-  else if (dragEmbedderKind === 'hashing') dragEmbedder = new HashingEmbeddingProvider();
-  else dragEmbedder = embeddingProvider; // configured OpenAI-compatible model, or null → keyword default
+  // Default is KEYWORD (predictable) unless config.drag.embedder (or the
+  // DKG_DRAG_EMBEDDER env override) selects a model — lexical hashing can rank
+  // wrong, so semantic is opt-in, never the silent default.
+  const dragEmbedder = defaultDragEmbedder(config);
   if (dragEmbedder) {
     agent.attachEntityRetriever(new VectorEntityRetriever(vectorStore, dragEmbedder, agent.store));
   }

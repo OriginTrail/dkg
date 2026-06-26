@@ -76,6 +76,16 @@ export function registerAnswerTool(server: McpServer, client: DkgClient, config:
               'context graph and aggregate their citations, each re-verified against ' +
               'the chain — use it to answer over knowledge this node may not hold.',
           ),
+        retrieval: z
+          .enum(['default', 'keyword', 'semantic'])
+          .optional()
+          .describe(
+            'How to find relevant facts. "default" = the node\'s configured retrieval. ' +
+              '"keyword" = exact substring match (predictable, but misses paraphrases). ' +
+              '"semantic" = embedding search that matches by MEANING (finds facts that ' +
+              'never use the question\'s words) — requires the node to have an embedding ' +
+              'model configured/installed.',
+          ),
         maxCitations: z
           .number()
           .int()
@@ -85,7 +95,7 @@ export function registerAnswerTool(server: McpServer, client: DkgClient, config:
           .describe('Cap on cited facts (default 12).'),
       },
     },
-    async ({ question, projectId, scope, maxCitations }): Promise<ToolResult> => {
+    async ({ question, projectId, scope, retrieval, maxCitations }): Promise<ToolResult> => {
       const cg = resolveProject(projectId, config);
       if (!cg) {
         return err(
@@ -93,7 +103,7 @@ export function registerAnswerTool(server: McpServer, client: DkgClient, config:
         );
       }
       try {
-        const result = await client.answer({ question, contextGraphId: cg, scope, maxCitations });
+        const result = await client.answer({ question, contextGraphId: cg, scope, retrieval, maxCitations });
         return ok(summarize(result));
       } catch (e) {
         return err(`dkg_answer failed: ${formatError(e)}`);

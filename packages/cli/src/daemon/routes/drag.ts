@@ -2,19 +2,23 @@
 //
 // dRAG routes (OT-RFC-55).
 //
-//   POST /api/answer { question, contextGraphId, scope?, peers?, maxCitations?, maxKas?, simulatePrice? }
-//     -> agent.dragAnswerLocal | dragAnswerNetwork
+//   POST /api/answer
+//     { question, contextGraphId, scope?: "local"|"network",
+//       retrieval?: "default"|"keyword"|"semantic", peers?, maxCitations?, maxKas? }
 //     -> { answer, citations[], facts[], stats, perNode?, settlement? }
 //
-// Each citation in the response is independently auditable against the chain
-// (V10 Merkle inclusion + on-chain root + EIP-712 author seal). No LLM is
-// required — retrieval is keyword/structural (the demoable baseline).
+// Every citation is independently auditable against the chain (V10 Merkle
+// inclusion + on-chain root + EIP-712 author seal). Retrieval is `keyword`
+// (substring) or `semantic` (embedding ANN over the CG's entities); `default`
+// uses the node's configured embedder (config.drag.embedder).
 //
-// PAYMENT (OT-RFC-55 §5.4): public CGs are FREE in V1. The x402 wire format +
-// pluggable PaymentVerifier are wired here so monetization is one swap away.
-// `simulatePrice` (e.g. "0.01 USDC") is a demo/test knob that exercises the
-// full 402 -> X-PAYMENT -> 200+receipt flow with the MockPaymentVerifier;
-// real per-CG pricing + the live facilitator are deferred (see PR notes).
+// PAYMENT (§5.4) is OFF by default (answers are free); enable with
+// config.drag.payments.enabled. The x402 wire format + a pluggable
+// PaymentVerifier are wired so monetization is one swap away.
+//
+// Dev/test knobs (`embedder`, `simulatePrice`) are honoured ONLY when
+// config.drag.experimentalOverrides is set — they are kept out of the public
+// answer contract.
 
 import { randomUUID } from 'node:crypto';
 import type { RequestContext } from './context.js';
@@ -28,23 +32,18 @@ import {
   type PaymentVerifier,
   type SettlementReceipt,
 } from '../payment.js';
-import { HashingEmbeddingProvider, LocalEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
+import type { EmbeddingProvider } from '../../vector-store.js';
 import { VectorEntityRetriever } from '../drag-retriever.js';
+import { buildEmbedder, resolveSemanticEmbedder, type EmbedderKind } from '../drag-embedder.js';
 
 // V1 default verifier. The real Coinbase/USDC facilitator drops in behind this
 // same interface (config-gated) without touching the route.
 const dragPaymentVerifier: PaymentVerifier = new MockPaymentVerifier();
 
-// Cache retrievers by embedder model so an overridden embedder (esp. the local
-// model) is loaded once, not per request.
+// Cache retrievers by embedder model so a model (esp. the local one) loads once.
 const retrieverCache = new Map<string, VectorEntityRetriever>();
 
-function resolveRetriever(kind: string, ctx: RequestContext): EntityRetriever | undefined {
-  let embedder: EmbeddingProvider | null;
-  if (kind === 'hashing') embedder = new HashingEmbeddingProvider();
-  else if (kind === 'local') embedder = new LocalEmbeddingProvider();
-  else if (kind === 'openai') embedder = ctx.embeddingProvider;
-  else embedder = null;
+function retrieverFor(embedder: EmbeddingProvider | null, ctx: RequestContext): EntityRetriever | undefined {
   if (!embedder) return undefined;
   let r = retrieverCache.get(embedder.model);
   if (!r) {
@@ -55,9 +54,8 @@ function resolveRetriever(kind: string, ctx: RequestContext): EntityRetriever | 
 }
 
 export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
-  const { req, res, agent, path, opWallets } = ctx;
+  const { req, res, agent, path, opWallets, config } = ctx;
 
-  // POST /api/answer — grounded, cited answer (local or network).
   if (req.method === 'POST' && path === '/api/answer') {
     let parsed: Record<string, unknown>;
     try {
@@ -77,9 +75,17 @@ export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
       return;
     }
 
-    // ── payment gate (localized; default free) ──────────────────────────────
-    const priceStr = typeof parsed.simulatePrice === 'string' ? parsed.simulatePrice : undefined;
+    const experimental = config.drag?.experimentalOverrides === true;
+    const paymentsEnabled = config.drag?.payments?.enabled === true;
+
+    // ── payment gate — OFF by default. `simulatePrice` is an experimental knob;
+    // real per-CG pricing is deferred, so payment only triggers when both
+    // payments AND experimental overrides are enabled. ──
     let settlement: SettlementReceipt | undefined;
+    const priceStr =
+      experimental && paymentsEnabled && typeof parsed.simulatePrice === 'string'
+        ? parsed.simulatePrice
+        : undefined;
     if (priceStr) {
       const price = parsePrice(priceStr);
       if (!price) {
@@ -87,9 +93,7 @@ export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
         return;
       }
       const payTo =
-        opWallets?.adminWallet?.address ??
-        opWallets?.wallets?.[0]?.address ??
-        '0x000000000000000000000000000000000000dEaD';
+        opWallets?.adminWallet?.address ?? opWallets?.wallets?.[0]?.address ?? '0x000000000000000000000000000000000000dEaD';
       const pay = await resolvePayment({
         price,
         network: 'base-sepolia',
@@ -100,33 +104,36 @@ export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
         verifier: dragPaymentVerifier,
       });
       if (pay.kind === 'challenge') {
-        jsonResponse(res, 402, {
-          ...build402Body(pay.required),
-          ...(pay.reason ? { reason: pay.reason } : {}),
-        });
+        jsonResponse(res, 402, { ...build402Body(pay.required), ...(pay.reason ? { reason: pay.reason } : {}) });
         return;
       }
       if (pay.kind === 'paid') settlement = pay.receipt;
     }
 
-    // ── answer ──────────────────────────────────────────────────────────────
-    const scope = parsed.scope === 'network' ? 'network' : 'local';
+    // ── retrieval selection ──
+    // Public: retrieval = "default" | "keyword" | "semantic".
+    // Experimental (gated): raw `embedder` = "keyword"|"hashing"|"local"|"openai".
+    const retrievalMode = typeof parsed.retrieval === 'string' ? parsed.retrieval : undefined;
+    const rawEmbedder = experimental && typeof parsed.embedder === 'string' ? (parsed.embedder as EmbedderKind) : undefined;
+    let retriever: EntityRetriever | undefined;
+    let forceKeyword = false;
+    if (rawEmbedder === 'keyword' || retrievalMode === 'keyword') {
+      forceKeyword = true;
+    } else if (rawEmbedder) {
+      retriever = retrieverFor(buildEmbedder(rawEmbedder, config), ctx);
+    } else if (retrievalMode === 'semantic') {
+      retriever = retrieverFor(resolveSemanticEmbedder(config), ctx);
+    } // else "default"/undefined → the agent's attached default (config.drag.embedder)
+
+    // ── answer ──
     const common = {
       question,
       contextGraphId,
-      maxCitations: typeof parsed.maxCitations === 'number' ? parsed.maxCitations : undefined,
-      maxKas: typeof parsed.maxKas === 'number' ? parsed.maxKas : undefined,
+      maxCitations: typeof parsed.maxCitations === 'number' ? parsed.maxCitations : config.drag?.maxCitations,
+      maxKas: typeof parsed.maxKas === 'number' ? parsed.maxKas : config.drag?.maxKas,
     };
-    const peers = Array.isArray(parsed.peers)
-      ? parsed.peers.filter((p): p is string => typeof p === 'string')
-      : undefined;
-    // Optional per-request retrieval override (local scope) for A/B comparison:
-    // "keyword" | "hashing" | "local" | "openai". Omit to use the node's default.
-    const embedderKind = typeof parsed.embedder === 'string' ? parsed.embedder : undefined;
-    let retriever: EntityRetriever | undefined;
-    let forceKeyword = false;
-    if (embedderKind === 'keyword') forceKeyword = true;
-    else if (embedderKind && embedderKind !== 'auto') retriever = resolveRetriever(embedderKind, ctx);
+    const scope = parsed.scope === 'network' ? 'network' : 'local';
+    const peers = Array.isArray(parsed.peers) ? parsed.peers.filter((p): p is string => typeof p === 'string') : undefined;
     try {
       const result =
         scope === 'network'

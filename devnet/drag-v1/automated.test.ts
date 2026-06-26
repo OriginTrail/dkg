@@ -105,9 +105,10 @@ beforeAll(async () => {
     await sleep(4000);
   }
 
-  // Detect whether the optional local semantic model is installed.
-  const probe = await answer(N(1), { question: 'which suppliers were flagged in the audit?', embedder: 'local' });
-  localModelAvailable = String(probe.stats?.retrieval ?? '').startsWith('vector:Xenova') && (probe.stats?.factsCited ?? 0) > 0;
+  // Detect whether a semantic embedder is reachable on this node (the optional
+  // local model, or a configured OpenAI-compatible one).
+  const probe = await answer(N(1), { question: 'which suppliers were flagged in the audit?', retrieval: 'semantic' });
+  localModelAvailable = String(probe.stats?.retrieval ?? '').startsWith('vector:') && (probe.stats?.factsCited ?? 0) > 0;
 }, 300_000);
 
 describe('dRAG P2 — single-node grounded, verifiable answer', () => {
@@ -147,38 +148,42 @@ describe('dRAG P3 — cross-node fan-out, re-verified by an asker that holds not
 });
 
 describe('dRAG P4 — payment seam', () => {
-  it('a priced request returns an x402 402 challenge (mock verifier, default config)', async () => {
+  it('payments are OFF by default — a priced request is answered for free (no settlement)', async () => {
     const r = await post(N(1), '/api/answer', {
       contextGraphId: CG,
       question: 'which suppliers were flagged in the audit?',
       simulatePrice: '0.01 USDC',
     });
-    expect(r.status).toBe(402);
-    expect(Array.isArray(r.b.accepts)).toBe(true);
+    expect(r.status).toBe(200);
+    expect(r.b.settlement).toBeUndefined();
+    expect((r.b.citations ?? []).length).toBeGreaterThan(0);
   });
 });
 
 describe('dRAG Phase 1 — semantic retrieval finds what keyword misses', () => {
   it('keyword finds the literal "flagged" supplier but MISSES the paraphrase one', async () => {
-    const kw = await answer(N(1), { question: 'which suppliers were flagged in the audit?', embedder: 'keyword' });
+    const kw = await answer(N(1), { question: 'which suppliers were flagged in the audit?', retrieval: 'keyword' });
     const ents = entitiesOf(kw);
     expect(ents).toContain('northwind'); // literal "flagged" → found
     expect(ents).not.toContain('initech'); // paraphrase → missed by substring scan
   });
 
-  it('the vector path retrieves entities (ranked), not a substring scan', async () => {
-    const hash = await answer(N(1), { question: 'which suppliers were flagged in the audit?', embedder: 'hashing' });
-    expect(String(hash.stats.retrieval)).toContain('vector:');
-    expect(hash.stats.factsCited).toBeGreaterThan(0);
-  });
-
-  it('semantic (MiniLM) reaches the paraphrase supplier [requires @huggingface/transformers]', async () => {
+  it('the semantic path retrieves entities by embedding ANN, not a substring scan', async () => {
     if (!localModelAvailable) {
-      console.warn('skipped: @huggingface/transformers not installed — semantic assertion not run');
+      console.warn('skipped: no semantic embedder reachable on this node');
       return;
     }
-    const sem = await answer(N(1), { question: 'which suppliers were flagged in the audit?', embedder: 'local' });
-    expect(String(sem.stats.retrieval)).toContain('Xenova');
+    const sem = await answer(N(1), { question: 'which suppliers were flagged in the audit?', retrieval: 'semantic' });
+    expect(String(sem.stats.retrieval)).toContain('vector:');
+    expect(sem.stats.factsCited).toBeGreaterThan(0);
+  });
+
+  it('semantic reaches the paraphrase supplier keyword cannot [requires an embedding model]', async () => {
+    if (!localModelAvailable) {
+      console.warn('skipped: no semantic embedder reachable on this node');
+      return;
+    }
+    const sem = await answer(N(1), { question: 'which suppliers were flagged in the audit?', retrieval: 'semantic' });
     expect(entitiesOf(sem)).toContain('initech');
   });
 });

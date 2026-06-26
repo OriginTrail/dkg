@@ -280,6 +280,37 @@ export interface LlmConfig {
   baseURL?: string;
 }
 
+/** dRAG (OT-RFC-55) — verifiable answering over context graphs. */
+export interface DragConfig {
+  /**
+   * Retrieval strategy. `keyword` (default) is a predictable substring match;
+   * `local` runs an offline MiniLM model (needs the optional
+   * `@huggingface/transformers` dependency); `openai` uses an OpenAI-compatible
+   * embeddings API (e.g. a local Ollama via `embedderBaseURL`); `hashing` is a
+   * zero-dependency lexical baseline (mostly a control for testing). When set to
+   * a model, semantic retrieval is the node default; otherwise keyword.
+   */
+  embedder?: 'keyword' | 'hashing' | 'local' | 'openai';
+  /** Embedding model id for `local`/`openai` (defaults per provider). */
+  embedderModel?: string;
+  /** Base URL for an OpenAI-compatible embeddings API (falls back to `llm.baseURL`). */
+  embedderBaseURL?: string;
+  /** API key for the embeddings API (falls back to `llm.apiKey`). */
+  embedderApiKey?: string;
+  /** x402 payment settings. Disabled by default — answers are free. */
+  payments?: { enabled?: boolean };
+  /** Cap on entities retrieved per answer (default 25). */
+  maxKas?: number;
+  /** Default cap on cited facts per answer (default 12). */
+  maxCitations?: number;
+  /**
+   * Allow per-request retrieval/embedder/price overrides (`embedder`,
+   * `simulatePrice`) on POST /api/answer. For development + testing only;
+   * default false (keeps the public answer contract clean).
+   */
+  experimentalOverrides?: boolean;
+}
+
 export type LocalAgentIntegrationStatus =
   | 'disconnected'
   | 'configured'
@@ -490,6 +521,8 @@ export interface DkgConfig {
   chain?: Partial<ChainConfig>;
   /** Optional LLM for the Node UI chatbot (natural language → SPARQL, answers). */
   llm?: LlmConfig;
+  /** dRAG (OT-RFC-55) — verifiable answering over context graphs. */
+  drag?: DragConfig;
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
   /** Triple store backend override (default: oxigraph-worker with file persistence). */

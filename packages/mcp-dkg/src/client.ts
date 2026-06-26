@@ -475,12 +475,14 @@ export class DkgClient {
     question: string;
     contextGraphId?: string;
     scope?: 'local' | 'network';
+    retrieval?: 'default' | 'keyword' | 'semantic';
     maxCitations?: number;
     maxKas?: number;
   }): Promise<DragAnswerResult> {
     const body: Record<string, unknown> = { question: args.question };
     if (args.contextGraphId) body.contextGraphId = args.contextGraphId;
     if (args.scope) body.scope = args.scope;
+    if (args.retrieval) body.retrieval = args.retrieval;
     if (args.maxCitations != null) body.maxCitations = args.maxCitations;
     if (args.maxKas != null) body.maxKas = args.maxKas;
     return this.request<DragAnswerResult>('POST', '/api/answer', body);
