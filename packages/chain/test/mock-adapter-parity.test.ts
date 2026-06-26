@@ -124,6 +124,11 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // write-failover helpers above.
   'readWithFailover',
   'contractReadWithFailover',
+  // TEMPORARY P1 helper (#1336): translates the legacy `{ attemptTimeoutMs,
+  // multiAttemptTimeoutMs }` knobs to a named `ReadPolicy` for the read
+  // delegators while the transport loop lives in `RpcFailoverClient`. Removed
+  // in P3 when call sites adopt the named-policy facades.
+  'legacyReadPolicy',
   'queryFilterWithFailover',
   'rebindContract',
   'rebindSigner',

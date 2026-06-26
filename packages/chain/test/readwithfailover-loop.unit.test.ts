@@ -206,9 +206,12 @@ describe('readWithFailover — per-attempt cap (log-scan stall fix)', () => {
     const only = { read: delayedRead(5_000, 'ONLY') };
     (a as any).providers = [only];
 
-    const settled = (a as any).readWithFailover('funding', (pr: any) => pr.read(), { attemptTimeoutMs: 1_000 })
+    const settled = (a as any).readWithFailover('funding', (pr: any) => pr.read(), { attemptTimeoutMs: RPC_READ_STALL_TIMEOUT_MS })
       .then((r: unknown) => r, (e: unknown) => e);
-    await vi.advanceTimersByTimeAsync(1_500); // exceeds the 1s hard cap → aborts; single → exhausted
+    // attemptTimeoutMs now maps to the `failOpenFundingRead` policy (caps every
+    // attempt incl. single-RPC at RPC_READ_STALL_TIMEOUT_MS); advance past it so
+    // the 5s read aborts → single → exhausted.
+    await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS + 1_500);
     const outcome: any = await settled;
     expect(outcome.code).toBe('RPC_ENDPOINTS_EXHAUSTED');
     expect(only.read.calls).toHaveLength(1);

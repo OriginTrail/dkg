@@ -24,6 +24,7 @@ import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvm
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isKnownTransactionError, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { noteRpcFailover, noteRpcExhaustion, rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
+import { RpcFailoverClient, type ReadPolicy } from './rpc-failover-client.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
@@ -307,21 +308,6 @@ async function contractAddress(contract: Contract): Promise<string> {
   throw new Error('DKGKnowledgeAssets address is unavailable from the resolved contract handle.');
 }
 
-/**
- * Failover classifier for CONTRACT VIEW reads (`contractReadWithFailover`'s
- * default): the generic `isRetryableRpcError` transient set MINUS `BAD_DATA`.
- * A view `BAD_DATA` ("could not decode result data") is a DETERMINISTIC
- * client-side decode of an empty / wrong-shape return for the ABI type — not an
- * RPC outage — so failing over would re-hit the same decode on every endpoint
- * and mask it as `RPC_ENDPOINTS_EXHAUSTED`. The pre-PR FallbackProvider never
- * failed over on a post-decode error; this restores that. (Direct provider reads
- * — getCode/getBalance/getNetwork — never produce BAD_DATA, so they keep the
- * unmodified `isRetryableRpcError`.)
- */
-function isContractViewRetryable(err: unknown): boolean {
-  return isRetryableRpcError(err) && errorCode(err) !== 'BAD_DATA';
-}
-
 export class EVMChainAdapterBase {
   /** See `ChainAdapter.deploymentId`. */
   get deploymentId(): string {
@@ -348,6 +334,15 @@ export class EVMChainAdapterBase {
   protected readonly providers: JsonRpcProvider[];
 
   protected readonly rpcUrls: string[];
+
+  /**
+   * The pure per-endpoint RPC transport mechanism (#1336). Owns the read
+   * failover loop + the named timeout-policy matrix + typed exhaustion;
+   * constructed in the constructor with LIVE thunks over `this.providers` /
+   * `this.rpcUrls` and the `signPopulatedTransaction` callback, so it never holds
+   * a back-reference to the adapter and never owns tx-safety state.
+   */
+  protected readonly rpcFailover: RpcFailoverClient;
 
   protected readonly filterErrorSilencer: FilterErrorSilencer;
 
@@ -652,6 +647,19 @@ export class EVMChainAdapterBase {
     // to the loop provider (`readWithFailover`) and every WRITE reconnects
     // per-endpoint explicitly, so this binding is never the failover surface.
     this.provider = this.primaryProvider;
+    // Construct the transport client AFTER `this.providers`/`this.rpcUrls` are
+    // set (above). The three capabilities are LIVE thunks / a callback (PLAN §0
+    // D1/D2): reading `providers`/`rpcUrls` live keeps tests that reassign
+    // `(a as any).providers` working, and routing signing through
+    // `signPopulatedTransaction` keeps that pure helper (with the #870 signer
+    // stub) on the adapter. No failover read can run before this point — the
+    // constructor below only builds Wallets/Contracts and a lazily-resolved
+    // HubResolutionCache.
+    this.rpcFailover = new RpcFailoverClient(
+      () => this.providers,
+      () => this.rpcUrls,
+      (signer, populated) => this.signPopulatedTransaction(signer, populated),
+    );
     const providerContext = formatProviderContext(config);
     // PR-8: install the filter-not-found silencer. Without this, RPC
     // nodes that GC filters faster than ethers' polling cadence
@@ -828,86 +836,44 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * Per-endpoint read-failover primitive (the bare `this.providers[]`, no
-   * FallbackProvider). Runs `fn` against each provider in turn; on a RETRYABLE
-   * error advances to the next (host-only `noteRpcFailover` per hop) and, once
-   * all are exhausted, throws the typed `RPC_ENDPOINTS_EXHAUSTED` (→ bounded
-   * 503). A NON-retryable error is rethrown AT ONCE (failing over a deterministic
-   * chain error would only mask it). The default "retryable?" classifier is
-   * `isRetryableRpcError`; override it via `opts.isRetryable` for reads whose
-   * error shapes carry domain meaning (a contract view's `BAD_DATA`,
-   * `getMaxKaNumberForAuthor`'s absent-view).
-   *
-   * The per-attempt `withTimeout` is a hard deadline that ABORTS and fails over a
-   * hung backend:
-   *   - MULTI-RPC: every attempt capped at `RPC_READ_STALL_TIMEOUT_MS` (4s, suits
-   *     a POINT read); a WIDE read (a multi-thousand-block `eth_getLogs`) raises
-   *     it via `opts.multiAttemptTimeoutMs` so a slow-but-healthy scan isn't
-   *     aborted + failed over into a spurious exhaustion.
-   *   - SINGLE-RPC: uncapped (nothing to fail over to; #894) UNLESS
-   *     `opts.attemptTimeoutMs` is given (a hard bound on EVERY attempt incl.
-   *     single-RPC — fail-open funding reads that must not stall selection).
-   *
-   * `fn` receives the active provider (`p => p.getCode(addr)`, or for a view
-   * `p => contract.connect(p).someView(args)`) and MUST be a PURE read — no
-   * sign / broadcast / WAL — since it may execute on more than one provider.
+   * TEMPORARY delegator (P1 of #1336): the per-endpoint read-failover loop now
+   * lives in `this.rpcFailover.read` (`rpc-failover-client.ts`). This thin
+   * pass-through keeps the existing call sites (which still pass the legacy
+   * `{ attemptTimeoutMs, multiAttemptTimeoutMs }` knobs) compiling and
+   * byte-identical while the transport mechanism moves out of the base; it is
+   * REMOVED in P3 when those call sites adopt the `readProvider`/`readContract`
+   * facades with an explicit named policy (PLAN §0 D4).
    */
-  protected async readWithFailover<T>(
+  protected readWithFailover<T>(
     label: string,
     fn: (provider: JsonRpcProvider) => Promise<T>,
     opts?: {
       attemptTimeoutMs?: number;
       multiAttemptTimeoutMs?: number;
-      // Override the "should this error fail over?" classifier (default
-      // `isRetryableRpcError`).
       isRetryable?: (err: unknown) => boolean;
     },
   ): Promise<T> {
-    const isRetryable = opts?.isRetryable ?? isRetryableRpcError;
-    let lastRetryable: unknown;
-    for (let i = 0; i < this.providers.length; i += 1) {
-      const isLast = i === this.providers.length - 1;
-      // Per-attempt hard deadline (see the method doc — NOT the old FallbackProvider
-      // stallTimeout, which parallelized a backup rather than aborting a read):
-      //   - MULTI-RPC: cap every attempt — `attemptTimeoutMs` if given, else
-      //     `multiAttemptTimeoutMs` (raised for WIDE log scans so a slow-but-healthy
-      //     getLogs isn't aborted), else the 4s point-read default.
-      //   - SINGLE-RPC: uncapped UNLESS `attemptTimeoutMs` is given (fail-open
-      //     funding reads); `multiAttemptTimeoutMs` never caps single-RPC (#894 —
-      //     nothing to fail over to).
-      const capMs = opts?.attemptTimeoutMs
-        ?? (this.providers.length > 1
-          ? (opts?.multiAttemptTimeoutMs ?? RPC_READ_STALL_TIMEOUT_MS)
-          : undefined);
-      try {
-        const attempt = fn(this.providers[i]);
-        return await (capMs == null
-          ? attempt
-          : withTimeout(attempt, capMs, `${label} via RPC #${i + 1}`));
-      } catch (err) {
-        if (!isRetryable(err)) throw err;
-        lastRetryable = err;
-        if (!isLast) {
-          noteRpcFailover(label, this.rpcUrls[i], err, this.rpcUrls[i + 1]);
-        }
-      }
-    }
-    if (lastRetryable) noteRpcExhaustion(label, this.rpcUrls);
-    // Single provider → carry the typed code but keep the original message
-    // byte-identical (there is no second endpoint, so the raw message reads
-    // cleaner and any message-inspecting caller keeps seeing it). Multiple
-    // providers → the host-only "all endpoints" aggregate (never full URLs —
-    // a configured rpcUrl may carry an API key and this message can reach HTTP
-    // clients via response paths that echo err.message). Mirrors the write
-    // preparation loop's single-vs-multi message handling.
-    const message = this.providers.length <= 1
-      ? errorMessage(lastRetryable)
-      : `${label} read failed on all configured RPC endpoints ` +
-        `(${this.rpcUrls.map(rpcHost).join(', ')}): ${errorMessage(lastRetryable)}`;
-    throw new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', message, {
-      cause: lastRetryable,
-      rpcUrls: this.rpcUrls,
+    return this.rpcFailover.read(label, fn, {
+      policy: this.legacyReadPolicy(opts),
+      isRetryable: opts?.isRetryable,
     });
+  }
+
+  /**
+   * TEMPORARY (P1 of #1336): translate the legacy `{ attemptTimeoutMs,
+   * multiAttemptTimeoutMs }` timeout knobs to a named `ReadPolicy` so the read
+   * delegators keep byte-identical timeout behaviour while the transport loop
+   * lives in `RpcFailoverClient`. The mapping is EXACT for the only values the
+   * codebase ever passes: `attemptTimeoutMs: RPC_READ_STALL_TIMEOUT_MS` (4s) →
+   * `failOpenFundingRead` (caps every attempt incl. single); `multiAttemptTimeoutMs:
+   * RPC_LOG_SCAN_TIMEOUT_MS` (30s) → `wideLogScan` (30s multi / uncapped single);
+   * neither → `pointRead` (4s multi / uncapped single). Removed in P3 when call
+   * sites pass an explicit policy.
+   */
+  private legacyReadPolicy(opts?: { attemptTimeoutMs?: number; multiAttemptTimeoutMs?: number }): ReadPolicy {
+    if (opts?.attemptTimeoutMs != null) return 'failOpenFundingRead';
+    if (opts?.multiAttemptTimeoutMs != null) return 'wideLogScan';
+    return 'pointRead';
   }
 
   /**
@@ -926,12 +892,12 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * `readWithFailover` for a CONTRACT VIEW read: runs `fn` against `contract`
-   * rebound to each provider in turn (failover), leaving `this.contracts.*`
-   * untouched. `fn` MUST be a pure view read. The default failover classifier is
-   * `isContractViewRetryable` (the transient set MINUS `BAD_DATA`, which on a
-   * view is a deterministic decode, not an outage, so it is rethrown rather than
-   * failed over and masked as exhaustion); a caller may pass its own `isRetryable`.
+   * TEMPORARY delegator (P1 of #1336): a CONTRACT VIEW read now routes through
+   * `this.rpcFailover.readContract` (which owns the rebind + the default
+   * `isContractViewRetryable` classifier). This pass-through keeps the existing
+   * call sites compiling and byte-identical (legacy timeout knobs translated via
+   * `legacyReadPolicy`) until P3 migrates them to the `readContract` facade with
+   * an explicit named policy (PLAN §0 D4).
    */
   protected contractReadWithFailover<T>(
     label: string,
@@ -943,9 +909,9 @@ export class EVMChainAdapterBase {
       isRetryable?: (err: unknown) => boolean;
     },
   ): Promise<T> {
-    return this.readWithFailover(label, (p) => fn(this.rebindContract(contract, p)), {
-      ...opts,
-      isRetryable: opts?.isRetryable ?? isContractViewRetryable,
+    return this.rpcFailover.readContract(label, contract, fn, {
+      policy: this.legacyReadPolicy(opts),
+      isRetryable: opts?.isRetryable,
     });
   }
 
