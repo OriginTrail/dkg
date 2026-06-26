@@ -244,6 +244,7 @@ describe('RpcFailoverClient.getReceipt — sawNonErrorResponse/null vs RPC_RECEI
     expect(thrown.code).not.toBe('RPC_ENDPOINTS_EXHAUSTED'); // the receipt poll must tell these apart
     expect(thrown.txHash).toBe('0xCAFE');
     expect(thrown.message).toContain('0xCAFE');
+    expect(thrown.message).not.toContain('https://'); // host-only, symmetric with broadcast/populateAndSign
   });
 
   it('a non-retryable receipt error propagates AT ONCE (backup untouched)', async () => {

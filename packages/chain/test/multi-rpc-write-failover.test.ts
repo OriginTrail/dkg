@@ -73,6 +73,11 @@ describe('multi-RPC write failover (real loopback providers)', () => {
     for (const s of servers.splice(0)) await s.close();
   });
 
+  // These tests drive the real adapter via the retained D3 delegator
+  // `broadcastSignedTransactionWithFailover` (#1336) to prove the broadcast loop
+  // over REAL loopback providers. The module-level broadcast assertion-port
+  // checklist (isKnownTransactionError short-circuit, exhaustion code-stamp,
+  // host-only message) lives in rpc-failover-client.unit.test.ts.
   // ── CONTROL (GREEN today): real broadcast over a healthy loopback provider ──
   it('control: broadcasts a real signed tx to a healthy primary (no failover)', async () => {
     const { signedTx, txHash } = await signTx();

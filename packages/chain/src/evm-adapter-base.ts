@@ -839,10 +839,12 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * Rebind a CONTRACT to `runner` (a provider for a view read, or a signer for a
-   * write populate) for one per-endpoint attempt, leaving the boot-bound
-   * `this.contracts.*` handle untouched. The `as Contract` recovers the
-   * dynamic-method index signature ethers' `BaseContract.connect` drops.
+   * Rebind a CONTRACT to a `provider` for one per-endpoint VIEW read, leaving the
+   * boot-bound `this.contracts.*` handle untouched. The sole remaining base caller
+   * is the `getMaxKaNumberForAuthor` staticCall (a `readProvider` lambda); the
+   * write-path signer rebind lives in the module's `populateAndSign`. The
+   * `as Contract` recovers the dynamic-method index signature ethers'
+   * `BaseContract.connect` drops.
    */
   protected rebindContract(contract: Contract, runner: JsonRpcProvider | Wallet): Contract {
     return contract.connect(runner) as Contract;

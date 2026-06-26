@@ -53,7 +53,8 @@ export const RPC_READ_STALL_TIMEOUT_MS = 4_000;
  * and fail it over across every endpoint → spurious `RPC_ENDPOINTS_EXHAUSTED`
  * (which, in the poller, escapes before the cursor advances → a permanent
  * stall). 30s still hard-bounds a genuinely hung backend on a multi-RPC node;
- * it is passed as `multiAttemptTimeoutMs`, so single-RPC stays uncapped (#894).
+ * it is consumed via the `wideLogScan` ReadPolicy in `resolveCapMs`
+ * (rpc-failover-client.ts), so single-RPC stays uncapped (#894).
  * Larger than `KA_HIGH_WATER_PAGE_TIMEOUT_MS` (15s) because that bounds smaller
  * 2,000-block pages, whereas this covers the wider 9,000-block poller window.
  */
