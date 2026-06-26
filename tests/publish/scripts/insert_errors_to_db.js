@@ -120,7 +120,23 @@ for (const file of files) {
     try {
         await db.connect();
         console.log(`✅ Connected to DB (${isMainnet ? 'mainnet' : 'testnet'})`);
-        
+
+        // Auto-create the target table if it doesn't exist yet (idempotent — a
+        // no-op for the long-lived mainnet table, creates the testnet table on
+        // its first import). Schema mirrors error_messages_mainnet_js exactly.
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS ${tableName} (
+                node_name TEXT,
+                blockchain_id TEXT,
+                ka_label TEXT,
+                publish_error TEXT,
+                query_error TEXT,
+                publisher_get_error TEXT,
+                non_publisher_get_error TEXT,
+                time_stamp TIMESTAMP
+            )
+        `);
+
         // Start transaction
         await db.query('BEGIN');
     } catch (err) {
