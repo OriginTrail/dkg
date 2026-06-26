@@ -41,10 +41,24 @@ export class VectorEntityRetriever implements EntityRetriever {
   }
 
   /**
+   * Fire-and-forget index warm-up — e.g. right after a publish, so the first
+   * query against fresh facts is not the one that pays for embedding. Never
+   * throws; indexing is incremental so this is cheap when nothing is new.
+   */
+  async warm(cgName: string): Promise<void> {
+    try {
+      await this.ensureIndexed(cgName);
+    } catch {
+      /* best effort */
+    }
+  }
+
+  /**
    * Synchronously (build-then-search) ensure this CG's VM entities are indexed
-   * under the current embedding model. Rebuilds when new entities have appeared
-   * since the last index (cheap freshness check: distinct-entity count). Inserts
-   * are idempotent (deterministic ids), so re-indexing is safe + self-healing.
+   * under the current embedding model. Re-scans when new entities have appeared
+   * since the last index (cheap freshness check: distinct-entity count) and only
+   * embeds the delta (incremental — see buildIndex). Inserts are idempotent
+   * (deterministic ids), so re-indexing is safe + self-healing.
    */
   private async ensureIndexed(cgName: string): Promise<void> {
     const vmPrefix = `did:dkg:context-graph:${cgName}/_verifiable_memory/`;
@@ -65,6 +79,9 @@ export class VectorEntityRetriever implements EntityRetriever {
   }
 
   private async buildIndex(cgName: string, vmPrefix: string): Promise<void> {
+    // Incremental: skip entities already embedded under this model so a re-scan
+    // only embeds newly-published entities (embedding is the expensive step).
+    const existing = await this.vectorStore.listIds(cgName, this.model);
     const r = await this.store
       .query(`SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${vmPrefix}")) }`)
       .catch(() => null);
@@ -86,6 +103,8 @@ export class VectorEntityRetriever implements EntityRetriever {
     }
 
     for (const { g, s, props } of byEntity.values()) {
+      const id = `${this.model}:${g}:${s}`;
+      if (existing.has(id)) continue; // already embedded — incremental skip
       const text = renderEntityText(s, props);
       let embedding: number[];
       try {
@@ -94,7 +113,7 @@ export class VectorEntityRetriever implements EntityRetriever {
         continue; // embedder unavailable (e.g. local model not installed) — skip
       }
       await this.vectorStore.insert({
-        id: `${this.model}:${g}:${s}`,
+        id,
         embedding,
         sourceUri: g,
         entityUri: s,

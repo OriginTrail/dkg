@@ -183,6 +183,18 @@ export class VectorStore {
     return row.cnt;
   }
 
+  /**
+   * All embedding ids for a CG (optionally a single model). The indexer uses
+   * this to skip entities already embedded, so re-indexing only embeds the
+   * delta (incremental indexing) rather than re-embedding the whole graph.
+   */
+  async listIds(contextGraphId: string, model?: string): Promise<Set<string>> {
+    const rows = model
+      ? (this.db.prepare('SELECT id FROM embeddings WHERE context_graph_id = ? AND model = ?').all(contextGraphId, model) as Array<{ id: string }>)
+      : (this.db.prepare('SELECT id FROM embeddings WHERE context_graph_id = ?').all(contextGraphId) as Array<{ id: string }>);
+    return new Set(rows.map((r) => r.id));
+  }
+
   close(): void {
     this.db.close();
   }

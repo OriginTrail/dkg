@@ -2312,6 +2312,10 @@ export async function runDaemonInner(
       ...event,
       timestamp: new Date().toISOString(),
     });
+    // dRAG: warm the semantic index for this CG after a memory change (e.g. a
+    // publish) so the first query against fresh facts is not the one that pays
+    // for embedding. Best-effort + incremental (a no-op when nothing is new).
+    void agent.entityRetriever?.warm?.(event.contextGraphId);
   }
   // A5: single generic `notification` SSE refresh for the bell pane. Fired
   // once per scoped notification write (join_* + assertion_activity) so the

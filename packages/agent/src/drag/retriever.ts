@@ -30,4 +30,10 @@ export interface EntityRetriever {
    * lazily (build-then-search on first use) and keep the index fresh.
    */
   retrieve(question: string, contextGraphName: string, limit: number): Promise<RetrievedAnchor[]>;
+  /**
+   * Optional: warm the index for a context graph ahead of any query (e.g. right
+   * after a publish). Best-effort and must never throw; indexing is incremental
+   * so it is cheap when nothing new has been published.
+   */
+  warm?(contextGraphName: string): Promise<void>;
 }
