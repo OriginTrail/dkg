@@ -37,10 +37,10 @@ export class AckSignMethods extends EVMChainAdapterBase {
         'Verify cannot enforce ACK quorum without a real chain read — fix the adapter wiring or pass an explicit override.',
       );
     }
-    const value = Number(await this.contractReadWithFailover(
-      'parametersStorage.minimumRequiredSignatures',
+    const value = Number(await this.readContract(
       this.contracts.parametersStorage,
-      (c) => c.minimumRequiredSignatures(),
+      'parametersStorage.minimumRequiredSignatures',
+      'minimumRequiredSignatures',
     ));
     this.cachedMinRequiredSignatures = { value, cachedAt: now };
     return value;
@@ -56,8 +56,8 @@ export class AckSignMethods extends EVMChainAdapterBase {
         'Verify path cannot enforce sharding-table eligibility without it.',
       );
     }
-    return Boolean(await this.contractReadWithFailover(
-      'shardingTableStorage.nodeExists', storage, (c) => c.nodeExists(identityId),
+    return Boolean(await this.readContract(
+      storage, 'shardingTableStorage.nodeExists', 'nodeExists', identityId,
     ));
   }
 
@@ -86,17 +86,17 @@ export class AckSignMethods extends EVMChainAdapterBase {
       if (!identityStorage) return { valid: false, reason: 'rpc-error' };
 
       const keyHash = ethers.keccak256(ethers.solidityPacked(['address'], [recoveredAddress]));
-      const hasPurpose: boolean = await this.contractReadWithFailover(
-        'identityStorage.keyHasPurpose', identityStorage,
-        (c) => c.keyHasPurpose(claimedIdentityId, keyHash, OPERATIONAL_KEY_PURPOSE),
+      const hasPurpose: boolean = await this.readContract(
+        identityStorage, 'identityStorage.keyHasPurpose',
+        'keyHasPurpose', claimedIdentityId, keyHash, OPERATIONAL_KEY_PURPOSE,
       );
       if (!hasPurpose) return { valid: false, reason: 'key-not-registered' };
 
       const shardingTableStorage = await this.resolveContract('ShardingTableStorage');
       if (!shardingTableStorage) return { valid: false, reason: 'rpc-error' };
-      const inST: boolean = Boolean(await this.contractReadWithFailover(
-        'shardingTableStorage.nodeExists', shardingTableStorage,
-        (c) => c.nodeExists(claimedIdentityId),
+      const inST: boolean = Boolean(await this.readContract(
+        shardingTableStorage, 'shardingTableStorage.nodeExists',
+        'nodeExists', claimedIdentityId,
       ));
       if (!inST) return { valid: false, reason: 'not-in-sharding-table' };
       return { valid: true };
@@ -130,9 +130,9 @@ export class AckSignMethods extends EVMChainAdapterBase {
     if (!identityStorage) return false;
 
     const keyHash = ethers.keccak256(ethers.solidityPacked(['address'], [recoveredAddress]));
-    return this.contractReadWithFailover(
-      'identityStorage.keyHasPurpose', identityStorage,
-      (c) => c.keyHasPurpose(claimedIdentityId, keyHash, OPERATIONAL_KEY_PURPOSE),
+    return this.readContract(
+      identityStorage, 'identityStorage.keyHasPurpose',
+      'keyHasPurpose', claimedIdentityId, keyHash, OPERATIONAL_KEY_PURPOSE,
     );
   }
 

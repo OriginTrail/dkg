@@ -31,8 +31,8 @@ export class StorageReadMethods extends EVMChainAdapterBase {
   async getLatestMerkleRoot(kaId: bigint): Promise<Uint8Array> {
     await this.init();
     const kas = this.requireKCStorage();
-    const rootHex: string = await this.contractReadWithFailover(
-      'kas.getLatestMerkleRoot', kas, (c) => c.getLatestMerkleRoot(kaId),
+    const rootHex: string = await this.readContract(
+      kas, 'kas.getLatestMerkleRoot', 'getLatestMerkleRoot', kaId,
     );
     return ethers.getBytes(rootHex);
   }
@@ -40,8 +40,8 @@ export class StorageReadMethods extends EVMChainAdapterBase {
   async getMerkleLeafCount(kaId: bigint): Promise<number> {
     await this.init();
     const kas = this.requireKCStorage();
-    const count: bigint = BigInt(await this.contractReadWithFailover(
-      'kas.getMerkleLeafCount', kas, (c) => c.getMerkleLeafCount(kaId),
+    const count: bigint = BigInt(await this.readContract(
+      kas, 'kas.getMerkleLeafCount', 'getMerkleLeafCount', kaId,
     ));
     return Number(count);
   }
@@ -49,8 +49,8 @@ export class StorageReadMethods extends EVMChainAdapterBase {
   async getCatalogRoot(kaId: bigint): Promise<Uint8Array> {
     await this.init();
     const kas = this.requireKCStorage();
-    const rootHex: string = await this.contractReadWithFailover(
-      'kas.getCatalogRoot', kas, (c) => c.getCatalogRoot(kaId),
+    const rootHex: string = await this.readContract(
+      kas, 'kas.getCatalogRoot', 'getCatalogRoot', kaId,
     );
     return ethers.getBytes(rootHex);
   }
@@ -58,8 +58,8 @@ export class StorageReadMethods extends EVMChainAdapterBase {
   async getCatalogLeafCount(kaId: bigint): Promise<number> {
     await this.init();
     const kas = this.requireKCStorage();
-    const count: bigint = BigInt(await this.contractReadWithFailover(
-      'kas.getCatalogLeafCount', kas, (c) => c.getCatalogLeafCount(kaId),
+    const count: bigint = BigInt(await this.readContract(
+      kas, 'kas.getCatalogLeafCount', 'getCatalogLeafCount', kaId,
     ));
     return Number(count);
   }
@@ -67,8 +67,8 @@ export class StorageReadMethods extends EVMChainAdapterBase {
   async getLatestMerkleRootPublisher(kaId: bigint): Promise<string> {
     await this.init();
     const kas = this.requireKCStorage();
-    const publisher: string = await this.contractReadWithFailover(
-      'kas.getLatestMerkleRootPublisher', kas, (c) => c.getLatestMerkleRootPublisher(kaId),
+    const publisher: string = await this.readContract(
+      kas, 'kas.getLatestMerkleRootPublisher', 'getLatestMerkleRootPublisher', kaId,
     );
     return publisher;
   }
@@ -76,8 +76,8 @@ export class StorageReadMethods extends EVMChainAdapterBase {
   async getLatestMerkleRootAuthor(kaId: bigint): Promise<string> {
     await this.init();
     const kas = this.requireKCStorage();
-    const author: string = await this.contractReadWithFailover(
-      'kas.getLatestMerkleRootAuthor', kas, (c) => c.getLatestMerkleRootAuthor(kaId),
+    const author: string = await this.readContract(
+      kas, 'kas.getLatestMerkleRootAuthor', 'getLatestMerkleRootAuthor', kaId,
     );
     return author;
   }

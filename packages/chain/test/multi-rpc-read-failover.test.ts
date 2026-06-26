@@ -6,8 +6,8 @@
  * Why this file exists: the ~170 adapter failover tests inject bare-object
  * provider mocks (`(a as any).providers = [...]`) that bypass JsonRpcProvider /
  * FetchRequest / the read path entirely, AND they only cover WRITES. The READ
- * failover path (today: ethers `FallbackProvider`; after R1: an explicit
- * `readWithFailover` loop over the bare providers) has ZERO real coverage.
+ * failover path (was: ethers `FallbackProvider`; after R1/#1336: the explicit
+ * `RpcFailoverClient` read loop over the bare providers) has ZERO real coverage.
  * Empirically the current FallbackProvider read path does NOT reliably fail over
  * on a fast 429 (it advances only on a 4s STALL; even at the default retry
  * budget it can surface the primary's error with a healthy backup) — so R1 is a
@@ -25,8 +25,8 @@
  * ── UN-SKIP PROTOCOL (HARD S1-ACCEPTANCE GATE, lead-mandated 2026-06-25) ──
  * Trigger: the moment ChainEngineer signals reads (getEvmChainId / Hub
  * getContractAddress / resolveContract / contract-views) route through
- * `readWithFailover` over the bare `this.providers[]` with per-endpoint
- * retries = 0 for multi-RPC, flip ALL `describe.skip` TARGET blocks below to
+ * the `RpcFailoverClient` read loop over the bare `this.providers[]` with
+ * per-endpoint retries = 0 for multi-RPC, flip ALL `describe.skip` TARGET blocks below to
  * live `describe`. They MUST then be GREEN — S1 is NOT complete until these are
  * live-green (lead + TxSafetyReviewer require it at S1 sign-off; the skip is
  * provably temporary, not optional). Kept skip ONLY while S1 is mid-flight so a
@@ -37,7 +37,9 @@
  * with a healthy backup = no failover). Do NOT weaken the assertions.
  */
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { JsonRpcProvider } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { RpcFailoverClient } from '../src/rpc-failover-client.js';
 import { startLoopbackRpc, type LoopbackRpc } from './loopback-rpc-harness.js';
 import { getRpcFailoverStats, _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 
@@ -93,8 +95,8 @@ describe('multi-RPC read failover (real loopback providers)', () => {
   });
 
   // ── TARGET (immediate failover) ──────────────────────────────────────────
-  // UN-SKIP when R1 routes reads through `readWithFailover` over the bare
-  // providers AND multi-RPC sets per-endpoint retries = 0. On the CURRENT code
+  // UN-SKIP when R1 routes reads through the `RpcFailoverClient` read loop over
+  // the bare providers AND multi-RPC sets per-endpoint retries = 0. On the CURRENT code
   // these are RED (the FallbackProvider read path does not immediately fail over
   // a fast 429), which is exactly the regression this gate locks. Verified
   // entrypoint: getEvmChainId() -> this.provider.getNetwork() (a "direct
@@ -135,21 +137,33 @@ describe('multi-RPC read failover (real loopback providers)', () => {
     });
   });
 
-  // Direct unit of the new read-failover primitive. UN-SKIP when
-  // `readWithFailover` exists. Asserts the loop advances on a retryable error
-  // and serves from the next provider — the read-side mirror of the write loops.
-  describe('TARGET — readWithFailover primitive (R1)', () => {
+  // Direct unit of the extracted read-failover primitive (#1336): the
+  // `RpcFailoverClient.read` loop advances on a retryable error and serves from
+  // the next provider — the read-side mirror of the write loops. Driven over the
+  // adapter's REAL constructed providers + URLs (PLAN §0 D7) so the end-to-end
+  // immediacy property (boundedRetryFetchRequest(url,0), no per-endpoint backoff)
+  // is still asserted against real JsonRpcProviders.
+  describe('TARGET — RpcFailoverClient.read primitive (R1, #1336)', () => {
     it('advances to the next provider on a retryable error and serves its result', async () => {
       const primary = trackServer(await startLoopbackRpc({ throttle: ['eth_getCode'] }));
       const backup = trackServer(await startLoopbackRpc());
       const a = track(new EVMChainAdapter(minimalConfig({ rpcUrl: primary.url, rpcUrls: [backup.url] })));
 
-      const readWithFailover = (a as unknown as {
-        readWithFailover: <T>(label: string, fn: (p: { getCode: (addr: string) => Promise<string> }) => Promise<T>) => Promise<T>;
-      }).readWithFailover;
+      // Construct the module over the adapter's bare constructed providers (the
+      // multi-RPC retries=0 wiring rides along) — exactly the three capability
+      // thunks the adapter uses. The read family never signs, so the callback
+      // throws if ever reached.
+      const client = new RpcFailoverClient(
+        () => (a as unknown as { providers: JsonRpcProvider[] }).providers,
+        () => a.getRpcUrls(),
+        async () => { throw new Error('read path must not sign'); },
+      );
 
-      const code = await readWithFailover.call(a, 'getCode', (p) => p.getCode(HUB));
+      const code = await client.read('getCode', (p) => p.getCode(HUB));
       expect(code).toBe('0x1234');
+      // Immediate: the throttled primary's eth_getCode is attempted exactly ONCE
+      // (no 5× same-endpoint backoff before failing over), proving the
+      // boundedRetryFetchRequest(url, 0) no-backoff wiring end-to-end.
       expect(primary.hits('eth_getCode')).toBe(1);
       expect(backup.hits('eth_getCode')).toBeGreaterThanOrEqual(1);
     });

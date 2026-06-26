@@ -250,14 +250,14 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
     expect(stale.getMaxKaNumberForAuthor.staticCall.calls).toEqual([]);
   });
 
-  // The view staticCall now routes THROUGH readWithFailover (base:2132) with a
-  // CUSTOM classifier (isRetryableRpcError minus the absent-view / bareRevert
-  // shapes), giving it the per-attempt stall timeout + endpoint failover the old
-  // bespoke loop lacked — while preserving the boundary: a TRANSIENT error fails
-  // over to the next endpoint, but a DETERMINISTIC absent-view
+  // The view staticCall now routes THROUGH readProvider (this.rpcFailover.read,
+  // #1336) with a CUSTOM classifier (isRetryableRpcError minus the absent-view /
+  // bareRevert shapes), giving it the per-attempt stall timeout + endpoint failover
+  // the old bespoke loop lacked — while preserving the boundary: a TRANSIENT error
+  // fails over to the next endpoint, but a DETERMINISTIC absent-view
   // (BAD_DATA/CALL_EXCEPTION) is non-retryable -> rethrown straight to the catch
   // -> the pre-10.0.4 scan (never failed over / masked as RPC_ENDPOINTS_EXHAUSTED).
-  it('getMaxKaNumber view (readWithFailover): a TRANSIENT 429 fails over to the next endpoint and answers from the view (no scan)', async () => {
+  it('getMaxKaNumber view (readProvider): a TRANSIENT 429 fails over to the next endpoint and answers from the view (no scan)', async () => {
     const queryFilter = recorder(async () => []);
     let attempt = 0;
     const storage: any = {
@@ -276,7 +276,7 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
     expect(queryFilter.calls).toEqual([]); // the view answered → NEVER scans logs
   });
 
-  it('getMaxKaNumber view (readWithFailover): an ABSENT-view (BAD_DATA) is deterministic across endpoints — no failover, straight to the scan', async () => {
+  it('getMaxKaNumber view (readProvider): an ABSENT-view (BAD_DATA) is deterministic across endpoints — no failover, straight to the scan', async () => {
     const badData: any = new Error(EMPTY_VIEW_RESULT);
     badData.code = 'BAD_DATA';
     const queryFilter = recorder(async () => []);
@@ -295,7 +295,7 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
     expect(queryFilter.calls.length).toBeGreaterThan(0); // the scan ran instead
   });
 
-  it('getMaxKaNumber view (readWithFailover): a HUNG primary staticCall times out (per-attempt cap the bespoke loop lacked) and fails over to the backup', async () => {
+  it('getMaxKaNumber view (readProvider): a HUNG primary staticCall times out (per-attempt cap the bespoke loop lacked) and fails over to the backup', async () => {
     vi.useFakeTimers();
     try {
       let attempt = 0;
@@ -310,7 +310,7 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
       const a = makeAdapter(storage, 100_000);
       (a as any).providers = [{}, {}];
       const p = a.getMaxKaNumberForAuthor(AUTHOR);
-      // The new readWithFailover cap aborts the hung primary at the 4s multi-RPC
+      // The new readProvider cap aborts the hung primary at the 4s multi-RPC
       // default and fails over (the old bespoke loop had NO per-attempt timeout →
       // a hung backend stalled the whole resolution).
       await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS + 500);
@@ -826,10 +826,10 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
       const a = makeAdapter(storage, head);
       const code = (block?: number) => (block === undefined || block >= deployBlock ? '0x6000' : '0x');
       // b0 is reachable (head ok) and serves the STANDALONE bytecode probe
-      // (block===undefined → readWithFailover, R1) but HANGS on the deploy-block
+      // (block===undefined → readProvider, R1) but HANGS on the deploy-block
       // SEARCH reads (block!==undefined); the search must time out its 3×4s
       // attempts and fail over to b1 rather than stalling. (Hanging the
-      // standalone probe too would add a 4s readWithFailover hop and push the
+      // standalone probe too would add a 4s readProvider hop and push the
       // total past the 13s advance — out of scope for this "search fails over"
       // assertion.)
       const b0 = {
@@ -1092,7 +1092,7 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
     const a = makeAdapter(storage, 0);
     // backend 0: completely down — getBlockNumber AND getCode fail (a real,
     // non-historical error). R1: the standalone bytecode probe now consults
-    // getCode via readWithFailover, so a down node must THROW (not return
+    // getCode via readProvider, so a down node must THROW (not return
     // undefined, which would be read as a valid empty result and short-circuit
     // before failover to the pruned-but-reachable backend).
     const downBackend = {

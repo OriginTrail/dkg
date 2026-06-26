@@ -24,7 +24,7 @@ import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvm
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
-import { RpcFailoverClient, type ReadPolicy } from './rpc-failover-client.js';
+import { RpcFailoverClient, type ReadOpts } from './rpc-failover-client.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
@@ -322,10 +322,10 @@ export class EVMChainAdapterBase {
    * The bare primary RPC provider (== `primaryProvider`). The nominal runner
    * that signers, boot-bound contract handles, and the Hub-rotation event
    * subscription bind to — NOT the read-failover surface. Every read reconnects
-   * to a per-endpoint provider via `readWithFailover`; the `FallbackProvider`
-   * was removed (see the constructor). Kept as a distinct field name for the
-   * binding sites; reads must never call `this.provider.<read>()` directly
-   * (route through `readWithFailover`).
+   * to a per-endpoint provider via the read facades (`readContract`/`readProvider`
+   * → `this.rpcFailover`); the `FallbackProvider` was removed (see the
+   * constructor). Kept as a distinct field name for the binding sites; reads must
+   * never call `this.provider.<read>()` directly (route through the read facades).
    */
   protected readonly provider: JsonRpcProvider;
 
@@ -618,8 +618,8 @@ export class EVMChainAdapterBase {
     // does not change the number of `eth_getLogs` operations issued.
     // Immediate-failover (R1): per-endpoint retries are 0 when ≥2 endpoints are
     // configured, so the FIRST retryable failure propagates at once and the
-    // explicit per-provider failover loops (reads: `readWithFailover`; writes:
-    // `sendContractTransaction` / broadcast / receipt / the V10 populate loop)
+    // explicit per-provider failover loops (reads: the `RpcFailoverClient` read
+    // facades; writes: `sendContractTransaction` / broadcast / receipt / the V10 populate loop)
     // advance to the next endpoint immediately instead of burning ~7.5s of
     // same-endpoint backoff on an endpoint we already know is failing. A
     // single-RPC node keeps the bounded `RPC_REQUEST_MAX_RETRIES` retry (its
@@ -633,8 +633,8 @@ export class EVMChainAdapterBase {
       }),
     );
     this.primaryProvider = this.providers[0];
-    // No `FallbackProvider`: reads route through `readWithFailover` over the bare
-    // `this.providers[]` for TRUE immediate failover. ethers' quorum:1
+    // No `FallbackProvider`: reads route through the `RpcFailoverClient` read
+    // facades over the bare `this.providers[]` for TRUE immediate failover. ethers' quorum:1
     // FallbackProvider threw a fast error straight to the caller WITHOUT
     // consulting a backup (it advanced only on a ~4s stall) — empirically
     // unreliable read failover even with per-endpoint retries > 0 — and its
@@ -644,8 +644,9 @@ export class EVMChainAdapterBase {
     // one-shot `#initialSync` latch. `this.provider` is now just the bare
     // primary: the nominal runner that signers, boot-bound contract handles, and
     // the Hub-rotation event subscription bind to. Every actual READ reconnects
-    // to the loop provider (`readWithFailover`) and every WRITE reconnects
-    // per-endpoint explicitly, so this binding is never the failover surface.
+    // to the loop provider (via the `RpcFailoverClient` read facades) and every
+    // WRITE reconnects per-endpoint explicitly, so this binding is never the
+    // failover surface.
     this.provider = this.primaryProvider;
     // Construct the transport client AFTER `this.providers`/`this.rpcUrls` are
     // set (above). The three capabilities are LIVE thunks / a callback (PLAN §0
@@ -792,44 +793,49 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * TEMPORARY delegator (P1 of #1336): the per-endpoint read-failover loop now
-   * lives in `this.rpcFailover.read` (`rpc-failover-client.ts`). This thin
-   * pass-through keeps the existing call sites (which still pass the legacy
-   * `{ attemptTimeoutMs, multiAttemptTimeoutMs }` knobs) compiling and
-   * byte-identical while the transport mechanism moves out of the base; it is
-   * REMOVED in P3 when those call sites adopt the `readProvider`/`readContract`
-   * facades with an explicit named policy (PLAN §0 D4).
+   * Common point-view CONTRACT read (refactor #2) — the chain-concept surface the
+   * domain mixins call: a `contract`, a `label`, a string `method` name, and its
+   * args, run with the default `pointRead` policy + the `isContractViewRetryable`
+   * classifier. The untyped ethers `Contract` resolves the string method through
+   * `any`, so this loses NO static checking versus a `c.method(...)` lambda.
    */
-  protected readWithFailover<T>(
+  protected readContract<T = any>(
+    contract: Contract,
     label: string,
-    fn: (provider: JsonRpcProvider) => Promise<T>,
-    opts?: {
-      attemptTimeoutMs?: number;
-      multiAttemptTimeoutMs?: number;
-      isRetryable?: (err: unknown) => boolean;
-    },
+    method: string,
+    ...args: unknown[]
   ): Promise<T> {
-    return this.rpcFailover.read(label, fn, {
-      policy: this.legacyReadPolicy(opts),
-      isRetryable: opts?.isRetryable,
-    });
+    return this.rpcFailover.readContract(label, contract, (c) => c[method](...args));
   }
 
   /**
-   * TEMPORARY (P1 of #1336): translate the legacy `{ attemptTimeoutMs,
-   * multiAttemptTimeoutMs }` timeout knobs to a named `ReadPolicy` so the read
-   * delegators keep byte-identical timeout behaviour while the transport loop
-   * lives in `RpcFailoverClient`. The mapping is EXACT for the only values the
-   * codebase ever passes: `attemptTimeoutMs: RPC_READ_STALL_TIMEOUT_MS` (4s) →
-   * `failOpenFundingRead` (caps every attempt incl. single); `multiAttemptTimeoutMs:
-   * RPC_LOG_SCAN_TIMEOUT_MS` (30s) → `wideLogScan` (30s multi / uncapped single);
-   * neither → `pointRead` (4s multi / uncapped single). Removed in P3 when call
-   * sites pass an explicit policy.
+   * CONTRACT view read needing a non-default policy or classifier — the funding
+   * reads (`failOpenFundingRead`), the events scan (`wideLogScan`), or a bespoke
+   * `isRetryable`. Keeps the `fn` lambda (vs the string-method `readContract`) for
+   * reads whose call shape isn't a plain `c.method(...args)`.
    */
-  private legacyReadPolicy(opts?: { attemptTimeoutMs?: number; multiAttemptTimeoutMs?: number }): ReadPolicy {
-    if (opts?.attemptTimeoutMs != null) return 'failOpenFundingRead';
-    if (opts?.multiAttemptTimeoutMs != null) return 'wideLogScan';
-    return 'pointRead';
+  protected readContractWith<T>(
+    contract: Contract,
+    label: string,
+    fn: (c: Contract) => Promise<T>,
+    opts?: ReadOpts,
+  ): Promise<T> {
+    return this.rpcFailover.readContract(label, contract, fn, opts);
+  }
+
+  /**
+   * Raw PROVIDER read (no contract rebind) — `getCode` / `getBlock` /
+   * `getNetwork` / `getBalance` / `getBlockNumber`, the fail-open native-balance
+   * funding read, and the `getMaxKaNumberForAuthor` staticCall with its bespoke
+   * absent-view classifier. Default `pointRead` + `isRetryableRpcError`; override
+   * the policy/classifier via `opts`.
+   */
+  protected readProvider<T>(
+    label: string,
+    fn: (provider: JsonRpcProvider) => Promise<T>,
+    opts?: ReadOpts,
+  ): Promise<T> {
+    return this.rpcFailover.read(label, fn, opts);
   }
 
   /**
@@ -840,35 +846,6 @@ export class EVMChainAdapterBase {
    */
   protected rebindContract(contract: Contract, runner: JsonRpcProvider | Wallet): Contract {
     return contract.connect(runner) as Contract;
-  }
-
-  /** Rebind a SIGNER to `provider` for one per-endpoint populate+sign attempt. */
-  protected rebindSigner(signer: Wallet, provider: JsonRpcProvider): Wallet {
-    return signer.connect(provider);
-  }
-
-  /**
-   * TEMPORARY delegator (P1 of #1336): a CONTRACT VIEW read now routes through
-   * `this.rpcFailover.readContract` (which owns the rebind + the default
-   * `isContractViewRetryable` classifier). This pass-through keeps the existing
-   * call sites compiling and byte-identical (legacy timeout knobs translated via
-   * `legacyReadPolicy`) until P3 migrates them to the `readContract` facade with
-   * an explicit named policy (PLAN §0 D4).
-   */
-  protected contractReadWithFailover<T>(
-    label: string,
-    contract: Contract,
-    fn: (c: Contract) => Promise<T>,
-    opts?: {
-      attemptTimeoutMs?: number;
-      multiAttemptTimeoutMs?: number;
-      isRetryable?: (err: unknown) => boolean;
-    },
-  ): Promise<T> {
-    return this.rpcFailover.readContract(label, contract, fn, {
-      policy: this.legacyReadPolicy(opts),
-      isRetryable: opts?.isRetryable,
-    });
   }
 
   protected async waitForReceiptWithFailover(
@@ -1130,10 +1107,12 @@ export class EVMChainAdapterBase {
   ): Promise<void> {
     if (!this.contracts.token) return;
     const tokenWithSigner = this.contracts.token.connect(signer) as Contract;
-    const currentAllowance: bigint = await this.contractReadWithFailover(
-      'token.allowance',
+    const currentAllowance: bigint = await this.readContract(
       tokenWithSigner,
-      (c) => c.allowance(signer.address, kav10Address),
+      'token.allowance',
+      'allowance',
+      signer.address,
+      kav10Address,
     );
     const { needsApprove, targetAllowance } = computeApprovalAction(
       this.approvalPolicy,
@@ -1218,11 +1197,11 @@ export class EVMChainAdapterBase {
         // recovery poll indefinitely. `withTimeout` rejects after
         // `RPC_READ_STALL_TIMEOUT_MS`, which the catch below treats as a
         // not-yet-visible read and backs off (same as a thrown read error).
-        current = (await this.contractReadWithFailover(
-          'allowance visibility poll',
+        current = (await this.readContractWith(
           token,
+          'allowance visibility poll',
           (c) => c.allowance(owner, spender),
-          { attemptTimeoutMs: RPC_READ_STALL_TIMEOUT_MS },
+          { policy: 'failOpenFundingRead' },
         )) as bigint;
       } catch {
         // Transient read failure / stall timeout — treat as not-yet-visible
@@ -1274,9 +1253,9 @@ export class EVMChainAdapterBase {
       } else {
         authorized = [];
         for (const signer of ordered) {
-          if (await this.contractReadWithFailover(
-            'contextGraphs.isAuthorizedPublisher', this.contracts.contextGraphs,
-            (c) => c.isAuthorizedPublisher(contextGraphId, signer.address),
+          if (await this.readContract(
+            this.contracts.contextGraphs, 'contextGraphs.isAuthorizedPublisher',
+            'isAuthorizedPublisher', contextGraphId, signer.address,
           )) {
             authorized.push(signer);
           }
@@ -1425,12 +1404,12 @@ export class EVMChainAdapterBase {
 
   private async readNativeBalance(address: string): Promise<bigint | null> {
     try {
-      return await this.readWithFailover(
+      return await this.readProvider(
         'publish wallet native balance',
         (p) => p.getBalance(address),
         // Fail-open funding read: keep a HARD per-attempt cap even on the
         // last / single provider so a hung RPC can't stall wallet selection.
-        { attemptTimeoutMs: RPC_READ_STALL_TIMEOUT_MS },
+        { policy: 'failOpenFundingRead' },
       );
     } catch {
       return null;
@@ -1441,9 +1420,9 @@ export class EVMChainAdapterBase {
     const token = this.contracts.token;
     if (!token) return null; // no token contract: TRAC does not gate selection
     try {
-      return (await this.contractReadWithFailover(
-        'token.balanceOf', token, (c) => c.balanceOf(address),
-        { attemptTimeoutMs: RPC_READ_STALL_TIMEOUT_MS },
+      return (await this.readContractWith(
+        token, 'token.balanceOf', (c) => c.balanceOf(address),
+        { policy: 'failOpenFundingRead' },
       )) as bigint;
     } catch {
       return null;
@@ -1522,9 +1501,9 @@ export class EVMChainAdapterBase {
         // No ContextGraphs surface ⇒ every operational wallet is a candidate
         // (mirrors nextAuthorizedSigner); otherwise only authorized wallets are
         // viable reroutes.
-        if (contextGraphs && !(await this.contractReadWithFailover(
-          'contextGraphs.isAuthorizedPublisher', contextGraphs,
-          (c) => c.isAuthorizedPublisher(contextGraphId, s.address),
+        if (contextGraphs && !(await this.readContract(
+          contextGraphs, 'contextGraphs.isAuthorizedPublisher',
+          'isAuthorizedPublisher', contextGraphId, s.address,
         ))) return false;
         return this.isWalletPublishFundable(s.address, await this.getWalletFunding(s.address), requiredTracWei);
       }),
@@ -1592,9 +1571,9 @@ export class EVMChainAdapterBase {
     identityId: bigint,
     address: string,
   ): Promise<boolean> {
-    return this.contractReadWithFailover(
-      'identityStorage.keyHasPurpose', identityStorage,
-      (c) => c.keyHasPurpose(identityId, this.walletKeyHash(address), ADMIN_KEY_PURPOSE),
+    return this.readContract(
+      identityStorage, 'identityStorage.keyHasPurpose',
+      'keyHasPurpose', identityId, this.walletKeyHash(address), ADMIN_KEY_PURPOSE,
     );
   }
 
@@ -1603,9 +1582,9 @@ export class EVMChainAdapterBase {
     identityId: bigint,
     address: string,
   ): Promise<boolean> {
-    return this.contractReadWithFailover(
-      'identityStorage.keyHasPurpose', identityStorage,
-      (c) => c.keyHasPurpose(identityId, this.walletKeyHash(address), OPERATIONAL_KEY_PURPOSE),
+    return this.readContract(
+      identityStorage, 'identityStorage.keyHasPurpose',
+      'keyHasPurpose', identityId, this.walletKeyHash(address), OPERATIONAL_KEY_PURPOSE,
     );
   }
 
@@ -1618,10 +1597,11 @@ export class EVMChainAdapterBase {
   protected async resolveContract(name: string, abiName?: string): Promise<Contract> {
     let address: string;
     try {
-      address = await this.contractReadWithFailover(
-        `Hub.getContractAddress(${name})`,
+      address = await this.readContract(
         this.contracts.hub,
-        (c) => c.getContractAddress(name),
+        `Hub.getContractAddress(${name})`,
+        'getContractAddress',
+        name,
       );
     } catch (err) {
       if (this.isContractMissingRevert(err)) {
@@ -1638,10 +1618,11 @@ export class EVMChainAdapterBase {
   protected async resolveAssetStorage(name: string, abiName?: string): Promise<Contract> {
     let address: string;
     try {
-      address = await this.contractReadWithFailover(
-        `Hub.getAssetStorageAddress(${name})`,
+      address = await this.readContract(
         this.contracts.hub,
-        (c) => c.getAssetStorageAddress(name),
+        `Hub.getAssetStorageAddress(${name})`,
+        'getAssetStorageAddress',
+        name,
       );
     } catch (err) {
       if (this.isContractMissingRevert(err)) {
@@ -1785,10 +1766,11 @@ export class EVMChainAdapterBase {
 
     await this.startHubRotationListener();
 
-    const tokenAddress: string = this.tokenAddress ?? await this.contractReadWithFailover(
-      'Hub.getContractAddress(Token)',
+    const tokenAddress: string = this.tokenAddress ?? await this.readContract(
       this.contracts.hub,
-      (c) => c.getContractAddress('Token'),
+      'Hub.getContractAddress(Token)',
+      'getContractAddress',
+      'Token',
     );
     if (tokenAddress !== ethers.ZeroAddress) {
       this.contracts.token = new Contract(
@@ -1815,7 +1797,7 @@ export class EVMChainAdapterBase {
   }
 
   protected async getBlockTimestamp(blockNumber: number): Promise<number> {
-    const block = await this.readWithFailover('getBlock', (p) => p.getBlock(blockNumber));
+    const block = await this.readProvider('getBlock', (p) => p.getBlock(blockNumber));
     return block?.timestamp ?? 0;
   }
 
@@ -1826,8 +1808,8 @@ export class EVMChainAdapterBase {
   async getIdentityId(): Promise<bigint> {
     await this.init();
     const identityStorage = await this.getIdentityStorage();
-    const id: bigint = await this.contractReadWithFailover(
-      'identityStorage.getIdentityId', identityStorage, (c) => c.getIdentityId(this.signer.address),
+    const id: bigint = await this.readContract(
+      identityStorage, 'identityStorage.getIdentityId', 'getIdentityId', this.signer.address,
     );
     return id;
   }
@@ -1892,17 +1874,17 @@ export class EVMChainAdapterBase {
     const getMax = (storage as any).getMaxKaNumberForAuthor;
     if (typeof getMax?.staticCall === 'function') {
       try {
-        // Route through `readWithFailover` (which gives the per-attempt stall
+        // Route through `readProvider` (which gives the per-attempt stall
         // timeout + endpoint failover for free) with a CUSTOM classifier: the
         // absent-view shapes (`BAD_DATA` empty-`0x`, bare `CALL_EXCEPTION`) are
         // DETERMINISTIC across endpoints and mean "pre-10.0.4 contract lacks the
-        // selector", so they are NON-retryable here — `readWithFailover` rethrows
+        // selector", so they are NON-retryable here — `readProvider` rethrows
         // them straight to the catch below (→ scan / bytecode-confirm) instead of
         // failing over and masking them as `RPC_ENDPOINTS_EXHAUSTED`. ONLY a
         // genuine transient advances to the next endpoint. `isKaHighWaterViewUnavailable`
         // runs FIRST (it enriches the error) so the ordering invariant the catch
         // below also relies on is preserved.
-        const max = await this.readWithFailover(
+        const max = await this.readProvider(
           'DKGKnowledgeAssets.getMaxKaNumberForAuthor',
           (p) => this.rebindContract(storage, p).getMaxKaNumberForAuthor.staticCall(normalized),
           {
@@ -1925,7 +1907,7 @@ export class EVMChainAdapterBase {
     }
 
     const storageAddress = await contractAddress(storage);
-    const code = await this.readWithFailover(
+    const code = await this.readProvider(
       'DKGKnowledgeAssets getCode',
       (p) => p.getCode(storageAddress),
     );
@@ -2332,7 +2314,7 @@ export class EVMChainAdapterBase {
     if (EVMChainAdapterBase.preflightCacheFresh(this.cachedChainId, now)) {
       return this.cachedChainId!.value;
     }
-    const network = await this.readWithFailover('getNetwork (chainId)', (p) => p.getNetwork());
+    const network = await this.readProvider('getNetwork (chainId)', (p) => p.getNetwork());
     this.cachedChainId = { value: network.chainId, cachedAt: now };
     return network.chainId;
   }
@@ -2349,7 +2331,7 @@ export class EVMChainAdapterBase {
    */
   async hasContractCode(address: string): Promise<boolean> {
     try {
-      const code = await this.readWithFailover('hasContractCode getCode', (p) => p.getCode(address));
+      const code = await this.readProvider('hasContractCode getCode', (p) => p.getCode(address));
       return code !== undefined && code !== null && code !== '0x' && code.length > 2;
     } catch {
       return false;
@@ -2391,9 +2373,9 @@ export class EVMChainAdapterBase {
         );
       }
       if (this.contracts.contextGraphs) {
-        const authorized = await this.contractReadWithFailover(
-          'contextGraphs.isAuthorizedPublisher', this.contracts.contextGraphs,
-          (c) => c.isAuthorizedPublisher(params.contextGraphId, selected.address),
+        const authorized = await this.readContract(
+          this.contracts.contextGraphs, 'contextGraphs.isAuthorizedPublisher',
+          'isAuthorizedPublisher', params.contextGraphId, selected.address,
         );
         if (!authorized) {
           throw new Error(
@@ -2676,7 +2658,7 @@ export class EVMChainAdapterBase {
   }
 
   async getBlockNumber(): Promise<number> {
-    return this.readWithFailover('getBlockNumber', (p) => p.getBlockNumber());
+    return this.readProvider('getBlockNumber', (p) => p.getBlockNumber());
   }
 
   getProvider(): JsonRpcProvider {
@@ -2686,9 +2668,10 @@ export class EVMChainAdapterBase {
   /**
    * @deprecated Returns the bare PRIMARY provider, which does NOT fail over: the
    * ethers `FallbackProvider` was removed and reads now route through the
-   * adapter's own read methods (`readWithFailover` over `this.providers[]`). Call
-   * those read methods instead, or `getProvider()` if you explicitly want the
-   * bare primary. Retained only for backward compatibility — this adapter is a
+   * adapter's own read facades (`readContract`/`readProvider` over
+   * `this.providers[]`). Call those read methods instead, or `getProvider()` if
+   * you explicitly want the bare primary. Retained only for backward
+   * compatibility — this adapter is a
    * published export, so removing a public method would be a breaking change.
    */
   getReadProvider(): JsonRpcProvider {

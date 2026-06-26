@@ -45,8 +45,8 @@ export class IdentityMethods extends EVMChainAdapterBase {
     }
 
     const onChainIds = await Promise.all(
-      uniqueAddresses.map((addr) => this.contractReadWithFailover(
-        'identityStorage.getIdentityId', identityStorage, (c) => c.getIdentityId(addr),
+      uniqueAddresses.map((addr) => this.readContract(
+        identityStorage, 'identityStorage.getIdentityId', 'getIdentityId', addr,
       ).then(BigInt)),
     );
     const missing: string[] = [];
@@ -105,8 +105,8 @@ export class IdentityMethods extends EVMChainAdapterBase {
     if (!this.contracts.profileStorage) {
       throw new Error('getRelayCapable: ProfileStorage not deployed on this Hub.');
     }
-    return Boolean(await this.contractReadWithFailover(
-      'profileStorage.getRelayCapable', this.contracts.profileStorage, (c) => c.getRelayCapable(identityId),
+    return Boolean(await this.readContract(
+      this.contracts.profileStorage, 'profileStorage.getRelayCapable', 'getRelayCapable', identityId,
     ));
   }
 
@@ -148,8 +148,8 @@ export class IdentityMethods extends EVMChainAdapterBase {
     if (cached !== undefined) return cached;
     await this.init();
     const identityStorage = await this.resolveContract('IdentityStorage');
-    const id: bigint = await this.contractReadWithFailover(
-      'identityStorage.getIdentityId', identityStorage, (c) => c.getIdentityId(checksum),
+    const id: bigint = await this.readContract(
+      identityStorage, 'identityStorage.getIdentityId', 'getIdentityId', checksum,
     );
     if (id > 0n) {
       // Only memoise positive hits — a 0n result may flip to non-zero
@@ -221,8 +221,8 @@ export class IdentityMethods extends EVMChainAdapterBase {
     if (stakeAmount > 0n && this.contracts.token) {
       try {
         const stakingNFT = await this.resolveContract('DKGStakingConvictionNFT');
-        const stakingV10Addr: string = await this.contractReadWithFailover(
-          'Hub.getContractAddress(StakingV10)', this.contracts.hub, (c) => c.getContractAddress('StakingV10'),
+        const stakingV10Addr: string = await this.readContract(
+          this.contracts.hub, 'Hub.getContractAddress(StakingV10)', 'getContractAddress', 'StakingV10',
         );
         if (stakingV10Addr === ethers.ZeroAddress) {
           throw new Error('StakingV10 not registered in Hub — V10 staking unavailable');

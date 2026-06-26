@@ -47,14 +47,14 @@ function makeStubbedAdapter(opts: {
 }) {
   const a = new EVMChainAdapter(minimalConfig());
   (a as any).initialized = true;
-  // R1: getEvmChainId reads chainId via readWithFailover over this.providers[0]
-  // (=== this.provider in prod). Set the mock on BOTH so the digest's chainId
-  // read resolves to the stub instead of dialling the placeholder RPC.
+  // R1/#1336: getEvmChainId reads chainId via readProvider (this.rpcFailover.read)
+  // over this.providers[0] (=== this.provider in prod). Set the mock on BOTH so the
+  // digest's chainId read resolves to the stub instead of dialling the placeholder RPC.
   const provider = { getNetwork: async () => ({ chainId: TEST_CHAIN_ID }) };
   (a as any).provider = provider;
   (a as any).providers = [provider];
-  // The contract view reads go through contractReadWithFailover → rebindContract
-  // (contract.connect(p)), so the contract stubs must be .connect-able.
+  // The contract view reads go through readContract (this.rpcFailover.readContract)
+  // → rebindContract (contract.connect(p)), so the contract stubs must be .connect-able.
   (a as any).contracts.knowledgeAssetsLifecycle = connectable({
     getAddress: async () => KAV10_ADDRESS,
   });

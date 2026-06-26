@@ -1626,10 +1626,10 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
   it('getEvmChainId issues exactly one provider.getNetwork call across repeat reads', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     const getNetwork = recorder(async () => ({ chainId: 31337n }));
-    // R1: getEvmChainId now reads via readWithFailover over this.providers[]
-    // (was this.provider.getNetwork). Mock this.providers[0]; the TTL-cache /
-    // dedup / no-cache-on-failure behaviour is unchanged (the cache wraps
-    // readWithFailover), so the assertions below are preserved verbatim.
+    // R1/#1336: getEvmChainId now reads via readProvider (this.rpcFailover.read)
+    // over this.providers[] (was this.provider.getNetwork). Mock this.providers[0];
+    // the TTL-cache / dedup / no-cache-on-failure behaviour is unchanged (the
+    // cache wraps the read facade), so the assertions below are preserved verbatim.
     (a as unknown as { providers: Array<{ getNetwork: () => Promise<{ chainId: bigint }> }> }).providers = [{
       getNetwork: getNetwork as unknown as () => Promise<{ chainId: bigint }>,
     }];
@@ -1674,10 +1674,10 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
     const a = new EVMChainAdapter(minimalConfig());
     let returned = 31337n;
     const getNetwork = recorder(async () => ({ chainId: returned }));
-    // R1: getEvmChainId now reads via readWithFailover over this.providers[]
-    // (was this.provider.getNetwork). Mock this.providers[0]; the TTL-cache /
-    // dedup / no-cache-on-failure behaviour is unchanged (the cache wraps
-    // readWithFailover), so the assertions below are preserved verbatim.
+    // R1/#1336: getEvmChainId now reads via readProvider (this.rpcFailover.read)
+    // over this.providers[] (was this.provider.getNetwork). Mock this.providers[0];
+    // the TTL-cache / dedup / no-cache-on-failure behaviour is unchanged (the
+    // cache wraps the read facade), so the assertions below are preserved verbatim.
     (a as unknown as { providers: Array<{ getNetwork: () => Promise<{ chainId: bigint }> }> }).providers = [{
       getNetwork: getNetwork as unknown as () => Promise<{ chainId: bigint }>,
     }];
@@ -1698,10 +1698,10 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
   it('invalidatePublishPreflightCache forces a fresh read on next call', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     const getNetwork = recorder(async () => ({ chainId: 31337n }));
-    // R1: getEvmChainId now reads via readWithFailover over this.providers[]
-    // (was this.provider.getNetwork). Mock this.providers[0]; the TTL-cache /
-    // dedup / no-cache-on-failure behaviour is unchanged (the cache wraps
-    // readWithFailover), so the assertions below are preserved verbatim.
+    // R1/#1336: getEvmChainId now reads via readProvider (this.rpcFailover.read)
+    // over this.providers[] (was this.provider.getNetwork). Mock this.providers[0];
+    // the TTL-cache / dedup / no-cache-on-failure behaviour is unchanged (the
+    // cache wraps the read facade), so the assertions below are preserved verbatim.
     (a as unknown as { providers: Array<{ getNetwork: () => Promise<{ chainId: bigint }> }> }).providers = [{
       getNetwork: getNetwork as unknown as () => Promise<{ chainId: bigint }>,
     }];
@@ -1722,10 +1722,10 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
       if (attempts === 1) throw new Error('rate limited');
       return { chainId: 31337n };
     });
-    // R1: getEvmChainId now reads via readWithFailover over this.providers[]
-    // (was this.provider.getNetwork). Mock this.providers[0]; the TTL-cache /
-    // dedup / no-cache-on-failure behaviour is unchanged (the cache wraps
-    // readWithFailover), so the assertions below are preserved verbatim.
+    // R1/#1336: getEvmChainId now reads via readProvider (this.rpcFailover.read)
+    // over this.providers[] (was this.provider.getNetwork). Mock this.providers[0];
+    // the TTL-cache / dedup / no-cache-on-failure behaviour is unchanged (the
+    // cache wraps the read facade), so the assertions below are preserved verbatim.
     (a as unknown as { providers: Array<{ getNetwork: () => Promise<{ chainId: bigint }> }> }).providers = [{
       getNetwork: getNetwork as unknown as () => Promise<{ chainId: bigint }>,
     }];
@@ -2032,8 +2032,8 @@ const V10_KA_ADDRESS = '0x' + 'aa'.repeat(20);
 // `allowance(...)` and connects it to the signer. `approve` itself goes through
 // the (stubbed) `sendContractTransaction`, so the recorder just needs to exist.
 function makeStubToken(allowance: bigint) {
-  // tokenWithSigner is read via contractReadWithFailover after token→signer
-  // rebind, so it too must be .connect-able (self no-op rebind).
+  // tokenWithSigner is read via readContract (this.rpcFailover.readContract)
+  // after token→signer rebind, so it too must be .connect-able (self no-op rebind).
   const tokenWithSigner = connectable({
     allowance: recorder(async (..._a: unknown[]) => allowance),
     approve: recorder(() => undefined),
@@ -2586,12 +2586,12 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     (a as any).provider.getBalance = recorder(async (addr: string) =>
       nativeByAddr.get(String(addr).toLowerCase()) ?? ABUNDANT_WEI);
 
-    // R1: readTracBalance now reads via contractReadWithFailover → withRunner
-    // does `token.connect(p).balanceOf(addr)`, so the CONNECTED contract (what
-    // token.connect returns) must expose balanceOf — not just the top-level
-    // token. (Native getBalance still works: the helper mutates
+    // R1/#1336: readTracBalance now reads via readContractWith (failOpenFundingRead
+    // policy) → rebindContract does `token.connect(p).balanceOf(addr)`, so the
+    // CONNECTED contract (what token.connect returns) must expose balanceOf — not
+    // just the top-level token. (Native getBalance still works: the helper mutates
     // this.provider.getBalance and this.provider === this.providers[0], so the
-    // shared object is what readWithFailover reads.)
+    // shared object is what the read facade reads.)
     const balanceOf = recorder(async (addr: string) =>
       tracByAddr.get(String(addr).toLowerCase()) ?? ABUNDANT_WEI);
     const tokenWithSigner = connectable({
@@ -2773,8 +2773,8 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     (a as any).computeUpdateNewTokenAmount = recorder(async () => 0n);
     (a as any).getIdentityId = recorder(async () => 0n);
     // `provider.getNetwork()` is called for chainId; stub it so the update path
-    // doesn't hit the placeholder RPC. R1: getEvmChainId reads via
-    // readWithFailover over this.providers[0] (=== this.provider), so MUTATE
+    // doesn't hit the placeholder RPC. R1/#1336: getEvmChainId reads via
+    // readProvider over this.providers[0] (=== this.provider), so MUTATE
     // getNetwork on the shared object — REPLACING this.provider would orphan
     // this.providers[0] (and the helper's getBalance mock) and the read would
     // dial the dead RPC instead.

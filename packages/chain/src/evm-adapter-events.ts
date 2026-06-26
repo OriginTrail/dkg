@@ -12,14 +12,6 @@
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers } from 'ethers';
 import type { EventFilter, ChainEvent } from './chain-adapter.js';
-import { RPC_LOG_SCAN_TIMEOUT_MS } from './evm-adapter-constants.js';
-
-// Wide `eth_getLogs` reads (over `[fromBlock ?? 0, toBlock]`, up to the poller's
-// 9,000-block window / a cold-start full backfill) legitimately exceed the 4s
-// point-read cap, so they fail over only after RPC_LOG_SCAN_TIMEOUT_MS on a
-// multi-RPC node (single-RPC stays uncapped, #894). Without this a slow-but-
-// healthy scan would abort, exhaust every endpoint, and stall the event poller.
-const LOG_SCAN_OPTS = { multiAttemptTimeoutMs: RPC_LOG_SCAN_TIMEOUT_MS } as const;
 
 export class EventsMethods extends EVMChainAdapterBase {
   // =====================================================================
@@ -27,9 +19,10 @@ export class EventsMethods extends EVMChainAdapterBase {
   // =====================================================================
 
   /**
-   * A WIDE `eth_getLogs` scan with read-failover, baking in `LOG_SCAN_OPTS` so
-   * the wide-log multi-RPC timeout is owned HERE once (not by per-call-site
-   * discipline). Used by every `listenForEvents` branch below.
+   * A WIDE `eth_getLogs` scan with read-failover, baking in the `wideLogScan`
+   * policy so the wide-log multi-RPC timeout (`RPC_LOG_SCAN_TIMEOUT_MS`, vs the 4s
+   * point-read cap; single-RPC stays uncapped, #894) is owned HERE once, not by
+   * per-call-site discipline. Used by every `listenForEvents` branch below.
    */
   private queryFilterWithFailover(
     contract: ethers.Contract,
@@ -38,11 +31,11 @@ export class EventsMethods extends EVMChainAdapterBase {
     fromBlock: ethers.BlockTag,
     toBlock?: ethers.BlockTag,
   ): Promise<(ethers.Log | ethers.EventLog)[]> {
-    return this.contractReadWithFailover(
-      label,
+    return this.readContractWith(
       contract,
+      label,
       (c) => c.queryFilter(eventFilter, fromBlock, toBlock),
-      LOG_SCAN_OPTS,
+      { policy: 'wideLogScan' },
     );
   }
 
