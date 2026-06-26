@@ -298,6 +298,15 @@ export function defineChainPublishSuite(config) {
             const txInfo = result.txHash ? ` | tx: ${result.txHash}` : '';
             const walletInfo = result.publisherAddress ? ` | wallet: ${result.publisherAddress}` : '';
             console.log(`✅ Published KA #${i + 1}${ual ? ` | UAL: ${ual}` : ''} | kaId: ${result.kaId} | KAs: ${kasCreated}${walletInfo}${txInfo}`);
+            // The publish mints a Knowledge Collection of N KAs; each KA's UAL is
+            // `${collectionUal}/${tokenId}`. Print the first 5 child KA UALs.
+            const childKas = Array.isArray(result.kas) ? result.kas
+              : (Array.isArray(result.kaManifest) ? result.kaManifest : []);
+            if (ual && childKas.length) {
+              const sample = childKas.slice(0, 5).map((ka) => `${ual}/${ka.tokenId}`);
+              console.log(`   ↳ first ${sample.length} child KA UAL(s):`);
+              sample.forEach((u) => console.log(`      ${u}`));
+            }
             publishSuccess++;
           } catch (error) {
             logError(error, name, step, errorStats, i + 1);
