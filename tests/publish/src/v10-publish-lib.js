@@ -82,6 +82,8 @@ export function makeNodeClient(baseUrl, token) {
   return {
     baseUrl,
     status: () => req('GET', '/api/status').then((r) => r.data),
+    // the node's own operational wallet addresses (it signs publishes with these)
+    wallets: () => req('GET', '/api/wallets').then((r) => r.data),
     publish: (contextGraphId, quads) =>
       req(
         'POST',
@@ -183,6 +185,20 @@ export function defineChainPublishSuite(config) {
         const publisherAddresses = new Set();
 
         const client = makeNodeClient(hostname, token);
+
+        // Per-node wallet check. In V10 the NODE signs publishes internally with
+        // its OWN operational wallets (loaded from that node's DKG_HOME), so each
+        // node naturally publishes from a different wallet. Surface the address(es)
+        // here — named by node — so each run proves which wallet the node uses and
+        // that the nodes are not all signing from one shared wallet.
+        let nodeWalletAddrs = [];
+        try {
+          const w = await client.wallets();
+          nodeWalletAddrs = Array.isArray(w?.wallets) ? w.wallets : [];
+          console.log(`💳 ${name} operational wallet(s): ${nodeWalletAddrs.length ? nodeWalletAddrs.join(', ') : '(none reported)'}${w?.chainId ? ` | chainId ${w.chainId}` : ''}`);
+        } catch (error) {
+          console.log(`💳 ${name} operational wallet(s): could not read /api/wallets (${error.message})`);
+        }
 
         // Ensure the context graph exists on this node (and is on-chain registered
         // when V10_CG_REGISTER=true). A successful publish to Verifiable Memory needs
@@ -333,6 +349,8 @@ SELECT ?s ?name ?description WHERE {
         const summary = {
           blockchain_name: blockchainName,
           node_name: name,
+          node_wallet: nodeWalletAddrs.join(', '),
+          node_publisher_wallets: [...publisherAddresses].join(', '),
           publish_success_rate: safeRate(publishSuccess, publishFail),
           query_success_rate: safeRate(querySuccess, queryFail),
           publisher_get_success_rate: safeRate(swmGetSuccess, swmGetFail),                 // SWM GET
