@@ -262,14 +262,21 @@ for (const file of files) {
                 };
             }
 
-            // Put the error message in the correct field based on content
-            if (errorMsg.toLowerCase().includes('publish')) {
+            // Route by the V10 operation prefix (every key is "<step> — <error>"):
+            //   publish              -> publish_error
+            //   query remote (sync)  -> non_publisher_get_error  (checked BEFORE plain "query")
+            //   VM GET (legacy: SWM GET / local get) -> publisher_get_error
+            //   query                -> query_error
+            const lower = errorMsg.toLowerCase();
+            if (lower.startsWith('publish')) {
                 kaErrors[kaNumber].publish_error = errorMsg;
-            } else if (errorMsg.toLowerCase().includes('query')) {
-                kaErrors[kaNumber].query_error = errorMsg;
-            } else if (errorMsg.toLowerCase().includes('local get')) {
+            } else if (lower.startsWith('query remote') || lower.includes('query remote')) {
+                kaErrors[kaNumber].non_publisher_get_error = errorMsg;
+            } else if (lower.startsWith('vm get') || lower.startsWith('swm get') || lower.includes('local get')) {
                 kaErrors[kaNumber].publisher_get_error = errorMsg;
-            } else if (errorMsg.toLowerCase().includes('get')) {
+            } else if (lower.startsWith('query')) {
+                kaErrors[kaNumber].query_error = errorMsg;
+            } else if (lower.includes('get')) {
                 kaErrors[kaNumber].non_publisher_get_error = errorMsg;
             }
         }

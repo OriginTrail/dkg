@@ -231,6 +231,19 @@ export function categorizeErrorService(error) {
   return 'other';
 }
 
+// Collapse per-publish-unique tokens (UALs, entity URIs, UUIDs, hex hashes /
+// addresses) to placeholders so otherwise-identical errors aggregate into one
+// bucket instead of N separate "1x" entries (e.g. the per-KA Query Remote
+// "returned no triples for urn:ka:<uuid> from SBB" lines collapse to one "10x").
+export function normalizeErrorMessage(message) {
+  return String(message)
+    .replace(/urn:(?:ka|entity):[A-Za-z0-9_.:-]+/g, '<entity>')
+    .replace(/did:dkg:[^\s"'),]+/gi, '<ual>')
+    .replace(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g, '<id>')
+    .replace(/0x[0-9a-fA-F]{6,}/g, '<hex>')
+    .trim();
+}
+
 export function logError(error, nodeName, step, errorStats, kaNumber = null) {
   console.log(`\n❌ Error on ${nodeName} during ${step}`);
   console.log(`Type: ${error.name}`);
@@ -243,11 +256,11 @@ export function logError(error, nodeName, step, errorStats, kaNumber = null) {
 
   if (!errorStats[nodeName]) errorStats[nodeName] = {};
 
-  const cleanErrorMessage = error.message.split('\n')[0];
+  const cleanErrorMessage = normalizeErrorMessage(error.message.split('\n')[0]);
   const service = categorizeErrorService(error);
 
   const aggregatedKey = `${step} — ${error.name}: ${cleanErrorMessage}`;
-  let detailedKey = `${step} — ${error.name}: ${error.message.split('\n')[0]}`;
+  let detailedKey = `${step} — ${error.name}: ${cleanErrorMessage}`;
   if (kaNumber) detailedKey += ` for KA #${kaNumber}`;
 
   if (!errorStats[nodeName].aggregated) errorStats[nodeName].aggregated = {};
