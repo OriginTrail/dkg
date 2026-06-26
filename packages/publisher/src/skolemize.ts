@@ -1,6 +1,6 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 
-const GENID_SEGMENT = '/.well-known/genid/';
+export const SKOLEMIZED_BLANK_NODE_SEGMENT = '/.well-known/genid/';
 
 /**
  * Replaces blank node identifiers with deterministic URIs scoped under rootEntity.
@@ -20,8 +20,7 @@ export function skolemize(rootEntity: string, quads: Quad[]): Quad[] {
 
   const mapping = new Map<string, string>();
   for (const bn of blankNodes) {
-    const label = bn.slice(2); // strip "_:"
-    mapping.set(bn, `${rootEntity}${GENID_SEGMENT}${label}`);
+    mapping.set(bn, skolemizedBlankNodeIri(rootEntity, bn));
   }
 
   return quads.map((q) => ({
@@ -32,12 +31,17 @@ export function skolemize(rootEntity: string, quads: Quad[]): Quad[] {
   }));
 }
 
+export function skolemizedBlankNodeIri(rootEntity: string, blankNode: string): string {
+  const label = blankNode.startsWith('_:') ? blankNode.slice(2) : blankNode;
+  return `${rootEntity}${SKOLEMIZED_BLANK_NODE_SEGMENT}${label}`;
+}
+
 export function isBlankNode(term: string): boolean {
   return term.startsWith('_:');
 }
 
 export function isSkolemizedUri(uri: string): boolean {
-  return uri.includes(GENID_SEGMENT);
+  return uri.includes(SKOLEMIZED_BLANK_NODE_SEGMENT);
 }
 
 /**
@@ -45,7 +49,7 @@ export function isSkolemizedUri(uri: string): boolean {
  * e.g., "did:dkg:agent:QmBot/.well-known/genid/o1" → "did:dkg:agent:QmBot"
  */
 export function rootEntityFromSkolemized(uri: string): string | null {
-  const idx = uri.indexOf(GENID_SEGMENT);
+  const idx = uri.indexOf(SKOLEMIZED_BLANK_NODE_SEGMENT);
   if (idx === -1) return null;
   return uri.slice(0, idx);
 }

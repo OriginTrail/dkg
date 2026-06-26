@@ -64,7 +64,7 @@ import {
   loadOpWallets,
 } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, sparqlIri, contextGraphSharedMemoryUri, sharedMemoryReadBothFilter, contextGraphAssertionUri, contextGraphMetaUri, escapeDkgRdfLiteral, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
-import { skolemizeByEntity, findReservedSubjectPrefix, isSkolemizedUri, type PublishOptions, type PublishResult } from '@origintrail-official/dkg-publisher';
+import { skolemizeByEntity, findReservedSubjectPrefix, isSkolemizedUri, SKOLEMIZED_BLANK_NODE_SEGMENT, type PublishOptions, type PublishResult } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
 import {
@@ -199,7 +199,7 @@ import {
   resolveNameToPeerId,
   isPublishQuad,
   isWritableQuad,
-  prepareValidatedPublicWriteQuads,
+  preparePublicWriteStorageQuads,
   oversizedRdfLiteralResponseBody,
   parsePublishRequestBody,
   jsonResponse,
@@ -367,10 +367,8 @@ type PreSignedAuthorAttestation = {
 
 type SharedMemoryPublishSelection = "all" | { rootEntities: string[] };
 const WORKSPACE_OWNER_PREDICATE = 'http://dkg.io/ontology/workspaceOwner';
-const SKOLEM_GENID_SEGMENT = '/.well-known/genid/';
-
 function subjectMatchesPublishRoot(subject: string, root: string): boolean {
-  return subject === root || (isSkolemizedUri(subject) && subject.startsWith(`${root}${SKOLEM_GENID_SEGMENT}`));
+  return subject === root || (isSkolemizedUri(subject) && subject.startsWith(`${root}${SKOLEMIZED_BLANK_NODE_SEGMENT}`));
 }
 
 // Exported for the OT-RFC-46 read-both regression test (the route mocks the
@@ -402,7 +400,7 @@ export async function resolvePublishRootEntities(
           VALUES ?root { ${values} }
           ?s ?p ?o .
           FILTER(?p != <${WORKSPACE_OWNER_PREDICATE}>)
-          FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "${SKOLEM_GENID_SEGMENT}")))
+          FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "${SKOLEMIZED_BLANK_NODE_SEGMENT}")))
         }
         ${swmGraphScope}
       }`,
@@ -669,7 +667,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
         };
       });
 
-      const normalizedQuads = prepareValidatedPublicWriteQuads("quads", normalized);
+      const normalizedQuads = preparePublicWriteStorageQuads("quads", normalized);
       if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
       normalized = normalizedQuads.value.quads;
       await agent.store.insert(normalized);
@@ -1657,7 +1655,7 @@ WHERE {
     // Validate object terms and chunk oversized schema:text literals before
     // storage/share sees these public-write quads.
     {
-      const normalizedQuads = prepareValidatedPublicWriteQuads("quads", quads);
+      const normalizedQuads = preparePublicWriteStorageQuads("quads", quads);
       if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
       quads = normalizedQuads.value.quads;
     }
@@ -2259,7 +2257,7 @@ WHERE {
     // Validate object terms and chunk oversized schema:text literals before
     // storage/share sees these public-write quads.
     {
-      const normalizedQuads = prepareValidatedPublicWriteQuads("quads", quads);
+      const normalizedQuads = preparePublicWriteStorageQuads("quads", quads);
       if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
       quads = normalizedQuads.value.quads;
     }
@@ -2458,7 +2456,7 @@ WHERE {
       });
     }
 
-    const normalizedQuads = prepareValidatedPublicWriteQuads("quads", quads);
+    const normalizedQuads = preparePublicWriteStorageQuads("quads", quads);
     if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
     const quadsToWrite = normalizedQuads.value.quads;
 

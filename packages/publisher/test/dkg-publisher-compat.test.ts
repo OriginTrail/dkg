@@ -1,14 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import {
-  DKG_CHUNK_INDEX,
   DKG_CHUNK_VALUE,
   DKG_HAS_TEXT_BODY,
-  DKG_HAS_TEXT_CHUNK,
   TypedEventBus,
   generateEd25519Keypair,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { reconstructChunkedText } from '../../core/test/helpers/chunked-text.js';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { skolemizeByEntity } from '../src/auto-partition.js';
 import { preparePublicWriteQuads } from '../src/public-write-normalization.js';
@@ -20,27 +19,6 @@ function q(s: string, p: string, o: string): Quad {
     object: o,
     graph: 'did:dkg:context-graph:test',
   };
-}
-
-function reconstructPlainChunkedText(quads: readonly Quad[], subject: string): string {
-  const bodySubject = quads.find((quad) =>
-    quad.subject === subject &&
-    quad.predicate === DKG_HAS_TEXT_BODY
-  )?.object;
-  if (!bodySubject) throw new Error(`Missing text body for ${subject}`);
-  return quads
-    .filter((quad) => quad.subject === bodySubject && quad.predicate === DKG_HAS_TEXT_CHUNK)
-    .map((link) => {
-      const chunkQuads = quads.filter((quad) => quad.subject === link.object);
-      const indexTerm = chunkQuads.find((quad) => quad.predicate === DKG_CHUNK_INDEX)?.object;
-      const valueTerm = chunkQuads.find((quad) => quad.predicate === DKG_CHUNK_VALUE)?.object;
-      const index = Number(/^"(\d+)"/.exec(indexTerm ?? '')?.[1] ?? NaN);
-      if (!Number.isInteger(index) || !valueTerm) throw new Error(`Invalid chunk ${link.object}`);
-      return { index, value: JSON.parse(valueTerm) as string };
-    })
-    .sort((a, b) => a.index - b.index)
-    .map((chunk) => chunk.value)
-    .join('');
 }
 
 async function makePublisher(): Promise<{ publisher: DKGPublisher; store: OxigraphStore }> {
@@ -89,7 +67,7 @@ describe('DKGPublisher compatibility aliases', () => {
     )).toBe(true);
     expect(result.quads.some((quad) => quad.predicate === DKG_CHUNK_VALUE)).toBe(true);
 
-    expect(reconstructPlainChunkedText(result.quads, root)).toBe('x'.repeat(60_000));
+    expect(reconstructChunkedText(result.quads, root)).toBe('x'.repeat(60_000));
   });
 
   it('chunks oversized schema:text literals on linked blank nodes before shared-memory writes', async () => {
@@ -117,7 +95,7 @@ describe('DKGPublisher compatibility aliases', () => {
       quad.predicate === 'http://schema.org/hasPart' &&
       quad.object === child
     )).toBe(true);
-    expect(reconstructPlainChunkedText(result.quads, child)).toBe('x'.repeat(60_000));
+    expect(reconstructChunkedText(result.quads, child)).toBe('x'.repeat(60_000));
   });
 
   it('rejects oversized non-text RDF literals at shared-memory producer boundary', async () => {
@@ -194,7 +172,7 @@ describe('DKGPublisher compatibility aliases', () => {
       quad.predicate === 'http://schema.org/text'
     )).toBe(false);
     expect(result.quads.some((quad) => quad.predicate === DKG_CHUNK_VALUE)).toBe(true);
-    expect(reconstructPlainChunkedText(result.quads, root)).toBe('x'.repeat(60_000));
+    expect(reconstructChunkedText(result.quads, root)).toBe('x'.repeat(60_000));
   });
 
   it('chunks oversized schema:text literals during direct publish', async () => {
@@ -218,7 +196,7 @@ describe('DKGPublisher compatibility aliases', () => {
       quad.subject === root &&
       quad.predicate === 'http://schema.org/text'
     )).toBe(false);
-    expect(reconstructPlainChunkedText(result.quads, root)).toBe('x'.repeat(60_000));
+    expect(reconstructChunkedText(result.quads, root)).toBe('x'.repeat(60_000));
   });
 
   it('chunks oversized schema:text literals on linked blank nodes during direct publish', async () => {
@@ -251,7 +229,7 @@ describe('DKGPublisher compatibility aliases', () => {
       quad.predicate === 'http://schema.org/hasPart' &&
       quad.object === child
     )).toBe(true);
-    expect(reconstructPlainChunkedText(result.quads, child)).toBe('x'.repeat(60_000));
+    expect(reconstructChunkedText(result.quads, child)).toBe('x'.repeat(60_000));
   });
 
   it('chunks oversized schema:text literals during update', async () => {
@@ -280,7 +258,7 @@ describe('DKGPublisher compatibility aliases', () => {
       quad.subject === root &&
       quad.predicate === 'http://schema.org/text'
     )).toBe(false);
-    expect(reconstructPlainChunkedText(result.quads, root)).toBe('x'.repeat(60_000));
+    expect(reconstructChunkedText(result.quads, root)).toBe('x'.repeat(60_000));
   });
 
   it('chunks oversized schema:text literals on linked blank nodes during update', async () => {
@@ -318,7 +296,7 @@ describe('DKGPublisher compatibility aliases', () => {
       quad.predicate === 'http://schema.org/hasPart' &&
       quad.object === child
     )).toBe(true);
-    expect(reconstructPlainChunkedText(result.quads, child)).toBe('x'.repeat(60_000));
+    expect(reconstructChunkedText(result.quads, child)).toBe('x'.repeat(60_000));
   });
 
   it('chunks oversized schema:text literals during assertion write', async () => {
@@ -337,7 +315,7 @@ describe('DKGPublisher compatibility aliases', () => {
       quad.subject === root &&
       quad.predicate === 'http://schema.org/text'
     )).toBe(false);
-    expect(reconstructPlainChunkedText(quads, root)).toBe('x'.repeat(60_000));
+    expect(reconstructChunkedText(quads, root)).toBe('x'.repeat(60_000));
   });
 
   it('preserves already-skolemized quads when normal roots are present', () => {

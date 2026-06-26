@@ -43,7 +43,7 @@ import {
   normalizeContextGraphIdOrUri,
   resolveRequiredWriteContextGraphId,
   oversizedRdfLiteralResponseBody,
-  prepareValidatedPublicWriteQuads,
+  preparePublicWriteStorageQuads,
   SMALL_BODY_BYTES,
   MAX_UPLOAD_BYTES,
   type ImportFileExtractionPayload,
@@ -639,7 +639,7 @@ export async function handleKaSemanticEnrichmentWrite(ctx: RequestContext): Prom
       generationMethod,
       semanticQuads,
     });
-    const normalizedQuads = prepareValidatedPublicWriteQuads("semanticQuads", [...semanticQuads, ...provenanceQuads]);
+    const normalizedQuads = preparePublicWriteStorageQuads("semanticQuads", [...semanticQuads, ...provenanceQuads]);
     if (!normalizedQuads.ok) {
       return jsonResponse(res, 400, normalizedQuads.body);
     }

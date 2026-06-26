@@ -40,7 +40,7 @@ import {
   respondIfReconcileUnavailable,
   respondIfChainRpcTransportError,
   sanitizeRpcMessage,
-  prepareValidatedPublicWriteQuads,
+  preparePublicWriteStorageQuads,
   normalizeContextGraphIdOrUri,
   resolveRequiredWriteContextGraphId,
   isNoFundedPublisherWalletLike,
@@ -825,7 +825,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       if (!quads.every(isWritableQuad)) {
         return jsonResponse(res, 400, { error: '"quads" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted' });
       }
-      const normalizedQuads = prepareValidatedPublicWriteQuads("quads", quads);
+      const normalizedQuads = preparePublicWriteStorageQuads("quads", quads);
       if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
       quadsToWrite = normalizedQuads.value.quads;
     }
@@ -1144,7 +1144,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         }
         // Validate object terms and chunk oversized schema:text literals before
         // the write path sees these public-write quads.
-        const normalizedQuads = prepareValidatedPublicWriteQuads("quads", parsed.quads);
+        const normalizedQuads = preparePublicWriteStorageQuads("quads", parsed.quads);
         if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
         // A bare write to a name that was never created used to fall through to
         // the legacy `/assertion/{addr}/{name}` graph and produce a KA that is

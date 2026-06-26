@@ -1,7 +1,10 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { isSkolemizedUri, rootEntityFromSkolemized, isBlankNode } from './skolemize.js';
-
-const GENID_SEGMENT = '/.well-known/genid/';
+import {
+  isSkolemizedUri,
+  rootEntityFromSkolemized,
+  isBlankNode,
+  skolemizedBlankNodeIri,
+} from './skolemize.js';
 
 /**
  * Skolemizes blank nodes under their parent entity and INDEXES the result by
@@ -116,7 +119,7 @@ function rootForNonBlankSubject(subject: string): string | undefined {
 }
 
 function skolemizeTermForRoot(term: string, root: string): string {
-  return isBlankNode(term) ? `${root}${GENID_SEGMENT}${term.slice(2)}` : term;
+  return isBlankNode(term) ? skolemizedBlankNodeIri(root, term) : term;
 }
 
 /**

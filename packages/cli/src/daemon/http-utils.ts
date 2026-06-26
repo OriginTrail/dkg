@@ -232,7 +232,7 @@ export interface PreparedPublicWriteQuads {
   readonly rewrites: RdfTextLiteralRewrite[];
 }
 
-export interface PreparedValidatedPublicWriteQuads extends PreparedPublicWriteQuads {
+export interface PreparedPublicWriteStorageQuads extends PreparedPublicWriteQuads {
   readonly totalQuads: number;
 }
 
@@ -257,10 +257,17 @@ export function preparePublicWriteQuads(
   }
 }
 
-export function prepareValidatedPublicWriteQuads(
+/**
+ * Prepares already shape-checked route quads for public storage. This helper
+ * intentionally does not own route shape, subject/predicate IRI, blank-node
+ * subject, or graph-policy validation; those remain with the route parsers that
+ * know their input contract. It validates object terms because parsing/chunking
+ * consumes them, then returns explicit storage quads plus rewrite/count metadata.
+ */
+export function preparePublicWriteStorageQuads(
   label: string,
   quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
-): { ok: true; value: PreparedValidatedPublicWriteQuads } | { ok: false; body: Record<string, unknown> } {
+): { ok: true; value: PreparedPublicWriteStorageQuads } | { ok: false; body: Record<string, unknown> } {
   const objectError = validateQuadObjectTerms(label, quads);
   if (objectError) return { ok: false, body: { error: objectError } };
   const prepared = preparePublicWriteQuads(label, quads);
@@ -487,7 +494,7 @@ export function parsePublishRequestBody(
       error: 'Missing or invalid "quads" (must be a non-empty quad array)',
     };
   }
-  const normalizedQuads = prepareValidatedPublicWriteQuads("quads", quads);
+  const normalizedQuads = preparePublicWriteStorageQuads("quads", quads);
   if (!normalizedQuads.ok) {
     return { ok: false, error: String(normalizedQuads.body.error ?? 'Oversized RDF literal'), body: normalizedQuads.body };
   }

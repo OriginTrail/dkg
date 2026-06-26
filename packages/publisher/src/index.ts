@@ -1,5 +1,5 @@
 export * from './publisher.js';
-export { skolemize, isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } from './skolemize.js';
+export { skolemize, skolemizedBlankNodeIri, SKOLEMIZED_BLANK_NODE_SEGMENT, isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } from './skolemize.js';
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 export { skolemizeByEntity, autoPartition } from './auto-partition.js';
 export {

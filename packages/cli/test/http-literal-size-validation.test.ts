@@ -8,7 +8,7 @@ import {
   buildImportFileResponse,
   parsePublishRequestBody,
   preparePublicWriteQuads,
-  prepareValidatedPublicWriteQuads,
+  preparePublicWriteStorageQuads,
   validateWritableQuadLiteralSizes,
 } from '../src/daemon/http-utils.js';
 
@@ -194,8 +194,8 @@ describe('HTTP RDF literal size validation', () => {
     }
   });
 
-  it('prepares validated public-write quads with explicit normalized count', () => {
-    const prepared = prepareValidatedPublicWriteQuads('quads', [{
+  it('prepares public-write storage quads with explicit normalized count', () => {
+    const prepared = preparePublicWriteStorageQuads('quads', [{
       subject: 'http://example.org/s',
       predicate: 'http://schema.org/text',
       object: OVERSIZED_LITERAL,
@@ -210,8 +210,8 @@ describe('HTTP RDF literal size validation', () => {
     }
   });
 
-  it('returns structured object-term validation failures from the validated public-write helper', () => {
-    const prepared = prepareValidatedPublicWriteQuads('quads', [{
+  it('returns structured object-term validation failures from the public-write storage helper', () => {
+    const prepared = preparePublicWriteStorageQuads('quads', [{
       subject: 'http://example.org/s',
       predicate: 'http://schema.org/name',
       object: 'not-a-valid-rdf-object',
@@ -226,7 +226,7 @@ describe('HTTP RDF literal size validation', () => {
 
   it('rejects small malformed quoted literal terms before storage routes see them', () => {
     for (const object of ['"bad\nliteral"', ' "ok"', '"ok"\n']) {
-      const prepared = prepareValidatedPublicWriteQuads('quads', [{
+      const prepared = preparePublicWriteStorageQuads('quads', [{
         subject: 'http://example.org/s',
         predicate: 'http://schema.org/name',
         object,
