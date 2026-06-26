@@ -1,53 +1,69 @@
 import fs from 'fs';
 
-const files = process.argv.slice(2);
+const errorFiles = fs
+    .readdirSync('.')
+    .filter(f => f.startsWith('errors_Node_') && f.endsWith('.json'));
 
-if (files.length === 0) {
-    console.log('Usage: node print_aggregated_errors.js errors_*.json');
-    process.exit(0);
-}
+console.log('\n\nGlobal Error Summary:\n');
 
-let totalErrors = 0;
+for (const file of errorFiles) {
+    const nodeName = file
+        .replace('errors_', '')
+        .replace('.json', '')
+        .replace(/_/g, ' ');
 
-for (const file of files) {
-    let data;
+    console.log(`${nodeName}`);
     try {
-        data = JSON.parse(fs.readFileSync(file, 'utf8'));
-    } catch (err) {
-        console.error(`Failed to parse ${file}: ${err.message}`);
-        continue;
-    }
+        const raw = fs.readFileSync(file, 'utf8');
+        const errors = JSON.parse(raw);
 
-    const match = file.match(/errors_([\w_]+)\.json/);
-    const nodeName = match ? match[1].replace(/_/g, ' ') : file;
-
-    const aggregated = data.aggregated || {};
-    const services = data.services || {};
-    const errorCount = Object.values(aggregated).reduce((sum, c) => sum + c, 0);
-    totalErrors += errorCount;
-
-    if (errorCount === 0) {
-        console.log(`\n${nodeName}: No errors`);
-        continue;
-    }
-
-    console.log(`\n${nodeName}: ${errorCount} total error(s)`);
-
-    // Group by service
-    const byService = {};
-    for (const [msg, count] of Object.entries(aggregated)) {
-        const svc = services[msg] || 'other';
-        if (!byService[svc]) byService[svc] = [];
-        byService[svc].push({ msg, count });
-    }
-
-    for (const [svc, entries] of Object.entries(byService)) {
-        const svcTotal = entries.reduce((sum, e) => sum + e.count, 0);
-        console.log(`  [${svc}] (${svcTotal})`);
-        for (const { msg, count } of entries) {
-            console.log(`    ${count}x ${msg}`);
+        if (Object.keys(errors).length === 0) {
+            console.log('  ✅ No errors');
+        } else {
+            // Handle new structure with blockchain_id and aggregated/detailed sections
+            if (errors.blockchain_id && errors.aggregated) {
+                // New structure - use aggregated section (without KA numbers)
+                Object.entries(errors.aggregated).forEach(([message, count]) => {
+                    const service = errors.services && errors.services[message] ? errors.services[message] : '';
+                    const serviceLabel = service ? ` [${service}]` : '';
+                    console.log(`  • ${count}x ${message}${serviceLabel}`);
+                });
+            } else if (errors.aggregated && errors.detailed) {
+                // Old structure with aggregated/detailed sections
+                Object.entries(errors.aggregated).forEach(([message, count]) => {
+                    const service = errors.services && errors.services[message] ? errors.services[message] : '';
+                    const serviceLabel = service ? ` [${service}]` : '';
+                    console.log(`  • ${count}x ${message}${serviceLabel}`);
+                });
+            } else {
+                // Old structure - direct error object - group similar errors
+                const groupedErrors = {};
+                
+                Object.entries(errors).forEach(([message, count]) => {
+                    // Remove KA numbers and node-specific details for aggregation
+                    let aggregatedMessage = message;
+                    
+                    // Remove "for KA #X" patterns
+                    aggregatedMessage = aggregatedMessage.replace(/\s+for\s+KA\s*#\d+/gi, '');
+                    
+                    // Remove "on Node X" patterns (keep the error type)
+                    aggregatedMessage = aggregatedMessage.replace(/\s+on\s+Node\s+\d+/gi, '');
+                    
+                    // Group by the cleaned message
+                    if (groupedErrors[aggregatedMessage]) {
+                        groupedErrors[aggregatedMessage] += count;
+                    } else {
+                        groupedErrors[aggregatedMessage] = count;
+                    }
+                });
+                
+                Object.entries(groupedErrors).forEach(([message, count]) => {
+                    console.log(`  • ${count}x ${message}`);
+                });
+            }
         }
+    } catch (err) {
+        console.log(`  Failed to read or parse ${file}: ${err.message}`);
     }
+    console.log('');
 }
-
-console.log(`\n--- Grand total: ${totalErrors} error(s) across ${files.length} file(s)`);

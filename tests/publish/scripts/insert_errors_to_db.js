@@ -1,147 +1,329 @@
 import fs from 'fs';
-import mysql from 'mysql2/promise';
+import { Client } from 'pg';
 import 'dotenv/config';
 
 const files = process.argv.slice(2);
 
-const requiredEnvVars = ['RAGAS_DB_HOST', 'RAGAS_DB_PASSWORD', 'RAGAS_DB_NAME'];
-const missingEnvVars = requiredEnvVars.filter(v => !process.env[v]);
-if (missingEnvVars.length > 0) {
-    console.error(`Missing required env vars: ${missingEnvVars.join(', ')}`);
-    process.exit(1);
-}
-
-const MAINNET_PORTS = [':8453', ':100', ':2043'];
+const networkConfig = {
+    'base:true':     { blockchainId: 'base:8453',   tableName: 'error_messages_mainnet_js', dbHost: process.env.DB_HOST_PUBLISH_MAINNET },
+    'base:false':    { blockchainId: 'base:84531',  tableName: 'error_messages_testnet_js', dbHost: process.env.DB_HOST_PUBLISH_TESTNET },
+    'gnosis:true':   { blockchainId: 'gnosis:100',  tableName: 'error_messages_mainnet_js', dbHost: process.env.DB_HOST_PUBLISH_MAINNET },
+    'gnosis:false':  { blockchainId: 'gnosis:10200',tableName: 'error_messages_testnet_js', dbHost: process.env.DB_HOST_PUBLISH_TESTNET },
+    'neuroweb:true': { blockchainId: 'neuroweb:2043', tableName: 'error_messages_mainnet_js', dbHost: process.env.DB_HOST_PUBLISH_MAINNET },
+    'neuroweb:false':{ blockchainId: 'neuroweb:20432',tableName: 'error_messages_testnet_js', dbHost: process.env.DB_HOST_PUBLISH_TESTNET },
+};
 
 for (const file of files) {
-    console.log(`Processing error file: ${file}`);
+    console.log(`📁 Processing error file: ${file}`);
     let errors;
 
     try {
         const raw = fs.readFileSync(file, 'utf8');
         errors = JSON.parse(raw);
     } catch (err) {
-        console.error(`Failed to read or parse ${file}: ${err.message}`);
+        console.error(`❌ Failed to read or parse ${file}:`, err.message);
         continue;
     }
 
-    const match = file.match(/errors_([\w_]+)\.json/);
+    const match = file.match(/errors_(Node_\d+)\.json/);
     if (!match) {
-        console.error(`Filename format incorrect for ${file}. Expected: errors_<NodeName>.json`);
+        console.error(`❌ Filename format incorrect for ${file}. Expected: errors_Node_XX.json`);
         continue;
     }
 
-    const nodeName = match[1].replace(/_/g, ' ');
-
-    let blockchainId = 'v9:local';
-    if (errors.blockchain_id) {
-        blockchainId = errors.blockchain_id;
+    const nodeName = match[1].replace('_', ' ');
+    
+    // Try to get blockchain_id from file content (array or object)
+    let blockchainIdFromContent = null;
+    if (Array.isArray(errors) && errors.length > 0 && errors[0].blockchain_id) {
+        blockchainIdFromContent = errors[0].blockchain_id;
+    } else if (!Array.isArray(errors)) {
+        // For new structure with blockchain_id and detailed sections
+        if (errors.blockchain_id) {
+            blockchainIdFromContent = errors.blockchain_id;
+            // Update errors to use the detailed section (with KA numbers for database)
+            errors = errors.detailed || {};
+        } else if (errors.blockchain_id) {
+            blockchainIdFromContent = errors.blockchain_id;
+        }
+    }
+    
+    // Also check for blockchain_id in environment variable
+    if (!blockchainIdFromContent && process.env.BLOCKCHAIN_ID) {
+        blockchainIdFromContent = process.env.BLOCKCHAIN_ID;
     }
 
+    // Use the same logic as insert_summary_to_db.js
+    const MAINNET_PORTS = [':8453', ':100', ':2043'];
     let isMainnet = false;
-    if (blockchainId && typeof blockchainId === 'string') {
-        isMainnet = MAINNET_PORTS.some(port => blockchainId.endsWith(port));
+    
+    if (blockchainIdFromContent && typeof blockchainIdFromContent === 'string') {
+        isMainnet = MAINNET_PORTS.some(port => blockchainIdFromContent.endsWith(port));
+    } else if (file.toLowerCase().includes('mainnet')) {
+        isMainnet = true;
+    } else if (file.toLowerCase().includes('testnet')) {
+        isMainnet = false;
+    } else {
+        // Try to determine from node numbers and file patterns
+        const nodeMatch = file.match(/Node_(\d+)/);
+        if (nodeMatch) {
+            const nodeNumber = parseInt(nodeMatch[1]);
+            // Mainnet uses Node 25-30, testnet uses Node 01, 04, 05, etc.
+            if (nodeNumber >= 25 && nodeNumber <= 30) {
+                isMainnet = true;
+            } else {
+                isMainnet = false;
+            }
+        }
     }
 
-    const tableName = isMainnet ? 'error_messages_v9_mainnet' : 'error_messages_v9_testnet';
-    console.log(`Network: ${isMainnet ? 'mainnet' : 'testnet'} | Table: ${tableName}`);
+    const tableName = isMainnet ? 'error_messages_mainnet_js' : 'error_messages_testnet_js';
+    const dbHost = isMainnet ? process.env.DB_HOST_PUBLISH_MAINNET : process.env.DB_HOST_PUBLISH_TESTNET;
 
-    const detailedErrors = errors.detailed || errors;
+    // Determine blockchain_id to use
+    let blockchainId;
+    if (blockchainIdFromContent) {
+        blockchainId = blockchainIdFromContent;
+    } else {
+        // Try to determine from the file name and node numbers
+        const nodeMatch = file.match(/Node_(\d+)/);
+        const nodeNumber = nodeMatch ? parseInt(nodeMatch[1]) : null;
+        
+        // Determine blockchain based on file patterns and node numbers
+        if (file.toLowerCase().includes('base')) {
+            blockchainId = isMainnet ? 'base:8453' : 'base:84532';
+        } else if (file.toLowerCase().includes('gnosis')) {
+            blockchainId = isMainnet ? 'gnosis:100' : 'gnosis:10200';
+        } else if (file.toLowerCase().includes('neuroweb')) {
+            blockchainId = isMainnet ? 'otp:2043' : 'otp:20430';
+        } else {
+            // Default based on node numbers and mainnet/testnet detection
+            if (isMainnet) {
+                blockchainId = 'otp:2043'; // Default to neuroweb mainnet
+            } else {
+                blockchainId = 'otp:20430'; // Default to neuroweb testnet
+            }
+        }
+    }
 
-    let db;
+    const db = new Client({
+        host: dbHost,
+        user: process.env.DB_USER_PUBLISH,
+        password: process.env.DB_PASSWORD_PUBLISH,
+        database: process.env.DB_NAME_PUBLISH,
+        port: 5432,
+    });
+
     try {
-        db = await mysql.createConnection({
-            host: process.env.RAGAS_DB_HOST,
-            user: process.env.RAGAS_DB_USER || process.env.RAGAS_DB_NAME || 'root',
-            password: process.env.RAGAS_DB_PASSWORD,
-            database: process.env.RAGAS_DB_NAME,
-            port: 3306,
-        });
-        console.log(`Connected to DB (${isMainnet ? 'mainnet' : 'testnet'})`);
+        await db.connect();
+        console.log(`✅ Connected to DB (${isMainnet ? 'mainnet' : 'testnet'})`);
+        
+        // Start transaction
+        await db.query('BEGIN');
     } catch (err) {
-        console.error('Failed to connect to DB:', err.message);
+        console.error('❌ Failed to connect to DB:', err.message);
         continue;
     }
 
     let insertedCount = 0;
 
-    const kaErrors = {};
-
-    for (const [errorMsg] of Object.entries(detailedErrors)) {
-        let kaNumber = null;
-
-        const kaMatch = errorMsg.match(/for KA #(\d+)/);
-        if (kaMatch) {
-            kaNumber = `KA #${kaMatch[1]}`;
-        } else {
-            const patterns = [
-                /KA\s*#?(\d+)/i,
-                /Knowledge\s*Asset\s*#?(\d+)/i,
-            ];
-            for (const pattern of patterns) {
-                const m = errorMsg.match(pattern);
-                if (m) {
-                    kaNumber = `KA #${m[1]}`;
-                    break;
+    if (Array.isArray(errors)) {
+        for (const attempt of errors) {
+            // Determine blockchain_id for this row
+            let rowBlockchainId = attempt.blockchain_id || blockchainId;
+            if (!rowBlockchainId) {
+                // Fallback to filename-based logic
+                if (file.toLowerCase().includes('base')) {
+                    rowBlockchainId = isMainnet ? 'base:8453' : 'base:84532';
+                } else if (file.toLowerCase().includes('gnosis')) {
+                    rowBlockchainId = isMainnet ? 'gnosis:100' : 'gnosis:10200';
+                } else {
+                    rowBlockchainId = isMainnet ? 'otp:2043' : 'otp:20430';
                 }
             }
-            if (!kaNumber) kaNumber = 'Unknown KA';
-        }
 
-        if (!kaErrors[kaNumber]) {
-            kaErrors[kaNumber] = {
-                publish_error: null,
-                query_error: null,
-                publisher_get_error: null,
-                non_publisher_get_error: null,
+            // Determine ka_label for this row
+            let rowKaLabel = attempt.ka_label;
+            if (!rowKaLabel) {
+                // Try to extract KA number from any error field
+                const errorFields = [attempt.publish_error, attempt.query_error, attempt.publisher_get_error, attempt.non_publisher_get_error];
+                for (const msg of errorFields) {
+                    if (typeof msg === 'string') {
+                        const kaMatch = msg.match(/KA\s*#?(\d+)/i);
+                        if (kaMatch) {
+                            rowKaLabel = `KA #${kaMatch[1]}`;
+                            break;
+                        }
+                    }
+                }
+                if (!rowKaLabel) rowKaLabel = 'Unknown KA';
+            }
+
+            const row = {
+                node_name: nodeName,
+                blockchain_id: rowBlockchainId,
+                ka_label: rowKaLabel,
+                publish_error: attempt.publish_error || null,
+                query_error: attempt.query_error || null,
+                publisher_get_error: attempt.publisher_get_error || null,
+                non_publisher_get_error: attempt.non_publisher_get_error || null,
+                time_stamp: new Date().toISOString(),
             };
+
+            const insertQuery = `
+                INSERT INTO ${tableName} (
+                    node_name, blockchain_id, ka_label,
+                    publish_error, query_error,
+                    publisher_get_error, non_publisher_get_error,
+                    time_stamp
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            `;
+
+            try {
+                const result = await db.query(insertQuery, [
+                    row.node_name,
+                    row.blockchain_id,
+                    row.ka_label,
+                    row.publish_error,
+                    row.query_error,
+                    row.publisher_get_error,
+                    row.non_publisher_get_error,
+                    row.time_stamp
+                ]);
+                insertedCount++;
+                console.log(`✅ Inserted ${row.ka_label} (attempt ${insertedCount}) for ${row.node_name}`);
+            } catch (err) {
+                console.error(`❌ Failed to insert KA ${row.ka_label}:`, err.message);
+            }
+        }
+    } else {
+        // Process detailed errors and group by KA number
+        const kaErrors = {};
+        
+        for (const [errorMsg, count] of Object.entries(errors)) {
+            // Extract KA number from the error message key (which includes KA number)
+            let kaNumber = null;
+            
+            // First try to extract KA number from the error message key itself
+            const kaMatch = errorMsg.match(/for KA #(\d+)/);
+            if (kaMatch) {
+                kaNumber = `KA #${kaMatch[1]}`;
+            } else {
+                // Fallback: Try multiple regex patterns to find KA number in the message content
+                const patterns = [
+                    /KA\s*#?(\d+)/i,           // KA #5, KA5
+                    /Knowledge\s*Asset\s*#?(\d+)/i,  // Knowledge Asset #5
+                    /Asset\s*#?(\d+)/i,        // Asset #5
+                    /publishing.*KA\s*#?(\d+)/i,  // publishing KA #5
+                    /querying.*KA\s*#?(\d+)/i,   // querying KA #5
+                    /get.*KA\s*#?(\d+)/i,       // get KA #5
+                    /KA\s*#?(\d+)\s*on/i,       // KA #5 on
+                    /KA\s*#?(\d+)\s*during/i,   // KA #5 during
+                    /(\d+)\s*KA/i,              // 5 KA
+                    /KA\s*(\d+)/i               // KA 5
+                ];
+                
+                for (const pattern of patterns) {
+                    const match = errorMsg.match(pattern);
+                    if (match) {
+                        kaNumber = `KA #${match[1]}`;
+                        break;
+                    }
+                }
+            }
+            
+            // If no KA found in message, try to infer from context
+            if (!kaNumber) {
+                // Check if we can extract from the error message context
+                const contextMatch = errorMsg.match(/(\d+)/);
+                if (contextMatch) {
+                    const num = parseInt(contextMatch[1]);
+                    // Only use if it's a reasonable KA number (1-20)
+                    if (num >= 1 && num <= 20) {
+                        kaNumber = `KA #${num}`;
+                    } else {
+                        kaNumber = 'Unknown KA';
+                    }
+                } else {
+                    kaNumber = 'Unknown KA';
+                }
+            }
+
+            // Initialize KA entry if it doesn't exist
+            if (!kaErrors[kaNumber]) {
+                kaErrors[kaNumber] = {
+                    publish_error: null,
+                    query_error: null,
+                    publisher_get_error: null,
+                    non_publisher_get_error: null
+                };
+            }
+
+            // Put the error message in the correct field based on content
+            if (errorMsg.toLowerCase().includes('publish')) {
+                kaErrors[kaNumber].publish_error = errorMsg;
+            } else if (errorMsg.toLowerCase().includes('query')) {
+                kaErrors[kaNumber].query_error = errorMsg;
+            } else if (errorMsg.toLowerCase().includes('local get')) {
+                kaErrors[kaNumber].publisher_get_error = errorMsg;
+            } else if (errorMsg.toLowerCase().includes('get')) {
+                kaErrors[kaNumber].non_publisher_get_error = errorMsg;
+            }
         }
 
-        if (errorMsg.toLowerCase().includes('publish')) {
-            kaErrors[kaNumber].publish_error = errorMsg;
-        } else if (errorMsg.toLowerCase().includes('asset') || errorMsg.toLowerCase().includes('asset-query')) {
-            kaErrors[kaNumber].publisher_get_error = errorMsg;
-        } else if (errorMsg.toLowerCase().includes('global') || errorMsg.toLowerCase().includes('global-query')) {
-            kaErrors[kaNumber].query_error = errorMsg;
-        } else if (errorMsg.toLowerCase().includes('query')) {
-            kaErrors[kaNumber].query_error = errorMsg;
+        // Insert one row per KA with all its errors
+        for (const [kaLabel, errorFields] of Object.entries(kaErrors)) {
+            const row = {
+                node_name: nodeName,
+                blockchain_id: blockchainId,
+                ka_label: kaLabel,
+                publish_error: errorFields.publish_error,
+                query_error: errorFields.query_error,
+                publisher_get_error: errorFields.publisher_get_error,
+                non_publisher_get_error: errorFields.non_publisher_get_error,
+                time_stamp: new Date().toISOString(),
+            };
+
+            const insertQuery = `
+                INSERT INTO ${tableName} (
+                    node_name, blockchain_id, ka_label,
+                    publish_error, query_error,
+                    publisher_get_error, non_publisher_get_error,
+                    time_stamp
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            `;
+
+            try {
+                const result = await db.query(insertQuery, [
+                    row.node_name,
+                    row.blockchain_id,
+                    row.ka_label,
+                    row.publish_error,
+                    row.query_error,
+                    row.publisher_get_error,
+                    row.non_publisher_get_error,
+                    row.time_stamp
+                ]);
+                insertedCount++;
+                console.log(`✅ Inserted ${row.ka_label} (attempt ${insertedCount}) for ${row.node_name}`);
+            } catch (err) {
+                console.error(`❌ Failed to insert KA ${row.ka_label}:`, err.message);
+            }
         }
     }
 
-    for (const [kaLabel, errorFields] of Object.entries(kaErrors)) {
-        const insertQuery = `
-            INSERT INTO ${tableName} (
-                node_name, blockchain_id, ka_label,
-                publish_error, query_error,
-                publisher_get_error, non_publisher_get_error,
-                time_stamp
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `;
-
-        const timestamp = new Date().toISOString().replace('T', ' ').replace('Z', '').split('.')[0];
-
-        try {
-            await db.execute(insertQuery, [
-                nodeName,
-                blockchainId,
-                kaLabel,
-                errorFields.publish_error,
-                errorFields.query_error,
-                errorFields.publisher_get_error,
-                errorFields.non_publisher_get_error,
-                timestamp,
-            ]);
-            insertedCount++;
-            console.log(`Inserted ${kaLabel} (attempt ${insertedCount}) for ${nodeName}`);
-        } catch (err) {
-            console.error(`Failed to insert KA ${kaLabel}: ${err.message}`);
-        }
+    // Commit transaction
+    try {
+        await db.query('COMMIT');
+    } catch (err) {
+        console.error('❌ Failed to commit transaction:', err.message);
+        await db.query('ROLLBACK');
     }
 
     try {
         await db.end();
-        console.log('DB connection closed');
+        console.log('✅ DB connection closed');
     } catch (err) {
-        console.error('Failed to close DB connection:', err.message);
+        console.error('❌ Failed to close DB connection:', err.message);
     }
 }

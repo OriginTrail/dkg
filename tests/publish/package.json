@@ -3,9 +3,18 @@
   "version": "1.0.0",
   "type": "module",
   "private": true,
-  "description": "DKG v10 publish/query lifecycle tests — mirrors the dkg.js V8 test suite",
+  "description": "DKG v10 publish/query lifecycle tests — a faithful port of the dkg.js V8 test suite (per-node parallel stages, 10 KAs/node, publish/query/local-get/remote-get, same Grafana import)",
   "scripts": {
     "test": "mocha src/v10-publish-test.spec.js --timeout 7200000 --exit",
+
+    "test:base:mainnet": "mocha src/Base_Mainnet.spec.js --reporter mochawesome --reporter-options reportFilename=mainnet_base",
+    "test:base:sbb:mainnet": "NODE_TO_TEST=\"SBB\" mocha src/Base_Mainnet.spec.js --reporter mochawesome --reporter-options reportFilename=mainnet_base",
+    "test:base:dmaast:mainnet": "NODE_TO_TEST=\"DMaaST\" mocha src/Base_Mainnet.spec.js --reporter mochawesome --reporter-options reportFilename=mainnet_base",
+
+    "test:gnosis:mainnet": "mocha src/Gnosis_Mainnet.spec.js --reporter mochawesome --reporter-options reportFilename=mainnet_gnosis",
+    "test:gnosis:terminus:mainnet": "NODE_TO_TEST=\"Terminus\" mocha src/Gnosis_Mainnet.spec.js --reporter mochawesome --reporter-options reportFilename=mainnet_gnosis",
+    "test:gnosis:rhodia:mainnet": "NODE_TO_TEST=\"Rhodia\" mocha src/Gnosis_Mainnet.spec.js --reporter mochawesome --reporter-options reportFilename=mainnet_gnosis",
+
     "insert-summary": "node scripts/insert_summary_to_db.js",
     "insert-errors": "node scripts/insert_errors_to_db.js",
     "print-errors": "node scripts/print_aggregated_errors.js"
@@ -13,6 +22,8 @@
   "dependencies": {
     "dotenv": "^16.4.7",
     "mocha": "^11.1.0",
-    "mysql2": "^3.11.0"
+    "mochawesome": "^7.1.3",
+    "mysql2": "^3.11.0",
+    "pg": "^8.13.1"
   }
 }
