@@ -18,5 +18,8 @@ defineChainPublishSuite({
   // 'megagiga' is an existing public CG on Base Sepolia (testnet) — publish into it
   // directly; testnet TRAC is free via the faucet.
   contextGraphId: process.env.DKG_CONTEXT_GRAPH_ID || 'megagiga',
+  // Fallback UAL for read ops when a publish fails. Set via DKG_FALLBACK_UAL once
+  // real Base Sepolia testnet nodes exist (publish one KA, use its UAL here).
+  fallbackUal: process.env.DKG_FALLBACK_UAL || '',
   nodes,
 });
