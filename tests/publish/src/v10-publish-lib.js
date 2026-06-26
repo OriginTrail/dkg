@@ -275,7 +275,7 @@ export function defineChainPublishSuite(config) {
 
         for (let i = 0; i < KA_COUNT; i++) {
           console.log(`\nPublishing KA #${i + 1} on ${name}`);
-          const { quads } = buildQuads(name, i + 1);
+          const { quads, rootEntity } = buildQuads(name, i + 1);
 
           let ual = null;
           let step = 'publish';
@@ -308,20 +308,27 @@ export function defineChainPublishSuite(config) {
             publishDurations.push(Date.now() - pubStart);
           }
 
-          // Reads target the fresh publish UAL; if the publish failed, they fall
-          // back to FALLBACK_UAL so the read paths are still exercised (V8 parity).
+          // Reads are RUN-SPECIFIC when the publish succeeded — they target THIS
+          // KA's unique root (urn:ka:<node>-<uuid>) / UAL, so a pass proves this
+          // run's data is really readable (no stale-data false positives). Only if
+          // the publish FAILED (no fresh UAL) do they fall back to the per-chain
+          // FALLBACK_UAL via ENTITY_BY_UAL, so the read paths are still exercised.
           const readUal = ual || FALLBACK_UAL;
-          const nodeKey = name.replace(/\s+/g, '').toLowerCase();
+          const fallbackPeerId = () => getPeerId(nodes.find((n) => n.name !== name) || nodes[0]);
 
-          // ── 2. query (broad verifiable-memory SPARQL) ──────────────────────
+          // ── 2. query — SELECT this KA's child entities (via isPartOf) from VM ─
           step = 'query';
           const queryStart = Date.now();
           try {
-            const generalSparql = `PREFIX schema: <http://schema.org/>
-SELECT ?s ?name ?description WHERE {
-  ?s schema:name ?name ; schema:description ?description .
-} LIMIT 10`;
-            const result = await readWithRetry('query', name, () => client.query(generalSparql, contextGraphId, 'verifiable-memory'));
+            let result;
+            if (ual) {
+              const sparql = `SELECT ?s ?name WHERE { ?s <http://schema.org/isPartOf> <${rootEntity}> ; <http://schema.org/name> ?name } LIMIT 5`;
+              result = await readWithRetry('query', name, () => client.query(sparql, contextGraphId, 'verifiable-memory'));
+            } else if (FALLBACK_UAL) {
+              result = await readWithRetry('query', name, async () => client.queryRemote(await fallbackPeerId(), contextGraphId, { lookupType: 'ENTITY_BY_UAL', ual: FALLBACK_UAL }));
+            } else {
+              throw new Error('query: publish failed and no DKG_FALLBACK_UAL configured');
+            }
             assert.ok(queryHasData(result), 'Query returned empty results');
             console.log(`✅ Query succeeded`);
             querySuccess++;
@@ -333,20 +340,16 @@ SELECT ?s ?name ?description WHERE {
             queryDurations.push(Date.now() - queryStart);
           }
 
-          // ── 3. VM GET (read the KA back from Verifiable Memory, SAME node) ──
+          // ── 3. VM GET — get THIS KA's root entity triples from local VM ──────
           step = 'VM GET';
           const vmGetStart = Date.now();
           try {
             let result;
             if (ual) {
-              // fresh publish: read this KA's just-written entities from local VM
-              const entitySparql = `SELECT ?s ?p ?o WHERE { ?s ?p ?o FILTER(STRSTARTS(STR(?s), "urn:entity:${nodeKey}:${i + 1}:")) } LIMIT 5`;
+              const entitySparql = `SELECT ?p ?o WHERE { <${rootEntity}> ?p ?o } LIMIT 5`;
               result = await readWithRetry('VM GET', name, () => client.query(entitySparql, contextGraphId, 'verifiable-memory'));
             } else if (FALLBACK_UAL) {
-              // publish failed: still exercise the get path against the known-good UAL
-              const peer = nodes.find((n) => n.name !== name) || nodes[0];
-              const peerId = await getPeerId(peer);
-              result = await readWithRetry('VM GET', name, () => client.queryRemote(peerId, contextGraphId, { lookupType: 'ENTITY_BY_UAL', ual: FALLBACK_UAL }));
+              result = await readWithRetry('VM GET', name, async () => client.queryRemote(await fallbackPeerId(), contextGraphId, { lookupType: 'ENTITY_BY_UAL', ual: FALLBACK_UAL }));
             } else {
               throw new Error('VM GET: publish failed and no DKG_FALLBACK_UAL configured');
             }
