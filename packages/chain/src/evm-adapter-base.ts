@@ -21,14 +21,14 @@ import { KeyedSerializer } from './keyed-mutex.js';
 import { floorPublishTokenAmount } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
-import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isKnownTransactionError, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
-import { noteRpcFailover, noteRpcExhaustion, rpcHost } from './rpc-failover-log.js';
+import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
+import { rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
 import { RpcFailoverClient, type ReadPolicy } from './rpc-failover-client.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_BROADCAST_ATTEMPT_TIMEOUT_MS, RPC_RECEIPT_ATTEMPT_TIMEOUT_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
+import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
 
 /**
  * Maps a Hub-registered contract name to the function that invalidates
@@ -767,72 +767,28 @@ export class EVMChainAdapterBase {
     return this.signerPool.find((signer) => signer.address.toLowerCase() === normalized);
   }
 
-  protected async broadcastSignedTransactionWithFailover(
+  /**
+   * TEMPORARY/RETAINED delegator (P2 of #1336, PLAN §0 D3): the per-endpoint
+   * broadcast loop now lives in `this.rpcFailover.broadcast`. This pass-through is
+   * KEPT so the tx-orchestration calls it BY NAME — `sendSignedTransactionAndWait`'s
+   * set-retry loop intercepts here, and the `write-tx-safety` pass-count spy binds
+   * to this method (not the module). Tx-safety state stays on the adapter.
+   */
+  protected broadcastSignedTransactionWithFailover(
     signedTx: string,
     txHash: string,
     label: string,
   ): Promise<void> {
-    let lastRetryable: unknown;
-    for (let i = 0; i < this.providers.length; i += 1) {
-      const provider = this.providers[i];
-      try {
-        await withTimeout(
-          provider.broadcastTransaction(signedTx),
-          RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
-          `${label} broadcast via RPC #${i + 1}`,
-        );
-        return;
-      } catch (err) {
-        if (isKnownTransactionError(err)) return;
-        if (!isRetryableRpcError(err)) throw err;
-        lastRetryable = err;
-        if (i < this.providers.length - 1) {
-          noteRpcFailover(`${label} broadcast`, this.rpcUrls[i], err, this.rpcUrls[i + 1]);
-        }
-      }
-    }
-    if (lastRetryable) noteRpcExhaustion(`${label} broadcast`, this.rpcUrls);
-    // Typed transport error (mirroring the preparation loop + CLI path) so a
-    // broadcast-time all-endpoints-exhausted failure maps to a retryable 503 at
-    // the HTTP boundary, not a generic 500 — an exhaustion after a provider
-    // populated/signed would otherwise surface code-less.
-    throw new ChainRpcTransportError(
-      'RPC_ENDPOINTS_EXHAUSTED',
-      `${label} broadcast failed on all configured RPC endpoints for tx ${txHash}: ${errorMessage(lastRetryable)}`,
-      { cause: lastRetryable, rpcUrls: this.rpcUrls },
-    );
+    return this.rpcFailover.broadcast(signedTx, txHash, label);
   }
 
-  protected async getTransactionReceiptWithFailover(txHash: string): Promise<ethers.TransactionReceipt | null> {
-    let lastRetryable: unknown;
-    let sawNonErrorResponse = false;
-    for (let i = 0; i < this.providers.length; i += 1) {
-      const provider = this.providers[i];
-      try {
-        const receipt = await withTimeout(
-          provider.getTransactionReceipt(txHash),
-          RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
-          `receipt lookup via RPC #${i + 1}`,
-        );
-        sawNonErrorResponse = true;
-        if (receipt) return receipt;
-      } catch (err) {
-        if (!isRetryableRpcError(err)) throw err;
-        lastRetryable = err;
-        if (i < this.providers.length - 1) {
-          noteRpcFailover('receipt lookup', this.rpcUrls[i], err, this.rpcUrls[i + 1]);
-        }
-      }
-    }
-    if (lastRetryable && !sawNonErrorResponse) {
-      noteRpcExhaustion('receipt lookup', this.rpcUrls);
-      throw new ChainRpcTransportError(
-        'RPC_RECEIPT_LOOKUP_FAILED',
-        `Receipt lookup for tx ${txHash} failed on all configured RPC endpoints: ${errorMessage(lastRetryable)}`,
-        { cause: lastRetryable, txHash },
-      );
-    }
-    return null;
+  /**
+   * RETAINED delegator (P2 of #1336, PLAN §0 D3): the per-endpoint receipt loop
+   * now lives in `this.rpcFailover.getReceipt`. Kept so `waitForReceiptWithFailover`
+   * + the `publish.ts` callers + the `evm-adapter.unit` spies bind BY NAME.
+   */
+  protected getTransactionReceiptWithFailover(txHash: string): Promise<ethers.TransactionReceipt | null> {
+    return this.rpcFailover.getReceipt(txHash);
   }
 
   /**
@@ -1096,21 +1052,15 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * Per-endpoint populate+sign loop SHARED by `sendContractTransaction` and the
-   * V10 publish/update path. Iterates `this.providers[i]` (signer + contract
-   * rebound to each), populates (gas/nonce/chainId reads, optional OOG-buffer gas
-   * estimate) + signs, and returns the FIRST successful `{signedTx,txHash}`.
-   * Advances ONLY on `isRetryableRpcError`; a non-retryable error (a decoded
-   * revert — e.g. `TooLowAllowance`) propagates AT ONCE so the caller can react.
-   * Exhaustion → typed `RPC_ENDPOINTS_EXHAUSTED`.
-   *
-   * STRICTLY pre-broadcast: signs once on the winning provider, does NOT broadcast
-   * or fire the WAL — the caller broadcasts the single returned tx. This keeps the
-   * WAL split intact (onBroadcast between sign and broadcast), so the V10 path
-   * reuses THIS helper rather than `sendContractTransaction` (which broadcasts
-   * internally).
+   * RETAINED delegator (P2 of #1336, PLAN §0 D3): the per-endpoint populate+sign
+   * loop now lives in `this.rpcFailover.populateAndSign` (which reaches the pure
+   * `signPopulatedTransaction` via the injected callback — PLAN §0 D2). Kept so
+   * `populateAndSignV10WithAllowanceRecovery` (the `forcedReapprove` latch owner)
+   * and `sendContractTransaction` call it BY NAME, and the `evm-adapter.unit`
+   * spies bind here. STRICTLY pre-broadcast — the caller still owns the WAL split
+   * and broadcasts the single returned tx.
    */
-  protected async populateAndSignAcrossProviders(
+  protected populateAndSignAcrossProviders(
     contract: Contract,
     method: string,
     args: readonly unknown[],
@@ -1118,71 +1068,7 @@ export class EVMChainAdapterBase {
     label: string,
     opts?: { gasLimitBufferBps?: number },
   ): Promise<{ signedTx: string; txHash: string }> {
-    let lastRetryable: unknown;
-    for (let i = 0; i < this.providers.length; i += 1) {
-      const rpcSigner = this.rebindSigner(signer, this.providers[i]);
-      try {
-        const connected = this.rebindContract(contract, rpcSigner) as any;
-        const populated = await withTimeout<ethers.TransactionRequest>(
-          connected[method].populateTransaction(...args) as Promise<ethers.TransactionRequest>,
-          RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
-          `${label} transaction population via RPC #${i + 1}`,
-        );
-        if (opts?.gasLimitBufferBps && populated.gasLimit == null) {
-          try {
-            const est = (await withTimeout<bigint>(
-              connected[method].estimateGas(...args) as Promise<bigint>,
-              RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
-              `${label} gas estimation via RPC #${i + 1}`,
-            ));
-            populated.gasLimit = (est * BigInt(10_000 + opts.gasLimitBufferBps)) / 10_000n;
-          } catch (estErr) {
-            // A RETRYABLE estimate failure must not silently drop the OOG
-            // headroom: if another RPC is left, re-throw so the loop fails over
-            // to it (it may estimate fine and apply the buffer). Only on the LAST
-            // provider — or for a non-retryable estimate error, where failover
-            // can't help — fall back to ethers' own unbuffered estimate during
-            // signing, leaving a breadcrumb so a recurring OOG isn't a mystery.
-            const hasMoreProviders = i < this.providers.length - 1;
-            if (isRetryableRpcError(estErr) && hasMoreProviders) {
-              throw estErr;
-            }
-            console.warn(
-              `[chain] ${label}: buffered gas estimation failed; falling back to ` +
-              `ethers' unbuffered estimate (no OOG headroom applied): ` +
-              `${estErr instanceof Error ? estErr.message : String(estErr)}`,
-            );
-          }
-        }
-        return await withTimeout(
-          this.signPopulatedTransaction(rpcSigner, populated),
-          RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
-          `${label} transaction signing via RPC #${i + 1}`,
-        );
-      } catch (err) {
-        if (!isRetryableRpcError(err)) throw err;
-        lastRetryable = err;
-        if (i < this.providers.length - 1) {
-          noteRpcFailover(`${label} preparation`, this.rpcUrls[i], err, this.rpcUrls[i + 1]);
-        }
-      }
-    }
-    if (lastRetryable) noteRpcExhaustion(`${label} preparation`, this.rpcUrls);
-    // Single provider → carry the code on a new error but keep the message
-    // byte-identical (no second endpoint, so the raw message reads cleaner and
-    // any message-inspecting caller keeps seeing it). Multiple providers → the
-    // HOST-ONLY aggregate (never full URLs — a configured rpcUrl may carry an API
-    // key and this message reaches HTTP clients via response paths that echo
-    // err.message, e.g. the create+publish 207 tail). Asserted by
-    // evm-adapter.unit.test.ts.
-    const message = this.providers.length <= 1
-      ? errorMessage(lastRetryable)
-      : `${label} transaction preparation failed on all configured RPC endpoints ` +
-        `(${this.rpcUrls.map(rpcHost).join(', ')}): ${errorMessage(lastRetryable)}`;
-    throw new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', message, {
-      cause: lastRetryable,
-      rpcUrls: this.rpcUrls,
-    });
+    return this.rpcFailover.populateAndSign(contract, method, args, signer, label, opts);
   }
 
   protected async sendContractTransaction(
