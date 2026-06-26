@@ -211,31 +211,23 @@ export function defineChainPublishSuite(config) {
           console.log(`💳 ${name} operational wallet(s): could not read /api/wallets (${error.message})`);
         }
 
-        // Ensure the context graph exists on this node (and is on-chain registered
-        // when V10_CG_REGISTER=true). Publish to Verifiable Memory needs the CG
-        // registered on-chain — otherwise the node has no on-chain id to anchor to
-        // and every publish silently degrades to `tentative` (localChainSkipReason
-        // "no-chain"). On-chain registration costs ~100 TRAC per chain.
-        try {
-          const cg = await client.createContextGraph(
-            contextGraphId,
-            'V10 Publish Test CG',
-            'Automated publish/query test context graph',
-            { accessPolicy: CG_ACCESS_POLICY, publishPolicy: CG_PUBLISH_POLICY, register: CG_REGISTER },
-          );
-          if (cg.onChainId) {
-            console.log(`Context graph "${contextGraphId}" ready on ${name} (on-chain ${cg.onChainId}, open/public)`);
-          } else {
-            console.log(`Context graph "${contextGraphId}" created on ${name} (open/public, local)`);
-          }
-        } catch (error) {
-          console.log(`Context graph setup on ${name}: ${error.message} (may already exist, continuing)`);
-        }
-
-        // When CG_REGISTER, ensure the CG is registered ON-CHAIN via the standalone
-        // endpoint — create(register:true) is a no-op for an already-existing local
-        // CG (409), so this is the only path that registers a pre-existing one.
+        // Context-graph setup. Two modes:
+        //   V10_CG_REGISTER=false (default) — publish into an EXISTING registered,
+        //     open-publish CG (e.g. 'sports' on Base, 'foodie-network' on Gnosis).
+        //     We do NOT create or register anything: calling create on an existing
+        //     public CG would 409 (or worse, shadow it with a local unregistered
+        //     copy), so we just publish straight into it.
+        //   V10_CG_REGISTER=true — create + on-chain-register OUR OWN CG (~100 TRAC
+        //     per chain). Needed only if you don't want to reuse a public CG.
         if (CG_REGISTER) {
+          try {
+            await client.createContextGraph(
+              contextGraphId, 'V10 Publish Test CG', 'Automated publish/query test context graph',
+              { accessPolicy: CG_ACCESS_POLICY, publishPolicy: CG_PUBLISH_POLICY, register: true },
+            );
+          } catch (error) {
+            console.log(`Context graph create on ${name}: ${error.message} (may already exist, continuing)`);
+          }
           try {
             const reg = await client.registerContextGraph(contextGraphId, { accessPolicy: CG_ACCESS_POLICY, publishPolicy: CG_PUBLISH_POLICY });
             console.log(`✅ Context graph "${contextGraphId}" registered on-chain on ${name}${reg.onChainId ? ` (on-chain ${reg.onChainId})` : ''}`);
@@ -243,6 +235,8 @@ export function defineChainPublishSuite(config) {
             const already = /already registered/i.test(error.message);
             console.log(`${already ? '' : '⚠️  '}Context graph "${contextGraphId}" on-chain register on ${name}: ${error.message}${already ? ' (ok — already on-chain)' : ''}`);
           }
+        } else {
+          console.log(`Publishing into existing context graph "${contextGraphId}" on ${name} (no create/register; reuses a registered open-publish CG)`);
         }
 
         for (let i = 0; i < KA_COUNT; i++) {

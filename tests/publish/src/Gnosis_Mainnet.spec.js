@@ -11,6 +11,8 @@ const nodes = [
 defineChainPublishSuite({
   title: 'DKG Asset Lifecycle on Gnosis Mainnet',
   blockchainName: 'v10:gnosis:100',
-  contextGraphId: process.env.DKG_CONTEXT_GRAPH_ID || 'jenkins-v10-gnosis-mainnet',
+  // 'foodie-network' is an existing REGISTERED, public, open-publish CG on Gnosis
+  // mainnet — no ~100-TRAC registration, only the tiny per-publish bid (~0.000273 TRAC).
+  contextGraphId: process.env.DKG_CONTEXT_GRAPH_ID || 'foodie-network',
   nodes,
 });

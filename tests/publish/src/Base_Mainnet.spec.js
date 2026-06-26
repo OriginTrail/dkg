@@ -11,6 +11,8 @@ const nodes = [
 defineChainPublishSuite({
   title: 'DKG Asset Lifecycle on Base Mainnet',
   blockchainName: 'v10:base:8453',
-  contextGraphId: process.env.DKG_CONTEXT_GRAPH_ID || 'jenkins-v10-base-mainnet',
+  // 'sports' is an existing REGISTERED, public, open-publish CG on Base mainnet — no
+  // ~100-TRAC registration needed, only the tiny per-publish bid (~0.000273 TRAC).
+  contextGraphId: process.env.DKG_CONTEXT_GRAPH_ID || 'sports',
   nodes,
 });

@@ -15,6 +15,8 @@ const nodes = [
 defineChainPublishSuite({
   title: 'DKG Asset Lifecycle on Base Testnet',
   blockchainName: 'v10:base:84532',
-  contextGraphId: process.env.DKG_CONTEXT_GRAPH_ID || 'jenkins-v10-base-testnet',
+  // 'megagiga' is an existing public CG on Base Sepolia (testnet) — publish into it
+  // directly; testnet TRAC is free via the faucet.
+  contextGraphId: process.env.DKG_CONTEXT_GRAPH_ID || 'megagiga',
   nodes,
 });
