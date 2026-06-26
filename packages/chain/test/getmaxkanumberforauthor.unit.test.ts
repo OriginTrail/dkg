@@ -21,16 +21,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
-
-// Round-2 review split withRunner → rebindContract (contract.connect(p), no
-// test-double fallback). makeAdapter gives `storage` a .connect; `connectable`
-// makes any OTHER connect-less contract mock satisfy the boundary with a
-// single-provider NO-OP self-rebind, so the REAL rebindContract runs.
-function connectable<T>(mock: T): T {
-  const m = mock as { connect?: unknown };
-  if (m && typeof m.connect !== 'function') m.connect = () => mock;
-  return mock;
-}
+import { connectable } from './connectable.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];

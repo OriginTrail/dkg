@@ -27,6 +27,7 @@ import {
 } from '../src/chain-adapter.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
+import { connectable } from './connectable.js';
 
 // Isolate the process-wide RPC failover stats + dedup window before EVERY test
 // so a failover/exhaustion warning emitted by one test can't suppress (via the
@@ -36,18 +37,6 @@ beforeEach(() => {
   _resetRpcFailoverStatsForTest();
 });
 
-// Round-2 review split withRunner → rebindContract (contract.connect(p), NO
-// test-double fallback) so production handles MUST be .connect-able (they are —
-// real ethers Contracts). These unit tests mock this.contracts.* as plain method
-// objects; `connectable` makes a mock satisfy that boundary with a single-provider
-// NO-OP self-rebind (connect returns the mock), so the REAL rebindContract runs
-// (a genuine rebindContract regression would still be caught). Idempotent —
-// leaves a MEANINGFUL .connect (e.g. token → tokenWithSigner) untouched.
-function connectable<T>(mock: T): T {
-  const m = mock as { connect?: unknown };
-  if (m && typeof m.connect !== 'function') m.connect = () => mock;
-  return mock;
-}
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const OTHER_PK = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b63b91100';

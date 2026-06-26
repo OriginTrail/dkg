@@ -16,16 +16,7 @@ import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { computeUpdateACKDigest } from '@origintrail-official/dkg-core';
-
-// Round-2 review split withRunner → rebindContract (contract.connect(p), no
-// test-double fallback). These tests mock this.contracts.* as plain method
-// objects; `connectable` makes a mock satisfy that boundary with a
-// single-provider NO-OP self-rebind, so the REAL rebindContract runs.
-function connectable<T>(mock: T): T {
-  const m = mock as { connect?: unknown };
-  if (m && typeof m.connect !== 'function') m.connect = () => mock;
-  return mock;
-}
+import { connectable } from './connectable.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const ADMIN_PK = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
