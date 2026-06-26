@@ -51,26 +51,6 @@ for (const file of files) {
     }
 
     try {
-        // Auto-create the target table if it doesn't exist yet (idempotent — a
-        // no-op for the long-lived mainnet table, creates the testnet table on
-        // its first import). Schema mirrors publish_mainnet_summary exactly.
-        await db.query(`
-            CREATE TABLE IF NOT EXISTS ${tableName} (
-                id SERIAL PRIMARY KEY,
-                blockchain_name VARCHAR,
-                node_name VARCHAR,
-                publish_success_rate NUMERIC,
-                query_success_rate NUMERIC,
-                publisher_get_success_rate NUMERIC,
-                non_publisher_get_success_rate NUMERIC,
-                average_publish_time NUMERIC,
-                average_query_time NUMERIC,
-                average_publisher_get_time NUMERIC,
-                average_non_publisher_get_time NUMERIC,
-                time_stamp TIMESTAMP
-            )
-        `);
-
         const query = `
             INSERT INTO ${tableName} (
                 blockchain_name, node_name,
