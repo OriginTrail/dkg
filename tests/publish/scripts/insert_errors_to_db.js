@@ -25,13 +25,13 @@ for (const file of files) {
         continue;
     }
 
-    const match = file.match(/errors_(Node_\d+)\.json/);
+    const match = file.match(/errors_(.+)\.json$/);
     if (!match) {
-        console.error(`❌ Filename format incorrect for ${file}. Expected: errors_Node_XX.json`);
+        console.error(`❌ Filename format incorrect for ${file}. Expected: errors_<NodeName>.json`);
         continue;
     }
 
-    const nodeName = match[1].replace('_', ' ');
+    const nodeName = match[1].replace(/_/g, ' ');
     
     // Try to get blockchain_id from file content (array or object)
     let blockchainIdFromContent = null;

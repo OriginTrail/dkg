@@ -3,28 +3,25 @@
 // per-chain specs to the V10 node HTTP API, using V10-native operation names.
 //
 // V10 operation vocabulary (what the node actually calls these):
-//   1. publish        -> POST /api/knowledge-assets/publish  (mint to Verifiable Memory)
-//   2. query          -> POST /api/query  view=verifiable-memory  (broad SPARQL read)
-//   3. verifiable-memory get
-//                     -> POST /api/query  view=verifiable-memory, scoped to the
-//                        published entity, on the SAME node (local read-back)
-//   4. query-remote   -> POST /api/query-remote  { peerId, lookupType:ENTITY_TRIPLES }
-//                        against ANOTHER node's peerId — reads the entity back from
-//                        a peer over the /dkg/10.0.1/query-remote protocol. This is
-//                        the real cross-node SYNC / replication test.
+//   1. publish            -> POST /api/knowledge-assets/publish  (mint to Verifiable Memory)
+//   2. query              -> POST /api/query  view=verifiable-memory  (broad SPARQL read)
+//   3. SWM GET            -> POST /api/query  view=shared-memory, scoped to the published
+//                            entity, on the SAME node (Shared-Memory read-back)
+//   4. Query Remote (sync)-> POST /api/query-remote { peerId, lookupType:ENTITY_TRIPLES }
+//                            against ANOTHER node's peerId — reads the entity back from a
+//                            peer over /dkg/10.0.1/query-remote. The cross-node SYNC test.
 //
 // V8 vs V10 — the only behavioural difference: V8 signed client-side with a
 // per-node PRIVATE KEY; V10 nodes sign INTERNALLY from their own op-wallet pool,
 // driven by the HTTP API + a per-node BEARER TOKEN. We record the
 // `publisherAddress` the node returns per publish instead of choosing the wallet.
 //
-// The summary_<Node>.json fields keep their V8 column names (publish_success_rate,
-// query_success_rate, publisher_get_success_rate, non_publisher_get_success_rate)
-// so the Grafana Postgres import stays byte-identical. They map to the V10 ops as:
+// The summary_<Node>.json fields keep their V8 column names so the Grafana
+// Postgres import stays byte-identical. They map to the V10 ops as:
 //   publish_success_rate            <- publish
 //   query_success_rate              <- query
-//   publisher_get_success_rate      <- verifiable-memory get (local)
-//   non_publisher_get_success_rate  <- query-remote (peer sync)
+//   publisher_get_success_rate      <- SWM GET
+//   non_publisher_get_success_rate  <- Query Remote (sync)
 // ===========================================================================
 
 import { strict as assert } from 'assert';
@@ -84,7 +81,6 @@ export function makeNodeClient(baseUrl, token) {
         { contextGraphId, quads, publishEpochs: PUBLISH_EPOCHS },
         { acceptStatuses: [200, 207] },
       ).then((r) => ({ ...r.data, httpStatus: r.status })),
-    // local query (view=verifiable-memory)
     query: (sparql, contextGraphId, view = 'verifiable-memory') =>
       req('POST', '/api/query', { sparql, contextGraphId, view }).then((r) => r.data),
     // cross-node read: ask a PEER (by peerId) for an entity's triples — the V10 sync test
@@ -119,6 +115,8 @@ async function getPeerId(node) {
   return pid;
 }
 
+const mean = (arr) => (arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
+
 // ---------------------------------------------------------------------------
 // Register the per-chain describe/it suite.
 //   config = { title, blockchainName, contextGraphId, nodes:[{name,hostname,token}] }
@@ -143,16 +141,16 @@ export function defineChainPublishSuite(config) {
       for (let currentIndex = 0; currentIndex < nodesToRun.length; currentIndex++) {
         const { name, hostname, token } = nodesToRun[currentIndex];
 
-        // counters keep the V8 metric names (publisherGet = verifiable-memory get,
-        // remoteGet = query-remote) so the Grafana summary columns are unchanged.
         let publishSuccess = 0, publishFail = 0;
         let querySuccess = 0, queryFail = 0;
-        let vmGetSuccess = 0, vmGetFail = 0;
+        let swmGetSuccess = 0, swmGetFail = 0;
         let queryRemoteSuccess = 0, queryRemoteFail = 0;
 
+        // durations record EVERY attempt (success or fail) so the average is the
+        // real operation latency and never spuriously 0.
         const publishDurations = [];
         const queryDurations = [];
-        const vmGetDurations = [];
+        const swmGetDurations = [];
         const queryRemoteDurations = [];
         const failedAssets = [];
         const publisherAddresses = new Set();
@@ -164,15 +162,13 @@ export function defineChainPublishSuite(config) {
           const { quads, rootEntity } = buildQuads(name, i + 1);
 
           let ual = null;
-          const target = rootEntity; // entity we read back in the get/query-remote steps
+          const target = rootEntity; // entity read back in the SWM GET / query-remote steps
           let step = 'publish';
 
           // ── 1. publish (mint to Verifiable Memory) ─────────────────────────
+          const pubStart = Date.now();
           try {
-            const t0 = Date.now();
             const result = await withTimeout(client.publish(contextGraphId, quads), 'publish', name);
-            publishDurations.push(Date.now() - t0);
-
             assert.ok(result, 'Publish returned no result');
             if (result.status !== 'confirmed') {
               throw new Error(
@@ -193,18 +189,19 @@ export function defineChainPublishSuite(config) {
             console.log(`❌ Publish failed | No UAL`);
             failedAssets.push(`KA #${i + 1} (Publish failed)`);
             publishFail++;
+          } finally {
+            publishDurations.push(Date.now() - pubStart);
           }
 
           // ── 2. query (broad verifiable-memory SPARQL) ──────────────────────
+          step = 'query';
+          const queryStart = Date.now();
           try {
-            step = 'query';
             const generalSparql = `PREFIX schema: <http://schema.org/>
 SELECT ?s ?name ?description WHERE {
   ?s schema:name ?name ; schema:description ?description .
 } LIMIT 10`;
-            const t0 = Date.now();
             const result = await withTimeout(client.query(generalSparql, contextGraphId, 'verifiable-memory'), 'query', name);
-            queryDurations.push(Date.now() - t0);
             assert.ok(queryHasData(result), 'Query returned empty results');
             console.log(`✅ Query succeeded`);
             querySuccess++;
@@ -212,53 +209,56 @@ SELECT ?s ?name ?description WHERE {
             logError(error, name, step, errorStats, i + 1);
             failedAssets.push(`KA #${i + 1} (Query failed — UAL: ${ual})`);
             queryFail++;
+          } finally {
+            queryDurations.push(Date.now() - queryStart);
           }
 
-          // ── 3. verifiable-memory get (read the entity back on the SAME node) ─
+          // ── 3. SWM GET (read the entity back from Shared Memory, SAME node) ─
+          step = 'SWM GET';
+          const swmStart = Date.now();
           try {
-            step = 'verifiable-memory get';
             const entitySparql = `SELECT ?p ?o WHERE { <${target}> ?p ?o } LIMIT 5`;
-            const t0 = Date.now();
-            const result = await withTimeout(client.query(entitySparql, contextGraphId, 'verifiable-memory'), 'verifiable-memory get', name);
-            vmGetDurations.push(Date.now() - t0);
-            assert.ok(queryHasData(result), `Verifiable-Memory Get returned empty results for ${target}`);
-            console.log(`✅ Verifiable-Memory Get succeeded`);
-            vmGetSuccess++;
+            const result = await withTimeout(client.query(entitySparql, contextGraphId, 'shared-memory'), 'SWM GET', name);
+            assert.ok(queryHasData(result), `SWM GET returned empty results for ${target}`);
+            console.log(`✅ SWM GET succeeded`);
+            swmGetSuccess++;
           } catch (error) {
             logError(error, name, step, errorStats, i + 1);
-            failedAssets.push(`KA #${i + 1} (Verifiable-Memory Get failed — UAL: ${ual})`);
-            vmGetFail++;
+            failedAssets.push(`KA #${i + 1} (SWM GET failed — UAL: ${ual})`);
+            swmGetFail++;
+          } finally {
+            swmGetDurations.push(Date.now() - swmStart);
           }
 
-          // ── 4. query-remote (read the entity back from a PEER — sync test) ──
-          step = 'query-remote';
+          // ── 4. Query Remote (sync) — read the entity back from a PEER ───────
+          step = 'Query Remote (sync)';
           const otherIndexes = nodes.map((_, idx) => idx).filter((idx) => nodes[idx].name !== name);
           if (otherIndexes.length === 0) {
             // single-node chain — no peer to sync-check against
             continue;
           }
           const remoteNode = nodes[otherIndexes[Math.floor(Math.random() * otherIndexes.length)]];
+          const remoteStart = Date.now();
           try {
             const remotePeerId = await getPeerId(remoteNode);
             if (!remotePeerId) throw new Error(`Could not resolve peerId for ${remoteNode.name} (${remoteNode.hostname})`);
-            const t0 = Date.now();
-            const result = await withTimeout(client.queryRemote(remotePeerId, contextGraphId, target), 'query-remote', remoteNode.name);
-            queryRemoteDurations.push(Date.now() - t0);
-            assert.ok(queryHasData(result), `Query-Remote returned no triples for ${target} from ${remoteNode.name}`);
-            console.log(`✅ Query-Remote succeeded — ${remoteNode.name} has the entity (synced)`);
+            const result = await withTimeout(client.queryRemote(remotePeerId, contextGraphId, target), 'Query Remote (sync)', remoteNode.name);
+            assert.ok(queryHasData(result), `Query Remote (sync) returned no triples for ${target} from ${remoteNode.name}`);
+            console.log(`✅ Query Remote (sync) succeeded — ${remoteNode.name} has the entity (synced)`);
             queryRemoteSuccess++;
           } catch (error) {
             logError(error, name, step, errorStats, i + 1);
-            failedAssets.push(`KA #${i + 1} (Query-Remote failed — UAL: ${ual})`);
+            failedAssets.push(`KA #${i + 1} (Query Remote (sync) failed — UAL: ${ual})`);
             queryRemoteFail++;
+          } finally {
+            queryRemoteDurations.push(Date.now() - remoteStart);
           }
         }
 
-        const avg = (arr) => (arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
-        const avgPublishMs = publishSuccess > 0 ? avg(publishDurations) : 0;
-        const avgQueryMs = querySuccess > 0 ? avg(queryDurations) : 0;
-        const avgVmGetMs = vmGetSuccess > 0 ? avg(vmGetDurations) : 0;
-        const avgQueryRemoteMs = queryRemoteSuccess > 0 ? avg(queryRemoteDurations) : 0;
+        const avgPublishMs = mean(publishDurations);
+        const avgQueryMs = mean(queryDurations);
+        const avgSwmGetMs = mean(swmGetDurations);
+        const avgQueryRemoteMs = mean(queryRemoteDurations);
 
         console.log(`\n──────────── Summary for ${name} ────────────`);
         if (failedAssets.length > 0) {
@@ -274,9 +274,9 @@ SELECT ?s ?name ?description WHERE {
         globalStats[blockchainName][name] = {
           publishSuccess, publishFail,
           querySuccess, queryFail,
-          vmGetSuccess, vmGetFail,
+          swmGetSuccess, swmGetFail,
           queryRemoteSuccess, queryRemoteFail,
-          avgPublishMs, avgQueryMs, avgVmGetMs, avgQueryRemoteMs,
+          avgPublishMs, avgQueryMs, avgSwmGetMs, avgQueryRemoteMs,
         };
 
         const summary = {
@@ -284,11 +284,11 @@ SELECT ?s ?name ?description WHERE {
           node_name: name,
           publish_success_rate: safeRate(publishSuccess, publishFail),
           query_success_rate: safeRate(querySuccess, queryFail),
-          publisher_get_success_rate: safeRate(vmGetSuccess, vmGetFail),            // verifiable-memory get (local)
-          non_publisher_get_success_rate: safeRate(queryRemoteSuccess, queryRemoteFail), // query-remote (peer sync)
+          publisher_get_success_rate: safeRate(swmGetSuccess, swmGetFail),                 // SWM GET
+          non_publisher_get_success_rate: safeRate(queryRemoteSuccess, queryRemoteFail),   // Query Remote (sync)
           average_publish_time: (avgPublishMs / 1000).toFixed(2),
           average_query_time: (avgQueryMs / 1000).toFixed(2),
-          average_publisher_get_time: (avgVmGetMs / 1000).toFixed(2),
+          average_publisher_get_time: (avgSwmGetMs / 1000).toFixed(2),
           average_non_publisher_get_time: (avgQueryRemoteMs / 1000).toFixed(2),
           time_stamp: new Date().toISOString(),
         };
@@ -314,14 +314,14 @@ SELECT ?s ?name ?description WHERE {
         console.log(`\n🔗 Blockchain: ${blockchain}`);
         Object.entries(nodeStats).forEach(([nodeName, stats]) => {
           console.log(`  • ${nodeName}:`);
-          console.log(`    Publish:            ✅ ${stats.publishSuccess} / ❌ ${stats.publishFail} -> ${safeRate(stats.publishSuccess, stats.publishFail)}%`);
-          console.log(`    Query:              ✅ ${stats.querySuccess} / ❌ ${stats.queryFail} -> ${safeRate(stats.querySuccess, stats.queryFail)}%`);
-          console.log(`    Verifiable-Mem Get: ✅ ${stats.vmGetSuccess} / ❌ ${stats.vmGetFail} -> ${safeRate(stats.vmGetSuccess, stats.vmGetFail)}%`);
-          console.log(`    Query-Remote (sync):✅ ${stats.queryRemoteSuccess} / ❌ ${stats.queryRemoteFail} -> ${safeRate(stats.queryRemoteSuccess, stats.queryRemoteFail)}%`);
+          console.log(`    Publish:             ✅ ${stats.publishSuccess} / ❌ ${stats.publishFail} -> ${safeRate(stats.publishSuccess, stats.publishFail)}%`);
+          console.log(`    Query:               ✅ ${stats.querySuccess} / ❌ ${stats.queryFail} -> ${safeRate(stats.querySuccess, stats.queryFail)}%`);
+          console.log(`    SWM GET:             ✅ ${stats.swmGetSuccess} / ❌ ${stats.swmGetFail} -> ${safeRate(stats.swmGetSuccess, stats.swmGetFail)}%`);
+          console.log(`    Query Remote (sync): ✅ ${stats.queryRemoteSuccess} / ❌ ${stats.queryRemoteFail} -> ${safeRate(stats.queryRemoteSuccess, stats.queryRemoteFail)}%`);
           console.log(`    Avg Publish Time:        ${formatDuration(stats.avgPublishMs)}`);
           console.log(`    Avg Query Time:          ${formatDuration(stats.avgQueryMs)}`);
-          console.log(`    Avg Verifiable-Mem Get:  ${formatDuration(stats.avgVmGetMs)}`);
-          console.log(`    Avg Query-Remote Time:   ${formatDuration(stats.avgQueryRemoteMs)}`);
+          console.log(`    Avg SWM GET Time:        ${formatDuration(stats.avgSwmGetMs)}`);
+          console.log(`    Avg Query Remote Time:   ${formatDuration(stats.avgQueryRemoteMs)}`);
         });
       });
 
