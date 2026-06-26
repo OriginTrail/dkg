@@ -4,15 +4,6 @@ import 'dotenv/config';
 
 const files = process.argv.slice(2);
 
-const networkConfig = {
-    'base:true':     { blockchainId: 'base:8453',   tableName: 'error_messages_mainnet_js', dbHost: process.env.DB_HOST_PUBLISH_MAINNET },
-    'base:false':    { blockchainId: 'base:84531',  tableName: 'error_messages_testnet_js', dbHost: process.env.DB_HOST_PUBLISH_TESTNET },
-    'gnosis:true':   { blockchainId: 'gnosis:100',  tableName: 'error_messages_mainnet_js', dbHost: process.env.DB_HOST_PUBLISH_MAINNET },
-    'gnosis:false':  { blockchainId: 'gnosis:10200',tableName: 'error_messages_testnet_js', dbHost: process.env.DB_HOST_PUBLISH_TESTNET },
-    'neuroweb:true': { blockchainId: 'neuroweb:2043', tableName: 'error_messages_mainnet_js', dbHost: process.env.DB_HOST_PUBLISH_MAINNET },
-    'neuroweb:false':{ blockchainId: 'neuroweb:20432',tableName: 'error_messages_testnet_js', dbHost: process.env.DB_HOST_PUBLISH_TESTNET },
-};
-
 for (const file of files) {
     console.log(`📁 Processing error file: ${file}`);
     let errors;
@@ -43,8 +34,6 @@ for (const file of files) {
             blockchainIdFromContent = errors.blockchain_id;
             // Update errors to use the detailed section (with KA numbers for database)
             errors = errors.detailed || {};
-        } else if (errors.blockchain_id) {
-            blockchainIdFromContent = errors.blockchain_id;
         }
     }
     
