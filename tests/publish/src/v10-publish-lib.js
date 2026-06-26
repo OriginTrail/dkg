@@ -111,6 +111,15 @@ export function makeNodeClient(baseUrl, token) {
         publishPolicy: opts.publishPolicy ?? 1,
         register: opts.register ?? false,
       }).then((r) => r.data),
+    // on-chain register an EXISTING (already locally-created) context graph.
+    // create(register:true) only registers when it also creates; an existing CG
+    // 409s there, so this standalone call is the path to register it on-chain.
+    registerContextGraph: (id, opts = {}) =>
+      req('POST', '/api/context-graph/register', {
+        id,
+        accessPolicy: opts.accessPolicy ?? 0,
+        publishPolicy: opts.publishPolicy ?? 1,
+      }).then((r) => r.data),
   };
 }
 
@@ -203,8 +212,10 @@ export function defineChainPublishSuite(config) {
         }
 
         // Ensure the context graph exists on this node (and is on-chain registered
-        // when V10_CG_REGISTER=true). A successful publish to Verifiable Memory needs
-        // the CG registered on-chain.
+        // when V10_CG_REGISTER=true). Publish to Verifiable Memory needs the CG
+        // registered on-chain — otherwise the node has no on-chain id to anchor to
+        // and every publish silently degrades to `tentative` (localChainSkipReason
+        // "no-chain"). On-chain registration costs ~100 TRAC per chain.
         try {
           const cg = await client.createContextGraph(
             contextGraphId,
@@ -212,18 +223,26 @@ export function defineChainPublishSuite(config) {
             'Automated publish/query test context graph',
             { accessPolicy: CG_ACCESS_POLICY, publishPolicy: CG_PUBLISH_POLICY, register: CG_REGISTER },
           );
-          if (CG_REGISTER && (cg.registerError || cg.registered !== true || !cg.onChainId)) {
-            console.log(`⚠️  Context graph "${contextGraphId}" on ${name}: on-chain registration incomplete (registered=${cg.registered}, onChainId=${cg.onChainId ?? 'none'}${cg.registerError ? `, ${cg.registerError}` : ''})`);
-          } else if (cg.onChainId) {
+          if (cg.onChainId) {
             console.log(`Context graph "${contextGraphId}" ready on ${name} (on-chain ${cg.onChainId}, open/public)`);
           } else {
-            // register:false path — CG exists locally as open/public; the node's
-            // VM-publish route auto-registers it on-chain on the first publish
-            // (idempotent: skips if already registered), then every run reuses it.
-            console.log(`Context graph "${contextGraphId}" ready on ${name} (open/public, local) — auto-registers on first publish, reused thereafter`);
+            console.log(`Context graph "${contextGraphId}" created on ${name} (open/public, local)`);
           }
         } catch (error) {
           console.log(`Context graph setup on ${name}: ${error.message} (may already exist, continuing)`);
+        }
+
+        // When CG_REGISTER, ensure the CG is registered ON-CHAIN via the standalone
+        // endpoint — create(register:true) is a no-op for an already-existing local
+        // CG (409), so this is the only path that registers a pre-existing one.
+        if (CG_REGISTER) {
+          try {
+            const reg = await client.registerContextGraph(contextGraphId, { accessPolicy: CG_ACCESS_POLICY, publishPolicy: CG_PUBLISH_POLICY });
+            console.log(`✅ Context graph "${contextGraphId}" registered on-chain on ${name}${reg.onChainId ? ` (on-chain ${reg.onChainId})` : ''}`);
+          } catch (error) {
+            const already = /already registered/i.test(error.message);
+            console.log(`${already ? '' : '⚠️  '}Context graph "${contextGraphId}" on-chain register on ${name}: ${error.message}${already ? ' (ok — already on-chain)' : ''}`);
+          }
         }
 
         for (let i = 0; i < KA_COUNT; i++) {
