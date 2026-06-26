@@ -20,9 +20,10 @@ class CountingEmbedder implements EmbeddingProvider {
 class FakeStore implements QueryableStore {
   entities: Array<{ g: string; s: string; p: string; o: string }> = [];
   async query(sparql: string) {
-    if (sparql.includes('COUNT(DISTINCT ?s)')) {
-      const n = new Set(this.entities.map((e) => e.s)).size;
-      return { type: 'bindings', bindings: [{ n: String(n) }] };
+    if (sparql.includes('COUNT')) {
+      // distinct (graph, subject) pairs — matches the indexer's insert granularity
+      const pairs = new Set(this.entities.map((e) => `${e.g}|${e.s}`));
+      return { type: 'bindings', bindings: [{ n: String(pairs.size) }] };
     }
     return { type: 'bindings', bindings: this.entities.map((e) => ({ ...e })) };
   }
@@ -69,5 +70,56 @@ describe('VectorEntityRetriever — incremental indexing', () => {
     expect(emb.calls - before2).toBe(1);
 
     vs.close();
+  });
+
+  it('sets degraded=true and returns no anchors when the embedder cannot run (no model)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'drag-vs-'));
+    dirs.push(dir);
+    const vs = new VectorStore(dir);
+    const broken: EmbeddingProvider = {
+      model: 'broken-model',
+      dimensions: 4,
+      embed: async () => {
+        throw new Error('optional model dependency not installed');
+      },
+    };
+    const store = new FakeStore();
+    store.entities.push({ g: `did:dkg:context-graph:cgd/_verifiable_memory/0x/1`, s: 'urn:a', p: 'http://ex/name', o: '"A"' });
+    const r = new VectorEntityRetriever(vs, broken, store);
+    const anchors = await r.retrieve('anything', 'cgd', 10);
+    expect(anchors).toEqual([]); // no silent crash
+    expect(r.degraded).toBe(true); // the actionable "no model" signal, distinct from "no matches"
+  });
+
+  it('re-indexes a new entity even when a subject recurs across VM graphs (gate counts pairs, not subjects)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'drag-vs-'));
+    dirs.push(dir);
+    const vs = new VectorStore(dir);
+    const emb = new CountingEmbedder();
+    const store = new FakeStore();
+    const cg = 'cg2';
+    // urn:shared is a subject in THREE VM graphs → 3 (g,s) pairs but 1 distinct subject.
+    for (const n of [1, 2, 3]) {
+      store.entities.push({
+        g: `did:dkg:context-graph:${cg}/_verifiable_memory/0xabc/${n}`,
+        s: 'urn:shared',
+        p: 'http://ex/name',
+        o: `"v${n}"`,
+      });
+    }
+    const r = new VectorEntityRetriever(vs, emb, store);
+    await r.retrieve('x', cg, 10);
+    expect(await vs.count(cg, emb.model)).toBe(3); // 3 pairs embedded
+
+    // Publish a brand-new entity: distinct subjects 1→2, but pairs 3→4. The old
+    // subject-count gate (2 <= 3) would SKIP this; the pair-count gate (4 > 3) indexes it.
+    store.entities.push({
+      g: `did:dkg:context-graph:${cg}/_verifiable_memory/0xabc/4`,
+      s: 'urn:fresh',
+      p: 'http://ex/name',
+      o: '"Fresh"',
+    });
+    await r.retrieve('y', cg, 10);
+    expect(await vs.count(cg, emb.model)).toBe(4); // urn:fresh got embedded
   });
 });

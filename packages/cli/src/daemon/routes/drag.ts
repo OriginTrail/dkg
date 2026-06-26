@@ -12,6 +12,10 @@
 // (substring) or `semantic` (embedding ANN over the CG's entities); `default`
 // uses the node's configured embedder (config.drag.embedder).
 //
+// `retrieval` applies to scope:"local". For scope:"network" each serving peer
+// answers with its OWN configured retrieval (a peer can't be forced to load a
+// model), so the caller's `retrieval` choice is not propagated over the wire.
+//
 // PAYMENT (§5.4) is OFF by default (answers are free); enable with
 // config.drag.payments.enabled. The x402 wire format + a pluggable
 // PaymentVerifier are wired so monetization is one swap away.

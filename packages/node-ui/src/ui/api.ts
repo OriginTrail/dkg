@@ -158,9 +158,9 @@ export interface DragAnswerRequest {
   question: string;
   contextGraphId: string;
   scope?: 'local' | 'network';
-  /** Retrieval override (local scope): keyword | hashing | local | openai. Omit = node default. */
-  embedder?: string;
-  /** Demo the x402 paywall: the call performs the 402 → pay → 200 round-trip. */
+  /** Retrieval mode (public, local scope): default | keyword | semantic. Omit = node default. */
+  retrieval?: 'default' | 'keyword' | 'semantic';
+  /** Demo the x402 paywall: the call performs the 402 → pay → 200 round-trip (only when the node enables payments). */
   pay?: boolean;
 }
 
@@ -182,7 +182,7 @@ async function rawAnswer(body: unknown, xPayment?: string): Promise<{ status: nu
 export async function answerQuestion(req: DragAnswerRequest): Promise<DragAnswer> {
   const base: Record<string, unknown> = { question: req.question, contextGraphId: req.contextGraphId };
   if (req.scope) base.scope = req.scope;
-  if (req.embedder) base.embedder = req.embedder;
+  if (req.retrieval) base.retrieval = req.retrieval;
 
   if (!req.pay) {
     const { status, body } = await rawAnswer(base);

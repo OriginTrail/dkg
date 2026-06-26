@@ -97,6 +97,12 @@ async function publish(api, name, triples) {
   hr('④ MONETIZED — the data-holder charges per answer (x402: 402 → pay → 200 + receipt)');
   const unpaid = await post(N(1), '/api/answer', { question: QUESTION, contextGraphId: CG, simulatePrice: '0.01 USDC' });
   console.log(`  request WITHOUT payment → HTTP ${c.y(unpaid.status)}  ${c.dim('(Payment Required)')}`);
+  if (unpaid.status !== 402 || !unpaid.b.accepts?.[0]) {
+    console.log(c.dim('  payments are OFF by default — set config.drag.payments.enabled + experimentalOverrides to'));
+    console.log(c.dim('  exercise the 402 → pay → 200 + receipt flow. (Answer returned free; the seam is unit-tested.)'));
+    console.log(c.b(`\n${c.c('━'.repeat(72))}\n  That's dRAG: ask in natural language → cryptographically-auditable answers,\n  assembled across nodes that hold knowledge you don't.\n${c.c('━'.repeat(72))}\n`));
+    return;
+  }
   const ch = unpaid.b.accepts[0];
   console.log(`  challenge: pay ${c.b(ch.amount + ' ' + ch.asset)} to ${ch.payTo.slice(0, 10)}… on ${ch.network}`);
   const xpay = Buffer.from(JSON.stringify({ x402Version: 1, scheme: ch.scheme, network: ch.network, asset: ch.asset, amount: ch.amount, payTo: ch.payTo, nonce: ch.nonce, from: '0xA9e1…buyerAgent' })).toString('base64');

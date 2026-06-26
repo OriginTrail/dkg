@@ -39,8 +39,8 @@ async function publish(name, triples, tries = 4) {
   }
   return false;
 }
-async function ask(question, embedder, maxKas) {
-  const r = await post('/api/answer', { question, contextGraphId: CG, scope: 'local', embedder, maxKas });
+async function ask(question, retrieval, maxKas) {
+  const r = await post('/api/answer', { question, contextGraphId: CG, scope: 'local', retrieval, maxKas });
   return [...new Set((r.b.facts || []).map((f) => f.subject.split(':').pop()))];
 }
 
@@ -62,15 +62,13 @@ async function ask(question, embedder, maxKas) {
   hr(`Q: "${Q}"  ${c.dim('— the data never says "flagged", "audit" or "suppliers"')}`);
   const kw = await ask(Q, 'keyword', 2);
   console.log(`  ${c.b('keyword')}  (substring scan)   → ${c.r(kw.length ? kw.join(', ') : 'nothing')}   ${c.dim('— misses entirely')}`);
-  const hh = await ask(Q, 'hashing', 2);
-  console.log(`  ${c.b('lexical')}  (hashing, top-2)   → ${c.r(hh.join(', ') || 'nothing')}   ${c.dim('(' + score(hh) + ' — token noise picks the wrong ones)')}`);
-  console.log(c.dim('  semantic: loading MiniLM + indexing on first call (~10s)…'));
-  const ll = await ask(Q, 'local', 2);
+  console.log(c.dim('  semantic: loading the embedding model + indexing on first call (~10s)…'));
+  const ll = await ask(Q, 'semantic', 2);
   const win = ll.filter((e) => RELEVANT.includes(e)).length === 2;
-  console.log(`  ${c.b('semantic')} (MiniLM,  top-2)   → ${(win ? c.g : c.y)(ll.join(', '))}   ${c.g('(' + score(ll) + ' — the actual failures)')}`);
+  console.log(`  ${c.b('semantic')} (by meaning, top-2) → ${(win ? c.g : c.y)(ll.join(', '))}   ${c.g('(' + score(ll) + ' — the actual failures)')}`);
 
   hr('1-hop GraphRAG — match the REVIEW entity, then follow its link to a supplier');
-  const hop = await ask('summarize the early 2026 vendor quality review', 'local', 5);
+  const hop = await ask('summarize the early 2026 vendor quality review', 'semantic', 5);
   console.log(`  Q: "summarize the early 2026 vendor quality review"`);
   console.log(`  → entities: ${hop.join(', ')}`);
   console.log(`  ${hop.includes('initech') ? c.g('✓ reached "initech"') : c.r('✗')} via coversVendor — a supplier the question never named.`);

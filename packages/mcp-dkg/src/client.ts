@@ -470,6 +470,9 @@ export class DkgClient {
    * dRAG single-node grounded answer (OT-RFC-55). Returns a keyword/structural
    * answer over one Context Graph's verifiable memory, with a verifiable
    * citation per cited fact. POST /api/answer.
+   *
+   * `retrieval` applies to scope:"local"; with scope:"network" each serving peer
+   * uses its own configured retrieval and the caller's choice is not propagated.
    */
   async answer(args: {
     question: string;

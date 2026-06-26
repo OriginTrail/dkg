@@ -18,8 +18,10 @@ describe('synthesizeAnswer — grounded prose, best-effort', () => {
     });
     const out = await synthesizeAnswer('who was flagged?', facts, llm);
     expect(out).toBe('Northwind was flagged.');
-    // grounded: a strict system instruction + the facts both reach the model
-    expect(captured.messages[0].content).toMatch(/only from a list of VERIFIED facts/i);
+    // grounded + fenced: the system instruction treats facts as untrusted data,
+    // and the facts are delimited in the user message.
+    expect(captured.messages[0].content).toMatch(/untrusted DATA/i);
+    expect(JSON.stringify(captured.messages)).toContain('<verified_facts>');
     expect(JSON.stringify(captured.messages)).toContain('flagged');
     expect(captured.temperature).toBe(0);
   });

@@ -44,6 +44,7 @@ export class VectorEntityRetriever implements EntityRetriever {
     const results = await this.vectorStore.search(queryVec, {
       contextGraphId: cgName,
       memoryLayers: ['vm'],
+      model: this.model, // score only this embedding space, never another model's vectors
       limit,
       // Conservative absolute floor only (drop near-orthogonal noise). NOT a
       // tuned precision cutoff — top-K + the consumer's reasoning handle ranking;
@@ -73,22 +74,31 @@ export class VectorEntityRetriever implements EntityRetriever {
   /**
    * Synchronously (build-then-search) ensure this CG's VM entities are indexed
    * under the current embedding model. Re-scans when new entities have appeared
-   * since the last index (cheap freshness check: distinct-entity count) and only
-   * embeds the delta (incremental — see buildIndex). Inserts are idempotent
-   * (deterministic ids), so re-indexing is safe + self-healing.
+   * since the last index and only embeds the delta (incremental — see buildIndex).
+   * Inserts are idempotent (deterministic ids), so re-indexing is safe.
+   *
+   * The freshness check counts distinct (graph, subject) PAIRS — the SAME
+   * granularity buildIndex inserts at and vectorStore.count() reports — because
+   * one entity URI is legitimately a subject across multiple VM graphs (shared
+   * / schema entities recur across KAs). Counting distinct SUBJECTS instead would
+   * undercount once any subject recurs, leaving the gate satisfied and silently
+   * skipping the embedding of freshly-published entities.
    */
   private async ensureIndexed(cgName: string): Promise<void> {
     const vmPrefix = `did:dkg:context-graph:${cgName}/_verifiable_memory/`;
-    const currentCount = await this.countEntities(vmPrefix);
+    const currentCount = await this.countIndexableRecords(vmPrefix);
     if (currentCount === 0) return;
     const indexedCount = await this.vectorStore.count(cgName, this.model);
     if (indexedCount >= currentCount) return; // up to date for this model
     await this.buildIndex(cgName, vmPrefix);
   }
 
-  private async countEntities(vmPrefix: string): Promise<number> {
+  /** Distinct (graph, subject) pairs under the VM prefix — matches buildIndex's one-row-per-pair insert granularity. */
+  private async countIndexableRecords(vmPrefix: string): Promise<number> {
     const r = await this.store
-      .query(`SELECT (COUNT(DISTINCT ?s) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${vmPrefix}")) }`)
+      .query(
+        `SELECT (COUNT(*) AS ?n) WHERE { SELECT DISTINCT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${vmPrefix}")) } }`,
+      )
       .catch(() => null);
     const v = r && r.type === 'bindings' && r.bindings?.[0] ? r.bindings[0]['n'] : '0';
     const m = String(v ?? '0').match(/\d+/);

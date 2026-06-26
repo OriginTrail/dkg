@@ -47,7 +47,7 @@ export function DragAskView() {
   const [question, setQuestion] = useState('Which suppliers were flagged in the 2026 Q1 audit, and why?');
   const [cg, setCg] = useState(activeProjectId ?? '');
   const [scope, setScope] = useState<'local' | 'network'>('local');
-  const [retrieval, setRetrieval] = useState(''); // '' = node default; else keyword|hashing|local
+  const [retrieval, setRetrieval] = useState<'' | 'keyword' | 'semantic'>(''); // '' = node default
   const [pay, setPay] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,7 +57,7 @@ export function DragAskView() {
     setLoading(true);
     setError(null);
     try {
-      setResult(await answerQuestion({ question, contextGraphId: cg.trim(), scope, pay, embedder: retrieval || undefined }));
+      setResult(await answerQuestion({ question, contextGraphId: cg.trim(), scope, pay, retrieval: retrieval || undefined }));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setResult(null);
@@ -103,13 +103,12 @@ export function DragAskView() {
             className="v10-drag-cg"
             style={{ flex: '0 0 auto', minWidth: 'auto' }}
             value={retrieval}
-            onChange={(e) => setRetrieval(e.target.value)}
+            onChange={(e) => setRetrieval(e.target.value as '' | 'keyword' | 'semantic')}
             title="Retrieval method (this node only)"
           >
             <option value="">retrieval: default</option>
             <option value="keyword">keyword (substring)</option>
-            <option value="hashing">lexical (hashing)</option>
-            <option value="local">semantic (MiniLM)</option>
+            <option value="semantic">semantic (by meaning)</option>
           </select>
           <label className="v10-drag-pay">
             <input type="checkbox" checked={pay} onChange={(e) => setPay(e.target.checked)} /> charge 0.01 USDC (x402)

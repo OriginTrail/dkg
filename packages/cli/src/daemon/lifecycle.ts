@@ -2717,14 +2717,14 @@ export async function runDaemonInner(
 
   // OT-RFC-55 Phase 1: attach a semantic entry-point retriever to the agent so
   // dRAG uses embed→ANN→anchor→graph-expand instead of keyword scans (both the
-  // local route AND the network serving handler). Embedder selection:
-  //   DKG_DRAG_EMBEDDER=local   → offline MiniLM (needs `npm i @huggingface/transformers`)
-  //   DKG_DRAG_EMBEDDER=hashing → zero-dep lexical (offline default / control)
-  //   DKG_DRAG_EMBEDDER=openai  → the configured OpenAI-compatible model
-  //   (unset)                   → configured OpenAI model if any, else hashing.
-  // Default is KEYWORD (predictable) unless config.drag.embedder (or the
-  // DKG_DRAG_EMBEDDER env override) selects a model — lexical hashing can rank
-  // wrong, so semantic is opt-in, never the silent default.
+  // local route AND the network serving handler). Embedder selection
+  // (config.drag.embedder, overridable by the DKG_DRAG_EMBEDDER env var):
+  //   local   → offline MiniLM (needs `npm i @huggingface/transformers`)
+  //   openai  → the configured OpenAI-compatible model (e.g. local Ollama)
+  //   hashing → zero-dep lexical control (testing only)
+  //   (unset) → keyword (no retriever attached).
+  // Default is KEYWORD (predictable) — semantic is opt-in, never the silent
+  // default, since a model is not always present and lexical fallbacks misrank.
   const dragEmbedder = defaultDragEmbedder(config);
   if (dragEmbedder) {
     agent.attachEntityRetriever(new VectorEntityRetriever(vectorStore, dragEmbedder, agent.store));

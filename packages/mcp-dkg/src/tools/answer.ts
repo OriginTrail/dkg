@@ -80,11 +80,11 @@ export function registerAnswerTool(server: McpServer, client: DkgClient, config:
           .enum(['default', 'keyword', 'semantic'])
           .optional()
           .describe(
-            'How to find relevant facts. "default" = the node\'s configured retrieval. ' +
-              '"keyword" = exact substring match (predictable, but misses paraphrases). ' +
-              '"semantic" = embedding search that matches by MEANING (finds facts that ' +
-              'never use the question\'s words) — requires the node to have an embedding ' +
-              'model configured/installed.',
+            'How to find relevant facts (applies to scope:"local"; with scope:"network" each ' +
+              'serving peer uses its own configured retrieval). "default" = the node\'s configured ' +
+              'retrieval. "keyword" = exact substring match (predictable, but misses paraphrases). ' +
+              '"semantic" = embedding search that matches by MEANING (finds facts that never use ' +
+              "the question's words) — requires the node to have an embedding model configured/installed.",
           ),
         maxCitations: z
           .number()

@@ -31,6 +31,8 @@ export interface VectorSearchOpts {
   memoryLayers: Array<'wm' | 'swm' | 'vm'>;
   limit: number;
   minSimilarity?: number;
+  /** Restrict to one embedding model so a query never scores vectors from a different (same-dimension) embedding space. */
+  model?: string;
 }
 
 export interface VectorSearchResult {
@@ -116,11 +118,12 @@ export class VectorStore {
    */
   async search(queryEmbedding: number[], opts: VectorSearchOpts): Promise<VectorSearchResult[]> {
     const layerPlaceholders = opts.memoryLayers.map(() => '?').join(',');
+    const modelClause = opts.model ? ' AND model = ?' : '';
     const rows = this.db.prepare(`
       SELECT id, embedding, dimensions, entity_uri, source_uri, label, snippet, memory_layer
       FROM embeddings
-      WHERE context_graph_id = ? AND memory_layer IN (${layerPlaceholders})
-    `).all(opts.contextGraphId, ...opts.memoryLayers) as Array<{
+      WHERE context_graph_id = ? AND memory_layer IN (${layerPlaceholders})${modelClause}
+    `).all(opts.contextGraphId, ...opts.memoryLayers, ...(opts.model ? [opts.model] : [])) as Array<{
       id: string;
       embedding: Buffer;
       dimensions: number;

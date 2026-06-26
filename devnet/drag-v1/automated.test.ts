@@ -147,14 +147,18 @@ describe('dRAG P3 — cross-node fan-out, re-verified by an asker that holds not
   });
 });
 
-describe('dRAG P4 — payment seam', () => {
-  it('payments are OFF by default — a priced request is answered for free (no settlement)', async () => {
+describe('dRAG P4 — payment seam (OFF by default)', () => {
+  // The devnet sets neither payments.enabled nor experimentalOverrides, so
+  // `simulatePrice` is a deliberate no-op here and the answer is free — this
+  // asserts the production default. The 402 → pay → 200 + receipt flow itself is
+  // exercised by the unit suite (packages/cli/test/drag-payment.test.ts).
+  it('a priced request on a payments-off node is answered for free, no settlement', async () => {
     const r = await post(N(1), '/api/answer', {
       contextGraphId: CG,
       question: 'which suppliers were flagged in the audit?',
       simulatePrice: '0.01 USDC',
     });
-    expect(r.status).toBe(200);
+    expect(r.status).toBe(200); // not 402 — payments disabled
     expect(r.b.settlement).toBeUndefined();
     expect((r.b.citations ?? []).length).toBeGreaterThan(0);
   });
@@ -168,21 +172,15 @@ describe('dRAG Phase 1 — semantic retrieval finds what keyword misses', () => 
     expect(ents).not.toContain('initech'); // paraphrase → missed by substring scan
   });
 
-  it('the semantic path retrieves entities by embedding ANN, not a substring scan', async () => {
-    if (!localModelAvailable) {
-      console.warn('skipped: no semantic embedder reachable on this node');
-      return;
-    }
+  it('the semantic path retrieves entities by embedding ANN, not a substring scan', async (ctx) => {
+    if (!localModelAvailable) ctx.skip(); // reports SKIPPED, not a silent pass
     const sem = await answer(N(1), { question: 'which suppliers were flagged in the audit?', retrieval: 'semantic' });
     expect(String(sem.stats.retrieval)).toContain('vector:');
     expect(sem.stats.factsCited).toBeGreaterThan(0);
   });
 
-  it('semantic reaches the paraphrase supplier keyword cannot [requires an embedding model]', async () => {
-    if (!localModelAvailable) {
-      console.warn('skipped: no semantic embedder reachable on this node');
-      return;
-    }
+  it('semantic reaches the paraphrase supplier keyword cannot [requires an embedding model]', async (ctx) => {
+    if (!localModelAvailable) ctx.skip(); // reports SKIPPED, not a silent pass
     const sem = await answer(N(1), { question: 'which suppliers were flagged in the audit?', retrieval: 'semantic' });
     expect(entitiesOf(sem)).toContain('initech');
   });
