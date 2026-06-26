@@ -217,6 +217,7 @@ export async function httpQuery(sparql, contextGraphId, view = 'verifiable-memor
 export function categorizeErrorService(error) {
   const message = (error.message || '').toLowerCase();
 
+  if (message.includes('unauthorized') || message.includes('bearer token') || message.includes('forbidden')) return 'auth';
   if (message.includes('access-policy is unknown') || message.includes('lu-5')) return 'cg-policy-readlag';
   if (message.includes('storage_ack') || message.includes('quorum') || message.includes('no_response')) return 'storage-ack-quorum';
   if (message.includes('toolowallowance') || message.includes('toolowbalance') || message.includes('execution reverted')) return 'blockchain-rpc';

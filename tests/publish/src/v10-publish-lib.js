@@ -1,20 +1,30 @@
 // ===========================================================================
-// V10 multi-node publish/query/get lifecycle — a faithful port of the dkg.js
-// V8 per-chain specs (tests/mainnet/Base_Mainnet.spec.js etc.) to the V10 node
-// HTTP API.
+// V10 multi-node publish/query lifecycle — a faithful port of the dkg.js V8
+// per-chain specs to the V10 node HTTP API, using V10-native operation names.
 //
-// V8 vs V10 — the only behavioural difference:
-//   * V8 signs client-side with a per-node PRIVATE KEY (the test picks the
-//     wallet). V10 nodes sign INTERNALLY from their own op-wallet pool, driven
-//     by the HTTP API + a per-node BEARER TOKEN. So each node still publishes
-//     "with its wallet(s)", but the node rotates the pool itself — we record
-//     the `publisherAddress` it returns per publish instead of choosing it.
+// V10 operation vocabulary (what the node actually calls these):
+//   1. publish        -> POST /api/knowledge-assets/publish  (mint to Verifiable Memory)
+//   2. query          -> POST /api/query  view=verifiable-memory  (broad SPARQL read)
+//   3. verifiable-memory get
+//                     -> POST /api/query  view=verifiable-memory, scoped to the
+//                        published entity, on the SAME node (local read-back)
+//   4. query-remote   -> POST /api/query-remote  { peerId, lookupType:ENTITY_TRIPLES }
+//                        against ANOTHER node's peerId — reads the entity back from
+//                        a peer over the /dkg/10.0.1/query-remote protocol. This is
+//                        the real cross-node SYNC / replication test.
 //
-// Everything else mirrors V8: 10 KAs per node, each doing
-//   publish -> query -> local get -> remote get (remote = a random OTHER node),
-// 6-minute per-operation timeouts, the same summary_<Node>.json /
-// errors_<Node>.json schema, the same global summary, and the same Grafana
-// insert scripts.
+// V8 vs V10 — the only behavioural difference: V8 signed client-side with a
+// per-node PRIVATE KEY; V10 nodes sign INTERNALLY from their own op-wallet pool,
+// driven by the HTTP API + a per-node BEARER TOKEN. We record the
+// `publisherAddress` the node returns per publish instead of choosing the wallet.
+//
+// The summary_<Node>.json fields keep their V8 column names (publish_success_rate,
+// query_success_rate, publisher_get_success_rate, non_publisher_get_success_rate)
+// so the Grafana Postgres import stays byte-identical. They map to the V10 ops as:
+//   publish_success_rate            <- publish
+//   query_success_rate              <- query
+//   publisher_get_success_rate      <- verifiable-memory get (local)
+//   non_publisher_get_success_rate  <- query-remote (peer sync)
 // ===========================================================================
 
 import { strict as assert } from 'assert';
@@ -28,8 +38,6 @@ import {
 } from './v10-helpers.js';
 
 const PUBLISH_EPOCHS = Number(process.env.PUBLISH_EPOCHS || 2);
-// 10 root KAs per node (V8 published a fixed 10; keep the same default, but
-// allow override via the same TEST_KA_BATCHES knob the V10 harness already uses).
 const KA_COUNT = Number(process.env.TEST_KA_BATCHES || 10);
 const OP_TIMEOUT_MS = Number(process.env.V10_OP_TIMEOUT_MS || 6 * 60 * 1000);
 
@@ -46,8 +54,8 @@ function withTimeout(promise, label, nodeName) {
 }
 
 // ---------------------------------------------------------------------------
-// Per-node HTTP client (V8's `new DKG({ endpoint, blockchain })` analogue).
-// Each node has its OWN base URL + bearer token; the node signs internally.
+// Per-node HTTP client. Each node has its OWN base URL + bearer token; the node
+// signs internally. /api/status is public; writes + query-remote need the token.
 // ---------------------------------------------------------------------------
 export function makeNodeClient(baseUrl, token) {
   async function req(method, path, body, { acceptStatuses } = {}) {
@@ -76,24 +84,45 @@ export function makeNodeClient(baseUrl, token) {
         { contextGraphId, quads, publishEpochs: PUBLISH_EPOCHS },
         { acceptStatuses: [200, 207] },
       ).then((r) => ({ ...r.data, httpStatus: r.status })),
+    // local query (view=verifiable-memory)
     query: (sparql, contextGraphId, view = 'verifiable-memory') =>
       req('POST', '/api/query', { sparql, contextGraphId, view }).then((r) => r.data),
+    // cross-node read: ask a PEER (by peerId) for an entity's triples — the V10 sync test
+    queryRemote: (peerId, contextGraphId, entityUri) =>
+      req('POST', '/api/query-remote', {
+        peerId,
+        lookupType: 'ENTITY_TRIPLES',
+        contextGraphId,
+        entityUri,
+      }).then((r) => r.data),
   };
 }
 
 function queryHasData(result) {
   if (!result) return false;
+  if (typeof result.resultCount === 'number') return result.resultCount > 0;
   if (Array.isArray(result)) return result.length > 0;
   if (Array.isArray(result.data)) return result.data.length > 0;
   if (Array.isArray(result.results)) return result.results.length > 0;
   if (result.data && Array.isArray(result.data.results)) return result.data.results.length > 0;
+  if (Array.isArray(result.triples)) return result.triples.length > 0;
   return false;
 }
 
+// Resolve (and cache) a node's libp2p peerId via its public /api/status.
+const peerIdCache = new Map();
+async function getPeerId(node) {
+  if (peerIdCache.has(node.hostname)) return peerIdCache.get(node.hostname);
+  const status = await makeNodeClient(node.hostname, node.token).status();
+  const pid = status && status.peerId;
+  if (pid) peerIdCache.set(node.hostname, pid);
+  return pid;
+}
+
 // ---------------------------------------------------------------------------
-// Register the V8-shaped describe/it suite for one chain.
+// Register the per-chain describe/it suite.
 //   config = { title, blockchainName, contextGraphId, nodes:[{name,hostname,token}] }
-// `NODE_TO_TEST` (env) selects which node this Jenkins stage runs.
+// NODE_TO_TEST (env) selects which node this Jenkins stage runs.
 // ---------------------------------------------------------------------------
 export function defineChainPublishSuite(config) {
   const { title, blockchainName, contextGraphId, nodes } = config;
@@ -114,15 +143,17 @@ export function defineChainPublishSuite(config) {
       for (let currentIndex = 0; currentIndex < nodesToRun.length; currentIndex++) {
         const { name, hostname, token } = nodesToRun[currentIndex];
 
+        // counters keep the V8 metric names (publisherGet = verifiable-memory get,
+        // remoteGet = query-remote) so the Grafana summary columns are unchanged.
         let publishSuccess = 0, publishFail = 0;
         let querySuccess = 0, queryFail = 0;
-        let localGetSuccess = 0, localGetFail = 0;
-        let remoteGetSuccess = 0, remoteGetFail = 0;
+        let vmGetSuccess = 0, vmGetFail = 0;
+        let queryRemoteSuccess = 0, queryRemoteFail = 0;
 
         const publishDurations = [];
         const queryDurations = [];
-        const localGetDurations = [];
-        const remoteGetDurations = [];
+        const vmGetDurations = [];
+        const queryRemoteDurations = [];
         const failedAssets = [];
         const publisherAddresses = new Set();
 
@@ -133,14 +164,14 @@ export function defineChainPublishSuite(config) {
           const { quads, rootEntity } = buildQuads(name, i + 1);
 
           let ual = null;
-          let target = rootEntity; // the subject we read back in get/query steps
-          let step = 'publishing';
+          const target = rootEntity; // entity we read back in the get/query-remote steps
+          let step = 'publish';
 
-          // ── publish ───────────────────────────────────────────────────────
+          // ── 1. publish (mint to Verifiable Memory) ─────────────────────────
           try {
-            const publishStart = Date.now();
-            const result = await withTimeout(client.publish(contextGraphId, quads), 'publishing', name);
-            publishDurations.push(Date.now() - publishStart);
+            const t0 = Date.now();
+            const result = await withTimeout(client.publish(contextGraphId, quads), 'publish', name);
+            publishDurations.push(Date.now() - t0);
 
             assert.ok(result, 'Publish returned no result');
             if (result.status !== 'confirmed') {
@@ -164,17 +195,17 @@ export function defineChainPublishSuite(config) {
             publishFail++;
           }
 
-          // ── query (general SELECT) ──────────────────────────────────────────
+          // ── 2. query (broad verifiable-memory SPARQL) ──────────────────────
           try {
-            step = 'querying';
+            step = 'query';
             const generalSparql = `PREFIX schema: <http://schema.org/>
 SELECT ?s ?name ?description WHERE {
   ?s schema:name ?name ; schema:description ?description .
 } LIMIT 10`;
-            const queryStart = Date.now();
-            const queryResult = await withTimeout(client.query(generalSparql, contextGraphId, 'verifiable-memory'), 'querying', name);
-            queryDurations.push(Date.now() - queryStart);
-            assert.ok(queryHasData(queryResult), 'Query returned empty results');
+            const t0 = Date.now();
+            const result = await withTimeout(client.query(generalSparql, contextGraphId, 'verifiable-memory'), 'query', name);
+            queryDurations.push(Date.now() - t0);
+            assert.ok(queryHasData(result), 'Query returned empty results');
             console.log(`✅ Query succeeded`);
             querySuccess++;
           } catch (error) {
@@ -183,51 +214,51 @@ SELECT ?s ?name ?description WHERE {
             queryFail++;
           }
 
-          // ── local get (read the published asset back on the SAME node) ──────
+          // ── 3. verifiable-memory get (read the entity back on the SAME node) ─
           try {
-            step = 'local get';
-            const assetSparql = `SELECT ?p ?o WHERE { <${target}> ?p ?o } LIMIT 5`;
-            const localGetStart = Date.now();
-            const localGetResult = await withTimeout(client.query(assetSparql, contextGraphId, 'verifiable-memory'), 'local get', name);
-            localGetDurations.push(Date.now() - localGetStart);
-            assert.ok(queryHasData(localGetResult), `Local Get returned empty results for ${target}`);
-            console.log(`✅ Local Get Succeeded`);
-            localGetSuccess++;
+            step = 'verifiable-memory get';
+            const entitySparql = `SELECT ?p ?o WHERE { <${target}> ?p ?o } LIMIT 5`;
+            const t0 = Date.now();
+            const result = await withTimeout(client.query(entitySparql, contextGraphId, 'verifiable-memory'), 'verifiable-memory get', name);
+            vmGetDurations.push(Date.now() - t0);
+            assert.ok(queryHasData(result), `Verifiable-Memory Get returned empty results for ${target}`);
+            console.log(`✅ Verifiable-Memory Get succeeded`);
+            vmGetSuccess++;
           } catch (error) {
             logError(error, name, step, errorStats, i + 1);
-            failedAssets.push(`KA #${i + 1} (Local Get failed — UAL: ${ual})`);
-            localGetFail++;
+            failedAssets.push(`KA #${i + 1} (Verifiable-Memory Get failed — UAL: ${ual})`);
+            vmGetFail++;
           }
 
-          // ── remote get (read it back from a random OTHER node on the chain) ─
-          step = 'get';
+          // ── 4. query-remote (read the entity back from a PEER — sync test) ──
+          step = 'query-remote';
           const otherIndexes = nodes.map((_, idx) => idx).filter((idx) => nodes[idx].name !== name);
           if (otherIndexes.length === 0) {
-            // single-node chain — nothing to do, mirror V8 by skipping cleanly
+            // single-node chain — no peer to sync-check against
             continue;
           }
           const remoteNode = nodes[otherIndexes[Math.floor(Math.random() * otherIndexes.length)]];
           try {
-            const remoteClient = makeNodeClient(remoteNode.hostname, remoteNode.token);
-            const assetSparql = `SELECT ?p ?o WHERE { <${target}> ?p ?o } LIMIT 5`;
-            const remoteGetStart = Date.now();
-            const remoteGetResult = await withTimeout(remoteClient.query(assetSparql, contextGraphId, 'verifiable-memory'), 'get', remoteNode.name);
-            remoteGetDurations.push(Date.now() - remoteGetStart);
-            assert.ok(queryHasData(remoteGetResult), `Get returned empty results for ${target} on ${remoteNode.name}`);
-            console.log(`✅ Get Succeeded on ${remoteNode.name}`);
-            remoteGetSuccess++;
+            const remotePeerId = await getPeerId(remoteNode);
+            if (!remotePeerId) throw new Error(`Could not resolve peerId for ${remoteNode.name} (${remoteNode.hostname})`);
+            const t0 = Date.now();
+            const result = await withTimeout(client.queryRemote(remotePeerId, contextGraphId, target), 'query-remote', remoteNode.name);
+            queryRemoteDurations.push(Date.now() - t0);
+            assert.ok(queryHasData(result), `Query-Remote returned no triples for ${target} from ${remoteNode.name}`);
+            console.log(`✅ Query-Remote succeeded — ${remoteNode.name} has the entity (synced)`);
+            queryRemoteSuccess++;
           } catch (error) {
             logError(error, name, step, errorStats, i + 1);
-            failedAssets.push(`KA #${i + 1} (Get failed — UAL: ${ual})`);
-            remoteGetFail++;
+            failedAssets.push(`KA #${i + 1} (Query-Remote failed — UAL: ${ual})`);
+            queryRemoteFail++;
           }
         }
 
         const avg = (arr) => (arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
         const avgPublishMs = publishSuccess > 0 ? avg(publishDurations) : 0;
         const avgQueryMs = querySuccess > 0 ? avg(queryDurations) : 0;
-        const avgLocalGetMs = localGetSuccess > 0 ? avg(localGetDurations) : 0;
-        const avgRemoteGetMs = remoteGetSuccess > 0 ? avg(remoteGetDurations) : 0;
+        const avgVmGetMs = vmGetSuccess > 0 ? avg(vmGetDurations) : 0;
+        const avgQueryRemoteMs = queryRemoteSuccess > 0 ? avg(queryRemoteDurations) : 0;
 
         console.log(`\n──────────── Summary for ${name} ────────────`);
         if (failedAssets.length > 0) {
@@ -243,9 +274,9 @@ SELECT ?s ?name ?description WHERE {
         globalStats[blockchainName][name] = {
           publishSuccess, publishFail,
           querySuccess, queryFail,
-          localGetSuccess, localGetFail,
-          remoteGetSuccess, remoteGetFail,
-          avgPublishMs, avgQueryMs, avgLocalGetMs, avgRemoteGetMs,
+          vmGetSuccess, vmGetFail,
+          queryRemoteSuccess, queryRemoteFail,
+          avgPublishMs, avgQueryMs, avgVmGetMs, avgQueryRemoteMs,
         };
 
         const summary = {
@@ -253,12 +284,12 @@ SELECT ?s ?name ?description WHERE {
           node_name: name,
           publish_success_rate: safeRate(publishSuccess, publishFail),
           query_success_rate: safeRate(querySuccess, queryFail),
-          publisher_get_success_rate: safeRate(localGetSuccess, localGetFail),
-          non_publisher_get_success_rate: safeRate(remoteGetSuccess, remoteGetFail),
+          publisher_get_success_rate: safeRate(vmGetSuccess, vmGetFail),            // verifiable-memory get (local)
+          non_publisher_get_success_rate: safeRate(queryRemoteSuccess, queryRemoteFail), // query-remote (peer sync)
           average_publish_time: (avgPublishMs / 1000).toFixed(2),
           average_query_time: (avgQueryMs / 1000).toFixed(2),
-          average_publisher_get_time: (avgLocalGetMs / 1000).toFixed(2),
-          average_non_publisher_get_time: (avgRemoteGetMs / 1000).toFixed(2),
+          average_publisher_get_time: (avgVmGetMs / 1000).toFixed(2),
+          average_non_publisher_get_time: (avgQueryRemoteMs / 1000).toFixed(2),
           time_stamp: new Date().toISOString(),
         };
         const summaryFileName = `summary_${name.replace(/\s+/g, '_')}.json`;
@@ -283,14 +314,14 @@ SELECT ?s ?name ?description WHERE {
         console.log(`\n🔗 Blockchain: ${blockchain}`);
         Object.entries(nodeStats).forEach(([nodeName, stats]) => {
           console.log(`  • ${nodeName}:`);
-          console.log(`    Publish:       ✅ ${stats.publishSuccess} / ❌ ${stats.publishFail} -> ${safeRate(stats.publishSuccess, stats.publishFail)}%`);
-          console.log(`    Query:         ✅ ${stats.querySuccess} / ❌ ${stats.queryFail} -> ${safeRate(stats.querySuccess, stats.queryFail)}%`);
-          console.log(`    Local Get:     ✅ ${stats.localGetSuccess} / ❌ ${stats.localGetFail} -> ${safeRate(stats.localGetSuccess, stats.localGetFail)}%`);
-          console.log(`    Get:           ✅ ${stats.remoteGetSuccess} / ❌ ${stats.remoteGetFail} -> ${safeRate(stats.remoteGetSuccess, stats.remoteGetFail)}%`);
-          console.log(`    Avg Publish Time:   ${formatDuration(stats.avgPublishMs)}`);
-          console.log(`    Avg Query Time:     ${formatDuration(stats.avgQueryMs)}`);
-          console.log(`    Avg Local Get Time: ${formatDuration(stats.avgLocalGetMs)}`);
-          console.log(`    Avg Get Time:       ${formatDuration(stats.avgRemoteGetMs)}`);
+          console.log(`    Publish:            ✅ ${stats.publishSuccess} / ❌ ${stats.publishFail} -> ${safeRate(stats.publishSuccess, stats.publishFail)}%`);
+          console.log(`    Query:              ✅ ${stats.querySuccess} / ❌ ${stats.queryFail} -> ${safeRate(stats.querySuccess, stats.queryFail)}%`);
+          console.log(`    Verifiable-Mem Get: ✅ ${stats.vmGetSuccess} / ❌ ${stats.vmGetFail} -> ${safeRate(stats.vmGetSuccess, stats.vmGetFail)}%`);
+          console.log(`    Query-Remote (sync):✅ ${stats.queryRemoteSuccess} / ❌ ${stats.queryRemoteFail} -> ${safeRate(stats.queryRemoteSuccess, stats.queryRemoteFail)}%`);
+          console.log(`    Avg Publish Time:        ${formatDuration(stats.avgPublishMs)}`);
+          console.log(`    Avg Query Time:          ${formatDuration(stats.avgQueryMs)}`);
+          console.log(`    Avg Verifiable-Mem Get:  ${formatDuration(stats.avgVmGetMs)}`);
+          console.log(`    Avg Query-Remote Time:   ${formatDuration(stats.avgQueryRemoteMs)}`);
         });
       });
 
