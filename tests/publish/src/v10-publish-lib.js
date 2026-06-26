@@ -38,6 +38,13 @@ const PUBLISH_EPOCHS = Number(process.env.PUBLISH_EPOCHS || 2);
 const KA_COUNT = Number(process.env.TEST_KA_BATCHES || 10);
 const OP_TIMEOUT_MS = Number(process.env.V10_OP_TIMEOUT_MS || 6 * 60 * 1000);
 
+// Context-graph provisioning. Publishing to Verifiable Memory needs the CG to be
+// registered on-chain. V10_CG_REGISTER=true registers a fresh CG (~100 TRAC on the
+// node wallet); false assumes DKG_CONTEXT_GRAPH_ID already exists + is registered.
+const CG_REGISTER = String(process.env.V10_CG_REGISTER || 'false').toLowerCase() === 'true';
+const CG_ACCESS_POLICY = Number(process.env.V10_CG_ACCESS_POLICY || 0);
+const CG_PUBLISH_POLICY = Number(process.env.V10_CG_PUBLISH_POLICY || 1);
+
 function withTimeout(promise, label, nodeName) {
   return Promise.race([
     promise,
@@ -90,6 +97,14 @@ export function makeNodeClient(baseUrl, token) {
         lookupType: 'ENTITY_TRIPLES',
         contextGraphId,
         entityUri,
+      }).then((r) => r.data),
+    // create (and optionally on-chain register) the context graph to publish into
+    createContextGraph: (id, name, description, opts = {}) =>
+      req('POST', '/api/context-graph/create', {
+        id, name, description,
+        accessPolicy: opts.accessPolicy ?? 0,
+        publishPolicy: opts.publishPolicy ?? 1,
+        register: opts.register ?? false,
       }).then((r) => r.data),
   };
 }
@@ -156,6 +171,25 @@ export function defineChainPublishSuite(config) {
         const publisherAddresses = new Set();
 
         const client = makeNodeClient(hostname, token);
+
+        // Ensure the context graph exists on this node (and is on-chain registered
+        // when V10_CG_REGISTER=true). A successful publish to Verifiable Memory needs
+        // the CG registered on-chain.
+        try {
+          const cg = await client.createContextGraph(
+            contextGraphId,
+            'V10 Publish Test CG',
+            'Automated publish/query test context graph',
+            { accessPolicy: CG_ACCESS_POLICY, publishPolicy: CG_PUBLISH_POLICY, register: CG_REGISTER },
+          );
+          if (CG_REGISTER && (cg.registerError || cg.registered !== true || !cg.onChainId)) {
+            console.log(`⚠️  Context graph "${contextGraphId}" on ${name}: on-chain registration incomplete (registered=${cg.registered}, onChainId=${cg.onChainId ?? 'none'}${cg.registerError ? `, ${cg.registerError}` : ''})`);
+          } else {
+            console.log(`Context graph "${contextGraphId}" ready on ${name}${cg.onChainId ? ` (on-chain ${cg.onChainId})` : ''}`);
+          }
+        } catch (error) {
+          console.log(`Context graph setup on ${name}: ${error.message} (may already exist, continuing)`);
+        }
 
         for (let i = 0; i < KA_COUNT; i++) {
           console.log(`\nPublishing KA #${i + 1} on ${name}`);
