@@ -2,7 +2,7 @@ import fs from 'fs';
 
 const errorFiles = fs
     .readdirSync('.')
-    .filter(f => f.startsWith('errors_Node_') && f.endsWith('.json'));
+    .filter(f => f.startsWith('errors_') && f.endsWith('.json'));
 
 console.log('\n\nGlobal Error Summary:\n');
 
