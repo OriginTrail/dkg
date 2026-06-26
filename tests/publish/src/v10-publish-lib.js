@@ -46,15 +46,17 @@ const CG_ACCESS_POLICY = Number(process.env.V10_CG_ACCESS_POLICY || 0);
 const CG_PUBLISH_POLICY = Number(process.env.V10_CG_PUBLISH_POLICY || 1);
 
 function withTimeout(promise, label, nodeName) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(
-        () => reject(new Error(`Timeout after ${Math.round(OP_TIMEOUT_MS / 60000)} minutes during "${label}" on ${nodeName}`)),
-        OP_TIMEOUT_MS,
-      ),
-    ),
-  ]);
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Timeout after ${Math.round(OP_TIMEOUT_MS / 60000)} minutes during "${label}" on ${nodeName}`)),
+      OP_TIMEOUT_MS,
+    );
+  });
+  // clearTimeout once the race settles: otherwise a resolved op leaves a live
+  // 6-minute timer that keeps the mocha process alive, hanging the Jenkins
+  // stage for ~6 min after the test already finished.
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 // ---------------------------------------------------------------------------
