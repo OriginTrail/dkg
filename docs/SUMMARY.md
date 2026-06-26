@@ -37,6 +37,7 @@
 
 * [Daemon Lifecycle](use-dkg/run-node.md)
 * [Publish & Query](use-dkg/publish-and-query.md)
+* [Verifiable Answers (dRAG)](use-dkg/verifiable-answers-drag.md)
 * [Funding](use-dkg/funding.md)
 * [Publishing Conviction](use-dkg/publishing-conviction.md)
 * [Relays & Peers](use-dkg/relays-and-peers.md)
