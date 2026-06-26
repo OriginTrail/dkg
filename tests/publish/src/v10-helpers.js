@@ -231,16 +231,24 @@ export function categorizeErrorService(error) {
   return 'other';
 }
 
-// Collapse per-publish-unique tokens (UALs, entity URIs, UUIDs, hex hashes /
-// addresses) to placeholders so otherwise-identical errors aggregate into one
-// bucket instead of N separate "1x" entries (e.g. the per-KA Query Remote
-// "returned no triples for urn:ka:<uuid> from SBB" lines collapse to one "10x").
+// Collapse per-occurrence-unique tokens to placeholders so otherwise-identical
+// errors aggregate into ONE bucket ("10x") instead of N separate "1x" entries.
+// Strips, in order: the verbose ethers CALL_EXCEPTION tail (action/data/
+// transaction/version — boilerplate that also carries volatile calldata), UALs &
+// entity URIs, UUIDs, hex (addresses/hashes), and long decimal amounts (wei bids
+// like the varying TooLowBalance `need`). Designed to be future-proof: any new
+// error whose only differences are ids/hashes/numbers will still aggregate.
 export function normalizeErrorMessage(message) {
   return String(message)
+    // drop the ethers v6 "(action=\"estimateGas\", data=..., transaction={...}, ...)" tail
+    .replace(/\s*\(action=["'][\s\S]*$/i, '')
     .replace(/urn:(?:ka|entity):[A-Za-z0-9_.:-]+/g, '<entity>')
     .replace(/did:dkg:[^\s"'),]+/gi, '<ual>')
     .replace(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g, '<id>')
     .replace(/0x[0-9a-fA-F]{6,}/g, '<hex>')
+    // long decimal numbers (wei amounts, token bids, timestamps) — keep small
+    // numbers like chain ids / KA counts intact
+    .replace(/\b\d{6,}\b/g, '<n>')
     .trim();
 }
 
