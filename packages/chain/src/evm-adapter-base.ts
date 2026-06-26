@@ -657,8 +657,11 @@ export class EVMChainAdapterBase {
     // constructor below only builds Wallets/Contracts and a lazily-resolved
     // HubResolutionCache.
     this.rpcFailover = new RpcFailoverClient(
-      () => this.providers,
-      () => this.rpcUrls,
+      // Mapped at CALL time inside the thunk (NOT captured), so a test that
+      // reassigns `(a as any).providers` / `(a as any).rpcUrls` after construction
+      // still propagates live (D1). `providers`/`rpcUrls` are built in lockstep
+      // (`providers = rpcUrls.map(...)`), so index i pairs provider[i]↔rpcUrl[i].
+      () => this.providers.map((provider, i) => ({ provider, rpcUrl: this.rpcUrls[i] })),
       (signer, populated) => this.signPopulatedTransaction(signer, populated),
     );
     const providerContext = formatProviderContext(config);

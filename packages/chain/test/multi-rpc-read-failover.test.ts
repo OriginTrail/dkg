@@ -150,12 +150,14 @@ describe('multi-RPC read failover (real loopback providers)', () => {
       const a = track(new EVMChainAdapter(minimalConfig({ rpcUrl: primary.url, rpcUrls: [backup.url] })));
 
       // Construct the module over the adapter's bare constructed providers (the
-      // multi-RPC retries=0 wiring rides along) — exactly the three capability
-      // thunks the adapter uses. The read family never signs, so the callback
-      // throws if ever reached.
+      // multi-RPC retries=0 wiring rides along) — exactly the endpoint thunk the
+      // adapter uses, mapping its providers↔rpcUrls into RpcEndpoint pairs at call
+      // time (liveness). The read family never signs, so the callback throws if
+      // ever reached.
       const client = new RpcFailoverClient(
-        () => (a as unknown as { providers: JsonRpcProvider[] }).providers,
-        () => a.getRpcUrls(),
+        () => (a as unknown as { providers: JsonRpcProvider[] }).providers.map(
+          (provider, i) => ({ provider, rpcUrl: a.getRpcUrls()[i] }),
+        ),
         async () => { throw new Error('read path must not sign'); },
       );
 

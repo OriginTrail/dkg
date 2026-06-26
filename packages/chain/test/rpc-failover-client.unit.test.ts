@@ -2,8 +2,9 @@
 /**
  * `RpcFailoverClient` — direct unit coverage of the pure per-endpoint transport
  * mechanism extracted from `EVMChainAdapterBase` (#1336). Constructs the module
- * DIRECTLY (PLAN §0 D1: three injected capability thunks — `getProviders` /
- * `getRpcUrls` / `signPopulated`) with hand-made provider/contract/signer doubles
+ * DIRECTLY (PLAN §0 D1: two injected capabilities — a `getEndpoints` thunk
+ * returning `{ provider, rpcUrl }[]` + a `signPopulated` callback) with
+ * hand-made provider/contract/signer doubles
  * — no `as any` reach through protected adapter seams (the testability win the
  * issue asks for).
  *
@@ -72,7 +73,7 @@ function makeClient(
   rpcUrls: string[],
   signPopulated: SignPopulatedFn = NEVER_SIGN,
 ): RpcFailoverClient {
-  return new RpcFailoverClient(() => providers as any, () => rpcUrls, signPopulated);
+  return new RpcFailoverClient(() => providers.map((p, i) => ({ provider: p as any, rpcUrl: rpcUrls[i] })), signPopulated);
 }
 
 const URLS = ['https://primary.example', 'https://backup.example'];
