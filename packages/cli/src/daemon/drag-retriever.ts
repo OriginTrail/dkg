@@ -10,6 +10,7 @@
 // builds verifiable citations.
 
 import type { EntityRetriever, RetrievedAnchor } from '@origintrail-official/dkg-agent';
+import { validateContextGraphId } from '@origintrail-official/dkg-core';
 import type { VectorStore, EmbeddingProvider } from '../vector-store.js';
 
 /** Minimal triple-store surface the indexer needs (the agent's store satisfies it). */
@@ -89,6 +90,12 @@ export class VectorEntityRetriever implements EntityRetriever {
    *     the gate while fresh VM entities go unembedded. Hence the 'vm' scope.
    */
   private async ensureIndexed(cgName: string): Promise<void> {
+    // cgName is interpolated into SPARQL below. The retrieve() path is already
+    // validated upstream, but warm() is invoked from memory-change events whose
+    // contextGraphId can originate from an unauthenticated remote publish — so
+    // validate HERE, the single chokepoint every indexing caller passes through,
+    // before the id ever reaches a SPARQL string.
+    if (!validateContextGraphId(cgName).valid) return;
     const vmPrefix = `did:dkg:context-graph:${cgName}/_verifiable_memory/`;
     const currentCount = await this.countIndexableRecords(vmPrefix);
     if (currentCount === 0) return;

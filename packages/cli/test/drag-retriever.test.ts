@@ -73,6 +73,24 @@ describe('VectorEntityRetriever — incremental indexing', () => {
     vs.close();
   });
 
+  it('warm() with an injection-bearing context graph id never reaches the SPARQL sink', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'drag-vs-'));
+    dirs.push(dir);
+    const vs = new VectorStore(dir);
+    const emb = new CountingEmbedder();
+    let queried = false;
+    const store: QueryableStore = {
+      query: async () => {
+        queried = true;
+        return { type: 'bindings', bindings: [] };
+      },
+    };
+    const r = new VectorEntityRetriever(vs, emb, store);
+    // A '"' would close the SPARQL string literal vmPrefix is interpolated into.
+    await r.warm('cg" } INSERT DATA { <urn:a> <urn:b> <urn:c> } #');
+    expect(queried).toBe(false); // validateContextGraphId rejected it before any SPARQL ran
+  });
+
   it('sets degraded=true and returns no anchors when the embedder cannot run (no model)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'drag-vs-'));
     dirs.push(dir);
