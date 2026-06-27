@@ -362,13 +362,19 @@ async function main() {
           }),
         },
       );
-      if (!pubRes.ok) {
+      // The per-KA /vm/publish route returns a NON-OK status (e.g. 502) for a
+      // TENTATIVE publish (publisher nonce race), unlike the legacy endpoint
+      // which returned 200 + status:'tentative'. Read the body before throwing
+      // so the transient tentative/kaId:'0' outcome is still retried, and only a
+      // genuine hard failure throws.
+      const isTentative = (b) => !!b && (b.status === 'tentative' || b.kaId === '0');
+      let pubJson = await pubRes.json().catch(() => null);
+      if (!pubRes.ok && !isTentative(pubJson)) {
         throw new Error(
-          `publish #${i} on core${core.num} failed: ${pubRes.status} ${await pubRes.text()}`,
+          `publish #${i} on core${core.num} failed: ${pubRes.status} ${pubJson ? JSON.stringify(pubJson) : ''}`,
         );
       }
-      let pubJson = await pubRes.json();
-      if (pubJson.status === 'tentative' || pubJson.kaId === '0') {
+      if (isTentative(pubJson)) {
         await new Promise((r) => setTimeout(r, 2000));
         const retry = await fetch(
           `http://127.0.0.1:${core.apiPort}/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`,
@@ -383,7 +389,12 @@ async function main() {
             }),
           },
         );
-        pubJson = await retry.json();
+        pubJson = await retry.json().catch(() => null);
+        if (!retry.ok && !isTentative(pubJson)) {
+          throw new Error(
+            `publish #${i} retry on core${core.num} failed: ${retry.status} ${pubJson ? JSON.stringify(pubJson) : ''}`,
+          );
+        }
       }
       publishLog.push({
         core: core.num,

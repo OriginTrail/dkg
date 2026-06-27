@@ -1042,7 +1042,7 @@ export interface BatchPublishResult {
  * into ONE `BatchPublishResult`. The canonical batch-publish loop reused by every CTA
  * (MemoryLayerView / entities / layer-widgets) so the partial-detail, sample, and per-KA
  * error accounting cannot drift between them. Per-KA failures are collected into
- * `lastError` (never thrown); the caller renders the aggregate.
+ * the `failures[]` array (never thrown); the caller renders the aggregate.
  */
 export async function publishAssertionsToVm(
   contextGraphId: string,

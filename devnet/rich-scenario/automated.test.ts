@@ -346,14 +346,20 @@ async function publishAssertionVm(
         // clearSharedMemoryAfter (it would wipe the whole CG's unpublished SWM).
       }),
     });
-    if (!res.ok) {
-      throw new Error(`publish ${name}: ${res.status} ${await res.text()}`);
-    }
-    return (await res.json()) as {
+    // /vm/publish returns a NON-OK status (e.g. 502) for a TENTATIVE publish
+    // (publisher nonce race). Read the body before throwing so a tentative
+    // outcome flows to the retry below instead of failing here; only a genuine
+    // hard failure throws.
+    const j = (await res.json().catch(() => null)) as {
       status?: string;
       kaId?: string;
       txHash?: string;
-    };
+    } | null;
+    const tentative = !!j && (j.status === 'tentative' || j.kaId === '0');
+    if (!res.ok && !tentative) {
+      throw new Error(`publish ${name}: ${res.status} ${j ? JSON.stringify(j) : ''}`);
+    }
+    return j ?? {};
   };
   let j = await doPublish();
   if (j.status === 'tentative' || j.kaId === '0') {
@@ -406,19 +412,29 @@ async function publishEdgeSwmVm(
     );
   }
   await new Promise((r) => setTimeout(r, 1_500));
-  const pubRes = await apiFetch(edge, `/api/knowledge-assets/${encodeURIComponent(assertionName)}/vm/publish`, {
-    method: 'POST',
-    body: JSON.stringify({
-      contextGraphId: cgId,
-      // Per-KA /vm/publish clears only this KA's own roots; no CG-wide clear.
-    }),
-  });
-  if (!pubRes.ok) {
-    throw new Error(
-      `edge publish ${entity}: ${pubRes.status} ${await pubRes.text()}`,
-    );
+  const doEdgePublish = async () => {
+    const pubRes = await apiFetch(edge, `/api/knowledge-assets/${encodeURIComponent(assertionName)}/vm/publish`, {
+      method: 'POST',
+      body: JSON.stringify({
+        contextGraphId: cgId,
+        // Per-KA /vm/publish clears only this KA's own roots; no CG-wide clear.
+      }),
+    });
+    // /vm/publish returns a NON-OK status (e.g. 502) for a TENTATIVE publish
+    // (publisher nonce race). Read the body before throwing so a tentative
+    // result flows to the retry below; only a genuine hard failure throws.
+    const body = (await pubRes.json().catch(() => null)) as { status?: string; kaId?: string } | null;
+    const tentative = !!body && (body.status === 'tentative' || body.kaId === '0');
+    if (!pubRes.ok && !tentative) {
+      throw new Error(`edge publish ${entity}: ${pubRes.status} ${body ? JSON.stringify(body) : ''}`);
+    }
+    return body ?? {};
+  };
+  let j = await doEdgePublish();
+  if (j.status === 'tentative' || j.kaId === '0') {
+    await new Promise((r) => setTimeout(r, 2_000));
+    j = await doEdgePublish();
   }
-  const j = (await pubRes.json()) as { status?: string; kaId?: string };
   if (j.status !== 'confirmed' || !j.kaId || j.kaId === '0') {
     throw new Error(`edge publish failed: ${JSON.stringify(j)}`);
   }

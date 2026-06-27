@@ -2525,9 +2525,13 @@ def _is_uri(value: str) -> bool:
     return bool(value) and any(value.startswith(prefix) for prefix in ("http://", "https://", "urn:", "did:"))
 
 
-# #1265 cross-adapter create/write one-shot quad-object contract — byte-parallel with
-# MCP's normalizeRdfObject/isRdfTerm (mcp-dkg assertions.ts) and core's
-# normalizeDkgPublisherObject/isDkgRdfTerm (publisher-extension.ts). Keep in sync.
+# #1265 cross-adapter create/write one-shot quad-object contract. Shares the
+# URI/blank-node/literal CLASSIFICATION and angle-bracket stripping with MCP's
+# normalizeRdfObject/isRdfTerm (mcp-dkg assertions.ts) and core's
+# normalizeDkgPublisherObject/isDkgRdfTerm (publisher-extension.ts) — keep that
+# classification in sync. NOTE: literal escaping is Hermes-local (_quote_literal
+# also UCHAR-escapes ASCII control bytes; MCP/core escape only the ECHAR set), so
+# this is not a byte-for-byte parity guarantee for control-byte literals.
 _RDF_URI_SCHEME_RE = re.compile(r"^(?:https?://|urn:|did:)", re.IGNORECASE)
 
 

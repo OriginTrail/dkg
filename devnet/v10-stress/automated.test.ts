@@ -1062,14 +1062,19 @@ describe('V10 chain — stress + scenario validation', () => {
             }),
           },
         );
-        if (!r.ok) {
-          throw new Error(`HTTP ${r.status}: ${await r.text()}`);
-        }
-        return (await r.json()) as {
+        // /vm/publish returns a NON-OK status (e.g. 502) for a TENTATIVE publish
+        // (publisher nonce race). Read the body before throwing so a tentative
+        // result reaches the retry below; only a genuine hard failure throws.
+        const j = (await r.json().catch(() => null)) as {
           kaId?: string;
           status?: string;
           txHash?: string;
-        };
+        } | null;
+        const tentative = !!j && (j.status === 'tentative' || j.kaId === '0');
+        if (!r.ok && !tentative) {
+          throw new Error(`HTTP ${r.status}: ${j ? JSON.stringify(j) : ''}`);
+        }
+        return j ?? {};
       };
 
       let publishJson = await doPublish();
