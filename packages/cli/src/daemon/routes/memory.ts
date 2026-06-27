@@ -64,7 +64,7 @@ import {
   loadOpWallets,
 } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, sparqlIri, contextGraphSharedMemoryUri, sharedMemoryReadBothFilter, contextGraphAssertionUri, contextGraphMetaUri, escapeDkgRdfLiteral, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
-import { skolemizeByEntity, findReservedSubjectPrefix, isSkolemizedUri, type PublishOptions, type PublishResult } from '@origintrail-official/dkg-publisher';
+import { skolemizeByEntity, findReservedSubjectPrefix, isSkolemizedUri, SKOLEMIZED_BLANK_NODE_SEGMENT, type PublishOptions, type PublishResult } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
 import {
@@ -199,8 +199,7 @@ import {
   resolveNameToPeerId,
   isPublishQuad,
   isWritableQuad,
-  validateQuadObjectTerms,
-  validateWritableQuadLiteralSizes,
+  preparePublicWriteStorageQuads,
   oversizedRdfLiteralResponseBody,
   parsePublishRequestBody,
   jsonResponse,
@@ -368,10 +367,8 @@ type PreSignedAuthorAttestation = {
 
 type SharedMemoryPublishSelection = "all" | { rootEntities: string[] };
 const WORKSPACE_OWNER_PREDICATE = 'http://dkg.io/ontology/workspaceOwner';
-const SKOLEM_GENID_SEGMENT = '/.well-known/genid/';
-
 function subjectMatchesPublishRoot(subject: string, root: string): boolean {
-  return subject === root || (isSkolemizedUri(subject) && subject.startsWith(`${root}${SKOLEM_GENID_SEGMENT}`));
+  return subject === root || (isSkolemizedUri(subject) && subject.startsWith(`${root}${SKOLEMIZED_BLANK_NODE_SEGMENT}`));
 }
 
 // Exported for the OT-RFC-46 read-both regression test (the route mocks the
@@ -403,7 +400,7 @@ export async function resolvePublishRootEntities(
           VALUES ?root { ${values} }
           ?s ?p ?o .
           FILTER(?p != <${WORKSPACE_OWNER_PREDICATE}>)
-          FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "${SKOLEM_GENID_SEGMENT}")))
+          FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "${SKOLEMIZED_BLANK_NODE_SEGMENT}")))
         }
         ${swmGraphScope}
       }`,
@@ -639,7 +636,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
     const graph = `did:dkg:context-graph:${resolvedContextGraphId}/meta/query-catalog`;
     try {
       assertSafeIri(graph);
-      const normalized = quads.map((quad: unknown, index: number) => {
+      let normalized = quads.map((quad: unknown, index: number) => {
         if (!quad || typeof quad !== "object" || Array.isArray(quad)) {
           throw new Error(`quads[${index}] must be an object`);
         }
@@ -670,8 +667,9 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
         };
       });
 
-      const literalSize = validateWritableQuadLiteralSizes("quads", normalized);
-      if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
+      const normalizedQuads = preparePublicWriteStorageQuads("quads", normalized);
+      if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
+      normalized = normalizedQuads.value.quads;
       await agent.store.insert(normalized);
       return jsonResponse(res, 200, {
         ok: true,
@@ -1629,7 +1627,7 @@ WHERE {
     const body = await readBody(req);
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
-    const { quads, subGraphName } = parsed;
+    let { quads, subGraphName } = parsed;
     const localOnly = parsed.localOnly === true;
     if (
       parsed.localOnly !== undefined &&
@@ -1654,15 +1652,13 @@ WHERE {
     // of crashing the SWM write path with a TypeError (HTTP 500).
     if (!Array.isArray(quads) || !quads.every(isWritableQuad))
       return jsonResponse(res, 400, { error: '"quads" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted' });
-    // GH #306/#787 (follow-up) — also reject objects that are neither a quoted
-    // literal nor an absolute IRI; otherwise they slip past the shape guard and
-    // crash the RDF parser ("No scheme found in an absolute IRI") with HTTP 500.
+    // Validate object terms and chunk oversized schema:text literals before
+    // storage/share sees these public-write quads.
     {
-      const objErr = validateQuadObjectTerms("quads", quads);
-      if (objErr) return jsonResponse(res, 400, { error: objErr });
+      const normalizedQuads = preparePublicWriteStorageQuads("quads", quads);
+      if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
+      quads = normalizedQuads.value.quads;
     }
-    const literalSize = validateWritableQuadLiteralSizes("quads", quads);
-    if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,
       contextGraphId,
@@ -2251,22 +2247,20 @@ WHERE {
     const body = await readBody(req);
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
-    const { quads, conditions, subGraphName } = parsed;
+    let { quads, conditions, subGraphName } = parsed;
     const contextGraphId = parsed.contextGraphId;
     if (!quads?.length)
       return jsonResponse(res, 400, { error: 'Missing "quads"' });
     // GH #787 / #306 — reject string-shaped / malformed quads (4xx, not a 500 crash).
     if (!Array.isArray(quads) || !quads.every(isWritableQuad))
       return jsonResponse(res, 400, { error: '"quads" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted' });
-    // GH #306/#787 (follow-up) — also reject objects that are neither a quoted
-    // literal nor an absolute IRI; otherwise they slip past the shape guard and
-    // crash the RDF parser ("No scheme found in an absolute IRI") with HTTP 500.
+    // Validate object terms and chunk oversized schema:text literals before
+    // storage/share sees these public-write quads.
     {
-      const objErr = validateQuadObjectTerms("quads", quads);
-      if (objErr) return jsonResponse(res, 400, { error: objErr });
+      const normalizedQuads = preparePublicWriteStorageQuads("quads", quads);
+      if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
+      quads = normalizedQuads.value.quads;
     }
-    const literalSize = validateWritableQuadLiteralSizes("quads", quads);
-    if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,
       contextGraphId,
@@ -2462,14 +2456,15 @@ WHERE {
       });
     }
 
-    const literalSize = validateWritableQuadLiteralSizes("quads", quads);
-    if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
+    const normalizedQuads = preparePublicWriteStorageQuads("quads", quads);
+    if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
+    const quadsToWrite = normalizedQuads.value.quads;
 
     // 5. Write to target layer
     try {
       if (targetLayer === 'swm') {
         // agent.share sets the graph field itself — pass quads with empty graph
-        const shareQuads = quads.map(({ subject, predicate, object }) => ({ subject, predicate, object, graph: '' }));
+        const shareQuads = quadsToWrite.map(({ subject, predicate, object }) => ({ subject, predicate, object, graph: '' }));
         const ctx = createOperationContext('share');
         tracker.start(ctx, { contextGraphId: resolvedContextGraphId, details: { tripleCount: shareQuads.length, source: 'memory-turn', subGraphName } });
         try {
@@ -2487,7 +2482,7 @@ WHERE {
           throw err;
         }
       } else {
-        await agent.store.insert(quads);
+        await agent.store.insert(quadsToWrite);
       }
     } catch (err: any) {
       if (err?.code === "OVERSIZED_RDF_LITERAL") {
@@ -2501,7 +2496,7 @@ WHERE {
       subGraphName,
       operation: "memory_turn_written",
       source: "memory-turn",
-      counts: { triples: quads.length },
+      counts: { triples: quadsToWrite.length },
     });
 
     // 6. Generate embedding (best-effort, non-blocking for response)
@@ -2532,7 +2527,7 @@ WHERE {
       graph: targetGraph,
       structuralTripleCount: extractResult.triples.length,
       semanticTripleCount: semanticTriples.length,
-      totalQuads: quads.length,
+      totalQuads: quadsToWrite.length,
       embeddingId,
       sessionUri: sessionUri ?? null,
     });

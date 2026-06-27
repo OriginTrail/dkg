@@ -54,14 +54,13 @@ describe('GH #787 — POST /api/shared-memory/write quad-shape validation', () =
     expect(status, JSON.stringify(body)).toBe(200);
   });
 
-  it('returns 400 for oversized RDF literals before SWM write', async () => {
+  it('chunks oversized schema:text literals before SWM write', async () => {
     const { status, body } = await postJson(daemon!, '/api/shared-memory/write', {
       contextGraphId: CG,
       quads: [{ subject: 'urn:wq:oversized-swm', predicate: 'http://schema.org/text', object: OVERSIZED_LITERAL }],
     });
-    expect(status, JSON.stringify(body)).toBe(400);
-    expect(body.code).toBe('OVERSIZED_RDF_LITERAL');
-    expect(body.actualBytes).toBeGreaterThan(60_000);
+    expect(status, JSON.stringify(body)).toBe(200);
+    expect(body.triplesWritten).toBeGreaterThan(1);
   });
 });
 
@@ -86,16 +85,15 @@ describe('GH #306 — POST /api/knowledge-assets/{name}/wm/write quad-shape vali
     expect(status, JSON.stringify(body)).toBe(200);
   });
 
-  it('returns 400 for oversized RDF literals before WM write', async () => {
+  it('chunks oversized schema:text literals before WM write', async () => {
     const created = await postJson(daemon!, '/api/knowledge-assets', { contextGraphId: CG, name: 'ka-306-oversized' });
     expect(created.status).toBeLessThan(300);
     const { status, body } = await postJson(daemon!, '/api/knowledge-assets/ka-306-oversized/wm/write', {
       contextGraphId: CG,
       quads: [{ subject: 'urn:wq:oversized-wm', predicate: 'http://schema.org/text', object: OVERSIZED_LITERAL }],
     });
-    expect(status, JSON.stringify(body)).toBe(400);
-    expect(body.code).toBe('OVERSIZED_RDF_LITERAL');
-    expect(body.actualBytes).toBeGreaterThan(60_000);
+    expect(status, JSON.stringify(body)).toBe(200);
+    expect(body.written).toBeGreaterThan(1);
   });
 });
 

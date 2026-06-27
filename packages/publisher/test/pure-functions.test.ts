@@ -100,6 +100,34 @@ describe('autoPartition', () => {
     const kaQuads = result.get(ENTITY)!;
     expect(kaQuads.length).toBe(3);
   });
+
+  it('uses the inferred blank-node root when multiple roots link to one blank object', () => {
+    const rootA = 'http://example.org/root-a';
+    const rootB = 'http://example.org/root-b';
+    const shared = `${rootA}/.well-known/genid/shared`;
+    const wrongShared = `${rootB}/.well-known/genid/shared`;
+    const quads: Quad[] = [
+      q(rootA, 'http://example.org/hasPart', '_:shared'),
+      q(rootB, 'http://example.org/mentions', '_:shared'),
+      q('_:shared', 'http://schema.org/name', '"Shared"'),
+    ];
+
+    const result = autoPartition(quads);
+    const reordered = autoPartition([...quads].reverse());
+    const allQuads = [...result.values()].flat();
+    const allReorderedQuads = [...reordered.values()].flat();
+
+    expect(result.get(rootA)).toEqual(expect.arrayContaining([
+      q(rootA, 'http://example.org/hasPart', shared),
+      q(shared, 'http://schema.org/name', '"Shared"'),
+    ]));
+    expect(result.get(rootB)).toEqual(expect.arrayContaining([
+      q(rootB, 'http://example.org/mentions', shared),
+    ]));
+    expect(allQuads.some((quad) => quad.subject === wrongShared || quad.object === wrongShared)).toBe(false);
+    expect(allReorderedQuads).toEqual(expect.arrayContaining(allQuads));
+    expect(allReorderedQuads).toHaveLength(allQuads.length);
+  });
 });
 
 describe('merkle', () => {

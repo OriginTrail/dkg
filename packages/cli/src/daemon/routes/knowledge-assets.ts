@@ -37,11 +37,10 @@ import {
   validateRequiredContextGraphId,
   parsePublishRequestBody,
   isWritableQuad,
-  validateQuadObjectTerms,
   respondIfReconcileUnavailable,
   respondIfChainRpcTransportError,
   sanitizeRpcMessage,
-  validateWritableQuadLiteralSizes,
+  preparePublicWriteStorageQuads,
   normalizeContextGraphIdOrUri,
   resolveRequiredWriteContextGraphId,
   isNoFundedPublisherWalletLike,
@@ -700,6 +699,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     const parsed = parsePublishRequestBody(rawBody);
     if (!parsed.ok) return jsonResponse(res, 400, parsed.body ?? { error: parsed.error });
     const raw = JSON.parse(rawBody) as Record<string, unknown>;
+    const { body: publishBody, literalRewrites } = parsed.value;
     const {
       contextGraphId,
       quads,
@@ -708,7 +708,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       allowedPeers,
       subGraphName,
       onChainContextGraphId,
-    } = parsed.value;
+    } = publishBody;
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,
       contextGraphId,
@@ -763,6 +763,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         ...(chain?.blockNumber !== undefined ? { blockNumber: chain.blockNumber } : {}),
         ...(chain?.batchId !== undefined ? { batchId: String(chain.batchId) } : {}),
         ...(chain?.publisherAddress ? { publisherAddress: chain.publisherAddress } : {}),
+        ...(literalRewrites && literalRewrites.length > 0 ? { literalRewrites } : {}),
         ...(typeof pub?.contextGraphError === "string" ? { contextGraphError: pub.contextGraphError } : {}),
         ...(reason ? { error: reason } : {}),
       });
@@ -846,12 +847,14 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // author attestation and reserves the on-chain identity, so it requires the
     // CG to be registered). OT-RFC-43 §10.5.5.
     const hasQuads = Array.isArray(quads) && quads.length > 0;
+    let quadsToWrite = quads;
     if (hasQuads) {
       if (!quads.every(isWritableQuad)) {
         return jsonResponse(res, 400, { error: '"quads" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted' });
       }
-      const literalSize = validateWritableQuadLiteralSizes("quads", quads);
-      if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
+      const normalizedQuads = preparePublicWriteStorageQuads("quads", quads);
+      if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
+      quadsToWrite = normalizedQuads.value.quads;
     }
     const shouldFinalize = hasQuads && finalize !== false;
     // #1116 D5: the create ROUTE stays a primitive — create+write+seal, with
@@ -931,9 +934,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       // explicit finalize:false leaves an editable WM draft and never touches
       // the chain (OT-RFC-43 §10.5.5). `also*` are opt-in transitions on top.
       if (hasQuads) {
-        await agent.assertion.write(resolvedContextGraphId, name, quads, { subGraphName, ...atomicAuthorLane });
-        result.written = quads.length;
-        emitMemoryGraphChanged?.({ contextGraphId: resolvedContextGraphId, layers: ["wm"], subGraphName, operation: "assertion_written", source: "api", counts: { triples: quads.length } });
+        await agent.assertion.write(resolvedContextGraphId, name, quadsToWrite, { subGraphName, ...atomicAuthorLane });
+        result.written = quadsToWrite.length;
+        emitMemoryGraphChanged?.({ contextGraphId: resolvedContextGraphId, layers: ["wm"], subGraphName, operation: "assertion_written", source: "api", counts: { triples: quadsToWrite.length } });
       }
       if (shouldFinalize) {
         const seal = await agent.assertion.finalize(resolvedContextGraphId, name, {
@@ -1172,12 +1175,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         if (!parsed.quads.every(isWritableQuad)) {
           return jsonResponse(res, 400, { error: '"quads" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted' });
         }
-        // GH #306/#787 (follow-up) — reject objects that are neither a quoted
-        // literal nor an absolute IRI before they reach (and crash) the parser.
-        const wmObjErr = validateQuadObjectTerms("quads", parsed.quads);
-        if (wmObjErr) return jsonResponse(res, 400, { error: wmObjErr });
-        const literalSize = validateWritableQuadLiteralSizes("quads", parsed.quads);
-        if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
+        // Validate object terms and chunk oversized schema:text literals before
+        // the write path sees these public-write quads.
+        const normalizedQuads = preparePublicWriteStorageQuads("quads", parsed.quads);
+        if (!normalizedQuads.ok) return jsonResponse(res, 400, normalizedQuads.body);
         // A bare write to a name that was never created used to fall through to
         // the legacy `/assertion/{addr}/{name}` graph and produce a KA that is
         // permanently 404 in the descriptor API (no `_meta` lifecycle record,
@@ -1203,9 +1204,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             ...writeAuthorLane,
           });
         }
-        await agent.assertion.write(contextGraphId, name, parsed.quads, { subGraphName, ...writeAuthorLane });
-        emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm"], subGraphName, operation: "assertion_written", source: "api", counts: { triples: parsed.quads.length } });
-        return jsonResponse(res, 200, { written: parsed.quads.length });
+        await agent.assertion.write(contextGraphId, name, normalizedQuads.value.quads, { subGraphName, ...writeAuthorLane });
+        emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm"], subGraphName, operation: "assertion_written", source: "api", counts: { triples: normalizedQuads.value.quads.length } });
+        return jsonResponse(res, 200, { written: normalizedQuads.value.quads.length });
       }
       if (verb === "finalize") {
         const finalizeOptions = resolveFinalizeOptions(parsed, res, writePreflightCallerAgentAddress);

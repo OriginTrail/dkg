@@ -9,6 +9,8 @@ import {
   PayloadTooLargeError,
   assertQuadLiteralsMutf8Safe,
   isOversizedRdfLiteralError,
+  parseRdfLiteralTerm,
+  type RdfTextLiteralRewrite,
   validateContextGraphId,
   validateSubGraphName,
   isSafeIri,
@@ -17,6 +19,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { enrichEvmError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import type { DKGAgent, ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
+import { preparePublicWriteQuads as prepareCanonicalPublicWriteQuads } from '@origintrail-official/dkg-publisher';
 import type { DkgConfig } from '../config.js';
 import { enforceSignedRequestPostBody } from '../auth.js';
 
@@ -40,6 +43,11 @@ export interface PublishRequestBody {
   allowedPeers?: string[];
   subGraphName?: string;
   onChainContextGraphId?: string;
+}
+
+export interface ParsedPublishRequest {
+  readonly body: PublishRequestBody;
+  readonly literalRewrites: RdfTextLiteralRewrite[];
 }
 
 import type { CorsAllowlist } from './state.js';
@@ -113,6 +121,8 @@ export function respondWithDaemonError(res: ServerResponse, err: any): void {
     (typeof err?.message === 'string' && err.message.includes('reserved namespace'))
   ) {
     jsonResponse(res, 400, { error: err.message });
+  } else if (isOversizedRdfLiteralError(err)) {
+    jsonResponse(res, 400, oversizedRdfLiteralResponseBody(err));
   } else if (isNoFundedPublisherWalletLike(err)) {
     // Funded-wallet selection found no operational wallet with gas + TRAC — a
     // user-actionable funding condition (4xx), not a server bug.
@@ -217,6 +227,60 @@ export function validateWritableQuadLiteralSizes(
   }
 }
 
+export interface PreparedPublicWriteQuads {
+  readonly quads: PublishQuad[];
+  readonly rewrites: RdfTextLiteralRewrite[];
+}
+
+export interface PreparedPublicWriteStorageQuads extends PreparedPublicWriteQuads {
+  readonly totalQuads: number;
+}
+
+/**
+ * Canonical HTTP-facing public-write preparation. Route handlers that must know
+ * the normalized quad count or return rewrite metadata call this once and pass
+ * its explicit storage quads onward; writer boundaries still run the same
+ * publisher-owned normalizer as an idempotent SDK/backstop path.
+ */
+export function preparePublicWriteQuads(
+  label: string,
+  quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
+): { ok: true; value: PreparedPublicWriteQuads } | { ok: false; body: Record<string, unknown> } {
+  try {
+    const result = prepareCanonicalPublicWriteQuads(quads, { label });
+    return { ok: true, value: { quads: result.quads, rewrites: result.rewrites } };
+  } catch (err) {
+    if (isOversizedRdfLiteralError(err)) {
+      return { ok: false, body: oversizedRdfLiteralResponseBody(err) };
+    }
+    throw err;
+  }
+}
+
+/**
+ * Prepares already shape-checked route quads for public storage. This helper
+ * intentionally does not own route shape, subject/predicate IRI, blank-node
+ * subject, or graph-policy validation; those remain with the route parsers that
+ * know their input contract. It validates object terms because parsing/chunking
+ * consumes them, then returns explicit storage quads plus rewrite/count metadata.
+ */
+export function preparePublicWriteStorageQuads(
+  label: string,
+  quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
+): { ok: true; value: PreparedPublicWriteStorageQuads } | { ok: false; body: Record<string, unknown> } {
+  const objectError = validateQuadObjectTerms(label, quads);
+  if (objectError) return { ok: false, body: { error: objectError } };
+  const prepared = preparePublicWriteQuads(label, quads);
+  if (!prepared.ok) return prepared;
+  return {
+    ok: true,
+    value: {
+      ...prepared.value,
+      totalQuads: prepared.value.quads.length,
+    },
+  };
+}
+
 /**
  * GH #306 / #787 (follow-up) — validate each quad's `object` term is either a
  * quoted RDF literal (`"…"`) or an absolute IRI. Shared by the publish path AND
@@ -226,18 +290,43 @@ export function validateWritableQuadLiteralSizes(
  * word `hello` or a number `123`) slips past them and crashes the RDF parser
  * with an uncaught "No scheme found in an absolute IRI" → HTTP 500 instead of an
  * actionable 400. Operates on any `{ object: string }` (PublishQuad or writable
- * quad alike).
+ * quad alike). Blank-node object terms are valid only for public write paths that
+ * subsequently skolemize them; callers that persist quads without normalization
+ * should set `allowBlankNodes: false`.
  */
 export function validateQuadObjectTerms(
   label: string,
   quads: ReadonlyArray<{ object: string }>,
+  options: { allowBlankNodes?: boolean } = {},
 ): string | null {
+  const allowBlankNodes = options.allowBlankNodes ?? true;
   const badIndex = quads.findIndex((q) => {
-    const object = q.object.trim();
-    return !object.startsWith('"') && !isSafeIri(object);
+    const object = q.object;
+    if (object.trim() !== object) return true;
+    if (object.startsWith('"')) return parseRdfLiteralTerm(object) === null;
+    return (
+      !(allowBlankNodes && isSafeBlankNode(object)) &&
+      !isSafeIri(object)
+    );
   });
   if (badIndex === -1) return null;
-  return `Invalid "${label}[${badIndex}].object": RDF object must be a quoted literal term or absolute IRI`;
+  const expected = allowBlankNodes
+    ? "a quoted literal term, blank node, or absolute IRI"
+    : "a quoted literal term or absolute IRI";
+  return `Invalid "${label}[${badIndex}].object": RDF object must be ${expected}`;
+}
+
+function validateNoBlankNodeSubjects(
+  label: string,
+  quads: ReadonlyArray<{ subject: string }>,
+): string | null {
+  const badIndex = quads.findIndex((q) => q.subject.trim().startsWith("_:"));
+  if (badIndex === -1) return null;
+  return `Invalid "${label}[${badIndex}].subject": RDF subject must not be a blank node`;
+}
+
+function isSafeBlankNode(term: string): boolean {
+  return /^_:[A-Za-z][A-Za-z0-9_-]*$/.test(term);
 }
 
 /**
@@ -371,7 +460,7 @@ export function respondIfChainRpcTransportError(
 
 export function parsePublishRequestBody(
   body: string,
-): { ok: true; value: PublishRequestBody } | { ok: false; error: string; body?: Record<string, unknown> } {
+): { ok: true; value: ParsedPublishRequest } | { ok: false; error: string; body?: Record<string, unknown> } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(body);
@@ -405,12 +494,16 @@ export function parsePublishRequestBody(
       error: 'Missing or invalid "quads" (must be a non-empty quad array)',
     };
   }
-  const quadObjectError = validateQuadObjectTerms("quads", quads);
-  if (quadObjectError) return { ok: false, error: quadObjectError };
-  const quadSize = validateWritableQuadLiteralSizes("quads", quads);
-  if (!quadSize.ok) {
-    return { ok: false, error: String(quadSize.body.error ?? 'Oversized RDF literal'), body: quadSize.body };
+  const normalizedQuads = preparePublicWriteStorageQuads("quads", quads);
+  if (!normalizedQuads.ok) {
+    return { ok: false, error: String(normalizedQuads.body.error ?? 'Oversized RDF literal'), body: normalizedQuads.body };
   }
+  const publishQuads = normalizedQuads.value.quads.map((quad) => ({
+    subject: quad.subject,
+    predicate: quad.predicate,
+    object: quad.object,
+    graph: quad.graph,
+  }));
 
   if (
     privateQuads !== undefined &&
@@ -422,7 +515,11 @@ export function parsePublishRequestBody(
     };
   }
   if (privateQuads !== undefined) {
-    const privateQuadObjectError = validateQuadObjectTerms("privateQuads", privateQuads);
+    const privateQuadSubjectError = validateNoBlankNodeSubjects("privateQuads", privateQuads);
+    if (privateQuadSubjectError) return { ok: false, error: privateQuadSubjectError };
+    const privateQuadObjectError = validateQuadObjectTerms("privateQuads", privateQuads, {
+      allowBlankNodes: false,
+    });
     if (privateQuadObjectError) return { ok: false, error: privateQuadObjectError };
     const privateQuadSize = validateWritableQuadLiteralSizes("privateQuads", privateQuads);
     if (!privateQuadSize.ok) {
@@ -500,13 +597,16 @@ export function parsePublishRequestBody(
   return {
     ok: true,
     value: {
-      contextGraphId,
-      quads,
-      privateQuads,
-      accessPolicy,
-      allowedPeers,
-      subGraphName: subGraphName as string | undefined,
-      onChainContextGraphId: normalizedOnChainContextGraphId,
+      body: {
+        contextGraphId,
+        quads: publishQuads,
+        privateQuads,
+        accessPolicy,
+        allowedPeers,
+        subGraphName: subGraphName as string | undefined,
+        onChainContextGraphId: normalizedOnChainContextGraphId,
+      },
+      literalRewrites: normalizedQuads.value.rewrites,
     },
   };
 }

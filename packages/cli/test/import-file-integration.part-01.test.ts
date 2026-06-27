@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, mkdtemp, rm, readFile, tmpdir, join, existsSync, ExtractionPipelineRegistry, autoPartition, findReservedSubjectPrefix, FileStore, parseBoundary, extractFromMarkdown, contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri, ImportFileRouteError, makeMockAgent, getDataGraphQuads, BOUNDARY, CRLF, buildMultipart, type ExtractionPipeline, type ExtractionInput, type ConverterOutput, type ExtractionStatusRecord, type CapturedQuad, type MockAgent } from './import-file-test-helpers';
 import { runImportFileOrchestration } from './import-file-orchestration.shared';
+import {
+  DKG_CHUNK_INDEX,
+  DKG_CHUNK_VALUE,
+  DKG_HAS_TEXT_BODY,
+  DKG_HAS_TEXT_CHUNK,
+} from '@origintrail-official/dkg-core';
+import { reconstructChunkedText } from '../../core/test/helpers/chunked-text.js';
 
 describe('import-file orchestration — happy paths', () => {
 
@@ -141,6 +148,52 @@ describe('import-file orchestration — happy paths', () => {
       expect(record.fileHash).toBe(result.fileHash);
       expect(record.pipelineUsed).toBe('text/markdown');
       expect(record.tripleCount).toBe(result.extraction.tripleCount);
+    });
+
+    it('text/markdown upload chunks oversized schema:text frontmatter literals in the assertion graph', async () => {
+      const largeText = 'x'.repeat(60_000);
+      const markdown = [
+        '---',
+        'id: large-literal-note',
+        `text: "${largeText}"`,
+        '---',
+        '',
+        '# Large Literal',
+        '',
+      ].join('\n');
+
+      const body = buildMultipart([
+        { kind: 'text', name: 'contextGraphId', value: 'large-literal-cg' },
+        { kind: 'file', name: 'file', filename: 'large.md', contentType: 'text/markdown', content: Buffer.from(markdown, 'utf-8') },
+      ]);
+
+      const result = await runImportFileOrchestration({
+        agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+        multipartBody: body, boundary: BOUNDARY, assertionName: 'large-literal',
+      });
+
+      expect(result.extraction.status).toBe('completed');
+      const assertionGraph = contextGraphAssertionUri('large-literal-cg', agent.peerId, 'large-literal');
+      const writtenTriples = getDataGraphQuads(agent, 'large-literal-cg', 'large-literal');
+      expect(writtenTriples.some((quad) =>
+        quad.subject === result.assertionUri &&
+        quad.predicate === 'http://schema.org/text'
+      )).toBe(false);
+      expect(writtenTriples.some((quad) => quad.predicate === DKG_CHUNK_VALUE)).toBe(true);
+      expect(reconstructChunkedText(writtenTriples, result.assertionUri)).toBe(largeText);
+
+      const chunkQuads = agent.insertedQuads.filter((quad) =>
+        quad.predicate === DKG_HAS_TEXT_BODY ||
+        quad.predicate === DKG_HAS_TEXT_CHUNK ||
+        quad.predicate === DKG_CHUNK_INDEX ||
+        quad.predicate === DKG_CHUNK_VALUE
+      );
+      expect(chunkQuads.length).toBeGreaterThan(0);
+      expect(chunkQuads.every((quad) => quad.graph === assertionGraph)).toBe(true);
+      expect(agent.insertedQuads.some((quad) =>
+        quad.graph === contextGraphMetaUri('large-literal-cg') &&
+        quad.predicate === DKG_CHUNK_VALUE
+      )).toBe(false);
     });
 
 

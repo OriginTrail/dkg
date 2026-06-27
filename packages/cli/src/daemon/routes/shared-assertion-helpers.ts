@@ -18,7 +18,6 @@ import {
   ImportedArtifactMetadataError,
   isDkgContentHash,
   resolveImportedArtifactMetadata,
-  assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { type PromoteJob, type PromoteJobState } from '@origintrail-official/dkg-publisher';
 import { daemonState } from '../state.js';
@@ -325,11 +324,6 @@ export function normalizeSemanticQuads(raw: unknown): Array<{ subject: string; p
     } else {
       normalizedObject = rdfLiteral(object);
     }
-    assertRdfLiteralMutf8Safe(normalizedObject, {
-      label: `semanticQuads[${index}].object`,
-      subject,
-      predicate,
-    });
     return { subject, predicate, object: normalizedObject };
   });
 }

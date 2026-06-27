@@ -5,12 +5,17 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  DKG_CHUNK_INDEX,
+  DKG_CHUNK_VALUE,
+  DKG_HAS_TEXT_BODY,
+  DKG_HAS_TEXT_CHUNK,
   contextGraphAssertionUri,
   contextGraphMetaUri,
   contextGraphSharedMemoryUri,
   keccak256ContentHash,
   sharedMemoryReadBothFilter,
 } from '@origintrail-official/dkg-core';
+import { reconstructChunkedText } from '../../core/test/helpers/chunked-text.js';
 import { FileStore } from '../src/file-store.js';
 import type { ExtractionStatusRecord } from '../src/extraction-status.js';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
@@ -18,7 +23,7 @@ import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-asse
 const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
 
-type Quad = { subject: string; predicate: string; object: string };
+type Quad = { subject: string; predicate: string; object: string; graph?: string };
 
 function sha256Hash(bytes: Buffer): string {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
@@ -111,6 +116,26 @@ describe('import artifact daemon routes', () => {
     return { status: res.status, body: await res.json() };
   }
 
+  async function postMultipart(
+    path: string,
+    parts: Array<
+      | { name: string; value: string }
+      | { name: string; filename: string; contentType: string; value: string | Uint8Array }
+    >,
+  ) {
+    const form = new FormData();
+    for (const part of parts) {
+      if ('filename' in part) {
+        const bytes = typeof part.value === 'string' ? part.value : new Uint8Array(part.value);
+        form.append(part.name, new Blob([bytes], { type: part.contentType }), part.filename);
+      } else {
+        form.append(part.name, part.value);
+      }
+    }
+    const res = await fetch(`${baseUrl}${path}`, { method: 'POST', body: form });
+    return { status: res.status, body: await res.json() };
+  }
+
   async function get(path: string) {
     const res = await fetch(`${baseUrl}${path}`);
     return { status: res.status, body: await res.json() };
@@ -168,6 +193,7 @@ describe('import artifact daemon routes', () => {
       agentAddress?: string;
       subGraphName?: string;
     }> = [];
+    const insertedQuads: Quad[] = [];
     const queries: string[] = [];
     const queryQuads = args.queryQuads ?? [
       { subject: 'urn:z', predicate: 'urn:p', object: 'urn:o' },
@@ -228,6 +254,14 @@ describe('import artifact daemon routes', () => {
           if (args.publisherDiscardError) throw args.publisherDiscardError;
           discards.push({ contextGraphId, name, agentAddress, subGraphName });
         },
+        async wmGraphUri(
+          contextGraphId: string,
+          agentAddress: string,
+          name: string,
+          subGraphName?: string,
+        ) {
+          return contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
+        },
       },
       ...(args.onChainPolicy
         ? {
@@ -252,8 +286,20 @@ describe('import artifact daemon routes', () => {
         async hasGraph() {
           return Boolean(args.targetGraphExists);
         },
+        async insert(quads: Quad[]) {
+          insertedQuads.push(...quads);
+        },
+        async deleteByPattern() {
+          return 0;
+        },
+        async dropGraph() {
+          return undefined;
+        },
         async query(sparql: string) {
           queries.push(sparql);
+          if (sparql.includes('CONSTRUCT')) {
+            return { type: 'quads', quads: [] };
+          }
           if (sparql.includes('SELECT ?p ?o')) {
             return { type: 'bindings', bindings: [] };
           }
@@ -309,7 +355,7 @@ describe('import artifact daemon routes', () => {
         },
       },
     };
-    return { agent, created, writes, discards, queries };
+    return { agent, created, writes, discards, queries, insertedQuads };
   }
 
   it('resolves and safely reads a completed Markdown import artifact by content hash', async () => {
@@ -359,6 +405,61 @@ describe('import artifact daemon routes', () => {
       bytes: Buffer.byteLength('# Imported\n\nHello DKG.\n'),
       markdown: '# Imported\n\nHello DKG.\n',
     });
+  });
+
+  it('wm/import-file chunks oversized schema:text through handleKaImportFile', async () => {
+    const contextGraphId = 'cg-import-file-large-text';
+    const assertionName = 'large-text-import';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:test', assertionName);
+    const { agent, insertedQuads } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: `keccak256:${'0'.repeat(64)}`,
+      markdownHash: `keccak256:${'1'.repeat(64)}`,
+      markdownForm: `urn:dkg:file:keccak256:${'1'.repeat(64)}`,
+    });
+    await startRoutes({ agent });
+
+    const largeText = 'x'.repeat(60_000);
+    const markdown = [
+      '---',
+      'id: route-large-text',
+      `text: "${largeText}"`,
+      '---',
+      '',
+      '# Large Text',
+      '',
+    ].join('\n');
+
+    const result = await postMultipart(`/api/knowledge-assets/${assertionName}/wm/import-file`, [
+      { name: 'contextGraphId', value: contextGraphId },
+      { name: 'file', filename: 'large.md', contentType: 'text/markdown', value: markdown },
+    ]);
+
+    expect(result.status).toBe(200);
+    expect(result.body.assertionUri).toBe(assertionUri);
+    const assertionGraph = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:test', assertionName);
+    const dataQuads = insertedQuads.filter((quad) => quad.graph === assertionGraph);
+    expect(dataQuads.some((quad) =>
+      quad.subject === assertionUri &&
+      quad.predicate === 'http://schema.org/text'
+    )).toBe(false);
+    expect(dataQuads.some((quad) => quad.predicate === DKG_CHUNK_VALUE)).toBe(true);
+    expect(reconstructChunkedText(dataQuads, assertionUri)).toBe(largeText);
+
+    const chunkQuads = insertedQuads.filter((quad) =>
+      quad.predicate === DKG_HAS_TEXT_BODY ||
+      quad.predicate === DKG_HAS_TEXT_CHUNK ||
+      quad.predicate === DKG_CHUNK_INDEX ||
+      quad.predicate === DKG_CHUNK_VALUE
+    );
+    expect(chunkQuads.length).toBeGreaterThan(0);
+    expect(chunkQuads.every((quad) => quad.graph === assertionGraph)).toBe(true);
+    expect(insertedQuads.some((quad) =>
+      quad.graph === contextGraphMetaUri(contextGraphId) &&
+      quad.predicate === DKG_CHUNK_VALUE
+    )).toBe(false);
   });
 
   it('reads a generic source artifact as bounded base64 bytes', async () => {
@@ -1872,15 +1973,15 @@ describe('import artifact daemon routes', () => {
     expect(writes[0]!.name).toBe(assertionName);
     expect(writes[0]!.agentAddress).toBe('did:dkg:agent:test');
     expect(writes[0]!.quads).toEqual(expect.arrayContaining([
-      { subject: 'urn:doc:imported', predicate: 'http://schema.org/about', object: '"Semantic topic"' },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}sourceAssertion`, object: assertionUri },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}sourceFileHash`, object: `"${entry.keccak256}"` },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}markdownHash`, object: `"${entry.keccak256}"` },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}markdownForm`, object: markdownForm },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generationMethod`, object: '"unit-test-model"' },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generatedBy`, object: 'did:dkg:agent:reviewer' },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${PROV}wasAttributedTo`, object: 'did:dkg:agent:reviewer' },
-      { subject: 'urn:doc:imported', predicate: `${PROV}wasDerivedFrom`, object: assertionUri },
+      expect.objectContaining({ subject: 'urn:doc:imported', predicate: 'http://schema.org/about', object: '"Semantic topic"' }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}sourceAssertion`, object: assertionUri }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}sourceFileHash`, object: `"${entry.keccak256}"` }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}markdownHash`, object: `"${entry.keccak256}"` }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}markdownForm`, object: markdownForm }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generationMethod`, object: '"unit-test-model"' }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generatedBy`, object: 'did:dkg:agent:reviewer' }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${PROV}wasAttributedTo`, object: 'did:dkg:agent:reviewer' }),
+      expect.objectContaining({ subject: 'urn:doc:imported', predicate: `${PROV}wasDerivedFrom`, object: assertionUri }),
     ]));
     expect(events).toEqual(expect.arrayContaining([
       expect.objectContaining({ operation: 'semantic_enrichment_written', layers: ['wm'] }),
@@ -1888,6 +1989,41 @@ describe('import artifact daemon routes', () => {
     expect(events).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ operation: 'assertion_created', layers: ['wm'] }),
     ]));
+  });
+
+  it('chunks oversized semantic enrichment schema:text before assertion write', async () => {
+    const entry = await fileStore.put(Buffer.from('# Imported\n'), 'text/markdown');
+    const contextGraphId = 'cg-semantic-enrichment-large-text';
+    const assertionName = 'imported-large-text';
+    const assertionUri = contextGraphAssertionUri(contextGraphId, 'did:dkg:agent:test', assertionName);
+    const largeText = 'x'.repeat(60_000);
+    const { agent, writes } = makeAgent({
+      contextGraphId,
+      assertionName,
+      assertionUri,
+      fileHash: entry.keccak256,
+      markdownHash: entry.keccak256,
+      markdownForm: `urn:dkg:file:${entry.keccak256}`,
+    });
+    await startRoutes({ agent });
+
+    const result = await post('/api/knowledge-assets/semantic-enrichment/write', {
+      contextGraphId,
+      assertionUri,
+      semanticQuads: [
+        { subject: 'urn:doc:semantic-large', predicate: 'http://schema.org/text', object: `"${largeText}"` },
+      ],
+    });
+
+    expect(result.status).toBe(200);
+    expect(writes).toHaveLength(1);
+    const written = writes[0]!.quads;
+    expect(written.some((quad) =>
+      quad.subject === 'urn:doc:semantic-large' &&
+      quad.predicate === 'http://schema.org/text'
+    )).toBe(false);
+    expect(written.some((quad) => quad.predicate === DKG_CHUNK_VALUE)).toBe(true);
+    expect(reconstructChunkedText(written, 'urn:doc:semantic-large')).toBe(largeText);
   });
 
   it('rejects semantic enrichment of imported assertions owned by another agent', async () => {
@@ -1960,7 +2096,7 @@ describe('import artifact daemon routes', () => {
     expect(result.status).toBe(200);
     expect(writes).toHaveLength(1);
     expect(writes[0]!.quads).toEqual(expect.arrayContaining([
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generatedBy`, object: '"Reviewer Bot"' },
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generatedBy`, object: '"Reviewer Bot"' }),
     ]));
     expect(writes[0]!.quads.filter((quad) => quad.predicate === `${PROV}wasAttributedTo`)).toHaveLength(0);
   });
@@ -1997,9 +2133,9 @@ describe('import artifact daemon routes', () => {
     expect(result.status).toBe(200);
     expect(writes).toHaveLength(1);
     expect(writes[0]!.quads).toEqual(expect.arrayContaining([
-      { subject: 'urn:doc:imported', predicate: 'http://schema.org/about', object: '"Topic\\u0000vertical\\u000Bdel\\u007F"' },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generationMethod`, object: '"model\\u0000unit\\u007F"' },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generatedBy`, object: '"Reviewer\\u000BBot"' },
+      expect.objectContaining({ subject: 'urn:doc:imported', predicate: 'http://schema.org/about', object: '"Topic\\u0000vertical\\u000Bdel\\u007F"' }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generationMethod`, object: '"model\\u0000unit\\u007F"' }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generatedBy`, object: '"Reviewer\\u000BBot"' }),
     ]));
     expect(writes[0]!.quads.filter((quad) => quad.predicate === `${PROV}wasAttributedTo`)).toHaveLength(0);
   });
@@ -2030,9 +2166,9 @@ describe('import artifact daemon routes', () => {
     expect(result.status).toBe(200);
     expect(writes).toHaveLength(1);
     expect(writes[0]!.quads).toEqual(expect.arrayContaining([
-      { subject: 'urn:doc:imported', predicate: 'http://schema.org/about', object: '"Fallback topic"' },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generatedBy`, object: 'did:dkg:agent:test' },
-      { subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${PROV}wasAttributedTo`, object: 'did:dkg:agent:test' },
+      expect.objectContaining({ subject: 'urn:doc:imported', predicate: 'http://schema.org/about', object: '"Fallback topic"' }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${DKG}generatedBy`, object: 'did:dkg:agent:test' }),
+      expect.objectContaining({ subject: expect.stringMatching(/^urn:dkg:semantic-enrichment:/), predicate: `${PROV}wasAttributedTo`, object: 'did:dkg:agent:test' }),
     ]));
     expect(writes[0]!.quads).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ object: 'did:dkg:agent:did:dkg:agent:test' }),

@@ -1,4 +1,5 @@
 import { contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri, parseMultipart, findReservedSubjectPrefix, isSkolemizedUri, FileStore, ExtractionPipelineRegistry, extractFromMarkdown, randomUUID, buildImportFileResponse, normalizeDetectedContentType, ImportFileRouteError, type CapturedQuad, type MockAgent, type ImportFileResult, type ExtractionStatusRecord } from './import-file-test-helpers';
+import { normalizeLargeRdfLiteralsForBlazegraph } from '@origintrail-official/dkg-core';
 import { inferContentTypeFromFilename } from '../src/daemon/manifest.js';
 
 
@@ -655,7 +656,20 @@ export async function runImportFileOrchestration(params: {
       metaCleanupSucceeded = true;
       await agent.store.dropGraph(assertionGraph);
       dataDropSucceeded = true;
-      await agent.store.insert([...dataGraphQuads, ...metaQuads]);
+      const normalizedImportQuads = normalizeLargeRdfLiteralsForBlazegraph([...dataGraphQuads, ...metaQuads], {
+        label: 'import-file.quads',
+      }).quads.map((q) => {
+        if (q.graph === undefined) {
+          throw new Error('import-file.quads normalization produced a quad without graph');
+        }
+        return {
+          subject: q.subject,
+          predicate: q.predicate,
+          object: q.object,
+          graph: q.graph,
+        };
+      });
+      await agent.store.insert(normalizedImportQuads);
     } catch (writeErr: any) {
       const rollbackErrors: string[] = [];
       if (dataDropSucceeded && dataSnapshot.length > 0) {

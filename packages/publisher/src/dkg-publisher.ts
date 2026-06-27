@@ -49,6 +49,7 @@ import {
 } from './metadata.js';
 import { storeWorkspaceOperationPublicQuads } from './workspace-resolution.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
+import { preparePublicWriteQuads } from './public-write-normalization.js';
 import { ethers } from 'ethers';
 import type { WorkspaceAgentRecipientResolver } from './workspace-agent-recipients.js';
 import {
@@ -412,6 +413,10 @@ function rejectUserAuthoredProtocolMetadata(quads: Quad[]): void {
 
 function rejectOversizedRdfLiterals(quads: Quad[], label: string): void {
   assertQuadLiteralsMutf8Safe(quads, { label });
+}
+
+function normalizePublicRdfLiterals(quads: Quad[], label: string): Quad[] {
+  return preparePublicWriteQuads(quads, { label }).quads;
 }
 
 async function stampTrustLevel(
@@ -1074,7 +1079,7 @@ export class DKGPublisher implements Publisher {
     // reserved-namespace violation cannot be masked by a lock timeout
     // or subject-level validation error downstream.
     rejectUserAuthoredProtocolMetadata(quads);
-    rejectOversizedRdfLiterals(quads, 'share.quads');
+    quads = normalizePublicRdfLiterals(quads, 'share.quads');
     const subjects = [...new Set(quads.map(q => q.subject))];
     const lockPrefix = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
     const lockKeys = subjects.map(s => `${lockPrefix}\0${s}`);
@@ -1364,12 +1369,17 @@ export class DKGPublisher implements Publisher {
     // violation with a StaleWriteError). Short-circuit per
     // `19_MARKDOWN_CONTENT_TYPE.md §10.2`.
     rejectUserAuthoredProtocolMetadata(quads);
-    rejectOversizedRdfLiterals(quads, 'conditionalShare.quads');
+    quads = normalizePublicRdfLiterals(quads, 'conditionalShare.quads');
     for (const cond of options.conditions) {
       assertSafeIri(cond.subject);
       assertSafeIri(cond.predicate);
       if (cond.expectedValue !== null) {
         assertSafeRdfTerm(cond.expectedValue);
+        assertQuadLiteralsMutf8Safe([{
+          subject: cond.subject,
+          predicate: cond.predicate,
+          object: cond.expectedValue,
+        }], { label: 'conditionalShare.conditions' });
       }
     }
 
@@ -1972,7 +1982,7 @@ export class DKGPublisher implements Publisher {
       };
     }
 
-    const {
+    let {
       contextGraphId,
       quads,
       privateQuads = [],
@@ -1996,7 +2006,7 @@ export class DKGPublisher implements Publisher {
       rejectUserAuthoredProtocolMetadata(quads);
       if (privateQuads.length > 0) rejectUserAuthoredProtocolMetadata(privateQuads);
     }
-    rejectOversizedRdfLiterals(quads, 'publish.quads');
+    quads = normalizePublicRdfLiterals(quads, 'publish.quads');
     if (privateQuads.length > 0) rejectOversizedRdfLiterals(privateQuads, 'publish.privateQuads');
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
     const effectiveAccessPolicy = accessPolicy ?? (privateQuads.length > 0 ? 'ownerOnly' : 'public');
@@ -3452,7 +3462,7 @@ export class DKGPublisher implements Publisher {
         'Publish a new KC instead, or remove and recreate the sub-graph.',
       );
     }
-    const { contextGraphId, quads, privateQuads = [], operationCtx, onPhase } = options;
+    let { contextGraphId, quads, privateQuads = [], operationCtx, onPhase } = options;
     // Round 12 Bug 34: `update()` is a Bucket A public write entry
     // point (accepts user-authored quads) that Round 9 missed. Apply
     // the same reserved-namespace guard as `publish()` / `assertionWrite`
@@ -3465,7 +3475,7 @@ export class DKGPublisher implements Publisher {
       rejectUserAuthoredProtocolMetadata(quads);
       if (privateQuads.length > 0) rejectUserAuthoredProtocolMetadata(privateQuads);
     }
-    rejectOversizedRdfLiterals(quads, 'update.quads');
+    quads = normalizePublicRdfLiterals(quads, 'update.quads');
     if (privateQuads.length > 0) rejectOversizedRdfLiterals(privateQuads, 'update.privateQuads');
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
     let publisherContextGraphId: bigint | undefined;
@@ -5354,8 +5364,8 @@ export class DKGPublisher implements Publisher {
     // Round 9 Bug 25: reject user-authored quads whose subject is in a
     // protocol-reserved URN namespace. See RESERVED_SUBJECT_PREFIXES above.
     rejectUserAuthoredProtocolMetadata(quads);
-    rejectOversizedRdfLiterals(quads, 'assertionWrite.quads');
-    await this.store.insert(quads);
+    const normalizedQuads = normalizePublicRdfLiterals(quads, 'assertionWrite.quads');
+    await this.store.insert(normalizedQuads);
   }
 
   async assertionQuery(

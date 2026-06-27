@@ -1089,7 +1089,7 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
         quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'bare string', graph: '' }],
       });
       expect(res.status).toBe(400);
-      expect(String(res.body.error)).toMatch(/RDF object must be a quoted literal term or absolute IRI/);
+      expect(String(res.body.error)).toMatch(/RDF object must be a quoted literal term, blank node, or absolute IRI/);
     });
 
     it('rejects a malformed onChainContextGraphId with 400 before direct publish', async () => {

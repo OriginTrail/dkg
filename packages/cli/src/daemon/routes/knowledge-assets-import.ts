@@ -25,6 +25,7 @@ import {
   validateAssertionName,
   PayloadTooLargeError,
   assertQuadLiteralsMutf8Safe,
+  normalizeLargeRdfLiteralsForBlazegraph,
   IMPORTED_ARTIFACT_MAX_PAGE_BYTES,
   isDkgContentHash,
   verifyDkgContentHash,
@@ -42,6 +43,7 @@ import {
   normalizeContextGraphIdOrUri,
   resolveRequiredWriteContextGraphId,
   oversizedRdfLiteralResponseBody,
+  preparePublicWriteStorageQuads,
   SMALL_BODY_BYTES,
   MAX_UPLOAD_BYTES,
   type ImportFileExtractionPayload,
@@ -637,7 +639,11 @@ export async function handleKaSemanticEnrichmentWrite(ctx: RequestContext): Prom
       generationMethod,
       semanticQuads,
     });
-    const quads = [...semanticQuads, ...provenanceQuads];
+    const normalizedQuads = preparePublicWriteStorageQuads("semanticQuads", [...semanticQuads, ...provenanceQuads]);
+    if (!normalizedQuads.ok) {
+      return jsonResponse(res, 400, normalizedQuads.body);
+    }
+    const quads = normalizedQuads.value.quads;
     const targetAssertionUri = contextGraphAssertionUri(
       artifact.contextGraphId,
       artifact.assertionAgentAddress,
@@ -1840,9 +1846,22 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
       });
     }
     try {
-      assertQuadLiteralsMutf8Safe([...dataGraphQuads, ...metaQuads], {
+      const normalizedImportQuads = normalizeLargeRdfLiteralsForBlazegraph([...dataGraphQuads, ...metaQuads], {
         label: 'import-file.quads',
       });
+      const normalizedGraphQuads = normalizedImportQuads.quads.map((q) => {
+        if (q.graph === undefined) {
+          throw new Error('import-file.quads normalization produced a quad without graph');
+        }
+        return {
+          subject: q.subject,
+          predicate: q.predicate,
+          object: q.object,
+          graph: q.graph,
+        };
+      });
+      dataGraphQuads = normalizedGraphQuads.filter((q) => q.graph === assertionGraph);
+      metaQuads.splice(0, metaQuads.length, ...normalizedGraphQuads.filter((q) => q.graph === metaGraph));
     } catch (err: any) {
       if (err?.code === "OVERSIZED_RDF_LITERAL") {
         const oversizedBody = oversizedRdfLiteralResponseBody(err);
