@@ -4,10 +4,9 @@
  *
  * Publishes PARAPHRASE-gap data (compliance failures described WITHOUT the words
  * "flagged"/"audit", plus two positive distractors and a linked review) and runs
- * the same question through three retrievers on one node:
- *   keyword (substring)  → misses entirely
- *   hashing (lexical)    → ranks the WRONG suppliers
- *   semantic (MiniLM)    → ranks the actual failures
+ * the same question through the two public retrieval modes on one node:
+ *   keyword  (substring)   → misses entirely
+ *   semantic (by meaning)  → ranks the actual failures
  * then shows 1-hop GraphRAG (match the review → follow the link to a supplier).
  *
  * Prereq:  ./scripts/devnet.sh start 4   AND   npm i @huggingface/transformers

@@ -77,18 +77,22 @@ export class VectorEntityRetriever implements EntityRetriever {
    * since the last index and only embeds the delta (incremental — see buildIndex).
    * Inserts are idempotent (deterministic ids), so re-indexing is safe.
    *
-   * The freshness check counts distinct (graph, subject) PAIRS — the SAME
-   * granularity buildIndex inserts at and vectorStore.count() reports — because
-   * one entity URI is legitimately a subject across multiple VM graphs (shared
-   * / schema entities recur across KAs). Counting distinct SUBJECTS instead would
-   * undercount once any subject recurs, leaving the gate satisfied and silently
-   * skipping the embedding of freshly-published entities.
+   * Both sides of the gate count the SAME rows: distinct (graph, subject) PAIRS
+   * in the VM layer. buildIndex inserts one VM row per pair, so the source count
+   * (countIndexableRecords) and the indexed count (vectorStore.count scoped to
+   * the 'vm' layer) match exactly. Two subtleties this avoids:
+   *   - counting distinct SUBJECTS would undercount once a subject recurs across
+   *     VM graphs (shared/schema entities), satisfying the gate while fresh
+   *     entities go unembedded;
+   *   - counting ALL layers on the indexed side would OVERcount when the same CG
+   *     also holds WM/SWM agent-memory vectors under this model, again satisfying
+   *     the gate while fresh VM entities go unembedded. Hence the 'vm' scope.
    */
   private async ensureIndexed(cgName: string): Promise<void> {
     const vmPrefix = `did:dkg:context-graph:${cgName}/_verifiable_memory/`;
     const currentCount = await this.countIndexableRecords(vmPrefix);
     if (currentCount === 0) return;
-    const indexedCount = await this.vectorStore.count(cgName, this.model);
+    const indexedCount = await this.vectorStore.count(cgName, this.model, 'vm');
     if (indexedCount >= currentCount) return; // up to date for this model
     await this.buildIndex(cgName, vmPrefix);
   }

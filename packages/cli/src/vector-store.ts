@@ -171,18 +171,30 @@ export class VectorStore {
     return 0;
   }
 
-  async count(contextGraphId?: string, model?: string): Promise<number> {
-    if (contextGraphId && model) {
-      const row = this.db
-        .prepare('SELECT COUNT(*) as cnt FROM embeddings WHERE context_graph_id = ? AND model = ?')
-        .get(contextGraphId, model) as { cnt: number };
-      return row.cnt;
-    }
+  /**
+   * Count embedding rows, optionally scoped by context graph, model, and memory
+   * layer. `memoryLayer` matters when a CG holds vectors from more than one layer
+   * (e.g. WM/SWM agent-memory rows alongside dRAG's VM rows under the same model):
+   * a caller comparing against a layer-specific source count MUST pass the layer
+   * so both sides count the same rows.
+   */
+  async count(contextGraphId?: string, model?: string, memoryLayer?: string): Promise<number> {
+    const clauses: string[] = [];
+    const args: string[] = [];
     if (contextGraphId) {
-      const row = this.db.prepare('SELECT COUNT(*) as cnt FROM embeddings WHERE context_graph_id = ?').get(contextGraphId) as { cnt: number };
-      return row.cnt;
+      clauses.push('context_graph_id = ?');
+      args.push(contextGraphId);
     }
-    const row = this.db.prepare('SELECT COUNT(*) as cnt FROM embeddings').get() as { cnt: number };
+    if (model) {
+      clauses.push('model = ?');
+      args.push(model);
+    }
+    if (memoryLayer) {
+      clauses.push('memory_layer = ?');
+      args.push(memoryLayer);
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
+    const row = this.db.prepare(`SELECT COUNT(*) as cnt FROM embeddings${where}`).get(...args) as { cnt: number };
     return row.cnt;
   }
 

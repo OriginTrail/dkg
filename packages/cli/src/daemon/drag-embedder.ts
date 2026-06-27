@@ -50,17 +50,15 @@ export function defaultDragEmbedder(config: DkgConfig): EmbeddingProvider | null
  * Resolve a SEMANTIC embedder for an explicit `retrieval:"semantic"` request —
  * tries hard so an agent that asks for semantic gets it: the configured model if
  * it is semantic, else an OpenAI-compatible provider if credentials exist, else
- * the offline local model (which fails gracefully to an empty result if the
- * optional dependency is not installed). Null only when keyword is configured
- * AND no semantic path is reachable.
+ * the offline local model (which fails gracefully — surfaces `degraded` — if its
+ * optional dependency is not installed). Always returns a provider; never null.
  */
-export function resolveSemanticEmbedder(config: DkgConfig): EmbeddingProvider | null {
+export function resolveSemanticEmbedder(config: DkgConfig): EmbeddingProvider {
   // 'local' always builds (never null). For 'openai' (or unset) try the configured
   // provider, but fall through to the offline local model when it returns null
   // (e.g. embedder:'openai' set with no credentials) so an explicit semantic
   // request still lands on a model — and surfaces degraded if that too is absent.
-  if (config.drag?.embedder === 'local') return buildEmbedder('local', config);
-  const openai = buildEmbedder('openai', config);
-  if (openai) return openai;
-  return new LocalEmbeddingProvider({ model: config.drag?.embedderModel });
+  const local = () => new LocalEmbeddingProvider({ model: config.drag?.embedderModel });
+  if (config.drag?.embedder === 'local') return local();
+  return buildEmbedder('openai', config) ?? local();
 }

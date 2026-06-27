@@ -50,6 +50,7 @@ describe('VectorEntityRetriever — incremental indexing', () => {
     await r.retrieve('hello', cg, 10);
     expect(emb.calls).toBe(3);
     expect(await vs.count(cg, emb.model)).toBe(2);
+    expect(r.degraded).toBe(false); // working embedder → NOT degraded (the "no matches" ≠ "no model" half)
 
     // Publish a third entity, then query again.
     store.entities.push({
@@ -121,5 +122,32 @@ describe('VectorEntityRetriever — incremental indexing', () => {
     });
     await r.retrieve('y', cg, 10);
     expect(await vs.count(cg, emb.model)).toBe(4); // urn:fresh got embedded
+  });
+
+  it('does not let WM/SWM rows on the same CG+model satisfy the VM freshness gate', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'drag-vs-'));
+    dirs.push(dir);
+    const vs = new VectorStore(dir);
+    const emb = new CountingEmbedder();
+    const store = new FakeStore();
+    const cg = 'cg3';
+    // Pre-seed a WM (agent-memory) embedding under the SAME cg + model — an
+    // assertion graph, NOT a verifiable-memory graph.
+    await vs.insert({
+      id: `${emb.model}:wm:urn:wm`,
+      embedding: [1, 2, 3, 0.5],
+      sourceUri: `did:dkg:context-graph:${cg}/assertion/x`,
+      entityUri: 'urn:wm',
+      contextGraphId: cg,
+      memoryLayer: 'wm',
+      model: emb.model,
+    });
+    // Publish one VM entity.
+    store.entities.push({ g: `did:dkg:context-graph:${cg}/_verifiable_memory/0x/1`, s: 'urn:v', p: 'http://ex/name', o: '"V"' });
+    const r = new VectorEntityRetriever(vs, emb, store);
+    await r.retrieve('q', cg, 10);
+    // The WM row must NOT count toward the VM gate, so the VM entity IS embedded.
+    expect(await vs.count(cg, emb.model, 'vm')).toBe(1);
+    expect(await vs.count(cg, emb.model)).toBe(2); // 1 wm + 1 vm overall
   });
 });

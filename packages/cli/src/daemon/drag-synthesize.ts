@@ -33,9 +33,12 @@ export async function synthesizeAnswer(
   if (!facts.length) return null;
   const baseURL = (llm.baseURL ?? 'https://api.openai.com/v1').replace(/\/$/, '');
   const model = llm.model ?? 'gpt-4o-mini';
+  // Strip the fence delimiter from the (attacker-controllable, public-CG) fact
+  // content so a literal cannot close the <verified_facts> block early.
+  const fence = (s: string) => s.replace(/<\/?verified_facts>/gi, '');
   const cap = (s: string) => (s.length > 300 ? s.slice(0, 300) + '…' : s);
   const factLines = facts
-    .map((f, i) => `${i + 1}. ${localName(f.subject)} — ${localName(f.predicate)}: ${cap(literal(f.object))}`)
+    .map((f, i) => `${i + 1}. ${localName(f.subject)} — ${localName(f.predicate)}: ${cap(fence(literal(f.object)))}`)
     .join('\n');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
