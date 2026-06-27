@@ -286,10 +286,10 @@ async function execPublish(
         phases: {},
       };
     }
-    const res = await fetch(`http://127.0.0.1:${node.port}/api/shared-memory/publish`, {
+    const res = await fetch(`http://127.0.0.1:${node.port}/api/knowledge-assets/${encodeURIComponent(assertionName)}/vm/publish`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(node) },
-      body: JSON.stringify({ contextGraphId: config.contextGraph, assertionName }),
+      body: JSON.stringify({ contextGraphId: config.contextGraph }),
       signal: opSignal(signal, 'publish'),
     });
     const body = (await res.json()) as { kaId?: string; kas?: unknown[]; status?: string; error?: string; phases?: Record<string, number> };

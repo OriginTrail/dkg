@@ -29,7 +29,7 @@ export interface HermesPublishGuardPolicy {
    * operators can set this to `disabled` when they want publish hidden.
    */
   defaultToolExposure: 'disabled' | 'request-only' | 'direct';
-  /** Allow direct `/api/shared-memory/publish` calls from the provider. */
+  /** Allow the model-callable `dkg_knowledge_asset_publish` tool (Verifiable Memory publish) to be exposed. */
   allowDirectPublish?: boolean;
   /** Require an explicit human/operator approval marker before publishing. */
   requireExplicitApproval?: boolean;

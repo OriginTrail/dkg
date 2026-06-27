@@ -83,10 +83,11 @@ export interface BenchmarkClient {
     contextGraphId: string,
     quads: BenchmarkPayload['quads'],
   ): Promise<{ shareOperationId?: string }>;
-  publishFromSharedMemory(
+  publishAssertion(
     contextGraphId: string,
-    selection: 'all' | { rootEntities: string[] },
-    clearAfter?: boolean,
+    name: string,
+    quads: BenchmarkPayload['quads'],
+    options?: { clearAfter?: boolean },
   ): Promise<{ kaId?: string; status?: string; kas?: Array<{ tokenId: string; rootEntity: string }> }>;
   publisherEnqueue(request: {
     contextGraphId: string;

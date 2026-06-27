@@ -138,7 +138,7 @@ autoShare: true
 
 `.dkg/` is gitignored repo-wide so this file stays local to each operator. The `tokenFile` path is resolved relative to the YAML; default of `~/.dkg/auth.token` matches what `dkg start` writes on first boot.
 
-## Tool surface (31 tools)
+## Tool surface (29 tools)
 
 All tools are available the moment `dkg mcp setup` registers the MCP with your client. They group into seven categories tracking how a session typically uses memory: check health, discover the graph, set it up, drive the knowledge-asset lifecycle (create → write → finalize → share → publish), recall from it, query it, and message other agents.
 
@@ -189,16 +189,11 @@ The lifecycle tool family that lets agents stage memory, seal it, share it, publ
 | `dkg_knowledge_asset_import_artifact_read_markdown` | import | Safely read the content-addressed Markdown blob for a completed imported attachment. |
 | `dkg_knowledge_asset_semantic_enrichment_write` | import | Append model-derived semantic triples + provenance to an imported assertion. |
 
-### Publish bridges (SWM → on-chain)
+### Publish (SWM → on-chain)
 
-The canonical per-KA sealed publish is `dkg_knowledge_asset_publish` (step 5 of the lifecycle above — returns the **UAL**). Two additional SWM-bridge surfaces exist (all documented in `SKILL.md §4a`):
+The canonical per-KA sealed publish is `dkg_knowledge_asset_publish` (step 5 of the lifecycle above — returns the **UAL**): it publishes a single named, sealed assertion from SWM to Verifiable Memory. It ships ungated — no `agent.canPublishToVm` flag — to mirror the OpenClaw adapter exactly.
 
-| Tool | When to use |
-|---|---|
-| `dkg_publish` | "I have fresh quads, publish them now." Two-call helper (SWM-bridge / CG-wide): writes the supplied quads to SWM, then publishes the entire SWM in the CG to Verifiable Memory and clears SWM. Skip the WM staging area. |
-| `dkg_shared_memory_publish` | SWM-bridge / CG-wide flush (legacy, retained) for the stepwise flow. Publishes existing SWM (filterable by `rootEntities`), clears SWM. Single-root-per-call — loop one root per call for multiple roots. Pass `registerIfNeeded: true` to upgrade a local-only CG to on-chain registration in the same call (may spend gas/TRAC). |
-
-All publish surfaces ship ungated — no `agent.canPublishToVm` flag — to mirror the OpenClaw adapter exactly.
+> The legacy CG-wide SWM-bridge publish tools were removed in #1087. Author content as a named knowledge asset and publish it through the lifecycle above.
 
 ### Search & query
 
@@ -225,7 +220,7 @@ Lifted from the repo-root README's [DKG V10 as agent memory quickstart](../../RE
 5. *(optional)* `dkg_knowledge_asset_share` to advance the lifecycle to SWM and gossip to peers (a full share auto-seals best-effort, so step 4 can be skipped for the common case).
 6. *(optional)* `dkg_knowledge_asset_publish` to **mint on chain** (costs TRAC + gas, clears SWM). The response carries the asset's **UAL** (`did:dkg:<chainId>/<addr>/<number>`) plus `kaId` and `txHash` — store the UAL to reference the asset later.
 
-For ad-hoc filtering or non-text-search queries, `dkg_query` is the lower-level SPARQL surface. For one-shot fresh-quads-to-VM writes that skip the WM staging area, use `dkg_publish` instead of the knowledge-asset lifecycle — but prefer the lifecycle for anything an agent will iterate on.
+For ad-hoc filtering or non-text-search queries, `dkg_query` is the lower-level SPARQL surface. To put fresh quads on chain, author them as a named knowledge asset and publish through the lifecycle (`create → write → finalize → share → publish`).
 
 ## View semantics
 
@@ -294,12 +289,11 @@ Per-turn state is kept in `~/.cache/dkg-mcp/sessions/*.json`; safe to delete at 
 
 | File | Purpose |
 |---|---|
-| `src/index.ts` | Stdio MCP server entrypoint. Boots `McpServer` and registers the 31 tools. |
+| `src/index.ts` | Stdio MCP server entrypoint. Boots `McpServer` and registers the 29 tools. |
 | `src/tools.ts` | Read tools (`dkg_list_context_graphs`, `dkg_sub_graph_list`, `dkg_query`, `dkg_get_entity`, `dkg_get_entity_sources`, `dkg_list_activity`, `dkg_get_agent`). |
 | `src/tools/assertions.ts` | Knowledge-asset lifecycle (`dkg_knowledge_asset_*` × 13: create/write/finalize/share/publish/pull_from/discard/query/history/import_file + import_artifact_resolve/read_markdown + semantic_enrichment_write). |
 | `src/tools/health.ts` | `dkg_status`, `dkg_peer_info`, `dkg_wallet_balances`. |
 | `src/tools/memory-search.ts` | `dkg_memory_search` with WM/SWM/VM fan-out and trust-weighted ranking. |
-| `src/tools/publish.ts` | `dkg_publish`, `dkg_shared_memory_publish` (SWM-bridge surfaces; per-KA publish lives in `assertions.ts`). |
 | `src/tools/setup.ts` | `dkg_context_graph_create`, `dkg_subscribe`, `dkg_sub_graph_create`. |
 | `src/tools/chat.ts` | `dkg_send_message`, `dkg_check_inbox`. |
 | `src/client.ts` | `DkgClient` HTTP wrapper. Re-exported as `@origintrail-official/dkg-mcp/client`. |

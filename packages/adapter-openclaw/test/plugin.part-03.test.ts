@@ -33,10 +33,11 @@ describe("DkgNodePlugin", () => {
         on: () => {},
         logger: {},
       });
-      // Most handler tests assume the node identity has resolved (e.g. dkg_share
-      // builds canned-quad subjects from it). Inject a placeholder address so
-      // tests don't have to mock the daemon /api/status probe end-to-end. Pass
-      // `skipNodeIdInjection: true` to exercise the unresolved-identity branch.
+      // Most handler tests assume the node identity has resolved (e.g.
+      // memory_search routes WM reads by the node's agent identity). Inject a
+      // placeholder address so tests don't have to mock the daemon /api/status
+      // probe end-to-end. Pass `skipNodeIdInjection: true` to exercise the
+      // unresolved-identity branch.
       if (!opts.skipNodeIdInjection) {
         (plugin as any).nodePeerId = '12D3KooTestPeerId';
       }
@@ -46,85 +47,6 @@ describe("DkgNodePlugin", () => {
 
 
     const originalFetch = globalThis.fetch;
-
-
-    it('dkg_share falls back to an anonymous unique subject when node identity is unresolved', async () => {
-      // Without an injected nodePeerId, ensureNodeAgentAddress/ensureNodePeerId
-      // both no-op (no memoryResolverApi). The direct /api/agent/identity
-      // probe returns the default mock payload which lacks agentAddress and
-      // peerId. The handler must NOT refuse the share — /api/shared-memory/write
-      // doesn't require identity preflight. Mint a unique-per-call anonymous
-      // subject so the upsert problem is still avoided and authorship just
-      // degrades to anon attribution.
-      const { fetchMock, byName } = setupPluginWithFetch(
-        { shareOperationId: 'op-noid' },
-        { skipNodeIdInjection: true },
-      );
-      const result = await byName.get('dkg_share')!.execute('tc', {
-        content: 'hello',
-        context_graph_id: 'ctx',
-      });
-      const body = JSON.parse(result.content[0].text);
-      expect(body.shareOperationId).toBe('op-noid');
-      expect(body.subject).toMatch(/^urn:openclaw:anon:shared:\d+-[a-z0-9]+$/);
-      expect(body.root_entities).toEqual([body.subject]);
-      // The actual share write must have happened.
-      const shareCalls = fetchMock.mock.calls.filter(c => String(c[0]).includes('/api/shared-memory/write'));
-      expect(shareCalls.length).toBe(1);
-    });
-
-
-    it('dkg_share UCHAR-encodes non-ECHAR control bytes (NUL, VT, DEL) the canonical escaper leaves raw', async () => {
-      const { fetchMock, byName } = setupPluginWithFetch({ shareOperationId: 'op-uchar' });
-      // escapeDkgRdfLiteral covers \b, \t, \n, \f, \r — but leaves NUL (0x00),
-      // VT (0x0B), DEL (0x7F), etc. untouched. Those would produce invalid
-      // N-Triples at the storage layer. Defensive post-pass UCHAR-encodes them.
-      const NUL = String.fromCharCode(0x00);
-      const VT = String.fromCharCode(0x0B);
-      const DEL = String.fromCharCode(0x7F);
-      await byName.get('dkg_share')!.execute('tc', {
-        content: `a${NUL}b${VT}c${DEL}d`,
-        context_graph_id: 'ctx',
-      });
-      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
-      expect(body.quads[0].object).toBe('"a\\u0000b\\u000Bc\\u007Fd"');
-    });
-
-
-    it('dkg_share plumbs sub_graph_name through to subGraphName for sub-graph-scoped writes', async () => {
-      const { fetchMock, byName } = setupPluginWithFetch({ shareOperationId: 'op-4' });
-      await byName.get('dkg_share')!.execute('tc', {
-        content: 'hello',
-        context_graph_id: 'ctx',
-        sub_graph_name: 'protocols',
-      });
-      const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
-      expect(body.subGraphName).toBe('protocols');
-    });
-
-
-    it('dkg_share surfaces daemon-offline failures via the standard daemonError helper', async () => {
-      const fetchMock = vi.fn(async () => { throw new Error('fetch failed: ECONNREFUSED'); });
-      globalThis.fetch = fetchMock as unknown as typeof fetch;
-      const plugin = new DkgNodePlugin({ daemonUrl: 'http://localhost:9200' });
-      const tools: OpenClawTool[] = [];
-      plugin.register({
-        config: {},
-        registerTool: (t) => tools.push(t),
-        registerHook: () => {},
-        on: () => {},
-        logger: {},
-      });
-      // Mirror setupPluginWithFetch's identity injection so the handler
-      // gets past the unresolved-identity guard and reaches the fetch.
-      (plugin as any).nodePeerId = '12D3KooTestPeerId';
-      const byName = new Map(tools.map((t) => [t.name, t] as const));
-      const result = await byName.get('dkg_share')!.execute('tc', {
-        content: 'hello',
-        context_graph_id: 'ctx',
-      });
-      expect(result.content[0].text).toContain('DKG daemon is not reachable');
-    });
 
 
     it('dkg_query explicitly rejects the v9 contextGraph_id field with a clear error', async () => {

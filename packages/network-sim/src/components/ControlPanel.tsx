@@ -566,29 +566,11 @@ function SharedMemoryTab() {
     }
   }, [contextGraphId, state.selectedNode]);
 
-  const doPublish = useCallback(async () => {
-    setBusy(true);
-    setResult('');
-    const opId = addBroadcast('publish', state.selectedNode, 'publish from shared memory');
-    try {
-      const res = await api.publishFromSharedMemory(state.selectedNode, contextGraphId, 'all', true);
-      completeOperation(opId, 'success', `KC: ${res.kaId}`);
-      setResult(
-        `Published to chain.\nKC: ${res.kaId}\nStatus: ${res.status}\nKAs: ${res.kas?.length ?? 0}` +
-        (res.txHash ? `\nTx: ${res.txHash}` : ''),
-      );
-    } catch (e: any) {
-      completeOperation(opId, 'error', e.message);
-      setResult(`Error: ${e.message}`);
-    } finally {
-      setBusy(false);
-    }
-  }, [contextGraphId, state.selectedNode, addBroadcast, completeOperation]);
-
   return (
     <div className="tab-form">
       <div className="setup-hint">
-        Write triples to shared memory (free, no gas). When ready, publish them to the chain with full finality.
+        Write triples to shared memory (free, no gas). Publishing to the chain is
+        done per knowledge asset from the Publish tab.
       </div>
 
       <div className="form-group">
@@ -627,16 +609,6 @@ function SharedMemoryTab() {
         Query Shared Memory
       </button>
       {sharedMemoryContents && <pre className="result-box code">{sharedMemoryContents}</pre>}
-
-      <div className="setup-divider" />
-
-      <div className="setup-section-title">Publish to Chain</div>
-      <p className="setup-hint">
-        Publish all shared memory content with full on-chain finality (costs TRAC + gas). Clears shared memory after.
-      </p>
-      <button className="btn btn-primary btn-wide" disabled={busy} onClick={doPublish}>
-        {busy ? 'Publishing...' : 'Publish All to Chain'}
-      </button>
 
       {result && <pre className="result-box code">{result}</pre>}
     </div>

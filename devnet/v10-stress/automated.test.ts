@@ -801,7 +801,7 @@ describe('V10 chain — stress + scenario validation', () => {
   //                         on-chain work, no SWM pollution.
   //   25 × WM → SWM → VM (custodial / mode B):
   //                         Custodial agent registered on core2 publishes via
-  //                         /api/shared-memory/publish { assertionName }. KC
+  //                         /api/knowledge-assets/:name/vm/publish. KC
   //                         author == agent.address, attribution → core2.
   //   25 × WM → SWM → VM (third-party / mode A):
   //                         CLI publish from edge node 5 routed through
@@ -949,45 +949,13 @@ describe('V10 chain — stress + scenario validation', () => {
     };
     const beforeSpentPca: bigint = await windowSpentSum(beforeWindow, 2n);
 
-    // ── 2d: drain SWM on every core that named-publishes from ─────────────
-    // See FINDINGS.md — `publishFromFinalizedAssertion` ignores the named
-    // assertion's identity and publishes whatever sits in SWM. If a prior
-    // run left content in SWM, the first named publish here would bundle
-    // it. Issue a one-shot selection-based publish-with-clear to drain.
-    // Empty SWM is a no-op (returns 0 KAs / errors which we swallow).
-    for (const node of [core1, core2]) {
-      try {
-        const drainRes = await fetch(
-          `http://127.0.0.1:${node.apiPort}/api/shared-memory/publish`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              ...(node.authToken
-                ? { Authorization: `Bearer ${node.authToken}` }
-                : {}),
-            },
-            body: JSON.stringify({
-              contextGraphId: CONTEXT_GRAPH,
-              selection: 'all',
-              clearAfter: true,
-            }),
-          },
-        );
-        if (drainRes.ok) {
-          const j = (await drainRes.json()) as { kas?: unknown[]; status?: string };
-          const drainedCount = Array.isArray(j.kas) ? j.kas.length : 0;
-          if (drainedCount > 0) {
-            console.log(
-              `phase 2: drained ${drainedCount} residual KAs from core${node.num} SWM (status=${j.status})`,
-            );
-          }
-        }
-      } catch {
-        // SWM was empty / drain failed — ignore, the per-iteration
-        // clearAfter:true will keep things clean from here.
-      }
-    }
+    // ── 2d: (retired) residual-SWM drain ──────────────────────────────────
+    // Previously a one-shot selection-based publish-with-clear evicted any
+    // loose SWM left by a prior run before the named publishes below. That
+    // legacy loose publish-by-selection bridge was removed (#1087) — there is
+    // no loose-SWM-publish path anymore, and the named-KA create+share+publish
+    // flow used below does not produce the un-named loose SWM this drained, so
+    // there is nothing to pre-drain. No drain step needed.
 
     // ── 2e: WM-only batch (25) ─────────────────────────────────────────────
     console.log(`phase 2: WM-only batch (${wmOnly} assertions on core1)...`);
@@ -1082,7 +1050,7 @@ describe('V10 chain — stress + scenario validation', () => {
       // succeeds. Persistent tentative is still a hard failure.
       const doPublish = async () => {
         const r = await fetch(
-          `http://127.0.0.1:${core2.apiPort}/api/shared-memory/publish`,
+          `http://127.0.0.1:${core2.apiPort}/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`,
           {
             method: 'POST',
             headers: {
@@ -1091,7 +1059,6 @@ describe('V10 chain — stress + scenario validation', () => {
             },
             body: JSON.stringify({
               contextGraphId: CONTEXT_GRAPH,
-              assertionName: name,
             }),
           },
         );
@@ -1301,7 +1268,7 @@ describe('V10 chain — stress + scenario validation', () => {
         `\`publishFromSharedMemory(contextGraphId, 'all', ...)\` with the literal selection \`'all'\`. ` +
         `It does NOT filter SWM content to the named assertion's quads. ` +
         `Reproduction: promote N assertions (\`POST /api/knowledge-assets { ..., quads, alsoShareSwm: true }\` × N) ` +
-        `then publish ONE of them by name (\`POST /api/shared-memory/publish { assertionName }\`). ` +
+        `then publish ONE of them by name (\`POST /api/knowledge-assets/:name/vm/publish\`). ` +
         `The publish bundles all N assertions' quads into one KC and the response status is \`tentative\` ` +
         `with \`kaId: "0"\` (sentinel), because the merkle root the publisher derives over the actual ` +
         `bundled SWM content does not match the seal's merkle root computed at finalize time. ` +

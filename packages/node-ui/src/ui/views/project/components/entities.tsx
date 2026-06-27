@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import { useFetch } from '../../../hooks.js';
 import { encodeDocTabId, resolveDocRef } from '../../../lib/doc-tab-id.js';
 import { truncateMiddle } from '../../../lib/truncate.js';
-import { listAssertions, promoteAssertion, describePromoteResult, describePromoteError, describeInsufficientPublisherFunds, ensureContextGraphOnChain, knowledgeAssetFinalize, knowledgeAssetPublish, publishAssertionsToVm, describeBulkVmPublishResult, fetchAssertionUals, type AssertionInfo } from '../../../api.js';
+import { listAssertions, promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetFinalize, knowledgeAssetPublishWithSeal, publishAssertionsToVm, partialPublishWarning, fetchAssertionUals, type AssertionInfo } from '../../../api.js';
 import { useMemoryEntities, type TrustLevel, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
@@ -427,7 +427,10 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
     try {
       // VM is the on-chain layer; finalize/publish need the CG registered, so
       // auto-register transparently first.
-      await ensureContextGraphOnChain(contextGraphId);
+      // No client-side CG pre-registration: the seal is CG-independent (#1116 —
+      // finalize works on an unregistered CG with no chain write), WM→SWM promote is
+      // off-chain, and /vm/publish owns register-then-mint (it registers ONLY after
+      // publish preconditions pass, so a doomed publish never burns registration gas).
       if (layer === 'wm') {
         // Seal the draft before sharing — promote moves content out of WM and a
         // later vm/publish requires a finalized assertion, so finalize must run
@@ -450,16 +453,20 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
         setResult(outcome.message);
       } else {
         // Publish THIS assertion as one Knowledge Asset (Design B, any entity
-        // count) via per-assertion vm/publish — NOT the legacy single-root
-        // shared-memory publish (which also wrongly published every SWM root).
-        await knowledgeAssetPublish(contextGraphId, assertion.name, assertion.subGraph ? { subGraphName: assertion.subGraph } : {});
-        setResult(`Published ${assertion.name} to Verifiable Memory`);
+        // count) via the shared knowledgeAssetPublishWithSeal wrapper — gets the
+        // seal-in-SWM retry + 207 partial-publish handling like the other CTAs.
+        const res = await knowledgeAssetPublishWithSeal(contextGraphId, assertion.name, assertion.subGraph ? { subGraphName: assertion.subGraph } : {});
+        setResult(
+          res.contextGraphError
+            ? `Published ${assertion.name} on-chain — ⚠ ${partialPublishWarning(res.contextGraphError)}`
+            : `Published ${assertion.name} to Verifiable Memory`,
+        );
       }
       refresh();
       onComplete();
     } catch (err: any) {
       const typed = describePromoteError(assertion.name, err);
-      setError(typed?.message ?? describeInsufficientPublisherFunds(err) ?? (err?.message ?? 'Action failed'));
+      setError(typed ? typed.message : (err?.message ?? 'Action failed'));
     } finally {
       setBusy(null);
     }
@@ -475,7 +482,9 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
     // "selected assertion …".
     let currentAssertion: string | null = null;
     try {
-      await ensureContextGraphOnChain(contextGraphId);
+      // No client-side CG pre-registration (see handleAction): the seal is
+      // CG-independent (#1116), promote is off-chain, and /vm/publish registers-then-
+      // mints only after preconditions pass.
       if (layer === 'wm') {
         let total = 0;
         let noopCount = 0;
@@ -501,25 +510,23 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
           setResult('No triples were promoted — every assertion was already in Shared Memory or its content is still being committed.');
         }
       } else {
-        // Publish each shared assertion as its own Knowledge Asset (Design B).
-        // Shared loop + funds messaging — see publishAssertionsToVm in api.ts.
-        const outcome = await publishAssertionsToVm(
-          contextGraphId,
-          assertions,
-          (name) => { currentAssertion = name; },
-        );
-        const line = describeBulkVmPublishResult(outcome);
-        if (line) {
-          setResult(line);
+        // Publish each shared assertion as its own Knowledge Asset (Design B) via the
+        // shared batch loop (api.ts publishAssertionsToVm) — seal-retry + 207 partial
+        // handling, uniform with the other batch-publish CTAs (carries the partial detail).
+        const r = await publishAssertionsToVm(contextGraphId, assertions);
+        if (r.published > 0) {
+          const tail = r.failures.length ? ` (${r.failures.length} could not be published)` : '';
+          const partialTail = r.partial > 0 ? ` — ⚠ ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
+          setResult(`Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}`);
         } else {
-          throw new Error(outcome.fundsErr ?? outcome.lastErr ?? 'Publish failed');
+          throw new Error(r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed');
         }
       }
       refresh();
       onComplete();
     } catch (err: any) {
       const typed = describePromoteError(currentAssertion ?? 'selected assertion', err);
-      setError(typed?.message ?? describeInsufficientPublisherFunds(err) ?? (err?.message ?? 'Action failed'));
+      setError(typed ? typed.message : (err?.message ?? 'Action failed'));
     } finally {
       setBusy(null);
     }

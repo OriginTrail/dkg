@@ -337,13 +337,13 @@ async function publishAssertionVm(
   agentToken: string,
 ): Promise<bigint> {
   const doPublish = async () => {
-    const res = await apiFetch(node, '/api/shared-memory/publish', {
+    const res = await apiFetch(node, `/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`, {
       method: 'POST',
       bearer: agentToken,
       body: JSON.stringify({
         contextGraphId: cgId,
-        assertionName: name,
-        clearAfter: true,
+        // Per-KA /vm/publish clears only this KA's own roots; do NOT pass
+        // clearSharedMemoryAfter (it would wipe the whole CG's unpublished SWM).
       }),
     });
     if (!res.ok) {
@@ -373,10 +373,15 @@ async function publishEdgeSwmVm(
   entity: string,
 ): Promise<bigint> {
   const subject = `urn:devnet:rich:edge:${stamp}/${entity}`;
-  const writeRes = await apiFetch(edge, '/api/shared-memory/write', {
+  const assertionName = `rich-edge-${stamp}-${entity}`;
+  // Stage as a named KA (create → write → seal → share), then publish via the
+  // canonical per-KA route. (The legacy loose write + selection-publish bridge
+  // was removed; the named-KA lifecycle is the only publish path now.)
+  const writeRes = await apiFetch(edge, '/api/knowledge-assets', {
     method: 'POST',
     body: JSON.stringify({
       contextGraphId: cgId,
+      name: assertionName,
       quads: [
         {
           subject,
@@ -391,20 +396,21 @@ async function publishEdgeSwmVm(
           graph: '',
         },
       ],
+      finalize: true,
+      alsoShareSwm: true,
     }),
   });
   if (!writeRes.ok) {
     throw new Error(
-      `SWM write ${entity}: ${writeRes.status} ${await writeRes.text()}`,
+      `KA create ${entity}: ${writeRes.status} ${await writeRes.text()}`,
     );
   }
   await new Promise((r) => setTimeout(r, 1_500));
-  const pubRes = await apiFetch(edge, '/api/shared-memory/publish', {
+  const pubRes = await apiFetch(edge, `/api/knowledge-assets/${encodeURIComponent(assertionName)}/vm/publish`, {
     method: 'POST',
     body: JSON.stringify({
       contextGraphId: cgId,
-      selection: 'all',
-      clearAfter: true,
+      // Per-KA /vm/publish clears only this KA's own roots; no CG-wide clear.
     }),
   });
   if (!pubRes.ok) {
@@ -745,7 +751,7 @@ describe('Devnet rich scenario (~10 min)', () => {
       const name = `bulk-vm-${run.stamp}-${i}`;
       const { quads, rootSubject } = buildBulkQuads(name, batchTs + 200 + i);
       // KA create auto-finalizes + `alsoShareSwm` promotes to SWM; the
-      // separate /api/shared-memory/publish below lifts SWM→VM.
+      // separate per-KA vm/publish below lifts SWM→VM.
       const createRes = await apiFetch(core1, '/api/knowledge-assets', {
         method: 'POST',
         bearer: token,

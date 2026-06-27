@@ -2,19 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   describePromoteResult,
   describePromoteError,
-  describeInsufficientPublisherFunds,
-  describeBulkVmPublishResult,
   HttpError,
 } from '../src/ui/api.js';
-import {
-  NO_FUNDED_PUBLISHER_WALLET_CODE,
-  NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX,
-} from '@origintrail-official/dkg-core';
-
-const FUNDS_MSG =
-  'No operational wallet has enough funds to publish to Verifiable Memory — each publish needs native gas AND TRAC on the same wallet. ' +
-  'Operational wallet balances:\n  0xAAA: 0.0 TRAC, 0.0 gas\n  0xBBB: 0.0 TRAC, 0.0 gas\n' +
-  'Fund one of these wallets (run `dkg wallets` to list addresses) and retry the publish.';
 
 /**
  * Codex review on #874 / #898 round 2 — pin the contract that the
@@ -30,50 +19,6 @@ const FUNDS_MSG =
  * contract stable so a future refactor of either helper doesn't
  * silently re-break that CTA.
  */
-// The browser module keeps local copies of the funds CODE + message marker (it
-// cannot import dkg-core in the Vite bundle). Pin them to the shared dkg-core
-// contract so a wording/code change there is caught here rather than drifting.
-describe('describeInsufficientPublisherFunds vs the shared dkg-core funds contract', () => {
-  const sharedMessage =
-    `${NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX} to publish to Verifiable Memory — fund a wallet and retry.`;
-
-  it('recognizes the shared structured code', () => {
-    const err = new HttpError(400, sharedMessage, { code: NO_FUNDED_PUBLISHER_WALLET_CODE, error: sharedMessage });
-    expect(describeInsufficientPublisherFunds(err)).toBe(sharedMessage);
-  });
-
-  it('recognizes the shared message prefix when the code is stripped by a re-wrap', () => {
-    expect(describeInsufficientPublisherFunds(new Error(sharedMessage))).toBe(sharedMessage);
-    expect(describeInsufficientPublisherFunds(new HttpError(500, sharedMessage, { error: sharedMessage }))).toBe(sharedMessage);
-  });
-});
-
-// Pins the formatting extracted from the entities/layer-widgets publish-all
-// loops into the shared describeBulkVmPublishResult (api.ts) — the dedupe must
-// not change the partial-success / funds-tail / nothing-published behavior.
-describe('describeBulkVmPublishResult', () => {
-  it('returns null when nothing was published (caller throws the funds/last error)', () => {
-    expect(describeBulkVmPublishResult({ published: 0, total: 3, lastErr: 'boom', fundsErr: null })).toBeNull();
-  });
-
-  it('appends an explicit fund-a-wallet tail on a partial funds failure', () => {
-    const line = describeBulkVmPublishResult({ published: 2, total: 3, lastErr: 'x', fundsErr: 'No operational wallet has enough funds' });
-    expect(line).toContain('Published 2 knowledge assets to Verifiable Memory');
-    expect(line).toContain('no operational wallet has enough funds');
-  });
-
-  it('appends a generic partial tail on a non-funds failure', () => {
-    const line = describeBulkVmPublishResult({ published: 1, total: 2, lastErr: 'boom', fundsErr: null });
-    expect(line).toContain('Published 1 knowledge asset to Verifiable Memory');
-    expect(line).toContain('some could not be published');
-  });
-
-  it('has no tail on full success', () => {
-    expect(describeBulkVmPublishResult({ published: 3, total: 3, lastErr: null, fundsErr: null }))
-      .toBe('Published 3 knowledge assets to Verifiable Memory');
-  });
-});
-
 describe('describePromoteResult', () => {
   it('returns kind="success" with a positive triple count message when promotedCount > 0', () => {
     const out = describePromoteResult('character-sheet', { promotedCount: 7 });
@@ -158,33 +103,5 @@ describe('describePromoteError', () => {
   it('returns null for non-HttpError throwables (network errors, generic Error)', () => {
     expect(describePromoteError('x', new Error('network'))).toBeNull();
     expect(describePromoteError('x', 'string error' as unknown)).toBeNull();
-  });
-
-  it('stays promote-focused: returns null for publish NO_FUNDED_PUBLISHER_WALLET errors (handled by describeInsufficientPublisherFunds)', () => {
-    expect(describePromoteError('skills-catalog', new HttpError(400, FUNDS_MSG, { code: 'NO_FUNDED_PUBLISHER_WALLET', error: FUNDS_MSG }))).toBeNull();
-    expect(describePromoteError('skills-catalog', new Error(FUNDS_MSG))).toBeNull();
-  });
-});
-
-describe('describeInsufficientPublisherFunds', () => {
-  it('extracts the message from a 400 with the structured funds code', () => {
-    const err = new HttpError(400, FUNDS_MSG, { code: 'NO_FUNDED_PUBLISHER_WALLET', error: FUNDS_MSG });
-    expect(describeInsufficientPublisherFunds(err)).toContain('No operational wallet has enough funds');
-  });
-
-  it('matches the message marker when the code is absent', () => {
-    const err = new HttpError(500, FUNDS_MSG, { error: FUNDS_MSG });
-    expect(describeInsufficientPublisherFunds(err)).toBe(FUNDS_MSG);
-  });
-
-  it('matches a plain Error / string carrying the marker', () => {
-    expect(describeInsufficientPublisherFunds(new Error(FUNDS_MSG))).toBe(FUNDS_MSG);
-    expect(describeInsufficientPublisherFunds(FUNDS_MSG)).toBe(FUNDS_MSG);
-  });
-
-  it('returns null for unrelated errors', () => {
-    expect(describeInsufficientPublisherFunds(new Error('insufficient funds for gas'))).toBeNull();
-    expect(describeInsufficientPublisherFunds(new HttpError(500, 'Internal'))).toBeNull();
-    expect(describeInsufficientPublisherFunds(undefined)).toBeNull();
   });
 });

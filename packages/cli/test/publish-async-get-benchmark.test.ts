@@ -172,7 +172,7 @@ describe('publish async get benchmark', () => {
     expect(summaries.get).toMatchObject({ count: 1, successCount: 1, failureCount: 0 });
   });
 
-  it('uses unique roots for warmup and measured payloads and does not clear shared memory on sync publish', async () => {
+  it('uses unique roots AND KA names for warmup and measured payloads and does not clear shared memory on sync publish', async () => {
     const client = new MockBenchmarkClient();
     const result = await runPublishAsyncGetBenchmark({ ...baseConfig(), repeat: 1, warmups: 1 }, client, monotonicClock());
 
@@ -188,6 +188,14 @@ describe('publish async get benchmark', () => {
     expect(new Set(roots).size).toBe(roots.length);
     expect(roots.some((root) => root.includes(':warmup-1:'))).toBe(true);
     expect(roots.some((root) => root.includes(':measured-1:'))).toBe(true);
+
+    // Names must ALSO be unique per phase — a regression that dropped the warmup/measured
+    // discriminator from the KA name would reuse the warmup name for the measured publish
+    // (KA create is name-idempotent), which the root check alone would NOT catch.
+    const names = client.publishCalls.map((call) => call.name);
+    expect(new Set(names).size).toBe(names.length);
+    expect(names.some((n) => n.includes('warmup'))).toBe(true);
+    expect(names.some((n) => n.includes('measured'))).toBe(true);
   });
 
   it('reports measured failures with operation, iteration, error, and reproduction context', async () => {

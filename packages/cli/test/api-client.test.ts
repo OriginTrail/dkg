@@ -717,4 +717,51 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     await client.getKnowledgeAsset('cg', 'f');
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f?contextGraphId=cg`);
   });
+
+  // #1087 migration guard: the compatibility wrapper used by `dkg shared-memory
+  // publish`/`dkg index`/benchmarks must POST the per-KA vm/publish route and
+  // translate `clearAfter` → `options.clearSharedMemoryAfter` (a typo/drop here
+  // would leave the higher-level validation green while breaking CLI/bench callers).
+  it('publishFromFinalizedAssertion POSTs /:name/vm/publish and translates clearAfter → options.clearSharedMemoryAfter', async () => {
+    const calls = track({ kaId: '1', status: 'confirmed', kas: [] });
+    await client.publishFromFinalizedAssertion('cg', 'my-asset', { clearAfter: true, subGraphName: 'sg1' });
+    expect(calls[0].opts.method).toBe('POST');
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/my-asset/vm/publish`);
+    const sent = JSON.parse(calls[0].opts.body as string);
+    expect(sent.contextGraphId).toBe('cg');
+    expect(sent.subGraphName).toBe('sg1');
+    expect(sent.options).toEqual({ clearSharedMemoryAfter: true });
+    expect(sent.clearAfter).toBeUndefined();
+  });
+
+  it('publishFromFinalizedAssertion omits the options object when no finalized-publish flags are set', async () => {
+    const calls = track({ kaId: '1', status: 'confirmed', kas: [] });
+    await client.publishFromFinalizedAssertion('cg', 'plain');
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/plain/vm/publish`);
+    expect(JSON.parse(calls[0].opts.body as string)).toEqual({ contextGraphId: 'cg' });
+  });
+
+  it('publishAssertion runs the create → per-KA /vm/publish two-call sequence', async () => {
+    const calls = track({ kaId: '1', status: 'confirmed', kas: [], assertionUri: 'urn:a' });
+    await client.publishAssertion(
+      'cg',
+      'asset2',
+      [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }],
+      { clearAfter: false, subGraphName: 'sg2' },
+    );
+    // 1st call creates (finalize+promote); the sequence ENDS at the per-KA vm/publish route
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets`);
+    expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
+      contextGraphId: 'cg',
+      name: 'asset2',
+      finalize: true,
+      promote: true,
+    });
+    const last = calls[calls.length - 1];
+    expect(last.url).toBe(`${base}/api/knowledge-assets/asset2/vm/publish`);
+    expect(last.opts.method).toBe('POST');
+    const published = JSON.parse(last.opts.body as string);
+    expect(published.subGraphName).toBe('sg2');
+    expect(published.options).toEqual({ clearSharedMemoryAfter: false });
+  });
 });

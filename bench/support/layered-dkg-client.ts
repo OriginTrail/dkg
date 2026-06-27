@@ -83,16 +83,21 @@ export class LayeredDkgBenchmarkClient implements BenchmarkClient {
     return { shareOperationId };
   }
 
-  async publishFromSharedMemory(
+  async publishAssertion(
     contextGraphId: string,
-    selection: 'all' | { rootEntities: string[] },
-    clearAfter = false,
+    _name: string,
+    quads: Quad[],
+    options?: { clearAfter?: boolean },
   ) {
-    const roots = selection === 'all' ? [...this.sharedWorkingMemory.keys()] : selection.rootEntities;
+    // Named-KA one-shot: stage the quads (create → write → share) then publish
+    // its roots to verifiable memory. Mirrors the create → /vm/publish flow the
+    // real benchmark client (ApiClient.publishAssertion) drives.
+    await this.sharedMemoryWrite(contextGraphId, quads);
+    const roots = uniqueSubjects(quads);
     const kaId = `kc-${++this.kcSequence}`;
     for (const rootEntity of roots) {
       this.promoteSharedRoot(contextGraphId, rootEntity, kaId);
-      if (clearAfter) this.sharedWorkingMemory.delete(rootEntity);
+      if (options?.clearAfter) this.sharedWorkingMemory.delete(rootEntity);
     }
     return {
       kaId,

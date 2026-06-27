@@ -397,11 +397,10 @@ expected_default = [
     "dkg_participant_add",
     "dkg_participant_list",
     "dkg_participant_remove",
-    "dkg_publish",
+    "dkg_knowledge_asset_publish",
     "dkg_query",
     "dkg_read_messages",
     "dkg_send_message",
-    "dkg_shared_memory_publish",
     "dkg_status",
     "dkg_sub_graph_create",
     "dkg_sub_graph_list",
@@ -411,6 +410,10 @@ expected_default = [
 ]
 missing = [name for name in expected_default if name not in names]
 assert missing == [], missing
+# Deleted tools (api-agent-tooling cleanup): the legacy direct/SWM-bridge publish
+# tools and the loose dkg_share are GONE — assert they are never registered.
+for removed in ["dkg_publish", "dkg_shared_memory_publish", "dkg_share"]:
+    assert removed not in names, f"{removed} should be removed: {names}"
 subscribe_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_subscribe")
 assert "include_shared_memory" in subscribe_schema["parameters"]["properties"], subscribe_schema
 search_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "memory_search")
@@ -418,17 +421,14 @@ assert "context_graph_id" in search_schema["parameters"]["properties"], search_s
 assert "context_graph" not in search_schema["parameters"]["properties"], search_schema
 query_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_query")
 assert "sub_graph_name" not in query_schema["parameters"]["properties"], query_schema
-share_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_share")
-assert "context_graph_id" in share_schema["parameters"]["properties"], share_schema
-assert "context_graph" not in share_schema["parameters"]["properties"], share_schema
-# sub_graph_name is in the schema so MCP clients can pass it portably
-# (#413 — _handle_share already forwards it; the schema exposure was missing).
-assert "sub_graph_name" in share_schema["parameters"]["properties"], share_schema
-# context_graph_id is required on Hermes too, matching OpenClaw's contract
-# (#413 unification — no implicit current-project fallback).
-assert share_schema["parameters"]["required"] == ["content", "context_graph_id"], share_schema
-missing_cg = provider.handle_tool_call("dkg_share", {"content": "alpha"})
-assert "context_graph_id is required" in missing_cg, missing_cg
+# dkg_share is removed: calling it falls through to the unknown-tool error.
+share_removed = provider.handle_tool_call("dkg_share", {"content": "alpha", "context_graph_id": "cg:test"})
+assert "Unknown DKG tool" in share_removed, share_removed
+# [D3] dkg_knowledge_asset_create now exposes the optional one-call quads + also_share_swm.
+create_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_knowledge_asset_create")
+assert "quads" in create_schema["parameters"]["properties"], create_schema
+assert "also_share_swm" in create_schema["parameters"]["properties"], create_schema
+assert create_schema["parameters"]["required"] == ["context_graph_id", "name"], create_schema
 semantic_schema = next(schema for schema in provider.get_tool_schemas() if schema["name"] == "dkg_knowledge_asset_semantic_enrichment_write")
 assert "name" not in semantic_schema["parameters"]["properties"], semantic_schema
 assert "Append model-derived triples" in semantic_schema["description"], semantic_schema
@@ -442,11 +442,14 @@ provider._config = {
     "allow_context_graph_admin_tools": False,
 }
 disabled_names = sorted(schema["name"] for schema in provider.get_tool_schemas())
+# Gate preservation: the deleted tools are gone unconditionally, and the SURVIVING
+# canonical publish stays behind the SAME _direct_publish_allowed() gate.
 assert "dkg_publish" not in disabled_names, disabled_names
 assert "dkg_shared_memory_publish" not in disabled_names, disabled_names
 assert "dkg_knowledge_asset_publish" not in disabled_names, disabled_names
 assert "dkg_context_graph_invite" not in disabled_names, disabled_names
-guarded = provider.handle_tool_call("dkg_shared_memory_publish", {"context_graph_id": "cg:test"})
+# The per-handler guard still fires for the surviving canonical publish when disabled.
+guarded = provider.handle_tool_call("dkg_knowledge_asset_publish", {"context_graph_id": "cg:test", "name": "ka"})
 assert "disabled by the adapter publish guard" in guarded, guarded
 admin_guarded = provider.handle_tool_call("dkg_participant_add", {"context_graph_id": "cg:test", "agent_address": "0xabc"})
 assert "Context graph admin tools are disabled" in admin_guarded, admin_guarded
@@ -454,13 +457,15 @@ assert "Context graph admin tools are disabled" in admin_guarded, admin_guarded
 provider._config = {"publish_tool": "direct", "allow_direct_publish": True}
 direct_schemas = provider.get_tool_schemas()
 direct_names = sorted(schema["name"] for schema in direct_schemas)
-for name in ["dkg_publish", "dkg_shared_memory_publish", "dkg_knowledge_asset_publish"]:
-    assert name in direct_names, direct_names
-publish_schema = next(schema for schema in direct_schemas if schema["name"] == "dkg_publish")
-quad_props = publish_schema["parameters"]["properties"]["quads"]["items"]["properties"]
-# No per-quad graph on the write/publish quad schema — the daemon pins triples
-# to the per-KA graph itself (CONTRACT inv.2). Parity with OpenClaw + MCP.
-assert "graph" not in quad_props, publish_schema
+# When enabled, only the canonical publish is exposed — the legacy tools stay gone.
+assert "dkg_knowledge_asset_publish" in direct_names, direct_names
+for removed in ["dkg_publish", "dkg_shared_memory_publish", "dkg_share"]:
+    assert removed not in direct_names, direct_names
+# No per-quad graph on the write quad schema — the daemon pins triples to the
+# per-KA graph itself (CONTRACT inv.2). Parity with OpenClaw + MCP.
+write_schema = next(schema for schema in direct_schemas if schema["name"] == "dkg_knowledge_asset_write")
+quad_props = write_schema["parameters"]["properties"]["quads"]["items"]["properties"]
+assert "graph" not in quad_props, write_schema
 
 provider._config = {
     "publish_tool": "direct",

@@ -862,8 +862,9 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
   //   1. Register a fresh custodial agent on core2's daemon. The daemon
   //      generates a secp256k1 keypair, persists it in agent-keystore.json,
   //      and returns { agentAddress, authToken, publicKey, privateKey }.
-  //   2. Use the agent's bearer token to call core2's publish endpoint
-  //      directly (POST /api/shared-memory/write + /api/shared-memory/publish).
+  //   2. Use the agent's bearer token to stage a named KA on core2
+  //      (POST /api/knowledge-assets {finalize, alsoShareSwm}) + publish it
+  //      (POST /api/knowledge-assets/:name/vm/publish).
   //   3. The daemon's publish route resolves the bearer → agent address →
   //      AgentKeyRecord → custodial private key, and threads it down to
   //      DKGPublisher as `authorPrivateKey`. The publisher signs the
@@ -913,16 +914,21 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
     const epoch: bigint = await s.chronos.getCurrentEpoch();
     const beforeEps: bigint = await s.eps.getNodeEpochPublishingAllocation(core2.identityId, epoch);
 
-    // 3. Write a single triple to SWM via the agent's token, then publish.
+    // 3. Stage a single triple as a named KA (create → write → seal → share)
+    //    via the agent's token, then publish it to VM with the canonical
+    //    per-KA route. (The legacy loose write + selection-publish bridge was
+    //    removed; the named-KA lifecycle is the only publish path now.)
     const ts = Date.now();
     const subjectIri = `urn:test:mode-b:${ts}`;
-    const writeRes = await fetch(
-      `http://127.0.0.1:${core2.apiPort}/api/shared-memory/write`,
+    const assertionName = `mode-b-${ts}`;
+    const createRes = await fetch(
+      `http://127.0.0.1:${core2.apiPort}/api/knowledge-assets`,
       {
         method: 'POST',
         headers: agentHeaders,
         body: JSON.stringify({
           contextGraphId: CONTEXT_GRAPH,
+          name: assertionName,
           quads: [
             {
               subject: subjectIri,
@@ -937,30 +943,31 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
               graph: `did:dkg:context-graph:${CONTEXT_GRAPH}`,
             },
           ],
+          finalize: true,
+          alsoShareSwm: true,
         }),
       },
     );
-    if (!writeRes.ok) {
+    if (!createRes.ok) {
       throw new Error(
-        `core2 /api/shared-memory/write failed: ${writeRes.status} ${await writeRes.text()}`,
+        `core2 /api/knowledge-assets create failed: ${createRes.status} ${await createRes.text()}`,
       );
     }
 
     const publishRes = await fetch(
-      `http://127.0.0.1:${core2.apiPort}/api/shared-memory/publish`,
+      `http://127.0.0.1:${core2.apiPort}/api/knowledge-assets/${encodeURIComponent(assertionName)}/vm/publish`,
       {
         method: 'POST',
         headers: agentHeaders,
         body: JSON.stringify({
           contextGraphId: CONTEXT_GRAPH,
-          selection: { rootEntities: [subjectIri] },
-          clearAfter: true,
+          // Per-KA /vm/publish clears only this KA's own roots; no CG-wide clear.
         }),
       },
     );
     if (!publishRes.ok) {
       throw new Error(
-        `core2 /api/shared-memory/publish failed: ${publishRes.status} ${await publishRes.text()}`,
+        `core2 vm/publish failed: ${publishRes.status} ${await publishRes.text()}`,
       );
     }
     const publishJson = (await publishRes.json()) as {

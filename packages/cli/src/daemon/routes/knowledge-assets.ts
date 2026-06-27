@@ -799,8 +799,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       alsoPublishVm,
     } = parsed;
     // OT-RFC-43 migration alias: the legacy one-shot publish shape posts
-    // `promote: true` (ApiClient.publishAssertion, MCP publishQuads, OpenClaw
-    // publish, and network-sim still send { quads, finalize: true, promote: true }).
+    // `promote: true` (ApiClient.publishAssertion and network-sim still send
+    // { quads, finalize: true, promote: true }).
     // Honor it as `alsoShareSwm` so those calls still promote WM→SWM — otherwise
     // they seal WM but never promote, and a follow-up VM publish runs against an
     // empty SWM and fails. An explicit `alsoShareSwm` wins when both are supplied.

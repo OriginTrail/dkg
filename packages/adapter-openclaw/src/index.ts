@@ -20,7 +20,6 @@ export type {
   LocalWorkspaceDiscardRequest,
   LocalWorkspacePromoteRequest,
   LocalWorkspaceWriteRequest,
-  SharedMemoryPublishRequest,
   SharedMemoryWriteRequest,
   VerifiableMemoryPublishRequest,
 } from '@origintrail-official/dkg-core';

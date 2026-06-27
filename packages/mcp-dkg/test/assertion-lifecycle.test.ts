@@ -204,6 +204,124 @@ describe('assertion CRUD quintet — round-trip with @en literal preservation', 
     ).rejects.toThrow();
   });
 
+  // ── [D3] one-shot create→write→seal→share via dkg_knowledge_asset_create ──
+  it('[D3] create with NO quads uses the bare create path (no createKnowledgeAsset call)', async () => {
+    const res = await server.call('dkg_knowledge_asset_create', { name: 'mode-draft' });
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toMatch(/Created assertion 'mode-draft'/);
+    // The combined one-shot helper must NOT fire for the no-quads draft mode.
+    expect(client.createKnowledgeAssetCalls).toHaveLength(0);
+  });
+
+  it('[D3] create with quads (no alsoShareSwm) seals a WM draft and passes alsoShareSwm:false EXPLICITLY', async () => {
+    const res = await server.call('dkg_knowledge_asset_create', {
+      name: 'mode-sealed',
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"hello"' }],
+    });
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toMatch(/sealed in a private Working Memory draft/);
+    expect(res.content[0].text).toContain('"status": "wm-sealed"');
+    expect(client.createKnowledgeAssetCalls).toHaveLength(1);
+    const call = client.createKnowledgeAssetCalls[0];
+    // Regression guard: the tool MUST forward an explicit alsoShareSwm:false so the
+    // client helper's internal seal-true default cannot leak and silently auto-share.
+    expect(call.alsoShareSwm).toBe(false);
+    expect(call).toHaveProperty('alsoShareSwm');
+    // It must NEVER expose/forward alsoPublishVm (no direct-publish bypass).
+    expect(call.alsoPublishVm).toBeUndefined();
+    // Quads forwarded with an empty per-KA graph (daemon pins to the per-KA WM graph).
+    expect(call.quads).toEqual([{ subject: 'urn:s', predicate: 'urn:p', object: '"hello"', graph: '' }]);
+  });
+
+  it('[D3] create with quads + alsoShareSwm:true runs the full one-shot to SWM (publish-ready)', async () => {
+    const res = await server.call('dkg_knowledge_asset_create', {
+      name: 'mode-shared',
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"hi"' }],
+      alsoShareSwm: true,
+    });
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toMatch(/shared to Shared Working Memory \(publish-ready\)/);
+    expect(res.content[0].text).toContain('"status": "swm-shared"');
+    expect(res.content[0].text).toContain('"publishReady": true');
+    expect(client.createKnowledgeAssetCalls).toHaveLength(1);
+    expect(client.createKnowledgeAssetCalls[0].alsoShareSwm).toBe(true);
+  });
+
+  it('[D3] create with alsoShareSwm:true surfaces a 207 share failure as an ERROR (not publish-ready)', async () => {
+    // The daemon returns 207 + errors when create+seal lands but the opt-in SWM share
+    // fails; DkgClient treats 207 as success, so the tool must judge from the OUTCOME,
+    // not the requested flag — otherwise it sends the agent to publish a non-SWM asset.
+    const localClient = new FakeClient({
+      createKnowledgeAsset: async () => ({
+        created: true,
+        status: 'wm-sealed',
+        sealed: true,
+        errors: [{ phase: 'swm-share', error: 'shared memory write rejected' }],
+      }),
+    });
+    const localServer = new FakeServer();
+    registerAssertionTools(localServer.asMcpServer(), localClient.asDkgClient(), makeConfig());
+
+    const res = await localServer.call('dkg_knowledge_asset_create', {
+      name: 'share-failed',
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"hi"' }],
+      alsoShareSwm: true,
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/Shared Working Memory share FAILED/);
+    expect(res.content[0].text).toContain('shared memory write rejected');
+    expect(res.content[0].text).toContain('NOT publish-ready');
+    // Must NOT claim publish-ready, and must steer to the share retry.
+    expect(res.content[0].text).not.toMatch(/\(publish-ready\)/);
+    expect(res.content[0].text).toContain('dkg_knowledge_asset_share');
+  });
+
+  it('[D3] create strips angle brackets from subject/predicate/object (a bracketed URI stays a URI)', async () => {
+    await server.call('dkg_knowledge_asset_create', {
+      name: 'mode-strip',
+      quads: [{ subject: '<urn:s>', predicate: '<urn:p>', object: '<urn:o>' }],
+    });
+    // The object strip runs BEFORE normalize, so `<urn:o>` → `urn:o` is recognized
+    // as a URI and passed through (NOT treated as a literal and quoted).
+    expect(client.createKnowledgeAssetCalls[0].quads).toEqual([
+      { subject: 'urn:s', predicate: 'urn:p', object: 'urn:o', graph: '' },
+    ]);
+  });
+
+  it('[D3] create AUTO-TYPES object terms identically to OpenClaw/Hermes (bare literal → quoted, URI/blank/quoted pass through)', async () => {
+    await server.call('dkg_knowledge_asset_create', {
+      name: 'mode-normalize',
+      quads: [
+        // bare literal → wrapped in quotes (the cross-adapter parity fix)
+        { subject: 'urn:s', predicate: 'urn:p1', object: 'hello world' },
+        // http/urn/did URIs → passed through unquoted
+        { subject: 'urn:s', predicate: 'urn:p2', object: 'https://example.org/x' },
+        { subject: 'urn:s', predicate: 'urn:p3', object: 'did:dkg:agent/abc' },
+        // already-quoted literal → kept as-is (NOT double-quoted)
+        { subject: 'urn:s', predicate: 'urn:p4', object: '"already"' },
+        // blank node → kept as-is
+        { subject: 'urn:s', predicate: 'urn:p5', object: '_:b0' },
+        // literal needing N-Triples escaping (quote + newline)
+        { subject: 'urn:s', predicate: 'urn:p6', object: 'a"b\nc' },
+      ],
+    });
+    expect(client.createKnowledgeAssetCalls[0].quads).toEqual([
+      { subject: 'urn:s', predicate: 'urn:p1', object: '"hello world"', graph: '' },
+      { subject: 'urn:s', predicate: 'urn:p2', object: 'https://example.org/x', graph: '' },
+      { subject: 'urn:s', predicate: 'urn:p3', object: 'did:dkg:agent/abc', graph: '' },
+      { subject: 'urn:s', predicate: 'urn:p4', object: '"already"', graph: '' },
+      { subject: 'urn:s', predicate: 'urn:p5', object: '_:b0', graph: '' },
+      { subject: 'urn:s', predicate: 'urn:p6', object: '"a\\"b\\nc"', graph: '' },
+    ]);
+  });
+
+  it('[D3] create does NOT expose alsoPublishVm on its tool schema (no VM-mint bypass)', () => {
+    const schema = server.get('dkg_knowledge_asset_create').config.inputSchema!;
+    expect(schema).toHaveProperty('quads');
+    expect(schema).toHaveProperty('alsoShareSwm');
+    expect(schema).not.toHaveProperty('alsoPublishVm');
+  });
+
   it('write requires a non-empty quads array', async () => {
     await server.call('dkg_knowledge_asset_create', { name: 'empty' });
     await expect(
@@ -341,8 +459,8 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     const schema = server.get('dkg_knowledge_asset_publish').config.inputSchema!;
     expect(schema).toHaveProperty('publishEpochs');
     expect(schema).toHaveProperty('publisherNodeIdentityIdOverride');
-    // CONTRACT §G: per-KA publish can register the CG on-chain first (mirrors
-    // dkg_shared_memory_publish) — vm/publish requires a registered CG.
+    // CONTRACT §G: per-KA publish can register the CG on-chain first —
+    // vm/publish requires a registered CG.
     expect(schema).toHaveProperty('registerIfNeeded');
     // FIX X (#1076:2396 / Option A): the explicit-register route uses the daemon's
     // DEFAULT publishPolicy and does NOT preserve a stored custom publishPolicy
@@ -350,8 +468,7 @@ describe('rc.17 lifecycle verbs — finalize / publish / pull_from (parity with 
     expect((schema.registerIfNeeded as { description?: string }).description).toContain('DEFAULT publishPolicy');
     expect((schema.registerIfNeeded as { description?: string }).description).toContain('OriginTrail/dkg#1085');
     // CONTRACT §D: clear-after is DROPPED from the per-asset publish tool — on
-    // vm/publish it is graph-wide destructive (wipes other agents' SWM). The
-    // CG-wide clear stays on dkg_publish / dkg_shared_memory_publish.
+    // vm/publish it is graph-wide destructive (wipes other agents' SWM).
     expect(schema).not.toHaveProperty('clearSharedMemoryAfter');
     expect(schema).not.toHaveProperty('clearAfter');
     expect(schema).not.toHaveProperty('authorAgentAddress');

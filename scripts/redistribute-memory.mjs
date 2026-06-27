@@ -17,7 +17,7 @@
  *    how many additional triples each target layer needs.
  * 3. Pick entities to move up using a deterministic lexicographic sort
  *    (so reruns bucket identically) and a greedy fill:
- *        - VM first  → publish via /api/shared-memory/publish
+ *        - VM first  → publish (loose selection-publish, RETIRED #1087 → #1260)
  *        - SWM next  → promote via /api/knowledge-assets/:name/swm/share
  *        - remainder stays WM
  * 4. Batch promotes/publishes (default 40 entities per call) so we stay
@@ -258,7 +258,7 @@ async function promoteBatches(sg, ents, tag) {
 
 // IMPORTANT ordering for disjoint layers:
 //
-// `POST /api/shared-memory/publish` with `clearAfter: true` wipes the
+// The retired loose selection-publish with `clearAfter: true` wiped the
 // ENTIRE SWM partition for the sub-graph, not just the selected entities
 // (see `publishFromSharedMemory` in packages/publisher/src/dkg-publisher.ts).
 // That means we cannot interleave publishes with other things in SWM —
@@ -273,6 +273,18 @@ async function promoteBatches(sg, ents, tag) {
 //
 // Net result: VM holds VM-bound, SWM holds only SWM-bound, WM holds the
 // rest — a clean WM/SWM/VM partition.
+
+// NEUTERED (#1087, pending #1260): the SWM→VM publish leg below is disabled
+// (loose publish-by-selection was removed). The default mode promotes the
+// VM-bound cohort into SWM expecting to drain it to VM — without that drain it
+// would leave a mixed SWM partition (VM-bound + SWM-bound). So bail BEFORE any
+// SWM mutation unless --skip-vm is set (promote-to-SWM-only, which is coherent).
+if (!SKIP_VM) {
+  console.error('\n[redist] SWM→VM publish leg is disabled pending the #1260 named-KA rework.');
+  console.error('[redist] Without it, this default redistribution can only half-complete (VM-bound would sit in SWM).');
+  console.error('[redist] Re-run with --skip-vm to only redistribute into SWM, or wait for #1260.');
+  process.exit(1);
+}
 
 console.log('\n──── promote WM → SWM (VM-bound first) ────');
 for (const sg of SUB_GRAPHS) {
@@ -291,24 +303,13 @@ if (SKIP_VM) {
 //       true on the LAST batch of each sub-graph (see note above).
 async function publishBatches(sg, ents) {
   if (ents.length === 0) return;
-  const totalBatches = Math.ceil(ents.length / BATCH);
-  for (let i = 0; i < ents.length; i += BATCH) {
-    const slice = ents.slice(i, i + BATCH).map(e => e.uri);
-    const batchN = Math.floor(i / BATCH) + 1;
-    const isLast = batchN === totalBatches;
-    try {
-      const r = await client.request('POST', '/api/shared-memory/publish', {
-        contextGraphId: cgId,
-        subGraphName: sg,
-        selection: slice,
-        clearAfter: isLast,
-      });
-      const drain = isLast ? ' [drain SWM]' : '';
-      console.log(`  · ${sg} publish ${batchN}/${totalBatches}: kaId=${r?.kaId} tx=${r?.txHash?.slice(0, 10) ?? '—'}${drain}`);
-    } catch (err) {
-      console.warn(`  ! ${sg} publish ${batchN}/${totalBatches} failed: ${err.message.split('\n')[0]}`);
-    }
-  }
+  // NEUTERED (#1087): the SWM→VM leg published loose SWM roots via the
+  // publish-by-`selection` route, which was REMOVED. The WM and SWM
+  // redistribution legs above still work; this VM leg must be re-implemented on
+  // the named-KA model (`/api/knowledge-assets/:name/vm/publish`) under #1260.
+  console.warn(
+    `  ! ${sg} VM publish (${ents.length} entities) skipped — SWM→VM leg disabled pending #1260 named-KA rework`,
+  );
 }
 
 console.log('\n──── publish SWM → VM ────');

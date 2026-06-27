@@ -57,11 +57,20 @@ async function runIteration(args: {
   const syncContext = reproductionContext(config, iteration, syncPayload, { flow: 'sync' });
 
   const syncPublish = await measureOperation('syncPublish', iteration, warmup, syncContext, config.timeoutMs, now, async () => {
-    await client.sharedMemoryWrite(config.contextGraphId, syncPayload.quads);
-    const result = await client.publishFromSharedMemory(
+    // Canonical named-KA publish (create → write → finalize → promote →
+    // publish in one composite). Replaces the removed loose-SWM-write +
+    // selection-fork publish path (the `/api/shared-memory/publish` bridge).
+    // The assertion name must be unique per PUBLISHED payload — `runIteration`
+    // runs with the same numeric `iteration` for BOTH the warmup and measured
+    // phases, so the name includes the phase (mirrors the payload's unique
+    // warmup-/measured- root + marker). Otherwise a measured publish would reuse
+    // the warmup KA name (KA create is name-idempotent) and the follow-up GET
+    // would validate the WRONG marker.
+    const result = await client.publishAssertion(
       config.contextGraphId,
-      { rootEntities: [syncPayload.rootEntity] },
-      false,
+      `benchmark-sync-${runId}-${warmup ? 'warmup' : 'measured'}-${iteration}`,
+      syncPayload.quads,
+      { clearAfter: false },
     );
     if (!result.kaId) {
       throw new Error('Synchronous publish response did not include kaId');

@@ -33,10 +33,11 @@ describe("DkgNodePlugin", () => {
         on: () => {},
         logger: {},
       });
-      // Most handler tests assume the node identity has resolved (e.g. dkg_share
-      // builds canned-quad subjects from it). Inject a placeholder address so
-      // tests don't have to mock the daemon /api/status probe end-to-end. Pass
-      // `skipNodeIdInjection: true` to exercise the unresolved-identity branch.
+      // Most handler tests assume the node identity has resolved (e.g.
+      // memory_search routes WM reads by the node's agent identity). Inject a
+      // placeholder address so tests don't have to mock the daemon /api/status
+      // probe end-to-end. Pass `skipNodeIdInjection: true` to exercise the
+      // unresolved-identity branch.
       if (!opts.skipNodeIdInjection) {
         (plugin as any).nodePeerId = '12D3KooTestPeerId';
       }

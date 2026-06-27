@@ -198,7 +198,7 @@ sharedMemoryCmd
       // RFC-001 §9.x assertion lifecycle:
       //   finalize → seal in _meta (idempotent on matching merkleRoot)
       //   promote  → SWM gossip
-      //   publish  → VM via /api/shared-memory/publish { assertionName }
+      //   publish  → VM via /api/knowledge-assets/:name/vm/publish
       const seal = await client.finalizeAssertion(
         targetContextGraph,
         assertionName,

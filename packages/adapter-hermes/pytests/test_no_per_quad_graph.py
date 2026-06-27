@@ -22,9 +22,12 @@ def test_write_schema_quads_have_no_graph(plugin_module):
     assert "graph" not in props
 
 
-def test_publish_schema_quads_have_no_graph(plugin_module):
-    publish = plugin_module.DKG_PUBLISH_SCHEMA
-    props = _quad_item_props(publish)
+def test_create_schema_quads_have_no_graph(plugin_module):
+    # [D3] dkg_knowledge_asset_create now carries optional quads (one-call
+    # create+write); they use the same no-graph write quad shape.
+    create = plugin_module.DKG_ASSERTION_CREATE_SCHEMA
+    props = _quad_item_props(create)
+    assert set(props) == {"subject", "predicate", "object"}
     assert "graph" not in props
 
 
@@ -79,3 +82,61 @@ def test_write_assertion_strips_graph_at_the_wire(recording_client):
     assert path == "/api/knowledge-assets/ka/wm/write"
     assert body["quads"] == [{"subject": "urn:s", "predicate": "urn:p", "object": "urn:o"}]
     assert all("graph" not in q for q in body["quads"])
+
+
+# -- [D3] alsoShareSwm default-false leak guard (parity with the TS adapters) --
+# The createKnowledgeAsset CLIENT HELPER in the TS adapters force-injects
+# alsoShareSwm:true when a quads-create seals, so the TS handlers forward the
+# flag explicitly to suppress it. Hermes' create_assertion builds the POST body
+# DIRECTLY (no such helper) and emits alsoShareSwm ONLY when also_share_swm is
+# true — so a default/false create must NEVER carry alsoShareSwm:true on the wire.
+# These tests pin that invariant at the body level so a future body-builder change
+# can't silently auto-share a private draft.
+
+def test_create_quads_without_share_omits_also_share_swm(recording_client):
+    client = recording_client
+    client.create_assertion(context_graph_id="cg1", name="ka", quads=[
+        {"subject": "urn:s", "predicate": "urn:p", "object": "urn:o"},
+    ])
+    path, body = client.posts[-1]
+    assert path == "/api/knowledge-assets"
+    # Arg-order / serialization guard: contextGraphId and name must not be swapped.
+    assert body["contextGraphId"] == "cg1"
+    assert body["name"] == "ka"
+    assert "quads" in body
+    # No alsoShareSwm on a private create — the daemon shares only on === true.
+    assert "alsoShareSwm" not in body
+
+
+def test_create_quads_explicit_false_does_not_share(recording_client):
+    client = recording_client
+    client.create_assertion(context_graph_id="cg1", name="ka", quads=[
+        {"subject": "urn:s", "predicate": "urn:p", "object": "urn:o"},
+    ], also_share_swm=False)
+    _, body = client.posts[-1]
+    assert body["contextGraphId"] == "cg1"
+    assert body["name"] == "ka"
+    assert body.get("alsoShareSwm") is not True
+    assert "alsoShareSwm" not in body
+
+
+def test_create_quads_with_share_sends_also_share_swm_true(recording_client):
+    client = recording_client
+    client.create_assertion(context_graph_id="cg1", name="ka", quads=[
+        {"subject": "urn:s", "predicate": "urn:p", "object": "urn:o"},
+    ], also_share_swm=True)
+    _, body = client.posts[-1]
+    assert body["contextGraphId"] == "cg1"
+    assert body["name"] == "ka"
+    assert body["alsoShareSwm"] is True
+
+
+def test_create_without_quads_never_sends_also_share_swm(recording_client):
+    # also_share_swm is meaningless without quads; the no-quads branch never emits it.
+    client = recording_client
+    client.create_assertion(context_graph_id="cg1", name="ka", also_share_swm=True)
+    _, body = client.posts[-1]
+    assert body["contextGraphId"] == "cg1"
+    assert body["name"] == "ka"
+    assert "alsoShareSwm" not in body
+    assert "quads" not in body

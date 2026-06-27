@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useCallback, useEffect } from 'react';
 import type { ReactNode } from 'react';
-import { listAssertions, promoteAssertion, describePromoteError, describeInsufficientPublisherFunds, ensureContextGraphOnChain, knowledgeAssetFinalize, publishAssertionsToVm, describeBulkVmPublishResult } from '../../../api.js';
+import { listAssertions, promoteAssertion, describePromoteError, knowledgeAssetFinalize, publishAssertionsToVm, partialPublishWarning } from '../../../api.js';
 import type { MemoryEntity } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { LAYER_CONFIG, entityMeta, layerNoun } from '../helpers.js';
@@ -131,12 +131,12 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
     let currentAssertion: string | null = null;
     try {
       if (isWm) {
-        // Verifiable Memory is the on-chain layer and `finalize` (the seal that
-        // a later VM publish requires) needs the CG registered on-chain. Promote
-        // moves content OUT of Working Memory, after which it can no longer be
-        // finalized — so we auto-register + finalize HERE, before sharing, so the
-        // shared assertions are publishable to VM later. (See OT-RFC-44 Design B.)
-        await ensureContextGraphOnChain(contextGraphId);
+        // Seal each draft before sharing — promote moves content OUT of Working
+        // Memory, after which it can no longer be finalized, and a later vm/publish
+        // requires a finalized assertion. The seal is CG-independent (#1116: finalize
+        // works on an unregistered CG with no chain write) and promote is off-chain, so
+        // no client-side CG pre-registration is needed — /vm/publish registers the CG
+        // later, only after publish preconditions pass. (See OT-RFC-44 Design B.)
         const assertions = await listAssertions(contextGraphId, 'wm');
         let promoted = 0;
         let noopCount = 0;
@@ -168,29 +168,30 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
       } else {
         // SWM -> VM: publish each shared assertion as ONE Knowledge Asset
         // (Design B, any entity count) via the per-assertion vm/publish path —
-        // NOT the legacy single-root shared-memory publish. Auto-register first
-        // since VM is the on-chain layer.
-        await ensureContextGraphOnChain(contextGraphId);
+        // NOT the legacy single-root shared-memory publish. We go through the
+        // shared knowledgeAssetPublishWithSeal wrapper so this CTA gets the same
+        // seal-in-SWM retry + 207 partial-publish handling as the other publish
+        // surfaces. No pre-register: the daemon's /vm/publish runs preconditions
+        // first and only auto-registers (with the stored policy) on its
+        // CG_NOT_REGISTERED retry, so a doomed publish never burns gas.
         const assertions = await listAssertions(contextGraphId, 'swm');
-        // Shared loop + funds messaging — see publishAssertionsToVm in api.ts.
-        const outcome = await publishAssertionsToVm(
-          contextGraphId,
-          assertions,
-          (name) => { currentAssertion = name; },
-        );
-        const line = describeBulkVmPublishResult(outcome);
-        if (line) {
-          setResult(line);
+        // Shared batch loop (api.ts publishAssertionsToVm) — uniform partial/error
+        // accounting with the other batch-publish CTAs (carries the partial detail).
+        const r = await publishAssertionsToVm(contextGraphId, assertions);
+        if (r.published > 0) {
+          const tail = r.failures.length ? ` (${r.failures.length} assertion${r.failures.length === 1 ? '' : 's'} could not be published)` : '';
+          const partialTail = r.partial > 0 ? ` — ⚠ ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
+          setResult(`Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}`);
         } else if (assertions.length === 0) {
           setResult('Nothing to publish — promote assertions to Shared Memory first.');
         } else {
-          throw new Error(outcome.fundsErr ?? outcome.lastErr ?? 'Publish failed');
+          throw new Error(r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed');
         }
       }
       onComplete?.();
     } catch (err: any) {
       const typed = describePromoteError(currentAssertion ?? 'an assertion', err);
-      setError(typed?.message ?? describeInsufficientPublisherFunds(err) ?? (err?.message ?? 'Action failed'));
+      setError(typed ? typed.message : (err?.message ?? 'Action failed'));
     } finally {
       setBusy(false);
     }

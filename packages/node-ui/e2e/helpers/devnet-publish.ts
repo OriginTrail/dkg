@@ -276,13 +276,12 @@ export async function publishToVm(opts: {
   const policyDeadline = Date.now() + POLICY_CONFIRM_BUDGET_MS;
   let res: Response;
   for (;;) {
-    res = await devnetApiFetch('/api/shared-memory/publish', {
+    res = await devnetApiFetch(`/api/knowledge-assets/${encodeURIComponent(opts.assertionName)}/vm/publish`, {
       method: 'POST',
       nodeNum: opts.nodeNum ?? 1,
       body: JSON.stringify({
         contextGraphId: opts.contextGraphId,
-        assertionName: opts.assertionName,
-        clearAfter: opts.clearAfter ?? false,
+        options: { clearSharedMemoryAfter: opts.clearAfter ?? false },
       }),
     });
     if (res.ok) break;

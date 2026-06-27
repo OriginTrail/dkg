@@ -1,9 +1,18 @@
 #!/usr/bin/env node
 /**
+ * DISABLED (#1087) — pending the #1260 named-KA rework.
+ *
+ * This script drained SWM by re-publishing already-verified entities via the
+ * loose publish-by-`selection` SWM-publish route (with a
+ * `selection`), which was REMOVED in #1087. The drain step is now neutered (a
+ * no-op that logs a skip). It must be re-implemented on the named-KA model
+ * under #1260 — though note a named KA already self-drains its own roots from
+ * SWM when published to VM, so this script may be obsolete entirely.
+ *
  * Move triples that are in BOTH SWM and VM out of SWM, so the UI's layer
- * counts are disjoint (WM / SWM-only / VM). Re-publishes each already-
- * verified entity with `clearAfter: true`, which tells the daemon to
- * evict the source quads from `_shared_memory` once they're anchored.
+ * counts are disjoint (WM / SWM-only / VM). (Historically re-published each
+ * already-verified entity with `clearAfter: true` to evict the source quads
+ * from `_shared_memory` once anchored.)
  *
  * Safe to re-run; a no-op for SWM-only or WM-only entities.
  *
@@ -60,19 +69,13 @@ for (const sg of SUB_GRAPHS) {
   console.log(`[${sg}] draining ${dupes.length} duplicated entities from SWM…`);
   const totalBatches = Math.ceil(dupes.length / BATCH);
   for (let i = 0; i < dupes.length; i += BATCH) {
-    const slice = dupes.slice(i, i + BATCH);
     const batchN = Math.floor(i / BATCH) + 1;
-    try {
-      const r = await client.request('POST', '/api/shared-memory/publish', {
-        contextGraphId: cgId,
-        subGraphName: sg,
-        selection: slice,
-        clearAfter: true,
-      });
-      console.log(`  · ${sg} drain ${batchN}/${totalBatches}: kaId=${r?.kaId}`);
-    } catch (err) {
-      console.warn(`  ! ${sg} drain ${batchN}/${totalBatches} failed: ${err.message.split('\n')[0]}`);
-    }
+    // NEUTERED (#1087): this drained SWM by re-publishing already-verified
+    // entities via the loose publish-by-`selection` route, which was removed.
+    // The evict-by-republish capability must be re-implemented on the named-KA
+    // model under #1260 (note: a named KA already self-drains its own roots on
+    // vm/publish, so this whole script may be obsolete). No-op for now.
+    console.warn(`  ! ${sg} drain ${batchN}/${totalBatches} skipped — disabled pending #1260 named-KA rework`);
   }
 }
 

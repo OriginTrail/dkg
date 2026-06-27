@@ -236,43 +236,20 @@ try {
   }
 }
 
-// Publish is per-sub-graph because the promote step wrote each selection
-// into the sub-graph's own SWM partition (`.../<sg>/_shared_memory`).
-// `/api/shared-memory/publish` without `subGraphName` only reads the
-// project's default SWM which is intentionally empty here. So we loop.
+// NEUTERED (#1087): step 4 (the best-effort SWM→VM publish) published loose
+// SWM roots via the publish-by-`selection` route, which was REMOVED. The seed
+// still completes through step 3 (WM + SWM are fully populated); only the
+// optional VM band is skipped. Re-implement on the named-KA model
+// (`/api/knowledge-assets/:name/vm/publish`) under #1260.
 async function publishSubGraph(subGraphName, selection, label) {
   if (selection.length === 0) {
     console.log(`[seed]   · ${label}: empty selection, skipping`);
     return;
   }
-  try {
-    const r = await client.request('POST', '/api/shared-memory/publish', {
-      contextGraphId: cgId,
-      subGraphName,
-      selection,
-      // Published entities are always removed from SWM after a confirmed
-      // chain tx (disjoint layers), so the pyramid visual already reads
-      // as intended. We intentionally do NOT set `clearAfter: true` —
-      // that option wipes the *entire* SWM partition for this sub-graph,
-      // including the larger set step 3 just promoted. With step 3
-      // promoting `all` decisions/tasks/packages/PRs and step 4 publishing
-      // only a curated VM subset, `clearAfter: true` leaves the SWM-only
-      // band empty and destroys the seeded shared layer.
-      clearAfter: false,
-    });
-    console.log(
-      `[seed]   + ${label}: published ${selection.length} entities ` +
-      JSON.stringify({
-        kaId: r.kaId,
-        status: r.status,
-        txHash: r.txHash,
-        blockNumber: r.blockNumber,
-        kas: r.kas?.length,
-      }),
-    );
-  } catch (err) {
-    console.warn(`[seed]   ! ${label} publish failed: ${err.message.split('\n')[0]}`);
-  }
+  void subGraphName;
+  console.warn(
+    `[seed]   ! ${label}: VM publish (${selection.length} entities) skipped — step 4 disabled pending #1260 named-KA rework`,
+  );
 }
 
 await publishSubGraph('decisions', vmDecisions, 'decisions');

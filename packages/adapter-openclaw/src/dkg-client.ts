@@ -1067,36 +1067,6 @@ export class DkgDaemonClient {
     });
   }
 
-  /**
-   * Final canonical-flow step: publish a single root from a context graph's
-   * Shared Working Memory to Verifiable Memory (on-chain). The daemon route
-   * accepts `selection` as either the literal `"all"` or an array of root entity
-   * URIs, but V10 synchronous publish only proceeds when that selection resolves
-   * to exactly one publishable root.
-   *
-   * Returns the daemon's publish descriptor: `{ kaId, status, kas: [{tokenId, rootEntity}],
-   * txHash?, blockNumber?, ... }`.
-   */
-  async publishSharedMemory(
-    contextGraphId: string,
-    opts?: { rootEntities?: string[]; clearAfter?: boolean; subGraphName?: string },
-  ): Promise<Record<string, unknown>> {
-    const cgId = normalizeContextGraphId(contextGraphId);
-    // Default `clearAfter` to `false` for subset publishes so unpublished root
-    // entities aren't dropped from SWM as a side-effect of publishing a few.
-    // Omitted rootEntities still maps to `"all"` for compatibility, but the
-    // daemon rejects it if SWM currently contains more than one publishable root.
-    // Explicit `clearAfter` on the opts always wins.
-    const hasSubset = Array.isArray(opts?.rootEntities) && opts!.rootEntities!.length > 0;
-    const clearAfter = opts?.clearAfter ?? !hasSubset;
-    return this.post('/api/shared-memory/publish', {
-      contextGraphId: cgId,
-      selection: opts?.rootEntities ?? 'all',
-      clearAfter,
-      subGraphName: opts?.subGraphName,
-    });
-  }
-
   // ---------------------------------------------------------------------------
   // Context Graphs
   // ---------------------------------------------------------------------------

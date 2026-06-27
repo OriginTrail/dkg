@@ -42,7 +42,6 @@ Agents should follow the Node Skill lifecycle (create → write → finalize →
 * `dkg_knowledge_asset_query`
 * `dkg_knowledge_asset_share` (formerly `dkg_assertion_promote`)
 * `dkg_knowledge_asset_publish`
-* `dkg_shared_memory_publish` (legacy CG-wide SWM-bridge publish)
 
 Do not publish to Verifiable Memory just because data exists. Publishing spends gas/TRAC and should be an explicit finality choice.
 

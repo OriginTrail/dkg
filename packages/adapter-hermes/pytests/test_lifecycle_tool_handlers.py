@@ -531,28 +531,6 @@ def test_publish_register_already_registered_short_circuits(provider):
     assert out["registration"].get("success") is not False
 
 
-def test_shared_memory_publish_already_registered_normalizes(plugin_module):
-    # FIX H (#1084:1810) on the CG-wide dkg_shared_memory_publish register path:
-    # the already-registered short-circuit must normalize, not attach raw failure.
-    class _Client:
-        def register_context_graph(self, cg, access_policy=None):
-            return {"success": False, "error": "context graph already registered"}
-
-        def publish(self, cg, selection="all", clear_after=True, sub_graph_name=None):
-            return {"kaId": "ka", "ual": "u", "status": "confirmed"}
-
-    p = plugin_module.DKGMemoryProvider()
-    p._offline = False
-    p._config = {"publish_tool": "direct", "allow_direct_publish": True}
-    p._client = _Client()
-    out = json.loads(p.handle_tool_call("dkg_shared_memory_publish", {
-        "context_graph_id": "cg1", "register_if_needed": True,
-    }))
-    assert out["status"] == "confirmed"
-    assert out["registration"] == {"alreadyRegistered": True}
-    assert out["registration"].get("success") is not False
-
-
 def test_publish_register_hard_failure_does_not_publish(provider):
     provider._client.register_response = {
         "success": False, "error": "wallet has insufficient gas",
@@ -633,56 +611,17 @@ def test_per_ka_publish_allows_access_policy_with_register(provider):
     assert provider._client.calls[0] == ("register", "cg1", 1)
 
 
-def test_shared_memory_publish_rejects_access_policy_without_register(plugin_module):
-    class _Client:
-        def __init__(self):
-            self.calls = []
-
-        def register_context_graph(self, cg, access_policy=None):
-            self.calls.append("register")
-            return {"registered": cg}
-
-        def publish(self, cg, selection="all", clear_after=True, sub_graph_name=None):
-            self.calls.append("publish")
-            return {"status": "confirmed"}
-
-    p = plugin_module.DKGMemoryProvider()
-    p._offline = False
-    p._config = {"publish_tool": "direct", "allow_direct_publish": True}
-    p._client = _Client()
-    out = json.loads(p.handle_tool_call("dkg_shared_memory_publish", {
-        "context_graph_id": "cg1", "access_policy": 1,
-    }))
-    assert "access_policy requires register_if_needed" in out["error"]
-    assert p._client.calls == []  # rejected before register/publish
-
-
 def test_access_policy_descriptions_note_register_dependency(provider):
-    for tool in ("dkg_knowledge_asset_publish", "dkg_shared_memory_publish"):
-        sch = next(s for s in provider.get_tool_schemas() if s["name"] == tool)
-        desc = sch["parameters"]["properties"]["access_policy"]["description"]
-        assert "REQUIRES register_if_needed" in desc
-
-
-# -- FIX V (#1076:memory-tools:24): shared-mem-publish register_if_needed wording
-
-def test_shared_memory_publish_register_desc_states_auto_register(provider):
-    # The CG-wide selection publish AUTO-registers an unregistered CG regardless of
-    # register_if_needed (memory.ts:1928) at gas/TRAC cost. register_if_needed only
-    # sets the access_policy of that registration — it does NOT gate whether
-    # registration happens. The description must not imply otherwise.
-    sch = next(s for s in provider.get_tool_schemas() if s["name"] == "dkg_shared_memory_publish")
-    desc = sch["parameters"]["properties"]["register_if_needed"]["description"]
-    assert "does NOT gate whether registration happens" in desc
-    assert "AUTO-register" in desc
-    assert "gas/TRAC" in desc
+    sch = next(s for s in provider.get_tool_schemas() if s["name"] == "dkg_knowledge_asset_publish")
+    desc = sch["parameters"]["properties"]["access_policy"]["description"]
+    assert "REQUIRES register_if_needed" in desc
 
 
 # -- FIX X (#1076:2396 / Option A): explicit-register publishPolicy caveat ------
 # The explicit register route uses the daemon's DEFAULT publishPolicy and does not
 # preserve a stored custom publishPolicy (daemon-side rehydration = dkg#1085). The
-# caveat lives on the explicit-register-exposed tool ONLY (dkg_knowledge_asset_
-# publish); dkg_shared_memory_publish uses the safe rehydrating auto-register path.
+# caveat lives on the explicit-register-exposed canonical publish tool
+# (dkg_knowledge_asset_publish).
 
 def test_per_ka_publish_register_desc_carries_publish_policy_caveat(provider):
     sch = next(s for s in provider.get_tool_schemas()
@@ -692,14 +631,6 @@ def test_per_ka_publish_register_desc_carries_publish_policy_caveat(provider):
     assert "does NOT preserve" in desc
     assert "Read access is unaffected" in desc
     assert "dkg#1085" in desc
-
-
-def test_shared_memory_publish_register_desc_has_no_publish_policy_caveat(provider):
-    # the safe auto-register path must NOT carry the explicit-register caveat
-    sch = next(s for s in provider.get_tool_schemas()
-               if s["name"] == "dkg_shared_memory_publish")
-    desc = sch["parameters"]["properties"]["register_if_needed"]["description"]
-    assert "dkg#1085" not in desc
 
 
 def test_access_policy_requires_register_helper(plugin_module):
@@ -736,7 +667,8 @@ def test_publish_207_partial_surfaces_warning_keeping_ual(provider):
     warning = out["warning"]
     assert "retry the publish" not in warning.lower()
     assert "Do NOT re-run publish" in warning
-    assert "duplicate" in warning and "VM precondition" in warning
+    # The warning now names only the surviving canonical publish (dkg_publish is gone).
+    assert "dkg_knowledge_asset_publish" in warning and "VM precondition" in warning
     assert "node operator" in warning
 
 
@@ -774,7 +706,8 @@ def test_annotate_vm_publish_partial_warning_no_retry_guidance(plugin_module):
     warning = f({"ual": "u", "contextGraphError": "bind failed"})["warning"]
     assert "retry the publish" not in warning.lower()
     assert "Do NOT re-run publish" in warning
-    assert "dkg_publish" in warning and "duplicate" in warning
+    # Names only the surviving canonical publish; the legacy dkg_publish reference is gone.
+    assert "dkg_publish" not in warning
     assert "dkg_knowledge_asset_publish" in warning and "VM precondition" in warning
     assert "node operator" in warning
 
@@ -823,62 +756,6 @@ def test_new_handlers_require_context_graph_id(provider, tool):
     assert "context_graph_id is required" in out["error"]
 
 
-# -- FIX N (#1084:1821): dkg_publish quadsPublished only on a non-hard-failure --
-# (On #1084 dkg_publish uses the atomic publish_quads fork — FIX M's clear_after
-#  is N/A here; only the quadsPublished count needs the failure guard.)
-
-class _PublishQuadsProbe:
-    """Fake client for the #1084 _handle_publish publish_quads path."""
-
-    def __init__(self, publish_quads_response):
-        self.publish_quads_response = publish_quads_response
-
-    def publish_quads(self, context_graph_id, quads, sub_graph_name=None):
-        return self.publish_quads_response
-
-
-def _publish_quads_provider(plugin_module, publish_quads_response):
-    p = plugin_module.DKGMemoryProvider()
-    p._offline = False
-    p._config = {"publish_tool": "direct", "allow_direct_publish": True}
-    p._client = _PublishQuadsProbe(publish_quads_response)
-    return p
-
-
-_PUB_Q2 = [
-    {"subject": "urn:r1", "predicate": "urn:p", "object": "a"},
-    {"subject": "urn:r2", "predicate": "urn:p", "object": "b"},
-]
-
-
-def test_dkg_publish_no_quads_published_on_hard_failure(plugin_module):
-    # FIX N (#1084:1821): publish_quads returns a partial-failure dict on
-    # create-207 / publish-fail — quadsPublished must NOT be stamped there.
-    p = _publish_quads_provider(plugin_module, {
-        "success": False, "assertionName": "hermes-publish-x", "error": "not shared",
-    })
-    out = json.loads(p.handle_tool_call("dkg_publish", {"context_graph_id": "cg", "quads": _PUB_Q2}))
-    assert out["success"] is False
-    assert "quadsPublished" not in out
-    assert out["assertionName"] == "hermes-publish-x"
-
-
-def test_dkg_publish_quads_published_on_confirmed(plugin_module):
-    p = _publish_quads_provider(plugin_module, {"kaId": "k", "ual": "u", "status": "confirmed"})
-    out = json.loads(p.handle_tool_call("dkg_publish", {"context_graph_id": "cg", "quads": _PUB_Q2}))
-    assert out["quadsPublished"] == 2
-
-
-def test_dkg_publish_quads_published_on_207_partial(plugin_module):
-    # a 207-partial (minted, CG-bind failed) is NOT a hard failure -> annotate.
-    p = _publish_quads_provider(plugin_module, {
-        "kaId": "k", "ual": "u", "status": "confirmed", "contextGraphError": "bind failed",
-    })
-    out = json.loads(p.handle_tool_call("dkg_publish", {"context_graph_id": "cg", "quads": _PUB_Q2}))
-    assert out["partial"] is True
-    assert out["quadsPublished"] == 2
-
-
 # -- FIX P (#1077:63 parity): create name desc states the real validation ------
 
 def test_create_name_description_aligns_to_validation(provider):
@@ -916,6 +793,31 @@ def test_annotate_share_seal_subset_warns_not_sealable(plugin_module):
     assert "A subset is NOT sealable/publishable" in out["warning"]
     assert 'entities:"all"' in out["warning"]
     assert "Seal it with" not in out["warning"]
+
+
+def test_create_swm_share_error_flags_207_share_failure(plugin_module):
+    # 207 + errors:[{phase:"swm-share"}] (create+seal OK, opt-in share failed) → the
+    # tool-error tail, so the create handler reports an error instead of publish-ready.
+    f = plugin_module._create_swm_share_error
+    msg = f({"status": "wm-sealed", "sealed": True,
+             "errors": [{"phase": "swm-share", "error": "write rejected"}]}, True)
+    assert msg is not None
+    assert "Shared Working Memory share FAILED" in msg
+    assert "write rejected" in msg
+    assert "NOT publish-ready" in msg
+    assert "dkg_knowledge_asset_share" in msg
+    # publishReady:false (no explicit error entry) also flags.
+    assert f({"publishReady": False}, True) is not None
+
+
+def test_create_swm_share_error_none_when_share_ok_or_not_requested(plugin_module):
+    f = plugin_module._create_swm_share_error
+    # Share succeeded (no errors, publishReady true) → no error.
+    assert f({"status": "swm-shared", "sealed": True, "publishReady": True}, True) is None
+    # Share not requested → None even if (hypothetically) an errors array is present.
+    assert f({"errors": [{"phase": "swm-share", "error": "x"}]}, False) is None
+    # An unrelated error phase (not swm-share), publishReady absent → None.
+    assert f({"errors": [{"phase": "vm-publish", "error": "x"}]}, True) is None
 
 
 def test_annotate_share_seal_incomplete_full_promote_warns_no_finalize(plugin_module):

@@ -387,7 +387,7 @@ This is the **#1 trap for "real-world" graph importers** — Wikidata, schema.or
 Graphify-style code graphs, EPCIS event streams, anything where the same
 subject URI legitimately appears across many logical artefacts. It fires from
 the daemon's `autoPartition` step (during `finalize: true` on `create`, or as
-part of `/api/shared-memory/publish`) and looks like:
+part of `/api/knowledge-assets/{name}/vm/publish`) and looks like:
 
 ```
 HTTP 400 "Rule 4 violation: rootEntity <http://www.wikidata.org/entity/Q2831>
@@ -469,8 +469,8 @@ If your data has a natural "real" root that's already unique per artefact
 anchor instead of minting a synthetic one — the blank-node rewrite still
 applies for everything *under* it.
 
-The synchronous `/api/shared-memory/publish` and the async promote queue
-both run through `autoPartition`, so this trap exists on both paths. Fix it
+Both the synchronous per-KA `/api/knowledge-assets/{name}/vm/publish` and the async promote queue
+run through `autoPartition`, so this trap exists on both paths. Fix it
 at the importer level, before any quads reach the daemon.
 
 ## 6. Async promote queue
@@ -610,9 +610,9 @@ promote job is queued / running.
 - **Don't `await Promise.all(partitions.map(importOne))` with N > 4.** The
   daemon serialises intra-assertion writes anyway; >4 concurrent assertions
   just inflates memory pressure without throughput gain.
-- **Don't call `/api/shared-memory/publish` mid-import.** That's the SWM → VM
+- **Don't call `/api/knowledge-assets/{name}/vm/publish` mid-import.** That's the SWM → VM
   on-chain transition (costs TRAC, human-gated). It is **not** the
-  `/swm/share` (WM → SWM promote) step. Confusing the two is the most common
+  `/swm/share` (WM → SWM share) step. Confusing the two is the most common
   "where did my money go?" mistake.
 - **Don't publish multiple KAs with overlapping subject URIs in the same CG.**
   The contract enforces "one root per KA per CG" (Rule 4) — if your raw data
@@ -638,7 +638,7 @@ promote job is queued / running.
    e. markPartitionStatus(..., 'done')
 4. On 413: halve chunk + retry.
 5. On crash: loadImportManifest → pendingPartitions → resume from step 3.
-6. (Optional, human-gated) /api/shared-memory/publish promotes SWM → VM.
+6. (Optional, human-gated) per-KA /api/knowledge-assets/{name}/vm/publish mints a sealed KA SWM → VM.
 ```
 
 ### Async loop (bulk imports — recommended for >100 partitions)
@@ -659,7 +659,7 @@ promote job is queued / running.
      - failed + classification=fatal → fix root cause + POST .../recover
      - failed_retrying → wait; worker will auto-retry transient errors
 5. On crash: loadImportManifest → pendingPartitions → resume from step 3.
-6. (Optional, human-gated) /api/shared-memory/publish promotes SWM → VM.
+6. (Optional, human-gated) per-KA /api/knowledge-assets/{name}/vm/publish mints a sealed KA SWM → VM.
 ```
 
 ## References

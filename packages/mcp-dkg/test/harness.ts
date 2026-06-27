@@ -126,7 +126,9 @@ export class FakeClient {
   readonly contextGraphs = new Set<string>();
   readonly subGraphs = new Set<string>();
   readonly subscribed = new Set<string>();
-  readonly publishCalls: Array<Record<string, unknown>> = [];
+  // [D3] records each createKnowledgeAsset wire call (one-shot create-with-quads)
+  // so tests can assert the EXPLICIT alsoShareSwm value the tool forwarded.
+  readonly createKnowledgeAssetCalls: Array<Record<string, unknown>> = [];
   readonly queryCalls: Array<Record<string, unknown>> = [];
 
   /** Per-layer hits used by memory-search tests. Keys are
@@ -531,17 +533,19 @@ export class FakeClient {
     } as unknown as ReturnType<DkgClient['getPeerInfo']> extends Promise<infer T> ? T : never;
   }
 
-  // ── Publish ─────────────────────────────────────────────────────
-  async publishQuads(args: Record<string, unknown>) {
-    if (this.overrides.publishQuads) return this.overrides.publishQuads.call(this, args);
-    this.publishCalls.push({ kind: 'publishQuads', ...args });
-    return { kaId: 'kc-1', kas: [], txHash: '0xdead' };
-  }
-
-  async publishSharedMemory(args: Record<string, unknown>) {
-    if (this.overrides.publishSharedMemory) return this.overrides.publishSharedMemory.call(this, args);
-    this.publishCalls.push({ kind: 'publishSharedMemory', ...args });
-    return { kaId: 'kc-2', kas: [{ tokenId: '1', rootEntity: 'urn:x' }], txHash: '0xbeef' };
+  // ── [D3] One-shot create→write→seal→share (create with quads) ──────
+  // Mirrors the route's three combined statuses. Records the exact wire args
+  // (incl. the EXPLICIT `alsoShareSwm`) on `createKnowledgeAssetCalls` so the D3
+  // tests can assert the tool never lets the client helper's seal-true default
+  // leak. `status` follows the route: quads + share → swm-shared (publish-ready);
+  // quads only → wm-sealed; (the no-quads path uses createAssertion, not this).
+  async createKnowledgeAsset(args: Record<string, unknown>) {
+    if (this.overrides.createKnowledgeAsset) return this.overrides.createKnowledgeAsset.call(this, args);
+    this.createKnowledgeAssetCalls.push({ ...args });
+    const shared = args.alsoShareSwm === true;
+    return shared
+      ? { status: 'swm-shared', sealed: true, publishReady: true }
+      : { status: 'wm-sealed', sealed: true, publishReady: false };
   }
 
   async registerContextGraph(args: { id: string }) {

@@ -163,9 +163,10 @@ async function analyzeGetFlow(config: BenchmarkConfig, payloadSize: PayloadSizeL
     const payload = traceSync(trace, 'setup', 'createPayload', [], 'Generate the asset to publish and read back.', () => (
       createPayload(config, `analysis-get-${payloadSize}`, 1, 'sync', false)
     ));
-    await traceSharedMemoryWrite(trace, client, config, payload);
-    await traceAsync(trace, 'setup', 'publishFromSharedMemory', ['promoteSharedRoot'], 'Finalize staged shared-memory content into verifiable memory for the read path.', () => (
-      client.publishFromSharedMemory(config.contextGraphId, { rootEntities: [payload.rootEntity] }, false)
+    // publishAssertion stages the quads internally (matches the ESBench path),
+    // so no separate traceSharedMemoryWrite here — it would double-write SWM.
+    await traceAsync(trace, 'setup', 'publishAssertion', ['promoteSharedRoot'], 'Finalize the named knowledge asset into verifiable memory for the read path.', () => (
+      client.publishAssertion(config.contextGraphId, `analysis-get-${payloadSize}`, payload.quads, { clearAfter: false })
     ), { rootEntity: payload.rootEntity });
     const sparql = traceSync(trace, 'measured', 'getSparql', [], 'Build the read query for the published root entity.', () => getSparql(payload.rootEntity));
     const response = await traceAsync(trace, 'measured', 'query', ['layer'], 'Read the published marker from the configured memory view.', () => (
@@ -184,9 +185,11 @@ async function analyzeSyncPublishFlow(config: BenchmarkConfig, payloadSize: Payl
     const payload = traceSync(trace, 'setup', 'createPayload', [], 'Generate the payload for synchronous publish.', () => (
       createPayload(config, `analysis-sync-${payloadSize}`, 1, 'sync', false)
     ));
-    await traceSharedMemoryWrite(trace, client, config, payload);
-    await traceAsync(trace, 'measured', 'publishFromSharedMemory', ['promoteSharedRoot'], 'Synchronously finalize staged shared-memory content into verifiable memory.', () => (
-      client.publishFromSharedMemory(config.contextGraphId, { rootEntities: [payload.rootEntity] }, false)
+    // publishAssertion stages the quads internally (matches the ESBench path), so no
+    // separate traceSharedMemoryWrite here — it would double-write SWM and make the
+    // measured publish unrepresentative of the canonical create/write/share/publish flow.
+    await traceAsync(trace, 'measured', 'publishAssertion', ['promoteSharedRoot'], 'Synchronously publish the named knowledge asset into verifiable memory.', () => (
+      client.publishAssertion(config.contextGraphId, `analysis-sync-${payloadSize}`, payload.quads, { clearAfter: false })
     ), { rootEntity: payload.rootEntity });
     traceSync(trace, 'cleanup', 'clear', ['Map.clear'], 'Clear all in-memory layers after the representative run.', () => client.clear());
   });

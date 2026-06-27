@@ -87,12 +87,18 @@ describe('SKILL.md file', () => {
   });
 
   it('includes key available API endpoints', () => {
-    expect(skillContent).toContain('/api/shared-memory/write');
-    expect(skillContent).toContain('/api/shared-memory/publish');
+    expect(skillContent).toContain('/api/knowledge-assets/{name}/swm/share');
+    expect(skillContent).toContain('/api/knowledge-assets/{name}/vm/publish');
     expect(skillContent).toContain('/api/query');
     expect(skillContent).toContain('/api/context-graph/create');
     expect(skillContent).toContain('/api/context-graph/list');
     expect(skillContent).toContain('/api/status');
+  });
+
+  it('does not advertise the removed SWM-bridge publish route', () => {
+    // The legacy /api/shared-memory/publish bridge was deleted (issues #1087/#1116);
+    // the canonical SWM→VM publish is the per-KA /vm/publish route.
+    expect(skillContent).not.toContain('/api/shared-memory/publish');
   });
 
   it('marks planned endpoints clearly', () => {

@@ -58,7 +58,7 @@ export function trackingFetch(calls: Array<{ url: string; init?: RequestInit }>,
 }
 
 export class MockBenchmarkClient implements BenchmarkClient {
-  readonly publishCalls: Array<{ roots: string[]; clearAfter?: boolean }> = [];
+  readonly publishCalls: Array<{ name: string; roots: string[]; clearAfter?: boolean }> = [];
   readonly enqueueCalls: Array<{ roots: string[] }> = [];
   private readonly markersByRoot = new Map<string, string>();
 
@@ -84,13 +84,21 @@ export class MockBenchmarkClient implements BenchmarkClient {
     return { shareOperationId: `share-${this.markersByRoot.size}` };
   }
 
-  async publishFromSharedMemory(
+  async publishAssertion(
     _contextGraphId: string,
-    selection: 'all' | { rootEntities: string[] },
-    clearAfter?: boolean,
+    name: string,
+    quads: Array<{ subject: string; predicate: string; object: string }>,
+    options?: { clearAfter?: boolean },
   ) {
-    const roots = selection === 'all' ? ['all'] : selection.rootEntities;
-    this.publishCalls.push({ roots, clearAfter });
+    // The named-KA composite stages the quads itself, so register the marker
+    // here (the sync leg no longer calls sharedMemoryWrite first) — the `get`
+    // validation looks up the marker by root. The KA `name` is recorded so tests can
+    // assert warmup/measured name uniqueness: KA create is name-idempotent, so a reused
+    // name would silently collide with the warmup KA — the root alone wouldn't catch it.
+    const markerQuad = quads.find((quad) => quad.predicate === 'http://schema.org/identifier');
+    if (markerQuad) this.markersByRoot.set(markerQuad.subject, markerQuad.object);
+    const roots = [...new Set(quads.map((quad) => quad.subject))];
+    this.publishCalls.push({ name, roots, clearAfter: options?.clearAfter });
     return { kaId: `kc-${this.publishCalls.length}`, kas: roots.map((rootEntity) => ({ tokenId: '1', rootEntity })) };
   }
 

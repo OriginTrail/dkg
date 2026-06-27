@@ -246,6 +246,14 @@
 .v10-ka-verify-ok {
   display: flex; flex-direction: column; gap: 4px;
 }
+/* Partial publish (HTTP 207): minted on-chain but the context-graph binding
+   failed. Same layout as the OK state, amber-tinted to read as a warning. */
+.v10-ka-verify-warn {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 6px 8px;
+  background: rgba(245,158,11,0.12);
+  border-radius: 4px;
+}
 .v10-ka-verify-ok-row {
   display: flex; justify-content: space-between; align-items: center;
   padding: 4px 0;

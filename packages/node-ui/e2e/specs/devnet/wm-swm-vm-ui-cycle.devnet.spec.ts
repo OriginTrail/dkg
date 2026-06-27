@@ -228,17 +228,16 @@ test.describe('WM → SWM → VM via the UI', () => {
   });
 
   // DEFERRED (OriginTrail/dkg#966): the SWM → VM publish step is a browser-
-  // coverage gap, NOT the promote bug this spec proves. The project-view bulk
-  // "Publish to Verifiable Memory" control (`widget-publish-vm-btn`) publishes
-  // EVERY SWM assertion on the CG as its own on-chain Knowledge Asset (Design B,
-  // any entity count). On the shared seeded devnet CG (~25 SWM roots) that fires
-  // ~25 real on-chain mints — too slow/flaky for a browser e2e, and it touches
-  // roots this spec doesn't own. The single-root surface (`PublishPanel` in
-  // `MemoryLayerView`, gated by `publishSharedMemory`'s one-root client guard)
-  // is NOT wired into ProjectView navigation, so there is no click-path to
-  // publish ONLY this spec's imported root. End-to-end on-chain mint is already
-  // verified by the API-driven sibling spec (`wm-swm-vm-lifecycle.devnet.spec`).
-  // Kept as `fixme` until either (a) PublishPanel is wired into nav, or (b) this
+  // coverage gap, NOT the promote bug this spec proves. Both the project-view
+  // bulk "Publish to Verifiable Memory" control (`widget-publish-vm-btn`) and the
+  // `PublishPanel` in `MemoryLayerView` now publish EVERY selected SWM assertion
+  // as its own on-chain Knowledge Asset via the canonical per-KA /vm/publish
+  // (Design B, any entity count). On the shared seeded devnet CG (~25 SWM roots)
+  // that fires ~25 real on-chain mints — too slow/flaky for a browser e2e, and it
+  // touches roots this spec doesn't own. Neither surface offers a click-path to
+  // publish ONLY this spec's imported root, so there is no clean single-assertion
+  // target. End-to-end on-chain mint is already verified by the API-driven
+  // sibling spec (`wm-swm-vm-lifecycle.devnet.spec`). Kept as `fixme` until this
   // spec provisions its own dedicated single-assertion CG so the bulk publish
   // maps 1:1 to our root. The import → promote steps above are the asserting
   // cycle for the blank-node fix.

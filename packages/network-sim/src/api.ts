@@ -77,8 +77,8 @@ export async function publishKA(
   // RFC-001 §9.x — route through the knowledge-asset lifecycle (sign at
   // creation): create an auto-named knowledge asset with the supplied quads,
   // finalize (computes the merkle root and signs the AuthorAttestation
-  // stored in `_meta`), promote into SWM, then publish via the
-  // `assertionName` shape so the publisher forwards the seal verbatim.
+  // stored in `_meta`), promote into SWM, then publish via the canonical
+  // per-KA `vm/publish` route so the publisher forwards the seal verbatim.
   const assertionName = `netsim-publish-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const quadsWithGraph = quads.map((q) => ({
     subject: q.subject,
@@ -101,9 +101,8 @@ export async function publishKA(
     status: string;
     kas: Array<{ tokenId: string; rootEntity: string }>;
     txHash?: string;
-  }>(`${nodeBase(nodeId)}/api/shared-memory/publish`, {
+  }>(`${nodeBase(nodeId)}/api/knowledge-assets/${encodeURIComponent(assertionName)}/vm/publish`, {
     contextGraphId,
-    assertionName,
   });
   return {
     ...published,
@@ -133,26 +132,6 @@ export async function share(
   return post<{ shareOperationId: string }>(`${nodeBase(nodeId)}/api/shared-memory/write`, {
     contextGraphId,
     quads,
-  });
-}
-
-export async function publishFromSharedMemory(
-  nodeId: number,
-  contextGraphId: string,
-  // "all" is compatibility shorthand only; V10 synchronous publish rejects it
-  // unless the source SWM resolves to exactly one publishable root.
-  selection: 'all' | { rootEntities: string[] } = 'all',
-  clearAfter = true,
-) {
-  return post<{
-    kaId: string;
-    status: string;
-    kas: Array<{ tokenId: string; rootEntity: string }>;
-    txHash?: string;
-  }>(`${nodeBase(nodeId)}/api/shared-memory/publish`, {
-    contextGraphId,
-    selection,
-    clearAfter,
   });
 }
 

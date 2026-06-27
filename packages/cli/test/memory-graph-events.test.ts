@@ -26,9 +26,8 @@
 //     connected core peers, which a single edge daemon cannot reach.
 //   - the VM verify verified/partial/no_quorum emissions: each needs a real
 //     multi-signer quorum state, which only arises on a curated devnet.
-//   - resolvePublishRootEntities dedup / skolemized-descendant filtering and
-//     publishContextGraphId remap forwarding: observable only through what the
-//     publish actually mints, i.e. the devnet tier.
+//   - the per-KA vm/publish mint path: observable only through what the
+//     publish actually mints on-chain, i.e. the devnet tier.
 //   - the callerAgentAddress threaded into agent.share / conditionalShare: an
 //     internal argument the live HTTP surface does not expose (the write's
 //     outcome is asserted instead).

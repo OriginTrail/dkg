@@ -26,7 +26,6 @@ Node Skill tools:
 - `dkg_knowledge_asset_query`
 - `dkg_knowledge_asset_share`
 - `dkg_knowledge_asset_publish`
-- `dkg_shared_memory_publish`
 
 ## Query path
 

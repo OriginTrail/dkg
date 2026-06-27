@@ -36,10 +36,6 @@ function createTransport(): DkgPublisherExtensionTransport & { calls: Array<[str
       calls.push(['publish', args]);
       return { kaId: '1', kas: [{ tokenId: '1', rootEntity: 'did:dkg:entity:1' }] };
     },
-    async publishSharedMemory(...args) {
-      calls.push(['publishSharedMemory', args]);
-      return { kaId: '2', kas: [{ tokenId: '2', rootEntity: 'did:dkg:entity:2' }] };
-    },
   };
 }
 
@@ -119,19 +115,13 @@ describe('DkgPublisherExtension', () => {
     ]);
   });
 
-  it('publishes fresh quads and existing shared memory into verifiable memory', async () => {
+  it('publishes fresh quads into verifiable memory', async () => {
     const transport = createTransport();
     const publisher = createDkgPublisherExtension(transport);
 
     await publisher.publishVerifiableMemory({
       contextGraphId: 'cg',
       quads: [{ subject: 'did:dkg:e:1', predicate: 'http://schema.org/name', object: 'Alpha' }],
-    });
-    await publisher.publishSharedMemory({
-      contextGraphId: 'cg',
-      rootEntities: ['did:dkg:e:1'],
-      clearAfter: false,
-      subGraphName: 'research',
     });
 
     expect(transport.calls).toEqual([
@@ -140,10 +130,6 @@ describe('DkgPublisherExtension', () => {
         [{ subject: 'did:dkg:e:1', predicate: 'http://schema.org/name', object: '"Alpha"', graph: '' }],
         undefined,
         { accessPolicy: undefined, allowedPeers: undefined },
-      ]],
-      ['publishSharedMemory', [
-        'cg',
-        { rootEntities: ['did:dkg:e:1'], clearAfter: false, subGraphName: 'research' },
       ]],
     ]);
   });

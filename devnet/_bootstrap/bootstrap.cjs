@@ -350,7 +350,7 @@ async function main() {
       // v10-stress test uses for the publisher nonce race.
       await new Promise((r) => setTimeout(r, 2000));
       const pubRes = await fetch(
-        `http://127.0.0.1:${core.apiPort}/api/shared-memory/publish`,
+        `http://127.0.0.1:${core.apiPort}/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`,
         {
           method: 'POST',
           headers: {
@@ -359,7 +359,6 @@ async function main() {
           },
           body: JSON.stringify({
             contextGraphId: CONTEXT_GRAPH,
-            assertionName: name,
           }),
         },
       );
@@ -372,7 +371,7 @@ async function main() {
       if (pubJson.status === 'tentative' || pubJson.kaId === '0') {
         await new Promise((r) => setTimeout(r, 2000));
         const retry = await fetch(
-          `http://127.0.0.1:${core.apiPort}/api/shared-memory/publish`,
+          `http://127.0.0.1:${core.apiPort}/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`,
           {
             method: 'POST',
             headers: {
@@ -381,7 +380,6 @@ async function main() {
             },
             body: JSON.stringify({
               contextGraphId: CONTEXT_GRAPH,
-              assertionName: name,
             }),
           },
         );

@@ -488,15 +488,17 @@ export class ApiClient {
 
   /**
    * Direct SWM write — appends loose triples to shared memory without
-   * creating a named WM assertion. Triples land ungrouped; downstream
-   * selection-based publishes (see `publishFromSharedMemory`) seal
-   * them at the publish boundary via the agent's selection bridge.
+   * creating a named WM assertion. Triples land ungrouped and are NOT
+   * publishable through the named-KA lifecycle.
    *
-   * Use this for "write loose content, decide what to publish later"
-   * workflows (e.g. node-ui MemoryLayer, mcp `dkg_share`). For
-   * sealed-from-creation provenance, use `createAssertion` /
-   * `appendToAssertion` / `publishAssertion` instead — the seal then
-   * binds to the named assertion at finalize time.
+   * Non-agent primitive: used by the source-worker bulk-ingest pipeline,
+   * benchmarks, and network-sim. There is no longer an agent tool for
+   * this (`dkg_share` was removed); consolidating the remaining
+   * producers onto the named-KA model is tracked in OriginTrail/dkg#1260.
+   * For sealed-from-creation provenance, use `createAssertion` /
+   * `appendToAssertion` and publish the named assertion via
+   * `knowledgeAssetPublish` instead — the seal binds to the named
+   * assertion at finalize time.
    */
   async sharedMemoryWrite(contextGraphId: string, quads: Array<{
     subject: string; predicate: string; object: string; graph: string;
@@ -508,46 +510,6 @@ export class ApiClient {
     skolemizedBlankNodes?: number;
   }> {
     return this.post('/api/shared-memory/write', { contextGraphId, quads });
-  }
-
-  /**
-   * Selection-based publish — publishes one selected SWM rootEntity to
-   * verifiable memory. Passing `"all"` is accepted only when the source
-   * SWM currently resolves to a single publishable root. The agent mints the
-   * AuthorAttestation seal inline at the selection boundary using
-   * the calling agent's bearer-token identity / explicit
-   * `authorAgentAddress` / `preSignedAuthorAttestation`, or falls
-   * back to the publisher's wallet. The publisher refuses any
-   * on-chain publish without a seal — sign-at-creation is preserved
-   * at the daemon boundary regardless of which fork the caller used
-   * to put content into SWM.
-   *
-   * For finalized-assertion publishes (seal from creation), use
-   * `publishFromFinalizedAssertion` instead — that path threads the
-   * already-signed seal through verbatim with no re-signing.
-   */
-  async publishFromSharedMemory(
-    contextGraphId: string,
-    selection: 'all' | { rootEntities: string[] } = 'all',
-    clearAfter = true,
-    options?: { subGraphName?: string; publishEpochs?: number; publisherNodeIdentityIdOverride?: bigint },
-  ): Promise<{
-    kaId: string;
-    status: 'tentative' | 'confirmed';
-    kas: Array<{ tokenId: string; rootEntity: string }>;
-    txHash?: string;
-    blockNumber?: number;
-  }> {
-    return this.post('/api/shared-memory/publish', {
-      contextGraphId,
-      selection,
-      clearAfter,
-      ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
-      ...(options?.publishEpochs !== undefined ? { publishEpochs: options.publishEpochs } : {}),
-      ...(options?.publisherNodeIdentityIdOverride !== undefined
-        ? { publisherNodeIdentityIdOverride: options.publisherNodeIdentityIdOverride.toString() }
-        : {}),
-    });
   }
 
   /**
@@ -786,6 +748,12 @@ export class ApiClient {
    * Pre-condition: the assertion must be both finalized AND promoted
    * to SWM. The high-level `publishAssertion` helper handles the
    * whole sequence in one call.
+   *
+   * Routes to the canonical per-KA publish `POST
+   * /api/knowledge-assets/:name/vm/publish` (the URL name selects the
+   * assertion). Kept as a thin wrapper over `knowledgeAssetPublish` so
+   * existing callers (`dkg shared-memory publish`, `dkg index`,
+   * `publishAssertion`) keep their signature + typed return.
    */
   async publishFromFinalizedAssertion(
     contextGraphId: string,
@@ -807,16 +775,17 @@ export class ApiClient {
     blockNumber?: number;
     contextGraphError?: string;
   }> {
-    return this.post('/api/shared-memory/publish', {
-      contextGraphId,
-      assertionName,
-      ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
-      ...(options?.clearAfter !== undefined ? { clearAfter: options.clearAfter } : {}),
-      ...(options?.publishEpochs !== undefined ? { publishEpochs: options.publishEpochs } : {}),
-      ...(options?.publisherNodeIdentityIdOverride !== undefined
-        ? { publisherNodeIdentityIdOverride: options.publisherNodeIdentityIdOverride.toString() }
-        : {}),
-    });
+    return this.knowledgeAssetPublish(contextGraphId, assertionName, options) as Promise<{
+      kaId: string;
+      status: 'tentative' | 'confirmed';
+      assertionUri: string;
+      authorAddress: string;
+      merkleRoot: string;
+      kas: Array<{ tokenId: string; rootEntity: string }>;
+      txHash?: string;
+      blockNumber?: number;
+      contextGraphError?: string;
+    }>;
   }
 
   /**

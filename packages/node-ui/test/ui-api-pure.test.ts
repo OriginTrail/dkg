@@ -24,9 +24,6 @@ import {
   fetchSuccessRates,
   fetchExtractionStatus,
   executeQuery,
-  publishTriples,
-  publishSharedMemory,
-  listSwmEntities,
   listAssertions,
   ensureContextGraphOnChain,
   fetchAssertionUals,
@@ -42,6 +39,10 @@ import {
   promoteAssertion,
   createKnowledgeAsset,
   knowledgeAssetPublish,
+  knowledgeAssetPublishWithSeal,
+  publishAssertionsToVm,
+  SwmSubsetNotSealableError,
+  partialPublishWarning,
   knowledgeAssetFinalize,
 } from '../src/ui/api.js';
 
@@ -49,6 +50,16 @@ let server: Server;
 let baseUrl: string;
 const requestLog: Array<{ url: string; method: string; body: string }> = [];
 let queryBindings: any[] = [];
+// Scripted per-call responses (status + body) for tests that need a non-200
+// reply, e.g. the knowledgeAssetPublishWithSeal recovery contract. Each entry
+// is consumed on first match (FIFO), so a test can sequence "first call 409,
+// next call 200". Cleared in beforeEach.
+type ResponseOverride = {
+  match: (url: string, method: string, body: string) => boolean;
+  status: number;
+  body: unknown;
+};
+let responseOverrides: ResponseOverride[] = [];
 
 function startTestServer(): Promise<void> {
   return new Promise((resolve) => {
@@ -56,7 +67,20 @@ function startTestServer(): Promise<void> {
       let body = '';
       req.on('data', (chunk) => { body += chunk; });
       req.on('end', () => {
-        requestLog.push({ url: req.url ?? '', method: req.method ?? '', body });
+        const reqUrl = req.url ?? '';
+        const reqMethod = req.method ?? '';
+        requestLog.push({ url: reqUrl, method: reqMethod, body });
+
+        // Scripted override (consumed on first match) — lets a test return a
+        // 409 then a 200 to exercise the catch→seal→retry path.
+        const ovIdx = responseOverrides.findIndex(o => o.match(reqUrl, reqMethod, body));
+        if (ovIdx !== -1) {
+          const [ov] = responseOverrides.splice(ovIdx, 1);
+          res.writeHead(ov.status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(ov.body));
+          return;
+        }
+
         res.writeHead(200, { 'Content-Type': 'application/json' });
 
         const url = req.url ?? '';
@@ -148,6 +172,7 @@ describe('UI API tests', () => {
   beforeEach(() => {
     requestLog.length = 0;
     queryBindings = [];
+    responseOverrides = [];
   });
 
   describe('fileUrl', () => {
@@ -294,20 +319,6 @@ describe('UI API tests', () => {
       expect(body.contextGraphId).toBe('cg-1');
     });
 
-    it('publishSharedMemory sends one explicit root selection', async () => {
-      await publishSharedMemory('cg-1', ['urn:root']);
-      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/shared-memory/publish'));
-      const body = JSON.parse(call?.body ?? '{}');
-      expect(body.contextGraphId).toBe('cg-1');
-      expect(body.selection).toEqual(['urn:root']);
-      expect(body.clearAfter).toBe(false);
-    });
-
-    it('publishSharedMemory keeps the UI-side single-root guard', async () => {
-      expect(() => publishSharedMemory('cg-1', ['urn:root:a', 'urn:root:b'])).toThrow(/exactly one root entity/i);
-      expect(requestLog.some(r => r.url.includes('/api/shared-memory/publish'))).toBe(false);
-    });
-
     it('knowledgeAssetPublish rejects non-decimal publisher identity overrides before POSTing', async () => {
       expect(() =>
         knowledgeAssetPublish('cg-1', 'f', { publisherNodeIdentityIdOverride: 'abc' }),
@@ -327,6 +338,155 @@ describe('UI API tests', () => {
         knowledgeAssetPublish('cg-1', 'f', { publishEpoch: 3 } as any),
       ).toThrow('Unsupported finalized publish option(s): publishEpoch');
       expect(requestLog).toHaveLength(0);
+    });
+
+    it('knowledgeAssetPublishWithSeal POSTs the canonical per-KA vm/publish (no seal when it succeeds)', async () => {
+      await knowledgeAssetPublishWithSeal('cg-1', 'my-asset', { subGraphName: 'sg' });
+      const publishCall = requestLog.find(
+        r => r.method === 'POST' && r.url.includes('/api/knowledge-assets/my-asset/vm/publish'),
+      );
+      expect(publishCall).toBeTruthy();
+      const body = JSON.parse(publishCall?.body ?? '{}');
+      expect(body.contextGraphId).toBe('cg-1');
+      expect(body.subGraphName).toBe('sg');
+      // Happy path: the asset is already sealed, so no wm/finalize is sent and
+      // the legacy /api/shared-memory/publish bridge is never touched.
+      expect(requestLog.some(r => r.url.includes('/wm/finalize'))).toBe(false);
+      expect(requestLog.some(r => r.url.includes('/api/shared-memory/publish'))).toBe(false);
+    });
+
+    it('knowledgeAssetPublishWithSeal seals in SWM (layer:swm + subGraphName) then retries on a VM_PUBLISH_PRECONDITION 409', async () => {
+      // VM_PUBLISH_PRECONDITION is the SEALABLE 409 — an unsealed full share. The
+      // wrapper seals in place (wm/finalize {layer:"swm"}, forwarding subGraphName) and
+      // retries the publish once. (A PUBLISH_NOT_FULL_SHARE 409 is NOT sealable: the
+      // full-share marker is missing, so finalize(layer:"swm") returns
+      // SWM_SUBSET_NOT_SEALABLE — that path is covered by the throws-no-retry test below.)
+      responseOverrides.push({
+        match: (url, method) => method === 'POST' && url.includes('/api/knowledge-assets/a/vm/publish'),
+        status: 409,
+        body: { code: 'VM_PUBLISH_PRECONDITION', error: 'is not finalized' },
+      });
+
+      const res = await knowledgeAssetPublishWithSeal('cg-1', 'a', { subGraphName: 'sg' });
+
+      const finalize = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/knowledge-assets/a/wm/finalize'));
+      expect(finalize, 'must seal in SWM after the 409').toBeTruthy();
+      expect(JSON.parse(finalize!.body).layer).toBe('swm');
+      expect(JSON.parse(finalize!.body).subGraphName).toBe('sg');
+      // Exactly two publish attempts: the failing one + the post-seal retry.
+      const publishCalls = requestLog.filter(r => r.method === 'POST' && r.url.includes('/vm/publish'));
+      expect(publishCalls).toHaveLength(2);
+      // `sealed` flag tells the caller a seal step ran (surface "sealing then publishing").
+      expect(res.sealed).toBe(true);
+    });
+
+    it('knowledgeAssetPublishWithSeal throws SwmSubsetNotSealableError and does NOT retry on SWM_SUBSET_NOT_SEALABLE', async () => {
+      // Publish 409s as not-finalized, but the in-place seal is rejected because
+      // only a subset was shared — surface the typed error, never loop.
+      responseOverrides.push({
+        match: (url, method) => method === 'POST' && url.includes('/api/knowledge-assets/c/vm/publish'),
+        status: 409,
+        body: { code: 'PUBLISH_NOT_FULL_SHARE', error: 'requires a complete full share' },
+      });
+      responseOverrides.push({
+        match: (url, method) => method === 'POST' && url.includes('/api/knowledge-assets/c/wm/finalize'),
+        status: 409,
+        body: { code: 'SWM_SUBSET_NOT_SEALABLE', error: 'share the full asset first' },
+      });
+
+      await expect(knowledgeAssetPublishWithSeal('cg-1', 'c')).rejects.toBeInstanceOf(SwmSubsetNotSealableError);
+
+      // The seal was attempted exactly once and the publish was NOT retried
+      // after the seal failed (one failing publish, no second attempt).
+      expect(requestLog.filter(r => r.method === 'POST' && r.url.includes('/api/knowledge-assets/c/wm/finalize'))).toHaveLength(1);
+      expect(requestLog.filter(r => r.method === 'POST' && r.url.includes('/vm/publish'))).toHaveLength(1);
+    });
+
+    it('knowledgeAssetPublishWithSeal surfaces a 207 partial publish (contextGraphError) without throwing', async () => {
+      // The daemon returns HTTP 207 when the KA minted on-chain (confirmed +
+      // txHash) but the context-graph binding failed. `post()` treats 207 as ok,
+      // so the wrapper resolves; the result must carry `contextGraphError` so the
+      // CTAs can render a partial/warning state instead of a clean success.
+      responseOverrides.push({
+        match: (url, method) => method === 'POST' && url.includes('/api/knowledge-assets/d/vm/publish'),
+        status: 207,
+        body: { kaId: '0xabc', status: 'confirmed', txHash: '0xdeadbeef', contextGraphError: 'binding failed' },
+      });
+
+      const res = await knowledgeAssetPublishWithSeal('cg-1', 'd');
+
+      expect(res.status).toBe('confirmed');
+      expect(res.txHash).toBe('0xdeadbeef');
+      expect(res.contextGraphError).toBe('binding failed');
+      // No seal/retry — a 207 is not a 409 precondition.
+      expect(requestLog.some(r => r.url.includes('/wm/finalize'))).toBe(false);
+      expect(requestLog.filter(r => r.method === 'POST' && r.url.includes('/vm/publish'))).toHaveLength(1);
+    });
+
+    it('publishAssertionsToVm aggregates per-KA results: partial detail, clean sample, subGraph forwarding', async () => {
+      // ka 'a' → clean confirm; ka 'b' (sub-graph) → 207 partial with a contextGraphError.
+      responseOverrides.push({
+        match: (url, method) => method === 'POST' && url.includes('/api/knowledge-assets/a/vm/publish'),
+        status: 200,
+        body: { kaId: '0xa', status: 'confirmed', txHash: '0xtxa' },
+      });
+      responseOverrides.push({
+        match: (url, method) => method === 'POST' && url.includes('/api/knowledge-assets/b/vm/publish'),
+        status: 207,
+        body: { kaId: '0xb', status: 'confirmed', txHash: '0xtxb', contextGraphError: 'binding failed for b' },
+      });
+
+      const r = await publishAssertionsToVm('cg-1', [{ name: 'a' }, { name: 'b', subGraph: 'sg1' }]);
+
+      expect(r.published).toBe(2);
+      expect(r.total).toBe(2);
+      expect(r.partial).toBe(1);
+      // The first 207's contextGraphError detail is preserved (the drift the shared helper fixes).
+      expect(r.partialError).toBe('binding failed for b');
+      expect(r.failures).toHaveLength(0);
+      // The headline sample prefers the fully-clean result (ka 'a'), not the partial 'b'.
+      expect(r.sample?.txHash).toBe('0xtxa');
+      expect(r.sample?.contextGraphError).toBeUndefined();
+      // ka 'b' was published under its sub-graph (name + subGraphName forwarded by the loop).
+      const bPublish = requestLog.find(rq => rq.method === 'POST' && rq.url.includes('/api/knowledge-assets/b/vm/publish'));
+      expect(JSON.parse(bPublish!.body).subGraphName).toBe('sg1');
+    });
+
+    it('publishAssertionsToVm collects each per-KA failure into failures[] (named) and keeps going', async () => {
+      responseOverrides.push({
+        match: (url, method) => method === 'POST' && url.includes('/api/knowledge-assets/x/vm/publish'),
+        status: 500,
+        body: { error: 'boom' },
+      });
+      responseOverrides.push({
+        match: (url, method) => method === 'POST' && url.includes('/api/knowledge-assets/y/vm/publish'),
+        status: 200,
+        body: { kaId: '0xy', status: 'confirmed', txHash: '0xtxy' },
+      });
+
+      const r = await publishAssertionsToVm('cg-1', [{ name: 'x' }, { name: 'y' }]);
+
+      // 'x' failed but the loop kept going and published 'y'; the failure is captured
+      // (named) in failures[], not thrown and not collapsed to a single lastError.
+      expect(r.published).toBe(1);
+      expect(r.total).toBe(2);
+      expect(r.failures).toHaveLength(1);
+      expect(r.failures[0].name).toBe('x');
+      expect(r.failures[0].error).toBeTruthy();
+      expect(r.sample?.txHash).toBe('0xtxy');
+    });
+
+    it('partialPublishWarning explains the 207 accurately and never suggests republishing', () => {
+      const withDetail = partialPublishWarning('binding failed');
+      // The KA is already minted; re-publishing does NOT repair the binding, so
+      // the copy must NOT tell the user to republish/retry.
+      expect(withDetail).not.toMatch(/republish|re-publish|try again|retry/i);
+      expect(withDetail).toMatch(/on-chain/i);
+      expect(withDetail).toMatch(/context graph/i);
+      expect(withDetail).toContain('binding failed'); // appends the daemon detail
+      // Works without a detail string too.
+      expect(partialPublishWarning()).not.toMatch(/republish|re-publish|retry/i);
+      expect(partialPublishWarning()).not.toContain('(');
     });
 
     it('createKnowledgeAsset normalizes context graph URIs before POSTing', async () => {
@@ -385,29 +545,6 @@ describe('UI API tests', () => {
         }),
       ).toThrow('authorAgentAddress and preSignedAuthorAttestation are mutually exclusive');
       expect(requestLog).toHaveLength(0);
-    });
-
-    it('listSwmEntities queries the shared-working-memory view', async () => {
-      await listSwmEntities('cg-1');
-      const call = requestLog.find(r => r.method === 'POST' && r.url.includes('/api/query'));
-      const body = JSON.parse(call?.body ?? '{}');
-      expect(body.contextGraphId).toBe('cg-1');
-      expect(body.view).toBe('shared-working-memory');
-      expect(body.sparql).toContain('/_shared_memory');
-      expect(body.sparql).toContain('workspaceOwner');
-    });
-
-    it('listSwmEntities collapses skolemized section subjects into canonical roots', async () => {
-      queryBindings = [
-        { s: { value: 'https://example.org/doc/root' }, cnt: { value: '2' } },
-        { s: { value: 'https://example.org/doc/root/.well-known/genid/section-1-intro' }, cnt: { value: '3' } },
-        { s: { value: '<https://example.org/doc/child-only/.well-known/genid/section-1-only>' }, cnt: { value: '4' } },
-      ];
-
-      await expect(listSwmEntities('cg-1')).resolves.toEqual([
-        { uri: 'https://example.org/doc/root', label: 'root', tripleCount: 5 },
-        { uri: 'https://example.org/doc/child-only', label: 'child-only', tripleCount: 4 },
-      ]);
     });
 
     it('listAssertions(wm) recognizes the lifecycle-URN marker form (file imports)', async () => {

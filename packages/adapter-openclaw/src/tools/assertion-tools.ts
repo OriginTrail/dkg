@@ -18,12 +18,46 @@ export function buildAssertionTools(ctx: DkgToolHost): OpenClawTool[] {
       description:
         'Step 1 of the canonical flow (create → write → finalize → share → publish). Create a per-agent ' +
         'Working Memory draft for a knowledge asset. Idempotent: a duplicate name returns ' +
-        '`{ assertionUri: null, alreadyExists: true }`.',
+        '`{ assertionUri: null, alreadyExists: true }`. ' +
+        'ONE-SHOT (optional): pass non-empty `quads` to write + seal in this one call — it STOPS at a ' +
+        'sealed Working Memory draft (private; does NOT auto-share). Add `also_share_swm: true` to also share ' +
+        'to Shared Working Memory in the same call, landing a publish-ready knowledge asset in SWM (the ' +
+        'recommended create → write → seal → share one-shot). This NEVER mints on-chain: to publish to ' +
+        'Verifiable Memory you then call `dkg_knowledge_asset_publish`. Omit `quads` for the stepwise flow ' +
+        '(`dkg_knowledge_asset_write` / `_finalize` / `_share` separately).',
       parameters: {
         type: 'object',
         properties: {
           context_graph_id: { type: 'string', description: `Target context graph. ${EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION}` },
           name: { type: 'string', description: 'Knowledge asset name. Any IRI-safe name up to 256 chars: no "/", no whitespace, no <>"{}|^`\\ characters. (Mixed case, dots, and underscores are fine — it is NOT restricted to a lowercase-hyphen slug.)' },
+          // [D3] optional one-shot quads — same auto-typed shape as dkg_knowledge_asset_write
+          // (object values starting with http://, https://, urn:, did: are URIs; anything else is a
+          // literal). No per-quad `graph` field — the daemon pins quads to the per-KA WM graph.
+          quads: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                subject: { type: 'string', description: 'Subject URI.' },
+                predicate: { type: 'string', description: 'Predicate URI.' },
+                object: { type: 'string', description: 'Object URI or literal (auto-typed).' },
+              },
+              required: ['subject', 'predicate', 'object'],
+            },
+            description:
+              'Optional one-shot triples. When present, the create call also writes these quads and SEALS the ' +
+              'draft (stops at a sealed WM draft). Omit for an empty draft you fill with dkg_knowledge_asset_write.',
+          },
+          // [D3] also_share_swm — only meaningful with `quads`. Defaults to FALSE; the handler passes it
+          // EXPLICITLY so the client helper's internal seal-true default cannot leak and silently auto-share.
+          also_share_swm: {
+            type: 'boolean',
+            description:
+              'When true (and `quads` are supplied), also SHARE the sealed asset to Shared Working Memory in ' +
+              'the same call, landing a publish-ready knowledge asset in SWM (the full create → write → seal → ' +
+              'share one-shot). Default false: stop at a sealed, private WM draft — sharing (the ' +
+              'private→networked step) stays explicit. Ignored when there are no `quads`.',
+          },
           sub_graph_name: { type: 'string', description: 'Optional sub-graph (must be pre-registered).' },
         },
         required: ['context_graph_id', 'name'],
@@ -151,9 +185,9 @@ export function buildAssertionTools(ctx: DkgToolHost): OpenClawTool[] {
         'segment is the KnowledgeAssets (KAV10) contract address, NOT the author; the separate `authorAddress` ' +
         'response field is the (different) seal author) plus `kaId`, `txHash`, `status`, ' +
         'and `kas`. The seal already selects the author and the whole asset — do not pass author or selection ' +
-        'overrides. Prefer this over dkg_shared_memory_publish when publishing a single named asset; it is ' +
-        'multi-root-safe and avoids the legacy single-root SWM constraint. Fails 409 if the asset is not yet ' +
-        'finalized + shared (run dkg_knowledge_asset_finalize / dkg_knowledge_asset_share first). vm/publish ' +
+        'overrides. Multi-root-safe. This is THE canonical publish for a single named asset. Fails 409 if the ' +
+        'asset is not yet finalized + shared (run dkg_knowledge_asset_finalize / dkg_knowledge_asset_share ' +
+        'first). vm/publish ' +
         'AUTO-registers an unregistered context graph on-chain at gas/TRAC cost regardless of ' +
         '`register_if_needed` (no explicit register step is needed). `register_if_needed: true` only lets you ' +
         'choose the registration\'s access_policy first.',

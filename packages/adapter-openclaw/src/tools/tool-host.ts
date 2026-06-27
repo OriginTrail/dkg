@@ -28,7 +28,6 @@ export interface DkgToolHost {
   handleJoinRequestApprove(args: ToolArgs): Promise<OpenClawToolResult>;
   handleJoinRequestReject(args: ToolArgs): Promise<OpenClawToolResult>;
   handleSubscribe(args: ToolArgs): Promise<OpenClawToolResult>;
-  handlePublish(args: ToolArgs): Promise<OpenClawToolResult>;
   handleQuery(args: ToolArgs): Promise<OpenClawToolResult>;
   handleQueryCatalogList(args: ToolArgs): Promise<OpenClawToolResult>;
   handleQueryCatalogRun(args: ToolArgs): Promise<OpenClawToolResult>;
@@ -52,7 +51,5 @@ export interface DkgToolHost {
   handleAssertionHistory(args: ToolArgs): Promise<OpenClawToolResult>;
   handleSubGraphCreate(args: ToolArgs): Promise<OpenClawToolResult>;
   handleSubGraphList(args: ToolArgs): Promise<OpenClawToolResult>;
-  handleSharedMemoryPublish(args: ToolArgs): Promise<OpenClawToolResult>;
-  handleShare(args: ToolArgs): Promise<OpenClawToolResult>;
   handleMemorySearch(args: ToolArgs): Promise<OpenClawToolResult>;
 }

@@ -10,7 +10,7 @@
  *                                          finalize: true, promote: true }
  *      Combined create+write+finalize+promote (one round-trip, agent does
  *      the work in-process).
- *   2. POST /api/shared-memory/publish   { contextGraphId, assertionName }
+ *   2. POST /api/knowledge-assets/:name/vm/publish   { contextGraphId }
  *      SWM → VM. This is where the chain TX happens.
  *
  * Calibration mode (`PHASE=calibrate`): publishes 10 partitions, measures
@@ -296,9 +296,8 @@ async function publishOnePartition(partition, partitionIdx, attempt = 0) {
   await sleep(3000);
 
   // 2. publish — SWM → VM. Returns kaId + txHash on success.
-  const publishRes = await apiCall('POST', '/api/shared-memory/publish', {
+  const publishRes = await apiCall('POST', `/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`, {
     contextGraphId: CFG.cgId,
-    assertionName: name,
   }, { timeoutMs: 180_000 });
 
   return {

@@ -541,62 +541,19 @@ describe('context-graph write-path validation — real daemon route wiring', () 
     expect(res.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_FOUND' });
   });
 
-  it('rejects unknown shared-memory publish targets with CONTEXT_GRAPH_NOT_FOUND', async () => {
-    const res = await postJson(daemon, '/api/shared-memory/publish', { contextGraphId: 'missing-cg', selection: 'all' });
+  it('rejects unknown vm/publish targets with CONTEXT_GRAPH_NOT_FOUND', async () => {
+    const res = await postJson(daemon, '/api/knowledge-assets/draft/vm/publish', { contextGraphId: 'missing-cg' });
     expect(res.status).toBe(400);
     expect(res.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_FOUND' });
   });
 
-  it('rejects an agent token that selection-publishes as a different authorAgentAddress before reading shared memory', async () => {
-    const agentA = await registerAgentClient('swm-publish-author-a');
-    const agentB = await registerAgentClient('swm-publish-author-b');
-    const cg = `swm-publish-author-${Date.now().toString(36)}`;
-    await createRegisteredAgentContextGraph(agentA, cg);
-
-    const res = await agentA.post('/api/shared-memory/publish', {
-      contextGraphId: cg,
-      selection: 'all',
-      authorAgentAddress: agentB.agentAddress,
-    });
-
-    expect(res.status).toBe(403);
-    expect(String(res.body.error)).toContain(agentA.agentAddress);
-    expect(String(res.body.error)).toContain(agentB.agentAddress);
-    expect(String(res.body.error)).toContain('authorAgentAddress');
-  });
-
-  it('rejects an agent token that selection-publishes with a different pre-signed author before reading shared memory', async () => {
-    const agentA = await registerAgentClient('swm-publish-presign-a');
-    const agentB = await registerAgentClient('swm-publish-presign-b');
-    const cg = `swm-publish-presign-${Date.now().toString(36)}`;
-    await createRegisteredAgentContextGraph(agentA, cg);
-
-    const res = await agentA.post('/api/shared-memory/publish', {
-      contextGraphId: cg,
-      selection: 'all',
-      preSignedAuthorAttestation: preSignedAttestationFor(agentB.agentAddress),
-    });
-
-    expect(res.status).toBe(403);
-    expect(String(res.body.error)).toContain(agentA.agentAddress);
-    expect(String(res.body.error)).toContain(agentB.agentAddress);
-    expect(String(res.body.error)).toContain('preSignedAuthorAttestation.address');
-  });
-
-  it('passes the token-scoped storage lane into shared-memory assertionName publish calls', async () => {
-    const { res, seen } = await runSharedMemoryPublishRoute({
-      bearer: 'agent-token',
-      tokenAgents: { 'agent-token': CALLER },
-      body: {
-        contextGraphId: 'cg',
-        assertionName: 'agent-owned-assertion',
-      },
-    });
-
-    expect(res.statusCode).toBe(200);
-    expect(seen).toHaveLength(1);
-    expect(seen[0]?.assertionName).toBe('agent-owned-assertion');
-    expect(seen[0]?.opts).toMatchObject({ agentAddress: CALLER });
+  // The legacy SWM-bridge publish route was removed (consolidated onto the
+  // per-KA vm/publish above). Guard against accidental reintroduction: the
+  // daemon must no longer recognize the route at all (route-not-found 404),
+  // rather than reach a handler.
+  it('no longer serves the removed /api/shared-memory/publish route (404)', async () => {
+    const res = await postJson(daemon, '/api/shared-memory/publish', { contextGraphId: LOCAL_CG });
+    expect(res.status).toBe(404);
   });
 
   // ── a real locally-created graph (and its full DID) is accepted ──

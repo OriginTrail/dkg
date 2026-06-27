@@ -207,7 +207,8 @@ function deriveEntityLabel(entity: MemoryEntity): string {
 //
 // Key insight: in V10 the plain `<cg>/<sg>` graph IS the committed
 // (chain-attested) view of a sub-graph — that's where
-// `/api/shared-memory/publish` deposits KAs after on-chain registration.
+// publishing to VM (`POST /api/knowledge-assets/:name/vm/publish`) deposits
+// KAs after on-chain registration.
 // We treat it as VM, not WM. Pre-publish writes only exist in
 // `assertion/<addr>/<name>` graphs.
 //
