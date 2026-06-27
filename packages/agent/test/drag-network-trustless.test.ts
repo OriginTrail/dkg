@@ -198,6 +198,66 @@ describe('dRAG P3 — trustless aggregation (asker re-verifies, never trusts a p
     expect(res.perNode.find((p) => p.peerId === 'peerGood')?.verified).toBe(1);
   });
 
+  it("an honest peer's verified fact is not poisoned by an earlier peer's bad-siblings citation for the same fact", async () => {
+    const wallet = ethers.Wallet.createRandom() as unknown as ethers.Wallet;
+    const { citation, root } = await buildSignedCitation(wallet, 1);
+    // Same fact (kaId/triple/leaf/chunkId) but CORRUPTED merkle siblings → verifies
+    // false — and a lying verified:true. The old verdict-cache key omitted siblings,
+    // so this would collide with + poison the honest citation's verdict.
+    const badSiblings: VerifiableCitation = {
+      ...citation,
+      proof: { ...citation.proof, siblings: citation.proof.siblings.map(() => '0x' + '00'.repeat(32)) },
+      checks: { merkle: true, onChain: true, authorSig: true, verified: true },
+    };
+    const asker = makeAsker({
+      remote: new Map([
+        ['peerBad', peerResult([badSiblings])], // processed first
+        ['peerGood', peerResult([citation])],
+      ]),
+      root,
+      author: wallet.address,
+      leafCount: citation.proof.leafCount,
+      kaScope: 1n,
+      askedCgId: 1n,
+    });
+    const res = await run(asker, ['peerBad', 'peerGood']);
+    expect(res.citations).toHaveLength(1);
+    expect(res.citations[0].checks.verified).toBe(true); // the honest verdict survives
+    expect(res.stats.verified).toBe(1);
+  });
+
+  it('verified facts win the citation cap over an earlier peer\'s unverified junk', async () => {
+    const wallet = ethers.Wallet.createRandom() as unknown as ethers.Wallet;
+    const { citation, root } = await buildSignedCitation(wallet, 1);
+    // Five DISTINCT-fact unverified (bad-siblings) citations, sent FIRST, would fill a
+    // cap of 1 under the old first-come logic and starve the one real verified fact.
+    const junk: VerifiableCitation[] = Array.from({ length: 5 }, (_, i) => ({
+      ...citation,
+      triple: { ...citation.triple, object: `"junk-${i}"` },
+      proof: { ...citation.proof, siblings: citation.proof.siblings.map(() => '0x' + '00'.repeat(32)) },
+      checks: { merkle: true, onChain: true, authorSig: true, verified: true },
+    }));
+    const asker = makeAsker({
+      remote: new Map([
+        ['peerJunk', peerResult(junk)],
+        ['peerGood', peerResult([citation])],
+      ]),
+      root,
+      author: wallet.address,
+      leafCount: citation.proof.leafCount,
+      kaScope: 1n,
+      askedCgId: 1n,
+    });
+    const res = await DragMethods.prototype.dragAnswerNetwork.call(asker, {
+      question: 'q',
+      contextGraphId: 'cg',
+      peers: ['peerJunk', 'peerGood'],
+      maxCitations: 1,
+    });
+    expect(res.citations).toHaveLength(1);
+    expect(res.citations[0].checks.verified).toBe(true); // verified fact won the single slot
+  });
+
   it('rejects a SPARQL-injection contextGraphId before it reaches any SPARQL sink', async () => {
     let sinkCalled = false;
     const asker = {

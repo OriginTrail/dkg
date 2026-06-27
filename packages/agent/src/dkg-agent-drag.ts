@@ -508,13 +508,18 @@ export class DragMethods extends DKGAgentBase {
     const citations: VerifiableCitation[] = [];
     const facts: DragFact[] = [];
     const kaIndex = new Map<string, number>();
-    const factIndex = new Map<string, number>(); // factKey -> index into `citations`
     const perNode: DragPerNode[] = [];
     const maxCitations = Math.min(Math.max(args.maxCitations ?? 12, 1), 50);
-    // Verdict cache keyed on the PROOF (not just the fact), so distinct proofs for
-    // the same fact are each verified — a bad proof can't poison an honest one.
+    // Verdict cache keyed on the FULL proof identity (the merkle siblings/content/
+    // leafCount, the on-chain anchor, and the seal ALL change the verdict), so a
+    // peer's bad proof can never collide with — and poison — an honest peer's
+    // verdict for the same fact.
     const verdictCache = new Map<string, CitationChecks>();
     const kaScopeCache = new Map<string, boolean>(); // kaId -> belongs to asked CG?
+    // Dedup by fact, keeping the BEST citation per fact (a verified one always
+    // beats an unverified one). The cap is applied AFTER, verified-first, so one
+    // early peer's unverified junk cannot starve honest verified facts out of it.
+    const byFact = new Map<string, VerifiableCitation>();
     let droppedOffScope = 0;
 
     for (const nr of nodeResults) {
@@ -546,7 +551,7 @@ export class DragMethods extends DKGAgentBase {
             }
           }
 
-          const proofKey = `${c.kaId}|${c.triple.subject}|${c.triple.predicate}|${c.triple.object}|${c.proof.leaf}|${c.proof.chunkId}`;
+          const proofKey = JSON.stringify({ k: c.kaId, t: c.triple, p: c.proof, o: c.onChain, s: c.seal });
           let checks = verdictCache.get(proofKey);
           if (!checks) {
             checks = await verifyVerifiableCitation(c, { chain }).catch(
@@ -565,21 +570,9 @@ export class DragMethods extends DKGAgentBase {
             checks,
           };
           const factKey = `${c.kaId}|${c.triple.subject}|${c.triple.predicate}|${c.triple.object}`;
-          const existingIdx = factIndex.get(factKey);
-          if (existingIdx === undefined) {
-            if (citations.length < maxCitations) {
-              factIndex.set(factKey, citations.length);
-              citations.push(recited);
-              let idx = kaIndex.get(c.kaId);
-              if (idx === undefined) {
-                idx = kaIndex.size + 1;
-                kaIndex.set(c.kaId, idx);
-              }
-              facts.push({ subject: c.triple.subject, predicate: c.triple.predicate, object: c.triple.object, source: idx });
-            }
-          } else if (!citations[existingIdx].checks.verified && checks.verified) {
-            // Upgrade a previously-unverified fact to a verified corroboration.
-            citations[existingIdx] = recited;
+          const existing = byFact.get(factKey);
+          if (!existing || (!existing.checks.verified && checks.verified)) {
+            byFact.set(factKey, recited);
           }
         } catch {
           // Skip a single malformed citation — never let it abort the answer.
@@ -587,6 +580,21 @@ export class DragMethods extends DKGAgentBase {
         }
       }
       perNode.push({ peerId: nr.peerId, factsCited: nr.result.citations.length, verified: nodeVerified });
+    }
+
+    // Verified-first, then truncate to the cap → honest verified facts win the
+    // slot budget over any peer's (deduped) unverified citations.
+    const ranked = [...byFact.values()].sort(
+      (a, b) => Number(b.checks.verified) - Number(a.checks.verified),
+    );
+    for (const c of ranked.slice(0, maxCitations)) {
+      let idx = kaIndex.get(c.kaId);
+      if (idx === undefined) {
+        idx = kaIndex.size + 1;
+        kaIndex.set(c.kaId, idx);
+      }
+      citations.push(c);
+      facts.push({ subject: c.triple.subject, predicate: c.triple.predicate, object: c.triple.object, source: idx });
     }
 
     const verified = citations.filter((c) => c.checks.verified).length;
