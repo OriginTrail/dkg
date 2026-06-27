@@ -33,9 +33,13 @@ export async function synthesizeAnswer(
   if (!facts.length) return null;
   const baseURL = (llm.baseURL ?? 'https://api.openai.com/v1').replace(/\/$/, '');
   const model = llm.model ?? 'gpt-4o-mini';
-  // Strip the fence delimiter from the (attacker-controllable, public-CG) fact
-  // content so a literal cannot close the <verified_facts> block early.
-  const fence = (s: string) => s.replace(/<\/?verified_facts>/gi, '');
+  // Neutralize angle brackets in the (attacker-controllable, public-CG) fact
+  // content so a literal cannot form ANY tag — and thus cannot close the
+  // <verified_facts> fence early. Stripping '<'/'>' outright beats a delimiter
+  // regex, which a split-token ("</veri</verified_facts>fied_facts>") or an
+  // attribute variant ("<verified_facts x>") would slip past. Fidelity loss is
+  // confined to the optional prose; the authoritative facts/citations are untouched.
+  const fence = (s: string) => s.replace(/[<>]/g, '');
   const cap = (s: string) => (s.length > 300 ? s.slice(0, 300) + '…' : s);
   const factLines = facts
     .map((f, i) => `${i + 1}. ${localName(f.subject)} — ${localName(f.predicate)}: ${cap(fence(literal(f.object)))}`)
