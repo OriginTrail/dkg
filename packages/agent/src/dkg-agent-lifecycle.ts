@@ -12,7 +12,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_DRAG_ANSWER, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_DRAG_ANSWER, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST, validateContextGraphId,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
@@ -750,6 +750,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const contextGraphId = req.contextGraphId;
       if (typeof question !== 'string' || !question || typeof contextGraphId !== 'string' || !contextGraphId) {
         return encode({ error: 'dRAG request requires question + contextGraphId' });
+      }
+      // Validate BEFORE isContextGraphPublicOnChain — it reaches getContextGraphOnChainId,
+      // which interpolates the id into a SPARQL IRI. Without this a remote peer could
+      // inject SPARQL via a crafted contextGraphId even for a non-public/garbage id.
+      const idCheck = validateContextGraphId(contextGraphId);
+      if (!idCheck.valid) {
+        return encode({ error: `dRAG: invalid contextGraphId — ${idCheck.reason ?? 'rejected'}` });
       }
       try {
         const isPublic = await this.isContextGraphPublicOnChain(

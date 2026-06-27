@@ -198,6 +198,33 @@ describe('dRAG P3 — trustless aggregation (asker re-verifies, never trusts a p
     expect(res.perNode.find((p) => p.peerId === 'peerGood')?.verified).toBe(1);
   });
 
+  it('rejects a SPARQL-injection contextGraphId before it reaches any SPARQL sink', async () => {
+    let sinkCalled = false;
+    const asker = {
+      peerId: '12D3KooWAsker',
+      getContextGraphOnChainId: async () => {
+        sinkCalled = true;
+        return '1';
+      },
+      discovery: {
+        findNodesServingCG: async () => {
+          sinkCalled = true;
+          return [];
+        },
+      },
+      dragAnswerRemote: async () => peerResult([]),
+      chain: {},
+    } as unknown as DKGAgent;
+    const res = await DragMethods.prototype.dragAnswerNetwork.call(asker, {
+      question: 'q',
+      contextGraphId: 'cg> } INSERT DATA { <urn:x> <urn:y> <urn:z> } #',
+      peers: ['x'],
+    });
+    expect(sinkCalled).toBe(false); // the crafted id never reached getContextGraphOnChainId/findNodesServingCG
+    expect(res.citations).toHaveLength(0);
+    expect(res.answer).toMatch(/invalid context graph id/i);
+  });
+
   it('accepts an honest peer (sanity: a valid in-scope citation verifies true)', async () => {
     const wallet = ethers.Wallet.createRandom() as unknown as ethers.Wallet;
     const { citation, root } = await buildSignedCitation(wallet, 1);

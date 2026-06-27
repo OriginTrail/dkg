@@ -444,6 +444,23 @@ export class DragMethods extends DKGAgentBase {
     },
   ): Promise<DragNetworkAnswerResult> {
     const keywords = extractKeywords(args.question);
+    // Validate the CG id BEFORE it reaches any SPARQL sink (getContextGraphOnChainId
+    // interpolates it into an IRI) — mirror the local path's guard so the network
+    // method is not a SPARQL-injection entry point.
+    const idCheck = validateContextGraphId(args.contextGraphId);
+    if (!idCheck.valid) {
+      return {
+        question: args.question,
+        contextGraphId: args.contextGraphId,
+        scope: 'network',
+        answer: `Invalid context graph id: ${idCheck.reason ?? 'rejected'}.`,
+        llm: false,
+        citations: [],
+        facts: [],
+        perNode: [],
+        stats: { keywords, servingNodes: 0, nodesAnswered: 0, factsCited: 0, verified: 0 },
+      };
+    }
     // Bind the answer to the asked CG: only credit a citation whose KA belongs
     // to THIS on-chain CG — defends the cross-CG scope-swap (a peer could
     // otherwise return a genuinely-verifiable fact drawn from a DIFFERENT KA).
