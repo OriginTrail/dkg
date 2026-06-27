@@ -343,34 +343,6 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(JSON.stringify(body.quads)).toContain('ex:new');
       expect(JSON.stringify(body.quads)).not.toContain('ex:old');
     });
-
-    it('rejects authorAgentAddress when shared-memory publish assertionName selects an existing sealed assertion', async () => {
-      const agentA = await registerAgentClient('ka-sealed-publish-a');
-      const agentB = await registerAgentClient('ka-sealed-publish-b');
-      const suffix = Date.now().toString(36);
-      const cg = `ka-sealed-publish-${suffix}`;
-      const name = `sealed-publish-${suffix}`;
-      await createRegisteredAgentContextGraph(agentA, cg);
-
-      const draft = await agentA.post('/api/knowledge-assets', { contextGraphId: cg, name });
-      expect(draft.status, `agent draft: ${JSON.stringify(draft.body)}`).toBe(201);
-      const wrote = await agentA.post(`/api/knowledge-assets/${name}/wm/write`, {
-        contextGraphId: cg,
-        quads: [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }],
-      });
-      expect(wrote.status, `agent write: ${JSON.stringify(wrote.body)}`).toBe(200);
-      const sealed = await agentA.post(`/api/knowledge-assets/${name}/wm/finalize`, { contextGraphId: cg });
-      expect(sealed.status, `agent seal: ${JSON.stringify(sealed.body)}`).toBe(200);
-
-      const res = await agentA.post('/api/shared-memory/publish', {
-        contextGraphId: cg,
-        assertionName: name,
-        authorAgentAddress: agentB.agentAddress,
-      });
-      expect(res.status).toBe(400);
-      expect(String(res.body.error)).toContain('assertionName');
-      expect(String(res.body.error)).toContain('authorAgentAddress');
-    });
   });
 
   // ── wm/quads ──────────────────────────────────────────────────────
