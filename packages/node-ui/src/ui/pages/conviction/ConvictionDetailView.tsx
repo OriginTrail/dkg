@@ -65,6 +65,12 @@ interface ActionState {
   busy: boolean;
   error: string | null;
   result: { txHash?: string; message: string } | null;
+  /**
+   * W2 — an ambiguous-broadcast warning (e.g. a top-up 504 carrying a txHash): the tx
+   * MAY be on-chain, so we surface it role=alert with the tx + a recheck, NOT a benign
+   * "try again" that would invite a second fund-locking submit.
+   */
+  warning?: { txHash?: string; message: string } | null;
 }
 const IDLE: ActionState = { busy: false, error: null, result: null };
 
@@ -166,13 +172,33 @@ function DetailBody({
   const ownerTitle = ownerIsPrimary ? undefined : ownerOnlyReason;
 
   const runFund = async () => {
-    setFund({ busy: true, error: null, result: null });
+    setFund({ busy: true, error: null, result: null, warning: null });
     try {
       const res = await owner.topUp(accountId, topUp.trim());
       setFund({ busy: false, error: null, result: { txHash: res.txHash, message: `Added ${formatTrac(res.addedTokens)} TRAC.` } });
       setTopUp('');
       refresh();
     } catch (err) {
+      // W2 — a 504 carrying a broadcast txHash means the top-up MAY be on-chain (the
+      // transferFrom already ran). Do NOT say "try again" — a retry would lock a SECOND
+      // top-up. Warn + show the tx + let them recheck. A 504 with NO txHash is a genuine
+      // pre-broadcast outage ("try again" correct), and 400/403/409 are unchanged.
+      if (err instanceof HttpError && err.status === 504) {
+        const txHash = (err.body as { txHash?: string } | undefined)?.txHash;
+        if (txHash) {
+          setFund({
+            busy: false,
+            error: null,
+            result: null,
+            warning: {
+              txHash,
+              message:
+                'Your top-up was submitted but we lost confirmation — it may already be on-chain. Verify on the explorer before adding again; a second top-up would lock additional TRAC.',
+            },
+          });
+          return;
+        }
+      }
       setFund({ busy: false, error: describePcaError(err, { accountId })?.message ?? (err as Error)?.message ?? 'Top-up failed.', result: null });
     }
   };
@@ -311,7 +337,7 @@ function DetailBody({
             {fund.busy ? 'Adding…' : 'Add funds'}
           </button>
         </div>
-        <ActionFeedback state={fund} explorer={explorer} />
+        <ActionFeedback state={fund} explorer={explorer} onRecheck={refresh} />
       </section>
 
       {/* Settlement (permissionless) */}
@@ -500,7 +526,33 @@ function WalletProbeRow({
   );
 }
 
-function ActionFeedback({ state, explorer }: { state: ActionState; explorer: string | null }) {
+function ActionFeedback({
+  state,
+  explorer,
+  onRecheck,
+}: {
+  state: ActionState;
+  explorer: string | null;
+  onRecheck?: () => void;
+}) {
+  if (state.warning) {
+    // W2 — ambiguous broadcast: role=alert, tx + recheck, NOT a benign "try again".
+    const txUrl = explorer && state.warning.txHash ? `${explorer}/tx/${state.warning.txHash}` : undefined;
+    return (
+      <p className="v10-pca-create-warn" data-testid="pca-action-warning" role="alert">
+        {state.warning.message}{' '}
+        {state.warning.txHash &&
+          (txUrl ? (
+            <a href={txUrl} target="_blank" rel="noreferrer">{state.warning.txHash} ↗</a>
+          ) : (
+            <code>{state.warning.txHash}</code>
+          ))}{' '}
+        {onRecheck && (
+          <button type="button" className="v10-pca-card-btn" onClick={onRecheck}>Recheck</button>
+        )}
+      </p>
+    );
+  }
   if (state.error) return <p className="v10-modal-error" role="alert">{state.error}</p>;
   if (!state.result) return null;
   const txUrl = explorer && state.result.txHash ? `${explorer}/tx/${state.result.txHash}` : undefined;
