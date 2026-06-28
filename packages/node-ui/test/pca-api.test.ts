@@ -215,6 +215,22 @@ describe('PCA api helpers (transport shaping)', () => {
     expect(fetchMock.mock.calls[2]![0]).toBe('/api/pca/1');
   });
 
+  // T1 — a GET failure must throw an HttpError that CARRIES the body, so the tab-gate
+  // can tell a transient transport 503 (RPC_* code) from the capability 503. Guards
+  // against a bodyless-HttpError regression.
+  it('fetchPca GET-failure carries the body — transport 503 (RPC_*) ≠ capability 503', async () => {
+    fetchMock.mockResolvedValueOnce(fail(503, { code: 'RPC_ENDPOINTS_EXHAUSTED' }));
+    const transportErr = await fetchPca('0').catch((e) => e);
+    expect(transportErr).toBeInstanceOf(HttpError);
+    expect(isRpcTransportError(transportErr)).toBe(true);
+    expect(isPcaFeatureUnavailable(transportErr)).toBe(false); // transport, NOT capability
+    expect(describePcaError(transportErr)?.message).toContain('temporarily unavailable');
+
+    fetchMock.mockResolvedValueOnce(fail(503, { error: 'FEATURE_UNAVAILABLE' }));
+    const capErr = await fetchPca('0').catch((e) => e);
+    expect(isPcaFeatureUnavailable(capErr)).toBe(true); // capability gate
+  });
+
   it('createPca POSTs { tokens, primaryNode } as JSON with auth', async () => {
     fetchMock.mockResolvedValueOnce(ok({ accountId: '5', committedTokens: '100000.0' }));
     const res = await createPca({ tokens: '100000', primaryNode: '42' });
