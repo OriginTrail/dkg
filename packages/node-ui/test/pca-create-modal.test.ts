@@ -264,6 +264,30 @@ describe('CreatePcaModal', () => {
     await unmount();
   });
 
+  // T3 — the reconcile screen must not falsely claim the marker "survives a refresh"
+  // when storage was blocked (persistNow returned false).
+  it('T3 — reconcile shows "survives a refresh" when the marker was persisted', async () => {
+    usePcaStore.setState({ trackedIds: [], createPending: { ownerEoa: OWNER, submittedAt: 1 }, createPendingPersisted: true });
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Confirm before retrying');
+    expect(container.textContent).toContain('survives a refresh');
+    expect(container.textContent).not.toContain('blocked saving the safety marker');
+    await unmount();
+  });
+
+  it('T3 — reconcile warns LOUDLY when the marker was NOT persisted (storage blocked)', async () => {
+    usePcaStore.setState({ trackedIds: [], createPending: { ownerEoa: OWNER, submittedAt: 1 }, createPendingPersisted: false });
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Confirm before retrying');
+    expect(container.textContent).toContain('blocked saving the safety marker');
+    expect(container.textContent).not.toContain('so this guard survives a refresh');
+    await unmount();
+  });
+
   // S1 — the create gate must fail CLOSED while node status is unknown (loading/failed):
   // no live form/submit, no create, no marker — a financial mutation can't run on
   // unknown eligibility.

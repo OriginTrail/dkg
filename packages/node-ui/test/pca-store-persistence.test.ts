@@ -100,4 +100,25 @@ describe('usePcaStore (dkg-pca persistence — double-mint marker durability)', 
     expect(reloaded.usePcaStore.getState().createPending).toBeNull();
     expect(reloaded.usePcaStore.getState().trackedIds).toContain('7');
   });
+
+  // T3 — when localStorage is unavailable, the marker still lives in memory (the
+  // within-session guard) but createPendingPersisted is FALSE so the reconcile
+  // screen can warn it won't survive a refresh (vs falsely claiming it's saved).
+  it('setCreatePending: storage failure → marker in memory but createPendingPersisted=false (T3)', async () => {
+    const { usePcaStore } = await loadFreshStore();
+    const spy = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new Error('quota');
+    });
+    usePcaStore.getState().setCreatePending({ ownerEoa: '0xabc', submittedAt: 1 });
+    expect(usePcaStore.getState().createPending?.ownerEoa).toBe('0xabc'); // in-memory guard intact
+    expect(usePcaStore.getState().createPendingPersisted).toBe(false); // storage blocked
+    spy.mockRestore();
+  });
+
+  it('setCreatePending: storage OK → createPendingPersisted=true (T3)', async () => {
+    const { usePcaStore } = await loadFreshStore();
+    usePcaStore.getState().setCreatePending({ ownerEoa: '0xabc', submittedAt: 1 });
+    expect(usePcaStore.getState().createPendingPersisted).toBe(true);
+    expect(JSON.parse(localStorage.getItem(PCA_KEY)!).createPending.ownerEoa).toBe('0xabc');
+  });
 });
