@@ -206,6 +206,12 @@ test.describe('Publishing Conviction tab (PCA) — P0', () => {
     // CTA (toolbar button or the no-discount banner's "Get sponsored").
     await page.getByRole('button', { name: /get sponsored|share my wallet/i }).first().click();
     await expect(conviction.getSponsoredPanel).toBeVisible();
+    // Regression guard for fbc88a16d: the panel must NOT false-empty — the edge's
+    // op-wallets load (here: 3 → "Copy all 3"), and "No operational wallets
+    // detected" must be absent once loaded (it was ungated during the in-flight
+    // fetch before the fix).
+    await expect(conviction.getSponsoredPanel.getByText(/Copy all \d+/i)).toBeVisible({ timeout: 10_000 });
+    await expect(conviction.getSponsoredPanel.getByText(/No operational wallets detected/i)).toHaveCount(0);
     await page.screenshot({ path: `${SHOT_DIR}/s6-edge-get-sponsored.png`, fullPage: true });
   });
 });
