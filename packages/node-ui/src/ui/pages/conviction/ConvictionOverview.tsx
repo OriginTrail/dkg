@@ -6,6 +6,8 @@ import { usePcaOverview } from '../../hooks/usePcaOverview.js';
 import { DiscountTierLadder } from '../../components/Pca/index.js';
 import { EmptyState } from '../../components/ContextGraphPrimitives.js';
 import { PcaAccountCard } from './PcaAccountCard.js';
+import { CreatePcaModal } from './CreatePcaModal.js';
+import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 
 type ViewFilter = 'owned' | 'approved';
 
@@ -17,10 +19,9 @@ type ViewFilter = 'owned' | 'approved';
  * set (no enumeration endpoint yet — P4); each card resolves independently so
  * one failure never blanks the grid.
  *
- * Action CTAs whose target screens land in later batches (Create → S2,
- * Approve → S4, Use-for-publishing → S5, Get sponsored → S6) are rendered but
- * disabled until those handlers are wired — the discovery surface itself is the
- * Batch B deliverable.
+ * Create (S2) and Approve-wallets (S4) are wired here (Batch C). CTAs whose
+ * target screens land later — Use-for-publishing (S5/Batch E) and Get-sponsored
+ * (S6/Batch D) — render in a neutral disabled state until then.
  */
 export function ConvictionOverview() {
   const nodeStatus = useAgentsStore((s) => s.nodeStatus) as
@@ -39,6 +40,8 @@ export function ConvictionOverview() {
 
   // Role picks the DEFAULT-selected filter; the user can still switch.
   const [filter, setFilter] = useState<ViewFilter>(role === 'edge' ? 'approved' : 'owned');
+  const [createOpen, setCreateOpen] = useState(false);
+  const [approve, setApprove] = useState<{ accountId: string; mode: 'self' | 'sponsor' } | null>(null);
 
   const owned = useMemo(() => accounts.filter((a) => a.classification === 'owned'), [accounts]);
   const others = useMemo(() => accounts.filter((a) => a.classification !== 'owned'), [accounts]);
@@ -92,11 +95,21 @@ export function ConvictionOverview() {
           </button>
         </div>
         {role === 'edge' ? (
-          <button type="button" className="v10-pca-card-btn primary" disabled title="Coming soon">
+          <button
+            type="button"
+            className="v10-pca-card-btn primary"
+            disabled
+            title="Get sponsored — available shortly"
+          >
             Share my wallet → get sponsored
           </button>
         ) : (
-          <button type="button" className="v10-pca-card-btn primary" disabled title="Coming soon">
+          <button
+            type="button"
+            className="v10-pca-card-btn primary"
+            data-testid="pca-create-btn"
+            onClick={() => setCreateOpen(true)}
+          >
             + Create PCA
           </button>
         )}
@@ -116,6 +129,7 @@ export function ConvictionOverview() {
                 account={account}
                 blockExplorerUrl={blockExplorerUrl}
                 onManage={onManage}
+                onApproveWallets={(id) => setApprove({ accountId: id, mode: 'sponsor' })}
                 onRemove={untrackAccount}
                 onRetry={() => refresh()}
               />
@@ -140,6 +154,21 @@ export function ConvictionOverview() {
         ⓘ No “list my accounts” API yet — this view tracks ids you create or add. Owned vs approved
         is resolved by probing your wallets.
       </p>
+
+      {createOpen && (
+        <CreatePcaModal
+          onClose={() => { setCreateOpen(false); refresh(); }}
+          onApproveOwnWallets={(id) => { setCreateOpen(false); setApprove({ accountId: id, mode: 'self' }); }}
+          onManage={(id) => { setCreateOpen(false); onManage(id); }}
+        />
+      )}
+      {approve && (
+        <ApproveWalletsModal
+          accountId={approve.accountId}
+          initialMode={approve.mode}
+          onClose={() => { setApprove(null); refresh(); }}
+        />
+      )}
     </div>
   );
 }

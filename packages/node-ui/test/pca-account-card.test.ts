@@ -95,8 +95,9 @@ describe('PcaAccountCard', () => {
   });
 
   it('disables "Approve wallets" when the owner is NOT the node primary wallet (§8A)', async () => {
+    const onApproveWallets = vi.fn();
     const enabled = await render(
-      React.createElement(PcaAccountCard, { account: acct({ ownerIsPrimaryWallet: true }) }),
+      React.createElement(PcaAccountCard, { account: acct({ ownerIsPrimaryWallet: true }), onApproveWallets }),
     );
     let approveBtn = Array.from(enabled.container.querySelectorAll('button')).find(
       (b) => b.textContent === 'Approve wallets',
@@ -105,7 +106,7 @@ describe('PcaAccountCard', () => {
     await enabled.unmount();
 
     const disabled = await render(
-      React.createElement(PcaAccountCard, { account: acct({ ownerIsPrimaryWallet: false }) }),
+      React.createElement(PcaAccountCard, { account: acct({ ownerIsPrimaryWallet: false }), onApproveWallets }),
     );
     approveBtn = Array.from(disabled.container.querySelectorAll('button')).find(
       (b) => b.textContent === 'Approve wallets',

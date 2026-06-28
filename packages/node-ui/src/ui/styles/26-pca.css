@@ -404,3 +404,47 @@
 
 /* ----- Settings card line (B3) ----- */
 .v10-pca-settings-line { font-size: 12px; color: var(--text-secondary); line-height: 1.5; margin: 0 0 12px; }
+
+/* ----- S2 Create modal (C1) ----- */
+.v10-pca-modal-box { max-width: 560px; }
+.v10-pca-create-section { margin-bottom: 18px; }
+.v10-pca-create-section + .v10-pca-create-section { border-top: 1px solid var(--border-subtle); padding-top: 16px; }
+.v10-pca-create-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 10px;
+}
+.v10-pca-create-balance { font-size: 11px; color: var(--text-secondary); margin: 6px 0 0; }
+.v10-pca-create-err { color: var(--text-danger); }
+.v10-pca-create-hint { font-size: 11px; color: var(--text-tertiary); margin: 6px 0 0; line-height: 1.45; }
+.v10-pca-create-warn {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-warning);
+  background: var(--amber-dim);
+  border-radius: 6px;
+}
+.v10-pca-create-tx { font-size: 11px; color: var(--text-secondary); margin: 8px 0 0; word-break: break-all; }
+.v10-pca-create-review { display: flex; flex-direction: column; gap: 6px; }
+.v10-pca-create-review > div { display: flex; justify-content: space-between; font-size: 12px; }
+.v10-pca-create-review span { color: var(--text-tertiary); }
+.v10-pca-create-review strong { color: var(--text-primary); }
+.v10-pca-create-owner { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.v10-pca-create-owner-note { font-size: 11px; color: var(--text-tertiary); margin: 6px 0 0; line-height: 1.45; }
+.v10-pca-create-success-stats { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--text-secondary); margin-bottom: 10px; }
+.v10-pca-create-recon { font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
+.v10-pca-create-recon code { word-break: break-all; }
+.v10-pca-create-recon-actions { margin: 8px 0 0; padding-left: 18px; }
+.v10-pca-create-recon-actions li { margin-bottom: 4px; }
+
+/* ----- S4 Approve modal (C2) ----- */
+.v10-pca-approve-checklist { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
+.v10-pca-approve-self-row { display: flex; align-items: center; gap: 8px; }
+.v10-pca-approve-self-row .v10-pca-wallet-row { flex: 1; }
+.v10-pca-approve-counts { font-size: 11px; color: var(--text-secondary); margin: 8px 0; display: flex; align-items: center; gap: 6px; }
+.v10-pca-approve-results { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
+.v10-pca-approve-summary { font-size: 12px; font-weight: 600; color: var(--text-primary); margin: 4px 0 0; }
+.v10-pca-approve-handoff { margin-top: 14px; display: flex; flex-direction: column; gap: 10px; }
