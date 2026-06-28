@@ -178,4 +178,46 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     expect(mocks.pcaAddAgent).toHaveBeenCalledTimes(1);
     await unmount();
   });
+
+  // N5/#9 — AgentAlreadyRegistered disambiguation must only assert a cross-account
+  // CONFLICT (danger) on a POSITIVE not-registered-here probe. A failed probe or an
+  // adapter capability gap is "couldn't verify" — neutral, not a false DANGER
+  // pointing at the wrong fix (deregister elsewhere).
+  async function runAlreadyRegistered(probeImpl: (key?: string) => Promise<unknown>) {
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) => (key ? probeImpl(key) : snap()));
+    mocks.pcaAddAgent.mockRejectedValue(new HttpError(409, 'x', { error: 'AgentAlreadyRegistered' }));
+    const handle = await render(
+      React.createElement(ApproveWalletsModal, { accountId: '7', initialMode: 'sponsor', onClose: vi.fn() }),
+    );
+    await waitForText(handle.container, 'Wallet address(es)');
+    setTextarea(handle.container.querySelector('[data-testid="pca-approve-address"]') as HTMLTextAreaElement, ADDR_A);
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(handle.container.querySelector('[data-testid="pca-approve-submit"]')!);
+    return handle;
+  }
+  const statusOf = (c: HTMLElement, addr: string) =>
+    Array.from(c.querySelectorAll('.v10-pca-wallet-row'))
+      .find((r) => r.getAttribute('aria-label')?.startsWith(addr))!
+      .querySelector('.v10-pca-wallet-status')!;
+
+  it('AgentAlreadyRegistered + probe FAILS → neutral "unverified", NOT a false conflict', async () => {
+    const { container, unmount } = await runAlreadyRegistered(async () => {
+      throw new Error('probe down');
+    });
+    await waitForText(container, 'couldn’t verify');
+    const status = statusOf(container, ADDR_A);
+    expect(status.getAttribute('data-tone')).toBe('neutral');
+    expect(status.textContent?.toLowerCase()).not.toContain('another conviction account');
+    await unmount();
+  });
+
+  it('AgentAlreadyRegistered + adapter capability gap → neutral "unverified", NOT a false conflict', async () => {
+    const { container, unmount } = await runAlreadyRegistered(async (key) => ({
+      ...snap(),
+      probedKey: { key, registered: undefined, adapterSupported: false },
+    }));
+    await waitForText(container, 'couldn’t verify');
+    expect(statusOf(container, ADDR_A).getAttribute('data-tone')).toBe('neutral');
+    await unmount();
+  });
 });
