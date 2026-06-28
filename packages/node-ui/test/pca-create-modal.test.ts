@@ -263,4 +263,70 @@ describe('CreatePcaModal', () => {
     expect(container.querySelector('[data-testid="pca-create-tokens"]')).toBeNull();
     await unmount();
   });
+
+  // S1 — the create gate must fail CLOSED while node status is unknown (loading/failed):
+  // no live form/submit, no create, no marker — a financial mutation can't run on
+  // unknown eligibility.
+  it('S1 — null status fails CLOSED: checking state, no submit, no create, no marker', async () => {
+    useAgentsStore.setState({ nodeStatus: null });
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Checking node eligibility');
+    expect(container.querySelector('[data-testid="pca-create-submit"]')).toBeNull();
+    expect(container.querySelector('[data-testid="pca-create-tokens"]')).toBeNull();
+    expect(mocks.createPca).not.toHaveBeenCalled();
+    expect(usePcaStore.getState().createPending).toBeNull();
+    await unmount();
+  });
+
+  // S1/R1 — a durable create-pending marker must still surface on a null-status reload
+  // (reconcile wins over the checking state).
+  it('S1 — a create-pending marker surfaces reconcile even while status is unknown', async () => {
+    useAgentsStore.setState({ nodeStatus: null });
+    usePcaStore.setState({ trackedIds: [], createPending: { ownerEoa: OWNER, submittedAt: 1, txHash: '0xbeef' } });
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Confirm before retrying');
+    expect(container.textContent).toContain('0xbeef');
+    await unmount();
+  });
+
+  it('S1 — delayed status → edge shows the sponsorship gate, never a live submit', async () => {
+    useAgentsStore.setState({ nodeStatus: null });
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Checking node eligibility');
+    await act(async () => {
+      useAgentsStore.setState({ nodeStatus: { nodeRole: 'edge', hasIdentity: false } });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await waitForText(container, 'requires a staked core-node identity');
+    expect(container.querySelector('[data-testid="pca-create-submit"]')).toBeNull();
+    await unmount();
+  });
+
+  // Over-correction regression guard: a resolved CORE node must enable the form + create.
+  it('S1 — delayed status → core enables the form and allows create', async () => {
+    mocks.createPca.mockResolvedValue({ accountId: '7', txHash: '0xabc', committedTokens: '100000.0' });
+    mocks.fetchPca.mockResolvedValue(snap({ discountBps: 3000 }));
+    useAgentsStore.setState({ nodeStatus: null });
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Checking node eligibility');
+    await act(async () => {
+      useAgentsStore.setState({ nodeStatus: { nodeRole: 'core', hasIdentity: true, identityId: '42', blockExplorerUrl: null } });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await waitForText(container, 'Commit amount (TRAC)');
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-create-submit"]')!);
+    await waitForText(container, 'PCA #7 created');
+    expect(mocks.createPca).toHaveBeenCalled();
+    await unmount();
+  });
 });
