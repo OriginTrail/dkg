@@ -51,7 +51,7 @@ export function PcaAccountCard({
   // --- Per-card error states ---
   if (notFound) {
     return (
-      <div className="card v10-pca-card" data-state="not-found" data-account={accountId}>
+      <div className="card v10-pca-card" data-state="not-found" data-account={accountId} data-testid="pca-account-card">
         <div className="card-body v10-pca-card-error">
           <p>PCA #{accountId} no longer exists on-chain.</p>
           {onRemove && (
@@ -65,7 +65,7 @@ export function PcaAccountCard({
   }
   if (!snapshot) {
     return (
-      <div className="card v10-pca-card" data-state="error" data-account={accountId}>
+      <div className="card v10-pca-card" data-state="error" data-account={accountId} data-testid="pca-account-card">
         <div className="card-body v10-pca-card-error">
           <p>Couldn’t load PCA #{accountId}.</p>
           {onRetry && (
@@ -117,7 +117,7 @@ export function PcaAccountCard({
   if (classification === 'owned') {
     const selfCovers = account.approvedCount > 0;
     return (
-      <div className="card v10-pca-card" data-state="owned" data-account={accountId}>
+      <div className="card v10-pca-card" data-state="owned" data-account={accountId} data-testid="pca-account-card">
         <div className="card-body">
           {titleBand}
           <StatStrip
@@ -175,7 +175,7 @@ export function PcaAccountCard({
   const allApproved = account.walletCount > 0 && account.approvedCount === account.walletCount;
   const firstUnapproved = account.walletProbes.find((p) => p.registered !== true)?.wallet;
   return (
-    <div className="card v10-pca-card" data-state="approved" data-account={accountId}>
+    <div className="card v10-pca-card" data-state="approved" data-account={accountId} data-testid="pca-account-card">
       <div className="card-body">
         <div className="v10-pca-card-title">
           <span className="v10-pca-card-id">PCA #{accountId}</span>

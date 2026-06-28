@@ -47,7 +47,7 @@ export function ConvictionOverview() {
   const visible = filter === 'owned' ? owned : others;
 
   return (
-    <div className="v10-pca-overview">
+    <div className="v10-pca-overview" data-testid="pca-landing">
       <header className="v10-pca-overview-head">
         <div className="v10-pca-overview-titlerow">
           <h2 className="v10-pca-overview-title">Publishing Conviction</h2>
@@ -210,6 +210,7 @@ function TrackByIdDisclosure({ onTrack }: { onTrack: (id: string) => void }) {
           <input
             type="text"
             className="v10-form-input"
+            data-testid="pca-track-input"
             value={value}
             onChange={(e) => setValue(e.target.value)}
             placeholder="Account id (e.g. 7)"
@@ -218,7 +219,7 @@ function TrackByIdDisclosure({ onTrack }: { onTrack: (id: string) => void }) {
               if (e.key === 'Enter') submit();
             }}
           />
-          <button type="button" className="v10-pca-card-btn primary" onClick={submit}>
+          <button type="button" className="v10-pca-card-btn primary" data-testid="pca-track-submit" onClick={submit}>
             Track
           </button>
           {error && (

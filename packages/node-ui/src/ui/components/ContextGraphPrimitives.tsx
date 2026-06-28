@@ -9,6 +9,8 @@ type EmptyStateAction = {
   label: string;
   onClick: () => void;
   variant?: 'primary' | 'secondary';
+  /** Optional stable e2e anchor for the action button. */
+  testId?: string;
 };
 
 const EMPTY_STATE_ACCENTS: Record<EmptyStateTone, string> = {
@@ -75,6 +77,7 @@ export function EmptyState({
                 type="button"
                 className={`v10-empty-state-action ${action.variant ?? 'secondary'}`}
                 onClick={action.onClick}
+                data-testid={action.testId}
               >
                 {action.label}
               </button>

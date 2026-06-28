@@ -118,6 +118,7 @@ export function HealthChip({
   return (
     <span
       className={classes}
+      data-testid="pca-health-chip"
       data-health={state}
       title={meta.hint}
     >

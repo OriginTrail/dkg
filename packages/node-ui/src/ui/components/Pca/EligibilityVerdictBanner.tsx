@@ -101,6 +101,7 @@ export function EligibilityVerdictBanner({
     return (
       <span
         className={['v10-pca-verdict-chip', meta.toneClass, className].filter(Boolean).join(' ')}
+        data-testid="pca-eligibility-chip"
         data-verdict={verdict}
       >
         <span className="v10-pca-verdict-chip-label" role={role} aria-live={ariaLive}>
@@ -150,6 +151,7 @@ export function EligibilityVerdictBanner({
   return (
     <div
       className={['v10-pca-verdict-banner', meta.toneClass, className].filter(Boolean).join(' ')}
+      data-testid="pca-eligibility-verdict"
       data-verdict={verdict}
       role={role}
       aria-live={ariaLive}
