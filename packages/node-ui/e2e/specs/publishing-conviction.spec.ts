@@ -97,34 +97,52 @@ test.describe('Publishing Conviction tab (PCA) — P0', () => {
   test.describe('create flow (S2)', () => {
     test.describe.configure({ mode: 'serial' });
 
-    test.fixme('create modal opens with tokens + primary-node fields; submit guarded', async ({ conviction }) => {
+    // READ-ONLY: opens the modal + inspects fields, NEVER submits → safe on the
+    // live testnet core (runs locally + CI).
+    test('create modal opens with tokens + primary-node fields (read-only, no submit)', async ({ conviction }) => {
       await conviction.open();
       await conviction.createBtn.click();
       await expect(conviction.createModal).toBeVisible();
       await expect(conviction.createTokensInput).toBeVisible();
       await expect(conviction.createPrimaryNode).toBeVisible(); // required (GitBook doc bug: it was omitted)
+      // do NOT submit — submitting commits TRAC (see the @mutating test below)
     });
 
-    test.fixme('INVARIANT 11: success card leads with "0/100 wallets approved — discounts nothing yet"', async ({ conviction }) => {
+    // @mutating — commits TRAC on-chain. Runs ONLY on the CI devnet (auto-staked,
+    // free); the local testnet-core config grepInverts /@mutating/ so it never
+    // spends on the real network. CI is its first verification (devnet can't boot
+    // on this Windows box).
+    test('INVARIANT 11: a fresh PCA leads with "0/100 wallets approved" + self-approve CTA @mutating', async ({ conviction }) => {
       // A fresh PCA grants ZERO self-discount until the owner approves its own
       // wallets (agentToAccountId[owner]==0 at mint). The success state must NOT
       // be a generic "Done — discounted" and MUST surface the approve-own-wallets CTA.
       await conviction.open();
+      await conviction.createBtn.click();
+      await expect(conviction.createModal).toBeVisible();
+      await conviction.createTokensInput.fill('50000'); // primaryNode auto-prefills from identityId
+      await conviction.createSubmit.click();
+      await expect(conviction.createSuccess).toBeVisible({ timeout: 120_000 }); // on-chain createAccount
       await expect(conviction.createSuccess).toContainText(/0\s*\/\s*100 wallets approved/i);
       await expect(conviction.approveOwnWalletsCta).toBeVisible();
     });
   });
 
-  // ── S4 approve wallets (MUTATING) — Batch C ────────────────────────────────
+  // ── S4 approve wallets (@mutating) — Batch C; CI devnet only ───────────────
 
-  test.fixme('S4: approve a publishing wallet (the OPERATIONAL wallet, not admin/peerId)', async ({ conviction }) => {
+  test('S4 @mutating: self-approve registers the operational wallet (msg.sender) and lists it', async ({ conviction }) => {
     // INVARIANT 1: what gets registered is the publish-tx msg.sender (op wallet),
     // copy says "approved publishing wallet". INVARIANT 5: one wallet ↔ one PCA.
+    // Self-contained: create a PCA, then self-approve from the success CTA.
     await conviction.open();
-    await conviction.approveModal.waitFor({ state: 'visible' });
-    await conviction.approveAddressInput.fill('0x...');
+    await conviction.createBtn.click();
+    await expect(conviction.createModal).toBeVisible();
+    await conviction.createTokensInput.fill('50000');
+    await conviction.createSubmit.click();
+    await expect(conviction.approveOwnWalletsCta).toBeVisible({ timeout: 120_000 });
+    await conviction.approveOwnWalletsCta.click();
+    await expect(conviction.approveModal).toBeVisible(); // self mode, prefilled checklist
     await conviction.approveSubmit.click();
-    await expect(conviction.agentRows.first()).toBeVisible(); // B3 live list
+    await expect(conviction.agentRows.first()).toBeVisible({ timeout: 120_000 }); // B3 live list
   });
 
   // ── S5 eligibility / fail-open-can-fail-closed (read-only; a11y) — Batch E ──
