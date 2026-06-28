@@ -36,8 +36,10 @@ export class PublishingConvictionPage {
   readonly createSubmit: Locator;
   readonly createSuccess: Locator;
   readonly approveOwnWalletsCta: Locator;
+  readonly detail: Locator;
   readonly agentList: Locator;
   readonly agentRows: Locator;
+  readonly actionResult: Locator;
   readonly approveModal: Locator;
   readonly approveAddressInput: Locator;
   readonly approveSubmit: Locator;
@@ -66,8 +68,10 @@ export class PublishingConvictionPage {
     this.createSubmit = page.locator(sel.conviction.createSubmit);
     this.createSuccess = page.locator(sel.conviction.createSuccess);
     this.approveOwnWalletsCta = page.locator(sel.conviction.approveOwnWalletsCta);
+    this.detail = page.locator(sel.conviction.detail);
     this.agentList = page.locator(sel.conviction.agentList);
     this.agentRows = page.locator(sel.conviction.agentRow);
+    this.actionResult = page.locator(sel.conviction.actionResult);
     this.approveModal = page.locator(sel.conviction.approveModal);
     this.approveAddressInput = page.locator(sel.conviction.approveAddressInput);
     this.approveSubmit = page.locator(sel.conviction.approveSubmit);
