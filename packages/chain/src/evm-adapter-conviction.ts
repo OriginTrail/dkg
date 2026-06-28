@@ -11,7 +11,12 @@
 
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers, Contract } from 'ethers';
-import type { TxResult, V10PublishingConvictionAccountInfo, ConvictionReader } from './chain-adapter.js';
+import type {
+  TxResult,
+  V10PublishingConvictionAccountInfo,
+  NodePublishingConvictionAccount,
+  ConvictionReader,
+} from './chain-adapter.js';
 import { PcaUnavailableError } from './pca-errors.js';
 import { enrichEvmError, getPcaLogicInterface } from './evm-adapter-errors.js';
 
@@ -379,5 +384,120 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       if (err?.code === 'CALL_EXCEPTION') return false;
       throw err;
     }
+  }
+
+  /**
+   * OT-RFC-51 designated primary node for a PCA. Reads index 9 of the
+   * `accounts(uint256)` tuple
+   * `(committedTRAC, createdAtEpoch, expiresAtEpoch, createdAtTimestamp,
+   *   expiresAtTimestamp, lockDurationEpochs, discountBps, lastSettledWindow,
+   *   fullySwept, primaryNode, lastPrimaryNodeChangeEpoch)`.
+   * `getAccountInfo` (used by {@link getPublishingConvictionAccountInfo}) does
+   * NOT carry `primaryNode`, so this is a separate read. Returns `0n` when
+   * unset, the account is missing, or the NFT is undeployed.
+   */
+  /**
+   * Addresses + numeric chain id a browser wallet needs to build owner-signed
+   * PCA txs client-side (wallet-connect path). The node's RPC URL is
+   * deliberately NOT included — the browser signs/reads over the user's own
+   * wallet provider, so the node's (possibly tenant-secret) RPC never leaks.
+   */
+  async getPcaContractContext(): Promise<{
+    chainId: number;
+    hubAddress: string;
+    nftAddress: string;
+    tokenAddress: string;
+  }> {
+    await this.init();
+    const nft = this.requireConvictionNFT();
+    const nftAddress = ethers.getAddress(await nft.getAddress());
+    if (!this.contracts.token) {
+      throw new Error('Token contract not available on this chain');
+    }
+    const tokenAddress = ethers.getAddress(await this.contracts.token.getAddress());
+    const chainId = Number(await this.getEvmChainId());
+    return {
+      chainId,
+      hubAddress: ethers.getAddress(this.hubAddress),
+      nftAddress,
+      tokenAddress,
+    };
+  }
+
+  async getConvictionPrimaryNode(accountId: bigint): Promise<bigint> {
+    await this.init();
+    if (!this.contracts.dkgPublishingConvictionNFT) return 0n;
+    if (accountId <= 0n) return 0n;
+    try {
+      const tuple = await this.readContract(
+        this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.accounts', 'accounts', accountId,
+      );
+      return BigInt(tuple[9]);
+    } catch (err: any) {
+      if (err?.code === 'CALL_EXCEPTION') return 0n;
+      throw err;
+    }
+  }
+
+  /**
+   * Enumerate the PCAs owned by the bound operational wallet via the NFT's
+   * ERC721Enumerable surface (`balanceOf` + `tokenOfOwnerByIndex`), annotating
+   * each with its OT-RFC-51 `primaryNode` association and whether it funds this
+   * node's own identity. These are exactly the accounts this wallet can manage
+   * (owner-gated writes). Accounts owned by a different wallet that nonetheless
+   * fund this node are out of scope here — load those by id via
+   * {@link getPublishingConvictionAccountInfo}.
+   */
+  async listNodePublishingConvictionAccounts(): Promise<NodePublishingConvictionAccount[]> {
+    await this.init();
+    if (!this.contracts.dkgPublishingConvictionNFT) throw new PcaUnavailableError();
+    const nft = this.requireConvictionNFT();
+    const owner = this.signer.address;
+    // 0n when this node has no on-chain profile yet — then no PCA "funds this node".
+    const myIdentity = await this.getIdentityId();
+
+    const balance: bigint = BigInt(await this.readContract(
+      nft, 'pcaNFT.balanceOf', 'balanceOf', owner,
+    ));
+
+    const out: NodePublishingConvictionAccount[] = [];
+    for (let i = 0n; i < balance; i += 1n) {
+      const accountId: bigint = BigInt(await this.readContract(
+        nft, 'pcaNFT.tokenOfOwnerByIndex', 'tokenOfOwnerByIndex', owner, i,
+      ));
+      const info = await this.getPublishingConvictionAccountInfo(accountId);
+      if (!info) continue; // raced burn / inconsistent enumeration — skip
+      const primaryNode = await this.getConvictionPrimaryNode(accountId);
+      out.push({
+        accountId,
+        primaryNode,
+        fundsThisNode: myIdentity !== 0n && primaryNode === myIdentity,
+        info,
+      });
+    }
+    // Surface the PCAs that fund this node first.
+    out.sort((a, b) => Number(b.fundsThisNode) - Number(a.fundsThisNode));
+    return out;
+  }
+
+  /**
+   * OT-RFC-51 owner-gated re-designation of a PCA's primary node. Moves FUTURE
+   * epochs' publishing allocation from the old node to `primaryNode`. The
+   * on-chain rate-limit (at most once per epoch) and the owner check surface as
+   * reverts that `pcaWrite` → the daemon classifier maps to 409 / 403.
+   */
+  async setPublishingConvictionPrimaryNode(accountId: bigint, primaryNode: bigint): Promise<TxResult> {
+    await this.init();
+    return this.pcaWrite(async () => {
+      const nft = this.requireConvictionNFT();
+      const receipt = await this.sendContractTransaction(
+        nft,
+        'setPrimaryNode',
+        [accountId, primaryNode],
+        this.signer,
+        'set publishing conviction primary node',
+      );
+      return { hash: receipt.hash, blockNumber: receipt.blockNumber, txIndex: receipt.index, success: receipt.status === 1 };
+    });
   }
 }

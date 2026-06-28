@@ -66,6 +66,13 @@ const OBSERVABILITY_ICON = (
   </svg>
 );
 
+const ADMIN_ICON = (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+    <path d="M9 12l2 2 4-4" />
+  </svg>
+);
+
 export function Header() {
   const { theme, setTheme, leftCollapsed, toggleLeft, rightCollapsed, toggleRight } = useLayoutStore();
   const nodeStatus = useAgentsStore((s) => s.nodeStatus);
@@ -137,6 +144,14 @@ export function Header() {
           title="Observability"
         >
           {OBSERVABILITY_ICON}
+        </button>
+
+        <button
+          className="v10-header-icon-btn"
+          onClick={() => openTab({ id: 'admin', label: 'Admin', closable: true })}
+          title="Admin — keys, wallets, PCAs"
+        >
+          {ADMIN_ICON}
         </button>
 
         <button

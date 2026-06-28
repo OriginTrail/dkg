@@ -966,10 +966,105 @@ export class ApiClient {
     agentCount: number;
     lastSettledWindow: number;
     fullySwept: boolean;
+    // OT-RFC-51 node association (string uint72; '0' = unset).
+    primaryNode?: string;
     probedKey?: { key: string; registered: boolean; adapterSupported?: boolean; error?: string };
   }> {
     const qs = probeKey ? `?key=${encodeURIComponent(probeKey)}` : '';
     return this.get(`/api/pca/${encodeURIComponent(accountId)}${qs}`);
+  }
+
+  /**
+   * List the PCAs owned by this node's operational wallet, each annotated with
+   * its OT-RFC-51 `primaryNode` association and whether it funds this node.
+   */
+  async listPcas(): Promise<{
+    accounts: Array<{
+      accountId: string;
+      owner: string;
+      committedTRAC: string;
+      committedTRACTrac: string;
+      baseEpochAllowance: string;
+      topUpBuffer: string;
+      topUpBufferTrac: string;
+      createdAtEpoch: number;
+      expiresAtEpoch: number;
+      createdAtTimestamp: number;
+      expiresAtTimestamp: number;
+      discountBps: number;
+      agentCount: number;
+      lastSettledWindow: number;
+      fullySwept: boolean;
+      primaryNode?: string;
+      fundsThisNode?: boolean;
+    }>;
+  }> {
+    return this.get('/api/pca');
+  }
+
+  /** OT-RFC-51 owner-gated re-designation of the node a PCA funds. */
+  async setPcaPrimaryNode(accountId: string, node: string): Promise<{
+    accountId: string;
+    primaryNode: string;
+    txHash: string;
+    blockNumber: number;
+  }> {
+    return this.post(`/api/pca/${encodeURIComponent(accountId)}/primary-node`, { node });
+  }
+
+  // ─── Node operational wallets (Identity operational keys) ────────────
+
+  /** List the node's local operational wallets (addresses only) + on-chain status. */
+  async listOperationalWallets(): Promise<{
+    identityId: string;
+    hasProfile: boolean;
+    adminKeyConfigured: boolean;
+    canManage: boolean;
+    wallets: Array<{
+      address: string;
+      isAdmin: boolean;
+      isPrimary: boolean;
+      registered: boolean | null;
+    }>;
+  }> {
+    return this.get('/api/operational-wallets');
+  }
+
+  /** Authorize an address as an operational key on the node identity (admin-signed). */
+  async addOperationalWallet(address: string): Promise<{
+    address: string;
+    added: boolean;
+    txHash: string;
+    blockNumber: number;
+  }> {
+    return this.post('/api/operational-wallets', { address });
+  }
+
+  /** De-authorize an operational key (admin-signed); refuses the primary wallet. */
+  async removeOperationalWallet(address: string): Promise<{
+    address: string;
+    removed: boolean;
+    txHash: string;
+    blockNumber: number;
+  }> {
+    return this.del(`/api/operational-wallets/${encodeURIComponent(address)}`);
+  }
+
+  /** List a local agent's workspace encryption keys (public fields only). */
+  async getAgentEncryptionKeys(address: string): Promise<{
+    agentAddress: string;
+    agentDid: string;
+    keys: Array<{
+      encryptionKeyId: string;
+      encryptionKeyAlgorithm: string;
+      publicEncryptionKey: string;
+      encryptionKeyProof: string;
+      createdAt: string;
+      revokedAt: string | null;
+      status: 'active' | 'revoked';
+    }>;
+  }> {
+    return this.get(`/api/agent/${encodeURIComponent(address)}/encryption-keys`);
   }
 
   async publisherEnqueue(request: {

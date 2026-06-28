@@ -448,7 +448,7 @@ create_node_config() {
     # host must pin DISTINCT ports or the second collides ("Address already in
     # use"). Give each node its own (7900 + node_num), clear of the Dockerized
     # external Oxigraph on 7878/7879 (nodes 5-6) and a real node's 7878.
-    store_block="\"store\": { \"backend\": \"oxigraph-server\", \"options\": { \"port\": $((7900 + node_num)) } },"
+    store_block="\"store\": { \"backend\": \"oxigraph-server\", \"options\": { \"port\": $(( ${DEVNET_OXIGRAPH_BASE:-7900} + node_num )) } },"
   elif [ "$node_num" -ge 3 ] && [ "$node_num" -le 4 ]; then
     if [ "$BLAZEGRAPH_AVAILABLE" = true ]; then
       store_block="\"store\": { \"backend\": \"blazegraph\", \"options\": { \"url\": \"http://127.0.0.1:${BLAZEGRAPH_PORT}/bigdata/namespace/node${node_num}/sparql\" } },"

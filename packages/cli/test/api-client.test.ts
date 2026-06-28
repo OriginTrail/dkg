@@ -551,6 +551,70 @@ describe('ApiClient', () => {
       await expect(client.shutdown()).resolves.toBeUndefined();
     });
   });
+
+  describe('Admin: operational wallets + PCA list/primary-node + agent keys', () => {
+    it('listOperationalWallets() GETs /api/operational-wallets', async () => {
+      const body = { identityId: '5', hasProfile: true, adminKeyConfigured: true, canManage: true, wallets: [] };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+      const result = await client.listOperationalWallets();
+      expect(result).toEqual(body);
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/operational-wallets`);
+      expect(calls[0].opts.method ?? 'GET').toBe('GET');
+    });
+
+    it('addOperationalWallet() POSTs the address', async () => {
+      const body = { address: '0x' + '1'.repeat(40), added: true, txHash: '0xabc', blockNumber: 1 };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+      const result = await client.addOperationalWallet('0x' + '1'.repeat(40));
+      expect(result).toEqual(body);
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/operational-wallets`);
+      expect(calls[0].opts.method).toBe('POST');
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({ address: '0x' + '1'.repeat(40) });
+    });
+
+    it('removeOperationalWallet() DELETEs the address route', async () => {
+      const addr = '0x' + '2'.repeat(40);
+      const body = { address: addr, removed: true, txHash: '0xdef', blockNumber: 2 };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+      const result = await client.removeOperationalWallet(addr);
+      expect(result).toEqual(body);
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/operational-wallets/${addr}`);
+      expect(calls[0].opts.method).toBe('DELETE');
+    });
+
+    it('listPcas() GETs /api/pca', async () => {
+      const body = { accounts: [] };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+      const result = await client.listPcas();
+      expect(result).toEqual(body);
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/pca`);
+    });
+
+    it('setPcaPrimaryNode() POSTs { node } to the primary-node route', async () => {
+      const body = { accountId: '7', primaryNode: '42', txHash: '0xabc', blockNumber: 3 };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+      const result = await client.setPcaPrimaryNode('7', '42');
+      expect(result).toEqual(body);
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/pca/7/primary-node`);
+      expect(calls[0].opts.method).toBe('POST');
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({ node: '42' });
+    });
+
+    it('getAgentEncryptionKeys() GETs the agent keys route', async () => {
+      const addr = '0x' + 'a'.repeat(40);
+      const body = { agentAddress: addr, agentDid: `did:dkg:agent:${addr}`, keys: [] };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+      const result = await client.getAgentEncryptionKeys(addr);
+      expect(result).toEqual(body);
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/agent/${addr}/encryption-keys`);
+    });
+  });
 });
 
 describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', () => {

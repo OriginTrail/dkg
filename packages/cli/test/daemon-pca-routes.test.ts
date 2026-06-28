@@ -19,7 +19,13 @@ function fakeReq(method: string, path: string, body?: unknown) {
   return req;
 }
 
-function runCtx(method: string, rawPath: string, agent: any, body?: unknown) {
+function runCtx(
+  method: string,
+  rawPath: string,
+  agent: any,
+  body?: unknown,
+  auth?: { authEnabled?: boolean; requestToken?: string; validTokens?: Set<string> },
+) {
   const res = fakeRes();
   // Mirror handle-request.ts: route on url.pathname, query lives on url.
   const url = new URL(`http://127.0.0.1${rawPath}`);
@@ -29,6 +35,15 @@ function runCtx(method: string, rawPath: string, agent: any, body?: unknown) {
     agent,
     path: url.pathname,
     url,
+    // opWallets is read at handler entry to compute PCA ownership; an empty
+    // pool is fine for these tests (no looked-up PCA is "owned by this node").
+    opWallets: { wallets: [] },
+    // Default: auth disabled → isNodeAdminCaller short-circuits true, so the
+    // existing route-logic tests below exercise the handler without an admin
+    // token. The node-admin gating itself is covered by its own describe block.
+    config: { auth: { enabled: auth?.authEnabled ?? false } },
+    requestToken: auth?.requestToken,
+    validTokens: auth?.validTokens ?? new Set<string>(),
   } as unknown as RequestContext;
   return { res, done: handlePcaRoutes(ctx) };
 }
@@ -574,5 +589,96 @@ describe('daemon /api/pca V10 caller contract', () => {
     const probe = JSON.parse(res.body).probedKey;
     expect(probe.registered).toBe(true);
     expect(probe).not.toHaveProperty('authorized');
+  });
+});
+
+describe('PCA write routes — node-admin caller gating', () => {
+  const ADMIN_TOKEN = 'node-admin-token';
+  const AGENT_TOKEN = 'dkg_at_agent';
+
+  // Resolves AGENT_TOKEN to an agent address, ADMIN_TOKEN (and anything else) to undefined.
+  const gateAgent = (extra: Record<string, any> = {}) => ({
+    resolveAgentByToken: (tok: string) => (tok === AGENT_TOKEN ? '0x' + 'a'.repeat(40) : undefined),
+    createPublishingConvictionAccount: async () => ({ accountId: 1n, hash: '0x', blockNumber: 1, success: true }),
+    setPublishingConvictionPrimaryNode: async () => ({ hash: '0x', blockNumber: 1, success: true }),
+    ...extra,
+  });
+
+  it('rejects an agent-scoped token with 403 (create)', async () => {
+    const { res, done } = runCtx('POST', '/api/pca', gateAgent(), { tokens: '100', primaryNode: '42' }, {
+      authEnabled: true,
+      requestToken: AGENT_TOKEN,
+      validTokens: new Set([AGENT_TOKEN]),
+    });
+    await done;
+    expect(res.statusCode).toBe(403);
+    expect(JSON.parse(res.body).error).toMatch(/admin token/i);
+  });
+
+  it('rejects an agent-scoped token with 403 (set primary-node)', async () => {
+    const { res, done } = runCtx('POST', '/api/pca/7/primary-node', gateAgent(), { node: '42' }, {
+      authEnabled: true,
+      requestToken: AGENT_TOKEN,
+      validTokens: new Set([AGENT_TOKEN]),
+    });
+    await done;
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('allows a node-admin token (create)', async () => {
+    const { res, done } = runCtx('POST', '/api/pca', gateAgent(), { tokens: '100', primaryNode: '42' }, {
+      authEnabled: true,
+      requestToken: ADMIN_TOKEN,
+      validTokens: new Set([ADMIN_TOKEN]),
+    });
+    await done;
+    expect(res.statusCode).toBe(200);
+  });
+
+  it('does NOT gate the permissionless settle route', async () => {
+    const agent = gateAgent({ settlePublishingConvictionAccount: async () => ({ hash: '0x', blockNumber: 1, success: true }) });
+    const { res, done } = runCtx('POST', '/api/pca/7/settle', agent, undefined, {
+      authEnabled: true,
+      requestToken: AGENT_TOKEN,
+      validTokens: new Set([AGENT_TOKEN]),
+    });
+    await done;
+    expect(res.statusCode).toBe(200);
+  });
+});
+
+describe('GET /api/pca/contracts — wallet-connect address context', () => {
+  it('returns chainId + nft/token/hub addresses', async () => {
+    const agent = {
+      getPcaContractContext: async () => ({
+        chainId: 31337,
+        hubAddress: '0x' + '1'.repeat(40),
+        nftAddress: '0x' + '2'.repeat(40),
+        tokenAddress: '0x' + '3'.repeat(40),
+      }),
+    };
+    const { res, done } = runCtx('GET', '/api/pca/contracts', agent);
+    await done;
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({
+      chainId: 31337,
+      hubAddress: '0x' + '1'.repeat(40),
+      nftAddress: '0x' + '2'.repeat(40),
+      tokenAddress: '0x' + '3'.repeat(40),
+    });
+  });
+
+  it('503 when the chain adapter has no surface', async () => {
+    const { res, done } = runCtx('GET', '/api/pca/contracts', { getPcaContractContext: async () => null });
+    await done;
+    expect(res.statusCode).toBe(503);
+  });
+
+  it('is NOT parsed as an accountId by the :id GET (ordering guard)', async () => {
+    // If the /:id GET matched first, "contracts" → parseAccountId → 400.
+    const agent = { getPcaContractContext: async () => ({ chainId: 1, hubAddress: '0x', nftAddress: '0x', tokenAddress: '0x' }) };
+    const { res, done } = runCtx('GET', '/api/pca/contracts', agent);
+    await done;
+    expect(res.statusCode).not.toBe(400);
   });
 });

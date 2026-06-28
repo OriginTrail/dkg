@@ -95,7 +95,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type NodePublishingConvictionAccount } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -1516,6 +1516,57 @@ export class AgentRegistryMethods extends DKGAgentBase {
   ): Promise<V10PublishingConvictionAccountInfo | null> {
     if (typeof this.chain.getPublishingConvictionAccountInfo !== 'function') return null;
     return this.chain.getPublishingConvictionAccountInfo(accountId);
+  }
+
+  /** OT-RFC-51 designated primary node for a PCA; `null` = no chain surface, `0n` = unset. */
+  async getConvictionPrimaryNode(this: DKGAgent, accountId: bigint): Promise<bigint | null> {
+    if (typeof this.chain.getConvictionPrimaryNode !== 'function') return null;
+    return this.chain.getConvictionPrimaryNode(accountId);
+  }
+
+  /** Addresses + chainId for the browser wallet-connect path; `null` = no chain surface. */
+  async getPcaContractContext(this: DKGAgent): Promise<{ chainId: number; hubAddress: string; nftAddress: string; tokenAddress: string } | null> {
+    if (typeof this.chain.getPcaContractContext !== 'function') return null;
+    return this.chain.getPcaContractContext();
+  }
+
+  /** Enumerate PCAs owned by the bound wallet, annotated with their node association. */
+  async listNodePublishingConvictionAccounts(this: DKGAgent): Promise<NodePublishingConvictionAccount[] | null> {
+    if (typeof this.chain.listNodePublishingConvictionAccounts !== 'function') return null;
+    return this.chain.listNodePublishingConvictionAccounts();
+  }
+
+  /** OT-RFC-51 owner-gated re-designation of a PCA's primary node. */
+  async setPublishingConvictionPrimaryNode(this: DKGAgent, accountId: bigint, primaryNode: bigint): Promise<TxResult | null> {
+    if (typeof this.chain.setPublishingConvictionPrimaryNode !== 'function') return null;
+    return this.chain.setPublishingConvictionPrimaryNode(accountId, primaryNode);
+  }
+
+  // ----- Node operational-wallet (Identity key) management -----
+  // Admin-signed on-chain key txs. `null` = no chain surface (→ 503); the
+  // adapter throws on missing admin key / not-an-admin / no-profile (→ 409).
+
+  /** The bound node's on-chain identityId (`0n` when no profile is registered). */
+  async getNodeIdentityId(this: DKGAgent): Promise<bigint> {
+    return this.chain.getIdentityId();
+  }
+
+  /** Whether `address` is a registered OPERATIONAL_KEY for `identityId`; `null` = no chain surface. */
+  async isOperationalWalletRegistered(this: DKGAgent, identityId: bigint, address: string): Promise<boolean | null> {
+    if (typeof this.chain.isOperationalWalletRegistered !== 'function') return null;
+    return this.chain.isOperationalWalletRegistered(identityId, address);
+  }
+
+  /** Add an operational wallet to the node identity (admin-signed). `null` = no chain surface. */
+  async addOperationalWallet(this: DKGAgent, address: string, options?: { identityId?: bigint }): Promise<TxResult | null> {
+    if (typeof this.chain.addOperationalWallet !== 'function') return null;
+    return this.chain.addOperationalWallet(address, options);
+  }
+
+  /** Remove an operational wallet from the node identity (admin-signed). `null` = no chain surface. */
+  async removeOperationalWallet(this: DKGAgent, address: string, options?: { identityId?: bigint }): Promise<TxResult | null> {
+    if (typeof this.chain.removeOperationalWallet !== 'function') return null;
+    return this.chain.removeOperationalWallet(address, options);
   }
 
   // ---------------------------------------------------------------------------

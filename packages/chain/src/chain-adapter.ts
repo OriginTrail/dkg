@@ -417,6 +417,19 @@ export interface V10PublishingConvictionAccountInfo {
   fullySwept: boolean;
 }
 
+/**
+ * A PCA owned by the bound node's operational wallet, annotated with its
+ * OT-RFC-51 node association. `primaryNode` is the node identityId whose
+ * publishing allocation this account's committed TRAC funds (0 = none);
+ * `fundsThisNode` is true when that equals the bound node's own identity.
+ */
+export interface NodePublishingConvictionAccount {
+  accountId: bigint;
+  primaryNode: bigint;
+  fundsThisNode: boolean;
+  info: V10PublishingConvictionAccountInfo;
+}
+
 // ----- V10 publish types -----
 
 /**
@@ -916,6 +929,41 @@ export interface ChainAdapter {
   getPublishingConvictionAccountInfo?(accountId: bigint): Promise<V10PublishingConvictionAccountInfo | null>;
 
   /**
+   * OT-RFC-51 designated primary node for a PCA — `accounts(accountId).primaryNode`.
+   * The node identityId whose publishing allocation this account's committed TRAC
+   * funds. Returns `0n` when unset, the account is missing, or the NFT is undeployed.
+   */
+  getConvictionPrimaryNode?(accountId: bigint): Promise<bigint>;
+
+  /**
+   * Addresses + numeric chain id for the browser wallet-connect path (so a PCA
+   * owner can sign owner-gated txs client-side). Excludes the node RPC URL by
+   * design — the browser uses its own wallet provider for reads + signing.
+   */
+  getPcaContractContext?(): Promise<{
+    chainId: number;
+    hubAddress: string;
+    nftAddress: string;
+    tokenAddress: string;
+  }>;
+
+  /**
+   * Enumerate the PCAs owned by the bound operational wallet (ERC721Enumerable
+   * `balanceOf` + `tokenOfOwnerByIndex`), each annotated with its OT-RFC-51
+   * `primaryNode` association and whether it funds this node's own identity.
+   * These are exactly the accounts the bound wallet can manage (owner-gated
+   * writes). Throws {@link PcaUnavailableError} (→ 503) when the NFT is undeployed.
+   */
+  listNodePublishingConvictionAccounts?(): Promise<NodePublishingConvictionAccount[]>;
+
+  /**
+   * OT-RFC-51 owner-gated re-designation of a PCA's primary node (moves FUTURE
+   * epochs' publishing allocation to `primaryNode`). Owner revert MUST surface
+   * (→ 403); the on-chain rate-limit (once per epoch) surfaces as a revert too.
+   */
+  setPublishingConvictionPrimaryNode?(accountId: bigint, primaryNode: bigint): Promise<TxResult>;
+
+  /**
    * Sign an arbitrary message hash using the node's primary operational key.
    * Used for self-signing as receiver or context graph participant.
    */
@@ -1069,6 +1117,27 @@ export interface ChainAdapter {
     identityId?: bigint;
     additionalAddresses?: string[];
   }): Promise<OperationalWalletRegistrationResult>;
+
+  /**
+   * Add a single operational wallet to the node identity via
+   * `Profile.addOperationalWallets(identityId, [address])`. Signed by the
+   * configured admin key (the on-chain `onlyAdmin` gate). Throws when no admin
+   * key is configured, the configured admin is not an on-chain ADMIN_KEY for
+   * the identity, or the identity has no profile. `identityId` defaults to the
+   * bound node's own identity.
+   */
+  addOperationalWallet?(address: string, options?: { identityId?: bigint }): Promise<TxResult>;
+
+  /**
+   * Remove a single operational wallet from the node identity via
+   * `Identity.removeKey(identityId, keccak(address))` (Profile has no remove
+   * path). Signed by the configured admin key. REFUSES to remove the bound
+   * primary operational wallet (the one that resolves the node's identityId) —
+   * the contract's only guard is `CannotDeleteOnlyOperationalKey`, which would
+   * not stop orphaning the node's own identity resolution while other keys
+   * remain. `identityId` defaults to the bound node's own identity.
+   */
+  removeOperationalWallet?(address: string, options?: { identityId?: bigint }): Promise<TxResult>;
 
   // ----- Network State Registry (RFC 04 v0.3 / Issue #461) -----
   //

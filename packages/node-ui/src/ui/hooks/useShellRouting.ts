@@ -11,10 +11,12 @@ export const URL_PATH_TO_TAB: Record<string, { id: string; label: string }> = {
   '/observability': { id: 'operations', label: 'Observability' },
   '/operations': { id: 'operations', label: 'Observability' },
   '/settings': { id: 'settings', label: 'Settings' },
+  '/admin': { id: 'admin', label: 'Admin' },
 };
 export const TAB_TO_URL_PATH: Record<string, string> = {
   operations: '/observability',
   settings: '/settings',
+  admin: '/admin',
   dashboard: '/',
 };
 

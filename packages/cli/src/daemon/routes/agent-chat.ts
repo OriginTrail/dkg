@@ -545,6 +545,41 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     }
   }
 
+  // GET /api/agent/:address/encryption-keys — list a local agent's workspace
+  // encryption keys (active + retired) for display before a rotate/revoke.
+  // PUBLIC fields only — private key material (privateEncryptionKey) is NEVER
+  // serialized, even though listLocalAgents() carries it in memory. Same
+  // caller-vs-target gate as rotate/revoke.
+  if (
+    req.method === "GET"
+    && path.startsWith("/api/agent/")
+    && path.endsWith("/encryption-keys")
+  ) {
+    const address = decodeURIComponent(path.slice("/api/agent/".length, -"/encryption-keys".length));
+    if (!address) return jsonResponse(res, 404, { error: "Agent address required in path" });
+    const authz = authorizeKeyManagementOnAddress(address);
+    if (!authz.ok) return jsonResponse(res, authz.status, authz.body);
+    const localAgents = agent.listLocalAgents();
+    const current = localAgents.find((a) => a.agentAddress.toLowerCase() === address.toLowerCase());
+    if (!current) {
+      return jsonResponse(res, 404, { error: `No local agent for address ${address}` });
+    }
+    const keys = (current.workspaceEncryptionKeys ?? []).map((k) => ({
+      encryptionKeyId: k.encryptionKeyId,
+      encryptionKeyAlgorithm: k.encryptionKeyAlgorithm,
+      publicEncryptionKey: k.publicEncryptionKey,
+      encryptionKeyProof: k.encryptionKeyProof,
+      createdAt: k.createdAt,
+      revokedAt: k.revokedAt ?? null,
+      status: k.revokedAt ? "revoked" : "active",
+    }));
+    return jsonResponse(res, 200, {
+      agentAddress: current.agentAddress,
+      agentDid: `did:dkg:agent:${current.agentAddress}`,
+      keys,
+    });
+  }
+
   // POST /api/agent/publish-profile — re-broadcast the daemon's default
   // agent profile. The rotate/revoke flows above call this implicitly on
   // success; this endpoint exists for the partial-failure path where

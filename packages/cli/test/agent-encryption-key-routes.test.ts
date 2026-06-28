@@ -265,3 +265,80 @@ describe('POST /api/agent/publish-profile — retry endpoint', () => {
     expect(JSON.parse(res.body).error).toMatch(/chain rpc unreachable/);
   });
 });
+
+describe('GET /api/agent/:address/encryption-keys', () => {
+  const TARGET = '0x' + 'a'.repeat(40);
+  const ATTACKER = '0x' + 'b'.repeat(40);
+  const SECRET_PRIV = 'PRIVATE_ENCRYPTION_KEY_MUST_NOT_LEAK';
+
+  function agentStub(tokenToAddress: Record<string, string> = {}) {
+    return {
+      resolveAgentByToken: (tok: string) => tokenToAddress[tok],
+      listLocalAgents: () => [
+        {
+          agentAddress: TARGET,
+          name: 'node-agent',
+          workspaceEncryptionKeys: [
+            {
+              encryptionKeyId: 'did:dkg:agent:x#x25519-active',
+              encryptionKeyAlgorithm: 'x25519',
+              publicEncryptionKey: '0xpub1',
+              // This MUST never reach the response body.
+              privateEncryptionKey: SECRET_PRIV,
+              encryptionKeyProof: '0xproof1',
+              createdAt: '2026-01-01T00:00:00Z',
+            },
+            {
+              encryptionKeyId: 'did:dkg:agent:x#x25519-retired',
+              encryptionKeyAlgorithm: 'x25519',
+              publicEncryptionKey: '0xpub2',
+              privateEncryptionKey: SECRET_PRIV,
+              encryptionKeyProof: '0xproof2',
+              createdAt: '2026-01-02T00:00:00Z',
+              revokedAt: '2026-02-01T00:00:00Z',
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  it('returns active + retired keys with PUBLIC fields only — never private key material', async () => {
+    const agent = agentStub({ admin: '' /* node-admin token: resolveAgentByToken → undefined */ });
+    const { res, done } = runCtx('GET', `/api/agent/${TARGET}/encryption-keys`, agent, { bearer: 'admin' });
+    await done;
+    expect(res.statusCode).toBe(200);
+    // SECURITY: the private encryption key must not appear anywhere.
+    expect(res.body).not.toContain(SECRET_PRIV);
+    expect(res.body).not.toContain('privateEncryptionKey');
+
+    const parsed = JSON.parse(res.body);
+    expect(parsed.agentAddress).toBe(TARGET);
+    expect(parsed.keys).toHaveLength(2);
+    expect(parsed.keys[0]).toEqual({
+      encryptionKeyId: 'did:dkg:agent:x#x25519-active',
+      encryptionKeyAlgorithm: 'x25519',
+      publicEncryptionKey: '0xpub1',
+      encryptionKeyProof: '0xproof1',
+      createdAt: '2026-01-01T00:00:00Z',
+      revokedAt: null,
+      status: 'active',
+    });
+    expect(parsed.keys[1].status).toBe('revoked');
+    expect(parsed.keys[1].revokedAt).toBe('2026-02-01T00:00:00Z');
+  });
+
+  it('returns 404 when no local agent matches the address', async () => {
+    const agent = agentStub();
+    const { res, done } = runCtx('GET', `/api/agent/${ATTACKER}/encryption-keys`, agent, { bearer: 'admin' });
+    await done;
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('rejects a cross-agent token with 403', async () => {
+    const agent = agentStub({ dkg_at_attacker: ATTACKER });
+    const { res, done } = runCtx('GET', `/api/agent/${TARGET}/encryption-keys`, agent, { bearer: 'dkg_at_attacker' });
+    await done;
+    expect(res.statusCode).toBe(403);
+  });
+});

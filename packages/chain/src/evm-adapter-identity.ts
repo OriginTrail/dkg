@@ -94,6 +94,103 @@ export class IdentityMethods extends EVMChainAdapterBase {
     return result;
   }
 
+  /**
+   * Add a single operational wallet to the node identity via
+   * `Profile.addOperationalWallets(identityId, [address])`. Signed by the
+   * configured admin key (the contract's `onlyAdmin` gate). Mirrors the
+   * preconditions of {@link ensureOperationalWalletsRegistered}: requires an
+   * admin key that is registered on-chain as an ADMIN_KEY for the identity.
+   */
+  async addOperationalWallet(address: string, options?: { identityId?: bigint }): Promise<TxResult> {
+    await this.init();
+    if (!ethers.isAddress(address)) {
+      throw new Error(`addOperationalWallet: invalid address ${address}`);
+    }
+    const wallet = ethers.getAddress(address);
+    const identityId = options?.identityId ?? (await this.getIdentityId());
+    if (identityId === 0n) {
+      throw new Error('addOperationalWallet: node has no on-chain profile (create a profile first).');
+    }
+    if (!this.adminSigner) {
+      throw new Error(
+        `Cannot add operational wallet to identity ${identityId}: adminPrivateKey is not configured.`,
+      );
+    }
+    const identityStorage = await this.getIdentityStorage();
+    if (!(await this.hasAdminPurpose(identityStorage, identityId, this.adminSigner.address))) {
+      throw new Error(
+        `Cannot add operational wallet to identity ${identityId}: configured admin wallet ` +
+        `${this.adminSigner.address} is not registered on-chain as an admin key for this identity.`,
+      );
+    }
+    const receipt = await this.sendContractTransaction(
+      this.contracts.profile!,
+      'addOperationalWallets',
+      [identityId, [wallet]],
+      this.adminSigner,
+      'addOperationalWallet',
+    );
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      txIndex: receipt.index,
+      success: receipt.status === 1,
+    };
+  }
+
+  /**
+   * Remove a single operational wallet from the node identity via
+   * `Identity.removeKey(identityId, keccak(address))`. Profile exposes no
+   * remove path, so this calls Identity directly with the admin key
+   * (`onlyAdmin`). REFUSES to remove the bound primary operational wallet:
+   * `getIdentityId()` resolves the node's identity from `this.signer.address`,
+   * so removing it would orphan the node's own identity resolution while other
+   * keys remain — and the contract's only guard is `CannotDeleteOnlyOperationalKey`
+   * (the LAST key), which would not stop this.
+   */
+  async removeOperationalWallet(address: string, options?: { identityId?: bigint }): Promise<TxResult> {
+    await this.init();
+    if (!ethers.isAddress(address)) {
+      throw new Error(`removeOperationalWallet: invalid address ${address}`);
+    }
+    const wallet = ethers.getAddress(address);
+    if (wallet.toLowerCase() === this.signer.address.toLowerCase()) {
+      throw new Error(
+        `removeOperationalWallet: refusing to remove the node's primary operational wallet ` +
+        `${this.signer.address} — it anchors on-chain identity resolution.`,
+      );
+    }
+    const identityId = options?.identityId ?? (await this.getIdentityId());
+    if (identityId === 0n) {
+      throw new Error('removeOperationalWallet: node has no on-chain profile.');
+    }
+    if (!this.adminSigner) {
+      throw new Error(
+        `Cannot remove operational wallet from identity ${identityId}: adminPrivateKey is not configured.`,
+      );
+    }
+    const identityStorage = await this.getIdentityStorage();
+    if (!(await this.hasAdminPurpose(identityStorage, identityId, this.adminSigner.address))) {
+      throw new Error(
+        `Cannot remove operational wallet from identity ${identityId}: configured admin wallet ` +
+        `${this.adminSigner.address} is not registered on-chain as an admin key for this identity.`,
+      );
+    }
+    const receipt = await this.sendContractTransaction(
+      this.contracts.identity!,
+      'removeKey',
+      [identityId, this.walletKeyHash(wallet)],
+      this.adminSigner,
+      'removeOperationalWallet',
+    );
+    return {
+      hash: receipt.hash,
+      blockNumber: receipt.blockNumber,
+      txIndex: receipt.index,
+      success: receipt.status === 1,
+    };
+  }
+
   // =====================================================================
   // RFC 04 v0.3 / Issue #461 — Network State Registry surface (relay-capable).
   // Multiaddrs are NOT exposed here — they live in per-round attestation KCs
