@@ -3,10 +3,10 @@ import { useFetch } from '../../hooks.js';
 import {
   fetchWalletsBalances,
   fetchPca,
-  pcaAddAgent,
   describePcaError,
   HttpError,
 } from '../../api.js';
+import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
 import { PcaModalShell } from './PcaModalShell.js';
 import {
   AddressCrux,
@@ -71,6 +71,7 @@ export function ApproveWalletsModal({
 }) {
   const { data: wb } = useFetch(fetchWalletsBalances, [], 0);
   const { data: snapshot } = useFetch(() => fetchPca(accountId), [accountId]);
+  const owner = useOwnerActionSubmitter(accountId); // owner-action seam (P0: daemon submitter)
   const nodeWallets = wb?.wallets ?? [];
   const agentCount = snapshot?.agentCount ?? 0;
   const cap = Math.max(0, 100 - agentCount);
@@ -124,7 +125,7 @@ export function ApproveWalletsModal({
         continue;
       }
       try {
-        const res = await pcaAddAgent(accountId, addr);
+        const res = await owner.registerAgent(accountId, addr);
         setRows((r) => ({
           ...r,
           [addr]: { address: addr, status: res.registered ? 'approved' : 'submitted', txHash: res.txHash },
