@@ -1,0 +1,115 @@
+// @vitest-environment happy-dom
+//
+// D2 — GetSponsoredPanel (S6). Pins the DRIFT-4 OUTCOME: the gas symbol is the
+// native per-chain symbol (xDAI on Gnosis / ETH on Base), derived from chainId —
+// NOT the TRAC `balances[].symbol`. Plus testnet-only faucet + the approval tracker.
+
+import React, { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => ({
+  fetchWalletsBalances: vi.fn(),
+  fetchPca: vi.fn(),
+}));
+
+vi.mock('../src/ui/api.js', async (orig) => {
+  const actual = await orig<typeof import('../src/ui/api.js')>();
+  return { ...actual, fetchWalletsBalances: mocks.fetchWalletsBalances, fetchPca: mocks.fetchPca };
+});
+
+const { GetSponsoredPanel } = await import('../src/ui/pages/conviction/GetSponsoredPanel.js');
+
+const W0 = '0x71D4000000000000000000000000000000009Ac2';
+const W1 = '0x3F8a0000000000000000000000000000000000C1b7';
+
+async function render(node: React.ReactElement) {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root: Root = createRoot(container);
+  await act(async () => { root.render(node); });
+  return { container, unmount: async () => { await act(async () => root.unmount()); container.remove(); } };
+}
+async function waitForText(c: HTMLElement, text: string) {
+  const started = Date.now(); let last = '';
+  while (Date.now() - started < 1500) {
+    last = c.textContent ?? '';
+    if (last.includes(text)) return;
+    await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+  }
+  throw new Error(`Timed out waiting for "${text}" in "${last}"`);
+}
+function setInputValue(el: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+  setter?.call(el, value);
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+beforeEach(() => {
+  (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+  document.body.innerHTML = '';
+  vi.clearAllMocks();
+});
+afterEach(() => { document.body.innerHTML = ''; });
+
+describe('GetSponsoredPanel', () => {
+  it('shows the native gas symbol per chain (xDAI on Gnosis), NOT the TRAC balances symbol', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0],
+      // balances[].symbol is the TRAC ERC-20 symbol — must NOT be used for gas.
+      balances: [{ address: W0, eth: '0.5', trac: '10', symbol: 'TRAC' }],
+      chainId: '100', // Gnosis → xDAI
+      rpcUrl: null,
+    });
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
+    await waitForText(container, 'operational wallets');
+    // The per-wallet gas line uses the native symbol.
+    expect(container.querySelector('.v10-pca-wallet-gas')?.textContent).toContain('xDAI');
+    // Non-testnet → no faucet link, hand-funding copy in the native symbol.
+    expect(container.querySelector('a[href*="faucet"]')).toBeNull();
+    expect(container.textContent).toContain('Fund with native xDAI');
+    await unmount();
+  });
+
+  it('renders a testnet faucet link on a testnet chain', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0],
+      balances: [{ address: W0, eth: '0.08', trac: '0', symbol: 'v9TRAC' }],
+      chainId: '84532', // Base Sepolia
+      rpcUrl: null,
+    });
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
+    await waitForText(container, 'operational wallets');
+    const faucet = container.querySelector('a[href*="faucet"]') as HTMLAnchorElement | null;
+    expect(faucet).toBeTruthy();
+    expect(container.querySelector('.v10-pca-wallet-gas')?.textContent).toContain('ETH');
+    await unmount();
+  });
+
+  it('tracks approval against the sponsor account id (N of M)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0, W1],
+      balances: [
+        { address: W0, eth: '0.08', trac: '0', symbol: 'TRAC' },
+        { address: W1, eth: '0', trac: '0', symbol: 'TRAC' },
+      ],
+      chainId: '84532',
+      rpcUrl: null,
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) => ({
+      accountId: '7',
+      probedKey: key ? { key, registered: key.toLowerCase() === W0.toLowerCase() } : undefined,
+    }));
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
+    await waitForText(container, 'Track your approval');
+    setInputValue(container.querySelector('input[aria-label="Sponsor account id"]') as HTMLInputElement, '7');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const checkBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
+    await act(async () => { checkBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    await waitForText(container, 'Approved on PCA #7: 1 of 2 wallets');
+    // W0 approved + funded → ready.
+    await waitForText(container, 'Ready');
+    await unmount();
+  });
+});

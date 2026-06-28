@@ -427,14 +427,18 @@ export async function createContextGraph(
  */
 export const registerContextGraph = (
   id: string,
-  opts: { accessPolicy?: number; publishPolicy?: number } = {},
+  opts: { accessPolicy?: number; publishPolicy?: number; pcaAccountId?: string } = {},
 ) =>
-  post<{ registered: string; onChainId: string; hint?: string }>(
+  post<{ registered: string; onChainId: string; txHash?: string; hint?: string }>(
     '/api/context-graph/register',
     {
       id,
       ...(opts.accessPolicy !== undefined ? { accessPolicy: opts.accessPolicy } : {}),
       ...(opts.publishPolicy !== undefined ? { publishPolicy: opts.publishPolicy } : {}),
+      // PCA CG-binding (S3 §5.3 step 6): the daemon's register route accepts an
+      // optional pcaAccountId (curated-only; signer must == PCA owner). No new
+      // route — this is the existing register path with the publish-authority arg.
+      ...(opts.pcaAccountId ? { pcaAccountId: opts.pcaAccountId } : {}),
     },
   );
 
