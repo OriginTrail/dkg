@@ -64,31 +64,31 @@ describe('normalizeProbeRegistered', () => {
   });
 });
 
-describe('classifyCoverage', () => {
-  it('registered + spendable → outcome covers (single-input; reads snap.probedKey)', () => {
+describe('classifyCoverage (discriminated union — facets ONLY on uncovered)', () => {
+  it('registered + spendable → { outcome: covers, registered: true } (no dead/hasBudget facets)', () => {
     const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: FUTURE, probedKey: { key: '0x', registered: true } }));
-    expect(c).toEqual({ outcome: 'covers', registered: true, dead: false, hasBudget: true });
+    expect(c).toEqual({ outcome: 'covers', registered: true });
   });
-  it('registered + expired → outcome uncovered, dead:true (the reviewer’s example facet)', () => {
+  it('registered + expired → uncovered, dead:true (the reviewer’s example facet)', () => {
     const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: PAST, probedKey: { key: '0x', registered: true } }));
     expect(c).toEqual({ outcome: 'uncovered', registered: true, dead: true, hasBudget: true });
   });
-  it('registered + zero-budget → outcome uncovered, hasBudget:false (dead+zero-budget reason facet)', () => {
+  it('registered + zero-budget → uncovered, hasBudget:false', () => {
     const c = classifyCoverage(
       makePcaSnapshot({ topUpBuffer: '0', baseEpochAllowance: '0', expiresAtTimestamp: FUTURE, probedKey: { key: '0x', registered: true } }),
     );
     expect(c).toEqual({ outcome: 'uncovered', registered: true, dead: false, hasBudget: false });
   });
-  it('registered:false → outcome unregistered', () => {
+  it('registered:false → { outcome: unregistered, registered: false }', () => {
     const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: FUTURE, probedKey: { key: '0x', registered: false } }));
-    expect(c).toEqual({ outcome: 'unregistered', registered: false, dead: false, hasBudget: true });
+    expect(c).toEqual({ outcome: 'unregistered', registered: false });
   });
-  it('adapterSupported:false → outcome inconclusive, never covers', () => {
+  it('adapterSupported:false → { outcome: inconclusive, registered: null }', () => {
     const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: FUTURE, probedKey: { key: '0x', registered: false, adapterSupported: false } }));
-    expect(c).toEqual({ outcome: 'inconclusive', registered: null, dead: false, hasBudget: true });
+    expect(c).toEqual({ outcome: 'inconclusive', registered: null });
   });
-  it('missing probedKey → outcome inconclusive', () => {
+  it('missing probedKey → { outcome: inconclusive, registered: null }', () => {
     const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: FUTURE }));
-    expect(c).toEqual({ outcome: 'inconclusive', registered: null, dead: false, hasBudget: true });
+    expect(c).toEqual({ outcome: 'inconclusive', registered: null });
   });
 });

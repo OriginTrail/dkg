@@ -120,7 +120,7 @@ describe('#1344 coverage parity — S5 / S6 / overview agree via the shared reso
     const probe: PcaProbedKey = { key: W0, registered: true };
     wire(snap, probe);
     const expected = classifyCoverage({ ...snap, probedKey: probe });
-    expect(expected).toEqual({ outcome: 'covers', registered: true, dead: false, hasBudget: true });
+    expect(expected).toEqual({ outcome: 'covers', registered: true });
 
     // overview
     const ov = await renderOverview();
@@ -156,7 +156,7 @@ describe('#1344 coverage parity — S5 / S6 / overview agree via the shared reso
     const probe: PcaProbedKey = { key: W0, registered: false, adapterSupported: false };
     wire(snap, probe);
     const expected = classifyCoverage({ ...snap, probedKey: probe });
-    expect(expected).toEqual({ outcome: 'inconclusive', registered: null, dead: false, hasBudget: true });
+    expect(expected).toEqual({ outcome: 'inconclusive', registered: null });
 
     // overview → inconclusive, not 0-approved-confirmed, not covered
     const ov = await renderOverview();
