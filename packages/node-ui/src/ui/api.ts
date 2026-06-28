@@ -93,6 +93,21 @@ async function get<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// GET that parses the daemon's `{ error, code }` body into the HttpError (like
+// `post`/`delJson`). The legacy `get` above throws a bodyless HttpError, but PCA
+// reads need the body to tell a CAPABILITY 503 (feature unavailable) from a
+// TRANSPORT 503/504 (transient RPC outage, `code: 'RPC_*'`) — see
+// `isPcaFeatureUnavailable` / `describePcaError`.
+async function getJson<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
+    throw new HttpError(res.status, msg, errBody);
+  }
+  return res.json() as Promise<T>;
+}
+
 async function getWithTimeout<T>(path: string, timeoutMs: number): Promise<T> {
   const res = await fetchWithTimeout(`${BASE}${path}`, { headers: authHeaders() }, timeoutMs);
   if (!res.ok) {
@@ -1667,7 +1682,7 @@ export const fetchPca = (
   if (key) params.set('key', key);
   if (opts?.extended) params.set('extended', '1');
   const qs = params.toString();
-  return get<PcaSnapshot>(`/api/pca/${encodeURIComponent(accountId)}${qs ? `?${qs}` : ''}`);
+  return getJson<PcaSnapshot>(`/api/pca/${encodeURIComponent(accountId)}${qs ? `?${qs}` : ''}`);
 };
 
 /** Create a PCA (commit TRAC for a publishing discount). Owner = the daemon EOA. */
@@ -1729,9 +1744,25 @@ export interface PcaErrorInfo {
   existingAccountId?: string;
 }
 
-/** Whether an error is the daemon's "PCA not available on this network" 503. */
+/**
+ * A transient RPC-transport failure (the daemon's failover layer exhausted /
+ * timed out), distinguished by a `RPC_*` body code (e.g. RPC_ENDPOINTS_EXHAUSTED
+ * → 503, RPC_TIMEOUT → 504). NOT a capability gap — the feature exists, the
+ * chain read just hiccupped, so it must not gate the tab.
+ */
+export function isRpcTransportError(err: unknown): boolean {
+  if (!(err instanceof HttpError)) return false;
+  const code = (err.body as { code?: string } | undefined)?.code;
+  return typeof code === 'string' && code.startsWith('RPC_');
+}
+
+/**
+ * Whether an error is the daemon's CAPABILITY 503 — PCA isn't deployed on this
+ * network. A transport 503/504 (`RPC_*` code) is explicitly excluded so a
+ * transient RPC blip during the mount probe doesn't falsely lock the whole tab.
+ */
 export function isPcaFeatureUnavailable(err: unknown): boolean {
-  return err instanceof HttpError && err.status === 503;
+  return err instanceof HttpError && err.status === 503 && !isRpcTransportError(err);
 }
 
 // Code tokens the daemon embeds in the `{ error }` body (a bare code on a
@@ -1775,7 +1806,18 @@ export function describePcaError(
   const existingAccountId =
     body.existingAccountId != null ? String(body.existingAccountId) : undefined;
 
-  // 503 is the network-capability gate regardless of body shape.
+  // Transient RPC-transport outage (RPC_* code, 503/504) — NOT a capability gap.
+  // Check before the capability-503 branch so a failover blip reads as
+  // "try again", not "not available on this network".
+  if (isRpcTransportError(err)) {
+    return {
+      code: 'ServerError',
+      status,
+      message: 'The chain RPC is temporarily unavailable — try again.',
+    };
+  }
+
+  // 503 (without an RPC_* code) is the network-capability gate.
   if (status === 503) {
     return {
       code: 'FEATURE_UNAVAILABLE',
