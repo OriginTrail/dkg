@@ -20,6 +20,13 @@ interface WalletDetail {
    * "no PCA → pays direct cost". Only set when `covered` is false.
    */
   deadAccountId?: string;
+  /**
+   * C1/#9 — the wallet is uncovered ONLY because a coverage probe FAILED (the
+   * fetch rejected), not because it's a confirmed not-registered/dead. Must never
+   * be folded into a confirmed fall-through; an all-inconclusive verdict resolves
+   * neutral ("unknown"), never DANGER, at spend time. Only set when uncovered.
+   */
+  inconclusive: boolean;
   gasFunded: boolean;
   hasTrac: boolean;
   sawExpired: boolean;
@@ -99,9 +106,14 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
           let sawExpired = false;
           let sawInsolvent = false;
           let deadAccountId: string | undefined;
+          let probeError = false;
           for (const id of trackedIds) {
             const snap = await fetchPca(id, w).catch(() => null);
-            if (!snap?.probedKey?.registered) continue;
+            // C1/#9 — a REJECTED probe (`null`) is "couldn't read", NOT a confirmed
+            // not-registered. Distinguish them: a failed probe is inconclusive (→
+            // neutral verdict), never a definitive fall-through DANGER at spend time.
+            if (snap === null) { probeError = true; continue; }
+            if (!snap.probedKey?.registered) continue;
             const h = healthForSnapshot(snap);
             // reverted L2 — see capstone finding. INTENTIONAL coarse P0 solvency
             // proxy: a funded PCA holds its per-epoch budget in `baseEpochAllowance`
@@ -131,6 +143,7 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
             accountId: cover?.accountId,
             discountBps: cover?.discountBps,
             deadAccountId: cover ? undefined : deadAccountId,
+            inconclusive: !cover && probeError,
             gasFunded,
             hasTrac,
             sawExpired,
@@ -162,6 +175,11 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
 
     const covered = wallets.filter((w) => w.covered);
     const uncovered = wallets.filter((w) => !w.covered);
+    // C1/#9 — drive amber/danger off CONFIRMED uncovered only; a wallet that's
+    // uncovered merely because its probe failed is inconclusive, never a definitive
+    // fall-through.
+    const confirmedUncovered = uncovered.filter((w) => !w.inconclusive);
+    const inconclusive = uncovered.filter((w) => w.inconclusive);
     const conditions = {
       approved: uncovered.length === 0,
       gasFunded: wallets.every((w) => w.gasFunded),
@@ -172,14 +190,19 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
     let verdict: PcaVerdict;
     const reasons: string[] = [];
     if (uncovered.length === 0) {
-      verdict = 'eligible';
+      verdict = 'eligible'; // inconclusive still blocks GREEN (uncovered includes it)
+    } else if (confirmedUncovered.length === 0 && inconclusive.length > 0) {
+      // Every uncovered wallet is merely UNREADABLE — resolve neutral (fail toward
+      // unknown, not a DANGER we can't confirm); self-corrects on the next 30s poll.
+      verdict = 'unknown';
     } else {
-      const anyNoTrac = uncovered.some((w) => !w.hasTrac);
+      const anyNoTrac = confirmedUncovered.some((w) => !w.hasTrac);
       verdict = anyNoTrac ? 'fallthrough-no-funds' : 'fallthrough';
       reasons.push(`${covered.length} of ${wallets.length} signing wallets approved`);
       if (wallets.some((w) => w.sawExpired)) reasons.push('a conviction account has expired or been fully swept');
       if (wallets.some((w) => w.sawInsolvent)) reasons.push('a conviction account is out of budget');
       if (!conditions.gasFunded) reasons.push('a signing wallet has no gas');
+      if (inconclusive.length > 0) reasons.push('a wallet’s PCA coverage couldn’t be checked');
     }
 
     // L1: the GREEN chip should advertise the BEST covering discount (wallets may

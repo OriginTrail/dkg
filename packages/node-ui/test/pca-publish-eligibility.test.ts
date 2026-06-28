@@ -159,6 +159,41 @@ describe('PublishEligibilityChip (S5)', () => {
     await unmount();
   });
 
+  // C1/#9 — a probe that FAILED (rejected) is "couldn't read", NOT a confirmed
+  // fall-through. It must resolve NEUTRAL (unknown), never a DANGER at spend time.
+  it('resolves NEUTRAL (unknown), not DANGER, when the coverage probe FAILS (C1/#9)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('0')); // no TRAC — the worst case that previously false-DANGERed
+    mocks.fetchPca.mockRejectedValue(new Error('probe down'));
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'PCA status unknown');
+    expect(container.textContent).not.toContain('Publish will fail');
+    expect(container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeNull();
+    expect(container.querySelector('[data-verdict="unknown"]')).toBeTruthy();
+    await unmount();
+  });
+
+  it('resolves unknown (not green, not danger) when one wallet is covered and another probe FAILS (C1)', async () => {
+    const W1 = '0x' + 'b'.repeat(40);
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0, W1],
+      balances: [
+        { address: W0, eth: '0.1', trac: '100', symbol: 'TRAC' },
+        { address: W1, eth: '0.1', trac: '0', symbol: 'TRAC' }, // no TRAC — would be danger if treated as confirmed
+      ],
+      chainId: '84532',
+      rpcUrl: null,
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) => {
+      if (key && key.toLowerCase() === W0.toLowerCase()) return { ...makePcaSnapshot(), probedKey: { key, registered: true } };
+      throw new Error('probe down'); // W1 probe unreadable → inconclusive
+    });
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'PCA status unknown');
+    expect(container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeNull();
+    expect(container.querySelector('[data-verdict="eligible"]')).toBeNull(); // inconclusive blocks green
+    await unmount();
+  });
+
   it('AMBER when a fall-through wallet HAS TRAC (pays the direct cost)', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('50')); // has TRAC
     mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
