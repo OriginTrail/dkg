@@ -69,11 +69,23 @@ async function click(el: Element) {
   await act(async () => { el.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 }
 
+// Test-isolation guard: every network path in this suite goes through the mocked
+// api.js fetchers, so the real global `fetch` must NEVER fire. happy-dom's fetch
+// will attempt a real connection to the page origin (:3000) if a path slips
+// through — and under a loaded parallel runner that surfaced as cross-worker
+// ECONNREFUSED flakes. We pin `fetch` to a throwing stub per test (restored
+// after) so no worker ordering can leak a real request, and assert it stayed
+// untouched. (`vi.clearAllMocks` keeps the impl; only call history is reset.)
+const fetchGuard = vi.fn(async () => {
+  throw new Error('pca-create-modal: unexpected real fetch() — a network path is not mocked');
+});
+
 beforeEach(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   document.body.innerHTML = '';
   localStorage.clear();
   vi.clearAllMocks();
+  vi.stubGlobal('fetch', fetchGuard);
   usePcaStore.setState({ trackedIds: [], createPending: null });
   useAgentsStore.getState().setNodeStatus({ nodeRole: 'core', hasIdentity: true, identityId: '42', blockExplorerUrl: null });
   mocks.fetchWalletsBalances.mockResolvedValue({
@@ -82,7 +94,11 @@ beforeEach(() => {
     chainId: '84532', rpcUrl: null,
   });
 });
-afterEach(() => { document.body.innerHTML = ''; });
+afterEach(() => {
+  expect(fetchGuard).not.toHaveBeenCalled();
+  vi.unstubAllGlobals();
+  document.body.innerHTML = '';
+});
 
 describe('CreatePcaModal', () => {
   it('gates edge / no-identity nodes: reason-titled, no form, + a Get-sponsored CTA → S6', async () => {
