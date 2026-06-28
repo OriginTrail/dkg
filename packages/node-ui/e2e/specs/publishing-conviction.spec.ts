@@ -154,7 +154,12 @@ test.describe('Publishing Conviction tab (PCA) — P0', () => {
     await conviction.approveOwnWalletsCta.click();
     await expect(conviction.approveModal).toBeVisible(); // self mode, prefilled checklist
     await conviction.approveSubmit.click();
-    await expect(conviction.agentRows.first()).toBeVisible({ timeout: 120_000 }); // B3 live list
+    // The approve confirms on-chain → the modal lists each signing wallet as
+    // "approved on-chain" (P0 per-wallet registration status; full agent
+    // enumeration is B3/getRegisteredAgents, deferred to P1). INVARIANT 1/5.
+    await expect(conviction.approveModal.getByText(/approved on-chain/i).first()).toBeVisible({
+      timeout: 120_000,
+    });
   });
 
   // ── S5 publish-eligibility chip + preflight (Batch E) — capstone / CI @mutating ──
