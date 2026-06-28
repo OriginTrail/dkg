@@ -39,6 +39,12 @@ interface PcaState {
   trackedIds: string[];
   /** The single in-flight create marker, or null. */
   createPending: PcaCreatePending | null;
+  /**
+   * T3 — whether the current `createPending` marker was actually WRITTEN to
+   * localStorage (false when storage is disabled/full). The reconcile screen reads
+   * this to avoid falsely claiming "this guard survives a refresh".
+   */
+  createPendingPersisted: boolean;
 
   trackAccount: (id: string) => void;
   untrackAccount: (id: string) => void;
@@ -131,15 +137,19 @@ function persist(state: PersistedPca): void {
  * marker fails toward DANGER, so `setCreatePending` must write NOW. Cancels any
  * queued debounced write so it subsumes (no lost-update / double-write).
  */
-function persistNow(state: PersistedPca): void {
+function persistNow(state: PersistedPca): boolean {
   if (persistTimer) {
     clearTimeout(persistTimer);
     persistTimer = null;
   }
   try {
     localStorage.setItem(PCA_STORAGE_KEY, JSON.stringify(state));
+    return true;
   } catch {
-    // localStorage may be unavailable (private mode, quota); silently skip.
+    // T3 — localStorage may be unavailable (private mode, quota). Report the FAILURE
+    // so the reconcile screen can warn the marker won't survive a refresh (vs falsely
+    // claiming it's saved). NON-blocking — the in-memory guard still covers the session.
+    return false;
   }
 }
 
@@ -155,6 +165,8 @@ const initial = loadPersisted();
 export const usePcaStore = create<PcaState>((set, get) => ({
   trackedIds: initial.trackedIds,
   createPending: initial.createPending,
+  // A loaded marker came FROM localStorage, so it's persisted by definition.
+  createPendingPersisted: initial.createPending != null,
 
   trackAccount: (id) => {
     if (!isValidAccountId(id)) return;
@@ -172,10 +184,11 @@ export const usePcaStore = create<PcaState>((set, get) => ({
     set({ createPending: marker });
     // C2 — write synchronously: this is the double-mint guard; it must survive a
     // crash/refresh inside the debounce window before the create POST resolves.
-    persistNow(snapshot(get()));
+    // T3 — record whether the write actually succeeded (false in a no-storage env).
+    set({ createPendingPersisted: persistNow(snapshot(get())) });
   },
   clearCreatePending: () => {
-    set({ createPending: null });
+    set({ createPending: null, createPendingPersisted: false });
     persist(snapshot(get()));
   },
   finishCreate: (id) => {
@@ -183,6 +196,7 @@ export const usePcaStore = create<PcaState>((set, get) => ({
     // so a reload can never resurrect the stale marker or lose the new id.
     set((s) => ({
       createPending: null,
+      createPendingPersisted: false,
       trackedIds:
         isValidAccountId(id) && !s.trackedIds.includes(id) ? [...s.trackedIds, id] : s.trackedIds,
     }));

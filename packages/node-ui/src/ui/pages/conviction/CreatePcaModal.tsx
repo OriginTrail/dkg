@@ -68,6 +68,9 @@ export function CreatePcaModal({
   const setCreatePending = usePcaStore((s) => s.setCreatePending);
   const clearCreatePending = usePcaStore((s) => s.clearCreatePending);
   const createPending = usePcaStore.getState().createPending;
+  // T3 — reactive: whether the marker actually hit localStorage (false in a
+  // no-storage env), so the reconcile screen doesn't falsely claim it survives a refresh.
+  const createPendingPersisted = usePcaStore((s) => s.createPendingPersisted);
 
   const [tokens, setTokens] = useState('');
   const [primaryNode, setPrimaryNode] = useState('');
@@ -192,10 +195,19 @@ export function CreatePcaModal({
                 )}
               </p>
             )}
-            <p>
-              A “create-pending” marker is saved, so this guard survives a refresh. Verify on the
-              explorer whether a PCA was minted to <code>{ownerWallet ?? 'your owner wallet'}</code>:
-            </p>
+            {createPendingPersisted ? (
+              <p>
+                A “create-pending” marker is saved, so this guard survives a refresh. Verify on the
+                explorer whether a PCA was minted to <code>{ownerWallet ?? 'your owner wallet'}</code>:
+              </p>
+            ) : (
+              <p className="v10-pca-create-warn" role="alert">
+                ⚠ This browser blocked saving the safety marker (storage disabled or full), so this
+                guard will <strong>NOT</strong> survive a refresh. Do not create again until you’ve
+                verified on the explorer whether a PCA was minted to{' '}
+                <code>{ownerWallet ?? 'your owner wallet'}</code>:
+              </p>
+            )}
             <ul className="v10-pca-create-recon-actions">
               <li>If a PCA <strong>was</strong> minted → close this, then “Track an account by id” on the overview.</li>
               <li>If <strong>none</strong> was minted → clear the marker below, then you can create again.</li>
