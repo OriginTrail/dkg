@@ -85,7 +85,11 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
         wallets.map((w) =>
           fetchPca(id, w)
             .then((snap): ProbeRow => {
-              const registered = snap.probedKey?.registered ?? null;
+              // S2/#9 — adapterSupported===false (couldn't answer) → null (neutral
+              // "unknown" row), NOT a confirmed not-approved; all-unsupported falls
+              // into the wholesale "retry" path, never a danger row.
+              const registered =
+                snap.probedKey?.adapterSupported === false ? null : (snap.probedKey?.registered ?? null);
               // N1: mirror S5's cover predicate so S6 "Ready" == S5 GREEN — a
               // registered wallet only covers when the PCA is spendable.
               const h = healthForSnapshot(snap);

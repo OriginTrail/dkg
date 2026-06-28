@@ -101,6 +101,22 @@ describe('usePcaOverview', () => {
     await unmount();
   });
 
+  // S2/#9 — adapterSupported:false (the adapter can't answer) → null (couldn't
+  // determine), NOT not-registered → probesInconclusive, excluded from approvedCount.
+  it('treats adapterSupported:false as inconclusive, not 0-approved (S2)', async () => {
+    usePcaStore.setState({ trackedIds: ['7'] });
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W1], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockImplementation((id: string, wallet?: string) => {
+      if (wallet === undefined) return Promise.resolve(snap({ accountId: '7', owner: W1 }));
+      return Promise.resolve(snap({ probedKey: { wallet: W1, registered: false, adapterSupported: false } }));
+    });
+    const { unmount } = await render();
+    const a = latest!.accounts.find((x) => x.accountId === '7')!;
+    expect(a.approvedCount).toBe(0);
+    expect(a.probesInconclusive).toBe(true); // NOT a confirmed 0-approved
+    await unmount();
+  });
+
   it('bestCoveringDiscountBps excludes expired/swept/0-approved and picks the MAX covering', async () => {
     usePcaStore.setState({ trackedIds: ['7', '20', '10', '9', '8'] });
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W1], balances: [], chainId: '84532', rpcUrl: null });

@@ -124,6 +124,10 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
             // not-registered. Distinguish them: a failed probe is inconclusive (→
             // neutral verdict), never a definitive fall-through DANGER at spend time.
             if (snap === null) { probeError = true; continue; }
+            // S2/#9 — the adapter COULDN'T answer (capability gap) is "couldn't read",
+            // NOT a confirmed not-registered. Funnel it into the inconclusive channel
+            // (→ neutral verdict), never a definitive fall-through DANGER.
+            if (snap.probedKey?.adapterSupported === false) { probeError = true; continue; }
             if (!snap.probedKey?.registered) continue;
             const h = healthForSnapshot(snap);
             // reverted L2 — see capstone finding. INTENTIONAL coarse P0 solvency
