@@ -175,4 +175,61 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     expect(container.querySelector('[data-testid="pca-deregister-btn"]')).toBeTruthy();
     await unmount();
   });
+
+  // C6 — owner-mode S3 write interactions: assert each helper fires with the
+  // right args + the success feedback renders (the dropped-payload regression
+  // class the gating/error-only tests couldn't catch).
+  const OWNER_WB = { wallets: [W0], balances: [{ address: W0, eth: '1', trac: '5', symbol: 'TRAC' }], chainId: '84532', rpcUrl: null };
+
+  it('owner Top-up fires pcaTopUp(id, amount) and renders the success result (C6)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
+    mocks.pcaTopUp.mockResolvedValue({ accountId: '7', addedTokens: '100', txHash: '0xabc' });
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Funding');
+    setInputValue(container.querySelector('input[aria-label="Top-up amount in TRAC"]') as HTMLInputElement, '100');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await act(async () => { btn(container, '[data-testid="pca-topup-btn"]').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(mocks.pcaTopUp).toHaveBeenCalledWith('7', '100');
+    await waitForText(container, 'Added');
+    expect(container.querySelector('[data-testid="pca-action-result"]')).toBeTruthy();
+    await unmount();
+  });
+
+  it('owner Settle fires pcaSettle(id) and renders the success message (C6)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
+    mocks.pcaSettle.mockResolvedValue({ accountId: '7', settled: true, txHash: '0xdef' });
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Settlement');
+    await act(async () => { btn(container, '[data-testid="pca-settle-btn"]').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(mocks.pcaSettle).toHaveBeenCalledWith('7');
+    await waitForText(container, 'Settlement sweep submitted.');
+    await unmount();
+  });
+
+  it('owner deregister confirm fires pcaRemoveAgent(id, wallet) (C6)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
+    mocks.pcaRemoveAgent.mockResolvedValue({ accountId: '7', agent: W0, deregistered: true });
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'approved');
+    await act(async () => { Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Remove')!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'will pay the direct cost');
+    await act(async () => { container.querySelector('[data-testid="pca-deregister-btn"]')!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(mocks.pcaRemoveAgent).toHaveBeenCalledWith('7', W0);
+    await unmount();
+  });
+
+  it('owner CG-bind fires registerContextGraph(cg, {pcaAccountId}) and shows the bound message (C6)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
+    mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [{ id: 'cg-1', name: 'CG One' }] });
+    mocks.registerContextGraph.mockResolvedValue({ registered: 'cg-1', onChainId: '1', txHash: '0x1' });
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Context-graph binding');
+    setSelect(container.querySelector('select.v10-form-select') as HTMLSelectElement, 'cg-1');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await act(async () => { findBtn(container, 'Bind context graph').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    // The dropped-{pcaAccountId} regression guard.
+    expect(mocks.registerContextGraph).toHaveBeenCalledWith('cg-1', { pcaAccountId: '7' });
+    await waitForText(container, 'Bound cg-1 to PCA #7.');
+    await unmount();
+  });
 });
