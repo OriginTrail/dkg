@@ -116,6 +116,26 @@ function persist(state: PersistedPca): void {
   }, PERSIST_DEBOUNCE_MS);
 }
 
+/**
+ * C2 — SYNCHRONOUS write for the highest-stakes marker. The debounced `persist`
+ * leaves a ≤150ms window where a crash/hard-refresh after the create POST is
+ * dispatched (the daemon mints regardless) but before the timer fires would lose
+ * the create-pending marker → a second fund-locking mint on reopen. A lost
+ * marker fails toward DANGER, so `setCreatePending` must write NOW. Cancels any
+ * queued debounced write so it subsumes (no lost-update / double-write).
+ */
+function persistNow(state: PersistedPca): void {
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  try {
+    localStorage.setItem(PCA_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // localStorage may be unavailable (private mode, quota); silently skip.
+  }
+}
+
 function snapshot(state: PcaState): PersistedPca {
   return {
     trackedIds: state.trackedIds,
@@ -143,7 +163,9 @@ export const usePcaStore = create<PcaState>((set, get) => ({
   isTracked: (id) => get().trackedIds.includes(id),
   setCreatePending: (marker) => {
     set({ createPending: marker });
-    persist(snapshot(get()));
+    // C2 — write synchronously: this is the double-mint guard; it must survive a
+    // crash/refresh inside the debounce window before the create POST resolves.
+    persistNow(snapshot(get()));
   },
   clearCreatePending: () => {
     set({ createPending: null });

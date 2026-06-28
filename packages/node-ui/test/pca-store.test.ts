@@ -100,7 +100,9 @@ describe('usePcaStore (dkg-pca localStorage persistence)', () => {
     usePcaStore.getState().setCreatePending(marker);
     expect(usePcaStore.getState().createPending).toEqual(marker);
 
-    await wait(DEBOUNCE_WAIT_MS);
+    // C2 — the create-pending marker is written SYNCHRONOUSLY (persistNow), so it
+    // is in localStorage immediately, with no debounce wait. (See
+    // pca-store-persistence.test.ts for the durability guarantee in detail.)
     expect(JSON.parse(localStorage.getItem(PCA_KEY)!).createPending).toEqual(marker);
 
     usePcaStore.getState().clearCreatePending();
