@@ -79,6 +79,7 @@ describe('PcaAccountCard', () => {
       React.createElement(PcaAccountCard, { account: acct({ approvedCount: 0 }) }),
     );
     expect(container.querySelector('[data-state="owned"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="pca-account-card"]')).toBeTruthy(); // e2e anchor
     expect(container.textContent).toContain('discounts nothing yet');
     // formatTrac uses toFixed (no thousands separators).
     expect(container.textContent).toContain('100000.00 TRAC');

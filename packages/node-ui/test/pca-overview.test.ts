@@ -92,6 +92,10 @@ describe('PublishingConvictionPage — deployment (503) gate', () => {
     mocks.fetchPca.mockRejectedValue(new HttpError(503));
     const { container, unmount } = await render(React.createElement(PublishingConvictionPage));
     await waitForText(container, "isn’t available on this network");
+    // e2e anchors: the full-tab unavailable state + its Recheck control.
+    expect(container.querySelector('[data-testid="pca-view"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="pca-unavailable"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="pca-recheck-btn"]')).toBeTruthy();
     // The overview title must NOT render under the gate.
     expect(container.textContent).not.toContain('Role: ◆');
     await unmount();
@@ -101,6 +105,8 @@ describe('PublishingConvictionPage — deployment (503) gate', () => {
     mocks.fetchPca.mockResolvedValue(snapFixture('0'));
     const { container, unmount } = await render(React.createElement(PublishingConvictionPage));
     await waitForText(container, 'Publishing Conviction');
+    expect(container.querySelector('[data-testid="pca-view"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="pca-landing"]')).toBeTruthy();
     await unmount();
   });
 });

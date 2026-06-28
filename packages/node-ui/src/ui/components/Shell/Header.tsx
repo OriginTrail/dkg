@@ -150,6 +150,7 @@ export function Header() {
 
         <button
           className="v10-header-icon-btn"
+          data-testid="pca-launch-btn"
           onClick={() => openTab({ id: 'conviction', label: 'Publishing Conviction', closable: true })}
           title="Publishing Conviction — publishing discounts & sponsorship"
         >

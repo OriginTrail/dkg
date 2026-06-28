@@ -60,6 +60,7 @@ export function DiscountAppliedBadge({
       className={['badge', 'badge-success', 'v10-pca-discount-applied', className]
         .filter(Boolean)
         .join(' ')}
+      data-testid="pca-discount-badge"
       role="status"
     >
       <span aria-hidden="true">◉ </span>

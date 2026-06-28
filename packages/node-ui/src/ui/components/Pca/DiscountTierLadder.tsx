@@ -56,7 +56,7 @@ export function DiscountTierLadder({
     committedTrac == null ? null : discountTierForTrac(committedTrac);
 
   return (
-    <div className={['v10-pca-tier-ladder', className].filter(Boolean).join(' ')}>
+    <div className={['v10-pca-tier-ladder', className].filter(Boolean).join(' ')} data-testid="pca-tier-ladder">
       <ul className="v10-pca-tier-list" role="list">
         {PCA_DISCOUNT_TIERS.map((tier) => {
           const isActive = active != null && active.minTrac === tier.minTrac;

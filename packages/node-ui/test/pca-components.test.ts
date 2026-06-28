@@ -72,6 +72,7 @@ describe('HealthChip', () => {
       const { container, unmount } = await render(React.createElement(HealthChip, { state }));
       const chip = container.querySelector('.v10-pca-health-chip')!;
       expect(chip).toBeTruthy();
+      expect(chip.getAttribute('data-testid')).toBe('pca-health-chip'); // e2e anchor
       expect(chip.getAttribute('data-health')).toBe(state);
       // Label text present (the accessible name).
       expect(container.querySelector('.v10-pca-health-label')?.textContent).toBe(
@@ -291,6 +292,7 @@ describe('DiscountAppliedBadge (B8, degrade-to-hidden)', () => {
     );
     const badge = container.querySelector('.v10-pca-discount-applied')!;
     expect(badge).toBeTruthy();
+    expect(badge.getAttribute('data-testid')).toBe('pca-discount-badge'); // e2e anchor
     expect(badge.textContent).toContain('30%');
     expect(badge.textContent).toContain('PCA #7');
     await unmount();
@@ -303,6 +305,7 @@ describe('EligibilityVerdictBanner', () => {
       React.createElement(EligibilityVerdictBanner, { verdict: 'eligible', accountId: '7', discountBps: 3000 }),
     );
     const banner = container.querySelector('.v10-pca-verdict-banner')!;
+    expect(banner.getAttribute('data-testid')).toBe('pca-eligibility-verdict'); // e2e anchor
     expect(banner.getAttribute('role')).toBe('status');
     expect(banner.classList.contains('v10-pca-verdict-green')).toBe(true);
     expect(banner.textContent).toContain('PCA #7');
@@ -396,7 +399,9 @@ describe('EligibilityVerdictBanner', () => {
     const label = container.querySelector('.v10-pca-verdict-chip-label')!;
     expect(label.getAttribute('role')).toBe('alert');
     expect(label.textContent).toContain('Publish will fail');
-    expect(container.querySelector('.v10-pca-verdict-chip')?.classList.contains('v10-pca-verdict-danger')).toBe(true);
+    const chip = container.querySelector('.v10-pca-verdict-chip')!;
+    expect(chip.getAttribute('data-testid')).toBe('pca-eligibility-chip'); // e2e anchor
+    expect(chip.classList.contains('v10-pca-verdict-danger')).toBe(true);
     await unmount();
   });
 
