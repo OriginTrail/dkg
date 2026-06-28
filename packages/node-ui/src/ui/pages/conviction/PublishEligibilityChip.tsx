@@ -103,7 +103,8 @@ export function PublishEligibilityChip({ contextGraphId, id }: { contextGraphId:
               ? 'Predicted — confirmed on-chain after publish (pending the discount-applied signal).'
               : elig.verdict === 'fallthrough-no-funds'
                 ? // QA #2 — DANGER is blocking ("will FAIL"), so the amber "won’t block" note is wrong here.
-                  'Publishing now would fail on-chain — fund this wallet with TRAC, or get it approved on a healthy PCA, before you publish.'
+                  // Q2 — the signer needs native GAS too; a PCA covers only the TRAC fee.
+                  'Publishing now would fail on-chain — a signing wallet needs native gas and TRAC (a PCA covers only the TRAC fee). Fund it, or get it approved on a healthy PCA, before you publish.'
                 : 'Fix: approve the un-approved wallet(s) on your PCA (Conviction tab), or pin publishing to an approved wallet. This won’t block the publish.'}
           </p>
         </div>

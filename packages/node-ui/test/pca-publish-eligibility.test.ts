@@ -83,6 +83,56 @@ describe('PublishEligibilityChip (S5)', () => {
     await unmount();
   });
 
+  // Q2/#9 — a PCA covers only the TRAC fee; the signer still needs native gas. A
+  // covered wallet with confirmed zero gas must NOT render GREEN.
+  it('Q2 — a covered wallet with zero gas → DANGER, not eligible', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0],
+      balances: [{ address: W0, eth: '0', trac: '100', symbol: 'TRAC' }], // no gas
+      chainId: '84532',
+      rpcUrl: null,
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...makePcaSnapshot(), probedKey: { key, registered: true } } : makePcaSnapshot(),
+    );
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'Publish will fail');
+    expect(container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeTruthy();
+    expect(container.querySelector('[data-verdict="eligible"]')).toBeNull();
+    // The danger foot mentions gas (a PCA covers only the TRAC fee), keeps "fail on-chain".
+    const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
+    await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'needs native gas');
+    expect(container.querySelector('.v10-pca-publish-foot')?.textContent).toContain('would fail on-chain');
+    await unmount();
+  });
+
+  it('Q2 — mixed covered wallets (one gas-funded, one gasless) → GREEN', async () => {
+    const W1 = '0x' + 'b'.repeat(40);
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0, W1],
+      balances: [
+        { address: W0, eth: '0.1', trac: '100', symbol: 'TRAC' }, // gas-funded
+        { address: W1, eth: '0', trac: '100', symbol: 'TRAC' }, // gasless, but also covered
+      ],
+      chainId: '84532',
+      rpcUrl: null,
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...makePcaSnapshot(), probedKey: { key, registered: true } } : makePcaSnapshot(),
+    );
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'Funded by PCA #7'); // ≥1 covered wallet has gas → GREEN
+    // L8 — the gas popover row stays informational (neutral) under the GREEN verdict.
+    const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
+    await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    const gasRow = Array.from(container.querySelectorAll('.v10-pca-publish-cond')).find((li) =>
+      li.textContent?.toLowerCase().includes('gas'),
+    )!;
+    expect(gasRow.getAttribute('data-tone')).toBe('neutral');
+    await unmount();
+  });
+
   // L1 — when wallets are covered by DIFFERENT PCAs, the GREEN chip advertises the
   // MAX covering discount (matching bestCoveringDiscountBps), not covered[0].
   it('GREEN advertises the MAX covering discount across wallets on different PCAs (L1)', async () => {
