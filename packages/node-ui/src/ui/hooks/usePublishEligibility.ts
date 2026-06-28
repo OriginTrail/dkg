@@ -223,13 +223,20 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
       // not assert "will FAIL". DANGER narrows; GREEN stays strict (every wallet
       // covered) so we never promise a discount the picker might not deliver.
       const anyCanFund = wallets.some((w) => (w.covered || w.hasTrac) && w.gasFunded);
-      verdict = anyCanFund ? 'fallthrough' : 'fallthrough-no-funds';
-      reasons.push(`${covered.length} of ${wallets.length} signing wallets approved`);
-      if (wallets.some((w) => w.sawExpired)) reasons.push('a conviction account has expired or been fully swept');
-      if (wallets.some((w) => w.sawInsolvent)) reasons.push('a conviction account is out of budget');
-      if (!conditions.gasFunded) reasons.push('a signing wallet has no gas');
-      if (uncovered.some((w) => w.inconclusive)) reasons.push('a wallet’s PCA coverage couldn’t be checked');
-      if (uncovered.some((w) => w.balanceUnknown)) reasons.push('a signing wallet’s balance couldn’t be checked');
+      if (!anyCanFund && inconclusive.length > 0) {
+        // V3/#9 — a CONFIRMED-broke wallet alongside an UNREADABLE one: don't assert
+        // "will fail" — the inconclusive wallet may be the funded signer once readable.
+        // Resolve neutral (like the all-inconclusive branch; push no definitive reasons).
+        verdict = 'unknown';
+      } else {
+        verdict = anyCanFund ? 'fallthrough' : 'fallthrough-no-funds';
+        reasons.push(`${covered.length} of ${wallets.length} signing wallets approved`);
+        if (wallets.some((w) => w.sawExpired)) reasons.push('a conviction account has expired or been fully swept');
+        if (wallets.some((w) => w.sawInsolvent)) reasons.push('a conviction account is out of budget');
+        if (!conditions.gasFunded) reasons.push('a signing wallet has no gas');
+        if (uncovered.some((w) => w.inconclusive)) reasons.push('a wallet’s PCA coverage couldn’t be checked');
+        if (uncovered.some((w) => w.balanceUnknown)) reasons.push('a signing wallet’s balance couldn’t be checked');
+      }
     }
 
     // L1: the GREEN chip should advertise the BEST covering discount (wallets may
