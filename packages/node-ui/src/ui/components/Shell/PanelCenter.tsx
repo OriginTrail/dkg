@@ -32,6 +32,14 @@ const AgentProfilePage = React.lazy(() =>
   import('../AgentProfilePage.js').then((m) => ({ default: m.AgentProfilePage }))
 );
 
+const PublishingConvictionView = React.lazy(() =>
+  import('../../pages/PublishingConviction.js').then((m) => ({ default: m.PublishingConvictionPage }))
+);
+
+const ConvictionDetailView = React.lazy(() =>
+  import('../../pages/conviction/ConvictionDetailView.js').then((m) => ({ default: m.ConvictionDetailView }))
+);
+
 function TabBar() {
   const { tabs, activeTabId, setActiveTab, closeTab } = useTabsStore();
 
@@ -296,6 +304,14 @@ function ViewContainer() {
     );
   }
 
+  if (activeTabId === 'conviction') {
+    return (
+      <Suspense fallback={<div className="lazy-spinner">Loading publishing conviction...</div>}>
+        <PublishingConvictionView />
+      </Suspense>
+    );
+  }
+
   if (activeTabId === 'memory-stack') return <MemoryStackView />;
 
   if (activeTabId === CONTEXT_GRAPH_PRIMER_TAB_ID) return <ContextGraphPrimerView />;
@@ -303,6 +319,15 @@ function ViewContainer() {
   if (activeTabId.startsWith('project:')) {
     const cgId = activeTabId.slice('project:'.length);
     return <ProjectView contextGraphId={cgId} />;
+  }
+
+  if (activeTabId.startsWith('conviction:')) {
+    const accountId = activeTabId.slice('conviction:'.length);
+    return (
+      <Suspense fallback={<div className="lazy-spinner">Loading account...</div>}>
+        <ConvictionDetailView accountId={accountId} />
+      </Suspense>
+    );
   }
 
   if (activeTabId.startsWith('agent:')) {

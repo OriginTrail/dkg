@@ -101,11 +101,13 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     return container;
   }
 
-  it('renders the four kept cards + Danger Zone in the approved order', async () => {
+  it('renders the kept cards (incl. Publishing Conviction) + Danger Zone in the approved order', async () => {
     const c = await render();
     expect(cardTitles(c)).toEqual([
       'Node Identity',
       'Blockchain Config',
+      // PCA card inserted directly after Blockchain Config (UX §3.2).
+      'Publishing Conviction',
       'Network Telemetry',
       'Local Data Retention',
       'Danger Zone',

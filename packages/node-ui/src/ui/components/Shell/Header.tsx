@@ -66,6 +66,15 @@ const OBSERVABILITY_ICON = (
   </svg>
 );
 
+// Publishing Conviction launcher — a "badge percent" glyph (discount +
+// commitment connotation), styled like the sibling header icons.
+const CONVICTION_ICON = (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.78 4.78 4 4 0 0 1-6.74 0 4 4 0 0 1-4.78-4.78 4 4 0 0 1 0-6.75z" />
+    <line x1="15" y1="9" x2="9" y2="15" /><circle cx="9.5" cy="9.5" r=".5" /><circle cx="14.5" cy="14.5" r=".5" />
+  </svg>
+);
+
 export function Header() {
   const { theme, setTheme, leftCollapsed, toggleLeft, rightCollapsed, toggleRight } = useLayoutStore();
   const nodeStatus = useAgentsStore((s) => s.nodeStatus);
@@ -137,6 +146,14 @@ export function Header() {
           title="Observability"
         >
           {OBSERVABILITY_ICON}
+        </button>
+
+        <button
+          className="v10-header-icon-btn"
+          onClick={() => openTab({ id: 'conviction', label: 'Publishing Conviction', closable: true })}
+          title="Publishing Conviction — publishing discounts & sponsorship"
+        >
+          {CONVICTION_ICON}
         </button>
 
         <button
