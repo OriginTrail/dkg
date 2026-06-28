@@ -159,6 +159,53 @@ describe('PublishEligibilityChip (S5)', () => {
     await unmount();
   });
 
+  // R3 — the verdict must track #1327's funding-aware signer selection: a covered
+  // wallet + an uncovered/no-TRAC SPARE must NOT assert "will FAIL" (the picker
+  // skips the spare). DANGER only when NO wallet can fund.
+  it('R3 — covered wallet + uncovered no-TRAC spare → AMBER, not false DANGER', async () => {
+    const W1 = '0x' + 'b'.repeat(40);
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0, W1],
+      balances: [
+        { address: W0, eth: '0.1', trac: '100', symbol: 'TRAC' },
+        { address: W1, eth: '0.1', trac: '0', symbol: 'TRAC' }, // spare: no TRAC, uncovered
+      ],
+      chainId: '84532',
+      rpcUrl: null,
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) => {
+      const registered = !!key && key.toLowerCase() === W0.toLowerCase();
+      return { ...makePcaSnapshot(), probedKey: { key, registered } }; // both probes SUCCEED
+    });
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'No PCA discount'); // AMBER, not "Publish will fail"
+    expect(container.textContent).not.toContain('Publish will fail');
+    expect(container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeNull();
+    expect(container.querySelector('[data-verdict="fallthrough"]')).toBeTruthy();
+    await unmount();
+  });
+
+  it('R3 — all wallets uncovered + 0 TRAC → DANGER (no wallet can fund)', async () => {
+    const W1 = '0x' + 'b'.repeat(40);
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0, W1],
+      balances: [
+        { address: W0, eth: '0.1', trac: '0', symbol: 'TRAC' },
+        { address: W1, eth: '0.1', trac: '0', symbol: 'TRAC' },
+      ],
+      chainId: '84532',
+      rpcUrl: null,
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) => ({
+      ...makePcaSnapshot(),
+      probedKey: { key, registered: false },
+    }));
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'Publish will fail');
+    expect(container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeTruthy();
+    await unmount();
+  });
+
   // C1/#9 — a probe that FAILED (rejected) is "couldn't read", NOT a confirmed
   // fall-through. It must resolve NEUTRAL (unknown), never a DANGER at spend time.
   it('resolves NEUTRAL (unknown), not DANGER, when the coverage probe FAILS (C1/#9)', async () => {
