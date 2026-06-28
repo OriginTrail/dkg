@@ -125,6 +125,67 @@ falls back to the structured digest. Default off.
   embedding model was reachable** — an actionable signal that is distinct from a
   genuine "no matches" empty result. Configure `config.drag.embedder` to fix it.
 
+## Reasoning — derive proof-carrying conclusions (EYE)
+
+`retrieve → verify → **reason** → prove`. With `"reason": true`, dRAG runs the
+**EYE** N3 reasoner (`eyereasoner`, in-process WebAssembly — an optional
+dependency) over the context graph's **verified** facts, applying N3 rules to
+**derive new conclusions** — the things vectors and SPARQL can't do: **negation**
+(`log:notIncludes` / `collectAllIn`), **transitive inference**, and conditional /
+policy logic — with an **auditable derivation** an LLM cannot give you.
+
+```jsonc
+"reasoning": {
+  "engine": "eye-js",
+  "rules": [{ "kaId": "...", "checks": { "verified": true } }],   // rules are themselves verifiable KAs
+  "derived": [
+    { "conclusion": { "subject": "...D1", "predicate": "...violatesReviewPolicy", "object": "\"true\"" },
+      "proof": { "rule": "{ … } => { … } .",
+                 "support": [ /* the chain-verified facts the rule fired on */ ] } }
+  ]
+}
+```
+
+Two invariants make this trustworthy:
+
+1. **EYE only sees VERIFIED facts.** The reasoner's inputs are filtered to facts
+   whose merkle/chain/seal citation verified — the trust gate. A bad rule can
+   mis-derive, but it can never reason from an unproven fact.
+2. **Derived ≠ published.** Conclusions are returned in `reasoning.derived`,
+   never mixed into `facts`/`citations`. Each derived conclusion is
+   **proof-carrying**: its `support` is the set of chain-verified citations the
+   rule fired on (the proof leaves), plus the rule. So the *whole* answer is
+   auditable — re-check the merkle proofs of the leaves, re-run the rule.
+
+**Rules are verifiable too.** A rule is N3; publish it as a KA whose object is the
+rule body under predicate `…/drag/reasoning#ruleN3`, and dRAG auto-discovers it.
+Now **verified facts + verified rules → verifiable derivations** — a conclusion's
+trust decomposes fully into *which facts, which rule, which proof*. Rules may also
+be passed per-request (`"rules": "<n3>"`).
+
+**Closed-world caveat.** Negation-as-failure is closed-world — "no senior review
+*in the facts EYE saw*." dRAG reasons over the CG's **complete** verified fact set
+(bounded by `config.drag.reasoningMaxKas`), so for a single CG the negation is
+sound; treat a NAF conclusion as scoped to that fact set.
+
+Reasoning is single-node (`scope:local`), opt-in per request, and disabled with
+`config.drag.reasoning: false`. See `scripts/drag-reason-demo.mjs` for a
+multi-agent code-graph example (a change that violates the review policy, derived
+with negation + transitivity, proven).
+
+**Known limitations (V1).**
+- **Untrusted rules + compute.** Auto-discovered rule-KAs are author-untrusted (any
+  publisher to a public CG can plant one), and EYE runs **in-process** — an
+  in-process timeout cannot interrupt the blocking WASM. The fact/rule/derived sets
+  are hard-capped, but an adversarial rule's *runtime* is not bounded. **Until EYE
+  runs in a worker-thread with a hard timeout, set `config.drag.reasoning: false`
+  on nodes that expose the API beyond loopback or reason over untrusted public CGs.**
+- **Proof is best-effort.** `support` is a sound set of verified facts in the
+  conclusion's rule-scoped neighbourhood — every leaf is a real chain-verified
+  citation (never fabricated), but the *set* may include a sibling-branch fact or
+  omit a body fact anchored on a shared object. The exact rule-instance proof
+  (EYE's justification output) is a planned enhancement.
+
 ## How it works under the hood
 
 1. **Index** (semantic only): each entity in the CG's verifiable memory is

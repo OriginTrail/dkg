@@ -304,6 +304,14 @@ export interface DragConfig {
   /** Default cap on cited facts per answer (default 12). */
   maxCitations?: number;
   /**
+   * EYE reasoning tier (retrieve→verify→reason→prove). Runs per-request when an
+   * answer is requested with `reason:true`; set false to disable entirely. Needs
+   * the optional `eyereasoner` dependency + rules (a rule-KA in the CG or request N3).
+   */
+  reasoning?: boolean;
+  /** Cap on KAs gathered for reasoning (default 200). */
+  reasoningMaxKas?: number;
+  /**
    * Allow per-request retrieval/embedder/price overrides (`embedder`,
    * `simulatePrice`) on POST /api/answer. For development + testing only;
    * default false (keeps the public answer contract clean).

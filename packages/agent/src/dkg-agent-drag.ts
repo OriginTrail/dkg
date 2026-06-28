@@ -342,6 +342,79 @@ export class DragMethods extends DKGAgentBase {
     };
   }
 
+  /**
+   * Gather EVERY verified fact of a context graph — all canonical triples
+   * (relationship + attribute, NOT just literal-object like the answer path),
+   * each with its VerifiableCitation, filtered to `checks.verified`. This is the
+   * fact set the reasoning tier (EYE) consumes: COMPLETE over the CG (so
+   * closed-world negation is sound) and TRUSTLESS (only chain-proven facts reach
+   * the reasoner). Bounded by `cap` KAs. Reuses the exact citation machinery as
+   * `dragAnswerLocal`; never fabricates (un-anchored KAs / un-citeable triples skipped).
+   */
+  async gatherVerifiedFacts(
+    this: DKGAgent,
+    contextGraphId: string,
+    opts?: { cap?: number; maxTriples?: number },
+  ): Promise<Array<{ triple: CitationTriple; citation: VerifiableCitation }>> {
+    const idCheck = validateContextGraphId(contextGraphId);
+    if (!idCheck.valid) return [];
+    const onChainIdStr = await this.getContextGraphOnChainId(contextGraphId).catch(() => null);
+    if (!onChainIdStr || !/^\d+$/.test(onChainIdStr) || BigInt(onChainIdStr) === 0n) return [];
+    const cgOnChainId = BigInt(onChainIdStr);
+    const vmPrefix = `did:dkg:context-graph:${contextGraphId}/_verifiable_memory/`;
+    const cap = Math.max(1, Math.min(opts?.cap ?? 200, 1000));
+    // Bound the TOTAL fact set (not just KA count) — the reasoner's runtime grows
+    // with the fact set, so this caps the compute an untrusted/large CG can drive.
+    const maxTriples = Math.max(1, Math.min(opts?.maxTriples ?? 10000, 100000));
+
+    const result = await this.store
+      .query(`SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), "${vmPrefix}")) } LIMIT ${cap}`)
+      .catch(() => null);
+    const graphs =
+      result && result.type === 'bindings'
+        ? result.bindings.map((b) => (b['g'] ?? '').replace(/^<|>$/g, '')).filter(Boolean)
+        : [];
+    if (graphs.length === 0) return [];
+
+    const chain: CitationChainReads = {
+      getLatestMerkleRoot: (kaId) => this.chain.getLatestMerkleRoot!(kaId),
+      getMerkleLeafCount: (kaId) => this.chain.getMerkleLeafCount!(kaId),
+      getLatestMerkleRootAuthor: (kaId) => this.chain.getLatestMerkleRootAuthor!(kaId),
+    };
+    const chainId = await this.chain.getEvmChainId().catch(() => 0n);
+    const deps = { store: this.store, chain, servingNode: this.peerId ?? 'local', chainId };
+
+    const out: Array<{ triple: CitationTriple; citation: VerifiableCitation }> = [];
+    const seen = new Set<string>();
+    for (const g of graphs) {
+      if (out.length >= maxTriples) break;
+      const m = g.match(VM_GRAPH_RE);
+      if (!m) continue;
+      const kaId = (BigInt(m[1]) << 96n) | BigInt(m[2]);
+      let prepared: PreparedKaCitation;
+      try {
+        prepared = await prepareKaCitation(deps, { contextGraphId: cgOnChainId, kaId });
+      } catch {
+        continue; // not anchored / not synced — skip, never fabricate
+      }
+      for (const triple of prepared.triples) {
+        if (out.length >= maxTriples) break;
+        const fk = `${triple.subject}|${triple.predicate}|${triple.object}`;
+        if (seen.has(fk)) continue;
+        let citation: VerifiableCitation;
+        try {
+          citation = citeTriple(prepared, triple as CitationTriple);
+        } catch {
+          continue; // un-citeable (not a real public leaf) — skip
+        }
+        if (!citation.checks.verified) continue; // trust gate: reasoning sees verified facts only
+        seen.add(fk);
+        out.push({ triple: { subject: triple.subject, predicate: triple.predicate, object: triple.object }, citation });
+      }
+    }
+    return out;
+  }
+
   /** Attach (or clear) the semantic entry-point retriever used by `dragAnswerLocal`. */
   attachEntityRetriever(this: DKGAgent, retriever: EntityRetriever | null): void {
     this.entityRetriever = retriever ?? undefined;

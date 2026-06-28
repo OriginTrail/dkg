@@ -40,10 +40,13 @@ import type { EmbeddingProvider } from '../../vector-store.js';
 import { VectorEntityRetriever } from '../drag-retriever.js';
 import { buildEmbedder, resolveSemanticEmbedder, type EmbedderKind } from '../drag-embedder.js';
 import { synthesizeAnswer } from '../drag-synthesize.js';
+import { DragReasoner, DRAG_RULE_PREDICATE, type ReasoningResult } from '../drag-reasoner.js';
+import type { VerifiableCitation, CitationTriple } from '@origintrail-official/dkg-core';
 
 // V1 default verifier. The real Coinbase/USDC facilitator drops in behind this
 // same interface (config-gated) without touching the route.
 const dragPaymentVerifier: PaymentVerifier = new MockPaymentVerifier();
+const dragReasoner = new DragReasoner();
 
 // ── observability: lightweight in-process counters (GET /api/answer/metrics) ──
 const dragMetrics = {
@@ -52,9 +55,53 @@ const dragMetrics = {
   citationsVerified: 0,
   retrievalDegraded: 0,
   synthesized: 0,
+  reasoned: 0,
 };
 export function getDragMetrics(): typeof dragMetrics {
   return JSON.parse(JSON.stringify(dragMetrics));
+}
+
+/** Unescape an N-Triples literal object back to its raw text (rule N3 carried in a KA). */
+function unquoteLiteral(o: string): string | null {
+  const m = o.match(/^"((?:[^"\\]|\\.)*)"/);
+  if (!m) return null;
+  return m[1].replace(/\\(.)/g, (_, c) => (c === 'n' ? '\n' : c === 't' ? '\t' : c));
+}
+
+/**
+ * Resolve the N3 rules to apply: auto-discover VERIFIABLE rule-KAs (verified
+ * facts whose predicate is DRAG_RULE_PREDICATE — so the rules are themselves
+ * chain-proven), then append any request-supplied `rules` N3.
+ */
+const MAX_RULES = 50;
+const MAX_RULES_BYTES = 64 * 1024;
+function resolveRules(
+  facts: Array<{ triple: CitationTriple; citation: VerifiableCitation }>,
+  requestRules?: string,
+): { rulesN3: string; ruleCitations: VerifiableCitation[] } {
+  // Bound rule count + total size. Auto-discovered rule-KAs are AUTHOR-untrusted
+  // (any publisher to a public CG can plant one) — these caps blunt a planted
+  // many-rule / huge-rule blowup. NOTE: they do NOT bound an adversarial rule's
+  // RUNTIME; EYE runs in-process and an in-process timeout cannot interrupt the
+  // blocking WASM (worker-thread isolation is the planned hardening — see the
+  // dRAG guide). Operators exposing the API beyond loopback, or reasoning over
+  // untrusted public CGs, should set `config.drag.reasoning: false`.
+  const parts: string[] = [];
+  const ruleCitations: VerifiableCitation[] = [];
+  let bytes = 0;
+  for (const f of facts) {
+    if (parts.length >= MAX_RULES || bytes >= MAX_RULES_BYTES) break;
+    if (f.triple.predicate === DRAG_RULE_PREDICATE) {
+      const n3 = unquoteLiteral(f.triple.object);
+      if (n3) {
+        parts.push(n3);
+        bytes += n3.length;
+        ruleCitations.push(f.citation);
+      }
+    }
+  }
+  if (requestRules && requestRules.trim() && bytes < MAX_RULES_BYTES) parts.push(requestRules.slice(0, MAX_RULES_BYTES - bytes));
+  return { rulesN3: parts.join('\n'), ruleCitations };
 }
 
 // Cache retrievers by embedder model so a model (esp. the local one) loads once.
@@ -176,6 +223,22 @@ export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
         }
       }
 
+      // ── REASON (opt-in; local scope) — EYE over the CG's VERIFIED facts ──
+      // derive proof-carrying conclusions (negation, transitivity, policy logic).
+      // Kept SEPARATE from result.facts/citations: derived ≠ published.
+      let reasoning: ReasoningResult | undefined;
+      if (parsed.reason === true && scope === 'local' && config.drag?.reasoning !== false) {
+        const facts = await agent.gatherVerifiedFacts(contextGraphId, { cap: config.drag?.reasoningMaxKas });
+        const { rulesN3, ruleCitations } = resolveRules(facts, typeof parsed.rules === 'string' ? parsed.rules : undefined);
+        if (rulesN3) {
+          reasoning = await dragReasoner.reason(facts, rulesN3);
+          if (ruleCitations.length) reasoning.rules = ruleCitations;
+        } else {
+          reasoning = { engine: 'eye-js', derived: [], note: 'no rules found — publish a rule KA (predicate ' + DRAG_RULE_PREDICATE + ') or pass `rules` N3' };
+        }
+        dragMetrics.reasoned++;
+      }
+
       result.stats.latencyMs = Date.now() - t0;
 
       // observability counters
@@ -187,7 +250,11 @@ export async function handleDragRoutes(ctx: RequestContext): Promise<void> {
       if ('retrievalDegraded' in result.stats && result.stats.retrievalDegraded) dragMetrics.retrievalDegraded++;
       if (synthesized) dragMetrics.synthesized++;
 
-      jsonResponse(res, 200, settlement ? { ...result, settlement } : result);
+      jsonResponse(res, 200, {
+        ...result,
+        ...(reasoning ? { reasoning } : {}),
+        ...(settlement ? { settlement } : {}),
+      });
     } catch (e) {
       jsonResponse(res, 500, { error: e instanceof Error ? e.message : String(e) });
     }

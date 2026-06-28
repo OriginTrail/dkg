@@ -31,23 +31,26 @@
     "clean": "node -e \"const fs=require('fs');for(const d of['dist','network']){fs.rmSync(d,{recursive:true,force:true})};fs.rmSync('tsconfig.tsbuildinfo',{force:true})\""
   },
   "dependencies": {
-    "@origintrail-official/dkg-adapter-openclaw": "workspace:*",
+    "@iarna/toml": "^2.2.5",
     "@origintrail-official/dkg-adapter-hermes": "workspace:*",
+    "@origintrail-official/dkg-adapter-openclaw": "workspace:*",
     "@origintrail-official/dkg-agent": "workspace:*",
     "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
-    "@origintrail-official/dkg-mcp": "workspace:*",
     "@origintrail-official/dkg-epcis": "workspace:*",
+    "@origintrail-official/dkg-mcp": "workspace:*",
     "@origintrail-official/dkg-node-ui": "workspace:*",
     "@origintrail-official/dkg-publisher": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
-    "@iarna/toml": "^2.2.5",
-    "commander": "^13",
     "better-sqlite3": "^11",
+    "commander": "^13",
     "ethers": "^6",
     "js-yaml": "^4.1.1",
     "n3": "^2.0.1",
     "typescript": "^5.7"
+  },
+  "optionalDependencies": {
+    "eyereasoner": "^21.1.10"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7",
