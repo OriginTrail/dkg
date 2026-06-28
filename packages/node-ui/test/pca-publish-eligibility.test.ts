@@ -188,6 +188,25 @@ describe('PublishEligibilityChip (S5)', () => {
     )!;
     expect(gasRow).toBeTruthy();
     expect(gasRow.getAttribute('data-tone')).toBe('neutral');
+    // QA #2 — AMBER is non-blocking, so the "won't block" fix-footer is correct here.
+    expect(container.textContent).toContain('won’t block the publish');
+    await unmount();
+  });
+
+  // QA #2 — DANGER ("will FAIL") is BLOCKING, so the amber "won't block" footer is
+  // wrong; it must read as a blocking-failure fix instead.
+  it('DANGER popover footer warns of on-chain failure, NOT "won’t block" (QA #2)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('0')); // no TRAC → danger
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...makePcaSnapshot(), probedKey: { key, registered: false } } : makePcaSnapshot(),
+    );
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'Publish will fail');
+    const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
+    await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'would fail on-chain');
+    const foot = container.querySelector('.v10-pca-publish-foot')!;
+    expect(foot.textContent).not.toContain('won’t block the publish');
     await unmount();
   });
 

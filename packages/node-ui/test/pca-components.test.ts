@@ -370,6 +370,26 @@ describe('EligibilityVerdictBanner', () => {
     await unmount();
   });
 
+  // F9 — amber + danger name the forfeited discount when it's in context.
+  it('amber/danger banners name the forfeited discount when discountBps is in context (F9)', async () => {
+    const amber = await render(
+      React.createElement(EligibilityVerdictBanner, { verdict: 'fallthrough', accountId: '2', discountBps: 3000 }),
+    );
+    expect(amber.container.querySelector('.v10-pca-verdict-banner')?.textContent).toContain('forfeiting PCA #2’s −30%');
+    await amber.unmount();
+
+    const danger = await render(
+      React.createElement(EligibilityVerdictBanner, { verdict: 'fallthrough-no-funds', accountId: '2', discountBps: 3000 }),
+    );
+    expect(danger.container.querySelector('.v10-pca-verdict-banner')?.textContent).toContain('forfeiting PCA #2’s −30%');
+    await danger.unmount();
+
+    // No discount in context → no fabricated forfeit clause.
+    const noDisc = await render(React.createElement(EligibilityVerdictBanner, { verdict: 'fallthrough' }));
+    expect(noDisc.container.querySelector('.v10-pca-verdict-banner')?.textContent).not.toContain('forfeiting');
+    await noDisc.unmount();
+  });
+
   it('danger banner adds the escrow caveat only on owner-publishes', async () => {
     const owner = await render(
       React.createElement(EligibilityVerdictBanner, {
