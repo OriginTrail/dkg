@@ -325,7 +325,11 @@ describe('EligibilityVerdictBanner', () => {
     const banner = container.querySelector('.v10-pca-verdict-banner')!;
     expect(banner.getAttribute('role')).toBe('alert');
     expect(banner.getAttribute('aria-live')).toBe('assertive');
-    expect(banner.textContent).toContain('direct cost');
+    // P2-interim — the amber copy must HEDGE (attempt + fails-below-fee), not assert
+    // the direct-cost publish will go through.
+    expect(banner.textContent).toContain('attempt to pay the direct cost');
+    expect(banner.textContent).toContain('fails if that TRAC is below the fee');
+    expect(banner.textContent).not.toContain('it will pay the direct cost');
     expect(banner.textContent).toContain('no approved wallet');
     expect(banner.textContent).toContain('expired');
     await unmount();

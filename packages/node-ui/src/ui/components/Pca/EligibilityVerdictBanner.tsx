@@ -136,10 +136,14 @@ export function EligibilityVerdictBanner({
   } else if (verdict === 'fallthrough') {
     message = (
       <>
-        No PCA discount on this publish — it will pay the direct cost (TRAC from the signing wallet)
+        {/* P2-interim — the chip can't see the sized per-publish fee (deferred to
+            #1351), so don't assert the direct-cost publish WILL succeed; say it
+            ATTEMPTS and fails if the wallet's TRAC is below the fee. */}
+        No PCA discount on this publish — it will attempt to pay the direct cost from the signing
+        wallet’s TRAC
         {/* F9 — name the forfeited discount when it's in context (§5.5 / #5a). */}
         {disc ? `, forfeiting ${pcaLabel}’s −${disc}` : ''}
-        {ownerPublish ? escrowCaveat : ''}.{reasonText}
+        {ownerPublish ? escrowCaveat : ''}; the publish fails if that TRAC is below the fee.{reasonText}
       </>
     );
   } else if (verdict === 'fallthrough-no-funds') {
