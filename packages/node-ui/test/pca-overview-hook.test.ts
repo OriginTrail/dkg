@@ -161,6 +161,21 @@ describe('usePcaOverview', () => {
     await unmount();
   });
 
+  // U2 — a zero-budget approved PCA must NOT advertise a discount (align overview ↔ S5).
+  it('excludes a zero-budget approved PCA from covered/bestCoveringDiscountBps (U2)', async () => {
+    usePcaStore.setState({ trackedIds: ['7'] });
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W1], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockImplementation((id: string, wallet?: string) => {
+      // healthy (future expiry, not swept), approved, but ZERO budget (override the snap() default topUpBuffer:'1').
+      if (wallet === undefined) return Promise.resolve(snap({ accountId: '7', topUpBuffer: '0', baseEpochAllowance: '0' }));
+      return Promise.resolve(snap({ probedKey: { wallet: W1, registered: true } }));
+    });
+    const { unmount } = await render();
+    expect(latest!.covered).toBe(false);
+    expect(latest!.bestCoveringDiscountBps).toBeNull();
+    await unmount();
+  });
+
   it('M2: two consumers of the same tracked-id set share ONE wallets fetch', async () => {
     usePcaStore.setState({ trackedIds: ['7'] });
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [], balances: [], chainId: '84532', rpcUrl: null });

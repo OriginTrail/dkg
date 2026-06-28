@@ -3,6 +3,7 @@ import { useFetch } from '../../hooks.js';
 import { fetchWalletsBalances, fetchPca, describePcaError } from '../../api.js';
 import { formatEth, formatEthTooltip } from '../../lib/formatEth.js';
 import { usePcaStore } from '../../stores/pca.js';
+import { bigGt0 } from '../../pca/coverage.js';
 import { PcaModalShell } from './PcaModalShell.js';
 import {
   WalletRow,
@@ -12,16 +13,6 @@ import {
   isTestnetChain,
   healthForSnapshot,
 } from '../../components/Pca/index.js';
-
-// mirror usePublishEligibility cover predicate — shared extraction tracked in #1344
-function bigGt0(wei: string | undefined): boolean {
-  if (!wei) return false;
-  try {
-    return BigInt(wei) > 0n;
-  } catch {
-    return false;
-  }
-}
 
 // Testnet faucets for the native gas token (testnet-only CTA — §6.2). Only
 // chains we have a known faucet for render a button; others show the copy alone.

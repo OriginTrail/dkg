@@ -4,6 +4,7 @@ import { fetchWalletsBalances, fetchPca, fetchContextGraphs, fetchCurrentAgent }
 import { usePcaStore } from '../stores/pca.js';
 import { healthForSnapshot } from '../components/Pca/HealthChip.js';
 import { canonicalAgentDid } from '../lib/contextGraphSidebar.js';
+import { bigGt0 } from '../pca/coverage.js';
 import type { PcaVerdict } from '../components/Pca/EligibilityVerdictBanner.js';
 
 const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
@@ -54,15 +55,6 @@ export interface PublishEligibility {
   /** Per-condition AND across all signing wallets (the popover breakdown). */
   conditions: { approved: boolean; gasFunded: boolean; notExpired: boolean; solvent: boolean };
   wallets: WalletDetail[];
-}
-
-function bigGt0(wei: string | undefined): boolean {
-  if (!wei) return false;
-  try {
-    return BigInt(wei) > 0n;
-  } catch {
-    return false;
-  }
 }
 
 /**
