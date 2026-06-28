@@ -156,7 +156,7 @@ export function PcaAccountCard({
               type="button"
               className="v10-pca-card-btn"
               onClick={() => onApproveWallets?.(accountId)}
-              disabled={!ownerIsPrimaryWallet}
+              disabled={!ownerIsPrimaryWallet || !onApproveWallets}
               title={
                 ownerIsPrimaryWallet
                   ? undefined
@@ -214,6 +214,7 @@ export function PcaAccountCard({
             type="button"
             className="v10-pca-card-btn primary"
             onClick={() => onUseForPublishing?.(accountId)}
+            disabled={!onUseForPublishing}
           >
             Use for publishing
           </button>

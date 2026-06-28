@@ -29,6 +29,7 @@ export function AddressCrux({
   disabled = false,
   rows = 5,
   id,
+  testId,
   className = '',
 }: {
   value: string;
@@ -43,6 +44,8 @@ export function AddressCrux({
   disabled?: boolean;
   rows?: number;
   id?: string;
+  /** Optional stable e2e anchor for the input/textarea. */
+  testId?: string;
   className?: string;
 }) {
   const autoId = useId();
@@ -61,6 +64,7 @@ export function AddressCrux({
       {mode === 'bulk' ? (
         <textarea
           id={inputId}
+          data-testid={testId}
           className="v10-form-textarea"
           value={value}
           onChange={(e) => onChange(e.target.value)}
@@ -74,6 +78,7 @@ export function AddressCrux({
       ) : (
         <input
           id={inputId}
+          data-testid={testId}
           type="text"
           className="v10-form-input"
           value={value}
