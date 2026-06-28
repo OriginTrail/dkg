@@ -2,7 +2,13 @@
 // reused across S1–S7 (UX proposal §4). See the per-file docs for the invariant
 // each one carries.
 export { CopyButton, useCopy } from './CopyButton.js';
-export { truncateAddress, formatWeiToTrac, formatRelativeExpiry } from './format.js';
+export {
+  truncateAddress,
+  formatWeiToTrac,
+  formatRelativeExpiry,
+  nativeGasSymbol,
+  isTestnetChain,
+} from './format.js';
 export {
   HealthChip,
   HEALTH_CHIP_META,

@@ -448,3 +448,25 @@
 .v10-pca-approve-results { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
 .v10-pca-approve-summary { font-size: 12px; font-weight: 600; color: var(--text-primary); margin: 4px 0 0; }
 .v10-pca-approve-handoff { margin-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+
+/* ----- S3 Detail (D1) ----- */
+.v10-pca-detail-section { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border-subtle); }
+.v10-pca-detail-section-title { font-size: 13px; font-weight: 700; color: var(--text-primary); margin: 0 0 8px; }
+.v10-pca-detail-hint { font-size: 11px; color: var(--text-tertiary); line-height: 1.5; margin: 6px 0; }
+.v10-pca-detail-subhead { font-size: 11px; font-weight: 600; color: var(--text-secondary); margin: 12px 0 6px; }
+.v10-pca-detail-form { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+.v10-pca-detail-form .v10-form-input,
+.v10-pca-detail-form .v10-form-select { max-width: 280px; }
+.v10-pca-detail-form .v10-pca-address-crux { flex: 1; min-width: 240px; }
+.v10-pca-detail-result { font-size: 11px; color: var(--text-success); margin: 8px 0 0; line-height: 1.5; }
+.v10-pca-detail-agentlist { display: flex; flex-direction: column; gap: 6px; }
+.v10-pca-agent-row { display: flex; }
+.v10-pca-agent-row .v10-pca-wallet-row { flex: 1; }
+.v10-pca-agent-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-warning);
+}

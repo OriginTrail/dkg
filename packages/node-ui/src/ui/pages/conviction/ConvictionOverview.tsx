@@ -8,6 +8,7 @@ import { EmptyState } from '../../components/ContextGraphPrimitives.js';
 import { PcaAccountCard } from './PcaAccountCard.js';
 import { CreatePcaModal } from './CreatePcaModal.js';
 import { ApproveWalletsModal } from './ApproveWalletsModal.js';
+import { GetSponsoredPanel } from './GetSponsoredPanel.js';
 
 type ViewFilter = 'owned' | 'approved';
 
@@ -19,9 +20,8 @@ type ViewFilter = 'owned' | 'approved';
  * set (no enumeration endpoint yet — P4); each card resolves independently so
  * one failure never blanks the grid.
  *
- * Create (S2) and Approve-wallets (S4) are wired here (Batch C). CTAs whose
- * target screens land later — Use-for-publishing (S5/Batch E) and Get-sponsored
- * (S6/Batch D) — render in a neutral disabled state until then.
+ * Create (S2), Approve-wallets (S4), and Get-sponsored (S6) are wired here.
+ * Use-for-publishing (S5/Batch E) still renders neutral-disabled until that lands.
  */
 export function ConvictionOverview() {
   const nodeStatus = useAgentsStore((s) => s.nodeStatus) as
@@ -42,6 +42,7 @@ export function ConvictionOverview() {
   const [filter, setFilter] = useState<ViewFilter>(role === 'edge' ? 'approved' : 'owned');
   const [createOpen, setCreateOpen] = useState(false);
   const [approve, setApprove] = useState<{ accountId: string; mode: 'self' | 'sponsor' } | null>(null);
+  const [sponsoredOpen, setSponsoredOpen] = useState(false);
 
   const owned = useMemo(() => accounts.filter((a) => a.classification === 'owned'), [accounts]);
   const others = useMemo(() => accounts.filter((a) => a.classification !== 'owned'), [accounts]);
@@ -69,6 +70,7 @@ export function ConvictionOverview() {
             tone="warning"
             title="No PCA discount on this node"
             description="No conviction account covers this node’s publishes, so each publish pays the direct cost from the signing wallet. Ask a core-node operator to sponsor you."
+            actions={[{ label: 'Get sponsored', onClick: () => setSponsoredOpen(true), variant: 'primary' }]}
           />
         </div>
       )}
@@ -98,8 +100,7 @@ export function ConvictionOverview() {
           <button
             type="button"
             className="v10-pca-card-btn primary"
-            disabled
-            title="Get sponsored — available shortly"
+            onClick={() => setSponsoredOpen(true)}
           >
             Share my wallet → get sponsored
           </button>
@@ -169,6 +170,7 @@ export function ConvictionOverview() {
           onClose={() => { setApprove(null); refresh(); }}
         />
       )}
+      {sponsoredOpen && <GetSponsoredPanel onClose={() => { setSponsoredOpen(false); refresh(); }} />}
     </div>
   );
 }
