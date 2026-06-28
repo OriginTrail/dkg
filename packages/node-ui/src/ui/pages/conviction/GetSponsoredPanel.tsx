@@ -3,7 +3,7 @@ import { useFetch } from '../../hooks.js';
 import { fetchWalletsBalances, fetchPca, describePcaError } from '../../api.js';
 import { formatEth, formatEthTooltip } from '../../lib/formatEth.js';
 import { usePcaStore } from '../../stores/pca.js';
-import { bigGt0 } from '../../pca/coverage.js';
+import { coverageForProbe } from '../../pca/coverage.js';
 import { PcaModalShell } from './PcaModalShell.js';
 import {
   WalletRow,
@@ -11,7 +11,6 @@ import {
   useCopy,
   nativeGasSymbol,
   isTestnetChain,
-  healthForSnapshot,
 } from '../../components/Pca/index.js';
 
 // Testnet faucets for the native gas token (testnet-only CTA — §6.2). Only
@@ -76,19 +75,11 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
         wallets.map((w) =>
           fetchPca(id, w)
             .then((snap): ProbeRow => {
-              // S2/#9 — adapterSupported===false (couldn't answer) → null (neutral
-              // "unknown" row), NOT a confirmed not-approved; all-unsupported falls
-              // into the wholesale "retry" path, never a danger row.
-              const registered =
-                snap.probedKey?.adapterSupported === false ? null : (snap.probedKey?.registered ?? null);
-              // N1: mirror S5's cover predicate so S6 "Ready" == S5 GREEN — a
-              // registered wallet only covers when the PCA is spendable.
-              const h = healthForSnapshot(snap);
-              const covers =
-                registered === true &&
-                h !== 'expired' &&
-                h !== 'swept' &&
-                (bigGt0(snap.topUpBuffer) || bigGt0(snap.baseEpochAllowance));
+              // #1344 — shared classifier: S2 adapterSupported===false → null (neutral
+              // "unknown" row, not a false not-approved; all-unsupported → wholesale
+              // "retry") + N1 covers = registered AND the PCA is spendable (S6 "Ready"
+              // == S5 GREEN).
+              const { registered, covers } = coverageForProbe(snap, snap.probedKey);
               return { wallet: w, registered, covers };
             })
             .catch((): ProbeRow => ({ wallet: w, registered: null, covers: false })),

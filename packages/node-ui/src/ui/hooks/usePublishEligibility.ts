@@ -4,7 +4,7 @@ import { fetchWalletsBalances, fetchPca, fetchContextGraphs, fetchCurrentAgent }
 import { usePcaStore } from '../stores/pca.js';
 import { healthForSnapshot } from '../components/Pca/HealthChip.js';
 import { canonicalAgentDid } from '../lib/contextGraphSidebar.js';
-import { bigGt0 } from '../pca/coverage.js';
+import { bigGt0, isPcaSpendable } from '../pca/coverage.js';
 import type { PcaVerdict } from '../components/Pca/EligibilityVerdictBanner.js';
 
 const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
@@ -118,31 +118,28 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
             if (snap === null) { probeError = true; continue; }
             // S2/#9 — the adapter COULDN'T answer (capability gap) is "couldn't read",
             // NOT a confirmed not-registered. Funnel it into the inconclusive channel
-            // (→ neutral verdict), never a definitive fall-through DANGER.
+            // (→ neutral verdict), never a definitive fall-through DANGER. (Kept inline,
+            // NOT via normalizeProbeRegistered: S5's `!registered` below treats an
+            // undefined registered as a plain skip, whereas overview/S6 treat it as
+            // inconclusive — preserving S5's exact semantics keeps this byte-identical.)
             if (snap.probedKey?.adapterSupported === false) { probeError = true; continue; }
             if (!snap.probedKey?.registered) continue;
-            const h = healthForSnapshot(snap);
-            // reverted L2 — see capstone finding. INTENTIONAL coarse P0 solvency
-            // proxy: a funded PCA holds its per-epoch budget in `baseEpochAllowance`
-            // (the cap), and `topUpBuffer` is only the EXTRA above that cap — 0 on a
-            // fresh, un-topped-up account. A topUpBuffer-only check therefore
-            // false-DANGERed every approved+funded PCA (live capstone: PCA #2, 5
-            // agents approved, chip showed "out of budget"). So ANY budget capacity
-            // ⇒ GREEN-eligible (a prediction, #9 "pending confirmation"); swept/
-            // expired are excluded SEPARATELY by the health check below; precise
-            // mid-epoch remaining is P2 via the extended snapshot's `remainingAllowance`.
-            const solvent = bigGt0(snap.topUpBuffer) || bigGt0(snap.baseEpochAllowance);
-            if (h !== 'expired' && h !== 'swept' && solvent) {
+            // #1344 — coarse P0 spendability via the shared isPcaSpendable (was inlined;
+            // see the reverted-L2 capstone finding). NOT remainingAllowance (P2/#1349).
+            if (isPcaSpendable(snap)) {
               cover = { accountId: id, discountBps: snap.discountBps };
               break;
             }
-            // Registered here but the account can't cover (swept/expired) — remember
-            // it so the copy distinguishes "approved-but-dead" from "no PCA" (#3).
+            // Registered here but the account can't cover — break down (dead vs
+            // out-of-budget) so the copy distinguishes "approved-but-dead" from "no PCA"
+            // (#3) and the reasons name the cause. Two INDEPENDENT checks (a dead AND
+            // zero-budget account sets both, matching the pre-refactor behavior).
+            const h = healthForSnapshot(snap);
             if (h === 'expired' || h === 'swept') {
               sawExpired = true;
               if (!deadAccountId) deadAccountId = id;
             }
-            if (!solvent) sawInsolvent = true;
+            if (!(bigGt0(snap.topUpBuffer) || bigGt0(snap.baseEpochAllowance))) sawInsolvent = true;
           }
           return {
             wallet: w,
