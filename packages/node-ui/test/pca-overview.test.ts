@@ -109,6 +109,23 @@ describe('PublishingConvictionPage — deployment (503) gate', () => {
     expect(container.querySelector('[data-testid="pca-landing"]')).toBeTruthy();
     await unmount();
   });
+
+  // Q4 — Recheck re-probes (the availability nonce increments) and clears the 503
+  // gate once the capability probe recovers.
+  it('Recheck re-probes and clears the 503 gate on recovery', async () => {
+    mocks.fetchPca.mockRejectedValueOnce(new HttpError(503)).mockResolvedValue(snapFixture('0'));
+    const { container, unmount } = await render(React.createElement(PublishingConvictionPage));
+    await waitForText(container, "isn’t available on this network");
+    expect(container.querySelector('[data-testid="pca-unavailable"]')).toBeTruthy();
+
+    await act(async () => {
+      container.querySelector('[data-testid="pca-recheck-btn"]')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await waitForText(container, 'Publishing Conviction');
+    expect(container.querySelector('[data-testid="pca-unavailable"]')).toBeNull();
+    expect(container.querySelector('[data-testid="pca-landing"]')).toBeTruthy();
+    await unmount();
+  });
 });
 
 describe('ConvictionOverview — S1 discovery', () => {

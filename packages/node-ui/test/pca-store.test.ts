@@ -91,7 +91,13 @@ describe('usePcaStore (dkg-pca localStorage persistence)', () => {
     localStorage.setItem(PCA_KEY, JSON.stringify({ trackedIds: ['1', '2', '3'] }));
     const { usePcaStore } = await loadFreshStore();
     usePcaStore.getState().untrackAccount('2');
-    expect(usePcaStore.getState().trackedIds).toEqual(['1', '3']);
+    expect(usePcaStore.getState().trackedIds).toEqual(['1', '3']); // in-memory sanity
+    // Q1 — the removal must actually PERSIST (the debounced write), not just live in
+    // memory: a hollow in-memory-only check would pass even if persist() were dropped.
+    await wait(DEBOUNCE_WAIT_MS);
+    expect(JSON.parse(localStorage.getItem(PCA_KEY)!).trackedIds).toEqual(['1', '3']);
+    const reloaded = await loadFreshStore();
+    expect(reloaded.usePcaStore.getState().trackedIds).toEqual(['1', '3']);
   });
 
   it('drives the create-pending lifecycle and persists each transition', async () => {
