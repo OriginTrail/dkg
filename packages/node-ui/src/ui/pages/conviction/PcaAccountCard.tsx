@@ -116,6 +116,7 @@ export function PcaAccountCard({
   // --- Owned card ---
   if (classification === 'owned') {
     const selfCovers = account.approvedCount > 0;
+    const inconclusive = account.probesInconclusive;
     return (
       <div className="card v10-pca-card" data-state="owned" data-account={accountId} data-testid="pca-account-card">
         <div className="card-body">
@@ -132,13 +133,20 @@ export function PcaAccountCard({
           <p className="v10-pca-card-owner-note">
             This is the node’s operational wallet — who <strong>signs</strong>, not who’s covered.
           </p>
-          {/* #11 — owner ≠ coverage. */}
-          {!selfCovers && (
+          {/* #11 — owner ≠ coverage. H2: never assert "0 approved" when the
+              per-wallet probes couldn't be read — caveat instead of a false
+              "discounts nothing yet". */}
+          {inconclusive ? (
+            <p className="v10-pca-card-warn">
+              ⚠ Couldn’t verify which of this node’s wallets are approved — retry. Until then, whether
+              this account discounts your publishes is unconfirmed.
+            </p>
+          ) : !selfCovers ? (
             <p className="v10-pca-card-warn">
               ⚠ 0 of this node’s wallets are approved here — it discounts nothing yet. Approve this
               node’s operational wallets to start saving.
             </p>
-          )}
+          ) : null}
           <p className="v10-pca-card-meta">
             {expiry}
             <span className="v10-pca-card-meta-sep"> · </span>
@@ -173,6 +181,7 @@ export function PcaAccountCard({
 
   // --- Approved / "sponsor" card (also the read-only "tracked, not approved" case) ---
   const allApproved = account.walletCount > 0 && account.approvedCount === account.walletCount;
+  const inconclusive = account.probesInconclusive;
   const firstUnapproved = account.walletProbes.find((p) => p.registered !== true)?.wallet;
   return (
     <div className="card v10-pca-card" data-state="approved" data-account={accountId} data-testid="pca-account-card">
@@ -182,11 +191,13 @@ export function PcaAccountCard({
           <span className="v10-pca-card-sponsor">(sponsor)</span>
           <span className="badge badge-info v10-pca-card-discount">◉ {pct(snapshot.discountBps)}</span>
           <span className="v10-pca-card-spacer" />
-          {!allApproved && account.walletCount > 0 && (
+          {inconclusive ? (
+            <span className="badge badge-warn">⚠ couldn’t verify approvals</span>
+          ) : !allApproved && account.walletCount > 0 ? (
             <span className="badge badge-warn">
               ⚠ {account.approvedCount} of {account.walletCount} wallets approved
             </span>
-          )}
+          ) : null}
         </div>
         {ownerLine}
         <p className="v10-pca-card-meta">
@@ -204,20 +215,27 @@ export function PcaAccountCard({
             />
           ))}
         </div>
-        {!allApproved && account.walletCount > 0 && (
+        {inconclusive ? (
+          <p className="v10-pca-card-warn">Couldn’t verify which wallets are approved — retry.</p>
+        ) : !allApproved && account.walletCount > 0 ? (
           <p className="v10-pca-card-warn">
             Publishes from the un-approved wallet(s) will quietly pay the direct cost.
           </p>
-        )}
+        ) : null}
         <div className="v10-pca-card-actions">
-          <button
-            type="button"
-            className="v10-pca-card-btn primary"
-            onClick={() => onUseForPublishing?.(accountId)}
-            disabled={!onUseForPublishing}
-          >
-            Use for publishing
-          </button>
+          {/* L9: no global "publish" target — the discount auto-applies at the
+              per-CG publish CTA. Guidance hint, not an inert disabled button.
+              (If a caller ever wires onUseForPublishing, render the action.) */}
+          {onUseForPublishing ? (
+            <button type="button" className="v10-pca-card-btn primary" onClick={() => onUseForPublishing(accountId)}>
+              Use for publishing
+            </button>
+          ) : (
+            <p className="v10-pca-card-hint">
+              Publish from any context graph — the discount applies automatically to your approved
+              wallets.
+            </p>
+          )}
           {firstUnapproved && (
             <CopyButton value={firstUnapproved} label={`Copy unapproved wallet ${firstUnapproved}`} />
           )}

@@ -231,6 +231,7 @@ function TrackByIdDisclosure({ onTrack }: { onTrack: (id: string) => void }) {
       <button
         type="button"
         className="v10-pca-track-toggle"
+        data-testid="pca-track-toggle"
         aria-expanded={open}
         aria-controls={panelId}
         onClick={() => setOpen((o) => !o)}

@@ -12,11 +12,18 @@ const mocks = vi.hoisted(() => ({
   fetchWalletsBalances: vi.fn(),
   fetchPca: vi.fn(),
   fetchContextGraphs: vi.fn(),
+  fetchCurrentAgent: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', async (orig) => {
   const actual = await orig<typeof import('../src/ui/api.js')>();
-  return { ...actual, fetchWalletsBalances: mocks.fetchWalletsBalances, fetchPca: mocks.fetchPca, fetchContextGraphs: mocks.fetchContextGraphs };
+  return {
+    ...actual,
+    fetchWalletsBalances: mocks.fetchWalletsBalances,
+    fetchPca: mocks.fetchPca,
+    fetchContextGraphs: mocks.fetchContextGraphs,
+    fetchCurrentAgent: mocks.fetchCurrentAgent,
+  };
 });
 
 const { PublishEligibilityChip } = await import('../src/ui/pages/conviction/PublishEligibilityChip.js');
@@ -48,6 +55,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   usePcaStore.setState({ trackedIds: ['7'], createPending: null });
   mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [] });
+  mocks.fetchCurrentAgent.mockResolvedValue({ agentDid: 'did:dkg:agent:0x' + '9'.repeat(40) });
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
@@ -75,6 +83,37 @@ describe('PublishEligibilityChip (S5)', () => {
     await unmount();
   });
 
+  // L1 — when wallets are covered by DIFFERENT PCAs, the GREEN chip advertises the
+  // MAX covering discount (matching bestCoveringDiscountBps), not covered[0].
+  it('GREEN advertises the MAX covering discount across wallets on different PCAs (L1)', async () => {
+    const W1 = '0x' + 'b'.repeat(40);
+    usePcaStore.setState({ trackedIds: ['7', '8'], createPending: null });
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0, W1],
+      balances: [
+        { address: W0, eth: '0.1', trac: '100', symbol: 'TRAC' },
+        { address: W1, eth: '0.1', trac: '100', symbol: 'TRAC' },
+      ],
+      chainId: '84532',
+      rpcUrl: null,
+    });
+    const bpsFor = (id: string) => (id === '8' ? 4000 : 1000);
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      const base = makePcaSnapshot({ accountId: id, discountBps: bpsFor(id) });
+      if (!key) return base;
+      // W0 is approved only on #7 (1000 bps); W1 only on #8 (4000 bps).
+      const registered =
+        (id === '7' && key.toLowerCase() === W0.toLowerCase()) ||
+        (id === '8' && key.toLowerCase() === W1.toLowerCase());
+      return { ...base, probedKey: { key, registered } };
+    });
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'Funded by PCA #8'); // the 4000-bps account, not #7
+    expect(container.textContent).toContain('40%');
+    expect(container.textContent).not.toContain('10%');
+    await unmount();
+  });
+
   it('DANGER (#6) when a fall-through wallet has NO TRAC → role=alert "Publish will fail"', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('0')); // no TRAC
     mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
@@ -99,7 +138,7 @@ describe('PublishEligibilityChip (S5)', () => {
     await unmount();
   });
 
-  it('"why?" opens the preflight popover with the per-condition breakdown', async () => {
+  it('"why?" opens the preflight popover with the per-condition breakdown (gas row informational, L8)', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('50'));
     mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
       key ? { ...makePcaSnapshot(), probedKey: { key, registered: false } } : makePcaSnapshot(),
@@ -110,6 +149,32 @@ describe('PublishEligibilityChip (S5)', () => {
     await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     await waitForText(container, 'All signing wallets approved');
     expect(container.querySelector('.v10-pca-publish-popover')).toBeTruthy();
+    // L8 — the gas row is informational (neutral), never a ⚠ that contradicts the verdict.
+    const gasRow = Array.from(container.querySelectorAll('.v10-pca-publish-cond')).find((li) =>
+      li.textContent?.toLowerCase().includes('gas is separate'),
+    )!;
+    expect(gasRow).toBeTruthy();
+    expect(gasRow.getAttribute('data-tone')).toBe('neutral');
+    await unmount();
+  });
+
+  // L12 — the #4 escrow caveat must fire on owner-publishes (node curates the
+  // target CG). Pre-fix it never did because the CG list has no isCurator/role —
+  // the owner signal is cg.curator vs the node's agentDid.
+  it('appends the #4 escrow caveat on an owner-publish, sourced from cg.curator vs agentDid (L12)', async () => {
+    const CURATOR = 'did:dkg:agent:0x' + 'a'.repeat(40);
+    mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [{ id: 'cg', curator: CURATOR }] });
+    mocks.fetchCurrentAgent.mockResolvedValue({ agentDid: CURATOR }); // node curates → owner-publish
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('50')); // has TRAC → amber fall-through
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...makePcaSnapshot(), probedKey: { key, registered: false } } : makePcaSnapshot(),
+    );
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'No PCA discount');
+    // The escrow caveat lives in the full banner (popover), not the chip label.
+    const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
+    await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'registration escrow already covers it');
     await unmount();
   });
 });

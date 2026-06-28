@@ -202,6 +202,41 @@ describe('CreatePcaModal', () => {
     await unmount();
   });
 
+  // H1 — the 503 capability-vs-transport WIRING is the highest-stakes branch
+  // (clear-vs-reconcile on the double-mint path) and was the one flavor untested.
+  it('fails toward reconcile on a TRANSPORT 503 (RPC_*) after submit and KEEPS the marker', async () => {
+    mocks.createPca.mockRejectedValue(new HttpError(503, 'x', { code: 'RPC_ENDPOINTS_EXHAUSTED' }));
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-create-submit"]')!);
+
+    // A transient RPC 503 is ambiguous (tx may have broadcast) → reconcile, marker kept.
+    await waitForText(container, 'Confirm before retrying');
+    expect(usePcaStore.getState().createPending?.ownerEoa).toBe(OWNER);
+    await unmount();
+  });
+
+  it('clears the marker and returns to the form on a CAPABILITY 503 (FEATURE_UNAVAILABLE, pre-broadcast)', async () => {
+    mocks.createPca.mockRejectedValue(new HttpError(503, 'x', { error: 'FEATURE_UNAVAILABLE' }));
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-create-submit"]')!);
+
+    // A capability 503 (no RPC_* code) is definitely pre-broadcast → clear + form.
+    await waitForText(container, 'available on this network');
+    expect(usePcaStore.getState().createPending).toBeNull();
+    expect(container.querySelector('[data-testid="pca-create-tokens"]')).toBeTruthy();
+    await unmount();
+  });
+
   it('resumes the reconcile guard when opened with an existing create-pending marker', async () => {
     usePcaStore.setState({ trackedIds: [], createPending: { ownerEoa: OWNER, submittedAt: 1, txHash: '0xbeef' } });
     const { container, unmount } = await render(

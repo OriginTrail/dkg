@@ -113,6 +113,31 @@ describe('GetSponsoredPanel', () => {
     await unmount();
   });
 
+  // L4 — when the approval check fails wholesale (every probe throws → all null),
+  // surface the error, never a false "0 of N approved".
+  it('surfaces an error (not a false "0 approved") when the approval check fails wholesale (L4)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0, W1],
+      balances: [
+        { address: W0, eth: '0.08', trac: '0', symbol: 'TRAC' },
+        { address: W1, eth: '0', trac: '0', symbol: 'TRAC' },
+      ],
+      chainId: '84532',
+      rpcUrl: null,
+    });
+    mocks.fetchPca.mockRejectedValue(new Error('rpc down')); // every per-wallet probe → null
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
+    await waitForText(container, 'Track your approval');
+    setInputValue(container.querySelector('input[aria-label="Sponsor account id"]') as HTMLInputElement, '7');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const checkBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
+    await act(async () => { checkBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    await waitForText(container, 'the chain lookup failed');
+    expect(container.textContent).not.toContain('Approved on PCA #7: 0 of');
+    await unmount();
+  });
+
   it('shows a LOADING state (never a false-empty) while wallets are in flight, then the wallets', async () => {
     let resolve!: (v: unknown) => void;
     mocks.fetchWalletsBalances.mockReturnValue(new Promise((r) => { resolve = r; }));

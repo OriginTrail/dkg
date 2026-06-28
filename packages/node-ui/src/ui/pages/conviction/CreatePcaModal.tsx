@@ -85,7 +85,11 @@ export function CreatePcaModal({
   const belowMinTier = amountValid && amountNum < 25_000;
   const estTier = useMemo(() => discountTierForTrac(amountValid ? amountNum : null), [amountNum, amountValid]);
   const primaryValid = /^\d+$/.test(primaryNode.trim()) && Number(primaryNode.trim()) > 0;
-  const canSubmit = amountValid && !insufficient && primaryValid && phase === 'form';
+  // L13: don't allow submit until the owner wallet has loaded — the durable
+  // double-mint marker is keyed on `ownerWallet`, so submitting before wallets
+  // resolve would skip persisting it (the in-session reconcile would still fire,
+  // but the refresh-survival guarantee wouldn't). Cheap belt-and-suspenders.
+  const canSubmit = amountValid && !insufficient && primaryValid && !!ownerWallet && phase === 'form';
 
   const handleCreate = async () => {
     setPhase('creating');
@@ -330,15 +334,20 @@ export function CreatePcaModal({
             type="button"
             className="v10-pca-track-toggle"
             aria-expanded={advanced}
+            aria-controls="pca-create-advanced"
             onClick={() => setAdvanced((a) => !a)}
           >
             ▸ Advanced: point reward weight at a different node id
           </button>
-          {advanced && (
-            <p className="v10-pca-create-hint">
-              The node id must already be in the sharding table, or creation reverts.
-            </p>
-          )}
+          {/* F1/L5: the disclosed region carries the id the button references —
+              kept in the DOM (hidden when collapsed) so aria-controls resolves. */}
+          <div id="pca-create-advanced" hidden={!advanced}>
+            {advanced && (
+              <p className="v10-pca-create-hint">
+                The node id must already be in the sharding table, or creation reverts.
+              </p>
+            )}
+          </div>
         </section>
 
         {/* Section 3 — Review */}

@@ -45,6 +45,7 @@ function acct(over: Partial<ResolvedPcaAccount> = {}): ResolvedPcaAccount {
     walletProbes: [],
     approvedCount: 0,
     walletCount: 3,
+    probesInconclusive: false,
     ...over,
   };
 }
@@ -83,6 +84,46 @@ describe('PcaAccountCard', () => {
     expect(container.textContent).toContain('discounts nothing yet');
     // formatTrac uses toFixed (no thousands separators).
     expect(container.textContent).toContain('100000.00 TRAC');
+    await unmount();
+  });
+
+  // H2 — a null per-wallet probe means we COULDN'T verify approvals, not that
+  // zero are approved. The card must caveat, never fire the false #11.
+  it('owned card with a null probe caveats instead of asserting "discounts nothing yet" (H2)', async () => {
+    const { container, unmount } = await render(
+      React.createElement(PcaAccountCard, {
+        account: acct({
+          approvedCount: 0,
+          probesInconclusive: true,
+          walletProbes: [{ wallet: '0x71D4000000000000000000000000000000009Ac2', registered: null }],
+        }),
+      }),
+    );
+    expect(container.textContent).not.toContain('discounts nothing yet');
+    expect(container.textContent).toContain('Couldn’t verify');
+    await unmount();
+  });
+
+  it('approved card with a null probe shows "couldn’t verify approvals", not a false "N of M" (H2)', async () => {
+    const { container, unmount } = await render(
+      React.createElement(PcaAccountCard, {
+        account: acct({
+          classification: 'approved',
+          owner: '0xSOMEONEELSE0000000000000000000000000000',
+          ownerIsPrimaryWallet: false,
+          approvedCount: 1,
+          walletCount: 3,
+          probesInconclusive: true,
+          walletProbes: [
+            { wallet: '0x71D4000000000000000000000000000000009Ac2', registered: true },
+            { wallet: '0x3F8a0000000000000000000000000000000C1b7', registered: null },
+            { wallet: '0xE0c500000000000000000000000000000000042dD', registered: null },
+          ],
+        }),
+      }),
+    );
+    expect(container.textContent).toContain('couldn’t verify approvals');
+    expect(container.textContent).not.toContain('1 of 3 wallets approved');
     await unmount();
   });
 

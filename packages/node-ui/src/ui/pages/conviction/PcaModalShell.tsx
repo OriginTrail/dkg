@@ -24,7 +24,12 @@ export function PcaModalShell({
   const { dialogRef, onBackdropClick } = useModalDismiss(true, onClose);
   const headingRef = useRef<HTMLHeadingElement | null>(null);
   useEffect(() => {
-    headingRef.current?.focus();
+    // F4/L7: useModalDismiss (called above, so its effect runs first) focuses the
+    // first focusable — the Close × — in a microtask on open. A synchronous
+    // focus here would be immediately overridden by that microtask. Queue ours in
+    // a microtask too; because this effect runs AFTER the hook's, ours is enqueued
+    // later and wins, so the dialog HEADING is what a screen reader announces.
+    queueMicrotask(() => headingRef.current?.focus());
   }, []);
 
   return (
