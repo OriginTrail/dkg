@@ -119,8 +119,8 @@ describe('#1344 coverage parity — S5 / S6 / overview agree via the shared reso
     const snap = makePcaSnapshot({ accountId: ACCOUNT, expiresAtTimestamp: FUTURE });
     const probe: PcaProbedKey = { key: W0, registered: true };
     wire(snap, probe);
-    const expected = classifyCoverage(snap, probe);
-    expect(expected).toEqual({ registered: true, inconclusive: false, covers: true, dead: false, hasBudget: true });
+    const expected = classifyCoverage({ ...snap, probedKey: probe });
+    expect(expected).toEqual({ outcome: 'covers', registered: true, dead: false, hasBudget: true });
 
     // overview
     const ov = await renderOverview();
@@ -155,8 +155,8 @@ describe('#1344 coverage parity — S5 / S6 / overview agree via the shared reso
     const snap = makePcaSnapshot({ accountId: ACCOUNT, expiresAtTimestamp: FUTURE });
     const probe: PcaProbedKey = { key: W0, registered: false, adapterSupported: false };
     wire(snap, probe);
-    const expected = classifyCoverage(snap, probe);
-    expect(expected).toEqual({ registered: null, inconclusive: true, covers: false, dead: false, hasBudget: true });
+    const expected = classifyCoverage({ ...snap, probedKey: probe });
+    expect(expected).toEqual({ outcome: 'inconclusive', registered: null, dead: false, hasBudget: true });
 
     // overview → inconclusive, not 0-approved-confirmed, not covered
     const ov = await renderOverview();
@@ -197,8 +197,8 @@ describe('#1344 coverage parity — S5 / S6 / overview agree via the shared reso
     const snap = makePcaSnapshot({ accountId: ACCOUNT, expiresAtTimestamp: FUTURE, topUpBuffer: '0', topUpBufferTrac: '0', baseEpochAllowance: '0' });
     const probe: PcaProbedKey = { key: W0, registered: true };
     wire(snap, probe);
-    const expected = classifyCoverage(snap, probe);
-    expect(expected).toEqual({ registered: true, inconclusive: false, covers: false, dead: false, hasBudget: false });
+    const expected = classifyCoverage({ ...snap, probedKey: probe });
+    expect(expected).toEqual({ outcome: 'uncovered', registered: true, dead: false, hasBudget: false });
 
     // overview → registered (approvedCount 1) but NOT covered, no advertised discount
     const ov = await renderOverview();

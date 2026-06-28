@@ -115,25 +115,25 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
             // not-registered. Distinguish them: a failed probe is inconclusive (→
             // neutral verdict), never a definitive fall-through DANGER at spend time.
             if (snap === null) { probeError = true; continue; }
-            // #1344 round-2 — ONE canonical classification (registration + coarse-P0
-            // spendability) instead of bundling the leaf predicates here. Behavior is
-            // byte-identical to the prior 4-helper form. Coarse P0, NOT remainingAllowance
-            // (P2/#1349).
-            const c = classifyCoverage(snap, snap.probedKey);
+            // #1344 round-3 — ONE canonical classification; switch on its `outcome`
+            // discriminant (coarse P0, NOT remainingAllowance, P2/#1349). The probe is
+            // read from snap.probedKey internally. Behavior is byte-identical to the
+            // prior 5-field form.
+            const c = classifyCoverage(snap);
             // S2/#9 — adapter gap OR an undefined registered → inconclusive ("couldn't
             // determine" → neutral verdict, never a definitive DANGER); a confirmed
             // not-registered → skip.
-            if (c.inconclusive) { probeError = true; continue; }
-            if (c.registered === false) continue;
-            // registered here — coarse spendability decides coverage.
-            if (c.covers) {
+            if (c.outcome === 'inconclusive') { probeError = true; continue; }
+            if (c.outcome === 'unregistered') continue;
+            if (c.outcome === 'covers') {
               cover = { accountId: id, discountBps: snap.discountBps };
-              break;
+              break; // breaks the tracked-id FOR loop (not a switch) — covered, stop probing.
             }
-            // Registered here but the account can't cover — break down (dead vs
-            // out-of-budget) from the SAME classification, so the copy distinguishes
-            // "approved-but-dead" from "no PCA" (#3) and the reasons name the cause. Two
-            // INDEPENDENT checks (a dead AND zero-budget account sets both).
+            // c.outcome === 'uncovered' — registered here but the account can't cover.
+            // Break down (dead vs out-of-budget) from the SAME classification's reason
+            // facets, so the copy distinguishes "approved-but-dead" from "no PCA" (#3)
+            // and the reasons name the cause. Two INDEPENDENT checks (a dead AND
+            // zero-budget account sets both).
             if (c.dead) {
               sawExpired = true;
               if (!deadAccountId) deadAccountId = id;

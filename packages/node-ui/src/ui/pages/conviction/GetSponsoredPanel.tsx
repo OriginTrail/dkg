@@ -75,12 +75,12 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
         wallets.map((w) =>
           fetchPca(id, w)
             .then((snap): ProbeRow => {
-              // #1344 — single canonical classifier: S2 adapterSupported===false → null
-              // (neutral "unknown" row, not a false not-approved; all-unsupported →
-              // wholesale "retry") + N1 covers = registered AND the PCA is spendable
-              // (S6 "Ready" == S5 GREEN).
-              const { registered, covers } = classifyCoverage(snap, snap.probedKey);
-              return { wallet: w, registered, covers };
+              // #1344 — single canonical classifier (reads snap.probedKey): S2
+              // adapterSupported===false → registered null (neutral "unknown" row, not a
+              // false not-approved; all-unsupported → wholesale "retry") + N1 covers =
+              // outcome 'covers' (registered AND the PCA is spendable; S6 "Ready" == S5 GREEN).
+              const c = classifyCoverage(snap);
+              return { wallet: w, registered: c.registered, covers: c.outcome === 'covers' };
             })
             .catch((): ProbeRow => ({ wallet: w, registered: null, covers: false })),
         ),

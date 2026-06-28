@@ -57,39 +57,49 @@ export function normalizeProbeRegistered(probedKey: PcaProbedKey | undefined): b
 }
 
 /**
- * The single canonical (snapshot, probe) coverage classification. Every surface
- * (S5 `usePublishEligibility`, S6 `GetSponsoredPanel`, `usePcaOverview`) runs THIS
- * one call instead of bundling the leaf predicates itself — so coverage can't
- * re-diverge across screens. Composed from the building blocks above (which stay
- * exported: `usePcaOverview` still needs `isPcaSpendable` for its account-level
- * `bestCoveringDiscountBps` filter, where there's no probe).
+ * The canonical coverage decision for a probed snapshot — the discriminant every
+ * surface switches on, so none has to recombine the bool soup itself:
+ *  - `inconclusive` — the probe couldn't be read → neutral, never DANGER (#9).
+ *  - `unregistered` — confirmed NOT an approved publishing wallet here.
+ *  - `covers`       — registered HERE AND the account is spendable (not dead, has budget).
+ *  - `uncovered`    — registered HERE but the account can't cover (dead and/or no budget).
+ */
+export type PcaCoverageOutcome = 'inconclusive' | 'unregistered' | 'covers' | 'uncovered';
+
+/**
+ * The single canonical coverage classification. Every surface (S5
+ * `usePublishEligibility`, S6 `GetSponsoredPanel`, `usePcaOverview`) runs THIS one
+ * call and switches on `outcome` instead of bundling the leaf predicates itself —
+ * so coverage can't re-diverge across screens. The probe is read from
+ * `snap.probedKey` (no separate param — a split snapshot/probe pair can't be
+ * mismatched). `dead`/`hasBudget` are the reason facets behind `'uncovered'` (S5's
+ * breakdown sets sawExpired/sawInsolvent from them INDEPENDENTLY). Composed from
+ * the building blocks above, which stay exported: `usePcaOverview` still needs
+ * `isPcaSpendable` for its account-level `bestCoveringDiscountBps` filter (no probe).
  */
 export interface PcaCoverageResult {
-  /** Normalized registration (the S2 rule). `null` = couldn't determine. */
+  /** The canonical coverage decision. */
+  outcome: PcaCoverageOutcome;
+  /** Normalized registration (the S2 rule). `null` = couldn't determine. Overview's
+   *  approvedCount counts `registered === true` (registered wallets, not covering ones). */
   registered: boolean | null;
-  /** The probe couldn't be read (`registered === null`) → neutral, never DANGER (#9). */
-  inconclusive: boolean;
-  /** The wallet is registered HERE AND the account is spendable (not dead, has budget). */
-  covers: boolean;
-  /** The account is expired or fully swept (`isPcaDead`). */
+  /** Reason facet — the account is expired or fully swept (`isPcaDead`). */
   dead: boolean;
-  /** The account has budget capacity (`hasPcaBudget`). */
+  /** Reason facet — the account has budget capacity (`hasPcaBudget`). */
   hasBudget: boolean;
 }
 
-export function classifyCoverage(
-  snap: PcaSnapshot,
-  probedKey: PcaProbedKey | undefined,
-  nowSec?: number,
-): PcaCoverageResult {
-  const registered = normalizeProbeRegistered(probedKey);
+export function classifyCoverage(snap: PcaSnapshot, nowSec?: number): PcaCoverageResult {
+  const registered = normalizeProbeRegistered(snap.probedKey);
   const dead = isPcaDead(snap, nowSec);
   const hasBudget = hasPcaBudget(snap);
-  return {
-    registered,
-    inconclusive: registered === null,
-    covers: registered === true && !dead && hasBudget,
-    dead,
-    hasBudget,
-  };
+  const outcome: PcaCoverageOutcome =
+    registered === null
+      ? 'inconclusive'
+      : registered === false
+        ? 'unregistered'
+        : !dead && hasBudget
+          ? 'covers'
+          : 'uncovered';
+  return { outcome, registered, dead, hasBudget };
 }
