@@ -18,15 +18,18 @@ function pct(bps: number | null): string {
 export function PcaDashboardRow() {
   const role = useAgentsStore((s) => (s.nodeStatus as { nodeRole?: string } | null)?.nodeRole);
   const openTab = useTabsStore((s) => s.openTab);
-  const { covered, bestCoveringDiscountBps } = usePcaOverview();
+  const { covered, bestCoveringDiscountBps, walletsInconclusive } = usePcaOverview();
 
   return (
     <div className="v10-ws-pca">
       <span className="v10-ws-pca-label">Publishing discount</span>
       <span className="v10-ws-pca-value" data-covered={covered}>
-        {covered
-          ? `${pct(bestCoveringDiscountBps)} (pending confirmation)`
-          : 'None — publishing at the direct cost'}
+        {/* T2/#9 — don't assert "None" off unreadable wallets. */}
+        {walletsInconclusive
+          ? 'Couldn’t verify your wallets — retry'
+          : covered
+            ? `${pct(bestCoveringDiscountBps)} (pending confirmation)`
+            : 'None — publishing at the direct cost'}
       </span>
       <button
         type="button"

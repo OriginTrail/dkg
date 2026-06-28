@@ -11,7 +11,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const state = vi.hoisted(() => ({
-  overview: { covered: false, bestCoveringDiscountBps: null as number | null },
+  overview: { covered: false, bestCoveringDiscountBps: null as number | null, walletsInconclusive: false },
   nodeRole: undefined as string | undefined,
   openTab: vi.fn(),
 }));
@@ -37,7 +37,7 @@ async function render(node: React.ReactElement) {
 beforeEach(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   document.body.innerHTML = '';
-  state.overview = { covered: false, bestCoveringDiscountBps: null };
+  state.overview = { covered: false, bestCoveringDiscountBps: null, walletsInconclusive: false };
   state.nodeRole = undefined;
   state.openTab = vi.fn();
 });
@@ -45,7 +45,7 @@ afterEach(() => { document.body.innerHTML = ''; });
 
 describe('PcaDashboardRow', () => {
   it('covered → discount + "pending confirmation", data-covered=true', async () => {
-    state.overview = { covered: true, bestCoveringDiscountBps: 1000 };
+    state.overview = { covered: true, bestCoveringDiscountBps: 1000, walletsInconclusive: false };
     const { container, unmount } = await render(React.createElement(PcaDashboardRow));
     const value = container.querySelector('.v10-ws-pca-value')!;
     expect(value.getAttribute('data-covered')).toBe('true');
@@ -55,11 +55,21 @@ describe('PcaDashboardRow', () => {
   });
 
   it('uncovered → "None — publishing at the direct cost", data-covered=false', async () => {
-    state.overview = { covered: false, bestCoveringDiscountBps: null };
+    state.overview = { covered: false, bestCoveringDiscountBps: null, walletsInconclusive: false };
     const { container, unmount } = await render(React.createElement(PcaDashboardRow));
     const value = container.querySelector('.v10-ws-pca-value')!;
     expect(value.getAttribute('data-covered')).toBe('false');
     expect(value.textContent).toBe('None — publishing at the direct cost');
+    await unmount();
+  });
+
+  // T2/#9 — unreadable wallets must not read as "None".
+  it('walletsInconclusive → "Couldn’t verify your wallets", not "None"', async () => {
+    state.overview = { covered: false, bestCoveringDiscountBps: null, walletsInconclusive: true };
+    const { container, unmount } = await render(React.createElement(PcaDashboardRow));
+    const value = container.querySelector('.v10-ws-pca-value')!;
+    expect(value.textContent).toContain('Couldn’t verify your wallets');
+    expect(value.textContent).not.toContain('None — publishing');
     await unmount();
   });
 

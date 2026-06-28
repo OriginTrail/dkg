@@ -9,7 +9,12 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const state = vi.hoisted(() => ({
-  overview: { accounts: [] as unknown[], covered: false, bestCoveringDiscountBps: null as number | null },
+  overview: {
+    accounts: [] as unknown[],
+    covered: false,
+    bestCoveringDiscountBps: null as number | null,
+    walletsInconclusive: false,
+  },
   openTab: vi.fn(),
 }));
 
@@ -31,7 +36,7 @@ async function render(node: React.ReactElement) {
 beforeEach(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   document.body.innerHTML = '';
-  state.overview = { accounts: [], covered: false, bestCoveringDiscountBps: null };
+  state.overview = { accounts: [], covered: false, bestCoveringDiscountBps: null, walletsInconclusive: false };
   state.openTab = vi.fn();
 });
 afterEach(() => { document.body.innerHTML = ''; });
@@ -44,15 +49,24 @@ describe('PcaSettingsCard', () => {
   });
 
   it('covered → discount + "pending confirmation"', async () => {
-    state.overview = { accounts: [{}], covered: true, bestCoveringDiscountBps: 1000 };
+    state.overview = { accounts: [{}], covered: true, bestCoveringDiscountBps: 1000, walletsInconclusive: false };
     const { container, unmount } = await render(React.createElement(PcaSettingsCard));
     expect(container.textContent).toContain('10%');
     expect(container.textContent).toContain('pending confirmation');
     await unmount();
   });
 
+  // T2/#9 — unreadable wallets must not read as "none currently covers".
+  it('tracked + walletsInconclusive → "couldn’t verify your wallets — retry", not "none covers"', async () => {
+    state.overview = { accounts: [{}], covered: false, bestCoveringDiscountBps: null, walletsInconclusive: true };
+    const { container, unmount } = await render(React.createElement(PcaSettingsCard));
+    expect(container.textContent?.toLowerCase()).toContain('couldn’t verify this node’s wallets'.toLowerCase());
+    expect(container.textContent).not.toContain('none currently covers');
+    await unmount();
+  });
+
   it('tracked but uncovered → the count + "none currently covers" line', async () => {
-    state.overview = { accounts: [{}, {}], covered: false, bestCoveringDiscountBps: null };
+    state.overview = { accounts: [{}, {}], covered: false, bestCoveringDiscountBps: null, walletsInconclusive: false };
     const { container, unmount } = await render(React.createElement(PcaSettingsCard));
     expect(container.textContent).toContain('Tracking 2 accounts');
     expect(container.textContent).toContain('none currently covers');
