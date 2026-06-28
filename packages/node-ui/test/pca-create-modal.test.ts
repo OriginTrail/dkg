@@ -145,6 +145,54 @@ describe('CreatePcaModal', () => {
     await unmount();
   });
 
+  it('fails toward reconcile on a non-HttpError NETWORK drop after submit (may have broadcast)', async () => {
+    mocks.createPca.mockRejectedValue(new Error('Failed to fetch'));
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-create-submit"]')!);
+
+    await waitForText(container, 'Confirm before retrying');
+    // Submit-time marker kept (no txHash on a raw network drop).
+    expect(usePcaStore.getState().createPending?.ownerEoa).toBe(OWNER);
+    await unmount();
+  });
+
+  it('fails toward reconcile on a 500 after submit', async () => {
+    mocks.createPca.mockRejectedValue(new HttpError(500, 'x', { error: 'createPublishingConvictionAccount failed: boom' }));
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-create-submit"]')!);
+
+    await waitForText(container, 'Confirm before retrying');
+    expect(usePcaStore.getState().createPending?.ownerEoa).toBe(OWNER);
+    await unmount();
+  });
+
+  it('clears the marker and returns to the form on a 400 (definitely pre-broadcast)', async () => {
+    mocks.createPca.mockRejectedValue(new HttpError(400, 'InvalidAmount', { error: 'InvalidAmount' }));
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-create-submit"]')!);
+
+    await waitForText(container, 'greater than 0'); // describePcaError InvalidAmount copy on the form
+    // Pre-broadcast → marker cleared, form is retryable.
+    expect(usePcaStore.getState().createPending).toBeNull();
+    expect(container.querySelector('[data-testid="pca-create-tokens"]')).toBeTruthy();
+    await unmount();
+  });
+
   it('resumes the reconcile guard when opened with an existing create-pending marker', async () => {
     usePcaStore.setState({ trackedIds: [], createPending: { ownerEoa: OWNER, submittedAt: 1, txHash: '0xbeef' } });
     const { container, unmount } = await render(

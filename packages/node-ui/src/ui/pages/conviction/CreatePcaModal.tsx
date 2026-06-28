@@ -5,6 +5,7 @@ import {
   createPca,
   fetchPca,
   describePcaError,
+  isPcaFeatureUnavailable,
   HttpError,
   type CreatePcaResult,
   type PcaSnapshot,
@@ -86,6 +87,12 @@ export function CreatePcaModal({
   const handleCreate = async () => {
     setPhase('creating');
     setError(null);
+    // Set the double-mint guard at SUBMIT — before the await — so an ambiguous
+    // failure (network drop / 500 / timeout, or the browser closing) AFTER the
+    // tx may have broadcast can never silently fall back to a retryable form and
+    // mint a second fund-locking PCA. Cleared only on success or a
+    // definitely-pre-broadcast error below.
+    if (ownerWallet) setCreatePending({ ownerEoa: ownerWallet, submittedAt: Date.now() });
     try {
       const res = await createPca({ tokens: tokens.trim(), primaryNode: primaryNode.trim() });
       trackAccount(res.accountId);
@@ -94,22 +101,29 @@ export function CreatePcaModal({
       setResult({ ...res, snapshot });
       setPhase('success');
     } catch (err) {
-      // Broadcast-then-timeout → reconcile-before-retry (the #1 double-mint footgun).
+      // DEFINITELY pre-broadcast → nothing hit the chain, safe to retry: clear
+      // the guard and return to the form. Only a 400 (InvalidAmount /
+      // PrimaryNodeNotInShardingTable / ZeroAgentAddress) or the CAPABILITY 503
+      // (FEATURE_UNAVAILABLE, not a transport RPC_* 503) qualify.
+      if (err instanceof HttpError && (err.status === 400 || isPcaFeatureUnavailable(err))) {
+        clearCreatePending();
+        setError(describePcaError(err)?.message ?? (err as Error)?.message ?? 'Create failed.');
+        setPhase('form');
+        return;
+      }
+      // ANY ambiguous failure (504 timeout, 500, transport RPC_* 503/504, or a
+      // non-HttpError network drop) → the tx MAY have broadcast. Fail toward
+      // reconcile: keep the submit-time marker, enriching it with the broadcast
+      // txHash when the 504 carries one. A double-mint dwarfs the friction of an
+      // extra "No PCA minted — clear & retry" click on a genuine pre-broadcast blip.
       if (err instanceof HttpError && err.status === 504) {
-        const body = (err.body ?? {}) as { code?: string; txHash?: string };
-        if (body.code === 'TIMEOUT') {
-          const txHash = body.txHash;
-          setPendingTxHash(txHash);
-          if (ownerWallet) {
-            setCreatePending({ ownerEoa: ownerWallet, submittedAt: Date.now(), ...(txHash ? { txHash } : {}) });
-          }
-          setPhase('reconcile');
-          return;
+        const body = (err.body ?? {}) as { txHash?: string };
+        if (body.txHash) {
+          setPendingTxHash(body.txHash);
+          if (ownerWallet) setCreatePending({ ownerEoa: ownerWallet, submittedAt: Date.now(), txHash: body.txHash });
         }
       }
-      clearCreatePending();
-      setError(describePcaError(err)?.message ?? (err as Error)?.message ?? 'Create failed.');
-      setPhase('form');
+      setPhase('reconcile');
     }
   };
 
