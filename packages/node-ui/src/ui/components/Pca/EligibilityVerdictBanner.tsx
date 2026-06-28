@@ -2,11 +2,22 @@ import React from 'react';
 import type { ReactNode } from 'react';
 
 /**
- * The tri-state publish-eligibility verdict (UX §5.5). NEUTRAL is a real third
- * state — "can't confirm" — and must NEVER render as green (P2: fail toward
- * warning).
+ * The publish-eligibility verdict (UX §5.5, expanded by invariant #6). FOUR
+ * states — the proposal's "tri-state" splits once the fail-open TRAC check is
+ * folded in:
+ *  - `eligible`            GREEN   — a PCA discount will apply.
+ *  - `fallthrough`         AMBER   — no discount, but the signing wallet HAS
+ *                                    TRAC, so the publish pays the direct cost
+ *                                    (non-blocking).
+ *  - `fallthrough-no-funds` DANGER — no discount AND the signing wallet has NO
+ *                                    TRAC → the publish will FAIL. (#6)
+ *  - `unknown`            NEUTRAL  — can't confirm; must NEVER render as green
+ *                                    (P2: fail toward warning).
+ *
+ * The Batch E (S5) preflight computes which state applies (fail-toward-loud: if
+ * a no-TRAC fall-through is possible under wallet round-robin, show DANGER).
  */
-export type PcaVerdict = 'eligible' | 'fallthrough' | 'unknown';
+export type PcaVerdict = 'eligible' | 'fallthrough' | 'fallthrough-no-funds' | 'unknown';
 
 function pctLabel(bps?: number): string | null {
   if (typeof bps !== 'number' || !Number.isFinite(bps) || bps <= 0) return null;
@@ -14,22 +25,24 @@ function pctLabel(bps?: number): string | null {
   return `${p.toFixed(p % 1 === 0 ? 0 : 1)}%`;
 }
 
-const VERDICT_META: Record<PcaVerdict, { glyph: string; toneClass: string; chipText: string }> = {
-  eligible: { glyph: '◉', toneClass: 'v10-pca-verdict-green', chipText: 'Funded by' },
-  fallthrough: { glyph: '⚠', toneClass: 'v10-pca-verdict-amber', chipText: 'No PCA discount' },
-  unknown: { glyph: '◌', toneClass: 'v10-pca-verdict-neutral', chipText: 'PCA status unknown' },
+const VERDICT_META: Record<PcaVerdict, { glyph: string; toneClass: string }> = {
+  eligible: { glyph: '◉', toneClass: 'v10-pca-verdict-green' },
+  fallthrough: { glyph: '⚠', toneClass: 'v10-pca-verdict-amber' },
+  'fallthrough-no-funds': { glyph: '⚠', toneClass: 'v10-pca-verdict-danger' },
+  unknown: { glyph: '◌', toneClass: 'v10-pca-verdict-neutral' },
 };
 
 /**
- * Green/amber/neutral publish verdict, as a full banner or the condensed chip
- * that sits on the publish CTA. Accessibility contract: amber is `role="alert"`
- * / assertive (the fall-through must be impossible to miss); green and neutral
- * are `role="status"` / polite. The state is always conveyed as TEXT, never
- * colour alone.
+ * The verdict as a full banner or the condensed chip that sits on the publish
+ * CTA. Accessibility contract (§6.3): the two LOUD states (amber fall-through,
+ * danger will-fail) are `role="alert"` / assertive — they must be impossible to
+ * miss; green and neutral are `role="status"` / polite. The state is always
+ * conveyed as TEXT, never colour alone.
  *
  * Invariants enforced here:
  *  - #4 the escrow caveat appears ONLY on owner-publishes (`ownerPublish`);
  *    sponsored/edge verdicts are definitive.
+ *  - #6 the no-TRAC fall-through is DANGER ("will FAIL"), not a soft amber.
  *  - #9 a green verdict is a PREDICTION — callers label the post-publish line
  *    "pending confirmation" until B8 confirms (this component states the
  *    pre-spend verdict only; it never claims a confirmed discount).
@@ -50,7 +63,7 @@ export function EligibilityVerdictBanner({
   verdict: PcaVerdict;
   accountId?: string;
   discountBps?: number;
-  /** Failed conditions, shown in the amber banner ("Reason: …"). */
+  /** Failed conditions, shown in the amber/danger banner ("Reason: …"). */
   reasons?: string[];
   /** #4 — when true (you own the target CG), append the escrow caveat. */
   ownerPublish?: boolean;
@@ -64,12 +77,17 @@ export function EligibilityVerdictBanner({
   className?: string;
 }) {
   const meta = VERDICT_META[verdict];
-  const isAmber = verdict === 'fallthrough';
-  const role = isAmber ? 'alert' : 'status';
-  const ariaLive = isAmber ? 'assertive' : 'polite';
+  // The two loud states get an assertive alert; green/neutral are polite.
+  const isLoud = verdict === 'fallthrough' || verdict === 'fallthrough-no-funds';
+  const role = isLoud ? 'alert' : 'status';
+  const ariaLive = isLoud ? 'assertive' : 'polite';
   const pcaLabel = accountId ? `PCA #${accountId}` : 'a conviction account';
   const disc = pctLabel(discountBps);
+  // The escrow caveat can pre-empt BOTH a fall-through cost and a no-funds
+  // failure (escrow pays, not the wallet), so it qualifies amber AND danger on
+  // owner-publishes.
   const escrowCaveat = ' unless this graph’s registration escrow already covers it';
+  const reasonText = reasons.length > 0 ? ` Reason: ${reasons.join('; ')}.` : '';
 
   if (variant === 'chip') {
     const chipLabel =
@@ -77,7 +95,9 @@ export function EligibilityVerdictBanner({
         ? `Funded by ${pcaLabel}${disc ? ` (−${disc})` : ''}`
         : verdict === 'fallthrough'
           ? '⚠ No PCA discount'
-          : 'PCA status unknown';
+          : verdict === 'fallthrough-no-funds'
+            ? '⚠ Publish will fail'
+            : 'PCA status unknown';
     return (
       <span
         className={['v10-pca-verdict-chip', meta.toneClass, className].filter(Boolean).join(' ')}
@@ -110,10 +130,16 @@ export function EligibilityVerdictBanner({
       </>
     );
   } else if (verdict === 'fallthrough') {
-    const reasonText = reasons.length > 0 ? ` Reason: ${reasons.join('; ')}.` : '';
     message = (
       <>
         No PCA discount on this publish — it will pay the direct cost (TRAC from the signing wallet)
+        {ownerPublish ? escrowCaveat : ''}.{reasonText}
+      </>
+    );
+  } else if (verdict === 'fallthrough-no-funds') {
+    message = (
+      <>
+        This publish will FAIL — the signing wallet has no TRAC to cover the direct cost
         {ownerPublish ? escrowCaveat : ''}.{reasonText}
       </>
     );
