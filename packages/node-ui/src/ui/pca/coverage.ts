@@ -5,7 +5,7 @@
 // the previously-inlined copies. NOT the precise mid-epoch `remainingAllowance`
 // check — that's the P2 extended snapshot (#1349).
 
-import { healthForSnapshot } from '../components/Pca/HealthChip.js';
+import { healthForSnapshot } from './health.js';
 import type { PcaSnapshot, PcaProbedKey } from '../api.js';
 
 /** True when a wei decimal-string is a positive amount (> 0). Tolerant of

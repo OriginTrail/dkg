@@ -6,7 +6,7 @@ import {
   type PcaSnapshot,
 } from '../api.js';
 import { usePcaStore } from '../stores/pca.js';
-import { healthForSnapshot, type PcaHealthState } from '../components/Pca/HealthChip.js';
+import { healthForSnapshot, type PcaHealthState } from '../pca/health.js';
 import { normalizeProbeRegistered, isPcaSpendable } from '../pca/coverage.js';
 
 /** Per-(node wallet) registration probe against one account. `null` = couldn't determine. */

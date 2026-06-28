@@ -9,14 +9,14 @@ export {
   nativeGasSymbol,
   isTestnetChain,
 } from './format.js';
+export { HealthChip, HEALTH_CHIP_META } from './HealthChip.js';
+// #1355 V2 — health derivation is sourced from the domain module (not the chip).
 export {
-  HealthChip,
-  HEALTH_CHIP_META,
   healthForSnapshot,
   PCA_CAP_NEAR_THRESHOLD,
   PCA_EXPIRING_SOON_SECONDS,
   type PcaHealthState,
-} from './HealthChip.js';
+} from '../../pca/health.js';
 export { WalletRow, type WalletRowTone } from './WalletRow.js';
 export { AddressCrux, DEFAULT_ADDRESS_CRUX_NOTE } from './AddressCrux.js';
 export {

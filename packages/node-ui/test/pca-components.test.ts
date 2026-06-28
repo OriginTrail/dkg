@@ -11,10 +11,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   HealthChip,
   HEALTH_CHIP_META,
-  healthForSnapshot,
-  PCA_CAP_NEAR_THRESHOLD,
-  PCA_EXPIRING_SOON_SECONDS,
-  type PcaHealthState,
   WalletRow,
   AddressCrux,
   DiscountTierLadder,
@@ -24,6 +20,12 @@ import {
   EligibilityVerdictBanner,
   SponsorshipHandshake,
 } from '../src/ui/components/Pca/index.js';
+import {
+  healthForSnapshot,
+  PCA_CAP_NEAR_THRESHOLD,
+  PCA_EXPIRING_SOON_SECONDS,
+  type PcaHealthState,
+} from '../src/ui/pca/health.js';
 import { EmptyState } from '../src/ui/components/ContextGraphPrimitives.js';
 
 async function render(node: React.ReactElement): Promise<{
