@@ -121,6 +121,46 @@ describe('GetSponsoredPanel', () => {
     await unmount();
   });
 
+  // S2/#9 — adapterSupported:false (the adapter can't answer) → a neutral "unknown"
+  // row, NOT a false "not approved" danger.
+  it('S2 — an adapterSupported:false wallet shows a neutral row, not "not approved"', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0, W1],
+      balances: [
+        { address: W0, eth: '0.08', trac: '0', symbol: 'TRAC' },
+        { address: W1, eth: '0', trac: '0', symbol: 'TRAC' },
+      ],
+      chainId: '84532',
+      rpcUrl: null,
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) => ({
+      ...makePcaSnapshot({ accountId: '7' }),
+      probedKey: key
+        ? key.toLowerCase() === W0.toLowerCase()
+          ? { key, registered: true }
+          : { key, registered: false, adapterSupported: false } // can't answer → null/unknown
+        : undefined,
+    }));
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
+    await waitForText(container, 'Track your approval');
+    setInputValue(container.querySelector('input[aria-label="Sponsor account id"]') as HTMLInputElement, '7');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const checkBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
+    await act(async () => { checkBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    await waitForText(container, 'Approved on PCA #7');
+    // Scope to the approval-results section (the wallets-share list also renders a
+    // statusless WalletRow for W1).
+    const results = container.querySelector('.v10-pca-approve-results')!;
+    const w1Row = Array.from(results.querySelectorAll('.v10-pca-wallet-row')).find((r) =>
+      r.getAttribute('aria-label')?.toLowerCase().startsWith(W1.toLowerCase()),
+    )!;
+    const status = w1Row.querySelector('.v10-pca-wallet-status')!;
+    expect(status.getAttribute('data-tone')).toBe('neutral');
+    expect(status.textContent?.toLowerCase()).not.toContain('not approved');
+    await unmount();
+  });
+
   // N1 — a wallet registered on an EXPIRED/SWEPT sponsor PCA does NOT cover the
   // publish; the panel must warn, never render "Ready" (#9 false coverage).
   async function runCheckOnSponsor(snapOver: Record<string, unknown>) {

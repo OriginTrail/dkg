@@ -133,6 +133,22 @@ describe('PublishEligibilityChip (S5)', () => {
     await unmount();
   });
 
+  // S2/#9 — adapterSupported:false (the adapter can't answer) is NOT a confirmed
+  // not-registered; on a healthy PCA + no-TRAC wallet it must resolve NEUTRAL, not DANGER.
+  it('S2 — adapterSupported:false resolves NEUTRAL (unknown), not DANGER', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('0')); // gas-funded, no TRAC
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key
+        ? { ...makePcaSnapshot(), probedKey: { key, registered: false, adapterSupported: false } }
+        : makePcaSnapshot(),
+    );
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'PCA status unknown');
+    expect(container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeNull();
+    expect(container.querySelector('[data-verdict="unknown"]')).toBeTruthy();
+    await unmount();
+  });
+
   // L1 — when wallets are covered by DIFFERENT PCAs, the GREEN chip advertises the
   // MAX covering discount (matching bestCoveringDiscountBps), not covered[0].
   it('GREEN advertises the MAX covering discount across wallets on different PCAs (L1)', async () => {

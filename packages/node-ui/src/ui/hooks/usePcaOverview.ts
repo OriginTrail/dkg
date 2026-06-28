@@ -86,7 +86,13 @@ async function resolveAccount(accountId: string, wallets: string[]): Promise<Res
   const walletProbes: PcaWalletProbe[] = await Promise.all(
     wallets.map((wallet) =>
       fetchPca(accountId, wallet)
-        .then((s): PcaWalletProbe => ({ wallet, registered: s.probedKey?.registered ?? null }))
+        // S2/#9 — adapterSupported===false (the adapter couldn't answer) is null
+        // (couldn't determine), NOT not-registered → probesInconclusive (H2 path),
+        // excluded from approvedCount, never a false "0 approved".
+        .then((s): PcaWalletProbe => ({
+          wallet,
+          registered: s.probedKey?.adapterSupported === false ? null : (s.probedKey?.registered ?? null),
+        }))
         .catch((): PcaWalletProbe => ({ wallet, registered: null })),
     ),
   );
