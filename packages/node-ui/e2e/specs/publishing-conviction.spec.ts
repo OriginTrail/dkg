@@ -231,16 +231,36 @@ test.describe('Publishing Conviction tab (PCA) — P0', () => {
 
   // ── S3 manage detail (@mutating; CI devnet — needs an owned account) — Batch D ──
 
-  test.fixme('S3 @mutating: manage an owned PCA — detail tab shows agents + settle/top-up', async ({ conviction }) => {
-    // Reachable only with an OWNED account (create first), opened via the owned
-    // card's [Manage] → conviction:<id>. Owner-write buttons (top-up/deregister)
-    // enabled only when owner==wallets[0] (§8A); settle is permissionless.
-    // Un-fixme once the manage-nav is pinned + verified (CI devnet / capstone).
+  test('S3 @mutating: manage an owned PCA — detail shows the settle + top-up owner controls', async ({ conviction }) => {
+    // Reachable only with an OWNED account: create one (devnet @mutating), then
+    // open Manage from the success screen. Assert the STATIC owner-management
+    // surface — the detail root, the permissionless settle button, and the
+    // top-up form — plus a non-destructive interaction (the top-up enable-toggle;
+    // we NEVER submit, which would commit a real tx). We deliberately do NOT
+    // assert the per-wallet agent rows: those depend on the per-wallet
+    // registration probe whose timing flaked the old S4 assertion. §8A: the
+    // owner-write controls are live because the node owns its just-created PCA
+    // (owner == primary signer).
     await conviction.open();
-    // …create, then open Manage from the owned card, then:
-    await expect(conviction.detail).toBeVisible();
-    await expect(conviction.agentList).toBeVisible();
+    await conviction.createBtn.click();
+    await expect(conviction.createModal).toBeVisible();
+    await conviction.createTokensInput.fill('50000');
+    await conviction.createSubmit.click();
+    await expect(conviction.createSuccess).toBeVisible({ timeout: 120_000 }); // on-chain createAccount
+    await conviction.createModal.getByRole('button', { name: /^Manage PCA/ }).click();
+
+    // The detail tab renders the owner-management surface.
+    await expect(conviction.detail).toBeVisible({ timeout: 30_000 });
+    // Settlement is permissionless and enabled on a fresh (un-swept) account.
     await expect(conviction.settleBtn).toBeVisible();
+    await expect(conviction.settleBtn).toBeEnabled();
+    // The top-up owner control renders.
+    await expect(conviction.topUpBtn).toBeVisible();
+    // Non-destructive interaction: "Add funds" is disabled until a valid amount
+    // is entered — filling the field enables it. We never click it (that commits).
+    await expect(conviction.topUpBtn).toBeDisabled();
+    await conviction.topUpInput.fill('100');
+    await expect(conviction.topUpBtn).toBeEnabled();
   });
 
   // ── S6 edge onboarding (read-only; EDGE role ONLY) — Batch D ────────────────
