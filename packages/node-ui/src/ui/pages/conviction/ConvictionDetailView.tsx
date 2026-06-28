@@ -4,15 +4,13 @@ import {
   fetchPca,
   fetchWalletsBalances,
   fetchContextGraphs,
-  pcaTopUp,
-  pcaSettle,
-  pcaRemoveAgent,
   registerContextGraph,
   describePcaError,
   isRpcTransportError,
   HttpError,
   type PcaSnapshot,
 } from '../../api.js';
+import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
 import { useAgentsStore } from '../../stores/agents.js';
 import { formatTrac } from '../../lib/formatTrac.js';
 import {
@@ -140,6 +138,7 @@ function DetailBody({
   onRetryWallets: () => void;
   refresh: () => void;
 }) {
+  const owner = useOwnerActionSubmitter(accountId); // owner-action seam (P0: daemon submitter)
   const [topUp, setTopUp] = useState('');
   const [fund, setFund] = useState<ActionState>(IDLE);
   const [settle, setSettle] = useState<ActionState>(IDLE);
@@ -169,7 +168,7 @@ function DetailBody({
   const runFund = async () => {
     setFund({ busy: true, error: null, result: null });
     try {
-      const res = await pcaTopUp(accountId, topUp.trim());
+      const res = await owner.topUp(accountId, topUp.trim());
       setFund({ busy: false, error: null, result: { txHash: res.txHash, message: `Added ${formatTrac(res.addedTokens)} TRAC.` } });
       setTopUp('');
       refresh();
@@ -180,7 +179,7 @@ function DetailBody({
   const runSettle = async () => {
     setSettle({ busy: true, error: null, result: null });
     try {
-      const res = await pcaSettle(accountId);
+      const res = await owner.settle(accountId);
       setSettle({ busy: false, error: null, result: { txHash: res.txHash, message: 'Settlement sweep submitted.' } });
       refresh();
     } catch (err) {
@@ -231,7 +230,7 @@ function DetailBody({
   const runRemove = async (addr: string) => {
     setRemoveState({ busy: true, error: null, result: null });
     try {
-      await pcaRemoveAgent(accountId, addr);
+      await owner.deregisterAgent(accountId, addr);
       setRemoveState({ busy: false, error: null, result: { message: `Removed ${addr}.` } });
       setConfirmRemove(null);
       refresh();

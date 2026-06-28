@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useFetch } from '../../hooks.js';
 import {
   fetchWalletsBalances,
-  createPca,
   fetchPca,
   describePcaError,
   isPcaFeatureUnavailable,
@@ -10,6 +9,7 @@ import {
   type CreatePcaResult,
   type PcaSnapshot,
 } from '../../api.js';
+import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
 import { useAgentsStore } from '../../stores/agents.js';
 import { usePcaStore } from '../../stores/pca.js';
 import { DiscountTierLadder, discountTierForTrac, WalletRow } from '../../components/Pca/index.js';
@@ -57,6 +57,7 @@ export function CreatePcaModal({
   const ownerTrac = wb?.balances?.find((b) => b.address === ownerWallet)?.trac;
   const ownerTracNum = ownerTrac != null ? Number(ownerTrac) : NaN;
 
+  const owner = useOwnerActionSubmitter(); // owner-action seam (P0: daemon submitter)
   const trackAccount = usePcaStore((s) => s.trackAccount);
   const setCreatePending = usePcaStore((s) => s.setCreatePending);
   const clearCreatePending = usePcaStore((s) => s.clearCreatePending);
@@ -101,7 +102,7 @@ export function CreatePcaModal({
     // definitely-pre-broadcast error below.
     if (ownerWallet) setCreatePending({ ownerEoa: ownerWallet, submittedAt: Date.now() });
     try {
-      const res = await createPca({ tokens: tokens.trim(), primaryNode: primaryNode.trim() });
+      const res = await owner.create({ tokens: tokens.trim(), primaryNode: primaryNode.trim() });
       trackAccount(res.accountId);
       clearCreatePending();
       const snapshot = await fetchPca(res.accountId).catch(() => null);
