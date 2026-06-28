@@ -196,8 +196,14 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
       // unknown, not a DANGER we can't confirm); self-corrects on the next 30s poll.
       verdict = 'unknown';
     } else {
-      const anyNoTrac = confirmedUncovered.some((w) => !w.hasTrac);
-      verdict = anyNoTrac ? 'fallthrough-no-funds' : 'fallthrough';
+      // R3 — #1327 made signer selection funding-aware (evm-adapter-base
+      // selectFundedSigner): it picks ONE authorized wallet that can pay (PCA-
+      // covered OR own-TRAC, + gas) and skips the rest. So the publish FAILS only
+      // when NO wallet can fund it — a single uncovered/no-TRAC spare wallet must
+      // not assert "will FAIL". DANGER narrows; GREEN stays strict (every wallet
+      // covered) so we never promise a discount the picker might not deliver.
+      const anyCanFund = wallets.some((w) => (w.covered || w.hasTrac) && w.gasFunded);
+      verdict = anyCanFund ? 'fallthrough' : 'fallthrough-no-funds';
       reasons.push(`${covered.length} of ${wallets.length} signing wallets approved`);
       if (wallets.some((w) => w.sawExpired)) reasons.push('a conviction account has expired or been fully swept');
       if (wallets.some((w) => w.sawInsolvent)) reasons.push('a conviction account is out of budget');

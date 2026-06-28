@@ -9,13 +9,16 @@ import type { ReactNode } from 'react';
  *  - `fallthrough`         AMBER   — no discount, but the signing wallet HAS
  *                                    TRAC, so the publish pays the direct cost
  *                                    (non-blocking).
- *  - `fallthrough-no-funds` DANGER — no discount AND the signing wallet has NO
- *                                    TRAC → the publish will FAIL. (#6)
+ *  - `fallthrough-no-funds` DANGER — NO wallet can fund the publish → it will
+ *                                    FAIL. (#6)
  *  - `unknown`            NEUTRAL  — can't confirm; must NEVER render as green
  *                                    (P2: fail toward warning).
  *
- * The Batch E (S5) preflight computes which state applies (fail-toward-loud: if
- * a no-TRAC fall-through is possible under wallet round-robin, show DANGER).
+ * The Batch E (S5) preflight computes which state applies. Post-#1327 the signer
+ * selection is FUNDING-AWARE — it picks ONE authorized wallet that can pay (PCA-
+ * covered OR own-TRAC, + gas) and skips the rest — so DANGER ("will FAIL") fires
+ * only when NO wallet can fund the publish; a single uncovered/no-TRAC spare does
+ * not. GREEN stays strict (every signing wallet covered).
  */
 export type PcaVerdict = 'eligible' | 'fallthrough' | 'fallthrough-no-funds' | 'unknown';
 
