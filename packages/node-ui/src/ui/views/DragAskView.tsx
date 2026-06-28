@@ -33,6 +33,13 @@ function shortPred(p: string): string {
   const m = p.match(/[/#]([^/#]+)$/);
   return m ? m[1] : p;
 }
+/** Display an RDF object/term: the literal value, or an IRI's local name. */
+function term(o: string): string {
+  const m = o.match(/^"((?:[^"\\]|\\.)*)"/);
+  if (m) return m[1];
+  const seg = o.match(/[/#]([^/#]+)$/);
+  return seg ? seg[1] : o;
+}
 
 function retrievalLabel(r: string): string {
   if (!r || r === 'none') return '';
@@ -48,6 +55,8 @@ export function DragAskView() {
   const [cg, setCg] = useState(activeProjectId ?? '');
   const [scope, setScope] = useState<'local' | 'network'>('local');
   const [retrieval, setRetrieval] = useState<'' | 'keyword' | 'semantic'>(''); // '' = node default
+  const [reason, setReason] = useState(false);
+  const [rules, setRules] = useState('');
   const [pay, setPay] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,7 +66,17 @@ export function DragAskView() {
     setLoading(true);
     setError(null);
     try {
-      setResult(await answerQuestion({ question, contextGraphId: cg.trim(), scope, pay, retrieval: retrieval || undefined }));
+      setResult(
+        await answerQuestion({
+          question,
+          contextGraphId: cg.trim(),
+          scope,
+          pay,
+          retrieval: retrieval || undefined,
+          reason: reason && scope === 'local',
+          rules: rules.trim() || undefined,
+        }),
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setResult(null);
@@ -110,6 +129,15 @@ export function DragAskView() {
             <option value="keyword">keyword (substring)</option>
             <option value="semantic">semantic (by meaning)</option>
           </select>
+          <label className="v10-drag-pay" title={scope === 'network' ? 'reasoning runs on this node only' : 'derive proof-carrying conclusions with EYE'}>
+            <input
+              type="checkbox"
+              checked={reason}
+              disabled={scope === 'network'}
+              onChange={(e) => setReason(e.target.checked)}
+            />{' '}
+            🧠 reason (EYE)
+          </label>
           <label className="v10-drag-pay">
             <input type="checkbox" checked={pay} onChange={(e) => setPay(e.target.checked)} /> charge 0.01 USDC (x402)
           </label>
@@ -121,6 +149,15 @@ export function DragAskView() {
             {loading ? 'Asking…' : 'Ask'}
           </button>
         </div>
+        {reason && scope === 'local' && (
+          <textarea
+            className="v10-drag-rules"
+            rows={2}
+            value={rules}
+            onChange={(e) => setRules(e.target.value)}
+            placeholder={'optional N3 rules — applied on top of any verifiable rule-KAs in the CG. e.g.  { ?c code:changes ?f . ?f code:inModule code:authModule } => { ?c code:touchesAuth "true" } .'}
+          />
+        )}
       </div>
 
       {error && <div className="v10-drag-error">⚠ {error}</div>}
@@ -171,6 +208,42 @@ export function DragAskView() {
               ))}
             </div>
           )}
+
+          {result.reasoning && result.reasoning.derived.length > 0 && (
+            <div className="v10-drag-reason">
+              <div className="v10-drag-cites-title">
+                🧠 Derived · {result.reasoning.derived.length} proof-carrying conclusion{result.reasoning.derived.length === 1 ? '' : 's'}
+                <span className="v10-drag-chip">{result.reasoning.engine}</span>
+                {result.reasoning.rules && result.reasoning.rules.length > 0 && (
+                  <span className="v10-drag-chip">{result.reasoning.rules.length} verifiable rule{result.reasoning.rules.length === 1 ? '' : 's'}</span>
+                )}
+              </div>
+              {result.reasoning.derived.map((d, i) => (
+                <details key={i} className="v10-drag-derived" open={i < 3}>
+                  <summary className="v10-drag-derived-concl">
+                    <span className="s">{shortPred(d.conclusion.subject)}</span>
+                    <span className="p">{shortPred(d.conclusion.predicate)}</span>
+                    {term(d.conclusion.object) !== 'true' && <span className="o">{term(d.conclusion.object)}</span>}
+                    <span className="cnt">proof · {d.support.length} fact{d.support.length === 1 ? '' : 's'}</span>
+                  </summary>
+                  <div className="v10-drag-proof">
+                    {d.support.map((c, j) => (
+                      <div key={j} className={`v10-drag-proofleaf ${c.checks.verified ? 'ok' : 'bad'}`}>
+                        <span className="mk">{c.checks.verified ? '✓' : '✗'}</span>
+                        <span className="s">{shortPred(c.triple.subject)}</span>
+                        <span className="p">{shortPred(c.triple.predicate)}</span>
+                        <span className="o">{term(c.triple.object)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              ))}
+              <div className="v10-drag-reason-foot">
+                derived ≠ published — EYE infers these over <strong>only chain-verified facts</strong>; every proof leaf is itself a verified citation.
+              </div>
+            </div>
+          )}
+          {result.reasoning?.note && <div className="v10-drag-note">🧠 {result.reasoning.note}</div>}
 
           {result.perNode && result.perNode.length > 0 && (
             <div className="v10-drag-nodes">

@@ -141,6 +141,20 @@ export interface DragCitation {
 
 export interface DragPerNode { peerId: string; factsCited: number; verified: number; error?: string }
 
+/** A conclusion DERIVED by EYE over the verified facts, with its proof (support citations). */
+export interface DragDerived {
+  conclusion: { subject: string; predicate: string; object: string };
+  rule?: string;
+  support: DragCitation[];
+}
+export interface DragReasoning {
+  engine: string;
+  derived: DragDerived[];
+  /** Citations for the rule-KAs applied (verifiable rules). */
+  rules?: DragCitation[];
+  note?: string;
+}
+
 export interface DragAnswer {
   question: string;
   contextGraphId: string;
@@ -150,6 +164,7 @@ export interface DragAnswer {
   citations: DragCitation[];
   facts: Array<{ subject: string; predicate: string; object: string; source: number }>;
   perNode?: DragPerNode[];
+  reasoning?: DragReasoning;
   settlement?: { ok: boolean; asset: string; amount: string; payTo: string; txRef?: string };
   stats: { keywords: string[]; verified: number; factsCited: number; [k: string]: unknown };
 }
@@ -160,6 +175,10 @@ export interface DragAnswerRequest {
   scope?: 'local' | 'network';
   /** Retrieval mode (public, local scope): default | keyword | semantic. Omit = node default. */
   retrieval?: 'default' | 'keyword' | 'semantic';
+  /** Run the EYE reasoning tier (local scope): derive proof-carrying conclusions over the verified facts. */
+  reason?: boolean;
+  /** Optional N3 rules to apply (in addition to any verifiable rule-KAs in the CG). */
+  rules?: string;
   /** Demo the x402 paywall: the call performs the 402 → pay → 200 round-trip (only when the node enables payments). */
   pay?: boolean;
 }
@@ -183,6 +202,8 @@ export async function answerQuestion(req: DragAnswerRequest): Promise<DragAnswer
   const base: Record<string, unknown> = { question: req.question, contextGraphId: req.contextGraphId };
   if (req.scope) base.scope = req.scope;
   if (req.retrieval) base.retrieval = req.retrieval;
+  if (req.reason) base.reason = true;
+  if (req.rules && req.rules.trim()) base.rules = req.rules;
 
   if (!req.pay) {
     const { status, body } = await rawAnswer(base);

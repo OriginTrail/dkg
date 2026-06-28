@@ -173,3 +173,66 @@
   padding: 10px 14px;
 }
 .v10-drag-receipt code { font-size: 11px; color: var(--text-info); word-break: break-all; }
+
+/* ── reasoning tier (EYE) ───────────────────────────────────────────────────── */
+.v10-drag-rules {
+  width: 100%;
+  margin-top: 8px;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  padding: 8px 10px;
+  font-family: monospace;
+  font-size: 12px;
+  resize: vertical;
+}
+.v10-drag-rules:focus { outline: none; border-color: var(--border-strong); }
+
+.v10-drag-reason { display: flex; flex-direction: column; gap: 8px; }
+.v10-drag-derived {
+  border: 1px solid var(--border-default);
+  border-left: 3px solid rgba(139, 92, 246, 0.7);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  padding: 8px 12px;
+}
+.v10-drag-derived-concl {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  font-size: 13px;
+  cursor: pointer;
+  list-style: none;
+}
+.v10-drag-derived-concl::-webkit-details-marker { display: none; }
+.v10-drag-derived-concl::before { content: '▸'; color: rgba(139, 92, 246, 0.8); font-size: 11px; }
+.v10-drag-derived[open] .v10-drag-derived-concl::before { content: '▾'; }
+.v10-drag-derived-concl .s { color: var(--text-primary); font-weight: 600; }
+.v10-drag-derived-concl .p { color: rgb(167, 139, 250); font-weight: 600; }
+.v10-drag-derived-concl .o { color: var(--text-secondary); }
+.v10-drag-derived-concl .cnt { margin-left: auto; font-size: 11px; color: var(--text-tertiary); }
+
+.v10-drag-proof { display: flex; flex-direction: column; gap: 3px; margin: 8px 0 2px; padding-left: 14px; }
+.v10-drag-proofleaf {
+  display: flex;
+  gap: 6px;
+  font-size: 12px;
+  font-family: monospace;
+  color: var(--text-secondary);
+}
+.v10-drag-proofleaf .mk { color: var(--accent-green); }
+.v10-drag-proofleaf.bad .mk { color: var(--accent-red); }
+.v10-drag-proofleaf .s { color: var(--text-tertiary); }
+.v10-drag-proofleaf .p { color: var(--text-secondary); }
+.v10-drag-proofleaf .o { color: var(--text-primary); }
+
+.v10-drag-reason-foot { font-size: 11px; color: var(--text-tertiary); padding-top: 2px; }
+.v10-drag-note {
+  border: 1px solid var(--accent-amber);
+  background: rgba(245, 158, 11, 0.08);
+  color: var(--text-secondary);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+}
