@@ -14,6 +14,7 @@ import {
   type AgentSidebarIdentity,
 } from '../lib/contextGraphSidebar.js';
 import { formatEth, formatEthTooltip } from '../lib/formatEth.js';
+import { PcaDashboardRow } from '../pages/conviction/PcaDashboardRow.js';
 
 // Single user-facing description shown inside the My Context Graphs
 // card (one line, no separate footnote — round-2 feedback: the split
@@ -850,6 +851,8 @@ export function DashboardView() {
               </div>
             ))}
           </div>
+
+          <PcaDashboardRow />
         </div>
       </div>
     </div>

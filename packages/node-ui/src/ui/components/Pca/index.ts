@@ -2,8 +2,15 @@
 // reused across S1–S7 (UX proposal §4). See the per-file docs for the invariant
 // each one carries.
 export { CopyButton, useCopy } from './CopyButton.js';
-export { truncateAddress } from './format.js';
-export { HealthChip, HEALTH_CHIP_META, type PcaHealthState } from './HealthChip.js';
+export { truncateAddress, formatWeiToTrac, formatRelativeExpiry } from './format.js';
+export {
+  HealthChip,
+  HEALTH_CHIP_META,
+  healthForSnapshot,
+  PCA_CAP_NEAR_THRESHOLD,
+  PCA_EXPIRING_SOON_SECONDS,
+  type PcaHealthState,
+} from './HealthChip.js';
 export { WalletRow, type WalletRowTone } from './WalletRow.js';
 export { AddressCrux, DEFAULT_ADDRESS_CRUX_NOTE } from './AddressCrux.js';
 export {

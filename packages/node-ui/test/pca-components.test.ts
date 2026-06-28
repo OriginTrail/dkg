@@ -11,6 +11,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   HealthChip,
   HEALTH_CHIP_META,
+  healthForSnapshot,
+  PCA_CAP_NEAR_THRESHOLD,
+  PCA_EXPIRING_SOON_SECONDS,
   type PcaHealthState,
   WalletRow,
   AddressCrux,
@@ -88,6 +91,65 @@ describe('HealthChip', () => {
     );
     expect(container.querySelector('.v10-pca-health-label')?.textContent).toBe('Expires in ~12 days');
     await unmount();
+  });
+
+  it('renders insolvent in the DANGER tone (badge-error), distinct from warn states (§6.4/G5)', () => {
+    expect(HEALTH_CHIP_META.insolvent.toneClass).toBe('badge-error');
+    // Expiring / cap-near stay warn-toned — insolvent must NOT collapse into them.
+    expect(HEALTH_CHIP_META.expiring.toneClass).toBe('badge-warn');
+    expect(HEALTH_CHIP_META['cap-near'].toneClass).toBe('badge-warn');
+    expect(HEALTH_CHIP_META.expired.toneClass).toBe('badge-error');
+  });
+});
+
+describe('healthForSnapshot (single source of truth for S1/S3/S5)', () => {
+  const NOW = 1_000_000; // arbitrary nowSec
+  const base = { expiresAtTimestamp: NOW + 30 * 24 * 3600, fullySwept: false, agentCount: 1 };
+
+  it('returns healthy for a solvent, far-from-expiry, low-cap account', () => {
+    expect(healthForSnapshot(base, NOW)).toBe('healthy');
+  });
+
+  it('expired takes precedence over everything once nowSec >= expiry', () => {
+    expect(
+      healthForSnapshot({ ...base, expiresAtTimestamp: NOW - 1, fullySwept: true, agentCount: 100 }, NOW),
+    ).toBe('expired');
+    // Exactly at expiry counts as expired.
+    expect(healthForSnapshot({ ...base, expiresAtTimestamp: NOW }, NOW)).toBe('expired');
+  });
+
+  it('swept outranks cap-near and expiring (when not expired)', () => {
+    expect(healthForSnapshot({ ...base, fullySwept: true, agentCount: 100 }, NOW)).toBe('swept');
+  });
+
+  it('cap-near fires at the threshold and outranks expiring', () => {
+    expect(healthForSnapshot({ ...base, agentCount: PCA_CAP_NEAR_THRESHOLD }, NOW)).toBe('cap-near');
+    expect(healthForSnapshot({ ...base, agentCount: PCA_CAP_NEAR_THRESHOLD - 1 }, NOW)).not.toBe('cap-near');
+  });
+
+  it('expiring fires within the 7-day window', () => {
+    expect(
+      healthForSnapshot({ ...base, expiresAtTimestamp: NOW + PCA_EXPIRING_SOON_SECONDS }, NOW),
+    ).toBe('expiring');
+    expect(
+      healthForSnapshot({ ...base, expiresAtTimestamp: NOW + PCA_EXPIRING_SOON_SECONDS + 1 }, NOW),
+    ).toBe('healthy');
+  });
+
+  it('never derives insolvent in P0 (deferred to P2 — invariant #9)', () => {
+    // No combination of P0 snapshot fields should yield 'insolvent'.
+    const states = new Set([
+      healthForSnapshot(base, NOW),
+      healthForSnapshot({ ...base, fullySwept: true }, NOW),
+      healthForSnapshot({ ...base, agentCount: 100 }, NOW),
+      healthForSnapshot({ ...base, expiresAtTimestamp: NOW - 5 }, NOW),
+      healthForSnapshot({ ...base, expiresAtTimestamp: NOW + 100 }, NOW),
+    ]);
+    expect(states.has('insolvent' as PcaHealthState)).toBe(false);
+  });
+
+  it('treats a missing/zero expiry as "no expiry data" (never expired/expiring)', () => {
+    expect(healthForSnapshot({ ...base, expiresAtTimestamp: 0 }, NOW)).toBe('healthy');
   });
 });
 
