@@ -37,7 +37,7 @@ interface ProbeRow {
  * ≥1 wallet approved AND gas-funded → publish.
  */
 export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
-  const { data: wb } = useFetch(fetchWalletsBalances, [], 0);
+  const { data: wb, loading: walletsLoading, error: walletsError, refresh: refreshWallets } = useFetch(fetchWalletsBalances, [], 0);
   const wallets = wb?.wallets ?? [];
   const balances = wb?.balances ?? [];
   const chainId = wb?.chainId ?? null;
@@ -92,24 +92,38 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
         <section className="v10-pca-detail-section">
           <h3 className="v10-pca-detail-section-title">Your operational wallets (signers / msg.sender)</h3>
           <div className="v10-pca-detail-agentlist">
-            {wallets.map((w) => {
-              const eth = ethFor(w);
-              const funded = isFunded(w);
-              return (
-                <WalletRow
-                  key={w}
-                  address={w}
-                  gas={
-                    eth != null ? (
-                      <span title={formatEthTooltip(eth)}>
-                        gas {formatEth(eth)} {gasSymbol} {funded ? '✓' : '⚠ fund to publish'}
-                      </span>
-                    ) : undefined
-                  }
-                />
-              );
-            })}
-            {wallets.length === 0 && <p className="v10-pca-handshake-empty">No operational wallets detected on this node.</p>}
+            {/* Gate the empty state on load/error — a false "No operational
+                wallets" while the fetch is in flight (or on a transient error)
+                reads, on the edge's ONLY path to a discount, as "I can't get
+                sponsored". Empty copy shows ONLY when loaded AND truly zero. */}
+            {walletsLoading && !wb ? (
+              <p className="v10-pca-handshake-empty" role="status">Loading your wallets…</p>
+            ) : walletsError && wallets.length === 0 ? (
+              <p className="v10-modal-error" role="alert">
+                Couldn’t load your wallets.{' '}
+                <button type="button" className="v10-pca-card-btn" onClick={() => refreshWallets()}>Retry</button>
+              </p>
+            ) : wallets.length === 0 ? (
+              <p className="v10-pca-handshake-empty">No operational wallets detected on this node.</p>
+            ) : (
+              wallets.map((w) => {
+                const eth = ethFor(w);
+                const funded = isFunded(w);
+                return (
+                  <WalletRow
+                    key={w}
+                    address={w}
+                    gas={
+                      eth != null ? (
+                        <span title={formatEthTooltip(eth)}>
+                          gas {formatEth(eth)} {gasSymbol} {funded ? '✓' : '⚠ fund to publish'}
+                        </span>
+                      ) : undefined
+                    }
+                  />
+                );
+              })
+            )}
           </div>
           {wallets.length > 0 && (
             <button
@@ -139,8 +153,9 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
           )}
         </div>
 
-        {/* Handshake packet */}
-        <SponsorshipHandshake wallets={wallets} accountId={probed?.accountId} role="edge" />
+        {/* Handshake packet — only once wallets have loaded, so its own
+            wallets-empty half can't become a false-empty during the fetch. */}
+        {wb && <SponsorshipHandshake wallets={wallets} accountId={probed?.accountId} role="edge" />}
 
         {/* Approval tracker */}
         <section className="v10-pca-detail-section">

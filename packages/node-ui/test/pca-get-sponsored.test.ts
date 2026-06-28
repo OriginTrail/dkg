@@ -112,4 +112,30 @@ describe('GetSponsoredPanel', () => {
     await waitForText(container, 'Ready');
     await unmount();
   });
+
+  it('shows a LOADING state (never a false-empty) while wallets are in flight, then the wallets', async () => {
+    let resolve!: (v: unknown) => void;
+    mocks.fetchWalletsBalances.mockReturnValue(new Promise((r) => { resolve = r; }));
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
+    // In flight: loading copy, NOT the false "No operational wallets" (the bug).
+    expect(container.textContent).toContain('Loading your wallets');
+    expect(container.textContent).not.toContain('No operational wallets detected');
+    await act(async () => {
+      resolve({ wallets: [W0], balances: [{ address: W0, eth: '0.08', trac: '0', symbol: 'TRAC' }], chainId: '84532', rpcUrl: null });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await waitForText(container, '0x71D4');
+    expect(container.textContent).not.toContain('No operational wallets detected');
+    // The wallet renders in both the list and the handshake half — at least one.
+    expect(container.querySelectorAll('.v10-pca-wallet-row').length).toBeGreaterThanOrEqual(1);
+    await unmount();
+  });
+
+  it('shows an error + Retry (not a false-empty) when the wallets fetch fails', async () => {
+    mocks.fetchWalletsBalances.mockRejectedValue(new Error('rpc down'));
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
+    await waitForText(container, 'Couldn’t load your wallets');
+    expect(container.textContent).not.toContain('No operational wallets detected');
+    await unmount();
+  });
 });
