@@ -276,4 +276,54 @@ export const sel = {
     rpcRedactBtn: 'button[aria-label="Redact RPC URL"]',
     shutdownBtn: '.settings-stack .card button',
   },
+
+  // Publishing Conviction (PCA) tab — GREENFIELD (P0). These are the e2e
+  // selector CONTRACT for the new node-UI surface (plan §2.3 file targets +
+  // PCA-NODE-UI-UX-PROPOSAL screens S1–S7/S2b). data-testid is used for every
+  // e2e-critical anchor so specs don't bind to volatile design-system classes;
+  // QA owns this map, Frontend adds the matching attributes. Until the tab
+  // lands, the spec (publishing-conviction.spec.ts) is `test.fixme`.
+  conviction: {
+    // Header launch button → openTab({ id:'conviction', ... }) (Header.tsx).
+    // Uses a data-testid (not title): the title is the proposal §3.1 benefit-cue
+    // tooltip "Publishing Conviction — publishing discounts & sponsorship".
+    headerBtn: '[data-testid="pca-launch-btn"]',
+    // PublishingConviction.tsx tab root (pages/PublishingConviction.tsx)
+    view: '[data-testid="pca-view"]',
+    // 503 / FEATURE_UNAVAILABLE mount-gate EmptyState (proposal §6.6/§8a)
+    unavailable: '[data-testid="pca-unavailable"]',
+    recheckBtn: '[data-testid="pca-recheck-btn"]',
+    // S7 role-adaptive landing + S1 overview
+    landing: '[data-testid="pca-landing"]',
+    trackToggle: '[data-testid="pca-track-toggle"], .v10-pca-track-toggle', // S1 collapsed "track by id" disclosure (expand first)
+    trackInput: '[data-testid="pca-track-input"]',         // S1 manual accountId paste (P0 pre-discovery)
+    trackSubmit: '[data-testid="pca-track-submit"]',
+    accountCard: '[data-testid="pca-account-card"]',        // S1/S3 PcaAccountCard
+    healthChip: '[data-testid="pca-health-chip"]',          // HealthChip
+    tierLadder: '[data-testid="pca-tier-ladder"]',          // DiscountTierLadder
+    // S2 create
+    createBtn: '[data-testid="pca-create-btn"]',
+    createModal: '[data-testid="pca-create-modal"]',        // CreatePcaModal (mirrors .v10-modal-*)
+    createTokensInput: '[data-testid="pca-create-tokens"]',
+    createPrimaryNode: '[data-testid="pca-create-primary-node"]',
+    createSubmit: '[data-testid="pca-create-submit"]',
+    createSuccess: '[data-testid="pca-create-success"]',    // invariant 11: "0/100 wallets approved — discounts nothing yet"
+    approveOwnWalletsCta: '[data-testid="pca-approve-own-wallets"]',
+    // S3 manage
+    agentList: '[data-testid="pca-agent-list"]',            // PcaAgentList (B3)
+    agentRow: '[data-testid="pca-agent-row"]',              // WalletRow
+    topUpBtn: '[data-testid="pca-topup-btn"]',
+    settleBtn: '[data-testid="pca-settle-btn"]',
+    deregisterBtn: '[data-testid="pca-deregister-btn"]',
+    // S4 approve wallets
+    approveModal: '[data-testid="pca-approve-modal"]',      // ApproveWalletsModal
+    approveAddressInput: '[data-testid="pca-approve-address"]',
+    approveSubmit: '[data-testid="pca-approve-submit"]',
+    // S5 eligibility (predictive in P0; confirmed B8 in P2)
+    eligibilityVerdict: '[data-testid="pca-eligibility-verdict"]', // EligibilityVerdictBanner (role=alert on amber)
+    eligibilityChip: '[data-testid="pca-eligibility-chip"]',       // condensed chip on the publish CTA (layer-widgets.tsx)
+    discountBadge: '[data-testid="pca-discount-badge"]',           // DiscountAppliedBadge (B8; degrade-to-hidden)
+    // S6 edge onboarding
+    getSponsoredPanel: '[data-testid="pca-get-sponsored"]',        // GetSponsoredPanel / SponsorshipHandshake
+  },
 } as const;

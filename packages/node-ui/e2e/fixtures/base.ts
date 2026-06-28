@@ -14,6 +14,7 @@ import { SettingsPage } from '../pages/settings.po.js';
 import { CreateProjectModal } from '../pages/modals/create-project.po.js';
 import { ImportFilesModal } from '../pages/modals/import-files.po.js';
 import { FilePreviewModal } from '../pages/modals/file-preview.po.js';
+import { PublishingConvictionPage } from '../pages/publishing-conviction.po.js';
 
 type Fixtures = {
   /**
@@ -36,6 +37,7 @@ type Fixtures = {
   createProjectModal: CreateProjectModal;
   importFilesModal: ImportFilesModal;
   filePreviewModal: FilePreviewModal;
+  conviction: PublishingConvictionPage;
 };
 
 export const test = base.extend<Fixtures>({
@@ -112,6 +114,9 @@ export const test = base.extend<Fixtures>({
   },
   filePreviewModal: async ({ page }, use) => {
     await use(new FilePreviewModal(page));
+  },
+  conviction: async ({ page }, use) => {
+    await use(new PublishingConvictionPage(page));
   },
 });
 
