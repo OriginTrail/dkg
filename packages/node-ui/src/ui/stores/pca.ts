@@ -45,6 +45,13 @@ interface PcaState {
   isTracked: (id: string) => boolean;
   setCreatePending: (marker: PcaCreatePending) => void;
   clearCreatePending: () => void;
+  /**
+   * P1 — atomically finalize a confirmed create: clear the marker AND track the new
+   * id in ONE synchronous write (persistNow). The split trackAccount+clearCreatePending
+   * were both debounced, so a crash/reload in the 150ms window resurrected the stale
+   * create-pending marker (→ reconcile screen) AND lost the new id, enabling a second mint.
+   */
+  finishCreate: (accountId: string) => void;
 }
 
 interface PersistedPca {
@@ -170,5 +177,15 @@ export const usePcaStore = create<PcaState>((set, get) => ({
   clearCreatePending: () => {
     set({ createPending: null });
     persist(snapshot(get()));
+  },
+  finishCreate: (id) => {
+    // P1 — clear the marker AND track the id in ONE set(), then write synchronously
+    // so a reload can never resurrect the stale marker or lose the new id.
+    set((s) => ({
+      createPending: null,
+      trackedIds:
+        isValidAccountId(id) && !s.trackedIds.includes(id) ? [...s.trackedIds, id] : s.trackedIds,
+    }));
+    persistNow(snapshot(get()));
   },
 }));
