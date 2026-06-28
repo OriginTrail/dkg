@@ -21,6 +21,7 @@ import {
   pcaRemoveAgent,
   pcaTopUp,
   pcaSettle,
+  registerContextGraph,
 } from '../src/ui/api.js';
 
 describe('describePcaError', () => {
@@ -271,5 +272,24 @@ describe('PCA api helpers (transport shaping)', () => {
     expect((err as HttpError).status).toBe(409);
     const mapped = describePcaError(err);
     expect(mapped!.code).toBe('AgentAlreadyRegistered');
+  });
+
+  // R1 — the CG→PCA bind key is financially load-bearing: a dropped/misspelled
+  // `pcaAccountId` means the daemon ignores the binding and publishes silently
+  // fall through to full price (the #1 PCA footgun). Guard the WIRE body + the
+  // conditional spread (the component-level C6 test only pins the helper args).
+  it('registerContextGraph POSTs { id, pcaAccountId } and omits it with no opts (CG-bind wire guard)', async () => {
+    fetchMock.mockResolvedValueOnce(ok({ registered: 'cg-1', onChainId: '1', txHash: '0x1' }));
+    await registerContextGraph('cg-1', { pcaAccountId: '7' });
+    let [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('/api/context-graph/register');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body as string)).toEqual({ id: 'cg-1', pcaAccountId: '7' });
+
+    // Conditional spread: no opts → no pcaAccountId key (never `pcaAccountId: undefined`).
+    fetchMock.mockResolvedValueOnce(ok({ registered: 'cg-1', onChainId: '1', txHash: '0x2' }));
+    await registerContextGraph('cg-1');
+    [url, init] = fetchMock.mock.calls[1]!;
+    expect(JSON.parse(init.body as string)).toEqual({ id: 'cg-1' });
   });
 });
