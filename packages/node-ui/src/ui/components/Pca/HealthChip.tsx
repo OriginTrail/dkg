@@ -1,14 +1,8 @@
 import React from 'react';
 // #1355 V2 — health derivation lives in the domain module `pca/health.ts`; this
-// presentation file re-exports it for back-compat (existing `components/Pca` importers).
-import {
-  type PcaHealthState,
-  PCA_CAP_NEAR_THRESHOLD,
-  PCA_EXPIRING_SOON_SECONDS,
-  healthForSnapshot,
-} from '../../pca/health.js';
-
-export { type PcaHealthState, PCA_CAP_NEAR_THRESHOLD, PCA_EXPIRING_SOON_SECONDS, healthForSnapshot };
+// presentation file only consumes `PcaHealthState` for its pill (every other consumer
+// imports the derivation directly from `pca/health.js`, so no re-export here).
+import { type PcaHealthState } from '../../pca/health.js';
 
 interface HealthMeta {
   glyph: string;
