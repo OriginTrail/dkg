@@ -19,6 +19,8 @@ vi.mock('../src/ui/api.js', async (orig) => {
 });
 
 const { GetSponsoredPanel } = await import('../src/ui/pages/conviction/GetSponsoredPanel.js');
+const { usePcaStore } = await import('../src/ui/stores/pca.js');
+const { makePcaSnapshot } = await import('../src/ui/mocks/pca.js');
 
 const W0 = '0x71D4000000000000000000000000000000009Ac2';
 const W1 = '0x3F8a0000000000000000000000000000000000C1b7';
@@ -49,6 +51,9 @@ beforeEach(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   document.body.innerHTML = '';
   vi.clearAllMocks();
+  // N2 — the store is a module singleton seeded from localStorage; reset both.
+  localStorage.clear();
+  usePcaStore.setState({ trackedIds: [], createPending: null });
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
@@ -97,7 +102,8 @@ describe('GetSponsoredPanel', () => {
       rpcUrl: null,
     });
     mocks.fetchPca.mockImplementation(async (_id: string, key?: string) => ({
-      accountId: '7',
+      // N1 — a healthy + funded snapshot so the approved W0 actually COVERS.
+      ...makePcaSnapshot({ accountId: '7' }),
       probedKey: key ? { key, registered: key.toLowerCase() === W0.toLowerCase() } : undefined,
     }));
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
@@ -108,8 +114,46 @@ describe('GetSponsoredPanel', () => {
     await act(async () => { checkBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 
     await waitForText(container, 'Approved on PCA #7: 1 of 2 wallets');
-    // W0 approved + funded → ready.
+    // W0 approved + funded + covering → ready.
     await waitForText(container, 'Ready');
+    // N2 — a confirmed check persists the sponsor id for the overview/chip.
+    expect(usePcaStore.getState().trackedIds).toContain('7');
+    await unmount();
+  });
+
+  // N1 — a wallet registered on an EXPIRED/SWEPT sponsor PCA does NOT cover the
+  // publish; the panel must warn, never render "Ready" (#9 false coverage).
+  async function runCheckOnSponsor(snapOver: Record<string, unknown>) {
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0],
+      balances: [{ address: W0, eth: '0.08', trac: '0', symbol: 'TRAC' }], // gas-funded
+      chainId: '84532',
+      rpcUrl: null,
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) => ({
+      ...makePcaSnapshot({ accountId: '7', ...snapOver }),
+      probedKey: key ? { key, registered: true } : undefined, // approved, but…
+    }));
+    const handle = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
+    await waitForText(handle.container, 'Track your approval');
+    setInputValue(handle.container.querySelector('input[aria-label="Sponsor account id"]') as HTMLInputElement, '7');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const checkBtn = Array.from(handle.container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
+    await act(async () => { checkBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    return handle;
+  }
+
+  it('N1 — registered on an EXPIRED sponsor PCA → warns, not Ready', async () => {
+    const { container, unmount } = await runCheckOnSponsor({ expiresAtTimestamp: Math.floor(Date.now() / 1000) - 86_400 });
+    await waitForText(container, 'publishes won’t get the discount');
+    expect(container.textContent).not.toContain('can publish under PCA');
+    await unmount();
+  });
+
+  it('N1 — registered on a FULLY-SWEPT sponsor PCA → warns, not Ready', async () => {
+    const { container, unmount } = await runCheckOnSponsor({ fullySwept: true });
+    await waitForText(container, 'publishes won’t get the discount');
+    expect(container.textContent).not.toContain('can publish under PCA');
     await unmount();
   });
 
@@ -135,6 +179,8 @@ describe('GetSponsoredPanel', () => {
 
     await waitForText(container, 'the chain lookup failed');
     expect(container.textContent).not.toContain('Approved on PCA #7: 0 of');
+    // N2 — a wholesale-failed lookup must NOT auto-track the id.
+    expect(usePcaStore.getState().trackedIds).not.toContain('7');
     await unmount();
   });
 
