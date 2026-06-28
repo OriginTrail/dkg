@@ -95,7 +95,10 @@ export function PublishEligibilityChip({ contextGraphId, id }: { contextGraphId:
           <p className="v10-pca-publish-foot">
             {elig.verdict === 'eligible'
               ? 'Predicted — confirmed on-chain after publish (pending the discount-applied signal).'
-              : 'Fix: approve the un-approved wallet(s) on your PCA (Conviction tab), or pin publishing to an approved wallet. This won’t block the publish.'}
+              : elig.verdict === 'fallthrough-no-funds'
+                ? // QA #2 — DANGER is blocking ("will FAIL"), so the amber "won’t block" note is wrong here.
+                  'Publishing now would fail on-chain — fund this wallet with TRAC, or get it approved on a healthy PCA, before you publish.'
+                : 'Fix: approve the un-approved wallet(s) on your PCA (Conviction tab), or pin publishing to an approved wallet. This won’t block the publish.'}
           </p>
         </div>
       )}

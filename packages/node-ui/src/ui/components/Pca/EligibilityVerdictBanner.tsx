@@ -134,6 +134,8 @@ export function EligibilityVerdictBanner({
     message = (
       <>
         No PCA discount on this publish — it will pay the direct cost (TRAC from the signing wallet)
+        {/* F9 — name the forfeited discount when it's in context (§5.5 / #5a). */}
+        {disc ? `, forfeiting ${pcaLabel}’s −${disc}` : ''}
         {ownerPublish ? escrowCaveat : ''}.{reasonText}
       </>
     );
@@ -141,6 +143,7 @@ export function EligibilityVerdictBanner({
     message = (
       <>
         This publish will FAIL — the signing wallet has no TRAC to cover the direct cost
+        {disc ? `, forfeiting ${pcaLabel}’s −${disc}` : ''}
         {ownerPublish ? escrowCaveat : ''}.{reasonText}
       </>
     );
