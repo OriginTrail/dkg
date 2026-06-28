@@ -126,6 +126,34 @@ describe('PublishingConvictionPage — deployment (503) gate', () => {
     expect(container.querySelector('[data-testid="pca-landing"]')).toBeTruthy();
     await unmount();
   });
+
+  // V1 — only a CAPABILITY 503 gates the tab. A 404 (no such account) and a transient
+  // transport 503 (RPC_* code) are NOT capability gaps → the landing renders.
+  it('a 404 capability probe renders the landing, not the unavailable gate', async () => {
+    mocks.fetchPca.mockRejectedValue(new HttpError(404));
+    const { container, unmount } = await render(React.createElement(PublishingConvictionPage));
+    await waitForText(container, 'Publishing Conviction');
+    expect(container.querySelector('[data-testid="pca-landing"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="pca-unavailable"]')).toBeNull();
+    await unmount();
+  });
+
+  it('a transient transport 503 (RPC_*) renders the landing, not the unavailable gate', async () => {
+    mocks.fetchPca.mockRejectedValue(new HttpError(503, 'x', { code: 'RPC_ENDPOINTS_EXHAUSTED' }));
+    const { container, unmount } = await render(React.createElement(PublishingConvictionPage));
+    await waitForText(container, 'Publishing Conviction');
+    expect(container.querySelector('[data-testid="pca-landing"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="pca-unavailable"]')).toBeNull();
+    await unmount();
+  });
+
+  it('a CAPABILITY 503 (FEATURE_UNAVAILABLE) DOES gate the tab', async () => {
+    mocks.fetchPca.mockRejectedValue(new HttpError(503, 'x', { error: 'FEATURE_UNAVAILABLE' }));
+    const { container, unmount } = await render(React.createElement(PublishingConvictionPage));
+    await waitForText(container, "isn’t available on this network");
+    expect(container.querySelector('[data-testid="pca-unavailable"]')).toBeTruthy();
+    await unmount();
+  });
 });
 
 describe('ConvictionOverview — S1 discovery', () => {
