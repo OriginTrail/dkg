@@ -291,5 +291,12 @@ describe('PCA api helpers (transport shaping)', () => {
     await registerContextGraph('cg-1');
     [url, init] = fetchMock.mock.calls[1]!;
     expect(JSON.parse(init.body as string)).toEqual({ id: 'cg-1' });
+
+    // O3 — the S3 bind forces curated publishPolicy:0 alongside pcaAccountId
+    // (publishPolicy:0 must serialize even though it's falsy).
+    fetchMock.mockResolvedValueOnce(ok({ registered: 'cg-1', onChainId: '1', txHash: '0x3' }));
+    await registerContextGraph('cg-1', { pcaAccountId: '7', publishPolicy: 0 });
+    [url, init] = fetchMock.mock.calls[2]!;
+    expect(JSON.parse(init.body as string)).toEqual({ id: 'cg-1', pcaAccountId: '7', publishPolicy: 0 });
   });
 });

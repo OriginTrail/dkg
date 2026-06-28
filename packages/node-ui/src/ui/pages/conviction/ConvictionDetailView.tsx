@@ -151,17 +151,17 @@ function DetailBody({
   const [approveOpen, setApproveOpen] = useState(false);
 
   const { data: cgData } = useFetch(fetchContextGraphs, [], 0);
-  // N3 — bind == register an UNREGISTERED CURATED CG with a PCA (there's no
-  // update-authority route). Filter the dropdown to bindable CGs so a registered
-  // one can't be picked and silently false-"Bound" (#9). The list endpoint already
-  // returns onChainId + accessPolicy.
+  // O3 (corrects N3) — bind == register an UNREGISTERED CG with a PCA, forcing the
+  // CURATED publish policy at registration (the backend governs bindability by
+  // PUBLISH policy, not access policy — public-read + curated-publish is supported).
+  // So bindable = unregistered (no onChainId); a registered CG can't be re-bound
+  // (there's no update-authority route) so it's excluded to avoid a false "Bound".
   const cgs = (cgData?.contextGraphs ?? []) as Array<{
     id: string;
     name?: string;
     onChainId?: string;
-    accessPolicy?: string;
   }>;
-  const bindable = cgs.filter((cg) => !cg.onChainId && cg.accessPolicy === 'private');
+  const bindable = cgs.filter((cg) => !cg.onChainId);
   const health = healthForSnapshot(snapshot);
   const ownerTitle = ownerIsPrimary ? undefined : ownerOnlyReason;
 
@@ -209,7 +209,10 @@ function DetailBody({
   const runBind = async () => {
     setBind({ busy: true, error: null, result: null });
     try {
-      const res = await registerContextGraph(bindCg, { pcaAccountId: accountId });
+      // O3 — force the CURATED publish policy: a public CG would otherwise derive
+      // to OPEN and the backend rejects ("PCA account id can only be used with
+      // curated publish policy"). Binding makes the graph curated-publish.
+      const res = await registerContextGraph(bindCg, { pcaAccountId: accountId, publishPolicy: 0 });
       // N3 — a 200 with NO txHash means the CG was already registered on-chain and
       // the daemon took the idempotent path WITHOUT applying the new pcaAccountId.
       // Never claim "Bound" (a #9 false confirmation) — say it plainly.
@@ -375,18 +378,18 @@ function DetailBody({
         </button>
       </section>
 
-      {/* Context-graph binding (curated only) */}
+      {/* Context-graph binding (registers the graph with curated publishing) */}
       <section className="v10-pca-detail-section">
         <h3 className="v10-pca-detail-section-title">Context-graph binding</h3>
         <p className="v10-pca-detail-hint">
-          Binding authorizes publishing into a graph under this account — separate from the primary
-          node and from which wallets pay. <strong>Curated/private policy only</strong>, and the
-          binding node’s signer must equal the PCA owner.
+          Binding registers the graph with <strong>curated publishing</strong> — only this PCA’s owner
+          and authorized wallets can publish into it; read access is unchanged. It’s separate from the
+          primary node and from which wallets pay, and the binding node’s signer must equal the PCA owner.
         </p>
         {bindable.length === 0 ? (
           <p className="v10-pca-detail-hint" role="status">
-            No unregistered curated context graphs to bind. Binding sets a graph’s publishing authority
-            at its first on-chain registration; an already-registered graph can’t be changed from here.
+            No unregistered context graphs to bind. Binding sets a graph’s publishing authority at its
+            first on-chain registration; an already-registered graph can’t be changed from here.
           </p>
         ) : (
           <div className="v10-pca-detail-form">

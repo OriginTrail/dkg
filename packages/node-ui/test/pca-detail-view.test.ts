@@ -227,20 +227,21 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     setSelect(container.querySelector('select.v10-form-select') as HTMLSelectElement, 'cg-1');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     await act(async () => { findBtn(container, 'Bind context graph').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    // The dropped-{pcaAccountId} regression guard.
-    expect(mocks.registerContextGraph).toHaveBeenCalledWith('cg-1', { pcaAccountId: '7' });
+    // The dropped-{pcaAccountId} regression guard + O3 forces curated publishPolicy.
+    expect(mocks.registerContextGraph).toHaveBeenCalledWith('cg-1', { pcaAccountId: '7', publishPolicy: 0 });
     await waitForText(container, 'Bound cg-1 to PCA #7.');
     await unmount();
   });
 
-  // N3 — the bind dropdown must list ONLY unregistered curated CGs (registered or
-  // open graphs can't be bound and would confuse / false-"Bound").
-  it('N3 — bind dropdown lists only unregistered curated context graphs', async () => {
+  // O3 (corrects N3) — bindable = UNREGISTERED, any access policy (binding forces
+  // curated PUBLISH at registration). A public-read CG is bindable; a registered
+  // CG (onChainId set) is excluded.
+  it('O3 — bind dropdown lists unregistered CGs of ANY access policy, excludes registered', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
     mocks.fetchContextGraphs.mockResolvedValue({
       contextGraphs: [
         { id: 'reg-curated', name: 'Registered', onChainId: '5', accessPolicy: 'private' },
-        { id: 'open-cg', name: 'Open', accessPolicy: 'public' },
+        { id: 'open-cg', name: 'Open', accessPolicy: 'public' }, // public-read → still bindable
         { id: 'bindable-cg', name: 'Bindable', accessPolicy: 'private' },
       ],
     });
@@ -248,7 +249,7 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     await waitForText(container, 'Context-graph binding');
     const select = container.querySelector('select.v10-form-select') as HTMLSelectElement;
     const optionValues = Array.from(select.querySelectorAll('option')).map((o) => o.value).filter(Boolean);
-    expect(optionValues).toEqual(['bindable-cg']);
+    expect(optionValues).toEqual(['open-cg', 'bindable-cg']); // both unregistered; registered excluded
     await unmount();
   });
 
