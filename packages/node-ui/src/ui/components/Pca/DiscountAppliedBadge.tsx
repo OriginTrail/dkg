@@ -7,7 +7,8 @@ import React from 'react';
  */
 export interface ConvictionCostCovered {
   accountId: string;
-  epoch: number;
+  /** Wire-serialized as a string (uint), like the other event fields. */
+  epoch: string;
   baseCost: string;
   discountedCost: string;
   drawnFromEpoch: string;

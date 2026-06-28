@@ -86,6 +86,26 @@ describe('usePcaAlerts derivation', () => {
     expect(container.textContent).toContain('Pending confirmation');
     await unmount();
   });
+
+  // M6/F8 — co-occurring concerns each surface independently (not collapsed to
+  // the single HealthChip precedence): cap-near must NOT hide expiring-soon.
+  it('emits BOTH cap-near and expiring alerts for an account that is both (M6)', async () => {
+    usePcaStore.setState({ trackedIds: ['11'], createPending: null });
+    const both = makePcaSnapshot({
+      accountId: '11',
+      owner: MOCK_OWNER,
+      agentCount: 96, // ≥ PCA_CAP_NEAR_THRESHOLD
+      expiresAtTimestamp: Math.floor(Date.now() / 1000) + 3 * 86_400, // within the 7-day window
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...both, probedKey: { key, registered: true } } : both,
+    );
+    const { container, unmount } = await render(React.createElement(AlertsHarness));
+    await waitFor(() => !!container.querySelector('[data-kind="cap-near"]') && !!container.querySelector('[data-kind="expiring"]'));
+    expect(container.querySelector('[data-kind="cap-near"]')).toBeTruthy();
+    expect(container.querySelector('[data-kind="expiring"]')).toBeTruthy();
+    await unmount();
+  });
 });
 
 describe('NotificationsPane PCA section', () => {

@@ -9,6 +9,8 @@ import {
   pcaRemoveAgent,
   registerContextGraph,
   describePcaError,
+  isRpcTransportError,
+  HttpError,
   type PcaSnapshot,
 } from '../../api.js';
 import { useAgentsStore } from '../../stores/agents.js';
@@ -27,6 +29,40 @@ import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 
+/**
+ * M7 — CG-bind goes through `POST /api/context-graph/register` whose classifier
+ * differs from the PCA routes (Backend-confirmed caveat set), so it needs its
+ * own mapping rather than `describePcaError`:
+ *  - transport RPC_* / TIMEOUT → transient retry
+ *  - 501 → soft "can't verify PCA ownership" (introspection gap, not a hard error)
+ *  - 403 signer≠owner → "bind from the PCA owner wallet"
+ *  - 404 / 409 / 400 (engine validation sentence) → surfaced verbatim-ish
+ *  - 503 "no known creator" → creator not synced yet (vs generic transport)
+ */
+function describeCgBindError(err: unknown): string {
+  if (isRpcTransportError(err)) return 'The chain RPC is temporarily unavailable — try again.';
+  if (err instanceof HttpError) {
+    const raw = (err.body as { error?: string } | undefined)?.error ?? err.message ?? '';
+    switch (err.status) {
+      case 501:
+        return 'Couldn’t verify PCA ownership on this node — its chain adapter doesn’t support the lookup, so binding can’t be completed here.';
+      case 403:
+        return 'Bind from the PCA owner wallet — this node’s chain signer isn’t the account owner.';
+      case 404:
+        return 'That context graph or PCA account doesn’t exist.';
+      case 409:
+        return /already/i.test(raw) ? 'This context graph is already registered.' : raw || 'Already registered.';
+      case 400:
+        return raw || 'Invalid request — the context graph must be curated and the PCA id a positive integer.';
+      case 503:
+        return /no known creator/i.test(raw)
+          ? 'The context graph’s creator isn’t synced on this node yet — try again shortly.'
+          : 'The chain RPC is temporarily unavailable — try again.';
+    }
+  }
+  return (err as Error)?.message ?? 'Bind failed.';
+}
+
 interface ActionState {
   busy: boolean;
   error: string | null;
@@ -43,10 +79,14 @@ const IDLE: ActionState = { busy: false, error: null, result: null };
  */
 export function ConvictionDetailView({ accountId }: { accountId: string }) {
   const { data: snapshot, loading, error, refresh } = useFetch(() => fetchPca(accountId), [accountId]);
-  const { data: wb } = useFetch(fetchWalletsBalances, [], 0);
+  const { data: wb, error: wbError, refresh: refreshWallets } = useFetch(fetchWalletsBalances, [], 0);
   const nodeStatus = useAgentsStore((s) => s.nodeStatus) as { blockExplorerUrl?: string | null } | null;
   const explorer = nodeStatus?.blockExplorerUrl ?? null;
   const wallets = wb?.wallets ?? [];
+  // L3: a transient balances blip (wb null + error) must NOT reclassify
+  // owned→not-owner and flicker the owner controls into a definitive "you're not
+  // the owner" — show "can't confirm" instead and keep the retry.
+  const walletsUnknown = !wb && !!wbError;
 
   if (loading && !snapshot) return <div className="lazy-spinner">Loading PCA #{accountId}…</div>;
   if (error || !snapshot) {
@@ -62,11 +102,13 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
     );
   }
 
-  const ownerIsPrimary = eq(wallets[0], snapshot.owner);
+  const ownerIsPrimary = !walletsUnknown && eq(wallets[0], snapshot.owner);
   const ownerInPool = wallets.some((w) => eq(w, snapshot.owner));
-  const ownerOnlyReason = ownerInPool
-    ? `Owner-only — PCA #${accountId} is owned by ${snapshot.owner}, not this node’s primary operational wallet, so node-UI can’t sign for it.`
-    : `Owner-only — this node isn’t the owner of PCA #${accountId}.`;
+  const ownerOnlyReason = walletsUnknown
+    ? `Couldn’t load this node’s wallets — can’t confirm ownership of PCA #${accountId}.`
+    : ownerInPool
+      ? `Owner-only — PCA #${accountId} is owned by ${snapshot.owner}, not this node’s primary operational wallet, so node-UI can’t sign for it.`
+      : `Owner-only — this node isn’t the owner of PCA #${accountId}.`;
 
   return (
     <DetailBody
@@ -77,13 +119,15 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
       explorer={explorer}
       ownerIsPrimary={ownerIsPrimary}
       ownerOnlyReason={ownerOnlyReason}
+      walletsUnknown={walletsUnknown}
+      onRetryWallets={refreshWallets}
       refresh={refresh}
     />
   );
 }
 
 function DetailBody({
-  accountId, snapshot, wallets, ownerTrac, explorer, ownerIsPrimary, ownerOnlyReason, refresh,
+  accountId, snapshot, wallets, ownerTrac, explorer, ownerIsPrimary, ownerOnlyReason, walletsUnknown, onRetryWallets, refresh,
 }: {
   accountId: string;
   snapshot: PcaSnapshot;
@@ -92,6 +136,8 @@ function DetailBody({
   explorer: string | null;
   ownerIsPrimary: boolean;
   ownerOnlyReason: string;
+  walletsUnknown: boolean;
+  onRetryWallets: () => void;
   refresh: () => void;
 }) {
   const [topUp, setTopUp] = useState('');
@@ -137,7 +183,16 @@ function DetailBody({
     if (!ADDR_RE.test(addr)) { setProbeResult('Enter a valid 0x address.'); return; }
     try {
       const snap = await fetchPca(accountId, addr);
-      setProbeResult(snap.probedKey?.registered ? `✓ ${addr} is an approved publishing wallet here.` : `✗ ${addr} is NOT approved here.`);
+      const reg = snap.probedKey?.registered;
+      // M8: a 200 that omits probedKey (or registered:null) means the adapter
+      // couldn't answer — render "couldn't determine", NOT a false "✗ NOT approved".
+      setProbeResult(
+        reg === true
+          ? `✓ ${addr} is an approved publishing wallet here.`
+          : reg === false
+            ? `✗ ${addr} is NOT approved here.`
+            : `Couldn’t determine whether ${addr} is approved here — retry.`,
+      );
     } catch (err) {
       setProbeResult(describePcaError(err, { accountId })?.message ?? 'Probe failed.');
     }
@@ -148,7 +203,7 @@ function DetailBody({
       const res = await registerContextGraph(bindCg, { pcaAccountId: accountId });
       setBind({ busy: false, error: null, result: { txHash: res.txHash, message: `Bound ${bindCg} to PCA #${accountId}.` } });
     } catch (err) {
-      setBind({ busy: false, error: describePcaError(err, { accountId })?.message ?? (err as Error)?.message ?? 'Bind failed.', result: null });
+      setBind({ busy: false, error: describeCgBindError(err), result: null });
     }
   };
   const runRemove = async (addr: string) => {
@@ -176,7 +231,14 @@ function DetailBody({
       </div>
 
       {!ownerIsPrimary && (
-        <div className="v10-modal-warning" role="status">ⓘ {ownerOnlyReason} Settlement and the wallet probe stay available.</div>
+        <div className="v10-modal-warning" role="status">
+          ⓘ {ownerOnlyReason}{' '}
+          {walletsUnknown ? (
+            <button type="button" className="v10-pca-card-btn" onClick={onRetryWallets}>Retry</button>
+          ) : (
+            'Settlement and the wallet probe stay available.'
+          )}
+        </div>
       )}
 
       <StatStrip
@@ -368,13 +430,16 @@ function WalletProbeRow({
   onConfirmRemove: () => void;
   removeBusy: boolean;
 }) {
-  const { data: snap } = useFetch(() => fetchPca(accountId, wallet), [accountId, wallet]);
+  const { data: snap, loading, error } = useFetch(() => fetchPca(accountId, wallet), [accountId, wallet]);
   const registered = snap?.probedKey?.registered;
+  // M8: a settled probe that errored or returned 200-without-probedKey is
+  // "couldn’t determine" — never silently stuck on "checking…" or false-negative.
+  const probeUnknown = !loading && (error != null || (snap != null && registered == null));
   return (
     <div className="v10-pca-agent-row" data-testid="pca-agent-row">
       <WalletRow
         address={wallet}
-        status={registered === true ? 'approved' : registered === false ? 'not approved' : 'checking…'}
+        status={registered === true ? 'approved' : registered === false ? 'not approved' : probeUnknown ? 'couldn’t determine' : 'checking…'}
         statusTone={registered === true ? 'success' : registered === false ? 'danger' : 'neutral'}
         trailing={
           registered === true ? (

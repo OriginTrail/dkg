@@ -1,4 +1,10 @@
-import type { PcaSnapshot } from '../api.js';
+import type {
+  PcaSnapshot,
+  CreatePcaResult,
+  PcaTopUpResult,
+  PcaAddAgentResult,
+  PcaSettleResult,
+} from '../api.js';
 import type { ConvictionCostCovered } from '../components/Pca/index.js';
 
 // E3 — shared PCA fixtures for unit/component tests (and Storybook-style manual
@@ -47,11 +53,44 @@ export const PCA_FIXTURES = {
 /** A B8 CostCovered event sample (baseCost 1000 → discountedCost 700 ⇒ 30%). */
 export const MOCK_COST_COVERED: ConvictionCostCovered = {
   accountId: '7',
-  epoch: 1284,
+  // L10: epoch is wire-serialized as a string (uint), like the other fields.
+  epoch: '1284',
   baseCost: '1000',
   discountedCost: '700',
   drawnFromEpoch: '700',
   drawnFromTopUp: '0',
+};
+
+// L10 — shared write-route response fixtures so tests/bench stop hand-rolling
+// (and drifting) the create/top-up/approve/settle 200 shapes.
+export const MOCK_CREATE_RESULT: CreatePcaResult = {
+  accountId: '7',
+  txHash: '0xcreate0000000000000000000000000000000000000000000000000000000001',
+  blockNumber: 12_345,
+  committedTokens: '100000.0',
+};
+
+export const MOCK_TOPUP_RESULT: PcaTopUpResult = {
+  accountId: '7',
+  addedTokens: '5000.0',
+  txHash: '0xtopup00000000000000000000000000000000000000000000000000000000002',
+  blockNumber: 12_400,
+};
+
+export const MOCK_ADD_AGENT_RESULT: PcaAddAgentResult = {
+  accountId: '7',
+  agent: MOCK_POOL_WALLET,
+  registered: true,
+  adapterSupported: true,
+  txHash: '0xagent00000000000000000000000000000000000000000000000000000000003',
+  blockNumber: 12_410,
+};
+
+export const MOCK_SETTLE_RESULT: PcaSettleResult = {
+  accountId: '7',
+  settled: true,
+  txHash: '0xsettle0000000000000000000000000000000000000000000000000000000004',
+  blockNumber: 12_420,
 };
 
 /** `/api/wallets/balances` shape on Base Sepolia (one funded core wallet). */

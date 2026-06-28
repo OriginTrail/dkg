@@ -25,6 +25,7 @@ vi.mock('../src/ui/api.js', async (orig) => {
 
 const { ConvictionDetailView } = await import('../src/ui/pages/conviction/ConvictionDetailView.js');
 const { useAgentsStore } = await import('../src/ui/stores/agents.js');
+const { HttpError } = await import('../src/ui/api.js');
 
 const W0 = '0x9A3f000000000000000000000000000000000E41D';
 
@@ -54,6 +55,18 @@ async function waitForText(c: HTMLElement, text: string) {
   throw new Error(`Timed out waiting for "${text}" in "${last}"`);
 }
 const btn = (c: HTMLElement, sel: string) => c.querySelector(sel) as HTMLButtonElement;
+function setInputValue(el: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+  setter?.call(el, value);
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+function setSelect(el: HTMLSelectElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+  setter?.call(el, value);
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+const findBtn = (c: HTMLElement, text: string) =>
+  Array.from(c.querySelectorAll('button')).find((b) => b.textContent === text)!;
 
 beforeEach(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -95,6 +108,57 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
     await waitForText(container, 'Settlement');
     expect(btn(container, '[data-testid="pca-settle-btn"]').disabled).toBe(true);
+    await unmount();
+  });
+
+  // M7 — CG-bind goes through the register classifier (not the PCA routes), so it
+  // gets its own mapping: 501 → soft "can't verify ownership", 403 → "owner wallet".
+  it('maps CG-bind 501 to a soft ownership caveat and 403 to "owner wallet" (M7)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [{ address: W0, eth: '1', trac: '5', symbol: 'TRAC' }], chainId: '84532', rpcUrl: null });
+    mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [{ id: 'cg-1', name: 'CG One' }] });
+    mocks.registerContextGraph
+      .mockRejectedValueOnce(new HttpError(501, 'x', { error: 'not supported' }))
+      .mockRejectedValueOnce(new HttpError(403, 'x', { error: 'signer is not the owner' }));
+
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Context-graph binding');
+    setSelect(container.querySelector('select.v10-form-select') as HTMLSelectElement, 'cg-1');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    await act(async () => { findBtn(container, 'Bind context graph').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'Couldn’t verify PCA ownership');
+
+    await act(async () => { findBtn(container, 'Bind context graph').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'Bind from the PCA owner wallet');
+    await unmount();
+  });
+
+  // M8 — a probe that returns 200-without-probedKey is "couldn't determine", never
+  // a false "NOT approved" (manual probe tool + the per-wallet row).
+  it('the manual Probe and the wallet row both say "couldn’t determine" on a probe with no probedKey (M8)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockImplementation(async () => snap()); // snap() never carries probedKey → registered null
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Check a wallet');
+    // Per-wallet row settles to couldn't-determine, not "not approved".
+    await waitForText(container, 'couldn’t determine');
+    expect(container.textContent).not.toContain('not approved');
+    // Manual probe tool agrees.
+    setInputValue(container.querySelector('.v10-pca-address-crux input.v10-form-input') as HTMLInputElement, '0x' + '1'.repeat(40));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await act(async () => { findBtn(container, 'Probe').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'Couldn’t determine whether');
+    await unmount();
+  });
+
+  // L3 — a wallets-balances outage must read "can't confirm ownership", not flip
+  // to a definitive "this node isn't the owner".
+  it('shows "can’t confirm ownership" + Retry (not a false non-owner) when the wallets fetch errors (L3)', async () => {
+    mocks.fetchWalletsBalances.mockRejectedValue(new Error('balances down'));
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'can’t confirm ownership');
+    expect(container.textContent).not.toContain('isn’t the owner');
+    expect(Array.from(container.querySelectorAll('button')).some((b) => b.textContent === 'Retry')).toBe(true);
     await unmount();
   });
 

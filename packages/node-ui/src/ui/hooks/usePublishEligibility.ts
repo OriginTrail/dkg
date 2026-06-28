@@ -1,8 +1,9 @@
 import { useMemo } from 'react';
 import { useFetch } from '../hooks.js';
-import { fetchWalletsBalances, fetchPca, fetchContextGraphs } from '../api.js';
+import { fetchWalletsBalances, fetchPca, fetchContextGraphs, fetchCurrentAgent } from '../api.js';
 import { usePcaStore } from '../stores/pca.js';
 import { healthForSnapshot } from '../components/Pca/HealthChip.js';
+import { canonicalAgentDid } from '../lib/contextGraphSidebar.js';
 import type { PcaVerdict } from '../components/Pca/EligibilityVerdictBanner.js';
 
 const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
@@ -67,10 +68,17 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
       const wallets = wb?.wallets ?? [];
       let ownerPublish = false;
       try {
+        // L12: the CG list item has NO `isCurator`/`role` field — the owner
+        // signal is `cg.curator` (a DID) vs this node's agent DID (the exact
+        // derivation DashboardView uses for its CURATOR badge). The escrow is
+        // owner-scoped (#4), so without this the caveat never fired on owner-CGs.
         const { contextGraphs } = await fetchContextGraphs();
         const cg = (contextGraphs ?? []).find((c: any) => c?.id === contextGraphId);
-        // Owner heuristic: the node curates the target CG (escrow is owner-scoped).
-        ownerPublish = !!(cg && (cg.isCurator === true || cg.role === 'curator'));
+        const curator = cg?.curator;
+        if (curator) {
+          const me = await fetchCurrentAgent().catch(() => null);
+          ownerPublish = !!(me?.agentDid && canonicalAgentDid(curator) === canonicalAgentDid(me.agentDid));
+        }
       } catch {
         ownerPublish = false;
       }
@@ -87,7 +95,11 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
             const snap = await fetchPca(id, w).catch(() => null);
             if (!snap?.probedKey?.registered) continue;
             const h = healthForSnapshot(snap);
-            const solvent = bigGt0(snap.topUpBuffer) || bigGt0(snap.baseEpochAllowance);
+            // L2: solvency proxy = spendable buffer only. `baseEpochAllowance` is
+            // the static per-epoch cap (>0 for any funded PCA), so OR-ing it made
+            // `sawInsolvent` a dead guard. Precise mid-epoch insolvency is P2
+            // (needs `remainingAllowance`), consistent with HealthChip's deferral.
+            const solvent = bigGt0(snap.topUpBuffer);
             if (h !== 'expired' && h !== 'swept' && solvent) {
               cover = { accountId: id, discountBps: snap.discountBps };
               break;
@@ -151,7 +163,12 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
       if (!conditions.gasFunded) reasons.push('a signing wallet has no gas');
     }
 
-    const best = covered[0];
+    // L1: the GREEN chip should advertise the BEST covering discount (wallets may
+    // draw from different PCAs), matching bestCoveringDiscountBps — not covered[0].
+    const best = covered.reduce<WalletDetail | undefined>(
+      (m, w) => ((w.discountBps ?? -1) > (m?.discountBps ?? -1) ? w : m),
+      undefined,
+    );
     return {
       verdict,
       loading,

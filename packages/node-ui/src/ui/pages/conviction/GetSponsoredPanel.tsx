@@ -69,6 +69,14 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
             .catch((): ProbeRow => ({ wallet: w, registered: null })),
         ),
       );
+      // L4: the per-wallet .catch swallows failures, so every-row-null means the
+      // lookup failed wholesale (vs genuine 0-approved, which is registered:false).
+      // Surface that as an error — don't render a false "0 of N approved".
+      if (rows.length > 0 && rows.every((r) => r.registered === null)) {
+        setProbeError(`Couldn’t check approval on PCA #${id} right now — the chain lookup failed. Retry.`);
+        setProbed(null);
+        return;
+      }
       setProbed({ accountId: id, rows });
     } catch (err) {
       setProbeError(describePcaError(err, { accountId: id })?.message ?? 'Couldn’t check approval.');
@@ -193,18 +201,16 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
 
         {ready && (
           <div className="v10-pca-create-success" role="status">
-            ● Ready: ≥1 wallet is approved and gas-funded — this node can publish under PCA #{probed!.accountId}.
+            ● Ready: ≥1 wallet is approved and gas-funded — this node can publish under PCA #{probed!.accountId}.{' '}
+            {/* L9: no global publish target — the discount applies at any per-CG
+                publish. Guidance hint, not an inert "Go to publish →" button. */}
+            Publish from any context graph — the discount applies automatically to your approved wallets.
           </div>
         )}
       </div>
 
       <div className="v10-modal-footer">
         <button type="button" className="v10-modal-btn" onClick={onClose}>Close</button>
-        {ready && (
-          <button type="button" className="v10-modal-btn primary" onClick={onClose}>
-            Go to publish →
-          </button>
-        )}
       </div>
     </PcaModalShell>
   );

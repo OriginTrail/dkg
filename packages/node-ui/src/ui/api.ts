@@ -1742,14 +1742,17 @@ export interface PcaErrorInfo {
 
 /**
  * A transient RPC-transport failure (the daemon's failover layer exhausted /
- * timed out), distinguished by a `RPC_*` body code (e.g. RPC_ENDPOINTS_EXHAUSTED
- * → 503, RPC_TIMEOUT → 504). NOT a capability gap — the feature exists, the
- * chain read just hiccupped, so it must not gate the tab.
+ * timed out), distinguished by the body code: `RPC_*` (e.g. RPC_ENDPOINTS_EXHAUSTED
+ * → 503, RPC_RECEIPT_LOOKUP_FAILED → 503) OR the bare `TIMEOUT` the chain-tx
+ * timeout 504 carries (http-utils RPC_TIMEOUT surfaces as `code:'TIMEOUT'`). NOT
+ * a capability gap — the feature exists, the chain read just hiccupped, so it
+ * must not gate the tab. (The double-mint guard is UNAFFECTED — it keys on
+ * `err.status===504` directly, before this.)
  */
 export function isRpcTransportError(err: unknown): boolean {
   if (!(err instanceof HttpError)) return false;
   const code = (err.body as { code?: string } | undefined)?.code;
-  return typeof code === 'string' && code.startsWith('RPC_');
+  return typeof code === 'string' && (code.startsWith('RPC_') || code === 'TIMEOUT');
 }
 
 /**

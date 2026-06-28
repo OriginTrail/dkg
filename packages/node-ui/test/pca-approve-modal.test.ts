@@ -120,6 +120,45 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     await unmount();
   });
 
+  // M4 — a transient 500/network on a MIDDLE wallet must NOT abort and must NOT
+  // tally as a benign skip: that row is a danger-tone failure, the loop continues,
+  // and the remaining wallet still gets approved.
+  it('continues past a mid-batch 500 (danger failure, never skip) and approves the rest', async () => {
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...snap(), probedKey: { key, registered: false } } : snap(),
+    );
+    mocks.pcaAddAgent.mockImplementation(async (id: string, addr: string) => {
+      if (addr === ADDR_B) throw new HttpError(500, 'x', { error: 'addPublishingAgent failed: boom' });
+      return { accountId: id, agent: addr, registered: true, adapterSupported: true };
+    });
+
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, { accountId: '7', initialMode: 'sponsor', onClose: vi.fn() }),
+    );
+    await waitForText(container, 'Wallet address(es)');
+    setTextarea(container.querySelector('[data-testid="pca-approve-address"]') as HTMLTextAreaElement, [ADDR_A, ADDR_B, ADDR_C].join('\n'));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+
+    await waitForText(container, 'failed');
+    // All three attempted — the 500 did NOT abort the batch (contrast: 403).
+    expect(mocks.pcaAddAgent).toHaveBeenCalledTimes(3);
+
+    const results = container.querySelector('.v10-pca-approve-results')!;
+    const rowFor = (addr: string) =>
+      Array.from(results.querySelectorAll('.v10-pca-wallet-row')).find(
+        (r) => r.getAttribute('aria-label')?.startsWith(addr),
+      )!;
+    expect(rowFor(ADDR_A).querySelector('.v10-pca-wallet-status')?.textContent).toContain('approved');
+    expect(rowFor(ADDR_C).querySelector('.v10-pca-wallet-status')?.textContent).toContain('approved');
+    const bStatus = rowFor(ADDR_B).querySelector('.v10-pca-wallet-status')!;
+    expect(bStatus.getAttribute('data-tone')).toBe('danger');
+    expect(bStatus.textContent?.toLowerCase()).not.toContain('skipped');
+    // Tallied as a failure, separate from skip/conflict.
+    expect(results.textContent).toContain('1 failed');
+    await unmount();
+  });
+
   it('aborts the whole operation on a 403 owner-gate failure', async () => {
     mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
       key ? { ...snap(), probedKey: { key, registered: false } } : snap(),

@@ -56,7 +56,17 @@ export function PublishEligibilityChip({ contextGraphId, id }: { contextGraphId:
           />
           <ul className="v10-pca-publish-conditions">
             <ConditionRow ok={elig.conditions.approved} label="All signing wallets approved on a PCA" />
-            <ConditionRow ok={elig.conditions.gasFunded} label="All signing wallets gas-funded" />
+            {/* L8: gas is excluded from the verdict (§6.3/#6/#7), so it's an
+                informational nudge — never a ⚠ pass/fail that contradicts a GREEN chip. */}
+            <ConditionRow
+              info
+              ok={elig.conditions.gasFunded}
+              label={
+                elig.conditions.gasFunded
+                  ? 'All signing wallets gas-funded (gas is separate from the PCA discount)'
+                  : 'Gas is separate from the PCA discount — fund any wallet with no gas before publishing'
+              }
+            />
             <ConditionRow ok={elig.conditions.notExpired} label="Account not expired" />
             <ConditionRow ok={elig.conditions.solvent} label="Account solvent" />
             <ConditionRow ok info label="Publish lifetime auto-matched to the lock period (informational)" />
