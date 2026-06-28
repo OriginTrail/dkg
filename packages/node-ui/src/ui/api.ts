@@ -133,6 +133,22 @@ async function del<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// DELETE variant that parses the daemon's `{ error }` body into an `HttpError`
+// (status + body), mirroring `post`. The legacy `del` above predates the
+// HttpError-aware error path and throws a bare `Error`, so callers that need to
+// branch on the status/code (e.g. the PCA deregister flow mapping 403/409 via
+// `describePcaError`) route through this instead. Both are kept so existing
+// `del` callers keep their current contract.
+async function delJson<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, { method: 'DELETE', headers: authHeaders() });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
+    throw new HttpError(res.status, msg, errBody);
+  }
+  return res.json() as Promise<T>;
+}
+
 // --- Status ---
 export const fetchStatus = () => get<any>('/api/status');
 
@@ -1515,6 +1531,304 @@ export function describePromoteError(
     }
   }
   return null;
+}
+
+// --- Publishing Conviction Accounts (PCA) ---------------------------------
+//
+// Client helpers for the daemon's `/api/pca/*` routes (see
+// `packages/cli/src/daemon/routes/pca.ts`). They route through the private
+// `get`/`post`/`delJson` so they inherit same-origin base, bearer auth, and
+// `HttpError`-shaped failures — never hand-roll `fetch` here.
+//
+// Terminology discipline (PCA UX §P1): the registered identity is the
+// OPERATIONAL WALLET that signs publishes (`msg.sender`). User-facing copy in
+// `describePcaError` says "approved publishing wallet" / "operational wallet",
+// never the contract word "agent" (which survives only in the route/field
+// identifiers like `pcaAddAgent` and the `AgentAlreadyRegistered` error code).
+
+/** A wallet-probe result, present on `fetchPca(id, key)` (the `?key=` query). */
+export interface PcaProbedKey {
+  key: string;
+  /** Whether `key` is an approved publishing wallet on this account. */
+  registered?: boolean;
+  /** False only when the chain adapter can't answer (capability gap). */
+  adapterSupported?: boolean;
+  /** Set instead of `registered` when `key` isn't a valid EVM address. */
+  error?: string;
+}
+
+/**
+ * A PCA snapshot — mirrors the daemon's `serializeAccountInfo`
+ * (`pca.ts:138`). Wei amounts are decimal strings (`committedTRAC`); the
+ * matching `*Trac` fields are pre-formatted ether strings. Epoch indices and
+ * timestamps are numbers; `*Timestamp` are unix SECONDS (multiply by 1000 for
+ * a JS `Date`). There is intentionally NO `primaryNode` / `remainingAllowance`
+ * (GAP-4/5 — not yet serialized).
+ */
+export interface PcaSnapshot {
+  accountId: string;
+  owner: string;
+  committedTRAC: string;
+  committedTRACTrac: string;
+  baseEpochAllowance: string;
+  topUpBuffer: string;
+  topUpBufferTrac: string;
+  createdAtEpoch: number;
+  expiresAtEpoch: number;
+  createdAtTimestamp: number;
+  expiresAtTimestamp: number;
+  discountBps: number;
+  agentCount: number;
+  lastSettledWindow: number;
+  fullySwept: boolean;
+  probedKey?: PcaProbedKey;
+}
+
+export interface CreatePcaResult {
+  accountId: string;
+  txHash?: string;
+  blockNumber?: number;
+  committedTokens: string;
+}
+
+export interface PcaAddAgentResult {
+  accountId: string;
+  agent: string;
+  /** The daemon re-reads the chain after the tx; trust this over a bare 200. */
+  registered: boolean;
+  adapterSupported: boolean;
+  txHash?: string;
+  blockNumber?: number;
+}
+
+export interface PcaRemoveAgentResult {
+  accountId: string;
+  agent: string;
+  deregistered: boolean;
+  txHash?: string;
+  blockNumber?: number;
+}
+
+export interface PcaTopUpResult {
+  accountId: string;
+  addedTokens: string;
+  txHash?: string;
+  blockNumber?: number;
+}
+
+export interface PcaSettleResult {
+  accountId: string;
+  settled: boolean;
+  txHash?: string;
+  blockNumber?: number;
+}
+
+/**
+ * GET a PCA snapshot. Pass `key` (an operational wallet address) to additionally
+ * probe whether that wallet is an approved publishing wallet on the account
+ * (the result lands on `snapshot.probedKey`). `GET` is permissionless.
+ */
+export const fetchPca = (accountId: string, key?: string) =>
+  get<PcaSnapshot>(
+    `/api/pca/${encodeURIComponent(accountId)}${key ? `?key=${encodeURIComponent(key)}` : ''}`,
+  );
+
+/** Create a PCA (commit TRAC for a publishing discount). Owner = the daemon EOA. */
+export const createPca = (args: { tokens: string; primaryNode: string }) =>
+  post<CreatePcaResult>('/api/pca', { tokens: args.tokens, primaryNode: args.primaryNode });
+
+/** Approve an operational wallet as a publishing wallet on a PCA (owner-gated). */
+export const pcaAddAgent = (accountId: string, address: string) =>
+  post<PcaAddAgentResult>(`/api/pca/${encodeURIComponent(accountId)}/agent`, { agent: address });
+
+/** Remove an approved publishing wallet from a PCA (owner-gated). */
+export const pcaRemoveAgent = (accountId: string, address: string) =>
+  delJson<PcaRemoveAgentResult>(
+    `/api/pca/${encodeURIComponent(accountId)}/agent/${encodeURIComponent(address)}`,
+  );
+
+/** Top up a PCA's spendable buffer (owner-gated). Does NOT extend the lock period. */
+export const pcaTopUp = (accountId: string, tokens: string) =>
+  post<PcaTopUpResult>(`/api/pca/${encodeURIComponent(accountId)}/funds`, { tokens });
+
+/** Run the lazy-settlement sweep (permissionless — enabled even for non-owners). */
+export const pcaSettle = (accountId: string) =>
+  post<PcaSettleResult>(`/api/pca/${encodeURIComponent(accountId)}/settle`, {});
+
+/** Normalized, terminology-disciplined PCA error code (UI branches on this). */
+export type PcaErrorCode =
+  | 'FEATURE_UNAVAILABLE'
+  | 'InvalidAmount'
+  | 'PrimaryNodeNotInShardingTable'
+  | 'ZeroPrimaryNode'
+  | 'PrimaryNodeUnchanged'
+  | 'PrimaryNodeChangeRateLimited'
+  | 'ZeroAgentAddress'
+  | 'TokenTransferFailed'
+  | 'NotAccountOwner'
+  | 'UnknownAccount'
+  | 'AgentAlreadyRegistered'
+  | 'AgentNotRegistered'
+  | 'AgentCapReached'
+  | 'AccountExpired'
+  | 'AccountAlreadyFullySettled'
+  | 'BadRequest'
+  | 'Conflict'
+  | 'ServerError'
+  | 'Unknown';
+
+export interface PcaErrorInfo {
+  code: PcaErrorCode;
+  status: number;
+  /** User-facing copy ("approved publishing wallet", never "agent"). */
+  message: string;
+  /**
+   * B10: the conviction account a wallet is ALREADY approved on, surfaced on
+   * `AgentAlreadyRegistered`. The daemon doesn't return it yet
+   * (`classifyPcaRevert` discards it — pca.ts:50), so this is `undefined` today
+   * and the copy degrades to "another conviction account"; it lights up
+   * automatically once the route includes `existingAccountId`.
+   */
+  existingAccountId?: string;
+}
+
+/** Whether an error is the daemon's "PCA not available on this network" 503. */
+export function isPcaFeatureUnavailable(err: unknown): boolean {
+  return err instanceof HttpError && err.status === 503;
+}
+
+// Code tokens the daemon embeds in the `{ error }` body (a bare code on a
+// contract revert, or a longer sentence like "NotAccountOwner — daemon EOA is
+// not the PCA owner"). Matched by word boundary, most-specific intent first.
+const PCA_ERROR_CODES: PcaErrorCode[] = [
+  'PrimaryNodeNotInShardingTable',
+  'PrimaryNodeUnchanged',
+  'PrimaryNodeChangeRateLimited',
+  'ZeroPrimaryNode',
+  'InvalidAmount',
+  'ZeroAgentAddress',
+  'TokenTransferFailed',
+  'NotAccountOwner',
+  'AgentAlreadyRegistered',
+  'AgentNotRegistered',
+  'AgentCapReached',
+  'AccountExpired',
+  'AccountAlreadyFullySettled',
+  'UnknownAccount',
+];
+
+/**
+ * Map a PCA route failure to terminology-disciplined, user-facing copy —
+ * the PCA counterpart to {@link describePromoteError}. Branches on
+ * `HttpError.status` + the `{ error }` body code. Returns `null` for
+ * non-`HttpError` throwables so the caller falls back to `err.message`;
+ * for any `HttpError` it always returns a populated `PcaErrorInfo`.
+ *
+ * `opts.accountId` lets the copy name the precise "PCA #N".
+ */
+export function describePcaError(
+  err: unknown,
+  opts: { accountId?: string } = {},
+): PcaErrorInfo | null {
+  if (!(err instanceof HttpError)) return null;
+  const status = err.status;
+  const body = (err.body ?? {}) as { error?: string; existingAccountId?: string | number };
+  const raw = typeof body.error === 'string' && body.error.length > 0 ? body.error : err.message;
+  const pcaRef = opts.accountId ? `PCA #${opts.accountId}` : 'this Publishing Conviction Account';
+  const existingAccountId =
+    body.existingAccountId != null ? String(body.existingAccountId) : undefined;
+
+  // 503 is the network-capability gate regardless of body shape.
+  if (status === 503) {
+    return {
+      code: 'FEATURE_UNAVAILABLE',
+      status,
+      message: "Publishing Conviction Accounts aren't available on this network.",
+    };
+  }
+
+  const matched = PCA_ERROR_CODES.find((c) => new RegExp(`\\b${c}\\b`).test(raw));
+  if (matched) {
+    let message: string;
+    switch (matched) {
+      case 'InvalidAmount':
+        message = 'Enter a TRAC amount greater than 0.';
+        break;
+      case 'PrimaryNodeNotInShardingTable':
+        message = "That primary node isn't a staked node in the sharding table.";
+        break;
+      case 'ZeroPrimaryNode':
+        message = 'Choose a staked node as the primary node.';
+        break;
+      case 'PrimaryNodeUnchanged':
+        message = "That's already this account's primary node.";
+        break;
+      case 'PrimaryNodeChangeRateLimited':
+        message = 'The primary node was changed too recently — try again later.';
+        break;
+      case 'ZeroAgentAddress':
+        message = 'Enter a valid operational wallet address.';
+        break;
+      case 'TokenTransferFailed':
+        message = "The TRAC transfer failed — check the owner wallet's TRAC balance and allowance.";
+        break;
+      case 'NotAccountOwner':
+        message = `This node isn't the owner of ${pcaRef}, so it can't manage it.`;
+        break;
+      case 'UnknownAccount':
+        message = `${pcaRef} doesn't exist.`;
+        break;
+      case 'AgentAlreadyRegistered':
+        message = existingAccountId
+          ? `This operational wallet is already an approved publishing wallet on PCA #${existingAccountId} — deregister it there first.`
+          : 'This operational wallet is already approved on another conviction account — deregister it there first.';
+        break;
+      case 'AgentNotRegistered':
+        message = `This operational wallet isn't an approved publishing wallet on ${pcaRef}.`;
+        break;
+      case 'AgentCapReached':
+        message = `${pcaRef} already has the maximum 100 approved publishing wallets.`;
+        break;
+      case 'AccountExpired':
+        message = `${pcaRef} has expired.`;
+        break;
+      case 'AccountAlreadyFullySettled':
+        message = `${pcaRef} is already fully settled.`;
+        break;
+      default:
+        message = raw;
+    }
+    return { code: matched, status, message, ...(existingAccountId ? { existingAccountId } : {}) };
+  }
+
+  // No code token matched — fall back to a status-shaped default. 404 (the
+  // GET route returns "Unknown PCA accountId N", which carries no code token)
+  // and 403 still get friendly copy; 400 surfaces the daemon's validation
+  // sentence (already readable); 5xx is generic.
+  if (status === 404) {
+    return { code: 'UnknownAccount', status, message: `${pcaRef} doesn't exist.` };
+  }
+  if (status === 403) {
+    return {
+      code: 'NotAccountOwner',
+      status,
+      message: `This node isn't the owner of ${pcaRef}, so it can't manage it.`,
+    };
+  }
+  if (status === 400) {
+    return { code: 'BadRequest', status, message: raw };
+  }
+  if (status === 409) {
+    return { code: 'Conflict', status, message: raw };
+  }
+  if (status >= 500) {
+    return {
+      code: 'ServerError',
+      status,
+      message: 'Something went wrong talking to the chain — try again.',
+    };
+  }
+  return { code: 'Unknown', status, message: raw };
 }
 
 // --- File preview ---
