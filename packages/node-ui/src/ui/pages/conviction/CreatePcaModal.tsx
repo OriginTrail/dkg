@@ -49,6 +49,12 @@ export function CreatePcaModal({
     | { nodeRole?: string; hasIdentity?: boolean; identityId?: string; blockExplorerUrl?: string | null }
     | null;
   const gated = nodeStatus?.nodeRole === 'edge' || nodeStatus?.hasIdentity === false;
+  // S1 — the create gate fails OPEN while status is loading/failed (nodeStatus null):
+  // `gated` is false, so without this an edge/no-identity node could lock TRAC before
+  // the gate appears. A financial mutation must fail CLOSED on unknown eligibility —
+  // the write-side mirror of C1/O4/Q2. (`==` catches null+undefined; a resolved core
+  // is NOT unknown, so a legit core create isn't blocked.)
+  const statusUnknown = nodeStatus == null;
   const explorer = nodeStatus?.blockExplorerUrl ?? null;
 
   const { data: wb } = useFetch(fetchWalletsBalances, [], 0);
@@ -90,7 +96,8 @@ export function CreatePcaModal({
   // double-mint marker is keyed on `ownerWallet`, so submitting before wallets
   // resolve would skip persisting it (the in-session reconcile would still fire,
   // but the refresh-survival guarantee wouldn't). Cheap belt-and-suspenders.
-  const canSubmit = amountValid && !insufficient && primaryValid && !!ownerWallet && phase === 'form';
+  const canSubmit =
+    amountValid && !insufficient && primaryValid && !!ownerWallet && !statusUnknown && phase === 'form';
 
   const handleCreate = async () => {
     setPhase('creating');
@@ -206,6 +213,26 @@ export function CreatePcaModal({
           >
             No PCA minted — clear &amp; retry
           </button>
+          <button type="button" className="v10-modal-btn" onClick={onClose}>Close</button>
+        </div>
+      </PcaModalShell>
+    );
+  }
+
+  // ----- Status unknown (loading / failed) — fail CLOSED (S1) -----
+  // Placed AFTER the reconcile resume (a durable create-pending marker must still
+  // surface on a null-status reload) and before the form. `gated` is null-safe
+  // (false when nodeStatus is null), so it can't render the sponsorship gate while
+  // unknown — we never assert "edge"; we just show a neutral checking state.
+  if (statusUnknown) {
+    return (
+      <PcaModalShell onClose={onClose} testId="pca-create-modal" title="Checking node eligibility…">
+        <div className="v10-modal-body">
+          <p className="v10-pca-create-hint" role="status">
+            Confirming this node can create a Publishing Conviction Account…
+          </p>
+        </div>
+        <div className="v10-modal-footer">
           <button type="button" className="v10-modal-btn" onClick={onClose}>Close</button>
         </div>
       </PcaModalShell>
