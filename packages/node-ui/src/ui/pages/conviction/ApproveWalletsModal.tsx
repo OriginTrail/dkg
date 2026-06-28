@@ -123,6 +123,21 @@ export function ApproveWalletsModal({
     setOrder(addresses);
     setRows(Object.fromEntries(addresses.map((a) => [a, { address: a, status: 'pending' as RowStatus }])));
 
+    // W1/U1 — set `current` AND sweep every still-'pending' (not-yet-processed) row to
+    // `status` before a loop `break`, so a break never leaves later rows on "approving…".
+    const markRemaining = (
+      prev: Record<string, Row>,
+      current: Row,
+      status: RowStatus,
+      message?: string,
+    ): Record<string, Row> => {
+      const next: Record<string, Row> = { ...prev, [current.address]: current };
+      for (const a of addresses) {
+        if (next[a]?.status === 'pending') next[a] = { address: a, status, message };
+      }
+      return next;
+    };
+
     for (const addr of addresses) {
       if (stopRef.current) {
         setRows((r) => ({ ...r, [addr]: { address: addr, status: 'error', message: 'stopped' } }));
@@ -135,23 +150,18 @@ export function ApproveWalletsModal({
           [addr]: { address: addr, status: res.registered ? 'approved' : 'submitted', txHash: res.txHash },
         }));
       } catch (err) {
-        // 403 → owner-gate failure: abort the WHOLE operation.
+        // 403 → owner-gate failure: abort the WHOLE operation. W1 — sweep the later
+        // not-yet-processed rows too, else they stay stuck on "approving…".
         if (err instanceof HttpError && err.status === 403) {
           setAborted(`This node isn’t the owner of PCA #${accountId} — approval aborted.`);
-          setRows((r) => ({ ...r, [addr]: { address: addr, status: 'error', message: 'owner-only' } }));
+          setRows((r) => markRemaining(r, { address: addr, status: 'error', message: 'owner-only' }, 'error', 'aborted'));
           break;
         }
         const info = describePcaError(err, { accountId });
         if (info?.code === 'AgentCapReached') {
           // U1 — mark the current row AND every NOT-YET-processed row 'cap' before the
           // break, else the later rows would stay stuck on 'pending' ("approving…").
-          setRows((r) => {
-            const next: Record<string, Row> = { ...r, [addr]: { address: addr, status: 'cap', message: info.message } };
-            for (const a of addresses) {
-              if (next[a]?.status === 'pending') next[a] = { address: a, status: 'cap' };
-            }
-            return next;
-          });
+          setRows((r) => markRemaining(r, { address: addr, status: 'cap', message: info.message }, 'cap'));
           break;
         }
         if (info?.code === 'AgentAlreadyRegistered') {

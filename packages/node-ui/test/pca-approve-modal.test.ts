@@ -275,4 +275,26 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     expect(mocks.pcaAddAgent).toHaveBeenCalledTimes(2); // A + B, then break
     await unmount();
   });
+
+  // W1 — a 403 owner-gate break must mark the later rows too (U1 fixed only the cap break).
+  it('W1 — 403 on the first row aborts + marks the rest, no stuck "approving…"', async () => {
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...snap(), probedKey: { key, registered: false } } : snap(),
+    );
+    mocks.pcaAddAgent.mockRejectedValue(new HttpError(403, 'x', { error: 'NotAccountOwner — daemon EOA is not the PCA owner' }));
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, { accountId: '7', initialMode: 'sponsor', onClose: vi.fn() }),
+    );
+    await waitForText(container, 'Wallet address(es)');
+    setTextarea(container.querySelector('[data-testid="pca-approve-address"]') as HTMLTextAreaElement, [ADDR_A, ADDR_B, ADDR_C].join('\n'));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, "isn’t the owner of PCA #7");
+    expect(mocks.pcaAddAgent).toHaveBeenCalledTimes(1); // aborted after the first row
+    // Later rows are swept (aborted), never left stuck on "approving…".
+    expect(container.textContent).not.toContain('approving…');
+    expect(statusOf(container, ADDR_B).textContent?.toLowerCase()).toContain('aborted');
+    expect(statusOf(container, ADDR_C).textContent?.toLowerCase()).toContain('aborted');
+    await unmount();
+  });
 });
