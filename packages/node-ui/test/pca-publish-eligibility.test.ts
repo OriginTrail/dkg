@@ -114,6 +114,39 @@ describe('PublishEligibilityChip (S5)', () => {
     await unmount();
   });
 
+  // L2 revert guard — a FRESH funded PCA holds its budget in baseEpochAllowance
+  // (per-epoch cap) with topUpBuffer=0; the topUpBuffer-only proxy false-DANGERed
+  // it on the live capstone. Coarse proxy: any budget capacity ⇒ GREEN.
+  it('GREEN for a funded PCA whose budget is in baseEpochAllowance, topUpBuffer=0 (L2 revert guard)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('100'));
+    const funded = makePcaSnapshot({ topUpBuffer: '0', topUpBufferTrac: '0', baseEpochAllowance: '850000000000000000000' });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...funded, probedKey: { key, registered: true } } : funded,
+    );
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'Funded by PCA #7'); // NOT a false out-of-budget DANGER
+    expect(container.textContent).not.toContain('Publish will fail');
+    expect(container.textContent).not.toContain('No PCA discount');
+    await unmount();
+  });
+
+  // #3 — an approved wallet on a swept/expired PCA is uncovered via HEALTH (not
+  // solvency), and reads "approved … but swept", never a misleading "no PCA".
+  it('an approved wallet on a SWEPT PCA reads "approved … but swept", not "no PCA" (#3)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('50')); // has TRAC → amber
+    const swept = makePcaSnapshot({ fullySwept: true });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...swept, probedKey: { key, registered: true } } : swept,
+    );
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'No PCA discount'); // amber chip (swept → no discount applies)
+    const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
+    await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'approved on PCA #7, but it’s swept/expired');
+    expect(container.textContent).not.toContain('no PCA → pays direct cost');
+    await unmount();
+  });
+
   it('DANGER (#6) when a fall-through wallet has NO TRAC → role=alert "Publish will fail"', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('0')); // no TRAC
     mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
