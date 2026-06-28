@@ -16,6 +16,10 @@ import { defineConfig, devices } from '@playwright/test';
 export default defineConfig({
   testDir: './e2e/specs',
   testMatch: 'publishing-conviction.spec.ts',
+  // SAFETY: never run @mutating tests against the LIVE testnet (they commit real
+  // TRAC). They run only on the auto-staked CI devnet (the default config). This
+  // lane is read-only.
+  grepInvert: /@mutating/,
   fullyParallel: false,
   workers: 1,
   retries: 0,
