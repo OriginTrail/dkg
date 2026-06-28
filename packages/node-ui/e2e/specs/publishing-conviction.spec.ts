@@ -21,10 +21,22 @@
  * (faucet/funded) TRAC and run ONLY in the lead-directed P0 validation phase,
  * never in the read-only conformance pass.
  */
+import type { Page } from '@playwright/test';
 import { test, expect } from '../fixtures/base.js';
 import { fetchApiInPage } from '../helpers/page-api.js';
 
 const SHOT_DIR = 'test-results/pca-smoke';
+
+/** Open a context-graph project tab from the left panel (mirrors the devnet specs). */
+async function openProjectTab(page: Page, name: string) {
+  await page
+    .locator('.v10-panel-left')
+    .first()
+    .locator('.v10-tree-section-header')
+    .filter({ hasText: name })
+    .first()
+    .click();
+}
 
 test.describe('Publishing Conviction tab (PCA) — P0', () => {
   test.beforeEach(async ({ shell }) => {
@@ -170,6 +182,39 @@ test.describe('Publishing Conviction tab (PCA) — P0', () => {
     // Own a PCA with 0 approved wallets → the NotificationsPane "Publishing
     // conviction" section shows a fall-through alert (Manage deep-link).
     await expect(conviction.bellAlert.first()).toBeVisible();
+  });
+
+  // L11 (review-gate guard): the chip-MOUNT integration is otherwise all
+  // test.fixme, so a silent un-mount of PublishEligibilityChip on the publish CTA
+  // would pass CI unnoticed. This NON-fixme test asserts the chip actually mounts
+  // on a project's SWM→VM publish CTA (with ≥1 PCA tracked) and carries its
+  // verdict pill + a11y role. Runs on the seeded CI devnet (a CG with SWM content
+  // exists); runtime-skips where there's no CG (the fresh live-core lane). NOT
+  // mutating — tracking is browser-local; navigating/viewing is read-only.
+  test('L11: publish-eligibility chip MOUNTS on the SWM publish CTA with a verdict role', async ({ shell, conviction, page, leftPanel }) => {
+    await shell.goto();
+    const cgs = await fetchApiInPage<{ contextGraphs?: Array<{ id: string; name: string }> }>(page, '/api/context-graphs');
+    const list = cgs.ok ? (cgs.json?.contextGraphs ?? []) : [];
+    test.skip(list.length === 0, 'needs a seeded CG with SWM content (CI devnet)');
+    const cgName = list[0]!.name;
+
+    // Track a PCA so the chip is expected to render (gate: trackedIds.length > 0).
+    await conviction.open();
+    await conviction.trackAccount('1');
+
+    // Navigate to the CG project → SWM layer (the SWM→VM publish CTA; chip is !isWm).
+    await expect(async () => {
+      expect((await leftPanel.getProjectNames()).length).toBeGreaterThan(0);
+    }).toPass({ timeout: 12_000, intervals: [250, 500, 1000] });
+    await openProjectTab(page, cgName);
+    await page.locator('button.v10-layer-switch-btn[data-layer="swm"]').first().click();
+
+    // MUST mount (a silent un-mount would otherwise pass CI) + carry the verdict
+    // pill with its a11y role (alert on the loud fall-through, else status).
+    await expect(conviction.publishEligibility.first()).toBeVisible({ timeout: 20_000 });
+    const chipRole = conviction.eligibilityChip.first().locator('[role]').first();
+    await expect(chipRole).toBeVisible();
+    expect(['alert', 'status']).toContain(await chipRole.getAttribute('role'));
   });
 
   // ── B8 confirmed discount badge (P2; degrade-to-hidden) ────────────────────
