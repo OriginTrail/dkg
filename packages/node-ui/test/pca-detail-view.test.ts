@@ -115,7 +115,7 @@ describe('ConvictionDetailView §8A owner-gating', () => {
   // gets its own mapping: 501 → soft "can't verify ownership", 403 → "owner wallet".
   it('maps CG-bind 501 to a soft ownership caveat and 403 to "owner wallet" (M7)', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [{ address: W0, eth: '1', trac: '5', symbol: 'TRAC' }], chainId: '84532', rpcUrl: null });
-    mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [{ id: 'cg-1', name: 'CG One' }] });
+    mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [{ id: 'cg-1', name: 'CG One', accessPolicy: 'private' }] });
     mocks.registerContextGraph
       .mockRejectedValueOnce(new HttpError(501, 'x', { error: 'not supported' }))
       .mockRejectedValueOnce(new HttpError(403, 'x', { error: 'signer is not the owner' }));
@@ -220,7 +220,7 @@ describe('ConvictionDetailView §8A owner-gating', () => {
 
   it('owner CG-bind fires registerContextGraph(cg, {pcaAccountId}) and shows the bound message (C6)', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
-    mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [{ id: 'cg-1', name: 'CG One' }] });
+    mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [{ id: 'cg-1', name: 'CG One', accessPolicy: 'private' }] });
     mocks.registerContextGraph.mockResolvedValue({ registered: 'cg-1', onChainId: '1', txHash: '0x1' });
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
     await waitForText(container, 'Context-graph binding');
@@ -230,6 +230,41 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     // The dropped-{pcaAccountId} regression guard.
     expect(mocks.registerContextGraph).toHaveBeenCalledWith('cg-1', { pcaAccountId: '7' });
     await waitForText(container, 'Bound cg-1 to PCA #7.');
+    await unmount();
+  });
+
+  // N3 — the bind dropdown must list ONLY unregistered curated CGs (registered or
+  // open graphs can't be bound and would confuse / false-"Bound").
+  it('N3 — bind dropdown lists only unregistered curated context graphs', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
+    mocks.fetchContextGraphs.mockResolvedValue({
+      contextGraphs: [
+        { id: 'reg-curated', name: 'Registered', onChainId: '5', accessPolicy: 'private' },
+        { id: 'open-cg', name: 'Open', accessPolicy: 'public' },
+        { id: 'bindable-cg', name: 'Bindable', accessPolicy: 'private' },
+      ],
+    });
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Context-graph binding');
+    const select = container.querySelector('select.v10-form-select') as HTMLSelectElement;
+    const optionValues = Array.from(select.querySelectorAll('option')).map((o) => o.value).filter(Boolean);
+    expect(optionValues).toEqual(['bindable-cg']);
+    await unmount();
+  });
+
+  // N3 — a 200 with no txHash = already registered on-chain (idempotent path that
+  // drops the new pcaAccountId). Must NOT claim "Bound" (#9 false confirmation).
+  it('N3 — bind does NOT claim "Bound" on an already-registered idempotent 200 (no txHash)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
+    mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [{ id: 'cg-1', name: 'CG One', accessPolicy: 'private' }] });
+    mocks.registerContextGraph.mockResolvedValue({ registered: 'cg-1', onChainId: '7', txHash: undefined });
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Context-graph binding');
+    setSelect(container.querySelector('select.v10-form-select') as HTMLSelectElement, 'cg-1');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await act(async () => { findBtn(container, 'Bind context graph').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'already registered on-chain');
+    expect(container.textContent).not.toContain('Bound cg-1 to PCA #7');
     await unmount();
   });
 });

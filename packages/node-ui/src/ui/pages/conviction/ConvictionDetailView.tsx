@@ -152,7 +152,17 @@ function DetailBody({
   const [approveOpen, setApproveOpen] = useState(false);
 
   const { data: cgData } = useFetch(fetchContextGraphs, [], 0);
-  const cgs = (cgData?.contextGraphs ?? []) as Array<{ id: string; name?: string }>;
+  // N3 — bind == register an UNREGISTERED CURATED CG with a PCA (there's no
+  // update-authority route). Filter the dropdown to bindable CGs so a registered
+  // one can't be picked and silently false-"Bound" (#9). The list endpoint already
+  // returns onChainId + accessPolicy.
+  const cgs = (cgData?.contextGraphs ?? []) as Array<{
+    id: string;
+    name?: string;
+    onChainId?: string;
+    accessPolicy?: string;
+  }>;
+  const bindable = cgs.filter((cg) => !cg.onChainId && cg.accessPolicy === 'private');
   const health = healthForSnapshot(snapshot);
   const ownerTitle = ownerIsPrimary ? undefined : ownerOnlyReason;
 
@@ -201,6 +211,18 @@ function DetailBody({
     setBind({ busy: true, error: null, result: null });
     try {
       const res = await registerContextGraph(bindCg, { pcaAccountId: accountId });
+      // N3 — a 200 with NO txHash means the CG was already registered on-chain and
+      // the daemon took the idempotent path WITHOUT applying the new pcaAccountId.
+      // Never claim "Bound" (a #9 false confirmation) — say it plainly.
+      if (!res.txHash) {
+        setBind({
+          busy: false,
+          error:
+            'This context graph is already registered on-chain — its publishing authority can’t be changed from here. Bind a PCA when first registering the graph.',
+          result: null,
+        });
+        return;
+      }
       setBind({ busy: false, error: null, result: { txHash: res.txHash, message: `Bound ${bindCg} to PCA #${accountId}.` } });
     } catch (err) {
       setBind({ busy: false, error: describeCgBindError(err), result: null });
@@ -362,29 +384,36 @@ function DetailBody({
           node and from which wallets pay. <strong>Curated/private policy only</strong>, and the
           binding node’s signer must equal the PCA owner.
         </p>
-        <div className="v10-pca-detail-form">
-          <select
-            className="v10-form-select"
-            value={bindCg}
-            onChange={(e) => setBindCg(e.target.value)}
-            disabled={!ownerIsPrimary || bind.busy}
-            aria-label="Context graph to bind"
-          >
-            <option value="">Select a context graph…</option>
-            {cgs.map((cg) => (
-              <option key={cg.id} value={cg.id}>{cg.name ?? cg.id}</option>
-            ))}
-          </select>
-          <button
-            type="button"
-            className="v10-pca-card-btn"
-            onClick={runBind}
-            disabled={!ownerIsPrimary || bind.busy || !bindCg}
-            title={ownerTitle}
-          >
-            {bind.busy ? 'Binding…' : 'Bind context graph'}
-          </button>
-        </div>
+        {bindable.length === 0 ? (
+          <p className="v10-pca-detail-hint" role="status">
+            No unregistered curated context graphs to bind. Binding sets a graph’s publishing authority
+            at its first on-chain registration; an already-registered graph can’t be changed from here.
+          </p>
+        ) : (
+          <div className="v10-pca-detail-form">
+            <select
+              className="v10-form-select"
+              value={bindCg}
+              onChange={(e) => setBindCg(e.target.value)}
+              disabled={!ownerIsPrimary || bind.busy}
+              aria-label="Context graph to bind"
+            >
+              <option value="">Select a context graph…</option>
+              {bindable.map((cg) => (
+                <option key={cg.id} value={cg.id}>{cg.name ?? cg.id}</option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="v10-pca-card-btn"
+              onClick={runBind}
+              disabled={!ownerIsPrimary || bind.busy || !bindCg}
+              title={ownerTitle}
+            >
+              {bind.busy ? 'Binding…' : 'Bind context graph'}
+            </button>
+          </div>
+        )}
         <ActionFeedback state={bind} explorer={explorer} />
       </section>
 
