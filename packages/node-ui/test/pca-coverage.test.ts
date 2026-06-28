@@ -5,7 +5,7 @@
 // pins the extracted pure functions so the surfaces can't re-diverge.
 
 import { describe, expect, it } from 'vitest';
-import { bigGt0, isPcaSpendable, normalizeProbeRegistered, coverageForProbe } from '../src/ui/pca/coverage.js';
+import { bigGt0, isPcaSpendable, normalizeProbeRegistered, classifyCoverage } from '../src/ui/pca/coverage.js';
 import { makePcaSnapshot } from '../src/ui/mocks/pca.js';
 
 const FUTURE = Math.floor(Date.now() / 1000) + 60 * 86_400;
@@ -64,32 +64,32 @@ describe('normalizeProbeRegistered', () => {
   });
 });
 
-describe('coverageForProbe', () => {
-  it('registered + spendable → covers', () => {
-    const c = coverageForProbe(makePcaSnapshot({ expiresAtTimestamp: FUTURE }), { key: '0x', registered: true });
-    expect(c).toEqual({ registered: true, inconclusive: false, covers: true });
+describe('classifyCoverage', () => {
+  it('registered + spendable → covers (full PcaCoverageResult)', () => {
+    const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: FUTURE }), { key: '0x', registered: true });
+    expect(c).toEqual({ registered: true, inconclusive: false, covers: true, dead: false, hasBudget: true });
   });
-  it('registered + expired → registered but does NOT cover', () => {
-    const c = coverageForProbe(makePcaSnapshot({ expiresAtTimestamp: PAST }), { key: '0x', registered: true });
-    expect(c).toEqual({ registered: true, inconclusive: false, covers: false });
+  it('registered + expired → registered + dead, does NOT cover', () => {
+    const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: PAST }), { key: '0x', registered: true });
+    expect(c).toEqual({ registered: true, inconclusive: false, covers: false, dead: true, hasBudget: true });
   });
-  it('registered + zero-budget → does NOT cover', () => {
-    const c = coverageForProbe(
+  it('registered + zero-budget → hasBudget false, does NOT cover', () => {
+    const c = classifyCoverage(
       makePcaSnapshot({ topUpBuffer: '0', baseEpochAllowance: '0', expiresAtTimestamp: FUTURE }),
       { key: '0x', registered: true },
     );
-    expect(c.covers).toBe(false);
+    expect(c).toEqual({ registered: true, inconclusive: false, covers: false, dead: false, hasBudget: false });
   });
   it('registered:false → not covering, not inconclusive', () => {
-    const c = coverageForProbe(makePcaSnapshot({ expiresAtTimestamp: FUTURE }), { key: '0x', registered: false });
-    expect(c).toEqual({ registered: false, inconclusive: false, covers: false });
+    const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: FUTURE }), { key: '0x', registered: false });
+    expect(c).toEqual({ registered: false, inconclusive: false, covers: false, dead: false, hasBudget: true });
   });
   it('adapterSupported:false → inconclusive, never covers', () => {
-    const c = coverageForProbe(makePcaSnapshot({ expiresAtTimestamp: FUTURE }), { key: '0x', registered: false, adapterSupported: false });
-    expect(c).toEqual({ registered: null, inconclusive: true, covers: false });
+    const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: FUTURE }), { key: '0x', registered: false, adapterSupported: false });
+    expect(c).toEqual({ registered: null, inconclusive: true, covers: false, dead: false, hasBudget: true });
   });
   it('missing probedKey → inconclusive', () => {
-    const c = coverageForProbe(makePcaSnapshot({ expiresAtTimestamp: FUTURE }), undefined);
-    expect(c).toEqual({ registered: null, inconclusive: true, covers: false });
+    const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: FUTURE }), undefined);
+    expect(c).toEqual({ registered: null, inconclusive: true, covers: false, dead: false, hasBudget: true });
   });
 });

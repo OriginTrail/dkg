@@ -57,20 +57,39 @@ export function normalizeProbeRegistered(probedKey: PcaProbedKey | undefined): b
 }
 
 /**
- * Per-(snapshot, probe) coverage classification:
- *  - `registered` — normalized (null = couldn't determine).
- *  - `inconclusive` — the probe couldn't be read (registered === null).
- *  - `covers` — the wallet is registered HERE AND the account is spendable.
+ * The single canonical (snapshot, probe) coverage classification. Every surface
+ * (S5 `usePublishEligibility`, S6 `GetSponsoredPanel`, `usePcaOverview`) runs THIS
+ * one call instead of bundling the leaf predicates itself — so coverage can't
+ * re-diverge across screens. Composed from the building blocks above (which stay
+ * exported: `usePcaOverview` still needs `isPcaSpendable` for its account-level
+ * `bestCoveringDiscountBps` filter, where there's no probe).
  */
-export function coverageForProbe(
+export interface PcaCoverageResult {
+  /** Normalized registration (the S2 rule). `null` = couldn't determine. */
+  registered: boolean | null;
+  /** The probe couldn't be read (`registered === null`) → neutral, never DANGER (#9). */
+  inconclusive: boolean;
+  /** The wallet is registered HERE AND the account is spendable (not dead, has budget). */
+  covers: boolean;
+  /** The account is expired or fully swept (`isPcaDead`). */
+  dead: boolean;
+  /** The account has budget capacity (`hasPcaBudget`). */
+  hasBudget: boolean;
+}
+
+export function classifyCoverage(
   snap: PcaSnapshot,
   probedKey: PcaProbedKey | undefined,
   nowSec?: number,
-): { registered: boolean | null; inconclusive: boolean; covers: boolean } {
+): PcaCoverageResult {
   const registered = normalizeProbeRegistered(probedKey);
+  const dead = isPcaDead(snap, nowSec);
+  const hasBudget = hasPcaBudget(snap);
   return {
     registered,
     inconclusive: registered === null,
-    covers: registered === true && isPcaSpendable(snap, nowSec),
+    covers: registered === true && !dead && hasBudget,
+    dead,
+    hasBudget,
   };
 }

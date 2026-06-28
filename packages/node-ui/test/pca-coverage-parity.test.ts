@@ -3,9 +3,9 @@
 // #1344 cross-consumer PARITY (anti-drift) — the three coverage surfaces now
 // share `src/ui/pca/coverage.ts` (the leaf rules that drifted across
 // C1/O4/Q2/S2/U2/V3). This feeds ONE fixture (a PCA snapshot + a per-wallet
-// probe) through `coverageForProbe` and asserts all three surfaces classify the
-// SAME fixture identically — covers / registered-but-uncovered / inconclusive —
-// so they can't re-diverge. Each surface keeps its own aggregation; this pins
+// probe) through the SINGLE `classifyCoverage` and asserts all three surfaces
+// classify the SAME fixture identically — covers / registered-but-uncovered /
+// inconclusive — so they can't re-diverge. Each surface keeps its own aggregation; this pins
 // only their agreement on the shared leaf coverage:
 //   - S5 `PublishEligibilityChip` (usePublishEligibility) → the chip verdict,
 //   - S6 `GetSponsoredPanel`       → the per-wallet approval-check outcome,
@@ -38,7 +38,7 @@ const { GetSponsoredPanel } = await import('../src/ui/pages/conviction/GetSponso
 const { usePcaOverview } = await import('../src/ui/hooks/usePcaOverview.js');
 const { usePcaStore } = await import('../src/ui/stores/pca.js');
 const { makePcaSnapshot } = await import('../src/ui/mocks/pca.js');
-const { coverageForProbe } = await import('../src/ui/pca/coverage.js');
+const { classifyCoverage } = await import('../src/ui/pca/coverage.js');
 import type { PcaOverview } from '../src/ui/hooks/usePcaOverview.js';
 import type { PcaSnapshot, PcaProbedKey } from '../src/ui/api.js';
 
@@ -119,8 +119,8 @@ describe('#1344 coverage parity — S5 / S6 / overview agree via the shared reso
     const snap = makePcaSnapshot({ accountId: ACCOUNT, expiresAtTimestamp: FUTURE });
     const probe: PcaProbedKey = { key: W0, registered: true };
     wire(snap, probe);
-    const expected = coverageForProbe(snap, probe);
-    expect(expected).toEqual({ registered: true, inconclusive: false, covers: true });
+    const expected = classifyCoverage(snap, probe);
+    expect(expected).toEqual({ registered: true, inconclusive: false, covers: true, dead: false, hasBudget: true });
 
     // overview
     const ov = await renderOverview();
@@ -155,8 +155,8 @@ describe('#1344 coverage parity — S5 / S6 / overview agree via the shared reso
     const snap = makePcaSnapshot({ accountId: ACCOUNT, expiresAtTimestamp: FUTURE });
     const probe: PcaProbedKey = { key: W0, registered: false, adapterSupported: false };
     wire(snap, probe);
-    const expected = coverageForProbe(snap, probe);
-    expect(expected).toEqual({ registered: null, inconclusive: true, covers: false });
+    const expected = classifyCoverage(snap, probe);
+    expect(expected).toEqual({ registered: null, inconclusive: true, covers: false, dead: false, hasBudget: true });
 
     // overview → inconclusive, not 0-approved-confirmed, not covered
     const ov = await renderOverview();
@@ -197,8 +197,8 @@ describe('#1344 coverage parity — S5 / S6 / overview agree via the shared reso
     const snap = makePcaSnapshot({ accountId: ACCOUNT, expiresAtTimestamp: FUTURE, topUpBuffer: '0', topUpBufferTrac: '0', baseEpochAllowance: '0' });
     const probe: PcaProbedKey = { key: W0, registered: true };
     wire(snap, probe);
-    const expected = coverageForProbe(snap, probe);
-    expect(expected).toEqual({ registered: true, inconclusive: false, covers: false });
+    const expected = classifyCoverage(snap, probe);
+    expect(expected).toEqual({ registered: true, inconclusive: false, covers: false, dead: false, hasBudget: false });
 
     // overview → registered (approvedCount 1) but NOT covered, no advertised discount
     const ov = await renderOverview();

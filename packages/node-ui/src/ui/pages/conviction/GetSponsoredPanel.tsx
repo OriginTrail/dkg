@@ -3,7 +3,7 @@ import { useFetch } from '../../hooks.js';
 import { fetchWalletsBalances, fetchPca, describePcaError } from '../../api.js';
 import { formatEth, formatEthTooltip } from '../../lib/formatEth.js';
 import { usePcaStore } from '../../stores/pca.js';
-import { coverageForProbe } from '../../pca/coverage.js';
+import { classifyCoverage } from '../../pca/coverage.js';
 import { PcaModalShell } from './PcaModalShell.js';
 import {
   WalletRow,
@@ -75,11 +75,11 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
         wallets.map((w) =>
           fetchPca(id, w)
             .then((snap): ProbeRow => {
-              // #1344 — shared classifier: S2 adapterSupported===false → null (neutral
-              // "unknown" row, not a false not-approved; all-unsupported → wholesale
-              // "retry") + N1 covers = registered AND the PCA is spendable (S6 "Ready"
-              // == S5 GREEN).
-              const { registered, covers } = coverageForProbe(snap, snap.probedKey);
+              // #1344 — single canonical classifier: S2 adapterSupported===false → null
+              // (neutral "unknown" row, not a false not-approved; all-unsupported →
+              // wholesale "retry") + N1 covers = registered AND the PCA is spendable
+              // (S6 "Ready" == S5 GREEN).
+              const { registered, covers } = classifyCoverage(snap, snap.probedKey);
               return { wallet: w, registered, covers };
             })
             .catch((): ProbeRow => ({ wallet: w, registered: null, covers: false })),

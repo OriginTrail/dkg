@@ -7,7 +7,7 @@ import {
 } from '../api.js';
 import { usePcaStore } from '../stores/pca.js';
 import { healthForSnapshot, type PcaHealthState } from '../pca/health.js';
-import { normalizeProbeRegistered, isPcaSpendable } from '../pca/coverage.js';
+import { classifyCoverage, isPcaSpendable } from '../pca/coverage.js';
 
 /** Per-(node wallet) registration probe against one account. `null` = couldn't determine. */
 export interface PcaWalletProbe {
@@ -94,10 +94,10 @@ async function resolveAccount(accountId: string, wallets: string[]): Promise<Res
   const walletProbes: PcaWalletProbe[] = await Promise.all(
     wallets.map((wallet) =>
       fetchPca(accountId, wallet)
-        // S2/#9 (via shared normalizeProbeRegistered, #1344) — adapterSupported===false
-        // (the adapter couldn't answer) → null (couldn't determine), NOT not-registered
-        // → probesInconclusive (H2 path), excluded from approvedCount.
-        .then((s): PcaWalletProbe => ({ wallet, registered: normalizeProbeRegistered(s.probedKey) }))
+        // S2/#9 (via shared classifyCoverage, #1344) — adapterSupported===false (the
+        // adapter couldn't answer) → registered null (couldn't determine), NOT
+        // not-registered → probesInconclusive (H2 path), excluded from approvedCount.
+        .then((s): PcaWalletProbe => ({ wallet, registered: classifyCoverage(s, s.probedKey).registered }))
         .catch((): PcaWalletProbe => ({ wallet, registered: null })),
     ),
   );

@@ -3,7 +3,7 @@ import { useFetch } from '../hooks.js';
 import { fetchWalletsBalances, fetchPca, fetchContextGraphs, fetchCurrentAgent } from '../api.js';
 import { usePcaStore } from '../stores/pca.js';
 import { canonicalAgentDid } from '../lib/contextGraphSidebar.js';
-import { normalizeProbeRegistered, isPcaSpendable, isPcaDead, hasPcaBudget } from '../pca/coverage.js';
+import { classifyCoverage } from '../pca/coverage.js';
 import type { PcaVerdict } from '../components/Pca/EligibilityVerdictBanner.js';
 
 const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
@@ -115,26 +115,30 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
             // not-registered. Distinguish them: a failed probe is inconclusive (→
             // neutral verdict), never a definitive fall-through DANGER at spend time.
             if (snap === null) { probeError = true; continue; }
-            // S2/#9 — registration via the shared normalizer (#1344): adapter gap OR an
-            // undefined registered → inconclusive ("couldn't determine" → neutral verdict,
-            // never a definitive DANGER); a confirmed not-registered → skip.
-            const reg = normalizeProbeRegistered(snap.probedKey);
-            if (reg === null) { probeError = true; continue; }
-            if (reg === false) continue;
-            // reg === true — coarse P0 spendability (NOT remainingAllowance, P2/#1349).
-            if (isPcaSpendable(snap)) {
+            // #1344 round-2 — ONE canonical classification (registration + coarse-P0
+            // spendability) instead of bundling the leaf predicates here. Behavior is
+            // byte-identical to the prior 4-helper form. Coarse P0, NOT remainingAllowance
+            // (P2/#1349).
+            const c = classifyCoverage(snap, snap.probedKey);
+            // S2/#9 — adapter gap OR an undefined registered → inconclusive ("couldn't
+            // determine" → neutral verdict, never a definitive DANGER); a confirmed
+            // not-registered → skip.
+            if (c.inconclusive) { probeError = true; continue; }
+            if (c.registered === false) continue;
+            // registered here — coarse spendability decides coverage.
+            if (c.covers) {
               cover = { accountId: id, discountBps: snap.discountBps };
               break;
             }
             // Registered here but the account can't cover — break down (dead vs
-            // out-of-budget) from the SAME shared predicates, so the copy distinguishes
+            // out-of-budget) from the SAME classification, so the copy distinguishes
             // "approved-but-dead" from "no PCA" (#3) and the reasons name the cause. Two
             // INDEPENDENT checks (a dead AND zero-budget account sets both).
-            if (isPcaDead(snap)) {
+            if (c.dead) {
               sawExpired = true;
               if (!deadAccountId) deadAccountId = id;
             }
-            if (!hasPcaBudget(snap)) sawInsolvent = true;
+            if (!c.hasBudget) sawInsolvent = true;
           }
           return {
             wallet: w,
