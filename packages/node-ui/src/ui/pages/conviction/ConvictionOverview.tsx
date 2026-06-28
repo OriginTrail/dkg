@@ -36,7 +36,7 @@ export function ConvictionOverview() {
   const trackAccount = usePcaStore((s) => s.trackAccount);
   const untrackAccount = usePcaStore((s) => s.untrackAccount);
   const overview = usePcaOverview();
-  const { accounts, loading, covered, refresh } = overview;
+  const { accounts, loading, covered, refresh, walletsInconclusive } = overview;
 
   // O2 — DERIVED default so the filter auto-reacts to the async role (a useState
   // initializer runs ONCE, so an edge node whose status resolved AFTER mount stayed
@@ -69,7 +69,9 @@ export function ConvictionOverview() {
         </p>
       </header>
 
-      {role === 'edge' && !loading && !covered && (
+      {/* T2/#9 — suppress the definitive "no discount" banner when the wallets read
+          failed; coverage can't be confirmed off an empty wallet set. */}
+      {role === 'edge' && !loading && !covered && !walletsInconclusive && (
         <div className="v10-pca-edge-banner" role="status">
           <EmptyState
             tone="warning"
@@ -77,6 +79,15 @@ export function ConvictionOverview() {
             description="No conviction account covers this node’s publishes, so each publish pays the direct cost from the signing wallet. Ask a core-node operator to sponsor you."
             actions={[{ label: 'Get sponsored', onClick: () => setSponsoredOpen(true), variant: 'primary' }]}
           />
+        </div>
+      )}
+
+      {walletsInconclusive && (
+        <div className="v10-pca-edge-banner" role="status">
+          <p className="v10-pca-overview-caveat">
+            ⓘ Couldn’t read this node’s wallets — ownership and coverage can’t be confirmed.{' '}
+            <button type="button" className="v10-pca-card-btn" onClick={() => refresh()}>Retry</button>
+          </p>
         </div>
       )}
 
@@ -148,6 +159,10 @@ export function ConvictionOverview() {
             </p>
           )}
         </>
+      ) : walletsInconclusive ? (
+        // T2 — the "couldn't read wallets" notice above already explains; don't also
+        // assert a misleading OwnedEmpty/ApprovedEmpty off the unreadable wallet set.
+        null
       ) : filter === 'owned' ? (
         <OwnedEmpty role={role} />
       ) : (

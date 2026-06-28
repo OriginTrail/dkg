@@ -117,6 +117,28 @@ describe('usePcaOverview', () => {
     await unmount();
   });
 
+  // T2/#9 — distinguish an UNREADABLE wallets read (error + empty) from a genuine
+  // 0-wallet node, so the discovery cards don't assert "none/not-covered" off bad data.
+  it('walletsInconclusive on a failed balances read, false on a genuine 0-wallet node (T2)', async () => {
+    usePcaStore.setState({ trackedIds: ['7'] });
+    mocks.fetchPca.mockResolvedValue(snap({ accountId: '7' }));
+
+    mocks.fetchWalletsBalances.mockRejectedValue(new Error('balances down')); // reject
+    const r1 = await render();
+    expect(latest!.walletsInconclusive).toBe(true);
+    await r1.unmount();
+
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [], balances: [], error: 'RPC timeout', chainId: '84532', rpcUrl: null }); // HTTP-200 error
+    const r2 = await render();
+    expect(latest!.walletsInconclusive).toBe(true);
+    await r2.unmount();
+
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [], balances: [], chainId: '84532', rpcUrl: null }); // genuine 0-wallet
+    const r3 = await render();
+    expect(latest!.walletsInconclusive).toBe(false);
+    await r3.unmount();
+  });
+
   it('bestCoveringDiscountBps excludes expired/swept/0-approved and picks the MAX covering', async () => {
     usePcaStore.setState({ trackedIds: ['7', '20', '10', '9', '8'] });
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W1], balances: [], chainId: '84532', rpcUrl: null });

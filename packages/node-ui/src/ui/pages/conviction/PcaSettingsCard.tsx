@@ -16,7 +16,7 @@ function pct(bps: number | null): string {
  */
 export function PcaSettingsCard() {
   const openTab = useTabsStore((s) => s.openTab);
-  const { accounts, covered, bestCoveringDiscountBps } = usePcaOverview();
+  const { accounts, covered, bestCoveringDiscountBps, walletsInconclusive } = usePcaOverview();
   const tracked = accounts.length;
 
   return (
@@ -31,6 +31,11 @@ export function PcaSettingsCard() {
           <p className="v10-pca-settings-line">
             This node’s publishes get up to <strong>{pct(bestCoveringDiscountBps)}</strong> off
             (pending confirmation).
+          </p>
+        ) : walletsInconclusive ? (
+          // T2/#9 — don't assert "none covers" off unreadable wallets.
+          <p className="v10-pca-settings-line" role="status">
+            Couldn’t verify this node’s wallets — retry.
           </p>
         ) : (
           <p className="v10-pca-settings-line">

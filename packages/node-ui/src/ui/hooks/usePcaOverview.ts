@@ -48,6 +48,13 @@ export interface PcaOverview {
   accounts: ResolvedPcaAccount[];
   wallets: string[];
   walletsError: boolean;
+  /**
+   * T2/#9 — the wallets balances read FAILED and returned no wallets, so owned/
+   * approved/covered are computed from an empty set and can't be trusted. Distinct
+   * from a genuine 0-wallet node (walletsError false). Consumers show "couldn't
+   * verify — retry" instead of a definitive empty/none/not-covered state.
+   */
+  walletsInconclusive: boolean;
   loading: boolean;
   error: string | null;
   refresh: () => void;
@@ -265,10 +272,14 @@ export function usePcaOverview(intervalMs = 30_000): PcaOverview {
     return { bestCoveringDiscountBps: best, covered: best != null };
   }, [accounts]);
 
+  const wallets = entry?.data?.wallets ?? [];
+  const walletsError = entry?.data?.walletsError ?? false;
   return {
     accounts,
-    wallets: entry?.data?.wallets ?? [],
-    walletsError: entry?.data?.walletsError ?? false,
+    wallets,
+    walletsError,
+    // T2 — unreadable wallets (error + empty) vs a genuine 0-wallet node (no error).
+    walletsInconclusive: walletsError && wallets.length === 0,
     loading,
     error,
     refresh: () => {
