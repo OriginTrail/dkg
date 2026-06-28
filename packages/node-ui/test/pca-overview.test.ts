@@ -150,4 +150,42 @@ describe('ConvictionOverview — S1 discovery', () => {
     expect(container.textContent).not.toContain('discounts nothing yet');
     await unmount();
   });
+
+  // O2 — the role-default filter must auto-react to async status (a useState
+  // initializer runs once, so an edge node whose status resolved after mount
+  // stayed stuck on "Owned" and hid its sponsorships); explicit picks stick.
+  it('O2 — edge default syncs to "Approved for me" after async role resolves; explicit pick preserved', async () => {
+    usePcaStore.setState({ trackedIds: ['7'], createPending: null });
+    useAgentsStore.setState({ nodeStatus: null }); // status not loaded yet → role undefined
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [WALLET0], balances: [], chainId: '84532', rpcUrl: null });
+    const SPONSOR = '0xSOMEONEELSE0000000000000000000000000000';
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      const base = { ...snapFixture(id), owner: SPONSOR }; // not owned by this node → 'approved'
+      if (key) return { ...base, probedKey: { key, registered: key.toLowerCase() === WALLET0.toLowerCase() } };
+      return base;
+    });
+
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    const tab = (label: string) =>
+      Array.from(container.querySelectorAll('[role="tab"]')).find((b) => b.textContent?.trim() === label)!;
+
+    // Status resolves to edge AFTER mount → default flips to "Approved for me".
+    await act(async () => {
+      useAgentsStore.setState({ nodeStatus: { nodeRole: 'edge', blockExplorerUrl: null } });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await waitForText(container, 'PCA #7'); // the approved sponsorship is visible by default — NO click
+    expect(tab('Approved for me').getAttribute('aria-selected')).toBe('true');
+    expect(tab('Owned by me').getAttribute('aria-selected')).toBe('false');
+
+    // An explicit pick survives a later role update.
+    await act(async () => { tab('Owned by me').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(tab('Owned by me').getAttribute('aria-selected')).toBe('true');
+    await act(async () => {
+      useAgentsStore.setState({ nodeStatus: { nodeRole: 'edge', blockExplorerUrl: null } });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(tab('Owned by me').getAttribute('aria-selected')).toBe('true'); // role default did NOT override
+    await unmount();
+  });
 });

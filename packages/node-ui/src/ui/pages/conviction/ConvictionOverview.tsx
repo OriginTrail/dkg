@@ -38,8 +38,13 @@ export function ConvictionOverview() {
   const overview = usePcaOverview();
   const { accounts, loading, covered, refresh } = overview;
 
-  // Role picks the DEFAULT-selected filter; the user can still switch.
-  const [filter, setFilter] = useState<ViewFilter>(role === 'edge' ? 'approved' : 'owned');
+  // O2 — DERIVED default so the filter auto-reacts to the async role (a useState
+  // initializer runs ONCE, so an edge node whose status resolved AFTER mount stayed
+  // stuck on 'owned' and hid its sponsorships). The role default applies until the
+  // user explicitly picks a tab, after which their choice is preserved.
+  const [userFilter, setUserFilter] = useState<ViewFilter | null>(null);
+  const defaultFilter: ViewFilter = role === 'edge' ? 'approved' : 'owned';
+  const filter = userFilter ?? defaultFilter;
   const [createOpen, setCreateOpen] = useState(false);
   const [approve, setApprove] = useState<{ accountId: string; mode: 'self' | 'sponsor' } | null>(null);
   const [sponsoredOpen, setSponsoredOpen] = useState(false);
@@ -82,7 +87,7 @@ export function ConvictionOverview() {
             role="tab"
             aria-selected={filter === 'owned'}
             className={`v10-pca-filter-tab ${filter === 'owned' ? 'active' : ''}`}
-            onClick={() => setFilter('owned')}
+            onClick={() => setUserFilter('owned')}
           >
             Owned by me
           </button>
@@ -91,7 +96,7 @@ export function ConvictionOverview() {
             role="tab"
             aria-selected={filter === 'approved'}
             className={`v10-pca-filter-tab ${filter === 'approved' ? 'active' : ''}`}
-            onClick={() => setFilter('approved')}
+            onClick={() => setUserFilter('approved')}
           >
             Approved for me
           </button>
