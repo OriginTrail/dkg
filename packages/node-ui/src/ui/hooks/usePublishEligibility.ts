@@ -2,9 +2,8 @@ import { useMemo } from 'react';
 import { useFetch } from '../hooks.js';
 import { fetchWalletsBalances, fetchPca, fetchContextGraphs, fetchCurrentAgent } from '../api.js';
 import { usePcaStore } from '../stores/pca.js';
-import { healthForSnapshot } from '../components/Pca/HealthChip.js';
 import { canonicalAgentDid } from '../lib/contextGraphSidebar.js';
-import { bigGt0, isPcaSpendable } from '../pca/coverage.js';
+import { normalizeProbeRegistered, isPcaSpendable, isPcaDead, hasPcaBudget } from '../pca/coverage.js';
 import type { PcaVerdict } from '../components/Pca/EligibilityVerdictBanner.js';
 
 const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
@@ -116,30 +115,26 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
             // not-registered. Distinguish them: a failed probe is inconclusive (→
             // neutral verdict), never a definitive fall-through DANGER at spend time.
             if (snap === null) { probeError = true; continue; }
-            // S2/#9 — the adapter COULDN'T answer (capability gap) is "couldn't read",
-            // NOT a confirmed not-registered. Funnel it into the inconclusive channel
-            // (→ neutral verdict), never a definitive fall-through DANGER. (Kept inline,
-            // NOT via normalizeProbeRegistered: S5's `!registered` below treats an
-            // undefined registered as a plain skip, whereas overview/S6 treat it as
-            // inconclusive — preserving S5's exact semantics keeps this byte-identical.)
-            if (snap.probedKey?.adapterSupported === false) { probeError = true; continue; }
-            if (!snap.probedKey?.registered) continue;
-            // #1344 — coarse P0 spendability via the shared isPcaSpendable (was inlined;
-            // see the reverted-L2 capstone finding). NOT remainingAllowance (P2/#1349).
+            // S2/#9 — registration via the shared normalizer (#1344): adapter gap OR an
+            // undefined registered → inconclusive ("couldn't determine" → neutral verdict,
+            // never a definitive DANGER); a confirmed not-registered → skip.
+            const reg = normalizeProbeRegistered(snap.probedKey);
+            if (reg === null) { probeError = true; continue; }
+            if (reg === false) continue;
+            // reg === true — coarse P0 spendability (NOT remainingAllowance, P2/#1349).
             if (isPcaSpendable(snap)) {
               cover = { accountId: id, discountBps: snap.discountBps };
               break;
             }
             // Registered here but the account can't cover — break down (dead vs
-            // out-of-budget) so the copy distinguishes "approved-but-dead" from "no PCA"
-            // (#3) and the reasons name the cause. Two INDEPENDENT checks (a dead AND
-            // zero-budget account sets both, matching the pre-refactor behavior).
-            const h = healthForSnapshot(snap);
-            if (h === 'expired' || h === 'swept') {
+            // out-of-budget) from the SAME shared predicates, so the copy distinguishes
+            // "approved-but-dead" from "no PCA" (#3) and the reasons name the cause. Two
+            // INDEPENDENT checks (a dead AND zero-budget account sets both).
+            if (isPcaDead(snap)) {
               sawExpired = true;
               if (!deadAccountId) deadAccountId = id;
             }
-            if (!(bigGt0(snap.topUpBuffer) || bigGt0(snap.baseEpochAllowance))) sawInsolvent = true;
+            if (!hasPcaBudget(snap)) sawInsolvent = true;
           }
           return {
             wallet: w,

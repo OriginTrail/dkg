@@ -19,18 +19,31 @@ export function bigGt0(wei: string | undefined): boolean {
   }
 }
 
+/** The account can't cover a publish because it's expired or fully swept. */
+export function isPcaDead(
+  snap: Pick<PcaSnapshot, 'expiresAtTimestamp' | 'fullySwept' | 'agentCount'>,
+  nowSec?: number,
+): boolean {
+  const h = healthForSnapshot(snap, nowSec);
+  return h === 'expired' || h === 'swept';
+}
+
+/** The account has budget capacity (top-up buffer OR per-epoch allowance). The coarse
+ *  P0 proxy — NOT the precise mid-epoch `remainingAllowance` (that's P2/#1349). */
+export function hasPcaBudget(snap: Pick<PcaSnapshot, 'topUpBuffer' | 'baseEpochAllowance'>): boolean {
+  return bigGt0(snap.topUpBuffer) || bigGt0(snap.baseEpochAllowance);
+}
+
 /**
- * The coarse P0 spendability proxy: a PCA can cover a publish only if it is NOT
- * expired/swept AND has budget capacity (top-up buffer OR per-epoch allowance).
- * Mirrors usePublishEligibility's cover check exactly. (Precise mid-epoch remaining
- * is P2/#1349 — do NOT use `remainingAllowance` here.)
+ * The coarse P0 spendability proxy: a PCA can cover a publish only if it is NOT dead
+ * (expired/swept) AND has budget. Composed from the two predicates above so the
+ * eligibility breakdown (dead vs out-of-budget) reuses the SAME rules.
  */
 export function isPcaSpendable(
   snap: Pick<PcaSnapshot, 'expiresAtTimestamp' | 'fullySwept' | 'agentCount' | 'topUpBuffer' | 'baseEpochAllowance'>,
   nowSec?: number,
 ): boolean {
-  const h = healthForSnapshot(snap, nowSec);
-  return h !== 'expired' && h !== 'swept' && (bigGt0(snap.topUpBuffer) || bigGt0(snap.baseEpochAllowance));
+  return !isPcaDead(snap, nowSec) && hasPcaBudget(snap);
 }
 
 /**

@@ -149,6 +149,21 @@ describe('PublishEligibilityChip (S5)', () => {
     await unmount();
   });
 
+  // V1/#1344/#9 — routing S5 registration through the shared normalizer means an
+  // OMITTED registered (undefined) is now inconclusive ("couldn't determine"), not a
+  // confirmed not-registered → resolves NEUTRAL, never a DANGER. (Now matches overview/S6.)
+  it('V1 — a probedKey with registered OMITTED resolves NEUTRAL, not DANGER', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('0')); // gas-funded, no TRAC
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...makePcaSnapshot(), probedKey: { key } } : makePcaSnapshot(), // registered OMITTED
+    );
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'PCA status unknown');
+    expect(container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeNull();
+    expect(container.querySelector('[data-verdict="unknown"]')).toBeTruthy();
+    await unmount();
+  });
+
   // L1 — when wallets are covered by DIFFERENT PCAs, the GREEN chip advertises the
   // MAX covering discount (matching bestCoveringDiscountBps), not covered[0].
   it('GREEN advertises the MAX covering discount across wallets on different PCAs (L1)', async () => {
