@@ -14,6 +14,7 @@ import {
   HttpError,
   describePcaError,
   isPcaFeatureUnavailable,
+  isRpcTransportError,
   fetchPca,
   createPca,
   pcaAddAgent,
@@ -36,10 +37,32 @@ describe('describePcaError', () => {
     expect(out!.message.toLowerCase()).toContain("aren't available");
   });
 
-  it('isPcaFeatureUnavailable is true only for an HttpError 503', () => {
+  it('isPcaFeatureUnavailable is true only for a CAPABILITY 503 (not a transport blip)', () => {
     expect(isPcaFeatureUnavailable(new HttpError(503))).toBe(true);
+    expect(isPcaFeatureUnavailable(new HttpError(503, 'x', { error: 'not available' }))).toBe(true);
     expect(isPcaFeatureUnavailable(new HttpError(400))).toBe(false);
     expect(isPcaFeatureUnavailable(new Error('x'))).toBe(false);
+    // A transient RPC-transport 503 must NOT gate the tab.
+    expect(
+      isPcaFeatureUnavailable(new HttpError(503, 'x', { code: 'RPC_ENDPOINTS_EXHAUSTED' })),
+    ).toBe(false);
+  });
+
+  it('isRpcTransportError detects RPC_* body codes regardless of status', () => {
+    expect(isRpcTransportError(new HttpError(503, 'x', { code: 'RPC_ENDPOINTS_EXHAUSTED' }))).toBe(true);
+    expect(isRpcTransportError(new HttpError(504, 'x', { code: 'RPC_TIMEOUT' }))).toBe(true);
+    expect(isRpcTransportError(new HttpError(503, 'x', { error: 'not available' }))).toBe(false);
+    expect(isRpcTransportError(new Error('x'))).toBe(false);
+  });
+
+  it('describePcaError maps a transport 503/504 to "try again", NOT "not available on this network"', () => {
+    const t503 = describePcaError(new HttpError(503, 'x', { code: 'RPC_ENDPOINTS_EXHAUSTED' }));
+    expect(t503!.code).toBe('ServerError');
+    expect(t503!.message.toLowerCase()).toContain('temporarily unavailable');
+    expect(t503!.message.toLowerCase()).not.toContain("aren't available");
+    const t504 = describePcaError(new HttpError(504, 'x', { code: 'RPC_TIMEOUT' }));
+    expect(t504!.code).toBe('ServerError');
+    expect(t504!.message.toLowerCase()).toContain('temporarily unavailable');
   });
 
   it('maps 400 InvalidAmount to a friendly amount prompt', () => {
