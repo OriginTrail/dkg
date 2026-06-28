@@ -40,6 +40,10 @@ export class PublishingConvictionPage {
   readonly agentList: Locator;
   readonly agentRows: Locator;
   readonly actionResult: Locator;
+  readonly settleBtn: Locator;
+  readonly topUpBtn: Locator;
+  readonly topUpInput: Locator;
+  readonly deregisterBtn: Locator;
   readonly approveModal: Locator;
   readonly approveAddressInput: Locator;
   readonly approveSubmit: Locator;
@@ -75,6 +79,10 @@ export class PublishingConvictionPage {
     this.agentList = page.locator(sel.conviction.agentList);
     this.agentRows = page.locator(sel.conviction.agentRow);
     this.actionResult = page.locator(sel.conviction.actionResult);
+    this.settleBtn = page.locator(sel.conviction.settleBtn);
+    this.topUpBtn = page.locator(sel.conviction.topUpBtn);
+    this.topUpInput = page.getByLabel('Top-up amount in TRAC');
+    this.deregisterBtn = page.locator(sel.conviction.deregisterBtn);
     this.approveModal = page.locator(sel.conviction.approveModal);
     this.approveAddressInput = page.locator(sel.conviction.approveAddressInput);
     this.approveSubmit = page.locator(sel.conviction.approveSubmit);
