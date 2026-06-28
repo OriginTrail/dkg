@@ -77,4 +77,27 @@ describe('usePcaStore (dkg-pca persistence — double-mint marker durability)', 
     expect(persisted.trackedIds).toContain('5'); // snapshot captured both
     spy.mockRestore();
   });
+
+  // P1 — confirmed-create finalize must be ATOMIC + SYNCHRONOUS: clearing the
+  // marker and tracking the new id in one write, so a reload in the 150ms window
+  // can't resurrect the stale marker (→ reconcile → double-mint) OR lose the id.
+  it('finishCreate clears the marker AND tracks the id synchronously (P1)', async () => {
+    const { usePcaStore } = await loadFreshStore();
+    usePcaStore.getState().setCreatePending({ ownerEoa: '0xabc', submittedAt: 1, txHash: '0xdead' });
+
+    usePcaStore.getState().finishCreate('7'); // no timer advance
+
+    // localStorage flipped synchronously: marker null AND id tracked.
+    const persisted = JSON.parse(localStorage.getItem(PCA_KEY)!);
+    expect(persisted.createPending).toBeNull();
+    expect(persisted.trackedIds).toContain('7');
+    // In-memory matches.
+    expect(usePcaStore.getState().createPending).toBeNull();
+    expect(usePcaStore.getState().trackedIds).toContain('7');
+
+    // A subsequent reload resumes the FORM (no stale marker), with the id tracked.
+    const reloaded = await loadFreshStore();
+    expect(reloaded.usePcaStore.getState().createPending).toBeNull();
+    expect(reloaded.usePcaStore.getState().trackedIds).toContain('7');
+  });
 });

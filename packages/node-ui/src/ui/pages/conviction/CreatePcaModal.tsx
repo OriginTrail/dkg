@@ -58,7 +58,7 @@ export function CreatePcaModal({
   const ownerTracNum = ownerTrac != null ? Number(ownerTrac) : NaN;
 
   const owner = useOwnerActionSubmitter(); // owner-action seam (P0: daemon submitter)
-  const trackAccount = usePcaStore((s) => s.trackAccount);
+  const finishCreate = usePcaStore((s) => s.finishCreate);
   const setCreatePending = usePcaStore((s) => s.setCreatePending);
   const clearCreatePending = usePcaStore((s) => s.clearCreatePending);
   const createPending = usePcaStore.getState().createPending;
@@ -103,8 +103,9 @@ export function CreatePcaModal({
     if (ownerWallet) setCreatePending({ ownerEoa: ownerWallet, submittedAt: Date.now() });
     try {
       const res = await owner.create({ tokens: tokens.trim(), primaryNode: primaryNode.trim() });
-      trackAccount(res.accountId);
-      clearCreatePending();
+      // P1 — atomically clear the marker + track the id in one synchronous write so a
+      // reload in the debounce window can't resurrect the marker or lose the new id.
+      finishCreate(res.accountId);
       const snapshot = await fetchPca(res.accountId).catch(() => null);
       setResult({ ...res, snapshot });
       setPhase('success');
