@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useFetch } from '../../hooks.js';
 import { fetchWalletsBalances, fetchPca, describePcaError } from '../../api.js';
 import { formatEth, formatEthTooltip } from '../../lib/formatEth.js';
+import { usePcaStore } from '../../stores/pca.js';
 import { PcaModalShell } from './PcaModalShell.js';
 import {
   WalletRow,
@@ -9,7 +10,18 @@ import {
   useCopy,
   nativeGasSymbol,
   isTestnetChain,
+  healthForSnapshot,
 } from '../../components/Pca/index.js';
+
+// mirror usePublishEligibility cover predicate — shared extraction tracked in #1344
+function bigGt0(wei: string | undefined): boolean {
+  if (!wei) return false;
+  try {
+    return BigInt(wei) > 0n;
+  } catch {
+    return false;
+  }
+}
 
 // Testnet faucets for the native gas token (testnet-only CTA — §6.2). Only
 // chains we have a known faucet for render a button; others show the copy alone.
@@ -28,6 +40,12 @@ function faucetUrl(chainId: string | null | undefined): string | undefined {
 interface ProbeRow {
   wallet: string;
   registered: boolean | null;
+  /**
+   * N1 — registered AND the sponsor PCA is spendable (not expired/swept, has
+   * budget): only then does an approved wallet actually COVER the publish. A
+   * registered wallet on a dead PCA must not render "Ready" (#9 false coverage).
+   */
+  covers: boolean;
 }
 
 /**
@@ -44,6 +62,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
   const gasSymbol = nativeGasSymbol(chainId);
   const faucet = isTestnetChain(chainId) ? faucetUrl(chainId) : undefined;
 
+  const trackAccount = usePcaStore((s) => s.trackAccount);
   const { copied, copy } = useCopy();
   const [sponsorId, setSponsorId] = useState('');
   const [checking, setChecking] = useState(false);
@@ -65,8 +84,19 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
       const rows = await Promise.all(
         wallets.map((w) =>
           fetchPca(id, w)
-            .then((snap): ProbeRow => ({ wallet: w, registered: snap.probedKey?.registered ?? null }))
-            .catch((): ProbeRow => ({ wallet: w, registered: null })),
+            .then((snap): ProbeRow => {
+              const registered = snap.probedKey?.registered ?? null;
+              // N1: mirror S5's cover predicate so S6 "Ready" == S5 GREEN — a
+              // registered wallet only covers when the PCA is spendable.
+              const h = healthForSnapshot(snap);
+              const covers =
+                registered === true &&
+                h !== 'expired' &&
+                h !== 'swept' &&
+                (bigGt0(snap.topUpBuffer) || bigGt0(snap.baseEpochAllowance));
+              return { wallet: w, registered, covers };
+            })
+            .catch((): ProbeRow => ({ wallet: w, registered: null, covers: false })),
         ),
       );
       // L4: the per-wallet .catch swallows failures, so every-row-null means the
@@ -77,6 +107,10 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
         setProbed(null);
         return;
       }
+      // N2: persist the sponsor id once ≥1 wallet is approved so the overview/chip
+      // pick it up (NOT on the wholesale-failure path). Downstream re-probes the
+      // chain independently, so nothing trusts this S6 result — safe vs #9.
+      if (rows.some((r) => r.registered === true)) trackAccount(id);
       setProbed({ accountId: id, rows });
     } catch (err) {
       setProbeError(describePcaError(err, { accountId: id })?.message ?? 'Couldn’t check approval.');
@@ -86,7 +120,8 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
   };
 
   const approvedCount = probed?.rows.filter((r) => r.registered === true).length ?? 0;
-  const ready = !!probed && probed.rows.some((r) => r.registered === true && isFunded(r.wallet));
+  // N1: Ready requires actual COVERAGE (spendable PCA), not bare registration.
+  const ready = !!probed && probed.rows.some((r) => r.covers && isFunded(r.wallet));
 
   return (
     <PcaModalShell
@@ -191,8 +226,24 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
                 <WalletRow
                   key={r.wallet}
                   address={r.wallet}
-                  status={r.registered === true ? 'approved' : r.registered === false ? 'not approved — ask the sponsor to approve it' : 'unknown'}
-                  statusTone={r.registered === true ? 'success' : r.registered === false ? 'danger' : 'neutral'}
+                  status={
+                    r.registered === true
+                      ? r.covers
+                        ? 'approved'
+                        : 'approved, but the sponsor’s PCA is expired/swept/out of budget — publishes won’t get the discount'
+                      : r.registered === false
+                        ? 'not approved — ask the sponsor to approve it'
+                        : 'unknown'
+                  }
+                  statusTone={
+                    r.registered === true
+                      ? r.covers
+                        ? 'success'
+                        : 'warn'
+                      : r.registered === false
+                        ? 'danger'
+                        : 'neutral'
+                  }
                 />
               ))}
             </div>
