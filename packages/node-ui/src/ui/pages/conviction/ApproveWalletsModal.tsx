@@ -111,7 +111,11 @@ export function ApproveWalletsModal({
   const overCap = addresses.length > cap;
 
   const run = async () => {
-    if (addresses.length === 0 || overCap) return;
+    // U1 — do NOT hard-block on the raw count > cap: already-approved-here addresses
+    // consume NO slot (resolved per-row as 'skipped' after submit) and the FE can't
+    // know that pre-probe. Cap correctness stays via the per-row AgentCapReached
+    // handling (the shipped daemon/contract enforce it).
+    if (addresses.length === 0) return;
     stopRef.current = false;
     setRunning(true);
     setDone(false);
@@ -139,7 +143,15 @@ export function ApproveWalletsModal({
         }
         const info = describePcaError(err, { accountId });
         if (info?.code === 'AgentCapReached') {
-          setRows((r) => ({ ...r, [addr]: { address: addr, status: 'cap', message: info.message } }));
+          // U1 — mark the current row AND every NOT-YET-processed row 'cap' before the
+          // break, else the later rows would stay stuck on 'pending' ("approving…").
+          setRows((r) => {
+            const next: Record<string, Row> = { ...r, [addr]: { address: addr, status: 'cap', message: info.message } };
+            for (const a of addresses) {
+              if (next[a]?.status === 'pending') next[a] = { address: a, status: 'cap' };
+            }
+            return next;
+          });
           break;
         }
         if (info?.code === 'AgentAlreadyRegistered') {
@@ -269,9 +281,11 @@ export function ApproveWalletsModal({
         )}
 
         {overCap && (
-          <div className="v10-modal-warning" role="alert">
-            ⚠ {addresses.length} wallets exceeds the {cap} remaining slots on this account. Remove some
-            or deregister existing wallets first.
+          // U1 — SOFT heads-up, not a command to remove: some of these may already be
+          // approved here (no slot consumed), so we don't know the real overage pre-probe.
+          <div className="v10-modal-warning" role="status">
+            ⚠ Up to {cap} of these can be approved. Any already approved here are skipped (no slot
+            used); any genuinely beyond the {cap}-slot cap are marked “cap reached”.
           </div>
         )}
 
@@ -336,7 +350,7 @@ export function ApproveWalletsModal({
             className="v10-modal-btn primary"
             data-testid="pca-approve-submit"
             onClick={run}
-            disabled={addresses.length === 0 || overCap}
+            disabled={addresses.length === 0}
           >
             Approve {addresses.length} wallet{addresses.length === 1 ? '' : 's'}
           </button>

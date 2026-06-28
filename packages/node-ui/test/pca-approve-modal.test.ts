@@ -220,4 +220,59 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     expect(statusOf(container, ADDR_A).getAttribute('data-tone')).toBe('neutral');
     await unmount();
   });
+
+  // U1 — the raw count > cap must NOT hard-block submit: already-approved-here
+  // addresses consume no slot and the FE can't know that pre-probe.
+  it('U1 — a near-cap paste with an already-approved address is NOT blocked', async () => {
+    // cap = 100 - 99 = 1; paste [already-approved, new] (count 2) must stay submittable.
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) => {
+      const base = { ...snap(), agentCount: 99 };
+      return key ? { ...base, probedKey: { key, registered: key.toLowerCase() === ADDR_A.toLowerCase() } } : base;
+    });
+    mocks.pcaAddAgent.mockImplementation(async (id: string, addr: string) => {
+      if (addr === ADDR_A) throw new HttpError(409, 'AgentAlreadyRegistered', { error: 'AgentAlreadyRegistered' });
+      return { accountId: id, agent: addr, registered: true, adapterSupported: true };
+    });
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, { accountId: '7', initialMode: 'sponsor', onClose: vi.fn() }),
+    );
+    await waitForText(container, 'Wallet address(es)');
+    setTextarea(container.querySelector('[data-testid="pca-approve-address"]') as HTMLTextAreaElement, [ADDR_A, ADDR_B].join('\n'));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const submit = container.querySelector('[data-testid="pca-approve-submit"]') as HTMLButtonElement;
+    expect(submit.disabled).toBe(false); // NOT hard-blocked despite count(2) > cap(1)
+    await click(submit);
+    await waitForText(container, 'approved');
+    expect(statusOf(container, ADDR_A).textContent?.toLowerCase()).toContain('skipped'); // no slot used
+    expect(statusOf(container, ADDR_B).textContent).toContain('approved');
+    await unmount();
+  });
+
+  // U1 — on AgentCapReached the loop breaks; the remaining rows must be marked 'cap',
+  // never left stuck on 'pending' ("approving…").
+  it('U1 — over-cap all-new: first approved, the rest "cap reached" (no stuck pending)', async () => {
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) => {
+      const base = { ...snap(), agentCount: 99 };
+      return key ? { ...base, probedKey: { key, registered: false } } : base;
+    });
+    mocks.pcaAddAgent.mockImplementation(async (id: string, addr: string) => {
+      if (addr === ADDR_A) return { accountId: id, agent: addr, registered: true, adapterSupported: true };
+      throw new HttpError(400, 'AgentCapReached', { error: 'AgentCapReached' });
+    });
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, { accountId: '7', initialMode: 'sponsor', onClose: vi.fn() }),
+    );
+    await waitForText(container, 'Wallet address(es)');
+    setTextarea(container.querySelector('[data-testid="pca-approve-address"]') as HTMLTextAreaElement, [ADDR_A, ADDR_B, ADDR_C].join('\n'));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, 'cap reached');
+    expect(statusOf(container, ADDR_A).textContent).toContain('approved');
+    expect(statusOf(container, ADDR_B).textContent).toContain('cap reached');
+    // ADDR_C was never attempted (loop broke) but must NOT be stuck on "approving…".
+    expect(statusOf(container, ADDR_C).textContent).toContain('cap reached');
+    expect(container.textContent).not.toContain('approving…');
+    expect(mocks.pcaAddAgent).toHaveBeenCalledTimes(2); // A + B, then break
+    await unmount();
+  });
 });
