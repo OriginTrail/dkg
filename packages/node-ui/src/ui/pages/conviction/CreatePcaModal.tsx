@@ -37,10 +37,13 @@ export function CreatePcaModal({
   onClose,
   onApproveOwnWallets,
   onManage,
+  onGetSponsored,
 }: {
   onClose: () => void;
   onApproveOwnWallets: (accountId: string) => void;
   onManage: (accountId: string) => void;
+  /** Routes the gated (edge / no-identity) state to S6 Get-sponsored. */
+  onGetSponsored: () => void;
 }) {
   const nodeStatus = useAgentsStore((s) => s.nodeStatus) as
     | { nodeRole?: string; hasIdentity?: boolean; identityId?: string; blockExplorerUrl?: string | null }
@@ -130,7 +133,7 @@ export function CreatePcaModal({
   // ----- Gated (edge / no staked identity) -----
   if (gated) {
     return (
-      <PcaModalShell onClose={onClose} testId="pca-create-modal" title="Create a Publishing Conviction Account">
+      <PcaModalShell onClose={onClose} testId="pca-create-modal" title="Create needs a staked core-node identity">
         <div className="v10-modal-body">
           <div className="v10-modal-warning">
             Creating a Publishing Conviction Account requires a staked core-node identity to set as its
@@ -141,6 +144,14 @@ export function CreatePcaModal({
         </div>
         <div className="v10-modal-footer">
           <button type="button" className="v10-modal-btn" onClick={onClose}>Close</button>
+          <button
+            type="button"
+            className="v10-modal-btn primary"
+            data-testid="pca-gated-get-sponsored"
+            onClick={onGetSponsored}
+          >
+            Get sponsored →
+          </button>
         </div>
       </PcaModalShell>
     );

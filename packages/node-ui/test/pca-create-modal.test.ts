@@ -85,13 +85,22 @@ beforeEach(() => {
 afterEach(() => { document.body.innerHTML = ''; });
 
 describe('CreatePcaModal', () => {
-  it('gates edge / no-identity nodes with the get-sponsored explainer (no form)', async () => {
+  it('gates edge / no-identity nodes: reason-titled, no form, + a Get-sponsored CTA → S6', async () => {
     useAgentsStore.getState().setNodeStatus({ nodeRole: 'edge', hasIdentity: false });
+    const onGetSponsored = vi.fn();
     const { container, unmount } = await render(
-      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn() }),
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored }),
     );
     await waitForText(container, 'requires a staked core-node identity');
+    // #4 — titled with the reason, not the generic "Create a PCA".
+    expect(container.querySelector('#pca-modal-title')?.textContent).toContain('staked core-node identity');
+    // #1 — zero wizard fields in the gated state.
     expect(container.querySelector('[data-testid="pca-create-tokens"]')).toBeNull();
+    // #2 — a primary Get-sponsored CTA routes to S6.
+    const cta = container.querySelector('[data-testid="pca-gated-get-sponsored"]')!;
+    expect(cta).toBeTruthy();
+    await act(async () => { cta.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(onGetSponsored).toHaveBeenCalled();
     await unmount();
   });
 
@@ -126,7 +135,7 @@ describe('CreatePcaModal', () => {
   it('enters reconcile-before-retry on a 504 TIMEOUT and persists the create-pending marker', async () => {
     mocks.createPca.mockRejectedValue(new HttpError(504, 'TIMEOUT', { code: 'TIMEOUT', txHash: '0xdead' }));
     const { container, unmount } = await render(
-      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn() }),
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
     );
     await waitForText(container, 'Commit amount (TRAC)');
     setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
@@ -148,7 +157,7 @@ describe('CreatePcaModal', () => {
   it('fails toward reconcile on a non-HttpError NETWORK drop after submit (may have broadcast)', async () => {
     mocks.createPca.mockRejectedValue(new Error('Failed to fetch'));
     const { container, unmount } = await render(
-      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn() }),
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
     );
     await waitForText(container, 'Commit amount (TRAC)');
     setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
@@ -164,7 +173,7 @@ describe('CreatePcaModal', () => {
   it('fails toward reconcile on a 500 after submit', async () => {
     mocks.createPca.mockRejectedValue(new HttpError(500, 'x', { error: 'createPublishingConvictionAccount failed: boom' }));
     const { container, unmount } = await render(
-      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn() }),
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
     );
     await waitForText(container, 'Commit amount (TRAC)');
     setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
@@ -179,7 +188,7 @@ describe('CreatePcaModal', () => {
   it('clears the marker and returns to the form on a 400 (definitely pre-broadcast)', async () => {
     mocks.createPca.mockRejectedValue(new HttpError(400, 'InvalidAmount', { error: 'InvalidAmount' }));
     const { container, unmount } = await render(
-      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn() }),
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
     );
     await waitForText(container, 'Commit amount (TRAC)');
     setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
@@ -196,7 +205,7 @@ describe('CreatePcaModal', () => {
   it('resumes the reconcile guard when opened with an existing create-pending marker', async () => {
     usePcaStore.setState({ trackedIds: [], createPending: { ownerEoa: OWNER, submittedAt: 1, txHash: '0xbeef' } });
     const { container, unmount } = await render(
-      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn() }),
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
     );
     await waitForText(container, 'Confirm before retrying');
     expect(container.textContent).toContain('0xbeef');
