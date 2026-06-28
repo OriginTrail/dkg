@@ -161,6 +161,7 @@ export function ConvictionOverview() {
           onClose={() => { setCreateOpen(false); refresh(); }}
           onApproveOwnWallets={(id) => { setCreateOpen(false); setApprove({ accountId: id, mode: 'self' }); }}
           onManage={(id) => { setCreateOpen(false); onManage(id); }}
+          onGetSponsored={() => { setCreateOpen(false); setSponsoredOpen(true); }}
         />
       )}
       {approve && (
