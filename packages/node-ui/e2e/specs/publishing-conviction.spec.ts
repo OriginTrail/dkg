@@ -145,20 +145,31 @@ test.describe('Publishing Conviction tab (PCA) — P0', () => {
     await expect(conviction.agentRows.first()).toBeVisible({ timeout: 120_000 }); // B3 live list
   });
 
-  // ── S5 eligibility / fail-open-can-fail-closed (read-only; a11y) — Batch E ──
+  // ── S5 publish-eligibility chip + preflight (Batch E) — capstone / CI @mutating ──
+  // The chip (pca-publish-eligibility) lives on a PROJECT's SWM→VM publish CTA
+  // (layer-widgets), and renders ONLY when ≥1 PCA is tracked — so it needs a
+  // CG/project with SWM content + a created/tracked PCA. NOT reachable on a fresh
+  // core read-only; exercised at the testnet capstone (and on the seeded CI
+  // devnet). The chip's tri-state verdict logic is unit-covered (Frontend, 101
+  // PCA cases). Bodies below are capstone stubs (navigate to the layer view first).
 
-  test.fixme('S5 a11y: amber/danger verdict is an assertive live region (role=alert)', async ({ conviction }) => {
+  test.fixme('S5 a11y @mutating: danger verdict (unapproved, no-TRAC signer) is role=alert', async ({ conviction }) => {
     // INVARIANT 6: fail-open is graceful ONLY if the signing wallet can pay full
-    // price in TRAC; otherwise the fall-through HARD-REVERTS. Amber ("will pay
-    // direct cost") vs danger ("this publish will FAIL") — never a false green.
-    await conviction.open();
-    await expect(conviction.eligibilityVerdict.first()).toBeVisible();
+    // price in TRAC; else the fall-through HARD-REVERTS. approved+funded → GREEN
+    // "Funded by PCA #N (−Y%)"; unapproved+has-TRAC → AMBER "will pay direct
+    // cost"; unapproved+no-TRAC → DANGER "Publish will fail" (role=alert).
+    await expect(conviction.publishEligibility.first()).toBeVisible();
     expect(await conviction.verdictRole()).toBe('alert');
   });
 
-  test.fixme('INVARIANT 9: pre-B8 discount is PREDICTED ("pending confirmation"), never asserted', async ({ conviction }) => {
-    await conviction.open();
+  test.fixme('S5 @mutating INVARIANT 9: pre-B8 the discount is PREDICTED ("pending confirmation")', async ({ conviction }) => {
     await expect(conviction.eligibilityChip.first()).toContainText(/pending confirmation/i);
+  });
+
+  test.fixme('predictive bell @mutating: a 0-approved PCA surfaces "discounts nothing yet" (fall-through)', async ({ conviction }) => {
+    // Own a PCA with 0 approved wallets → the NotificationsPane "Publishing
+    // conviction" section shows a fall-through alert (Manage deep-link).
+    await expect(conviction.bellAlert.first()).toBeVisible();
   });
 
   // ── B8 confirmed discount badge (P2; degrade-to-hidden) ────────────────────

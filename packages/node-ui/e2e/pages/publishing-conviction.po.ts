@@ -43,10 +43,13 @@ export class PublishingConvictionPage {
   readonly approveModal: Locator;
   readonly approveAddressInput: Locator;
   readonly approveSubmit: Locator;
+  readonly publishEligibility: Locator;
   readonly eligibilityVerdict: Locator;
   readonly eligibilityChip: Locator;
+  readonly verdictWhy: Locator;
   readonly discountBadge: Locator;
   readonly getSponsoredPanel: Locator;
+  readonly bellAlert: Locator;
 
   constructor(page: Page) {
     this.page = page;
@@ -75,10 +78,13 @@ export class PublishingConvictionPage {
     this.approveModal = page.locator(sel.conviction.approveModal);
     this.approveAddressInput = page.locator(sel.conviction.approveAddressInput);
     this.approveSubmit = page.locator(sel.conviction.approveSubmit);
+    this.publishEligibility = page.locator(sel.conviction.publishEligibility);
     this.eligibilityVerdict = page.locator(sel.conviction.eligibilityVerdict);
     this.eligibilityChip = page.locator(sel.conviction.eligibilityChip);
+    this.verdictWhy = page.locator(sel.conviction.verdictWhy);
     this.discountBadge = page.locator(sel.conviction.discountBadge);
     this.getSponsoredPanel = page.locator(sel.conviction.getSponsoredPanel);
+    this.bellAlert = page.locator(sel.conviction.bellAlert);
   }
 
   /** Open the PCA tab from the header and wait for it to mount. */

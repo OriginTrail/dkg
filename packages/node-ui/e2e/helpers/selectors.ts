@@ -321,11 +321,17 @@ export const sel = {
     approveModal: '[data-testid="pca-approve-modal"]',      // ApproveWalletsModal
     approveAddressInput: '[data-testid="pca-approve-address"]',
     approveSubmit: '[data-testid="pca-approve-submit"]',
-    // S5 eligibility (predictive in P0; confirmed B8 in P2)
-    eligibilityVerdict: '[data-testid="pca-eligibility-verdict"]', // EligibilityVerdictBanner (role=alert on amber)
-    eligibilityChip: '[data-testid="pca-eligibility-chip"]',       // condensed chip on the publish CTA (layer-widgets.tsx)
+    // S5 eligibility (predictive in P0; confirmed B8 in P2). The chip renders
+    // ONLY in a project's SWM/VM layer view (publish CTA) AND only when ≥1 PCA
+    // is tracked → reachable at the capstone/CI-devnet, not a fresh core.
+    publishEligibility: '[data-testid="pca-publish-eligibility"]',  // chip wrapper on the SWM→VM publish CTA (layer-widgets)
+    eligibilityVerdict: '[data-testid="pca-eligibility-verdict"]', // EligibilityVerdictBanner (role=alert on amber/danger)
+    eligibilityChip: '[data-testid="pca-eligibility-chip"]',       // condensed chip label/popover
+    verdictWhy: '.v10-pca-verdict-why',                            // "why?" → preflight popover (no testid yet)
     discountBadge: '[data-testid="pca-discount-badge"]',           // DiscountAppliedBadge (B8; degrade-to-hidden)
     // S6 edge onboarding
     getSponsoredPanel: '[data-testid="pca-get-sponsored"]',        // GetSponsoredPanel / SponsorshipHandshake
+    // Predictive bell (NotificationsPane "Publishing conviction" section)
+    bellAlert: '[data-testid="pca-bell-alert"]',
   },
 } as const;
