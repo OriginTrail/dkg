@@ -7,6 +7,7 @@ import {
 } from '../api.js';
 import { usePcaStore } from '../stores/pca.js';
 import { healthForSnapshot, type PcaHealthState } from '../components/Pca/HealthChip.js';
+import { bigGt0 } from '../pca/coverage.js';
 
 /** Per-(node wallet) registration probe against one account. `null` = couldn't determine. */
 export interface PcaWalletProbe {
@@ -266,6 +267,10 @@ export function usePcaOverview(intervalMs = 30_000): PcaOverview {
     for (const a of accounts) {
       if (!a.snapshot || a.approvedCount <= 0) continue;
       if (a.health === 'expired' || a.health === 'swept') continue;
+      // U2 — exclude a zero-budget PCA so the dashboard/settings don't advertise a
+      // discount S5 treats as not-covering. Matches usePublishEligibility's coarse
+      // proxy (NOT remainingAllowance — that's P2/#1349); full consolidation #1344.
+      if (!(bigGt0(a.snapshot.topUpBuffer) || bigGt0(a.snapshot.baseEpochAllowance))) continue;
       const bps = a.snapshot.discountBps;
       if (typeof bps === 'number' && (best == null || bps > best)) best = bps;
     }
