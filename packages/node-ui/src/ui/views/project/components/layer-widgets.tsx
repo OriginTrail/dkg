@@ -1,10 +1,11 @@
-import React, { useMemo, useState, useCallback, useEffect } from 'react';
+import React, { useId, useMemo, useState, useCallback, useEffect } from 'react';
 import type { ReactNode } from 'react';
 import { listAssertions, promoteAssertion, describePromoteError, knowledgeAssetFinalize, publishAssertionsToVm, partialPublishWarning } from '../../../api.js';
 import type { MemoryEntity } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { LAYER_CONFIG, entityMeta, layerNoun } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
+import { PublishEligibilityChip } from '../../../pages/conviction/PublishEligibilityChip.js';
 
 // ─── Generative Widget Components ─────────────────────────────
 
@@ -114,6 +115,9 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const isWm = layer === 'wm';
+  // S5 — the PCA eligibility verdict the publish button is aria-describedby'd to,
+  // so a screen-reader user activating Publish hears the direct-cost/fail state.
+  const verdictId = useId();
   // Mirror the outcome up to the strip; it persists past this widget's unmount.
   useEffect(() => {
     if (result) onResult?.({ ok: true, text: result });
@@ -209,6 +213,8 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
       </div>
       {result && <div data-testid="layer-action-result" style={{ fontSize: 11, color: 'var(--text-success)', marginBottom: 8 }}>✓ {result}</div>}
       {error && <div data-testid="layer-action-result" style={{ fontSize: 11, color: 'var(--text-danger)', marginBottom: 8 }}>✕ {error}</div>}
+      {/* S5 — PCA fall-through guard at the moment of spend (VM publish only). */}
+      {!isWm && <PublishEligibilityChip contextGraphId={contextGraphId} id={verdictId} />}
       <div className="v10-decision-actions">
         <button
           data-testid={isWm ? 'widget-promote-all-btn' : 'widget-publish-vm-btn'}
@@ -217,6 +223,7 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
             ? { borderColor: `${color}50`, color: 'var(--text-warning)', background: `${color}15`, opacity: busy ? 0.5 : 1 }
             : { opacity: busy ? 0.5 : 1 }}
           disabled={busy}
+          aria-describedby={!isWm ? verdictId : undefined}
           onClick={handleAction}
         >
           {busy ? '...' : (isWm ? '✓ Promote All → Shared' : '◉ Publish to Verifiable Memory')}

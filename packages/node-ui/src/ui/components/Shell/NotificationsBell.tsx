@@ -18,6 +18,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useProjectsStore } from '../../stores/projects.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useNotificationsFeed } from '../../hooks/useNotificationsFeed.js';
+import { usePcaAlerts } from '../../hooks/usePcaAlerts.js';
 import { NotificationsPane } from '../Notifications/NotificationsPane.js';
 
 const BELL_ICON = (
@@ -31,6 +32,7 @@ const PANE_ID = 'v10-notifications-pane';
 
 export function NotificationsBell() {
   const feed = useNotificationsFeed();
+  const pcaAlerts = usePcaAlerts();
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const bellRef = useRef<HTMLButtonElement>(null);
@@ -87,7 +89,14 @@ export function NotificationsBell() {
     close();
   }, [setActiveProject, openTab, close]);
 
-  const unread = feed.unread;
+  const onOpenPca = useCallback((accountId: string) => {
+    openTab({ id: `conviction:${accountId}`, label: `PCA #${accountId}`, closable: true });
+    close();
+  }, [openTab, close]);
+
+  // Fold the client-derived predictive PCA alerts into the unread count so the
+  // fall-through/expiry warnings are ambient even with an empty server feed.
+  const unread = feed.unread + pcaAlerts.length;
 
   return (
     <div
@@ -123,6 +132,8 @@ export function NotificationsBell() {
           paneRef={paneRef}
           feed={feed}
           onOpenContextGraph={onOpenContextGraph}
+          pcaAlerts={pcaAlerts}
+          onOpenPca={onOpenPca}
         />
       )}
     </div>
