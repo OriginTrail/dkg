@@ -166,6 +166,11 @@
   border-color: rgba(245, 158, 11, 0.3);
 }
 .v10-pca-verdict-amber .v10-pca-verdict-glyph { color: var(--text-warning); }
+.v10-pca-verdict-danger {
+  background: var(--red-dim);
+  border-color: rgba(239, 68, 68, 0.35);
+}
+.v10-pca-verdict-danger .v10-pca-verdict-glyph { color: var(--text-danger); }
 .v10-pca-verdict-neutral {
   background: var(--bg-elevated);
   border-color: var(--border-default);
@@ -191,6 +196,10 @@
 .v10-pca-verdict-chip.v10-pca-verdict-amber {
   color: var(--text-warning);
   border-color: rgba(245, 158, 11, 0.3);
+}
+.v10-pca-verdict-chip.v10-pca-verdict-danger {
+  color: var(--text-danger);
+  border-color: rgba(239, 68, 68, 0.35);
 }
 .v10-pca-verdict-chip.v10-pca-verdict-neutral {
   color: var(--text-secondary);

@@ -288,6 +288,56 @@ describe('EligibilityVerdictBanner', () => {
     await sponsored.unmount();
   });
 
+  it('danger banner (#6 no-TRAC fall-through) says the publish will FAIL and is role=alert', async () => {
+    const { container, unmount } = await render(
+      React.createElement(EligibilityVerdictBanner, {
+        verdict: 'fallthrough-no-funds',
+        reasons: ['no approved wallet'],
+      }),
+    );
+    const banner = container.querySelector('.v10-pca-verdict-banner')!;
+    expect(banner.classList.contains('v10-pca-verdict-danger')).toBe(true);
+    expect(banner.getAttribute('role')).toBe('alert');
+    expect(banner.getAttribute('aria-live')).toBe('assertive');
+    expect(banner.textContent).toContain('will FAIL');
+    expect(banner.textContent).toContain('no TRAC');
+    expect(banner.textContent).toContain('no approved wallet');
+    await unmount();
+  });
+
+  it('danger banner adds the escrow caveat only on owner-publishes', async () => {
+    const owner = await render(
+      React.createElement(EligibilityVerdictBanner, {
+        verdict: 'fallthrough-no-funds',
+        ownerPublish: true,
+      }),
+    );
+    expect(owner.container.querySelector('.v10-pca-verdict-banner')?.textContent).toContain('escrow');
+    await owner.unmount();
+
+    const sponsored = await render(
+      React.createElement(EligibilityVerdictBanner, { verdict: 'fallthrough-no-funds' }),
+    );
+    expect(
+      sponsored.container.querySelector('.v10-pca-verdict-banner')?.textContent,
+    ).not.toContain('escrow');
+    await sponsored.unmount();
+  });
+
+  it('danger chip reads "Publish will fail" and is role=alert', async () => {
+    const { container, unmount } = await render(
+      React.createElement(EligibilityVerdictBanner, {
+        verdict: 'fallthrough-no-funds',
+        variant: 'chip',
+      }),
+    );
+    const label = container.querySelector('.v10-pca-verdict-chip-label')!;
+    expect(label.getAttribute('role')).toBe('alert');
+    expect(label.textContent).toContain('Publish will fail');
+    expect(container.querySelector('.v10-pca-verdict-chip')?.classList.contains('v10-pca-verdict-danger')).toBe(true);
+    await unmount();
+  });
+
   it('neutral banner reads "couldn\'t confirm" and never renders as green', async () => {
     const { container, unmount } = await render(
       React.createElement(EligibilityVerdictBanner, { verdict: 'unknown' }),
