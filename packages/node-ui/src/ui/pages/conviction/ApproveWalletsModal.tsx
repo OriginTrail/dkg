@@ -16,7 +16,7 @@ import {
   type WalletRowTone,
 } from '../../components/Pca/index.js';
 
-type RowStatus = 'pending' | 'approved' | 'submitted' | 'skipped' | 'conflict' | 'cap' | 'error';
+type RowStatus = 'pending' | 'approved' | 'submitted' | 'skipped' | 'conflict' | 'cap' | 'error' | 'unverified';
 interface Row {
   address: string;
   status: RowStatus;
@@ -34,6 +34,9 @@ const ROW_LABEL: Record<RowStatus, string> = {
   conflict: 'on another conviction account',
   cap: 'cap reached',
   error: 'failed',
+  // N5/#9 — couldn't confirm whether the AgentAlreadyRegistered is on THIS account
+  // (transient probe failure or adapter capability gap). Neutral, not a false conflict.
+  unverified: 'already approved somewhere — couldn’t verify; retry',
 };
 const ROW_TONE: Record<RowStatus, WalletRowTone> = {
   pending: 'neutral',
@@ -43,6 +46,7 @@ const ROW_TONE: Record<RowStatus, WalletRowTone> = {
   conflict: 'danger',
   cap: 'warn',
   error: 'danger',
+  unverified: 'neutral',
 };
 
 /**
@@ -138,16 +142,25 @@ export function ApproveWalletsModal({
           break;
         }
         if (info?.code === 'AgentAlreadyRegistered') {
-          // Resolve the ambiguity: is it already approved HERE, or bound elsewhere?
+          // Resolve the ambiguity: already approved HERE, bound ELSEWHERE, or
+          // UNVERIFIABLE? N5/#9 — only assert a cross-account CONFLICT (danger,
+          // "deregister there first") when the probe POSITIVELY says not-registered
+          // -here with a working adapter. A transient probe failure (null) or a
+          // capability gap (adapterSupported===false) is "couldn't verify" — neutral,
+          // never a false DANGER pointing at the wrong fix. (A real conflict is still
+          // NEVER downgraded to a benign skip.)
           const probe = await fetchPca(accountId, addr).catch(() => null);
-          if (probe?.probedKey?.registered) {
+          const pk = probe?.probedKey;
+          if (pk?.registered === true) {
             setRows((r) => ({
               ...r,
               [addr]: { address: addr, status: 'skipped', message: 'Already an approved publishing wallet here.' },
             }));
-          } else {
+          } else if (pk?.registered === false && pk.adapterSupported !== false) {
             // Cross-account conflict — NEVER a benign skip.
             setRows((r) => ({ ...r, [addr]: { address: addr, status: 'conflict', message: info.message } }));
+          } else {
+            setRows((r) => ({ ...r, [addr]: { address: addr, status: 'unverified' } }));
           }
         } else {
           setRows((r) => ({
@@ -165,10 +178,14 @@ export function ApproveWalletsModal({
   const counts = useMemo(() => {
     const list = order.map((a) => rows[a]).filter(Boolean);
     return {
-      approved: list.filter((r) => r.status === 'approved' || r.status === 'submitted').length,
+      // #9 — confirmed (chain re-read) vs submitted (verify) kept separate so the
+      // roll-up never overstates on-chain confirmation.
+      confirmed: list.filter((r) => r.status === 'approved').length,
+      submitted: list.filter((r) => r.status === 'submitted').length,
       skipped: list.filter((r) => r.status === 'skipped').length,
       conflict: list.filter((r) => r.status === 'conflict').length,
       error: list.filter((r) => r.status === 'error' || r.status === 'cap').length,
+      unverified: list.filter((r) => r.status === 'unverified').length,
     };
   }, [order, rows]);
 
@@ -278,8 +295,11 @@ export function ApproveWalletsModal({
             })}
             {done && (
               <p className="v10-pca-approve-summary">
-                Approved {counts.approved} · {counts.skipped} already here · {counts.conflict} conflict
-                {counts.error > 0 ? ` · ${counts.error} failed` : ''} (of {order.length}).
+                Approved {counts.confirmed} confirmed
+                {counts.submitted > 0 ? ` · ${counts.submitted} submitted (verify)` : ''}
+                {' '}· {counts.skipped} already here · {counts.conflict} conflict
+                {counts.error > 0 ? ` · ${counts.error} failed` : ''}
+                {counts.unverified > 0 ? ` · ${counts.unverified} unverified` : ''} (of {order.length}).
               </p>
             )}
           </div>
