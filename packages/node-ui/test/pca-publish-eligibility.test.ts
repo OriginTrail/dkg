@@ -241,6 +241,32 @@ describe('PublishEligibilityChip (S5)', () => {
     await unmount();
   });
 
+  // O4/#9 — the balances route returns {balances:[], error} at HTTP 200, so the
+  // wb=null guard misses it and gas/TRAC read false from UNREAD data. Must resolve
+  // NEUTRAL, never a DANGER from balances we couldn't read.
+  it('O4 — resolves NEUTRAL (unknown), not DANGER, when balances are UNREAD (HTTP-200 error)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], error: 'RPC timeout', chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...makePcaSnapshot(), probedKey: { key, registered: false } } : makePcaSnapshot(),
+    );
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'PCA status unknown');
+    expect(container.textContent).not.toContain('Publish will fail');
+    expect(container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeNull();
+    expect(container.querySelector('[data-verdict="unknown"]')).toBeTruthy();
+    await unmount();
+  });
+
+  it('O4 — a covering PCA stays GREEN even when balances are unread', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], error: 'RPC timeout', chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...makePcaSnapshot(), probedKey: { key, registered: true } } : makePcaSnapshot(),
+    );
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'Funded by PCA #7'); // coverage-driven GREEN is unaffected
+    await unmount();
+  });
+
   it('AMBER when a fall-through wallet HAS TRAC (pays the direct cost)', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('50')); // has TRAC
     mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>

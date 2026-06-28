@@ -27,6 +27,13 @@ interface WalletDetail {
    * neutral ("unknown"), never DANGER, at spend time. Only set when uncovered.
    */
   inconclusive: boolean;
+  /**
+   * O4/#9 — the wallet's funding is UNREADABLE: the balances route errored (the
+   * daemon returns {balances:[], error} at HTTP 200, so the wb=null guard misses
+   * it). gasFunded/hasTrac then read false from UNREAD data — must never drive a
+   * no-funds DANGER. Treated like `inconclusive` in the verdict. Only set when uncovered.
+   */
+  balanceUnknown: boolean;
   gasFunded: boolean;
   hasTrac: boolean;
   sawExpired: boolean;
@@ -100,6 +107,9 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
       const details: WalletDetail[] = await Promise.all(
         wallets.map(async (w) => {
           const bal = wb?.balances?.find((b) => eq(b.address, w));
+          // O4 — balances is all-or-nothing: the daemon returns a full per-wallet
+          // list or [] (+ error) at HTTP 200. A missing entry = UNREAD funding.
+          const balanceUnknown = bal == null;
           const gasFunded = bal != null && Number(bal.eth) > 0;
           const hasTrac = bal != null && Number(bal.trac) > 0;
           let cover: { accountId: string; discountBps: number } | undefined;
@@ -144,6 +154,7 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
             discountBps: cover?.discountBps,
             deadAccountId: cover ? undefined : deadAccountId,
             inconclusive: !cover && probeError,
+            balanceUnknown: !cover && balanceUnknown,
             gasFunded,
             hasTrac,
             sawExpired,
@@ -175,11 +186,11 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
 
     const covered = wallets.filter((w) => w.covered);
     const uncovered = wallets.filter((w) => !w.covered);
-    // C1/#9 — drive amber/danger off CONFIRMED uncovered only; a wallet that's
-    // uncovered merely because its probe failed is inconclusive, never a definitive
-    // fall-through.
-    const confirmedUncovered = uncovered.filter((w) => !w.inconclusive);
-    const inconclusive = uncovered.filter((w) => w.inconclusive);
+    // C1/O4/#9 — drive amber/danger off CONFIRMED uncovered only; a wallet that's
+    // uncovered merely because its coverage probe failed (inconclusive) OR whose
+    // balance was unreadable (balanceUnknown) is not a definitive fall-through.
+    const confirmedUncovered = uncovered.filter((w) => !w.inconclusive && !w.balanceUnknown);
+    const inconclusive = uncovered.filter((w) => w.inconclusive || w.balanceUnknown);
     const conditions = {
       approved: uncovered.length === 0,
       gasFunded: wallets.every((w) => w.gasFunded),
@@ -208,7 +219,8 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
       if (wallets.some((w) => w.sawExpired)) reasons.push('a conviction account has expired or been fully swept');
       if (wallets.some((w) => w.sawInsolvent)) reasons.push('a conviction account is out of budget');
       if (!conditions.gasFunded) reasons.push('a signing wallet has no gas');
-      if (inconclusive.length > 0) reasons.push('a wallet’s PCA coverage couldn’t be checked');
+      if (uncovered.some((w) => w.inconclusive)) reasons.push('a wallet’s PCA coverage couldn’t be checked');
+      if (uncovered.some((w) => w.balanceUnknown)) reasons.push('a signing wallet’s balance couldn’t be checked');
     }
 
     // L1: the GREEN chip should advertise the BEST covering discount (wallets may
