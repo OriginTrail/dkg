@@ -1562,8 +1562,14 @@ export interface PcaProbedKey {
  * (`pca.ts:138`). Wei amounts are decimal strings (`committedTRAC`); the
  * matching `*Trac` fields are pre-formatted ether strings. Epoch indices and
  * timestamps are numbers; `*Timestamp` are unix SECONDS (multiply by 1000 for
- * a JS `Date`). There is intentionally NO `primaryNode` / `remainingAllowance`
- * (GAP-4/5 — not yet serialized).
+ * a JS `Date`).
+ *
+ * The EXTENDED group (`primaryNode`, `lastPrimaryNodeChangeEpoch`,
+ * `remainingAllowance`(+Trac), `currentEpoch`) is GAP-4/5, only serialized when
+ * the GET route is called with `{ extended: true }` (P2 — the S3 budget
+ * widget). The default non-extended snapshot (all of P0's S1/S5 polling) leaves
+ * them `undefined`, so they're typed optional now to keep the api.ts signature
+ * stable when P2 lands.
  */
 export interface PcaSnapshot {
   accountId: string;
@@ -1582,6 +1588,17 @@ export interface PcaSnapshot {
   lastSettledWindow: number;
   fullySwept: boolean;
   probedKey?: PcaProbedKey;
+  // --- Extended (P2 / `?extended=1` only — undefined in P0) ---
+  /** The node identityId this PCA directs publishing-reward weight to (uint72 string). */
+  primaryNode?: string;
+  /** Epoch index of the last `setPrimaryNode` change. */
+  lastPrimaryNodeChangeEpoch?: number;
+  /** Spendable allowance remaining in the current epoch (wei string). */
+  remainingAllowance?: string;
+  /** Pre-formatted ether form of `remainingAllowance`. */
+  remainingAllowanceTrac?: string;
+  /** The current protocol epoch index (resolves the lock-period readout). */
+  currentEpoch?: number;
 }
 
 export interface CreatePcaResult {
@@ -1627,11 +1644,23 @@ export interface PcaSettleResult {
  * GET a PCA snapshot. Pass `key` (an operational wallet address) to additionally
  * probe whether that wallet is an approved publishing wallet on the account
  * (the result lands on `snapshot.probedKey`). `GET` is permissionless.
+ *
+ * `opts.extended` (`?extended=1`) requests the GAP-4/5 extended fields
+ * (primaryNode / remainingAllowance / currentEpoch). It is a P2 concern (the S3
+ * budget widget) — P0's S1/S5 polling loops NEVER set it, to avoid read
+ * amplification.
  */
-export const fetchPca = (accountId: string, key?: string) =>
-  get<PcaSnapshot>(
-    `/api/pca/${encodeURIComponent(accountId)}${key ? `?key=${encodeURIComponent(key)}` : ''}`,
-  );
+export const fetchPca = (
+  accountId: string,
+  key?: string,
+  opts?: { extended?: boolean },
+) => {
+  const params = new URLSearchParams();
+  if (key) params.set('key', key);
+  if (opts?.extended) params.set('extended', '1');
+  const qs = params.toString();
+  return get<PcaSnapshot>(`/api/pca/${encodeURIComponent(accountId)}${qs ? `?${qs}` : ''}`);
+};
 
 /** Create a PCA (commit TRAC for a publishing discount). Owner = the daemon EOA. */
 export const createPca = (args: { tokens: string; primaryNode: string }) =>

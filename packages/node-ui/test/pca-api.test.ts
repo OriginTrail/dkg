@@ -176,6 +176,21 @@ describe('PCA api helpers (transport shaping)', () => {
     expect(url).toBe('/api/pca/1?key=0xABC');
   });
 
+  it('fetchPca appends ?extended=1 only when opts.extended is set (P2), and combines with key', async () => {
+    fetchMock.mockResolvedValueOnce(ok({ accountId: '1', primaryNode: '42' }));
+    await fetchPca('1', undefined, { extended: true });
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/pca/1?extended=1');
+
+    fetchMock.mockResolvedValueOnce(ok({ accountId: '1' }));
+    await fetchPca('1', '0xabc', { extended: true });
+    expect(fetchMock.mock.calls[1]![0]).toBe('/api/pca/1?key=0xabc&extended=1');
+
+    // P0 default: no extended param.
+    fetchMock.mockResolvedValueOnce(ok({ accountId: '1' }));
+    await fetchPca('1');
+    expect(fetchMock.mock.calls[2]![0]).toBe('/api/pca/1');
+  });
+
   it('createPca POSTs { tokens, primaryNode } as JSON with auth', async () => {
     fetchMock.mockResolvedValueOnce(ok({ accountId: '5', committedTokens: '100000.0' }));
     const res = await createPca({ tokens: '100000', primaryNode: '42' });
