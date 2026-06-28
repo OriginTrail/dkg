@@ -76,7 +76,17 @@ export function PublishEligibilityChip({ contextGraphId, id }: { contextGraphId:
               <WalletRow
                 key={w.wallet}
                 address={w.wallet}
-                status={w.covered ? 'covered' : w.hasTrac ? 'no PCA → pays direct cost' : 'no PCA + no TRAC → would FAIL'}
+                status={
+                  w.covered
+                    ? 'covered'
+                    : w.deadAccountId
+                      ? w.hasTrac
+                        ? `approved on PCA #${w.deadAccountId}, but it’s swept/expired → pays direct cost`
+                        : `approved on PCA #${w.deadAccountId}, but it’s swept/expired → would FAIL (no TRAC)`
+                      : w.hasTrac
+                        ? 'no PCA → pays direct cost'
+                        : 'no PCA + no TRAC → would FAIL'
+                }
                 statusTone={w.covered ? 'success' : w.hasTrac ? 'warn' : 'danger'}
                 trailing={!w.covered ? <CopyButton value={w.wallet} label={`Copy wallet ${w.wallet}`} /> : undefined}
               />

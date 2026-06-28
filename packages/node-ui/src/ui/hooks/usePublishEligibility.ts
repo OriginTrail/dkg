@@ -13,6 +13,13 @@ interface WalletDetail {
   covered: boolean;
   accountId?: string;
   discountBps?: number;
+  /**
+   * #3 — the wallet IS an approved publishing wallet on this account, but the
+   * account is swept/expired so it doesn't cover the publish. Lets the chip say
+   * "approved on PCA #N, but it's swept/expired" instead of a misleading
+   * "no PCA → pays direct cost". Only set when `covered` is false.
+   */
+  deadAccountId?: string;
   gasFunded: boolean;
   hasTrac: boolean;
   sawExpired: boolean;
@@ -91,20 +98,31 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
           let cover: { accountId: string; discountBps: number } | undefined;
           let sawExpired = false;
           let sawInsolvent = false;
+          let deadAccountId: string | undefined;
           for (const id of trackedIds) {
             const snap = await fetchPca(id, w).catch(() => null);
             if (!snap?.probedKey?.registered) continue;
             const h = healthForSnapshot(snap);
-            // L2: solvency proxy = spendable buffer only. `baseEpochAllowance` is
-            // the static per-epoch cap (>0 for any funded PCA), so OR-ing it made
-            // `sawInsolvent` a dead guard. Precise mid-epoch insolvency is P2
-            // (needs `remainingAllowance`), consistent with HealthChip's deferral.
-            const solvent = bigGt0(snap.topUpBuffer);
+            // reverted L2 — see capstone finding. INTENTIONAL coarse P0 solvency
+            // proxy: a funded PCA holds its per-epoch budget in `baseEpochAllowance`
+            // (the cap), and `topUpBuffer` is only the EXTRA above that cap — 0 on a
+            // fresh, un-topped-up account. A topUpBuffer-only check therefore
+            // false-DANGERed every approved+funded PCA (live capstone: PCA #2, 5
+            // agents approved, chip showed "out of budget"). So ANY budget capacity
+            // ⇒ GREEN-eligible (a prediction, #9 "pending confirmation"); swept/
+            // expired are excluded SEPARATELY by the health check below; precise
+            // mid-epoch remaining is P2 via the extended snapshot's `remainingAllowance`.
+            const solvent = bigGt0(snap.topUpBuffer) || bigGt0(snap.baseEpochAllowance);
             if (h !== 'expired' && h !== 'swept' && solvent) {
               cover = { accountId: id, discountBps: snap.discountBps };
               break;
             }
-            if (h === 'expired' || h === 'swept') sawExpired = true;
+            // Registered here but the account can't cover (swept/expired) — remember
+            // it so the copy distinguishes "approved-but-dead" from "no PCA" (#3).
+            if (h === 'expired' || h === 'swept') {
+              sawExpired = true;
+              if (!deadAccountId) deadAccountId = id;
+            }
             if (!solvent) sawInsolvent = true;
           }
           return {
@@ -112,6 +130,7 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
             covered: !!cover,
             accountId: cover?.accountId,
             discountBps: cover?.discountBps,
+            deadAccountId: cover ? undefined : deadAccountId,
             gasFunded,
             hasTrac,
             sawExpired,
@@ -158,7 +177,7 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
       const anyNoTrac = uncovered.some((w) => !w.hasTrac);
       verdict = anyNoTrac ? 'fallthrough-no-funds' : 'fallthrough';
       reasons.push(`${covered.length} of ${wallets.length} signing wallets approved`);
-      if (wallets.some((w) => w.sawExpired)) reasons.push('a conviction account has expired');
+      if (wallets.some((w) => w.sawExpired)) reasons.push('a conviction account has expired or been fully swept');
       if (wallets.some((w) => w.sawInsolvent)) reasons.push('a conviction account is out of budget');
       if (!conditions.gasFunded) reasons.push('a signing wallet has no gas');
     }
