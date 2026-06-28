@@ -272,6 +272,27 @@ describe('PublishEligibilityChip (S5)', () => {
     await unmount();
   });
 
+  // V3/#9 — a CONFIRMED-broke wallet + an UNREADABLE-funding wallet must resolve
+  // NEUTRAL, not DANGER: the inconclusive wallet may be the funded signer once readable.
+  it('V3 — confirmed-broke + an unreadable-funding wallet → unknown, not DANGER', async () => {
+    const W1 = '0x' + 'b'.repeat(40);
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0, W1],
+      balances: [{ address: W0, eth: '0', trac: '0', symbol: 'TRAC' }], // W1 ABSENT → balanceUnknown
+      chainId: '84532',
+      rpcUrl: null,
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) => ({
+      ...makePcaSnapshot(),
+      probedKey: { key, registered: false }, // both confirmed not-covered
+    }));
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'PCA status unknown');
+    expect(container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeNull();
+    expect(container.querySelector('[data-verdict="unknown"]')).toBeTruthy();
+    await unmount();
+  });
+
   // C1/#9 — a probe that FAILED (rejected) is "couldn't read", NOT a confirmed
   // fall-through. It must resolve NEUTRAL (unknown), never a DANGER at spend time.
   it('resolves NEUTRAL (unknown), not DANGER, when the coverage probe FAILS (C1/#9)', async () => {
