@@ -167,4 +167,34 @@ test.describe('Publishing Conviction tab (PCA) — P0', () => {
     await conviction.open();
     await expect(conviction.discountBadge).toHaveCount(0);
   });
+
+  // ── S3 manage detail (@mutating; CI devnet — needs an owned account) — Batch D ──
+
+  test.fixme('S3 @mutating: manage an owned PCA — detail tab shows agents + settle/top-up', async ({ conviction }) => {
+    // Reachable only with an OWNED account (create first), opened via the owned
+    // card's [Manage] → conviction:<id>. Owner-write buttons (top-up/deregister)
+    // enabled only when owner==wallets[0] (§8A); settle is permissionless.
+    // Un-fixme once the manage-nav is pinned + verified (CI devnet / capstone).
+    await conviction.open();
+    // …create, then open Manage from the owned card, then:
+    await expect(conviction.detail).toBeVisible();
+    await expect(conviction.agentList).toBeVisible();
+    await expect(conviction.settleBtn).toBeVisible();
+  });
+
+  // ── S6 edge onboarding (read-only; EDGE role ONLY) — Batch D ────────────────
+
+  test('S6: edge node shows the get-sponsored onboarding panel', async ({ conviction, page }) => {
+    // The get-sponsored panel renders only when nodeRole==='edge'. Skip on a
+    // core node (incl. the all-core CI devnet); this runs against the live EDGE
+    // node locally (playwright.testnet-edge.config.ts → Vite proxied to :9201).
+    const status = await fetchApiInPage<{ nodeRole?: string }>(page, '/api/status');
+    test.skip(status.json?.nodeRole !== 'edge', 'edge-only screen (S6)');
+    await conviction.open();
+    // The panel opens on click of the edge "Share my wallet → get sponsored"
+    // CTA (toolbar button or the no-discount banner's "Get sponsored").
+    await page.getByRole('button', { name: /get sponsored|share my wallet/i }).first().click();
+    await expect(conviction.getSponsoredPanel).toBeVisible();
+    await page.screenshot({ path: `${SHOT_DIR}/s6-edge-get-sponsored.png`, fullPage: true });
+  });
 });

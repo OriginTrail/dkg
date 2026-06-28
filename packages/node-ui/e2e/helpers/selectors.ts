@@ -309,12 +309,14 @@ export const sel = {
     createSubmit: '[data-testid="pca-create-submit"]',
     createSuccess: '[data-testid="pca-create-success"]',    // invariant 11: "0/100 wallets approved — discounts nothing yet"
     approveOwnWalletsCta: '[data-testid="pca-approve-own-wallets"]',
-    // S3 manage
+    // S3 manage (conviction:<id> detail tab)
+    detail: '[data-testid="pca-detail"]',                   // S3 detail root
     agentList: '[data-testid="pca-agent-list"]',            // PcaAgentList (B3)
     agentRow: '[data-testid="pca-agent-row"]',              // WalletRow
     topUpBtn: '[data-testid="pca-topup-btn"]',
-    settleBtn: '[data-testid="pca-settle-btn"]',
-    deregisterBtn: '[data-testid="pca-deregister-btn"]',
+    settleBtn: '[data-testid="pca-settle-btn"]',            // permissionless (enabled for everyone)
+    deregisterBtn: '[data-testid="pca-deregister-btn"]',    // two-step: shows after "Remove" confirm
+    actionResult: '[data-testid="pca-action-result"]',      // funding/settle/bind result line
     // S4 approve wallets
     approveModal: '[data-testid="pca-approve-modal"]',      // ApproveWalletsModal
     approveAddressInput: '[data-testid="pca-approve-address"]',
