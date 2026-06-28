@@ -149,7 +149,9 @@ export function EligibilityVerdictBanner({
   } else if (verdict === 'fallthrough-no-funds') {
     message = (
       <>
-        This publish will FAIL — the signing wallet has no TRAC to cover the direct cost
+        {/* Q2 — source-agnostic: DANGER now fires on no TRAC (R3) OR no gas (Q2);
+            the specific cause is carried in reasonText. */}
+        This publish will FAIL — no signing wallet can cover it
         {disc ? `, forfeiting ${pcaLabel}’s −${disc}` : ''}
         {ownerPublish ? escrowCaveat : ''}.{reasonText}
       </>

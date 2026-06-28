@@ -31,7 +31,8 @@ interface WalletDetail {
    * O4/#9 — the wallet's funding is UNREADABLE: the balances route errored (the
    * daemon returns {balances:[], error} at HTTP 200, so the wb=null guard misses
    * it). gasFunded/hasTrac then read false from UNREAD data — must never drive a
-   * no-funds DANGER. Treated like `inconclusive` in the verdict. Only set when uncovered.
+   * no-funds DANGER. On UNCOVERED wallets it's treated like `inconclusive` in the
+   * verdict (O4); on COVERED wallets it lets GREEN's gas check fail OPEN (Q2).
    */
   balanceUnknown: boolean;
   gasFunded: boolean;
@@ -154,7 +155,9 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
             discountBps: cover?.discountBps,
             deadAccountId: cover ? undefined : deadAccountId,
             inconclusive: !cover && probeError,
-            balanceUnknown: !cover && balanceUnknown,
+            // Q2 — set for COVERED wallets too: GREEN's gas check must tell a
+            // confirmed-zero-gas covered wallet from an unreadable-gas one (fail open).
+            balanceUnknown,
             gasFunded,
             hasTrac,
             sawExpired,
@@ -201,7 +204,17 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
     let verdict: PcaVerdict;
     const reasons: string[] = [];
     if (uncovered.length === 0) {
-      verdict = 'eligible'; // inconclusive still blocks GREEN (uncovered includes it)
+      // Q2/#9 — a PCA covers only the TRAC fee; the signer still needs native GAS or
+      // it terminally fails on-chain. GREEN requires ≥1 covered wallet with confirmed
+      // gas OR unreadable gas (fail OPEN — mirror the backend's native===null, don't
+      // regress O4); ALL-covered-confirmed-zero-gas → DANGER. (inconclusive still
+      // blocks GREEN since it keeps wallets in `uncovered`.)
+      if (covered.some((w) => w.gasFunded || w.balanceUnknown)) {
+        verdict = 'eligible';
+      } else {
+        verdict = 'fallthrough-no-funds';
+        reasons.push('every approved signing wallet is out of gas');
+      }
     } else if (confirmedUncovered.length === 0 && inconclusive.length > 0) {
       // Every uncovered wallet is merely UNREADABLE — resolve neutral (fail toward
       // unknown, not a DANGER we can't confirm); self-corrects on the next 30s poll.

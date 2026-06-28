@@ -369,7 +369,8 @@ describe('EligibilityVerdictBanner', () => {
     expect(banner.getAttribute('role')).toBe('alert');
     expect(banner.getAttribute('aria-live')).toBe('assertive');
     expect(banner.textContent).toContain('will FAIL');
-    expect(banner.textContent).toContain('no TRAC');
+    // Q2 — source-agnostic lead (no TRAC OR no gas); the specific cause is in reasonText.
+    expect(banner.textContent).toContain('no signing wallet can cover it');
     expect(banner.textContent).toContain('no approved wallet');
     await unmount();
   });
