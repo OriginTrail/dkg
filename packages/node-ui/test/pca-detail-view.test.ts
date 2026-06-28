@@ -268,4 +268,49 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     expect(container.textContent).not.toContain('Bound cg-1 to PCA #7');
     await unmount();
   });
+
+  // W2 — a top-up 504 carrying a broadcast txHash means the tx MAY be on-chain; warn
+  // (don't say "try again") so a retry can't lock a SECOND top-up.
+  it('W2 — top-up 504 with a txHash warns "may be on-chain", not "try again"', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
+    mocks.pcaTopUp.mockRejectedValue(new HttpError(504, 'TIMEOUT', { code: 'TIMEOUT', txHash: '0xabc' }));
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Funding');
+    setInputValue(container.querySelector('input[aria-label="Top-up amount in TRAC"]') as HTMLInputElement, '100');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await act(async () => { btn(container, '[data-testid="pca-topup-btn"]').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'may already be on-chain');
+    const warn = container.querySelector('[data-testid="pca-action-warning"]')!;
+    expect(warn.getAttribute('role')).toBe('alert');
+    expect(warn.textContent).toContain('0xabc');
+    expect(warn.textContent).toContain('a second top-up would lock additional TRAC');
+    expect(container.textContent).not.toContain('temporarily unavailable');
+    await unmount();
+  });
+
+  it('W2 — top-up 504 with NO txHash stays retryable ("try again"), no warning', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
+    mocks.pcaTopUp.mockRejectedValue(new HttpError(504, 'TIMEOUT', { code: 'TIMEOUT' })); // no txHash
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Funding');
+    setInputValue(container.querySelector('input[aria-label="Top-up amount in TRAC"]') as HTMLInputElement, '100');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await act(async () => { btn(container, '[data-testid="pca-topup-btn"]').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'temporarily unavailable');
+    expect(container.querySelector('[data-testid="pca-action-warning"]')).toBeNull();
+    await unmount();
+  });
+
+  it('W2 — top-up 400 InvalidAmount keeps the validation copy (no warning)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
+    mocks.pcaTopUp.mockRejectedValue(new HttpError(400, 'InvalidAmount', { error: 'InvalidAmount' }));
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Funding');
+    setInputValue(container.querySelector('input[aria-label="Top-up amount in TRAC"]') as HTMLInputElement, '100');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await act(async () => { btn(container, '[data-testid="pca-topup-btn"]').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'greater than 0');
+    expect(container.querySelector('[data-testid="pca-action-warning"]')).toBeNull();
+    await unmount();
+  });
 });
