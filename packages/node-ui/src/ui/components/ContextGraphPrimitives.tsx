@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 
 type ContextGraphLayer = 'wm' | 'swm' | 'vm';
 
-export type EmptyStateTone = 'neutral' | ContextGraphLayer | 'danger' | 'query';
+export type EmptyStateTone = 'neutral' | ContextGraphLayer | 'danger' | 'query' | 'warning';
 
 type EmptyStateAction = {
   label: string;
@@ -18,6 +18,11 @@ const EMPTY_STATE_ACCENTS: Record<EmptyStateTone, string> = {
   vm: 'var(--layer-verified, #22c55e)',
   danger: 'var(--text-danger)',
   query: '#38bdf8',
+  // Warning tone (PCA edge/fall-through empty states). Resolves to the same
+  // `--text-warning` token as `.badge-warn` / `.v10-modal-warning` — the
+  // theme-aware amber (#fbbf24 dark / #92400e light), NOT the SWM
+  // `--layer-shared` #f59e0b layer-identity accent used by the `swm` tone.
+  warning: 'var(--text-warning)',
 };
 
 export function toneForLayer(layer: ContextGraphLayer): EmptyStateTone {
