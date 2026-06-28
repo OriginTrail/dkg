@@ -1,0 +1,80 @@
+// @vitest-environment happy-dom
+//
+// C2 — the double-mint create-pending marker must be DURABLE. `setCreatePending`
+// writes localStorage SYNCHRONOUSLY (persistNow), not via the 150ms debounce, so a
+// crash/hard-refresh in the window after the create POST is dispatched (the daemon
+// mints regardless) but before a debounced timer would fire cannot lose the marker
+// → no second fund-locking mint on reopen. Low-risk writes (trackAccount/
+// untrackAccount) stay debounced. Mirrors layout-persistence.test.ts.
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const PCA_KEY = 'dkg-pca';
+const DEBOUNCE_WAIT_MS = 150 + 30;
+
+async function loadFreshStore(): Promise<typeof import('../src/ui/stores/pca.js')> {
+  vi.resetModules();
+  return await import('../src/ui/stores/pca.js');
+}
+
+const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+describe('usePcaStore (dkg-pca persistence — double-mint marker durability)', () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(() => localStorage.clear());
+
+  it('setCreatePending writes localStorage SYNCHRONOUSLY (no timer advance)', async () => {
+    const { usePcaStore } = await loadFreshStore();
+    const spy = vi.spyOn(localStorage, 'setItem');
+
+    usePcaStore.getState().setCreatePending({ ownerEoa: '0xabc', submittedAt: 1 });
+
+    // The marker is the double-mint guard — it must hit storage immediately, with
+    // NO `await wait(...)`.
+    expect(spy).toHaveBeenCalledTimes(1);
+    const [key, raw] = spy.mock.calls[0]!;
+    expect(key).toBe(PCA_KEY);
+    expect(JSON.parse(raw as string).createPending.ownerEoa).toBe('0xabc');
+    spy.mockRestore();
+  });
+
+  it('trackAccount stays DEBOUNCED (not synchronous)', async () => {
+    const { usePcaStore } = await loadFreshStore();
+    const spy = vi.spyOn(localStorage, 'setItem');
+
+    usePcaStore.getState().trackAccount('5');
+    expect(spy).not.toHaveBeenCalled(); // debounced, unlike the marker
+
+    await wait(DEBOUNCE_WAIT_MS);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(spy.mock.calls[0]![1] as string).trackedIds).toContain('5');
+    spy.mockRestore();
+  });
+
+  it('the create-pending marker survives a reload happening INSIDE the debounce window', async () => {
+    const { usePcaStore } = await loadFreshStore();
+    usePcaStore.getState().setCreatePending({ ownerEoa: '0xabc', submittedAt: 1, txHash: '0xdead' });
+    // Do NOT advance timers — simulate a crash/refresh immediately after submit.
+    const reloaded = await loadFreshStore();
+    const marker = reloaded.usePcaStore.getState().createPending;
+    expect(marker?.ownerEoa).toBe('0xabc');
+    expect(marker?.txHash).toBe('0xdead');
+  });
+
+  it('persistNow subsumes a queued debounced write (no stale-marker double-write)', async () => {
+    const { usePcaStore } = await loadFreshStore();
+    const spy = vi.spyOn(localStorage, 'setItem');
+
+    usePcaStore.getState().trackAccount('5'); // queues a debounced write
+    usePcaStore.getState().setCreatePending({ ownerEoa: '0xabc', submittedAt: 1 }); // synchronous, cancels the timer
+
+    // One synchronous write so far; the cancelled debounce must NOT fire a second.
+    expect(spy).toHaveBeenCalledTimes(1);
+    await wait(DEBOUNCE_WAIT_MS);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const persisted = JSON.parse(spy.mock.calls[0]![1] as string);
+    expect(persisted.createPending.ownerEoa).toBe('0xabc');
+    expect(persisted.trackedIds).toContain('5'); // snapshot captured both
+    spy.mockRestore();
+  });
+});
