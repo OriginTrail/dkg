@@ -106,7 +106,7 @@ export interface ConceptMapping {
 /** A non-fatal diagnostic surfaced during a bundle import. */
 export interface OkfWarning {
   conceptId?: string;
-  code: 'broken-link' | 'code-span-link' | 'missing-optional' | 'reserved-skip' | 'parse';
+  code: 'broken-link' | 'code-span-link' | 'missing-type' | 'reserved-skip' | 'parse';
   message: string;
 }
 
@@ -137,7 +137,7 @@ export interface BundleFile {
 /** §9 conformance report. */
 export interface ConformanceReport {
   conformant: boolean;
-  /** Hard violations (only the three §9 rules can make a bundle non-conformant). */
+  /** Hard violations — only §9 rules 1–2 (parseable frontmatter + non-empty `type`) make a bundle non-conformant; reserved-file structure issues are warnings. */
   errors: string[];
   /** Things consumers MUST tolerate (§9) — surfaced as info, never failing. */
   warnings: string[];

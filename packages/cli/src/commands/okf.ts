@@ -79,12 +79,27 @@ export function registerOkfCommand(program: Command): void {
   // Gating on `result.type === 'bindings'` therefore silently yields no rows
   // (the bug that made `okf verify` report 0 for everything). Read `bindings`
   // structurally instead.
-  function bindingsOf(result: unknown): Array<Record<string, string>> {
+  function bindingsOf(result: unknown): Array<Record<string, unknown>> {
     if (result && typeof result === 'object' && Array.isArray((result as { bindings?: unknown }).bindings)) {
-      return (result as { bindings: Array<Record<string, string>> }).bindings;
+      return (result as { bindings: Array<Record<string, unknown>> }).bindings;
     }
     return [];
   }
+
+  // A `/api/query` binding cell can arrive as a bare string OR a SPARQL-JSON
+  // object (`{ value, type, datatype? }`); calling `.startsWith()`/`.exec()` on
+  // the object form throws at runtime. Normalise every cell to its string value
+  // before use (mirrors the daemon's `bindingValue`). The static `QueryResult`
+  // type annotates cells as strings, but the runtime path can return objects.
+  const cell = (v: unknown): string => {
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'string') return v;
+    if (typeof v === 'object' && 'value' in (v as Record<string, unknown>)) {
+      const raw = (v as { value?: unknown }).value;
+      return raw === null || raw === undefined ? '' : String(raw);
+    }
+    return String(v);
+  };
 
   function summarize(imported: BundleImport): {
     concepts: number;
@@ -156,7 +171,7 @@ export function registerOkfCommand(program: Command): void {
       collect,
       [] as string[],
     )
-    .option('--replace', 'Discard any existing Working-Memory draft for each concept before writing (avoids stale triples when re-importing a changed bundle)')
+    .option('--replace', 'Discard any existing Working-Memory draft for each concept before writing (avoids stale triples when re-importing a changed bundle). WM-only: it does NOT clear already-shared SWM or --private loose quads (those are append/dedupe; to drop removed triples there, recreate the Context Graph).')
     .option('--create-context-graph', 'Create the Context Graph if it does not exist')
     .option('--share', 'Finalize and advance assets to Shared Working Memory (free, team-visible)')
     .option(
@@ -173,6 +188,10 @@ export function registerOkfCommand(program: Command): void {
         'peers seed the allowlist; on an existing CG each is invited.',
       collect,
       [] as string[],
+    )
+    .option(
+      '--allow-public-context-graph',
+      'Override the safety check that refuses --private bulk writes into an existing Context Graph whose accessPolicy is "public" (which would expose the private substance).',
     )
     .option('--manifest <path>', 'Resumability manifest path (default <bundleDir>/.okf-import-manifest.json)')
     .option('--dry-run', 'Run the deterministic mapping offline and print the summary; never touch the node')
@@ -267,8 +286,28 @@ export function registerOkfCommand(program: Command): void {
             `Created ${isPrivate ? 'private (invite-only) ' : ''}Context Graph "${contextGraphId}"` +
               (isPrivate && allowedPeers.length ? ` with ${allowedPeers.length} allowlisted peer(s).` : '.'),
           );
-        } else if (isPrivate && allowedPeers.length) {
-          // Existing CG: invite each peer (best-effort; already-member is fine).
+        } else if (isPrivate) {
+          // Existing CG + --private: REFUSE to bulk-write private substance into a
+          // Context Graph that is publicly readable. accessPolicy comes from the
+          // daemon's CG list ('public' | 'ownerOnly' | 'allowList').
+          const list = await client.listContextGraphs().catch(() => null);
+          const policy = list?.contextGraphs?.find((c: { id: string }) => c.id === contextGraphId)
+            ?.accessPolicy;
+          if (policy === 'public' && !opts.allowPublicContextGraph) {
+            console.error(
+              `Refusing --private import: Context Graph "${contextGraphId}" already exists with ` +
+                `accessPolicy "public". Writing private substance there would expose it. Use a ` +
+                `private (invite-only) Context Graph, or pass --allow-public-context-graph to override.`,
+            );
+            process.exit(OKF_EXIT_CODES.CLIENT_ERROR);
+          }
+          if (policy !== 'allowList' && policy !== 'ownerOnly') {
+            console.error(
+              `  warning: could not confirm Context Graph "${contextGraphId}" is invite-only ` +
+                `(accessPolicy "${policy ?? 'unknown'}"); proceeding with the private write.`,
+            );
+          }
+          // Invite each allowlisted peer (best-effort; already-member is fine).
           for (const peerId of allowedPeers) {
             try {
               await client.inviteToContextGraph(contextGraphId, peerId);
@@ -571,9 +610,12 @@ export function registerOkfCommand(program: Command): void {
 
         const quadsBySubject = new Map<string, Quad[]>();
         for (const b of bindings) {
-          if (!b.s || !b.p || !b.o) continue;
-          const subject = unwrapIri(b.s);
-          const quad: Quad = { subject, predicate: unwrapIri(b.p), object: b.o };
+          const s = cell(b.s);
+          const p = cell(b.p);
+          const o = cell(b.o);
+          if (!s || !p || !o) continue;
+          const subject = unwrapIri(s);
+          const quad: Quad = { subject, predicate: unwrapIri(p), object: o };
           if (!quadsBySubject.has(subject)) quadsBySubject.set(subject, []);
           quadsBySubject.get(subject)!.push(quad);
         }
@@ -700,13 +742,21 @@ export function registerOkfCommand(program: Command): void {
             includeSharedMemory: true,
           });
           const bindings = bindingsOf(result);
-          const raw = bindings[0]?.c ?? '0';
-          const m = /^"?(\d+)"?/.exec(String(raw));
+          const raw = cell(bindings[0]?.c) || '0';
+          const m = /^"?(\d+)"?/.exec(raw);
           return m ? parseInt(m[1], 10) : 0;
         };
 
+        // Verify EVERY predicate the bundle actually produced, not a fixed
+        // allowlist — otherwise a shortfall in e.g. schema:hasPart (--relate),
+        // schema:dateModified or producer-extra keys would be invisible. The
+        // INTEGRITY_PREDICATES list only fixes the leading report order.
+        const orderedPreds = [
+          ...INTEGRITY_PREDICATES.filter((p) => expectedByPred.has(p)),
+          ...[...expectedByPred.keys()].filter((p) => !INTEGRITY_PREDICATES.includes(p)).sort(),
+        ];
         const rows: Array<{ predicate: string; expected: number; actual: number; missing: number }> = [];
-        for (const predicate of INTEGRITY_PREDICATES) {
+        for (const predicate of orderedPreds) {
           const expected = expectedByPred.get(predicate) ?? 0;
           if (expected === 0) continue; // predicate not used by this bundle
           const actual = await countFor(predicate);
@@ -720,7 +770,7 @@ export function registerOkfCommand(program: Command): void {
           const { result } = await client.query(sparql, contextGraphId, { includeSharedMemory: true });
           const bindings = bindingsOf(result);
           const unwrap = (t: string): string => (t.startsWith('<') && t.endsWith('>') ? t.slice(1, -1) : t);
-          const present = new Set(bindings.map((b) => unwrap(String(b.s))));
+          const present = new Set(bindings.map((b) => unwrap(cell(b.s))));
           missingConcepts = imported.concepts
             .map((c) => c.iri)
             .filter((iri) => !present.has(iri))

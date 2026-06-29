@@ -71,8 +71,8 @@ export function importBundle(files: BundleFile[], opts: OkfMappingOptions = {}):
     if (type === undefined || type === null || String(type).trim() === '') {
       warnings.push({
         conceptId: doc.conceptId,
-        code: 'missing-optional',
-        message: 'concept has no non-empty `type` (mapped as a generic concept; SPEC §9)',
+        code: 'missing-type',
+        message: 'concept has no non-empty `type` (a hard §9 conformance requirement; the bundle will not validate)',
       });
     }
   }

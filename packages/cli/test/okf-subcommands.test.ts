@@ -378,4 +378,80 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
     expect(out.concepts).toBe(1); // only a.md, not the symlink
     await rm(dir, { recursive: true, force: true });
   });
+
+  it('export normalizes SPARQL-JSON object binding cells (not just bare strings)', async () => {
+    clear();
+    const outDir = await mkdtemp(join(tmpdir(), 'okf-export-obj-'));
+    // The daemon's /api/query can return each cell as `{ value, type, datatype? }`
+    // rather than a bare string. The command must normalize these — previously
+    // `unwrapIri(b.s).startsWith` threw on the object form.
+    stub.setHandler(() => ({
+      status: 200,
+      body: {
+        result: {
+          bindings: [
+            {
+              s: { value: 'urn:okf:a', type: 'uri' },
+              p: { value: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', type: 'uri' },
+              o: { value: 'http://schema.org/Thing', type: 'uri' },
+            },
+            {
+              s: { value: 'urn:okf:a', type: 'uri' },
+              p: { value: 'http://schema.org/name', type: 'uri' },
+              o: { value: '"A"', type: 'literal' },
+            },
+          ],
+        },
+      },
+    }));
+    const r = await runCli(['okf', 'export', 'cg-obj', outDir], env());
+    stub.setHandler(okfDaemonHandler(createdCGs));
+    expect(r.exitCode).toBe(0);
+    const out = parseJsonTail(r.stdout);
+    expect(out.concepts).toBe(1);
+    const files = (await readdir(outDir, { recursive: true } as { recursive: true })) as string[];
+    expect(files.map(String)).toContain('a.md');
+    await rm(outDir, { recursive: true, force: true });
+  });
+
+  it('verify gates on scoped per-predicate counts and normalizes object-form count cells', async () => {
+    clear();
+    // Clean 2-concept bundle, no headings/links: predicates are rdf:type×2, schema:name×2.
+    const dir = await mkdtemp(join(tmpdir(), 'okf-verify-'));
+    await writeFile(join(dir, 'index.md'), '---\nokf_version: "0.1"\n---\n# Root\n');
+    await writeFile(join(dir, 'x.md'), '---\ntype: Thing\ntitle: X\n---\n\nplain body\n');
+    await writeFile(join(dir, 'y.md'), '---\ntype: Thing\ntitle: Y\n---\n\nplain body\n');
+
+    const TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+    const NAME = 'http://schema.org/name';
+    // COUNT(*) returned as a SPARQL-JSON OBJECT cell (exercises the cell() fix in verify).
+    const countHandler =
+      (counts: Record<string, number>): StubHandler =>
+      (req, body) => {
+        const sparql = String(JSON.parse(body || '{}').sparql ?? '');
+        const pred = Object.keys(counts).find((p) => sparql.includes(`<${p}>`)) ?? '';
+        return {
+          status: 200,
+          body: { result: { bindings: [{ c: { value: String(counts[pred] ?? 0), type: 'literal' } }] } },
+        };
+      };
+
+    // All present → complete, zero missing, exit 0.
+    stub.setHandler(countHandler({ [TYPE]: 2, [NAME]: 2 }));
+    const ok = await runCli(['okf', 'verify', dir, '--context-graph-id', 'cg-v'], env());
+    expect(ok.exitCode).toBe(0);
+    const okOut = parseJsonTail(ok.stdout);
+    expect(okOut.complete).toBe(true);
+    expect(okOut.totalMissingTriples).toBe(0);
+
+    // One name missing → shortfall → complete:false, non-zero exit (pipeline gate).
+    stub.setHandler(countHandler({ [TYPE]: 2, [NAME]: 1 }));
+    const bad = await runCli(['okf', 'verify', dir, '--context-graph-id', 'cg-v'], env());
+    stub.setHandler(okfDaemonHandler(createdCGs));
+    expect(bad.exitCode).not.toBe(0);
+    const badOut = parseJsonTail(bad.stdout);
+    expect(badOut.complete).toBe(false);
+    expect(badOut.totalMissingTriples).toBe(1);
+    await rm(dir, { recursive: true, force: true });
+  });
 });
