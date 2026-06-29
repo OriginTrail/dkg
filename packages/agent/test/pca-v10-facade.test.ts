@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
@@ -105,5 +105,33 @@ describe('DKGAgent V10 PCA facade', () => {
 
     const none = await makeAgent(new NoChainAdapter());
     expect(await none.listPublishingConvictionAccountsForWallets([owner.address])).toBeNull();
+  });
+
+  it('listDesignatableNodes delegates to the adapter; null when unsupported', async () => {
+    const chain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    const agent = await makeAgent(chain);
+    const nodes = await agent.listDesignatableNodes();
+    expect(nodes).not.toBeNull();
+    expect(nodes!.map((n) => n.identityId)).toEqual([42n, 57n, 61n]);
+
+    const none = await makeAgent(new NoChainAdapter());
+    expect(await none.listDesignatableNodes()).toBeNull();
+  });
+
+  it('listDesignatableNodes forwards { fresh } through the facade bridge (TfJ)', async () => {
+    const chain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    const spy = vi.spyOn(chain, 'listDesignatableNodes');
+    const agent = await makeAgent(chain);
+
+    await agent.listDesignatableNodes({ fresh: true });
+    expect(spy).toHaveBeenLastCalledWith({ fresh: true }); // ?fresh propagates to the adapter
+
+    await agent.listDesignatableNodes();
+    expect(spy).toHaveBeenLastCalledWith(undefined); // no opts → undefined (adapter uses its cache)
+    spy.mockRestore();
+
+    // Unsupported adapter still short-circuits to null even with opts.
+    const none = await makeAgent(new NoChainAdapter());
+    expect(await none.listDesignatableNodes({ fresh: true })).toBeNull();
   });
 });

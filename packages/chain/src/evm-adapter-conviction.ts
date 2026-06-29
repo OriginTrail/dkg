@@ -11,9 +11,33 @@
 
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers, Contract } from 'ethers';
-import type { TxResult, V10PublishingConvictionAccountInfo, ConvictionReader, PcaAccountRelation } from './chain-adapter.js';
+import type { TxResult, V10PublishingConvictionAccountInfo, ConvictionReader, PcaAccountRelation, ShardingTableNode } from './chain-adapter.js';
 import { PcaUnavailableError } from './pca-errors.js';
 import { enrichEvmError, getPcaLogicInterface } from './evm-adapter-errors.js';
+
+/**
+ * ethers v6 returns a Solidity struct as a `Result`: it is BOTH array-indexable
+ * (positional) AND — when the ABI names the outputs — property-accessible. The
+ * `ShardingTable.getShardingTable()` ABI names them today; we normalize either
+ * shape so a future ABI regen that drops the names can't silently break the
+ * decode. Pure + exported for unit testing (R6); kills the `any` at the
+ * read boundary in `listDesignatableNodes`.
+ */
+export interface RawShardingTableNode extends ArrayLike<unknown> {
+  nodeId?: unknown;
+  identityId?: unknown;
+  ask?: unknown;
+  stake?: unknown;
+}
+
+export function toShardingTableNode(raw: RawShardingTableNode): ShardingTableNode {
+  return {
+    nodeId: String(raw.nodeId ?? raw[0]),
+    identityId: BigInt((raw.identityId ?? raw[1]) as bigint | number | string),
+    ask: BigInt((raw.ask ?? raw[2]) as bigint | number | string),
+    stake: BigInt((raw.stake ?? raw[3]) as bigint | number | string),
+  };
+}
 
 export class ConvictionMethods extends EVMChainAdapterBase implements ConvictionReader {
   // =====================================================================
@@ -504,5 +528,64 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       const g = agent.has(accountId);
       return { accountId, relation: (o && g ? 'both' : o ? 'owned' : 'agent') as PcaAccountRelation['relation'] };
     });
+  }
+
+  /** ~30s adapter-side TTL for the B-staked-nodes list. The sharding table
+   *  changes slowly and the picker polls it; this is a DEDICATED short TTL, not
+   *  the 1h publish-preflight cache. */
+  private static readonly DESIGNATABLE_NODES_TTL_MS = 30_000;
+  private cachedDesignatableNodes: { value: ShardingTableNode[]; cachedAt: number } | undefined;
+
+  /**
+   * B-staked-nodes (Stage-5) — the full sharding table of nodes designatable as
+   * a PCA `primaryNode`. Reads the no-arg `ShardingTable.getShardingTable()`,
+   * which returns the COMPLETE table: it sizes the read to the live
+   * `nodesCount()`, and `shardingTableSizeLimit` is an INSERT-enforced maximum
+   * (ShardingTable._insertNode reverts `ShardingTableIsFull` at `nodesCount >=
+   * limit`), never a read-truncation cap — so there is nothing to page and no
+   * silent node drop. Hash-ring order is preserved; the UI sorts for display.
+   *
+   * TTL-cached (~30s) adapter-side, success-only (a throw never poisons the
+   * cache). `opts.fresh` BYPASSES the cache and re-reads the chain (then
+   * repopulates the cache) — M4: the create `PrimaryNodeNotInShardingTable`
+   * revert recovery + the picker Retry call it so a just-rejected /
+   * just-(un)staked node isn't re-served for up to 30s. Read failures SURFACE —
+   * a CALL_EXCEPTION/transport blip propagates to the route (→ 503
+   * SHARDING_TABLE_READ_FAILED / 503-504), never a partial or empty list a
+   * picker would misread as "no stakeable nodes".
+   *
+   * The no-arg overload is resolved via the explicit `getFunction(...)`
+   * signature so ethers v6 never confuses it with `getShardingTable(uint72,
+   * uint72)`.
+   */
+  async listDesignatableNodes(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]> {
+    const now = Date.now();
+    const cached = this.cachedDesignatableNodes;
+    if (!opts?.fresh && cached && now - cached.cachedAt < ConvictionMethods.DESIGNATABLE_NODES_TTL_MS) {
+      return cached.value;
+    }
+    await this.init();
+    // TfA: resolve ShardingTable PER READ — do NOT memoize the handle. A Hub
+    // rotation of ShardingTable isn't on the rotation listener's allowlist, and
+    // `opts.fresh` only busts the node-list cache, so a cached handle would go
+    // stale (serving an old table) until daemon restart. Re-resolving each read
+    // (only on a node-list cache MISS — hits skip this entirely) costs one cheap
+    // Hub getContractAddress and is always rotation-correct. (Reverts N2.)
+    const shardingTable = await this.resolveContract('ShardingTable');
+    const raw = await this.readContractWith<readonly RawShardingTableNode[]>(
+      shardingTable,
+      'shardingTable.getShardingTable',
+      (c) => c.getFunction('getShardingTable()').staticCall(),
+    );
+    const nodes: ShardingTableNode[] = [];
+    for (const n of raw ?? []) {
+      const node = toShardingTableNode(n);
+      // The no-arg read is sized to nodesCount() so it shouldn't pad, but a
+      // zero identityId is never a real node — skip defensively.
+      if (node.identityId <= 0n) continue;
+      nodes.push(node);
+    }
+    this.cachedDesignatableNodes = { value: nodes, cachedAt: now };
+    return nodes;
   }
 }

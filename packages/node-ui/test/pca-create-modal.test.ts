@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   fetchWalletsBalances: vi.fn(),
   createPca: vi.fn(),
   fetchPca: vi.fn(),
+  pcaAgentAccount: vi.fn(),
+  listDesignatableNodes: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', async (orig) => {
@@ -21,6 +23,8 @@ vi.mock('../src/ui/api.js', async (orig) => {
     fetchWalletsBalances: mocks.fetchWalletsBalances,
     createPca: mocks.createPca,
     fetchPca: mocks.fetchPca,
+    pcaAgentAccount: mocks.pcaAgentAccount,
+    listDesignatableNodes: mocks.listDesignatableNodes,
   };
 });
 
@@ -93,6 +97,13 @@ beforeEach(() => {
     balances: [{ address: OWNER, eth: '1', trac: '200000', symbol: 'TRAC' }],
     chainId: '84532', rpcUrl: null,
   });
+  // B1 default: the wallet is bound to nothing → no zero-coverage warning (and no real fetch).
+  mocks.pcaAgentAccount.mockResolvedValue({ agent: '', accountId: null });
+  // §3b picker list: this node's identity (#42) is staked → core pre-selects it (M3).
+  mocks.listDesignatableNodes.mockResolvedValue({
+    nodes: [{ nodeId: 'peerA', identityId: '42', stake: '1000000000000000000000', ask: '0' }],
+    total: 1, nextStart: null,
+  });
 });
 afterEach(() => {
   expect(fetchGuard).not.toHaveBeenCalled();
@@ -101,21 +112,20 @@ afterEach(() => {
 });
 
 describe('CreatePcaModal', () => {
-  it('gates edge / no-identity nodes: reason-titled, no form, + a Get-sponsored CTA → S6', async () => {
+  // Sub-PR 1 (§5.2 Step 1) — the edge/no-identity HARD GATE is REMOVED: the wizard opens
+  // for all; a no-own-identity node gets a NON-BLOCKING explainer + a get-sponsored link.
+  it('edge / no-identity: the wizard OPENS (no hard gate) with a non-blocking get-sponsored explainer', async () => {
     useAgentsStore.getState().setNodeStatus({ nodeRole: 'edge', hasIdentity: false });
     const onGetSponsored = vi.fn();
     const { container, unmount } = await render(
       React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored }),
     );
-    await waitForText(container, 'requires a staked core-node identity');
-    // #4 — titled with the reason, not the generic "Create a PCA".
-    expect(container.querySelector('#pca-modal-title')?.textContent).toContain('staked core-node identity');
-    // #1 — zero wizard fields in the gated state.
-    expect(container.querySelector('[data-testid="pca-create-tokens"]')).toBeNull();
-    // #2 — a primary Get-sponsored CTA routes to S6.
-    const cta = container.querySelector('[data-testid="pca-gated-get-sponsored"]')!;
-    expect(cta).toBeTruthy();
-    await act(async () => { cta.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'Commit amount (TRAC)'); // the form opens — no gate
+    expect(container.querySelector('[data-testid="pca-create-tokens"]')).toBeTruthy();
+    // Non-blocking explainer + a get-sponsored LINK (never a redirect that prevents Create).
+    expect(container.querySelector('[data-testid="pca-create-no-identity-note"]')).toBeTruthy();
+    const link = container.querySelector('[data-testid="pca-create-get-sponsored-link"]')!;
+    await act(async () => { link.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     expect(onGetSponsored).toHaveBeenCalled();
     await unmount();
   });
@@ -145,6 +155,293 @@ describe('CreatePcaModal', () => {
     // The primary success action opens self-approval.
     await click(container.querySelector('[data-testid="pca-approve-own-wallets"]')!);
     expect(onApproveOwn).toHaveBeenCalledWith('7');
+    await unmount();
+  });
+
+  // B1 (§9.5) — every op wallet already on a sponsor's PCA → a loud informed-consent warning
+  // before the TRAC commit; NOT a hard block (a node may create purely to sponsor others).
+  it('B1 — all wallets sponsor-bound shows the zero-self-coverage warning but NEVER blocks Create (H3)', async () => {
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: OWNER, accountId: '5' });
+    // id '5' = the sponsor's PCA (binding owner read) — LIVE (budget + unexpired) so it reads as
+    // "already discounted free" (R1); any other id = the create read-back snapshot.
+    mocks.fetchPca.mockImplementation(async (id: string) =>
+      id === '5'
+        ? snap({ accountId: '5', owner: '0xSPONSOR000000000000000000000000000beEf12', baseEpochAllowance: '1000000000000000000000' })
+        : snap({ discountBps: 3000 }),
+    );
+    mocks.createPca.mockResolvedValue({ accountId: '8', txHash: '0xabc', committedTokens: '100000.0' });
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'sponsor other nodes'); // the zero-coverage warning copy
+    expect(container.querySelector('[data-testid="pca-b1-zero-coverage"]')).toBeTruthy();
+    // Enter a valid amount (node #42 is pre-selected) — informed consent, NOT a gate.
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const submit = container.querySelector('[data-testid="pca-create-submit"]') as HTMLButtonElement;
+    expect(submit.disabled).toBe(false); // create proceeds despite zero-self-coverage
+    await click(submit);
+    await waitForText(container, 'PCA #8 created');
+    expect(mocks.createPca).toHaveBeenCalled();
+    await unmount();
+  });
+
+  // Escape closes the OPEN picker popup first, not the whole Create modal: the picker stops
+  // the event while its listbox is open (so committed state isn't discarded), and a second
+  // Escape — popup now closed — dismisses the modal. The shared dismiss hook stays generic.
+  it('Escape with the picker open closes the popup, does NOT dismiss the modal', async () => {
+    const onClose = vi.fn();
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose, onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '50000');
+    const search = container.querySelector('[data-testid="pca-primary-node-search"]') as HTMLInputElement;
+    // React (root delegation) maps onFocus to the native bubbling `focusin`.
+    await act(async () => { search.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); });
+    expect(container.querySelector('[role="listbox"]')).toBeTruthy(); // popup open
+    await act(async () => { search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    // Popup closed; modal NOT dismissed; the committed amount survives.
+    expect(onClose).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="listbox"]')).toBeNull();
+    expect((container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement).value).toBe('50000');
+    // A second Escape (popup now closed) DOES dismiss the modal.
+    await act(async () => { search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    expect(onClose).toHaveBeenCalled();
+    await unmount();
+  });
+
+  // M3 — own-bound migration is disclosed even when no wallet is sponsor-bound.
+  it('M3 — own-bound-only wallets get a MOVE disclosure (no sponsor-bound preview needed)', async () => {
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: OWNER, accountId: '3' });
+    // id '3' = a PCA THIS node owns (owner == OWNER) → own-bound; else = read-back snapshot.
+    mocks.fetchPca.mockImplementation(async (id: string) =>
+      id === '3' ? snap({ accountId: '3', owner: OWNER }) : snap({ discountBps: 3000 }),
+    );
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'already approved on a PCA you own');
+    expect(container.querySelector('[data-testid="pca-b1-own-bound"]')).toBeTruthy();
+    // Not the zero-coverage alarm (the wallet IS self-coverable via migration).
+    expect(container.querySelector('[data-testid="pca-b1-zero-coverage"]')).toBeNull();
+    await unmount();
+  });
+
+  // §3b/M3 — core pre-selects its OWN staked node only when its identity is in the list.
+  it('§3b/M3 — core pre-selects its own staked node when its identity is in the list', async () => {
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'node #42');
+    expect(container.querySelector('[data-testid="pca-primary-node-selected"]')?.textContent).toContain('✓ this node');
+    await unmount();
+  });
+
+  it('§3b/M3 — own identity NOT in the staked list → no default; primary node required (submit blocked)', async () => {
+    mocks.listDesignatableNodes.mockResolvedValue({
+      nodes: [{ nodeId: 'pX', identityId: '99', stake: '5000000000000000000', ask: '0' }], total: 1, nextStart: null,
+    });
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    // #42 isn't staked → no pre-selection → the required primary node blocks submit.
+    expect(container.querySelector('[data-testid="pca-primary-node-selected"]')).toBeNull();
+    expect((container.querySelector('[data-testid="pca-create-submit"]') as HTMLButtonElement).disabled).toBe(true);
+    await unmount();
+  });
+
+  it('Q1 — list-down: core best-effort defaults to its own id; the picker shows a retry', async () => {
+    mocks.listDesignatableNodes.mockRejectedValue(new HttpError(503, 'x', { code: 'SHARDING_TABLE_READ_FAILED' }));
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Couldn’t load the staked-node list');
+    expect(container.querySelector('[data-testid="pca-primary-node-error"]')).toBeTruthy();
+    // The create-time PrimaryNodeNotInShardingTable revert is the backstop; core still defaults
+    // to its own id (#42) so the Review reflects it (Q1).
+    expect(container.textContent).toContain('#42');
+    await unmount();
+  });
+
+  // M4/M9 — a PrimaryNodeNotInShardingTable revert is RECOVERABLE: return to the form AND refetch
+  // the staked list with the cache-bust (fresh=1), so the just-unstaked node isn't re-served stale.
+  it('M4/M9 — PrimaryNodeNotInShardingTable revert returns to the form + refetches the list FRESH', async () => {
+    mocks.createPca.mockRejectedValue(new HttpError(400, 'PrimaryNodeNotInShardingTable', { error: 'PrimaryNodeNotInShardingTable' }));
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-create-submit"]')!);
+    // Poll until the recovery refetch fires (the create-error handler calls refreshNodes → fresh).
+    const started = Date.now();
+    while (Date.now() - started < 1500 && !mocks.listDesignatableNodes.mock.calls.some((c) => c[0]?.fresh)) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+    }
+    expect(mocks.listDesignatableNodes).toHaveBeenCalledWith(expect.objectContaining({ fresh: true }));
+    // Recoverable, not terminal — still on the form (the amount field is present).
+    expect(container.querySelector('[data-testid="pca-create-tokens"]')).toBeTruthy();
+    await unmount();
+  });
+
+  // R2 — the rejection handler clears the rejected node IMMEDIATELY (it does NOT wait for the fresh
+  // refetch): with the refetch held pending, submit is already disabled, the chip is gone, and a 2nd
+  // click can't re-submit the rejected id. Then the fresh list (without #42) resolves → still cleared.
+  it('R2 — rejection clears the rejected node before the fresh refetch resolves; a 2nd click cannot re-submit', async () => {
+    let resolveFresh!: (v: { nodes: any[]; total: number }) => void;
+    const freshPending = new Promise<{ nodes: any[]; total: number }>((res) => { resolveFresh = res; });
+    mocks.listDesignatableNodes
+      .mockResolvedValueOnce({ nodes: [{ nodeId: 'p42', identityId: '42', stake: '1000000000000000000000', ask: '0' }], total: 1 })
+      .mockReturnValueOnce(freshPending); // the fresh:true refetch stays PENDING
+    mocks.createPca.mockRejectedValue(new HttpError(400, 'PrimaryNodeNotInShardingTable', { error: 'PrimaryNodeNotInShardingTable' }));
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'node #42'); // #42 pre-selected from the initial list
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const submit = () => container.querySelector('[data-testid="pca-create-submit"]') as HTMLButtonElement;
+    await click(submit()!);
+    // Wait until the create rejects and the catch dispatches the fresh refetch (which stays pending).
+    const started = Date.now();
+    while (Date.now() - started < 1500 && !mocks.listDesignatableNodes.mock.calls.some((c) => c[0]?.fresh)) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+    }
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+
+    // BEFORE the fresh list resolves: back on the form, #42 already cleared (not re-defaulted off the
+    // stale list), submit disabled.
+    expect(container.querySelector('[data-testid="pca-create-tokens"]')).toBeTruthy(); // recoverable — on the form
+    expect(container.querySelector('[data-testid="pca-primary-node-selected"]')).toBeNull();
+    expect(submit().disabled).toBe(true);
+
+    // A 2nd click while the fresh list is still loading cannot re-submit the rejected id.
+    const callsAfterReject = mocks.createPca.mock.calls.length;
+    await click(submit());
+    expect(mocks.createPca.mock.calls.length).toBe(callsAfterReject);
+
+    // The fresh list resolves WITHOUT #42 → still cleared, submit still disabled.
+    await act(async () => {
+      resolveFresh({ nodes: [{ nodeId: 'p99', identityId: '99', stake: '1000000000000000000000', ask: '0' }], total: 1 });
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(submit().disabled).toBe(true);
+    expect(container.querySelector('[data-testid="pca-primary-node-selected"]')).toBeNull();
+    await unmount();
+  });
+
+  // A successful but EMPTY staked list is authoritative: a 503 → list-down own-default (#42) that a
+  // retry can't find in the (empty) table must be CLEARED, not kept (else Create enables on a node
+  // that isn't designatable).
+  it('a retry returning an EMPTY staked list clears the list-down own-default (submit disabled)', async () => {
+    mocks.listDesignatableNodes
+      .mockRejectedValueOnce(new Error('SHARDING_TABLE_READ_FAILED')) // initial load fails → list-down
+      .mockResolvedValue({ nodes: [], total: 0 }); // retry succeeds but the table is empty
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    // List down → core best-effort defaults to its own id (#42) → submit ENABLED, retry shown.
+    await waitForText(container, 'Using node #42');
+    const submit = () => container.querySelector('[data-testid="pca-create-submit"]') as HTMLButtonElement;
+    expect(submit().disabled).toBe(false);
+
+    // Retry → the table comes back EMPTY → #42 isn't designatable → the default is cleared.
+    await click(container.querySelector('[data-testid="pca-primary-node-retry"]')!);
+    const started = Date.now();
+    while (Date.now() - started < 1500 && !mocks.listDesignatableNodes.mock.calls.some((c) => c[0]?.fresh)) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+    }
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(submit().disabled).toBe(true);
+    await unmount();
+  });
+
+  // Phase gating — the reconcile / status-unknown / success screens must NOT start the form's reads
+  // (sharding-table + wallet-binding probe); only the live form does.
+  it('does NOT start designatable-node or wallet-binding reads in the reconcile phase', async () => {
+    usePcaStore.setState({ trackedIds: [], createPending: { ownerEoa: OWNER, submittedAt: Date.now() } });
+    const { unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    expect(mocks.listDesignatableNodes).not.toHaveBeenCalled();
+    expect(mocks.pcaAgentAccount).not.toHaveBeenCalled();
+    await unmount();
+  });
+
+  it('does NOT start designatable-node or wallet-binding reads while node status is unknown', async () => {
+    useAgentsStore.setState({ nodeStatus: null } as any);
+    const { unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    expect(mocks.listDesignatableNodes).not.toHaveBeenCalled();
+    expect(mocks.pcaAgentAccount).not.toHaveBeenCalled();
+    await unmount();
+  });
+
+  it('DOES start those reads on the live form (gating control)', async () => {
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(mocks.listDesignatableNodes).toHaveBeenCalled();
+    expect(mocks.pcaAgentAccount).toHaveBeenCalled();
+    await unmount();
+  });
+
+  // R9 — edge-create integration: an edge node picks a staked node and creates with that primaryNode.
+  it('R9 — edge node picks a staked node via the picker and creates with primaryNode', async () => {
+    useAgentsStore.getState().setNodeStatus({ nodeRole: 'edge', hasIdentity: false, blockExplorerUrl: null });
+    mocks.listDesignatableNodes.mockResolvedValue({
+      nodes: [{ nodeId: 'p99', identityId: '99', stake: '5000000000000000000000', ask: '0' }], total: 1,
+    });
+    mocks.createPca.mockResolvedValue({ accountId: '8', txHash: '0xabc', committedTokens: '100000.0' });
+    mocks.fetchPca.mockResolvedValue(snap({ accountId: '8', discountBps: 3000 }));
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)'); // edge opens the wizard (no gate)
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    // Edge has no own-node default → pick #99 via the picker (open + select the option).
+    const search = container.querySelector('[data-testid="pca-primary-node-search"]') as HTMLInputElement;
+    await act(async () => { search.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); });
+    const opt = container.querySelector('[data-testid="pca-primary-node-option"]') as HTMLElement;
+    await act(async () => { opt.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-create-submit"]')!);
+    await waitForText(container, 'PCA #8 created');
+    expect(mocks.createPca).toHaveBeenCalledWith({ tokens: '100000', primaryNode: '99' });
+    await unmount();
+  });
+
+  // M8 — a FAILED create must never fire the self-coverage hand-off (onApproveOwnWallets); the
+  // self-coverage modal (with its deregister-first loop) only follows a CONFIRMED mint.
+  it('M8 — a failed create never opens self-coverage (onApproveOwnWallets not called)', async () => {
+    mocks.createPca.mockRejectedValue(new HttpError(400, 'InvalidAmount', { error: 'InvalidAmount' }));
+    const onApproveOwn = vi.fn();
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: onApproveOwn, onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-create-submit"]')!);
+    const started = Date.now();
+    while (Date.now() - started < 1000 && mocks.createPca.mock.calls.length === 0) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+    }
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); }); // let the rejection settle
+    expect(mocks.createPca).toHaveBeenCalled();
+    expect(onApproveOwn).not.toHaveBeenCalled();
     await unmount();
   });
 
@@ -204,7 +501,9 @@ describe('CreatePcaModal', () => {
     expect(note.textContent).toContain('0/100');
     // Commit amount is seeded from the expiring account.
     expect((container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement).value).toBe('100000.0');
-    expect((container.querySelector('[data-testid="pca-create-primary-node"]') as HTMLInputElement).value).toBe('42');
+    // Primary node is seeded into the picker (shown as the selected node).
+    await waitForText(container, 'node #42');
+    expect(container.querySelector('[data-testid="pca-primary-node-selected"]')?.textContent).toContain('node #42');
     await unmount();
   });
 
@@ -377,18 +676,21 @@ describe('CreatePcaModal', () => {
     await unmount();
   });
 
-  it('S1 — delayed status → edge shows the sponsorship gate, never a live submit', async () => {
+  it('S1 — delayed status: checking (no live form) while unknown, then edge resolves → wizard opens', async () => {
     useAgentsStore.setState({ nodeStatus: null });
     const { container, unmount } = await render(
       React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
     );
     await waitForText(container, 'Checking node eligibility');
+    // Fail-closed while unknown — no live submit.
+    expect(container.querySelector('[data-testid="pca-create-submit"]')).toBeNull();
     await act(async () => {
       useAgentsStore.setState({ nodeStatus: { nodeRole: 'edge', hasIdentity: false } });
       await new Promise((r) => setTimeout(r, 0));
     });
-    await waitForText(container, 'requires a staked core-node identity');
-    expect(container.querySelector('[data-testid="pca-create-submit"]')).toBeNull();
+    // Edge now OPENS the wizard (no gate) — form + the non-blocking explainer.
+    await waitForText(container, 'Commit amount (TRAC)');
+    expect(container.querySelector('[data-testid="pca-create-no-identity-note"]')).toBeTruthy();
     await unmount();
   });
 

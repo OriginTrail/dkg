@@ -10,7 +10,7 @@
  * Conventions mirror chain-lifecycle-extra.test.ts: real EVMChainAdapter
  * over the shared Hardhat node, one snapshot per test for isolation.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
@@ -185,6 +185,74 @@ describe('V10 Publishing Conviction NFT — chain-adapter lifecycle', () => {
 
     // A wallet related to nothing → [].
     expect(await owner.listPublishingConvictionAccountsForWallets([ethers.Wallet.createRandom().address])).toEqual([]);
+  });
+
+  it('listDesignatableNodes reads the staked sharding table (no-arg overload) and maps NodeInfo (B-staked-nodes)', async () => {
+    // The shared Hardhat env pre-stakes the core node + 3 receivers into the
+    // sharding table (spawnHardhatEnv: "staked + ask set"), so the table is
+    // non-empty at baseline — this exercises the no-arg getShardingTable()
+    // overload + the on-chain NodeInfo decode/mapping against real data.
+    const reader = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const { receiverIds } = getSharedContext();
+
+    const nodes = await reader.listDesignatableNodes();
+    expect(nodes.length).toBeGreaterThanOrEqual(receiverIds.length);
+
+    // Every pre-staked receiver appears, mapped from the on-chain NodeInfo.
+    const byId = new Map(nodes.map((n) => [n.identityId, n]));
+    for (const rid of receiverIds) {
+      const node = byId.get(BigInt(rid));
+      expect(node, `receiver ${rid} should be in the sharding table`).toBeDefined();
+      expect(node!.nodeId).toMatch(/^0x[0-9a-fA-F]+$/); // on-chain bytes → hex
+      expect(node!.stake).toBeGreaterThan(0n);
+      expect(node!.ask).toBeGreaterThan(0n);
+    }
+    // No zero-id padding leaks through (defensive trim holds).
+    expect(nodes.every((n) => n.identityId > 0n)).toBe(true);
+  });
+
+  it('listDesignatableNodes TTL-caches, ?fresh REPOPULATES the cache, and a throw does not poison it (M6/R3)', async () => {
+    const reader = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const good = await reader.listDesignatableNodes(); // real read populates the cache
+
+    // Cache hit: a 2nd call within the 30s TTL does NOT re-read the chain.
+    const hitSpy = vi.spyOn(reader as any, 'readContractWith');
+    expect(await reader.listDesignatableNodes()).toEqual(good);
+    expect(hitSpy).not.toHaveBeenCalled();
+    hitSpy.mockRestore();
+
+    // ?fresh BYPASSES *and REPOPULATES*: stub the underlying read to return a
+    // DISTINGUISHABLE table, then prove the next NON-fresh call serves it. (A
+    // bypass-without-repopulate would still return `good` here and pass falsely —
+    // this is the R3 strengthening over the same-fixture version.)
+    const refreshed = [{ nodeId: '0xfeed', identityId: 99999n, ask: 7n, stake: 8n }];
+    const rawRefreshed = refreshed.map((n) => [n.nodeId, n.identityId, n.ask, n.stake]); // ethers positional tuple
+    const freshSpy = vi.spyOn(reader as any, 'readContractWith').mockResolvedValueOnce(rawRefreshed);
+    expect(await reader.listDesignatableNodes({ fresh: true })).toEqual(refreshed);
+    expect(freshSpy).toHaveBeenCalledTimes(1);
+    freshSpy.mockRestore();
+    expect(await reader.listDesignatableNodes()).toEqual(refreshed); // cache now holds the refreshed value
+
+    // No-negative-cache: a throwing fresh read leaves the last good (refreshed) value.
+    const boom = vi.spyOn(reader as any, 'readContractWith')
+      .mockRejectedValueOnce(Object.assign(new Error('blip'), { code: 'CALL_EXCEPTION' }));
+    await expect(reader.listDesignatableNodes({ fresh: true })).rejects.toThrow();
+    boom.mockRestore();
+    expect(await reader.listDesignatableNodes()).toEqual(refreshed); // unpoisoned
+  });
+
+  it('listDesignatableNodes re-resolves ShardingTable per read — no stale handle after a Hub rotation (TfA)', async () => {
+    // The handle is NOT memoized: each read that reaches the chain (a node-list
+    // cache MISS — ?fresh forces one) re-resolves ShardingTable from the Hub, so
+    // a Hub rotation is picked up on the next read instead of a stale cached
+    // contract serving the old table until daemon restart.
+    const reader = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const resolveSpy = vi.spyOn(reader as any, 'resolveContract');
+    await reader.listDesignatableNodes({ fresh: true });
+    await reader.listDesignatableNodes({ fresh: true });
+    const stResolves = resolveSpy.mock.calls.filter((c: any[]) => c[0] === 'ShardingTable').length;
+    expect(stResolves).toBe(2); // re-resolved on each read, never memoized
+    resolveSpy.mockRestore();
   });
 
   it('getPublishingConvictionAgents enumerates registered agents (checksummed) and reflects deregistration', async () => {

@@ -557,6 +557,55 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
     }
   }
 
+  // GET /api/pca/designatable-nodes — B-staked-nodes (Stage-5). The full
+  // sharding table of nodes designatable as a PCA `primaryNode`, for the create
+  // wizard's PrimaryNodePicker. Read-only; returns the WHOLE capped table
+  // (≤ shardingTableSizeLimit, default 500) in ONE response — no pagination
+  // (R4): the adapter reads + caches it whole and the UI drains it whole, so
+  // offset cursors bought no chain-work savings. ?fresh=1 bypasses the adapter
+  // cache (M4). Hash-ring order preserved (the UI sorts). Matched EXACTLY before
+  // the generic GET :id below, else 'designatable-nodes' parses as an accountId.
+  if (req.method === 'GET' && path === '/api/pca/designatable-nodes') {
+    if (!agent.supportsPublishingConvictionNft) {
+      return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+    }
+    // M4: ?fresh=1 bypasses the adapter's 30s TTL cache (and repopulates it) so
+    // the create PrimaryNodeNotInShardingTable revert recovery + picker Retry
+    // re-read the chain instead of re-serving a stale just-rejected node.
+    const fresh = ctx.url.searchParams.get('fresh') === '1';
+    try {
+      const all = await agent.listDesignatableNodes({ fresh });
+      if (all === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      return jsonResponse(res, 200, {
+        nodes: all.map((n) => ({
+          nodeId: n.nodeId,
+          identityId: n.identityId.toString(),
+          ask: n.ask.toString(),
+          stake: n.stake.toString(),
+        })),
+        total: all.length,
+      });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (respondIfChainRpcTransportError(res, err)) return;
+      // A CALL_EXCEPTION (read revert) or BAD_DATA (ABI/overload decode failure,
+      // L10) here is a sharding-table read failure → 503 retryable with a
+      // DEDICATED code (distinct from a PCA snapshot read), NOT a partial/empty
+      // list a picker would read as "no stakeable nodes".
+      if (err?.code === 'CALL_EXCEPTION' || err?.code === 'BAD_DATA') {
+        return jsonResponse(res, 503, {
+          error: 'Designatable-node list temporarily unavailable — sharding-table read failed',
+          code: 'SHARDING_TABLE_READ_FAILED',
+        });
+      }
+      return jsonResponse(res, 500, {
+        error: `listDesignatableNodes failed: ${msg}`,
+      });
+    }
+  }
+
   // GET /api/pca/:id — V10 conviction NFT snapshot. Optional ?key=0x...
   // probes whether that address is a registered agent. Optional ?extended=1
   // adds the GAP-4/5 budget fields (primaryNode + current-epoch allowance);

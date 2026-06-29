@@ -15,6 +15,18 @@ export interface PcaAccountRelation {
   relation: PcaRelation;
 }
 
+/** A node from the on-chain sharding table, eligible to be designated as a
+ *  PCA `primaryNode` (B-staked-nodes, Stage-5 picker). `nodeId` is the on-chain
+ *  `bytes` self-reported id (hex string — display-only, hence the picker's
+ *  "unverified" tag); `identityId` is the value passed as `primaryNode`.
+ *  `ask`/`stake` are wei. Returned in the contract's hash-ring order. */
+export interface ShardingTableNode {
+  nodeId: string;
+  identityId: bigint;
+  ask: bigint;
+  stake: bigint;
+}
+
 export interface ConvictionReader {
   getConvictionAgentAccountId(agent: string): Promise<bigint>;
   convictionAccountCanCover(accountId: bigint, baseCost: bigint): Promise<boolean>;
@@ -23,6 +35,11 @@ export interface ConvictionReader {
    *  published surface, consistent with the facade's typeof-guard (capability →
    *  503) and the optional ChainAdapter decl. EVMChainAdapter + mock implement it. */
   listPublishingConvictionAccountsForWallets?(wallets: string[]): Promise<PcaAccountRelation[]>;
+  /** B-staked-nodes (Stage-5) — the full sharding table of designatable PCA
+   *  primary nodes, hash-ring order, TTL-cached adapter-side. `opts.fresh`
+   *  bypasses the cache (M4: the create-revert recovery + picker Retry). Optional,
+   *  same rationale as above (facade typeof-guard / optional ChainAdapter decl). */
+  listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
 }
 
 export interface IdentityProof {
@@ -921,6 +938,15 @@ export interface ChainAdapter {
    * Read-only; surfaces read failures (does not fail-safe to a partial list).
    */
   listPublishingConvictionAccountsForWallets?(wallets: string[]): Promise<PcaAccountRelation[]>;
+
+  /**
+   * B-staked-nodes (Stage-5) — the full on-chain sharding table of nodes
+   * designatable as a PCA `primaryNode`. Read-only; hash-ring order preserved;
+   * TTL-cached adapter-side (the table changes slowly); `opts.fresh` bypasses
+   * the cache (M4). Optional for the same reason as the other PCA reads
+   * (mock-chain tests can omit it).
+   */
+  listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
 
   /**
    * Returns the V10 NFT-backed PCA's `lockDurationEpochs` for the given

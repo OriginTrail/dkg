@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   fetchPca: vi.fn(),
   pcaAddAgent: vi.fn(),
   pcaRemoveAgent: vi.fn(),
+  pcaAgentAccount: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', async (orig) => {
@@ -23,6 +24,7 @@ vi.mock('../src/ui/api.js', async (orig) => {
     fetchPca: mocks.fetchPca,
     pcaAddAgent: mocks.pcaAddAgent,
     pcaRemoveAgent: mocks.pcaRemoveAgent,
+    pcaAgentAccount: mocks.pcaAgentAccount,
   };
 });
 
@@ -76,6 +78,8 @@ beforeEach(() => {
   document.body.innerHTML = '';
   vi.clearAllMocks();
   mocks.fetchWalletsBalances.mockResolvedValue({ wallets: ['0xnode1'], balances: [], chainId: '84532', rpcUrl: null });
+  // B1 default: wallets bound to nothing (no self-coverage probe surprises in non-B1 tests).
+  mocks.pcaAgentAccount.mockResolvedValue({ agent: '', accountId: null });
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
@@ -198,6 +202,140 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     await waitForText(container, 'add them manually');
     expect(container.querySelector('[data-testid="pca-renew-reapprove-note"]')?.textContent)
       .toContain('Couldn’t load PCA #4’s wallets');
+    await unmount();
+  });
+
+  // B1 self-coverage (§9.5) — the post-create self-coverage of THIS node's own wallets:
+  // an own-bound wallet is deregistered-first then registered; a sponsor-bound wallet is
+  // SKIPPED (already discounted free), never burning a register. The old account VARIES
+  // per wallet (unlike renew's single deregisterFrom).
+  it('B1 self-coverage: deregisters an own-bound wallet first, skips a sponsor-bound one', async () => {
+    const SPONSOR = '0xC0FFEE0000000000000000000000000000000001';
+    // Self mode approves the node's own wallets: ADDR_A (owner/daemon EOA) + ADDR_B.
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [ADDR_A, ADDR_B], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.pcaAgentAccount.mockImplementation(async (w: string) =>
+      w === ADDR_A ? { agent: w, accountId: '4' } : { agent: w, accountId: '9' },
+    );
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      if (id === '4') return { ...snap({ accountId: '4' }), owner: ADDR_A };   // own-bound → deregister-first
+      // sponsor-bound + LIVE (budget + unexpired) → "already discounted free" skip (R1).
+      if (id === '9') return { ...snap({ accountId: '9', baseEpochAllowance: '1000000000000000000000' }), owner: SPONSOR };
+      return key ? { ...snap(), probedKey: { key, registered: true } } : snap(); // the new account (#8)
+    });
+    mocks.pcaRemoveAgent.mockResolvedValue({ accountId: '4', agent: ADDR_A, removed: true });
+    mocks.pcaAddAgent.mockResolvedValue({ accountId: '8', agent: ADDR_A, registered: true, adapterSupported: true });
+
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, { accountId: '8', initialMode: 'self', selfCoverage: true, onClose: vi.fn() }),
+    );
+    await waitForText(container, 'slots used');
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, 'already discounted free'); // the sponsor-bound skip copy
+
+    // Own-bound ADDR_A: deregistered from #4 FIRST, then registered on #8.
+    expect(mocks.pcaRemoveAgent).toHaveBeenCalledWith('4', ADDR_A);
+    expect(mocks.pcaAddAgent).toHaveBeenCalledWith('8', ADDR_A);
+    expect(mocks.pcaRemoveAgent.mock.invocationCallOrder[0]).toBeLessThan(mocks.pcaAddAgent.mock.invocationCallOrder[0]);
+    // Sponsor-bound ADDR_B: SKIPPED — never registered, never deregistered.
+    expect(mocks.pcaAddAgent).not.toHaveBeenCalledWith('8', ADDR_B);
+    expect(mocks.pcaRemoveAgent).not.toHaveBeenCalledWith('9', ADDR_B);
+    await unmount();
+  });
+
+  // R1 (#9) — a wallet on an EXPIRED/swept sponsor PCA must NOT be skipped as "already discounted
+  // free": it's uncovered + unfreeable (not the owner) → a distinct conflict, never registered.
+  it('R1 — self-coverage: an EXPIRED sponsor binding → conflict (not "already free"), not registered', async () => {
+    const SPONSOR = '0xC0FFEE0000000000000000000000000000000001';
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [ADDR_A], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: ADDR_A, accountId: '9' });
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) =>
+      id === '9'
+        ? { ...snap({ accountId: '9', expiresAtTimestamp: 1, baseEpochAllowance: '1000000000000000000000' }), owner: SPONSOR } // EXPIRED sponsor
+        : (key ? { ...snap(), probedKey: { key, registered: true } } : snap()),
+    );
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, { accountId: '8', initialMode: 'self', selfCoverage: true, onClose: vi.fn() }),
+    );
+    await waitForText(container, 'slots used');
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, 'expired/swept'); // the R1 dead-sponsor conflict copy
+    expect(container.querySelector('.v10-pca-approve-results')?.textContent).not.toContain('already discounted free');
+    expect(mocks.pcaAddAgent).not.toHaveBeenCalled(); // not registered (can't free a sponsor's PCA)
+    expect(mocks.pcaRemoveAgent).not.toHaveBeenCalled(); // not deregistered (not the owner)
+    await unmount();
+  });
+
+  // H2 (#9 safety) — selfCoverage logic must NOT run in sponsor mode: a third-party wallet on a
+  // PCA this node happens to own must NOT be silently deregistered, and no false "already free" skip.
+  it('H2 — selfCoverage does NOT run in sponsor mode (no silent third-party deregister)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: ['0xnode1'], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: ADDR_A, accountId: '4' }); // ADDR_A bound to a PCA the node owns
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      if (id === '4') return { ...snap({ accountId: '4' }), owner: '0xnode1' }; // node owns #4
+      return key ? { ...snap(), probedKey: { key, registered: false } } : snap();
+    });
+    mocks.pcaAddAgent.mockRejectedValue(new HttpError(409, 'AgentAlreadyRegistered', { error: 'AgentAlreadyRegistered' }));
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, { accountId: '8', initialMode: 'sponsor', selfCoverage: true, onClose: vi.fn() }),
+    );
+    await waitForText(container, 'Wallet address(es)');
+    setTextarea(container.querySelector('[data-testid="pca-approve-address"]') as HTMLTextAreaElement, ADDR_A);
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, 'another conviction account'); // normal sponsor-mode conflict path
+    // The gate held: NO silent deregister of the third-party wallet, NO false self-coverage skip.
+    expect(mocks.pcaRemoveAgent).not.toHaveBeenCalled();
+    expect(container.querySelector('.v10-pca-approve-results')?.textContent).not.toContain('already discounted free');
+    await unmount();
+  });
+
+  // M5 — hot→cold migration: deregister succeeds then register fails → the wallet is STRANDED
+  // (off old, not on new); surfaced loudly with a one-click "Retry to finish" that completes it.
+  it('M5 — deregister-then-register-fail strands the wallet; Retry to finish recovers it', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [ADDR_A], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.pcaAgentAccount
+      .mockResolvedValueOnce({ agent: ADDR_A, accountId: '4' }) // run 1: own-bound
+      .mockResolvedValue({ agent: ADDR_A, accountId: null });   // run 2 (retry): now unbound
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) =>
+      id === '4' ? { ...snap({ accountId: '4' }), owner: ADDR_A } : (key ? { ...snap(), probedKey: { key, registered: true } } : snap()),
+    );
+    mocks.pcaRemoveAgent.mockResolvedValue({ accountId: '4', agent: ADDR_A, removed: true });
+    mocks.pcaAddAgent
+      .mockRejectedValueOnce(new HttpError(500, 'x', { error: 'boom' }))                            // run 1: register FAILS → stranded
+      .mockResolvedValue({ accountId: '8', agent: ADDR_A, registered: true, adapterSupported: true }); // run 2: succeeds
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, { accountId: '8', initialMode: 'self', selfCoverage: true, onClose: vi.fn() }),
+    );
+    await waitForText(container, 'slots used');
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, 'temporarily UNCOVERED'); // the stranded banner
+    expect(container.querySelector('[data-testid="pca-approve-stranded"]')).toBeTruthy();
+    // One-click retry finishes the migration.
+    await click(container.querySelector('[data-testid="pca-approve-retry-stranded"]')!);
+    await waitForText(container, 'approved on-chain');
+    expect(container.querySelector('[data-testid="pca-approve-stranded"]')).toBeNull();
+    await unmount();
+  });
+
+  // M10 — self-coverage: an UNREADABLE binding (the owner read fails → inconclusive) must NOT be
+  // skipped or deregistered; it falls through to registerAgent and the AgentAlreadyRegistered
+  // backstop resolves it (#9 — never assert "already free" off an unread probe).
+  it('M10 — self-coverage: an inconclusive binding falls through to register (conflict backstop), not skipped', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [ADDR_A], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: ADDR_A, accountId: '9' }); // bound…
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      if (id === '9') throw new Error('rpc'); // …but the owner read FAILS → inconclusive
+      return key ? { ...snap(), probedKey: { key, registered: false } } : snap(); // new account #8
+    });
+    mocks.pcaAddAgent.mockRejectedValue(new HttpError(409, 'AgentAlreadyRegistered', { error: 'AgentAlreadyRegistered' }));
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, { accountId: '8', initialMode: 'self', selfCoverage: true, onClose: vi.fn() }),
+    );
+    await waitForText(container, 'slots used');
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, 'another conviction account'); // register attempted → conflict backstop
+    expect(mocks.pcaAddAgent).toHaveBeenCalledWith('8', ADDR_A); // registered (not skipped)
+    expect(mocks.pcaRemoveAgent).not.toHaveBeenCalled(); // inconclusive → no deregister
     await unmount();
   });
 

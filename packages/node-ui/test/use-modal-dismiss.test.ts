@@ -280,18 +280,39 @@ describe('useModalDismiss (BUG-017)', () => {
     expect(document.activeElement).toBe(last);
   });
 
-  it('uses capture phase so Escape inside a child <input> still closes the dialog (BUG-017 regression guard)', async () => {
+  it('Escape inside a child <input> bubbles up and still closes the dialog (BUG-017 regression guard)', async () => {
     const onClose = vi.fn();
     mount(true, onClose, React.createElement('input', { id: 'inside-input', defaultValue: '' }));
     await tick();
     const input = document.getElementById('inside-input') as HTMLInputElement;
     input.focus();
 
-    // Dispatch via input so the event starts at the input target. The
-    // hook listens at the window level with capture=true so Escape
-    // reaches the handler before any input keybinding could swallow
-    // it.
+    // Dispatch via the input so the event starts at the input target. The hook listens at
+    // the window level in the BUBBLE phase, so an Escape from a child that doesn't stop
+    // propagation reaches the handler and dismisses the dialog.
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('does NOT special-case an expanded combobox child — Escape dismisses generically (no widget coupling)', async () => {
+    // Regression guard: a previous fix made the hook query for
+    // `[role="combobox"][aria-expanded="true"]` and no-op Escape when one was open,
+    // coupling the SHARED hook to combobox DOM internals. The hook is now generic — a
+    // widget that wants to own Escape must stop propagation in its OWN handler. A bare
+    // expanded combobox with no handler therefore does NOT suppress the dialog dismiss.
+    const onClose = vi.fn();
+    mount(
+      true,
+      onClose,
+      React.createElement('input', {
+        id: 'bare-combobox',
+        role: 'combobox',
+        'aria-expanded': 'true',
+        defaultValue: '',
+      }),
+    );
+    await tick();
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

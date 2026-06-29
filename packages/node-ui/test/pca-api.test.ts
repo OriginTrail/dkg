@@ -18,6 +18,7 @@ import {
   isPcaReadFailed,
   fetchPca,
   fetchMyPcas,
+  listDesignatableNodes,
   createPca,
   pcaAddAgent,
   pcaRemoveAgent,
@@ -236,6 +237,17 @@ describe('PCA api helpers (transport shaping)', () => {
     fetchMock.mockResolvedValueOnce(ok({ accounts: [] }));
     await fetchMyPcas({ hydrate: true });
     expect(fetchMock.mock.calls[1]![0]).toBe('/api/pca/mine?hydrate=1');
+  });
+
+  it('listDesignatableNodes GETs the whole list in one shot (R4 — no pagination), +?fresh=1 on demand', async () => {
+    fetchMock.mockResolvedValueOnce(ok({ nodes: [], total: 0 }));
+    await listDesignatableNodes();
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/pca/designatable-nodes');
+
+    // M4 — fresh:true appends ?fresh=1 (cache-bust); absent otherwise.
+    fetchMock.mockResolvedValueOnce(ok({ nodes: [], total: 0 }));
+    await listDesignatableNodes({ fresh: true });
+    expect(fetchMock.mock.calls[1]![0]).toBe('/api/pca/designatable-nodes?fresh=1');
   });
 
   // T1 — a GET failure must throw an HttpError that CARRIES the body, so the tab-gate
