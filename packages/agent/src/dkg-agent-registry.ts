@@ -1533,9 +1533,13 @@ export class AgentRegistryMethods extends DKGAgentBase {
    *  Chain-scoped DISCOVERY (may surface an account the node does not track);
    *  callers route the id through coverage classification, never treating
    *  "registered" as "covered". */
-  async getConvictionAgentAccountId(this: DKGAgent, agent: string): Promise<bigint | null> {
+  async getConvictionAgentAccountId(
+    this: DKGAgent,
+    agent: string,
+    opts?: { strict?: boolean },
+  ): Promise<bigint | null> {
     if (typeof this.chain.getConvictionAgentAccountId !== 'function') return null;
-    return this.chain.getConvictionAgentAccountId(agent);
+    return this.chain.getConvictionAgentAccountId(agent, opts);
   }
 
   // ---------------------------------------------------------------------------

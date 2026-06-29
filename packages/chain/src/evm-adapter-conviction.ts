@@ -34,9 +34,19 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
    * deployed on this chain, the address is malformed, or the chain
    * call fails — callers treat the unknown case as "no PCA path".
    */
-  async getConvictionAgentAccountId(agent: string): Promise<bigint> {
+  async getConvictionAgentAccountId(
+    agent: string,
+    opts?: { strict?: boolean },
+  ): Promise<bigint> {
     await this.init();
-    if (!this.contracts.dkgPublishingConvictionNFT) return 0n;
+    if (!this.contracts.dkgPublishingConvictionNFT) {
+      // Selector fail-safe: "no PCA contract on this chain" → "no PCA path"
+      // (0n), so publishing stays on direct-spend. The discovery path (strict)
+      // surfaces it instead, so the daemon answers 503 rather than letting a UI
+      // read "unavailable" as "registered nowhere".
+      if (opts?.strict) throw new PcaUnavailableError();
+      return 0n;
+    }
     if (!ethers.isAddress(agent)) return 0n;
     try {
       const id: bigint = await this.readContract(
@@ -44,7 +54,13 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       );
       return BigInt(id);
     } catch (err: any) {
-      if (err?.code === 'CALL_EXCEPTION') return 0n;
+      // `agentToAccountId` is a plain mapping getter — it returns 0 (NOT a
+      // revert) for an unregistered address, so a CALL_EXCEPTION here is a real
+      // read failure, never a normal "unregistered". The selector fail-safe
+      // masks it as 0n (publish at full price, safe); the discovery path
+      // (strict) rethrows so a transient blip stays inconclusive instead of
+      // flipping a covered wallet to a confirmed "registered nowhere".
+      if (err?.code === 'CALL_EXCEPTION' && !opts?.strict) return 0n;
       throw err;
     }
   }

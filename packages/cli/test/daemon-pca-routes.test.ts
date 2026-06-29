@@ -665,22 +665,27 @@ describe('daemon /api/pca V10 caller contract', () => {
   });
 
   // ----- GAP-3: GET /api/pca/agent/:address (which PCA funds a wallet) -----
-  it('GET /api/pca/agent/:address → 200 { agent, accountId } for a registered wallet', async () => {
+  it('GET /api/pca/agent/:address → 200 { agent, accountId } for a registered wallet (strict discovery read)', async () => {
     const addr = ethers.getAddress('0x' + 'ab'.repeat(20));
-    let queried: string | null = null;
+    let queried: { a: string; strict: boolean | undefined } | null = null;
     const agent = {
-      getConvictionAgentAccountId: async (a: string) => { queried = a; return 7n; },
+      supportsPublishingConvictionNft: true,
+      getConvictionAgentAccountId: async (a: string, opts?: { strict?: boolean }) => {
+        queried = { a, strict: opts?.strict };
+        return 7n;
+      },
     };
     const { res, done } = runCtx('GET', `/api/pca/agent/${addr}`, agent);
     await done;
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body)).toEqual({ agent: addr, accountId: '7' });
-    expect(queried).toBe(addr);
+    // Discovery route MUST opt into strict so a read failure can't masquerade as "unregistered".
+    expect(queried).toEqual({ a: addr, strict: true });
   });
 
-  it('GET /api/pca/agent/:address → 200 { accountId: null } for an unregistered wallet (0n)', async () => {
+  it('GET /api/pca/agent/:address → 200 { accountId: null } for a genuinely unregistered wallet (0n on a healthy read)', async () => {
     const addr = ethers.getAddress('0x' + 'cd'.repeat(20));
-    const agent = { getConvictionAgentAccountId: async () => 0n };
+    const agent = { supportsPublishingConvictionNft: true, getConvictionAgentAccountId: async () => 0n };
     const { res, done } = runCtx('GET', `/api/pca/agent/${addr}`, agent);
     await done;
     expect(res.statusCode).toBe(200);
@@ -693,9 +698,57 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(res.statusCode).toBe(400);
   });
 
-  it('GET /api/pca/agent/:address → 503 when the adapter lacks the surface (facade null)', async () => {
+  it('GET /api/pca/agent/:address → 503 (capability gate) when the adapter lacks the PCA surface; lookup not called', async () => {
+    let called = false;
     const addr = ethers.getAddress('0x' + 'ab'.repeat(20));
-    const agent = { getConvictionAgentAccountId: async () => null };
+    const agent = {
+      supportsPublishingConvictionNft: false,
+      getConvictionAgentAccountId: async () => { called = true; return 0n; },
+    };
+    const { res, done } = runCtx('GET', `/api/pca/agent/${addr}`, agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    expect(called).toBe(false);
+  });
+
+  it('GET /api/pca/agent/:address → 503 when the facade returns null despite capability', async () => {
+    const addr = ethers.getAddress('0x' + 'ab'.repeat(20));
+    const agent = { supportsPublishingConvictionNft: true, getConvictionAgentAccountId: async () => null };
+    const { res, done } = runCtx('GET', `/api/pca/agent/${addr}`, agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+  });
+
+  it('GET /api/pca/agent/:address → 503 PCA_LOOKUP_READ_FAILED on a CALL_EXCEPTION read failure (NOT 200 null)', async () => {
+    const addr = ethers.getAddress('0x' + 'ab'.repeat(20));
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getConvictionAgentAccountId: async () => {
+        // The strict path rethrows a CALL_EXCEPTION (a real read failure on the
+        // mapping getter) — the route must NOT collapse it to accountId:null.
+        const err: any = new Error('missing revert data (execution reverted)');
+        err.code = 'CALL_EXCEPTION';
+        throw err;
+      },
+    };
+    const { res, done } = runCtx('GET', `/api/pca/agent/${addr}`, agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    const body = JSON.parse(res.body);
+    expect(body.code).toBe('PCA_LOOKUP_READ_FAILED');
+    expect(body.accountId).toBeUndefined();
+  });
+
+  it('GET /api/pca/agent/:address → 503 when strict surfaces NFT-undeployed (PcaUnavailableError)', async () => {
+    const addr = ethers.getAddress('0x' + 'ab'.repeat(20));
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getConvictionAgentAccountId: async () => {
+        const err: any = new Error('DKGPublishingConvictionNFT not deployed on this Hub.');
+        err.code = 'PCA_UNAVAILABLE';
+        throw err;
+      },
+    };
     const { res, done } = runCtx('GET', `/api/pca/agent/${addr}`, agent);
     await done;
     expect(res.statusCode).toBe(503);
@@ -704,6 +757,7 @@ describe('daemon /api/pca V10 caller contract', () => {
   it('GET /api/pca/agent/:address → 503 on RPC transport exhaustion (sanitized)', async () => {
     const addr = ethers.getAddress('0x' + 'ab'.repeat(20));
     const agent = {
+      supportsPublishingConvictionNft: true,
       getConvictionAgentAccountId: async () => {
         const err: any = new Error(
           'agentToAccountId failed on all configured RPC endpoints (https://rpc.example/v2/SECRETKEY): boom',

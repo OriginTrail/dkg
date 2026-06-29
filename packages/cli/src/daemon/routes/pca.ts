@@ -403,8 +403,19 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
     if (!ethers.isAddress(addr)) {
       return jsonResponse(res, 400, { error: 'address must be a valid 0x-prefixed EVM address' });
     }
+    // Capability gate (mirror B3 / GET :id): an adapter without the PCA surface
+    // answers 503 — never a 200 a UI would read as "registered nowhere".
+    if (!agent.supportsPublishingConvictionNft) {
+      return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+    }
     try {
-      const accountId = await agent.getConvictionAgentAccountId(addr);
+      // STRICT discovery read: surfaces NFT-undeployed (PcaUnavailableError →
+      // 503) and read failures (CALL_EXCEPTION → 503) instead of the selector's
+      // fail-safe 0n. Otherwise a transient blip would resolve `accountId:null`
+      // = a CONFIRMED "registered nowhere", flipping a covered wallet to a
+      // false-DANGER fall-through in S5 (#9). A 0n from a healthy read is a
+      // genuine "unregistered" → accountId:null.
+      const accountId = await agent.getConvictionAgentAccountId(addr, { strict: true });
       if (accountId === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
       return jsonResponse(res, 200, {
         agent: ethers.getAddress(addr),
@@ -415,6 +426,15 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
       if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
       if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
       if (respondIfChainRpcTransportError(res, err)) return;
+      // A CALL_EXCEPTION on the mapping getter is a real read failure (the
+      // getter never reverts for an unregistered address) → 503 retryable, NOT
+      // a 200 the UI would read as a confirmed "registered nowhere".
+      if (err?.code === 'CALL_EXCEPTION') {
+        return jsonResponse(res, 503, {
+          error: 'PCA agent lookup temporarily unavailable — chain read failed',
+          code: 'PCA_LOOKUP_READ_FAILED',
+        });
+      }
       return jsonResponse(res, 500, {
         error: `getConvictionAgentAccountId failed: ${msg}`,
       });
