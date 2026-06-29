@@ -393,3 +393,51 @@ describe('ConvictionDetailView B3 — live approved-wallet table', () => {
     await unmount();
   });
 });
+
+// GAP-4/5 — the S3 detail view opts into the EXTENDED snapshot and renders a remaining-
+// allowance budget item + a primaryNode readout; both degrade-to-nothing when the
+// best-effort extended fields are absent (never a false value). Coverage spine unchanged.
+describe('ConvictionDetailView GAP-4/5 — budget widget + primaryNode', () => {
+  it('requests the EXTENDED snapshot (so the budget widget has remainingAllowance)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
+    const { unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    // The primary snapshot fetch (no key) opts in to extended; the per-wallet probes don't.
+    expect(mocks.fetchPca).toHaveBeenCalledWith('7', undefined, { extended: true });
+    await unmount();
+  });
+
+  it('renders remaining-allowance + primaryNode when the extended fields are present', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key
+        ? { ...snap(), probedKey: { key, registered: true } }
+        : snap({ remainingAllowance: '500000000000000000000', remainingAllowanceTrac: '500.0', currentEpoch: 1290, primaryNode: '42', lastPrimaryNodeChangeEpoch: 1288 }),
+    );
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Remaining this epoch');
+    expect(container.textContent).toContain('500');
+    expect(container.textContent).toContain('Node #42');
+    await unmount();
+  });
+
+  it('omits the budget widget items when the extended fields are absent (read-failed degrade)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
+    // default snap() carries no extended fields.
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Top-up buffer');
+    expect(container.textContent).not.toContain('Remaining this epoch');
+    expect(container.textContent).not.toContain('Primary node');
+    await unmount();
+  });
+
+  it('primaryNode "0" reads "None set" (vs a real node id)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...snap(), probedKey: { key, registered: true } } : snap({ primaryNode: '0' }),
+    );
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'None set');
+    expect(container.textContent).not.toContain('Node #');
+    await unmount();
+  });
+});

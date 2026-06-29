@@ -2,6 +2,7 @@ import React, { useState, useMemo, useCallback, lazy, Suspense } from 'react';
 import { useFetch } from '../hooks.js';
 import { executeQuery, fetchStatus, listAssertions, promoteAssertion, publishAssertionsToVm, partialPublishWarning, describePromoteResult, describePromoteError, type AssertionInfo, type BatchPublishResult } from '../api.js';
 import { FilePreviewModal } from '../components/Modals/FilePreviewModal.js';
+import { DiscountAppliedBadge } from '../components/Pca/index.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 import { memoryGraphLabels } from '../lib/memoryLabels.js';
 import { truncateMiddle } from '../lib/truncate.js';
@@ -779,7 +780,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
       </div>
 
       {publishResult && (() => {
-        const { published, total, sealed, partial, partialError, failures, sample } = publishResult;
+        const { published, total, sealed, partial, partialError, failures, sample, convictionCostCovered } = publishResult;
         // "Clean" only when every asset published AND none came back as a 207
         // partial (minted on-chain but the CG binding failed).
         const allOk = published === total && published > 0 && partial === 0;
@@ -826,6 +827,10 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
                   an unfunded signer, or a chain adapter that isn&apos;t V10-ready).
                 </div>
               )}
+              {/* B8 — the CONFIRMED post-publish discount, aggregated across the BATCH (not
+                  off the headline `sample`, which is picked for cleanliness not discount —
+                  #1365 r3). Renders nothing unless some item drew on a PCA (#9). */}
+              <DiscountAppliedBadge convictionCostCovered={convictionCostCovered} />
             </div>
           </div>
         );

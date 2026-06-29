@@ -184,6 +184,42 @@ describe('MemoryLayerView PublishPanel (SWM → VM)', () => {
     await unmount();
   });
 
+  // B8 (#1365 r3) — the CONFIRMED discount badge reads the BATCH-LEVEL convictionCostCovered,
+  // NOT the headline `sample` (which is picked for cleanliness, not discount). Regression
+  // guard: a CLEAN non-discount sample alongside a batch-level discount must still render.
+  it('B8 — renders the discount badge from the BATCH field even when the clean sample has no discount', async () => {
+    apiMocks.publishAssertionsToVm.mockResolvedValue({
+      published: 2, total: 2, sealed: 0, partial: 0, failures: [],
+      // The headline sample is a clean, NON-discount item (the mixed-batch trap)…
+      sample: { status: 'confirmed', txHash: '0xtx', kaId: '0xka' },
+      // …but the batch DID draw a discount on another item → badge must render it.
+      convictionCostCovered: { accountId: '7', epoch: 1284, baseCost: '1000', discountedCost: '700', drawnFromEpoch: '700', drawnFromTopUp: '0' },
+    });
+    const { container, unmount } = await render(
+      React.createElement(PublishPanel, { contextGraphId: 'cg', onPublished: () => {} }),
+    );
+    await flush();
+    await act(async () => { (container.querySelector('.v10-btn-promote-all') as HTMLButtonElement).click(); });
+    await flush();
+    const badge = container.querySelector('[data-testid="pca-discount-badge"]');
+    expect(badge, 'discount badge renders from the batch field, not the sample').toBeTruthy();
+    expect(badge!.textContent).toContain('30%'); // 10000*(1000-700)/1000 = 3000 bps
+    expect(badge!.textContent).toContain('PCA #7');
+    await unmount();
+  });
+
+  it('B8 — renders NO discount badge when the batch has no convictionCostCovered (degrade-hidden #9)', async () => {
+    // cleanResult (default) has no convictionCostCovered → no false discount claim.
+    const { container, unmount } = await render(
+      React.createElement(PublishPanel, { contextGraphId: 'cg', onPublished: () => {} }),
+    );
+    await flush();
+    await act(async () => { (container.querySelector('.v10-btn-promote-all') as HTMLButtonElement).click(); });
+    await flush();
+    expect(container.querySelector('[data-testid="pca-discount-badge"]')).toBeNull();
+    await unmount();
+  });
+
   it('surfaces a per-KA failure (subset-not-sealable) via failures[] without crashing', async () => {
     apiMocks.publishAssertionsToVm.mockResolvedValue({
       published: 0, total: 1, sealed: 0, partial: 0,

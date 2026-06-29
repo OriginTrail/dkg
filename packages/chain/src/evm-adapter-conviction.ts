@@ -75,10 +75,16 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     if (!this.contracts.dkgPublishingConvictionNFT) return 0;
     if (accountId <= 0n) return 0;
     try {
-      // `accounts(uint256)` returns
-      // (committedTRAC, createdAtEpoch, expiresAtEpoch, createdAtTimestamp,
-      //  expiresAtTimestamp, lockDurationEpochs, discountBps,
-      //  lastSettledWindow, fullySwept). Pull index 5.
+      // `accounts(uint256)` returns, in order:
+      //  [0] committedTRAC          [1] createdAtEpoch
+      //  [2] expiresAtEpoch         [3] createdAtTimestamp
+      //  [4] expiresAtTimestamp     [5] lockDurationEpochs
+      //  [6] discountBps            [7] lastSettledWindow
+      //  [8] fullySwept             [9] primaryNode (uint72, OT-RFC-51)
+      //  [10] lastPrimaryNodeChangeEpoch
+      // Pull index 5 for the lock duration. (primaryNode [9] /
+      // lastPrimaryNodeChangeEpoch [10] were appended in the RFC-51 bump;
+      // `getAccountInfo` does not surface them — GAP-4 reads them here.)
       const tuple = await this.readContract(
         this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.accounts', 'accounts', accountId,
       );
@@ -284,7 +290,10 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     });
   }
 
-  async getPublishingConvictionAccountInfo(accountId: bigint): Promise<V10PublishingConvictionAccountInfo | null> {
+  async getPublishingConvictionAccountInfo(
+    accountId: bigint,
+    opts?: { extended?: boolean },
+  ): Promise<V10PublishingConvictionAccountInfo | null> {
     await this.init();
     // Undeployed NFT → capability error (503). null is reserved below
     // for a genuine account-missing revert so the route can disambiguate.
@@ -293,7 +302,7 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       const t = await this.readContract(
         this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.getAccountInfo', 'getAccountInfo', accountId,
       );
-      return {
+      const info: V10PublishingConvictionAccountInfo = {
         owner: ethers.getAddress(t[0]),
         committedTRAC: BigInt(t[1]),
         baseEpochAllowance: BigInt(t[2]),
@@ -307,6 +316,35 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
         lastSettledWindow: Number(t[10]),
         fullySwept: Boolean(t[11]),
       };
+      // GAP-4/5 (opt-in; the S3 budget widget passes `extended`). The default
+      // path (incl. the `convictionAccountCanCover` publish hot path) skips
+      // this entirely — zero extra reads. FAIL-SOFT: an extended-read error
+      // must NOT null the account (core getAccountInfo already succeeded); the
+      // fields are simply left undefined so the UI shows them as unknown
+      // (distinct from primaryNode '0' = "no designated node"). primaryNode /
+      // lastPrimaryNodeChangeEpoch are `accounts()` [9]/[10] (RFC-51, not in
+      // getAccountInfo); remainingAllowance is the current epoch's headroom.
+      if (opts?.extended) {
+        try {
+          const acct = await this.readContract(
+            this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.accounts', 'accounts', accountId,
+          );
+          info.primaryNode = BigInt(acct[9]);
+          info.lastPrimaryNodeChangeEpoch = Number(acct[10]);
+          if (!this.contracts.chronos) {
+            this.contracts.chronos = await this.resolveContract('Chronos');
+          }
+          const currentEpoch: bigint = BigInt(await this.readContract(
+            this.contracts.chronos, 'chronos.getCurrentEpoch', 'getCurrentEpoch',
+          ));
+          info.currentEpoch = Number(currentEpoch);
+          info.remainingAllowance = BigInt(await this.readContract(
+            this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.getRemainingAllowance',
+            'getRemainingAllowance', accountId, currentEpoch,
+          ));
+        } catch { /* extended enrichment is best-effort; leave fields undefined */ }
+      }
+      return info;
     } catch (err: any) {
       if (err?.code === 'CALL_EXCEPTION') return null;
       throw err;

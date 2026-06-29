@@ -13,6 +13,7 @@
  */
 import React, { useState } from 'react';
 import { formatNotificationTimestamp } from '../../lib/formatTimestamp.js';
+import { convictionDiscountBps, formatWeiToTrac } from '../Pca/index.js';
 import type {
   JoinRequestItem,
   ActivityItem,
@@ -314,6 +315,59 @@ export function ConfirmationRow({
       aria-disabled="true"
     >
       {body}
+    </div>
+  );
+}
+
+// ─── PCA discount applied (informational, B8 confirmed) ──────────────────────
+
+/** B8 (P2) — the CONFIRMED post-publish discount bell row. Informational + non-
+ *  clickable (like the rejected confirmation), distinct from S5's predictive
+ *  "pending confirmation" alert: this is the on-chain CostCovered draw. Derives the
+ *  discount + saved amount from the event; falls back gracefully if the costs are
+ *  un-parseable (never asserts a bogus number — #9). */
+export function PcaCostCoveredRow({
+  item,
+}: {
+  item: Extract<ActivityItem, { kind: 'pca_cost_covered' }>;
+}) {
+  const bps = convictionDiscountBps(item.covered);
+  const pct = bps != null ? (bps / 100).toFixed(bps % 100 === 0 ? 0 : 1) : null;
+  let saved: string | null = null;
+  try {
+    const base = BigInt(item.covered.baseCost);
+    const disc = BigInt(item.covered.discountedCost);
+    // STRICT (`disc < base`): a 0% draw (disc === base) is no saving → no "saved 0 TRAC".
+    if (base > 0n && disc >= 0n && disc < base) saved = formatWeiToTrac((base - disc).toString());
+  } catch {
+    saved = null;
+  }
+  const pca = `PCA #${item.covered.accountId}`;
+  // Append the CG context when the daemon supplied it (meta.contextGraphName).
+  const where = item.contextGraphName?.trim() ? ` in ${item.contextGraphName.trim()}` : '';
+  // A genuine 0% draw (pct null but the event fired) still means the PCA COVERED the
+  // publish — surface that honestly WITHOUT a discount/saved claim (#9). Only a positive
+  // discount renders the "−X% … saved Y" copy.
+  const title = pct != null ? 'Publishing discount applied' : 'Publishing fee covered';
+  const detail =
+    pct != null
+      ? `−${pct}% via ${pca}${saved ? ` · saved ${saved} TRAC` : ''}${where}`
+      : `via ${pca}${where}`;
+  const when = formatNotificationTimestamp(item.ts);
+  return (
+    <div
+      className={`v10-notif-row v10-notif-row-confirm v10-notif-pca-discount${item.read ? '' : ' v10-notif-unread'}`}
+      role="status"
+      aria-label={`${title}, ${detail}${when ? `, ${when}` : ''}.`}
+    >
+      <span className="v10-notif-glyph v10-notif-glyph-approved" aria-hidden="true">◉</span>
+      <span className="v10-notif-row-body" aria-hidden="true">
+        <span className="v10-notif-row-title">{title}</span>
+        <span className="v10-notif-row-detail">{detail}</span>
+      </span>
+      <span className="v10-notif-time" aria-hidden="true" title={new Date(item.ts).toLocaleString()}>
+        {when}
+      </span>
     </div>
   );
 }

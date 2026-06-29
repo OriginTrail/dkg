@@ -164,6 +164,14 @@ function serializeAccountInfo(
     agentCount: info.agentCount,
     lastSettledWindow: info.lastSettledWindow,
     fullySwept: info.fullySwept,
+    // GAP-4/5 - present only on the extended read (S3 budget widget); omitted
+    // (not zeroed) when absent so the UI can tell "unknown" from a real value.
+    ...(info.primaryNode !== undefined ? { primaryNode: info.primaryNode.toString() } : {}),
+    ...(info.lastPrimaryNodeChangeEpoch !== undefined ? { lastPrimaryNodeChangeEpoch: info.lastPrimaryNodeChangeEpoch } : {}),
+    ...(info.remainingAllowance !== undefined
+      ? { remainingAllowance: info.remainingAllowance.toString(), remainingAllowanceTrac: ethers.formatEther(info.remainingAllowance) }
+      : {}),
+    ...(info.currentEpoch !== undefined ? { currentEpoch: info.currentEpoch } : {}),
     // OT-RFC-51 node association: the node identityId this PCA funds.
     // `0` = unset. `fundsThisNode` is true when it equals this node's identity.
     ...(extra?.primaryNode != null ? { primaryNode: extra.primaryNode.toString() } : {}),
@@ -579,7 +587,9 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
   }
 
   // GET /api/pca/:id — V10 conviction NFT snapshot. Optional ?key=0x...
-  // probes whether that address is a registered agent.
+  // probes whether that address is a registered agent. Optional ?extended=1
+  // adds the GAP-4/5 budget fields (primaryNode + current-epoch allowance);
+  // default-OFF so the hot S1/S5 polling path stays cheap (no extra reads).
   if (req.method === 'GET' && /^\/api\/pca\/[^/]+$/.test(path)) {
     const idStr = decodeURIComponent(path.split('/')[3] ?? '');
     const accountId = parseAccountId(idStr);
@@ -587,7 +597,8 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 400, { error: 'Invalid accountId — must be a non-negative integer' });
     }
     try {
-      const info = await agent.getPublishingConvictionAccountInfo(accountId);
+      const extended = ctx.url.searchParams.get('extended') === '1';
+      const info = await agent.getPublishingConvictionAccountInfo(accountId, { extended });
       if (info === null) {
         // null = view absent OR account missing; the facade capability
         // signal disambiguates (no chain surface → 503, else genuine 404).

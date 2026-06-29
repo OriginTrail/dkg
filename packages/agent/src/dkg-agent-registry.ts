@@ -1513,9 +1513,10 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
   async getPublishingConvictionAccountInfo(this: DKGAgent,
     accountId: bigint,
+    opts?: { extended?: boolean },
   ): Promise<V10PublishingConvictionAccountInfo | null> {
     if (typeof this.chain.getPublishingConvictionAccountInfo !== 'function') return null;
-    return this.chain.getPublishingConvictionAccountInfo(accountId);
+    return this.chain.getPublishingConvictionAccountInfo(accountId, opts);
   }
 
   /** OT-RFC-51 designated primary node for a PCA; `null` = no chain surface, `0n` = unset. */

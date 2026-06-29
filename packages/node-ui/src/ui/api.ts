@@ -1077,6 +1077,12 @@ export interface BatchPublishResult {
   // name/reason of each — `failures.length` is the failed count.
   failures: Array<{ name: string; subGraph?: string; error: string }>;
   sample: PublishResult | null; // a representative confirmed result for the headline
+  // B8 (#1365 round-3) — the CONFIRMED discount aggregated across the batch, NOT a
+  // property of the headline `sample` (which is picked for cleanliness, not discount).
+  // baseCost/discountedCost are SUMMED over every item that drew on a PCA, so the badge
+  // derives the blended % + the TRUE total saved; absent when no item drew one (→ badge
+  // hidden, #9). accountId/epoch name the first drawing item (single-PCA is the norm).
+  convictionCostCovered?: ConvictionCostCovered;
 }
 
 /**
@@ -1097,6 +1103,16 @@ export async function publishAssertionsToVm(
   let firstPartialError: string | undefined;
   const failures: BatchPublishResult['failures'] = [];
   let sample: PublishResult | null = null;
+  // B8 (#1365 round-3) — aggregate the CONFIRMED discount across the BATCH (the headline
+  // `sample` is picked for cleanliness, not discount, so a mixed batch could hide a real
+  // draw if the badge read it off `sample`). Sum baseCost/discountedCost over every item
+  // that drew on a PCA → blended % + true total saved; the first drawing item names the
+  // account/epoch.
+  let aggBase = 0n;
+  let aggDiscounted = 0n;
+  let aggDrawnEpoch = 0n;
+  let aggDrawnTopUp = 0n;
+  let firstCovered: ConvictionCostCovered | undefined;
   for (const a of items) {
     try {
       const res = await knowledgeAssetPublishWithSeal(
@@ -1115,6 +1131,18 @@ export async function publishAssertionsToVm(
       // Prefer a fully-clean sample (confirmed + txHash + no binding error) for the
       // headline; fall back to the first result otherwise.
       if (!sample || (pr.status === 'confirmed' && !!pr.txHash && !pr.contextGraphError)) sample = pr;
+      const cc = pr.convictionCostCovered;
+      if (cc) {
+        try {
+          aggBase += BigInt(cc.baseCost);
+          aggDiscounted += BigInt(cc.discountedCost);
+          aggDrawnEpoch += BigInt(cc.drawnFromEpoch);
+          aggDrawnTopUp += BigInt(cc.drawnFromTopUp);
+          if (!firstCovered) firstCovered = cc;
+        } catch {
+          // skip an un-parseable per-item event; never let it break the batch accounting.
+        }
+      }
     } catch (err: unknown) {
       const message =
         err instanceof SwmSubsetNotSealableError
@@ -1123,7 +1151,17 @@ export async function publishAssertionsToVm(
       failures.push({ name: a.name, ...(a.subGraph ? { subGraph: a.subGraph } : {}), error: message });
     }
   }
-  return { published, total: items.length, sealed, partial, partialError: firstPartialError, failures, sample };
+  const convictionCostCovered: ConvictionCostCovered | undefined = firstCovered
+    ? {
+        accountId: firstCovered.accountId,
+        epoch: firstCovered.epoch,
+        baseCost: aggBase.toString(),
+        discountedCost: aggDiscounted.toString(),
+        drawnFromEpoch: aggDrawnEpoch.toString(),
+        drawnFromTopUp: aggDrawnTopUp.toString(),
+      }
+    : undefined;
+  return { published, total: items.length, sealed, partial, partialError: firstPartialError, failures, sample, convictionCostCovered };
 }
 
 // --- Assertions (WM objects) ---
@@ -1996,12 +2034,33 @@ export function fileUrl(hash: string, contentType?: string): string {
   return `${BASE}/api/file/${encodeURIComponent(normalizedHash)}${params}`;
 }
 
+/**
+ * The post-publish CostCovered signal (B8) — decoded by the daemon from the on-chain
+ * `CostCovered(accountId, epoch, baseCost, discountedCost, drawnFromEpoch, drawnFromTopUp)`
+ * event and attached to the publish response when the publish drew on a PCA (absent
+ * otherwise → the badge degrades to hidden, #9). Lives at the api boundary so both the
+ * publish response and the `pca_cost_covered` bell meta reuse it. Wei amounts are decimal
+ * strings; `epoch` is a JSON number (uint40, fits safely in Number).
+ */
+export interface ConvictionCostCovered {
+  accountId: string;
+  epoch: number;
+  baseCost: string;
+  discountedCost: string;
+  drawnFromEpoch: string;
+  drawnFromTopUp: string;
+}
+
 export interface PublishResult {
   kaId: string;
   status: string;
   kas: { tokenId: string; rootEntity: string }[];
   txHash?: string;
   blockNumber?: number;
+  // B8 — the CONFIRMED post-publish discount, attached when this publish drew on a
+  // PCA (absent otherwise → DiscountAppliedBadge renders nothing, #9). Distinct from
+  // S5's pre-spend PREDICTION; the badge derives bps from baseCost/discountedCost.
+  convictionCostCovered?: ConvictionCostCovered;
   // Set when the daemon returned HTTP 207 (PR #972): the KA minted on-chain
   // (status "confirmed", txHash present) BUT the context-graph binding failed.
   // A PARTIAL publish — the asset is permanently on-chain, but it isn't linked
@@ -3458,11 +3517,27 @@ export interface AssertionActivityNotif extends NotifWireBase {
   };
 }
 
+/** B8 confirmed-discount bell row (P2) — a server-confirmed on-chain CostCovered
+ *  draw on one of THIS node's publishing wallets (wallet-scoped, mirrors
+ *  join_approved). Informational; counts toward the unread badge. `meta` reuses
+ *  {@link ConvictionCostCovered} plus the publishing wallet. `contextGraphId` is
+ *  optional (the locked wire shape). The P2 source is self-publish capture;
+ *  sponsored/owner-side draws are P3. */
+export interface PcaCostCoveredNotif {
+  type: 'pca_cost_covered';
+  id: number | string;
+  ts: number;
+  read: 0 | 1;
+  contextGraphId?: string;
+  meta: ConvictionCostCovered & { publisherAddress: string; contextGraphName?: string };
+}
+
 export type NotifWire =
   | JoinRequestNotif
   | JoinApprovedNotif
   | JoinRejectedNotif
-  | AssertionActivityNotif;
+  | AssertionActivityNotif
+  | PcaCostCoveredNotif;
 
 export interface NotificationsFeedResponse {
   /** Already scoped, type-allowlisted, activity-collapsed, join_request

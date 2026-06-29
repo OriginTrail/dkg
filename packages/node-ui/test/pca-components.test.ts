@@ -296,6 +296,18 @@ describe('DiscountAppliedBadge (B8, degrade-to-hidden)', () => {
       }),
     ).toBeNull();
     expect(convictionDiscountBps(null)).toBeNull();
+    // #9 — a genuine 0% draw (discountedCost === baseCost, reachable on-chain) → null,
+    // NOT 0, so the badge hides + the bell row drops the −% rather than claiming "−0%".
+    expect(
+      convictionDiscountBps({
+        accountId: '7',
+        epoch: 1,
+        baseCost: '1000',
+        discountedCost: '1000',
+        drawnFromEpoch: '0',
+        drawnFromTopUp: '0',
+      }),
+    ).toBeNull();
   });
 
   it('renders the confirmed discount + PCA #N when the field is present', async () => {
@@ -316,6 +328,20 @@ describe('DiscountAppliedBadge (B8, degrade-to-hidden)', () => {
     expect(badge.getAttribute('data-testid')).toBe('pca-discount-badge'); // e2e anchor
     expect(badge.textContent).toContain('30%');
     expect(badge.textContent).toContain('PCA #7');
+    await unmount();
+  });
+
+  it('renders NOTHING for a genuine 0% draw (baseCost === discountedCost) — no false −0% (#9)', async () => {
+    const { container, unmount } = await render(
+      React.createElement(DiscountAppliedBadge, {
+        convictionCostCovered: {
+          accountId: '7', epoch: 1,
+          baseCost: '1000', discountedCost: '1000', // 0% effective discount
+          drawnFromEpoch: '0', drawnFromTopUp: '0',
+        },
+      }),
+    );
+    expect(container.firstChild).toBeNull();
     await unmount();
   });
 });
