@@ -88,6 +88,27 @@ describe('V10 Publishing Conviction NFT — chain-adapter lifecycle', () => {
     expect(await owner.getConvictionAgentAccountId(agent)).toBe(0n);
   });
 
+  it('getConvictionAgentAccountId strict mode: healthy reads resolve normally; undeployed NFT surfaces (PcaUnavailableError) instead of fail-safe 0n', async () => {
+    const owner = await fundedOwner();
+    const { accountId } = await owner.createPublishingConvictionAccount(COMMITTED);
+    const wallet = ethers.Wallet.createRandom().address;
+    await owner.registerPublishingConvictionAgent(accountId, wallet);
+
+    // Healthy read: strict returns the same on-chain truth as the fail-safe path.
+    expect(await owner.getConvictionAgentAccountId(wallet, { strict: true })).toBe(accountId);
+    expect(await owner.getConvictionAgentAccountId(ethers.Wallet.createRandom().address, { strict: true })).toBe(0n);
+
+    // Undeployed NFT: the discovery (strict) path SURFACES it so the daemon can
+    // answer 503 — never a 0n a UI would read as "registered nowhere". init() is
+    // idempotent (`if (this.initialized) return`), so clearing the cached
+    // binding after init holds for the next call.
+    (owner as any).contracts.dkgPublishingConvictionNFT = undefined;
+    await expect(owner.getConvictionAgentAccountId(wallet, { strict: true }))
+      .rejects.toMatchObject({ code: 'PCA_UNAVAILABLE' });
+    // The funded-wallet-selector fail-safe path still returns 0n for the same state.
+    expect(await owner.getConvictionAgentAccountId(wallet)).toBe(0n);
+  });
+
   it('getPublishingConvictionAgents enumerates registered agents (checksummed) and reflects deregistration', async () => {
     const owner = await fundedOwner();
     const { accountId } = await owner.createPublishingConvictionAccount(COMMITTED);
