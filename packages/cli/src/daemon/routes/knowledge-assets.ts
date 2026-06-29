@@ -771,8 +771,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           actorAgentAddress: requestAgentAddress,
           subGraphName,
         });
-        recordPcaDiscount(ctx, resolvedContextGraphId, pub?.onChainResult);
       }
+      // B8: the PCA spend is on-chain-confirmed whenever CostCovered was decoded
+      // (the mint happened) — record the discount even on a 207 partial publish
+      // (minted on-chain, CG-binding failed). No-ops when no PCA was drawn.
+      recordPcaDiscount(ctx, resolvedContextGraphId, pub?.onChainResult);
       const chain = pub?.onChainResult;
       const kaManifest = Array.isArray(pub?.kaManifest) ? pub.kaManifest : [];
       return jsonResponse(res, httpStatus, {
@@ -1021,11 +1024,13 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           const { httpStatus, reason } = classifyVmPublish(pub);
           if (httpStatus === 200) {
             result.status = "vm-confirmed";
-            recordPcaDiscount(ctx, resolvedContextGraphId, pub?.onChainResult);
           } else {
             result.status = httpStatus === 207 ? "vm-partial" : "vm-failed";
             errors.push({ phase: "vm-publish", error: sanitizeRpcMessage(reason ?? "VM publish did not confirm") });
           }
+          // B8: record the confirmed discount on ANY on-chain spend (mint
+          // happened → CostCovered present), including the 207/partial branch.
+          recordPcaDiscount(ctx, resolvedContextGraphId, pub?.onChainResult);
         } catch (e: any) {
           errors.push({ phase: "vm-publish", error: sanitizeRpcMessage(e?.message ?? String(e)) });
         }
@@ -1466,8 +1471,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         if (httpStatus === 200) {
           // Activity attributed to the SEAL author (PR #971), not the requester.
           recordActivityAndNotify(ctx, { contextGraphId, kind: "published", actorAgentAddress: pub?.seal?.authorAddress ?? pub?.authorAddress ?? requestAgentAddress, subGraphName });
-          recordPcaDiscount(ctx, contextGraphId, pub?.onChainResult);
         }
+        // B8: the PCA spend is on-chain-confirmed whenever CostCovered was
+        // decoded — record it even on a 207 partial publish (minted, binding
+        // failed). No-ops when no PCA was drawn.
+        recordPcaDiscount(ctx, contextGraphId, pub?.onChainResult);
         // Full publish payload (PR #971) so clients can reconcile sealed↔minted.
         return jsonResponse(res, httpStatus, {
           kaId: pub?.kaId,
