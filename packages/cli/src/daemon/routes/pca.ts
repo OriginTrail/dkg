@@ -70,6 +70,34 @@ function classifyPcaRevert(msg: string): { status: number; error: string } | nul
   return null;
 }
 
+// B10: resolve WHICH account already holds `agentAddr` for an
+// AgentAlreadyRegistered conflict, so the UI can deep-link ("approved on
+// PCA #N — deregister it there first"). Primary: the decoded revert arg —
+// `enrichEvmError` (run on every pcaWrite) sets `err.revert.args` from
+// AgentAlreadyRegistered(agent, existingAccountId). Fallback: some RPCs strip
+// revert data, so resolve via the on-chain reverse map. NEVER throws — a
+// failed lookup must not mask the 409; it just omits `existingAccountId`.
+// Returns the id string only when resolvable and > 0n.
+async function resolveConflictingAccountId(
+  err: any,
+  agentAddr: string,
+  agent: { getConvictionAgentAccountId(agent: string, opts?: { strict?: boolean }): Promise<bigint | null> },
+): Promise<string | undefined> {
+  let existing: bigint | null = null;
+  const rv: any = err?.revert;
+  if (rv?.name === 'AgentAlreadyRegistered') {
+    const raw = rv.args?.existingAccountId ?? rv.args?.[1];
+    if (raw != null) { try { existing = BigInt(raw); } catch { /* unparseable arg */ } }
+  }
+  if (existing == null || existing <= 0n) {
+    try {
+      const viaMap = await agent.getConvictionAgentAccountId(agentAddr);
+      if (viaMap != null && viaMap > 0n) existing = viaMap;
+    } catch { /* reverse-map fallback is best-effort; never mask the 409 */ }
+  }
+  return existing != null && existing > 0n ? existing.toString() : undefined;
+}
+
 function parseAccountId(idStr: string): bigint | null {
   if (!/^\d+$/.test(idStr)) return null;
   try {
@@ -252,26 +280,8 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
       if (revert) {
         const body: Record<string, unknown> = { error: revert.error, accountId: idStr };
         if (revert.error === 'AgentAlreadyRegistered') {
-          // B10: surface WHICH account already holds this wallet so the UI can
-          // deep-link ("approved on PCA #N — deregister it there first").
-          // Primary: the decoded revert arg — `enrichEvmError` (run on every
-          // pcaWrite) sets `err.revert.args` from AgentAlreadyRegistered(agent,
-          // existingAccountId). Fallback: some RPCs strip revert data, so
-          // resolve via the on-chain reverse map. Both are wrapped so a failed
-          // lookup never masks the 409.
-          let existing: bigint | null = null;
-          const rv: any = (err as any)?.revert;
-          if (rv?.name === 'AgentAlreadyRegistered') {
-            const raw = rv.args?.existingAccountId ?? rv.args?.[1];
-            if (raw != null) { try { existing = BigInt(raw); } catch { /* unparseable arg */ } }
-          }
-          if (existing == null || existing <= 0n) {
-            try {
-              const viaMap = await agent.getConvictionAgentAccountId(agentAddr);
-              if (viaMap != null && viaMap > 0n) existing = viaMap;
-            } catch { /* reverse-map fallback is best-effort; never mask the 409 */ }
-          }
-          if (existing != null && existing > 0n) body.existingAccountId = existing.toString();
+          const existingAccountId = await resolveConflictingAccountId(err, agentAddr, agent);
+          if (existingAccountId) body.existingAccountId = existingAccountId;
         }
         return jsonResponse(res, revert.status, body);
       }
