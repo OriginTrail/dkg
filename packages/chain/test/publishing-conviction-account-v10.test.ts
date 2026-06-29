@@ -109,6 +109,26 @@ describe('V10 Publishing Conviction NFT — chain-adapter lifecycle', () => {
     expect(await owner.getConvictionAgentAccountId(wallet)).toBe(0n);
   });
 
+  it('getPublishingConvictionAccountInfo extended returns primaryNode + current-epoch allowance from chain; default omits', async () => {
+    const owner = await fundedOwner();
+    // A non-zero primaryNode proves the adapter reads accounts() index [9] (not
+    // a neighbouring slot). coreProfileId is a registered sharding-table node.
+    const primaryNode = BigInt(getSharedContext().coreProfileId);
+    const { accountId } = await owner.createPublishingConvictionAccount(COMMITTED, primaryNode);
+
+    const base = (await owner.getPublishingConvictionAccountInfo(accountId))!;
+    expect(base.primaryNode).toBeUndefined();
+    expect(base.remainingAllowance).toBeUndefined();
+    expect(base.currentEpoch).toBeUndefined();
+
+    const ext = (await owner.getPublishingConvictionAccountInfo(accountId, { extended: true }))!;
+    expect(ext.primaryNode).toBe(primaryNode);
+    expect(typeof ext.lastPrimaryNodeChangeEpoch).toBe('number');
+    expect(typeof ext.currentEpoch).toBe('number');
+    expect(ext.currentEpoch!).toBeGreaterThan(0);
+    expect(ext.remainingAllowance!).toBeGreaterThan(0n);
+  });
+
   it('getPublishingConvictionAgents enumerates registered agents (checksummed) and reflects deregistration', async () => {
     const owner = await fundedOwner();
     const { accountId } = await owner.createPublishingConvictionAccount(COMMITTED);

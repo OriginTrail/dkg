@@ -431,6 +431,16 @@ export interface V10PublishingConvictionAccountInfo {
   agentCount: number;
   lastSettledWindow: number;
   fullySwept: boolean;
+  // GAP-4/5 — populated ONLY when getInfo is called with `{ extended: true }`
+  // (the S3 budget widget; the publish hot path omits them → zero extra reads),
+  // and best-effort within that (an extended-read error leaves them undefined so
+  // the UI shows "unknown", distinct from `primaryNode === 0n` = "no node").
+  // primaryNode / lastPrimaryNodeChangeEpoch are `accounts()` [9]/[10] (RFC-51);
+  // remainingAllowance + currentEpoch are this epoch's spend headroom + index.
+  primaryNode?: bigint;
+  lastPrimaryNodeChangeEpoch?: number;
+  remainingAllowance?: bigint;
+  currentEpoch?: number;
 }
 
 // ----- V10 publish types -----
@@ -929,7 +939,7 @@ export interface ChainAdapter {
   deregisterPublishingConvictionAgent?(accountId: bigint, agent: string): Promise<TxResult>;
   isPublishingConvictionAgent?(accountId: bigint, agent: string): Promise<boolean>;
   settlePublishingConvictionAccount?(accountId: bigint): Promise<TxResult>;
-  getPublishingConvictionAccountInfo?(accountId: bigint): Promise<V10PublishingConvictionAccountInfo | null>;
+  getPublishingConvictionAccountInfo?(accountId: bigint, opts?: { extended?: boolean }): Promise<V10PublishingConvictionAccountInfo | null>;
 
   /**
    * Enumerate the operational wallets registered as publishing agents on
