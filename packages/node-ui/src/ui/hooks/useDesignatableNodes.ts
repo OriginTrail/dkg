@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useCallback, useMemo, useRef } from 'react';
 import { useFetch } from '../hooks.js';
 import { listDesignatableNodes, type DesignatableNode } from '../api.js';
 
@@ -6,13 +6,15 @@ import { listDesignatableNodes, type DesignatableNode } from '../api.js';
 // short TTL cache, so the picker fetches it WHOLE (following the offset cursor) and does
 // search/filter + sort CLIENT-side. Backend returns hash-ring order; we sort by stake DESC.
 
-async function fetchAllDesignatableNodes(): Promise<DesignatableNode[]> {
+async function fetchAllDesignatableNodes(fresh = false): Promise<DesignatableNode[]> {
   const all: DesignatableNode[] = [];
   let start = 0; // 0-based offset cursor (Backend serves offset pages over the cached table)
   // The table is ≤500; cap the page loop defensively so a misbehaving cursor (a nextStart that
   // never goes null) can't spin forever.
   for (let page = 0; page < 25; page++) {
-    const r = await listDesignatableNodes({ start, limit: 200 });
+    // M4 — bust the cache on the FIRST page only: `fresh=1` re-reads the chain AND repopulates the
+    // daemon cache, so subsequent pages read the just-refreshed list.
+    const r = await listDesignatableNodes({ start, limit: 200, fresh: fresh && page === 0 });
     all.push(...r.nodes);
     if (r.nextStart == null || r.nodes.length === 0) break;
     start = r.nextStart;
@@ -41,7 +43,19 @@ export interface UseDesignatableNodes {
 
 /** The staked-node list for the PrimaryNodePicker — fetched whole, sorted by stake desc. */
 export function useDesignatableNodes(): UseDesignatableNodes {
-  const { data, loading, error, refresh } = useFetch(fetchAllDesignatableNodes, [], 0);
+  // M4 — the initial load uses the cache (fast); `refresh` (picker Retry + the
+  // PrimaryNodeNotInShardingTable recovery) busts it via `fresh=1`. The ref is read inside the
+  // fetcher closure so useFetch's own load/refresh picks up the current mode.
+  const freshRef = useRef(false);
+  const { data, loading, error, refresh: rawRefresh } = useFetch(
+    () => fetchAllDesignatableNodes(freshRef.current),
+    [],
+    0,
+  );
+  const refresh = useCallback(() => {
+    freshRef.current = true;
+    rawRefresh();
+  }, [rawRefresh]);
   const nodes = useMemo(() => [...(data ?? [])].sort(byStakeDesc), [data]);
   return { nodes, loading, error: error != null, refresh };
 }

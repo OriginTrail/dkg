@@ -1832,11 +1832,13 @@ export interface DesignatableNodesResult {
  * offset, NOT a startingIdentityId — the contract walk reverts on an unknown id). `start` omitted
  * = first page (0). A read failure 503s (`SHARDING_TABLE_READ_FAILED` / transport / capability) —
  * all retryable; the picker shows a retry, and `primaryNode` is required so edge can't proceed
- * until it loads. `GET` is permissionless.
+ * until it loads. `fresh:true` (M4) BYPASSES the daemon's 30s TTL cache + repopulates it — used by
+ * the picker Retry + the `PrimaryNodeNotInShardingTable` recovery so a just-(un)staked node is seen
+ * immediately, not after the stale window. `GET` is permissionless.
  */
-export const listDesignatableNodes = (opts?: { start?: number; limit?: number }) =>
+export const listDesignatableNodes = (opts?: { start?: number; limit?: number; fresh?: boolean }) =>
   getJson<DesignatableNodesResult>(
-    `/api/pca/designatable-nodes?start=${opts?.start ?? 0}&limit=${opts?.limit ?? 200}`,
+    `/api/pca/designatable-nodes?start=${opts?.start ?? 0}&limit=${opts?.limit ?? 200}${opts?.fresh ? '&fresh=1' : ''}`,
   );
 
 /** Normalized, terminology-disciplined PCA error code (UI branches on this). */

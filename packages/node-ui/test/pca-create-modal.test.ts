@@ -263,6 +263,28 @@ describe('CreatePcaModal', () => {
     await unmount();
   });
 
+  // M4/M9 — a PrimaryNodeNotInShardingTable revert is RECOVERABLE: return to the form AND refetch
+  // the staked list with the cache-bust (fresh=1), so the just-unstaked node isn't re-served stale.
+  it('M4/M9 — PrimaryNodeNotInShardingTable revert returns to the form + refetches the list FRESH', async () => {
+    mocks.createPca.mockRejectedValue(new HttpError(400, 'PrimaryNodeNotInShardingTable', { error: 'PrimaryNodeNotInShardingTable' }));
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-create-submit"]')!);
+    // Poll until the recovery refetch fires (the create-error handler calls refreshNodes → fresh).
+    const started = Date.now();
+    while (Date.now() - started < 1500 && !mocks.listDesignatableNodes.mock.calls.some((c) => c[0]?.fresh)) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+    }
+    expect(mocks.listDesignatableNodes).toHaveBeenCalledWith(expect.objectContaining({ fresh: true }));
+    // Recoverable, not terminal — still on the form (the amount field is present).
+    expect(container.querySelector('[data-testid="pca-create-tokens"]')).toBeTruthy();
+    await unmount();
+  });
+
   // S2b renew [MEDIUM] — on the renew path the success action re-approves the OLD account's
   // wallets (not a fresh "this node's wallets"), so the button is relabelled.
   it('S2b renew: relabels the success action to re-approve the OLD account’s wallets', async () => {
