@@ -2268,6 +2268,30 @@ export class DashboardDB {
     ).all(...types, limit) as NotificationRow[];
   }
 
+  /**
+   * The caller's OWN confirmed-discount rows (`pca_cost_covered`, B8). Wallet-
+   * scoped, NOT CG-membership-scoped (the publishing wallet may not be a member
+   * of the CG it published to — a sponsored edge). Kept on a DEDICATED fetch
+   * (filtered in SQL by type + lowercased `meta.publisherAddress`) rather than
+   * the shared join-confirmation `getNotificationsOfTypes` window: discount rows
+   * are higher-volume (one per discounted publish vs rare join events), so
+   * cap-sharing would let a busy node's join/other volume age a publisher's older
+   * discount rows out of the window → hidden + unmarkable (#1365 round-2). The
+   * SQL pulls ONLY the caller's own rows under its own bound. The type literal
+   * mirrors `PCA_COST_COVERED_TYPE` (kept inline to avoid a notifications-scope
+   * import cycle into the DB layer).
+   */
+  getPcaCostCoveredRowsForWallet(walletAddress: string, limit = 200): NotificationRow[] {
+    const wallet = walletAddress.trim().toLowerCase();
+    if (!wallet) return [];
+    return this.db.prepare(
+      `SELECT * FROM notifications
+        WHERE type = 'pca_cost_covered'
+          AND lower(json_extract(meta, '$.publisherAddress')) = ?
+        ORDER BY ts DESC LIMIT ?`,
+    ).all(wallet, limit) as NotificationRow[];
+  }
+
   markNotificationsRead(ids?: number[]): number {
     if (ids && ids.length > 0) {
       const placeholders = ids.map(() => '?').join(',');
