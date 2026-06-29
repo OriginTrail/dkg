@@ -41,7 +41,7 @@ vi.mock('../src/ui/pages/conviction/ApproveWalletsModal.js', () => ({
     return React.createElement(
       'div',
       { 'data-testid': 'mock-approve' },
-      `id=${props.accountId} mode=${props.initialMode} seed=${props.seedBulk ?? ''}`,
+      `id=${props.accountId} mode=${props.initialMode} dereg=${props.deregisterFrom} resolved=${props.seedAgentsResolved} seed=${props.seedBulk ?? ''}`,
     );
   },
 }));
@@ -121,6 +121,25 @@ describe('ConvictionDetailView S2b — renew chain', () => {
     expect(approveProps.accountId).toBe('42');
     expect(approveProps.initialMode).toBe('sponsor');
     expect(approveProps.seedBulk).toBe(`${OLD_AGENT_A}\n${OLD_AGENT_B}`);
+    // [HIGH] — the chained Approve must deregister the seeded wallets from the OLD account
+    // (#7) first; expiry doesn't free them. And the resolve succeeded.
+    expect(approveProps.deregisterFrom).toBe('7');
+    expect(approveProps.seedAgentsResolved).toBe(true);
+    await unmount();
+  });
+
+  it('when the old agents fail to load, chains with agentsResolved=false and an empty seed (no false pre-fill)', async () => {
+    mocks.listPcaAgents.mockRejectedValue(new Error('boom')); // mount (B3) + the chain both fail
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Lifecycle');
+    const renewBtn = container.querySelector('[data-testid="pca-renew-btn"]') as HTMLButtonElement;
+    await act(async () => { renewBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    const createApprove = container.querySelector('[data-testid="mock-create-approve"]') as HTMLButtonElement;
+    await act(async () => { createApprove.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'id=42');
+    expect(approveProps.seedAgentsResolved).toBe(false);
+    expect(approveProps.seedBulk).toBe('');
+    expect(approveProps.deregisterFrom).toBe('7');
     await unmount();
   });
 });

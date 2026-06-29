@@ -166,18 +166,29 @@ function DetailBody({
   // S2b renew (re-mint replacement): the seeded create modal, then the chained
   // approve modal pre-filled with THIS (old) account's agents for one-step re-approval.
   const [renewOpen, setRenewOpen] = useState(false);
-  const [renewApprove, setRenewApprove] = useState<{ newAccountId: string; seedBulk: string } | null>(null);
+  // LOW#3 — in-flight while resolving the old agents (prevents a no-feedback gap).
+  const [renewChaining, setRenewChaining] = useState(false);
+  const [renewApprove, setRenewApprove] = useState<
+    { newAccountId: string; seedBulk: string; agentsResolved: boolean } | null
+  >(null);
   const openTab = useTabsStore((s) => s.openTab);
 
-  // After the renewal mint, chain into Approve seeded with the OLD account's agents
-  // (approvals don't carry over — re-approve them on the new id in one step).
+  // After the renewal mint, chain into Approve seeded with the OLD account's agents.
+  // Approvals don't carry over AND expiry doesn't free them (gate-HIGH), so the chained
+  // modal deregisters each from the old account before re-approving on the new id.
   const onRenewSuccess = (newAccountId: string) => {
+    // LOW#3 — close the create modal IMMEDIATELY so its success button can't be
+    // double-clicked into a second chain, and show an in-flight state while we resolve
+    // the old agents. `agentsResolved:false` (listPcaAgents failed) stops the next step
+    // from promising a pre-filled list it doesn't have.
+    setRenewOpen(false);
+    setRenewChaining(true);
     listPcaAgents(accountId)
-      .then((r) => r.agents)
-      .catch(() => [] as string[])
-      .then((oldAgents) => {
-        setRenewOpen(false);
-        setRenewApprove({ newAccountId, seedBulk: oldAgents.join('\n') });
+      .then((r) => ({ agents: r.agents, resolved: true }))
+      .catch(() => ({ agents: [] as string[], resolved: false }))
+      .then(({ agents, resolved }) => {
+        setRenewChaining(false);
+        setRenewApprove({ newAccountId, seedBulk: agents.join('\n'), agentsResolved: resolved });
       });
   };
 
@@ -581,6 +592,9 @@ function DetailBody({
             tokens: snapshot.committedTRACTrac,
             primaryNode:
               snapshot.primaryNode && snapshot.primaryNode !== '0' ? String(snapshot.primaryNode) : undefined,
+            // LOW — distinguish "extended read failed" (null) from a genuine "none" ('0'),
+            // so the modal can flag a silent fall-back to this node.
+            primaryNodeUnknown: snapshot.primaryNode == null,
           }}
           replacingAccountId={accountId}
           onClose={() => setRenewOpen(false)}
@@ -589,12 +603,21 @@ function DetailBody({
           onGetSponsored={() => setRenewOpen(false)}
         />
       )}
-      {/* S2b renew — chained Approve, pre-seeded with the OLD account's agents. */}
+      {/* LOW#3 — brief in-flight state between the mint and the seeded re-approval. */}
+      {renewChaining && (
+        <div className="lazy-spinner" role="status" data-testid="pca-renew-chaining">
+          Preparing re-approval…
+        </div>
+      )}
+      {/* S2b renew — chained Approve, pre-seeded with the OLD account's agents, which it
+          DEREGISTERS from the old account first (expiry doesn't free them — gate-HIGH). */}
       {renewApprove && (
         <ApproveWalletsModal
           accountId={renewApprove.newAccountId}
           initialMode="sponsor"
           seedBulk={renewApprove.seedBulk}
+          deregisterFrom={accountId}
+          seedAgentsResolved={renewApprove.agentsResolved}
           onClose={() => setRenewApprove(null)}
         />
       )}

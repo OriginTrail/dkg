@@ -47,8 +47,10 @@ export function CreatePcaModal({
   /** Routes the gated (edge / no-identity) state to S6 Get-sponsored. */
   onGetSponsored: () => void;
   /** S2b renew — prefill the commit amount / primary node from an expiring account
-   *  (re-mint REPLACEMENT). The create flow is otherwise unchanged. */
-  seed?: { tokens?: string; primaryNode?: string };
+   *  (re-mint REPLACEMENT). The create flow is otherwise unchanged. `primaryNodeUnknown`
+   *  = the old account's primary node couldn't be read (extended snapshot failed), so the
+   *  field falls back to THIS node — surface that rather than silently defaulting (LOW). */
+  seed?: { tokens?: string; primaryNode?: string; primaryNodeUnknown?: boolean };
   /** S2b renew — the account being replaced; non-null drives the honest renew copy. */
   replacingAccountId?: string;
 }) {
@@ -300,7 +302,9 @@ export function CreatePcaModal({
             data-testid="pca-approve-own-wallets"
             onClick={() => onApproveOwnWallets(result.accountId)}
           >
-            Approve this node’s operational wallets
+            {replacingAccountId
+              ? `Re-approve PCA #${replacingAccountId}’s wallets`
+              : 'Approve this node’s operational wallets'}
           </button>
           <button type="button" className="v10-modal-btn" onClick={() => onManage(result.accountId)}>
             Manage PCA #{result.accountId}
@@ -385,6 +389,14 @@ export function CreatePcaModal({
           </div>
           {nodeStatus?.identityId && primaryNode === String(nodeStatus.identityId) && (
             <p className="v10-pca-create-hint">✓ This node (identityId #{nodeStatus.identityId}).</p>
+          )}
+          {/* S2b renew (LOW) — the old account's primary node couldn't be read, so the field
+              fell back to THIS node. Surface it rather than silently defaulting. */}
+          {replacingAccountId && seed?.primaryNodeUnknown && (
+            <p className="v10-pca-create-hint" role="status" data-testid="pca-renew-primary-unknown">
+              ⓘ Couldn’t read PCA #{replacingAccountId}’s primary node — defaulting to this node. Change
+              it under Advanced if the replacement should point elsewhere.
+            </p>
           )}
           <div className="v10-modal-tip">
             <span className="v10-modal-tip-title">Primary node ≠ who pays and ≠ who’s covered.</span>{' '}

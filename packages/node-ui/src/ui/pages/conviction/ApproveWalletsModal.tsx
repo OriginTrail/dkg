@@ -64,6 +64,8 @@ export function ApproveWalletsModal({
   onClose,
   onApproved,
   seedBulk,
+  deregisterFrom,
+  seedAgentsResolved,
 }: {
   accountId: string;
   initialMode?: 'self' | 'sponsor';
@@ -72,10 +74,24 @@ export function ApproveWalletsModal({
   /** S2b renew — prefill the sponsor bulk-paste with the replaced account's agents,
    *  so re-approving the same wallets on the new account is one step. */
   seedBulk?: string;
+  /**
+   * S2b renew (#1344 gate-HIGH) — the OLD account these seeded wallets are still bound
+   * to on-chain. Account EXPIRY does NOT clear `agentToAccountId`, so re-approving a
+   * seeded wallet on the new account would revert `AgentAlreadyRegistered`. When set,
+   * each row is DEREGISTERED from this old account before being registered on the new
+   * one. Its presence also marks the renew re-approval context (honest copy).
+   */
+  deregisterFrom?: string;
+  /** S2b renew — whether the old account's agents loaded (`listPcaAgents`). `false` →
+   *  the seed couldn't be pre-filled; the copy stops promising it and prompts manual entry. */
+  seedAgentsResolved?: boolean;
 }) {
   const { data: wb } = useFetch(fetchWalletsBalances, [], 0);
   const { data: snapshot } = useFetch(() => fetchPca(accountId), [accountId]);
   const owner = useOwnerActionSubmitter(accountId); // owner-action seam (P0: daemon submitter)
+  // S2b renew — the OLD account's owner-action submitter (free the wallet there first).
+  // Same daemon submitter in P0; keyed separately for the §9 wallet-owned future.
+  const deregisterOwner = useOwnerActionSubmitter(deregisterFrom);
   const nodeWallets = wb?.wallets ?? [];
   const agentCount = snapshot?.agentCount ?? 0;
   const cap = Math.max(0, 100 - agentCount);
@@ -148,6 +164,15 @@ export function ApproveWalletsModal({
         continue;
       }
       try {
+        // S2b renew (deregister-first, #1344 gate-HIGH): expiry doesn't clear
+        // `agentToAccountId`, so a seeded old-PCA wallet is still bound there and
+        // registerAgent(newId) would revert AgentAlreadyRegistered. Free it from the OLD
+        // account FIRST. Best-effort — an already-free wallet (AgentNotRegistered) or a
+        // transient failure just falls through to the register, whose AgentAlreadyRegistered
+        // handling below surfaces a still-bound wallet as a conflict (#old) for recovery.
+        if (deregisterFrom) {
+          await deregisterOwner.deregisterAgent(deregisterFrom, addr).catch(() => {});
+        }
         const res = await owner.registerAgent(accountId, addr);
         setRows((r) => ({
           ...r,
@@ -286,11 +311,27 @@ export function ApproveWalletsModal({
               {parsed.valid.length} valid · {parsed.invalid} invalid ·{' '}
               {agentCount} → {agentCount + parsed.valid.length} of 100 after this
             </p>
-            <div className="v10-modal-warning">
-              ⚠ We can only check the address is well-formed — we can’t verify it’s the node’s real
-              signing wallet. A typo / admin / author address still “approves” and burns a cap slot.
-              Confirm it shows ✓ in the other operator’s Get-sponsored panel.
-            </div>
+            {deregisterFrom ? (
+              // S2b renew (#1344 [MEDIUM]) — these are the node's OWN carried-over wallets,
+              // not a third party, so the sponsor-can't-verify warning is wrong here.
+              <div className="v10-modal-warning" data-testid="pca-renew-reapprove-note">
+                ⓘ Re-approving PCA #{deregisterFrom}’s wallets on #{accountId}. Each wallet is MOVED —
+                deregistered from #{deregisterFrom}, then approved on #{accountId} (two txs per wallet,
+                owner gas). Account expiry alone doesn’t free a wallet, so this is required to re-use them.
+                {seedAgentsResolved === false && (
+                  <>
+                    {' '}
+                    <strong>Couldn’t load PCA #{deregisterFrom}’s wallets — add them manually below.</strong>
+                  </>
+                )}
+              </div>
+            ) : (
+              <div className="v10-modal-warning">
+                ⚠ We can only check the address is well-formed — we can’t verify it’s the node’s real
+                signing wallet. A typo / admin / author address still “approves” and burns a cap slot.
+                Confirm it shows ✓ in the other operator’s Get-sponsored panel.
+              </div>
+            )}
           </section>
         )}
 
@@ -334,8 +375,9 @@ export function ApproveWalletsModal({
           </div>
         )}
 
-        {/* Sponsor handoff after a run */}
-        {done && mode === 'sponsor' && (
+        {/* Sponsor handoff after a run — third-party only; a renew re-approves the node's
+            OWN wallets (#1344 [MEDIUM]), so the "remind the other operator" handshake is off. */}
+        {done && mode === 'sponsor' && !deregisterFrom && (
           <div className="v10-pca-approve-handoff">
             <div className="v10-modal-warning">
               Remind the other operator: these wallets must hold NATIVE GAS to publish — the account

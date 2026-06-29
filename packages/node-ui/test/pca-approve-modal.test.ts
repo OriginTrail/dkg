@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   fetchWalletsBalances: vi.fn(),
   fetchPca: vi.fn(),
   pcaAddAgent: vi.fn(),
+  pcaRemoveAgent: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', async (orig) => {
@@ -21,6 +22,7 @@ vi.mock('../src/ui/api.js', async (orig) => {
     fetchWalletsBalances: mocks.fetchWalletsBalances,
     fetchPca: mocks.fetchPca,
     pcaAddAgent: mocks.pcaAddAgent,
+    pcaRemoveAgent: mocks.pcaRemoveAgent,
   };
 });
 
@@ -132,6 +134,70 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     await waitForText(container, 'Wallet address(es)');
     const ta = container.querySelector('[data-testid="pca-approve-address"]') as HTMLTextAreaElement;
     expect(ta.value).toBe([ADDR_A, ADDR_B].join('\n'));
+    await unmount();
+  });
+
+  // S2b renew [HIGH] — account EXPIRY does not clear agentToAccountId, so a seeded
+  // old-PCA wallet is still bound there. The renew chain must DEREGISTER it from the old
+  // account before registering on the new one, else registerAgent reverts AgentAlreadyRegistered.
+  it('S2b renew (deregister-first): frees each seeded wallet from the OLD account, then approves on the new', async () => {
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...snap(), probedKey: { key, registered: true } } : snap(),
+    );
+    mocks.pcaRemoveAgent.mockResolvedValue({ accountId: '4', agent: ADDR_A, removed: true });
+    mocks.pcaAddAgent.mockResolvedValue({ accountId: '8', agent: ADDR_A, registered: true, adapterSupported: true });
+
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, {
+        accountId: '8', deregisterFrom: '4', initialMode: 'sponsor', seedBulk: ADDR_A, onClose: vi.fn(),
+      }),
+    );
+    await waitForText(container, 'Wallet address(es)');
+    // [MEDIUM] — the renew note REPLACES the sponsor-can't-verify warning (these are the
+    // node's own carried-over wallets, not a third party).
+    expect(container.querySelector('[data-testid="pca-renew-reapprove-note"]')).toBeTruthy();
+    expect(container.textContent).not.toContain('can’t verify it’s the node’s real');
+
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, 'approved on-chain');
+    // deregister(old) ran BEFORE register(new) for the seeded wallet.
+    expect(mocks.pcaRemoveAgent).toHaveBeenCalledWith('4', ADDR_A);
+    expect(mocks.pcaAddAgent).toHaveBeenCalledWith('8', ADDR_A);
+    expect(mocks.pcaRemoveAgent.mock.invocationCallOrder[0]).toBeLessThan(mocks.pcaAddAgent.mock.invocationCallOrder[0]);
+    await unmount();
+  });
+
+  it('S2b renew: a failed deregister falls through to the register, whose B10 surfaces the still-bound wallet as a conflict', async () => {
+    // deregister(old) fails (e.g. not owner of old / transient); the wallet stays bound,
+    // so register(new) reverts AgentAlreadyRegistered → the existing B10 probe → conflict.
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...snap(), probedKey: { key, registered: false } } : snap(),
+    );
+    mocks.pcaRemoveAgent.mockRejectedValue(new HttpError(403, 'x', { error: 'NotAccountOwner' }));
+    mocks.pcaAddAgent.mockRejectedValue(new HttpError(409, 'AgentAlreadyRegistered', { error: 'AgentAlreadyRegistered' }));
+
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, {
+        accountId: '8', deregisterFrom: '4', initialMode: 'sponsor', seedBulk: ADDR_A, onClose: vi.fn(),
+      }),
+    );
+    await waitForText(container, 'Wallet address(es)');
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, 'another conviction account');
+    expect(mocks.pcaAddAgent).toHaveBeenCalledWith('8', ADDR_A); // register still attempted (recovery path)
+    await unmount();
+  });
+
+  it('S2b renew: when the old agents could not be loaded, the copy stops promising a pre-fill', async () => {
+    mocks.fetchPca.mockResolvedValue(snap());
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, {
+        accountId: '8', deregisterFrom: '4', initialMode: 'sponsor', seedBulk: '', seedAgentsResolved: false, onClose: vi.fn(),
+      }),
+    );
+    await waitForText(container, 'add them manually');
+    expect(container.querySelector('[data-testid="pca-renew-reapprove-note"]')?.textContent)
+      .toContain('Couldn’t load PCA #4’s wallets');
     await unmount();
   });
 

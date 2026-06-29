@@ -148,6 +148,42 @@ describe('CreatePcaModal', () => {
     await unmount();
   });
 
+  // S2b renew [MEDIUM] — on the renew path the success action re-approves the OLD account's
+  // wallets (not a fresh "this node's wallets"), so the button is relabelled.
+  it('S2b renew: relabels the success action to re-approve the OLD account’s wallets', async () => {
+    mocks.createPca.mockResolvedValue({ accountId: '8', txHash: '0xabc', committedTokens: '100000.0' });
+    mocks.fetchPca.mockResolvedValue(snap({ accountId: '8', discountBps: 3000 }));
+    const onApproveOwn = vi.fn();
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, {
+        onClose: vi.fn(), onApproveOwnWallets: onApproveOwn, onManage: vi.fn(), onGetSponsored: vi.fn(),
+        seed: { tokens: '100000.0', primaryNode: '99' }, replacingAccountId: '4',
+      }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    await click(container.querySelector('[data-testid="pca-create-submit"]')!);
+    await waitForText(container, 'PCA #8 created');
+    const btn = container.querySelector('[data-testid="pca-approve-own-wallets"]')!;
+    expect(btn.textContent).toContain('Re-approve PCA #4’s wallets');
+    await click(btn);
+    expect(onApproveOwn).toHaveBeenCalledWith('8');
+    await unmount();
+  });
+
+  // S2b renew [LOW] — when the old account's primary node couldn't be read, the field
+  // falls back to THIS node; surface that rather than silently defaulting.
+  it('S2b renew: flags a fall-back to this node when the old primary node couldn’t be read', async () => {
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, {
+        onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn(),
+        seed: { tokens: '100000.0', primaryNodeUnknown: true }, replacingAccountId: '4',
+      }),
+    );
+    await waitForText(container, 'Couldn’t read PCA #4’s primary node');
+    expect(container.querySelector('[data-testid="pca-renew-primary-unknown"]')).toBeTruthy();
+    await unmount();
+  });
+
   // S2b — renew re-mints a REPLACEMENT: the modal is seeded from the expiring account
   // and the copy is HONEST (#9) — a new separate account, the old TRAC stays locked.
   it('S2b renew — seeds the amount/primary node + shows honest "new separate account" copy', async () => {
