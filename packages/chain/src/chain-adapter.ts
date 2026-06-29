@@ -19,8 +19,10 @@ export interface ConvictionReader {
   getConvictionAgentAccountId(agent: string): Promise<bigint>;
   convictionAccountCanCover(accountId: bigint, baseCost: bigint): Promise<boolean>;
   /** GAP-1 — enumerate every PCA the given wallets relate to (owned + agent-on),
-   *  deduped, relation-tagged, sorted by accountId asc. */
-  listPublishingConvictionAccountsForWallets(wallets: string[]): Promise<PcaAccountRelation[]>;
+   *  deduped, relation-tagged, sorted by accountId asc. Optional: additive to the
+   *  published surface, consistent with the facade's typeof-guard (capability →
+   *  503) and the optional ChainAdapter decl. EVMChainAdapter + mock implement it. */
+  listPublishingConvictionAccountsForWallets?(wallets: string[]): Promise<PcaAccountRelation[]>;
 }
 
 export interface IdentityProof {

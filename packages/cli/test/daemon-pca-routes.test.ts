@@ -927,6 +927,21 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(called).toBe(false);
   });
 
+  it('GET /api/pca/mine → 503 FEATURE_UNAVAILABLE when the facade returns null despite the capability flag', async () => {
+    // The capability flag is true (passes the gate) but the facade delegator
+    // returns null (chain lacks the method) — the route must still answer 503
+    // FEATURE_UNAVAILABLE, never a 200 empty list a UI would read as "relates to
+    // nothing". Distinct from the CALL_EXCEPTION 503 (no PCA_LOOKUP_READ_FAILED code).
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      listPublishingConvictionAccountsForWallets: async () => null,
+    };
+    const { res, done } = runCtx('GET', '/api/pca/mine', agent, undefined, { wallets: [{ address: '0x' + '1'.repeat(40) }] });
+    await done;
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body).code).toBeUndefined();
+  });
+
   it('GET /api/pca/mine → 503 PCA_LOOKUP_READ_FAILED on a CALL_EXCEPTION (not a partial/empty list)', async () => {
     const agent = {
       supportsPublishingConvictionNft: true,
