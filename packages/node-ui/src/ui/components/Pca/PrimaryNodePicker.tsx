@@ -75,6 +75,7 @@ export function PrimaryNodePicker({
       setActiveIdx((i) => Math.min(i + 1, shown.length - 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
+      setOpen(true); // N8 — APG: Up also opens a closed popup
       setActiveIdx((i) => Math.max(i - 1, 0));
     } else if (e.key === 'Enter') {
       if (open && activeIdx >= 0 && shown[activeIdx]) {
@@ -88,9 +89,11 @@ export function PrimaryNodePicker({
   };
 
   const usePastedId = () => {
-    const id = pasteVal.trim();
-    if (!id) return;
-    const match = nodes.find((n) => n.identityId === id || n.nodeId === id);
+    // L7 — strip a leading '#' and match case-INSENSITIVELY (nodeId is a hex string; a pasted
+    // '#42' / mixed-case hex must still resolve a valid staked node).
+    const raw = pasteVal.trim().replace(/^#/, '');
+    if (!raw) return;
+    const match = nodes.find((n) => n.identityId === raw || n.nodeId.toLowerCase() === raw.toLowerCase());
     if (!match) {
       setPasteErr('Not a staked sharding-table node.');
       return;
@@ -115,7 +118,7 @@ export function PrimaryNodePicker({
       {loading ? (
         <p className="v10-pca-create-hint" role="status">Loading staked nodes…</p>
       ) : error ? (
-        <div className="v10-modal-warning" role="status" data-testid="pca-primary-node-error">
+        <div className="v10-modal-warning" role="alert" data-testid="pca-primary-node-error">
           Couldn’t load the staked-node list — a primary node is required to create.{' '}
           <button
             type="button"
@@ -125,6 +128,13 @@ export function PrimaryNodePicker({
           >
             Retry
           </button>
+          {/* L3 — surface the best-effort default (core fell back to its own id) so it isn't
+              invisible while the list is down. */}
+          {value !== '' && (
+            <p className="v10-pca-create-hint" data-testid="pca-primary-node-error-selected">
+              Using node #{value}{pickedOwn ? ' (this node)' : ''} for now — Retry to pick another.
+            </p>
+          )}
         </div>
       ) : nodes.length === 0 ? (
         <p className="v10-pca-create-hint" role="status">No staked nodes found.</p>
@@ -135,7 +145,7 @@ export function PrimaryNodePicker({
               type="text"
               role="combobox"
               aria-expanded={open}
-              aria-controls={listboxId}
+              aria-controls={open ? listboxId : undefined}
               aria-autocomplete="list"
               aria-label="Search staked nodes"
               aria-required={required}
@@ -159,7 +169,7 @@ export function PrimaryNodePicker({
               onKeyDown={onKeyDown}
             />
             {open && (
-              <ul role="listbox" id={listboxId} className="v10-pca-node-picker-list">
+              <ul role="listbox" id={listboxId} aria-label="Staked sharding-table nodes" className="v10-pca-node-picker-list">
                 {shown.map((n, i) => {
                   const selected = n.identityId === value;
                   const isOwn = ownIdentityId != null && n.identityId === ownIdentityId;
@@ -198,7 +208,8 @@ export function PrimaryNodePicker({
                   );
                 })}
                 {truncated && (
-                  <li className="v10-pca-node-picker-more" aria-disabled="true">
+                  // N6 — a non-option child of the listbox must not be an `option` to AT.
+                  <li role="presentation" className="v10-pca-node-picker-more">
                     showing {shown.length} of {filtered.length} — refine your search
                   </li>
                 )}

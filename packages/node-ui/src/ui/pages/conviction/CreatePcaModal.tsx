@@ -130,6 +130,15 @@ export function CreatePcaModal({
     else if (nodesError) setPrimaryNode(ownIdentity);
   }, [primaryNode, ownIdentity, ownStaked, nodesError]);
 
+  // L2 — reconcile a STALE best-effort default: if the list was down (Q1 set primaryNode=ownIdentity)
+  // and a successful retry then loads a list that does NOT contain the own id, the pre-selection is
+  // invalid — clear it so the picker re-prompts (else submit stays enabled on a bad id until the
+  // create-time revert). Fresh-create only (renew owns its seed + the revert backstop).
+  useEffect(() => {
+    if (replacingAccountId || nodesError || nodesLoading || stakedNodes.length === 0) return;
+    if (ownIdentity && primaryNode === ownIdentity && !ownStaked) setPrimaryNode('');
+  }, [replacingAccountId, nodesError, nodesLoading, stakedNodes.length, ownIdentity, primaryNode, ownStaked]);
+
   const amountNum = AMOUNT_RE.test(tokens.trim()) ? Number(tokens.trim()) : NaN;
   const amountValid = Number.isFinite(amountNum) && amountNum > 0;
   const insufficient = amountValid && Number.isFinite(ownerTracNum) && amountNum > ownerTracNum;

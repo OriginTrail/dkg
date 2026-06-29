@@ -78,6 +78,19 @@ describe('PrimaryNodePicker', () => {
     await picked.unmount();
   });
 
+  it('M11 — ArrowDown highlights an option (aria-activedescendant) and Enter selects it', async () => {
+    const onChange = vi.fn();
+    const { container, unmount } = await render(base({ onChange }));
+    const input = container.querySelector('[data-testid="pca-primary-node-search"]') as HTMLInputElement;
+    await focus(input); // open the popup
+    await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })); });
+    // aria-activedescendant tracks the first option (node #11, as-passed order).
+    expect(input.getAttribute('aria-activedescendant')).toContain('-opt-11');
+    await act(async () => { input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
+    expect(onChange).toHaveBeenCalledWith('11');
+    await unmount();
+  });
+
   it('search filters by id', async () => {
     const { container, unmount } = await render(base());
     const search = container.querySelector('[data-testid="pca-primary-node-search"]') as HTMLInputElement;

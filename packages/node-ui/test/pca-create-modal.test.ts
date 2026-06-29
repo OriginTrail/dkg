@@ -285,6 +285,28 @@ describe('CreatePcaModal', () => {
     await unmount();
   });
 
+  // M8 — a FAILED create must never fire the self-coverage hand-off (onApproveOwnWallets); the
+  // self-coverage modal (with its deregister-first loop) only follows a CONFIRMED mint.
+  it('M8 — a failed create never opens self-coverage (onApproveOwnWallets not called)', async () => {
+    mocks.createPca.mockRejectedValue(new HttpError(400, 'InvalidAmount', { error: 'InvalidAmount' }));
+    const onApproveOwn = vi.fn();
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: onApproveOwn, onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-create-submit"]')!);
+    const started = Date.now();
+    while (Date.now() - started < 1000 && mocks.createPca.mock.calls.length === 0) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+    }
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); }); // let the rejection settle
+    expect(mocks.createPca).toHaveBeenCalled();
+    expect(onApproveOwn).not.toHaveBeenCalled();
+    await unmount();
+  });
+
   // S2b renew [MEDIUM] — on the renew path the success action re-approves the OLD account's
   // wallets (not a fresh "this node's wallets"), so the button is relabelled.
   it('S2b renew: relabels the success action to re-approve the OLD account’s wallets', async () => {

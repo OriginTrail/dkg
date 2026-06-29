@@ -9,14 +9,15 @@ import { listDesignatableNodes, type DesignatableNode } from '../api.js';
 async function fetchAllDesignatableNodes(fresh = false): Promise<DesignatableNode[]> {
   const all: DesignatableNode[] = [];
   let start = 0; // 0-based offset cursor (Backend serves offset pages over the cached table)
-  // The table is ≤500; cap the page loop defensively so a misbehaving cursor (a nextStart that
-  // never goes null) can't spin forever.
-  for (let page = 0; page < 25; page++) {
+  // L11 — drive off the route's `total` (the sharding-table size is governance-mutable, so no magic
+  // page cap that could silently truncate). Stop when collected >= total or the cursor ends; the
+  // `guard` is only a defensive backstop against a pathological never-null cursor.
+  for (let guard = 0; guard < 100; guard++) {
     // M4 — bust the cache on the FIRST page only: `fresh=1` re-reads the chain AND repopulates the
     // daemon cache, so subsequent pages read the just-refreshed list.
-    const r = await listDesignatableNodes({ start, limit: 200, fresh: fresh && page === 0 });
+    const r = await listDesignatableNodes({ start, limit: 200, fresh: fresh && start === 0 });
     all.push(...r.nodes);
-    if (r.nextStart == null || r.nodes.length === 0) break;
+    if (r.nextStart == null || r.nodes.length === 0 || all.length >= r.total) break;
     start = r.nextStart;
   }
   return all;

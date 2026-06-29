@@ -293,6 +293,28 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     await unmount();
   });
 
+  // M10 — self-coverage: an UNREADABLE binding (the owner read fails → inconclusive) must NOT be
+  // skipped or deregistered; it falls through to registerAgent and the AgentAlreadyRegistered
+  // backstop resolves it (#9 — never assert "already free" off an unread probe).
+  it('M10 — self-coverage: an inconclusive binding falls through to register (conflict backstop), not skipped', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [ADDR_A], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: ADDR_A, accountId: '9' }); // bound…
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      if (id === '9') throw new Error('rpc'); // …but the owner read FAILS → inconclusive
+      return key ? { ...snap(), probedKey: { key, registered: false } } : snap(); // new account #8
+    });
+    mocks.pcaAddAgent.mockRejectedValue(new HttpError(409, 'AgentAlreadyRegistered', { error: 'AgentAlreadyRegistered' }));
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, { accountId: '8', initialMode: 'self', selfCoverage: true, onClose: vi.fn() }),
+    );
+    await waitForText(container, 'slots used');
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, 'another conviction account'); // register attempted → conflict backstop
+    expect(mocks.pcaAddAgent).toHaveBeenCalledWith('8', ADDR_A); // registered (not skipped)
+    expect(mocks.pcaRemoveAgent).not.toHaveBeenCalled(); // inconclusive → no deregister
+    await unmount();
+  });
+
   // M4 — a transient 500/network on a MIDDLE wallet must NOT abort and must NOT
   // tally as a benign skip: that row is a danger-tone failure, the loop continues,
   // and the remaining wallet still gets approved.
