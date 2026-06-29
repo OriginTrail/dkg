@@ -8,8 +8,10 @@ export type { ConvictionCostCovered };
  * The CONFIRMED discount in basis points, derived from the event (the bps
  * isn't in the event itself): `10000 · (baseCost − discountedCost) / baseCost`.
  * BigInt math (uint96 wei can exceed `Number.MAX_SAFE_INTEGER`). Returns `null`
- * when the costs are missing/zero/un-parseable so the caller can hide rather
- * than assert a bogus 0%.
+ * when the costs are missing/zero/un-parseable OR when there is NO actual discount
+ * (`discounted >= base`) — a genuine 0% draw is reachable on-chain (the contract
+ * floors discountedCost back to baseCost, and discountBps==0 accounts exist), and
+ * must NOT render a bogus "−0%"/"saved 0" claim (#9). Only a POSITIVE discount returns.
  */
 export function convictionDiscountBps(covered: ConvictionCostCovered | null | undefined): number | null {
   if (!covered) return null;
@@ -21,7 +23,9 @@ export function convictionDiscountBps(covered: ConvictionCostCovered | null | un
   } catch {
     return null;
   }
-  if (base <= 0n || discounted < 0n || discounted > base) return null;
+  // `discounted >= base` (not `>`) → a 0% draw resolves to null, so the badge hides
+  // and the bell row drops the −%/saved rather than claiming a discount that isn't.
+  if (base <= 0n || discounted < 0n || discounted >= base) return null;
   // Round to nearest bps.
   return Number(((base - discounted) * 10000n + base / 2n) / base);
 }

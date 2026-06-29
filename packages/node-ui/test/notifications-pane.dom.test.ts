@@ -240,6 +240,30 @@ describe('NotificationsPane — interaction + a11y (happy-dom)', () => {
     expect(buttonByText(/^Approve$/)).toBeUndefined();
   });
 
+  // #9 — a genuine 0% draw (baseCost === discountedCost) still fired a CostCovered event
+  // (the PCA covered the publish), but there's NO discount: the row must say "covered"
+  // WITHOUT a "−0%"/"saved 0 TRAC" false claim.
+  it('B8 — a 0% draw renders "Publishing fee covered" with no −%/saved (#9)', () => {
+    const covered: ActivityItem = {
+      kind: 'pca_cost_covered',
+      id: 13,
+      cgId: 'cg:e',
+      covered: {
+        accountId: '9', epoch: 1300,
+        baseCost: '1000000000000000000000', discountedCost: '1000000000000000000000', // 0% effective
+        drawnFromEpoch: '0', drawnFromTopUp: '1000000000000000000000',
+      },
+      publisherAddress: '0xpub0000000000000000000000000000000000pub',
+      ts: 1,
+      read: false,
+    };
+    render(makeFeed({ unread: 1, hasInformationalUnread: true, activity: [covered] }));
+    expect(container.textContent).toContain('Publishing fee covered');
+    expect(container.textContent).toContain('PCA #9');
+    expect(container.textContent).not.toContain('%'); // no −0% (or any %) claim
+    expect(container.textContent).not.toContain('saved'); // no "saved 0 TRAC"
+  });
+
   it('M9 frontend re-surface: a digest renders unread again after a load() returns read=0 for its digestKey', () => {
     const digest = (read: boolean): ActivityItem => ({
       kind: 'digest', id: 'activity:cg:a:promoted:42', cgId: 'cg:a',
