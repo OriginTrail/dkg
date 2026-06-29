@@ -134,10 +134,13 @@ describe('PublishEligibilityChip (S5)', () => {
     await first.unmount();
 
     // Mid-TTL re-mount → cached negative is fresh → NOT re-probed (the bound holds).
+    // LOW#1: with the whole wallet set fresh-negative, even the balances fetch is skipped.
+    expect(mocks.fetchWalletsBalances).toHaveBeenCalledTimes(1);
     __ageAgentDiscoveryCache(1_000);
     const second = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
     await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
     expect(mocks.pcaAgentAccount).toHaveBeenCalledTimes(1); // skipped — still 1
+    expect(mocks.fetchWalletsBalances).toHaveBeenCalledTimes(1); // LOW#1 — balances not re-fetched
     await second.unmount();
 
     // Operator gets sponsored mid-session; once the entry ages past the TTL, the next pass

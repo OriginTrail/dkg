@@ -24,10 +24,15 @@ const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLow
  */
 const NEGATIVE_CACHE_TTL_MS = 3 * 60_000;
 const noAgentAccount = new Map<string, number>();
+// LOW#1 — the wallet set from the last real fetch, so a fully-cached-negative node can
+// short-circuit BEFORE re-fetching balances (a non-PCA node shouldn't poll balances just
+// to re-skip every wallet). Refreshed on every actual fetch; bounded by the same TTL.
+let lastWalletSet: string[] = [];
 
 /** TEST-ONLY — clear the session negative cache between cases. */
 export function __resetAgentDiscoveryCache(): void {
   noAgentAccount.clear();
+  lastWalletSet = [];
 }
 
 /** TEST-ONLY — age every cached negative by `ms` (exercises the TTL without faking the clock). */
@@ -44,10 +49,24 @@ export function __ageAgentDiscoveryCache(ms: number): void {
  * `classifyCoverage` once the id is tracked, so this never asserts coverage (#9).
  */
 async function discoverAgentAccounts(): Promise<string[]> {
+  const now = Date.now();
+  // LOW#1 — if every wallet from the last fetch is still a FRESH confirmed-negative, there's
+  // nothing to discover: skip the balances fetch entirely (a non-PCA node would otherwise
+  // poll it per chip × per CG × per 30s just to re-skip). A wallet-set change or a TTL
+  // expiry below falls through to a real fetch + re-probe.
+  if (
+    lastWalletSet.length > 0 &&
+    lastWalletSet.every((w) => {
+      const ts = noAgentAccount.get(w.toLowerCase());
+      return ts != null && now - ts < NEGATIVE_CACHE_TTL_MS;
+    })
+  ) {
+    return [];
+  }
   const wb = await fetchWalletsBalances().catch(() => null);
   const wallets = wb?.wallets ?? [];
+  lastWalletSet = wallets;
   const found = new Set<string>();
-  const now = Date.now();
   await Promise.all(
     wallets.map(async (w) => {
       const key = w.toLowerCase();
