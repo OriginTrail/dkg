@@ -111,6 +111,7 @@ export type ActivityItem =
       kind: 'pca_cost_covered';
       id: number | string;
       cgId?: string;
+      contextGraphName?: string;
       covered: ConvictionCostCovered;
       publisherAddress: string;
       ts: number;
@@ -209,6 +210,7 @@ export function mapActivity(rows: NotifWire[]): ActivityItem[] {
         kind: 'pca_cost_covered',
         id: n.id,
         cgId: n.contextGraphId,
+        contextGraphName: n.meta.contextGraphName,
         covered: n.meta,
         publisherAddress: n.meta.publisherAddress,
         ts: n.ts,

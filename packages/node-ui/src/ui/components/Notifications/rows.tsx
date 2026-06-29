@@ -342,17 +342,19 @@ export function PcaCostCoveredRow({
     saved = null;
   }
   const pca = `PCA #${item.covered.accountId}`;
-  const detail = `${pct ? `−${pct}% ` : ''}via ${pca}${saved ? ` · saved ${saved} TRAC` : ''}`;
+  // Append the CG context when the daemon supplied it (meta.contextGraphName).
+  const where = item.contextGraphName?.trim() ? ` in ${item.contextGraphName.trim()}` : '';
+  const detail = `${pct ? `−${pct}% ` : ''}via ${pca}${saved ? ` · saved ${saved} TRAC` : ''}${where}`;
   const when = formatNotificationTimestamp(item.ts);
   return (
     <div
       className={`v10-notif-row v10-notif-row-confirm v10-notif-pca-discount${item.read ? '' : ' v10-notif-unread'}`}
       role="status"
-      aria-label={`Discount applied, ${detail}${when ? `, ${when}` : ''}.`}
+      aria-label={`Publishing discount applied, ${detail}${when ? `, ${when}` : ''}.`}
     >
       <span className="v10-notif-glyph v10-notif-glyph-approved" aria-hidden="true">◉</span>
       <span className="v10-notif-row-body" aria-hidden="true">
-        <span className="v10-notif-row-title">Discount applied</span>
+        <span className="v10-notif-row-title">Publishing discount applied</span>
         <span className="v10-notif-row-detail">{detail}</span>
       </span>
       <span className="v10-notif-time" aria-hidden="true" title={new Date(item.ts).toLocaleString()}>

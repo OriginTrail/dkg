@@ -3349,7 +3349,7 @@ export interface PcaCostCoveredNotif {
   ts: number;
   read: 0 | 1;
   contextGraphId?: string;
-  meta: ConvictionCostCovered & { publisherAddress: string };
+  meta: ConvictionCostCovered & { publisherAddress: string; contextGraphName?: string };
 }
 
 export type NotifWire =

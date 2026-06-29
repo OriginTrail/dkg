@@ -65,7 +65,7 @@ const pcaCovered = (over: Partial<Extract<NotifWire, { type: 'pca_cost_covered' 
   ts: 1800,
   read: 0,
   contextGraphId: 'cg:d',
-  meta: { accountId: '7', epoch: 1284, baseCost: '1000', discountedCost: '700', drawnFromEpoch: '700', drawnFromTopUp: '0', publisherAddress: '0xpub' },
+  meta: { contextGraphName: 'Delta', accountId: '7', epoch: 1284, baseCost: '1000', discountedCost: '700', drawnFromEpoch: '700', drawnFromTopUp: '0', publisherAddress: '0xpub' },
   ...over,
 });
 
@@ -98,6 +98,7 @@ describe('mapActivity', () => {
     if (item.kind !== 'pca_cost_covered') throw new Error('expected pca_cost_covered');
     expect(item.covered).toMatchObject({ accountId: '7', epoch: 1284, baseCost: '1000', discountedCost: '700' });
     expect(item.publisherAddress).toBe('0xpub');
+    expect(item.contextGraphName).toBe('Delta');
     expect(item.read).toBe(false);
   });
 

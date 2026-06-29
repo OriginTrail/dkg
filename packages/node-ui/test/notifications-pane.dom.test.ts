@@ -226,14 +226,16 @@ describe('NotificationsPane — interaction + a11y (happy-dom)', () => {
         drawnFromEpoch: '700000000000000000000', drawnFromTopUp: '0',
       },
       publisherAddress: '0xpub0000000000000000000000000000000000pub',
+      contextGraphName: 'Delta',
       ts: 1,
       read: false,
     };
     render(makeFeed({ unread: 1, hasInformationalUnread: true, activity: [covered] }));
-    expect(container.textContent).toContain('Discount applied');
+    expect(container.textContent).toContain('Publishing discount applied');
     expect(container.textContent).toContain('30%');
     expect(container.textContent).toContain('PCA #7');
     expect(container.textContent).toContain('300'); // saved 300 TRAC
+    expect(container.textContent).toContain('Delta'); // CG context surfaced when present
     // Informational — no Approve/Deny actions on this row.
     expect(buttonByText(/^Approve$/)).toBeUndefined();
   });
