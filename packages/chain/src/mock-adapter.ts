@@ -24,6 +24,7 @@ import type {
   OperationalWalletRegistrationResult,
   V10PublishingConvictionAccountInfo,
   VerifyACKIdentityResult,
+  PcaAccountRelation,
 } from './chain-adapter.js';
 import {
   NoEligibleContextGraphError,
@@ -673,6 +674,29 @@ export class MockChainAdapter implements ChainAdapter {
     const acct = this.convictionAccounts.get(accountId);
     if (!acct) return [];
     return [...acct.agents].map((k) => ethers.getAddress(k));
+  }
+
+  /** GAP-1 parity — enumerate PCAs the wallets relate to: OWNED (the account's
+   *  owner is the wallet) + AGENT (the reverse map). Deduped, relation-tagged,
+   *  sorted asc. */
+  async listPublishingConvictionAccountsForWallets(wallets: string[]): Promise<PcaAccountRelation[]> {
+    const owned = new Set<bigint>();
+    const agent = new Set<bigint>();
+    for (const w of wallets) {
+      if (!ethers.isAddress(w)) continue;
+      const key = ethers.getAddress(w).toLowerCase();
+      for (const [id, acct] of this.convictionAccounts) {
+        if (acct.owner.toLowerCase() === key) owned.add(id);
+      }
+      const acctId = this.agentToConvictionAccount.get(key);
+      if (acctId != null && acctId > 0n) agent.add(acctId);
+    }
+    const ids = [...new Set<bigint>([...owned, ...agent])].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    return ids.map((accountId) => {
+      const o = owned.has(accountId);
+      const g = agent.has(accountId);
+      return { accountId, relation: (o && g ? 'both' : o ? 'owned' : 'agent') as PcaAccountRelation['relation'] };
+    });
   }
 
   /** Mirrors `agentToAccountId`; `0n` for unregistered → publisher SDK

@@ -95,7 +95,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type PcaAccountRelation } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -1541,6 +1541,16 @@ export class AgentRegistryMethods extends DKGAgentBase {
   ): Promise<bigint | null> {
     if (typeof this.chain.getConvictionAgentAccountId !== 'function') return null;
     return this.chain.getConvictionAgentAccountId(agent, opts);
+  }
+
+  /** GAP-1 — enumerate every PCA the given wallets relate to (owned + agent-on).
+   *  `null` when the adapter lacks the surface (daemon maps null → 503). */
+  async listPublishingConvictionAccountsForWallets(
+    this: DKGAgent,
+    wallets: string[],
+  ): Promise<PcaAccountRelation[] | null> {
+    if (typeof this.chain.listPublishingConvictionAccountsForWallets !== 'function') return null;
+    return this.chain.listPublishingConvictionAccountsForWallets(wallets);
   }
 
   // ---------------------------------------------------------------------------

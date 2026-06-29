@@ -11,7 +11,7 @@
 
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers, Contract } from 'ethers';
-import type { TxResult, V10PublishingConvictionAccountInfo, ConvictionReader } from './chain-adapter.js';
+import type { TxResult, V10PublishingConvictionAccountInfo, ConvictionReader, PcaAccountRelation } from './chain-adapter.js';
 import { PcaUnavailableError } from './pca-errors.js';
 import { enrichEvmError, getPcaLogicInterface } from './evm-adapter-errors.js';
 
@@ -461,5 +461,48 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.getRegisteredAgents', 'getRegisteredAgents', accountId,
     );
     return (raw ?? []).map((a) => ethers.getAddress(a));
+  }
+
+  /**
+   * GAP-1 — enumerate every PCA the given `wallets` relate to:
+   *   - OWNED: the wallet holds the NFT. `DKGPublishingConvictionNFT` is
+   *     ERC721Enumerable and tokenId === accountId, so `balanceOf` +
+   *     `tokenOfOwnerByIndex` enumerates owned accounts (no `tokensOfOwner`
+   *     getter exists — wallet-iteration is the cheapest correct path).
+   *   - AGENT: the wallet is a registered publishing agent (`agentToAccountId`,
+   *     via the strict GAP-3 lookup).
+   * Deduped, relation-tagged (owned/agent/both), sorted by accountId asc.
+   *
+   * Strict / #9: undeployed NFT throws `PcaUnavailableError` (route → 503); a
+   * CALL_EXCEPTION on any read SURFACES (not caught here), so a transient blip
+   * becomes a 503, never a partial/empty list a UI would read as "relates to
+   * nothing". A healthy read with no matches returns `[]`.
+   */
+  async listPublishingConvictionAccountsForWallets(wallets: string[]): Promise<PcaAccountRelation[]> {
+    await this.init();
+    const nft = this.contracts.dkgPublishingConvictionNFT;
+    if (!nft) throw new PcaUnavailableError();
+    const owned = new Set<bigint>();
+    const agent = new Set<bigint>();
+    for (const w of wallets) {
+      if (!ethers.isAddress(w)) continue;
+      const balance: bigint = BigInt(await this.readContract(
+        nft, 'pcaNFT.balanceOf', 'balanceOf', w,
+      ));
+      for (let i = 0n; i < balance; i++) {
+        const tokenId: bigint = BigInt(await this.readContract(
+          nft, 'pcaNFT.tokenOfOwnerByIndex', 'tokenOfOwnerByIndex', w, i,
+        ));
+        owned.add(tokenId);
+      }
+      const acctId = await this.getConvictionAgentAccountId(w, { strict: true });
+      if (acctId > 0n) agent.add(acctId);
+    }
+    const ids = [...new Set<bigint>([...owned, ...agent])].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    return ids.map((accountId) => {
+      const o = owned.has(accountId);
+      const g = agent.has(accountId);
+      return { accountId, relation: (o && g ? 'both' : o ? 'owned' : 'agent') as PcaAccountRelation['relation'] };
+    });
   }
 }

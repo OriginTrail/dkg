@@ -7,9 +7,20 @@ import type { ethers } from 'ethers';
  * is caught at compile time, rather than only at runtime through the base-class
  * structural cast in `isConvictionFundedAgent`.
  */
+/** A PCA the node relates to (GAP-1): `owned` (a node wallet holds the NFT),
+ *  `agent` (a node op wallet is its registered publishing agent), or `both`. */
+export type PcaRelation = 'owned' | 'agent' | 'both';
+export interface PcaAccountRelation {
+  accountId: bigint;
+  relation: PcaRelation;
+}
+
 export interface ConvictionReader {
   getConvictionAgentAccountId(agent: string): Promise<bigint>;
   convictionAccountCanCover(accountId: bigint, baseCost: bigint): Promise<boolean>;
+  /** GAP-1 — enumerate every PCA the given wallets relate to (owned + agent-on),
+   *  deduped, relation-tagged, sorted by accountId asc. */
+  listPublishingConvictionAccountsForWallets(wallets: string[]): Promise<PcaAccountRelation[]>;
 }
 
 export interface IdentityProof {
@@ -899,6 +910,15 @@ export interface ChainAdapter {
    * publisher gracefully treats `undefined` as "no PCA path active".
    */
   getConvictionAgentAccountId?(agent: string, opts?: { strict?: boolean }): Promise<bigint>;
+
+  /**
+   * GAP-1 — enumerate every PCA the given wallets relate to: `owned` (the wallet
+   * holds the NFT, via ERC721Enumerable balanceOf+tokenOfOwnerByIndex since
+   * tokenId === accountId) and/or `agent` (the wallet is a registered publishing
+   * agent, via agentToAccountId). Deduped + relation-tagged + sorted asc.
+   * Read-only; surfaces read failures (does not fail-safe to a partial list).
+   */
+  listPublishingConvictionAccountsForWallets?(wallets: string[]): Promise<PcaAccountRelation[]>;
 
   /**
    * Returns the V10 NFT-backed PCA's `lockDurationEpochs` for the given
