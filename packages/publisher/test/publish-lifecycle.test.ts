@@ -24,7 +24,7 @@ import { DKGPublisher } from '../src/dkg-publisher.js';
 import { PublishHandler } from '../src/publish-handler.js';
 import { ChainEventPoller } from '../src/chain-event-poller.js';
 import { autoPartition } from '../src/auto-partition.js';
-import { computeTripleHashV10 as computeTripleHash } from '../src/merkle.js';
+import { computePrivateRootV10, computeTripleHashV10 as computeTripleHash } from '../src/merkle.js';
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
@@ -1048,17 +1048,48 @@ describe('Tentative publish UAL uniqueness', () => {
     });
 
     const entity = 'did:dkg:agent:FoldedPrivateConfirm';
+    const publicQuads = [q(entity, 'http://schema.org/name', '"FoldedPrivateConfirm"')];
+    const privateQuads = [q(entity, 'http://dkg.io/ontology/secret', '"hidden"')];
+    const expectedPrivateRoot = computePrivateRootV10(privateQuads)!;
+    let receivedPrivateRoots: Uint8Array[] | undefined;
+    const realProvider = hardhatACKProvider(_kav10Address);
+    const v10ACKProvider: Parameters<DKGPublisher['publish']>[0]['v10ACKProvider'] = async (
+      merkleRoot, cgId, kaCount,
+      rootEntities, byteSize, stagingQuads,
+      epochs, tokenAmount,
+      swmGraphId, subGraphName,
+      merkleLeafCount,
+      isEncryptedPayload,
+      catalogCommitment,
+      privateMerkleRoots,
+    ) => {
+      receivedPrivateRoots = privateMerkleRoots?.map((root) => new Uint8Array(root));
+      return realProvider(
+        merkleRoot, cgId, kaCount,
+        rootEntities, byteSize, stagingQuads,
+        epochs, tokenAmount,
+        swmGraphId, subGraphName,
+        merkleLeafCount,
+        isEncryptedPayload,
+        catalogCommitment,
+        privateMerkleRoots,
+      );
+    };
+
     const result = await pubS(publisher, {
       contextGraphId: CONTEXT_GRAPH,
       publisherPeerId: '12D3KooWPrivateConfirm',
-      quads: [q(entity, 'http://schema.org/name', '"FoldedPrivateConfirm"')],
-      privateQuads: [q(entity, 'http://dkg.io/ontology/secret', '"hidden"')],
+      quads: publicQuads,
+      privateQuads,
+      v10ACKProvider,
     });
 
     expect(result.status).toBe('confirmed');
     expect(result.kaId > 0n).toBe(true);
     expect(result.kaManifest[0]?.privateTripleCount).toBe(1);
     expect(result.kaManifest[0]?.privateMerkleRoot).toBeDefined();
+    expect(receivedPrivateRoots).toHaveLength(1);
+    expect(receivedPrivateRoots![0]).toEqual(expectedPrivateRoot);
   });
 
   it('stores distinct KC metadata for each tentative publish', async () => {
