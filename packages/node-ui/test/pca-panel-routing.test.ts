@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   fetchPca: vi.fn(),
   fetchWalletsBalances: vi.fn(),
   fetchContextGraphs: vi.fn(),
+  listPcaAgents: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', async (orig) => {
@@ -21,6 +22,7 @@ vi.mock('../src/ui/api.js', async (orig) => {
     fetchPca: mocks.fetchPca,
     fetchWalletsBalances: mocks.fetchWalletsBalances,
     fetchContextGraphs: mocks.fetchContextGraphs,
+    listPcaAgents: mocks.listPcaAgents,
   };
 });
 
@@ -58,6 +60,9 @@ beforeEach(() => {
   );
   mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
   mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [] });
+  // B3 — the detail view fetches the approved-wallet list; mock it so the routing test
+  // doesn't hit a real fetch (graceful-degrade would still render, but cleaner without).
+  mocks.listPcaAgents.mockResolvedValue({ accountId: '7', agents: [W0] });
 });
 afterEach(() => {
   document.body.innerHTML = '';

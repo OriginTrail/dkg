@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   fetchPca: vi.fn(),
   fetchContextGraphs: vi.fn(),
   fetchCurrentAgent: vi.fn(),
+  pcaAgentAccount: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', async (orig) => {
@@ -30,6 +31,7 @@ vi.mock('../src/ui/api.js', async (orig) => {
     fetchPca: mocks.fetchPca,
     fetchContextGraphs: mocks.fetchContextGraphs,
     fetchCurrentAgent: mocks.fetchCurrentAgent,
+    pcaAgentAccount: mocks.pcaAgentAccount,
   };
 });
 
@@ -109,6 +111,10 @@ beforeEach(() => {
   // S5 owner-publish escrow caveat off (not under test here).
   mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [] });
   mocks.fetchCurrentAgent.mockResolvedValue({ agentDid: 'did:dkg:agent:0x' + '9'.repeat(40) });
+  // GAP-3 (#1344): the wallet is registered ON the fixture account, so the S5 augment
+  // never fires (the tracked fast-path resolves it) and S6 discovery is inert here —
+  // stub it so neither path hits a real fetch. Parity is about classifyCoverage, not GAP-3.
+  mocks.pcaAgentAccount.mockResolvedValue({ agent: W0, accountId: null });
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
