@@ -84,7 +84,11 @@ const IDLE: ActionState = { busy: false, error: null, result: null };
  * txHash + a "still pending… verify here" escape.
  */
 export function ConvictionDetailView({ accountId }: { accountId: string }) {
-  const { data: snapshot, loading, error, refresh } = useFetch(() => fetchPca(accountId), [accountId]);
+  // GAP-4/5 — the S3 detail view opts into the EXTENDED snapshot (remainingAllowance /
+  // primaryNode / currentEpoch) for the budget widget. It's a single on-mount read (not a
+  // hot poll), so the extra readback cost is fine here; the fields are best-effort (absent
+  // on read-failure → the widget shows nothing, never a false value).
+  const { data: snapshot, loading, error, refresh } = useFetch(() => fetchPca(accountId, undefined, { extended: true }), [accountId]);
   const { data: wb, error: wbError, refresh: refreshWallets } = useFetch(fetchWalletsBalances, [], 0);
   const nodeStatus = useAgentsStore((s) => s.nodeStatus) as { blockExplorerUrl?: string | null } | null;
   const explorer = nodeStatus?.blockExplorerUrl ?? null;
@@ -307,8 +311,29 @@ function DetailBody({
         items={[
           { id: 'buffer', label: 'Top-up buffer', value: `${formatTrac(snapshot.topUpBufferTrac)} TRAC` },
           { id: 'per-epoch', label: 'TRAC per epoch', value: `${formatWeiToTrac(snapshot.baseEpochAllowance)} TRAC` },
+          // GAP-4/5 — the precise current-epoch remaining allowance (extended snapshot,
+          // best-effort). Display only — the coverage spine stays the coarse proxy (#1349
+          // is a separate decision). Omitted when the extended read didn't return it.
+          ...(snapshot.remainingAllowanceTrac != null
+            ? [{
+                id: 'remaining',
+                label: 'Remaining this epoch',
+                value: `${formatTrac(snapshot.remainingAllowanceTrac)} TRAC`,
+                tooltip: snapshot.currentEpoch != null ? `Current epoch ${snapshot.currentEpoch}` : undefined,
+              }]
+            : []),
           { id: 'wallets', label: 'Publishing wallets', value: `${snapshot.agentCount} / 100` },
           { id: 'expires', label: 'Expires', value: formatRelativeExpiry(snapshot.expiresAtTimestamp), tooltip: `Expiry epoch ${snapshot.expiresAtEpoch}` },
+          // GAP-4/5 — the node this PCA directs publishing-reward weight to. '0' = none set;
+          // ABSENT (read-failed) → omit, never a false value.
+          ...(snapshot.primaryNode != null
+            ? [{
+                id: 'primary-node',
+                label: 'Primary node',
+                value: snapshot.primaryNode === '0' ? 'None set' : `Node #${snapshot.primaryNode}`,
+                tooltip: snapshot.lastPrimaryNodeChangeEpoch != null ? `Last changed epoch ${snapshot.lastPrimaryNodeChangeEpoch}` : undefined,
+              }]
+            : []),
         ]}
       />
       <div className="v10-pca-detail-owner">
