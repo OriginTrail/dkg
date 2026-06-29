@@ -658,6 +658,27 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(res.body).not.toContain('SECRETKEY');
   });
 
+  it('GET /api/pca/:id/agents → 503 PCA_LOOKUP_READ_FAILED on an enumerator CALL_EXCEPTION (NOT 200 [])', async () => {
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getPublishingConvictionAccountInfo: async () => ({ owner: '0x' + '9'.repeat(40) }),
+      getPublishingConvictionAgents: async () => {
+        // getRegisteredAgents is a plain getter that returns [] for an unknown
+        // account, so a CALL_EXCEPTION is a real read failure — the route must
+        // NOT collapse it to a confirmed 200 [] ("no approved wallets").
+        const err: any = new Error('missing revert data (execution reverted)');
+        err.code = 'CALL_EXCEPTION';
+        throw err;
+      },
+    };
+    const { res, done } = runCtx('GET', '/api/pca/5/agents', agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    const body = JSON.parse(res.body);
+    expect(body.code).toBe('PCA_LOOKUP_READ_FAILED');
+    expect(body.agents).toBeUndefined();
+  });
+
   it('GET /api/pca/:id/agents → 400 for a non-numeric id', async () => {
     const { res, done } = runCtx('GET', '/api/pca/not-an-id/agents', {});
     await done;

@@ -405,24 +405,23 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
    * returns checksummed addresses; normalize defensively so callers (and
    * the daemon's approved-wallet table) always get EIP-55 form.
    *
-   * Returns `[]` when the NFT contract is not deployed, the id is
-   * non-positive, or the chain call reverts (e.g. unknown account). The
-   * daemon route runs its own existence check via
-   * `getPublishingConvictionAccountInfo` first, so once that passes a `[]`
-   * here means "account exists, no agents registered".
+   * Discovery-only (no funded-wallet-selector caller), so it does NOT
+   * fail-safe a read error to `[]`: `getRegisteredAgents` is reached only
+   * AFTER the daemon route's existence/capability gate
+   * (`getPublishingConvictionAccountInfo`), so a CALL_EXCEPTION here is a real
+   * read failure (stale binding / RPC), never a "missing account". Surfacing
+   * it lets the route answer 503 — a transient blip must not read as a
+   * confirmed empty list ("no approved wallets"), the same #9 honesty rule as
+   * the strict GAP-3 lookup. A healthy empty read still returns `[]`. The
+   * undeployed / non-positive-id guards are defensive (the route gates both).
    */
   async getPublishingConvictionAgents(accountId: bigint): Promise<string[]> {
     await this.init();
     if (!this.contracts.dkgPublishingConvictionNFT) return [];
     if (accountId <= 0n) return [];
-    try {
-      const raw: string[] = await this.readContract(
-        this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.getRegisteredAgents', 'getRegisteredAgents', accountId,
-      );
-      return (raw ?? []).map((a) => ethers.getAddress(a));
-    } catch (err: any) {
-      if (err?.code === 'CALL_EXCEPTION') return [];
-      throw err;
-    }
+    const raw: string[] = await this.readContract(
+      this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.getRegisteredAgents', 'getRegisteredAgents', accountId,
+    );
+    return (raw ?? []).map((a) => ethers.getAddress(a));
   }
 }

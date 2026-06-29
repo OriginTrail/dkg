@@ -482,6 +482,15 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
       if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
       if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
       if (respondIfChainRpcTransportError(res, err)) return;
+      // A CALL_EXCEPTION here is a real enumerator read failure (the route's
+      // existence gate already ran, so the account exists) → 503 retryable, NOT
+      // a 200 [] the UI would read as a confirmed "no approved wallets" (#9).
+      if (err?.code === 'CALL_EXCEPTION') {
+        return jsonResponse(res, 503, {
+          error: 'PCA agent enumeration temporarily unavailable — chain read failed',
+          code: 'PCA_LOOKUP_READ_FAILED',
+        });
+      }
       const revert = classifyPcaRevert(msg);
       if (revert) return jsonResponse(res, revert.status, { error: revert.error, accountId: idStr });
       return jsonResponse(res, 500, {
