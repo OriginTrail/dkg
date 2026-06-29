@@ -11,7 +11,7 @@
 //   GET  /api/notifications        → scoped { notifications, badgeCount, scopeUnknown? }
 //   POST /api/notifications/read   → mark ids + digestKeys read (caller-scoped)
 
-import { scopeNotifications, type NotificationScopeContext } from '@origintrail-official/dkg-node-ui';
+import { scopeNotifications, PCA_COST_COVERED_TYPE, type NotificationScopeContext } from '@origintrail-official/dkg-node-ui';
 import { jsonResponse, readBody, SMALL_BODY_BYTES } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 
@@ -87,28 +87,44 @@ async function resolveCallerScope(ctx: RequestContext, callerAddress: string): P
   return { callerAddress, memberCgIds, curatedCgIds, contextGraphNames };
 }
 
-/** Confirmation types — the caller's own outbound-request resolutions. */
-const CONFIRMATION_TYPES = ['join_approved', 'join_rejected'];
+/**
+ * Wallet-scoped notification types — the caller's OWN rows, which are NOT
+ * CG-membership-scoped and so must be fetched by TYPE + filtered by the
+ * caller's wallet (the member-CG read would miss them):
+ *   - join_approved/join_rejected (scoped by meta.agentAddress) — a rejected
+ *     requester is no longer a member of the rejected CG (R3-1).
+ *   - pca_cost_covered (scoped by meta.publisherAddress) — a confirmed PCA
+ *     discount belongs to the publishing wallet, which may NOT be a "member"
+ *     of the CG it published to (e.g. a sponsored edge publishing to a core's
+ *     CG). Without this, the bell would only fire for member-CG self-publishes.
+ */
+const CONFIRMATION_TYPES = ['join_approved', 'join_rejected', PCA_COST_COVERED_TYPE];
 const CONFIRMATION_READ_LIMIT = 200;
 
 /**
- * The caller's OWN join confirmations (join_approved/join_rejected). These are
- * emitted only on the requester's node and are NOT CG-membership-scoped — a
- * rejected requester is no longer a member of the rejected CG, so the member-CG
- * read (getNotificationsForContextGraphs) would drop every rejection (R3-1).
- * Read them by type, then keep only the rows whose meta.agentAddress is the
- * caller (multi-agent-node safety; scopeNotifications enforces the same).
+ * The lowercased wallet a wallet-scoped row belongs to: `meta.agentAddress`
+ * for join confirmations, `meta.publisherAddress` for pca_cost_covered.
+ */
+function walletOfConfirmationRow(r: { type: string; meta: string | null }): string | undefined {
+  let meta: { agentAddress?: unknown; publisherAddress?: unknown };
+  try {
+    meta = JSON.parse(r.meta ?? '{}');
+  } catch {
+    return undefined;
+  }
+  const raw = r.type === PCA_COST_COVERED_TYPE ? meta.publisherAddress : meta.agentAddress;
+  return typeof raw === 'string' ? raw.toLowerCase() : undefined;
+}
+
+/**
+ * The caller's OWN wallet-scoped rows (see CONFIRMATION_TYPES). Read by type,
+ * then keep only the rows whose owning wallet is the caller (multi-agent-node
+ * safety; scopeNotifications re-enforces the same scope at the wire layer).
  */
 function callerConfirmationRows(ctx: RequestContext, callerAddress: string) {
-  return ctx.dashDb.getNotificationsOfTypes(CONFIRMATION_TYPES, CONFIRMATION_READ_LIMIT).filter((r) => {
-    let metaAddr: unknown;
-    try {
-      metaAddr = (JSON.parse(r.meta ?? '{}') as { agentAddress?: unknown }).agentAddress;
-    } catch {
-      return false;
-    }
-    return typeof metaAddr === 'string' && metaAddr.toLowerCase() === callerAddress;
-  });
+  return ctx.dashDb
+    .getNotificationsOfTypes(CONFIRMATION_TYPES, CONFIRMATION_READ_LIMIT)
+    .filter((r) => walletOfConfirmationRow(r) === callerAddress);
 }
 
 export async function handleNotificationRoutes(ctx: RequestContext): Promise<void> {
