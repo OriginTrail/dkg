@@ -11,11 +11,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   fetchPca: vi.fn(),
   fetchWalletsBalances: vi.fn(),
+  pcaAgentAccount: vi.fn(),
+  fetchMyPcas: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', async (orig) => {
   const actual = await orig<typeof import('../src/ui/api.js')>();
-  return { ...actual, fetchPca: mocks.fetchPca, fetchWalletsBalances: mocks.fetchWalletsBalances };
+  return {
+    ...actual,
+    fetchPca: mocks.fetchPca,
+    fetchWalletsBalances: mocks.fetchWalletsBalances,
+    pcaAgentAccount: mocks.pcaAgentAccount,
+    fetchMyPcas: mocks.fetchMyPcas,
+  };
 });
 
 const { HttpError } = await import('../src/ui/api.js');
@@ -82,6 +90,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   usePcaStore.setState({ trackedIds: [], createPending: null });
   useAgentsStore.getState().setNodeStatus({ nodeRole: 'core', blockExplorerUrl: null });
+  // GAP-1 discovery defaults: nothing discovered (deterministic; no real fetch). Tests
+  // that exercise the discovered strip / auto-track override these.
+  mocks.pcaAgentAccount.mockResolvedValue({ agent: '', accountId: null });
+  mocks.fetchMyPcas.mockResolvedValue({ accounts: [] });
 });
 afterEach(() => {
   document.body.innerHTML = '';
@@ -231,6 +243,46 @@ describe('ConvictionOverview — S1 discovery', () => {
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(tab('Owned by me').getAttribute('aria-selected')).toBe('true'); // role default did NOT override
+    await unmount();
+  });
+
+  // GAP-1 — an OWNED PCA the node hasn't locally tracked surfaces in the "discovered,
+  // not tracked" strip with a [Track] action (owned does NOT auto-track).
+  it('GAP-1 — surfaces an owned, untracked PCA in the discovered strip with a Track action', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [WALLET0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchMyPcas.mockResolvedValue({
+      accounts: [{ accountId: '42', relation: 'owned', discountBps: 2000, committedTRACTrac: '50000.0', expiresAtTimestamp: 9_999_999_999, agentCount: 0 }],
+    });
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'Discovered — not tracked here');
+    const strip = container.querySelector('[data-testid="pca-discovered-strip"]') as HTMLElement;
+    expect(strip.textContent).toContain('PCA #42');
+    expect(strip.textContent).toContain('you own this account');
+    expect(strip.textContent).toContain('20%'); // hydrated discountBps
+    await act(async () => {
+      (strip.querySelector('[data-testid="pca-discovered-track"]') as HTMLButtonElement)
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(usePcaStore.getState().trackedIds).toContain('42');
+    await unmount();
+  });
+
+  // GAP-1 ★ AUTO-TRACK — a CONFIRMED agent-on discovery auto-adds to the tracked set
+  // (the pure-edge self-heal), so it does NOT linger in the strip.
+  it('GAP-1 — auto-tracks a confirmed agent-on PCA (edge self-heal), not left in the strip', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [WALLET0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: WALLET0, accountId: '9' });
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      const base = { ...snapFixture(id), owner: '0xother0000000000000000000000000000000000' };
+      return key ? { ...base, probedKey: { key, registered: true } } : base;
+    });
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    const started = Date.now();
+    while (Date.now() - started < 1000 && !usePcaStore.getState().trackedIds.includes('9')) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    }
+    expect(usePcaStore.getState().trackedIds).toContain('9'); // auto-tracked
+    expect(container.querySelector('[data-testid="pca-discovered-strip"]')).toBeNull(); // → not in the strip
     await unmount();
   });
 });

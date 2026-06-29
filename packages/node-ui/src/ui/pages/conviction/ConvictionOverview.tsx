@@ -3,7 +3,8 @@ import { useAgentsStore } from '../../stores/agents.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { usePcaStore } from '../../stores/pca.js';
 import { usePcaOverview } from '../../hooks/usePcaOverview.js';
-import { DiscountTierLadder } from '../../components/Pca/index.js';
+import { useDiscoveredPcas, type DiscoveredPca } from '../../hooks/useDiscoveredPcas.js';
+import { DiscountTierLadder, truncateAddress } from '../../components/Pca/index.js';
 import { EmptyState } from '../../components/ContextGraphPrimitives.js';
 import { PcaAccountCard } from './PcaAccountCard.js';
 import { CreatePcaModal } from './CreatePcaModal.js';
@@ -37,6 +38,9 @@ export function ConvictionOverview() {
   const untrackAccount = usePcaStore((s) => s.untrackAccount);
   const overview = usePcaOverview();
   const { accounts, loading, covered, refresh, walletsInconclusive } = overview;
+  // GAP-1 — PCAs this node relates to on-chain (owned + agent-on) beyond the locally
+  // tracked set. Agent-on auto-tracks (edge self-heal); the rest surface in the strip.
+  const { untracked: discoveredUntracked } = useDiscoveredPcas();
 
   // O2 — DERIVED default so the filter auto-reacts to the async role (a useState
   // initializer runs ONCE, so an edge node whose status resolved AFTER mount stayed
@@ -169,11 +173,13 @@ export function ConvictionOverview() {
         <ApprovedEmpty />
       )}
 
+      <DiscoveredStrip items={discoveredUntracked} onTrack={trackAccount} onManage={onManage} />
+
       <TrackByIdDisclosure onTrack={trackAccount} />
 
       <p className="v10-pca-overview-foot">
-        ⓘ No “list my accounts” API yet — this view tracks ids you create or add. Owned vs approved
-        is resolved by probing your wallets.
+        ⓘ PCAs you own or whose approved wallet is one of this node’s are discovered from the chain;
+        ids you track persist across reloads. Approved-on accounts are tracked automatically.
       </p>
 
       {createOpen && (
@@ -193,6 +199,61 @@ export function ConvictionOverview() {
       )}
       {sponsoredOpen && <GetSponsoredPanel onClose={() => { setSponsoredOpen(false); refresh(); }} />}
     </div>
+  );
+}
+
+/**
+ * GAP-1 — the "discovered, not tracked" strip: PCAs this node relates to on-chain
+ * (owned + agent-on) that aren't in the locally-tracked set. Agent-on ones auto-track
+ * (so they don't linger here); this surfaces the rest (typically OWNED accounts created
+ * elsewhere) with a [Track] affordance. Renders nothing when there's nothing to surface.
+ */
+function DiscoveredStrip({
+  items,
+  onTrack,
+  onManage,
+}: {
+  items: DiscoveredPca[];
+  onTrack: (id: string) => void;
+  onManage: (id: string) => void;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <section className="v10-pca-discovered" data-testid="pca-discovered-strip">
+      <h3 className="v10-pca-discovered-title">Discovered — not tracked here</h3>
+      <p className="v10-pca-overview-caveat">
+        ⓘ Found on-chain for this node’s wallets. Track to show them in the grid above.
+      </p>
+      {items.map((d) => {
+        const bps = d.basics?.discountBps;
+        return (
+          <div key={d.accountId} className="v10-pca-discovered-row" data-testid="pca-discovered-row">
+            <span className="v10-pca-discovered-label">
+              <button type="button" className="v10-notif-cg-link" onClick={() => onManage(d.accountId)}>
+                PCA #{d.accountId}
+              </button>{' '}
+              —{' '}
+              {d.relation === 'agent'
+                ? `your wallet ${d.agentWallet ? truncateAddress(d.agentWallet) : ''} is approved here`
+                : d.relation === 'both'
+                  ? 'you own this · your wallet is approved here'
+                  : 'you own this account'}
+              {typeof bps === 'number' && bps > 0 && (
+                <span className="badge badge-info"> ◉ {(bps / 100).toFixed(bps % 100 === 0 ? 0 : 1)}%</span>
+              )}
+            </span>
+            <button
+              type="button"
+              className="v10-pca-card-btn primary"
+              data-testid="pca-discovered-track"
+              onClick={() => onTrack(d.accountId)}
+            >
+              Track
+            </button>
+          </div>
+        );
+      })}
+    </section>
   );
 }
 
