@@ -129,6 +129,34 @@ describe('V10 Publishing Conviction NFT — chain-adapter lifecycle', () => {
     expect(ext.remainingAllowance!).toBeGreaterThan(0n);
   });
 
+  it('getPublishingConvictionAccountInfo extended is FAIL-SOFT: an extended-read throw leaves the core account intact', async () => {
+    const owner = await fundedOwner();
+    const { accountId } = await owner.createPublishingConvictionAccount(COMMITTED);
+
+    // Force the extended enrichment reads (accounts / Chronos / remaining
+    // allowance) to throw, while getAccountInfo (the core read) still succeeds.
+    const realRead = (owner as any).readContract.bind(owner);
+    (owner as any).readContract = async (contract: unknown, label: string, method: string, ...args: unknown[]) => {
+      if (method === 'accounts' || method === 'getCurrentEpoch' || method === 'getRemainingAllowance') {
+        const e: any = new Error('simulated extended-read failure');
+        e.code = 'CALL_EXCEPTION';
+        throw e;
+      }
+      return realRead(contract, label, method, ...args);
+    };
+
+    const info = await owner.getPublishingConvictionAccountInfo(accountId, { extended: true });
+    // Core account is returned intact (NOT nulled) — the extended block is a
+    // nested try that swallows the throw and leaves the extended fields unset.
+    expect(info).not.toBeNull();
+    expect(info!.committedTRAC).toBe(COMMITTED);
+    expect(info!.owner.toLowerCase()).toBe(owner.getSignerAddress().toLowerCase());
+    expect(info!.primaryNode).toBeUndefined();
+    expect(info!.lastPrimaryNodeChangeEpoch).toBeUndefined();
+    expect(info!.currentEpoch).toBeUndefined();
+    expect(info!.remainingAllowance).toBeUndefined();
+  });
+
   it('getPublishingConvictionAgents enumerates registered agents (checksummed) and reflects deregistration', async () => {
     const owner = await fundedOwner();
     const { accountId } = await owner.createPublishingConvictionAccount(COMMITTED);
