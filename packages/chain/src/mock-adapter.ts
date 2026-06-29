@@ -25,6 +25,7 @@ import type {
   V10PublishingConvictionAccountInfo,
   VerifyACKIdentityResult,
   PcaAccountRelation,
+  ShardingTableNode,
 } from './chain-adapter.js';
 import {
   NoEligibleContextGraphError,
@@ -697,6 +698,16 @@ export class MockChainAdapter implements ChainAdapter {
       const g = agent.has(accountId);
       return { accountId, relation: (o && g ? 'both' : o ? 'owned' : 'agent') as PcaAccountRelation['relation'] };
     });
+  }
+
+  /** B-staked-nodes parity (Stage-5) — a small fixed sharding-table fixture in
+   *  hash-ring order. nodeId = hex `bytes`; identityId/ask/stake = bigint. */
+  async listDesignatableNodes(): Promise<ShardingTableNode[]> {
+    return [
+      { nodeId: '0x6e6f64652d31', identityId: 42n, ask: 1_000_000_000_000_000_000n, stake: 250_000n * 10n ** 18n },
+      { nodeId: '0x6e6f64652d32', identityId: 57n, ask: 2_000_000_000_000_000_000n, stake: 180_000n * 10n ** 18n },
+      { nodeId: '0x6e6f64652d33', identityId: 61n, ask: 1_500_000_000_000_000_000n, stake: 500_000n * 10n ** 18n },
+    ];
   }
 
   /** Mirrors `agentToAccountId`; `0n` for unregistered → publisher SDK

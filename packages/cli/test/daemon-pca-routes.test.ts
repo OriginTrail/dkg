@@ -986,4 +986,97 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).accounts).toEqual([{ accountId: '5', relation: 'agent' }]);
   });
+
+  // ----- B-staked-nodes (Stage-5): GET /api/pca/designatable-nodes -----
+  const NODE_FIXTURE = [
+    { nodeId: '0xaa', identityId: 42n, ask: 1n, stake: 250n },
+    { nodeId: '0xbb', identityId: 57n, ask: 2n, stake: 180n },
+    { nodeId: '0xcc', identityId: 61n, ask: 3n, stake: 500n },
+  ];
+
+  it('GET /api/pca/designatable-nodes → 200 {nodes,total,nextStart}, bigints serialized, order preserved', async () => {
+    const agent = { supportsPublishingConvictionNft: true, listDesignatableNodes: async () => NODE_FIXTURE };
+    const { res, done } = runCtx('GET', '/api/pca/designatable-nodes', agent);
+    await done;
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.total).toBe(3);
+    expect(body.nextStart).toBeNull(); // default limit 50 > total
+    expect(body.nodes).toEqual([
+      { nodeId: '0xaa', identityId: '42', ask: '1', stake: '250' },
+      { nodeId: '0xbb', identityId: '57', ask: '2', stake: '180' },
+      { nodeId: '0xcc', identityId: '61', ask: '3', stake: '500' },
+    ]);
+  });
+
+  it('GET /api/pca/designatable-nodes paginates via ?start & ?limit with nextStart', async () => {
+    const agent = { supportsPublishingConvictionNft: true, listDesignatableNodes: async () => NODE_FIXTURE };
+    const p1 = runCtx('GET', '/api/pca/designatable-nodes?start=0&limit=2', agent);
+    await p1.done;
+    const b1 = JSON.parse(p1.res.body);
+    expect(b1.nodes.map((n: any) => n.identityId)).toEqual(['42', '57']);
+    expect(b1.total).toBe(3);
+    expect(b1.nextStart).toBe(2);
+
+    const p2 = runCtx('GET', '/api/pca/designatable-nodes?start=2&limit=2', agent);
+    await p2.done;
+    const b2 = JSON.parse(p2.res.body);
+    expect(b2.nodes.map((n: any) => n.identityId)).toEqual(['61']);
+    expect(b2.nextStart).toBeNull(); // last page
+  });
+
+  it('GET /api/pca/designatable-nodes → empty table {nodes:[],total:0,nextStart:null}', async () => {
+    const agent = { supportsPublishingConvictionNft: true, listDesignatableNodes: async () => [] };
+    const { res, done } = runCtx('GET', '/api/pca/designatable-nodes', agent);
+    await done;
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ nodes: [], total: 0, nextStart: null });
+  });
+
+  it('GET /api/pca/designatable-nodes → 400 on invalid start/limit', async () => {
+    const agent = { supportsPublishingConvictionNft: true, listDesignatableNodes: async () => NODE_FIXTURE };
+    for (const q of ['?start=-1', '?limit=0', '?limit=201', '?start=abc', '?limit=1.5']) {
+      const { res, done } = runCtx('GET', `/api/pca/designatable-nodes${q}`, agent);
+      await done;
+      expect(res.statusCode).toBe(400);
+    }
+  });
+
+  it('GET /api/pca/designatable-nodes → 503 when the adapter lacks the PCA surface (lookup not called)', async () => {
+    let called = false;
+    const agent = { supportsPublishingConvictionNft: false, listDesignatableNodes: async () => { called = true; return []; } };
+    const { res, done } = runCtx('GET', '/api/pca/designatable-nodes', agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    expect(called).toBe(false);
+  });
+
+  it('GET /api/pca/designatable-nodes → 503 SHARDING_TABLE_READ_FAILED on a CALL_EXCEPTION (dedicated code)', async () => {
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      listDesignatableNodes: async () => { const e: any = new Error('sharding read failed'); e.code = 'CALL_EXCEPTION'; throw e; },
+    };
+    const { res, done } = runCtx('GET', '/api/pca/designatable-nodes', agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body).code).toBe('SHARDING_TABLE_READ_FAILED');
+  });
+
+  it('GET /api/pca/designatable-nodes → 503 FEATURE_UNAVAILABLE when the facade returns null (no code)', async () => {
+    const agent = { supportsPublishingConvictionNft: true, listDesignatableNodes: async () => null };
+    const { res, done } = runCtx('GET', '/api/pca/designatable-nodes', agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body).code).toBeUndefined();
+  });
+
+  it('route ordering: /api/pca/designatable-nodes is matched BEFORE the generic GET :id (not 400 as an id)', async () => {
+    // If the generic :id matcher ran first, "designatable-nodes" would parse as
+    // an accountId and 400 ("Invalid accountId"). A clean 200 proves the
+    // specific route is registered ahead of it.
+    const agent = { supportsPublishingConvictionNft: true, listDesignatableNodes: async () => [] };
+    const { res, done } = runCtx('GET', '/api/pca/designatable-nodes', agent);
+    await done;
+    expect(res.statusCode).toBe(200);
+  });
 });

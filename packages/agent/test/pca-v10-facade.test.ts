@@ -106,4 +106,15 @@ describe('DKGAgent V10 PCA facade', () => {
     const none = await makeAgent(new NoChainAdapter());
     expect(await none.listPublishingConvictionAccountsForWallets([owner.address])).toBeNull();
   });
+
+  it('listDesignatableNodes delegates to the adapter; null when unsupported', async () => {
+    const chain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    const agent = await makeAgent(chain);
+    const nodes = await agent.listDesignatableNodes();
+    expect(nodes).not.toBeNull();
+    expect(nodes!.map((n) => n.identityId)).toEqual([42n, 57n, 61n]);
+
+    const none = await makeAgent(new NoChainAdapter());
+    expect(await none.listDesignatableNodes()).toBeNull();
+  });
 });

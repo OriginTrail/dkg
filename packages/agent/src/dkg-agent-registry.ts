@@ -95,7 +95,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type PcaAccountRelation } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type PcaAccountRelation, type ShardingTableNode } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -1551,6 +1551,13 @@ export class AgentRegistryMethods extends DKGAgentBase {
   ): Promise<PcaAccountRelation[] | null> {
     if (typeof this.chain.listPublishingConvictionAccountsForWallets !== 'function') return null;
     return this.chain.listPublishingConvictionAccountsForWallets(wallets);
+  }
+
+  /** B-staked-nodes (Stage-5) — the sharding table of designatable PCA primary
+   *  nodes. `null` when the adapter lacks the surface (daemon maps null → 503). */
+  async listDesignatableNodes(this: DKGAgent): Promise<ShardingTableNode[] | null> {
+    if (typeof this.chain.listDesignatableNodes !== 'function') return null;
+    return this.chain.listDesignatableNodes();
   }
 
   // ---------------------------------------------------------------------------

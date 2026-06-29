@@ -557,6 +557,63 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
     }
   }
 
+  // GET /api/pca/designatable-nodes — B-staked-nodes (Stage-5). The full
+  // sharding table of nodes designatable as a PCA `primaryNode`, for the create
+  // wizard's PrimaryNodePicker. Read-only; the adapter reads the whole table
+  // (TTL-cached) and this route serves OFFSET pages: ?start=<0-based offset>
+  // &limit=<1..200, default 50>. Hash-ring order preserved (the UI sorts).
+  // Matched EXACTLY before the generic GET :id below, else 'designatable-nodes'
+  // parses as an accountId and 400s.
+  if (req.method === 'GET' && path === '/api/pca/designatable-nodes') {
+    if (!agent.supportsPublishingConvictionNft) {
+      return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+    }
+    const startRaw = ctx.url.searchParams.get('start');
+    const limitRaw = ctx.url.searchParams.get('limit');
+    const start = startRaw === null ? 0 : Number(startRaw);
+    const limit = limitRaw === null ? 50 : Number(limitRaw);
+    if (!Number.isInteger(start) || start < 0) {
+      return jsonResponse(res, 400, { error: 'Invalid start — must be a non-negative integer offset' });
+    }
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+      return jsonResponse(res, 400, { error: 'Invalid limit — must be an integer 1..200' });
+    }
+    try {
+      const all = await agent.listDesignatableNodes();
+      if (all === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      const total = all.length;
+      const page = all.slice(start, start + limit);
+      const nextStart = start + limit < total ? start + limit : null;
+      return jsonResponse(res, 200, {
+        nodes: page.map((n) => ({
+          nodeId: n.nodeId,
+          identityId: n.identityId.toString(),
+          ask: n.ask.toString(),
+          stake: n.stake.toString(),
+        })),
+        total,
+        nextStart,
+      });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (respondIfChainRpcTransportError(res, err)) return;
+      // A CALL_EXCEPTION here is a sharding-table read failure → 503 retryable
+      // with a DEDICATED code (distinct from a PCA snapshot read), NOT a
+      // partial/empty list a picker would read as "no stakeable nodes".
+      if (err?.code === 'CALL_EXCEPTION') {
+        return jsonResponse(res, 503, {
+          error: 'Designatable-node list temporarily unavailable — sharding-table read failed',
+          code: 'SHARDING_TABLE_READ_FAILED',
+        });
+      }
+      return jsonResponse(res, 500, {
+        error: `listDesignatableNodes failed: ${msg}`,
+      });
+    }
+  }
+
   // GET /api/pca/:id — V10 conviction NFT snapshot. Optional ?key=0x...
   // probes whether that address is a registered agent. Optional ?extended=1
   // adds the GAP-4/5 budget fields (primaryNode + current-epoch allowance);

@@ -187,6 +187,30 @@ describe('V10 Publishing Conviction NFT — chain-adapter lifecycle', () => {
     expect(await owner.listPublishingConvictionAccountsForWallets([ethers.Wallet.createRandom().address])).toEqual([]);
   });
 
+  it('listDesignatableNodes reads the staked sharding table (no-arg overload) and maps NodeInfo (B-staked-nodes)', async () => {
+    // The shared Hardhat env pre-stakes the core node + 3 receivers into the
+    // sharding table (spawnHardhatEnv: "staked + ask set"), so the table is
+    // non-empty at baseline — this exercises the no-arg getShardingTable()
+    // overload + the on-chain NodeInfo decode/mapping against real data.
+    const reader = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const { receiverIds } = getSharedContext();
+
+    const nodes = await reader.listDesignatableNodes();
+    expect(nodes.length).toBeGreaterThanOrEqual(receiverIds.length);
+
+    // Every pre-staked receiver appears, mapped from the on-chain NodeInfo.
+    const byId = new Map(nodes.map((n) => [n.identityId, n]));
+    for (const rid of receiverIds) {
+      const node = byId.get(BigInt(rid));
+      expect(node, `receiver ${rid} should be in the sharding table`).toBeDefined();
+      expect(node!.nodeId).toMatch(/^0x[0-9a-fA-F]+$/); // on-chain bytes → hex
+      expect(node!.stake).toBeGreaterThan(0n);
+      expect(node!.ask).toBeGreaterThan(0n);
+    }
+    // No zero-id padding leaks through (defensive trim holds).
+    expect(nodes.every((n) => n.identityId > 0n)).toBe(true);
+  });
+
   it('getPublishingConvictionAgents enumerates registered agents (checksummed) and reflects deregistration', async () => {
     const owner = await fundedOwner();
     const { accountId } = await owner.createPublishingConvictionAccount(COMMITTED);

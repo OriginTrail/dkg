@@ -169,6 +169,19 @@ describe('MockChainAdapter — V10 conviction agent register/deregister', () => 
     // Unrelated wallet → [].
     expect(await mock.listPublishingConvictionAccountsForWallets([ethers.Wallet.createRandom().address])).toEqual([]);
   });
+
+  it('listDesignatableNodes — fixture sharding table in hash-ring order (B-staked-nodes parity)', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const nodes = await mock.listDesignatableNodes();
+    expect(nodes).toHaveLength(3);
+    expect(nodes.map((n) => n.identityId)).toEqual([42n, 57n, 61n]); // order preserved (not sorted)
+    for (const n of nodes) {
+      expect(n.nodeId).toMatch(/^0x[0-9a-fA-F]+$/);
+      expect(typeof n.identityId).toBe('bigint');
+      expect(n.stake).toBeGreaterThan(0n);
+      expect(n.ask).toBeGreaterThan(0n);
+    }
+  });
 });
 
 describe('MockChainAdapter — V10 conviction topUp/settle', () => {

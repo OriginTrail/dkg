@@ -11,7 +11,7 @@
 
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers, Contract } from 'ethers';
-import type { TxResult, V10PublishingConvictionAccountInfo, ConvictionReader, PcaAccountRelation } from './chain-adapter.js';
+import type { TxResult, V10PublishingConvictionAccountInfo, ConvictionReader, PcaAccountRelation, ShardingTableNode } from './chain-adapter.js';
 import { PcaUnavailableError } from './pca-errors.js';
 import { enrichEvmError, getPcaLogicInterface } from './evm-adapter-errors.js';
 
@@ -504,5 +504,59 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       const g = agent.has(accountId);
       return { accountId, relation: (o && g ? 'both' : o ? 'owned' : 'agent') as PcaAccountRelation['relation'] };
     });
+  }
+
+  /** ~30s adapter-side TTL for the B-staked-nodes list. The sharding table
+   *  changes slowly and the picker polls it; this is a DEDICATED short TTL, not
+   *  the 1h publish-preflight cache. */
+  private static readonly DESIGNATABLE_NODES_TTL_MS = 30_000;
+  private cachedDesignatableNodes: { value: ShardingTableNode[]; cachedAt: number } | undefined;
+
+  /**
+   * B-staked-nodes (Stage-5) — the full sharding table of nodes designatable as
+   * a PCA `primaryNode`. Reads the no-arg `ShardingTable.getShardingTable()`,
+   * which returns the COMPLETE table: it sizes the read to the live
+   * `nodesCount()`, and `shardingTableSizeLimit` is an INSERT-enforced maximum
+   * (ShardingTable._insertNode reverts `ShardingTableIsFull` at `nodesCount >=
+   * limit`), never a read-truncation cap — so there is nothing to page and no
+   * silent node drop. Hash-ring order is preserved; the UI sorts for display.
+   *
+   * TTL-cached (~30s) adapter-side, success-only (a throw never poisons the
+   * cache). Read failures SURFACE — a CALL_EXCEPTION/transport blip propagates
+   * to the route (→ 503 SHARDING_TABLE_READ_FAILED / 503-504), never a partial
+   * or empty list a picker would misread as "no stakeable nodes".
+   *
+   * The no-arg overload is resolved via the explicit `getFunction(...)`
+   * signature so ethers v6 never confuses it with `getShardingTable(uint72,
+   * uint72)`.
+   */
+  async listDesignatableNodes(): Promise<ShardingTableNode[]> {
+    const now = Date.now();
+    const cached = this.cachedDesignatableNodes;
+    if (cached && now - cached.cachedAt < ConvictionMethods.DESIGNATABLE_NODES_TTL_MS) {
+      return cached.value;
+    }
+    await this.init();
+    const shardingTable = await this.resolveContract('ShardingTable');
+    const raw = await this.readContractWith<ReadonlyArray<any>>(
+      shardingTable,
+      'shardingTable.getShardingTable',
+      (c) => c.getFunction('getShardingTable()').staticCall(),
+    );
+    const nodes: ShardingTableNode[] = [];
+    for (const n of raw ?? []) {
+      const identityId = BigInt(n.identityId ?? n[1]);
+      // The no-arg read is sized to nodesCount() so it shouldn't pad, but a
+      // zero identityId is never a real node — skip defensively.
+      if (identityId <= 0n) continue;
+      nodes.push({
+        nodeId: String(n.nodeId ?? n[0]),
+        identityId,
+        ask: BigInt(n.ask ?? n[2]),
+        stake: BigInt(n.stake ?? n[3]),
+      });
+    }
+    this.cachedDesignatableNodes = { value: nodes, cachedAt: now };
+    return nodes;
   }
 }
