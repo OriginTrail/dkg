@@ -344,12 +344,18 @@ importers:
       '@origintrail-official/dkg-epcis':
         specifier: workspace:*
         version: link:../epcis
+      '@origintrail-official/dkg-ip-oracle':
+        specifier: workspace:*
+        version: link:../ip-oracle
       '@origintrail-official/dkg-mcp':
         specifier: workspace:*
         version: link:../mcp-dkg
       '@origintrail-official/dkg-node-ui':
         specifier: workspace:*
         version: link:../node-ui
+      '@origintrail-official/dkg-okf':
+        specifier: workspace:*
+        version: link:../okf
       '@origintrail-official/dkg-publisher':
         specifier: workspace:*
         version: link:../publisher
@@ -641,6 +647,25 @@ importers:
         specifier: ^8.3.3
         version: 8.3.3(web-streams-polyfill@3.3.3)
 
+  packages/ip-oracle:
+    dependencies:
+      '@origintrail-official/dkg-okf':
+        specifier: workspace:*
+        version: link:../okf
+      js-yaml:
+        specifier: ^4.1.1
+        version: 4.1.1
+    devDependencies:
+      '@types/js-yaml':
+        specifier: ^4.0.9
+        version: 4.0.9
+      '@vitest/coverage-v8':
+        specifier: ^4.0.18
+        version: 4.0.18(vitest@4.0.18(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0))
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0)
+
   packages/kafka-plugin:
     dependencies:
       '@origintrail-official/dkg':
@@ -797,6 +822,31 @@ importers:
       vite:
         specifier: ^6
         version: 6.4.2(@types/node@22.19.11)(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0)
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0)
+
+  packages/okf:
+    dependencies:
+      js-yaml:
+        specifier: ^4.1.1
+        version: 4.1.1
+      mdast-util-from-markdown:
+        specifier: ^2.0.3
+        version: 2.0.3
+      mdast-util-to-string:
+        specifier: ^4.0.0
+        version: 4.0.0
+    devDependencies:
+      '@types/js-yaml':
+        specifier: ^4.0.9
+        version: 4.0.9
+      '@types/mdast':
+        specifier: ^4.0.4
+        version: 4.0.4
+      '@vitest/coverage-v8':
+        specifier: ^4.0.18
+        version: 4.0.18(vitest@4.0.18(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0))
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0)

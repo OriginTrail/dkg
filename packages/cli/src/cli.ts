@@ -26,6 +26,8 @@ import { registerNodeOpsCommands } from './commands/node-ops.js';
 import { registerQueryCatalogCommand } from './commands/query-catalog.js';
 import { registerMaintenanceCommands } from './commands/maintenance.js';
 import { registerRandomSamplingCommand } from './commands/random-sampling.js';
+import { registerOkfCommand } from './commands/okf.js';
+import { registerIpOracleCommand } from './commands/ip-oracle.js';
 
 const program = new Command();
 program
@@ -56,6 +58,8 @@ registerNodeOpsCommands(program);
 registerQueryCatalogCommand(program);
 registerMaintenanceCommands(program);
 registerRandomSamplingCommand(program);
+registerOkfCommand(program);
+registerIpOracleCommand(program);
 
 // ─── dkg integration ─────────────────────────────────────────────────
 
