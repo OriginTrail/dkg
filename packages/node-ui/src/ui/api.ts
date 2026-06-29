@@ -1988,12 +1988,33 @@ export function fileUrl(hash: string, contentType?: string): string {
   return `${BASE}/api/file/${encodeURIComponent(normalizedHash)}${params}`;
 }
 
+/**
+ * The post-publish CostCovered signal (B8) — decoded by the daemon from the on-chain
+ * `CostCovered(accountId, epoch, baseCost, discountedCost, drawnFromEpoch, drawnFromTopUp)`
+ * event and attached to the publish response when the publish drew on a PCA (absent
+ * otherwise → the badge degrades to hidden, #9). Lives at the api boundary so both the
+ * publish response and the `pca_cost_covered` bell meta reuse it. Wei amounts are decimal
+ * strings; `epoch` is a JSON number (uint40, fits safely in Number).
+ */
+export interface ConvictionCostCovered {
+  accountId: string;
+  epoch: number;
+  baseCost: string;
+  discountedCost: string;
+  drawnFromEpoch: string;
+  drawnFromTopUp: string;
+}
+
 export interface PublishResult {
   kaId: string;
   status: string;
   kas: { tokenId: string; rootEntity: string }[];
   txHash?: string;
   blockNumber?: number;
+  // B8 — the CONFIRMED post-publish discount, attached when this publish drew on a
+  // PCA (absent otherwise → DiscountAppliedBadge renders nothing, #9). Distinct from
+  // S5's pre-spend PREDICTION; the badge derives bps from baseCost/discountedCost.
+  convictionCostCovered?: ConvictionCostCovered;
   // Set when the daemon returned HTTP 207 (PR #972): the KA minted on-chain
   // (status "confirmed", txHash present) BUT the context-graph binding failed.
   // A PARTIAL publish — the asset is permanently on-chain, but it isn't linked

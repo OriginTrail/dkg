@@ -2,6 +2,7 @@ import React, { useState, useMemo, useCallback, lazy, Suspense } from 'react';
 import { useFetch } from '../hooks.js';
 import { executeQuery, fetchStatus, listAssertions, promoteAssertion, publishAssertionsToVm, partialPublishWarning, describePromoteResult, describePromoteError, type AssertionInfo, type BatchPublishResult } from '../api.js';
 import { FilePreviewModal } from '../components/Modals/FilePreviewModal.js';
+import { DiscountAppliedBadge } from '../components/Pca/index.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 import { memoryGraphLabels } from '../lib/memoryLabels.js';
 import { truncateMiddle } from '../lib/truncate.js';
@@ -826,6 +827,9 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
                   an unfunded signer, or a chain adapter that isn&apos;t V10-ready).
                 </div>
               )}
+              {/* B8 — the CONFIRMED post-publish discount (from the on-chain CostCovered
+                  event). Renders nothing unless the publish drew on a PCA (#9). */}
+              <DiscountAppliedBadge convictionCostCovered={sample?.convictionCostCovered} />
             </div>
           </div>
         );

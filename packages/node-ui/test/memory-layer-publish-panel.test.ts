@@ -184,6 +184,41 @@ describe('MemoryLayerView PublishPanel (SWM → VM)', () => {
     await unmount();
   });
 
+  // B8 — the CONFIRMED post-publish discount badge lights up from the publish sample's
+  // convictionCostCovered (degrade-hidden when absent, #9).
+  it('B8 — renders the confirmed DiscountAppliedBadge when the sample carries convictionCostCovered', async () => {
+    apiMocks.publishAssertionsToVm.mockResolvedValue({
+      published: 1, total: 1, sealed: 0, partial: 0, failures: [],
+      sample: {
+        status: 'confirmed', txHash: '0xtx', kaId: '0xka',
+        convictionCostCovered: { accountId: '7', epoch: 1284, baseCost: '1000', discountedCost: '700', drawnFromEpoch: '700', drawnFromTopUp: '0' },
+      },
+    });
+    const { container, unmount } = await render(
+      React.createElement(PublishPanel, { contextGraphId: 'cg', onPublished: () => {} }),
+    );
+    await flush();
+    await act(async () => { (container.querySelector('.v10-btn-promote-all') as HTMLButtonElement).click(); });
+    await flush();
+    const badge = container.querySelector('[data-testid="pca-discount-badge"]');
+    expect(badge, 'discount badge renders on a confirmed discounted publish').toBeTruthy();
+    expect(badge!.textContent).toContain('30%'); // 10000*(1000-700)/1000 = 3000 bps
+    expect(badge!.textContent).toContain('PCA #7');
+    await unmount();
+  });
+
+  it('B8 — renders NO discount badge when the sample omits convictionCostCovered (degrade-hidden #9)', async () => {
+    // cleanResult (default) has no convictionCostCovered → no false discount claim.
+    const { container, unmount } = await render(
+      React.createElement(PublishPanel, { contextGraphId: 'cg', onPublished: () => {} }),
+    );
+    await flush();
+    await act(async () => { (container.querySelector('.v10-btn-promote-all') as HTMLButtonElement).click(); });
+    await flush();
+    expect(container.querySelector('[data-testid="pca-discount-badge"]')).toBeNull();
+    await unmount();
+  });
+
   it('surfaces a per-KA failure (subset-not-sealable) via failures[] without crashing', async () => {
     apiMocks.publishAssertionsToVm.mockResolvedValue({
       published: 0, total: 1, sealed: 0, partial: 0,
