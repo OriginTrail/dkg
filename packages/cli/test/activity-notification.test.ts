@@ -2,9 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DashboardDB, ASSERTION_ACTIVITY_TYPE } from '@origintrail-official/dkg-node-ui';
+import { DashboardDB, ASSERTION_ACTIVITY_TYPE, PCA_COST_COVERED_TYPE } from '@origintrail-official/dkg-node-ui';
 import {
   recordAssertionActivity,
+  recordConvictionCostCovered,
   toActorAgentDid,
   localNodeInvolvedInContextGraph,
 } from '../src/daemon/activity-notification.js';
@@ -125,5 +126,51 @@ describe('localNodeInvolvedInContextGraph (CR-2 gossip gate)', () => {
 
   it('false for a blank contextGraphId', () => {
     expect(localNodeInvolvedInContextGraph(db, '  ')).toBe(false);
+  });
+});
+
+describe('recordConvictionCostCovered (B8 confirmed-discount bell)', () => {
+  const PUBLISHER = '0xAbCdEf0123456789012345678901234567890123';
+
+  it('persists a pca_cost_covered row with lowercased publisher + string cost fields', () => {
+    const id = recordConvictionCostCovered(db, {
+      contextGraphId: 'cg-1',
+      publisherAddress: PUBLISHER,
+      accountId: 7n,
+      epoch: 42,
+      baseCost: 1000n,
+      discountedCost: 700n,
+      drawnFromEpoch: 500n,
+      drawnFromTopUp: 200n,
+    });
+    expect(typeof id).toBe('number');
+
+    const { notifications } = db.getNotifications();
+    expect(notifications).toHaveLength(1);
+    const r = notifications[0];
+    expect(r.type).toBe(PCA_COST_COVERED_TYPE);
+    expect(r.context_graph_id).toBe('cg-1');
+    const meta = JSON.parse(r.meta!);
+    expect(meta).toMatchObject({
+      publisherAddress: PUBLISHER.toLowerCase(), // wallet-scoped match is case-insensitive
+      accountId: '7',
+      epoch: 42, // number
+      baseCost: '1000', // bigints → decimal strings
+      discountedCost: '700',
+      drawnFromEpoch: '500',
+      drawnFromTopUp: '200',
+    });
+  });
+
+  it('is a no-op (null) for a blank CG or a non-address publisher', () => {
+    expect(recordConvictionCostCovered(db, {
+      contextGraphId: '  ', publisherAddress: PUBLISHER, accountId: 1n, epoch: 1,
+      baseCost: 1n, discountedCost: 1n, drawnFromEpoch: 1n, drawnFromTopUp: 0n,
+    })).toBeNull();
+    expect(recordConvictionCostCovered(db, {
+      contextGraphId: 'cg-1', publisherAddress: 'not-an-address', accountId: 1n, epoch: 1,
+      baseCost: 1n, discountedCost: 1n, drawnFromEpoch: 1n, drawnFromTopUp: 0n,
+    })).toBeNull();
+    expect(db.getNotifications().notifications).toHaveLength(0);
   });
 });

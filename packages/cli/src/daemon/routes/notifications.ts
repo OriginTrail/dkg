@@ -111,6 +111,21 @@ function callerConfirmationRows(ctx: RequestContext, callerAddress: string) {
   });
 }
 
+/**
+ * The caller's OWN confirmed-discount rows (pca_cost_covered, B8). Also wallet-
+ * scoped + NOT CG-membership-scoped (the publishing wallet may not be a member
+ * of the CG it published to — a sponsored edge), but on a DEDICATED SQL-filtered
+ * fetch (`getPcaCostCoveredRowsForWallet`, by type + meta.publisherAddress) — NOT
+ * the shared join `getNotificationsOfTypes` window. Discount rows are higher
+ * volume (one per discounted publish vs rare joins), so cap-sharing would let a
+ * busy node's join/other volume age a non-member publisher's older discount rows
+ * out of the 200-window → hidden + unmarkable (#1365 round-2). The SQL already
+ * filters to the caller's wallet, so no JS post-filter is needed.
+ */
+function callerPcaDiscountRows(ctx: RequestContext, callerAddress: string) {
+  return ctx.dashDb.getPcaCostCoveredRowsForWallet(callerAddress, CONFIRMATION_READ_LIMIT);
+}
+
 export async function handleNotificationRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, agent, dashDb, path } = ctx;
 
@@ -141,6 +156,9 @@ export async function handleNotificationRoutes(ctx: RequestContext): Promise<voi
       const byId = new Map<number, (typeof memberRows)[number]>();
       for (const r of memberRows) byId.set(r.id, r);
       for (const r of callerConfirmationRows(ctx, callerAddress)) byId.set(r.id, r);
+      // ...PLUS the caller's own confirmed-discount rows on their OWN dedicated
+      // by-wallet fetch (not cap-shared with joins — #1365 round-2).
+      for (const r of callerPcaDiscountRows(ctx, callerAddress)) byId.set(r.id, r);
       const notifications = [...byId.values()];
 
       // Authoritative pending-join set per curated CG (G3 reconcile).
@@ -200,6 +218,8 @@ export async function handleNotificationRoutes(ctx: RequestContext): Promise<voi
       // Include the caller's own confirmations (not member-CG-scoped — R3-1) so
       // they can mark their join_approved/join_rejected rows read too.
       for (const r of callerConfirmationRows(ctx, callerAddress)) scopedIds.add(r.id);
+      // ...and their confirmed-discount rows (dedicated by-wallet fetch — r2).
+      for (const r of callerPcaDiscountRows(ctx, callerAddress)) scopedIds.add(r.id);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       return jsonResponse(res, 500, { error: `Failed to resolve notification scope: ${message}` });

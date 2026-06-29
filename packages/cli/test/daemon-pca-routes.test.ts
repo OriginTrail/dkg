@@ -855,4 +855,40 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(res.statusCode).toBe(409);
     expect(JSON.parse(res.body)).toEqual({ error: 'AgentAlreadyRegistered', accountId: '1' });
   });
+
+  // ----- GAP-4/5: GET /api/pca/:id?extended=1 (budget widget fields) -----
+  it('GET /api/pca/:id?extended=1 includes the GAP-4/5 fields; default GET :id omits them', async () => {
+    const baseInfo = {
+      owner: '0x' + '9'.repeat(40), committedTRAC: 100n, baseEpochAllowance: 1n,
+      createdAtEpoch: 1, expiresAtEpoch: 9, createdAtTimestamp: 0, expiresAtTimestamp: 0,
+      discountBps: 500, topUpBuffer: 0n, agentCount: 0, lastSettledWindow: 0, fullySwept: false,
+    };
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getPublishingConvictionAccountInfo: async (_id: bigint, opts?: { extended?: boolean }) =>
+        opts?.extended
+          ? { ...baseInfo, primaryNode: 42n, lastPrimaryNodeChangeEpoch: 3, remainingAllowance: 8333n, currentEpoch: 7 }
+          : baseInfo,
+    };
+
+    // Default: extended fields omitted (hot-poll path stays lean).
+    const def = runCtx('GET', '/api/pca/1', agent);
+    await def.done;
+    expect(def.res.statusCode).toBe(200);
+    const defBody = JSON.parse(def.res.body);
+    expect(defBody).not.toHaveProperty('primaryNode');
+    expect(defBody).not.toHaveProperty('remainingAllowance');
+    expect(defBody).not.toHaveProperty('currentEpoch');
+
+    // ?extended=1: fields present + typed (primaryNode/allowance strings, epochs numbers).
+    const ext = runCtx('GET', '/api/pca/1?extended=1', agent);
+    await ext.done;
+    expect(ext.res.statusCode).toBe(200);
+    const extBody = JSON.parse(ext.res.body);
+    expect(extBody.primaryNode).toBe('42');
+    expect(extBody.lastPrimaryNodeChangeEpoch).toBe(3);
+    expect(extBody.remainingAllowance).toBe('8333');
+    expect(extBody.remainingAllowanceTrac).toBe(ethers.formatEther(8333n));
+    expect(extBody.currentEpoch).toBe(7);
+  });
 });

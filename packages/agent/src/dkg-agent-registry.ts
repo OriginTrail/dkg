@@ -1513,9 +1513,10 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
   async getPublishingConvictionAccountInfo(this: DKGAgent,
     accountId: bigint,
+    opts?: { extended?: boolean },
   ): Promise<V10PublishingConvictionAccountInfo | null> {
     if (typeof this.chain.getPublishingConvictionAccountInfo !== 'function') return null;
-    return this.chain.getPublishingConvictionAccountInfo(accountId);
+    return this.chain.getPublishingConvictionAccountInfo(accountId, opts);
   }
 
   /** Enumerate registered publishing agents (operational wallets) for a PCA.

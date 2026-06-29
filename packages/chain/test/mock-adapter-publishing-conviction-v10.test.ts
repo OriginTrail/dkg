@@ -38,6 +38,23 @@ describe('MockChainAdapter — V10 conviction account create/read', () => {
     expect(await mock.getPublishingConvictionAccountInfo(999n)).toBeNull();
   });
 
+  it('getPublishingConvictionAccountInfo extended adds GAP-4/5 fields; default omits them', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const { accountId } = await mock.createPublishingConvictionAccount(COMMITTED);
+
+    const base = (await mock.getPublishingConvictionAccountInfo(accountId))!;
+    expect(base.primaryNode).toBeUndefined();
+    expect(base.remainingAllowance).toBeUndefined();
+    expect(base.currentEpoch).toBeUndefined();
+    expect(base.lastPrimaryNodeChangeEpoch).toBeUndefined();
+
+    const ext = (await mock.getPublishingConvictionAccountInfo(accountId, { extended: true }))!;
+    expect(ext.primaryNode).toBe(0n); // mock doesn't model RFC-51 per-node allocation
+    expect(ext.lastPrimaryNodeChangeEpoch).toBe(0);
+    expect(typeof ext.currentEpoch).toBe('number');
+    expect(ext.remainingAllowance).toBe(ext.baseEpochAllowance + ext.topUpBuffer);
+  });
+
   it('lifecycle metadata is internally consistent: expiresAtEpoch = createdAtEpoch + lockDurationEpochs', async () => {
     const mock = new MockChainAdapter('mock:31337', SIGNER);
     const { accountId } = await mock.createPublishingConvictionAccount(COMMITTED);

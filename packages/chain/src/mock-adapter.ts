@@ -560,13 +560,17 @@ export class MockChainAdapter implements ChainAdapter {
     return { accountId, ...this.txResult(true) };
   }
 
-  async getPublishingConvictionAccountInfo(accountId: bigint): Promise<V10PublishingConvictionAccountInfo | null> {
+  async getPublishingConvictionAccountInfo(
+    accountId: bigint,
+    opts?: { extended?: boolean },
+  ): Promise<V10PublishingConvictionAccountInfo | null> {
     const acct = this.convictionAccounts.get(accountId);
     if (!acct) return null;
-    return {
+    const baseEpochAllowance = acct.committedTRAC / BigInt(acct.lockDurationEpochs);
+    const info: V10PublishingConvictionAccountInfo = {
       owner: acct.owner,
       committedTRAC: acct.committedTRAC,
-      baseEpochAllowance: acct.committedTRAC / BigInt(acct.lockDurationEpochs),
+      baseEpochAllowance,
       createdAtEpoch: acct.createdAtEpoch,
       // Mock models boundary-aligned creation only; the contract's mid-epoch
       // round-up (epochAtTimestamp(expiresAtTimestamp-1)+1) is not modeled.
@@ -582,6 +586,16 @@ export class MockChainAdapter implements ChainAdapter {
       lastSettledWindow: 0,
       fullySwept: false,
     };
+    if (opts?.extended) {
+      // GAP-4/5 stubs — mock doesn't model RFC-51 per-node allocation
+      // (primaryNode 0n) or per-epoch decay; current-epoch headroom is the
+      // nominal base allowance + top-up buffer.
+      info.primaryNode = 0n;
+      info.lastPrimaryNodeChangeEpoch = 0;
+      info.currentEpoch = acct.createdAtEpoch;
+      info.remainingAllowance = baseEpochAllowance + acct.topUpBuffer;
+    }
+    return info;
   }
 
   private requireConvictionAccount(accountId: bigint) {

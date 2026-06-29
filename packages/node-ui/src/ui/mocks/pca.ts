@@ -53,8 +53,9 @@ export const PCA_FIXTURES = {
 /** A B8 CostCovered event sample (baseCost 1000 → discountedCost 700 ⇒ 30%). */
 export const MOCK_COST_COVERED: ConvictionCostCovered = {
   accountId: '7',
-  // L10: epoch is wire-serialized as a string (uint), like the other fields.
-  epoch: '1284',
+  // P2 — epoch is a JSON number (uint40, fits safely in Number); the wei cost fields
+  // stay decimal strings. (Supersedes the P0 L10 all-strings note for epoch.)
+  epoch: 1284,
   baseCost: '1000',
   discountedCost: '700',
   drawnFromEpoch: '700',

@@ -145,6 +145,22 @@ export interface OnChainPublishResult {
   effectiveGasPrice?: bigint;
   gasCostWei?: bigint;
   tokenAmount?: bigint;
+  /**
+   * B8 — present only when this publish drew on a Publishing Conviction
+   * Account (the `CostCovered` event was emitted). The cost fields are bigint
+   * (serialized as decimal strings via the daemon's bigint→string JSON replacer);
+   * `epoch` is a small int (number). The UI derives the discount bps from
+   * `baseCost`/`discountedCost`. Absent for a normal (non-PCA) publish → the
+   * confirmed-discount badge degrades hidden.
+   */
+  convictionCostCovered?: {
+    accountId: bigint;
+    epoch: number;
+    baseCost: bigint;
+    discountedCost: bigint;
+    drawnFromEpoch: bigint;
+    drawnFromTopUp: bigint;
+  };
 }
 
 export interface UpdateKAParams {
@@ -415,6 +431,16 @@ export interface V10PublishingConvictionAccountInfo {
   agentCount: number;
   lastSettledWindow: number;
   fullySwept: boolean;
+  // GAP-4/5 — populated ONLY when getInfo is called with `{ extended: true }`
+  // (the S3 budget widget; the publish hot path omits them → zero extra reads),
+  // and best-effort within that (an extended-read error leaves them undefined so
+  // the UI shows "unknown", distinct from `primaryNode === 0n` = "no node").
+  // primaryNode / lastPrimaryNodeChangeEpoch are `accounts()` [9]/[10] (RFC-51);
+  // remainingAllowance + currentEpoch are this epoch's spend headroom + index.
+  primaryNode?: bigint;
+  lastPrimaryNodeChangeEpoch?: number;
+  remainingAllowance?: bigint;
+  currentEpoch?: number;
 }
 
 // ----- V10 publish types -----
@@ -913,7 +939,7 @@ export interface ChainAdapter {
   deregisterPublishingConvictionAgent?(accountId: bigint, agent: string): Promise<TxResult>;
   isPublishingConvictionAgent?(accountId: bigint, agent: string): Promise<boolean>;
   settlePublishingConvictionAccount?(accountId: bigint): Promise<TxResult>;
-  getPublishingConvictionAccountInfo?(accountId: bigint): Promise<V10PublishingConvictionAccountInfo | null>;
+  getPublishingConvictionAccountInfo?(accountId: bigint, opts?: { extended?: boolean }): Promise<V10PublishingConvictionAccountInfo | null>;
 
   /**
    * Enumerate the operational wallets registered as publishing agents on
