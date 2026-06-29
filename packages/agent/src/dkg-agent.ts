@@ -1435,6 +1435,11 @@ export class DKGAgent extends DKGAgentBase {
    * protocol negotiation (no handler registered), so over-asking is
    * cheap, while under-asking is fatal.
    *
+   * Folded-private publishes require `PROTOCOL_STORAGE_ACK_V2` because their
+   * PublishIntent carries field 20 (`privateMerkleRoots`). For that protocol we
+   * do not fall back to all connected peers: V1-only cores would silently ignore
+   * field 20 and recompute the wrong root during rolling upgrades.
+   *
    * Codex review (PR #1107): the quorum threshold here must track the
    * CHAIN's runtime `requiredACKs` (ParametersStorage
    * minimumRequiredSignatures), not the hard-coded default — on networks
@@ -1446,9 +1451,12 @@ export class DKGAgent extends DKGAgentBase {
    * read sees the current value; the default only covers the first call
    * on chains without the getter.
    */
-  private getACKCandidatePeers(): string[] {
+  private getACKCandidatePeers(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
     const peers = this.node.libp2p.getPeers();
     const connected = peers.map(p => p.toString()).filter(id => id !== this.peerId);
+    if (protocol === PROTOCOL_STORAGE_ACK_V2) {
+      return connected.filter(id => this.knownCorePeerIdsV2.has(id));
+    }
     const confirmedCore = connected.filter(id => this.knownCorePeerIds.has(id));
     const quorum = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
     if (confirmedCore.length >= quorum) return confirmedCore;
@@ -1496,7 +1504,7 @@ export class DKGAgent extends DKGAgentBase {
         }
         return sendResult.response;
       },
-      getConnectedCorePeers: () => this.getACKCandidatePeers(),
+      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeers(protocol),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -1677,7 +1685,7 @@ export class DKGAgent extends DKGAgentBase {
         }
         return sendResult.response;
       },
-      getConnectedCorePeers: () => this.getACKCandidatePeers(),
+      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeers(protocol),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {

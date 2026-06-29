@@ -13,6 +13,7 @@ import {
   PROTOCOL_VERIFY_PROPOSAL,
   PROTOCOL_VERIFY_APPROVAL,
   PROTOCOL_STORAGE_ACK,
+  PROTOCOL_STORAGE_ACK_V2,
   DHT_PROTOCOL,
   contextGraphSharedMemoryTopic,
   contextGraphFinalizationTopic,
@@ -81,6 +82,10 @@ describe('V10 protocol stream IDs', () => {
 
   it('sync uses the /dkg/10.0.2/ prefix (taken back OFF the messenger substrate)', () => {
     expect(PROTOCOL_SYNC).toBe('/dkg/10.0.2/sync');
+  });
+
+  it('storage ACK V2 uses the /dkg/10.0.2/ prefix for field-20 capable ACKs', () => {
+    expect(PROTOCOL_STORAGE_ACK_V2).toBe('/dkg/10.0.2/storage-ack');
   });
 
   it('DHT protocol is unchanged', () => {

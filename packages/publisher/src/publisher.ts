@@ -28,7 +28,9 @@ export type ReceiverSignatureProvider = (
 ) => Promise<ReceiverSignature[]>;
 
 /**
- * V10 core node ACK signature collected via /dkg/10.0.1/storage-ack.
+ * V10 core node ACK signature collected via storage-ack. Public/catalog ACKs
+ * use /dkg/10.0.1/storage-ack; folded-private ACKs require
+ * /dkg/10.0.2/storage-ack so field 20 support is capability-gated.
  * Spec §9.0.3: ACK = EIP-191(computePublishACKDigest(chainId, kav10Address,
  *   contextGraphId, merkleRoot, kaCount, byteSize, epochs, tokenAmount))
  */
@@ -60,6 +62,13 @@ export interface V10CoreNodeACK {
  *
  * stagingQuads: optional N-Quads bytes to send inline to core nodes so
  * they can verify the merkle root without needing SWM pre-positioning.
+ *
+ * ACK modes are mutually exclusive:
+ * - public: no `isEncryptedPayload`, no `catalogCommitment`, no private roots.
+ * - folded-private: `privateMerkleRoots` present, `isEncryptedPayload !== true`.
+ * - curated-catalog: `isEncryptedPayload === true` with `catalogCommitment`.
+ * The collector and handler reject mixed folded-private + curated/encrypted
+ * inputs because the curated branch cannot verify private roots.
  */
 export type V10ACKProvider = (
   merkleRoot: Uint8Array,
@@ -390,14 +399,9 @@ export interface PublishResult {
    * chain submission:
    *   - `no-chain`        — no on-chain CG id / chain not V10-ready: local is the
    *                         only possible outcome (an honest local finalization).
-   *   - `private-no-acks` — the CG IS chain-registered but a private payload
-   *                         couldn't collect storage ACKs, so it never reached the
-   *                         chain it should have. The async lift must NOT report
-   *                         this as `finalized` with a provisional UAL (#1013) —
-   *                         the real fix for reaching chain here is #1121.
    * Undefined on confirmed publishes and pre-#1013 results.
    */
-  localChainSkipReason?: 'no-chain' | 'private-no-acks';
+  localChainSkipReason?: 'no-chain';
   /** Public quads that were stored (used for broadcast — never includes private triples). */
   publicQuads?: Quad[];
   /** Set when KC is confirmed on-chain but context-graph registration failed. */

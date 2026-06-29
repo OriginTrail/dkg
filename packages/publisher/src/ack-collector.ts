@@ -1,5 +1,6 @@
 import {
   PROTOCOL_STORAGE_ACK,
+  PROTOCOL_STORAGE_ACK_V2,
   PROTOCOL_STORAGE_UPDATE_ACK,
   encodePublishIntent,
   encodeUpdateIntent,
@@ -37,7 +38,7 @@ export interface ACKVerifyResult {
 export interface ACKCollectorDeps {
   gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
   sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
-  getConnectedCorePeers: () => string[];
+  getConnectedCorePeers: (protocol?: string) => string[];
   /**
    * Boolean ACK signer pre-flight. Backward-compatible legacy entry
    * point — when only this is provided the rejection log surfaces a
@@ -330,12 +331,25 @@ export class ACKCollector {
         );
       }
     }
+    if (privateMerkleRoots.length > 0 && params.isEncryptedPayload === true) {
+      throw new Error(
+        'ACKCollector: privateMerkleRoots are only valid for folded-private public-CG ACKs; ' +
+        'curated/encrypted ACKs must use catalogCommitment without folded private roots',
+      );
+    }
+    if (privateMerkleRoots.length > 0 && params.catalogCommitment) {
+      throw new Error(
+        'ACKCollector: privateMerkleRoots cannot be combined with catalogCommitment; ' +
+        'choose folded-private or curated-catalog ACK mode',
+      );
+    }
 
     // P2P intent includes staging quads so core nodes can verify inline.
-    // Encrypted inline payloads are gated by this collector's exclusive
-    // use of PROTOCOL_STORAGE_ACK (`/dkg/10.0.1/storage-ack`): pre-LU-5
-    // cores that only speak `/dkg/10.0.0/storage-ack` never receive field
-    // 14 ciphertext and therefore cannot misparse it as plaintext.
+    // Plain public and curated/catalog ACKs stay on PROTOCOL_STORAGE_ACK
+    // (`/dkg/10.0.1/storage-ack`): pre-LU-5 cores that only speak
+    // `/dkg/10.0.0/storage-ack` never receive field 14 ciphertext and
+    // therefore cannot misparse it as plaintext. Folded-private ACKs switch to
+    // V2 below because field 20 must be understood by every quorum peer.
     // `contextGraphId` on the wire is the TARGET numeric id peers will sign
     // the ACK against. `swmGraphId` (optional) is the SOURCE graph where
     // data lives in SWM — only set when the publisher is remapping a named
@@ -368,9 +382,13 @@ export class ACKCollector {
         );
       }
     }
-    // OT-RFC-49 collapsed the V2 chunked-ciphertext ACK path; the curated
-    // catalog ACK rides the V1 protocol with inline catalog stagingQuads.
-    const ackProtocolId = PROTOCOL_STORAGE_ACK;
+    // Folded-private ACKs require field 20 (`privateMerkleRoots`), so they ride
+    // the V2 storage-ack protocol. This makes mixed-version clusters fail at
+    // protocol/capability selection instead of dialing V1-only cores that would
+    // ignore field 20 and sign/decline against a public-only root.
+    const ackProtocolId = privateMerkleRoots.length > 0
+      ? PROTOCOL_STORAGE_ACK_V2
+      : PROTOCOL_STORAGE_ACK;
     const p2pMsg: PublishIntentMsg = {
       merkleRoot,
       contextGraphId: contextGraphIdStr,
@@ -401,7 +419,7 @@ export class ACKCollector {
     // that decode payloads as FinalizationMessages, causing decode errors.
     log(`[ACKCollector] Collecting ACKs via direct P2P (merkleRoot=${ethers.hexlify(merkleRoot).slice(0, 18)}...)`);
 
-    const corePeers = this.deps.getConnectedCorePeers();
+    const corePeers = this.deps.getConnectedCorePeers(ackProtocolId);
     if (corePeers.length === 0) {
       // Pre-dial impossibility — wrap in the typed surface but preserve
       // the legacy `ACK collection failed: no connected core peers` text
@@ -550,7 +568,7 @@ export class ACKCollector {
 
     log(`[ACKCollector] Collecting UPDATE ACKs via direct P2P (kaId=${kaId}, newMerkleRoot=${ethers.hexlify(newMerkleRoot).slice(0, 18)}...)`);
 
-    const corePeers = this.deps.getConnectedCorePeers();
+    const corePeers = this.deps.getConnectedCorePeers(PROTOCOL_STORAGE_UPDATE_ACK);
     if (corePeers.length === 0) {
       throw new QuorumUnmetError({
         collected: 0,

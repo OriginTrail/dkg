@@ -668,6 +668,12 @@ export class StorageACKHandler {
       ? intent.merkleRoot
       : new Uint8Array(intent.merkleRoot);
     const privateMerkleRoots = normalizePrivateMerkleRoots(intent.privateMerkleRoots);
+    if (intent.isEncryptedPayload === true && privateMerkleRoots.length > 0) {
+      throw new Error(
+        'StorageACK: privateMerkleRoots are only valid for folded-private public-CG ACKs; ' +
+        'curated/encrypted ACKs must use catalogCommitment without folded private roots',
+      );
+    }
 
     const swmGraphUri = this.config.contextGraphSharedMemoryUri(swmGraphId, subGraphName);
 

@@ -1836,11 +1836,19 @@ export async function runDaemonInner(
                 }
                 return sendResult.response;
               },
-              getConnectedCorePeers: () => {
+              getConnectedCorePeers: (protocol?: string) => {
                 const allPeers = agent.node.libp2p
                   .getPeers()
                   .map((p) => p.toString())
                   .filter((id) => id !== agent.peerId);
+                if (protocol === PROTOCOL_STORAGE_ACK_V2) {
+                  const knownCorePeerIdsV2 = (agent as any).knownCorePeerIdsV2 as
+                    | Set<string>
+                    | undefined;
+                  return knownCorePeerIdsV2
+                    ? allPeers.filter((id) => knownCorePeerIdsV2.has(id))
+                    : [];
+                }
                 const knownCorePeerIds = (agent as any).knownCorePeerIds as
                   | Set<string>
                   | undefined;

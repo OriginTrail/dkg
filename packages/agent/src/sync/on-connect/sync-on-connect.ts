@@ -1,4 +1,4 @@
-import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
+import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
 
 interface SyncProgressSummary {
   insertedTriples: number;
@@ -26,6 +26,7 @@ interface SyncOnConnectContext {
   syncingPeers: Set<string>;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
   knownCorePeerIds: Set<string>;
+  knownCorePeerIdsV2?: Set<string>;
   getSyncContextGraphs: () => string[];
   getSharedMemorySyncContextGraphs?: (remotePeerId: string) => string[] | Promise<string[]>;
   syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<SyncFromPeerResult>;
@@ -135,6 +136,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     syncingPeers,
     getPeerProtocols,
     knownCorePeerIds,
+    knownCorePeerIdsV2 = new Set<string>(),
     getSyncContextGraphs,
     getSharedMemorySyncContextGraphs,
     syncFromPeer,
@@ -199,6 +201,11 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       // would re-poison the ACK candidate pool that
       // `DKGAgent.getACKCandidatePeers` builds for the publisher.
       knownCorePeerIds.delete(remotePeer);
+    }
+    if (protocols.includes(PROTOCOL_STORAGE_ACK_V2)) {
+      knownCorePeerIdsV2.add(remotePeer);
+    } else if (protocols.length > 0) {
+      knownCorePeerIdsV2.delete(remotePeer);
     }
 
     const hasSync = protocols.includes(PROTOCOL_SYNC);

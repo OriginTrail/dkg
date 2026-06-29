@@ -90,7 +90,9 @@ export const PublishIntentSchema = new Type('PublishIntent')
   .add(new Field('catalogLeafCount', 19, 'uint32'))
   // Folded public+private KAs expose only the per-entity private commitments to
   // core ACK signers. Cores never see private plaintext, but they can recompute
-  // the exact KC root as hash(public subtree, collapse(private roots)).
+  // the exact KC root as hash(public subtree, collapse(private roots)). Sent
+  // only over `PROTOCOL_STORAGE_ACK_V2` so V1 cores never silently ignore the
+  // commitments during rolling upgrades.
   .add(new Field('privateMerkleRoots', 20, 'bytes', 'repeated'));
 
 type Long = { low: number; high: number; unsigned: boolean };
@@ -197,7 +199,8 @@ export interface PublishIntentMsg {
    * Per-entity private commitments for folded public+private KAs. These are
    * 32-byte Merkle roots over private triples, not private plaintext. Public
    * ACK handlers fold them into the claimed KC root while still verifying only
-   * the public quads they store.
+   * the public quads they store. Must be sent over `PROTOCOL_STORAGE_ACK_V2`;
+   * V1 peers are not compatible because they ignore field 20.
    */
   privateMerkleRoots?: Uint8Array[];
 }

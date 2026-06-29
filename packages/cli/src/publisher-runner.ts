@@ -31,7 +31,7 @@ interface ACKTransportFactory {
   publisherPeerId: string;
   gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
   sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
-  getConnectedCorePeers: () => string[];
+  getConnectedCorePeers: (protocol?: string) => string[];
   log?: (message: string) => void;
 }
 

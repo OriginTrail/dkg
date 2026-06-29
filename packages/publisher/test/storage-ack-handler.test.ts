@@ -245,6 +245,100 @@ describe('StorageACKHandler', () => {
     expect(recovered.toLowerCase()).toBe(coreWallet.address.toLowerCase());
   });
 
+  it('returns valid StorageACK for inline folded public+private stagingQuads', async () => {
+    const publicQuads: Quad[] = [
+      makeQuad('urn:entity:inline-private-folded', 'urn:p', 'urn:public', 'did:dkg:context-graph:42'),
+    ];
+    const privateQuads: Quad[] = [
+      makeQuad('urn:entity:inline-private-folded', 'urn:p', '"secret"', 'did:dkg:context-graph:42'),
+    ];
+    const privateRoot = computePrivateRootV10(privateQuads)!;
+    const foldedRoot = computeFlatKCRoot(publicQuads, [privateRoot]);
+    const foldedLeafCount = computeFlatKCMerkleLeafCountV10(publicQuads, [privateRoot]);
+    const stagingQuads = new TextEncoder().encode(
+      publicQuads
+        .map((q) => `<${q.subject}> <${q.predicate}> <${q.object}> <${q.graph}> .`)
+        .join('\n'),
+    );
+    const handler = await createHandler([]);
+
+    const response = await handler.handler(encodePublishIntent({
+      merkleRoot: foldedRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: stagingQuads.length,
+      isPrivate: true,
+      kaCount: 1,
+      rootEntities: ['urn:entity:inline-private-folded'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: foldedLeafCount,
+      stagingQuads,
+      privateMerkleRoots: [privateRoot],
+    }), fakePeerId);
+    const ack = decodeStorageACK(response);
+
+    expect(isStorageACKDecline(ack)).toBe(false);
+    expect(new Uint8Array(ack.merkleRoot)).toEqual(foldedRoot);
+  });
+
+  it('rejects inline folded public+private stagingQuads when private root commitment mismatches', async () => {
+    const publicQuads: Quad[] = [
+      makeQuad('urn:entity:inline-private-mismatch', 'urn:p', 'urn:public', 'did:dkg:context-graph:42'),
+    ];
+    const privateQuads: Quad[] = [
+      makeQuad('urn:entity:inline-private-mismatch', 'urn:p', '"secret"', 'did:dkg:context-graph:42'),
+    ];
+    const privateRoot = computePrivateRootV10(privateQuads)!;
+    const foldedRoot = computeFlatKCRoot(publicQuads, [privateRoot]);
+    const foldedLeafCount = computeFlatKCMerkleLeafCountV10(publicQuads, [privateRoot]);
+    const stagingQuads = new TextEncoder().encode(
+      publicQuads
+        .map((q) => `<${q.subject}> <${q.predicate}> <${q.object}> <${q.graph}> .`)
+        .join('\n'),
+    );
+    const wrongPrivateRoot = new Uint8Array(privateRoot);
+    wrongPrivateRoot[0] ^= 0xff;
+    const handler = await createHandler([]);
+
+    await expect(handler.handler(encodePublishIntent({
+      merkleRoot: foldedRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: stagingQuads.length,
+      isPrivate: true,
+      kaCount: 1,
+      rootEntities: ['urn:entity:inline-private-mismatch'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: foldedLeafCount,
+      stagingQuads,
+      privateMerkleRoots: [wrongPrivateRoot],
+    }), fakePeerId)).rejects.toThrow('Merkle root mismatch (inline quads)');
+  });
+
+  it('rejects private root commitments on curated/encrypted ACK mode', async () => {
+    const privateRoot = computePrivateRootV10([
+      makeQuad('urn:entity:curated-mode-mix', 'urn:p', '"secret"'),
+    ])!;
+    const handler = await createHandler([]);
+
+    await expect(handler.handler(encodePublishIntent({
+      merkleRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 1,
+      isPrivate: true,
+      kaCount: 1,
+      rootEntities: ['urn:entity:curated-mode-mix'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: swmMerkleLeafCount,
+      isEncryptedPayload: true,
+      privateMerkleRoots: [privateRoot],
+    }), fakePeerId)).rejects.toThrow('privateMerkleRoots are only valid for folded-private public-CG ACKs');
+  });
+
   it('declines (BYTESIZE_UNDERCLAIM) when publicByteSize is below the real content lower bound', async () => {
     // The 3 fixture triples have Σ(|s|+|p|+|o|) = 69, a strict lower bound on
     // any valid N-Quads serialization. A claim of 1 (the byteSize=1 cost dodge)

@@ -121,11 +121,12 @@ export const PROTOCOL_VERIFY_PROPOSAL = '/dkg/10.0.1/verify-proposal';
 export const PROTOCOL_VERIFY_APPROVAL = '/dkg/10.0.0/verify-approval';
 export const PROTOCOL_STORAGE_ACK = '/dkg/10.0.1/storage-ack';
 /**
- * OT-RFC-38 LU-11 / OT-RFC-39 — storage-ack protocol version that
- * carries `ciphertextChunksRoot` + `ciphertextChunkCount` +
- * `ackProtocolVersion` on `PublishIntent`. Pre-LU-11 nodes don't
- * register this handler so an LU-11 publisher falls back to V1 against
- * legacy peers (with no curated chunked-publish support there).
+ * OT-RFC-38 LU-11 / OT-RFC-39 and folded-private ACKs — storage-ack protocol
+ * version for PublishIntent fields that require capability gating beyond
+ * `/dkg/10.0.1/storage-ack`, including chunked ciphertext fields and field 20
+ * `privateMerkleRoots`. Pre-V2 nodes do not register this handler, so
+ * mixed-version clusters fail at protocol selection instead of silently
+ * ignoring new fields.
  */
 export const PROTOCOL_STORAGE_ACK_V2 = '/dkg/10.0.2/storage-ack';
 
