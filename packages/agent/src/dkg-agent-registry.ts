@@ -1527,6 +1527,17 @@ export class AgentRegistryMethods extends DKGAgentBase {
     return this.chain.getPublishingConvictionAgents(accountId);
   }
 
+  /** Reverse-resolve which PCA a wallet is a registered publishing agent of,
+   *  via the on-chain `agentToAccountId` map. `0n` = not registered on any
+   *  account; `null` = adapter lacks the surface (daemon maps null → 503).
+   *  Chain-scoped DISCOVERY (may surface an account the node does not track);
+   *  callers route the id through coverage classification, never treating
+   *  "registered" as "covered". */
+  async getConvictionAgentAccountId(this: DKGAgent, agent: string): Promise<bigint | null> {
+    if (typeof this.chain.getConvictionAgentAccountId !== 'function') return null;
+    return this.chain.getConvictionAgentAccountId(agent);
+  }
+
   // ---------------------------------------------------------------------------
 
   /**

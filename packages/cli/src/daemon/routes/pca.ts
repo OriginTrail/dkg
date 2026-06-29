@@ -366,6 +366,36 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
     }
   }
 
+  // GET /api/pca/agent/:address — reverse-lookup which PCA a wallet is a
+  // registered publishing agent of (GAP-3, for S5/S6 discovery). Returns the
+  // bare on-chain `agentToAccountId` fact (may be an account this node does
+  // NOT track — that is the point for edge discovery); the UI routes the id
+  // through coverage classification, never treating "registered" as "covered".
+  // Two-segment path: no collision with the generic GET :id, but declared
+  // ahead of it for explicit ordering.
+  if (req.method === 'GET' && /^\/api\/pca\/agent\/[^/]+$/.test(path)) {
+    const addr = decodeURIComponent(path.split('/')[4] ?? '');
+    if (!ethers.isAddress(addr)) {
+      return jsonResponse(res, 400, { error: 'address must be a valid 0x-prefixed EVM address' });
+    }
+    try {
+      const accountId = await agent.getConvictionAgentAccountId(addr);
+      if (accountId === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      return jsonResponse(res, 200, {
+        agent: ethers.getAddress(addr),
+        accountId: accountId > 0n ? accountId.toString() : null,
+      });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (respondIfChainRpcTransportError(res, err)) return;
+      return jsonResponse(res, 500, {
+        error: `getConvictionAgentAccountId failed: ${msg}`,
+      });
+    }
+  }
+
   // GET /api/pca/:id/agents — enumerate the operational wallets registered
   // as publishing agents on this PCA (B3). Mirrors the GET :id existence
   // check first, so an unknown account is a 404 (not an empty list): a 200

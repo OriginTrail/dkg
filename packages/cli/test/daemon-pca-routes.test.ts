@@ -663,4 +663,60 @@ describe('daemon /api/pca V10 caller contract', () => {
     await done;
     expect(res.statusCode).toBe(400);
   });
+
+  // ----- GAP-3: GET /api/pca/agent/:address (which PCA funds a wallet) -----
+  it('GET /api/pca/agent/:address → 200 { agent, accountId } for a registered wallet', async () => {
+    const addr = ethers.getAddress('0x' + 'ab'.repeat(20));
+    let queried: string | null = null;
+    const agent = {
+      getConvictionAgentAccountId: async (a: string) => { queried = a; return 7n; },
+    };
+    const { res, done } = runCtx('GET', `/api/pca/agent/${addr}`, agent);
+    await done;
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ agent: addr, accountId: '7' });
+    expect(queried).toBe(addr);
+  });
+
+  it('GET /api/pca/agent/:address → 200 { accountId: null } for an unregistered wallet (0n)', async () => {
+    const addr = ethers.getAddress('0x' + 'cd'.repeat(20));
+    const agent = { getConvictionAgentAccountId: async () => 0n };
+    const { res, done } = runCtx('GET', `/api/pca/agent/${addr}`, agent);
+    await done;
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ agent: addr, accountId: null });
+  });
+
+  it('GET /api/pca/agent/:address → 400 for a malformed address', async () => {
+    const { res, done } = runCtx('GET', '/api/pca/agent/not-an-address', {});
+    await done;
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('GET /api/pca/agent/:address → 503 when the adapter lacks the surface (facade null)', async () => {
+    const addr = ethers.getAddress('0x' + 'ab'.repeat(20));
+    const agent = { getConvictionAgentAccountId: async () => null };
+    const { res, done } = runCtx('GET', `/api/pca/agent/${addr}`, agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+  });
+
+  it('GET /api/pca/agent/:address → 503 on RPC transport exhaustion (sanitized)', async () => {
+    const addr = ethers.getAddress('0x' + 'ab'.repeat(20));
+    const agent = {
+      getConvictionAgentAccountId: async () => {
+        const err: any = new Error(
+          'agentToAccountId failed on all configured RPC endpoints (https://rpc.example/v2/SECRETKEY): boom',
+        );
+        err.code = 'RPC_ENDPOINTS_EXHAUSTED';
+        err.rpcUrls = ['https://rpc.example/v2/SECRETKEY'];
+        throw err;
+      },
+    };
+    const { res, done } = runCtx('GET', `/api/pca/agent/${addr}`, agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body).code).toBe('RPC_ENDPOINTS_EXHAUSTED');
+    expect(res.body).not.toContain('SECRETKEY');
+  });
 });
