@@ -530,4 +530,46 @@ describe('PublishEligibilityChip (S5)', () => {
     expect(mocks.pcaAgentAccount).not.toHaveBeenCalled(); // fast-path covered → augment skipped
     await unmount();
   });
+
+  // (iv) the GAP-3 lookup THROWS (transport) → inconclusive (neutral), NEVER DANGER
+  // (#9): a wallet unregistered on the tracked set whose reverse-map read fails can't
+  // be confirmed as a fall-through.
+  it('GAP-3 — pcaAgentAccount throws → unknown (neutral), not DANGER (#9)', async () => {
+    usePcaStore.setState({ trackedIds: ['7'], createPending: null });
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('0')); // no TRAC — the worst case
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      const base = makePcaSnapshot({ accountId: id });
+      return key ? { ...base, probedKey: { key, registered: false } } : base; // unregistered on tracked
+    });
+    mocks.pcaAgentAccount.mockRejectedValue(new Error('agent route down'));
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'PCA status unknown');
+    expect(container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeNull();
+    expect(container.querySelector('[data-verdict="unknown"]')).toBeTruthy();
+    await unmount();
+  });
+
+  // (v) accountId:null is a CONFIRMED "on no PCA" → a definitive fall-through, split by
+  // balance (#6): has-TRAC → amber "pays direct"; no-TRAC → danger "will FAIL". (The
+  // balance signals still populate WalletDetail; only coverage moved to GAP-3.)
+  it('GAP-3 — accountId:null confirms fall-through: has-TRAC → amber, no-TRAC → danger (#6)', async () => {
+    usePcaStore.setState({ trackedIds: ['7'], createPending: null });
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      const base = makePcaSnapshot({ accountId: id });
+      return key ? { ...base, probedKey: { key, registered: false } } : base; // unregistered on tracked
+    });
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: W0, accountId: null }); // on NO account anywhere
+
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('50')); // has TRAC
+    const amber = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(amber.container, 'No PCA discount');
+    expect(amber.container.querySelector('[data-verdict="fallthrough"]')).toBeTruthy();
+    await amber.unmount();
+
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('0')); // no TRAC
+    const danger = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(danger.container, 'Publish will fail');
+    expect(danger.container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeTruthy();
+    await danger.unmount();
+  });
 });
