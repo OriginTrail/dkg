@@ -249,7 +249,32 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
         });
       }
       const revert = classifyPcaRevert(msg);
-      if (revert) return jsonResponse(res, revert.status, { error: revert.error, accountId: idStr });
+      if (revert) {
+        const body: Record<string, unknown> = { error: revert.error, accountId: idStr };
+        if (revert.error === 'AgentAlreadyRegistered') {
+          // B10: surface WHICH account already holds this wallet so the UI can
+          // deep-link ("approved on PCA #N — deregister it there first").
+          // Primary: the decoded revert arg — `enrichEvmError` (run on every
+          // pcaWrite) sets `err.revert.args` from AgentAlreadyRegistered(agent,
+          // existingAccountId). Fallback: some RPCs strip revert data, so
+          // resolve via the on-chain reverse map. Both are wrapped so a failed
+          // lookup never masks the 409.
+          let existing: bigint | null = null;
+          const rv: any = (err as any)?.revert;
+          if (rv?.name === 'AgentAlreadyRegistered') {
+            const raw = rv.args?.existingAccountId ?? rv.args?.[1];
+            if (raw != null) { try { existing = BigInt(raw); } catch { /* unparseable arg */ } }
+          }
+          if (existing == null || existing <= 0n) {
+            try {
+              const viaMap = await agent.getConvictionAgentAccountId(agentAddr);
+              if (viaMap != null && viaMap > 0n) existing = viaMap;
+            } catch { /* reverse-map fallback is best-effort; never mask the 409 */ }
+          }
+          if (existing != null && existing > 0n) body.existingAccountId = existing.toString();
+        }
+        return jsonResponse(res, revert.status, body);
+      }
       return jsonResponse(res, 500, { error: `registerPublishingConvictionAgent failed: ${msg}` });
     }
   }

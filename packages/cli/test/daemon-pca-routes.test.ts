@@ -719,4 +719,65 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(JSON.parse(res.body).code).toBe('RPC_ENDPOINTS_EXHAUSTED');
     expect(res.body).not.toContain('SECRETKEY');
   });
+
+  // ----- B10: register 409 carries existingAccountId (cross-PCA conflict) -----
+  it('register AgentAlreadyRegistered → 409 with existingAccountId from the decoded revert arg', async () => {
+    const addr = '0x' + '1'.repeat(40);
+    const agent = {
+      registerPublishingConvictionAgent: async () => {
+        const err: any = new Error(`execution reverted: AgentAlreadyRegistered(${addr}, 5)`);
+        // enrichEvmError shape: ethers.Result exposes named + positional access.
+        err.revert = {
+          name: 'AgentAlreadyRegistered',
+          args: Object.assign([addr, 5n], { agent: addr, existingAccountId: 5n }),
+        };
+        throw err;
+      },
+      // Must NOT be consulted when the revert arg is present.
+      getConvictionAgentAccountId: async () => { throw new Error('should not be called'); },
+    };
+    const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
+    await done;
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body)).toEqual({ error: 'AgentAlreadyRegistered', accountId: '1', existingAccountId: '5' });
+  });
+
+  it('register AgentAlreadyRegistered with no revert arg → 409 with existingAccountId via reverse-map fallback', async () => {
+    const addr = '0x' + '1'.repeat(40);
+    const agent = {
+      registerPublishingConvictionAgent: async () => {
+        // RPC stripped the revert data — no err.revert, message-only.
+        throw new Error('execution reverted: AgentAlreadyRegistered');
+      },
+      getConvictionAgentAccountId: async (a: string) => { expect(a).toBe(addr); return 7n; },
+    };
+    const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
+    await done;
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body)).toEqual({ error: 'AgentAlreadyRegistered', accountId: '1', existingAccountId: '7' });
+  });
+
+  it('register AgentAlreadyRegistered with neither arg nor resolvable map → 409 WITHOUT existingAccountId', async () => {
+    const addr = '0x' + '1'.repeat(40);
+    const agent = {
+      registerPublishingConvictionAgent: async () => { throw new Error('execution reverted: AgentAlreadyRegistered'); },
+      getConvictionAgentAccountId: async () => 0n,
+    };
+    const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
+    await done;
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body)).toEqual({ error: 'AgentAlreadyRegistered', accountId: '1' });
+  });
+
+  it('register AgentAlreadyRegistered fallback throwing must NOT mask the 409', async () => {
+    const addr = '0x' + '1'.repeat(40);
+    const agent = {
+      registerPublishingConvictionAgent: async () => { throw new Error('execution reverted: AgentAlreadyRegistered'); },
+      getConvictionAgentAccountId: async () => { throw new Error('reverse-map RPC blip'); },
+    };
+    const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
+    await done;
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body)).toEqual({ error: 'AgentAlreadyRegistered', accountId: '1' });
+  });
 });
