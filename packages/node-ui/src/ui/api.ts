@@ -1703,6 +1703,22 @@ export const pcaTopUp = (accountId: string, tokens: string) =>
 export const pcaSettle = (accountId: string) =>
   post<PcaSettleResult>(`/api/pca/${encodeURIComponent(accountId)}/settle`, {});
 
+export interface PcaAgentsResult {
+  accountId: string;
+  /** The FULL set of approved publishing-wallet addresses (checksummed). `[]` = a
+   *  real 0-approved account, distinct from a 404 (unknown account). */
+  agents: string[];
+}
+
+/**
+ * B3 — list the approved publishing wallets on a PCA (the full on-chain enumerator,
+ * vs just this node's wallets the detail view can probe). Existence-checked like
+ * {@link fetchPca}: an unknown account 404s (so the caller distinguishes "no such
+ * account" from `agents: []`); 503 = capability/transport. `GET` is permissionless.
+ */
+export const listPcaAgents = (accountId: string) =>
+  getJson<PcaAgentsResult>(`/api/pca/${encodeURIComponent(accountId)}/agents`);
+
 /** Normalized, terminology-disciplined PCA error code (UI branches on this). */
 export type PcaErrorCode =
   | 'FEATURE_UNAVAILABLE'

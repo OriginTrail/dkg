@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   fetchPca: vi.fn(),
   fetchWalletsBalances: vi.fn(),
   fetchContextGraphs: vi.fn(),
+  listPcaAgents: vi.fn(),
   pcaTopUp: vi.fn(),
   pcaSettle: vi.fn(),
   pcaRemoveAgent: vi.fn(),
@@ -77,6 +78,8 @@ beforeEach(() => {
   mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
     key ? { ...snap(), probedKey: { key, registered: key.toLowerCase() === W0.toLowerCase() } } : snap(),
   );
+  // B3 — default to the happy full-list path (W0 = this node's wallet, approved).
+  mocks.listPcaAgents.mockResolvedValue({ accountId: '7', agents: [W0] });
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
@@ -137,6 +140,8 @@ describe('ConvictionDetailView §8A owner-gating', () => {
   // a false "NOT approved" (manual probe tool + the per-wallet row).
   it('the manual Probe and the wallet row both say "couldn’t determine" on a probe with no probedKey (M8)', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
+    // The per-wallet probe ROW only exists in the B3-degrade fallback — force it.
+    mocks.listPcaAgents.mockRejectedValue(new HttpError(503, 'unavailable', { error: 'unavailable' }));
     mocks.fetchPca.mockImplementation(async () => snap()); // snap() never carries probedKey → registered null
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
     await waitForText(container, 'Check a wallet');
@@ -311,6 +316,61 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     await act(async () => { btn(container, '[data-testid="pca-topup-btn"]').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     await waitForText(container, 'greater than 0');
     expect(container.querySelector('[data-testid="pca-action-warning"]')).toBeNull();
+    await unmount();
+  });
+});
+
+// B3 — the S3 "Publishing wallets" section renders the FULL approved set from
+// listPcaAgents (GET /api/pca/:id/agents), retiring P0's count-only caveat, and
+// degrades to the probe-only this-node-wallets view when the route is unavailable.
+describe('ConvictionDetailView B3 — live approved-wallet table', () => {
+  const EXTERNAL = '0xExternal0000000000000000000000000000A1b2';
+  const OWNER_WB = { wallets: [W0], balances: [{ address: W0, eth: '1', trac: '5', symbol: 'TRAC' }], chainId: '84532', rpcUrl: null };
+
+  it('renders the FULL approved list (incl. wallets NOT on this node) and retires the count-only caveat', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.listPcaAgents.mockResolvedValue({ accountId: '7', agents: [W0, EXTERNAL] });
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Approved publishing wallets:');
+    const rows = container.querySelectorAll('[data-testid="pca-agent-row"]');
+    expect(rows.length).toBe(2); // includes the EXTERNAL wallet the node can't probe
+    // The node's own wallet is badged; the caveat is gone once the full list renders.
+    expect(container.textContent).toContain('approved · this node');
+    expect(container.textContent).not.toContain('not the full list');
+    await unmount();
+  });
+
+  it('shows a real 0-approved empty state (200 + agents: []), still no caveat', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.listPcaAgents.mockResolvedValue({ accountId: '7', agents: [] });
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'No approved publishing wallets yet.');
+    expect(container.textContent).not.toContain('not the full list');
+    await unmount();
+  });
+
+  it('degrades to the probe-only this-node view + count caveat when listPcaAgents fails (503/404)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.listPcaAgents.mockRejectedValue(new HttpError(503, 'unavailable', { error: 'unavailable' }));
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'This node’s wallets:');
+    // The P0 caveat is restored as the honest degrade signal.
+    expect(container.textContent).toContain('not the full list');
+    // The node's own wallet still resolves via the per-row probe (W0 → approved).
+    await waitForText(container, 'approved');
+    await unmount();
+  });
+
+  it('owner Remove on a listed wallet fires pcaRemoveAgent(id, addr) (full-list path)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
+    mocks.listPcaAgents.mockResolvedValue({ accountId: '7', agents: [W0] });
+    mocks.pcaRemoveAgent.mockResolvedValue({ accountId: '7', agent: W0, deregistered: true });
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Approved publishing wallets:');
+    await act(async () => { findBtn(container, 'Remove').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'will pay the direct cost');
+    await act(async () => { container.querySelector('[data-testid="pca-deregister-btn"]')!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(mocks.pcaRemoveAgent).toHaveBeenCalledWith('7', W0);
     await unmount();
   });
 });
