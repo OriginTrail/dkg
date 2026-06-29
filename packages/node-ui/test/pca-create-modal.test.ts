@@ -148,6 +148,30 @@ describe('CreatePcaModal', () => {
     await unmount();
   });
 
+  // S2b — renew re-mints a REPLACEMENT: the modal is seeded from the expiring account
+  // and the copy is HONEST (#9) — a new separate account, the old TRAC stays locked.
+  it('S2b renew — seeds the amount/primary node + shows honest "new separate account" copy', async () => {
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, {
+        onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn(),
+        seed: { tokens: '100000.0', primaryNode: '42' },
+        replacingAccountId: '7',
+      }),
+    );
+    await waitForText(container, 'Renew');
+    // Title names the renew (not the generic create).
+    expect(container.querySelector('#pca-modal-title')?.textContent).toContain('Renew');
+    // Honest #9 framing: new SEPARATE account, names the replaced id, 0/100 approvals.
+    const note = container.querySelector('[data-testid="pca-renew-note"]')!;
+    expect(note.textContent).toContain('new, separate');
+    expect(note.textContent).toContain('#7');
+    expect(note.textContent).toContain('0/100');
+    // Commit amount is seeded from the expiring account.
+    expect((container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement).value).toBe('100000.0');
+    expect((container.querySelector('[data-testid="pca-create-primary-node"]') as HTMLInputElement).value).toBe('42');
+    await unmount();
+  });
+
   it('enters reconcile-before-retry on a 504 TIMEOUT and persists the create-pending marker', async () => {
     mocks.createPca.mockRejectedValue(new HttpError(504, 'TIMEOUT', { code: 'TIMEOUT', txHash: '0xdead' }));
     const { container, unmount } = await render(

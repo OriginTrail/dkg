@@ -441,3 +441,28 @@ describe('ConvictionDetailView GAP-4/5 — budget widget + primaryNode', () => {
     await unmount();
   });
 });
+
+// S2b — the Renew CTA on the Lifecycle section opens a re-mint REPLACEMENT create modal,
+// seeded from this account + carrying the honest "new separate account" copy (#9).
+describe('ConvictionDetailView S2b — Renew', () => {
+  const OWNER_WB = { wallets: [W0], balances: [{ address: W0, eth: '1', trac: '5', symbol: 'TRAC' }], chainId: '84532', rpcUrl: null };
+
+  it('Renew opens the seeded replacement create modal with the honest copy', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...snap(), probedKey: { key, registered: true } } : snap(),
+    );
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Lifecycle');
+    const renewBtn = container.querySelector('[data-testid="pca-renew-btn"]') as HTMLButtonElement;
+    expect(renewBtn).toBeTruthy();
+    expect(renewBtn.disabled).toBe(false); // owner == wallets[0]
+    await act(async () => { renewBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'new, separate'); // the honest renew note
+    expect(container.querySelector('[data-testid="pca-renew-note"]')).toBeTruthy();
+    expect(container.querySelector('#pca-modal-title')?.textContent).toContain('Renew');
+    // Seeded from this account's committed amount (snap().committedTRACTrac).
+    expect((container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement).value).toBe('100000.0');
+    await unmount();
+  });
+});

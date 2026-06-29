@@ -63,11 +63,15 @@ export function ApproveWalletsModal({
   initialMode = 'sponsor',
   onClose,
   onApproved,
+  seedBulk,
 }: {
   accountId: string;
   initialMode?: 'self' | 'sponsor';
   onClose: () => void;
   onApproved?: () => void;
+  /** S2b renew — prefill the sponsor bulk-paste with the replaced account's agents,
+   *  so re-approving the same wallets on the new account is one step. */
+  seedBulk?: string;
 }) {
   const { data: wb } = useFetch(fetchWalletsBalances, [], 0);
   const { data: snapshot } = useFetch(() => fetchPca(accountId), [accountId]);
@@ -78,7 +82,7 @@ export function ApproveWalletsModal({
 
   const [mode, setMode] = useState<'self' | 'sponsor'>(initialMode);
   const [unchecked, setUnchecked] = useState<Record<string, boolean>>({}); // self: opt-OUT set
-  const [bulk, setBulk] = useState('');
+  const [bulk, setBulk] = useState(seedBulk ?? ''); // S2b renew prefills the old account's agents
   const [rows, setRows] = useState<Record<string, Row>>({});
   const [order, setOrder] = useState<string[]>([]);
   const [running, setRunning] = useState(false);

@@ -120,6 +120,21 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     await unmount();
   });
 
+  // S2b — the renew chain seeds the bulk paste with the OLD account's agents so
+  // re-approving them on the new account is one step.
+  it('S2b — seedBulk pre-fills the bulk paste for one-step re-approval', async () => {
+    mocks.fetchPca.mockResolvedValue(snap());
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, {
+        accountId: '8', initialMode: 'sponsor', seedBulk: [ADDR_A, ADDR_B].join('\n'), onClose: vi.fn(),
+      }),
+    );
+    await waitForText(container, 'Wallet address(es)');
+    const ta = container.querySelector('[data-testid="pca-approve-address"]') as HTMLTextAreaElement;
+    expect(ta.value).toBe([ADDR_A, ADDR_B].join('\n'));
+    await unmount();
+  });
+
   // M4 — a transient 500/network on a MIDDLE wallet must NOT abort and must NOT
   // tally as a benign skip: that row is a danger-tone failure, the loop continues,
   // and the remaining wallet still gets approved.

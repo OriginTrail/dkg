@@ -38,12 +38,19 @@ export function CreatePcaModal({
   onApproveOwnWallets,
   onManage,
   onGetSponsored,
+  seed,
+  replacingAccountId,
 }: {
   onClose: () => void;
   onApproveOwnWallets: (accountId: string) => void;
   onManage: (accountId: string) => void;
   /** Routes the gated (edge / no-identity) state to S6 Get-sponsored. */
   onGetSponsored: () => void;
+  /** S2b renew — prefill the commit amount / primary node from an expiring account
+   *  (re-mint REPLACEMENT). The create flow is otherwise unchanged. */
+  seed?: { tokens?: string; primaryNode?: string };
+  /** S2b renew — the account being replaced; non-null drives the honest renew copy. */
+  replacingAccountId?: string;
 }) {
   const nodeStatus = useAgentsStore((s) => s.nodeStatus) as
     | { nodeRole?: string; hasIdentity?: boolean; identityId?: string; blockExplorerUrl?: string | null }
@@ -72,8 +79,9 @@ export function CreatePcaModal({
   // no-storage env), so the reconcile screen doesn't falsely claim it survives a refresh.
   const createPendingPersisted = usePcaStore((s) => s.createPendingPersisted);
 
-  const [tokens, setTokens] = useState('');
-  const [primaryNode, setPrimaryNode] = useState('');
+  // S2b renew — seed the commit amount + primary node from the expiring account.
+  const [tokens, setTokens] = useState(seed?.tokens ?? '');
+  const [primaryNode, setPrimaryNode] = useState(seed?.primaryNode ?? '');
   const [advanced, setAdvanced] = useState(false);
   // Resume the reconcile guard if a create is already in flight from a prior
   // session (durable marker) — never drop straight to a retryable form.
@@ -307,11 +315,23 @@ export function CreatePcaModal({
     <PcaModalShell
       onClose={onClose}
       testId="pca-create-modal"
-      title="Create a Publishing Conviction Account"
-      subtitle="Lock TRAC up front to publish at a discount."
+      title={replacingAccountId ? `Renew — new PCA to replace #${replacingAccountId}` : 'Create a Publishing Conviction Account'}
+      subtitle={replacingAccountId ? 'Re-mint a fresh account seeded from the expiring one.' : 'Lock TRAC up front to publish at a discount.'}
     >
       <div className="v10-modal-body">
         {error && <div className="v10-modal-error" role="alert">{error}</div>}
+
+        {/* S2b renew — HONEST framing (#9): this is a NEW separate account, not an
+            in-place extension; the old account's TRAC stays locked until its own expiry. */}
+        {replacingAccountId && (
+          <div className="v10-modal-warning" role="status" data-testid="pca-renew-note">
+            ⓘ This creates a <strong>new, separate</strong> account (a new id) — it does not extend or
+            reclaim PCA #{replacingAccountId}. The old account’s committed TRAC stays locked until its
+            own expiry (it can’t be withdrawn early), and the new account starts at <strong>0/100</strong>
+            approved wallets. The next step is pre-filled with the old account’s wallets for one-step
+            re-approval.
+          </div>
+        )}
 
         {/* Section 1 — Commitment */}
         <section className="v10-pca-create-section">
