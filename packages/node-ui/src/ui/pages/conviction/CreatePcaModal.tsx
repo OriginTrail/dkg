@@ -57,12 +57,14 @@ export function CreatePcaModal({
   const nodeStatus = useAgentsStore((s) => s.nodeStatus) as
     | { nodeRole?: string; hasIdentity?: boolean; identityId?: string; blockExplorerUrl?: string | null }
     | null;
-  const gated = nodeStatus?.nodeRole === 'edge' || nodeStatus?.hasIdentity === false;
-  // S1 — the create gate fails OPEN while status is loading/failed (nodeStatus null):
-  // `gated` is false, so without this an edge/no-identity node could lock TRAC before
-  // the gate appears. A financial mutation must fail CLOSED on unknown eligibility —
-  // the write-side mirror of C1/O4/Q2. (`==` catches null+undefined; a resolved core
-  // is NOT unknown, so a legit core create isn't blocked.)
+  // Sub-PR 1 (§9.3) — the edge/no-identity CREATE GATE is REMOVED: any node can create a
+  // PCA by designating a staked sharding-table node as its `primaryNode` (the picker, §3b).
+  // A node without its own staked identity gets a non-blocking explainer (not a hard block).
+  // `hasIdentity === false` (or edge) only drives that explainer now, never a gate.
+  const noOwnIdentity = nodeStatus?.nodeRole === 'edge' || nodeStatus?.hasIdentity === false;
+  // S1 — still fail CLOSED while status is loading/failed (nodeStatus null): create needs
+  // the owner wallet (double-mint marker) and status (picker pre-select / M3 cross-check)
+  // resolved first. A financial mutation must not proceed on unknown eligibility.
   const statusUnknown = nodeStatus == null;
   const explorer = nodeStatus?.blockExplorerUrl ?? null;
 
@@ -156,33 +158,6 @@ export function CreatePcaModal({
     }
   };
 
-  // ----- Gated (edge / no staked identity) -----
-  if (gated) {
-    return (
-      <PcaModalShell onClose={onClose} testId="pca-create-modal" title="Create needs a staked core-node identity">
-        <div className="v10-modal-body">
-          <div className="v10-modal-warning">
-            Creating a Publishing Conviction Account requires a staked core-node identity to set as its
-            primary node — this node has none yet. An edge node gets a publishing discount by being
-            <strong> sponsored</strong>: share your operational wallets with a core node and have them
-            approve you on their account.
-          </div>
-        </div>
-        <div className="v10-modal-footer">
-          <button type="button" className="v10-modal-btn" onClick={onClose}>Close</button>
-          <button
-            type="button"
-            className="v10-modal-btn primary"
-            data-testid="pca-gated-get-sponsored"
-            onClick={onGetSponsored}
-          >
-            Get sponsored →
-          </button>
-        </div>
-      </PcaModalShell>
-    );
-  }
-
   // ----- Reconcile (double-mint guard) -----
   if (phase === 'reconcile') {
     const txUrl = explorer && pendingTxHash ? `${explorer}/tx/${pendingTxHash}` : undefined;
@@ -243,9 +218,9 @@ export function CreatePcaModal({
 
   // ----- Status unknown (loading / failed) — fail CLOSED (S1) -----
   // Placed AFTER the reconcile resume (a durable create-pending marker must still
-  // surface on a null-status reload) and before the form. `gated` is null-safe
-  // (false when nodeStatus is null), so it can't render the sponsorship gate while
-  // unknown — we never assert "edge"; we just show a neutral checking state.
+  // surface on a null-status reload) and before the form. We never assert "edge" while
+  // unknown — just a neutral checking state until status (owner wallet + identity for
+  // the picker pre-select) resolves.
   if (statusUnknown) {
     return (
       <PcaModalShell onClose={onClose} testId="pca-create-modal" title="Checking node eligibility…">
@@ -324,6 +299,21 @@ export function CreatePcaModal({
     >
       <div className="v10-modal-body">
         {error && <div className="v10-modal-error" role="alert">{error}</div>}
+
+        {/* Sub-PR 1 (§5.2 Step 1) — NON-BLOCKING explainer for a node without its own staked
+            identity (edge / no-identity). Create is NOT gated; this just surfaces the free
+            alternative. Never a redirect that prevents Create. */}
+        {noOwnIdentity && !replacingAccountId && (
+          <div className="v10-modal-tip" role="status" data-testid="pca-create-no-identity-note">
+            This node has no staked identity of its own — you can still create a PCA by choosing a
+            staked node as its primary node below (you get the discount; the reward weight accrues to
+            the node you pick).{' '}
+            <button type="button" className="v10-pca-card-btn" data-testid="pca-create-get-sponsored-link" onClick={onGetSponsored}>
+              Or get sponsored
+            </button>{' '}
+            — the free alternative (no TRAC locked).
+          </div>
+        )}
 
         {/* S2b renew — HONEST framing (#9): this is a NEW separate account, not an
             in-place extension; the old account's TRAC stays locked until its own expiry. */}

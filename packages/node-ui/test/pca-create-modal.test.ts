@@ -101,21 +101,20 @@ afterEach(() => {
 });
 
 describe('CreatePcaModal', () => {
-  it('gates edge / no-identity nodes: reason-titled, no form, + a Get-sponsored CTA → S6', async () => {
+  // Sub-PR 1 (§5.2 Step 1) — the edge/no-identity HARD GATE is REMOVED: the wizard opens
+  // for all; a no-own-identity node gets a NON-BLOCKING explainer + a get-sponsored link.
+  it('edge / no-identity: the wizard OPENS (no hard gate) with a non-blocking get-sponsored explainer', async () => {
     useAgentsStore.getState().setNodeStatus({ nodeRole: 'edge', hasIdentity: false });
     const onGetSponsored = vi.fn();
     const { container, unmount } = await render(
       React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored }),
     );
-    await waitForText(container, 'requires a staked core-node identity');
-    // #4 — titled with the reason, not the generic "Create a PCA".
-    expect(container.querySelector('#pca-modal-title')?.textContent).toContain('staked core-node identity');
-    // #1 — zero wizard fields in the gated state.
-    expect(container.querySelector('[data-testid="pca-create-tokens"]')).toBeNull();
-    // #2 — a primary Get-sponsored CTA routes to S6.
-    const cta = container.querySelector('[data-testid="pca-gated-get-sponsored"]')!;
-    expect(cta).toBeTruthy();
-    await act(async () => { cta.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'Commit amount (TRAC)'); // the form opens — no gate
+    expect(container.querySelector('[data-testid="pca-create-tokens"]')).toBeTruthy();
+    // Non-blocking explainer + a get-sponsored LINK (never a redirect that prevents Create).
+    expect(container.querySelector('[data-testid="pca-create-no-identity-note"]')).toBeTruthy();
+    const link = container.querySelector('[data-testid="pca-create-get-sponsored-link"]')!;
+    await act(async () => { link.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     expect(onGetSponsored).toHaveBeenCalled();
     await unmount();
   });
@@ -377,18 +376,21 @@ describe('CreatePcaModal', () => {
     await unmount();
   });
 
-  it('S1 — delayed status → edge shows the sponsorship gate, never a live submit', async () => {
+  it('S1 — delayed status: checking (no live form) while unknown, then edge resolves → wizard opens', async () => {
     useAgentsStore.setState({ nodeStatus: null });
     const { container, unmount } = await render(
       React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
     );
     await waitForText(container, 'Checking node eligibility');
+    // Fail-closed while unknown — no live submit.
+    expect(container.querySelector('[data-testid="pca-create-submit"]')).toBeNull();
     await act(async () => {
       useAgentsStore.setState({ nodeStatus: { nodeRole: 'edge', hasIdentity: false } });
       await new Promise((r) => setTimeout(r, 0));
     });
-    await waitForText(container, 'requires a staked core-node identity');
-    expect(container.querySelector('[data-testid="pca-create-submit"]')).toBeNull();
+    // Edge now OPENS the wizard (no gate) — form + the non-blocking explainer.
+    await waitForText(container, 'Commit amount (TRAC)');
+    expect(container.querySelector('[data-testid="pca-create-no-identity-note"]')).toBeTruthy();
     await unmount();
   });
 
