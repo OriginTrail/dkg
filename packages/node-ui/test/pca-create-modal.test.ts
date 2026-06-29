@@ -186,9 +186,10 @@ describe('CreatePcaModal', () => {
     await unmount();
   });
 
-  // H1 — Escape closes the OPEN picker popup, not the whole Create modal (the modal's
-  // useModalDismiss must no-op while a combobox is expanded so committed state isn't discarded).
-  it('H1 — Escape with the picker open closes the popup, does NOT dismiss the modal', async () => {
+  // Escape closes the OPEN picker popup first, not the whole Create modal: the picker stops
+  // the event while its listbox is open (so committed state isn't discarded), and a second
+  // Escape — popup now closed — dismisses the modal. The shared dismiss hook stays generic.
+  it('Escape with the picker open closes the popup, does NOT dismiss the modal', async () => {
     const onClose = vi.fn();
     const { container, unmount } = await render(
       React.createElement(CreatePcaModal, { onClose, onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),

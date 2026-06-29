@@ -90,15 +90,11 @@ export function useModalDismiss(open: boolean, onClose: () => void) {
     if (!open) return undefined;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        // If an inner combobox popup is OPEN, let IT handle Escape first (close the
-        // popup), rather than closing the whole dialog and discarding its state. This
-        // capture-phase window listener would otherwise win over the combobox's own
-        // bubble-phase handler. Escape closes the innermost layer first; a second
-        // Escape (popup now closed) dismisses the dialog.
-        const dlg = dialogRef.current;
-        if (dlg && dlg.querySelector('[role="combobox"][aria-expanded="true"]')) {
-          return; // no stopPropagation/onClose — the combobox's handler closes the popup
-        }
+        // Generic: Escape dismisses the dialog. An inner widget that owns its own
+        // layered Escape (e.g. a combobox popup that should close first) opts out by
+        // calling stopPropagation on its own keydown handler — this listener runs in the
+        // bubble phase, so a descendant's stopPropagation prevents it from firing. The
+        // hook itself stays free of any widget-specific knowledge.
         e.stopPropagation();
         onClose();
         return;
@@ -143,8 +139,11 @@ export function useModalDismiss(open: boolean, onClose: () => void) {
         first.focus();
       }
     };
-    window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
+    // Bubble phase (not capture): a descendant widget can intercept Escape/Tab before it
+    // reaches here by calling stopPropagation in its own handler. Tab trapping is unaffected —
+    // preventDefault works in the bubble phase too.
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
   }, [open, onClose]);
 
   const onBackdropClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {

@@ -90,8 +90,15 @@ export function PrimaryNodePicker({
         select(shown[activeIdx]);
       }
     } else if (e.key === 'Escape') {
-      setOpen(false);
-      setActiveIdx(-1);
+      // The picker owns Escape while its popup is open: close just the popup and stop the
+      // event so the surrounding modal's Escape-to-dismiss doesn't also fire (a second
+      // Escape, popup now closed, falls through and dismisses the modal). This keeps the
+      // shared modal-dismiss hook generic — it has no combobox-specific knowledge.
+      if (open) {
+        e.stopPropagation();
+        setOpen(false);
+        setActiveIdx(-1);
+      }
     }
   };
 
