@@ -1,4 +1,4 @@
-// Ported from OriginTrail/staking-ui-v10 (internal).
+// Adapted from OriginTrail/staking-ui-v10 (Apache-2.0, © OriginTrail).
 //
 // EIP-6963 multi-injected-provider discovery (https://eips.ethereum.org/EIPS/eip-6963).
 //

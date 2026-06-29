@@ -1,4 +1,4 @@
-// Ported from OriginTrail/staking-ui-v10 (internal).
+// Adapted from OriginTrail/staking-ui-v10 (Apache-2.0, © OriginTrail).
 //
 // Persistence for "remember which EIP-6963 provider I last used".
 //
