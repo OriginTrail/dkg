@@ -289,12 +289,15 @@ describe('CreatePcaModal', () => {
     await unmount();
   });
 
-  // R2 — when the refreshed list NO LONGER contains the rejected node, the revert must CLEAR it (not
-  // re-enable submit on its numeric shape) — the user picks a still-listed node.
-  it('R2 — revert clears the rejected node when the fresh list excludes it (submit stays disabled)', async () => {
+  // R2 — the rejection handler clears the rejected node IMMEDIATELY (it does NOT wait for the fresh
+  // refetch): with the refetch held pending, submit is already disabled, the chip is gone, and a 2nd
+  // click can't re-submit the rejected id. Then the fresh list (without #42) resolves → still cleared.
+  it('R2 — rejection clears the rejected node before the fresh refetch resolves; a 2nd click cannot re-submit', async () => {
+    let resolveFresh!: (v: { nodes: any[]; total: number }) => void;
+    const freshPending = new Promise<{ nodes: any[]; total: number }>((res) => { resolveFresh = res; });
     mocks.listDesignatableNodes
       .mockResolvedValueOnce({ nodes: [{ nodeId: 'p42', identityId: '42', stake: '1000000000000000000000', ask: '0' }], total: 1 })
-      .mockResolvedValue({ nodes: [{ nodeId: 'p99', identityId: '99', stake: '1000000000000000000000', ask: '0' }], total: 1 }); // fresh: #42 unstaked
+      .mockReturnValueOnce(freshPending); // the fresh:true refetch stays PENDING
     mocks.createPca.mockRejectedValue(new HttpError(400, 'PrimaryNodeNotInShardingTable', { error: 'PrimaryNodeNotInShardingTable' }));
     const { container, unmount } = await render(
       React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
@@ -302,16 +305,96 @@ describe('CreatePcaModal', () => {
     await waitForText(container, 'node #42'); // #42 pre-selected from the initial list
     setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-    await click(container.querySelector('[data-testid="pca-create-submit"]')!);
-    // Poll until the revert's fresh refetch lands (and the rejected #42 is cleared).
+    const submit = () => container.querySelector('[data-testid="pca-create-submit"]') as HTMLButtonElement;
+    await click(submit()!);
+    // Wait until the create rejects and the catch dispatches the fresh refetch (which stays pending).
     const started = Date.now();
     while (Date.now() - started < 1500 && !mocks.listDesignatableNodes.mock.calls.some((c) => c[0]?.fresh)) {
       await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
     }
     await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
-    // #42 is gone from the fresh list → cleared, NOT re-defaulted → submit disabled.
-    expect((container.querySelector('[data-testid="pca-create-submit"]') as HTMLButtonElement).disabled).toBe(true);
+
+    // BEFORE the fresh list resolves: back on the form, #42 already cleared (not re-defaulted off the
+    // stale list), submit disabled.
+    expect(container.querySelector('[data-testid="pca-create-tokens"]')).toBeTruthy(); // recoverable — on the form
     expect(container.querySelector('[data-testid="pca-primary-node-selected"]')).toBeNull();
+    expect(submit().disabled).toBe(true);
+
+    // A 2nd click while the fresh list is still loading cannot re-submit the rejected id.
+    const callsAfterReject = mocks.createPca.mock.calls.length;
+    await click(submit());
+    expect(mocks.createPca.mock.calls.length).toBe(callsAfterReject);
+
+    // The fresh list resolves WITHOUT #42 → still cleared, submit still disabled.
+    await act(async () => {
+      resolveFresh({ nodes: [{ nodeId: 'p99', identityId: '99', stake: '1000000000000000000000', ask: '0' }], total: 1 });
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(submit().disabled).toBe(true);
+    expect(container.querySelector('[data-testid="pca-primary-node-selected"]')).toBeNull();
+    await unmount();
+  });
+
+  // A successful but EMPTY staked list is authoritative: a 503 → list-down own-default (#42) that a
+  // retry can't find in the (empty) table must be CLEARED, not kept (else Create enables on a node
+  // that isn't designatable).
+  it('a retry returning an EMPTY staked list clears the list-down own-default (submit disabled)', async () => {
+    mocks.listDesignatableNodes
+      .mockRejectedValueOnce(new Error('SHARDING_TABLE_READ_FAILED')) // initial load fails → list-down
+      .mockResolvedValue({ nodes: [], total: 0 }); // retry succeeds but the table is empty
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    // List down → core best-effort defaults to its own id (#42) → submit ENABLED, retry shown.
+    await waitForText(container, 'Using node #42');
+    const submit = () => container.querySelector('[data-testid="pca-create-submit"]') as HTMLButtonElement;
+    expect(submit().disabled).toBe(false);
+
+    // Retry → the table comes back EMPTY → #42 isn't designatable → the default is cleared.
+    await click(container.querySelector('[data-testid="pca-primary-node-retry"]')!);
+    const started = Date.now();
+    while (Date.now() - started < 1500 && !mocks.listDesignatableNodes.mock.calls.some((c) => c[0]?.fresh)) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+    }
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(submit().disabled).toBe(true);
+    await unmount();
+  });
+
+  // Phase gating — the reconcile / status-unknown / success screens must NOT start the form's reads
+  // (sharding-table + wallet-binding probe); only the live form does.
+  it('does NOT start designatable-node or wallet-binding reads in the reconcile phase', async () => {
+    usePcaStore.setState({ trackedIds: [], createPending: { ownerEoa: OWNER, submittedAt: Date.now() } });
+    const { unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    expect(mocks.listDesignatableNodes).not.toHaveBeenCalled();
+    expect(mocks.pcaAgentAccount).not.toHaveBeenCalled();
+    await unmount();
+  });
+
+  it('does NOT start designatable-node or wallet-binding reads while node status is unknown', async () => {
+    useAgentsStore.setState({ nodeStatus: null } as any);
+    const { unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    expect(mocks.listDesignatableNodes).not.toHaveBeenCalled();
+    expect(mocks.pcaAgentAccount).not.toHaveBeenCalled();
+    await unmount();
+  });
+
+  it('DOES start those reads on the live form (gating control)', async () => {
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(mocks.listDesignatableNodes).toHaveBeenCalled();
+    expect(mocks.pcaAgentAccount).toHaveBeenCalled();
     await unmount();
   });
 

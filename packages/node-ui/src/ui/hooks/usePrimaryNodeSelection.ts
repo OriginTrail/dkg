@@ -33,8 +33,11 @@ export function usePrimaryNodeSelection(opts: {
   stakedNodes: readonly { identityId: string }[];
   nodesError: boolean;
   nodesLoading: boolean;
+  /** Run the pre-select/reconcile policy only while the create form is active (default true).
+   *  The reconcile/success/status-unknown screens don't show the picker, so their effects no-op. */
+  enabled?: boolean;
 }): UsePrimaryNodeSelection {
-  const { seedPrimaryNode, replacingAccountId, identityId, stakedNodes, nodesError, nodesLoading } = opts;
+  const { seedPrimaryNode, replacingAccountId, identityId, stakedNodes, nodesError, nodesLoading, enabled = true } = opts;
   const [primaryNode, setPrimaryNode] = useState(seedPrimaryNode ?? '');
 
   // This node's own identity counts as a default ONLY if it's actually IN the staked list
@@ -49,18 +52,25 @@ export function usePrimaryNodeSelection(opts: {
   // Pre-select own id only when confirmed staked; if the list is DOWN, core best-effort defaults to
   // its own id (the create-time revert recovery is the backstop). Edge (no own identity) → no default.
   useEffect(() => {
-    if (primaryNode || !ownIdentity) return;
+    // Don't (re-)default while a (re)fetch is in flight. After a create-time rejection the modal
+    // clears the rejected id AND kicks a FRESH refetch in the same render batch (nodesLoading→true);
+    // this guard stops an immediate re-default to the STALE list's own id before the refreshed list
+    // (which drops the just-rejected node) arrives — so onRejected's clear holds durably.
+    if (!enabled || primaryNode || !ownIdentity || nodesLoading) return;
     if (ownStaked) setPrimaryNode(ownStaked);
     else if (nodesError) setPrimaryNode(ownIdentity);
-  }, [primaryNode, ownIdentity, ownStaked, nodesError]);
+  }, [enabled, primaryNode, ownIdentity, ownStaked, nodesError, nodesLoading]);
 
   // Reconcile a STALE best-effort default: a list-down default (primaryNode = ownIdentity) that a
   // successfully-loaded list does NOT contain is invalid → clear it so the picker re-prompts (else
-  // submit stays enabled on a bad id until the create-time revert). Fresh-create only.
+  // submit stays enabled on a bad id until the create-time revert). Fresh-create only. Once the load
+  // settles (not loading, not errored) the list is AUTHORITATIVE — including an EMPTY list: an empty
+  // table means the own id isn't designatable either, so the default must still be cleared (no
+  // length guard, else a 503→own-default then a successful empty retry would keep the bad id).
   useEffect(() => {
-    if (replacingAccountId || nodesError || nodesLoading || stakedNodes.length === 0) return;
+    if (!enabled || replacingAccountId || nodesError || nodesLoading) return;
     if (ownIdentity && primaryNode === ownIdentity && !ownStaked) setPrimaryNode('');
-  }, [replacingAccountId, nodesError, nodesLoading, stakedNodes.length, ownIdentity, primaryNode, ownStaked]);
+  }, [enabled, replacingAccountId, nodesError, nodesLoading, stakedNodes.length, ownIdentity, primaryNode, ownStaked]);
 
   const onRejected = useCallback(() => setPrimaryNode(''), []);
 

@@ -76,19 +76,7 @@ export function CreatePcaModal({
   const ownerWallet = wallets[0];
   const ownerTrac = wb?.balances?.find((b) => b.address === ownerWallet)?.trac;
   const ownerTracNum = ownerTrac != null ? Number(ownerTrac) : NaN;
-
-  // Pre-flight wallet-binding probe — READ-ONLY, at wizard open. Surfaces the
-  // self-coverage outlook BEFORE the TRAC commit: if EVERY op wallet is already bound to a
-  // sponsor's PCA, the new account would discount none of this node's own publishes (a loud
-  // informed-consent warning — NOT a hard block; a node may create purely to sponsor others).
-  // The per-wallet deregister-first then runs in the self-coverage loop (ApproveWalletsModal).
   const walletsKey = wallets.join(',');
-  const { data: bindings } = useFetch(
-    () => probeWalletBindings(wallets, ownerWallet),
-    [walletsKey, ownerWallet],
-    0,
-  );
-  const b1 = useMemo(() => selfCoverageOutlook(bindings ?? []), [bindings]);
 
   const owner = useOwnerActionSubmitter(); // owner-action seam (P0: daemon submitter)
   const finishCreate = usePcaStore((s) => s.finishCreate);
@@ -108,9 +96,25 @@ export function CreatePcaModal({
   const [pendingTxHash, setPendingTxHash] = useState<string | undefined>(createPending?.txHash);
   const [error, setError] = useState<string | null>(null);
 
+  // Form-only reads are gated to the form phase: the reconcile / status-unknown / success screens
+  // don't render the form, so they must not start the wallet-binding probe or the sharding-table read.
+  const formActive = phase === 'form' && !statusUnknown;
+
+  // Pre-flight wallet-binding probe — READ-ONLY, while the form is showing. Surfaces the
+  // self-coverage outlook BEFORE the TRAC commit: if EVERY op wallet is already bound to a
+  // sponsor's PCA, the new account would discount none of this node's own publishes (a loud
+  // informed-consent warning — NOT a hard block; a node may create purely to sponsor others).
+  // The per-wallet deregister-first then runs in the self-coverage loop (ApproveWalletsModal).
+  const { data: bindings } = useFetch(
+    () => (formActive ? probeWalletBindings(wallets, ownerWallet) : Promise.resolve([])),
+    [walletsKey, ownerWallet, formActive],
+    0,
+  );
+  const b1 = useMemo(() => selfCoverageOutlook(bindings ?? []), [bindings]);
+
   // §3b — the REQUIRED staked-node picker's list (B-staked-nodes; fetched whole, sorted desc).
   const { nodes: stakedNodes, loading: nodesLoading, error: nodesError, refresh: refreshNodes } =
-    useDesignatableNodes();
+    useDesignatableNodes(formActive);
   // All primary-node selection policy (renew seed / staked-default / list-down fallback / stale-clear
   // / rejected-node recovery) lives in one hook — the modal just wires value/actions to the picker.
   const { primaryNode, setPrimaryNode, ownStaked, onRejected: onPrimaryNodeRejected } = usePrimaryNodeSelection({
@@ -120,6 +124,7 @@ export function CreatePcaModal({
     stakedNodes,
     nodesError,
     nodesLoading,
+    enabled: formActive,
   });
 
   const amountNum = AMOUNT_RE.test(tokens.trim()) ? Number(tokens.trim()) : NaN;

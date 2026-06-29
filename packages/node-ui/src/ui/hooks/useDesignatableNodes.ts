@@ -26,12 +26,19 @@ export interface UseDesignatableNodes {
   refresh: () => void;
 }
 
-/** The staked-node list for the PrimaryNodePicker — fetched whole (one shot), sorted by stake desc. */
-export function useDesignatableNodes(): UseDesignatableNodes {
+/**
+ * The staked-node list for the PrimaryNodePicker — fetched whole (one shot), sorted by stake desc.
+ * `enabled` (default true) gates the one-shot load to the create form: the reconcile/success/
+ * status-unknown screens don't render the picker, so they must not start a sharding-table read. The
+ * initial load fires once, the first time `enabled` is true, and never re-fires on later phase
+ * toggles (form→creating→form); the explicit cache-busting `refresh()` is always available.
+ */
+export function useDesignatableNodes(enabled = true): UseDesignatableNodes {
   const [nodes, setNodes] = useState<DesignatableNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const mountedRef = useRef(true);
+  const didLoadRef = useRef(false);
 
   const load = useCallback(async (fresh: boolean) => {
     setLoading(true);
@@ -53,11 +60,17 @@ export function useDesignatableNodes(): UseDesignatableNodes {
 
   useEffect(() => {
     mountedRef.current = true;
-    void load(false);
     return () => {
       mountedRef.current = false;
     };
-  }, [load]);
+  }, []);
+
+  useEffect(() => {
+    if (enabled && !didLoadRef.current) {
+      didLoadRef.current = true;
+      void load(false);
+    }
+  }, [enabled, load]);
 
   const refresh = useCallback(() => {
     void load(true);
