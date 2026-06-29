@@ -575,4 +575,284 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(probe.registered).toBe(true);
     expect(probe).not.toHaveProperty('authorized');
   });
+
+  // ----- B3: GET /api/pca/:id/agents (live approved publishing-wallet list) -----
+  it('GET /api/pca/:id/agents → 200 with the checksummed agent list', async () => {
+    const a1 = ethers.getAddress('0x' + 'ab'.repeat(20));
+    const a2 = ethers.getAddress('0x' + 'cd'.repeat(20));
+    let enumeratedId: bigint | null = null;
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getPublishingConvictionAccountInfo: async () => ({ owner: '0x' + '9'.repeat(40) }),
+      getPublishingConvictionAgents: async (id: bigint) => { enumeratedId = id; return [a1, a2]; },
+    };
+    const { res, done } = runCtx('GET', '/api/pca/5/agents', agent);
+    await done;
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ accountId: '5', agents: [a1, a2] });
+    expect(enumeratedId).toBe(5n);
+  });
+
+  it('GET /api/pca/:id/agents → 200 { agents: [] } for an existing account with no agents (NOT 404)', async () => {
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getPublishingConvictionAccountInfo: async () => ({ owner: '0x' + '9'.repeat(40) }),
+      getPublishingConvictionAgents: async () => [],
+    };
+    const { res, done } = runCtx('GET', '/api/pca/5/agents', agent);
+    await done;
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).agents).toEqual([]);
+  });
+
+  it('GET /api/pca/:id/agents → 404 for an unknown account on a deployed adapter (existence-checked, never enumerates)', async () => {
+    let enumerated = false;
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getPublishingConvictionAccountInfo: async () => null,
+      getPublishingConvictionAgents: async () => { enumerated = true; return []; },
+    };
+    const { res, done } = runCtx('GET', '/api/pca/9/agents', agent);
+    await done;
+    expect(res.statusCode).toBe(404);
+    expect(enumerated).toBe(false);
+  });
+
+  it('GET /api/pca/:id/agents → 503 when the adapter lacks the PCA surface', async () => {
+    const agent = {
+      supportsPublishingConvictionNft: false,
+      getPublishingConvictionAccountInfo: async () => null,
+    };
+    const { res, done } = runCtx('GET', '/api/pca/1/agents', agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+  });
+
+  it('GET /api/pca/:id/agents → 503 when getInfo works but the enumerator is absent (facade null)', async () => {
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getPublishingConvictionAccountInfo: async () => ({ owner: '0x' + '9'.repeat(40) }),
+      getPublishingConvictionAgents: async () => null,
+    };
+    const { res, done } = runCtx('GET', '/api/pca/1/agents', agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+  });
+
+  it('GET /api/pca/:id/agents → 503 on RPC transport exhaustion (sanitized body)', async () => {
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getPublishingConvictionAccountInfo: async () => {
+        const err: any = new Error(
+          'getAccountInfo failed on all configured RPC endpoints (https://rpc.example/v2/SECRETKEY): boom',
+        );
+        err.code = 'RPC_ENDPOINTS_EXHAUSTED';
+        err.rpcUrls = ['https://rpc.example/v2/SECRETKEY'];
+        throw err;
+      },
+    };
+    const { res, done } = runCtx('GET', '/api/pca/1/agents', agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body).code).toBe('RPC_ENDPOINTS_EXHAUSTED');
+    expect(res.body).not.toContain('SECRETKEY');
+  });
+
+  it('GET /api/pca/:id/agents → 503 PCA_LOOKUP_READ_FAILED on an enumerator CALL_EXCEPTION (NOT 200 [])', async () => {
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getPublishingConvictionAccountInfo: async () => ({ owner: '0x' + '9'.repeat(40) }),
+      getPublishingConvictionAgents: async () => {
+        // getRegisteredAgents is a plain getter that returns [] for an unknown
+        // account, so a CALL_EXCEPTION is a real read failure — the route must
+        // NOT collapse it to a confirmed 200 [] ("no approved wallets").
+        const err: any = new Error('missing revert data (execution reverted)');
+        err.code = 'CALL_EXCEPTION';
+        throw err;
+      },
+    };
+    const { res, done } = runCtx('GET', '/api/pca/5/agents', agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    const body = JSON.parse(res.body);
+    expect(body.code).toBe('PCA_LOOKUP_READ_FAILED');
+    expect(body.agents).toBeUndefined();
+  });
+
+  it('GET /api/pca/:id/agents → 400 for a non-numeric id', async () => {
+    const { res, done } = runCtx('GET', '/api/pca/not-an-id/agents', {});
+    await done;
+    expect(res.statusCode).toBe(400);
+  });
+
+  // ----- GAP-3: GET /api/pca/agent/:address (which PCA funds a wallet) -----
+  it('GET /api/pca/agent/:address → 200 { agent, accountId } for a registered wallet (strict discovery read)', async () => {
+    const addr = ethers.getAddress('0x' + 'ab'.repeat(20));
+    let queried: { a: string; strict: boolean | undefined } | null = null;
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getConvictionAgentAccountId: async (a: string, opts?: { strict?: boolean }) => {
+        queried = { a, strict: opts?.strict };
+        return 7n;
+      },
+    };
+    const { res, done } = runCtx('GET', `/api/pca/agent/${addr}`, agent);
+    await done;
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ agent: addr, accountId: '7' });
+    // Discovery route MUST opt into strict so a read failure can't masquerade as "unregistered".
+    expect(queried).toEqual({ a: addr, strict: true });
+  });
+
+  it('GET /api/pca/agent/:address → 200 { accountId: null } for a genuinely unregistered wallet (0n on a healthy read)', async () => {
+    const addr = ethers.getAddress('0x' + 'cd'.repeat(20));
+    const agent = { supportsPublishingConvictionNft: true, getConvictionAgentAccountId: async () => 0n };
+    const { res, done } = runCtx('GET', `/api/pca/agent/${addr}`, agent);
+    await done;
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ agent: addr, accountId: null });
+  });
+
+  it('GET /api/pca/agent/:address → 400 for a malformed address', async () => {
+    const { res, done } = runCtx('GET', '/api/pca/agent/not-an-address', {});
+    await done;
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('GET /api/pca/agent/:address → 503 (capability gate) when the adapter lacks the PCA surface; lookup not called', async () => {
+    let called = false;
+    const addr = ethers.getAddress('0x' + 'ab'.repeat(20));
+    const agent = {
+      supportsPublishingConvictionNft: false,
+      getConvictionAgentAccountId: async () => { called = true; return 0n; },
+    };
+    const { res, done } = runCtx('GET', `/api/pca/agent/${addr}`, agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    expect(called).toBe(false);
+  });
+
+  it('GET /api/pca/agent/:address → 503 when the facade returns null despite capability', async () => {
+    const addr = ethers.getAddress('0x' + 'ab'.repeat(20));
+    const agent = { supportsPublishingConvictionNft: true, getConvictionAgentAccountId: async () => null };
+    const { res, done } = runCtx('GET', `/api/pca/agent/${addr}`, agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+  });
+
+  it('GET /api/pca/agent/:address → 503 PCA_LOOKUP_READ_FAILED on a CALL_EXCEPTION read failure (NOT 200 null)', async () => {
+    const addr = ethers.getAddress('0x' + 'ab'.repeat(20));
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getConvictionAgentAccountId: async () => {
+        // The strict path rethrows a CALL_EXCEPTION (a real read failure on the
+        // mapping getter) — the route must NOT collapse it to accountId:null.
+        const err: any = new Error('missing revert data (execution reverted)');
+        err.code = 'CALL_EXCEPTION';
+        throw err;
+      },
+    };
+    const { res, done } = runCtx('GET', `/api/pca/agent/${addr}`, agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    const body = JSON.parse(res.body);
+    expect(body.code).toBe('PCA_LOOKUP_READ_FAILED');
+    expect(body.accountId).toBeUndefined();
+  });
+
+  it('GET /api/pca/agent/:address → 503 when strict surfaces NFT-undeployed (PcaUnavailableError)', async () => {
+    const addr = ethers.getAddress('0x' + 'ab'.repeat(20));
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getConvictionAgentAccountId: async () => {
+        const err: any = new Error('DKGPublishingConvictionNFT not deployed on this Hub.');
+        err.code = 'PCA_UNAVAILABLE';
+        throw err;
+      },
+    };
+    const { res, done } = runCtx('GET', `/api/pca/agent/${addr}`, agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+  });
+
+  it('GET /api/pca/agent/:address → 503 on RPC transport exhaustion (sanitized)', async () => {
+    const addr = ethers.getAddress('0x' + 'ab'.repeat(20));
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getConvictionAgentAccountId: async () => {
+        const err: any = new Error(
+          'agentToAccountId failed on all configured RPC endpoints (https://rpc.example/v2/SECRETKEY): boom',
+        );
+        err.code = 'RPC_ENDPOINTS_EXHAUSTED';
+        err.rpcUrls = ['https://rpc.example/v2/SECRETKEY'];
+        throw err;
+      },
+    };
+    const { res, done } = runCtx('GET', `/api/pca/agent/${addr}`, agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body).code).toBe('RPC_ENDPOINTS_EXHAUSTED');
+    expect(res.body).not.toContain('SECRETKEY');
+  });
+
+  // ----- B10: register 409 carries existingAccountId (cross-PCA conflict) -----
+  it('register AgentAlreadyRegistered → 409 with existingAccountId from the decoded revert arg', async () => {
+    const addr = '0x' + '1'.repeat(40);
+    const agent = {
+      registerPublishingConvictionAgent: async () => {
+        const err: any = new Error(`execution reverted: AgentAlreadyRegistered(${addr}, 5)`);
+        // enrichEvmError shape: ethers.Result exposes named + positional access.
+        err.revert = {
+          name: 'AgentAlreadyRegistered',
+          args: Object.assign([addr, 5n], { agent: addr, existingAccountId: 5n }),
+        };
+        throw err;
+      },
+      // Must NOT be consulted when the revert arg is present.
+      getConvictionAgentAccountId: async () => { throw new Error('should not be called'); },
+    };
+    const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
+    await done;
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body)).toEqual({ error: 'AgentAlreadyRegistered', accountId: '1', existingAccountId: '5' });
+  });
+
+  it('register AgentAlreadyRegistered with no revert arg → 409 with existingAccountId via reverse-map fallback', async () => {
+    const addr = '0x' + '1'.repeat(40);
+    const agent = {
+      registerPublishingConvictionAgent: async () => {
+        // RPC stripped the revert data — no err.revert, message-only.
+        throw new Error('execution reverted: AgentAlreadyRegistered');
+      },
+      getConvictionAgentAccountId: async (a: string) => { expect(a).toBe(addr); return 7n; },
+    };
+    const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
+    await done;
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body)).toEqual({ error: 'AgentAlreadyRegistered', accountId: '1', existingAccountId: '7' });
+  });
+
+  it('register AgentAlreadyRegistered with neither arg nor resolvable map → 409 WITHOUT existingAccountId', async () => {
+    const addr = '0x' + '1'.repeat(40);
+    const agent = {
+      registerPublishingConvictionAgent: async () => { throw new Error('execution reverted: AgentAlreadyRegistered'); },
+      getConvictionAgentAccountId: async () => 0n,
+    };
+    const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
+    await done;
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body)).toEqual({ error: 'AgentAlreadyRegistered', accountId: '1' });
+  });
+
+  it('register AgentAlreadyRegistered fallback throwing must NOT mask the 409', async () => {
+    const addr = '0x' + '1'.repeat(40);
+    const agent = {
+      registerPublishingConvictionAgent: async () => { throw new Error('execution reverted: AgentAlreadyRegistered'); },
+      getConvictionAgentAccountId: async () => { throw new Error('reverse-map RPC blip'); },
+    };
+    const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
+    await done;
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body)).toEqual({ error: 'AgentAlreadyRegistered', accountId: '1' });
+  });
 });

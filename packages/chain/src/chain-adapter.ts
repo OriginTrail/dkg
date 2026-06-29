@@ -872,7 +872,7 @@ export interface ChainAdapter {
    * don't model PCA registration can omit the implementation. The
    * publisher gracefully treats `undefined` as "no PCA path active".
    */
-  getConvictionAgentAccountId?(agent: string): Promise<bigint>;
+  getConvictionAgentAccountId?(agent: string, opts?: { strict?: boolean }): Promise<bigint>;
 
   /**
    * Returns the V10 NFT-backed PCA's `lockDurationEpochs` for the given
@@ -914,6 +914,14 @@ export interface ChainAdapter {
   isPublishingConvictionAgent?(accountId: bigint, agent: string): Promise<boolean>;
   settlePublishingConvictionAccount?(accountId: bigint): Promise<TxResult>;
   getPublishingConvictionAccountInfo?(accountId: bigint): Promise<V10PublishingConvictionAccountInfo | null>;
+
+  /**
+   * Enumerate the operational wallets registered as publishing agents on
+   * `accountId` (mirrors `getRegisteredAgents`). Checksummed addresses;
+   * `[]` when the account has none or the NFT is undeployed. Optional —
+   * adapters that omit it surface as "no agent enumeration" (daemon → 503).
+   */
+  getPublishingConvictionAgents?(accountId: bigint): Promise<string[]>;
 
   /**
    * Sign an arbitrary message hash using the node's primary operational key.

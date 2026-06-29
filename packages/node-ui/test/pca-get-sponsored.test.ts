@@ -11,11 +11,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   fetchWalletsBalances: vi.fn(),
   fetchPca: vi.fn(),
+  pcaAgentAccount: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', async (orig) => {
   const actual = await orig<typeof import('../src/ui/api.js')>();
-  return { ...actual, fetchWalletsBalances: mocks.fetchWalletsBalances, fetchPca: mocks.fetchPca };
+  return {
+    ...actual,
+    fetchWalletsBalances: mocks.fetchWalletsBalances,
+    fetchPca: mocks.fetchPca,
+    pcaAgentAccount: mocks.pcaAgentAccount,
+  };
 });
 
 const { GetSponsoredPanel } = await import('../src/ui/pages/conviction/GetSponsoredPanel.js');
@@ -54,6 +60,9 @@ beforeEach(() => {
   // N2 — the store is a module singleton seeded from localStorage; reset both.
   localStorage.clear();
   usePcaStore.setState({ trackedIds: [], createPending: null });
+  // GAP-3 discovery default: nothing discovered (keeps the existing manual-check tests
+  // deterministic — no real fetch). The discovery test overrides this.
+  mocks.pcaAgentAccount.mockResolvedValue({ agent: '', accountId: null });
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
@@ -247,6 +256,27 @@ describe('GetSponsoredPanel', () => {
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
     await waitForText(container, 'Couldn’t load your wallets');
     expect(container.textContent).not.toContain('No operational wallets detected');
+    await unmount();
+  });
+
+  // GAP-3 discovery (#1344) — S6 surfaces the sponsoring PCA found on-chain (untracked
+  // by definition) and pre-fills the manual check WITHOUT auto-tracking (guardrail b).
+  it('GAP-3 — discovers + surfaces the sponsoring PCA, pre-fills the check, never auto-tracks', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0],
+      balances: [{ address: W0, eth: '0.08', trac: '0', symbol: 'TRAC' }],
+      chainId: '84532',
+      rpcUrl: null,
+    });
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: W0, accountId: '7' });
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
+    await waitForText(container, 'already approved on PCA #7');
+    // Discovery must NOT auto-track (guardrail b) — only the explicit Check approval does.
+    expect(usePcaStore.getState().trackedIds).not.toContain('7');
+    // The "Check PCA #7" affordance pre-fills the manual sponsor-id input.
+    const checkDiscovered = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check PCA #7')!;
+    await act(async () => { checkDiscovered.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect((container.querySelector('input[aria-label="Sponsor account id"]') as HTMLInputElement).value).toBe('7');
     await unmount();
   });
 });

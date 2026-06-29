@@ -42,4 +42,36 @@ describe('DKGAgent V10 PCA facade', () => {
     const agent = await makeAgent(new NoChainAdapter());
     expect(agent.supportsPublishingConvictionNft).toBe(false);
   });
+
+  it('getPublishingConvictionAgents delegates to the adapter (checksummed list)', async () => {
+    const owner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', owner.address);
+    const agent = await makeAgent(chain);
+    const created = await agent.createPublishingConvictionAccount(1_000n, 42n);
+    const wallet = ethers.Wallet.createRandom().address;
+    await agent.registerPublishingConvictionAgent(created!.accountId, wallet);
+    expect(await agent.getPublishingConvictionAgents(created!.accountId)).toEqual([ethers.getAddress(wallet)]);
+  });
+
+  it('getPublishingConvictionAgents returns null when the adapter lacks the surface', async () => {
+    const agent = await makeAgent(new NoChainAdapter());
+    expect(await agent.getPublishingConvictionAgents(1n)).toBeNull();
+  });
+
+  it('getConvictionAgentAccountId delegates: registered wallet → its account id, unregistered → 0n', async () => {
+    const owner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', owner.address);
+    const agent = await makeAgent(chain);
+    const created = await agent.createPublishingConvictionAccount(1_000n, 42n);
+    const wallet = ethers.Wallet.createRandom().address;
+    await agent.registerPublishingConvictionAgent(created!.accountId, wallet);
+    expect(await agent.getConvictionAgentAccountId(wallet)).toBe(created!.accountId);
+    // Unregistered wallet → 0n (the chain "not registered" sentinel), not null.
+    expect(await agent.getConvictionAgentAccountId(ethers.Wallet.createRandom().address)).toBe(0n);
+  });
+
+  it('getConvictionAgentAccountId returns null when the adapter lacks the surface', async () => {
+    const agent = await makeAgent(new NoChainAdapter());
+    expect(await agent.getConvictionAgentAccountId(ethers.Wallet.createRandom().address)).toBeNull();
+  });
 });

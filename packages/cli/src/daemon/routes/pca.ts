@@ -70,6 +70,34 @@ function classifyPcaRevert(msg: string): { status: number; error: string } | nul
   return null;
 }
 
+// B10: resolve WHICH account already holds `agentAddr` for an
+// AgentAlreadyRegistered conflict, so the UI can deep-link ("approved on
+// PCA #N — deregister it there first"). Primary: the decoded revert arg —
+// `enrichEvmError` (run on every pcaWrite) sets `err.revert.args` from
+// AgentAlreadyRegistered(agent, existingAccountId). Fallback: some RPCs strip
+// revert data, so resolve via the on-chain reverse map. NEVER throws — a
+// failed lookup must not mask the 409; it just omits `existingAccountId`.
+// Returns the id string only when resolvable and > 0n.
+async function resolveConflictingAccountId(
+  err: any,
+  agentAddr: string,
+  agent: { getConvictionAgentAccountId(agent: string, opts?: { strict?: boolean }): Promise<bigint | null> },
+): Promise<string | undefined> {
+  let existing: bigint | null = null;
+  const rv: any = err?.revert;
+  if (rv?.name === 'AgentAlreadyRegistered') {
+    const raw = rv.args?.existingAccountId ?? rv.args?.[1];
+    if (raw != null) { try { existing = BigInt(raw); } catch { /* unparseable arg */ } }
+  }
+  if (existing == null || existing <= 0n) {
+    try {
+      const viaMap = await agent.getConvictionAgentAccountId(agentAddr);
+      if (viaMap != null && viaMap > 0n) existing = viaMap;
+    } catch { /* reverse-map fallback is best-effort; never mask the 409 */ }
+  }
+  return existing != null && existing > 0n ? existing.toString() : undefined;
+}
+
 function parseAccountId(idStr: string): bigint | null {
   if (!/^\d+$/.test(idStr)) return null;
   try {
@@ -249,7 +277,14 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
         });
       }
       const revert = classifyPcaRevert(msg);
-      if (revert) return jsonResponse(res, revert.status, { error: revert.error, accountId: idStr });
+      if (revert) {
+        const body: Record<string, unknown> = { error: revert.error, accountId: idStr };
+        if (revert.error === 'AgentAlreadyRegistered') {
+          const existingAccountId = await resolveConflictingAccountId(err, agentAddr, agent);
+          if (existingAccountId) body.existingAccountId = existingAccountId;
+        }
+        return jsonResponse(res, revert.status, body);
+      }
       return jsonResponse(res, 500, { error: `registerPublishingConvictionAgent failed: ${msg}` });
     }
   }
@@ -363,6 +398,104 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
       const revert = classifyPcaRevert(msg);
       if (revert) return jsonResponse(res, revert.status, { error: revert.error, accountId: idStr });
       return jsonResponse(res, 500, { error: `settlePublishingConvictionAccount failed: ${msg}` });
+    }
+  }
+
+  // GET /api/pca/agent/:address — reverse-lookup which PCA a wallet is a
+  // registered publishing agent of (GAP-3, for S5/S6 discovery). Returns the
+  // bare on-chain `agentToAccountId` fact (may be an account this node does
+  // NOT track — that is the point for edge discovery); the UI routes the id
+  // through coverage classification, never treating "registered" as "covered".
+  // Two-segment path: no collision with the generic GET :id, but declared
+  // ahead of it for explicit ordering.
+  if (req.method === 'GET' && /^\/api\/pca\/agent\/[^/]+$/.test(path)) {
+    const addr = decodeURIComponent(path.split('/')[4] ?? '');
+    if (!ethers.isAddress(addr)) {
+      return jsonResponse(res, 400, { error: 'address must be a valid 0x-prefixed EVM address' });
+    }
+    // Capability gate (mirror B3 / GET :id): an adapter without the PCA surface
+    // answers 503 — never a 200 a UI would read as "registered nowhere".
+    if (!agent.supportsPublishingConvictionNft) {
+      return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+    }
+    try {
+      // STRICT discovery read: surfaces NFT-undeployed (PcaUnavailableError →
+      // 503) and read failures (CALL_EXCEPTION → 503) instead of the selector's
+      // fail-safe 0n. Otherwise a transient blip would resolve `accountId:null`
+      // = a CONFIRMED "registered nowhere", flipping a covered wallet to a
+      // false-DANGER fall-through in S5 (#9). A 0n from a healthy read is a
+      // genuine "unregistered" → accountId:null.
+      const accountId = await agent.getConvictionAgentAccountId(addr, { strict: true });
+      if (accountId === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      return jsonResponse(res, 200, {
+        agent: ethers.getAddress(addr),
+        accountId: accountId > 0n ? accountId.toString() : null,
+      });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (respondIfChainRpcTransportError(res, err)) return;
+      // A CALL_EXCEPTION on the mapping getter is a real read failure (the
+      // getter never reverts for an unregistered address) → 503 retryable, NOT
+      // a 200 the UI would read as a confirmed "registered nowhere".
+      if (err?.code === 'CALL_EXCEPTION') {
+        return jsonResponse(res, 503, {
+          error: 'PCA agent lookup temporarily unavailable — chain read failed',
+          code: 'PCA_LOOKUP_READ_FAILED',
+        });
+      }
+      return jsonResponse(res, 500, {
+        error: `getConvictionAgentAccountId failed: ${msg}`,
+      });
+    }
+  }
+
+  // GET /api/pca/:id/agents — enumerate the operational wallets registered
+  // as publishing agents on this PCA (B3). Mirrors the GET :id existence
+  // check first, so an unknown account is a 404 (not an empty list): a 200
+  // with `agents: []` means the account EXISTS but has no approved wallets.
+  // Declared before the generic GET :id below (it matches single-segment ids
+  // only, but the explicit ordering keeps the two-segment route unambiguous).
+  if (req.method === 'GET' && /^\/api\/pca\/[^/]+\/agents$/.test(path)) {
+    const idStr = decodeURIComponent(path.split('/')[3] ?? '');
+    const accountId = parseAccountId(idStr);
+    if (accountId === null) {
+      return jsonResponse(res, 400, { error: 'Invalid accountId — must be a non-negative integer' });
+    }
+    try {
+      // Existence gate (mirror GET :id): null = view absent OR account
+      // missing; the facade capability signal disambiguates 503 vs 404.
+      const info = await agent.getPublishingConvictionAccountInfo(accountId);
+      if (info === null) {
+        if (!agent.supportsPublishingConvictionNft) {
+          return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+        }
+        return jsonResponse(res, 404, { error: `Unknown PCA accountId ${idStr}` });
+      }
+      const agents = await agent.getPublishingConvictionAgents(accountId);
+      // getInfo succeeded but the adapter lacks the enumerator → capability gap.
+      if (agents === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      return jsonResponse(res, 200, { accountId: idStr, agents });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (respondIfChainRpcTransportError(res, err)) return;
+      // A CALL_EXCEPTION here is a real enumerator read failure (the route's
+      // existence gate already ran, so the account exists) → 503 retryable, NOT
+      // a 200 [] the UI would read as a confirmed "no approved wallets" (#9).
+      if (err?.code === 'CALL_EXCEPTION') {
+        return jsonResponse(res, 503, {
+          error: 'PCA agent enumeration temporarily unavailable — chain read failed',
+          code: 'PCA_LOOKUP_READ_FAILED',
+        });
+      }
+      const revert = classifyPcaRevert(msg);
+      if (revert) return jsonResponse(res, revert.status, { error: revert.error, accountId: idStr });
+      return jsonResponse(res, 500, {
+        error: `getPublishingConvictionAgents failed: ${msg}`,
+      });
     }
   }
 

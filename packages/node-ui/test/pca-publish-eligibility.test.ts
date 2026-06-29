@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   fetchPca: vi.fn(),
   fetchContextGraphs: vi.fn(),
   fetchCurrentAgent: vi.fn(),
+  pcaAgentAccount: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', async (orig) => {
@@ -23,6 +24,7 @@ vi.mock('../src/ui/api.js', async (orig) => {
     fetchPca: mocks.fetchPca,
     fetchContextGraphs: mocks.fetchContextGraphs,
     fetchCurrentAgent: mocks.fetchCurrentAgent,
+    pcaAgentAccount: mocks.pcaAgentAccount,
   };
 });
 
@@ -56,6 +58,11 @@ beforeEach(() => {
   usePcaStore.setState({ trackedIds: ['7'], createPending: null });
   mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [] });
   mocks.fetchCurrentAgent.mockResolvedValue({ agentDid: 'did:dkg:agent:0x' + '9'.repeat(40) });
+  // GAP-3 Model B default: NO untracked coverage. The augment only fires when a wallet
+  // is cleanly unregistered on every tracked account; this default makes those cases a
+  // CONFIRMED fall-through (accountId: null), preserving the pre-Model-B behavior. Tests
+  // that exercise untracked coverage override this per-wallet.
+  mocks.pcaAgentAccount.mockResolvedValue({ agent: '', accountId: null });
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
@@ -460,6 +467,132 @@ describe('PublishEligibilityChip (S5)', () => {
     const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
     await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     await waitForText(container, 'registration escrow already covers it');
+    await unmount();
+  });
+
+  // GAP-3 Model B (#1344) — a signing wallet covered by an account this node DOESN'T
+  // track is resolved via pcaAgentAccount → fetchPca → classifyCoverage. The three
+  // "deliberate + tested" cases (the lead's required set):
+
+  // (i) wallet → UNTRACKED fundable account ⇒ GREEN, labelled "(not tracked)".
+  it('GAP-3 — wallet on an UNTRACKED fundable account resolves GREEN (fixes the false-fallthrough)', async () => {
+    usePcaStore.setState({ trackedIds: ['7'], createPending: null }); // tracks #7, NOT #9
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('100'));
+    // Unregistered on the tracked account #7; registered + healthy on the untracked #9.
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      const base = makePcaSnapshot({ accountId: id });
+      if (!key) return base;
+      return { ...base, probedKey: { key, registered: id === '9' } };
+    });
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: W0, accountId: '9' });
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'Funded by PCA #9');
+    expect(container.textContent).toContain('not tracked by this node');
+    expect(container.querySelector('[data-verdict="eligible"]')).toBeTruthy();
+    await unmount();
+  });
+
+  // (ii) wallet → UNTRACKED EXPIRED account ⇒ NOT covered (proves registered ⇏ covered):
+  // GAP-3 only DISCOVERS the account; classifyCoverage still decides, so a dead account
+  // can never mint a false green.
+  it('GAP-3 — wallet on an UNTRACKED EXPIRED account is NOT covered (registered ⇏ covered)', async () => {
+    usePcaStore.setState({ trackedIds: ['7'], createPending: null });
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('50')); // has TRAC → amber, not danger
+    const expired = (id: string) =>
+      makePcaSnapshot({ accountId: id, expiresAtTimestamp: Math.floor(Date.now() / 1000) - 86_400 });
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      const base = id === '9' ? expired(id) : makePcaSnapshot({ accountId: id });
+      if (!key) return base;
+      return { ...base, probedKey: { key, registered: id === '9' } };
+    });
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: W0, accountId: '9' });
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'No PCA discount'); // amber fall-through, NOT eligible
+    expect(container.querySelector('[data-verdict="eligible"]')).toBeNull();
+    // The popover names the dead account it discovered (#3 "approved … but swept/expired").
+    const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
+    await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'approved on PCA #9, but it’s swept/expired');
+    await unmount();
+  });
+
+  // (iii) tracked fast-path UNCHANGED — a wallet covered by a TRACKED account resolves
+  // GREEN without the untracked label and WITHOUT a GAP-3 lookup (the augment is skipped).
+  it('GAP-3 — tracked coverage is unchanged (no untracked label, no GAP-3 call)', async () => {
+    usePcaStore.setState({ trackedIds: ['7'], createPending: null });
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('100'));
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...makePcaSnapshot(), probedKey: { key, registered: true } } : makePcaSnapshot(),
+    );
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'Funded by PCA #7');
+    expect(container.textContent).not.toContain('not tracked by this node');
+    expect(mocks.pcaAgentAccount).not.toHaveBeenCalled(); // fast-path covered → augment skipped
+    await unmount();
+  });
+
+  // (iv) the GAP-3 lookup THROWS (transport) → inconclusive (neutral), NEVER DANGER
+  // (#9): a wallet unregistered on the tracked set whose reverse-map read fails can't
+  // be confirmed as a fall-through.
+  it('GAP-3 — pcaAgentAccount throws → unknown (neutral), not DANGER (#9)', async () => {
+    usePcaStore.setState({ trackedIds: ['7'], createPending: null });
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('0')); // no TRAC — the worst case
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      const base = makePcaSnapshot({ accountId: id });
+      return key ? { ...base, probedKey: { key, registered: false } } : base; // unregistered on tracked
+    });
+    mocks.pcaAgentAccount.mockRejectedValue(new Error('agent route down'));
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'PCA status unknown');
+    expect(container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeNull();
+    expect(container.querySelector('[data-verdict="unknown"]')).toBeTruthy();
+    await unmount();
+  });
+
+  // (v) accountId:null is a CONFIRMED "on no PCA" → a definitive fall-through, split by
+  // balance (#6): has-TRAC → amber "pays direct"; no-TRAC → danger "will FAIL". (The
+  // balance signals still populate WalletDetail; only coverage moved to GAP-3.)
+  it('GAP-3 — accountId:null confirms fall-through: has-TRAC → amber, no-TRAC → danger (#6)', async () => {
+    usePcaStore.setState({ trackedIds: ['7'], createPending: null });
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      const base = makePcaSnapshot({ accountId: id });
+      return key ? { ...base, probedKey: { key, registered: false } } : base; // unregistered on tracked
+    });
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: W0, accountId: null }); // on NO account anywhere
+
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('50')); // has TRAC
+    const amber = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(amber.container, 'No PCA discount');
+    expect(amber.container.querySelector('[data-verdict="fallthrough"]')).toBeTruthy();
+    await amber.unmount();
+
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('0')); // no TRAC
+    const danger = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(danger.container, 'Publish will fail');
+    expect(danger.container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeTruthy();
+    await danger.unmount();
+  });
+
+  // C (#1357) — complements (ii): an UNTRACKED account that is LIVE (not expired) but has
+  // NO budget → 'uncovered' via the OTHER reason facet (sawInsolvent), still NOT covered.
+  // Proves registered⇏covered through the out-of-budget branch of the GAP-3 augment too.
+  it('GAP-3 — wallet on an UNTRACKED live-but-zero-budget account is NOT covered (out-of-budget)', async () => {
+    usePcaStore.setState({ trackedIds: ['7'], createPending: null });
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('50')); // has TRAC → amber, not danger
+    const noBudget = (id: string) =>
+      makePcaSnapshot({ accountId: id, topUpBuffer: '0', topUpBufferTrac: '0', baseEpochAllowance: '0' }); // live, zero budget
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      const base = id === '9' ? noBudget(id) : makePcaSnapshot({ accountId: id });
+      if (!key) return base;
+      return { ...base, probedKey: { key, registered: id === '9' } }; // unregistered on tracked #7, registered on untracked #9
+    });
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: W0, accountId: '9' });
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'No PCA discount'); // amber fall-through, NOT eligible
+    expect(container.querySelector('[data-verdict="eligible"]')).toBeNull();
+    const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
+    await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'out of budget'); // the discovered account's reason facet
     await unmount();
   });
 });

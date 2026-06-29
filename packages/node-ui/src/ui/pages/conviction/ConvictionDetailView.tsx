@@ -5,6 +5,7 @@ import {
   fetchWalletsBalances,
   fetchContextGraphs,
   registerContextGraph,
+  listPcaAgents,
   describePcaError,
   isRpcTransportError,
   HttpError,
@@ -16,6 +17,7 @@ import { formatTrac } from '../../lib/formatTrac.js';
 import {
   HealthChip,
   WalletRow,
+  PcaAgentList,
   AddressCrux,
   formatWeiToTrac,
   formatRelativeExpiry,
@@ -157,6 +159,15 @@ function DetailBody({
   const [approveOpen, setApproveOpen] = useState(false);
 
   const { data: cgData } = useFetch(fetchContextGraphs, [], 0);
+  // B3 — the FULL approved publishing-wallet set (chain enumerator). A 404/503/error
+  // degrades to the P0 probe-only "this node's wallets" view below (no crash).
+  const { data: agentsData, loading: agentsLoading, refresh: refreshAgents } =
+    useFetch(() => listPcaAgents(accountId), [accountId]);
+  // A (#1357) — useFetch RETAINS the prior account's data on a failed re-fetch, so after
+  // switching PCAs a failed listPcaAgents for the NEW account would render the PREVIOUS
+  // account's wallets under the new header. The response echoes its accountId; only treat
+  // the data as current when it matches (both decimal id strings). Otherwise loading/degrade.
+  const agentsForThis = agentsData && agentsData.accountId === accountId ? agentsData : null;
   // O3 (corrects N3) — bind == register an UNREGISTERED CG with a PCA, forcing the
   // CURATED publish policy at registration (the backend governs bindability by
   // PUBLISH policy, not access policy — public-read + curated-publish is supported).
@@ -263,6 +274,7 @@ function DetailBody({
       setRemoveState({ busy: false, error: null, result: { message: `Removed ${addr}.` } });
       setConfirmRemove(null);
       refresh();
+      refreshAgents();
     } catch (err) {
       setRemoveState({ busy: false, error: describePcaError(err, { accountId })?.message ?? (err as Error)?.message ?? 'Remove failed.', result: null });
     }
@@ -370,29 +382,64 @@ function DetailBody({
         </div>
         {probeResult && <p className="v10-pca-detail-hint" role="status">{probeResult}</p>}
 
-        <p className="v10-pca-detail-subhead">This node’s wallets:</p>
-        <div className="v10-pca-detail-agentlist" data-testid="pca-agent-list">
-          {wallets.map((w) => (
-            <WalletProbeRow
-              key={w}
-              accountId={accountId}
-              wallet={w}
-              ownerIsPrimary={ownerIsPrimary}
-              ownerTitle={ownerTitle}
-              confirming={confirmRemove === w}
-              onAskRemove={() => setConfirmRemove(w)}
-              onCancelRemove={() => setConfirmRemove(null)}
-              onConfirmRemove={() => runRemove(w)}
-              removeBusy={removeState.busy}
-            />
-          ))}
-          {wallets.length === 0 && <p className="v10-pca-handshake-empty">No operational wallets on this node.</p>}
-        </div>
+        {agentsLoading && !agentsForThis ? (
+          <p className="v10-pca-detail-hint" role="status">Loading approved wallets…</p>
+        ) : agentsForThis ? (
+          // B3 — the FULL approved set (chain enumerator); the count-only caveat is retired.
+          <>
+            <p className="v10-pca-detail-subhead">Approved publishing wallets:</p>
+            {agentsForThis.agents.length > 0 ? (
+              <PcaAgentList
+                agents={agentsForThis.agents}
+                nodeWallets={wallets}
+                ownerIsPrimary={ownerIsPrimary}
+                ownerTitle={ownerTitle}
+                confirmRemove={confirmRemove}
+                onAskRemove={(a) => setConfirmRemove(a)}
+                onCancelRemove={() => setConfirmRemove(null)}
+                onConfirmRemove={(a) => runRemove(a)}
+                removeBusy={removeState.busy}
+                explorer={explorer}
+              />
+            ) : (
+              <div className="v10-pca-detail-agentlist" data-testid="pca-agent-list">
+                <p className="v10-pca-handshake-empty">No approved publishing wallets yet.</p>
+              </div>
+            )}
+          </>
+        ) : (
+          // Graceful degrade (B3 route absent / 503 / a 404 race after the snapshot
+          // loaded): the P0 probe-only view of THIS node's wallets + the count-only caveat.
+          <>
+            <p className="v10-pca-detail-subhead">This node’s wallets:</p>
+            <div className="v10-pca-detail-agentlist" data-testid="pca-agent-list">
+              {wallets.map((w) => (
+                <WalletProbeRow
+                  key={w}
+                  accountId={accountId}
+                  wallet={w}
+                  ownerIsPrimary={ownerIsPrimary}
+                  ownerTitle={ownerTitle}
+                  confirming={confirmRemove === w}
+                  onAskRemove={() => setConfirmRemove(w)}
+                  onCancelRemove={() => setConfirmRemove(null)}
+                  onConfirmRemove={() => runRemove(w)}
+                  removeBusy={removeState.busy}
+                />
+              ))}
+              {wallets.length === 0 && <p className="v10-pca-handshake-empty">No operational wallets on this node.</p>}
+            </div>
+            <p className="v10-pca-overview-caveat">
+              ⓘ The chain exposes how many wallets are approved, not the full list — only this node’s
+              wallets and any you probe are shown here.
+            </p>
+          </>
+        )}
         {removeState.error && <p className="v10-modal-error" role="alert">{removeState.error}</p>}
-        <p className="v10-pca-overview-caveat">
-          ⓘ The chain exposes how many wallets are approved, not the full list — only this node’s
-          wallets and any you probe are shown here.
-        </p>
+        {/* D2 (#1357) — surface the deregister success (was a dead state). */}
+        {removeState.result && (
+          <p className="v10-pca-detail-result" role="status" data-testid="pca-remove-result">{removeState.result.message}</p>
+        )}
         <button
           type="button"
           className="v10-pca-card-btn primary"
@@ -467,7 +514,7 @@ function DetailBody({
         <ApproveWalletsModal
           accountId={accountId}
           initialMode="self"
-          onClose={() => { setApproveOpen(false); refresh(); }}
+          onClose={() => { setApproveOpen(false); refresh(); refreshAgents(); }}
         />
       )}
     </div>
@@ -502,16 +549,20 @@ function WalletProbeRow({
           registered === true ? (
             confirming ? (
               <span className="v10-pca-agent-confirm">
-                <span>Publishes from this wallet will pay the direct cost (and revert if it holds no TRAC). Remove?</span>
-                <button type="button" className="v10-pca-card-btn" data-testid="pca-deregister-btn" onClick={onConfirmRemove} disabled={removeBusy}>
+                {/* D (#1357) — these degrade-path rows are ALL this node's own wallets, so
+                    name that consequence explicitly (deregistering your own signer degrades
+                    your own publishes). */}
+                <span>This is one of this node’s own signing wallets — its publishes will pay the direct cost (and revert if it holds no TRAC). Remove?</span>
+                <button type="button" className="v10-pca-card-btn" data-testid="pca-deregister-btn" aria-label={`Confirm removing ${wallet}`} onClick={onConfirmRemove} disabled={removeBusy}>
                   {removeBusy ? 'Removing…' : 'Yes, remove'}
                 </button>
-                <button type="button" className="v10-pca-card-btn" onClick={onCancelRemove} disabled={removeBusy}>Cancel</button>
+                <button type="button" className="v10-pca-card-btn" aria-label={`Cancel removing ${wallet}`} onClick={onCancelRemove} disabled={removeBusy}>Cancel</button>
               </span>
             ) : (
               <button
                 type="button"
                 className="v10-pca-card-btn"
+                aria-label={`Remove ${wallet}`}
                 onClick={onAskRemove}
                 disabled={!ownerIsPrimary}
                 title={ownerTitle}
