@@ -213,6 +213,31 @@ describe('NotificationsPane — interaction + a11y (happy-dom)', () => {
     expect(buttonByText(/Mark all read/)).toBeUndefined();
   });
 
+  // B8 (P2) — the CONFIRMED PCA discount row renders the derived discount + saved amount
+  // + the account; informational + non-actionable (no approve/deny).
+  it('B8 — renders the confirmed PCA discount row (−% + saved + PCA #N)', () => {
+    const covered: ActivityItem = {
+      kind: 'pca_cost_covered',
+      id: 12,
+      cgId: 'cg:d',
+      covered: {
+        accountId: '7', epoch: 1284,
+        baseCost: '1000000000000000000000', discountedCost: '700000000000000000000', // 1000 → 700 TRAC ⇒ 30%
+        drawnFromEpoch: '700000000000000000000', drawnFromTopUp: '0',
+      },
+      publisherAddress: '0xpub0000000000000000000000000000000000pub',
+      ts: 1,
+      read: false,
+    };
+    render(makeFeed({ unread: 1, hasInformationalUnread: true, activity: [covered] }));
+    expect(container.textContent).toContain('Discount applied');
+    expect(container.textContent).toContain('30%');
+    expect(container.textContent).toContain('PCA #7');
+    expect(container.textContent).toContain('300'); // saved 300 TRAC
+    // Informational — no Approve/Deny actions on this row.
+    expect(buttonByText(/^Approve$/)).toBeUndefined();
+  });
+
   it('M9 frontend re-surface: a digest renders unread again after a load() returns read=0 for its digestKey', () => {
     const digest = (read: boolean): ActivityItem => ({
       kind: 'digest', id: 'activity:cg:a:promoted:42', cgId: 'cg:a',

@@ -14,7 +14,7 @@
 import React from 'react';
 import type { UseNotificationsFeed } from '../../hooks/useNotificationsFeed.js';
 import type { PcaAlert } from '../../hooks/usePcaAlerts.js';
-import { JoinRequestRow, ActivityDigestRow, ConfirmationRow } from './rows.js';
+import { JoinRequestRow, ActivityDigestRow, ConfirmationRow, PcaCostCoveredRow } from './rows.js';
 
 export interface NotificationsPaneProps {
   feed: UseNotificationsFeed;
@@ -172,6 +172,9 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
                         item={item}
                         onOpen={(cgId) => openAndMarkSeen(cgId, item.id)}
                       />
+                    ) : item.kind === 'pca_cost_covered' ? (
+                      // B8 (P2) — confirmed discount; informational, non-clickable.
+                      <PcaCostCoveredRow key={item.id} item={item} />
                     ) : (
                       <ConfirmationRow
                         key={item.id}

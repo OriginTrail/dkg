@@ -3337,11 +3337,27 @@ export interface AssertionActivityNotif extends NotifWireBase {
   };
 }
 
+/** B8 confirmed-discount bell row (P2) — a server-confirmed on-chain CostCovered
+ *  draw on one of THIS node's publishing wallets (wallet-scoped, mirrors
+ *  join_approved). Informational; counts toward the unread badge. `meta` reuses
+ *  {@link ConvictionCostCovered} plus the publishing wallet. `contextGraphId` is
+ *  optional (the locked wire shape). The P2 source is self-publish capture;
+ *  sponsored/owner-side draws are P3. */
+export interface PcaCostCoveredNotif {
+  type: 'pca_cost_covered';
+  id: number | string;
+  ts: number;
+  read: 0 | 1;
+  contextGraphId?: string;
+  meta: ConvictionCostCovered & { publisherAddress: string };
+}
+
 export type NotifWire =
   | JoinRequestNotif
   | JoinApprovedNotif
   | JoinRejectedNotif
-  | AssertionActivityNotif;
+  | AssertionActivityNotif
+  | PcaCostCoveredNotif;
 
 export interface NotificationsFeedResponse {
   /** Already scoped, type-allowlisted, activity-collapsed, join_request
