@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useFetch } from '../hooks.js';
 import { fetchWalletsBalances, fetchPca, fetchContextGraphs, fetchCurrentAgent, pcaAgentAccount } from '../api.js';
 import { usePcaStore } from '../stores/pca.js';
@@ -7,6 +7,53 @@ import { classifyCoverage } from '../pca/coverage.js';
 import type { PcaVerdict } from '../components/Pca/EligibilityVerdictBanner.js';
 
 const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+
+/**
+ * Flag-2 (#1344) — session-level NEGATIVE cache for the publish-surface self-heal:
+ * signing wallets (lowercased) CONFIRMED to have NO agent-on PCA this session. The
+ * self-heal (below) discovers agent-on accounts by reverse-looking-up every wallet
+ * (`pcaAgentAccount`); without this, a non-PCA node would re-run those probes on
+ * every eligibility eval (per chip × per CG × per 30s poll). With it, a node that
+ * discovers nothing pays ~one probe per wallet per session. ONLY confirmed negatives
+ * are cached — a transport error stays uncached (so it retries) and a freshly-
+ * sponsored wallet is still picked up on a later poll until it caches negative.
+ */
+const noAgentAccount = new Set<string>();
+
+/** TEST-ONLY — clear the session negative cache between cases. */
+export function __resetAgentDiscoveryCache(): void {
+  noAgentAccount.clear();
+}
+
+/**
+ * Flag-2 self-heal discovery — the account ids this node is an approved AGENT on,
+ * reverse-resolved from its signing wallets. Returns the confirmed agent-on ids
+ * (deduped); skips wallets already known-negative this session and records new
+ * confirmed negatives. Health is NOT consulted here (a wallet is approved on at
+ * most one account regardless of liveness); the verdict still runs through
+ * `classifyCoverage` once the id is tracked, so this never asserts coverage (#9).
+ */
+async function discoverAgentAccounts(): Promise<string[]> {
+  const wb = await fetchWalletsBalances().catch(() => null);
+  const wallets = wb?.wallets ?? [];
+  const found = new Set<string>();
+  await Promise.all(
+    wallets.map(async (w) => {
+      const key = w.toLowerCase();
+      if (noAgentAccount.has(key)) return;
+      const acct = await pcaAgentAccount(w).catch(() => undefined);
+      // #9 — a REJECTED probe is "couldn't read", not a confirmed no-account: leave it
+      // uncached so the next poll retries (never silently suppresses a real sponsorship).
+      if (acct === undefined) return;
+      if (acct.accountId == null) {
+        noAgentAccount.add(key); // confirmed: this wallet is an agent on no PCA
+        return;
+      }
+      found.add(acct.accountId);
+    }),
+  );
+  return [...found];
+}
 
 interface WalletDetail {
   wallet: string;
@@ -65,6 +112,15 @@ export interface PublishEligibility {
   wallets: WalletDetail[];
 }
 
+/** Internal fetch payload. `discover` carries the flag-2 self-heal ids (only on the
+ *  nothing-tracked pass) for the auto-track effect to consume. */
+interface EligData {
+  wallets: WalletDetail[];
+  ownerPublish: boolean;
+  resolved: boolean;
+  discover?: string[];
+}
+
 /**
  * S5 publish-eligibility engine (UX §5.5). For a publish into `contextGraphId`,
  * probes every operational wallet × every tracked PCA and resolves the
@@ -81,10 +137,21 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
   const trackedIds = usePcaStore((s) => s.trackedIds);
   const idsKey = trackedIds.join(',');
 
-  const { data, loading } = useFetch(
+  const trackAccount = usePcaStore((s) => s.trackAccount);
+
+  const { data, loading } = useFetch<EligData>(
     async () => {
       if (trackedIds.length === 0) {
-        return { wallets: [] as WalletDetail[], ownerPublish: false, resolved: false };
+        // Flag-2 self-heal (#1344) — nothing tracked, but this node may be a sponsored
+        // AGENT on a PCA it never explicitly tracked (a pure-edge node that publishes
+        // from the project view without ever opening the conviction tab, so GAP-1's
+        // conviction-tab discovery never ran). Discover the agent-on accounts from the
+        // signing wallets and auto-track them (durable) — the chip then resolves on the
+        // next pass via the normal tracked path. #9: auto-track only makes the account
+        // RESOLVED; the verdict still runs classifyCoverage (registered ⇏ covered), so
+        // this fixes the false fall-through without ever minting a false green.
+        const discover = await discoverAgentAccounts();
+        return { wallets: [], ownerPublish: false, resolved: false, discover };
       }
       const wb = await fetchWalletsBalances().catch(() => null);
       const wallets = wb?.wallets ?? [];
@@ -209,6 +276,17 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
     [idsKey, contextGraphId],
     intervalMs,
   );
+
+  // Flag-2 — auto-track the discovered agent-on accounts (the durable publish-surface
+  // self-heal). Idempotent: trackAccount skips already-tracked ids, and once an id is
+  // tracked `trackedIds` is non-empty so the discovery branch never re-runs (the normal
+  // tracked path takes over) — no loop. `discover` is undefined on the normal pass.
+  const discover = data?.discover;
+  useEffect(() => {
+    for (const id of discover ?? []) {
+      if (!trackedIds.includes(id)) trackAccount(id);
+    }
+  }, [discover, trackedIds, trackAccount]);
 
   return useMemo<PublishEligibility>(() => {
     const wallets = data?.wallets ?? [];
