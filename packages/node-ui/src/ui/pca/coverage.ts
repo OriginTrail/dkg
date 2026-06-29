@@ -5,7 +5,7 @@
 // the previously-inlined copies. NOT the precise mid-epoch `remainingAllowance`
 // check — that's the P2 extended snapshot (#1349).
 
-import { healthForSnapshot } from './health.js';
+import { isPcaExpired } from './health.js';
 import type { PcaSnapshot, PcaProbedKey } from '../api.js';
 
 /** True when a wei decimal-string is a positive amount (> 0). Tolerant of
@@ -19,13 +19,19 @@ export function bigGt0(wei: string | undefined): boolean {
   }
 }
 
-/** The account can't cover a publish because it's expired or fully swept. */
+/**
+ * The account can't cover a publish because it's expired or fully swept. Built from
+ * the shared `isPcaExpired` liveness primitive (NOT the full health taxonomy) so
+ * spendability doesn't depend on cap-near/expiring/agentCount. Byte-identical to the
+ * old `healthForSnapshot`-derived form: `health==='expired' ⟺ isPcaExpired`, and
+ * `health==='swept' ⟺ !isPcaExpired && fullySwept` (swept is checked after expired),
+ * so `expired || swept = isPcaExpired || fullySwept`.
+ */
 export function isPcaDead(
-  snap: Pick<PcaSnapshot, 'expiresAtTimestamp' | 'fullySwept' | 'agentCount'>,
+  snap: Pick<PcaSnapshot, 'expiresAtTimestamp' | 'fullySwept'>,
   nowSec?: number,
 ): boolean {
-  const h = healthForSnapshot(snap, nowSec);
-  return h === 'expired' || h === 'swept';
+  return isPcaExpired(snap, nowSec) || !!snap.fullySwept;
 }
 
 /** The account has budget capacity (top-up buffer OR per-epoch allowance). The coarse
@@ -40,7 +46,7 @@ export function hasPcaBudget(snap: Pick<PcaSnapshot, 'topUpBuffer' | 'baseEpochA
  * eligibility breakdown (dead vs out-of-budget) reuses the SAME rules.
  */
 export function isPcaSpendable(
-  snap: Pick<PcaSnapshot, 'expiresAtTimestamp' | 'fullySwept' | 'agentCount' | 'topUpBuffer' | 'baseEpochAllowance'>,
+  snap: Pick<PcaSnapshot, 'expiresAtTimestamp' | 'fullySwept' | 'topUpBuffer' | 'baseEpochAllowance'>,
   nowSec?: number,
 ): boolean {
   return !isPcaDead(snap, nowSec) && hasPcaBudget(snap);

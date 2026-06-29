@@ -22,6 +22,20 @@ export const PCA_CAP_NEAR_THRESHOLD = 90;
 export const PCA_EXPIRING_SOON_SECONDS = 7 * 24 * 60 * 60;
 
 /**
+ * The SINGLE expiry (liveness) source — the one check `healthForSnapshot`'s
+ * `'expired'` state and coverage's `isPcaDead` both consume, so coverage liveness
+ * doesn't have to drag in the whole health taxonomy. `expiresAtTimestamp` 0 / absent
+ * means "no lock period" → never expired.
+ */
+export function isPcaExpired(
+  snap: Pick<PcaSnapshot, 'expiresAtTimestamp'>,
+  nowSec: number = Math.floor(Date.now() / 1000),
+): boolean {
+  const { expiresAtTimestamp } = snap;
+  return typeof expiresAtTimestamp === 'number' && expiresAtTimestamp > 0 && nowSec >= expiresAtTimestamp;
+}
+
+/**
  * The SINGLE source of truth for deriving a PCA's `HealthChip` state from its
  * snapshot — used by S1/S3/S5 so the derivation can't drift across screens.
  * Precedence (highest first), per the lead's contract:
@@ -38,7 +52,7 @@ export function healthForSnapshot(
 ): PcaHealthState {
   const { expiresAtTimestamp, fullySwept, agentCount } = snapshot;
   const hasExpiry = typeof expiresAtTimestamp === 'number' && expiresAtTimestamp > 0;
-  if (hasExpiry && nowSec >= expiresAtTimestamp) return 'expired';
+  if (isPcaExpired(snapshot, nowSec)) return 'expired';
   if (fullySwept) return 'swept';
   if (typeof agentCount === 'number' && agentCount >= PCA_CAP_NEAR_THRESHOLD) return 'cap-near';
   if (hasExpiry && expiresAtTimestamp - nowSec <= PCA_EXPIRING_SOON_SECONDS) return 'expiring';
