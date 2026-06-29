@@ -81,6 +81,32 @@ describe('PcaAgentList (B3)', () => {
     await r2.unmount();
   });
 
+  // D (#1357) — removing one of THIS node's own wallets names that consequence;
+  // removing an external approved wallet keeps the generic copy.
+  it('confirm names "this node’s own signing wallets" only for node-owned rows', async () => {
+    const own = await render(React.createElement(PcaAgentList, { ...baseProps, confirmRemove: NODE }));
+    expect(own.container.textContent).toContain('one of this node’s own signing wallets');
+    await own.unmount();
+
+    const ext = await render(React.createElement(PcaAgentList, { ...baseProps, confirmRemove: EXTERNAL }));
+    expect(ext.container.textContent).not.toContain('one of this node’s own signing wallets');
+    expect(ext.container.textContent).toContain('will pay the direct cost'); // generic copy
+    await ext.unmount();
+  });
+
+  // D3 (#1357 a11y) — trailing controls carry a per-address accessible name.
+  it('trailing Remove / Confirm / Cancel buttons have per-address aria-labels', async () => {
+    const idle = await render(React.createElement(PcaAgentList, { ...baseProps }));
+    expect(idle.container.querySelector(`button[aria-label="Remove ${NODE}"]`)).toBeTruthy();
+    expect(idle.container.querySelector(`button[aria-label="Remove ${EXTERNAL}"]`)).toBeTruthy();
+    await idle.unmount();
+
+    const confirming = await render(React.createElement(PcaAgentList, { ...baseProps, confirmRemove: NODE }));
+    expect(confirming.container.querySelector(`button[aria-label="Confirm removing ${NODE}"]`)).toBeTruthy();
+    expect(confirming.container.querySelector(`button[aria-label="Cancel removing ${NODE}"]`)).toBeTruthy();
+    await confirming.unmount();
+  });
+
   it('renders a per-address explorer link only when an explorer base is provided', async () => {
     const r1 = await render(React.createElement(PcaAgentList, { ...baseProps, explorer: 'https://exp' }));
     const link = r1.container.querySelector('a.v10-pca-card-explorer') as HTMLAnchorElement;

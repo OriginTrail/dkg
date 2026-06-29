@@ -56,17 +56,24 @@ export function PcaAgentList({
               trailing={
                 confirming ? (
                   <span className="v10-pca-agent-confirm">
-                    <span>Publishes from this wallet will pay the direct cost (and revert if it holds no TRAC). Remove?</span>
+                    {/* D (#1357) — when the wallet belongs to THIS node, removing it degrades
+                        this node's OWN publishes; name that explicitly vs a generic external wallet. */}
+                    <span>
+                      {isNode
+                        ? 'This is one of this node’s own signing wallets — its publishes will pay the direct cost (and revert if it holds no TRAC). Remove?'
+                        : 'Publishes from this wallet will pay the direct cost (and revert if it holds no TRAC). Remove?'}
+                    </span>
                     <button
                       type="button"
                       className="v10-pca-card-btn"
                       data-testid="pca-deregister-btn"
+                      aria-label={`Confirm removing ${addr}`}
                       onClick={() => onConfirmRemove(addr)}
                       disabled={removeBusy}
                     >
                       {removeBusy ? 'Removing…' : 'Yes, remove'}
                     </button>
-                    <button type="button" className="v10-pca-card-btn" onClick={onCancelRemove} disabled={removeBusy}>
+                    <button type="button" className="v10-pca-card-btn" aria-label={`Cancel removing ${addr}`} onClick={onCancelRemove} disabled={removeBusy}>
                       Cancel
                     </button>
                   </span>
@@ -86,6 +93,7 @@ export function PcaAgentList({
                     <button
                       type="button"
                       className="v10-pca-card-btn"
+                      aria-label={`Remove ${addr}`}
                       onClick={() => onAskRemove(addr)}
                       disabled={!ownerIsPrimary}
                       title={ownerTitle}

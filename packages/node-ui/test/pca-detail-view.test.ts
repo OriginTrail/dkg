@@ -368,9 +368,28 @@ describe('ConvictionDetailView B3 — live approved-wallet table', () => {
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
     await waitForText(container, 'Approved publishing wallets:');
     await act(async () => { findBtn(container, 'Remove').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    await waitForText(container, 'will pay the direct cost');
+    // D (#1357) — W0 is this node's own wallet, so the confirm names that consequence.
+    await waitForText(container, 'one of this node’s own signing wallets');
     await act(async () => { container.querySelector('[data-testid="pca-deregister-btn"]')!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     expect(mocks.pcaRemoveAgent).toHaveBeenCalledWith('7', W0);
+    // D2 (#1357) — the deregister success now renders (was a dead state).
+    await waitForText(container, 'Removed');
+    expect(container.querySelector('[data-testid="pca-remove-result"]')).toBeTruthy();
+    await unmount();
+  });
+
+  // A (#1357) — a failed listPcaAgents for the CURRENT account must NOT render a
+  // previous account's list. The guard keys the full-list render on agentsData.accountId
+  // === accountId; a mismatch (stale) falls through to the probe-only degrade.
+  it('A — stale agentsData (different accountId) does NOT render under the new header (degrades)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
+    // The list resolves for a DIFFERENT account than the one being viewed (#7).
+    mocks.listPcaAgents.mockResolvedValue({ accountId: '999', agents: [EXTERNAL] });
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    // Falls to the degrade (probe-only this-node view + caveat), NOT the stale list.
+    await waitForText(container, 'This node’s wallets:');
+    expect(container.textContent).toContain('not the full list'); // degrade caveat
+    expect(container.textContent).not.toContain(EXTERNAL.slice(0, 10)); // the stale wallet is NOT shown
     await unmount();
   });
 });
