@@ -366,6 +366,45 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
     }
   }
 
+  // GET /api/pca/:id/agents — enumerate the operational wallets registered
+  // as publishing agents on this PCA (B3). Mirrors the GET :id existence
+  // check first, so an unknown account is a 404 (not an empty list): a 200
+  // with `agents: []` means the account EXISTS but has no approved wallets.
+  // Declared before the generic GET :id below (it matches single-segment ids
+  // only, but the explicit ordering keeps the two-segment route unambiguous).
+  if (req.method === 'GET' && /^\/api\/pca\/[^/]+\/agents$/.test(path)) {
+    const idStr = decodeURIComponent(path.split('/')[3] ?? '');
+    const accountId = parseAccountId(idStr);
+    if (accountId === null) {
+      return jsonResponse(res, 400, { error: 'Invalid accountId — must be a non-negative integer' });
+    }
+    try {
+      // Existence gate (mirror GET :id): null = view absent OR account
+      // missing; the facade capability signal disambiguates 503 vs 404.
+      const info = await agent.getPublishingConvictionAccountInfo(accountId);
+      if (info === null) {
+        if (!agent.supportsPublishingConvictionNft) {
+          return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+        }
+        return jsonResponse(res, 404, { error: `Unknown PCA accountId ${idStr}` });
+      }
+      const agents = await agent.getPublishingConvictionAgents(accountId);
+      // getInfo succeeded but the adapter lacks the enumerator → capability gap.
+      if (agents === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      return jsonResponse(res, 200, { accountId: idStr, agents });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (respondIfChainRpcTransportError(res, err)) return;
+      const revert = classifyPcaRevert(msg);
+      if (revert) return jsonResponse(res, revert.status, { error: revert.error, accountId: idStr });
+      return jsonResponse(res, 500, {
+        error: `getPublishingConvictionAgents failed: ${msg}`,
+      });
+    }
+  }
+
   // GET /api/pca/:id — V10 conviction NFT snapshot. Optional ?key=0x...
   // probes whether that address is a registered agent.
   if (req.method === 'GET' && /^\/api\/pca\/[^/]+$/.test(path)) {

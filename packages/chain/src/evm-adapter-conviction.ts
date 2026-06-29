@@ -380,4 +380,33 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       throw err;
     }
   }
+
+  /**
+   * Enumerate every publishing agent (operational wallet) currently
+   * registered to `accountId`, mirroring
+   * `PublishingConvictionStorage.getRegisteredAgents` (surfaced via the
+   * `DKGPublishingConvictionNFT` wrapper). The on-chain view already
+   * returns checksummed addresses; normalize defensively so callers (and
+   * the daemon's approved-wallet table) always get EIP-55 form.
+   *
+   * Returns `[]` when the NFT contract is not deployed, the id is
+   * non-positive, or the chain call reverts (e.g. unknown account). The
+   * daemon route runs its own existence check via
+   * `getPublishingConvictionAccountInfo` first, so once that passes a `[]`
+   * here means "account exists, no agents registered".
+   */
+  async getPublishingConvictionAgents(accountId: bigint): Promise<string[]> {
+    await this.init();
+    if (!this.contracts.dkgPublishingConvictionNFT) return [];
+    if (accountId <= 0n) return [];
+    try {
+      const raw: string[] = await this.readContract(
+        this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.getRegisteredAgents', 'getRegisteredAgents', accountId,
+      );
+      return (raw ?? []).map((a) => ethers.getAddress(a));
+    } catch (err: any) {
+      if (err?.code === 'CALL_EXCEPTION') return [];
+      throw err;
+    }
+  }
 }

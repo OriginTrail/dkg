@@ -916,6 +916,14 @@ export interface ChainAdapter {
   getPublishingConvictionAccountInfo?(accountId: bigint): Promise<V10PublishingConvictionAccountInfo | null>;
 
   /**
+   * Enumerate the operational wallets registered as publishing agents on
+   * `accountId` (mirrors `getRegisteredAgents`). Checksummed addresses;
+   * `[]` when the account has none or the NFT is undeployed. Optional —
+   * adapters that omit it surface as "no agent enumeration" (daemon → 503).
+   */
+  getPublishingConvictionAgents?(accountId: bigint): Promise<string[]>;
+
+  /**
    * Sign an arbitrary message hash using the node's primary operational key.
    * Used for self-signing as receiver or context graph participant.
    */

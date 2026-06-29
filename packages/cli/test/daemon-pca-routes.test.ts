@@ -575,4 +575,92 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(probe.registered).toBe(true);
     expect(probe).not.toHaveProperty('authorized');
   });
+
+  // ----- B3: GET /api/pca/:id/agents (live approved publishing-wallet list) -----
+  it('GET /api/pca/:id/agents → 200 with the checksummed agent list', async () => {
+    const a1 = ethers.getAddress('0x' + 'ab'.repeat(20));
+    const a2 = ethers.getAddress('0x' + 'cd'.repeat(20));
+    let enumeratedId: bigint | null = null;
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getPublishingConvictionAccountInfo: async () => ({ owner: '0x' + '9'.repeat(40) }),
+      getPublishingConvictionAgents: async (id: bigint) => { enumeratedId = id; return [a1, a2]; },
+    };
+    const { res, done } = runCtx('GET', '/api/pca/5/agents', agent);
+    await done;
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ accountId: '5', agents: [a1, a2] });
+    expect(enumeratedId).toBe(5n);
+  });
+
+  it('GET /api/pca/:id/agents → 200 { agents: [] } for an existing account with no agents (NOT 404)', async () => {
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getPublishingConvictionAccountInfo: async () => ({ owner: '0x' + '9'.repeat(40) }),
+      getPublishingConvictionAgents: async () => [],
+    };
+    const { res, done } = runCtx('GET', '/api/pca/5/agents', agent);
+    await done;
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).agents).toEqual([]);
+  });
+
+  it('GET /api/pca/:id/agents → 404 for an unknown account on a deployed adapter (existence-checked, never enumerates)', async () => {
+    let enumerated = false;
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getPublishingConvictionAccountInfo: async () => null,
+      getPublishingConvictionAgents: async () => { enumerated = true; return []; },
+    };
+    const { res, done } = runCtx('GET', '/api/pca/9/agents', agent);
+    await done;
+    expect(res.statusCode).toBe(404);
+    expect(enumerated).toBe(false);
+  });
+
+  it('GET /api/pca/:id/agents → 503 when the adapter lacks the PCA surface', async () => {
+    const agent = {
+      supportsPublishingConvictionNft: false,
+      getPublishingConvictionAccountInfo: async () => null,
+    };
+    const { res, done } = runCtx('GET', '/api/pca/1/agents', agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+  });
+
+  it('GET /api/pca/:id/agents → 503 when getInfo works but the enumerator is absent (facade null)', async () => {
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getPublishingConvictionAccountInfo: async () => ({ owner: '0x' + '9'.repeat(40) }),
+      getPublishingConvictionAgents: async () => null,
+    };
+    const { res, done } = runCtx('GET', '/api/pca/1/agents', agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+  });
+
+  it('GET /api/pca/:id/agents → 503 on RPC transport exhaustion (sanitized body)', async () => {
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getPublishingConvictionAccountInfo: async () => {
+        const err: any = new Error(
+          'getAccountInfo failed on all configured RPC endpoints (https://rpc.example/v2/SECRETKEY): boom',
+        );
+        err.code = 'RPC_ENDPOINTS_EXHAUSTED';
+        err.rpcUrls = ['https://rpc.example/v2/SECRETKEY'];
+        throw err;
+      },
+    };
+    const { res, done } = runCtx('GET', '/api/pca/1/agents', agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body).code).toBe('RPC_ENDPOINTS_EXHAUSTED');
+    expect(res.body).not.toContain('SECRETKEY');
+  });
+
+  it('GET /api/pca/:id/agents → 400 for a non-numeric id', async () => {
+    const { res, done } = runCtx('GET', '/api/pca/not-an-id/agents', {});
+    await done;
+    expect(res.statusCode).toBe(400);
+  });
 });

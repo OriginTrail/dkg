@@ -88,6 +88,32 @@ describe('V10 Publishing Conviction NFT — chain-adapter lifecycle', () => {
     expect(await owner.getConvictionAgentAccountId(agent)).toBe(0n);
   });
 
+  it('getPublishingConvictionAgents enumerates registered agents (checksummed) and reflects deregistration', async () => {
+    const owner = await fundedOwner();
+    const { accountId } = await owner.createPublishingConvictionAccount(COMMITTED);
+    expect(await owner.getPublishingConvictionAgents(accountId)).toEqual([]);
+
+    const a1 = ethers.Wallet.createRandom().address;
+    const a2 = ethers.Wallet.createRandom().address;
+    // Register a1 in lowercased form to prove normalization is input-agnostic.
+    await owner.registerPublishingConvictionAgent(accountId, a1.toLowerCase());
+    await owner.registerPublishingConvictionAgent(accountId, a2);
+
+    const agents = await owner.getPublishingConvictionAgents(accountId);
+    expect(agents).toHaveLength(2);
+    expect(agents).toEqual(expect.arrayContaining([ethers.getAddress(a1), ethers.getAddress(a2)]));
+    // EIP-55 checksummed (the on-chain address[] view), regardless of input case.
+    for (const a of agents) expect(a).toBe(ethers.getAddress(a));
+
+    await owner.deregisterPublishingConvictionAgent(accountId, a1);
+    expect(await owner.getPublishingConvictionAgents(accountId)).toEqual([ethers.getAddress(a2)]);
+  });
+
+  it('getPublishingConvictionAgents returns [] for a nonexistent account', async () => {
+    const owner = await fundedOwner();
+    expect(await owner.getPublishingConvictionAgents(999999n)).toEqual([]);
+  });
+
   it('owner topUpPublishingConvictionAccount + settlePublishingConvictionAccount succeed and topUpBuffer updates', async () => {
     const owner = await fundedOwner();
     const { accountId } = await owner.createPublishingConvictionAccount(COMMITTED);

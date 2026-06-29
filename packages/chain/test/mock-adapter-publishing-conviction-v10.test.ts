@@ -113,6 +113,22 @@ describe('MockChainAdapter — V10 conviction agent register/deregister', () => 
     await expect(mock.registerPublishingConvictionAgent(accountId, agent))
       .rejects.toThrow(/AgentAlreadyRegistered/);
   });
+
+  it('getPublishingConvictionAgents enumerates checksummed addresses and returns [] for missing/empty (B3 parity)', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    expect(await mock.getPublishingConvictionAgents(999n)).toEqual([]); // missing account
+
+    const { accountId } = await mock.createPublishingConvictionAccount(COMMITTED);
+    expect(await mock.getPublishingConvictionAgents(accountId)).toEqual([]); // exists, no agents
+
+    // Mock stores keys lowercased; register a LOWERCASE address and assert the
+    // enumerator checksum-normalizes to match the on-chain address[] view.
+    const checksummed = ethers.getAddress('0x' + 'ab'.repeat(20));
+    await mock.registerPublishingConvictionAgent(accountId, checksummed.toLowerCase());
+    const agents = await mock.getPublishingConvictionAgents(accountId);
+    expect(agents).toEqual([checksummed]);
+    expect(agents[0]).not.toBe(checksummed.toLowerCase()); // EIP-55, not lowercased
+  });
 });
 
 describe('MockChainAdapter — V10 conviction topUp/settle', () => {
