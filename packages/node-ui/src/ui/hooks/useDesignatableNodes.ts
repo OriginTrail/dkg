@@ -8,13 +8,13 @@ import { listDesignatableNodes, type DesignatableNode } from '../api.js';
 
 async function fetchAllDesignatableNodes(): Promise<DesignatableNode[]> {
   const all: DesignatableNode[] = [];
-  let start: string | undefined;
+  let start = 0; // 0-based offset cursor (Backend serves offset pages over the cached table)
   // The table is ≤500; cap the page loop defensively so a misbehaving cursor (a nextStart that
   // never goes null) can't spin forever.
   for (let page = 0; page < 25; page++) {
     const r = await listDesignatableNodes({ start, limit: 200 });
     all.push(...r.nodes);
-    if (!r.nextStart || r.nodes.length === 0) break;
+    if (r.nextStart == null || r.nodes.length === 0) break;
     start = r.nextStart;
   }
   return all;

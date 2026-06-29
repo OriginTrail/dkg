@@ -1817,20 +1817,21 @@ export interface DesignatableNodesResult {
   nodes: DesignatableNode[];
   /** Total nodes in the sharding table (for the "showing N of total" hint). */
   total: number;
-  /** Offset cursor for the next page, or null at the end. */
-  nextStart: string | null;
+  /** Next 0-based OFFSET to request, or null at the end. */
+  nextStart: number | null;
 }
 
 /**
- * B-staked-nodes (§9.3) — the staked sharding-table nodes for the PrimaryNodePicker, via
- * offset pagination over the daemon's TTL-cached read of the whole (≤500) table. `start`
- * omitted = first page. A read failure surfaces `SHARDING_TABLE_READ_FAILED` (retryable —
- * the picker shows a retry; `primaryNode` is required so edge can't proceed until it loads).
- * `GET` is permissionless.
+ * B-staked-nodes (§9.3) — the staked sharding-table nodes for the PrimaryNodePicker. The daemon
+ * reads the whole (≤500) table, TTL-caches it, and serves 0-based OFFSET pages (`start` is an
+ * offset, NOT a startingIdentityId — the contract walk reverts on an unknown id). `start` omitted
+ * = first page (0). A read failure 503s (`PCA_LOOKUP_READ_FAILED` / transport / capability) — all
+ * retryable; the picker shows a retry, and `primaryNode` is required so edge can't proceed until
+ * it loads. `GET` is permissionless.
  */
-export const listDesignatableNodes = (opts?: { start?: string; limit?: number }) =>
+export const listDesignatableNodes = (opts?: { start?: number; limit?: number }) =>
   getJson<DesignatableNodesResult>(
-    `/api/pca/designatable-nodes?start=${encodeURIComponent(opts?.start ?? '')}&limit=${opts?.limit ?? 200}`,
+    `/api/pca/designatable-nodes?start=${opts?.start ?? 0}&limit=${opts?.limit ?? 200}`,
   );
 
 /** Normalized, terminology-disciplined PCA error code (UI branches on this). */

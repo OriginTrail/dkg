@@ -239,14 +239,14 @@ describe('PCA api helpers (transport shaping)', () => {
     expect(fetchMock.mock.calls[1]![0]).toBe('/api/pca/mine?hydrate=1');
   });
 
-  it('listDesignatableNodes GETs /api/pca/designatable-nodes with start+limit (offset pagination)', async () => {
+  it('listDesignatableNodes GETs /api/pca/designatable-nodes with a 0-based offset start + limit', async () => {
     fetchMock.mockResolvedValueOnce(ok({ nodes: [], total: 0, nextStart: null }));
     await listDesignatableNodes();
-    expect(fetchMock.mock.calls[0]![0]).toBe('/api/pca/designatable-nodes?start=&limit=200');
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/pca/designatable-nodes?start=0&limit=200');
 
     fetchMock.mockResolvedValueOnce(ok({ nodes: [], total: 0, nextStart: null }));
-    await listDesignatableNodes({ start: '7', limit: 50 });
-    expect(fetchMock.mock.calls[1]![0]).toBe('/api/pca/designatable-nodes?start=7&limit=50');
+    await listDesignatableNodes({ start: 200, limit: 50 });
+    expect(fetchMock.mock.calls[1]![0]).toBe('/api/pca/designatable-nodes?start=200&limit=50');
   });
 
   // T1 — a GET failure must throw an HttpError that CARRIES the body, so the tab-gate
