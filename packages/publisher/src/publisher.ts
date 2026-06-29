@@ -98,6 +98,12 @@ export type V10ACKProvider = (
     catalogRoot: Uint8Array;
     catalogLeafCount: number;
   },
+  /**
+   * Folded public+private KAs expose only private Merkle commitments to ACK
+   * signers. Cores use these 32-byte roots to recompute the claimed KC root
+   * together with the public quads they store, without seeing private plaintext.
+   */
+  privateMerkleRoots?: Uint8Array[],
 ) => Promise<V10CoreNodeACK[]>;
 
 /**

@@ -443,6 +443,7 @@ function createV10ACKProviderForPublisher(
     merkleLeafCount,
     isEncryptedPayload,
     catalogCommitment,
+    privateMerkleRoots,
   ) => {
     // Fail loud on non-numeric or non-positive CG ids. V10 publish requires
     // a real on-chain context graph; `ZeroContextGraphId` at
@@ -507,7 +508,7 @@ function createV10ACKProviderForPublisher(
       contextGraphIdStr: contextGraphId,
       publisherPeerId: transport.publisherPeerId,
       publicByteSize,
-      isPrivate: isEncryptedPayload === true,
+      isPrivate: isEncryptedPayload === true || (privateMerkleRoots?.length ?? 0) > 0,
       kaCount,
       rootEntities,
       chainId: chainIdBig,
@@ -521,6 +522,7 @@ function createV10ACKProviderForPublisher(
       merkleLeafCount,
       isEncryptedPayload,
       catalogCommitment,
+      privateMerkleRoots,
     });
     return result.acks;
   };

@@ -78,6 +78,21 @@ function catalogRootForAckDigest(root: Uint8Array | undefined): Uint8Array {
   return root;
 }
 
+function normalizePrivateMerkleRoots(
+  roots: readonly Uint8Array[] | undefined,
+): Uint8Array[] {
+  if (!roots || roots.length === 0) return [];
+  return roots.map((root, idx) => {
+    const bytes = root instanceof Uint8Array ? root : new Uint8Array(root);
+    if (bytes.length !== 32) {
+      throw new Error(
+        `StorageACK: privateMerkleRoots[${idx}] must be 32 bytes, got ${bytes.length}`,
+      );
+    }
+    return bytes;
+  });
+}
+
 function summarizeDeclineEntities(entities: readonly string[]): string {
   if (entities.length === 0) return '(none)';
   const visible = entities
@@ -652,6 +667,7 @@ export class StorageACKHandler {
     const merkleRoot = intent.merkleRoot instanceof Uint8Array
       ? intent.merkleRoot
       : new Uint8Array(intent.merkleRoot);
+    const privateMerkleRoots = normalizePrivateMerkleRoots(intent.privateMerkleRoots);
 
     const swmGraphUri = this.config.contextGraphSharedMemoryUri(swmGraphId, subGraphName);
 
@@ -919,7 +935,7 @@ export class StorageACKHandler {
         }
       }
 
-      const inMemoryRoot = computeFlatKCRoot(parsed, []);
+      const inMemoryRoot = computeFlatKCRoot(parsed, privateMerkleRoots);
       if (!bytesEqual(inMemoryRoot, merkleRoot)) {
         throw new Error(
           `Merkle root mismatch (inline quads): publisher=${ethers.hexlify(merkleRoot).slice(0, 18)}..., ` +
@@ -973,7 +989,7 @@ export class StorageACKHandler {
         );
       }
 
-      const recomputedRoot = computeFlatKCRoot(swmQuads, []);
+      const recomputedRoot = computeFlatKCRoot(swmQuads, privateMerkleRoots);
       if (!bytesEqual(recomputedRoot, merkleRoot)) {
         return this.encodeDecline(
           cgId,
@@ -1089,7 +1105,7 @@ export class StorageACKHandler {
       ? BigInt(intent.tokenAmountStr)
       : 0n;
 
-    const verifiedLeafCount = computeFlatKCMerkleLeafCountV10(swmQuads, []);
+    const verifiedLeafCount = computeFlatKCMerkleLeafCountV10(swmQuads, privateMerkleRoots);
     if (verifiedLeafCount === 0) {
       throw new Error(
         'StorageACK: empty Knowledge Asset payload (zero V10 Merkle leaves after sort+dedupe) — refusing ACK',

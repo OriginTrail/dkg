@@ -1548,6 +1548,7 @@ export class DKGAgent extends DKGAgentBase {
         catalogRoot: Uint8Array;
         catalogLeafCount: number;
       },
+      privateMerkleRoots?: Uint8Array[],
     ) => {
       // Fail loud on non-numeric or non-positive CG ids: V10 publish requires
       // a real on-chain context graph and the contract rejects `cgId == 0`
@@ -1628,7 +1629,7 @@ export class DKGAgent extends DKGAgentBase {
         contextGraphIdStr: contextGraphId,
         publisherPeerId: this.peerId,
         publicByteSize,
-        isPrivate: isEncryptedPayload === true,
+        isPrivate: isEncryptedPayload === true || (privateMerkleRoots?.length ?? 0) > 0,
         kaCount,
         rootEntities,
         chainId: chainIdBig,
@@ -1642,6 +1643,7 @@ export class DKGAgent extends DKGAgentBase {
         merkleLeafCount,
         isEncryptedPayload,
         catalogCommitment,
+        privateMerkleRoots,
       });
       return result.acks;
     };

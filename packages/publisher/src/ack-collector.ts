@@ -237,6 +237,12 @@ export class ACKCollector {
       catalogRoot: Uint8Array;
       catalogLeafCount: number;
     };
+    /**
+     * Folded public+private publish commitments. These are private-data Merkle
+     * roots only; they let cores verify the folded KC root without private
+     * plaintext.
+     */
+    privateMerkleRoots?: readonly Uint8Array[];
   }): Promise<ACKCollectionResult> {
     const {
       merkleRoot, contextGraphId, contextGraphIdStr,
@@ -316,6 +322,14 @@ export class ACKCollector {
         `ACK collection failed: V10 publish requires exactly one Knowledge Asset (kaCount=1); got ${params.kaCount}`,
       );
     }
+    const privateMerkleRoots = params.privateMerkleRoots ?? [];
+    for (const [idx, root] of privateMerkleRoots.entries()) {
+      if (root.length !== 32) {
+        throw new Error(
+          `ACK collection failed: privateMerkleRoots[${idx}] must be 32 bytes, got ${root.length}`,
+        );
+      }
+    }
 
     // P2P intent includes staging quads so core nodes can verify inline.
     // Encrypted inline payloads are gated by this collector's exclusive
@@ -376,6 +390,9 @@ export class ACKCollector {
       isEncryptedPayload: params.isEncryptedPayload === true ? true : undefined,
       catalogRoot: params.catalogCommitment?.catalogRoot,
       catalogLeafCount: params.catalogCommitment?.catalogLeafCount,
+      privateMerkleRoots: privateMerkleRoots.length > 0
+        ? [...privateMerkleRoots]
+        : undefined,
     };
     const intentBytes = encodePublishIntent(p2pMsg);
 

@@ -3,6 +3,7 @@ import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
   computeFlatKCMerkleLeafCountV10,
+  computePrivateRootV10,
 } from '../src/merkle.js';
 import {
   encodePublishIntent, decodeStorageACK, computePublishACKDigest,
@@ -190,6 +191,58 @@ describe('StorageACKHandler', () => {
       metrics.disable();
       rebuildMetrics();
     }
+  });
+
+  it('returns valid StorageACK for folded public+private data using private root commitments', async () => {
+    const publicQuads: Quad[] = [
+      makeQuad('urn:entity:private-folded', 'urn:p', 'urn:public'),
+    ];
+    const privateQuads: Quad[] = [
+      makeQuad('urn:entity:private-folded', 'urn:p', '"secret"'),
+    ];
+    const privateRoot = computePrivateRootV10(privateQuads)!;
+    const foldedRoot = computeFlatKCRoot(publicQuads, [privateRoot]);
+    const foldedLeafCount = computeFlatKCMerkleLeafCountV10(publicQuads, [privateRoot]);
+    const handler = await createHandler(publicQuads);
+
+    const intent = encodePublishIntent({
+      merkleRoot: foldedRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 300,
+      isPrivate: true,
+      kaCount: 1,
+      rootEntities: ['urn:entity:private-folded'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: foldedLeafCount,
+      privateMerkleRoots: [privateRoot],
+    });
+
+    const response = await handler.handler(intent, fakePeerId);
+    const ack = decodeStorageACK(response);
+
+    expect(isStorageACKDecline(ack)).toBe(false);
+    expect(new Uint8Array(ack.merkleRoot)).toEqual(foldedRoot);
+
+    const digest = computePublishACKDigest(
+      TEST_CHAIN_ID,
+      TEST_KAV10_ADDR,
+      cgIdBigInt,
+      foldedRoot,
+      1n,
+      300n,
+      1n,
+      1000n,
+      BigInt(foldedLeafCount),
+    );
+    const recovered = ethers.recoverAddress(ethers.hashMessage(digest), {
+      r: ethers.hexlify(ack.coreNodeSignatureR instanceof Uint8Array
+        ? ack.coreNodeSignatureR : new Uint8Array(ack.coreNodeSignatureR)),
+      yParityAndS: ethers.hexlify(ack.coreNodeSignatureVS instanceof Uint8Array
+        ? ack.coreNodeSignatureVS : new Uint8Array(ack.coreNodeSignatureVS)),
+    });
+    expect(recovered.toLowerCase()).toBe(coreWallet.address.toLowerCase());
   });
 
   it('declines (BYTESIZE_UNDERCLAIM) when publicByteSize is below the real content lower bound', async () => {

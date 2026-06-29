@@ -2341,9 +2341,10 @@ export class DKGPublisher implements Publisher {
     // For publishFromSharedMemory (publishContextGraphId set): data is already in
     // peers' SWM via shared memory gossip — do NOT send inline quads; core nodes
     // verify against their local SWM copy (preserving storage-attestation).
-    // Skipped for private publishes because StorageACKHandler cannot
-    // recompute private merkle roots from SWM data alone.
-    const hasPrivateData = privateRoots.length > 0;
+    // Folded public+private publishes send only the private Merkle roots on
+    // the ACK wire. Core nodes verify the public quads they store and fold
+    // those commitments into the claimed KC root without seeing private
+    // plaintext.
     const isPublishFromSharedMemory = !!options.fromSharedMemory;
     // OT-RFC-38 / LU-5: when an encryptInlinePayload hook is wired (curated
     // CGs only — DKGAgent resolves this from accessPolicy), ALWAYS send the
@@ -2596,7 +2597,6 @@ export class DKGPublisher implements Publisher {
     const v10ACKProvider = options.v10ACKProvider;
     const shouldCollectV10ACKs =
       v10ACKProvider !== undefined &&
-      !hasPrivateData &&
       canAttemptOnChainPublish;
     let v10ACKs: V10CoreNodeACK[] | undefined;
     if (shouldCollectV10ACKs) {
@@ -2617,6 +2617,7 @@ export class DKGPublisher implements Publisher {
           catalogCommitment
             ? { catalogRoot: catalogCommitment.root, catalogLeafCount: catalogCommitment.leafCount }
             : undefined,
+          privateRoots,
         );
         // PR5 ACK-provenance summary — one line per publish that names
         // every ACKing core and the LU-6 Phase B discovery path that
@@ -2658,8 +2659,6 @@ export class DKGPublisher implements Publisher {
       } finally {
         onPhase?.('collect_v10_acks', 'end');
       }
-    } else if (v10ACKProvider && hasPrivateData && canAttemptOnChainPublish) {
-      this.log.info(ctx, `V10 ACK collection skipped: publish contains private quads (${privateRoots.length} private roots)`);
     }
 
     // Resolve the target CG id bigint once for the whole V10 block so the
@@ -2747,9 +2746,8 @@ export class DKGPublisher implements Publisher {
       // Pre-PR2 this was the responsibility of the chain-failure
       // catch block via `generateTentativeMetadata`. PR2 deleted that
       // unconditional catch (failed *chain* publishes now write
-      // nothing locally), but the three intentional-local branches
-      // (`no on-chain CG id`, `chain not V10-ready`,
-      // `private data — no ACKs collectable`) all need the metadata
+      // nothing locally), but the two intentional-local branches
+      // (`no on-chain CG id`, `chain not V10-ready`) both need the metadata
       // to keep the local data-graph queryable. Replicating the
       // tentative-metadata generation here scopes the metadata write
       // exclusively to those intentional-skip branches and keeps the
@@ -2820,33 +2818,10 @@ export class DKGPublisher implements Publisher {
       await persistCatalogEntry();
     };
 
-    // RC11 / PR3: extra intentional-local-only branch for publishes
-    // with `hasPrivateData === true`. Peer ACK collection is
-    // *structurally* skipped at line 1954 above (`!hasPrivateData`
-    // gate) because peers can't see private payloads and therefore
-    // can't sign anything meaningful — there is no transport that
-    // could ever produce a valid V10 ACK quorum for these. They are
-    // NOT a real on-chain publish failure; they are a configuration
-    // where on-chain submission was never feasible in the first
-    // place. Routing them through `finalizeIntentionalLocalPublish`
-    // gives them the same intentional local-only behaviour the
-    // "no CG id" / "chain not V10-ready" branches above already
-    // guarantee.
-    //
-    // The structurally-similar "no v10ACKProvider wired" case is
-    // INTENTIONALLY NOT caught here. Per the plan that case is a
-    // configuration error in a publishing node (the daemon should
-    // wire one); it must surface as the loud
-    // "V10 ACKs required for on-chain publish" throw from the
-    // submit-branch guard so the operator notices instead of
-    // silently downgrading to tentative.
-    const noPathToOnChainACKs =
-      hasPrivateData && (!v10ACKs || v10ACKs.length === 0);
-
     // GH #1013 — record WHY a local-only publish skipped chain so the async
-    // lift can tell an honest local finalization (no chain) from a private
-    // publish that failed to reach the chain it should have.
-    let localChainSkipReason: 'no-chain' | 'private-no-acks' | undefined;
+    // lift can tell an honest local finalization (no chain) from a publish
+    // that failed to reach the chain it should have.
+    let localChainSkipReason: 'no-chain' | undefined;
     if (publisherContextGraphId === undefined) {
       this.log.warn(ctx, `No positive on-chain context graph id resolved from "${v10CgDomain}" — skipping on-chain publish`);
       localChainSkipReason = 'no-chain';
@@ -2855,14 +2830,6 @@ export class DKGPublisher implements Publisher {
       this.log.warn(ctx, 'Chain adapter is not V10-ready — skipping on-chain publish');
       localChainSkipReason = 'no-chain';
       await finalizeIntentionalLocalPublish('chain not V10-ready');
-    } else if (noPathToOnChainACKs) {
-      const reason = 'private data — no ACKs collectable (peers cannot see private payloads)';
-      this.log.warn(
-        ctx,
-        `Skipping on-chain submission: ${reason}. Storing locally as tentative.`,
-      );
-      localChainSkipReason = 'private-no-acks';
-      await finalizeIntentionalLocalPublish(reason);
     } else {
       const tokenAmount = precomputedTokenAmount;
       usedV10Path = true;
@@ -2886,8 +2853,8 @@ export class DKGPublisher implements Publisher {
       // / PR-A deliberately rethrows that failure instead of
       // downgrading to local tentative VM, so ACK-ready no-seal callers
       // get a clear contract error and no root data-graph write.
-      // Intentional local publishes (no on-chain CG id / non-V10 /
-      // private data) still bypass this branch and can remain tentative.
+      // Intentional local publishes (no on-chain CG id / non-V10)
+      // still bypass this branch and can remain tentative.
       // ─────────────────────────────────────────────────────────────
       if (
         options.precomputedAttestation &&

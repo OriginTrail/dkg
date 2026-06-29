@@ -87,7 +87,11 @@ export const PublishIntentSchema = new Type('PublishIntent')
   // RFC-39 random sampling and the prover verify against it. Additive
   // fields (18/19) — empty / 32 zero bytes + 0 on public-CG traffic.
   .add(new Field('catalogRoot', 18, 'bytes'))
-  .add(new Field('catalogLeafCount', 19, 'uint32'));
+  .add(new Field('catalogLeafCount', 19, 'uint32'))
+  // Folded public+private KAs expose only the per-entity private commitments to
+  // core ACK signers. Cores never see private plaintext, but they can recompute
+  // the exact KC root as hash(public subtree, collapse(private roots)).
+  .add(new Field('privateMerkleRoots', 20, 'bytes', 'repeated'));
 
 type Long = { low: number; high: number; unsigned: boolean };
 
@@ -189,6 +193,13 @@ export interface PublishIntentMsg {
    * modulus). Defaults to `0` on public-CG traffic.
    */
   catalogLeafCount?: number;
+  /**
+   * Per-entity private commitments for folded public+private KAs. These are
+   * 32-byte Merkle roots over private triples, not private plaintext. Public
+   * ACK handlers fold them into the claimed KC root while still verifying only
+   * the public quads they store.
+   */
+  privateMerkleRoots?: Uint8Array[];
 }
 
 /** Sent in `ackProtocolVersion` for LU-11 chunked ACKs. */

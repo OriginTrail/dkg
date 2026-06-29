@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
-import { encodeStorageACK, computePublishACKDigest } from '@origintrail-official/dkg-core';
-import { computeFlatKCRootV10, computeFlatKCMerkleLeafCountV10 } from '../src/merkle.js';
+import { decodePublishIntent, encodeStorageACK, computePublishACKDigest } from '@origintrail-official/dkg-core';
+import { computeFlatKCRootV10, computeFlatKCMerkleLeafCountV10, computePrivateRootV10 } from '../src/merkle.js';
 import { ethers } from 'ethers';
 
 // Test H5 prefix inputs — must match what the collector passes into
@@ -102,6 +102,59 @@ describe('ACKCollector', () => {
       expect(ack.signatureR.length).toBe(32);
       expect(ack.signatureVS.length).toBe(32);
       expect(ack.nodeIdentityId).toBeGreaterThan(0n);
+    }
+  });
+
+  it('puts folded-private Merkle roots on the PublishIntent wire', async () => {
+    const privateRoot = computePrivateRootV10([
+      makeQuad('urn:a', 'urn:secret', '"hidden"'),
+    ])!;
+    const foldedRoot = computeFlatKCRootV10(testQuads, [privateRoot]);
+    const foldedLeafCount = computeFlatKCMerkleLeafCountV10(testQuads, [privateRoot]);
+    const seenPrivateRoots: Uint8Array[][] = [];
+
+    const deps: ACKCollectorDeps = {
+      gossipPublish: async () => {},
+      sendP2P: async (peerId, _protocol, data) => {
+        const decoded = decodePublishIntent(data);
+        seenPrivateRoots.push((decoded.privateMerkleRoots ?? []).map((root) => new Uint8Array(root)));
+
+        const idx = parseInt(peerId.replace('peer-', ''), 10);
+        const wallet = coreWallets[idx];
+        const { r, vs } = await signACK(wallet, testCGId, foldedRoot, 1, 100n, 1n, 0n, foldedLeafCount);
+        return encodeStorageACK({
+          merkleRoot: foldedRoot,
+          coreNodeSignatureR: r,
+          coreNodeSignatureVS: vs,
+          contextGraphId: testCGIdStr,
+          nodeIdentityId: idx + 1,
+        });
+      },
+      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
+      log: () => {},
+    };
+
+    const collector = new ACKCollector(deps);
+    const result = await collector.collect({
+      merkleRoot: foldedRoot,
+      contextGraphId: testCGId,
+      contextGraphIdStr: testCGIdStr,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 100n,
+      isPrivate: true,
+      kaCount: 1,
+      rootEntities: ['urn:a'],
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
+      merkleLeafCount: foldedLeafCount,
+      privateMerkleRoots: [privateRoot],
+    });
+
+    expect(result.acks).toHaveLength(3);
+    expect(seenPrivateRoots).toHaveLength(3);
+    for (const roots of seenPrivateRoots) {
+      expect(roots).toHaveLength(1);
+      expect(roots[0]).toEqual(privateRoot);
     }
   });
 
