@@ -1860,6 +1860,20 @@ export function isPcaFeatureUnavailable(err: unknown): boolean {
   return err instanceof HttpError && err.status === 503 && !isRpcTransportError(err);
 }
 
+/**
+ * The PCA enumeration route's RETRYABLE chain-read failure: 503 with body code
+ * `PCA_LOOKUP_READ_FAILED` (a CALL_EXCEPTION mid-enumeration, NOT a capability gap).
+ * `isPcaFeatureUnavailable` can't tell it apart — both are non-transport 503s — so a
+ * caller distinguishing "couldn't load" from "not on this network" must check this
+ * first (and treat it like a transport blip: retry, never assert "you relate to none").
+ */
+export function isPcaReadFailed(err: unknown): boolean {
+  return (
+    err instanceof HttpError &&
+    (err.body as { code?: string } | undefined)?.code === 'PCA_LOOKUP_READ_FAILED'
+  );
+}
+
 // Code tokens the daemon embeds in the `{ error }` body (a bare code on a
 // contract revert, or a longer sentence like "NotAccountOwner — daemon EOA is
 // not the PCA owner"). Matched by word boundary, most-specific intent first.

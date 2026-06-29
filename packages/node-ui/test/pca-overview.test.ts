@@ -285,4 +285,45 @@ describe('ConvictionOverview — S1 discovery', () => {
     expect(container.querySelector('[data-testid="pca-discovered-strip"]')).toBeNull(); // → not in the strip
     await unmount();
   });
+
+  // GAP-1/#9 — a RETRYABLE /mine failure (503 PCA_LOOKUP_READ_FAILED) must NOT collapse
+  // to "you own none": the strip offers a retry, and a re-probe recovers.
+  it('GAP-1 — a retryable /mine read-fail shows a retry affordance, not a false "no PCAs"', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [WALLET0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchMyPcas
+      .mockRejectedValueOnce(new HttpError(503, 'read failed', { code: 'PCA_LOOKUP_READ_FAILED' }))
+      .mockResolvedValue({ accounts: [{ accountId: '42', relation: 'owned', discountBps: 2000 }] });
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    const err = (await (async () => {
+      const started = Date.now();
+      while (Date.now() - started < 1500) {
+        const e = container.querySelector('[data-testid="pca-discovered-error"]');
+        if (e) return e as HTMLElement;
+        await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+      }
+      return null;
+    })());
+    expect(err).toBeTruthy();
+    expect(err!.textContent).toContain('Couldn’t load your Publishing Conviction Accounts');
+    // It did NOT assert the owned-empty state off the read failure.
+    expect(container.querySelector('[data-testid="pca-discovered-strip"]')).toBeNull();
+    // Retry → the second (successful) probe surfaces the owned PCA in the strip.
+    await act(async () => {
+      (err!.querySelector('button') as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await waitForText(container, 'PCA #42');
+    expect(container.querySelector('[data-testid="pca-discovered-error"]')).toBeNull();
+    await unmount();
+  });
+
+  it('GAP-1 — a CAPABILITY 503 on /mine stays silent (no retry banner, no strip)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [WALLET0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchMyPcas.mockRejectedValue(new HttpError(503, 'x', { error: 'FEATURE_UNAVAILABLE' }));
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'Publishing Conviction'); // overview rendered
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    expect(container.querySelector('[data-testid="pca-discovered-error"]')).toBeNull();
+    expect(container.querySelector('[data-testid="pca-discovered-strip"]')).toBeNull();
+    await unmount();
+  });
 });

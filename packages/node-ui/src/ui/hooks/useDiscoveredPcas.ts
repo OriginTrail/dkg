@@ -4,6 +4,8 @@ import {
   fetchWalletsBalances,
   pcaAgentAccount,
   fetchMyPcas,
+  isPcaFeatureUnavailable,
+  isPcaReadFailed,
   type MyPcaEntry,
   type PcaSnapshot,
 } from '../api.js';
@@ -25,6 +27,13 @@ export interface UseDiscoveredPcas {
   discovered: DiscoveredPca[];
   /** `discovered` minus the locally-tracked set — the "discovered, not tracked" strip. */
   untracked: DiscoveredPca[];
+  /**
+   * GAP-1/#9 — the OWNED enumeration (`/api/pca/mine`) failed RETRYABLY (a transport
+   * blip or the route's 503 `PCA_LOOKUP_READ_FAILED`): the surface must offer a retry,
+   * NOT assert "you own none". False on success AND on a capability gap (no PCA on this
+   * network → silent, no strip). The agent-on half is independent of this flag.
+   */
+  ownedError: boolean;
   loading: boolean;
   refresh: () => void;
 }
@@ -71,11 +80,23 @@ export function useDiscoveredPcas(): UseDiscoveredPcas {
           }),
         )
       ).filter((p): p is { accountId: string; wallet: string } => p != null);
-      // Owned (+agent/both) via the enumeration route — degrades to [] until it lands.
-      const mine = await fetchMyPcas({ hydrate: true })
-        .then((r) => r.accounts)
-        .catch(() => [] as MyPcaEntry[]);
-      return { agentPairs, mine };
+      // Owned (+agent/both) via the enumeration route. A CAPABILITY 503 (PCA not on this
+      // network) → no strip, silent. A RETRYABLE failure — a transport blip OR the route's
+      // 503 `PCA_LOOKUP_READ_FAILED` chain read fail — must NOT collapse to "you own none"
+      // (#9): surface `ownedError` so the strip offers a retry instead of asserting empty.
+      // (A genuine 200 `{accounts:[]}` IS none.)
+      let mine: MyPcaEntry[] = [];
+      let ownedError = false;
+      try {
+        mine = (await fetchMyPcas({ hydrate: true })).accounts;
+      } catch (err) {
+        if (isPcaFeatureUnavailable(err) && !isPcaReadFailed(err)) {
+          mine = []; // capability gap — no PCA feature here; stay silent
+        } else {
+          ownedError = true; // read-fail / transport / unknown — couldn't load, not "none"
+        }
+      }
+      return { agentPairs, mine, ownedError };
     },
     [],
     0,
@@ -113,5 +134,5 @@ export function useDiscoveredPcas(): UseDiscoveredPcas {
     [discovered, trackedIds],
   );
 
-  return { discovered, untracked, loading, refresh };
+  return { discovered, untracked, ownedError: data?.ownedError ?? false, loading, refresh };
 }

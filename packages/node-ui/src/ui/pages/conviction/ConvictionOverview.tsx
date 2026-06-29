@@ -40,7 +40,9 @@ export function ConvictionOverview() {
   const { accounts, loading, covered, refresh, walletsInconclusive } = overview;
   // GAP-1 — PCAs this node relates to on-chain (owned + agent-on) beyond the locally
   // tracked set. Agent-on auto-tracks (edge self-heal); the rest surface in the strip.
-  const { untracked: discoveredUntracked } = useDiscoveredPcas();
+  // `ownedError` = the enumeration failed retryably (#9 — don't assert "you own none").
+  const { untracked: discoveredUntracked, ownedError: discoveredOwnedError, refresh: refreshDiscovered } =
+    useDiscoveredPcas();
 
   // O2 — DERIVED default so the filter auto-reacts to the async role (a useState
   // initializer runs ONCE, so an edge node whose status resolved AFTER mount stayed
@@ -171,6 +173,18 @@ export function ConvictionOverview() {
         <OwnedEmpty role={role} />
       ) : (
         <ApprovedEmpty />
+      )}
+
+      {/* GAP-1/#9 — the OWNED enumeration failed retryably: offer a retry instead of
+          silently asserting "you own none". (Agent-on discovery is independent and may
+          still have populated the strip below.) */}
+      {discoveredOwnedError && (
+        <section className="v10-pca-discovered" data-testid="pca-discovered-error" role="status">
+          <p className="v10-pca-overview-caveat">
+            ⓘ Couldn’t load your Publishing Conviction Accounts — any you own may still exist.{' '}
+            <button type="button" className="v10-pca-card-btn" onClick={() => refreshDiscovered()}>Retry</button>
+          </p>
+        </section>
       )}
 
       <DiscoveredStrip items={discoveredUntracked} onTrack={trackAccount} onManage={onManage} />
