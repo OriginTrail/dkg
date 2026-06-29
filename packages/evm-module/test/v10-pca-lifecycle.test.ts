@@ -2324,4 +2324,86 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     expect(roots[0].merkleRoot).to.equal(publishRoot);
     expect(roots[1].merkleRoot).to.equal(newRoot);
   });
+
+  // --------------------------------------------------------------------------
+  // OT-RFC-53 — registration-deposit WAIVER for PCA-backed CGs.
+  // A CG whose publish authority is a PCA the CREATOR owns or is a registered
+  // agent of pays NO separate 100-TRAC deposit: the PCA already locks real TRAC
+  // (the anti-spam stake) and funds the CG's publishing. Caller authz is owner
+  // OR registered agent — NOT merely authority==owner (that would let a third
+  // party dodge the deposit against someone else's PCA).
+  // --------------------------------------------------------------------------
+  describe('OT-RFC-53 deposit waiver for PCA-backed CGs', () => {
+    const DEPOSIT = ethers.parseEther('100');
+
+    const setDeposit = async () => {
+      const Params = await hre.ethers.getContract<ParametersStorage>('ParametersStorage');
+      await Params.connect(accounts[0]).setContextGraphRegistrationDeposit(DEPOSIT);
+    };
+    // Curated CG (publishPolicy 0) whose authority is `owner` and which is
+    // bound to PCA `accountId` — the PCA-authority shape the waiver keys on.
+    const createPcaCg = (caller: SignerWithAddress, owner: SignerWithAddress, accountId: bigint) =>
+      CGFacade.connect(caller).createContextGraph([], 0, 1, 0, owner.address, accountId, ethers.ZeroHash);
+
+    it('WAIVES the deposit when the PCA OWNER creates the CG (no TRAC pulled)', async () => {
+      await setDeposit();
+      const owner = accounts[1];
+      const accountId = await createAccountFor(owner);
+      const before = await Token.balanceOf(owner.address); // owner funded nothing for a deposit
+
+      await expect(createPcaCg(owner, owner, accountId))
+        .to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived')
+        .and.not.to.emit(CGFacade, 'ContextGraphRegistrationDeposited');
+
+      const cgId = await CGS.getLatestContextGraphId();
+      expect(await CGS.getRegistrationEscrow(cgId)).to.equal(0n); // no escrow
+      expect(await Token.balanceOf(owner.address)).to.equal(before); // nothing pulled
+    });
+
+    it('WAIVES the deposit when a REGISTERED AGENT of the PCA creates the CG', async () => {
+      await setDeposit();
+      const owner = accounts[1];
+      const agent = accounts[3];
+      const accountId = await createAccountFor(owner);
+      await NFT.connect(owner).registerAgent(accountId, agent.address);
+      expect(await NFT.agentToAccountId(agent.address)).to.equal(accountId);
+
+      const before = await Token.balanceOf(agent.address);
+      await expect(createPcaCg(agent, owner, accountId)) // authority must be the owner (coherence)
+        .to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
+
+      const cgId = await CGS.getLatestContextGraphId();
+      expect(await CGS.getRegistrationEscrow(cgId)).to.equal(0n);
+      expect(await Token.balanceOf(agent.address)).to.equal(before);
+    });
+
+    it('does NOT waive for a non-owner non-agent — the deposit is still charged (caller guard)', async () => {
+      await setDeposit();
+      const owner = accounts[1];
+      const stranger = accounts[4];
+      const accountId = await createAccountFor(owner);
+
+      // Stranger sets authority=owner so the coherence gate passes, but is
+      // neither owner nor a registered agent → must pay. Unfunded → revert.
+      await expect(createPcaCg(stranger, owner, accountId)).to.be.reverted;
+
+      // Funded + approved, the stranger CAN create it — but is CHARGED (not waived).
+      await Token.mint(stranger.address, DEPOSIT);
+      await Token.connect(stranger).approve(await CGFacade.getAddress(), DEPOSIT);
+      await expect(createPcaCg(stranger, owner, accountId))
+        .to.emit(CGFacade, 'ContextGraphRegistrationDeposited')
+        .and.not.to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
+      const cgId = await CGS.getLatestContextGraphId();
+      expect(await CGS.getRegistrationEscrow(cgId)).to.equal(DEPOSIT);
+    });
+
+    it('does NOT waive a CG with no PCA (accountId 0) — normal deposit applies', async () => {
+      await setDeposit();
+      const creator = accounts[5];
+      // No PCA designated → unfunded create reverts (deposit charged, not waived).
+      await expect(
+        CGFacade.connect(creator).createContextGraph([], 0, 0, 1, ethers.ZeroAddress, 0, ethers.ZeroHash),
+      ).to.be.reverted;
+    });
+  });
 });

@@ -83,6 +83,16 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
         uint96 amount
     );
 
+    /// @notice OT-RFC-53: emitted when the registration deposit is WAIVED because
+    ///         the CG is backed by a PCA the creator owns or is a registered
+    ///         agent of. The PCA's locked commitment is the anti-spam stake;
+    ///         the CG carries no own escrow and its publishing is funded by the PCA.
+    event ContextGraphRegistrationDepositWaived(
+        uint256 indexed contextGraphId,
+        uint256 indexed accountId,
+        address indexed creator
+    );
+
     /// @notice Emitted when an admin sweeps a CG's residual escrow to the pool.
     event ContextGraphEscrowSwept(uint256 indexed contextGraphId, uint96 amount);
 
@@ -196,12 +206,58 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
         // OT-RFC-53: anti-spam registration deposit, held as the CG's prepaid
         // publishing escrow. Skipped when ParametersStorage is unresolved
         // (deposit feature off) or the param is 0 (dormant default).
+        //
+        // WAIVER: a CG backed by a PCA the creator owns or is a registered agent
+        // of pays NO separate deposit — the PCA already locks real TRAC (a far
+        // larger anti-spam stake than the per-CG deposit) and funds the CG's
+        // publishing. The result is a zero-escrow CG, which is the same state a
+        // dormant deposit param already produces, so the consume path is
+        // unchanged (it falls through to the PCA). See _waivesRegistrationDeposit.
         if (address(parametersStorage) != address(0)) {
             uint96 deposit = parametersStorage.contextGraphRegistrationDeposit();
             if (deposit > 0) {
-                _pullRegistrationDeposit(contextGraphId, deposit);
+                if (_waivesRegistrationDeposit(publishAuthorityAccountId)) {
+                    emit ContextGraphRegistrationDepositWaived(
+                        contextGraphId, publishAuthorityAccountId, msg.sender
+                    );
+                } else {
+                    _pullRegistrationDeposit(contextGraphId, deposit);
+                }
             }
         }
+    }
+
+    /// @dev OT-RFC-53 deposit waiver authorization. Returns true when the CG is
+    ///      backed by PCA `accountId` AND the CALLER is its owner or a currently
+    ///      registered conviction agent. The caller check is EXPLICIT here:
+    ///      `_validatePCACoherence` only ties the stored authority to the owner,
+    ///      NOT `msg.sender`, so without this a third party could create a CG
+    ///      pointing at someone else's PCA and dodge the deposit. Fails CLOSED
+    ///      (charges the deposit) on any resolution/lookup failure.
+    function _waivesRegistrationDeposit(uint256 accountId) internal view returns (bool) {
+        if (accountId == 0) return false;
+        address nftAddr;
+        try hub.getContractAddress("DKGPublishingConvictionNFT") returns (address addr) {
+            nftAddr = addr;
+        } catch {
+            return false;
+        }
+        if (nftAddr == address(0)) return false;
+        IDKGPublishingConvictionNFT nft = IDKGPublishingConvictionNFT(nftAddr);
+        // Owner of the PCA NFT.
+        try nft.ownerOf(accountId) returns (address owner_) {
+            if (owner_ == msg.sender) return true;
+        } catch {
+            return false; // nonexistent account → not waivable
+        }
+        // Registered conviction agent. `agentToAccountId` returns the single PCA
+        // an agent is bound to (0 when unregistered), so equality is the check.
+        try nft.agentToAccountId(msg.sender) returns (uint256 boundAccount) {
+            if (boundAccount == accountId) return true;
+        } catch {
+            /* fall through → not waived */
+        }
+        return false;
     }
 
     // -----------------------------------------------------------------------
