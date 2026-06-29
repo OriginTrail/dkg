@@ -4,7 +4,8 @@
 
 import { describe, expect, it } from 'vitest';
 import { PCA_FIXTURES, MOCK_COST_COVERED } from '../src/ui/mocks/pca.js';
-import { healthForSnapshot, convictionDiscountBps } from '../src/ui/components/Pca/index.js';
+import { convictionDiscountBps } from '../src/ui/components/Pca/index.js';
+import { healthForSnapshot } from '../src/ui/pca/health.js';
 
 describe('PCA fixtures', () => {
   it('each fixture derives its intended HealthChip state', () => {

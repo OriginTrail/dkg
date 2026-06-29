@@ -9,14 +9,10 @@ export {
   nativeGasSymbol,
   isTestnetChain,
 } from './format.js';
-export {
-  HealthChip,
-  HEALTH_CHIP_META,
-  healthForSnapshot,
-  PCA_CAP_NEAR_THRESHOLD,
-  PCA_EXPIRING_SOON_SECONDS,
-  type PcaHealthState,
-} from './HealthChip.js';
+export { HealthChip, HEALTH_CHIP_META } from './HealthChip.js';
+// #1355 V2 — health derivation (healthForSnapshot / PcaHealthState / the threshold
+// constants) is imported DIRECTLY from the domain module `pca/health.js` by every
+// consumer, so the barrel no longer re-exports it.
 export { WalletRow, type WalletRowTone } from './WalletRow.js';
 export { AddressCrux, DEFAULT_ADDRESS_CRUX_NOTE } from './AddressCrux.js';
 export {

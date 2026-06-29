@@ -149,6 +149,21 @@ describe('PublishEligibilityChip (S5)', () => {
     await unmount();
   });
 
+  // V1/#1344/#9 — routing S5 registration through the shared normalizer means an
+  // OMITTED registered (undefined) is now inconclusive ("couldn't determine"), not a
+  // confirmed not-registered → resolves NEUTRAL, never a DANGER. (Now matches overview/S6.)
+  it('V1 — a probedKey with registered OMITTED resolves NEUTRAL, not DANGER', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('0')); // gas-funded, no TRAC
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...makePcaSnapshot(), probedKey: { key } } : makePcaSnapshot(), // registered OMITTED
+    );
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'PCA status unknown');
+    expect(container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeNull();
+    expect(container.querySelector('[data-verdict="unknown"]')).toBeTruthy();
+    await unmount();
+  });
+
   // L1 — when wallets are covered by DIFFERENT PCAs, the GREEN chip advertises the
   // MAX covering discount (matching bestCoveringDiscountBps), not covered[0].
   it('GREEN advertises the MAX covering discount across wallets on different PCAs (L1)', async () => {
@@ -193,6 +208,29 @@ describe('PublishEligibilityChip (S5)', () => {
     await waitForText(container, 'Funded by PCA #7'); // NOT a false out-of-budget DANGER
     expect(container.textContent).not.toContain('Publish will fail');
     expect(container.textContent).not.toContain('No PCA discount');
+    await unmount();
+  });
+
+  // C1 — `dead` and out-of-budget are INDEPENDENT reason facets: an account that
+  // is BOTH expired AND zero-budget must surface BOTH reasons in the popover (the
+  // two independent `if`s in usePublishEligibility fire), not just one.
+  it('C1: an expired AND out-of-budget approved account surfaces BOTH reasons', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('50')); // gas+TRAC → amber fall-through
+    const deadBroke = makePcaSnapshot({
+      expiresAtTimestamp: Math.floor(Date.now() / 1000) - 86_400, // expired
+      topUpBuffer: '0',
+      topUpBufferTrac: '0',
+      baseEpochAllowance: '0', // out of budget
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...deadBroke, probedKey: { key, registered: true } } : deadBroke,
+    );
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'No PCA discount'); // amber (wallet has TRAC)
+    const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
+    await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'expired or been fully swept');
+    expect(container.textContent).toContain('out of budget'); // BOTH independent facets surfaced
     await unmount();
   });
 

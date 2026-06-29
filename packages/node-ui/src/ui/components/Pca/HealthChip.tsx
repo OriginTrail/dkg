@@ -1,18 +1,8 @@
 import React from 'react';
-import type { PcaSnapshot } from '../../api.js';
-
-/**
- * The health states a PCA can be in (S1/S3 `HealthChip`). Each maps to a
- * DISTINCT glyph (not colour-only) and a text label that is NEVER dropped — the
- * label is the accessible name, the glyph is decorative (`aria-hidden`).
- */
-export type PcaHealthState =
-  | 'healthy'
-  | 'expiring'
-  | 'expired'
-  | 'insolvent'
-  | 'swept'
-  | 'cap-near';
+// #1355 V2 — health derivation lives in the domain module `pca/health.ts`; this
+// presentation file only consumes `PcaHealthState` for its pill (every other consumer
+// imports the derivation directly from `pca/health.js`, so no re-export here).
+import { type PcaHealthState } from '../../pca/health.js';
 
 interface HealthMeta {
   glyph: string;
@@ -64,35 +54,6 @@ export const HEALTH_CHIP_META: Record<PcaHealthState, HealthMeta> = {
     hint: 'Approaching the 100 approved-publishing-wallet cap.',
   },
 };
-
-/** Approved-wallet count at which a PCA is flagged "Cap near 100". */
-export const PCA_CAP_NEAR_THRESHOLD = 90;
-/** Window (seconds) before expiry at which a PCA is flagged "Expiring soon" (7 days). */
-export const PCA_EXPIRING_SOON_SECONDS = 7 * 24 * 60 * 60;
-
-/**
- * The SINGLE source of truth for deriving a PCA's `HealthChip` state from its
- * snapshot — used by S1/S3/S5 so the derivation can't drift across screens.
- * Precedence (highest first), per the lead's contract:
- *   expired → swept → cap-near → expiring → healthy.
- *
- * `insolvent` is intentionally NOT derived in P0: accurate insolvency needs the
- * current-epoch `remainingAllowance` (GAP-4/5 extended snapshot), which the P0
- * snapshot doesn't carry — asserting it from P0 data would be a false claim
- * (invariant #9). The `insolvent` STATE still exists for the P2 budget widget.
- */
-export function healthForSnapshot(
-  snapshot: Pick<PcaSnapshot, 'expiresAtTimestamp' | 'fullySwept' | 'agentCount'>,
-  nowSec: number = Math.floor(Date.now() / 1000),
-): PcaHealthState {
-  const { expiresAtTimestamp, fullySwept, agentCount } = snapshot;
-  const hasExpiry = typeof expiresAtTimestamp === 'number' && expiresAtTimestamp > 0;
-  if (hasExpiry && nowSec >= expiresAtTimestamp) return 'expired';
-  if (fullySwept) return 'swept';
-  if (typeof agentCount === 'number' && agentCount >= PCA_CAP_NEAR_THRESHOLD) return 'cap-near';
-  if (hasExpiry && expiresAtTimestamp - nowSec <= PCA_EXPIRING_SOON_SECONDS) return 'expiring';
-  return 'healthy';
-}
 
 /**
  * A status pill for a PCA's health. The text label always renders (the

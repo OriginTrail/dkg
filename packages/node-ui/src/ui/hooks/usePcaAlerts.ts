@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { usePcaOverview } from './usePcaOverview.js';
-import { PCA_CAP_NEAR_THRESHOLD, PCA_EXPIRING_SOON_SECONDS } from '../components/Pca/HealthChip.js';
+import { PCA_CAP_NEAR_THRESHOLD, PCA_EXPIRING_SOON_SECONDS } from '../pca/health.js';
 
 export type PcaAlertKind = 'expired' | 'expiring' | 'swept' | 'cap-near' | 'fallthrough';
 

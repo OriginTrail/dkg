@@ -11,10 +11,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   HealthChip,
   HEALTH_CHIP_META,
-  healthForSnapshot,
-  PCA_CAP_NEAR_THRESHOLD,
-  PCA_EXPIRING_SOON_SECONDS,
-  type PcaHealthState,
   WalletRow,
   AddressCrux,
   DiscountTierLadder,
@@ -24,6 +20,13 @@ import {
   EligibilityVerdictBanner,
   SponsorshipHandshake,
 } from '../src/ui/components/Pca/index.js';
+import {
+  healthForSnapshot,
+  isPcaExpired,
+  PCA_CAP_NEAR_THRESHOLD,
+  PCA_EXPIRING_SOON_SECONDS,
+  type PcaHealthState,
+} from '../src/ui/pca/health.js';
 import { EmptyState } from '../src/ui/components/ContextGraphPrimitives.js';
 
 async function render(node: React.ReactElement): Promise<{
@@ -151,6 +154,24 @@ describe('healthForSnapshot (single source of truth for S1/S3/S5)', () => {
 
   it('treats a missing/zero expiry as "no expiry data" (never expired/expiring)', () => {
     expect(healthForSnapshot({ ...base, expiresAtTimestamp: 0 }, NOW)).toBe('healthy');
+  });
+});
+
+describe('isPcaExpired (shared liveness primitive — single expiry source, #1344 C-live)', () => {
+  const NOW = 1_000_000;
+  it('expired exactly at and past the boundary; not before', () => {
+    expect(isPcaExpired({ expiresAtTimestamp: NOW }, NOW)).toBe(true); // boundary counts as expired
+    expect(isPcaExpired({ expiresAtTimestamp: NOW - 1 }, NOW)).toBe(true);
+    expect(isPcaExpired({ expiresAtTimestamp: NOW + 1 }, NOW)).toBe(false);
+  });
+  it('treats 0 / absent expiry as "no lock period" → never expired', () => {
+    expect(isPcaExpired({ expiresAtTimestamp: 0 }, NOW)).toBe(false);
+    expect(isPcaExpired({ expiresAtTimestamp: undefined as unknown as number }, NOW)).toBe(false);
+  });
+  it('is exactly healthForSnapshot’s expired discriminant', () => {
+    // The two stay lockstep: expired-state ⟺ isPcaExpired (the C-live contract).
+    expect(healthForSnapshot({ expiresAtTimestamp: NOW, fullySwept: false, agentCount: 1 }, NOW)).toBe('expired');
+    expect(isPcaExpired({ expiresAtTimestamp: NOW }, NOW)).toBe(true);
   });
 });
 
