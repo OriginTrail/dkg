@@ -32,3 +32,4 @@ export {
   type PcaVerdict,
 } from './EligibilityVerdictBanner.js';
 export { SponsorshipHandshake } from './SponsorshipHandshake.js';
+export { PrimaryNodePicker, type PrimaryNodeOption } from './PrimaryNodePicker.js';

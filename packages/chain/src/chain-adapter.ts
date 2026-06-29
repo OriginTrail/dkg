@@ -10,6 +10,26 @@ import type { ethers } from 'ethers';
 export interface ConvictionReader {
   getConvictionAgentAccountId(agent: string): Promise<bigint>;
   convictionAccountCanCover(accountId: bigint, baseCost: bigint): Promise<boolean>;
+  listPublishingConvictionAccountsForWallets?(wallets: string[]): Promise<PcaAccountRelation[]>;
+  listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
+}
+
+/** A PCA the node relates to (GAP-1): `owned` (a node wallet holds the NFT),
+ *  `agent` (a node op wallet is its registered publishing agent), or `both`. */
+export type PcaRelation = 'owned' | 'agent' | 'both';
+export interface PcaAccountRelation {
+  accountId: bigint;
+  relation: PcaRelation;
+}
+
+/** A node from the on-chain sharding table, eligible to be designated as a
+ *  PCA `primaryNode`. `nodeId` is a display-only self-reported id; `identityId`
+ *  is the value passed as `primaryNode`. `ask`/`stake` are wei. */
+export interface ShardingTableNode {
+  nodeId: string;
+  identityId: bigint;
+  ask: bigint;
+  stake: bigint;
 }
 
 export interface IdentityProof {
@@ -910,8 +930,21 @@ export interface ChainAdapter {
    * Optional on the adapter surface so mock-chain unit tests that
    * don't model PCA registration can omit the implementation. The
    * publisher gracefully treats `undefined` as "no PCA path active".
-   */
+  */
   getConvictionAgentAccountId?(agent: string, opts?: { strict?: boolean }): Promise<bigint>;
+
+  /**
+   * GAP-1 — enumerate every PCA the given wallets relate to: `owned` (the wallet
+   * holds the NFT) and/or `agent` (the wallet is a registered publishing agent).
+   * Deduped, relation-tagged, sorted asc.
+   */
+  listPublishingConvictionAccountsForWallets?(wallets: string[]): Promise<PcaAccountRelation[]>;
+
+  /**
+   * B-staked-nodes — the full on-chain sharding table of nodes designatable as a
+   * PCA `primaryNode`. `opts.fresh` bypasses adapter-side cache.
+   */
+  listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
 
   /**
    * Returns the V10 NFT-backed PCA's `lockDurationEpochs` for the given

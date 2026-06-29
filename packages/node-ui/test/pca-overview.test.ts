@@ -173,6 +173,20 @@ describe('ConvictionOverview — S1 discovery', () => {
     await unmount();
   });
 
+  // Sub-PR 1 (§5.6/§5.1) — edge can now create: Get sponsored stays primary, Create is
+  // an available SECONDARY CTA alongside it (no longer edge-gated).
+  it('edge S1 offers Create alongside the (primary) Get-sponsored CTA', async () => {
+    useAgentsStore.getState().setNodeStatus({ nodeRole: 'edge', blockExplorerUrl: null });
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'Share my wallet → get sponsored');
+    const createBtn = container.querySelector('[data-testid="pca-create-btn"]') as HTMLButtonElement;
+    expect(createBtn).toBeTruthy();
+    expect(createBtn.textContent).toContain('Create a conviction account');
+    // Get sponsored stays the PRIMARY-styled action; Create is the secondary.
+    expect(createBtn.className).not.toContain('primary');
+    await unmount();
+  });
+
   it('classifies a tracked account the node owns under "Owned by me"', async () => {
     usePcaStore.setState({ trackedIds: ['7'], createPending: null });
     mocks.fetchWalletsBalances.mockResolvedValue({

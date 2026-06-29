@@ -10,7 +10,7 @@
  * Conventions mirror chain-lifecycle-extra.test.ts: real EVMChainAdapter
  * over the shared Hardhat node, one snapshot per test for isolation.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
@@ -192,6 +192,84 @@ describe('V10 Publishing Conviction NFT — chain-adapter lifecycle', () => {
     expect(info!.lastPrimaryNodeChangeEpoch).toBeUndefined();
     expect(info!.currentEpoch).toBeUndefined();
     expect(info!.remainingAllowance).toBeUndefined();
+  });
+
+  it('listPublishingConvictionAccountsForWallets enumerates owned / agent / both, deduped and sorted', async () => {
+    const owner = await fundedOwner();
+    const ownerAddr = owner.getSignerAddress();
+    const { accountId: a1 } = await owner.createPublishingConvictionAccount(COMMITTED);
+    const { accountId: a2 } = await owner.createPublishingConvictionAccount(COMMITTED);
+    const wallet = ethers.Wallet.createRandom().address;
+    await owner.registerPublishingConvictionAgent(a1, wallet);
+
+    const ownedList = await owner.listPublishingConvictionAccountsForWallets([ownerAddr]);
+    const owned = new Map(ownedList.map((entry) => [entry.accountId, entry.relation]));
+    expect(owned.get(a1)).toBe('owned');
+    expect(owned.get(a2)).toBe('owned');
+    expect(ownedList).toHaveLength(2);
+
+    expect(await owner.listPublishingConvictionAccountsForWallets([wallet]))
+      .toEqual([{ accountId: a1, relation: 'agent' }]);
+
+    const combined = await owner.listPublishingConvictionAccountsForWallets([ownerAddr, wallet]);
+    const relations = new Map(combined.map((entry) => [entry.accountId, entry.relation]));
+    expect(relations.get(a1)).toBe('both');
+    expect(relations.get(a2)).toBe('owned');
+    expect(combined).toHaveLength(2);
+    expect(combined.map((entry) => entry.accountId)).toEqual([a1, a2].sort((x, y) => (x < y ? -1 : 1)));
+    expect(await owner.listPublishingConvictionAccountsForWallets([ethers.Wallet.createRandom().address])).toEqual([]);
+  });
+
+  it('listDesignatableNodes reads the staked sharding table and maps NodeInfo', async () => {
+    const reader = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const { receiverIds } = getSharedContext();
+
+    const nodes = await reader.listDesignatableNodes();
+    expect(nodes.length).toBeGreaterThanOrEqual(receiverIds.length);
+
+    const byId = new Map(nodes.map((node) => [node.identityId, node]));
+    for (const receiverId of receiverIds) {
+      const node = byId.get(BigInt(receiverId));
+      expect(node, `receiver ${receiverId} should be in the sharding table`).toBeDefined();
+      expect(node!.nodeId).toMatch(/^0x[0-9a-fA-F]+$/);
+      expect(node!.stake).toBeGreaterThan(0n);
+      expect(node!.ask).toBeGreaterThan(0n);
+    }
+    expect(nodes.every((node) => node.identityId > 0n)).toBe(true);
+  });
+
+  it('listDesignatableNodes caches, fresh repopulates, and throws do not poison the last good cache', async () => {
+    const reader = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const good = await reader.listDesignatableNodes();
+
+    const hitSpy = vi.spyOn(reader as any, 'readContractWith');
+    expect(await reader.listDesignatableNodes()).toEqual(good);
+    expect(hitSpy).not.toHaveBeenCalled();
+    hitSpy.mockRestore();
+
+    const refreshed = [{ nodeId: '0xfeed', identityId: 99999n, ask: 7n, stake: 8n }];
+    const rawRefreshed = refreshed.map((node) => [node.nodeId, node.identityId, node.ask, node.stake]);
+    const freshSpy = vi.spyOn(reader as any, 'readContractWith').mockResolvedValueOnce(rawRefreshed);
+    expect(await reader.listDesignatableNodes({ fresh: true })).toEqual(refreshed);
+    expect(freshSpy).toHaveBeenCalledTimes(1);
+    freshSpy.mockRestore();
+    expect(await reader.listDesignatableNodes()).toEqual(refreshed);
+
+    const boom = vi.spyOn(reader as any, 'readContractWith')
+      .mockRejectedValueOnce(Object.assign(new Error('blip'), { code: 'CALL_EXCEPTION' }));
+    await expect(reader.listDesignatableNodes({ fresh: true })).rejects.toThrow();
+    boom.mockRestore();
+    expect(await reader.listDesignatableNodes()).toEqual(refreshed);
+  });
+
+  it('listDesignatableNodes re-resolves ShardingTable per fresh read', async () => {
+    const reader = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const resolveSpy = vi.spyOn(reader as any, 'resolveContract');
+    await reader.listDesignatableNodes({ fresh: true });
+    await reader.listDesignatableNodes({ fresh: true });
+    const shardingTableResolves = resolveSpy.mock.calls.filter((call: any[]) => call[0] === 'ShardingTable').length;
+    expect(shardingTableResolves).toBe(2);
+    resolveSpy.mockRestore();
   });
 
   it('getPublishingConvictionAgents enumerates registered agents (checksummed) and reflects deregistration', async () => {

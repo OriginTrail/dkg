@@ -46,7 +46,7 @@ export function ConvictionOverview() {
   const defaultFilter: ViewFilter = role === 'edge' ? 'approved' : 'owned';
   const filter = userFilter ?? defaultFilter;
   const [createOpen, setCreateOpen] = useState(false);
-  const [approve, setApprove] = useState<{ accountId: string; mode: 'self' | 'sponsor' } | null>(null);
+  const [approve, setApprove] = useState<{ accountId: string; mode: 'self' | 'sponsor'; selfCoverage?: boolean } | null>(null);
   const [sponsoredOpen, setSponsoredOpen] = useState(false);
 
   const owned = useMemo(() => accounts.filter((a) => a.classification === 'owned'), [accounts]);
@@ -113,13 +113,25 @@ export function ConvictionOverview() {
           </button>
         </div>
         {role === 'edge' ? (
-          <button
-            type="button"
-            className="v10-pca-card-btn primary"
-            onClick={() => setSponsoredOpen(true)}
-          >
-            Share my wallet → get sponsored
-          </button>
+          // Sub-PR 1 (§5.6/§5.1) — edge can now create too: Get sponsored stays the
+          // PRIMARY/recommended-free CTA; Create is an available SECONDARY alongside it.
+          <div className="v10-pca-overview-cta-group">
+            <button
+              type="button"
+              className="v10-pca-card-btn primary"
+              onClick={() => setSponsoredOpen(true)}
+            >
+              Share my wallet → get sponsored
+            </button>
+            <button
+              type="button"
+              className="v10-pca-card-btn"
+              data-testid="pca-create-btn"
+              onClick={() => setCreateOpen(true)}
+            >
+              + Create a conviction account
+            </button>
+          </div>
         ) : (
           <button
             type="button"
@@ -179,7 +191,7 @@ export function ConvictionOverview() {
       {createOpen && (
         <CreatePcaModal
           onClose={() => { setCreateOpen(false); refresh(); }}
-          onApproveOwnWallets={(id) => { setCreateOpen(false); setApprove({ accountId: id, mode: 'self' }); }}
+          onApproveOwnWallets={(id) => { setCreateOpen(false); setApprove({ accountId: id, mode: 'self', selfCoverage: true }); }}
           onManage={(id) => { setCreateOpen(false); onManage(id); }}
           onGetSponsored={() => { setCreateOpen(false); setSponsoredOpen(true); }}
         />
@@ -188,6 +200,7 @@ export function ConvictionOverview() {
         <ApproveWalletsModal
           accountId={approve.accountId}
           initialMode={approve.mode}
+          selfCoverage={approve.selfCoverage}
           onClose={() => { setApprove(null); refresh(); }}
         />
       )}
@@ -198,11 +211,13 @@ export function ConvictionOverview() {
 
 function OwnedEmpty({ role }: { role?: 'core' | 'edge' }) {
   if (role === 'edge') {
+    // Sub-PR 1 (§5.6) — edge CAN own a PCA now (by designating a staked node as primary).
+    // Get sponsored stays the recommended free path; creating is the available alternative.
     return (
       <EmptyState
         tone="neutral"
-        title="Edge nodes can’t own a Publishing Conviction Account"
-        description="Creating a PCA requires a staked core-node identity to set as its primary node. Get sponsored by a core node instead."
+        title="Get sponsored — or create your own"
+        description="The free path: have a core node approve your operational wallets (Get sponsored — no TRAC locked). You can also create your own conviction account by designating a staked node as its primary node — you get the discount, and the reward weight accrues to the node you pick."
       />
     );
   }

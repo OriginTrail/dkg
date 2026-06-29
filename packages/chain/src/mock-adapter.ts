@@ -24,6 +24,8 @@ import type {
   OperationalWalletRegistrationResult,
   V10PublishingConvictionAccountInfo,
   NodePublishingConvictionAccount,
+  PcaAccountRelation,
+  ShardingTableNode,
   VerifyACKIdentityResult,
 } from './chain-adapter.js';
 import {
@@ -716,6 +718,36 @@ export class MockChainAdapter implements ChainAdapter {
     const acct = this.convictionAccounts.get(accountId);
     if (!acct) return [];
     return [...acct.agents].map((k) => ethers.getAddress(k));
+  }
+
+  async listPublishingConvictionAccountsForWallets(wallets: string[]): Promise<PcaAccountRelation[]> {
+    const owned = new Set<bigint>();
+    const agent = new Set<bigint>();
+
+    for (const wallet of wallets) {
+      if (!ethers.isAddress(wallet)) continue;
+      const key = ethers.getAddress(wallet).toLowerCase();
+      for (const [id, acct] of this.convictionAccounts) {
+        if (acct.owner.toLowerCase() === key) owned.add(id);
+      }
+      const accountId = this.agentToConvictionAccount.get(key);
+      if (accountId != null && accountId > 0n) agent.add(accountId);
+    }
+
+    const ids = [...new Set<bigint>([...owned, ...agent])].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    return ids.map((accountId) => {
+      const isOwned = owned.has(accountId);
+      const isAgent = agent.has(accountId);
+      return { accountId, relation: isOwned && isAgent ? 'both' : isOwned ? 'owned' : 'agent' };
+    });
+  }
+
+  async listDesignatableNodes(_opts?: { fresh?: boolean }): Promise<ShardingTableNode[]> {
+    return [
+      { nodeId: '0x6e6f64652d31', identityId: 42n, ask: 1_000_000_000_000_000_000n, stake: 250_000n * 10n ** 18n },
+      { nodeId: '0x6e6f64652d32', identityId: 57n, ask: 2_000_000_000_000_000_000n, stake: 180_000n * 10n ** 18n },
+      { nodeId: '0x6e6f64652d33', identityId: 61n, ask: 1_500_000_000_000_000_000n, stake: 500_000n * 10n ** 18n },
+    ];
   }
 
   /** Mirrors `agentToAccountId`; `0n` for unregistered → publisher SDK

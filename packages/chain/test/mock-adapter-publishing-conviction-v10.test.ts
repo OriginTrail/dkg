@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '../src/mock-adapter.js';
+import { toShardingTableNode } from '../src/evm-adapter-conviction.js';
 
 const SIGNER = '0x1111111111111111111111111111111111111111';
 const COMMITTED = ethers.parseEther('10000');
@@ -184,6 +185,50 @@ describe('MockChainAdapter — V10 conviction agent register/deregister', () => 
     const agents = await mock.getPublishingConvictionAgents(accountId);
     expect(agents).toEqual([checksummed]);
     expect(agents[0]).not.toBe(checksummed.toLowerCase()); // EIP-55, not lowercased
+  });
+
+  it('listPublishingConvictionAccountsForWallets returns owned / agent / both, deduped and sorted', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const { accountId: a1 } = await mock.createPublishingConvictionAccount(COMMITTED);
+    const { accountId: a2 } = await mock.createPublishingConvictionAccount(COMMITTED);
+    const wallet = ethers.Wallet.createRandom().address;
+    await mock.registerPublishingConvictionAgent(a1, wallet);
+
+    const owned = await mock.listPublishingConvictionAccountsForWallets([SIGNER]);
+    expect(owned.map((entry) => entry.relation)).toEqual(['owned', 'owned']);
+
+    expect(await mock.listPublishingConvictionAccountsForWallets([wallet]))
+      .toEqual([{ accountId: a1, relation: 'agent' }]);
+
+    const combined = await mock.listPublishingConvictionAccountsForWallets([SIGNER, wallet]);
+    const relations = new Map(combined.map((entry) => [entry.accountId, entry.relation]));
+    expect(relations.get(a1)).toBe('both');
+    expect(relations.get(a2)).toBe('owned');
+    expect(combined).toHaveLength(2);
+    expect(combined.map((entry) => entry.accountId)).toEqual([a1, a2]);
+    expect(await mock.listPublishingConvictionAccountsForWallets([ethers.Wallet.createRandom().address])).toEqual([]);
+  });
+
+  it('listDesignatableNodes returns the fixture sharding table in hash-ring order', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const nodes = await mock.listDesignatableNodes();
+    expect(nodes).toHaveLength(3);
+    expect(nodes.map((node) => node.identityId)).toEqual([42n, 57n, 61n]);
+    for (const node of nodes) {
+      expect(node.nodeId).toMatch(/^0x[0-9a-fA-F]+$/);
+      expect(typeof node.identityId).toBe('bigint');
+      expect(node.stake).toBeGreaterThan(0n);
+      expect(node.ask).toBeGreaterThan(0n);
+    }
+  });
+
+  it('toShardingTableNode normalizes named object and positional tuple shapes', () => {
+    expect(toShardingTableNode({ nodeId: '0xab', identityId: 7n, ask: 1n, stake: 2n }))
+      .toEqual({ nodeId: '0xab', identityId: 7n, ask: 1n, stake: 2n });
+    expect(toShardingTableNode(['0xab', 7n, 1n, 2n]))
+      .toEqual({ nodeId: '0xab', identityId: 7n, ask: 1n, stake: 2n });
+    expect(toShardingTableNode(['0xcd', '9', 3, 4n]))
+      .toEqual({ nodeId: '0xcd', identityId: 9n, ask: 3n, stake: 4n });
   });
 });
 

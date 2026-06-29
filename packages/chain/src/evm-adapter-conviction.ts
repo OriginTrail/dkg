@@ -16,9 +16,27 @@ import type {
   V10PublishingConvictionAccountInfo,
   NodePublishingConvictionAccount,
   ConvictionReader,
+  PcaAccountRelation,
+  ShardingTableNode,
 } from './chain-adapter.js';
 import { PcaUnavailableError } from './pca-errors.js';
 import { enrichEvmError, getPcaLogicInterface } from './evm-adapter-errors.js';
+
+export interface RawShardingTableNode extends ArrayLike<unknown> {
+  nodeId?: unknown;
+  identityId?: unknown;
+  ask?: unknown;
+  stake?: unknown;
+}
+
+export function toShardingTableNode(raw: RawShardingTableNode): ShardingTableNode {
+  return {
+    nodeId: String(raw.nodeId ?? raw[0]),
+    identityId: BigInt((raw.identityId ?? raw[1]) as bigint | number | string),
+    ask: BigInt((raw.ask ?? raw[2]) as bigint | number | string),
+    stake: BigInt((raw.stake ?? raw[3]) as bigint | number | string),
+  };
+}
 
 export class ConvictionMethods extends EVMChainAdapterBase implements ConvictionReader {
   // =====================================================================
@@ -646,5 +664,64 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.getRegisteredAgents', 'getRegisteredAgents', accountId,
     );
     return (raw ?? []).map((a) => ethers.getAddress(a));
+  }
+
+  async listPublishingConvictionAccountsForWallets(wallets: string[]): Promise<PcaAccountRelation[]> {
+    await this.init();
+    const nft = this.contracts.dkgPublishingConvictionNFT;
+    if (!nft) throw new PcaUnavailableError();
+
+    const owned = new Set<bigint>();
+    const agent = new Set<bigint>();
+    for (const wallet of wallets) {
+      if (!ethers.isAddress(wallet)) continue;
+
+      const balance = BigInt(await this.readContract(
+        nft, 'pcaNFT.balanceOf', 'balanceOf', wallet,
+      ));
+      for (let index = 0n; index < balance; index++) {
+        const tokenId = BigInt(await this.readContract(
+          nft, 'pcaNFT.tokenOfOwnerByIndex', 'tokenOfOwnerByIndex', wallet, index,
+        ));
+        owned.add(tokenId);
+      }
+
+      const accountId = await this.getConvictionAgentAccountId(wallet, { strict: true });
+      if (accountId > 0n) agent.add(accountId);
+    }
+
+    const ids = [...new Set<bigint>([...owned, ...agent])].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    return ids.map((accountId) => {
+      const isOwned = owned.has(accountId);
+      const isAgent = agent.has(accountId);
+      return { accountId, relation: isOwned && isAgent ? 'both' : isOwned ? 'owned' : 'agent' };
+    });
+  }
+
+  private static readonly DESIGNATABLE_NODES_TTL_MS = 30_000;
+  private cachedDesignatableNodes: { value: ShardingTableNode[]; cachedAt: number } | undefined;
+
+  async listDesignatableNodes(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]> {
+    const now = Date.now();
+    const cached = this.cachedDesignatableNodes;
+    if (!opts?.fresh && cached && now - cached.cachedAt < ConvictionMethods.DESIGNATABLE_NODES_TTL_MS) {
+      return cached.value;
+    }
+
+    await this.init();
+    const shardingTable = await this.resolveContract('ShardingTable');
+    const raw = await this.readContractWith<readonly RawShardingTableNode[]>(
+      shardingTable,
+      'shardingTable.getShardingTable',
+      (contract) => contract.getFunction('getShardingTable()').staticCall(),
+    );
+    const nodes: ShardingTableNode[] = [];
+    for (const item of raw ?? []) {
+      const node = toShardingTableNode(item);
+      if (node.identityId <= 0n) continue;
+      nodes.push(node);
+    }
+    this.cachedDesignatableNodes = { value: nodes, cachedAt: now };
+    return nodes;
   }
 }

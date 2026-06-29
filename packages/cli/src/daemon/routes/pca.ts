@@ -586,6 +586,95 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
     }
   }
 
+  // GET /api/pca/mine - enumerate every PCA the node relates to (owned + agent-on
+  // across the node's operational wallets). Exact path before the generic :id
+  // matcher, otherwise "mine" would parse as an account id.
+  if (req.method === 'GET' && path === '/api/pca/mine') {
+    if (!agent.supportsPublishingConvictionNft) {
+      return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+    }
+    const wallets = ctx.opWallets.wallets.map((wallet) => wallet.address);
+    try {
+      const accounts = await agent.listPublishingConvictionAccountsForWallets(wallets);
+      if (accounts === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      const hydrate = ctx.url.searchParams.get('hydrate') === '1';
+      if (!hydrate) {
+        return jsonResponse(res, 200, {
+          accounts: accounts.map((account) => ({
+            accountId: account.accountId.toString(),
+            relation: account.relation,
+          })),
+        });
+      }
+
+      const hydrated: Array<Record<string, unknown>> = [];
+      for (const account of accounts) {
+        const entry: Record<string, unknown> = {
+          accountId: account.accountId.toString(),
+          relation: account.relation,
+        };
+        try {
+          const info = await agent.getPublishingConvictionAccountInfo(account.accountId);
+          if (info) Object.assign(entry, serializeAccountInfo(account.accountId, info));
+        } catch {
+          // Per-account hydration is best-effort; the relation row is still useful.
+        }
+        hydrated.push(entry);
+      }
+      return jsonResponse(res, 200, { accounts: hydrated });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (respondIfChainRpcTransportError(res, err)) return;
+      if (err?.code === 'CALL_EXCEPTION') {
+        return jsonResponse(res, 503, {
+          error: 'PCA enumeration temporarily unavailable - chain read failed',
+          code: 'PCA_LOOKUP_READ_FAILED',
+        });
+      }
+      return jsonResponse(res, 500, {
+        error: `listPublishingConvictionAccountsForWallets failed: ${msg}`,
+      });
+    }
+  }
+
+  // GET /api/pca/designatable-nodes - full sharding table of nodes that can be
+  // designated as a PCA primary node. ?fresh=1 bypasses adapter cache.
+  if (req.method === 'GET' && path === '/api/pca/designatable-nodes') {
+    if (!agent.supportsPublishingConvictionNft) {
+      return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+    }
+    const fresh = ctx.url.searchParams.get('fresh') === '1';
+    try {
+      const nodes = await agent.listDesignatableNodes({ fresh });
+      if (nodes === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      return jsonResponse(res, 200, {
+        nodes: nodes.map((node) => ({
+          nodeId: node.nodeId,
+          identityId: node.identityId.toString(),
+          ask: node.ask.toString(),
+          stake: node.stake.toString(),
+        })),
+        total: nodes.length,
+      });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (respondIfChainRpcTransportError(res, err)) return;
+      if (err?.code === 'CALL_EXCEPTION' || err?.code === 'BAD_DATA') {
+        return jsonResponse(res, 503, {
+          error: 'Designatable-node list temporarily unavailable - sharding-table read failed',
+          code: 'SHARDING_TABLE_READ_FAILED',
+        });
+      }
+      return jsonResponse(res, 500, {
+        error: `listDesignatableNodes failed: ${msg}`,
+      });
+    }
+  }
+
   // GET /api/pca/:id — V10 conviction NFT snapshot. Optional ?key=0x...
   // probes whether that address is a registered agent. Optional ?extended=1
   // adds the GAP-4/5 budget fields (primaryNode + current-epoch allowance);

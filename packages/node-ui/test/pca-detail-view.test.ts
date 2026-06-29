@@ -17,6 +17,9 @@ const mocks = vi.hoisted(() => ({
   pcaSettle: vi.fn(),
   pcaRemoveAgent: vi.fn(),
   registerContextGraph: vi.fn(),
+  // The renew path renders the real CreatePcaModal → the §3b picker + B1 probe.
+  pcaAgentAccount: vi.fn(),
+  listDesignatableNodes: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', async (orig) => {
@@ -80,6 +83,9 @@ beforeEach(() => {
   );
   // B3 — default to the happy full-list path (W0 = this node's wallet, approved).
   mocks.listPcaAgents.mockResolvedValue({ accountId: '7', agents: [W0] });
+  // Renew → real CreatePcaModal: stub the picker list + B1 probe (no real fetch).
+  mocks.pcaAgentAccount.mockResolvedValue({ agent: '', accountId: null });
+  mocks.listDesignatableNodes.mockResolvedValue({ nodes: [], total: 0, nextStart: null });
 });
 afterEach(() => { document.body.innerHTML = ''; });
 

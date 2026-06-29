@@ -15,7 +15,10 @@ import {
   describePcaError,
   isPcaFeatureUnavailable,
   isRpcTransportError,
+  isPcaReadFailed,
   fetchPca,
+  fetchMyPcas,
+  listDesignatableNodes,
   createPca,
   pcaAddAgent,
   pcaRemoveAgent,
@@ -47,6 +50,17 @@ describe('describePcaError', () => {
     expect(
       isPcaFeatureUnavailable(new HttpError(503, 'x', { code: 'RPC_ENDPOINTS_EXHAUSTED' })),
     ).toBe(false);
+  });
+
+  it('isPcaReadFailed pins the retryable read-fail apart from a capability 503', () => {
+    // The /mine route's retryable chain-read failure — isPcaFeatureUnavailable can't
+    // tell it from a capability gap (both non-transport 503s), so this must.
+    const readFail = new HttpError(503, 'x', { code: 'PCA_LOOKUP_READ_FAILED' });
+    expect(isPcaReadFailed(readFail)).toBe(true);
+    expect(isPcaFeatureUnavailable(readFail)).toBe(true); // (documents the overlap the caller resolves)
+    expect(isPcaReadFailed(new HttpError(503, 'x', { error: 'FEATURE_UNAVAILABLE' }))).toBe(false);
+    expect(isPcaReadFailed(new HttpError(503, 'x', { code: 'RPC_ENDPOINTS_EXHAUSTED' }))).toBe(false);
+    expect(isPcaReadFailed(new Error('x'))).toBe(false);
   });
 
   it('isRpcTransportError detects RPC_* body codes regardless of status', () => {
@@ -103,12 +117,12 @@ describe('describePcaError', () => {
     expect(out!.code).toBe('UnknownAccount');
   });
 
-  it('AgentAlreadyRegistered degrades to "another conviction account" without existingAccountId', () => {
+  it('AgentAlreadyRegistered degrades to "another PCA" without existingAccountId', () => {
     const out = describePcaError(
       new HttpError(409, 'AgentAlreadyRegistered', { error: 'AgentAlreadyRegistered' }),
     );
     expect(out!.code).toBe('AgentAlreadyRegistered');
-    expect(out!.message).toContain('another conviction account');
+    expect(out!.message).toContain('another PCA');
     // Terminology discipline: user copy refers to the operational/publishing
     // wallet, never the contract word "agent".
     expect(out!.message.toLowerCase()).not.toContain('agent');
@@ -202,17 +216,41 @@ describe('PCA api helpers (transport shaping)', () => {
 
   it('fetchPca appends ?extended=1 only when opts.extended is set (P2), and combines with key', async () => {
     fetchMock.mockResolvedValueOnce(ok({ accountId: '1', primaryNode: '42' }));
-    await fetchPca('1', undefined, { extended: true });
+    const extended = await fetchPca('1', undefined, { extended: true });
     expect(fetchMock.mock.calls[0]![0]).toBe('/api/pca/1?extended=1');
+    expect(extended.extendedRequested).toBe(true);
 
     fetchMock.mockResolvedValueOnce(ok({ accountId: '1' }));
-    await fetchPca('1', '0xabc', { extended: true });
+    const probedExtended = await fetchPca('1', '0xabc', { extended: true });
     expect(fetchMock.mock.calls[1]![0]).toBe('/api/pca/1?key=0xabc&extended=1');
+    expect(probedExtended.extendedRequested).toBe(true);
 
     // P0 default: no extended param.
     fetchMock.mockResolvedValueOnce(ok({ accountId: '1' }));
-    await fetchPca('1');
+    const basic = await fetchPca('1');
     expect(fetchMock.mock.calls[2]![0]).toBe('/api/pca/1');
+    expect(basic.extendedRequested).toBeUndefined();
+  });
+
+  it('fetchMyPcas GETs /api/pca/mine, adding ?hydrate=1 only when requested', async () => {
+    fetchMock.mockResolvedValueOnce(ok({ accounts: [] }));
+    await fetchMyPcas();
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/pca/mine');
+
+    fetchMock.mockResolvedValueOnce(ok({ accounts: [] }));
+    await fetchMyPcas({ hydrate: true });
+    expect(fetchMock.mock.calls[1]![0]).toBe('/api/pca/mine?hydrate=1');
+  });
+
+  it('listDesignatableNodes GETs the whole list in one shot (R4 — no pagination), +?fresh=1 on demand', async () => {
+    fetchMock.mockResolvedValueOnce(ok({ nodes: [], total: 0 }));
+    await listDesignatableNodes();
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/pca/designatable-nodes');
+
+    // M4 — fresh:true appends ?fresh=1 (cache-bust); absent otherwise.
+    fetchMock.mockResolvedValueOnce(ok({ nodes: [], total: 0 }));
+    await listDesignatableNodes({ fresh: true });
+    expect(fetchMock.mock.calls[1]![0]).toBe('/api/pca/designatable-nodes?fresh=1');
   });
 
   // T1 — a GET failure must throw an HttpError that CARRIES the body, so the tab-gate
