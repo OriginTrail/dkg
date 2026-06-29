@@ -160,16 +160,67 @@ describe('CreatePcaModal', () => {
 
   // B1 (§9.5) — every op wallet already on a sponsor's PCA → a loud informed-consent warning
   // before the TRAC commit; NOT a hard block (a node may create purely to sponsor others).
-  it('B1 — all wallets sponsor-bound shows the zero-self-coverage warning, never blocks Create', async () => {
+  it('B1 — all wallets sponsor-bound shows the zero-self-coverage warning but NEVER blocks Create (H3)', async () => {
     mocks.pcaAgentAccount.mockResolvedValue({ agent: OWNER, accountId: '5' });
-    mocks.fetchPca.mockResolvedValue(snap({ accountId: '5', owner: '0xSPONSOR000000000000000000000000000beEf12' }));
+    // id '5' = the sponsor's PCA (binding owner read); any other id = the create read-back snapshot.
+    mocks.fetchPca.mockImplementation(async (id: string) =>
+      id === '5' ? snap({ accountId: '5', owner: '0xSPONSOR000000000000000000000000000beEf12' }) : snap({ discountBps: 3000 }),
+    );
+    mocks.createPca.mockResolvedValue({ accountId: '8', txHash: '0xabc', committedTokens: '100000.0' });
     const { container, unmount } = await render(
       React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
     );
     await waitForText(container, 'sponsor other nodes'); // the zero-coverage warning copy
     expect(container.querySelector('[data-testid="pca-b1-zero-coverage"]')).toBeTruthy();
-    // Informed consent, not a gate — the submit control is still present.
-    expect(container.querySelector('[data-testid="pca-create-submit"]')).toBeTruthy();
+    // Enter a valid amount (node #42 is pre-selected) — informed consent, NOT a gate.
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const submit = container.querySelector('[data-testid="pca-create-submit"]') as HTMLButtonElement;
+    expect(submit.disabled).toBe(false); // create proceeds despite zero-self-coverage
+    await click(submit);
+    await waitForText(container, 'PCA #8 created');
+    expect(mocks.createPca).toHaveBeenCalled();
+    await unmount();
+  });
+
+  // H1 — Escape closes the OPEN picker popup, not the whole Create modal (the modal's
+  // useModalDismiss must no-op while a combobox is expanded so committed state isn't discarded).
+  it('H1 — Escape with the picker open closes the popup, does NOT dismiss the modal', async () => {
+    const onClose = vi.fn();
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose, onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '50000');
+    const search = container.querySelector('[data-testid="pca-primary-node-search"]') as HTMLInputElement;
+    // React (root delegation) maps onFocus to the native bubbling `focusin`.
+    await act(async () => { search.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); });
+    expect(container.querySelector('[role="listbox"]')).toBeTruthy(); // popup open
+    await act(async () => { search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    // Popup closed; modal NOT dismissed; the committed amount survives.
+    expect(onClose).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="listbox"]')).toBeNull();
+    expect((container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement).value).toBe('50000');
+    // A second Escape (popup now closed) DOES dismiss the modal.
+    await act(async () => { search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    expect(onClose).toHaveBeenCalled();
+    await unmount();
+  });
+
+  // M3 — own-bound migration is disclosed even when no wallet is sponsor-bound.
+  it('M3 — own-bound-only wallets get a MOVE disclosure (no sponsor-bound preview needed)', async () => {
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: OWNER, accountId: '3' });
+    // id '3' = a PCA THIS node owns (owner == OWNER) → own-bound; else = read-back snapshot.
+    mocks.fetchPca.mockImplementation(async (id: string) =>
+      id === '3' ? snap({ accountId: '3', owner: OWNER }) : snap({ discountBps: 3000 }),
+    );
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'already approved on a PCA you own');
+    expect(container.querySelector('[data-testid="pca-b1-own-bound"]')).toBeTruthy();
+    // Not the zero-coverage alarm (the wallet IS self-coverable via migration).
+    expect(container.querySelector('[data-testid="pca-b1-zero-coverage"]')).toBeNull();
     await unmount();
   });
 

@@ -26,6 +26,7 @@ export function PrimaryNodePicker({
   onChange,
   ownIdentityId,
   role,
+  required = false,
 }: {
   nodes: DesignatableNode[];
   loading: boolean;
@@ -38,6 +39,9 @@ export function PrimaryNodePicker({
    *  does the M3 staked cross-check). null/undefined ⇒ edge / not-staked ⇒ no "this node". */
   ownIdentityId?: string | null;
   role?: 'core' | 'edge';
+  /** M1 — the field is mandatory (Create requires a primary node). Drives aria-required +
+   *  aria-invalid so AT announces that an unresolved pick blocks submit (disabled buttons don't). */
+  required?: boolean;
 }) {
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
@@ -134,6 +138,8 @@ export function PrimaryNodePicker({
               aria-controls={listboxId}
               aria-autocomplete="list"
               aria-label="Search staked nodes"
+              aria-required={required}
+              aria-invalid={required && value === ''}
               aria-activedescendant={
                 open && activeIdx >= 0 && shown[activeIdx]
                   ? `${listboxId}-opt-${shown[activeIdx].identityId}`

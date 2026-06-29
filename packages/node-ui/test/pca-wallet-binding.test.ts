@@ -86,6 +86,14 @@ describe('selfCoverageOutlook', () => {
   it('empty wallet set → not zeroSelfCoverage', async () => {
     expect(selfCoverageOutlook([]).zeroSelfCoverage).toBe(false);
   });
+
+  it('ownBound (M3) counts wallets on a PCA the node owns — the migration-disclosure source', async () => {
+    const o = selfCoverageOutlook([mk({ boundTo: '4', canOwn: true }), mk({ boundTo: '9' }), mk({ boundTo: null })]);
+    expect(o.ownBound).toHaveLength(1);
+    expect(o.ownBound[0].boundTo).toBe('4');
+    expect(o.sponsorBound).toHaveLength(1); // #9 (not ownable)
+    expect(o.selfCoverable).toHaveLength(2); // own-bound #4 (migrate) + unbound
+  });
 });
 
 describe('probeWalletBindings', () => {

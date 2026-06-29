@@ -367,6 +367,16 @@ export function CreatePcaModal({
             (any already on a PCA you own are deregistered from it first).
           </div>
         )}
+        {/* M3 — own-bound migration must be disclosed: these wallets are MOVED off a PCA this node
+            already owns. Independent of the sponsor-bound preview (fires even when sponsorBound===0). */}
+        {!b1.zeroSelfCoverage && b1.ownBound.length > 0 && (
+          <div className="v10-modal-warning" role="status" data-testid="pca-b1-own-bound">
+            ⚠ {b1.ownBound.length} of this node’s wallet(s) are already approved on a PCA you own.
+            Self-coverage will <strong>move</strong> them — deregister from that account, then approve
+            on the new one. The old account’s committed TRAC stays locked until its own expiry and
+            would then cover nothing, so only proceed if you’re replacing it.
+          </div>
+        )}
 
         {/* S2b renew — HONEST framing (#9): this is a NEW separate account, not an
             in-place extension; the old account's TRAC stays locked until its own expiry. */}
@@ -431,6 +441,7 @@ export function CreatePcaModal({
             onChange={setPrimaryNode}
             ownIdentityId={ownStaked}
             role={nodeStatus?.nodeRole === 'edge' ? 'edge' : nodeStatus?.nodeRole === 'core' ? 'core' : undefined}
+            required
           />
         </section>
 

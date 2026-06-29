@@ -17,7 +17,7 @@ import {
   type WalletRowTone,
 } from '../../components/Pca/index.js';
 
-type RowStatus = 'pending' | 'approved' | 'submitted' | 'skipped' | 'sponsored' | 'conflict' | 'cap' | 'error' | 'unverified';
+type RowStatus = 'pending' | 'approved' | 'submitted' | 'skipped' | 'sponsored' | 'stranded' | 'conflict' | 'cap' | 'error' | 'unverified';
 interface Row {
   address: string;
   status: RowStatus;
@@ -35,6 +35,8 @@ const ROW_LABEL: Record<RowStatus, string> = {
   // B1 self-coverage — bound to a sponsor's PCA; intentionally left there (already discounted
   // free), NOT moved. Distinct from 'skipped' (= already approved HERE).
   sponsored: 'left on a sponsor’s PCA (already discounted free)',
+  // M5 — deregistered from the old PCA but the re-register failed: currently uncovered, recoverable.
+  stranded: 'removed from the old PCA, not yet on the new one — retry to finish',
   conflict: 'on another conviction account',
   cap: 'cap reached',
   error: 'failed',
@@ -48,6 +50,7 @@ const ROW_TONE: Record<RowStatus, WalletRowTone> = {
   submitted: 'neutral',
   skipped: 'neutral',
   sponsored: 'neutral',
+  stranded: 'warn',
   conflict: 'danger',
   cap: 'warn',
   error: 'danger',
@@ -178,6 +181,9 @@ export function ApproveWalletsModal({
         setRows((r) => ({ ...r, [addr]: { address: addr, status: 'error', message: 'stopped' } }));
         continue;
       }
+      // M5 — the old PCA we DEREGISTERED this wallet from (set only on a SUCCESSFUL deregister),
+      // so a subsequent register failure can be flagged "stranded" (off old, not on new) for retry.
+      let strandedFrom: string | null = null;
       try {
         // S2b renew (deregister-first, #1344 gate-HIGH): expiry doesn't clear
         // `agentToAccountId`, so a seeded old-PCA wallet is still bound there and
@@ -187,7 +193,11 @@ export function ApproveWalletsModal({
         // handling below surfaces a still-bound wallet as a conflict (#old) for recovery.
         if (deregisterFrom) {
           await deregisterOwner.deregisterAgent(deregisterFrom, addr).catch(() => {});
-        } else if (selfCoverage) {
+        } else if (selfCoverage && mode === 'self') {
+          // H2 (#9 safety) — gate on mode==='self': the mode radios stay enabled, so running this
+          // self-coverage deregister/skip logic on THIRD-PARTY (sponsor-mode) addresses would make a
+          // false "already discounted free" claim and could silently deregister a wallet off a PCA
+          // this node happens to own. Self-coverage applies to OUR wallets only.
           // B1 self-coverage (§9.5) — the old account VARIES per wallet. Probe this wallet's
           // binding right before its register: bound to a PCA the node CAN'T own (a sponsor's)
           // → SKIP (already discounted free; don't burn a register/conflict); bound to a PCA
@@ -202,7 +212,11 @@ export function ApproveWalletsModal({
             continue;
           }
           if (b.boundTo && b.canOwn) {
-            await owner.deregisterAgent(b.boundTo, addr).catch(() => {});
+            // M5 — record a SUCCESSFUL deregister so a later register failure reads as "stranded"
+            // (off old, not on new) with a retry, not a generic error. A FAILED deregister leaves
+            // the wallet on old → register conflicts → the B10 handling below recovers it.
+            try { await owner.deregisterAgent(b.boundTo, addr); strandedFrom = b.boundTo; }
+            catch { /* still bound to old — not stranded; register's conflict path recovers */ }
           }
         }
         const res = await owner.registerAgent(accountId, addr);
@@ -211,11 +225,19 @@ export function ApproveWalletsModal({
           [addr]: { address: addr, status: res.registered ? 'approved' : 'submitted', txHash: res.txHash },
         }));
       } catch (err) {
+        // M5 — if we'd already deregistered this wallet off its old PCA, a register failure leaves
+        // it off old + not on new (stranded). Tag it so the row offers "retry to finish" instead of
+        // a dead-end error. (NOT used for AgentAlreadyRegistered, which means it's still bound.)
+        const strandRow = (): Row => ({
+          address: addr,
+          status: 'stranded',
+          message: `Removed from PCA #${strandedFrom}, not yet on #${accountId} — retry to finish.`,
+        });
         // 403 → owner-gate failure: abort the WHOLE operation. W1 — sweep the later
         // not-yet-processed rows too, else they stay stuck on "approving…".
         if (err instanceof HttpError && err.status === 403) {
           setAborted(`This node isn’t the owner of PCA #${accountId} — approval aborted.`);
-          setRows((r) => markRemaining(r, { address: addr, status: 'error', message: 'owner-only' }, 'error', 'aborted'));
+          setRows((r) => markRemaining(r, strandedFrom ? strandRow() : { address: addr, status: 'error', message: 'owner-only' }, 'error', 'aborted'));
           break;
         }
         const info = describePcaError(err, { accountId });
@@ -249,7 +271,7 @@ export function ApproveWalletsModal({
         } else {
           setRows((r) => ({
             ...r,
-            [addr]: { address: addr, status: 'error', message: info?.message ?? (err as Error)?.message },
+            [addr]: strandedFrom ? strandRow() : { address: addr, status: 'error', message: info?.message ?? (err as Error)?.message },
           }));
         }
       }
@@ -268,6 +290,7 @@ export function ApproveWalletsModal({
       submitted: list.filter((r) => r.status === 'submitted').length,
       skipped: list.filter((r) => r.status === 'skipped').length,
       sponsored: list.filter((r) => r.status === 'sponsored').length,
+      stranded: list.filter((r) => r.status === 'stranded').length,
       conflict: list.filter((r) => r.status === 'conflict').length,
       error: list.filter((r) => r.status === 'error' || r.status === 'cap').length,
       unverified: list.filter((r) => r.status === 'unverified').length,
@@ -391,7 +414,7 @@ export function ApproveWalletsModal({
                 <WalletRow
                   key={a}
                   address={a}
-                  status={row.message && (row.status === 'conflict' || row.status === 'error' || row.status === 'sponsored') ? row.message : ROW_LABEL[row.status]}
+                  status={row.message && (row.status === 'conflict' || row.status === 'error' || row.status === 'sponsored' || row.status === 'stranded') ? row.message : ROW_LABEL[row.status]}
                   statusTone={ROW_TONE[row.status]}
                 />
               );
@@ -402,10 +425,22 @@ export function ApproveWalletsModal({
                 {counts.submitted > 0 ? ` · ${counts.submitted} submitted (verify)` : ''}
                 {' '}· {counts.skipped} already here · {counts.conflict} conflict
                 {counts.sponsored > 0 ? ` · ${counts.sponsored} left on a sponsor’s PCA` : ''}
+                {counts.stranded > 0 ? ` · ${counts.stranded} need a retry` : ''}
                 {counts.error > 0 ? ` · ${counts.error} failed` : ''}
                 {counts.unverified > 0 ? ` · ${counts.unverified} unverified` : ''} (of {order.length}).
               </p>
             )}
+          </div>
+        )}
+
+        {/* M5 — stranded recovery: a wallet was deregistered from its old PCA but its re-register
+            failed, so it's temporarily UNCOVERED. Surface it loudly + offer the one-click re-run
+            (the footer "Retry to finish" button re-runs the loop; the now-unbound wallet registers). */}
+        {done && counts.stranded > 0 && (
+          <div className="v10-modal-warning" role="alert" data-testid="pca-approve-stranded">
+            ⚠ {counts.stranded} wallet{counts.stranded === 1 ? ' was' : 's were'} removed from the old
+            PCA but not yet re-approved on #{accountId} — temporarily UNCOVERED. Click “Retry to finish”
+            to complete the move.
           </div>
         )}
 
@@ -443,6 +478,12 @@ export function ApproveWalletsModal({
             disabled={addresses.length === 0}
           >
             Approve {addresses.length} wallet{addresses.length === 1 ? '' : 's'}
+          </button>
+        ) : counts.stranded > 0 ? (
+          // M5 — one-click re-run to finish the stranded migrations. `run()` re-processes the
+          // selected wallets; a stranded one is now UNBOUND (we deregistered it) → it registers.
+          <button type="button" className="v10-modal-btn primary" data-testid="pca-approve-retry-stranded" onClick={run}>
+            Retry to finish
           </button>
         ) : null}
       </div>

@@ -66,6 +66,18 @@ describe('PrimaryNodePicker', () => {
     await unmount();
   });
 
+  it('M1 — a required combobox exposes aria-required + aria-invalid until a node is picked', async () => {
+    const unpicked = await render(base({ required: true, value: '' }));
+    const input = unpicked.container.querySelector('[data-testid="pca-primary-node-search"]') as HTMLInputElement;
+    expect(input.getAttribute('aria-required')).toBe('true');
+    expect(input.getAttribute('aria-invalid')).toBe('true');
+    await unpicked.unmount();
+    const picked = await render(base({ required: true, value: '22' }));
+    const input2 = picked.container.querySelector('[data-testid="pca-primary-node-search"]') as HTMLInputElement;
+    expect(input2.getAttribute('aria-invalid')).toBe('false');
+    await picked.unmount();
+  });
+
   it('search filters by id', async () => {
     const { container, unmount } = await render(base());
     const search = container.querySelector('[data-testid="pca-primary-node-search"]') as HTMLInputElement;

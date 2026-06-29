@@ -241,6 +241,58 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     await unmount();
   });
 
+  // H2 (#9 safety) — selfCoverage logic must NOT run in sponsor mode: a third-party wallet on a
+  // PCA this node happens to own must NOT be silently deregistered, and no false "already free" skip.
+  it('H2 — selfCoverage does NOT run in sponsor mode (no silent third-party deregister)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: ['0xnode1'], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: ADDR_A, accountId: '4' }); // ADDR_A bound to a PCA the node owns
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      if (id === '4') return { ...snap({ accountId: '4' }), owner: '0xnode1' }; // node owns #4
+      return key ? { ...snap(), probedKey: { key, registered: false } } : snap();
+    });
+    mocks.pcaAddAgent.mockRejectedValue(new HttpError(409, 'AgentAlreadyRegistered', { error: 'AgentAlreadyRegistered' }));
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, { accountId: '8', initialMode: 'sponsor', selfCoverage: true, onClose: vi.fn() }),
+    );
+    await waitForText(container, 'Wallet address(es)');
+    setTextarea(container.querySelector('[data-testid="pca-approve-address"]') as HTMLTextAreaElement, ADDR_A);
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, 'another conviction account'); // normal sponsor-mode conflict path
+    // The gate held: NO silent deregister of the third-party wallet, NO false self-coverage skip.
+    expect(mocks.pcaRemoveAgent).not.toHaveBeenCalled();
+    expect(container.querySelector('.v10-pca-approve-results')?.textContent).not.toContain('already discounted free');
+    await unmount();
+  });
+
+  // M5 — hot→cold migration: deregister succeeds then register fails → the wallet is STRANDED
+  // (off old, not on new); surfaced loudly with a one-click "Retry to finish" that completes it.
+  it('M5 — deregister-then-register-fail strands the wallet; Retry to finish recovers it', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [ADDR_A], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.pcaAgentAccount
+      .mockResolvedValueOnce({ agent: ADDR_A, accountId: '4' }) // run 1: own-bound
+      .mockResolvedValue({ agent: ADDR_A, accountId: null });   // run 2 (retry): now unbound
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) =>
+      id === '4' ? { ...snap({ accountId: '4' }), owner: ADDR_A } : (key ? { ...snap(), probedKey: { key, registered: true } } : snap()),
+    );
+    mocks.pcaRemoveAgent.mockResolvedValue({ accountId: '4', agent: ADDR_A, removed: true });
+    mocks.pcaAddAgent
+      .mockRejectedValueOnce(new HttpError(500, 'x', { error: 'boom' }))                            // run 1: register FAILS → stranded
+      .mockResolvedValue({ accountId: '8', agent: ADDR_A, registered: true, adapterSupported: true }); // run 2: succeeds
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, { accountId: '8', initialMode: 'self', selfCoverage: true, onClose: vi.fn() }),
+    );
+    await waitForText(container, 'slots used');
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, 'temporarily UNCOVERED'); // the stranded banner
+    expect(container.querySelector('[data-testid="pca-approve-stranded"]')).toBeTruthy();
+    // One-click retry finishes the migration.
+    await click(container.querySelector('[data-testid="pca-approve-retry-stranded"]')!);
+    await waitForText(container, 'approved on-chain');
+    expect(container.querySelector('[data-testid="pca-approve-stranded"]')).toBeNull();
+    await unmount();
+  });
+
   // M4 — a transient 500/network on a MIDDLE wallet must NOT abort and must NOT
   // tally as a benign skip: that row is a danger-tone failure, the loop continues,
   // and the remaining wallet still gets approved.

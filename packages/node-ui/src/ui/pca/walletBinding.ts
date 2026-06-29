@@ -50,14 +50,18 @@ export async function probeWalletBindings(wallets: string[], ownerWallet?: strin
  */
 export function selfCoverageOutlook(bindings: WalletBinding[]): {
   selfCoverable: WalletBinding[];
+  /** Bound to a PCA THIS NODE OWNS — self-coverage DEREGISTERS it from there first (M3: must be
+   *  disclosed, since the old account's locked TRAC keeps running but would then cover nothing). */
+  ownBound: WalletBinding[];
   sponsorBound: WalletBinding[];
   inconclusive: WalletBinding[];
   zeroSelfCoverage: boolean;
 } {
   const selfCoverable = bindings.filter((b) => !b.inconclusive && (b.boundTo == null || b.canOwn));
+  const ownBound = bindings.filter((b) => b.canOwn); // canOwn ⇒ bound + owned + readable
   const sponsorBound = bindings.filter((b) => !b.inconclusive && b.boundTo != null && !b.canOwn);
   const inconclusive = bindings.filter((b) => b.inconclusive);
   const zeroSelfCoverage =
     bindings.length > 0 && selfCoverable.length === 0 && inconclusive.length === 0;
-  return { selfCoverable, sponsorBound, inconclusive, zeroSelfCoverage };
+  return { selfCoverable, ownBound, sponsorBound, inconclusive, zeroSelfCoverage };
 }

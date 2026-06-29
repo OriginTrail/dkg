@@ -1830,9 +1830,9 @@ export interface DesignatableNodesResult {
  * B-staked-nodes (§9.3) — the staked sharding-table nodes for the PrimaryNodePicker. The daemon
  * reads the whole (≤500) table, TTL-caches it, and serves 0-based OFFSET pages (`start` is an
  * offset, NOT a startingIdentityId — the contract walk reverts on an unknown id). `start` omitted
- * = first page (0). A read failure 503s (`PCA_LOOKUP_READ_FAILED` / transport / capability) — all
- * retryable; the picker shows a retry, and `primaryNode` is required so edge can't proceed until
- * it loads. `GET` is permissionless.
+ * = first page (0). A read failure 503s (`SHARDING_TABLE_READ_FAILED` / transport / capability) —
+ * all retryable; the picker shows a retry, and `primaryNode` is required so edge can't proceed
+ * until it loads. `GET` is permissionless.
  */
 export const listDesignatableNodes = (opts?: { start?: number; limit?: number }) =>
   getJson<DesignatableNodesResult>(
