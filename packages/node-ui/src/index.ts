@@ -38,7 +38,7 @@ export { OperationTracker } from './operation-tracker.js';
 export { MetricsCollector } from './metrics-collector.js';
 export type { MetricsSource } from './metrics-collector.js';
 export { handleNodeUIRequest } from './api.js';
-export { scopeNotifications } from './notifications-scope.js';
+export { scopeNotifications, PCA_COST_COVERED_TYPE } from './notifications-scope.js';
 export type {
   NotifWire,
   ScopedNotificationsResult,
