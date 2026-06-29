@@ -1767,10 +1767,10 @@ export interface PcaErrorInfo {
   message: string;
   /**
    * B10: the conviction account a wallet is ALREADY approved on, surfaced on
-   * `AgentAlreadyRegistered`. The daemon doesn't return it yet
-   * (`classifyPcaRevert` discards it — pca.ts:50), so this is `undefined` today
-   * and the copy degrades to "another conviction account"; it lights up
-   * automatically once the route includes `existingAccountId`.
+   * `AgentAlreadyRegistered`. The P1 daemon NOW returns it (`resolveConflictingAccountId`
+   * + the register route populate it), so `describePcaError` names "PCA #M — deregister
+   * it there first". It is `undefined` only on the rare case the daemon can't resolve the
+   * id, where the copy degrades to "another conviction account".
    */
   existingAccountId?: string;
 }
