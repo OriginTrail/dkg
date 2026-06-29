@@ -763,6 +763,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         ...(chain?.blockNumber !== undefined ? { blockNumber: chain.blockNumber } : {}),
         ...(chain?.batchId !== undefined ? { batchId: String(chain.batchId) } : {}),
         ...(chain?.publisherAddress ? { publisherAddress: chain.publisherAddress } : {}),
+        ...(chain?.convictionCostCovered ? { convictionCostCovered: chain.convictionCostCovered } : {}),
         ...(typeof pub?.contextGraphError === "string" ? { contextGraphError: pub.contextGraphError } : {}),
         ...(reason ? { error: reason } : {}),
       });
@@ -987,6 +988,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           result.kaId = pub?.kaId;
           result.ual = pub?.ual;
           result.txHash = pub?.onChainResult?.txHash;
+          // B8: surface the confirmed PCA discount when this publish drew on one.
+          if (pub?.onChainResult?.convictionCostCovered) result.convictionCostCovered = pub.onChainResult.convictionCostCovered;
           // PR #972: only a fully-confirmed publish is "vm-confirmed"; a partial
           // (207) or non-confirmed (502) outcome is flagged as a tail error so
           // the atomic response is a 207 rather than a misleading success.
@@ -1451,6 +1454,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             : {}),
           ...(Array.isArray(pub?.kas) ? { kas: pub.kas } : {}),
           ...(pub?.onChainResult?.blockNumber !== undefined ? { blockNumber: pub.onChainResult.blockNumber } : {}),
+          ...(pub?.onChainResult?.convictionCostCovered ? { convictionCostCovered: pub.onChainResult.convictionCostCovered } : {}),
           ...(typeof pub?.contextGraphError === "string" ? { contextGraphError: pub.contextGraphError } : {}),
           ...(reason ? { error: reason } : {}),
         });

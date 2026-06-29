@@ -145,6 +145,22 @@ export interface OnChainPublishResult {
   effectiveGasPrice?: bigint;
   gasCostWei?: bigint;
   tokenAmount?: bigint;
+  /**
+   * B8 — present only when this publish drew on a Publishing Conviction
+   * Account (the `CostCovered` event was emitted). The cost fields are bigint
+   * (serialized as decimal strings via the daemon's bigint→string JSON replacer);
+   * `epoch` is a small int (number). The UI derives the discount bps from
+   * `baseCost`/`discountedCost`. Absent for a normal (non-PCA) publish → the
+   * confirmed-discount badge degrades hidden.
+   */
+  convictionCostCovered?: {
+    accountId: bigint;
+    epoch: number;
+    baseCost: bigint;
+    discountedCost: bigint;
+    drawnFromEpoch: bigint;
+    drawnFromTopUp: bigint;
+  };
 }
 
 export interface UpdateKAParams {
