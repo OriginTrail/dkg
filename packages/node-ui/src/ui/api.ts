@@ -1069,6 +1069,12 @@ export interface BatchPublishResult {
   // name/reason of each — `failures.length` is the failed count.
   failures: Array<{ name: string; subGraph?: string; error: string }>;
   sample: PublishResult | null; // a representative confirmed result for the headline
+  // B8 (#1365 round-3) — the CONFIRMED discount aggregated across the batch, NOT a
+  // property of the headline `sample` (which is picked for cleanliness, not discount).
+  // baseCost/discountedCost are SUMMED over every item that drew on a PCA, so the badge
+  // derives the blended % + the TRUE total saved; absent when no item drew one (→ badge
+  // hidden, #9). accountId/epoch name the first drawing item (single-PCA is the norm).
+  convictionCostCovered?: ConvictionCostCovered;
 }
 
 /**
@@ -1089,6 +1095,16 @@ export async function publishAssertionsToVm(
   let firstPartialError: string | undefined;
   const failures: BatchPublishResult['failures'] = [];
   let sample: PublishResult | null = null;
+  // B8 (#1365 round-3) — aggregate the CONFIRMED discount across the BATCH (the headline
+  // `sample` is picked for cleanliness, not discount, so a mixed batch could hide a real
+  // draw if the badge read it off `sample`). Sum baseCost/discountedCost over every item
+  // that drew on a PCA → blended % + true total saved; the first drawing item names the
+  // account/epoch.
+  let aggBase = 0n;
+  let aggDiscounted = 0n;
+  let aggDrawnEpoch = 0n;
+  let aggDrawnTopUp = 0n;
+  let firstCovered: ConvictionCostCovered | undefined;
   for (const a of items) {
     try {
       const res = await knowledgeAssetPublishWithSeal(
@@ -1107,6 +1123,18 @@ export async function publishAssertionsToVm(
       // Prefer a fully-clean sample (confirmed + txHash + no binding error) for the
       // headline; fall back to the first result otherwise.
       if (!sample || (pr.status === 'confirmed' && !!pr.txHash && !pr.contextGraphError)) sample = pr;
+      const cc = pr.convictionCostCovered;
+      if (cc) {
+        try {
+          aggBase += BigInt(cc.baseCost);
+          aggDiscounted += BigInt(cc.discountedCost);
+          aggDrawnEpoch += BigInt(cc.drawnFromEpoch);
+          aggDrawnTopUp += BigInt(cc.drawnFromTopUp);
+          if (!firstCovered) firstCovered = cc;
+        } catch {
+          // skip an un-parseable per-item event; never let it break the batch accounting.
+        }
+      }
     } catch (err: unknown) {
       const message =
         err instanceof SwmSubsetNotSealableError
@@ -1115,7 +1143,17 @@ export async function publishAssertionsToVm(
       failures.push({ name: a.name, ...(a.subGraph ? { subGraph: a.subGraph } : {}), error: message });
     }
   }
-  return { published, total: items.length, sealed, partial, partialError: firstPartialError, failures, sample };
+  const convictionCostCovered: ConvictionCostCovered | undefined = firstCovered
+    ? {
+        accountId: firstCovered.accountId,
+        epoch: firstCovered.epoch,
+        baseCost: aggBase.toString(),
+        discountedCost: aggDiscounted.toString(),
+        drawnFromEpoch: aggDrawnEpoch.toString(),
+        drawnFromTopUp: aggDrawnTopUp.toString(),
+      }
+    : undefined;
+  return { published, total: items.length, sealed, partial, partialError: firstPartialError, failures, sample, convictionCostCovered };
 }
 
 // --- Assertions (WM objects) ---

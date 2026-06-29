@@ -190,8 +190,9 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
           const tail = r.failures.length ? ` (${r.failures.length} assertion${r.failures.length === 1 ? '' : 's'} could not be published)` : '';
           const partialTail = r.partial > 0 ? ` — ⚠ ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
           setResult(`Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}`);
-          // B8 — surface the CONFIRMED discount when the publish drew on a PCA (absent → hidden).
-          setCostCovered(r.sample?.convictionCostCovered ?? null);
+          // B8 (#1365 r3) — the CONFIRMED discount aggregated across the BATCH (not off the
+          // headline sample, which is picked for cleanliness not discount). Absent → hidden.
+          setCostCovered(r.convictionCostCovered ?? null);
         } else if (assertions.length === 0) {
           setResult('Nothing to publish — promote assertions to Shared Memory first.');
         } else {
