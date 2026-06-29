@@ -241,6 +241,20 @@ describe('V10 Publishing Conviction NFT — chain-adapter lifecycle', () => {
     expect(await reader.listDesignatableNodes()).toEqual(refreshed); // unpoisoned
   });
 
+  it('listDesignatableNodes re-resolves ShardingTable per read — no stale handle after a Hub rotation (TfA)', async () => {
+    // The handle is NOT memoized: each read that reaches the chain (a node-list
+    // cache MISS — ?fresh forces one) re-resolves ShardingTable from the Hub, so
+    // a Hub rotation is picked up on the next read instead of a stale cached
+    // contract serving the old table until daemon restart.
+    const reader = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const resolveSpy = vi.spyOn(reader as any, 'resolveContract');
+    await reader.listDesignatableNodes({ fresh: true });
+    await reader.listDesignatableNodes({ fresh: true });
+    const stResolves = resolveSpy.mock.calls.filter((c: any[]) => c[0] === 'ShardingTable').length;
+    expect(stResolves).toBe(2); // re-resolved on each read, never memoized
+    resolveSpy.mockRestore();
+  });
+
   it('getPublishingConvictionAgents enumerates registered agents (checksummed) and reflects deregistration', async () => {
     const owner = await fundedOwner();
     const { accountId } = await owner.createPublishingConvictionAccount(COMMITTED);

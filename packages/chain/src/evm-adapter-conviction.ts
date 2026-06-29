@@ -565,12 +565,13 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       return cached.value;
     }
     await this.init();
-    // N2: memoize the resolved logic contract (its address is immutable) so a
-    // TTL-cache miss doesn't re-hit the Hub each time.
-    if (!this.contracts.shardingTable) {
-      this.contracts.shardingTable = await this.resolveContract('ShardingTable');
-    }
-    const shardingTable = this.contracts.shardingTable;
+    // TfA: resolve ShardingTable PER READ — do NOT memoize the handle. A Hub
+    // rotation of ShardingTable isn't on the rotation listener's allowlist, and
+    // `opts.fresh` only busts the node-list cache, so a cached handle would go
+    // stale (serving an old table) until daemon restart. Re-resolving each read
+    // (only on a node-list cache MISS — hits skip this entirely) costs one cheap
+    // Hub getContractAddress and is always rotation-correct. (Reverts N2.)
+    const shardingTable = await this.resolveContract('ShardingTable');
     const raw = await this.readContractWith<readonly RawShardingTableNode[]>(
       shardingTable,
       'shardingTable.getShardingTable',
