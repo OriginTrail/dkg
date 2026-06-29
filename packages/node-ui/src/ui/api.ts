@@ -1800,16 +1800,21 @@ export const pcaAgentAccount = (address: string) =>
   getJson<PcaAgentAccountResult>(`/api/pca/agent/${encodeURIComponent(address)}`);
 
 /**
- * B-staked-nodes (§9.3) — one staked sharding-table node. `identityId` is the on-chain id
- * a PCA designates as its `primaryNode`; `nodeId` is the network/peer id (display detail);
- * `stake`/`ask` are wei strings. The sharding table is capped (`shardingTableSizeLimit`, ≤500)
- * and the daemon serves it from a short TTL cache — the picker fetches it all + sorts/filters
- * CLIENT-side (the `ask` column is dropped from display, L9). All ids/amounts are strings.
+ * B-staked-nodes (§9.3) — one staked sharding-table node. `identityId` (DECIMAL string) is the
+ * on-chain id a PCA designates as its `primaryNode` (the value Create submits); `nodeId` is a HEX
+ * string (on-chain `bytes`, the node's self-reported id → the "unverified" display label);
+ * `stake`/`ask` are wei strings. The sharding table is capped (`shardingTableSizeLimit`, ≤500) and
+ * the daemon serves it from a short TTL cache — the picker fetches it all + sorts/filters
+ * CLIENT-side (the `ask` column is dropped from display, L9).
  */
 export interface DesignatableNode {
+  /** Hex string (`0x…`) — the node's self-reported id; display-only ("unverified"). */
   nodeId: string;
+  /** Decimal string — the on-chain identity; the value passed as `primaryNode`. */
   identityId: string;
+  /** Wei string. */
   stake: string;
+  /** Wei string; returned by the route but dropped from display (L9). */
   ask?: string;
 }
 
