@@ -13,6 +13,7 @@ import {
 } from '../../api.js';
 import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
 import { useAgentsStore } from '../../stores/agents.js';
+import { useTabsStore } from '../../stores/tabs.js';
 import { formatTrac } from '../../lib/formatTrac.js';
 import {
   HealthChip,
@@ -25,6 +26,7 @@ import {
 import { healthForSnapshot } from '../../pca/health.js';
 import { StatStrip } from '../../components/ContextGraphPrimitives.js';
 import { ApproveWalletsModal } from './ApproveWalletsModal.js';
+import { CreatePcaModal } from './CreatePcaModal.js';
 
 const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -161,6 +163,34 @@ function DetailBody({
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [removeState, setRemoveState] = useState<ActionState>(IDLE);
   const [approveOpen, setApproveOpen] = useState(false);
+  // S2b renew (re-mint replacement): the seeded create modal, then the chained
+  // approve modal pre-filled with THIS (old) account's agents for one-step re-approval.
+  const [renewOpen, setRenewOpen] = useState(false);
+  // LOW#3 — in-flight while resolving the old agents (prevents a no-feedback gap).
+  const [renewChaining, setRenewChaining] = useState(false);
+  const [renewApprove, setRenewApprove] = useState<
+    { newAccountId: string; seedBulk: string; agentsResolved: boolean } | null
+  >(null);
+  const openTab = useTabsStore((s) => s.openTab);
+
+  // After the renewal mint, chain into Approve seeded with the OLD account's agents.
+  // Approvals don't carry over AND expiry doesn't free them (gate-HIGH), so the chained
+  // modal deregisters each from the old account before re-approving on the new id.
+  const onRenewSuccess = (newAccountId: string) => {
+    // LOW#3 — close the create modal IMMEDIATELY so its success button can't be
+    // double-clicked into a second chain, and show an in-flight state while we resolve
+    // the old agents. `agentsResolved:false` (listPcaAgents failed) stops the next step
+    // from promising a pre-filled list it doesn't have.
+    setRenewOpen(false);
+    setRenewChaining(true);
+    listPcaAgents(accountId)
+      .then((r) => ({ agents: r.agents, resolved: true }))
+      .catch(() => ({ agents: [] as string[], resolved: false }))
+      .then(({ agents, resolved }) => {
+        setRenewChaining(false);
+        setRenewApprove({ newAccountId, seedBulk: agents.join('\n'), agentsResolved: resolved });
+      });
+  };
 
   const { data: cgData } = useFetch(fetchContextGraphs, [], 0);
   // B3 — the FULL approved publishing-wallet set (chain enumerator). A 404/503/error
@@ -522,10 +552,23 @@ function DetailBody({
         <h3 className="v10-pca-detail-section-title">Lifecycle</h3>
         {(health === 'expiring' || health === 'expired') && (
           <p className="v10-pca-card-warn">
-            {formatRelativeExpiry(snapshot.expiresAtTimestamp)}. Top-up can’t extend the lock period —
-            create a replacement account from the overview when it expires.
+            {formatRelativeExpiry(snapshot.expiresAtTimestamp)}. The lock period can’t be extended —
+            Renew creates a fresh replacement account seeded from this one (the old TRAC stays locked
+            until its own expiry).
           </p>
         )}
+        {/* S2b — Renew = re-mint a REPLACEMENT (owner-signed create), emphasized as the
+            account nears/passes expiry. Honest copy lives in the seeded create modal (#9). */}
+        <button
+          type="button"
+          className={`v10-pca-card-btn${health === 'expiring' || health === 'expired' ? ' primary' : ''}`}
+          data-testid="pca-renew-btn"
+          onClick={() => setRenewOpen(true)}
+          disabled={!ownerIsPrimary}
+          title={ownerTitle}
+        >
+          Renew — create a replacement PCA
+        </button>
         <p className="v10-pca-detail-hint">
           ⓘ Transferring this account’s NFT to another wallet clears every approved publishing wallet —
           the new owner starts clean. (Out-of-band wallet op — no button here.)
@@ -540,6 +583,42 @@ function DetailBody({
           accountId={accountId}
           initialMode="self"
           onClose={() => { setApproveOpen(false); refresh(); refreshAgents(); }}
+        />
+      )}
+      {/* S2b renew — the seeded create modal (re-mint replacement). */}
+      {renewOpen && (
+        <CreatePcaModal
+          seed={{
+            tokens: snapshot.committedTRACTrac,
+            primaryNode:
+              snapshot.primaryNode && snapshot.primaryNode !== '0' ? String(snapshot.primaryNode) : undefined,
+            // LOW — distinguish "extended read failed" (null) from a genuine "none" ('0'),
+            // so the modal can flag a silent fall-back to this node.
+            primaryNodeUnknown: snapshot.primaryNode == null,
+          }}
+          replacingAccountId={accountId}
+          onClose={() => setRenewOpen(false)}
+          onApproveOwnWallets={onRenewSuccess}
+          onManage={(newId) => { setRenewOpen(false); openTab({ id: `conviction:${newId}`, label: `PCA #${newId}`, closable: true }); }}
+          onGetSponsored={() => setRenewOpen(false)}
+        />
+      )}
+      {/* LOW#3 — brief in-flight state between the mint and the seeded re-approval. */}
+      {renewChaining && (
+        <div className="lazy-spinner" role="status" data-testid="pca-renew-chaining">
+          Preparing re-approval…
+        </div>
+      )}
+      {/* S2b renew — chained Approve, pre-seeded with the OLD account's agents, which it
+          DEREGISTERS from the old account first (expiry doesn't free them — gate-HIGH). */}
+      {renewApprove && (
+        <ApproveWalletsModal
+          accountId={renewApprove.newAccountId}
+          initialMode="sponsor"
+          seedBulk={renewApprove.seedBulk}
+          deregisterFrom={accountId}
+          seedAgentsResolved={renewApprove.agentsResolved}
+          onClose={() => setRenewApprove(null)}
         />
       )}
     </div>

@@ -90,4 +90,20 @@ describe('DKGAgent V10 PCA facade', () => {
     expect(typeof ext.currentEpoch).toBe('number');
     expect(ext.remainingAllowance).toBe(ext.baseEpochAllowance + ext.topUpBuffer);
   });
+
+  it('listPublishingConvictionAccountsForWallets delegates (owned/agent/both); null when unsupported', async () => {
+    const owner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', owner.address);
+    const agent = await makeAgent(chain);
+    const created = await agent.createPublishingConvictionAccount(1_000n, 42n);
+    const w = ethers.Wallet.createRandom().address;
+    await agent.registerPublishingConvictionAgent(created!.accountId, w);
+
+    const mine = await agent.listPublishingConvictionAccountsForWallets([owner.address, w]);
+    const m = new Map(mine!.map((e) => [e.accountId, e.relation]));
+    expect(m.get(created!.accountId)).toBe('both'); // owner holds it + w is its agent
+
+    const none = await makeAgent(new NoChainAdapter());
+    expect(await none.listPublishingConvictionAccountsForWallets([owner.address])).toBeNull();
+  });
 });

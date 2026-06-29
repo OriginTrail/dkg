@@ -29,6 +29,7 @@ vi.mock('../src/ui/api.js', async (orig) => {
 });
 
 const { PublishEligibilityChip } = await import('../src/ui/pages/conviction/PublishEligibilityChip.js');
+const { __resetAgentDiscoveryCache, __ageAgentDiscoveryCache } = await import('../src/ui/hooks/usePublishEligibility.js');
 const { usePcaStore } = await import('../src/ui/stores/pca.js');
 const { makePcaSnapshot } = await import('../src/ui/mocks/pca.js');
 
@@ -55,6 +56,7 @@ beforeEach(() => {
   (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
   document.body.innerHTML = '';
   vi.clearAllMocks();
+  __resetAgentDiscoveryCache(); // flag-2 self-heal cache is module-level — clear between cases
   usePcaStore.setState({ trackedIds: ['7'], createPending: null });
   mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [] });
   mocks.fetchCurrentAgent.mockResolvedValue({ agentDid: 'did:dkg:agent:0x' + '9'.repeat(40) });
@@ -71,12 +73,85 @@ function walletsBalances(trac: string) {
 }
 
 describe('PublishEligibilityChip (S5)', () => {
-  it('renders nothing when the node tracks no PCA', async () => {
+  it('renders nothing when the node tracks no PCA and is an agent on none', async () => {
+    // Flag-2: nothing tracked + the self-heal discovers no agent-on PCA (default
+    // pcaAgentAccount → {accountId:null}) → no auto-track → no chip noise.
     usePcaStore.setState({ trackedIds: [], createPending: null });
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('100'));
     const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
     await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
     expect(container.querySelector('[data-testid="pca-publish-eligibility"]')).toBeNull();
+    expect(usePcaStore.getState().trackedIds).toEqual([]);
     await unmount();
+  });
+
+  it('flag-2 self-heal: discovers + auto-tracks an agent-on PCA when nothing is tracked, then shows GREEN', async () => {
+    // A pure-edge node sponsored as an AGENT but tracking nothing: the publish-surface
+    // self-heal reverse-resolves the wallet → account #7, auto-tracks it (durable), and
+    // the chip resolves via the normal classifyCoverage path (#9 — no false green).
+    usePcaStore.setState({ trackedIds: [], createPending: null });
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('100'));
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: W0, accountId: '7' });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...makePcaSnapshot(), probedKey: { key, registered: true } } : makePcaSnapshot(),
+    );
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'Funded by PCA #7');
+    expect(usePcaStore.getState().trackedIds).toContain('7');
+    await unmount();
+  });
+
+  it('flag-2 self-heal: a transport error on the agent probe leaves the wallet uncached (retry-able)', async () => {
+    // #9 — a rejected pcaAgentAccount is "couldn't read", NOT a confirmed no-account, so
+    // it must not be cached as negative (a later poll/sponsorship can still self-heal).
+    usePcaStore.setState({ trackedIds: [], createPending: null });
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('100'));
+    mocks.pcaAgentAccount.mockRejectedValueOnce(new Error('boom')).mockResolvedValue({ agent: W0, accountId: '7' });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...makePcaSnapshot(), probedKey: { key, registered: true } } : makePcaSnapshot(),
+    );
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    // First pass rejects (uncached); the 30s poll isn't awaited here, so re-mount to force
+    // a fresh discovery pass — the wallet wasn't cached negative, so it now resolves.
+    await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    await unmount();
+    const second = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(second.container, 'Funded by PCA #7');
+    expect(usePcaStore.getState().trackedIds).toContain('7');
+    await second.unmount();
+  });
+
+  it('flag-2 self-heal: a cached-negative wallet is skipped within the TTL, re-probed after it (mid-session sponsorship)', async () => {
+    // Pass 1: wallet is an agent on nothing → cached negative (default pcaAgentAccount → null).
+    usePcaStore.setState({ trackedIds: [], createPending: null });
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('100'));
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...makePcaSnapshot(), probedKey: { key, registered: true } } : makePcaSnapshot(),
+    );
+    const first = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    expect(mocks.pcaAgentAccount).toHaveBeenCalledTimes(1); // probed once, cached negative
+    await first.unmount();
+
+    // Mid-TTL re-mount → cached negative is fresh → NOT re-probed (the bound holds).
+    // LOW#1: with the whole wallet set fresh-negative, even the balances fetch is skipped.
+    expect(mocks.fetchWalletsBalances).toHaveBeenCalledTimes(1);
+    __ageAgentDiscoveryCache(1_000);
+    const second = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    expect(mocks.pcaAgentAccount).toHaveBeenCalledTimes(1); // skipped — still 1
+    expect(mocks.fetchWalletsBalances).toHaveBeenCalledTimes(1); // LOW#1 — balances not re-fetched
+    await second.unmount();
+
+    // Operator gets sponsored mid-session; once the entry ages past the TTL, the next pass
+    // RE-PROBES and the chip self-heals (the reason the cache is TTL'd, not permanent).
+    __ageAgentDiscoveryCache(60 * 60_000);
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: W0, accountId: '7' });
+    const third = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(third.container, 'Funded by PCA #7');
+    expect(mocks.pcaAgentAccount).toHaveBeenCalledTimes(2); // re-probed after the TTL
+    expect(usePcaStore.getState().trackedIds).toContain('7');
+    await third.unmount();
   });
 
   it('GREEN when every signing wallet is covered by a healthy PCA', async () => {

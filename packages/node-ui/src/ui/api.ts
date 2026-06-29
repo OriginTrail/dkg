@@ -1741,6 +1741,29 @@ export const pcaTopUp = (accountId: string, tokens: string) =>
 export const pcaSettle = (accountId: string) =>
   post<PcaSettleResult>(`/api/pca/${encodeURIComponent(accountId)}/settle`, {});
 
+/** GAP-1 — one PCA this node relates to. `relation` is owned (NFT owner is a node
+ *  wallet) / agent (a node op wallet is a registered agent) / both. The snapshot
+ *  basics are present only with `?hydrate=1` (optional otherwise). */
+export interface MyPcaEntry
+  extends Partial<Pick<PcaSnapshot, 'owner' | 'committedTRACTrac' | 'expiresAtTimestamp' | 'agentCount' | 'discountBps'>> {
+  accountId: string;
+  relation: 'owned' | 'agent' | 'both';
+}
+
+export interface MyPcasResult {
+  accounts: MyPcaEntry[];
+}
+
+/**
+ * GAP-1 — enumerate the PCAs this node relates to (OWNED and/or AGENT-ON), replacing the
+ * tracked-id-only discovery. `?hydrate=1` includes the serializeAccountInfo basics
+ * (owner / committedTRACTrac / expiresAtTimestamp / agentCount / discountBps) so the
+ * discovered strip renders without a per-row `fetchPca`. 503 = capability/transport;
+ * `{ accounts: [] }` = no related PCAs. `GET` is permissionless.
+ */
+export const fetchMyPcas = (opts?: { hydrate?: boolean }) =>
+  getJson<MyPcasResult>(`/api/pca/mine${opts?.hydrate ? '?hydrate=1' : ''}`);
+
 export interface PcaAgentsResult {
   accountId: string;
   /** The FULL set of approved publishing-wallet addresses (checksummed). `[]` = a
@@ -1835,6 +1858,20 @@ export function isRpcTransportError(err: unknown): boolean {
  */
 export function isPcaFeatureUnavailable(err: unknown): boolean {
   return err instanceof HttpError && err.status === 503 && !isRpcTransportError(err);
+}
+
+/**
+ * The PCA enumeration route's RETRYABLE chain-read failure: 503 with body code
+ * `PCA_LOOKUP_READ_FAILED` (a CALL_EXCEPTION mid-enumeration, NOT a capability gap).
+ * `isPcaFeatureUnavailable` can't tell it apart — both are non-transport 503s — so a
+ * caller distinguishing "couldn't load" from "not on this network" must check this
+ * first (and treat it like a transport blip: retry, never assert "you relate to none").
+ */
+export function isPcaReadFailed(err: unknown): boolean {
+  return (
+    err instanceof HttpError &&
+    (err.body as { code?: string } | undefined)?.code === 'PCA_LOOKUP_READ_FAILED'
+  );
 }
 
 // Code tokens the daemon embeds in the `{ error }` body (a bare code on a

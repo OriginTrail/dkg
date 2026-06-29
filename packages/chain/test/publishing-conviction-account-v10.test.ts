@@ -157,6 +157,36 @@ describe('V10 Publishing Conviction NFT — chain-adapter lifecycle', () => {
     expect(info!.remainingAllowance).toBeUndefined();
   });
 
+  it('listPublishingConvictionAccountsForWallets enumerates owned / agent / both, deduped + sorted (GAP-1)', async () => {
+    const owner = await fundedOwner();
+    const ownerAddr = owner.getSignerAddress();
+    const { accountId: a1 } = await owner.createPublishingConvictionAccount(COMMITTED);
+    const { accountId: a2 } = await owner.createPublishingConvictionAccount(COMMITTED);
+    const w = ethers.Wallet.createRandom().address;
+    await owner.registerPublishingConvictionAgent(a1, w); // w is a publishing agent on a1
+
+    // The owner wallet holds both NFTs and is an agent of neither → both 'owned'.
+    const ownedList = await owner.listPublishingConvictionAccountsForWallets([ownerAddr]);
+    const om = new Map(ownedList.map((e) => [e.accountId, e.relation]));
+    expect(om.get(a1)).toBe('owned');
+    expect(om.get(a2)).toBe('owned');
+    expect(ownedList).toHaveLength(2);
+
+    // w owns nothing, is an agent on a1 → 'agent'.
+    expect(await owner.listPublishingConvictionAccountsForWallets([w])).toEqual([{ accountId: a1, relation: 'agent' }]);
+
+    // Combined: a1 owned(owner)+agent(w) → 'both'; a2 'owned'. Deduped + sorted asc.
+    const combined = await owner.listPublishingConvictionAccountsForWallets([ownerAddr, w]);
+    const cm = new Map(combined.map((e) => [e.accountId, e.relation]));
+    expect(cm.get(a1)).toBe('both');
+    expect(cm.get(a2)).toBe('owned');
+    expect(combined).toHaveLength(2); // deduped (each account once)
+    expect(combined.map((e) => e.accountId)).toEqual([a1, a2].sort((x, y) => (x < y ? -1 : 1)));
+
+    // A wallet related to nothing → [].
+    expect(await owner.listPublishingConvictionAccountsForWallets([ethers.Wallet.createRandom().address])).toEqual([]);
+  });
+
   it('getPublishingConvictionAgents enumerates registered agents (checksummed) and reflects deregistration', async () => {
     const owner = await fundedOwner();
     const { accountId } = await owner.createPublishingConvictionAccount(COMMITTED);

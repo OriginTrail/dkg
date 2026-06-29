@@ -146,6 +146,29 @@ describe('MockChainAdapter — V10 conviction agent register/deregister', () => 
     expect(agents).toEqual([checksummed]);
     expect(agents[0]).not.toBe(checksummed.toLowerCase()); // EIP-55, not lowercased
   });
+
+  it('listPublishingConvictionAccountsForWallets — owned / agent / both, deduped + sorted (GAP-1 parity)', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const { accountId: a1 } = await mock.createPublishingConvictionAccount(COMMITTED);
+    const { accountId: a2 } = await mock.createPublishingConvictionAccount(COMMITTED);
+    const w = ethers.Wallet.createRandom().address;
+    await mock.registerPublishingConvictionAgent(a1, w);
+
+    // SIGNER owns a1+a2, is an agent of neither → both 'owned'.
+    const owned = await mock.listPublishingConvictionAccountsForWallets([SIGNER]);
+    expect(owned.map((e) => e.relation)).toEqual(['owned', 'owned']);
+    // w owns nothing, agent on a1 → 'agent'.
+    expect(await mock.listPublishingConvictionAccountsForWallets([w])).toEqual([{ accountId: a1, relation: 'agent' }]);
+    // Combined → a1 'both', a2 'owned', deduped + sorted asc.
+    const combined = await mock.listPublishingConvictionAccountsForWallets([SIGNER, w]);
+    const m = new Map(combined.map((e) => [e.accountId, e.relation]));
+    expect(m.get(a1)).toBe('both');
+    expect(m.get(a2)).toBe('owned');
+    expect(combined).toHaveLength(2);
+    expect(combined.map((e) => e.accountId)).toEqual([a1, a2]); // sorted asc (1n, 2n)
+    // Unrelated wallet → [].
+    expect(await mock.listPublishingConvictionAccountsForWallets([ethers.Wallet.createRandom().address])).toEqual([]);
+  });
 });
 
 describe('MockChainAdapter — V10 conviction topUp/settle', () => {

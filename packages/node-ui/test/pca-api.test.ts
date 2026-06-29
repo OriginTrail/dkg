@@ -15,7 +15,9 @@ import {
   describePcaError,
   isPcaFeatureUnavailable,
   isRpcTransportError,
+  isPcaReadFailed,
   fetchPca,
+  fetchMyPcas,
   createPca,
   pcaAddAgent,
   pcaRemoveAgent,
@@ -47,6 +49,17 @@ describe('describePcaError', () => {
     expect(
       isPcaFeatureUnavailable(new HttpError(503, 'x', { code: 'RPC_ENDPOINTS_EXHAUSTED' })),
     ).toBe(false);
+  });
+
+  it('isPcaReadFailed pins the retryable read-fail apart from a capability 503', () => {
+    // The /mine route's retryable chain-read failure — isPcaFeatureUnavailable can't
+    // tell it from a capability gap (both non-transport 503s), so this must.
+    const readFail = new HttpError(503, 'x', { code: 'PCA_LOOKUP_READ_FAILED' });
+    expect(isPcaReadFailed(readFail)).toBe(true);
+    expect(isPcaFeatureUnavailable(readFail)).toBe(true); // (documents the overlap the caller resolves)
+    expect(isPcaReadFailed(new HttpError(503, 'x', { error: 'FEATURE_UNAVAILABLE' }))).toBe(false);
+    expect(isPcaReadFailed(new HttpError(503, 'x', { code: 'RPC_ENDPOINTS_EXHAUSTED' }))).toBe(false);
+    expect(isPcaReadFailed(new Error('x'))).toBe(false);
   });
 
   it('isRpcTransportError detects RPC_* body codes regardless of status', () => {
@@ -213,6 +226,16 @@ describe('PCA api helpers (transport shaping)', () => {
     fetchMock.mockResolvedValueOnce(ok({ accountId: '1' }));
     await fetchPca('1');
     expect(fetchMock.mock.calls[2]![0]).toBe('/api/pca/1');
+  });
+
+  it('fetchMyPcas GETs /api/pca/mine, adding ?hydrate=1 only when requested', async () => {
+    fetchMock.mockResolvedValueOnce(ok({ accounts: [] }));
+    await fetchMyPcas();
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/pca/mine');
+
+    fetchMock.mockResolvedValueOnce(ok({ accounts: [] }));
+    await fetchMyPcas({ hydrate: true });
+    expect(fetchMock.mock.calls[1]![0]).toBe('/api/pca/mine?hydrate=1');
   });
 
   // T1 — a GET failure must throw an HttpError that CARRIES the body, so the tab-gate

@@ -11,11 +11,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   fetchPca: vi.fn(),
   fetchWalletsBalances: vi.fn(),
+  pcaAgentAccount: vi.fn(),
+  fetchMyPcas: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', async (orig) => {
   const actual = await orig<typeof import('../src/ui/api.js')>();
-  return { ...actual, fetchPca: mocks.fetchPca, fetchWalletsBalances: mocks.fetchWalletsBalances };
+  return {
+    ...actual,
+    fetchPca: mocks.fetchPca,
+    fetchWalletsBalances: mocks.fetchWalletsBalances,
+    pcaAgentAccount: mocks.pcaAgentAccount,
+    fetchMyPcas: mocks.fetchMyPcas,
+  };
 });
 
 const { HttpError } = await import('../src/ui/api.js');
@@ -82,6 +90,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   usePcaStore.setState({ trackedIds: [], createPending: null });
   useAgentsStore.getState().setNodeStatus({ nodeRole: 'core', blockExplorerUrl: null });
+  // GAP-1 discovery defaults: nothing discovered (deterministic; no real fetch). Tests
+  // that exercise the discovered strip / auto-track override these.
+  mocks.pcaAgentAccount.mockResolvedValue({ agent: '', accountId: null });
+  mocks.fetchMyPcas.mockResolvedValue({ accounts: [] });
 });
 afterEach(() => {
   document.body.innerHTML = '';
@@ -231,6 +243,89 @@ describe('ConvictionOverview — S1 discovery', () => {
       await new Promise((r) => setTimeout(r, 0));
     });
     expect(tab('Owned by me').getAttribute('aria-selected')).toBe('true'); // role default did NOT override
+    await unmount();
+  });
+
+  // GAP-1 — an OWNED PCA the node hasn't locally tracked surfaces in the "discovered,
+  // not tracked" strip with a [Track] action (owned does NOT auto-track).
+  it('GAP-1 — surfaces an owned, untracked PCA in the discovered strip with a Track action', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [WALLET0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchMyPcas.mockResolvedValue({
+      accounts: [{ accountId: '42', relation: 'owned', discountBps: 2000, committedTRACTrac: '50000.0', expiresAtTimestamp: 9_999_999_999, agentCount: 0 }],
+    });
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'Discovered — not tracked here');
+    const strip = container.querySelector('[data-testid="pca-discovered-strip"]') as HTMLElement;
+    expect(strip.textContent).toContain('PCA #42');
+    expect(strip.textContent).toContain('you own this account');
+    // 🟢/#9 — an OWNED-only account (no wallet approved) doesn't realize the discount, so
+    // the strip must NOT show "20%" there (it would read as a false "you'd get this %").
+    expect(strip.textContent).not.toContain('20%');
+    await act(async () => {
+      (strip.querySelector('[data-testid="pca-discovered-track"]') as HTMLButtonElement)
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(usePcaStore.getState().trackedIds).toContain('42');
+    await unmount();
+  });
+
+  // GAP-1 ★ AUTO-TRACK — a CONFIRMED agent-on discovery auto-adds to the tracked set
+  // (the pure-edge self-heal), so it does NOT linger in the strip.
+  it('GAP-1 — auto-tracks a confirmed agent-on PCA (edge self-heal), not left in the strip', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [WALLET0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: WALLET0, accountId: '9' });
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      const base = { ...snapFixture(id), owner: '0xother0000000000000000000000000000000000' };
+      return key ? { ...base, probedKey: { key, registered: true } } : base;
+    });
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    const started = Date.now();
+    while (Date.now() - started < 1000 && !usePcaStore.getState().trackedIds.includes('9')) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+    }
+    expect(usePcaStore.getState().trackedIds).toContain('9'); // auto-tracked
+    expect(container.querySelector('[data-testid="pca-discovered-strip"]')).toBeNull(); // → not in the strip
+    await unmount();
+  });
+
+  // GAP-1/#9 — a RETRYABLE /mine failure (503 PCA_LOOKUP_READ_FAILED) must NOT collapse
+  // to "you own none": the strip offers a retry, and a re-probe recovers.
+  it('GAP-1 — a retryable /mine read-fail shows a retry affordance, not a false "no PCAs"', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [WALLET0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchMyPcas
+      .mockRejectedValueOnce(new HttpError(503, 'read failed', { code: 'PCA_LOOKUP_READ_FAILED' }))
+      .mockResolvedValue({ accounts: [{ accountId: '42', relation: 'owned', discountBps: 2000 }] });
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    const err = (await (async () => {
+      const started = Date.now();
+      while (Date.now() - started < 1500) {
+        const e = container.querySelector('[data-testid="pca-discovered-error"]');
+        if (e) return e as HTMLElement;
+        await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+      }
+      return null;
+    })());
+    expect(err).toBeTruthy();
+    expect(err!.textContent).toContain('Couldn’t load your Publishing Conviction Accounts');
+    // It did NOT assert the owned-empty state off the read failure.
+    expect(container.querySelector('[data-testid="pca-discovered-strip"]')).toBeNull();
+    // Retry → the second (successful) probe surfaces the owned PCA in the strip.
+    await act(async () => {
+      (err!.querySelector('button') as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await waitForText(container, 'PCA #42');
+    expect(container.querySelector('[data-testid="pca-discovered-error"]')).toBeNull();
+    await unmount();
+  });
+
+  it('GAP-1 — a CAPABILITY 503 on /mine stays silent (no retry banner, no strip)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [WALLET0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchMyPcas.mockRejectedValue(new HttpError(503, 'x', { error: 'FEATURE_UNAVAILABLE' }));
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'Publishing Conviction'); // overview rendered
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    expect(container.querySelector('[data-testid="pca-discovered-error"]')).toBeNull();
+    expect(container.querySelector('[data-testid="pca-discovered-strip"]')).toBeNull();
     await unmount();
   });
 });
