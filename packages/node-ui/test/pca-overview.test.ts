@@ -258,7 +258,9 @@ describe('ConvictionOverview — S1 discovery', () => {
     const strip = container.querySelector('[data-testid="pca-discovered-strip"]') as HTMLElement;
     expect(strip.textContent).toContain('PCA #42');
     expect(strip.textContent).toContain('you own this account');
-    expect(strip.textContent).toContain('20%'); // hydrated discountBps
+    // 🟢/#9 — an OWNED-only account (no wallet approved) doesn't realize the discount, so
+    // the strip must NOT show "20%" there (it would read as a false "you'd get this %").
+    expect(strip.textContent).not.toContain('20%');
     await act(async () => {
       (strip.querySelector('[data-testid="pca-discovered-track"]') as HTMLButtonElement)
         .dispatchEvent(new MouseEvent('click', { bubbles: true }));

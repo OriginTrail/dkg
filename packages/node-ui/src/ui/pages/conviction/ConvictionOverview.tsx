@@ -252,7 +252,11 @@ function DiscoveredStrip({
                 : d.relation === 'both'
                   ? 'you own this · your wallet is approved here'
                   : 'you own this account'}
-              {typeof bps === 'number' && bps > 0 && (
+              {/* 🟢/#9 — only show the discount on accounts this node actually DRAWS from
+                  (a wallet is an approved agent). On an owned-ONLY account no wallet is
+                  approved, so the account's tier isn't a discount this node realizes —
+                  showing "◉ %" there reads as a false "you'd get this %". */}
+              {(d.relation === 'agent' || d.relation === 'both') && typeof bps === 'number' && bps > 0 && (
                 <span className="badge badge-info"> ◉ {(bps / 100).toFixed(bps % 100 === 0 ? 0 : 1)}%</span>
               )}
             </span>
