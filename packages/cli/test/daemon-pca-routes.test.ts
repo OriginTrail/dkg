@@ -994,14 +994,14 @@ describe('daemon /api/pca V10 caller contract', () => {
     { nodeId: '0xcc', identityId: 61n, ask: 3n, stake: 500n },
   ];
 
-  it('GET /api/pca/designatable-nodes → 200 {nodes,total,nextStart}, bigints serialized, order preserved', async () => {
+  it('GET /api/pca/designatable-nodes → 200 {nodes,total} — the WHOLE table in one response (R4, no pagination)', async () => {
     const agent = { supportsPublishingConvictionNft: true, listDesignatableNodes: async () => NODE_FIXTURE };
     const { res, done } = runCtx('GET', '/api/pca/designatable-nodes', agent);
     await done;
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
     expect(body.total).toBe(3);
-    expect(body.nextStart).toBeNull(); // default limit 50 > total
+    expect(body).not.toHaveProperty('nextStart'); // pagination dropped (R4)
     expect(body.nodes).toEqual([
       { nodeId: '0xaa', identityId: '42', ask: '1', stake: '250' },
       { nodeId: '0xbb', identityId: '57', ask: '2', stake: '180' },
@@ -1009,38 +1009,22 @@ describe('daemon /api/pca V10 caller contract', () => {
     ]);
   });
 
-  it('GET /api/pca/designatable-nodes paginates via ?start & ?limit with nextStart', async () => {
+  it('GET /api/pca/designatable-nodes ignores legacy ?start/?limit (no pagination, no 400)', async () => {
     const agent = { supportsPublishingConvictionNft: true, listDesignatableNodes: async () => NODE_FIXTURE };
-    const p1 = runCtx('GET', '/api/pca/designatable-nodes?start=0&limit=2', agent);
-    await p1.done;
-    const b1 = JSON.parse(p1.res.body);
-    expect(b1.nodes.map((n: any) => n.identityId)).toEqual(['42', '57']);
-    expect(b1.total).toBe(3);
-    expect(b1.nextStart).toBe(2);
-
-    const p2 = runCtx('GET', '/api/pca/designatable-nodes?start=2&limit=2', agent);
-    await p2.done;
-    const b2 = JSON.parse(p2.res.body);
-    expect(b2.nodes.map((n: any) => n.identityId)).toEqual(['61']);
-    expect(b2.nextStart).toBeNull(); // last page
+    const { res, done } = runCtx('GET', '/api/pca/designatable-nodes?start=2&limit=1', agent);
+    await done;
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.nodes).toHaveLength(3); // full table regardless of legacy params
+    expect(body).not.toHaveProperty('nextStart');
   });
 
-  it('GET /api/pca/designatable-nodes → empty table {nodes:[],total:0,nextStart:null}', async () => {
+  it('GET /api/pca/designatable-nodes → empty table {nodes:[],total:0}', async () => {
     const agent = { supportsPublishingConvictionNft: true, listDesignatableNodes: async () => [] };
     const { res, done } = runCtx('GET', '/api/pca/designatable-nodes', agent);
     await done;
     expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body)).toEqual({ nodes: [], total: 0, nextStart: null });
-  });
-
-  it('GET /api/pca/designatable-nodes → 400 on invalid start/limit', async () => {
-    const agent = { supportsPublishingConvictionNft: true, listDesignatableNodes: async () => NODE_FIXTURE };
-    // N5: strict decimal — hex / exponent / leading '+' (URL-encoded) are rejected too.
-    for (const q of ['?start=-1', '?limit=0', '?limit=201', '?start=abc', '?limit=1.5', '?start=0x10', '?limit=1e2', '?start=%2B5']) {
-      const { res, done } = runCtx('GET', `/api/pca/designatable-nodes${q}`, agent);
-      await done;
-      expect(res.statusCode).toBe(400);
-    }
+    expect(JSON.parse(res.body)).toEqual({ nodes: [], total: 0 });
   });
 
   it('GET /api/pca/designatable-nodes → 503 when the adapter lacks the PCA surface (lookup not called)', async () => {

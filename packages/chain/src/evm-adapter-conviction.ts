@@ -15,6 +15,30 @@ import type { TxResult, V10PublishingConvictionAccountInfo, ConvictionReader, Pc
 import { PcaUnavailableError } from './pca-errors.js';
 import { enrichEvmError, getPcaLogicInterface } from './evm-adapter-errors.js';
 
+/**
+ * ethers v6 returns a Solidity struct as a `Result`: it is BOTH array-indexable
+ * (positional) AND — when the ABI names the outputs — property-accessible. The
+ * `ShardingTable.getShardingTable()` ABI names them today; we normalize either
+ * shape so a future ABI regen that drops the names can't silently break the
+ * decode. Pure + exported for unit testing (R6); kills the `any` at the
+ * read boundary in `listDesignatableNodes`.
+ */
+export interface RawShardingTableNode extends ArrayLike<unknown> {
+  nodeId?: unknown;
+  identityId?: unknown;
+  ask?: unknown;
+  stake?: unknown;
+}
+
+export function toShardingTableNode(raw: RawShardingTableNode): ShardingTableNode {
+  return {
+    nodeId: String(raw.nodeId ?? raw[0]),
+    identityId: BigInt((raw.identityId ?? raw[1]) as bigint | number | string),
+    ask: BigInt((raw.ask ?? raw[2]) as bigint | number | string),
+    stake: BigInt((raw.stake ?? raw[3]) as bigint | number | string),
+  };
+}
+
 export class ConvictionMethods extends EVMChainAdapterBase implements ConvictionReader {
   // =====================================================================
   // Staking + Publishing Conviction Account legacy surface — ARCHIVED
@@ -547,23 +571,18 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       this.contracts.shardingTable = await this.resolveContract('ShardingTable');
     }
     const shardingTable = this.contracts.shardingTable;
-    const raw = await this.readContractWith<ReadonlyArray<any>>(
+    const raw = await this.readContractWith<readonly RawShardingTableNode[]>(
       shardingTable,
       'shardingTable.getShardingTable',
       (c) => c.getFunction('getShardingTable()').staticCall(),
     );
     const nodes: ShardingTableNode[] = [];
     for (const n of raw ?? []) {
-      const identityId = BigInt(n.identityId ?? n[1]);
+      const node = toShardingTableNode(n);
       // The no-arg read is sized to nodesCount() so it shouldn't pad, but a
       // zero identityId is never a real node — skip defensively.
-      if (identityId <= 0n) continue;
-      nodes.push({
-        nodeId: String(n.nodeId ?? n[0]),
-        identityId,
-        ask: BigInt(n.ask ?? n[2]),
-        stake: BigInt(n.stake ?? n[3]),
-      });
+      if (node.identityId <= 0n) continue;
+      nodes.push(node);
     }
     this.cachedDesignatableNodes = { value: nodes, cachedAt: now };
     return nodes;

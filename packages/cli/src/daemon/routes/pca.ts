@@ -559,33 +559,15 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
 
   // GET /api/pca/designatable-nodes — B-staked-nodes (Stage-5). The full
   // sharding table of nodes designatable as a PCA `primaryNode`, for the create
-  // wizard's PrimaryNodePicker. Read-only; the adapter reads the whole table
-  // (TTL-cached) and this route serves OFFSET pages: ?start=<0-based offset>
-  // &limit=<1..200, route default 50; the FE fetches the whole table with
-  // limit=200, N3>. ?fresh=1 bypasses the adapter cache (M4). Hash-ring order
-  // preserved (the UI sorts). Matched EXACTLY before the generic GET :id below,
-  // else 'designatable-nodes' parses as an accountId and 400s.
+  // wizard's PrimaryNodePicker. Read-only; returns the WHOLE capped table
+  // (≤ shardingTableSizeLimit, default 500) in ONE response — no pagination
+  // (R4): the adapter reads + caches it whole and the UI drains it whole, so
+  // offset cursors bought no chain-work savings. ?fresh=1 bypasses the adapter
+  // cache (M4). Hash-ring order preserved (the UI sorts). Matched EXACTLY before
+  // the generic GET :id below, else 'designatable-nodes' parses as an accountId.
   if (req.method === 'GET' && path === '/api/pca/designatable-nodes') {
     if (!agent.supportsPublishingConvictionNft) {
       return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
-    }
-    const startRaw = ctx.url.searchParams.get('start');
-    const limitRaw = ctx.url.searchParams.get('limit');
-    // N5: strict decimal — reject hex/exponent/'+'/'' that Number() would coerce,
-    // so parsing matches the "non-negative integer" contract the error copy claims.
-    if (startRaw !== null && !/^\d+$/.test(startRaw)) {
-      return jsonResponse(res, 400, { error: 'Invalid start — must be a non-negative integer offset' });
-    }
-    if (limitRaw !== null && !/^\d+$/.test(limitRaw)) {
-      return jsonResponse(res, 400, { error: 'Invalid limit — must be an integer 1..200' });
-    }
-    const start = startRaw === null ? 0 : Number(startRaw);
-    const limit = limitRaw === null ? 50 : Number(limitRaw);
-    if (!Number.isInteger(start) || start < 0) {
-      return jsonResponse(res, 400, { error: 'Invalid start — must be a non-negative integer offset' });
-    }
-    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
-      return jsonResponse(res, 400, { error: 'Invalid limit — must be an integer 1..200' });
     }
     // M4: ?fresh=1 bypasses the adapter's 30s TTL cache (and repopulates it) so
     // the create PrimaryNodeNotInShardingTable revert recovery + picker Retry
@@ -594,18 +576,14 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
     try {
       const all = await agent.listDesignatableNodes({ fresh });
       if (all === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
-      const total = all.length;
-      const page = all.slice(start, start + limit);
-      const nextStart = start + limit < total ? start + limit : null;
       return jsonResponse(res, 200, {
-        nodes: page.map((n) => ({
+        nodes: all.map((n) => ({
           nodeId: n.nodeId,
           identityId: n.identityId.toString(),
           ask: n.ask.toString(),
           stake: n.stake.toString(),
         })),
-        total,
-        nextStart,
+        total: all.length,
       });
     } catch (err: any) {
       const msg = err?.message ?? String(err);

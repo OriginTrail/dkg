@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '../src/mock-adapter.js';
+import { toShardingTableNode } from '../src/evm-adapter-conviction.js';
 
 const SIGNER = '0x1111111111111111111111111111111111111111';
 const COMMITTED = ethers.parseEther('10000');
@@ -181,6 +182,18 @@ describe('MockChainAdapter — V10 conviction agent register/deregister', () => 
       expect(n.stake).toBeGreaterThan(0n);
       expect(n.ask).toBeGreaterThan(0n);
     }
+  });
+
+  it('toShardingTableNode normalizes both ethers Result shapes — named object + positional tuple (R6)', () => {
+    // Named-object shape (the ABI names the struct outputs today).
+    expect(toShardingTableNode({ nodeId: '0xab', identityId: 7n, ask: 1n, stake: 2n } as any))
+      .toEqual({ nodeId: '0xab', identityId: 7n, ask: 1n, stake: 2n });
+    // Positional-tuple shape (names dropped) — same result via the index fallback.
+    expect(toShardingTableNode(['0xab', 7n, 1n, 2n] as any))
+      .toEqual({ nodeId: '0xab', identityId: 7n, ask: 1n, stake: 2n });
+    // Mixed numeric/string inputs coerce to bigint.
+    expect(toShardingTableNode(['0xcd', '9', 3, 4n] as any))
+      .toEqual({ nodeId: '0xcd', identityId: 9n, ask: 3n, stake: 4n });
   });
 });
 

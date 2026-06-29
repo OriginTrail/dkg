@@ -211,27 +211,34 @@ describe('V10 Publishing Conviction NFT — chain-adapter lifecycle', () => {
     expect(nodes.every((n) => n.identityId > 0n)).toBe(true);
   });
 
-  it('listDesignatableNodes TTL-caches (cache hit skips the read; ?fresh bypasses) and a throw does not poison it (M6)', async () => {
+  it('listDesignatableNodes TTL-caches, ?fresh REPOPULATES the cache, and a throw does not poison it (M6/R3)', async () => {
     const reader = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    const good = await reader.listDesignatableNodes(); // populate the cache + memoize the contract
+    const good = await reader.listDesignatableNodes(); // real read populates the cache
 
     // Cache hit: a 2nd call within the 30s TTL does NOT re-read the chain.
-    const spy = vi.spyOn(reader as any, 'readContractWith');
-    await reader.listDesignatableNodes();
-    expect(spy).not.toHaveBeenCalled();
+    const hitSpy = vi.spyOn(reader as any, 'readContractWith');
+    expect(await reader.listDesignatableNodes()).toEqual(good);
+    expect(hitSpy).not.toHaveBeenCalled();
+    hitSpy.mockRestore();
 
-    // ?fresh bypasses the cache → exactly one underlying read.
-    await reader.listDesignatableNodes({ fresh: true });
-    expect(spy).toHaveBeenCalledTimes(1);
-    spy.mockRestore();
+    // ?fresh BYPASSES *and REPOPULATES*: stub the underlying read to return a
+    // DISTINGUISHABLE table, then prove the next NON-fresh call serves it. (A
+    // bypass-without-repopulate would still return `good` here and pass falsely —
+    // this is the R3 strengthening over the same-fixture version.)
+    const refreshed = [{ nodeId: '0xfeed', identityId: 99999n, ask: 7n, stake: 8n }];
+    const rawRefreshed = refreshed.map((n) => [n.nodeId, n.identityId, n.ask, n.stake]); // ethers positional tuple
+    const freshSpy = vi.spyOn(reader as any, 'readContractWith').mockResolvedValueOnce(rawRefreshed);
+    expect(await reader.listDesignatableNodes({ fresh: true })).toEqual(refreshed);
+    expect(freshSpy).toHaveBeenCalledTimes(1);
+    freshSpy.mockRestore();
+    expect(await reader.listDesignatableNodes()).toEqual(refreshed); // cache now holds the refreshed value
 
-    // Success-only / no-negative-cache: a throwing fresh read must leave the
-    // prior good value cached (the next non-fresh call still returns it).
+    // No-negative-cache: a throwing fresh read leaves the last good (refreshed) value.
     const boom = vi.spyOn(reader as any, 'readContractWith')
       .mockRejectedValueOnce(Object.assign(new Error('blip'), { code: 'CALL_EXCEPTION' }));
     await expect(reader.listDesignatableNodes({ fresh: true })).rejects.toThrow();
     boom.mockRestore();
-    expect(await reader.listDesignatableNodes()).toEqual(good);
+    expect(await reader.listDesignatableNodes()).toEqual(refreshed); // unpoisoned
   });
 
   it('getPublishingConvictionAgents enumerates registered agents (checksummed) and reflects deregistration', async () => {
