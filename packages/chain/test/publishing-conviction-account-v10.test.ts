@@ -255,6 +255,25 @@ describe('V10 Publishing Conviction NFT — chain-adapter lifecycle', () => {
     resolveSpy.mockRestore();
   });
 
+  it('getPublishingConvictionContracts returns the deployed nft/token (EIP-55) + chainId + rpcUrls (sub-PR #2 bootstrap)', async () => {
+    const reader = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const { hubAddress } = getSharedContext();
+    const hub = new ethers.Contract(
+      hubAddress,
+      ['function getContractAddress(string) view returns (address)'],
+      createProvider(),
+    );
+    const expectedNft = ethers.getAddress(await hub.getContractAddress('DKGPublishingConvictionNFT'));
+    const expectedToken = ethers.getAddress(await hub.getContractAddress('Token'));
+
+    const c = await reader.getPublishingConvictionContracts();
+    expect(c.nft).toBe(expectedNft);     // the deployed wrapper, EIP-55 checksummed
+    expect(c.token).toBe(expectedToken); // the deployed TRAC, EIP-55 checksummed
+    expect(c.nft).not.toBe(c.token);
+    expect(c.chainId).toBe(reader.chainId);       // AS-IS, the adapter's configured chainId
+    expect(c.rpcUrls).toEqual(reader.getRpcUrls()); // the viem transport set
+  });
+
   it('getPublishingConvictionAgents enumerates registered agents (checksummed) and reflects deregistration', async () => {
     const owner = await fundedOwner();
     const { accountId } = await owner.createPublishingConvictionAccount(COMMITTED);
