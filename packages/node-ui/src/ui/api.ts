@@ -1719,6 +1719,25 @@ export interface PcaAgentsResult {
 export const listPcaAgents = (accountId: string) =>
   getJson<PcaAgentsResult>(`/api/pca/${encodeURIComponent(accountId)}/agents`);
 
+export interface PcaAgentAccountResult {
+  /** Echoed checksummed address that was queried. */
+  agent: string;
+  /** The PCA this wallet is an approved publishing wallet on, or `null` if none. A
+   *  wallet is approved on at most one account, so this is a direct answer. */
+  accountId: string | null;
+}
+
+/**
+ * GAP-3 — resolve which PCA (if any) an operational wallet is an approved publishing
+ * wallet on (`GET /api/pca/agent/:address`). A faster/authoritative path than probing
+ * each tracked account; `accountId: null` = not a publishing agent anywhere. 400 =
+ * invalid address, 503 = capability/transport. NOTE: this is a discovery/optimization
+ * primitive only — coverage MUST still resolve via `fetchPca` → `classifyCoverage`
+ * (registered ≠ covered; the #1344 honesty line). `GET` is permissionless.
+ */
+export const pcaAgentAccount = (address: string) =>
+  getJson<PcaAgentAccountResult>(`/api/pca/agent/${encodeURIComponent(address)}`);
+
 /** Normalized, terminology-disciplined PCA error code (UI branches on this). */
 export type PcaErrorCode =
   | 'FEATURE_UNAVAILABLE'
