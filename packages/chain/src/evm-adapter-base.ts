@@ -125,9 +125,13 @@ type ScanProvider = { provider: JsonRpcProvider; backendHead: number };
  * B8 — decode the `CostCovered` event from a publish receipt's logs via the
  * PublishingConviction LOGIC ABI (the event is emitted by the logic contract, a
  * different address than KA storage, so the KA-storage receipt loop skips it).
- * Returns the discount detail (all bigint, so the daemon's JSON replacer
- * stringifies them) when a publish drew on a Publishing Conviction Account, else
- * `undefined`. Exported for unit testing.
+ * Returns the discount detail (cost fields bigint → decimal strings via the
+ * daemon's JSON replacer; `epoch` a number) when a publish drew on a Publishing
+ * Conviction Account, else `undefined`. `coverPublishingCost` runs once per
+ * publish tx, so a (batch) publish emits ONE CostCovered covering the batch's
+ * total draw — this returns that single event (the "discount applied" badge is
+ * tx-level; a precise per-KA breakdown would be a future enhancement). Exported
+ * for unit testing.
  */
 export function decodeConvictionCostCovered(
   logs: ReadonlyArray<{ topics: ReadonlyArray<string>; data: string }>,
