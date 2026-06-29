@@ -69,6 +69,22 @@ describe('useDesignatableNodes', () => {
     await unmount();
   });
 
+  it('R4 robustness — surfaces the WHOLE set (>50 nodes) from the single fetch, sorted desc', async () => {
+    // 60 nodes (above the picker's 50-row display CAP). The HOOK must return ALL 60 — a future
+    // server-side cap/pagination re-introduction (only serving a page) would fail this.
+    const nodes = Array.from({ length: 60 }, (_, i) => ({
+      nodeId: `p${i}`, identityId: String(i + 1), stake: String(i + 1), ask: '0', // stake 1..60
+    }));
+    mocks.listDesignatableNodes.mockResolvedValue({ nodes, total: 60 });
+    const { unmount } = await renderHook();
+    expect(mocks.listDesignatableNodes).toHaveBeenCalledTimes(1); // one fetch, whole table
+    expect(latest!.nodes).toHaveLength(60);
+    // Sorted by stake DESC: identityId 60 (stake 60) … down to 1 (stake 1).
+    expect(latest!.nodes[0].identityId).toBe('60');
+    expect(latest!.nodes[59].identityId).toBe('1');
+    await unmount();
+  });
+
   it('surfaces a read failure as error (retryable)', async () => {
     mocks.listDesignatableNodes.mockRejectedValue(new Error('SHARDING_TABLE_READ_FAILED'));
     const { unmount } = await renderHook();

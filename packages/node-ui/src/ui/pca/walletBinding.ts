@@ -96,11 +96,20 @@ export function selfCoverageOutlook(bindings: WalletBinding[]): {
   inconclusive: WalletBinding[];
   zeroSelfCoverage: boolean;
 } {
-  const selfCoverable = bindings.filter((b) => !b.inconclusive && (b.boundTo == null || b.canOwn));
-  const ownBound = bindings.filter((b) => b.canOwn); // canOwn ⇒ bound + owned + readable
-  const sponsorBound = bindings.filter((b) => !b.inconclusive && b.boundTo != null && !b.canOwn && b.boundLive);
-  const sponsorDead = bindings.filter((b) => !b.inconclusive && b.boundTo != null && !b.canOwn && !b.boundLive);
-  const inconclusive = bindings.filter((b) => b.inconclusive);
+  // Derive the preview buckets FROM the single policy source (`planSelfCoverage`) — no parallel
+  // re-classification. Group bindings by their planned action; the only sub-split the planner
+  // intentionally collapses is unbound-vs-inconclusive (both → `register`), so we read the
+  // binding's `inconclusive` flag to separate those two within that group.
+  const planned = bindings.map((b) => ({ binding: b, kind: planSelfCoverage(b).kind }));
+  const ofKind = (k: SelfCoverageAction['kind']) => planned.filter((p) => p.kind === k).map((p) => p.binding);
+
+  const registerable = ofKind('register'); // unbound OR inconclusive (fall through to register)
+  const inconclusive = registerable.filter((b) => b.inconclusive);
+  const unbound = registerable.filter((b) => !b.inconclusive);
+  const ownBound = ofKind('deregisterThenRegister'); // M3 migrate (own-bound)
+  const sponsorBound = ofKind('skipSponsored'); // already discounted free (live sponsor)
+  const sponsorDead = ofKind('conflictSponsorDead'); // R1 — uncovered + unfreeable (dead sponsor)
+  const selfCoverable = [...unbound, ...ownBound]; // can end up covered (register or migrate-then-register)
   const zeroSelfCoverage =
     bindings.length > 0 && selfCoverable.length === 0 && inconclusive.length === 0;
   return { selfCoverable, ownBound, sponsorBound, sponsorDead, inconclusive, zeroSelfCoverage };
