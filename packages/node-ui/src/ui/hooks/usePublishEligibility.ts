@@ -9,20 +9,30 @@ import type { PcaVerdict } from '../components/Pca/EligibilityVerdictBanner.js';
 const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 
 /**
- * Flag-2 (#1344) — session-level NEGATIVE cache for the publish-surface self-heal:
- * signing wallets (lowercased) CONFIRMED to have NO agent-on PCA this session. The
- * self-heal (below) discovers agent-on accounts by reverse-looking-up every wallet
- * (`pcaAgentAccount`); without this, a non-PCA node would re-run those probes on
- * every eligibility eval (per chip × per CG × per 30s poll). With it, a node that
- * discovers nothing pays ~one probe per wallet per session. ONLY confirmed negatives
- * are cached — a transport error stays uncached (so it retries) and a freshly-
- * sponsored wallet is still picked up on a later poll until it caches negative.
+ * Flag-2 (#1344) — TTL'd NEGATIVE cache for the publish-surface self-heal: signing
+ * wallets (lowercased) CONFIRMED to have NO agent-on PCA → the timestamp of that
+ * confirmation. The self-heal (below) discovers agent-on accounts by reverse-looking-up
+ * every wallet (`pcaAgentAccount`); without this, a non-PCA node would re-run those
+ * probes on every eligibility eval (per chip × per CG × per 30s poll). With it, a node
+ * that discovers nothing pays ~one probe per wallet per TTL.
+ *
+ * The TTL (not a permanent cache) is the fix for the mid-session-sponsorship gap: an
+ * operator can open the UI and THEN get sponsored, so a never-expiring negative would
+ * pin the chip un-resolved until reload. A re-probe after the TTL lets that self-heal.
+ * ONLY confirmed negatives are cached — a transport error stays uncached (retries next
+ * poll), and a wallet that turns positive drops its stale entry (#9 preserved).
  */
-const noAgentAccount = new Set<string>();
+const NEGATIVE_CACHE_TTL_MS = 3 * 60_000;
+const noAgentAccount = new Map<string, number>();
 
 /** TEST-ONLY — clear the session negative cache between cases. */
 export function __resetAgentDiscoveryCache(): void {
   noAgentAccount.clear();
+}
+
+/** TEST-ONLY — age every cached negative by `ms` (exercises the TTL without faking the clock). */
+export function __ageAgentDiscoveryCache(ms: number): void {
+  for (const [k, ts] of noAgentAccount) noAgentAccount.set(k, ts - ms);
 }
 
 /**
@@ -37,18 +47,21 @@ async function discoverAgentAccounts(): Promise<string[]> {
   const wb = await fetchWalletsBalances().catch(() => null);
   const wallets = wb?.wallets ?? [];
   const found = new Set<string>();
+  const now = Date.now();
   await Promise.all(
     wallets.map(async (w) => {
       const key = w.toLowerCase();
-      if (noAgentAccount.has(key)) return;
+      const negAt = noAgentAccount.get(key);
+      if (negAt != null && now - negAt < NEGATIVE_CACHE_TTL_MS) return; // fresh negative — skip
       const acct = await pcaAgentAccount(w).catch(() => undefined);
       // #9 — a REJECTED probe is "couldn't read", not a confirmed no-account: leave it
       // uncached so the next poll retries (never silently suppresses a real sponsorship).
       if (acct === undefined) return;
       if (acct.accountId == null) {
-        noAgentAccount.add(key); // confirmed: this wallet is an agent on no PCA
+        noAgentAccount.set(key, now); // (re)confirm negative + refresh the TTL window
         return;
       }
+      noAgentAccount.delete(key); // turned positive (e.g. just sponsored) — drop the stale entry
       found.add(acct.accountId);
     }),
   );
