@@ -54,6 +54,7 @@ export function EligibilityVerdictBanner({
   verdict,
   accountId,
   discountBps,
+  accountUntracked = false,
   reasons = [],
   ownerPublish = false,
   variant = 'banner',
@@ -66,6 +67,10 @@ export function EligibilityVerdictBanner({
   verdict: PcaVerdict;
   accountId?: string;
   discountBps?: number;
+  /** GAP-3 (#1344) — the covering account is one this node doesn't track; the GREEN
+   *  copy names it honestly ("(not tracked by this node)") so it's never mistaken for
+   *  one of the user's tracked PCAs. */
+  accountUntracked?: boolean;
   /** Failed conditions, shown in the amber/danger banner ("Reason: …"). */
   reasons?: string[];
   /** #4 — when true (you own the target CG), append the escrow caveat. */
@@ -85,6 +90,9 @@ export function EligibilityVerdictBanner({
   const role = isLoud ? 'alert' : 'status';
   const ariaLive = isLoud ? 'assertive' : 'polite';
   const pcaLabel = accountId ? `PCA #${accountId}` : 'a conviction account';
+  // GAP-3 (#1344) — append the honest untracked note to the GREEN copy only (where a
+  // covering account is named); amber/danger never claim coverage so it'd read oddly there.
+  const trackedNote = accountUntracked ? ' (not tracked by this node)' : '';
   const disc = pctLabel(discountBps);
   // The escrow caveat can pre-empt BOTH a fall-through cost and a no-funds
   // failure (escrow pays, not the wallet), so it qualifies amber AND danger on
@@ -95,7 +103,7 @@ export function EligibilityVerdictBanner({
   if (variant === 'chip') {
     const chipLabel =
       verdict === 'eligible'
-        ? `Funded by ${pcaLabel}${disc ? ` (−${disc})` : ''}`
+        ? `Funded by ${pcaLabel}${trackedNote}${disc ? ` (−${disc})` : ''}`
         : verdict === 'fallthrough'
           ? '⚠ No PCA discount'
           : verdict === 'fallthrough-no-funds'
@@ -130,6 +138,7 @@ export function EligibilityVerdictBanner({
     message = (
       <>
         This publish will use {pcaLabel}
+        {trackedNote}
         {disc ? ` (−${disc})` : ''}.{ownerPublish ? `${escrowCaveat}.` : ''}
       </>
     );

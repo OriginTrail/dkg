@@ -696,6 +696,14 @@ export class MockChainAdapter implements ChainAdapter {
     return acct.agents.has(ethers.getAddress(agent).toLowerCase());
   }
 
+  /** Mirrors `getRegisteredAgents`. Keys are stored lowercased, so
+   *  checksum-normalize on the way out to match the on-chain view. */
+  async getPublishingConvictionAgents(accountId: bigint): Promise<string[]> {
+    const acct = this.convictionAccounts.get(accountId);
+    if (!acct) return [];
+    return [...acct.agents].map((k) => ethers.getAddress(k));
+  }
+
   /** Mirrors `agentToAccountId`; `0n` for unregistered → publisher SDK
    *  stays on direct-spend until an agent is registered. */
   async getConvictionAgentAccountId(agent: string): Promise<bigint> {

@@ -1711,6 +1711,41 @@ export const pcaTopUp = (accountId: string, tokens: string) =>
 export const pcaSettle = (accountId: string) =>
   post<PcaSettleResult>(`/api/pca/${encodeURIComponent(accountId)}/settle`, {});
 
+export interface PcaAgentsResult {
+  accountId: string;
+  /** The FULL set of approved publishing-wallet addresses (checksummed). `[]` = a
+   *  real 0-approved account, distinct from a 404 (unknown account). */
+  agents: string[];
+}
+
+/**
+ * B3 — list the approved publishing wallets on a PCA (the full on-chain enumerator,
+ * vs just this node's wallets the detail view can probe). Existence-checked like
+ * {@link fetchPca}: an unknown account 404s (so the caller distinguishes "no such
+ * account" from `agents: []`); 503 = capability/transport. `GET` is permissionless.
+ */
+export const listPcaAgents = (accountId: string) =>
+  getJson<PcaAgentsResult>(`/api/pca/${encodeURIComponent(accountId)}/agents`);
+
+export interface PcaAgentAccountResult {
+  /** Echoed checksummed address that was queried. */
+  agent: string;
+  /** The PCA this wallet is an approved publishing wallet on, or `null` if none. A
+   *  wallet is approved on at most one account, so this is a direct answer. */
+  accountId: string | null;
+}
+
+/**
+ * GAP-3 — resolve which PCA (if any) an operational wallet is an approved publishing
+ * wallet on (`GET /api/pca/agent/:address`). A faster/authoritative path than probing
+ * each tracked account; `accountId: null` = not a publishing agent anywhere. 400 =
+ * invalid address, 503 = capability/transport. NOTE: this is a discovery/optimization
+ * primitive only — coverage MUST still resolve via `fetchPca` → `classifyCoverage`
+ * (registered ≠ covered; the #1344 honesty line). `GET` is permissionless.
+ */
+export const pcaAgentAccount = (address: string) =>
+  getJson<PcaAgentAccountResult>(`/api/pca/agent/${encodeURIComponent(address)}`);
+
 /** Normalized, terminology-disciplined PCA error code (UI branches on this). */
 export type PcaErrorCode =
   | 'FEATURE_UNAVAILABLE'
@@ -1740,10 +1775,10 @@ export interface PcaErrorInfo {
   message: string;
   /**
    * B10: the conviction account a wallet is ALREADY approved on, surfaced on
-   * `AgentAlreadyRegistered`. The daemon doesn't return it yet
-   * (`classifyPcaRevert` discards it — pca.ts:50), so this is `undefined` today
-   * and the copy degrades to "another conviction account"; it lights up
-   * automatically once the route includes `existingAccountId`.
+   * `AgentAlreadyRegistered`. The P1 daemon NOW returns it (`resolveConflictingAccountId`
+   * + the register route populate it), so `describePcaError` names "PCA #M — deregister
+   * it there first". It is `undefined` only on the rare case the daemon can't resolve the
+   * id, where the copy degrades to "another conviction account".
    */
   existingAccountId?: string;
 }

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useFetch } from '../../hooks.js';
-import { fetchWalletsBalances, fetchPca, describePcaError } from '../../api.js';
+import { fetchWalletsBalances, fetchPca, pcaAgentAccount, describePcaError } from '../../api.js';
 import { formatEth, formatEthTooltip } from '../../lib/formatEth.js';
 import { usePcaStore } from '../../stores/pca.js';
 import { classifyCoverage } from '../../pca/coverage.js';
@@ -54,6 +54,26 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
 
   const trackAccount = usePcaStore((s) => s.trackAccount);
   const { copied, copy } = useCopy();
+
+  // GAP-3 discovery (#1344) — surface which PCA(s) already sponsor this node's wallets
+  // (chain truth, untracked by definition — that's the point of the edge panel). PURE
+  // discovery: it never auto-tracks (guardrail b) and never asserts coverage — it just
+  // pre-fills the manual "Check approval" so the edge doesn't need the core to hand over
+  // the id. A wallet is approved on at most one account; distinct non-null ids are shown.
+  const walletsKey = wallets.join(',');
+  const { data: discovered } = useFetch(
+    async () => {
+      const ws = wb?.wallets ?? [];
+      if (ws.length === 0) return [] as string[];
+      const ids = await Promise.all(
+        ws.map((w) => pcaAgentAccount(w).then((r) => r.accountId).catch(() => null)),
+      );
+      return Array.from(new Set(ids.filter((id): id is string => id != null)));
+    },
+    [walletsKey],
+    0,
+  );
+
   const [sponsorId, setSponsorId] = useState('');
   const [checking, setChecking] = useState(false);
   const [probeError, setProbeError] = useState<string | null>(null);
@@ -189,6 +209,16 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
         {/* Approval tracker */}
         <section className="v10-pca-detail-section">
           <h3 className="v10-pca-detail-section-title">Track your approval</h3>
+          {/* GAP-3 discovery — surface any sponsoring PCA we found on-chain; pre-fill the
+              check (the user confirms; nothing is auto-tracked). */}
+          {discovered && discovered.length > 0 && (
+            <p className="v10-pca-detail-hint" role="status" data-testid="pca-sponsor-discovered">
+              ◉ We found your wallet(s) already approved on {discovered.map((id) => `PCA #${id}`).join(', ')}.{' '}
+              <button type="button" className="v10-pca-card-btn" onClick={() => setSponsorId(discovered[0])}>
+                Check PCA #{discovered[0]}
+              </button>
+            </p>
+          )}
           <div className="v10-pca-detail-form">
             <input
               className="v10-form-input"

@@ -502,6 +502,82 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
     }
   }
 
+  // GET /api/pca/agent/:address - reverse-lookup which PCA a wallet is a
+  // registered publishing agent of (GAP-3, for S5/S6 discovery). Returns the
+  // bare on-chain `agentToAccountId` fact; coverage classification happens in
+  // the caller, never by treating "registered" as "covered".
+  if (req.method === 'GET' && /^\/api\/pca\/agent\/[^/]+$/.test(path)) {
+    const addr = decodeURIComponent(path.split('/')[4] ?? '');
+    if (!ethers.isAddress(addr)) {
+      return jsonResponse(res, 400, { error: 'address must be a valid 0x-prefixed EVM address' });
+    }
+    if (!agent.supportsPublishingConvictionNft) {
+      return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+    }
+    try {
+      const accountId = await agent.getConvictionAgentAccountId(addr, { strict: true });
+      if (accountId === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      return jsonResponse(res, 200, {
+        agent: ethers.getAddress(addr),
+        accountId: accountId > 0n ? accountId.toString() : null,
+      });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (respondIfChainRpcTransportError(res, err)) return;
+      if (err?.code === 'CALL_EXCEPTION') {
+        return jsonResponse(res, 503, {
+          error: 'PCA agent lookup temporarily unavailable - chain read failed',
+          code: 'PCA_LOOKUP_READ_FAILED',
+        });
+      }
+      return jsonResponse(res, 500, {
+        error: `getConvictionAgentAccountId failed: ${msg}`,
+      });
+    }
+  }
+
+  // GET /api/pca/:id/agents - enumerate the operational wallets registered as
+  // publishing agents on this PCA. This is declared before the generic GET :id
+  // matcher so an existing account with zero approved wallets returns 200 []
+  // while an unknown account returns 404.
+  if (req.method === 'GET' && /^\/api\/pca\/[^/]+\/agents$/.test(path)) {
+    const idStr = decodeURIComponent(path.split('/')[3] ?? '');
+    const accountId = parseAccountId(idStr);
+    if (accountId === null) {
+      return jsonResponse(res, 400, { error: 'Invalid accountId - must be a non-negative integer' });
+    }
+    try {
+      const info = await agent.getPublishingConvictionAccountInfo(accountId);
+      if (info === null) {
+        if (!agent.supportsPublishingConvictionNft) {
+          return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+        }
+        return jsonResponse(res, 404, { error: `Unknown PCA accountId ${idStr}` });
+      }
+      const agents = await agent.getPublishingConvictionAgents(accountId);
+      if (agents === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      return jsonResponse(res, 200, { accountId: idStr, agents });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (respondIfChainRpcTransportError(res, err)) return;
+      if (err?.code === 'CALL_EXCEPTION') {
+        return jsonResponse(res, 503, {
+          error: 'PCA agent enumeration temporarily unavailable - chain read failed',
+          code: 'PCA_LOOKUP_READ_FAILED',
+        });
+      }
+      const revert = classifyPcaRevert(msg);
+      if (revert) return jsonResponse(res, revert.status, { error: revert.error, accountId: idStr });
+      return jsonResponse(res, 500, {
+        error: `getPublishingConvictionAgents failed: ${msg}`,
+      });
+    }
+  }
+
   // GET /api/pca/:id — V10 conviction NFT snapshot. Optional ?key=0x...
   // probes whether that address is a registered agent.
   if (req.method === 'GET' && /^\/api\/pca\/[^/]+$/.test(path)) {

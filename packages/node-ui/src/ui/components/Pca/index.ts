@@ -14,6 +14,7 @@ export { HealthChip, HEALTH_CHIP_META } from './HealthChip.js';
 // constants) is imported DIRECTLY from the domain module `pca/health.js` by every
 // consumer, so the barrel no longer re-exports it.
 export { WalletRow, type WalletRowTone } from './WalletRow.js';
+export { PcaAgentList, type PcaAgentListProps } from './PcaAgentList.js';
 export { AddressCrux, DEFAULT_ADDRESS_CRUX_NOTE } from './AddressCrux.js';
 export {
   DiscountTierLadder,
