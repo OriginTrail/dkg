@@ -93,7 +93,7 @@ export function useModalDismiss(open: boolean, onClose: () => void) {
         // If an inner combobox popup is OPEN, let IT handle Escape first (close the
         // popup), rather than closing the whole dialog and discarding its state. This
         // capture-phase window listener would otherwise win over the combobox's own
-        // bubble-phase handler (H1). Escape closes the innermost layer first; a second
+        // bubble-phase handler. Escape closes the innermost layer first; a second
         // Escape (popup now closed) dismisses the dialog.
         const dlg = dialogRef.current;
         if (dlg && dlg.querySelector('[role="combobox"][aria-expanded="true"]')) {

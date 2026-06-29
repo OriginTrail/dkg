@@ -1800,11 +1800,11 @@ export const pcaAgentAccount = (address: string) =>
   getJson<PcaAgentAccountResult>(`/api/pca/agent/${encodeURIComponent(address)}`);
 
 /**
- * B-staked-nodes (§9.3) — one staked sharding-table node, as the API returns it. `identityId`
- * (DECIMAL string) is the on-chain id a PCA designates as its `primaryNode` (the value Create
- * submits); `nodeId` is a HEX string (on-chain `bytes`, the node's self-reported id → the
- * "unverified" display label); `stake`/`ask` are wei strings. R7: `ask` is REQUIRED — the route
- * always sends it (the picker just doesn't display it, L9; its prop type omits `ask`).
+ * One staked sharding-table node, as the API returns it. `identityId` (DECIMAL string) is the
+ * on-chain id a PCA designates as its `primaryNode` (the value Create submits); `nodeId` is a HEX
+ * string (on-chain `bytes`, the node's self-reported id → shown only as an "unverified" label);
+ * `stake`/`ask` are wei strings. `ask` is REQUIRED on the API type — the route always sends it; the
+ * picker just doesn't display it, so its separate prop type omits `ask` (don't loosen this contract).
  */
 export interface DesignatableNode {
   /** Hex string (`0x…`) — the node's self-reported id; display-only ("unverified"). */
@@ -1813,11 +1813,11 @@ export interface DesignatableNode {
   identityId: string;
   /** Wei string. */
   stake: string;
-  /** Wei string; returned by the route, dropped from display (L9). */
+  /** Wei string; returned by the route, not shown in the picker. */
   ask: string;
 }
 
-/** R4 — the sharding table is ≤500, read+cached whole, and the UI drains it whole, so the route
+/** The sharding table is capped (≤500), read+cached whole, and the UI drains it whole, so the route
  *  returns the FULL list in one response (no offset pagination). */
 export interface DesignatableNodesResult {
   nodes: DesignatableNode[];
@@ -1826,13 +1826,13 @@ export interface DesignatableNodesResult {
 }
 
 /**
- * B-staked-nodes (§9.3) — the staked sharding-table nodes for the PrimaryNodePicker. The daemon
- * reads the whole (≤500) table, TTL-caches it, and returns it in ONE response (R4 — no pagination).
- * A read failure 503s (`SHARDING_TABLE_READ_FAILED` / transport / capability) — all retryable; the
- * picker shows a retry, and `primaryNode` is required so edge can't proceed until it loads.
- * `fresh:true` (M4) BYPASSES the daemon's 30s TTL cache + repopulates it — used by the picker Retry
- * + the `PrimaryNodeNotInShardingTable` recovery so a just-(un)staked node is seen immediately, not
- * after the stale window. `GET` is permissionless.
+ * The staked sharding-table nodes for the PrimaryNodePicker. The daemon reads the whole (≤500) table,
+ * TTL-caches it, and returns it in ONE response (no pagination). A read failure 503s
+ * (`SHARDING_TABLE_READ_FAILED` / transport / capability) — all retryable; the picker shows a retry,
+ * and `primaryNode` is required so edge can't proceed until it loads. `fresh:true` BYPASSES the
+ * daemon's 30s TTL cache + repopulates it — used by the picker Retry + the
+ * `PrimaryNodeNotInShardingTable` recovery so a just-(un)staked node is seen immediately, not after
+ * the stale window. `GET` is permissionless.
  */
 export const listDesignatableNodes = (opts?: { fresh?: boolean }) =>
   getJson<DesignatableNodesResult>(

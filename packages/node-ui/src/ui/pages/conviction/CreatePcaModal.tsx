@@ -60,13 +60,13 @@ export function CreatePcaModal({
   const nodeStatus = useAgentsStore((s) => s.nodeStatus) as
     | { nodeRole?: string; hasIdentity?: boolean; identityId?: string; blockExplorerUrl?: string | null }
     | null;
-  // Sub-PR 1 (§9.3) — the edge/no-identity CREATE GATE is REMOVED: any node can create a
-  // PCA by designating a staked sharding-table node as its `primaryNode` (the picker, §3b).
-  // A node without its own staked identity gets a non-blocking explainer (not a hard block).
-  // `hasIdentity === false` (or edge) only drives that explainer now, never a gate.
+  // The edge/no-identity CREATE GATE is REMOVED: any node can create a PCA by designating a
+  // staked sharding-table node as its `primaryNode` (via the picker). A node without its own
+  // staked identity gets a non-blocking explainer (not a hard block); `hasIdentity === false`
+  // (or edge) only drives that explainer now, never a gate.
   const noOwnIdentity = nodeStatus?.nodeRole === 'edge' || nodeStatus?.hasIdentity === false;
-  // S1 — still fail CLOSED while status is loading/failed (nodeStatus null): create needs
-  // the owner wallet (double-mint marker) and status (picker pre-select / M3 cross-check)
+  // Still fail CLOSED while status is loading/failed (nodeStatus null): create needs the owner
+  // wallet (double-mint marker) and status (picker pre-select / own-staked cross-check)
   // resolved first. A financial mutation must not proceed on unknown eligibility.
   const statusUnknown = nodeStatus == null;
   const explorer = nodeStatus?.blockExplorerUrl ?? null;
@@ -77,7 +77,7 @@ export function CreatePcaModal({
   const ownerTrac = wb?.balances?.find((b) => b.address === ownerWallet)?.trac;
   const ownerTracNum = ownerTrac != null ? Number(ownerTrac) : NaN;
 
-  // B1 pre-flight wallet-binding probe (§9.5) — READ-ONLY, at wizard open. Surfaces the
+  // Pre-flight wallet-binding probe — READ-ONLY, at wizard open. Surfaces the
   // self-coverage outlook BEFORE the TRAC commit: if EVERY op wallet is already bound to a
   // sponsor's PCA, the new account would discount none of this node's own publishes (a loud
   // informed-consent warning — NOT a hard block; a node may create purely to sponsor others).
@@ -128,10 +128,10 @@ export function CreatePcaModal({
   const belowMinTier = amountValid && amountNum < 25_000;
   const estTier = useMemo(() => discountTierForTrac(amountValid ? amountNum : null), [amountNum, amountValid]);
   const primaryValid = /^\d+$/.test(primaryNode.trim()) && Number(primaryNode.trim()) > 0;
-  // L13: don't allow submit until the owner wallet has loaded — the durable
-  // double-mint marker is keyed on `ownerWallet`, so submitting before wallets
-  // resolve would skip persisting it (the in-session reconcile would still fire,
-  // but the refresh-survival guarantee wouldn't). Cheap belt-and-suspenders.
+  // Don't allow submit until the owner wallet has loaded — the durable double-mint
+  // marker is keyed on `ownerWallet`, so submitting before wallets resolve would skip
+  // persisting it (the in-session reconcile would still fire, but the refresh-survival
+  // guarantee wouldn't). Cheap belt-and-suspenders.
   const canSubmit =
     amountValid && !insufficient && primaryValid && !!ownerWallet && !statusUnknown && phase === 'form';
 
@@ -160,13 +160,12 @@ export function CreatePcaModal({
       if (err instanceof HttpError && (err.status === 400 || isPcaFeatureUnavailable(err))) {
         clearCreatePending();
         const info = describePcaError(err);
-        // §9.4 #18 / Q1 / R2 — PrimaryNodeNotInShardingTable is RECOVERABLE, not terminal: the
-        // picked node was unstaked between picking and submit. CLEAR the rejected node AND refetch
-        // the list FRESH, so submit stays disabled until a still-listed node is picked (the prefill
-        // re-defaults to the core's own id only if it's still staked) — never re-submit the same
-        // rejected id on its numeric shape.
+        // PrimaryNodeNotInShardingTable is RECOVERABLE, not terminal: the picked node was unstaked
+        // between picking and submit. CLEAR the rejected node AND refetch the list FRESH, so submit
+        // stays disabled until a still-listed node is picked (the prefill re-defaults to the core's
+        // own id only if it's still staked) — never re-submit the same rejected id on its numeric shape.
         if (info?.code === 'PrimaryNodeNotInShardingTable') {
-          onPrimaryNodeRejected(); // R2 — clear the rejected node so it can't be re-submitted
+          onPrimaryNodeRejected(); // clear the rejected node so it can't be re-submitted
           refreshNodes();
         }
         setError(info?.message ?? (err as Error)?.message ?? 'Create failed.');
@@ -346,9 +345,9 @@ export function CreatePcaModal({
           </div>
         )}
 
-        {/* B1 (§9.5) — zero-self-coverage informed consent: every op wallet is already on another
-            PCA, so this account discounts NONE of your own publishes. NOT a block. (R1 — only the
-            ones on a LIVE sponsor PCA are actually "free"; dead ones get the separate warning below.) */}
+        {/* Zero-self-coverage informed consent: every op wallet is already on another PCA, so this
+            account discounts NONE of your own publishes. NOT a block. (Only the ones on a LIVE
+            sponsor PCA are actually "free"; dead ones get the separate warning below.) */}
         {b1.zeroSelfCoverage && (
           <div className="v10-modal-warning" role="alert" data-testid="pca-b1-zero-coverage">
             ⚠ All of this node’s operational wallets are already approved on other PCAs
@@ -358,8 +357,8 @@ export function CreatePcaModal({
             path and creating just locks your TRAC.
           </div>
         )}
-        {/* R1 (#9) — wallets on an EXPIRED/swept sponsor PCA: NOT covered, and this node can't free
-            them (not the owner). Never claim "already free"; surface the honest, actionable state. */}
+        {/* Wallets on an EXPIRED/swept sponsor PCA: NOT covered, and this node can't free them
+            (not the owner). Never claim "already free"; surface the honest, actionable state. */}
         {b1.sponsorDead.length > 0 && (
           <div className="v10-modal-warning" role="alert" data-testid="pca-b1-sponsor-dead">
             ⚠ {b1.sponsorDead.length} of this node’s wallet(s) are approved on a sponsor’s PCA that’s
@@ -376,7 +375,7 @@ export function CreatePcaModal({
             (any already on a PCA you own are deregistered from it first).
           </div>
         )}
-        {/* M3 — own-bound migration must be disclosed: these wallets are MOVED off a PCA this node
+        {/* Own-bound migration must be disclosed: these wallets are MOVED off a PCA this node
             already owns. Independent of the sponsor-bound preview (fires even when sponsorBound===0). */}
         {!b1.zeroSelfCoverage && b1.ownBound.length > 0 && (
           <div className="v10-modal-warning" role="status" data-testid="pca-b1-own-bound">
@@ -387,8 +386,8 @@ export function CreatePcaModal({
           </div>
         )}
 
-        {/* S2b renew — HONEST framing (#9): this is a NEW separate account, not an
-            in-place extension; the old account's TRAC stays locked until its own expiry. */}
+        {/* Renew — HONEST framing: this is a NEW separate account, not an in-place
+            extension; the old account's TRAC stays locked until its own expiry. */}
         {replacingAccountId && (
           <div className="v10-modal-warning" role="status" data-testid="pca-renew-note">
             ⓘ This creates a <strong>new, separate</strong> account (a new id) — it does not extend or
