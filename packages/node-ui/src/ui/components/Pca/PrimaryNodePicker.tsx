@@ -1,9 +1,9 @@
 import React, { useId, useMemo, useState } from 'react';
 import { formatWeiToTrac } from './format.js';
 
-// R7 — the picker's prop type is SEPARATE from the api `DesignatableNode` (which requires `ask`):
-// the picker only needs/displays these fields (no `ask`, dropped per L9). The api type is a
-// structural superset, so the parent can pass `DesignatableNode[]` straight in.
+// The picker's prop type is intentionally separate from the API's `DesignatableNode`: the picker
+// doesn't display `ask`, but the API always returns it (and requires it). This type is a structural
+// subset, so the parent can pass the API nodes straight in.
 export interface PrimaryNodeOption {
   /** Hex string (`0x…`) — the node's self-reported id; display-only ("unverified"). */
   nodeId: string;
@@ -16,13 +16,12 @@ export interface PrimaryNodeOption {
 const CAP = 50;
 
 /**
- * §3b — the always-visible, REQUIRED primary-node picker for Create/Renew. Purely
- * PRESENTATIONAL: the parent fetches the staked-node list (daemon `B-staked-nodes`) and
- * owns the value. The picked node receives the account's reward-weight credit; the
- * creator gets only the discount — so the copy is honest about the DONATION (H6/M11/M12),
- * the node id is the primary identifier (labels are node-supplied + unverified), and the
- * `ask` column is dropped (L9). `value`/`onChange` carry the node's `identityId` — the
- * exact `primaryNode` value the create submits.
+ * The always-visible, REQUIRED primary-node picker for Create/Renew. Purely presentational: the
+ * parent fetches the staked-node list and owns the value. The picked node receives the account's
+ * reward-weight credit while the creator gets only the discount, so the copy is honest that picking
+ * a node DONATES that reward weight to it. The node's identityId is the primary identifier (the
+ * self-reported nodeId is shown but marked "unverified"); the `ask` column is not displayed.
+ * `value`/`onChange` carry the node's `identityId` — the exact `primaryNode` value Create submits.
  */
 export function PrimaryNodePicker({
   nodes,
@@ -43,11 +42,12 @@ export function PrimaryNodePicker({
   value: string;
   onChange: (identityId: string) => void;
   /** This node's OWN staked identityId, but only when it is present in `nodes` (the parent
-   *  does the M3 staked cross-check). null/undefined ⇒ edge / not-staked ⇒ no "this node". */
+   *  cross-checks that the node is actually staked). null/undefined ⇒ edge / not-staked ⇒ no
+   *  "this node" affordance. */
   ownIdentityId?: string | null;
   role?: 'core' | 'edge';
-  /** M1 — the field is mandatory (Create requires a primary node). Drives aria-required +
-   *  aria-invalid so AT announces that an unresolved pick blocks submit (disabled buttons don't). */
+  /** The field is mandatory (Create requires a primary node). Drives aria-required + aria-invalid
+   *  so assistive tech announces that an unresolved pick blocks submit (a disabled button doesn't). */
   required?: boolean;
 }) {
   const [query, setQuery] = useState('');
@@ -82,7 +82,7 @@ export function PrimaryNodePicker({
       setActiveIdx((i) => Math.min(i + 1, shown.length - 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      setOpen(true); // N8 — APG: Up also opens a closed popup
+      setOpen(true); // Up also opens a closed popup (combobox keyboard convention)
       setActiveIdx((i) => Math.max(i - 1, 0));
     } else if (e.key === 'Enter') {
       if (open && activeIdx >= 0 && shown[activeIdx]) {
@@ -96,7 +96,7 @@ export function PrimaryNodePicker({
   };
 
   const usePastedId = () => {
-    // L7 — strip a leading '#' and match case-INSENSITIVELY (nodeId is a hex string; a pasted
+    // Strip a leading '#' and match case-INSENSITIVELY (nodeId is a hex string; a pasted
     // '#42' / mixed-case hex must still resolve a valid staked node).
     const raw = pasteVal.trim().replace(/^#/, '');
     if (!raw) return;
@@ -116,7 +116,7 @@ export function PrimaryNodePicker({
 
   return (
     <div className="v10-pca-node-picker" data-testid="pca-primary-node-picker">
-      {/* The §5 confusion-killer — primary node ≠ payer ≠ covered ≠ discount. */}
+      {/* Confusion-killer — primary node ≠ payer ≠ covered ≠ discount. */}
       <p className="v10-pca-create-hint">
         Primary node = where reward weight goes. It’s separate from which wallets publish and from
         your discount.
@@ -135,7 +135,7 @@ export function PrimaryNodePicker({
           >
             Retry
           </button>
-          {/* L3 — surface the best-effort default (core fell back to its own id) so it isn't
+          {/* Surface the best-effort default (core fell back to its own id) so it isn't
               invisible while the list is down. */}
           {value !== '' && (
             <p className="v10-pca-create-hint" data-testid="pca-primary-node-error-selected">
@@ -215,7 +215,7 @@ export function PrimaryNodePicker({
                   );
                 })}
                 {truncated && (
-                  // N6 — a non-option child of the listbox must not be an `option` to AT.
+                  // A non-option child of the listbox must not be an `option` to assistive tech.
                   <li role="presentation" className="v10-pca-node-picker-more">
                     showing {shown.length} of {filtered.length} — refine your search
                   </li>
@@ -224,7 +224,7 @@ export function PrimaryNodePicker({
             )}
           </div>
 
-          {/* Paste-an-id convenience (NOT a replacement for the dropdown — #10/L11). */}
+          {/* Paste-an-id convenience (NOT a replacement for the dropdown). */}
           <div className="v10-pca-node-picker-paste">
             <input
               type="text"
@@ -268,7 +268,7 @@ export function PrimaryNodePicker({
             </p>
           )}
 
-          {/* Honest reward-weight DONATION copy (H6/M11/M12). */}
+          {/* Honest reward-weight DONATION copy. */}
           {isEdgeLike ? (
             <p className="v10-pca-create-hint" data-testid="pca-primary-node-donation">
               You get the discount; the reward weight from this account accrues to the node you pick —

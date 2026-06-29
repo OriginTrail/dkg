@@ -1,10 +1,11 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
-import { useFetch } from '../hooks.js';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { listDesignatableNodes, type DesignatableNode } from '../api.js';
 
 // B-staked-nodes (§9.3) — the sharding table is capped (≤500), read+cached whole, and returned in
-// ONE response (R4 — no pagination). The picker does search/filter + sort CLIENT-side. Backend
-// returns hash-ring order; we sort by stake DESC.
+// ONE response (no pagination). The picker does search/filter + sort CLIENT-side; we sort by stake
+// DESC. This hook owns its own fetch lifecycle (one-shot load + an explicit cache-busting refresh)
+// rather than the shared useFetch, so `loading` covers the refresh too and nothing depends on a
+// hidden promise return — the picker's Retry + the create recovery both get honest loading feedback.
 
 const byStakeDesc = (a: DesignatableNode, b: DesignatableNode): number => {
   try {
@@ -20,30 +21,47 @@ export interface UseDesignatableNodes {
   nodes: DesignatableNode[];
   loading: boolean;
   /** A read failure (SHARDING_TABLE_READ_FAILED / transport) — the picker shows a retry; a
-   *  primary node is REQUIRED, so edge can't proceed until the list loads (Q1). */
+   *  primary node is REQUIRED, so edge can't proceed until the list loads. */
   error: boolean;
   refresh: () => void;
 }
 
 /** The staked-node list for the PrimaryNodePicker — fetched whole (one shot), sorted by stake desc. */
 export function useDesignatableNodes(): UseDesignatableNodes {
-  // M4 — the initial load uses the cache (fast); `refresh` (picker Retry + the
-  // PrimaryNodeNotInShardingTable recovery) busts it via `fresh=1`. The ref is read inside the
-  // fetcher closure so useFetch's own load/refresh picks up the current mode.
-  const freshRef = useRef(false);
-  // L8 — surface "Loading…" during a Retry. useFetch doesn't toggle its `loading` on refresh, so
-  // track it here off the refresh promise (settles on success OR error — no stuck-true on a repeat error).
-  const [refreshing, setRefreshing] = useState(false);
-  const { data, loading, error, refresh: rawRefresh } = useFetch(
-    () => listDesignatableNodes({ fresh: freshRef.current }).then((r) => r.nodes), // R4 — single fetch
-    [],
-    0,
-  );
+  const [nodes, setNodes] = useState<DesignatableNode[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const mountedRef = useRef(true);
+
+  const load = useCallback(async (fresh: boolean) => {
+    setLoading(true);
+    setError(false);
+    try {
+      // The initial load uses the daemon's cache (fast); a refresh sends `?fresh=1` to bypass +
+      // repopulate it (the picker Retry + the PrimaryNodeNotInShardingTable recovery).
+      const r = await listDesignatableNodes(fresh ? { fresh: true } : undefined);
+      if (mountedRef.current) setNodes([...r.nodes].sort(byStakeDesc));
+    } catch {
+      if (mountedRef.current) {
+        setNodes([]);
+        setError(true);
+      }
+    } finally {
+      if (mountedRef.current) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    void load(false);
+    return () => {
+      mountedRef.current = false;
+    };
+  }, [load]);
+
   const refresh = useCallback(() => {
-    freshRef.current = true;
-    setRefreshing(true);
-    void Promise.resolve(rawRefresh()).finally(() => setRefreshing(false));
-  }, [rawRefresh]);
-  const nodes = useMemo(() => [...(data ?? [])].sort(byStakeDesc), [data]);
-  return { nodes, loading: loading || refreshing, error: error != null, refresh };
+    void load(true);
+  }, [load]);
+
+  return { nodes, loading, error, refresh };
 }

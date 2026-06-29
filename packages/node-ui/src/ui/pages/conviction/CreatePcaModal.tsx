@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useFetch } from '../../hooks.js';
 import {
   fetchWalletsBalances,
@@ -12,6 +12,7 @@ import {
 import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
 import { probeWalletBindings, selfCoverageOutlook } from '../../pca/walletBinding.js';
 import { useDesignatableNodes } from '../../hooks/useDesignatableNodes.js';
+import { usePrimaryNodeSelection } from '../../hooks/usePrimaryNodeSelection.js';
 import { useAgentsStore } from '../../stores/agents.js';
 import { usePcaStore } from '../../stores/pca.js';
 import { DiscountTierLadder, discountTierForTrac, WalletRow, PrimaryNodePicker } from '../../components/Pca/index.js';
@@ -98,9 +99,8 @@ export function CreatePcaModal({
   // no-storage env), so the reconcile screen doesn't falsely claim it survives a refresh.
   const createPendingPersisted = usePcaStore((s) => s.createPendingPersisted);
 
-  // S2b renew — seed the commit amount + primary node from the expiring account.
+  // S2b renew — seed the commit amount from the expiring account.
   const [tokens, setTokens] = useState(seed?.tokens ?? '');
-  const [primaryNode, setPrimaryNode] = useState(seed?.primaryNode ?? '');
   // Resume the reconcile guard if a create is already in flight from a prior
   // session (durable marker) — never drop straight to a retryable form.
   const [phase, setPhase] = useState<Phase>(createPending ? 'reconcile' : 'form');
@@ -111,33 +111,16 @@ export function CreatePcaModal({
   // §3b — the REQUIRED staked-node picker's list (B-staked-nodes; fetched whole, sorted desc).
   const { nodes: stakedNodes, loading: nodesLoading, error: nodesError, refresh: refreshNodes } =
     useDesignatableNodes();
-  // M3 — this node's own identity counts as a default ONLY if it's actually IN the staked list
-  // (hasIdentity / identityId > 0 alone does NOT imply staked + in the sharding table).
-  const ownIdentity = nodeStatus?.identityId && nodeStatus.identityId !== '0' ? String(nodeStatus.identityId) : null;
-  const ownStaked = useMemo(
-    () => (ownIdentity && stakedNodes.some((n) => n.identityId === ownIdentity) ? ownIdentity : null),
-    [ownIdentity, stakedNodes],
-  );
-
-  // Pre-select the primary node (core convenience). Never overrides a seeded (renew) or
-  // already-picked value. M3: pre-select own id only when it's confirmed staked. Q1: if the
-  // list is DOWN, core best-effort defaults to its own id — the create-time
-  // PrimaryNodeNotInShardingTable revert (handled recoverably below) is the backstop. Edge
-  // (no own identity) gets NO default → a required pick.
-  useEffect(() => {
-    if (primaryNode || !ownIdentity) return;
-    if (ownStaked) setPrimaryNode(ownStaked);
-    else if (nodesError) setPrimaryNode(ownIdentity);
-  }, [primaryNode, ownIdentity, ownStaked, nodesError]);
-
-  // L2 — reconcile a STALE best-effort default: if the list was down (Q1 set primaryNode=ownIdentity)
-  // and a successful retry then loads a list that does NOT contain the own id, the pre-selection is
-  // invalid — clear it so the picker re-prompts (else submit stays enabled on a bad id until the
-  // create-time revert). Fresh-create only (renew owns its seed + the revert backstop).
-  useEffect(() => {
-    if (replacingAccountId || nodesError || nodesLoading || stakedNodes.length === 0) return;
-    if (ownIdentity && primaryNode === ownIdentity && !ownStaked) setPrimaryNode('');
-  }, [replacingAccountId, nodesError, nodesLoading, stakedNodes.length, ownIdentity, primaryNode, ownStaked]);
+  // All primary-node selection policy (renew seed / staked-default / list-down fallback / stale-clear
+  // / rejected-node recovery) lives in one hook — the modal just wires value/actions to the picker.
+  const { primaryNode, setPrimaryNode, ownStaked, onRejected: onPrimaryNodeRejected } = usePrimaryNodeSelection({
+    seedPrimaryNode: seed?.primaryNode,
+    replacingAccountId,
+    identityId: nodeStatus?.identityId,
+    stakedNodes,
+    nodesError,
+    nodesLoading,
+  });
 
   const amountNum = AMOUNT_RE.test(tokens.trim()) ? Number(tokens.trim()) : NaN;
   const amountValid = Number.isFinite(amountNum) && amountNum > 0;
@@ -183,7 +166,7 @@ export function CreatePcaModal({
         // re-defaults to the core's own id only if it's still staked) — never re-submit the same
         // rejected id on its numeric shape.
         if (info?.code === 'PrimaryNodeNotInShardingTable') {
-          setPrimaryNode('');
+          onPrimaryNodeRejected(); // R2 — clear the rejected node so it can't be re-submitted
           refreshNodes();
         }
         setError(info?.message ?? (err as Error)?.message ?? 'Create failed.');
