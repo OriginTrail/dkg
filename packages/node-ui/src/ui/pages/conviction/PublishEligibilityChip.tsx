@@ -40,6 +40,7 @@ export function PublishEligibilityChip({ contextGraphId, id }: { contextGraphId:
         verdict={elig.verdict}
         accountId={elig.accountId}
         discountBps={elig.discountBps}
+        accountUntracked={elig.accountUntracked}
         ownerPublish={elig.ownerPublish}
         onWhy={() => setOpen((o) => !o)}
         whyExpanded={open}
@@ -51,6 +52,7 @@ export function PublishEligibilityChip({ contextGraphId, id }: { contextGraphId:
             verdict={elig.verdict}
             accountId={elig.accountId}
             discountBps={elig.discountBps}
+            accountUntracked={elig.accountUntracked}
             reasons={elig.reasons}
             ownerPublish={elig.ownerPublish}
           />
@@ -78,7 +80,9 @@ export function PublishEligibilityChip({ contextGraphId, id }: { contextGraphId:
                 address={w.wallet}
                 status={
                   w.covered
-                    ? 'covered'
+                    ? w.coverUntracked
+                      ? `covered via PCA #${w.accountId} (not tracked by this node)`
+                      : 'covered'
                     : w.inconclusive
                       ? 'couldn’t check PCA coverage — retry'
                       : w.balanceUnknown

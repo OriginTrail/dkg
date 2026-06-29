@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { useFetch } from '../hooks.js';
-import { fetchWalletsBalances, fetchPca, fetchContextGraphs, fetchCurrentAgent } from '../api.js';
+import { fetchWalletsBalances, fetchPca, fetchContextGraphs, fetchCurrentAgent, pcaAgentAccount } from '../api.js';
 import { usePcaStore } from '../stores/pca.js';
 import { canonicalAgentDid } from '../lib/contextGraphSidebar.js';
 import { classifyCoverage } from '../pca/coverage.js';
@@ -13,6 +13,13 @@ interface WalletDetail {
   covered: boolean;
   accountId?: string;
   discountBps?: number;
+  /**
+   * GAP-3 Model B (#1344) — the covering account is one this node does NOT track
+   * (resolved via `pcaAgentAccount`). Drives the honest "(not tracked by this node)"
+   * label so covered-via-untracked never reads as one of the user's tracked PCAs.
+   * Only meaningful when `covered`.
+   */
+  coverUntracked: boolean;
   /**
    * #3 — the wallet IS an approved publishing wallet on this account, but the
    * account is swept/expired so it doesn't cover the publish. Lets the chip say
@@ -47,6 +54,8 @@ export interface PublishEligibility {
   /** The covering PCA + its discount, when GREEN. */
   accountId?: string;
   discountBps?: number;
+  /** GAP-3 (#1344) — the best covering account is one this node doesn't track. */
+  accountUntracked?: boolean;
   /** #4 — true only when this node owns the target CG (curator). */
   ownerPublish: boolean;
   /** Failed-condition phrases for the amber/danger message. */
@@ -104,21 +113,22 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
           const balanceUnknown = bal == null;
           const gasFunded = bal != null && Number(bal.eth) > 0;
           const hasTrac = bal != null && Number(bal.trac) > 0;
-          let cover: { accountId: string; discountBps: number } | undefined;
+          let cover: { accountId: string; discountBps: number; untracked: boolean } | undefined;
           let sawExpired = false;
           let sawInsolvent = false;
           let deadAccountId: string | undefined;
           let probeError = false;
+          // Fast-path: the accounts this node TRACKS (the common case; renders without
+          // a GAP-3 round-trip when the wallet is covered by a tracked PCA).
           for (const id of trackedIds) {
             const snap = await fetchPca(id, w).catch(() => null);
             // C1/#9 — a REJECTED probe (`null`) is "couldn't read", NOT a confirmed
             // not-registered. Distinguish them: a failed probe is inconclusive (→
             // neutral verdict), never a definitive fall-through DANGER at spend time.
             if (snap === null) { probeError = true; continue; }
-            // #1344 round-3 — ONE canonical classification; switch on its `outcome`
-            // discriminant (coarse P0, NOT remainingAllowance, P2/#1349). The probe is
-            // read from snap.probedKey internally. Behavior is byte-identical to the
-            // prior 5-field form.
+            // #1344 — ONE canonical classification; switch on its `outcome` discriminant
+            // (coarse P0, NOT remainingAllowance, P2/#1349). The probe is read from
+            // snap.probedKey internally.
             const c = classifyCoverage(snap);
             // S2/#9 — adapter gap OR an undefined registered → inconclusive ("couldn't
             // determine" → neutral verdict, never a definitive DANGER); a confirmed
@@ -126,7 +136,7 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
             if (c.outcome === 'inconclusive') { probeError = true; continue; }
             if (c.outcome === 'unregistered') continue;
             if (c.outcome === 'covers') {
-              cover = { accountId: id, discountBps: snap.discountBps };
+              cover = { accountId: id, discountBps: snap.discountBps, untracked: false };
               break; // breaks the tracked-id FOR loop (not a switch) — covered, stop probing.
             }
             // c.outcome === 'uncovered' — registered here but the account can't cover.
@@ -140,11 +150,48 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
             }
             if (!c.hasBudget) sawInsolvent = true;
           }
+
+          // GAP-3 Model B augment (#1344/#9) — the wallet looked UNREGISTERED on every
+          // tracked account (no probe error, no dead/budget finding), so its account (a
+          // wallet is approved on AT MOST ONE) is one this node does NOT track. Resolve
+          // it from chain truth and let classifyCoverage decide. GAP-3 is a DISCOVERY
+          // INPUT only: `registered ⇏ covered` (an untracked expired/insolvent/zero-budget
+          // account is NOT covered), so this only FIXES false-fallthroughs, never mints a
+          // false green. Bounded to one GAP-3 lookup per signing wallet; transport →
+          // inconclusive (never DANGER), `accountId: null` → confirmed fall-through.
+          if (!cover && !probeError && !sawExpired && !sawInsolvent) {
+            const acct = await pcaAgentAccount(w).catch(() => undefined);
+            if (acct === undefined) {
+              probeError = true; // couldn't confirm there's no untracked coverage (#9)
+            } else if (acct.accountId != null && !trackedIds.includes(acct.accountId)) {
+              const id = acct.accountId;
+              const snap = await fetchPca(id, w).catch(() => null);
+              if (snap === null) {
+                probeError = true;
+              } else {
+                const c = classifyCoverage(snap);
+                if (c.outcome === 'covers') {
+                  cover = { accountId: id, discountBps: snap.discountBps, untracked: true };
+                } else if (c.outcome === 'uncovered') {
+                  if (c.dead) { sawExpired = true; if (!deadAccountId) deadAccountId = id; }
+                  if (!c.hasBudget) sawInsolvent = true;
+                } else {
+                  // GAP-3 said registered on `id`, but the snapshot probe couldn't confirm
+                  // (adapter gap / race) → don't assert a fall-through (#9).
+                  probeError = true;
+                }
+              }
+            }
+            // acct.accountId == null (or already tracked) → confirmed: no untracked
+            // coverage → the fast-path's confirmed fall-through stands.
+          }
+
           return {
             wallet: w,
             covered: !!cover,
             accountId: cover?.accountId,
             discountBps: cover?.discountBps,
+            coverUntracked: cover?.untracked ?? false,
             deadAccountId: cover ? undefined : deadAccountId,
             inconclusive: !cover && probeError,
             // Q2 — set for COVERED wallets too: GREEN's gas check must tell a
@@ -246,6 +293,7 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
       loading,
       accountId: best?.accountId,
       discountBps: best?.discountBps,
+      accountUntracked: best?.coverUntracked,
       ownerPublish,
       reasons,
       conditions,
