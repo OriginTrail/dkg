@@ -162,9 +162,12 @@ describe('CreatePcaModal', () => {
   // before the TRAC commit; NOT a hard block (a node may create purely to sponsor others).
   it('B1 — all wallets sponsor-bound shows the zero-self-coverage warning but NEVER blocks Create (H3)', async () => {
     mocks.pcaAgentAccount.mockResolvedValue({ agent: OWNER, accountId: '5' });
-    // id '5' = the sponsor's PCA (binding owner read); any other id = the create read-back snapshot.
+    // id '5' = the sponsor's PCA (binding owner read) — LIVE (budget + unexpired) so it reads as
+    // "already discounted free" (R1); any other id = the create read-back snapshot.
     mocks.fetchPca.mockImplementation(async (id: string) =>
-      id === '5' ? snap({ accountId: '5', owner: '0xSPONSOR000000000000000000000000000beEf12' }) : snap({ discountBps: 3000 }),
+      id === '5'
+        ? snap({ accountId: '5', owner: '0xSPONSOR000000000000000000000000000beEf12', baseEpochAllowance: '1000000000000000000000' })
+        : snap({ discountBps: 3000 }),
     );
     mocks.createPca.mockResolvedValue({ accountId: '8', txHash: '0xabc', committedTokens: '100000.0' });
     const { container, unmount } = await render(
@@ -282,6 +285,57 @@ describe('CreatePcaModal', () => {
     expect(mocks.listDesignatableNodes).toHaveBeenCalledWith(expect.objectContaining({ fresh: true }));
     // Recoverable, not terminal — still on the form (the amount field is present).
     expect(container.querySelector('[data-testid="pca-create-tokens"]')).toBeTruthy();
+    await unmount();
+  });
+
+  // R2 — when the refreshed list NO LONGER contains the rejected node, the revert must CLEAR it (not
+  // re-enable submit on its numeric shape) — the user picks a still-listed node.
+  it('R2 — revert clears the rejected node when the fresh list excludes it (submit stays disabled)', async () => {
+    mocks.listDesignatableNodes
+      .mockResolvedValueOnce({ nodes: [{ nodeId: 'p42', identityId: '42', stake: '1000000000000000000000', ask: '0' }], total: 1 })
+      .mockResolvedValue({ nodes: [{ nodeId: 'p99', identityId: '99', stake: '1000000000000000000000', ask: '0' }], total: 1 }); // fresh: #42 unstaked
+    mocks.createPca.mockRejectedValue(new HttpError(400, 'PrimaryNodeNotInShardingTable', { error: 'PrimaryNodeNotInShardingTable' }));
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'node #42'); // #42 pre-selected from the initial list
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-create-submit"]')!);
+    // Poll until the revert's fresh refetch lands (and the rejected #42 is cleared).
+    const started = Date.now();
+    while (Date.now() - started < 1500 && !mocks.listDesignatableNodes.mock.calls.some((c) => c[0]?.fresh)) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+    }
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    // #42 is gone from the fresh list → cleared, NOT re-defaulted → submit disabled.
+    expect((container.querySelector('[data-testid="pca-create-submit"]') as HTMLButtonElement).disabled).toBe(true);
+    expect(container.querySelector('[data-testid="pca-primary-node-selected"]')).toBeNull();
+    await unmount();
+  });
+
+  // R9 — edge-create integration: an edge node picks a staked node and creates with that primaryNode.
+  it('R9 — edge node picks a staked node via the picker and creates with primaryNode', async () => {
+    useAgentsStore.getState().setNodeStatus({ nodeRole: 'edge', hasIdentity: false, blockExplorerUrl: null });
+    mocks.listDesignatableNodes.mockResolvedValue({
+      nodes: [{ nodeId: 'p99', identityId: '99', stake: '5000000000000000000000', ask: '0' }], total: 1,
+    });
+    mocks.createPca.mockResolvedValue({ accountId: '8', txHash: '0xabc', committedTokens: '100000.0' });
+    mocks.fetchPca.mockResolvedValue(snap({ accountId: '8', discountBps: 3000 }));
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)'); // edge opens the wizard (no gate)
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    // Edge has no own-node default → pick #99 via the picker (open + select the option).
+    const search = container.querySelector('[data-testid="pca-primary-node-search"]') as HTMLInputElement;
+    await act(async () => { search.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); });
+    const opt = container.querySelector('[data-testid="pca-primary-node-option"]') as HTMLElement;
+    await act(async () => { opt.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-create-submit"]')!);
+    await waitForText(container, 'PCA #8 created');
+    expect(mocks.createPca).toHaveBeenCalledWith({ tokens: '100000', primaryNode: '99' });
     await unmount();
   });
 

@@ -239,19 +239,15 @@ describe('PCA api helpers (transport shaping)', () => {
     expect(fetchMock.mock.calls[1]![0]).toBe('/api/pca/mine?hydrate=1');
   });
 
-  it('listDesignatableNodes GETs /api/pca/designatable-nodes with a 0-based offset start + limit', async () => {
-    fetchMock.mockResolvedValueOnce(ok({ nodes: [], total: 0, nextStart: null }));
+  it('listDesignatableNodes GETs the whole list in one shot (R4 — no pagination), +?fresh=1 on demand', async () => {
+    fetchMock.mockResolvedValueOnce(ok({ nodes: [], total: 0 }));
     await listDesignatableNodes();
-    expect(fetchMock.mock.calls[0]![0]).toBe('/api/pca/designatable-nodes?start=0&limit=200');
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/pca/designatable-nodes');
 
-    fetchMock.mockResolvedValueOnce(ok({ nodes: [], total: 0, nextStart: null }));
-    await listDesignatableNodes({ start: 200, limit: 50 });
-    expect(fetchMock.mock.calls[1]![0]).toBe('/api/pca/designatable-nodes?start=200&limit=50');
-
-    // M4 — fresh:true appends &fresh=1 (cache-bust); absent otherwise.
-    fetchMock.mockResolvedValueOnce(ok({ nodes: [], total: 0, nextStart: null }));
+    // M4 — fresh:true appends ?fresh=1 (cache-bust); absent otherwise.
+    fetchMock.mockResolvedValueOnce(ok({ nodes: [], total: 0 }));
     await listDesignatableNodes({ fresh: true });
-    expect(fetchMock.mock.calls[2]![0]).toBe('/api/pca/designatable-nodes?start=0&limit=200&fresh=1');
+    expect(fetchMock.mock.calls[1]![0]).toBe('/api/pca/designatable-nodes?fresh=1');
   });
 
   // T1 — a GET failure must throw an HttpError that CARRIES the body, so the tab-gate

@@ -1,27 +1,10 @@
-import { useCallback, useMemo, useRef } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { useFetch } from '../hooks.js';
 import { listDesignatableNodes, type DesignatableNode } from '../api.js';
 
-// B-staked-nodes (§9.3) — the sharding table is capped (≤500) and the daemon serves it from a
-// short TTL cache, so the picker fetches it WHOLE (following the offset cursor) and does
-// search/filter + sort CLIENT-side. Backend returns hash-ring order; we sort by stake DESC.
-
-async function fetchAllDesignatableNodes(fresh = false): Promise<DesignatableNode[]> {
-  const all: DesignatableNode[] = [];
-  let start = 0; // 0-based offset cursor (Backend serves offset pages over the cached table)
-  // L11 — drive off the route's `total` (the sharding-table size is governance-mutable, so no magic
-  // page cap that could silently truncate). Stop when collected >= total or the cursor ends; the
-  // `guard` is only a defensive backstop against a pathological never-null cursor.
-  for (let guard = 0; guard < 100; guard++) {
-    // M4 — bust the cache on the FIRST page only: `fresh=1` re-reads the chain AND repopulates the
-    // daemon cache, so subsequent pages read the just-refreshed list.
-    const r = await listDesignatableNodes({ start, limit: 200, fresh: fresh && start === 0 });
-    all.push(...r.nodes);
-    if (r.nextStart == null || r.nodes.length === 0 || all.length >= r.total) break;
-    start = r.nextStart;
-  }
-  return all;
-}
+// B-staked-nodes (§9.3) — the sharding table is capped (≤500), read+cached whole, and returned in
+// ONE response (R4 — no pagination). The picker does search/filter + sort CLIENT-side. Backend
+// returns hash-ring order; we sort by stake DESC.
 
 const byStakeDesc = (a: DesignatableNode, b: DesignatableNode): number => {
   try {
@@ -42,21 +25,25 @@ export interface UseDesignatableNodes {
   refresh: () => void;
 }
 
-/** The staked-node list for the PrimaryNodePicker — fetched whole, sorted by stake desc. */
+/** The staked-node list for the PrimaryNodePicker — fetched whole (one shot), sorted by stake desc. */
 export function useDesignatableNodes(): UseDesignatableNodes {
   // M4 — the initial load uses the cache (fast); `refresh` (picker Retry + the
   // PrimaryNodeNotInShardingTable recovery) busts it via `fresh=1`. The ref is read inside the
   // fetcher closure so useFetch's own load/refresh picks up the current mode.
   const freshRef = useRef(false);
+  // L8 — surface "Loading…" during a Retry. useFetch doesn't toggle its `loading` on refresh, so
+  // track it here off the refresh promise (settles on success OR error — no stuck-true on a repeat error).
+  const [refreshing, setRefreshing] = useState(false);
   const { data, loading, error, refresh: rawRefresh } = useFetch(
-    () => fetchAllDesignatableNodes(freshRef.current),
+    () => listDesignatableNodes({ fresh: freshRef.current }).then((r) => r.nodes), // R4 — single fetch
     [],
     0,
   );
   const refresh = useCallback(() => {
     freshRef.current = true;
-    rawRefresh();
+    setRefreshing(true);
+    void Promise.resolve(rawRefresh()).finally(() => setRefreshing(false));
   }, [rawRefresh]);
   const nodes = useMemo(() => [...(data ?? [])].sort(byStakeDesc), [data]);
-  return { nodes, loading, error: error != null, refresh };
+  return { nodes, loading: loading || refreshing, error: error != null, refresh };
 }

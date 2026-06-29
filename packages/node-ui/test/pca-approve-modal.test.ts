@@ -218,7 +218,8 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     );
     mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
       if (id === '4') return { ...snap({ accountId: '4' }), owner: ADDR_A };   // own-bound → deregister-first
-      if (id === '9') return { ...snap({ accountId: '9' }), owner: SPONSOR };  // sponsor-bound → skip
+      // sponsor-bound + LIVE (budget + unexpired) → "already discounted free" skip (R1).
+      if (id === '9') return { ...snap({ accountId: '9', baseEpochAllowance: '1000000000000000000000' }), owner: SPONSOR };
       return key ? { ...snap(), probedKey: { key, registered: true } } : snap(); // the new account (#8)
     });
     mocks.pcaRemoveAgent.mockResolvedValue({ accountId: '4', agent: ADDR_A, removed: true });
@@ -238,6 +239,29 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     // Sponsor-bound ADDR_B: SKIPPED — never registered, never deregistered.
     expect(mocks.pcaAddAgent).not.toHaveBeenCalledWith('8', ADDR_B);
     expect(mocks.pcaRemoveAgent).not.toHaveBeenCalledWith('9', ADDR_B);
+    await unmount();
+  });
+
+  // R1 (#9) — a wallet on an EXPIRED/swept sponsor PCA must NOT be skipped as "already discounted
+  // free": it's uncovered + unfreeable (not the owner) → a distinct conflict, never registered.
+  it('R1 — self-coverage: an EXPIRED sponsor binding → conflict (not "already free"), not registered', async () => {
+    const SPONSOR = '0xC0FFEE0000000000000000000000000000000001';
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [ADDR_A], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: ADDR_A, accountId: '9' });
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) =>
+      id === '9'
+        ? { ...snap({ accountId: '9', expiresAtTimestamp: 1, baseEpochAllowance: '1000000000000000000000' }), owner: SPONSOR } // EXPIRED sponsor
+        : (key ? { ...snap(), probedKey: { key, registered: true } } : snap()),
+    );
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, { accountId: '8', initialMode: 'self', selfCoverage: true, onClose: vi.fn() }),
+    );
+    await waitForText(container, 'slots used');
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, 'expired/swept'); // the R1 dead-sponsor conflict copy
+    expect(container.querySelector('.v10-pca-approve-results')?.textContent).not.toContain('already discounted free');
+    expect(mocks.pcaAddAgent).not.toHaveBeenCalled(); // not registered (can't free a sponsor's PCA)
+    expect(mocks.pcaRemoveAgent).not.toHaveBeenCalled(); // not deregistered (not the owner)
     await unmount();
   });
 

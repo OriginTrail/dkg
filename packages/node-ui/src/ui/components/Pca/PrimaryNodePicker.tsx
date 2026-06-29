@@ -1,10 +1,17 @@
 import React, { useId, useMemo, useState } from 'react';
 import { formatWeiToTrac } from './format.js';
-import type { DesignatableNode } from '../../api.js';
 
-// The staked sharding-table node shape is the api.ts data type (re-exported here so the
-// Pca barrel keeps exporting it); `ask` is carried by the wire but dropped from display (L9).
-export type { DesignatableNode };
+// R7 — the picker's prop type is SEPARATE from the api `DesignatableNode` (which requires `ask`):
+// the picker only needs/displays these fields (no `ask`, dropped per L9). The api type is a
+// structural superset, so the parent can pass `DesignatableNode[]` straight in.
+export interface PrimaryNodeOption {
+  /** Hex string (`0x…`) — the node's self-reported id; display-only ("unverified"). */
+  nodeId: string;
+  /** Decimal string — the on-chain identity; the value passed as `primaryNode`. */
+  identityId: string;
+  /** Wei string. */
+  stake: string;
+}
 
 const CAP = 50;
 
@@ -28,7 +35,7 @@ export function PrimaryNodePicker({
   role,
   required = false,
 }: {
-  nodes: DesignatableNode[];
+  nodes: PrimaryNodeOption[];
   loading: boolean;
   error: boolean;
   onRetry: () => void;
@@ -60,7 +67,7 @@ export function PrimaryNodePicker({
   const shown = filtered.slice(0, CAP);
   const truncated = filtered.length > shown.length;
 
-  const select = (n: DesignatableNode) => {
+  const select = (n: PrimaryNodeOption) => {
     onChange(n.identityId);
     setQuery('');
     setOpen(false);

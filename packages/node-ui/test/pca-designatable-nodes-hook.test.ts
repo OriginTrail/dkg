@@ -43,15 +43,17 @@ beforeEach(() => {
 afterEach(() => { document.body.innerHTML = ''; });
 
 describe('useDesignatableNodes', () => {
-  it('follows the offset cursor across pages and sorts by stake DESC', async () => {
-    mocks.listDesignatableNodes.mockImplementation(async (opts?: { start?: number }) => {
-      const start = opts?.start ?? 0;
-      if (start === 0) return { nodes: [{ nodeId: 'a', identityId: '1', stake: '30' }], total: 3, nextStart: 1 };
-      if (start === 1) return { nodes: [{ nodeId: 'b', identityId: '2', stake: '90' }], total: 3, nextStart: 2 };
-      return { nodes: [{ nodeId: 'c', identityId: '3', stake: '10' }], total: 3, nextStart: null };
+  it('R4 — single fetch (no pagination) returns the whole list, sorted by stake DESC', async () => {
+    mocks.listDesignatableNodes.mockResolvedValue({
+      nodes: [
+        { nodeId: 'a', identityId: '1', stake: '30', ask: '0' },
+        { nodeId: 'b', identityId: '2', stake: '90', ask: '0' },
+        { nodeId: 'c', identityId: '3', stake: '10', ask: '0' },
+      ],
+      total: 3,
     });
     const { unmount } = await renderHook();
-    expect(mocks.listDesignatableNodes).toHaveBeenCalledTimes(3);
+    expect(mocks.listDesignatableNodes).toHaveBeenCalledTimes(1); // ONE fetch, no cursor loop
     expect(latest!.nodes.map((n) => n.identityId)).toEqual(['2', '1', '3']); // 90, 30, 10
     expect(latest!.error).toBe(false);
     await unmount();
@@ -59,23 +61,11 @@ describe('useDesignatableNodes', () => {
 
   it('non-numeric stake → byStakeDesc leaves order (no throw)', async () => {
     mocks.listDesignatableNodes.mockResolvedValue({
-      nodes: [{ nodeId: 'a', identityId: '1', stake: 'not-a-number' }, { nodeId: 'b', identityId: '2', stake: '5' }],
-      total: 2, nextStart: null,
+      nodes: [{ nodeId: 'a', identityId: '1', stake: 'not-a-number', ask: '0' }, { nodeId: 'b', identityId: '2', stake: '5', ask: '0' }],
+      total: 2,
     });
     const { unmount } = await renderHook();
     expect(latest!.nodes).toHaveLength(2); // did not throw
-    await unmount();
-  });
-
-  it('L11 — stops once it has collected `total`, even if nextStart is non-null', async () => {
-    mocks.listDesignatableNodes.mockImplementation(async (opts?: { start?: number }) =>
-      (opts?.start ?? 0) === 0
-        ? { nodes: [{ nodeId: 'a', identityId: '1', stake: '1' }, { nodeId: 'b', identityId: '2', stake: '2' }], total: 2, nextStart: 2 }
-        : { nodes: [{ nodeId: 'c', identityId: '3', stake: '3' }], total: 2, nextStart: null },
-    );
-    const { unmount } = await renderHook();
-    expect(latest!.nodes).toHaveLength(2);
-    expect(mocks.listDesignatableNodes).toHaveBeenCalledTimes(1); // stopped at total (no extra page)
     await unmount();
   });
 

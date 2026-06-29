@@ -7,7 +7,7 @@ import {
   HttpError,
 } from '../../api.js';
 import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
-import { resolveWalletBinding } from '../../pca/walletBinding.js';
+import { resolveWalletBinding, planSelfCoverage } from '../../pca/walletBinding.js';
 import { PcaModalShell } from './PcaModalShell.js';
 import {
   AddressCrux,
@@ -195,29 +195,35 @@ export function ApproveWalletsModal({
           await deregisterOwner.deregisterAgent(deregisterFrom, addr).catch(() => {});
         } else if (selfCoverage && mode === 'self') {
           // H2 (#9 safety) — gate on mode==='self': the mode radios stay enabled, so running this
-          // self-coverage deregister/skip logic on THIRD-PARTY (sponsor-mode) addresses would make a
-          // false "already discounted free" claim and could silently deregister a wallet off a PCA
-          // this node happens to own. Self-coverage applies to OUR wallets only.
-          // B1 self-coverage (§9.5) — the old account VARIES per wallet. Probe this wallet's
-          // binding right before its register: bound to a PCA the node CAN'T own (a sponsor's)
-          // → SKIP (already discounted free; don't burn a register/conflict); bound to a PCA
-          // the node OWNS → deregister-first; unbound → register. A probe that can't be read
-          // falls through to register (the B10 conflict handling below is the backstop, #9).
-          const b = await resolveWalletBinding(addr, ownerWallet);
-          if (b.boundTo && !b.canOwn && !b.inconclusive) {
+          // self-coverage logic on THIRD-PARTY (sponsor-mode) addresses would mis-classify them.
+          // R5 — the per-wallet classification lives in the planner (walletBinding.ts); this loop
+          // just EXECUTES the plan. (Old account varies per wallet, unlike renew's deregisterFrom.)
+          const plan = planSelfCoverage(await resolveWalletBinding(addr, ownerWallet));
+          if (plan.kind === 'skipSponsored') {
+            // Bound to a LIVE sponsor PCA → already discounted free; don't burn a register/conflict.
             setRows((r) => ({
               ...r,
-              [addr]: { address: addr, status: 'sponsored', message: `Stays on PCA #${b.boundTo} — already discounted free.` },
+              [addr]: { address: addr, status: 'sponsored', message: `Stays on PCA #${plan.prevAccountId} — already discounted free.` },
             }));
             continue;
           }
-          if (b.boundTo && b.canOwn) {
+          if (plan.kind === 'conflictSponsorDead') {
+            // R1 (#9) — bound to an EXPIRED/swept sponsor PCA: NOT covering, and this node can't free
+            // it (not the owner). A distinct conflict — NEVER the benign "already discounted free" skip.
+            setRows((r) => ({
+              ...r,
+              [addr]: { address: addr, status: 'conflict', message: `Approved on PCA #${plan.prevAccountId}, but it’s expired/swept (not covering) — ask its owner to deregister you; this node can’t free it.` },
+            }));
+            continue;
+          }
+          if (plan.kind === 'deregisterThenRegister') {
             // M5 — record a SUCCESSFUL deregister so a later register failure reads as "stranded"
             // (off old, not on new) with a retry, not a generic error. A FAILED deregister leaves
             // the wallet on old → register conflicts → the B10 handling below recovers it.
-            try { await owner.deregisterAgent(b.boundTo, addr); strandedFrom = b.boundTo; }
+            try { await owner.deregisterAgent(plan.prevAccountId, addr); strandedFrom = plan.prevAccountId; }
             catch { /* still bound to old — not stranded; register's conflict path recovers */ }
           }
+          // plan.kind === 'register' (unbound / inconclusive) → fall through to register.
         }
         const res = await owner.registerAgent(accountId, addr);
         setRows((r) => ({

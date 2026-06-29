@@ -177,10 +177,15 @@ export function CreatePcaModal({
       if (err instanceof HttpError && (err.status === 400 || isPcaFeatureUnavailable(err))) {
         clearCreatePending();
         const info = describePcaError(err);
-        // §9.4 #18 / Q1 — PrimaryNodeNotInShardingTable is RECOVERABLE, not terminal: the
-        // picked node was unstaked between picking and submit (or a list-down core best-effort
-        // default raced). Refetch the staked list so the picker re-prompts with fresh data.
-        if (info?.code === 'PrimaryNodeNotInShardingTable') refreshNodes();
+        // §9.4 #18 / Q1 / R2 — PrimaryNodeNotInShardingTable is RECOVERABLE, not terminal: the
+        // picked node was unstaked between picking and submit. CLEAR the rejected node AND refetch
+        // the list FRESH, so submit stays disabled until a still-listed node is picked (the prefill
+        // re-defaults to the core's own id only if it's still staked) — never re-submit the same
+        // rejected id on its numeric shape.
+        if (info?.code === 'PrimaryNodeNotInShardingTable') {
+          setPrimaryNode('');
+          refreshNodes();
+        }
         setError(info?.message ?? (err as Error)?.message ?? 'Create failed.');
         setPhase('form');
         return;
@@ -358,14 +363,26 @@ export function CreatePcaModal({
           </div>
         )}
 
-        {/* B1 (§9.5) — zero-self-coverage informed consent: every op wallet is already on a
-            sponsor's PCA, so this account discounts NONE of your own publishes. NOT a block. */}
+        {/* B1 (§9.5) — zero-self-coverage informed consent: every op wallet is already on another
+            PCA, so this account discounts NONE of your own publishes. NOT a block. (R1 — only the
+            ones on a LIVE sponsor PCA are actually "free"; dead ones get the separate warning below.) */}
         {b1.zeroSelfCoverage && (
           <div className="v10-modal-warning" role="alert" data-testid="pca-b1-zero-coverage">
-            ⚠ All of this node’s operational wallets are already approved on other PCAs — you
-            already get the discount, free. This new account will <strong>NOT</strong> discount your
-            own publishes. Create it only if you intend to <strong>sponsor other nodes</strong>;
-            otherwise getting sponsored is the free path and creating just locks your TRAC.
+            ⚠ All of this node’s operational wallets are already approved on other PCAs
+            {b1.sponsorBound.length > 0 ? ' (you already get the discount free where those are live)' : ''}.
+            This new account will <strong>NOT</strong> discount your own publishes. Create it only if
+            you intend to <strong>sponsor other nodes</strong>; otherwise getting sponsored is the free
+            path and creating just locks your TRAC.
+          </div>
+        )}
+        {/* R1 (#9) — wallets on an EXPIRED/swept sponsor PCA: NOT covered, and this node can't free
+            them (not the owner). Never claim "already free"; surface the honest, actionable state. */}
+        {b1.sponsorDead.length > 0 && (
+          <div className="v10-modal-warning" role="alert" data-testid="pca-b1-sponsor-dead">
+            ⚠ {b1.sponsorDead.length} of this node’s wallet(s) are approved on a sponsor’s PCA that’s
+            <strong> expired or swept</strong> — they’re <strong>not covered</strong>, and this node
+            can’t free them (it doesn’t own that account). Ask the sponsor to deregister you, then
+            re-approve them here — otherwise they stay uncovered.
           </div>
         )}
         {/* Partial case — some wallets stay on a sponsor's PCA (already free), not moved. */}
