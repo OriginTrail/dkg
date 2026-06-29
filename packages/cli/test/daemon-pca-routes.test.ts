@@ -19,7 +19,7 @@ function fakeReq(method: string, path: string, body?: unknown) {
   return req;
 }
 
-function runCtx(method: string, rawPath: string, agent: any, body?: unknown) {
+function runCtx(method: string, rawPath: string, agent: any, body?: unknown, opWallets?: { wallets: Array<{ address: string }> }) {
   const res = fakeRes();
   // Mirror handle-request.ts: route on url.pathname, query lives on url.
   const url = new URL(`http://127.0.0.1${rawPath}`);
@@ -29,6 +29,8 @@ function runCtx(method: string, rawPath: string, agent: any, body?: unknown) {
     agent,
     path: url.pathname,
     url,
+    // GAP-1: GET /api/pca/mine reads the node's op wallet set.
+    opWallets: opWallets ?? { wallets: [] },
   } as unknown as RequestContext;
   return { res, done: handlePcaRoutes(ctx) };
 }
@@ -890,5 +892,83 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(extBody.remainingAllowance).toBe('8333');
     expect(extBody.remainingAllowanceTrac).toBe(ethers.formatEther(8333n));
     expect(extBody.currentEpoch).toBe(7);
+  });
+
+  // ----- GAP-1: GET /api/pca/mine (enumerate the node's PCAs) -----
+  it('GET /api/pca/mine → 200 {accounts:[{accountId,relation}]} from the node op wallets', async () => {
+    const w1 = '0x' + '1'.repeat(40);
+    const w2 = '0x' + '2'.repeat(40);
+    let askedWallets: string[] | undefined;
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      listPublishingConvictionAccountsForWallets: async (w: string[]) => {
+        askedWallets = w;
+        return [{ accountId: 5n, relation: 'owned' }, { accountId: 7n, relation: 'both' }];
+      },
+    };
+    const { res, done } = runCtx('GET', '/api/pca/mine', agent, undefined, { wallets: [{ address: w1 }, { address: w2 }] });
+    await done;
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({
+      accounts: [{ accountId: '5', relation: 'owned' }, { accountId: '7', relation: 'both' }],
+    });
+    expect(askedWallets).toEqual([w1, w2]); // route passes the node's op wallet set
+  });
+
+  it('GET /api/pca/mine → 503 when the adapter lacks the PCA surface (lookup not called)', async () => {
+    let called = false;
+    const agent = {
+      supportsPublishingConvictionNft: false,
+      listPublishingConvictionAccountsForWallets: async () => { called = true; return []; },
+    };
+    const { res, done } = runCtx('GET', '/api/pca/mine', agent, undefined, { wallets: [{ address: '0x' + '1'.repeat(40) }] });
+    await done;
+    expect(res.statusCode).toBe(503);
+    expect(called).toBe(false);
+  });
+
+  it('GET /api/pca/mine → 503 PCA_LOOKUP_READ_FAILED on a CALL_EXCEPTION (not a partial/empty list)', async () => {
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      listPublishingConvictionAccountsForWallets: async () => {
+        const e: any = new Error('enumeration read failed'); e.code = 'CALL_EXCEPTION'; throw e;
+      },
+    };
+    const { res, done } = runCtx('GET', '/api/pca/mine', agent, undefined, { wallets: [{ address: '0x' + '1'.repeat(40) }] });
+    await done;
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body).code).toBe('PCA_LOOKUP_READ_FAILED');
+  });
+
+  it('GET /api/pca/mine?hydrate=1 merges the snapshot basics per account (best-effort)', async () => {
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      listPublishingConvictionAccountsForWallets: async () => [{ accountId: 5n, relation: 'owned' }],
+      getPublishingConvictionAccountInfo: async () => ({
+        owner: '0x' + '9'.repeat(40), committedTRAC: 100n, baseEpochAllowance: 1n,
+        createdAtEpoch: 1, expiresAtEpoch: 9, createdAtTimestamp: 0, expiresAtTimestamp: 0,
+        discountBps: 500, topUpBuffer: 0n, agentCount: 0, lastSettledWindow: 0, fullySwept: false,
+      }),
+    };
+    const { res, done } = runCtx('GET', '/api/pca/mine?hydrate=1', agent, undefined, { wallets: [{ address: '0x' + '1'.repeat(40) }] });
+    await done;
+    expect(res.statusCode).toBe(200);
+    const acct = JSON.parse(res.body).accounts[0];
+    expect(acct.accountId).toBe('5');
+    expect(acct.relation).toBe('owned');
+    expect(acct.committedTRAC).toBe('100'); // serializeAccountInfo basics merged
+    expect(acct.discountBps).toBe(500);
+  });
+
+  it('GET /api/pca/mine?hydrate=1 keeps {accountId,relation} when a per-account snapshot read throws (best-effort)', async () => {
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      listPublishingConvictionAccountsForWallets: async () => [{ accountId: 5n, relation: 'agent' }],
+      getPublishingConvictionAccountInfo: async () => { throw new Error('per-account read blip'); },
+    };
+    const { res, done } = runCtx('GET', '/api/pca/mine?hydrate=1', agent, undefined, { wallets: [{ address: '0x' + '1'.repeat(40) }] });
+    await done;
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).accounts).toEqual([{ accountId: '5', relation: 'agent' }]);
   });
 });

@@ -507,6 +507,56 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
     }
   }
 
+  // GET /api/pca/mine — enumerate every PCA the node relates to (owned + agent-on
+  // across the node's operational wallets, GAP-1). Read-only. Optional ?hydrate=1
+  // adds the serializeAccountInfo basics per account (best-effort per id). Matched
+  // EXACTLY before the generic GET :id below, else 'mine' would parse as an id.
+  if (req.method === 'GET' && path === '/api/pca/mine') {
+    if (!agent.supportsPublishingConvictionNft) {
+      return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+    }
+    const wallets = ctx.opWallets.wallets.map((w) => w.address);
+    try {
+      const accounts = await agent.listPublishingConvictionAccountsForWallets(wallets);
+      if (accounts === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      const hydrate = ctx.url.searchParams.get('hydrate') === '1';
+      if (!hydrate) {
+        return jsonResponse(res, 200, {
+          accounts: accounts.map((a) => ({ accountId: a.accountId.toString(), relation: a.relation })),
+        });
+      }
+      // Hydrate: add the snapshot basics per account. Best-effort per id — a
+      // single account's read failure leaves it as just {accountId, relation},
+      // never drops it or fails the whole list.
+      const hydrated: Array<Record<string, unknown>> = [];
+      for (const a of accounts) {
+        const entry: Record<string, unknown> = { accountId: a.accountId.toString(), relation: a.relation };
+        try {
+          const info = await agent.getPublishingConvictionAccountInfo(a.accountId);
+          if (info) Object.assign(entry, serializeAccountInfo(a.accountId, info));
+        } catch { /* per-account hydrate is best-effort */ }
+        hydrated.push(entry);
+      }
+      return jsonResponse(res, 200, { accounts: hydrated });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (respondIfChainRpcTransportError(res, err)) return;
+      // A CALL_EXCEPTION here is a real enumeration read failure → 503 retryable,
+      // NOT a partial/empty list a UI would read as "relates to nothing" (#9).
+      if (err?.code === 'CALL_EXCEPTION') {
+        return jsonResponse(res, 503, {
+          error: 'PCA enumeration temporarily unavailable — chain read failed',
+          code: 'PCA_LOOKUP_READ_FAILED',
+        });
+      }
+      return jsonResponse(res, 500, {
+        error: `listPublishingConvictionAccountsForWallets failed: ${msg}`,
+      });
+    }
+  }
+
   // GET /api/pca/:id — V10 conviction NFT snapshot. Optional ?key=0x...
   // probes whether that address is a registered agent. Optional ?extended=1
   // adds the GAP-4/5 budget fields (primaryNode + current-epoch allowance);
