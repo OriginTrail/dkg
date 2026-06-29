@@ -1799,6 +1799,40 @@ export interface PcaAgentAccountResult {
 export const pcaAgentAccount = (address: string) =>
   getJson<PcaAgentAccountResult>(`/api/pca/agent/${encodeURIComponent(address)}`);
 
+/**
+ * B-staked-nodes (§9.3) — one staked sharding-table node. `identityId` is the on-chain id
+ * a PCA designates as its `primaryNode`; `nodeId` is the network/peer id (display detail);
+ * `stake`/`ask` are wei strings. The sharding table is capped (`shardingTableSizeLimit`, ≤500)
+ * and the daemon serves it from a short TTL cache — the picker fetches it all + sorts/filters
+ * CLIENT-side (the `ask` column is dropped from display, L9). All ids/amounts are strings.
+ */
+export interface DesignatableNode {
+  nodeId: string;
+  identityId: string;
+  stake: string;
+  ask?: string;
+}
+
+export interface DesignatableNodesResult {
+  nodes: DesignatableNode[];
+  /** Total nodes in the sharding table (for the "showing N of total" hint). */
+  total: number;
+  /** Offset cursor for the next page, or null at the end. */
+  nextStart: string | null;
+}
+
+/**
+ * B-staked-nodes (§9.3) — the staked sharding-table nodes for the PrimaryNodePicker, via
+ * offset pagination over the daemon's TTL-cached read of the whole (≤500) table. `start`
+ * omitted = first page. A read failure surfaces `SHARDING_TABLE_READ_FAILED` (retryable —
+ * the picker shows a retry; `primaryNode` is required so edge can't proceed until it loads).
+ * `GET` is permissionless.
+ */
+export const listDesignatableNodes = (opts?: { start?: string; limit?: number }) =>
+  getJson<DesignatableNodesResult>(
+    `/api/pca/designatable-nodes?start=${encodeURIComponent(opts?.start ?? '')}&limit=${opts?.limit ?? 200}`,
+  );
+
 /** Normalized, terminology-disciplined PCA error code (UI branches on this). */
 export type PcaErrorCode =
   | 'FEATURE_UNAVAILABLE'

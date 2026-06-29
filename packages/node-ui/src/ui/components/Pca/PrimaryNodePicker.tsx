@@ -1,17 +1,10 @@
 import React, { useId, useMemo, useState } from 'react';
 import { formatWeiToTrac } from './format.js';
+import type { DesignatableNode } from '../../api.js';
 
-/**
- * A staked sharding-table node, as served by the daemon `B-staked-nodes` read route
- * (`GET /api/pca/designatable-nodes`). `identityId` is the on-chain id designated as a
- * PCA's `primaryNode`; `nodeId` is the network/peer id (display detail); `stake` is wei.
- * (The api.ts wire type re-exports this once the route shape is locked.)
- */
-export interface DesignatableNode {
-  nodeId: string;
-  identityId: string;
-  stake: string;
-}
+// The staked sharding-table node shape is the api.ts data type (re-exported here so the
+// Pca barrel keeps exporting it); `ask` is carried by the wire but dropped from display (L9).
+export type { DesignatableNode };
 
 const CAP = 50;
 

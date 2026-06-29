@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   createPca: vi.fn(),
   fetchPca: vi.fn(),
   pcaAgentAccount: vi.fn(),
+  listDesignatableNodes: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', async (orig) => {
@@ -23,6 +24,7 @@ vi.mock('../src/ui/api.js', async (orig) => {
     createPca: mocks.createPca,
     fetchPca: mocks.fetchPca,
     pcaAgentAccount: mocks.pcaAgentAccount,
+    listDesignatableNodes: mocks.listDesignatableNodes,
   };
 });
 
@@ -97,6 +99,11 @@ beforeEach(() => {
   });
   // B1 default: the wallet is bound to nothing → no zero-coverage warning (and no real fetch).
   mocks.pcaAgentAccount.mockResolvedValue({ agent: '', accountId: null });
+  // §3b picker list: this node's identity (#42) is staked → core pre-selects it (M3).
+  mocks.listDesignatableNodes.mockResolvedValue({
+    nodes: [{ nodeId: 'peerA', identityId: '42', stake: '1000000000000000000000', ask: '0' }],
+    total: 1, nextStart: null,
+  });
 });
 afterEach(() => {
   expect(fetchGuard).not.toHaveBeenCalled();
@@ -166,6 +173,45 @@ describe('CreatePcaModal', () => {
     await unmount();
   });
 
+  // §3b/M3 — core pre-selects its OWN staked node only when its identity is in the list.
+  it('§3b/M3 — core pre-selects its own staked node when its identity is in the list', async () => {
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'node #42');
+    expect(container.querySelector('[data-testid="pca-primary-node-selected"]')?.textContent).toContain('✓ this node');
+    await unmount();
+  });
+
+  it('§3b/M3 — own identity NOT in the staked list → no default; primary node required (submit blocked)', async () => {
+    mocks.listDesignatableNodes.mockResolvedValue({
+      nodes: [{ nodeId: 'pX', identityId: '99', stake: '5000000000000000000', ask: '0' }], total: 1, nextStart: null,
+    });
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    // #42 isn't staked → no pre-selection → the required primary node blocks submit.
+    expect(container.querySelector('[data-testid="pca-primary-node-selected"]')).toBeNull();
+    expect((container.querySelector('[data-testid="pca-create-submit"]') as HTMLButtonElement).disabled).toBe(true);
+    await unmount();
+  });
+
+  it('Q1 — list-down: core best-effort defaults to its own id; the picker shows a retry', async () => {
+    mocks.listDesignatableNodes.mockRejectedValue(new HttpError(503, 'x', { code: 'SHARDING_TABLE_READ_FAILED' }));
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Couldn’t load the staked-node list');
+    expect(container.querySelector('[data-testid="pca-primary-node-error"]')).toBeTruthy();
+    // The create-time PrimaryNodeNotInShardingTable revert is the backstop; core still defaults
+    // to its own id (#42) so the Review reflects it (Q1).
+    expect(container.textContent).toContain('#42');
+    await unmount();
+  });
+
   // S2b renew [MEDIUM] — on the renew path the success action re-approves the OLD account's
   // wallets (not a fresh "this node's wallets"), so the button is relabelled.
   it('S2b renew: relabels the success action to re-approve the OLD account’s wallets', async () => {
@@ -222,7 +268,9 @@ describe('CreatePcaModal', () => {
     expect(note.textContent).toContain('0/100');
     // Commit amount is seeded from the expiring account.
     expect((container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement).value).toBe('100000.0');
-    expect((container.querySelector('[data-testid="pca-create-primary-node"]') as HTMLInputElement).value).toBe('42');
+    // Primary node is seeded into the picker (shown as the selected node).
+    await waitForText(container, 'node #42');
+    expect(container.querySelector('[data-testid="pca-primary-node-selected"]')?.textContent).toContain('node #42');
     await unmount();
   });
 

@@ -18,6 +18,7 @@ import {
   isPcaReadFailed,
   fetchPca,
   fetchMyPcas,
+  listDesignatableNodes,
   createPca,
   pcaAddAgent,
   pcaRemoveAgent,
@@ -236,6 +237,16 @@ describe('PCA api helpers (transport shaping)', () => {
     fetchMock.mockResolvedValueOnce(ok({ accounts: [] }));
     await fetchMyPcas({ hydrate: true });
     expect(fetchMock.mock.calls[1]![0]).toBe('/api/pca/mine?hydrate=1');
+  });
+
+  it('listDesignatableNodes GETs /api/pca/designatable-nodes with start+limit (offset pagination)', async () => {
+    fetchMock.mockResolvedValueOnce(ok({ nodes: [], total: 0, nextStart: null }));
+    await listDesignatableNodes();
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/pca/designatable-nodes?start=&limit=200');
+
+    fetchMock.mockResolvedValueOnce(ok({ nodes: [], total: 0, nextStart: null }));
+    await listDesignatableNodes({ start: '7', limit: 50 });
+    expect(fetchMock.mock.calls[1]![0]).toBe('/api/pca/designatable-nodes?start=7&limit=50');
   });
 
   // T1 — a GET failure must throw an HttpError that CARRIES the body, so the tab-gate

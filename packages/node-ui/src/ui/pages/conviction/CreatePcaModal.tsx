@@ -11,9 +11,10 @@ import {
 } from '../../api.js';
 import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
 import { probeWalletBindings, selfCoverageOutlook } from '../../pca/walletBinding.js';
+import { useDesignatableNodes } from '../../hooks/useDesignatableNodes.js';
 import { useAgentsStore } from '../../stores/agents.js';
 import { usePcaStore } from '../../stores/pca.js';
-import { DiscountTierLadder, discountTierForTrac, WalletRow } from '../../components/Pca/index.js';
+import { DiscountTierLadder, discountTierForTrac, WalletRow, PrimaryNodePicker } from '../../components/Pca/index.js';
 import { PcaModalShell } from './PcaModalShell.js';
 import { formatTrac } from '../../lib/formatTrac.js';
 
@@ -100,7 +101,6 @@ export function CreatePcaModal({
   // S2b renew — seed the commit amount + primary node from the expiring account.
   const [tokens, setTokens] = useState(seed?.tokens ?? '');
   const [primaryNode, setPrimaryNode] = useState(seed?.primaryNode ?? '');
-  const [advanced, setAdvanced] = useState(false);
   // Resume the reconcile guard if a create is already in flight from a prior
   // session (durable marker) — never drop straight to a retryable form.
   const [phase, setPhase] = useState<Phase>(createPending ? 'reconcile' : 'form');
@@ -108,12 +108,27 @@ export function CreatePcaModal({
   const [pendingTxHash, setPendingTxHash] = useState<string | undefined>(createPending?.txHash);
   const [error, setError] = useState<string | null>(null);
 
-  // Prefill the primary node with this node's identity once status resolves.
+  // §3b — the REQUIRED staked-node picker's list (B-staked-nodes; fetched whole, sorted desc).
+  const { nodes: stakedNodes, loading: nodesLoading, error: nodesError, refresh: refreshNodes } =
+    useDesignatableNodes();
+  // M3 — this node's own identity counts as a default ONLY if it's actually IN the staked list
+  // (hasIdentity / identityId > 0 alone does NOT imply staked + in the sharding table).
+  const ownIdentity = nodeStatus?.identityId && nodeStatus.identityId !== '0' ? String(nodeStatus.identityId) : null;
+  const ownStaked = useMemo(
+    () => (ownIdentity && stakedNodes.some((n) => n.identityId === ownIdentity) ? ownIdentity : null),
+    [ownIdentity, stakedNodes],
+  );
+
+  // Pre-select the primary node (core convenience). Never overrides a seeded (renew) or
+  // already-picked value. M3: pre-select own id only when it's confirmed staked. Q1: if the
+  // list is DOWN, core best-effort defaults to its own id — the create-time
+  // PrimaryNodeNotInShardingTable revert (handled recoverably below) is the backstop. Edge
+  // (no own identity) gets NO default → a required pick.
   useEffect(() => {
-    if (!primaryNode && nodeStatus?.identityId && nodeStatus.identityId !== '0') {
-      setPrimaryNode(String(nodeStatus.identityId));
-    }
-  }, [nodeStatus?.identityId, primaryNode]);
+    if (primaryNode || !ownIdentity) return;
+    if (ownStaked) setPrimaryNode(ownStaked);
+    else if (nodesError) setPrimaryNode(ownIdentity);
+  }, [primaryNode, ownIdentity, ownStaked, nodesError]);
 
   const amountNum = AMOUNT_RE.test(tokens.trim()) ? Number(tokens.trim()) : NaN;
   const amountValid = Number.isFinite(amountNum) && amountNum > 0;
@@ -152,7 +167,12 @@ export function CreatePcaModal({
       // (FEATURE_UNAVAILABLE, not a transport RPC_* 503) qualify.
       if (err instanceof HttpError && (err.status === 400 || isPcaFeatureUnavailable(err))) {
         clearCreatePending();
-        setError(describePcaError(err)?.message ?? (err as Error)?.message ?? 'Create failed.');
+        const info = describePcaError(err);
+        // §9.4 #18 / Q1 — PrimaryNodeNotInShardingTable is RECOVERABLE, not terminal: the
+        // picked node was unstaked between picking and submit (or a list-down core best-effort
+        // default raced). Refetch the staked list so the picker re-prompts with fresh data.
+        if (info?.code === 'PrimaryNodeNotInShardingTable') refreshNodes();
+        setError(info?.message ?? (err as Error)?.message ?? 'Create failed.');
         setPhase('form');
         return;
       }
@@ -391,59 +411,27 @@ export function CreatePcaModal({
           <DiscountTierLadder committedTrac={amountValid ? amountNum : null} />
         </section>
 
-        {/* Section 2 — Primary node */}
+        {/* Section 2 — Primary node (§3b: the always-visible, REQUIRED staked-node picker) */}
         <section className="v10-pca-create-section">
           <h3 className="v10-pca-create-section-title">2 · Primary node</h3>
-          <div className="v10-form-group">
-            <label className="v10-form-label" htmlFor="pca-create-primary-node">
-              Primary node (publishing-reward allocation)
-            </label>
-            <input
-              id="pca-create-primary-node"
-              data-testid="pca-create-primary-node"
-              className="v10-form-input"
-              type="text"
-              value={primaryNode}
-              onChange={(e) => setPrimaryNode(e.target.value)}
-              placeholder="node identityId"
-              disabled={!advanced && !!nodeStatus?.identityId}
-              autoComplete="off"
-            />
-          </div>
-          {nodeStatus?.identityId && primaryNode === String(nodeStatus.identityId) && (
-            <p className="v10-pca-create-hint">✓ This node (identityId #{nodeStatus.identityId}).</p>
-          )}
-          {/* S2b renew (LOW) — the old account's primary node couldn't be read, so the field
+          {/* S2b renew (LOW) — the old account's primary node couldn't be read, so the picker
               fell back to THIS node. Surface it rather than silently defaulting. */}
           {replacingAccountId && seed?.primaryNodeUnknown && (
             <p className="v10-pca-create-hint" role="status" data-testid="pca-renew-primary-unknown">
-              ⓘ Couldn’t read PCA #{replacingAccountId}’s primary node — defaulting to this node. Change
-              it under Advanced if the replacement should point elsewhere.
+              ⓘ Couldn’t read PCA #{replacingAccountId}’s primary node — defaulting to this node. Pick a
+              different staked node below if the replacement should point elsewhere.
             </p>
           )}
-          <div className="v10-modal-tip">
-            <span className="v10-modal-tip-title">Primary node ≠ who pays and ≠ who’s covered.</span>{' '}
-            Pays the discounted cost → this account’s escrow. Covered to publish → the wallets you
-            approve. Reward weight → this primary node.
-          </div>
-          <button
-            type="button"
-            className="v10-pca-track-toggle"
-            aria-expanded={advanced}
-            aria-controls="pca-create-advanced"
-            onClick={() => setAdvanced((a) => !a)}
-          >
-            ▸ Advanced: point reward weight at a different node id
-          </button>
-          {/* F1/L5: the disclosed region carries the id the button references —
-              kept in the DOM (hidden when collapsed) so aria-controls resolves. */}
-          <div id="pca-create-advanced" hidden={!advanced}>
-            {advanced && (
-              <p className="v10-pca-create-hint">
-                The node id must already be in the sharding table, or creation reverts.
-              </p>
-            )}
-          </div>
+          <PrimaryNodePicker
+            nodes={stakedNodes}
+            loading={nodesLoading}
+            error={nodesError}
+            onRetry={refreshNodes}
+            value={primaryNode}
+            onChange={setPrimaryNode}
+            ownIdentityId={ownStaked}
+            role={nodeStatus?.nodeRole === 'edge' ? 'edge' : nodeStatus?.nodeRole === 'core' ? 'core' : undefined}
+          />
         </section>
 
         {/* Section 3 — Review */}
