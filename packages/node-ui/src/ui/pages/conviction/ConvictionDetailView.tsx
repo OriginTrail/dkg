@@ -17,10 +17,10 @@ import {
   HealthChip,
   WalletRow,
   AddressCrux,
-  healthForSnapshot,
   formatWeiToTrac,
   formatRelativeExpiry,
 } from '../../components/Pca/index.js';
+import { healthForSnapshot } from '../../pca/health.js';
 import { StatStrip } from '../../components/ContextGraphPrimitives.js';
 import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 

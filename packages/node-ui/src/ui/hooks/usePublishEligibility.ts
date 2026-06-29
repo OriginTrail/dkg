@@ -2,9 +2,8 @@ import { useMemo } from 'react';
 import { useFetch } from '../hooks.js';
 import { fetchWalletsBalances, fetchPca, fetchContextGraphs, fetchCurrentAgent } from '../api.js';
 import { usePcaStore } from '../stores/pca.js';
-import { healthForSnapshot } from '../components/Pca/HealthChip.js';
 import { canonicalAgentDid } from '../lib/contextGraphSidebar.js';
-import { bigGt0 } from '../pca/coverage.js';
+import { classifyCoverage } from '../pca/coverage.js';
 import type { PcaVerdict } from '../components/Pca/EligibilityVerdictBanner.js';
 
 const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
@@ -116,33 +115,30 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
             // not-registered. Distinguish them: a failed probe is inconclusive (→
             // neutral verdict), never a definitive fall-through DANGER at spend time.
             if (snap === null) { probeError = true; continue; }
-            // S2/#9 — the adapter COULDN'T answer (capability gap) is "couldn't read",
-            // NOT a confirmed not-registered. Funnel it into the inconclusive channel
-            // (→ neutral verdict), never a definitive fall-through DANGER.
-            if (snap.probedKey?.adapterSupported === false) { probeError = true; continue; }
-            if (!snap.probedKey?.registered) continue;
-            const h = healthForSnapshot(snap);
-            // reverted L2 — see capstone finding. INTENTIONAL coarse P0 solvency
-            // proxy: a funded PCA holds its per-epoch budget in `baseEpochAllowance`
-            // (the cap), and `topUpBuffer` is only the EXTRA above that cap — 0 on a
-            // fresh, un-topped-up account. A topUpBuffer-only check therefore
-            // false-DANGERed every approved+funded PCA (live capstone: PCA #2, 5
-            // agents approved, chip showed "out of budget"). So ANY budget capacity
-            // ⇒ GREEN-eligible (a prediction, #9 "pending confirmation"); swept/
-            // expired are excluded SEPARATELY by the health check below; precise
-            // mid-epoch remaining is P2 via the extended snapshot's `remainingAllowance`.
-            const solvent = bigGt0(snap.topUpBuffer) || bigGt0(snap.baseEpochAllowance);
-            if (h !== 'expired' && h !== 'swept' && solvent) {
+            // #1344 round-3 — ONE canonical classification; switch on its `outcome`
+            // discriminant (coarse P0, NOT remainingAllowance, P2/#1349). The probe is
+            // read from snap.probedKey internally. Behavior is byte-identical to the
+            // prior 5-field form.
+            const c = classifyCoverage(snap);
+            // S2/#9 — adapter gap OR an undefined registered → inconclusive ("couldn't
+            // determine" → neutral verdict, never a definitive DANGER); a confirmed
+            // not-registered → skip.
+            if (c.outcome === 'inconclusive') { probeError = true; continue; }
+            if (c.outcome === 'unregistered') continue;
+            if (c.outcome === 'covers') {
               cover = { accountId: id, discountBps: snap.discountBps };
-              break;
+              break; // breaks the tracked-id FOR loop (not a switch) — covered, stop probing.
             }
-            // Registered here but the account can't cover (swept/expired) — remember
-            // it so the copy distinguishes "approved-but-dead" from "no PCA" (#3).
-            if (h === 'expired' || h === 'swept') {
+            // c.outcome === 'uncovered' — registered here but the account can't cover.
+            // Break down (dead vs out-of-budget) from the SAME classification's reason
+            // facets, so the copy distinguishes "approved-but-dead" from "no PCA" (#3)
+            // and the reasons name the cause. Two INDEPENDENT checks (a dead AND
+            // zero-budget account sets both).
+            if (c.dead) {
               sawExpired = true;
               if (!deadAccountId) deadAccountId = id;
             }
-            if (!solvent) sawInsolvent = true;
+            if (!c.hasBudget) sawInsolvent = true;
           }
           return {
             wallet: w,

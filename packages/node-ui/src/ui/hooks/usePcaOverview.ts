@@ -6,8 +6,8 @@ import {
   type PcaSnapshot,
 } from '../api.js';
 import { usePcaStore } from '../stores/pca.js';
-import { healthForSnapshot, type PcaHealthState } from '../components/Pca/HealthChip.js';
-import { bigGt0 } from '../pca/coverage.js';
+import { healthForSnapshot, type PcaHealthState } from '../pca/health.js';
+import { classifyCoverage, isPcaSpendable } from '../pca/coverage.js';
 
 /** Per-(node wallet) registration probe against one account. `null` = couldn't determine. */
 export interface PcaWalletProbe {
@@ -94,13 +94,11 @@ async function resolveAccount(accountId: string, wallets: string[]): Promise<Res
   const walletProbes: PcaWalletProbe[] = await Promise.all(
     wallets.map((wallet) =>
       fetchPca(accountId, wallet)
-        // S2/#9 — adapterSupported===false (the adapter couldn't answer) is null
+        // S2/#9 (via shared classifyCoverage, #1344 — reads s.probedKey) —
+        // adapterSupported===false (the adapter couldn't answer) → registered null
         // (couldn't determine), NOT not-registered → probesInconclusive (H2 path),
-        // excluded from approvedCount, never a false "0 approved".
-        .then((s): PcaWalletProbe => ({
-          wallet,
-          registered: s.probedKey?.adapterSupported === false ? null : (s.probedKey?.registered ?? null),
-        }))
+        // excluded from approvedCount (which counts registered === true, not 'covers').
+        .then((s): PcaWalletProbe => ({ wallet, registered: classifyCoverage(s).registered }))
         .catch((): PcaWalletProbe => ({ wallet, registered: null })),
     ),
   );
@@ -266,11 +264,9 @@ export function usePcaOverview(intervalMs = 30_000): PcaOverview {
     let best: number | null = null;
     for (const a of accounts) {
       if (!a.snapshot || a.approvedCount <= 0) continue;
-      if (a.health === 'expired' || a.health === 'swept') continue;
-      // U2 — exclude a zero-budget PCA so the dashboard/settings don't advertise a
-      // discount S5 treats as not-covering. Matches usePublishEligibility's coarse
-      // proxy (NOT remainingAllowance — that's P2/#1349); full consolidation #1344.
-      if (!(bigGt0(a.snapshot.topUpBuffer) || bigGt0(a.snapshot.baseEpochAllowance))) continue;
+      // U2 (via shared isPcaSpendable, #1344) — exclude expired/swept + zero-budget so
+      // the dashboard/settings don't advertise a discount S5 treats as not-covering.
+      if (!isPcaSpendable(a.snapshot)) continue;
       const bps = a.snapshot.discountBps;
       if (typeof bps === 'number' && (best == null || bps > best)) best = bps;
     }
