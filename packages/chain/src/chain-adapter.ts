@@ -36,9 +36,10 @@ export interface ConvictionReader {
    *  503) and the optional ChainAdapter decl. EVMChainAdapter + mock implement it. */
   listPublishingConvictionAccountsForWallets?(wallets: string[]): Promise<PcaAccountRelation[]>;
   /** B-staked-nodes (Stage-5) — the full sharding table of designatable PCA
-   *  primary nodes, hash-ring order, TTL-cached adapter-side. Optional, same
-   *  rationale as above (facade typeof-guard / optional ChainAdapter decl). */
-  listDesignatableNodes?(): Promise<ShardingTableNode[]>;
+   *  primary nodes, hash-ring order, TTL-cached adapter-side. `opts.fresh`
+   *  bypasses the cache (M4: the create-revert recovery + picker Retry). Optional,
+   *  same rationale as above (facade typeof-guard / optional ChainAdapter decl). */
+  listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
 }
 
 export interface IdentityProof {
@@ -941,10 +942,11 @@ export interface ChainAdapter {
   /**
    * B-staked-nodes (Stage-5) — the full on-chain sharding table of nodes
    * designatable as a PCA `primaryNode`. Read-only; hash-ring order preserved;
-   * TTL-cached adapter-side (the table changes slowly). Optional for the same
-   * reason as the other PCA reads (mock-chain tests can omit it).
+   * TTL-cached adapter-side (the table changes slowly); `opts.fresh` bypasses
+   * the cache (M4). Optional for the same reason as the other PCA reads
+   * (mock-chain tests can omit it).
    */
-  listDesignatableNodes?(): Promise<ShardingTableNode[]>;
+  listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
 
   /**
    * Returns the V10 NFT-backed PCA's `lockDurationEpochs` for the given

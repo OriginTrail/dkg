@@ -561,15 +561,24 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
   // sharding table of nodes designatable as a PCA `primaryNode`, for the create
   // wizard's PrimaryNodePicker. Read-only; the adapter reads the whole table
   // (TTL-cached) and this route serves OFFSET pages: ?start=<0-based offset>
-  // &limit=<1..200, default 50>. Hash-ring order preserved (the UI sorts).
-  // Matched EXACTLY before the generic GET :id below, else 'designatable-nodes'
-  // parses as an accountId and 400s.
+  // &limit=<1..200, route default 50; the FE fetches the whole table with
+  // limit=200, N3>. ?fresh=1 bypasses the adapter cache (M4). Hash-ring order
+  // preserved (the UI sorts). Matched EXACTLY before the generic GET :id below,
+  // else 'designatable-nodes' parses as an accountId and 400s.
   if (req.method === 'GET' && path === '/api/pca/designatable-nodes') {
     if (!agent.supportsPublishingConvictionNft) {
       return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
     }
     const startRaw = ctx.url.searchParams.get('start');
     const limitRaw = ctx.url.searchParams.get('limit');
+    // N5: strict decimal — reject hex/exponent/'+'/'' that Number() would coerce,
+    // so parsing matches the "non-negative integer" contract the error copy claims.
+    if (startRaw !== null && !/^\d+$/.test(startRaw)) {
+      return jsonResponse(res, 400, { error: 'Invalid start — must be a non-negative integer offset' });
+    }
+    if (limitRaw !== null && !/^\d+$/.test(limitRaw)) {
+      return jsonResponse(res, 400, { error: 'Invalid limit — must be an integer 1..200' });
+    }
     const start = startRaw === null ? 0 : Number(startRaw);
     const limit = limitRaw === null ? 50 : Number(limitRaw);
     if (!Number.isInteger(start) || start < 0) {
@@ -578,8 +587,12 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
       return jsonResponse(res, 400, { error: 'Invalid limit — must be an integer 1..200' });
     }
+    // M4: ?fresh=1 bypasses the adapter's 30s TTL cache (and repopulates it) so
+    // the create PrimaryNodeNotInShardingTable revert recovery + picker Retry
+    // re-read the chain instead of re-serving a stale just-rejected node.
+    const fresh = ctx.url.searchParams.get('fresh') === '1';
     try {
-      const all = await agent.listDesignatableNodes();
+      const all = await agent.listDesignatableNodes({ fresh });
       if (all === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
       const total = all.length;
       const page = all.slice(start, start + limit);
@@ -599,10 +612,11 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
       if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
       if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
       if (respondIfChainRpcTransportError(res, err)) return;
-      // A CALL_EXCEPTION here is a sharding-table read failure → 503 retryable
-      // with a DEDICATED code (distinct from a PCA snapshot read), NOT a
-      // partial/empty list a picker would read as "no stakeable nodes".
-      if (err?.code === 'CALL_EXCEPTION') {
+      // A CALL_EXCEPTION (read revert) or BAD_DATA (ABI/overload decode failure,
+      // L10) here is a sharding-table read failure → 503 retryable with a
+      // DEDICATED code (distinct from a PCA snapshot read), NOT a partial/empty
+      // list a picker would read as "no stakeable nodes".
+      if (err?.code === 'CALL_EXCEPTION' || err?.code === 'BAD_DATA') {
         return jsonResponse(res, 503, {
           error: 'Designatable-node list temporarily unavailable — sharding-table read failed',
           code: 'SHARDING_TABLE_READ_FAILED',

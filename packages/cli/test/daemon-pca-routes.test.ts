@@ -1035,7 +1035,8 @@ describe('daemon /api/pca V10 caller contract', () => {
 
   it('GET /api/pca/designatable-nodes → 400 on invalid start/limit', async () => {
     const agent = { supportsPublishingConvictionNft: true, listDesignatableNodes: async () => NODE_FIXTURE };
-    for (const q of ['?start=-1', '?limit=0', '?limit=201', '?start=abc', '?limit=1.5']) {
+    // N5: strict decimal — hex / exponent / leading '+' (URL-encoded) are rejected too.
+    for (const q of ['?start=-1', '?limit=0', '?limit=201', '?start=abc', '?limit=1.5', '?start=0x10', '?limit=1e2', '?start=%2B5']) {
       const { res, done } = runCtx('GET', `/api/pca/designatable-nodes${q}`, agent);
       await done;
       expect(res.statusCode).toBe(400);
@@ -1078,5 +1079,57 @@ describe('daemon /api/pca V10 caller contract', () => {
     const { res, done } = runCtx('GET', '/api/pca/designatable-nodes', agent);
     await done;
     expect(res.statusCode).toBe(200);
+  });
+
+  it('GET /api/pca/designatable-nodes threads ?fresh=1 to the facade (M4 cache-bust)', async () => {
+    const seen: Array<{ fresh?: boolean } | undefined> = [];
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      listDesignatableNodes: async (opts?: { fresh?: boolean }) => { seen.push(opts); return NODE_FIXTURE; },
+    };
+    const a = runCtx('GET', '/api/pca/designatable-nodes?fresh=1', agent); await a.done;
+    const b = runCtx('GET', '/api/pca/designatable-nodes', agent); await b.done;
+    expect(a.res.statusCode).toBe(200);
+    expect(seen[0]).toEqual({ fresh: true });  // ?fresh=1 → bypass the adapter cache
+    expect(seen[1]).toEqual({ fresh: false }); // default → use the cache
+  });
+
+  it('GET /api/pca/designatable-nodes → 503 SHARDING_TABLE_READ_FAILED on a BAD_DATA decode failure (L10)', async () => {
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      listDesignatableNodes: async () => { const e: any = new Error('could not decode result data'); e.code = 'BAD_DATA'; throw e; },
+    };
+    const { res, done } = runCtx('GET', '/api/pca/designatable-nodes', agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body).code).toBe('SHARDING_TABLE_READ_FAILED');
+  });
+
+  it('GET /api/pca/designatable-nodes → 503 on an RPC transport exhaustion (L12)', async () => {
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      listDesignatableNodes: async () => { throw Object.assign(new Error('all endpoints failed'), { code: 'RPC_ENDPOINTS_EXHAUSTED' }); },
+    };
+    const { res, done } = runCtx('GET', '/api/pca/designatable-nodes', agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body).code).toBe('RPC_ENDPOINTS_EXHAUSTED');
+  });
+
+  it('GET /api/pca/designatable-nodes → 503 on no-chain and on PCA-unavailable (L12)', async () => {
+    const noChain = { supportsPublishingConvictionNft: true, listDesignatableNodes: async () => { throw new Error('No blockchain configured'); } };
+    const r1 = runCtx('GET', '/api/pca/designatable-nodes', noChain); await r1.done;
+    expect(r1.res.statusCode).toBe(503);
+
+    const unavail = { supportsPublishingConvictionNft: true, listDesignatableNodes: async () => { throw new Error('DKGPublishingConvictionNFT is not deployed on this Hub'); } };
+    const r2 = runCtx('GET', '/api/pca/designatable-nodes', unavail); await r2.done;
+    expect(r2.res.statusCode).toBe(503);
+  });
+
+  it('GET /api/pca/designatable-nodes → 500 on a generic (non-classified) error (L12)', async () => {
+    const agent = { supportsPublishingConvictionNft: true, listDesignatableNodes: async () => { throw new Error('boom'); } };
+    const { res, done } = runCtx('GET', '/api/pca/designatable-nodes', agent);
+    await done;
+    expect(res.statusCode).toBe(500);
   });
 });

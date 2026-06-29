@@ -701,8 +701,9 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   /** B-staked-nodes parity (Stage-5) — a small fixed sharding-table fixture in
-   *  hash-ring order. nodeId = hex `bytes`; identityId/ask/stake = bigint. */
-  async listDesignatableNodes(): Promise<ShardingTableNode[]> {
+   *  hash-ring order. nodeId = hex `bytes`; identityId/ask/stake = bigint. The
+   *  `fresh` opt is accepted for surface parity (the mock has no cache). */
+  async listDesignatableNodes(_opts?: { fresh?: boolean }): Promise<ShardingTableNode[]> {
     return [
       { nodeId: '0x6e6f64652d31', identityId: 42n, ask: 1_000_000_000_000_000_000n, stake: 250_000n * 10n ** 18n },
       { nodeId: '0x6e6f64652d32', identityId: 57n, ask: 2_000_000_000_000_000_000n, stake: 180_000n * 10n ** 18n },

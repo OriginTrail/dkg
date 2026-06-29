@@ -10,7 +10,7 @@
  * Conventions mirror chain-lifecycle-extra.test.ts: real EVMChainAdapter
  * over the shared Hardhat node, one snapshot per test for isolation.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
@@ -209,6 +209,29 @@ describe('V10 Publishing Conviction NFT — chain-adapter lifecycle', () => {
     }
     // No zero-id padding leaks through (defensive trim holds).
     expect(nodes.every((n) => n.identityId > 0n)).toBe(true);
+  });
+
+  it('listDesignatableNodes TTL-caches (cache hit skips the read; ?fresh bypasses) and a throw does not poison it (M6)', async () => {
+    const reader = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const good = await reader.listDesignatableNodes(); // populate the cache + memoize the contract
+
+    // Cache hit: a 2nd call within the 30s TTL does NOT re-read the chain.
+    const spy = vi.spyOn(reader as any, 'readContractWith');
+    await reader.listDesignatableNodes();
+    expect(spy).not.toHaveBeenCalled();
+
+    // ?fresh bypasses the cache → exactly one underlying read.
+    await reader.listDesignatableNodes({ fresh: true });
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
+
+    // Success-only / no-negative-cache: a throwing fresh read must leave the
+    // prior good value cached (the next non-fresh call still returns it).
+    const boom = vi.spyOn(reader as any, 'readContractWith')
+      .mockRejectedValueOnce(Object.assign(new Error('blip'), { code: 'CALL_EXCEPTION' }));
+    await expect(reader.listDesignatableNodes({ fresh: true })).rejects.toThrow();
+    boom.mockRestore();
+    expect(await reader.listDesignatableNodes()).toEqual(good);
   });
 
   it('getPublishingConvictionAgents enumerates registered agents (checksummed) and reflects deregistration', async () => {

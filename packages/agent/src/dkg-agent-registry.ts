@@ -1554,10 +1554,11 @@ export class AgentRegistryMethods extends DKGAgentBase {
   }
 
   /** B-staked-nodes (Stage-5) — the sharding table of designatable PCA primary
-   *  nodes. `null` when the adapter lacks the surface (daemon maps null → 503). */
-  async listDesignatableNodes(this: DKGAgent): Promise<ShardingTableNode[] | null> {
+   *  nodes. `opts.fresh` bypasses the adapter's TTL cache (M4). `null` when the
+   *  adapter lacks the surface (daemon maps null → 503). */
+  async listDesignatableNodes(this: DKGAgent, opts?: { fresh?: boolean }): Promise<ShardingTableNode[] | null> {
     if (typeof this.chain.listDesignatableNodes !== 'function') return null;
-    return this.chain.listDesignatableNodes();
+    return this.chain.listDesignatableNodes(opts);
   }
 
   // ---------------------------------------------------------------------------

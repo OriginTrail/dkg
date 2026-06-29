@@ -522,22 +522,31 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
    * silent node drop. Hash-ring order is preserved; the UI sorts for display.
    *
    * TTL-cached (~30s) adapter-side, success-only (a throw never poisons the
-   * cache). Read failures SURFACE — a CALL_EXCEPTION/transport blip propagates
-   * to the route (→ 503 SHARDING_TABLE_READ_FAILED / 503-504), never a partial
-   * or empty list a picker would misread as "no stakeable nodes".
+   * cache). `opts.fresh` BYPASSES the cache and re-reads the chain (then
+   * repopulates the cache) — M4: the create `PrimaryNodeNotInShardingTable`
+   * revert recovery + the picker Retry call it so a just-rejected /
+   * just-(un)staked node isn't re-served for up to 30s. Read failures SURFACE —
+   * a CALL_EXCEPTION/transport blip propagates to the route (→ 503
+   * SHARDING_TABLE_READ_FAILED / 503-504), never a partial or empty list a
+   * picker would misread as "no stakeable nodes".
    *
    * The no-arg overload is resolved via the explicit `getFunction(...)`
    * signature so ethers v6 never confuses it with `getShardingTable(uint72,
    * uint72)`.
    */
-  async listDesignatableNodes(): Promise<ShardingTableNode[]> {
+  async listDesignatableNodes(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]> {
     const now = Date.now();
     const cached = this.cachedDesignatableNodes;
-    if (cached && now - cached.cachedAt < ConvictionMethods.DESIGNATABLE_NODES_TTL_MS) {
+    if (!opts?.fresh && cached && now - cached.cachedAt < ConvictionMethods.DESIGNATABLE_NODES_TTL_MS) {
       return cached.value;
     }
     await this.init();
-    const shardingTable = await this.resolveContract('ShardingTable');
+    // N2: memoize the resolved logic contract (its address is immutable) so a
+    // TTL-cache miss doesn't re-hit the Hub each time.
+    if (!this.contracts.shardingTable) {
+      this.contracts.shardingTable = await this.resolveContract('ShardingTable');
+    }
+    const shardingTable = this.contracts.shardingTable;
     const raw = await this.readContractWith<ReadonlyArray<any>>(
       shardingTable,
       'shardingTable.getShardingTable',

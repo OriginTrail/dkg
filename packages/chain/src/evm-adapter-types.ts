@@ -130,6 +130,10 @@ export interface ContractCache {
    * Tracked at issue #831.
    */
   chronos?: Contract;
+  /** B-staked-nodes (Stage-5): memoized ShardingTable logic contract — its
+   *  address is immutable, so listDesignatableNodes resolves it once instead of
+   *  re-hitting the Hub on every TTL-cache miss. */
+  shardingTable?: Contract;
 }
 
 export function formatProviderContext(config: Pick<EVMAdapterConfig, 'chainId' | 'rpcUrl'>): string {
