@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   fetchWalletsBalances: vi.fn(),
   createPca: vi.fn(),
   fetchPca: vi.fn(),
+  pcaAgentAccount: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', async (orig) => {
@@ -21,6 +22,7 @@ vi.mock('../src/ui/api.js', async (orig) => {
     fetchWalletsBalances: mocks.fetchWalletsBalances,
     createPca: mocks.createPca,
     fetchPca: mocks.fetchPca,
+    pcaAgentAccount: mocks.pcaAgentAccount,
   };
 });
 
@@ -93,6 +95,8 @@ beforeEach(() => {
     balances: [{ address: OWNER, eth: '1', trac: '200000', symbol: 'TRAC' }],
     chainId: '84532', rpcUrl: null,
   });
+  // B1 default: the wallet is bound to nothing → no zero-coverage warning (and no real fetch).
+  mocks.pcaAgentAccount.mockResolvedValue({ agent: '', accountId: null });
 });
 afterEach(() => {
   expect(fetchGuard).not.toHaveBeenCalled();
@@ -144,6 +148,21 @@ describe('CreatePcaModal', () => {
     // The primary success action opens self-approval.
     await click(container.querySelector('[data-testid="pca-approve-own-wallets"]')!);
     expect(onApproveOwn).toHaveBeenCalledWith('7');
+    await unmount();
+  });
+
+  // B1 (§9.5) — every op wallet already on a sponsor's PCA → a loud informed-consent warning
+  // before the TRAC commit; NOT a hard block (a node may create purely to sponsor others).
+  it('B1 — all wallets sponsor-bound shows the zero-self-coverage warning, never blocks Create', async () => {
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: OWNER, accountId: '5' });
+    mocks.fetchPca.mockResolvedValue(snap({ accountId: '5', owner: '0xSPONSOR000000000000000000000000000beEf12' }));
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'sponsor other nodes'); // the zero-coverage warning copy
+    expect(container.querySelector('[data-testid="pca-b1-zero-coverage"]')).toBeTruthy();
+    // Informed consent, not a gate — the submit control is still present.
+    expect(container.querySelector('[data-testid="pca-create-submit"]')).toBeTruthy();
     await unmount();
   });
 

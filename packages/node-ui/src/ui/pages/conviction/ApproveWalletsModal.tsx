@@ -7,6 +7,7 @@ import {
   HttpError,
 } from '../../api.js';
 import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
+import { resolveWalletBinding } from '../../pca/walletBinding.js';
 import { PcaModalShell } from './PcaModalShell.js';
 import {
   AddressCrux,
@@ -16,7 +17,7 @@ import {
   type WalletRowTone,
 } from '../../components/Pca/index.js';
 
-type RowStatus = 'pending' | 'approved' | 'submitted' | 'skipped' | 'conflict' | 'cap' | 'error' | 'unverified';
+type RowStatus = 'pending' | 'approved' | 'submitted' | 'skipped' | 'sponsored' | 'conflict' | 'cap' | 'error' | 'unverified';
 interface Row {
   address: string;
   status: RowStatus;
@@ -31,6 +32,9 @@ const ROW_LABEL: Record<RowStatus, string> = {
   approved: 'approved on-chain',
   submitted: 'submitted — verify',
   skipped: 'already approved here (skipped)',
+  // B1 self-coverage — bound to a sponsor's PCA; intentionally left there (already discounted
+  // free), NOT moved. Distinct from 'skipped' (= already approved HERE).
+  sponsored: 'left on a sponsor’s PCA (already discounted free)',
   conflict: 'on another conviction account',
   cap: 'cap reached',
   error: 'failed',
@@ -43,6 +47,7 @@ const ROW_TONE: Record<RowStatus, WalletRowTone> = {
   approved: 'success',
   submitted: 'neutral',
   skipped: 'neutral',
+  sponsored: 'neutral',
   conflict: 'danger',
   cap: 'warn',
   error: 'danger',
@@ -66,6 +71,7 @@ export function ApproveWalletsModal({
   seedBulk,
   deregisterFrom,
   seedAgentsResolved,
+  selfCoverage,
 }: {
   accountId: string;
   initialMode?: 'self' | 'sponsor';
@@ -85,6 +91,14 @@ export function ApproveWalletsModal({
   /** S2b renew — whether the old account's agents loaded (`listPcaAgents`). `false` →
    *  the seed couldn't be pre-filled; the copy stops promising it and prompts manual entry. */
   seedAgentsResolved?: boolean;
+  /**
+   * B1 self-coverage (§9.5) — set when this is the post-create self-coverage of THIS node's
+   * own wallets. Each wallet is binding-probed PER-ROW just before its register: a wallet on a
+   * PCA the node OWNS is deregistered-first; a wallet on a PCA the node CAN'T own (a sponsor's)
+   * is SKIPPED (already discounted free), never burning a register. Distinct from `deregisterFrom`
+   * (renew's single old account) — here the old account varies per wallet.
+   */
+  selfCoverage?: boolean;
 }) {
   const { data: wb } = useFetch(fetchWalletsBalances, [], 0);
   const { data: snapshot } = useFetch(() => fetchPca(accountId), [accountId]);
@@ -93,6 +107,7 @@ export function ApproveWalletsModal({
   // Same daemon submitter in P0; keyed separately for the §9 wallet-owned future.
   const deregisterOwner = useOwnerActionSubmitter(deregisterFrom);
   const nodeWallets = wb?.wallets ?? [];
+  const ownerWallet = nodeWallets[0]; // the daemon EOA — what it can deregister-from (B1)
   const agentCount = snapshot?.agentCount ?? 0;
   const cap = Math.max(0, 100 - agentCount);
 
@@ -172,6 +187,23 @@ export function ApproveWalletsModal({
         // handling below surfaces a still-bound wallet as a conflict (#old) for recovery.
         if (deregisterFrom) {
           await deregisterOwner.deregisterAgent(deregisterFrom, addr).catch(() => {});
+        } else if (selfCoverage) {
+          // B1 self-coverage (§9.5) — the old account VARIES per wallet. Probe this wallet's
+          // binding right before its register: bound to a PCA the node CAN'T own (a sponsor's)
+          // → SKIP (already discounted free; don't burn a register/conflict); bound to a PCA
+          // the node OWNS → deregister-first; unbound → register. A probe that can't be read
+          // falls through to register (the B10 conflict handling below is the backstop, #9).
+          const b = await resolveWalletBinding(addr, ownerWallet);
+          if (b.boundTo && !b.canOwn && !b.inconclusive) {
+            setRows((r) => ({
+              ...r,
+              [addr]: { address: addr, status: 'sponsored', message: `Stays on PCA #${b.boundTo} — already discounted free.` },
+            }));
+            continue;
+          }
+          if (b.boundTo && b.canOwn) {
+            await owner.deregisterAgent(b.boundTo, addr).catch(() => {});
+          }
         }
         const res = await owner.registerAgent(accountId, addr);
         setRows((r) => ({
@@ -235,6 +267,7 @@ export function ApproveWalletsModal({
       confirmed: list.filter((r) => r.status === 'approved').length,
       submitted: list.filter((r) => r.status === 'submitted').length,
       skipped: list.filter((r) => r.status === 'skipped').length,
+      sponsored: list.filter((r) => r.status === 'sponsored').length,
       conflict: list.filter((r) => r.status === 'conflict').length,
       error: list.filter((r) => r.status === 'error' || r.status === 'cap').length,
       unverified: list.filter((r) => r.status === 'unverified').length,
@@ -358,7 +391,7 @@ export function ApproveWalletsModal({
                 <WalletRow
                   key={a}
                   address={a}
-                  status={row.message && (row.status === 'conflict' || row.status === 'error') ? row.message : ROW_LABEL[row.status]}
+                  status={row.message && (row.status === 'conflict' || row.status === 'error' || row.status === 'sponsored') ? row.message : ROW_LABEL[row.status]}
                   statusTone={ROW_TONE[row.status]}
                 />
               );
@@ -368,6 +401,7 @@ export function ApproveWalletsModal({
                 Approved {counts.confirmed} confirmed
                 {counts.submitted > 0 ? ` · ${counts.submitted} submitted (verify)` : ''}
                 {' '}· {counts.skipped} already here · {counts.conflict} conflict
+                {counts.sponsored > 0 ? ` · ${counts.sponsored} left on a sponsor’s PCA` : ''}
                 {counts.error > 0 ? ` · ${counts.error} failed` : ''}
                 {counts.unverified > 0 ? ` · ${counts.unverified} unverified` : ''} (of {order.length}).
               </p>

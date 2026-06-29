@@ -10,6 +10,7 @@ import {
   type PcaSnapshot,
 } from '../../api.js';
 import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
+import { probeWalletBindings, selfCoverageOutlook } from '../../pca/walletBinding.js';
 import { useAgentsStore } from '../../stores/agents.js';
 import { usePcaStore } from '../../stores/pca.js';
 import { DiscountTierLadder, discountTierForTrac, WalletRow } from '../../components/Pca/index.js';
@@ -73,6 +74,19 @@ export function CreatePcaModal({
   const ownerWallet = wallets[0];
   const ownerTrac = wb?.balances?.find((b) => b.address === ownerWallet)?.trac;
   const ownerTracNum = ownerTrac != null ? Number(ownerTrac) : NaN;
+
+  // B1 pre-flight wallet-binding probe (§9.5) — READ-ONLY, at wizard open. Surfaces the
+  // self-coverage outlook BEFORE the TRAC commit: if EVERY op wallet is already bound to a
+  // sponsor's PCA, the new account would discount none of this node's own publishes (a loud
+  // informed-consent warning — NOT a hard block; a node may create purely to sponsor others).
+  // The per-wallet deregister-first then runs in the self-coverage loop (ApproveWalletsModal).
+  const walletsKey = wallets.join(',');
+  const { data: bindings } = useFetch(
+    () => probeWalletBindings(wallets, ownerWallet),
+    [walletsKey, ownerWallet],
+    0,
+  );
+  const b1 = useMemo(() => selfCoverageOutlook(bindings ?? []), [bindings]);
 
   const owner = useOwnerActionSubmitter(); // owner-action seam (P0: daemon submitter)
   const finishCreate = usePcaStore((s) => s.finishCreate);
@@ -312,6 +326,25 @@ export function CreatePcaModal({
               Or get sponsored
             </button>{' '}
             — the free alternative (no TRAC locked).
+          </div>
+        )}
+
+        {/* B1 (§9.5) — zero-self-coverage informed consent: every op wallet is already on a
+            sponsor's PCA, so this account discounts NONE of your own publishes. NOT a block. */}
+        {b1.zeroSelfCoverage && (
+          <div className="v10-modal-warning" role="alert" data-testid="pca-b1-zero-coverage">
+            ⚠ All of this node’s operational wallets are already approved on other PCAs — you
+            already get the discount, free. This new account will <strong>NOT</strong> discount your
+            own publishes. Create it only if you intend to <strong>sponsor other nodes</strong>;
+            otherwise getting sponsored is the free path and creating just locks your TRAC.
+          </div>
+        )}
+        {/* Partial case — some wallets stay on a sponsor's PCA (already free), not moved. */}
+        {!b1.zeroSelfCoverage && b1.sponsorBound.length > 0 && (
+          <div className="v10-modal-tip" role="status" data-testid="pca-b1-preview">
+            ⓘ After creating, {b1.sponsorBound.length} of your wallet(s) stay on a sponsor’s PCA
+            (already discounted free) and won’t be moved; the rest are approved on the new account
+            (any already on a PCA you own are deregistered from it first).
           </div>
         )}
 

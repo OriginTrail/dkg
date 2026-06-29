@@ -52,7 +52,7 @@ export function ConvictionOverview() {
   const defaultFilter: ViewFilter = role === 'edge' ? 'approved' : 'owned';
   const filter = userFilter ?? defaultFilter;
   const [createOpen, setCreateOpen] = useState(false);
-  const [approve, setApprove] = useState<{ accountId: string; mode: 'self' | 'sponsor' } | null>(null);
+  const [approve, setApprove] = useState<{ accountId: string; mode: 'self' | 'sponsor'; selfCoverage?: boolean } | null>(null);
   const [sponsoredOpen, setSponsoredOpen] = useState(false);
 
   const owned = useMemo(() => accounts.filter((a) => a.classification === 'owned'), [accounts]);
@@ -211,7 +211,7 @@ export function ConvictionOverview() {
       {createOpen && (
         <CreatePcaModal
           onClose={() => { setCreateOpen(false); refresh(); }}
-          onApproveOwnWallets={(id) => { setCreateOpen(false); setApprove({ accountId: id, mode: 'self' }); }}
+          onApproveOwnWallets={(id) => { setCreateOpen(false); setApprove({ accountId: id, mode: 'self', selfCoverage: true }); }}
           onManage={(id) => { setCreateOpen(false); onManage(id); }}
           onGetSponsored={() => { setCreateOpen(false); setSponsoredOpen(true); }}
         />
@@ -220,6 +220,7 @@ export function ConvictionOverview() {
         <ApproveWalletsModal
           accountId={approve.accountId}
           initialMode={approve.mode}
+          selfCoverage={approve.selfCoverage}
           onClose={() => { setApprove(null); refresh(); }}
         />
       )}
