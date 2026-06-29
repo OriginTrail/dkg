@@ -1,12 +1,12 @@
 // @vitest-environment happy-dom
 //
-// #1344 cross-consumer PARITY (anti-drift) — the three coverage surfaces now
-// share `src/ui/pca/coverage.ts` (the leaf rules that drifted across
-// C1/O4/Q2/S2/U2/V3). This feeds ONE fixture (a PCA snapshot + a per-wallet
+// #1344 cross-consumer PARITY (anti-drift), TABLE-DRIVEN — the three coverage
+// surfaces share `src/ui/pca/coverage.ts` (the leaf rules that drifted across
+// C1/O4/Q2/S2/U2/V3). Each row feeds ONE fixture (a PCA snapshot + a per-wallet
 // probe) through the SINGLE `classifyCoverage` and asserts all three surfaces
-// classify the SAME fixture identically — covers / registered-but-uncovered /
-// inconclusive — so they can't re-diverge. Each surface keeps its own aggregation; this pins
-// only their agreement on the shared leaf coverage:
+// classify it identically — covers / inconclusive / registered-but-uncovered —
+// so they can't re-diverge. One driver, one row per scenario (adding a case is a
+// table row, not a copied render block). Surfaces pinned:
 //   - S5 `PublishEligibilityChip` (usePublishEligibility) → the chip verdict,
 //   - S6 `GetSponsoredPanel`       → the per-wallet approval-check outcome,
 //   - `usePcaOverview`             → registered / approvedCount / covered / bestBps.
@@ -113,122 +113,115 @@ beforeEach(() => {
 afterEach(() => { document.body.innerHTML = ''; });
 
 const FUTURE = Math.floor(Date.now() / 1000) + 60 * 86_400;
+const PAST = Math.floor(Date.now() / 1000) - 86_400;
 
-describe('#1344 coverage parity — S5 / S6 / overview agree via the shared resolver', () => {
-  it('registered + spendable → ALL THREE say "covers"', async () => {
-    const snap = makePcaSnapshot({ accountId: ACCOUNT, expiresAtTimestamp: FUTURE });
-    const probe: PcaProbedKey = { key: W0, registered: true };
-    wire(snap, probe);
-    const expected = classifyCoverage({ ...snap, probedKey: probe });
-    expect(expected).toEqual({ outcome: 'covers', registered: true });
+interface Scenario {
+  name: string;
+  snapOver: Record<string, unknown>;
+  probe: PcaProbedKey;
+  /** The shared-resolver oracle result the 3 surfaces must agree with. */
+  expected: ReturnType<typeof classifyCoverage>;
+  overview: { registered: boolean | null; approvedCount: number; inconclusive: boolean; covered: boolean; bestBps: 'discount' | null };
+  s5Verdict: 'eligible' | 'fallthrough' | 'unknown';
+  s5Wait: string;
+  s6: { wait: string; ready: boolean; notText?: string[] };
+}
 
-    // overview
-    const ov = await renderOverview();
-    const a = latestOverview!.accounts.find((x) => x.accountId === ACCOUNT)!;
-    expect(a.walletProbes[0]?.registered).toBe(true);
-    expect(a.approvedCount).toBe(1);
-    expect(a.probesInconclusive).toBe(false);
-    expect(latestOverview!.covered).toBe(true);
-    expect(latestOverview!.bestCoveringDiscountBps).toBe(snap.discountBps);
-    await ov.unmount();
+const SCENARIOS: Scenario[] = [
+  {
+    name: 'registered + spendable → covers',
+    snapOver: { expiresAtTimestamp: FUTURE },
+    probe: { key: W0, registered: true },
+    expected: { outcome: 'covers', registered: true },
+    overview: { registered: true, approvedCount: 1, inconclusive: false, covered: true, bestBps: 'discount' },
+    s5Verdict: 'eligible',
+    s5Wait: 'Funded by PCA #' + ACCOUNT,
+    s6: { wait: 'Ready', ready: true },
+  },
+  {
+    name: 'adapterSupported:false → inconclusive (never a confirmed not-approved/DANGER)',
+    snapOver: { expiresAtTimestamp: FUTURE },
+    probe: { key: W0, registered: false, adapterSupported: false },
+    expected: { outcome: 'inconclusive', registered: null },
+    overview: { registered: null, approvedCount: 0, inconclusive: true, covered: false, bestBps: null },
+    s5Verdict: 'unknown',
+    s5Wait: 'PCA status unknown',
+    // All-inconclusive → S6 reports a wholesale "couldn't determine" (never a false
+    // "not approved"/"0 of N", never Ready) — still the inconclusive outcome.
+    s6: { wait: 'the chain lookup failed', ready: false, notText: ['0 of 1'] },
+  },
+  {
+    name: 'zero-budget approved → uncovered (hasBudget:false)',
+    snapOver: { expiresAtTimestamp: FUTURE, topUpBuffer: '0', topUpBufferTrac: '0', baseEpochAllowance: '0' },
+    probe: { key: W0, registered: true },
+    expected: { outcome: 'uncovered', registered: true, dead: false, hasBudget: false },
+    overview: { registered: true, approvedCount: 1, inconclusive: false, covered: false, bestBps: null },
+    s5Verdict: 'fallthrough', // wallet has TRAC → amber, not danger
+    s5Wait: 'No PCA discount',
+    s6: { wait: 'Approved on PCA #' + ACCOUNT, ready: false },
+  },
+  {
+    name: 'expired approved → uncovered (dead:true)',
+    snapOver: { expiresAtTimestamp: PAST },
+    probe: { key: W0, registered: true },
+    expected: { outcome: 'uncovered', registered: true, dead: true, hasBudget: true },
+    overview: { registered: true, approvedCount: 1, inconclusive: false, covered: false, bestBps: null },
+    s5Verdict: 'fallthrough',
+    s5Wait: 'No PCA discount',
+    s6: { wait: 'publishes won’t get the discount', ready: false },
+  },
+  {
+    name: 'swept approved → uncovered (dead:true)',
+    snapOver: { fullySwept: true, expiresAtTimestamp: FUTURE },
+    probe: { key: W0, registered: true },
+    expected: { outcome: 'uncovered', registered: true, dead: true, hasBudget: true },
+    overview: { registered: true, approvedCount: 1, inconclusive: false, covered: false, bestBps: null },
+    s5Verdict: 'fallthrough',
+    s5Wait: 'No PCA discount',
+    s6: { wait: 'publishes won’t get the discount', ready: false },
+  },
+];
 
-    // S5 chip → eligible
-    const s5 = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
-    await waitForText(s5.container, 'Funded by PCA #' + ACCOUNT);
-    expect(s5.container.querySelector('[data-verdict="eligible"]')).toBeTruthy();
-    await s5.unmount();
+describe('#1344 coverage parity (table-driven) — S5 / S6 / overview agree via classifyCoverage', () => {
+  for (const s of SCENARIOS) {
+    it(`all surfaces agree: ${s.name}`, async () => {
+      const snap = makePcaSnapshot({ accountId: ACCOUNT, ...s.snapOver });
+      wire(snap, s.probe);
 
-    // S6 panel → covers → Ready
-    const s6 = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
-    await waitForText(s6.container, 'Track your approval');
-    setInputValue(s6.container.querySelector('input[aria-label="Sponsor account id"]') as HTMLInputElement, ACCOUNT);
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-    await act(async () => {
-      (Array.from(s6.container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!)
-        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      // 0. the shared-resolver oracle — the single source the 3 surfaces consume.
+      expect(classifyCoverage({ ...snap, probedKey: s.probe })).toEqual(s.expected);
+
+      // 1. usePcaOverview
+      const ov = await renderOverview();
+      const a = latestOverview!.accounts.find((x) => x.accountId === ACCOUNT)!;
+      expect(a.walletProbes[0]?.registered).toBe(s.overview.registered);
+      expect(a.approvedCount).toBe(s.overview.approvedCount);
+      expect(a.probesInconclusive).toBe(s.overview.inconclusive);
+      expect(latestOverview!.covered).toBe(s.overview.covered);
+      expect(latestOverview!.bestCoveringDiscountBps).toBe(s.overview.bestBps === 'discount' ? snap.discountBps : null);
+      await ov.unmount();
+
+      // 2. S5 chip (PublishEligibilityChip)
+      const s5 = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+      await waitForText(s5.container, s.s5Wait);
+      expect(s5.container.querySelector(`[data-verdict="${s.s5Verdict}"]`)).toBeTruthy();
+      if (s.s5Verdict !== 'eligible') expect(s5.container.querySelector('[data-verdict="eligible"]')).toBeNull();
+      await s5.unmount();
+
+      // 3. S6 panel (GetSponsoredPanel) — run the approval check
+      const s6 = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
+      await waitForText(s6.container, 'Track your approval');
+      setInputValue(s6.container.querySelector('input[aria-label="Sponsor account id"]') as HTMLInputElement, ACCOUNT);
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+      await act(async () => {
+        (Array.from(s6.container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!)
+          .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      await waitForText(s6.container, s.s6.wait);
+      if (s.s6.ready) expect(s6.container.textContent).toContain('Ready');
+      else expect(s6.container.textContent).not.toContain('Ready');
+      for (const nt of s.s6.notText ?? []) expect(s6.container.textContent).not.toContain(nt);
+      await s6.unmount();
     });
-    await waitForText(s6.container, 'Ready');
-    await s6.unmount();
-  });
-
-  it('adapterSupported:false → ALL THREE say "inconclusive" (never a confirmed not-approved/DANGER)', async () => {
-    const snap = makePcaSnapshot({ accountId: ACCOUNT, expiresAtTimestamp: FUTURE });
-    const probe: PcaProbedKey = { key: W0, registered: false, adapterSupported: false };
-    wire(snap, probe);
-    const expected = classifyCoverage({ ...snap, probedKey: probe });
-    expect(expected).toEqual({ outcome: 'inconclusive', registered: null });
-
-    // overview → inconclusive, not 0-approved-confirmed, not covered
-    const ov = await renderOverview();
-    const a = latestOverview!.accounts.find((x) => x.accountId === ACCOUNT)!;
-    expect(a.walletProbes[0]?.registered).toBeNull();
-    expect(a.approvedCount).toBe(0);
-    expect(a.probesInconclusive).toBe(true);
-    expect(latestOverview!.covered).toBe(false);
-    await ov.unmount();
-
-    // S5 chip → unknown (neutral), NOT danger
-    const s5 = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
-    await waitForText(s5.container, 'PCA status unknown');
-    expect(s5.container.querySelector('[data-verdict="unknown"]')).toBeTruthy();
-    expect(s5.container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeNull();
-    expect(s5.container.querySelector('[data-verdict="eligible"]')).toBeNull();
-    await s5.unmount();
-
-    // S6 panel → neutral row, never "not approved", never Ready
-    const s6 = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
-    await waitForText(s6.container, 'Track your approval');
-    setInputValue(s6.container.querySelector('input[aria-label="Sponsor account id"]') as HTMLInputElement, ACCOUNT);
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-    await act(async () => {
-      (Array.from(s6.container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!)
-        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    // All probed wallets inconclusive (adapterSupported:false) → S6 reports a
-    // wholesale "couldn't determine" (never a false "not approved"/"0 of N",
-    // never Ready) — the inconclusive outcome, consistent with S5 + overview.
-    await waitForText(s6.container, 'the chain lookup failed');
-    expect(s6.container.textContent).not.toContain('Ready');
-    expect(s6.container.textContent).not.toContain('0 of 1');
-    await s6.unmount();
-  });
-
-  it('zero-budget approved → ALL THREE say "registered but NONE covers"', async () => {
-    const snap = makePcaSnapshot({ accountId: ACCOUNT, expiresAtTimestamp: FUTURE, topUpBuffer: '0', topUpBufferTrac: '0', baseEpochAllowance: '0' });
-    const probe: PcaProbedKey = { key: W0, registered: true };
-    wire(snap, probe);
-    const expected = classifyCoverage({ ...snap, probedKey: probe });
-    expect(expected).toEqual({ outcome: 'uncovered', registered: true, dead: false, hasBudget: false });
-
-    // overview → registered (approvedCount 1) but NOT covered, no advertised discount
-    const ov = await renderOverview();
-    const a = latestOverview!.accounts.find((x) => x.accountId === ACCOUNT)!;
-    expect(a.walletProbes[0]?.registered).toBe(true);
-    expect(a.approvedCount).toBe(1);
-    expect(a.probesInconclusive).toBe(false);
-    expect(latestOverview!.covered).toBe(false);
-    expect(latestOverview!.bestCoveringDiscountBps).toBeNull();
-    await ov.unmount();
-
-    // S5 chip → fall-through (no discount), NOT eligible (covers:false); wallet has
-    // TRAC so it's amber, not danger.
-    const s5 = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
-    await waitForText(s5.container, 'No PCA discount');
-    expect(s5.container.querySelector('[data-verdict="fallthrough"]')).toBeTruthy();
-    expect(s5.container.querySelector('[data-verdict="eligible"]')).toBeNull();
-    await s5.unmount();
-
-    // S6 panel → registered counted, but NOT Ready (the account can't cover)
-    const s6 = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
-    await waitForText(s6.container, 'Track your approval');
-    setInputValue(s6.container.querySelector('input[aria-label="Sponsor account id"]') as HTMLInputElement, ACCOUNT);
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-    await act(async () => {
-      (Array.from(s6.container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!)
-        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    await waitForText(s6.container, 'Approved on PCA #' + ACCOUNT);
-    expect(s6.container.textContent).not.toContain('Ready');
-    await s6.unmount();
-  });
+  }
 });

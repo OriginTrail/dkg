@@ -79,6 +79,21 @@ describe('classifyCoverage (discriminated union — facets ONLY on uncovered)', 
     );
     expect(c).toEqual({ outcome: 'uncovered', registered: true, dead: false, hasBudget: false });
   });
+  // C1 — `dead` and `hasBudget` are INDEPENDENT reason facets. An account that is
+  // BOTH expired (or swept) AND out-of-budget must set BOTH (dead:true, hasBudget:false),
+  // not just one — the reviewer's independence lock (each facet has its own `if`).
+  it('registered + expired + zero-budget → uncovered with BOTH facets (dead:true, hasBudget:false)', () => {
+    const c = classifyCoverage(
+      makePcaSnapshot({ expiresAtTimestamp: PAST, topUpBuffer: '0', baseEpochAllowance: '0', probedKey: { key: '0x', registered: true } }),
+    );
+    expect(c).toEqual({ outcome: 'uncovered', registered: true, dead: true, hasBudget: false });
+  });
+  it('registered + swept + zero-budget → uncovered with BOTH facets (dead:true, hasBudget:false)', () => {
+    const c = classifyCoverage(
+      makePcaSnapshot({ fullySwept: true, expiresAtTimestamp: FUTURE, topUpBuffer: '0', baseEpochAllowance: '0', probedKey: { key: '0x', registered: true } }),
+    );
+    expect(c).toEqual({ outcome: 'uncovered', registered: true, dead: true, hasBudget: false });
+  });
   it('registered:false → { outcome: unregistered, registered: false }', () => {
     const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: FUTURE, probedKey: { key: '0x', registered: false } }));
     expect(c).toEqual({ outcome: 'unregistered', registered: false });

@@ -211,6 +211,29 @@ describe('PublishEligibilityChip (S5)', () => {
     await unmount();
   });
 
+  // C1 — `dead` and out-of-budget are INDEPENDENT reason facets: an account that
+  // is BOTH expired AND zero-budget must surface BOTH reasons in the popover (the
+  // two independent `if`s in usePublishEligibility fire), not just one.
+  it('C1: an expired AND out-of-budget approved account surfaces BOTH reasons', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('50')); // gas+TRAC → amber fall-through
+    const deadBroke = makePcaSnapshot({
+      expiresAtTimestamp: Math.floor(Date.now() / 1000) - 86_400, // expired
+      topUpBuffer: '0',
+      topUpBufferTrac: '0',
+      baseEpochAllowance: '0', // out of budget
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...deadBroke, probedKey: { key, registered: true } } : deadBroke,
+    );
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'No PCA discount'); // amber (wallet has TRAC)
+    const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
+    await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'expired or been fully swept');
+    expect(container.textContent).toContain('out of budget'); // BOTH independent facets surfaced
+    await unmount();
+  });
+
   // #3 — an approved wallet on a swept/expired PCA is uncovered via HEALTH (not
   // solvency), and reads "approved … but swept", never a misleading "no PCA".
   it('an approved wallet on a SWEPT PCA reads "approved … but swept", not "no PCA" (#3)', async () => {
