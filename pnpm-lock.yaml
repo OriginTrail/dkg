@@ -382,7 +382,7 @@ importers:
         version: 4.1.1
       n3:
         specifier: ^2.0.1
-        version: 2.0.1
+        version: 2.1.0
       typescript:
         specifier: ^5.7
         version: 5.9.3
@@ -612,8 +612,8 @@ importers:
         specifier: ^1.51.0
         version: 1.51.1
       n3:
-        specifier: ^1.22.3
-        version: 1.26.0
+        specifier: ^2.1.0
+        version: 2.1.0
       oxigraph:
         specifier: ^0.5.4
         version: 0.5.5
@@ -5096,8 +5096,8 @@ packages:
     resolution: {integrity: sha512-SQknS0ua90rN+3RHuk8BeIqeYyqIH/+ecViZxX08jR4j6MugqWRjtONl3uANG/crWXnOM2WIqBJtjIhVYFha+w==}
     engines: {node: '>=12.0'}
 
-  n3@2.0.1:
-    resolution: {integrity: sha512-Q6TPsTrlEoELXQ47tSBYcAZ800PQN9gtSImRUqQYoBq+Q7riIUAoDgf3tuMv6PuwonO86SBIx5GfOxvS4A/4kw==}
+  n3@2.1.0:
+    resolution: {integrity: sha512-+05H/h40wRyROglcVGrNZAwBu0Nc87luKhiTV95aGBGX1YyITtpwftHwyhT5YoZr4soXJWrzxqC1CHPdGqV63g==}
     engines: {node: '>=12.0'}
 
   nanoid@3.3.12:
@@ -11582,7 +11582,7 @@ snapshots:
       buffer: 6.0.3
       readable-stream: 4.7.0
 
-  n3@2.0.1:
+  n3@2.1.0:
     dependencies:
       buffer: 6.0.3
       readable-stream: 4.7.0
