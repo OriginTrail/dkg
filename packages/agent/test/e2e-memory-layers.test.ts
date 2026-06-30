@@ -942,6 +942,60 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     expect(history?.vmCurrentAssertion).toBe(intent.sealMerkleRoot.slice(2));
   }, 120_000);
 
+  it('synchronous VM publish updates a sub-graph KA in the sub-graph VM graph', async () => {
+    const agent = await createAgent('SyncVmSubgraphUpdateBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Sync VM Subgraph Update E2E' });
+    await agent.registerContextGraph(CG_ID);
+    const subGraphName = 'sync-update';
+    await agent.createSubGraph(CG_ID, subGraphName);
+
+    const name = 'sync-subgraph-update';
+    const root = `${ENTITY_BASE}:sync-subgraph-update`;
+    await agent.assertion.create(CG_ID, name, { subGraphName });
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Sync Subgraph v1"' },
+    ], { subGraphName });
+    const firstShare = await agent.assertion.promote(CG_ID, name, { subGraphName });
+    expect(firstShare.publishReady).toBe(true);
+    const firstPublish = await agent.publishFromFinalizedAssertion(CG_ID, name, { subGraphName });
+    expect(firstPublish.status).toBe('confirmed');
+
+    const reopened = await agent.assertion.pullFrom(CG_ID, name, 'vm', {
+      subGraphName,
+      onConflict: 'replace',
+    });
+    expect(reopened.seeded).toBe(1);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Sync Subgraph v2"' },
+    ], { subGraphName });
+    await agent.assertion.finalize(CG_ID, name, { subGraphName });
+    const updateShare = await agent.assertion.promote(CG_ID, name, { subGraphName });
+    expect(updateShare.publishReady).toBe(true);
+    expect(updateShare.shareOperationId).not.toBe(firstShare.shareOperationId);
+    const updateIntent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name, { subGraphName });
+    expect(updateIntent.vmCurrentAssertion).toBeDefined();
+
+    const secondPublish = await agent.publishFromFinalizedAssertion(CG_ID, name, { subGraphName });
+    expect(secondPublish.status).toBe('confirmed');
+
+    const subgraphVm = await agent.query(
+      `SELECT ?name WHERE { <${root}> <http://schema.org/name> ?name }`,
+      { contextGraphId: CG_ID, subGraphName },
+    );
+    expect(subgraphVm.bindings.map((row) => row['name'])).toContain('"Sync Subgraph v2"');
+
+    const rootVm = await agent.query(
+      `SELECT ?name WHERE { <${root}> <http://schema.org/name> ?name }`,
+      { contextGraphId: CG_ID },
+    );
+    expect(rootVm.bindings.map((row) => row['name'])).not.toContain('"Sync Subgraph v2"');
+
+    const history = await agent.assertion.history(CG_ID, name, { subGraphName });
+    expect(history?.state).toBe('published');
+    expect(history?.memoryLayer).toBe(MemoryLayer.VerifiableMemory);
+    expect(history?.vmCurrentAssertion).toBe(updateIntent.sealMerkleRoot.slice(2));
+  }, 120_000);
+
   // B2: SEAL-IN-SWM round trip. An asset shared UNSEALED (stuck, unpublishable)
   // is made publishable by finalize(layer:'swm') WITHOUT recreating it:
   // pull-from reconstructs a transient WM draft, finalize seals it, then the
