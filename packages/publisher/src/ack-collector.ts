@@ -116,7 +116,7 @@ export interface ACKCollectorParams {
   subGraphName?: string;
   /** V10 flat-KC Merkle leaf count (sorted + deduped); binds StorageACK to on-chain RandomSampling. */
   merkleLeafCount: number;
-  ackMode: V10ACKMode;
+  ackMode?: V10ACKMode;
 }
 
 /**
@@ -268,21 +268,22 @@ export class ACKCollector {
         `ACK collection failed: V10 publish requires exactly one Knowledge Asset (kaCount=1); got ${params.kaCount}`,
       );
     }
-    const privateMerkleRoots = params.ackMode.kind === 'folded-private'
-      ? params.ackMode.privateMerkleRoots
+    const ackMode = params.ackMode ?? { kind: 'public' as const };
+    const privateMerkleRoots = ackMode.kind === 'folded-private'
+      ? ackMode.privateMerkleRoots
       : [];
-    const catalogCommitment = params.ackMode.kind === 'curated-catalog'
-      ? params.ackMode.catalogCommitment
+    const catalogCommitment = ackMode.kind === 'curated-catalog'
+      ? ackMode.catalogCommitment
       : undefined;
     if (
-      params.ackMode.kind === 'curated-catalog' &&
-      (params.ackMode as { privateMerkleRoots?: unknown }).privateMerkleRoots !== undefined
+      ackMode.kind === 'curated-catalog' &&
+      (ackMode as { privateMerkleRoots?: unknown }).privateMerkleRoots !== undefined
     ) {
       throw new Error(
         'ACKCollector: privateMerkleRoots cannot be combined with curated-catalog ACK mode',
       );
     }
-    if (params.ackMode.kind === 'folded-private' && privateMerkleRoots.length === 0) {
+    if (ackMode.kind === 'folded-private' && privateMerkleRoots.length === 0) {
       throw new Error('ACK collection failed: folded-private ACK mode requires at least one privateMerkleRoot');
     }
     for (const [idx, root] of privateMerkleRoots.entries()) {
@@ -349,7 +350,7 @@ export class ACKCollector {
         : undefined,
       subGraphName: params.subGraphName,
       merkleLeafCount: params.merkleLeafCount,
-      isEncryptedPayload: params.ackMode.kind === 'curated-catalog' ? true : undefined,
+      isEncryptedPayload: ackMode.kind === 'curated-catalog' ? true : undefined,
       catalogRoot: catalogCommitment?.catalogRoot,
       catalogLeafCount: catalogCommitment?.catalogLeafCount,
       privateMerkleRoots: privateMerkleRoots.length > 0
