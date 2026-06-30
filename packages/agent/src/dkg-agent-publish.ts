@@ -113,7 +113,8 @@ import {
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject,
   canonicalPublishPayload,
   generatedPrivateCatalogTripleKeys,
-  createKnowledgeAssetVmPublishLiftRequest,
+  createKnowledgeAssetVmPublishSnapshotMetadata,
+  createKnowledgeAssetVmPublishSnapshotRequest,
   resolveLiftWorkspaceSlice,
   validateLiftPublishPayload,
   subtractFinalizedExactQuads,
@@ -3581,16 +3582,18 @@ export class PublishMethods extends DKGAgentBase {
     this: DKGAgent,
     request: KnowledgeAssetVmPublishRequest,
   ): Promise<void> {
-    const liftRequest: LiftRequest = createKnowledgeAssetVmPublishLiftRequest(request);
+    const snapshot = createKnowledgeAssetVmPublishSnapshotRequest(request);
+    const snapshotMetadata = createKnowledgeAssetVmPublishSnapshotMetadata(request);
     try {
       const resolved = await resolveLiftWorkspaceSlice({
         store: this.store,
         graphManager: new GraphManager(this.store),
-        request: liftRequest,
+        request: snapshot,
         publicSnapshotStore: this.publicSnapshotStore,
       });
       validateLiftPublishPayload({
-        request: liftRequest,
+        request: snapshot,
+        metadata: snapshotMetadata,
         resolved,
       });
       if (resolved.quads.length === 0 && (resolved.privateQuads ?? []).length === 0) {

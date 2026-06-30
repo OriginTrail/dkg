@@ -8,6 +8,8 @@ import type {
   LiftJobFailedFromIncluded,
   LiftJobFinalized,
   LiftJobRequest,
+  LiftPublishRequestMetadata,
+  LiftPublishSnapshotRequest,
   LiftRequest,
   KnowledgeAssetVmPublishJobRequest,
   RawLiftJobRequest,
@@ -22,6 +24,10 @@ import {
   LIFT_TRANSITION_TYPES,
   createLiftJobFailureMetadata,
 } from '../src/lift-job.js';
+import {
+  createKnowledgeAssetVmPublishSnapshotMetadata,
+  createKnowledgeAssetVmPublishSnapshotRequest,
+} from '../src/async-lift-publisher-utils.js';
 
 function rawJobRequest(request: RawLiftRequest): RawLiftJobRequest {
   return { jobType: 'lift', lift: request };
@@ -141,6 +147,52 @@ describe('LiftJob request and record types', () => {
     const invalidKa: KnowledgeAssetVmPublishJobRequest = { jobType: 'knowledge-asset-vm-publish', lift: raw };
     expect(invalidRaw).toBeDefined();
     expect(invalidKa).toBeDefined();
+  });
+
+  it('models KA VM publish snapshot validation without raw-lift placeholder fields', () => {
+    const request = {
+      contextGraphId: 'music-social',
+      name: 'albums',
+      shareOperationId: 'op-1',
+      roots: ['urn:local:/rihana'],
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}` as const,
+        authorAddress: '0x1111111111111111111111111111111111111111' as const,
+        signature: {
+          r: `0x${'34'.repeat(32)}` as const,
+          vs: `0x${'56'.repeat(32)}` as const,
+        },
+        schemeVersion: 1,
+      },
+      sealChainId: '31337' as const,
+      sealKav10Address: '0x2222222222222222222222222222222222222222' as const,
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}` as const,
+      intentKey: `sha256:${'ab'.repeat(32)}`,
+    };
+
+    const snapshot = createKnowledgeAssetVmPublishSnapshotRequest(request);
+    const metadata = createKnowledgeAssetVmPublishSnapshotMetadata(request);
+
+    expectTypeOf(snapshot).toMatchTypeOf<LiftPublishSnapshotRequest>();
+    expectTypeOf(metadata).toMatchTypeOf<LiftPublishRequestMetadata>();
+    expect(snapshot).toMatchObject({
+      contextGraphId: 'music-social',
+      shareOperationId: 'op-1',
+      roots: ['urn:local:/rihana'],
+      seal: request.seal,
+    });
+    for (const rawOnlyField of ['jobType', 'swmId', 'namespace', 'scope', 'transitionType', 'authority']) {
+      expect(snapshot).not.toHaveProperty(rawOnlyField);
+    }
+    expect(metadata).toEqual({
+      scope: 'vm-publish',
+      transitionType: 'CREATE',
+      authority: {
+        type: 'owner',
+        proofRef: 'urn:dkg:knowledge-assets:music-social:albums:op-1:vm-publish',
+      },
+    });
   });
 
   it('requires broadcast jobs to carry claim, validation, and tx metadata', () => {

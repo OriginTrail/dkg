@@ -76,14 +76,18 @@ export {
   buildBatchRejectionRecord,
   batchRejectionAssertionName,
   batchRejectionRecordToQuads,
-  reportBatchRejectionWithLifecycle,
   type VerifyBatchInput,
   type VerifyBatchResult,
   type BatchRejectionRecord,
+} from './swm/verify-batch.js';
+export {
+  reportBatchRejectionWithLifecycle,
   type BatchRejectionReporterAgent,
+  type BatchRejectionAgentLaneOptions,
+  type BatchRejectionAuthorLaneOptions,
   type ReportBatchRejectionInput,
   type ReportBatchRejectionResult,
-} from './swm/verify-batch.js';
+} from './swm/batch-rejection-reporter.js';
 export { createCGHostEnumerator, type CGHostEnumerator, type CGHostEnumeratorDeps } from './swm/enumerate-cg-hosts.js';
 export {
   createSwmCatchupPeerSelector,

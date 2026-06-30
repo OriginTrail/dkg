@@ -1,9 +1,15 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { LiftResolvedPublishSlice } from './async-lift-publish-options.js';
-import type { LiftJobValidationMetadata, LiftRequest } from './lift-job.js';
+import type {
+  LiftJobValidationMetadata,
+  LiftPublishRequestMetadata,
+  LiftPublishSnapshotRequest,
+  LiftRequest,
+} from './lift-job.js';
 
 export interface LiftValidationInput {
-  readonly request: LiftRequest;
+  readonly request: LiftPublishSnapshotRequest;
+  readonly metadata?: LiftPublishRequestMetadata;
   readonly resolved: LiftResolvedPublishSlice;
 }
 
@@ -13,13 +19,14 @@ export interface ValidatedLiftPublishPayload {
 }
 
 export function validateLiftPublishPayload(input: LiftValidationInput): ValidatedLiftPublishPayload {
-  const authorityProofRef = input.request.authority.proofRef.trim();
+  const metadata = resolveLiftPublishRequestMetadata(input.request, input.metadata);
+  const authorityProofRef = metadata.authority.proofRef.trim();
   if (authorityProofRef.length === 0) {
     throw new Error('Lift validation requires a non-empty authority proof reference');
   }
 
   const priorVersion = normalizePriorVersion(input.request.priorVersion);
-  validatePriorVersion(input.request.transitionType, priorVersion);
+  validatePriorVersion(metadata.transitionType, priorVersion);
 
   const requestedRoots = normalizeRoots(input.request.roots);
   if (requestedRoots.length === 0) {
@@ -52,10 +59,26 @@ export function validateLiftPublishPayload(input: LiftValidationInput): Validate
       canonicalRootMap,
       swmQuadCount,
       authorityProofRef,
-      transitionType: input.request.transitionType,
+      transitionType: metadata.transitionType,
       priorVersion,
     },
     resolved,
+  };
+}
+
+function resolveLiftPublishRequestMetadata(
+  request: LiftPublishSnapshotRequest,
+  metadata: LiftPublishRequestMetadata | undefined,
+): LiftPublishRequestMetadata {
+  if (metadata) return metadata;
+  const raw = request as LiftRequest;
+  if (!raw.authority || !raw.scope || !raw.transitionType) {
+    throw new Error('Lift validation requires request metadata for non-raw snapshot requests');
+  }
+  return {
+    scope: raw.scope,
+    transitionType: raw.transitionType,
+    authority: raw.authority,
   };
 }
 
@@ -115,7 +138,7 @@ function canonicalizeTerm(term: string, canonicalRootMap: Record<string, string>
  * root, and the canonical-vs-source `privateDataAnchor` bridge (an async-only
  * artifact of the old rewrite that sync never created) is correctly skipped.
  */
-export function canonicalRootIri(_request: LiftRequest, root: string): string {
+export function canonicalRootIri(_request: LiftPublishSnapshotRequest, root: string): string {
   return root;
 }
 

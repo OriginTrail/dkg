@@ -122,6 +122,8 @@ export {
   type LiftJobTimeoutMetadata,
   type LiftJobFailurePolicy,
   type LiftAuthorityProof,
+  type LiftPublishRequestMetadata,
+  type LiftPublishSnapshotRequest,
   type LiftRequest,
   type LiftRequestAuthorSeal,
   type LiftJobTimestamps,
@@ -228,7 +230,10 @@ export {
   type AsyncLiftPublishSuccess,
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
-export { createKnowledgeAssetVmPublishLiftRequest } from './async-lift-publisher-utils.js';
+export {
+  createKnowledgeAssetVmPublishSnapshotMetadata,
+  createKnowledgeAssetVmPublishSnapshotRequest,
+} from './async-lift-publisher-utils.js';
 export { SharedMemoryHandler, WorkspaceHandler } from './workspace-handler.js';
 export {
   FileWorkspacePublicSnapshotStore,
