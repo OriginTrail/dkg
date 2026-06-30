@@ -382,6 +382,14 @@ function scopedTokenStorageLane(agentAddress?: string): { agentAddress?: string 
   return agentAddress ? { agentAddress } : {};
 }
 
+function resolveBatchRejectionReporterIdentity(
+  ctx: Pick<RequestContext, "agent" | "requestAgentAddress">,
+  tokenAgentAddress?: string,
+): { agentAddress: string; peerId?: string } {
+  const agentAddress = tokenAgentAddress || ctx.requestAgentAddress || "unknown";
+  return ctx.agent.peerId ? { agentAddress, peerId: ctx.agent.peerId } : { agentAddress };
+}
+
 async function resolveFinalizeStorageLane(
   agent: RequestContext["agent"],
   contextGraphId: string,
@@ -687,17 +695,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       });
     }
 
-    const inferredAgentAddress =
-      (agent as any).getAgentAddress?.() ??
-      (agent as any).agentAddress ??
-      (agent as any).config?.agentAddress ??
-      (agent as any).wallet?.address ??
-      requestAgentAddress ??
-      "unknown";
-    const rejectedBy = parsed.rejectedBy ?? {
-      agentAddress: inferredAgentAddress,
-      peerId: (agent as any).peerId,
-    };
+    const rejectedBy = parsed.rejectedBy ?? resolveBatchRejectionReporterIdentity(
+      ctx,
+      writePreflightCallerAgentAddress,
+    );
 
     try {
       const result = await reportBatchRejectionWithLifecycle(agent, {
