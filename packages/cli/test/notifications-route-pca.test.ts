@@ -61,7 +61,13 @@ function fakeDb(over: Record<string, any> = {}) {
   };
 }
 
-function makeCtx(method: string, path: string, dashDb: any, body?: unknown): { ctx: RequestContext; res: any } {
+function makeCtx(
+  method: string,
+  path: string,
+  dashDb: any,
+  body?: unknown,
+  agentOverrides: Record<string, unknown> = {},
+): { ctx: RequestContext; res: any } {
   const res = fakeRes();
   const url = new URL(`http://127.0.0.1${path}`);
   const agent = {
@@ -70,6 +76,7 @@ function makeCtx(method: string, path: string, dashDb: any, body?: unknown): { c
     // Caller curates / belongs to NOTHING → memberCgIds + curatedCgIds empty.
     listContextGraphs: async () => [],
     listPendingJoinRequests: async () => [],
+    ...agentOverrides,
   };
   const ctx = {
     req: fakeReq(method, path, body), res, agent, dashDb,
@@ -133,5 +140,38 @@ describe('#1365 — pca_cost_covered is wallet-scoped via a dedicated fetch (GET
     expect(res.statusCode).toBe(200);
     expect(marked).toContain(1);
     expect(JSON.parse(res.body).marked).toBe(1);
+  });
+
+  it('does not let same-CG membership mark another publisher’s PCA discount row read', async () => {
+    let marked: number[] = [];
+    let memberRowsLimit: number | undefined;
+    const dashDb = fakeDb({
+      getScopedNotificationRowIds: () => new Set<number>([2, 9]),
+      getNotificationsForContextGraphs: (_cgIds: string[], limit: number) => {
+        memberRowsLimit = limit;
+        return [pcaRow(2, OTHER)];
+      },
+      getPcaCostCoveredRowsForWallet: () => [pcaRow(1, CALLER)],
+      markNotificationsRead: (ids: number[]) => { marked = ids; return ids.length; },
+    });
+    const { ctx, res } = makeCtx(
+      'POST',
+      '/api/notifications/read',
+      dashDb,
+      { ids: [1, 2, 9] },
+      {
+        listContextGraphs: async () => [{
+          id: 'cg-published',
+          name: 'Published CG',
+          curator: `did:dkg:agent:${OTHER}`,
+          callerInvolved: true,
+        }],
+      },
+    );
+    await handleNotificationRoutes(ctx);
+    expect(res.statusCode).toBe(200);
+    expect(memberRowsLimit).toBe(Number.MAX_SAFE_INTEGER);
+    expect(marked.sort((a, b) => a - b)).toEqual([1, 9]);
+    expect(marked).not.toContain(2);
   });
 });

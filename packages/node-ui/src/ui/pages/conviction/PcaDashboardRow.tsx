@@ -2,6 +2,7 @@ import React from 'react';
 import { useAgentsStore } from '../../stores/agents.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { usePcaOverview } from '../../hooks/usePcaOverview.js';
+import { usePcaScopeBootstrap } from '../../hooks/usePcaScopeBootstrap.js';
 
 function pct(bps: number | null): string {
   if (bps == null) return '—';
@@ -16,6 +17,7 @@ function pct(bps: number | null): string {
  * (#9 — no B8 confirmation yet). The CTA opens the conviction tab.
  */
 export function PcaDashboardRow() {
+  usePcaScopeBootstrap();
   const role = useAgentsStore((s) => (s.nodeStatus as { nodeRole?: string } | null)?.nodeRole);
   const openTab = useTabsStore((s) => s.openTab);
   const { covered, bestCoveringDiscountBps, walletsInconclusive } = usePcaOverview();

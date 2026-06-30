@@ -16,9 +16,11 @@ const state = vi.hoisted(() => ({
     walletsInconclusive: false,
   },
   openTab: vi.fn(),
+  bootstrapScope: vi.fn(),
 }));
 
 vi.mock('../src/ui/hooks/usePcaOverview.js', () => ({ usePcaOverview: () => state.overview }));
+vi.mock('../src/ui/hooks/usePcaScopeBootstrap.js', () => ({ usePcaScopeBootstrap: () => state.bootstrapScope() }));
 vi.mock('../src/ui/stores/tabs.js', () => ({
   useTabsStore: (sel: (s: unknown) => unknown) => sel({ openTab: state.openTab }),
 }));
@@ -38,12 +40,14 @@ beforeEach(() => {
   document.body.innerHTML = '';
   state.overview = { accounts: [], covered: false, bestCoveringDiscountBps: null, walletsInconclusive: false };
   state.openTab = vi.fn();
+  state.bootstrapScope = vi.fn();
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
 describe('PcaSettingsCard', () => {
   it('no tracked account → the no-tracked line', async () => {
     const { container, unmount } = await render(React.createElement(PcaSettingsCard));
+    expect(state.bootstrapScope).toHaveBeenCalled();
     expect(container.textContent).toContain('No tracked Publisher Conviction Account');
     await unmount();
   });

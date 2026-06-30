@@ -494,14 +494,12 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     await this.init();
     if (!this.contracts.dkgPublishingConvictionNFT) return false;
     if (!ethers.isAddress(agent)) return false;
-    try {
-      return Boolean(await this.readContract(
-        this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.isAgent', 'isAgent', accountId, agent,
-      ));
-    } catch (err: any) {
-      if (err?.code === 'CALL_EXCEPTION') return false;
-      throw err;
-    }
+    // `isAgent` is a pure view that returns false for normal not-approved cases.
+    // A CALL_EXCEPTION here is a read failure, not a confirmed negative; callers
+    // must surface it as inconclusive so the UI never makes a false coverage claim.
+    return Boolean(await this.readContract(
+      this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.isAgent', 'isAgent', accountId, agent,
+    ));
   }
 
   /**

@@ -17,6 +17,7 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock('../src/ui/hooks/usePcaOverview.js', () => ({ usePcaOverview: () => state.overview }));
+vi.mock('../src/ui/hooks/usePcaScopeBootstrap.js', () => ({ usePcaScopeBootstrap: () => {} }));
 vi.mock('../src/ui/stores/agents.js', () => ({
   useAgentsStore: (sel: (s: unknown) => unknown) => sel({ nodeStatus: { nodeRole: state.nodeRole } }),
 }));

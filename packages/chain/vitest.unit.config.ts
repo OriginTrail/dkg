@@ -19,6 +19,7 @@ export default defineConfig({
     // but do not follow the `.unit.test.ts` naming convention.
     include: [
       'test/**/*.unit.test.ts',
+      'test/conviction-cost-covered-decode.test.ts',
       'test/evm-adapter-pca-rpc.unit.test.ts',
       'test/evm-adapter-pca-enrich.test.ts',
       'test/filter-error-console-suppressor.test.ts',

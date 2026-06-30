@@ -34,6 +34,7 @@ function addressFromAgentDid(value: string | undefined | null): string | undefin
  * caller's actionable join requests from the window (Codex round-1 B3).
  */
 const SCOPED_READ_LIMIT = 500;
+const SCOPED_MARK_ALL_LIMIT = Number.MAX_SAFE_INTEGER;
 
 /**
  * Resolve the caller's wallet address from the request token ONLY — no
@@ -214,7 +215,14 @@ export async function handleNotificationRoutes(ctx: RequestContext): Promise<voi
     let scopedIds: Set<number>;
     try {
       const scope = await resolveCallerScope(ctx, callerAddress);
-      scopedIds = dashDb.getScopedNotificationRowIds([...scope.memberCgIds]);
+      // Wallet-scoped PCA discount rows may share a CG with the caller while
+      // belonging to another publisher. Keep them out of the member-CG scope;
+      // add only the caller's own rows via the dedicated wallet query below.
+      const memberCgIds = [...scope.memberCgIds];
+      scopedIds = dashDb.getScopedNotificationRowIds(memberCgIds);
+      for (const row of dashDb.getNotificationsForContextGraphs(memberCgIds, SCOPED_MARK_ALL_LIMIT)) {
+        if (row.type === 'pca_cost_covered') scopedIds.delete(row.id);
+      }
       // Include the caller's own confirmations (not member-CG-scoped — R3-1) so
       // they can mark their join_approved/join_rejected rows read too.
       for (const r of callerConfirmationRows(ctx, callerAddress)) scopedIds.add(r.id);

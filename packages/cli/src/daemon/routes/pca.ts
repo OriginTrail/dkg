@@ -989,6 +989,15 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
       if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
       if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
       if (respondIfChainRpcTransportError(res, err)) return;
+      // A CALL_EXCEPTION on the `isAgent` probe is a read failure (the view
+      // returns false for a normal not-approved wallet), so it must stay
+      // inconclusive instead of becoming `registered:false`.
+      if (err?.code === 'CALL_EXCEPTION') {
+        return jsonResponse(res, 503, {
+          error: 'PCA agent probe temporarily unavailable — chain read failed',
+          code: 'PCA_LOOKUP_READ_FAILED',
+        });
+      }
       return jsonResponse(res, 500, {
         error: `getPublishingConvictionAccountInfo failed: ${msg}`,
       });

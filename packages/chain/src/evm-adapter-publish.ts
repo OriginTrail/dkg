@@ -9,7 +9,7 @@
  * via applyMixins(); see evm-adapter.ts for the assembly.
  */
 
-import { EVMChainAdapterBase } from './evm-adapter-base.js';
+import { EVMChainAdapterBase, decodeConvictionCostCovered } from './evm-adapter-base.js';
 import { ethers, Wallet, Contract } from 'ethers';
 import type { ReservedRange, BatchMintParams, BatchMintResult, KAUpdateVerification, OnChainPublishResult, V10UpdateKAParams, TxResult } from './chain-adapter.js';
 import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
@@ -315,6 +315,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     }
 
     const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
+    const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
 
     return {
       batchId: kaId,
@@ -328,6 +329,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       blockTimestamp,
       publisherAddress,
       authorAddress,
+      ...(convictionCostCovered ? { convictionCostCovered } : {}),
     };
   }
 

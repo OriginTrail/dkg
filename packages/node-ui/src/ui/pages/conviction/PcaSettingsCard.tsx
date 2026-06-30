@@ -1,6 +1,7 @@
 import React from 'react';
 import { useTabsStore } from '../../stores/tabs.js';
 import { usePcaOverview } from '../../hooks/usePcaOverview.js';
+import { usePcaScopeBootstrap } from '../../hooks/usePcaScopeBootstrap.js';
 
 function pct(bps: number | null): string {
   if (bps == null) return '—';
@@ -15,6 +16,7 @@ function pct(bps: number | null): string {
  * check their publishing discount.
  */
 export function PcaSettingsCard() {
+  usePcaScopeBootstrap();
   const openTab = useTabsStore((s) => s.openTab);
   const { accounts, covered, bestCoveringDiscountBps, walletsInconclusive } = usePcaOverview();
   const tracked = accounts.length;

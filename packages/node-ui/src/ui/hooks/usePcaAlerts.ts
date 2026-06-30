@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import { usePcaOverview } from './usePcaOverview.js';
+import { usePcaScopeBootstrap } from './usePcaScopeBootstrap.js';
 import { PCA_CAP_NEAR_THRESHOLD, PCA_EXPIRING_SOON_SECONDS } from '../pca/health.js';
 
 export type PcaAlertKind = 'expired' | 'expiring' | 'swept' | 'cap-near' | 'fallthrough';
@@ -26,6 +27,7 @@ export interface PcaAlert {
  * Fall-through is PREDICTIVE — "pending confirmation", no exact TRAC delta (#9).
  */
 export function usePcaAlerts(): PcaAlert[] {
+  usePcaScopeBootstrap();
   const { accounts } = usePcaOverview(30_000);
   return useMemo(() => {
     const out: PcaAlert[] = [];

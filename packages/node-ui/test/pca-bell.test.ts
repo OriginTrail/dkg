@@ -17,6 +17,7 @@ vi.mock('../src/ui/api.js', async (orig) => {
   const actual = await orig<typeof import('../src/ui/api.js')>();
   return { ...actual, fetchWalletsBalances: mocks.fetchWalletsBalances, fetchPca: mocks.fetchPca };
 });
+vi.mock('../src/ui/hooks/usePcaScopeBootstrap.js', () => ({ usePcaScopeBootstrap: () => {} }));
 
 const { usePcaAlerts } = await import('../src/ui/hooks/usePcaAlerts.js');
 const { NotificationsPane } = await import('../src/ui/components/Notifications/NotificationsPane.js');

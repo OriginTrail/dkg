@@ -615,6 +615,27 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(probe).not.toHaveProperty('authorized');
   });
 
+  it('GET ?key= probe read failure stays 503/inconclusive, not registered:false', async () => {
+    const addr = '0x' + '6'.repeat(40);
+    const agent = {
+      getPublishingConvictionAccountInfo: async () => ({
+        owner: '0x' + '9'.repeat(40),
+        committedTRAC: 1n, baseEpochAllowance: 1n, createdAtEpoch: 1, expiresAtEpoch: 9,
+        createdAtTimestamp: 0, expiresAtTimestamp: 0, discountBps: 0, topUpBuffer: 0n,
+        agentCount: 1, lastSettledWindow: 0, fullySwept: false,
+      }),
+      isPublishingConvictionAgent: async () => {
+        const err: any = new Error('isAgent read failed');
+        err.code = 'CALL_EXCEPTION';
+        throw err;
+      },
+    };
+    const { res, done } = runCtx('GET', `/api/pca/1?key=${addr}`, agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body).code).toBe('PCA_LOOKUP_READ_FAILED');
+  });
+
   // ----- B3: GET /api/pca/:id/agents (live approved publishing-wallet list) -----
   it('GET /api/pca/:id/agents → 200 with the checksummed agent list', async () => {
     const a1 = ethers.getAddress('0x' + 'ab'.repeat(20));
