@@ -3857,6 +3857,10 @@ export class PublishMethods extends DKGAgentBase {
         );
       }
     };
+    const onChainCapable =
+      typeof this.chain.getEvmChainId === 'function' &&
+      typeof this.chain.getKnowledgeAssetsLifecycleAddress === 'function';
+    let queuedOnChainContextGraphId: string | undefined;
 
     if (vmCurrent && packedKaId !== undefined) {
       const updateAttestation = await this._buildPrecomputedUpdateAttestationForSeal(
@@ -3905,31 +3909,59 @@ export class PublishMethods extends DKGAgentBase {
       }
     } else {
       const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
-      const onChainCapable =
-        typeof this.chain.getEvmChainId === 'function' &&
-        typeof this.chain.getKnowledgeAssetsLifecycleAddress === 'function';
       if (recoveredReservedKaId === undefined && onChainCapable) {
         throw new Error(
           `publishQueuedKnowledgeAssetVmPublish: cannot recover the reservedKaId for <${assertionUri}>. ` +
             `Re-finalize the assertion before publishing asynchronously.`,
         );
       }
+      const queuedSnapshotOnChainContextGraphId = normalizeOptionalContextGraphId(publishOptions.publishContextGraphId);
+      if (onChainCapable) {
+        try {
+          queuedOnChainContextGraphId = normalizeOptionalContextGraphId(
+            await this.getContextGraphOnChainId(request.contextGraphId),
+          ) ?? queuedSnapshotOnChainContextGraphId;
+        } catch (err) {
+          if (!queuedSnapshotOnChainContextGraphId) throw err;
+          this.log.warn(
+            ctx,
+            `Could not verify queued on-chain cgId ${queuedSnapshotOnChainContextGraphId} for "${request.contextGraphId}" ` +
+              `before async VM publish; using the immutable queued snapshot binding: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+          );
+          queuedOnChainContextGraphId = queuedSnapshotOnChainContextGraphId;
+        }
+      }
+      if (onChainCapable && !queuedOnChainContextGraphId) {
+        throw Object.assign(
+          new Error(`Context graph "${request.contextGraphId}" is not registered on-chain.`),
+          { code: 'CG_NOT_REGISTERED' },
+        );
+      }
+      const publisherPublishOptions = { ...publishOptions };
+      delete publisherPublishOptions.publishContextGraphId;
+      const publishBindingOptions = queuedOnChainContextGraphId
+        ? { aeadBindingContextGraphId: queuedOnChainContextGraphId }
+        : undefined;
       const resolvedEncryptInlinePayload = await this._resolveEncryptInlinePayload(
         request.contextGraphId,
         request.subGraphName,
         undefined,
-        publishOptions.publishContextGraphId,
+        undefined,
+        publishBindingOptions,
       );
       const resolvedEncryptInlineChunked = await this._resolveEncryptInlineChunked(
         request.contextGraphId,
         request.subGraphName,
         undefined,
-        publishOptions.publishContextGraphId,
+        undefined,
+        publishBindingOptions,
       );
       const encryptInlinePayload = resolvedEncryptInlinePayload ?? publishOptions.encryptInlinePayload;
       const encryptInlineChunked = resolvedEncryptInlineChunked ?? publishOptions.encryptInlineChunked;
       result = await publisher.publish({
-        ...publishOptions,
+        ...publisherPublishOptions,
         contextGraphId: request.contextGraphId,
         quads: snapshotQuads,
         privateQuads: snapshotPrivateQuads.length > 0 ? snapshotPrivateQuads : undefined,
@@ -3950,6 +3982,7 @@ export class PublishMethods extends DKGAgentBase {
           schemeVersion: seal.authorSchemeVersion,
           reservedKaId: recoveredReservedKaId ?? 0n,
         },
+        onChainContextGraphId: queuedOnChainContextGraphId,
         encryptInlinePayload,
         encryptInlineChunked,
       });
@@ -4047,7 +4080,9 @@ export class PublishMethods extends DKGAgentBase {
       const rootEntities = result.kaManifest.length > 0
         ? result.kaManifest.map((ka) => ka.rootEntity)
         : [...request.roots];
-      const broadcastCgId = publishOptions.publishContextGraphId;
+      const broadcastCgId = queuedOnChainContextGraphId ?? (onChainCapable
+        ? normalizeOptionalContextGraphId(await this.getContextGraphOnChainId(request.contextGraphId))
+        : undefined);
       const keepRootCopyOnLabel = true;
       const msg: FinalizationMessageMsg = {
         ual: result.ual,

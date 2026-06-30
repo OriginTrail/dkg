@@ -1993,9 +1993,10 @@ export class DKGPublisher implements Publisher {
     const effectiveAccessPolicy = accessPolicy ?? (privateQuads.length > 0 ? 'ownerOnly' : 'public');
     const normalizedAllowedPeers = [...new Set((allowedPeers ?? []).map((p) => p.trim()).filter(Boolean))];
     const normalizedPublisherPeerId = publisherPeerId.trim();
+    const onChainContextGraphId = options.onChainContextGraphId ?? options.publishContextGraphId;
     let publisherContextGraphId: bigint | undefined;
     try {
-      const parsed = BigInt(options.publishContextGraphId ?? contextGraphId);
+      const parsed = BigInt(onChainContextGraphId ?? contextGraphId);
       if (parsed > 0n) publisherContextGraphId = parsed;
     } catch {
       // Descriptive SWM graph names stay on the existing tentative/mock path.
@@ -2537,7 +2538,7 @@ export class DKGPublisher implements Publisher {
     // the on-chain tx see the SOURCE name (not a number) in the remap
     // flow → `BigInt()` threw → silent 0n → evm-adapter fail-loud →
     // ZeroContextGraphId. Always prefer the explicit target override.
-    const v10CgDomain = options.publishContextGraphId ?? contextGraphId;
+    const v10CgDomain = String(onChainContextGraphId ?? contextGraphId);
     const swmGraphId = contextGraphId;
 
     // Numeric-negative and numeric-zero CG ids are programming errors —

@@ -717,9 +717,11 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       undefined,
       undefined,
       undefined,
+      undefined,
     ]);
     expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)).toEqual([
       'private-cg',
+      undefined,
       undefined,
       undefined,
       undefined,
@@ -730,6 +732,175 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     });
     expect(publisherPublish.calls.at(-1)?.[0].encryptInlinePayload).not.toBe(failClosedInline);
     expect(publisherPublish.calls.at(-1)?.[0].encryptInlineChunked).not.toBe(failClosedChunked);
+  });
+
+  it('uses queued resolved on-chain CG id as binding-only metadata for same-CG publishes', async () => {
+    const publisherPublish = recorder(async (_opts: any) => ({
+      status: 'tentative',
+      ual: 'did:dkg:local/queued-binding',
+    }));
+    const store = {
+      query: recorder(async () => ({ type: 'bindings', bindings: [] })),
+      insert: recorder(async () => undefined),
+      deleteByPattern: recorder(async () => undefined),
+    };
+    const agentLike = {
+      peerId: 'did:dkg:agent:queued-binding',
+      defaultAgentAddress: '0x1111111111111111111111111111111111111111',
+      chain: {
+        getEvmChainId: recorder(async () => 31337n),
+        getKnowledgeAssetsLifecycleAddress: recorder(async () => '0x2222222222222222222222222222222222222222'),
+      },
+      getContextGraphOnChainId: recorder(async () => null),
+      store,
+      log: {
+        info: recorder(() => undefined),
+        warn: recorder(() => undefined),
+        error: recorder(() => undefined),
+        debug: recorder(() => undefined),
+      },
+      publisher: {
+        publish: publisherPublish,
+        clearSwmShareComplete: recorder(async () => undefined),
+      },
+      createV10ACKProvider: recorder(() => undefined),
+      _resolveEncryptInlinePayload: recorder(async () => undefined),
+      _resolveEncryptInlineChunked: recorder(async () => undefined),
+      _stampPointer: recorder(async () => undefined),
+    } as any;
+    const request: KnowledgeAssetVmPublishRequest = {
+      contextGraphId: 'memory-layers-e2e',
+      name: 'queued-binding-ka',
+      shareOperationId: 'share-op-1',
+      roots: ['urn:test:queued-binding'],
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}`,
+        authorAddress: '0x1111111111111111111111111111111111111111',
+        signature: {
+          r: `0x${'34'.repeat(32)}`,
+          vs: `0x${'56'.repeat(32)}`,
+        },
+        schemeVersion: 1,
+        reservedKaId: '1' as `${bigint}`,
+      },
+      sealChainId: '31337',
+      sealKav10Address: '0x2222222222222222222222222222222222222222',
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}`,
+      intentKey: `sha256:${'cd'.repeat(32)}`,
+    };
+
+    await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(agentLike, request, {
+      contextGraphId: request.contextGraphId,
+      quads: [{
+        subject: 'urn:test:queued-binding',
+        predicate: 'http://schema.org/name',
+        object: '"Queued Binding"',
+        graph: '',
+      }],
+      publishContextGraphId: '42',
+    });
+
+    expect(agentLike.getContextGraphOnChainId.calls).toEqual([
+      ['memory-layers-e2e'],
+    ]);
+    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
+      'memory-layers-e2e',
+      undefined,
+      undefined,
+      undefined,
+      { aeadBindingContextGraphId: '42' },
+    ]);
+    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)).toEqual([
+      'memory-layers-e2e',
+      undefined,
+      undefined,
+      undefined,
+      { aeadBindingContextGraphId: '42' },
+    ]);
+    const publishCall = publisherPublish.calls.at(-1)?.[0];
+    expect(publishCall).toMatchObject({
+      contextGraphId: 'memory-layers-e2e',
+      onChainContextGraphId: '42',
+      subGraphName: undefined,
+    });
+    expect(publishCall).not.toHaveProperty('publishContextGraphId');
+  });
+
+  it('fails queued same-CG publishes before publisher execution when the CG is not on chain', async () => {
+    const publisherPublish = recorder(async (_opts: any) => ({
+      status: 'tentative',
+      ual: 'did:dkg:local/should-not-publish',
+    }));
+    const agentLike = {
+      peerId: 'did:dkg:agent:queued-unregistered',
+      defaultAgentAddress: '0x1111111111111111111111111111111111111111',
+      chain: {
+        getEvmChainId: recorder(async () => 31337n),
+        getKnowledgeAssetsLifecycleAddress: recorder(async () => '0x2222222222222222222222222222222222222222'),
+      },
+      getContextGraphOnChainId: recorder(async () => null),
+      store: {
+        query: recorder(async () => ({ type: 'bindings', bindings: [] })),
+        insert: recorder(async () => undefined),
+        deleteByPattern: recorder(async () => undefined),
+      },
+      log: {
+        info: recorder(() => undefined),
+        warn: recorder(() => undefined),
+        error: recorder(() => undefined),
+        debug: recorder(() => undefined),
+      },
+      publisher: {
+        publish: publisherPublish,
+        clearSwmShareComplete: recorder(async () => undefined),
+      },
+      createV10ACKProvider: recorder(() => undefined),
+      _resolveEncryptInlinePayload: recorder(async () => undefined),
+      _resolveEncryptInlineChunked: recorder(async () => undefined),
+      _stampPointer: recorder(async () => undefined),
+    } as any;
+    const request: KnowledgeAssetVmPublishRequest = {
+      contextGraphId: 'unregistered-product-cg',
+      name: 'queued-unregistered-ka',
+      shareOperationId: 'share-op-1',
+      roots: ['urn:test:queued-unregistered'],
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}`,
+        authorAddress: '0x1111111111111111111111111111111111111111',
+        signature: {
+          r: `0x${'34'.repeat(32)}`,
+          vs: `0x${'56'.repeat(32)}`,
+        },
+        schemeVersion: 1,
+        reservedKaId: '1' as `${bigint}`,
+      },
+      sealChainId: '31337',
+      sealKav10Address: '0x2222222222222222222222222222222222222222',
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}`,
+      intentKey: `sha256:${'de'.repeat(32)}`,
+    };
+
+    let thrown: any;
+    try {
+      await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(agentLike, request, {
+        contextGraphId: request.contextGraphId,
+        quads: [{
+          subject: 'urn:test:queued-unregistered',
+          predicate: 'http://schema.org/name',
+          object: '"Queued Unregistered"',
+          graph: '',
+        }],
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeTruthy();
+    expect(thrown.code).toBe('CG_NOT_REGISTERED');
+    expect(String(thrown.message)).toMatch(/not registered on-chain/i);
+    expect(publisherPublish.calls).toEqual([]);
   });
 });
 
