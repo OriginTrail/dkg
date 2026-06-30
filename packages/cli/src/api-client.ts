@@ -448,45 +448,6 @@ export class ApiClient {
   }
 
   /**
-   * One-shot publish with explicit quads. This uses the daemon's direct
-   * publish route so StorageACK collection receives the publish payload
-   * inline and never depends on target cores already having SWM state.
-   *
-   * Use `publishAssertion(contextGraphId, name, quads, opts)` when you
-   * deliberately want the named assertion lifecycle (WM -> SWM -> VM).
-   */
-  async publish(contextGraphId: string, quads: Array<{
-    subject: string; predicate: string; object: string; graph: string;
-  }>, privateQuads?: Array<{
-    subject: string; predicate: string; object: string; graph: string;
-  }>, options?: {
-    accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
-    allowedPeers?: string[];
-    publishEpochs?: number;
-    publisherNodeIdentityIdOverride?: bigint;
-  }): Promise<{
-    kaId: string;
-    status: 'tentative' | 'confirmed';
-    kas: Array<{ tokenId: string; rootEntity: string }>;
-    txHash?: string;
-    blockNumber?: number;
-    batchId?: string;
-    publisherAddress?: string;
-  }> {
-    return this.post('/api/knowledge-assets/publish', {
-      contextGraphId,
-      quads,
-      ...(privateQuads !== undefined ? { privateQuads } : {}),
-      ...(options?.accessPolicy !== undefined ? { accessPolicy: options.accessPolicy } : {}),
-      ...(options?.allowedPeers !== undefined ? { allowedPeers: options.allowedPeers } : {}),
-      ...(options?.publishEpochs !== undefined ? { publishEpochs: options.publishEpochs } : {}),
-      ...(options?.publisherNodeIdentityIdOverride !== undefined
-        ? { publisherNodeIdentityIdOverride: options.publisherNodeIdentityIdOverride.toString() }
-        : {}),
-    });
-  }
-
-  /**
    * Create an assertion in WM, optionally writing quads + finalizing +
    * promoting in the same call. Maps directly to the extended
    * `POST /api/knowledge-assets` body.

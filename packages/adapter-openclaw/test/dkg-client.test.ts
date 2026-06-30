@@ -737,33 +737,8 @@ describe('DkgDaemonClient', () => {
     expect(url).toContain('since=1710000000000');
   });
 
-  // ---------------------------------------------------------------------------
-  // Publish
-  // ---------------------------------------------------------------------------
-
-  it('publish should use the direct explicit-quads route', async () => {
-    fetchResponses.push(new Response(JSON.stringify({ kaId: 'kc-1' }), { status: 200 }));
-
-    const quads = [{ subject: 'urn:a', predicate: 'urn:b', object: '"value"' }];
-    const privateQuads = [{ subject: 'urn:a', predicate: 'urn:secret', object: '"secret"' }];
-    const result = await client.publish('testing', quads, privateQuads, {
-      accessPolicy: 'allowList',
-      allowedPeers: ['12D3peer1'],
-    });
-    expect(result.kaId).toBe('kc-1');
-
-    expect(fetchCalls).toHaveLength(1);
-    const [url, opts] = fetchCalls[0];
-    expect(url).toBe('http://localhost:9200/api/knowledge-assets/publish');
-    expect(opts?.method).toBe('POST');
-    const body = JSON.parse(opts?.body as string);
-    expect(body).toMatchObject({
-      contextGraphId: 'testing',
-      accessPolicy: 'allowList',
-      allowedPeers: ['12D3peer1'],
-    });
-    expect(body.quads).toEqual([{ subject: 'urn:a', predicate: 'urn:b', object: '"value"', graph: '' }]);
-    expect(body.privateQuads).toEqual([{ subject: 'urn:a', predicate: 'urn:secret', object: '"secret"', graph: '' }]);
+  it('does not expose the retired direct explicit-quads publish helper', () => {
+    expect((client as any).publish).toBeUndefined();
   });
 
   // ---------------------------------------------------------------------------

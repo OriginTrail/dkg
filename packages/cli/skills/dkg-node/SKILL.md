@@ -274,7 +274,6 @@ SWM is for knowledge you've shared from WM and want peers to see. Agents put dat
 
 - `POST /api/knowledge-assets/{name}/swm/share` — the canonical way an agent puts a named assertion into SWM (after `create` → `write`); a full share seals by default and is publish-ready. **This is the agent path** — see §5 WM and the lifecycle in §3.
 - `POST /api/knowledge-assets/{name}/swm/share-async` — enqueue the same WM→SWM share for the in-daemon worker. Use this for bulk importers that should not block on the synchronous share round.
-- `POST /api/knowledge-assets/publish` — direct explicit-quads one-shot mint, for **CLI / programmatic** callers that already hold the exact quads to publish (the ACK path carries the inline payload, no SWM stage). Body: `{ contextGraphId, quads, privateQuads?, accessPolicy?, allowedPeers?, subGraphName? }`. **Not the agent path** — agents use the named-KA lifecycle (`…/swm/share` → `…/vm/publish`).
 
 > **No loose SWM writes.** Agent-facing producers must author a named knowledge
 > asset and move it through WM→SWM→VM. The legacy loose-write SWM routes were
@@ -284,9 +283,8 @@ SWM is for knowledge you've shared from WM and want peers to see. Agents put dat
 ### Verifiable Memory (VM) — Permanent, on-chain
 
 > **Lifecycle VM publishing goes through SWM.** Named WM assertions are finalized,
-> shared to SWM, then published from there. One-shot requests that already carry
-> explicit quads use `POST /api/knowledge-assets/publish` so the publish ACK path
-> carries the payload directly.
+> shared to SWM, then published from there. The public daemon API no longer has
+> an unnamed direct explicit-quads publish route.
 
 **Canonical publish (the agent path):** `POST /api/knowledge-assets/{name}/vm/publish`.
 Mints (or updates) the **sealed** assertion on chain. The URL `:name` + the seal
@@ -298,11 +296,6 @@ Body: `{ "contextGraphId": "...", "subGraphName"?: "...", "options"?: { "publish
 `409 VM_PUBLISH_PRECONDITION`), and the context graph must be registered on-chain — which
 `vm/publish` does **automatically on first publish** (no flag needed; costs gas/TRAC). Returns the
 **publish response body** below.
-
-> **Direct one-shot (CLI / programmatic only — not the agent path):** `POST /api/knowledge-assets/publish`
-> mints directly from inline quads (no WM draft, no named assertion, no SWM stage). It is the explicit
-> "publish quads you already hold" escape hatch used by the CLI (`dkg index`, `dkg knowledge publish`) and
-> programmatic clients. Agents do **not** use it — author a named KA and publish via `/vm/publish`.
 
 **Publish response body (`vm/publish`).** A successful publish returns:
 

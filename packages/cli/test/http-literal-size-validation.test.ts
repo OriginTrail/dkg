@@ -1,36 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildImportFileResponse,
-  parsePublishRequestBody,
   validateWritableQuadLiteralSizes,
 } from '../src/daemon/http-utils.js';
 
 const OVERSIZED_LITERAL = `"${'x'.repeat(60_000)}"`;
 
 describe('HTTP RDF literal size validation', () => {
-  it('returns structured parse failure for oversized direct publish literals', () => {
-    const parsed = parsePublishRequestBody(JSON.stringify({
-      contextGraphId: 'literal-size-cg',
-      quads: [{
-        subject: 'http://example.org/s',
-        predicate: 'http://schema.org/text',
-        object: OVERSIZED_LITERAL,
-        graph: 'http://example.org/g',
-      }],
-    }));
-
-    expect(parsed.ok).toBe(false);
-    if (!parsed.ok) {
-      expect(parsed.body).toMatchObject({
-        code: 'OVERSIZED_RDF_LITERAL',
-        actualBytes: 60_002,
-        limitBytes: 60_000,
-        predicate: 'http://schema.org/text',
-      });
-    }
-  });
-
-  it('returns structured validation failure for writable route quads', () => {
+  it('returns structured validation failure for lifecycle writable route quads', () => {
     const result = validateWritableQuadLiteralSizes('quads', [{
       subject: 'http://example.org/s',
       predicate: 'http://schema.org/text',
