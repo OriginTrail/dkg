@@ -331,7 +331,7 @@ describe('DKGQueryEngine', () => {
   it('view=verifiable-memory includes the root content graph (RC11 / PR-A: Codex #671)', async () => {
     // RC11 / PR-A (Codex review fix on #671, comment 3302058969):
     // re-includes the root context-graph alongside `_verifiable_memory/*`
-    // so a successful `/api/shared-memory/publish` is immediately
+    // so a successful lifecycle VM publish is immediately
     // observable via `view: 'verifiable-memory'` (the pre-PR2 behaviour
     // existing callers, including memory-search, rely on). The
     // tentative-VM leak that PR2 was meant to plug is now fixed at the

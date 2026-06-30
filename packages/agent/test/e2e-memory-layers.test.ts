@@ -628,6 +628,100 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     expect(retainedSwm.bindings).toHaveLength(1);
   }, 60_000);
 
+  it('async VM publish with clearAfter true clears the remaining SWM scope', async () => {
+    const agent = await createAgent('QueuedAsyncVmPublishClearAllBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Clear All E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const publishedName = 'queued-async-clearall-published';
+    const retainedName = 'queued-async-clearall-retained';
+    const publishedRoot = `${ENTITY_BASE}:queued-clearall-published`;
+    const retainedRoot = `${ENTITY_BASE}:queued-clearall-retained`;
+    await agent.assertion.create(CG_ID, publishedName);
+    await agent.assertion.write(CG_ID, publishedName, [
+      { subject: publishedRoot, predicate: 'http://schema.org/name', object: '"Published root"' },
+    ]);
+    const publishedShare = await agent.assertion.promote(CG_ID, publishedName);
+    expect(publishedShare.publishReady).toBe(true);
+
+    await agent.assertion.create(CG_ID, retainedName);
+    await agent.assertion.write(CG_ID, retainedName, [
+      { subject: retainedRoot, predicate: 'http://schema.org/name', object: '"Retained root"' },
+    ]);
+    const retainedShare = await agent.assertion.promote(CG_ID, retainedName);
+    expect(retainedShare.publishReady).toBe(true);
+
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, publishedName, {
+      clearSharedMemoryAfter: true,
+    });
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
+      knowledgeAssetVmPublishExecutor: async ({ request, publishOptions }) =>
+        agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
+    });
+    const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
+    const processed = await asyncPublisher.processNext('wallet-1');
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('finalized');
+
+    const publishedSwm = await agent.query(
+      `SELECT ?name WHERE { <${publishedRoot}> <http://schema.org/name> ?name }`,
+      { contextGraphId: CG_ID, graphSuffix: '_shared_memory' },
+    );
+    expect(publishedSwm.bindings).toHaveLength(0);
+
+    const retainedSwm = await agent.query(
+      `SELECT ?name WHERE { <${retainedRoot}> <http://schema.org/name> ?name }`,
+      { contextGraphId: CG_ID, graphSuffix: '_shared_memory' },
+    );
+    expect(retainedSwm.bindings).toHaveLength(0);
+  }, 60_000);
+
+  it('async VM publish tentative private-no-acks fails without VM published metadata', async () => {
+    const agent = await createAgent('QueuedAsyncVmPublishTentativeNoAcksBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Tentative E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-async-tentative-no-acks';
+    const root = `${ENTITY_BASE}:queued-tentative-no-acks`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Tentative no ACKs"' },
+    ]);
+    const share = await agent.assertion.promote(CG_ID, name);
+    expect(share.publishReady).toBe(true);
+
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+    const fakePublisher = {
+      publish: vi.fn(async () => ({
+        status: 'tentative' as const,
+        localChainSkipReason: 'private-no-acks' as const,
+        ual: 'did:dkg:local/private-no-acks',
+        merkleRoot: ethers.getBytes(intent.sealMerkleRoot),
+        kaManifest: [],
+      })),
+      clearPublishedSwmRoots: vi.fn(),
+      clearRemainingSharedMemory: vi.fn(),
+    };
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
+      knowledgeAssetVmPublishExecutor: async ({ request, publishOptions }) =>
+        agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions, {
+          publisherOverride: fakePublisher as any,
+        }),
+    });
+    const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
+    const processed = await asyncPublisher.processNext('wallet-1');
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('failed');
+    expect(fakePublisher.publish).toHaveBeenCalledOnce();
+    expect(fakePublisher.clearPublishedSwmRoots).not.toHaveBeenCalled();
+    expect(fakePublisher.clearRemainingSharedMemory).not.toHaveBeenCalled();
+
+    const history = await agent.assertion.history(CG_ID, name);
+    expect(history?.vmCurrentAssertion).not.toBe(intent.sealMerkleRoot.slice(2));
+    expect(history?.state).not.toBe('published');
+    expect(history?.memoryLayer).not.toBe(MemoryLayer.VerifiableMemory);
+  }, 60_000);
+
   it('async VM publish updates a sub-graph KA in the sub-graph VM graph', async () => {
     const agent = await createAgent('QueuedAsyncVmSubgraphUpdateBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Subgraph Update E2E' });

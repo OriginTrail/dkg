@@ -3586,7 +3586,7 @@ export class DKGPublisher implements Publisher {
       const DKG_ONT = 'http://dkg.io/ontology/';
       const priorRootEntities = new Set<string>();
       try {
-        const labelMetaForPriors = contextGraphMetaUri(contextGraphId, options.subGraphName);
+        const labelMetaForPriors = this.graphManager.metaGraphUri(contextGraphId);
         let ualForPriors = await resolveUalByBatchId(this.store, labelMetaForPriors, kaId);
         if (!ualForPriors) {
           // Same local-only deterministic-UAL fallback as the restate
@@ -3660,7 +3660,7 @@ export class DKGPublisher implements Publisher {
       // when `resolveKaUal` would throw. For the on-chain path we still
       // let `resolveKaUal` throw (failing the update) — which is the
       // correct behavior when chain-truth is required but unavailable.
-      const labelMeta = contextGraphMetaUri(contextGraphId, options.subGraphName);
+      const labelMeta = this.graphManager.metaGraphUri(contextGraphId);
       let ualForRestate = await resolveUalByBatchId(this.store, labelMeta, kaId);
       if (!ualForRestate) {
         if (localOnlyUpdate && publisherAddress) {

@@ -276,6 +276,53 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     });
   });
 
+  it('reaccepts a compatible retryable failed knowledge asset VM publish when enqueued again', async () => {
+    const publisher = createPublisher();
+    const intent = kaVmPublishRequest({ subGraphName: 'research' });
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(intent);
+    const claimed = await publisher.claimNext('wallet-1');
+    expect(claimed?.jobId).toBe(jobId);
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRootMap: {
+          'urn:album:one': 'urn:album:one',
+          'urn:album:two': 'urn:album:two',
+        },
+        swmQuadCount: 2,
+        authorityProofRef: 'urn:dkg:publish-async:share-op-1',
+        transitionType: 'CREATE',
+      },
+    });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: {
+        txHash: `0x${'ab'.repeat(32)}`,
+        walletId: 'wallet-1',
+        merkleRoot: intent.sealMerkleRoot,
+      },
+    });
+    const failed = await publisher.recordPublishFailure(jobId, {
+      error: new Error('RPC endpoint temporarily unavailable'),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:dkg:test:error:rpc-unavailable',
+    });
+    expect(failed.status).toBe('failed');
+    if (failed.status !== 'failed') throw new Error('expected failed job');
+    expect(failed.failure.retryable).toBe(true);
+
+    await expect(publisher.enqueueKnowledgeAssetVmPublish(intent)).resolves.toBe(jobId);
+    const reaccepted = await publisher.getStatus(jobId);
+    expect(reaccepted?.status).toBe('accepted');
+    expect(reaccepted?.retries.retryCount).toBe(1);
+    expect(reaccepted?.retries.lastRetryReason).toBe('rpc_unavailable');
+    expect(reaccepted?.timestamps.lastRetriedAt).toBeDefined();
+
+    const claimedAgain = await publisher.claimNext('wallet-2');
+    expect(claimedAgain?.jobId).toBe(jobId);
+    expect(claimedAgain?.status).toBe('claimed');
+  });
+
   it('processes knowledge asset VM publish jobs through the lifecycle executor', async () => {
     const calls: unknown[] = [];
     const publisher = createPublisher({

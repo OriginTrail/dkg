@@ -3767,7 +3767,7 @@ export class PublishMethods extends DKGAgentBase {
         }
       }
 
-      if (result.status === 'confirmed' || result.status === 'tentative') {
+      if (result.status === 'confirmed') {
         try {
           const priorBare = vmCurrent.startsWith('0x') ? vmCurrent.slice(2) : vmCurrent;
           const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
@@ -3863,7 +3863,7 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
-    if (result.status === 'confirmed' || result.status === 'tentative') {
+    if (result.status === 'confirmed') {
       try {
         await this._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
         const MEMORY_LAYER_PRED = 'http://dkg.io/ontology/memoryLayer';

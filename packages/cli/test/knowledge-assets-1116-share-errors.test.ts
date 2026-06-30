@@ -24,8 +24,13 @@ import { join } from 'node:path';
 import { ethers } from 'ethers';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { generateEd25519Keypair, TypedEventBus } from '@origintrail-official/dkg-core';
-import { DKGPublisher } from '@origintrail-official/dkg-publisher';
-import { createTripleStore } from '@origintrail-official/dkg-storage';
+import {
+  DKGPublisher,
+  createKnowledgeAssetVmPublishLiftRequest,
+  resolveLiftWorkspaceSlice,
+  validateLiftPublishPayload,
+} from '@origintrail-official/dkg-publisher';
+import { GraphManager, createTripleStore } from '@origintrail-official/dkg-storage';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { daemonState } from '../src/daemon/state.js';
 import { addPublisherWallet } from '../src/publisher-wallets.js';
@@ -350,6 +355,162 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.code).toBe('PUBLISH_INTENT_STALE');
     expect(String(res.body.error)).toContain('re-share');
     expect(enqueueCalls).toBe(0);
+  });
+
+  it('vm/publish-async rejects a missing real share snapshot before enqueue', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    let enqueueCalls = 0;
+    const intent = {
+      contextGraphId: CG_ID,
+      name: ASSERTION_NAME,
+      shareOperationId: 'missing-real-share-op',
+      roots: ['urn:test:missing-root'],
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+        authorAddress: '0x1111111111111111111111111111111111111111' as `0x${string}`,
+        signature: {
+          r: `0x${'34'.repeat(32)}` as `0x${string}`,
+          vs: `0x${'56'.repeat(32)}` as `0x${string}`,
+        },
+        schemeVersion: 1,
+      },
+      sealChainId: '31337' as `${bigint}`,
+      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+      intentKey: `sha256:${'ef'.repeat(32)}`,
+    };
+
+    try {
+      await startWith({}, {
+        resolveFinalizedAssertionVmPublishIntent: async () => intent,
+        preflightKnowledgeAssetVmPublishSnapshot: async (request: unknown) => {
+          const liftRequest = createKnowledgeAssetVmPublishLiftRequest(request as any);
+          try {
+            const resolved = await resolveLiftWorkspaceSlice({
+              store,
+              graphManager: new GraphManager(store),
+              request: liftRequest,
+            });
+            validateLiftPublishPayload({ request: liftRequest, resolved });
+          } catch (err) {
+            throw Object.assign(
+              new Error(
+                `Cannot enqueue VM publish for "${ASSERTION_NAME}" because share snapshot ` +
+                  `missing-real-share-op is unavailable or stale. Re-share the knowledge asset before enqueueing: ` +
+                  (err instanceof Error ? err.message : String(err)),
+              ),
+              { code: 'PUBLISH_INTENT_STALE' },
+            );
+          }
+        },
+      }, {}, {
+        enqueueKnowledgeAssetVmPublish: async () => {
+          enqueueCalls += 1;
+          return 'job-should-not-exist';
+        },
+      });
+
+      const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('PUBLISH_INTENT_STALE');
+      expect(String(res.body.error)).toContain('Re-share');
+      expect(enqueueCalls).toBe(0);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('vm/publish-async forwards non-default route options into the immutable intent', async () => {
+    const seenResolveOptions: any[] = [];
+    const enqueuedIntents: any[] = [];
+
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async (_contextGraphId: string, _name: string, opts: any) => {
+        seenResolveOptions.push(opts);
+        return {
+          contextGraphId: CG_ID,
+          name: ASSERTION_NAME,
+          shareOperationId: 'share-with-options',
+          roots: ['urn:test:options-root'],
+          seal: {
+            merkleRoot: `0x${'12'.repeat(32)}`,
+            authorAddress: '0x1111111111111111111111111111111111111111',
+            signature: {
+              r: `0x${'34'.repeat(32)}`,
+              vs: `0x${'56'.repeat(32)}`,
+            },
+            schemeVersion: 1,
+          },
+          sealChainId: '31337',
+          sealKav10Address: '0x2222222222222222222222222222222222222222',
+          sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+          sealMerkleRoot: `0x${'12'.repeat(32)}`,
+          intentKey: `sha256:${'bc'.repeat(32)}`,
+          publishEpochs: opts.publishEpochs,
+          clearSharedMemoryAfter: opts.clearSharedMemoryAfter,
+          publisherNodeIdentityIdOverride: opts.publisherNodeIdentityIdOverride?.toString(),
+        };
+      },
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async (intent: unknown) => {
+        enqueuedIntents.push(intent);
+        return 'job-options';
+      },
+    });
+
+    const res = await post('vm/publish-async', {
+      contextGraphId: CG_ID,
+      options: {
+        publishEpochs: 2,
+        clearSharedMemoryAfter: true,
+        publisherNodeIdentityIdOverride: '0',
+      },
+    });
+
+    expect(res.status).toBe(202);
+    expect(res.body.jobId).toBe('job-options');
+    expect(seenResolveOptions).toHaveLength(1);
+    expect(seenResolveOptions[0]).toMatchObject({
+      publishEpochs: 2,
+      clearSharedMemoryAfter: true,
+      publisherNodeIdentityIdOverride: 0n,
+    });
+    expect(enqueuedIntents[0]).toMatchObject({
+      publishEpochs: 2,
+      clearSharedMemoryAfter: true,
+      publisherNodeIdentityIdOverride: '0',
+    });
+  });
+
+  it('rejects the retired create promote flag before mutation', async () => {
+    for (const promote of [true, false]) {
+      let mutations = 0;
+      await startWith({
+        create: async () => { mutations += 1; },
+        write: async () => { mutations += 1; },
+        finalize: async () => { mutations += 1; },
+        promote: async () => { mutations += 1; },
+      });
+
+      const res = await postRoot({
+        contextGraphId: CG_ID,
+        name: `legacy-promote-${promote}`,
+        quads: [{ subject: 'urn:test:legacy', predicate: 'http://schema.org/name', object: '"Legacy"' }],
+        finalize: true,
+        promote,
+      });
+
+      expect(res.status).toBe(400);
+      expect(String(res.body.error)).toContain('promote');
+      expect(mutations).toBe(0);
+
+      await new Promise<void>((resolve, reject) => {
+        server!.close((err) => (err ? reject(err) : resolve()));
+      });
+      server = undefined;
+    }
   });
 
   it('vm/publish-async enqueue is processable by createPublisherRuntimeFromAgent', async () => {

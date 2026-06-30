@@ -1,9 +1,11 @@
 import type { QueryResult } from '@origintrail-official/dkg-storage';
 import type {
+  KnowledgeAssetVmPublishLiftRequest,
   KnowledgeAssetVmPublishRequest,
   LiftJob,
   LiftJobHex,
   LiftRequest,
+  RawLiftRequest,
 } from './lift-job.js';
 export {
   CONTROL_CLAIM_TOKEN,
@@ -54,7 +56,7 @@ export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
 
 export function createKnowledgeAssetVmPublishLiftRequest(
   request: KnowledgeAssetVmPublishRequest,
-): LiftRequest {
+): KnowledgeAssetVmPublishLiftRequest {
   const subGraphPart = request.subGraphName ? `:${request.subGraphName}` : '';
   const operationKey = `${request.contextGraphId}:${request.name}${subGraphPart}:${request.shareOperationId}`;
   return {
@@ -78,4 +80,14 @@ export function createKnowledgeAssetVmPublishLiftRequest(
       : {}),
     seal: request.seal,
   };
+}
+
+export function isKnowledgeAssetVmPublishLiftRequest(
+  request: LiftRequest,
+): request is KnowledgeAssetVmPublishLiftRequest {
+  return request.jobType === 'knowledge-asset-vm-publish';
+}
+
+export function isRawLiftRequest(request: LiftRequest): request is RawLiftRequest {
+  return request.jobType !== 'knowledge-asset-vm-publish';
 }

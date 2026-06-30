@@ -3148,8 +3148,8 @@ export async function runDaemonInner(
       // Single top-level error→HTTP mapping (in http-utils.ts
       // respondWithDaemonError): 413 payload-too-large; 400 SyntaxError /
       // reserved-namespace / NO_FUNDED_PUBLISHER_WALLET; 503/504 for a transient
-      // chain-RPC transport exhaustion (so rethrowing routes like
-      // /api/shared-memory/publish get the retryable status); else 500.
+      // chain-RPC transport exhaustion (so rethrowing lifecycle publish routes
+      // get the retryable status); else 500.
       respondWithDaemonError(res, err);
     }
     // Note: the admission slot is released on the response's `close` event

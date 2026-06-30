@@ -2,8 +2,8 @@
  * Wire-contract coverage for the shared NO_FUNDED_PUBLISHER_WALLET classifier +
  * response body. Both publish error surfaces consume these helpers — the
  * `/vm/publish` route catch (knowledge-assets.ts) and the top-level daemon
- * handler (lifecycle.ts), which is the path `/api/shared-memory/publish` and any
- * other rethrowing route hit. Centralizing + pinning this here means a
+ * handler (lifecycle.ts), which any rethrowing route can hit. Centralizing +
+ * pinning this here means a
  * regression that drops a branch, changes the status code, or omits the
  * structured `code` for either route shows up as a failing unit test rather
  * than only on a live publish.
@@ -66,9 +66,9 @@ describe('noFundedPublisherWalletBody', () => {
   });
 });
 
-// This is the lifecycle/top-level handler contract that rethrowing routes such
-// as /api/shared-memory/publish depend on — exercised here directly so a
-// regression that drops the funds branch or changes the status/code fails.
+// This is the lifecycle/top-level handler contract that rethrowing publish
+// routes depend on — exercised here directly so a regression that drops the
+// funds branch or changes the status/code fails.
 describe('respondWithDaemonError', () => {
   it('maps NO_FUNDED_PUBLISHER_WALLET (code) to HTTP 400 { code, error }', () => {
     const res = mockRes();

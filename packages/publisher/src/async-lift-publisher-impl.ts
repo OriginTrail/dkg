@@ -16,6 +16,7 @@ import {
   type LiftJobState,
   type KnowledgeAssetVmPublishRequest,
   type LiftRequest,
+  type RawLiftRequest,
 } from './lift-job.js';
 import type {
   AsyncLiftPublisher,
@@ -48,7 +49,9 @@ import {
   createJobSlug,
   expectBindings,
   getRecoveryTxHash,
+  isKnowledgeAssetVmPublishLiftRequest,
   isFailedJob,
+  isRawLiftRequest,
   jobSubject,
   literal,
   parseIntegerLiteral,
@@ -100,7 +103,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.graphManager = new GraphManager(store);
   }
 
-  async lift(request: LiftRequest): Promise<string> {
+  async lift(request: RawLiftRequest): Promise<string> {
     await this.ensureGraph();
 
     const now = this.now();
@@ -131,6 +134,10 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       }
       const existing = await this.findActiveKnowledgeAssetVmPublishJob(request);
       if (existing?.compatible) {
+        if (isFailedJob(existing.job)) {
+          const reaccepted = await this.reacceptRetryableFailedKnowledgeAssetVmPublishJob(existing.job);
+          return reaccepted.jobId;
+        }
         return existing.job.jobId;
       }
       if (existing?.job) {
@@ -264,7 +271,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (!job) {
       return null;
     }
-    if (job.request.jobType === 'knowledge-asset-vm-publish') {
+    if (isKnowledgeAssetVmPublishLiftRequest(job.request)) {
       return null;
     }
 
@@ -310,7 +317,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
     let failureState: LiftJobState = claimed.status;
     try {
-      if (claimed.request.jobType === 'knowledge-asset-vm-publish') {
+      if (isKnowledgeAssetVmPublishLiftRequest(claimed.request)) {
         return await this.processKnowledgeAssetVmPublish(claimed, walletId);
       }
       if (!this.publishExecutor) {
@@ -370,10 +377,10 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (!this.knowledgeAssetVmPublishExecutor) {
       throw new Error('Async knowledge asset VM publish requires a configured knowledgeAssetVmPublishExecutor');
     }
-    const request = claimed.request.knowledgeAssetVmPublish;
-    if (!request) {
-      throw new Error(`Knowledge asset VM publish job ${claimed.jobId} is missing request metadata`);
+    if (!isKnowledgeAssetVmPublishLiftRequest(claimed.request)) {
+      throw new Error(`LiftJob ${claimed.jobId} is not a knowledge asset VM publish job`);
     }
+    const request = claimed.request.knowledgeAssetVmPublish;
 
     let validated!: ReturnType<typeof validateLiftPublishPayload>;
     let prepared!: AsyncPreparedPublishPayload;
@@ -429,10 +436,11 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     const jobs = await this.list();
     for (const job of jobs) {
       if (job.status === 'finalized') continue;
-      if (job.status === 'failed' && job.failure?.retryable !== true) continue;
-      if (job.request.jobType !== 'knowledge-asset-vm-publish') continue;
+      if (isFailedJob(job)) {
+        if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) continue;
+      }
+      if (!isKnowledgeAssetVmPublishLiftRequest(job.request)) continue;
       const publish = job.request.knowledgeAssetVmPublish;
-      if (!publish) continue;
       const sameName = publish.contextGraphId === request.contextGraphId
         && publish.name === request.name
         && (publish.subGraphName ?? '') === (request.subGraphName ?? '');
@@ -440,6 +448,33 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       return { job, compatible: publish.intentKey === request.intentKey };
     }
     return null;
+  }
+
+  private async reacceptRetryableFailedKnowledgeAssetVmPublishJob(job: PersistedFailedJob): Promise<LiftJobAccepted> {
+    if (!isKnowledgeAssetVmPublishLiftRequest(job.request)) {
+      throw new Error(`LiftJob ${job.jobId} is not a knowledge asset VM publish job`);
+    }
+    if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) {
+      throw new Error(`Knowledge asset VM publish job ${job.jobId} is not retryable`);
+    }
+    const reset = this.resetFailedJobToAccepted(job);
+    const retriedAt = this.now();
+    const reaccepted: LiftJobAccepted = {
+      ...reset,
+      retries: {
+        ...reset.retries,
+        retryCount: job.retries.retryCount + 1,
+        lastRetryReason: job.failure.code,
+      },
+      timestamps: {
+        ...reset.timestamps,
+        lastRetriedAt: retriedAt,
+        updatedAt: retriedAt,
+      },
+    };
+    await this.releaseWalletLockForJob(job);
+    await this.writeJob(reaccepted);
+    return reaccepted;
   }
 
   private isKnowledgeAssetPublishPreconditionFailure(error: unknown): boolean {
@@ -567,7 +602,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       if (
         (job.status === 'broadcast' || job.status === 'included') &&
         this.chainRecoveryResolver &&
-        job.request.jobType !== 'knowledge-asset-vm-publish'
+        isRawLiftRequest(job.request)
       ) {
         const resolved = await this.chainRecoveryResolver(job);
         if (resolved) {
@@ -586,7 +621,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         continue;
       }
 
-      if (job.status === 'included' && job.request.jobType === 'knowledge-asset-vm-publish') {
+      if (job.status === 'included' && isKnowledgeAssetVmPublishLiftRequest(job.request)) {
         if (this.hasInconclusiveRecoveryTimedOut(job)) {
           await this.releaseWalletLockForJob(job);
           await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(job));
@@ -607,7 +642,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (this.chainRecoveryResolver) {
       const retryRecoveryJobs = (await this.list({ status: 'failed' }))
         .filter(isFailedJob)
-        .filter((job) => job.request.jobType !== 'knowledge-asset-vm-publish')
+        .filter((job) => isRawLiftRequest(job.request))
         .filter((job) => job.failure.resolution === 'retry_recovery' && 'broadcast' in job && job.broadcast);
 
       for (const job of retryRecoveryJobs) {
@@ -1157,7 +1192,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
   private async promoteFinalizedPrivateStaging(job: LiftJob): Promise<void> {
     if (job.status !== 'finalized' || !job.validation) return;
-    if (job.request.jobType === 'knowledge-asset-vm-publish') return;
+    if (isKnowledgeAssetVmPublishLiftRequest(job.request)) return;
 
     const privateStore = new PrivateContentStore(this.store, this.graphManager);
     for (const sourceRoot of job.request.roots) {

@@ -55,8 +55,8 @@ describe('resolveViewGraphs', () => {
       // now plugged at the publisher (root-graph insert deferred to the
       // chain-success branch in `DKGPublisher.publish`), so re-unioning
       // root in VM no longer surfaces unconfirmed quads while still
-      // letting `/api/shared-memory/publish` → VM-query callers (incl.
-      // memory-search) see confirmed data immediately, without needing
+      // letting VM-publish query callers (incl. memory-search) see confirmed
+      // data immediately, without needing
       // a separate `verify` step.
       expect(res.graphs).toEqual([`did:dkg:context-graph:${CG}`]);
       expect(res.graphPrefixes).toEqual([`did:dkg:context-graph:${CG}/_verifiable_memory/`]);

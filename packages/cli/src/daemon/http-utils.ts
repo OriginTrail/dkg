@@ -95,7 +95,7 @@ export function noFundedPublisherWalletBody(message: string): { code: string; er
 
 /**
  * Map a thrown request error to the daemon's top-level HTTP response — the
- * single neutral place that rethrowing routes (e.g. `/api/shared-memory/publish`)
+ * single neutral place that rethrowing lifecycle publish routes
  * and the lifecycle catch agree on status codes: 413 payload-too-large; 400 for
  * SyntaxError / reserved-namespace / NO_FUNDED_PUBLISHER_WALLET; otherwise a 500
  * with the EVM-decoded message. Unit-testable in isolation.
@@ -120,8 +120,8 @@ export function respondWithDaemonError(res: ServerResponse, err: any): void {
   } else if (respondIfChainRpcTransportError(res, err)) {
     // Transient transport exhaustion (RPC_ENDPOINTS_EXHAUSTED /
     // RPC_RECEIPT_LOOKUP_FAILED → 503, TIMEOUT → 504) is retryable — a route
-    // that RE-THROWS to this top-level handler (e.g. the SWM→VM publish at
-    // /api/shared-memory/publish) gets the retryable status instead of 500.
+    // that RE-THROWS to this top-level handler gets the retryable status instead
+    // of 500.
     // Code-keyed, so on-chain reverts (no transport code) fall through to 500.
   } else {
     enrichEvmError(err);

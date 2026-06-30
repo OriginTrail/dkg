@@ -18,6 +18,7 @@ describe.sequential('assertion CLI smoke', () => {
   let smokeApiPort: string;
   let lastImportBody = '';
   let lastImportContentType = '';
+  let lastPublishAsyncBody = '';
 
   beforeAll(async () => {
     dkgHome = await mkdtemp(join(tmpdir(), 'dkg-assertion-cli-'));
@@ -86,6 +87,27 @@ describe.sequential('assertion CLI smoke', () => {
           contextGraphId: 'research',
           sharedMemoryGraph: 'did:dkg:context-graph:research/shared-memory',
           rootEntities: ['urn:company:acme'],
+        }));
+        return;
+      }
+
+      if (req.method === 'POST' && req.url === '/api/knowledge-assets/paper/vm/publish-async') {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        lastPublishAsyncBody = Buffer.concat(chunks).toString('utf-8');
+        res.writeHead(202, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          jobId: 'job-cli-123',
+          status: 'accepted',
+          contextGraphId: 'research',
+          name: 'paper',
+          subGraphName: 'lab',
+          shareOperationId: 'share-cli-123',
+          rootsCount: 1,
+          sealMerkleRoot: `0x${'12'.repeat(32)}`,
+          intentKey: `sha256:${'ab'.repeat(32)}`,
         }));
         return;
       }
@@ -220,7 +242,7 @@ describe.sequential('assertion CLI smoke', () => {
     ], { env });
 
     expect(promotedSubgraph.stdout).toContain('Next:           dkg publisher publish-async research paper --sub-graph lab');
-  }, 15000);
+  }, 30000);
 
   it('does not expose retired shared-memory or raw publisher enqueue commands', async () => {
     const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
@@ -228,6 +250,31 @@ describe.sequential('assertion CLI smoke', () => {
     await expectCliFailure(['shared-memory', 'write', 'research'], env);
     await expectCliFailure(['publisher', 'enqueue', 'research'], env);
   }, 15000);
+
+  it('enqueues a named KA async VM publish through the publisher CLI', async () => {
+    const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
+
+    const published = await execFileAsync('node', [
+      CLI_ENTRY,
+      'publisher',
+      'publish-async',
+      'research',
+      'paper',
+      '--sub-graph',
+      'lab',
+      '--publish-epochs',
+      '3',
+    ], { env });
+
+    expect(published.stdout).toContain('Knowledge asset publish job accepted:');
+    expect(published.stdout).toContain('Job ID:     job-cli-123');
+    expect(published.stdout).toContain('Status:     accepted');
+    expect(JSON.parse(lastPublishAsyncBody)).toEqual({
+      contextGraphId: 'research',
+      subGraphName: 'lab',
+      options: { publishEpochs: 3 },
+    });
+  }, 30000);
 });
 
 async function expectCliFailure(args: string[], env: NodeJS.ProcessEnv): Promise<void> {

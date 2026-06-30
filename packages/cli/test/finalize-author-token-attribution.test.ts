@@ -5,7 +5,7 @@
  * the atomic `POST /api/knowledge-assets` (create + auto-finalize) and the
  * dedicated `POST /api/knowledge-assets/:name/wm/finalize` routes. It must
  * attribute authorship to the request's agent-scoped bearer token when the body
- * doesn't carry an explicit author — exactly like `/api/shared-memory/publish`.
+ * doesn't carry an explicit author, matching lifecycle VM publish attribution.
  *
  * Before the fix it ignored the token, so a custodial agent's create+finalize
  * sealed under the node's own signer and the on-chain author came out as the
