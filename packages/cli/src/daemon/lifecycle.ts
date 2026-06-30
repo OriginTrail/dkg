@@ -222,8 +222,6 @@ import {
 } from './shutdown.js';
 import {
   resolveNameToPeerId,
-  isPublishQuad,
-  parsePublishRequestBody,
   jsonResponse,
   safeDecodeURIComponent,
   safeParseJson,

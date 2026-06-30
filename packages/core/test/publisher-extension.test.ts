@@ -28,10 +28,6 @@ function createTransport(): DkgPublisherExtensionTransport & { calls: Array<[str
       calls.push(['discardAssertion', args]);
       return { discarded: true };
     },
-    async publish(...args) {
-      calls.push(['publish', args]);
-      return { kaId: '1', kas: [{ tokenId: '1', rootEntity: 'did:dkg:entity:1' }] };
-    },
   };
 }
 
@@ -92,22 +88,4 @@ describe('DkgPublisherExtension', () => {
     ]);
   });
 
-  it('publishes fresh quads into verifiable memory', async () => {
-    const transport = createTransport();
-    const publisher = createDkgPublisherExtension(transport);
-
-    await publisher.publishVerifiableMemory({
-      contextGraphId: 'cg',
-      quads: [{ subject: 'did:dkg:e:1', predicate: 'http://schema.org/name', object: 'Alpha' }],
-    });
-
-    expect(transport.calls).toEqual([
-      ['publish', [
-        'cg',
-        [{ subject: 'did:dkg:e:1', predicate: 'http://schema.org/name', object: '"Alpha"', graph: '' }],
-        undefined,
-        { accessPolicy: undefined, allowedPeers: undefined },
-      ]],
-    ]);
-  });
 });

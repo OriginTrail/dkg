@@ -998,43 +998,6 @@ export class DkgDaemonClient {
   }
 
   // ---------------------------------------------------------------------------
-  // Publish
-  // ---------------------------------------------------------------------------
-
-  /**
-   * One-shot publish with explicit quads. This uses the daemon's direct
-   * publish route, so core StorageACK requests carry the publish payload
-   * instead of assuming target cores already have the data in SWM.
-   */
-  async publish(
-    contextGraphId: string,
-    quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
-    privateQuads?: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
-    opts?: { accessPolicy?: 'public' | 'ownerOnly' | 'allowList'; allowedPeers?: string[] },
-  ): Promise<any> {
-    const cgId = normalizeContextGraphId(contextGraphId);
-    const wireQuads = quads.map((q) => ({
-      subject: q.subject,
-      predicate: q.predicate,
-      object: q.object,
-      graph: q.graph ?? '',
-    }));
-    const wirePrivateQuads = privateQuads?.map((q) => ({
-      subject: q.subject,
-      predicate: q.predicate,
-      object: q.object,
-      graph: q.graph ?? '',
-    }));
-    return this.post('/api/knowledge-assets/publish', {
-      contextGraphId: cgId,
-      quads: wireQuads,
-      ...(wirePrivateQuads !== undefined ? { privateQuads: wirePrivateQuads } : {}),
-      ...(opts?.accessPolicy !== undefined ? { accessPolicy: opts.accessPolicy } : {}),
-      ...(opts?.allowedPeers !== undefined ? { allowedPeers: opts.allowedPeers } : {}),
-    });
-  }
-
-  // ---------------------------------------------------------------------------
   // Context Graphs
   // ---------------------------------------------------------------------------
 

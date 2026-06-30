@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-// Route-level coverage of the chain-RPC transport-status mapping on the
-// knowledge-assets publish catches (#1329 review). Each route has its OWN
-// catch with route-specific branches BEFORE the shared
-// classifyChainRpcTransportStatus call, so a per-route regression (removing or
-// misordering the call) would not be caught by the helper unit test alone.
+// Route-level coverage of the chain-RPC transport-status mapping on the named
+// KA VM publish catch (#1329 review). This route has its own catch with
+// route-specific branches BEFORE the shared classifyChainRpcTransportStatus
+// call, so a route regression would not be caught by the helper unit test alone.
 // Driven in-process via handleKnowledgeAssetsRoutes with a stub agent — no
 // daemon / storage / native deps.
 import { describe, it, expect } from 'vitest';
@@ -41,9 +40,6 @@ const ACCEPT_PROBE = {
 function publishAgent(extra: Record<string, unknown>) {
   return { probeContextGraphWritePreflight: async () => ACCEPT_PROBE, ...extra };
 }
-// Direct-publish requires isPublishQuad shape (graph is REQUIRED here).
-const QUADS = [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"', graph: 'ex:g' }];
-
 function exhaustion() {
   const e: any = new Error(
     'publish transaction preparation failed on all configured RPC endpoints ' +
@@ -58,36 +54,17 @@ function timeoutErr() {
   // timeout; the guard recognises TIMEOUT via the instance, not a bare code.
   return new ChainRpcTransportError('RPC_TIMEOUT', 'tx 0xabc timed out waiting for a receipt after 180000ms');
 }
-function revert() {
-  const e: any = new Error('execution reverted');
-  e.code = 'CALL_EXCEPTION';
-  return e;
-}
 
 describe('knowledge-assets publish routes — transport-status mapping (#1329)', () => {
-  describe('POST /api/knowledge-assets/publish (direct explicit-quads mint)', () => {
-    it('→ 503 on RPC_ENDPOINTS_EXHAUSTED, with a sanitized body (no URL/key leak)', async () => {
-      const agent = publishAgent({ publish: async () => { throw exhaustion(); } });
-      const { res, done } = runKaCtx('POST', '/api/knowledge-assets/publish', agent, { contextGraphId: 'cg-1', quads: QUADS });
+  describe('POST /api/knowledge-assets/publish (removed)', () => {
+    it('→ 404 without invoking agent.publish', async () => {
+      let called = false;
+      const agent = publishAgent({ publish: async () => { called = true; } });
+      const { res, done } = runKaCtx('POST', '/api/knowledge-assets/publish', agent, { contextGraphId: 'cg-1', quads: [] });
       await done;
-      expect(res.statusCode).toBe(503);
-      expect(JSON.parse(res.body).code).toBe('RPC_ENDPOINTS_EXHAUSTED');
-      expect(res.body).not.toContain('://');
-      expect(res.body).not.toContain('SECRETKEY');
-    });
-
-    it('→ 504 on a bounded chain TIMEOUT', async () => {
-      const agent = publishAgent({ publish: async () => { throw timeoutErr(); } });
-      const { res, done } = runKaCtx('POST', '/api/knowledge-assets/publish', agent, { contextGraphId: 'cg-1', quads: QUADS });
-      await done;
-      expect(res.statusCode).toBe(504);
-    });
-
-    it('→ 500 (NOT down-classified) for a genuine on-chain revert', async () => {
-      const agent = publishAgent({ publish: async () => { throw revert(); } });
-      const { res, done } = runKaCtx('POST', '/api/knowledge-assets/publish', agent, { contextGraphId: 'cg-1', quads: QUADS });
-      await done;
-      expect(res.statusCode).toBe(500);
+      expect(res.statusCode).toBe(404);
+      expect(JSON.parse(res.body).code).toBe('DIRECT_PUBLISH_ROUTE_REMOVED');
+      expect(called).toBe(false);
     });
   });
 

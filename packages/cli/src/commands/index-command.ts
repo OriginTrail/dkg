@@ -30,7 +30,6 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
-import { parsePositiveIntegerOption, parsePositiveMsOption } from '../publisher-runner.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
@@ -108,10 +107,10 @@ export function registerIndexCommand(program: Command): void {
 
 program
   .command('index [directory]')
-  .description('Index a repository and write to shared memory or publish directly')
+  .description('Index a repository and stage or publish it as a named knowledge asset')
   .option('-p, --context-graph <id>', 'Target context graph', 'dev-coordination')
-  .option('--shared-memory', 'Write indexed quads to shared memory instead of publishing')
-  .option('--workspace', 'Write indexed quads to shared memory instead of publishing (legacy alias)')
+  .option('--shared-memory', 'Stage indexed quads as a named WM knowledge asset instead of publishing')
+  .option('--workspace', 'Stage indexed quads as a named WM knowledge asset instead of publishing (legacy alias)')
   .option('--include-content', 'Index docs/content files in addition to source code')
   .option('--solidity-ast', 'Use Hardhat build-info ASTs for Solidity indexing (adds StateVariable/Event/Error/Modifier and a call-graph). Falls back to regex for packages without artifacts/build-info/.')
   .option('--dry-run', 'Print statistics without publishing')
@@ -151,42 +150,41 @@ program
       }
 
       const client = await ApiClient.connect();
-      // RFC-001 §9.x — both branches now go through the assertion
-      // lifecycle. `--shared-memory` stages content into a named WM
-      // assertion (no chain submit); the default branch publishes
-      // directly via the one-shot `publishAssertion` helper.
       const indexAssertionName = `index-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const verb = useSharedMemory ? 'Staging in WM assertion' : 'Publishing';
-      const applyBatch = useSharedMemory
-        ? async (batch: typeof result.quads) => {
-            // Create-or-append: the daemon's create endpoint is
-            // idempotent on `(cg, name)`, so we lazily create on the
-            // first batch (no quads body) and append on subsequent
-            // batches via `/api/knowledge-assets/:name/wm/write`.
-            await client.createAssertion(targetContextGraph, indexAssertionName);
-            return client.appendToAssertion(
-              targetContextGraph,
-              indexAssertionName,
-              batch,
-            );
-          }
-        : async (batch: typeof result.quads) => client.publish(targetContextGraph, batch);
+      const verb = useSharedMemory ? 'Staging WM knowledge asset' : 'Writing KA draft';
+      if (result.quads.length === 0) {
+        console.log('\n\n  No quads to stage or publish.');
+        return;
+      }
+      await client.createAssertion(targetContextGraph, indexAssertionName);
+      const applyBatch = async (batch: typeof result.quads) => client.appendToAssertion(
+        targetContextGraph,
+        indexAssertionName,
+        batch,
+      );
 
       await publishEntityBatches(result.quads, applyBatch, (sent) => {
         process.stdout.write(`\r  ${verb}: ${sent}/${result.quads.length} quads`);
       }, {
-        maxBatchBytes: useSharedMemory ? 240 * 1024 : undefined,
-        estimateBatchBytes: useSharedMemory
-          ? (batch) => new TextEncoder().encode(JSON.stringify({ contextGraphId: targetContextGraph, quads: batch })).length
-          : undefined,
-        splitOversizedEntities: useSharedMemory ? true : undefined,
+        maxBatchBytes: 240 * 1024,
+        estimateBatchBytes: (batch) => new TextEncoder().encode(JSON.stringify({ contextGraphId: targetContextGraph, quads: batch })).length,
+        splitOversizedEntities: true,
       });
 
       if (useSharedMemory) {
-        console.log(`\n\n  Staged ${result.quads.length} quads into WM assertion "${indexAssertionName}" for context graph "${targetContextGraph}".`);
-        console.log(`  Next: dkg assertion promote ${indexAssertionName} -c ${targetContextGraph}`);
+        console.log(`\n\n  Staged ${result.quads.length} quads into WM knowledge asset "${indexAssertionName}" for context graph "${targetContextGraph}".`);
+        console.log("  Next: finalize, share, and publish it through the knowledge-assets lifecycle API.");
       } else {
-        console.log(`\n\n  Published ${result.quads.length} quads to context graph "${targetContextGraph}".`);
+        process.stdout.write(`\n  Finalizing "${indexAssertionName}"...`);
+        await client.finalizeAssertion(targetContextGraph, indexAssertionName);
+        process.stdout.write(`\n  Sharing "${indexAssertionName}" to SWM...`);
+        await client.knowledgeAssetShare(targetContextGraph, indexAssertionName);
+        process.stdout.write(`\n  Publishing "${indexAssertionName}" to VM...`);
+        const published = await client.publishFromFinalizedAssertion(targetContextGraph, indexAssertionName);
+        console.log(`\n\n  Published ${result.quads.length} quads as knowledge asset "${indexAssertionName}" in context graph "${targetContextGraph}".`);
+        console.log(`  Status: ${published.status}`);
+        console.log(`  KA ID:  ${published.kaId}`);
+        if (published.txHash) console.log(`  TX:     ${published.txHash}`);
       }
     } catch (err) {
       console.error(toErrorMessage(err));

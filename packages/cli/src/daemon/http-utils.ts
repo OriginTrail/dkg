@@ -20,28 +20,6 @@ import type { DKGAgent, ContextGraphWritePreflightProbe } from '@origintrail-off
 import type { DkgConfig } from '../config.js';
 import { enforceSignedRequestPostBody } from '../auth.js';
 
-// Co-located here because the body parser is their only semantic
-// consumer; moving them to `./types.ts` would just add an import
-// cycle with no real benefit.
-export interface PublishQuad {
-  subject: string;
-  predicate: string;
-  object: string;
-  graph: string;
-}
-
-export type PublishAccessPolicy = 'public' | 'ownerOnly' | 'allowList';
-
-export interface PublishRequestBody {
-  contextGraphId: string;
-  quads: PublishQuad[];
-  privateQuads?: PublishQuad[];
-  accessPolicy?: PublishAccessPolicy;
-  allowedPeers?: string[];
-  subGraphName?: string;
-  onChainContextGraphId?: string;
-}
-
 import type { CorsAllowlist } from './state.js';
 
 export function isPayloadTooLargeError(err: unknown): err is PayloadTooLargeError {
@@ -171,21 +149,10 @@ export async function resolveNameToPeerId(
   return match?.peerId ?? null;
 }
 
-export function isPublishQuad(value: unknown): value is PublishQuad {
-  if (!value || typeof value !== "object") return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.subject === "string" &&
-    typeof v.predicate === "string" &&
-    typeof v.object === "string" &&
-    typeof v.graph === "string"
-  );
-}
-
 /**
  * GH #306 / #787 — shape guard for the WRITE routes (wm/write,
- * shared-memory/write). Unlike {@link isPublishQuad} the `graph` term is
- * OPTIONAL here: those routes legitimately accept `{subject,predicate,object}`
+ * shared-memory/write). The `graph` term is OPTIONAL here: those routes
+ * legitimately accept `{subject,predicate,object}`
  * and fill the graph internally. Without this guard, a string-shaped quad
  * (e.g. an N-Quad line `"<s> <p> <o> ."`) slips past a bare `Array.isArray`
  * check and crashes the agent write path with a TypeError → HTTP 500 instead
@@ -219,14 +186,13 @@ export function validateWritableQuadLiteralSizes(
 
 /**
  * GH #306 / #787 (follow-up) — validate each quad's `object` term is either a
- * quoted RDF literal (`"…"`) or an absolute IRI. Shared by the publish path AND
- * the write routes (wm/write, shared-memory/write, conditional-write): the shape
- * guards ({@link isPublishQuad} / {@link isWritableQuad}) only check the fields
+ * quoted RDF literal (`"…"`) or an absolute IRI. Shared by lifecycle write
+ * routes and other quad-accepting validation paths: the shape guard
+ * ({@link isWritableQuad}) only checks that fields
  * are strings, so an object that is neither a literal nor an IRI (e.g. a bare
  * word `hello` or a number `123`) slips past them and crashes the RDF parser
  * with an uncaught "No scheme found in an absolute IRI" → HTTP 500 instead of an
- * actionable 400. Operates on any `{ object: string }` (PublishQuad or writable
- * quad alike).
+ * actionable 400.
  */
 export function validateQuadObjectTerms(
   label: string,
@@ -367,148 +333,6 @@ export function respondIfChainRpcTransportError(
   if (!transport) return false;
   jsonResponse(res, transport.status, extraBody ? { ...extraBody, ...transport.body } : transport.body);
   return true;
-}
-
-export function parsePublishRequestBody(
-  body: string,
-): { ok: true; value: PublishRequestBody } | { ok: false; error: string; body?: Record<string, unknown> } {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    return { ok: false, error: "Invalid JSON body" };
-  }
-
-  if (!parsed || typeof parsed !== "object") {
-    return { ok: false, error: "Body must be a JSON object" };
-  }
-
-  const payload = parsed as Record<string, unknown>;
-  const { quads, privateQuads, accessPolicy, allowedPeers, subGraphName, onChainContextGraphId } =
-    payload;
-  const contextGraphId = payload.contextGraphId as unknown;
-
-  if (typeof contextGraphId !== "string" || contextGraphId.trim().length === 0) {
-    return {
-      ok: false,
-      error: 'Missing or invalid "contextGraphId"',
-    };
-  }
-
-  if (
-    !Array.isArray(quads) ||
-    quads.length === 0 ||
-    !quads.every(isPublishQuad)
-  ) {
-    return {
-      ok: false,
-      error: 'Missing or invalid "quads" (must be a non-empty quad array)',
-    };
-  }
-  const quadObjectError = validateQuadObjectTerms("quads", quads);
-  if (quadObjectError) return { ok: false, error: quadObjectError };
-  const quadSize = validateWritableQuadLiteralSizes("quads", quads);
-  if (!quadSize.ok) {
-    return { ok: false, error: String(quadSize.body.error ?? 'Oversized RDF literal'), body: quadSize.body };
-  }
-
-  if (
-    privateQuads !== undefined &&
-    (!Array.isArray(privateQuads) || !privateQuads.every(isPublishQuad))
-  ) {
-    return {
-      ok: false,
-      error: 'Invalid "privateQuads" (must be a quad array)',
-    };
-  }
-  if (privateQuads !== undefined) {
-    const privateQuadObjectError = validateQuadObjectTerms("privateQuads", privateQuads);
-    if (privateQuadObjectError) return { ok: false, error: privateQuadObjectError };
-    const privateQuadSize = validateWritableQuadLiteralSizes("privateQuads", privateQuads);
-    if (!privateQuadSize.ok) {
-      return { ok: false, error: String(privateQuadSize.body.error ?? 'Oversized RDF literal'), body: privateQuadSize.body };
-    }
-  }
-
-  if (
-    accessPolicy !== undefined &&
-    accessPolicy !== "public" &&
-    accessPolicy !== "ownerOnly" &&
-    accessPolicy !== "allowList"
-  ) {
-    return {
-      ok: false,
-      error: 'Invalid "accessPolicy" (must be public, ownerOnly, or allowList)',
-    };
-  }
-
-  if (
-    allowedPeers !== undefined &&
-    (!Array.isArray(allowedPeers) ||
-      !allowedPeers.every((p) => typeof p === "string" && p.trim().length > 0))
-  ) {
-    return {
-      ok: false,
-      error: 'Invalid "allowedPeers" (must be an array of non-empty strings)',
-    };
-  }
-
-  if (
-    accessPolicy === "allowList" &&
-    (!allowedPeers || allowedPeers.length === 0)
-  ) {
-    return {
-      ok: false,
-      error: '"allowList" accessPolicy requires non-empty "allowedPeers"',
-    };
-  }
-
-  if (accessPolicy !== "allowList" && allowedPeers && allowedPeers.length > 0) {
-    return {
-      ok: false,
-      error: '"allowedPeers" is only valid when "accessPolicy" is "allowList"',
-    };
-  }
-
-  if (subGraphName !== undefined) {
-    if (typeof subGraphName !== "string" || subGraphName.trim().length === 0) {
-      return {
-        ok: false,
-        error: 'Invalid "subGraphName" (must be a non-empty string)',
-      };
-    }
-    const sgValidation = validateSubGraphName(subGraphName);
-    if (!sgValidation.valid) {
-      return {
-        ok: false,
-        error: `Invalid "subGraphName": ${sgValidation.reason}`,
-      };
-    }
-  }
-
-  let normalizedOnChainContextGraphId: string | undefined;
-  if (onChainContextGraphId !== undefined) {
-    if (typeof onChainContextGraphId !== "string" || !/^[1-9]\d*$/.test(onChainContextGraphId.trim())) {
-      return {
-        ok: false,
-        error: 'Invalid "onChainContextGraphId" (must be a positive integer string)',
-      };
-    }
-    normalizedOnChainContextGraphId = onChainContextGraphId.trim();
-  }
-
-  return {
-    ok: true,
-    value: {
-      contextGraphId,
-      quads,
-      privateQuads,
-      accessPolicy,
-      allowedPeers,
-      subGraphName: subGraphName as string | undefined,
-      onChainContextGraphId: normalizedOnChainContextGraphId,
-    },
-  };
 }
 
 /**

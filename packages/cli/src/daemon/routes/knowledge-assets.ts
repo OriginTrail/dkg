@@ -16,10 +16,9 @@
 //   POST /api/knowledge-assets/:name/vm/publish      mint/update on chain
 //   POST /api/knowledge-assets/:name/vm/publish-async enqueue mint/update on chain
 //
-// These delegate to the SAME agent lifecycle methods the legacy
-// `/api/assertion/*` + `/api/shared-memory/*` routes use, so behavior is
-// identical; only the URL shape changes. This module is purely ADDITIVE — the
-// legacy routes are untouched (308 redirects from them land in a follow-up).
+// These delegate to the agent lifecycle methods directly. Public content
+// authoring and VM publish must enter through named KA lifecycle routes; retired
+// loose/direct publish surfaces are guarded below with explicit 404s.
 //
 // Identifier note (OT-RFC-43 §10.5.7): for the v10.0 floor the KA is addressed
 // by its lifecycle NAME (the file handle) + `contextGraphId`. Minter-namespaced
@@ -36,7 +35,6 @@ import {
   validateEntities,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
-  parsePublishRequestBody,
   isWritableQuad,
   validateQuadObjectTerms,
   respondIfReconcileUnavailable,
@@ -579,41 +577,6 @@ function resolveStandaloneVmPublishOptions(
   return resolveFinalizedPublishOptions(ctx, raw);
 }
 
-async function verifyDirectPublishOnChainContextGraphId(
-  agent: RequestContext["agent"],
-  contextGraphId: string,
-  onChainContextGraphId: string | undefined,
-  res: RequestContext["res"],
-): Promise<string | undefined | null> {
-  if (onChainContextGraphId === undefined) return undefined;
-  let resolvedOnChainContextGraphId: string | null | undefined;
-  try {
-    resolvedOnChainContextGraphId = await agent.getContextGraphOnChainId(contextGraphId);
-  } catch (err) {
-    jsonResponse(res, 400, {
-      error:
-        `Unable to verify "onChainContextGraphId" for context graph "${contextGraphId}": ${err instanceof Error ? err.message : String(err)}`,
-    });
-    return null;
-  }
-  const normalizedResolved = String(resolvedOnChainContextGraphId ?? "").trim();
-  if (!/^[1-9]\d*$/.test(normalizedResolved)) {
-    jsonResponse(res, 400, {
-      error:
-        `"onChainContextGraphId" cannot be supplied for context graph "${contextGraphId}" because no trusted positive on-chain mapping is available`,
-    });
-    return null;
-  }
-  if (BigInt(normalizedResolved) !== BigInt(onChainContextGraphId)) {
-    jsonResponse(res, 400, {
-      error:
-        `"onChainContextGraphId" (${onChainContextGraphId}) does not match the trusted mapping for context graph "${contextGraphId}" (${normalizedResolved})`,
-    });
-    return null;
-  }
-  return normalizedResolved;
-}
-
 export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, agent, publisherControl, path, url, requestToken, requestAgentAddress, emitMemoryGraphChanged } = ctx;
   if (path !== PREFIX && !path.startsWith(`${PREFIX}/`)) return;
@@ -689,99 +652,13 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     allowLocalExactFallback: !writePreflightCallerAgentAddress,
   };
 
-  // ── POST /api/knowledge-assets/publish — explicit-quads one-shot publish ──
-  //
-  // This is intentionally separate from the assertion/SWM lifecycle routes. If
-  // the caller already has the exact quads to publish, use agent.publish()
-  // directly so the publisher's ACK/direct-payload path owns availability. The
-  // SWM/finalized-assertion methods below remain only for callers that have
-  // explicitly staged or finalized the target content first.
+  // ── POST /api/knowledge-assets/publish — retired direct publish surface ──
   if (method === "POST" && path === `${PREFIX}/publish`) {
-    const rawBody = await readBody(req);
-    const parsed = parsePublishRequestBody(rawBody);
-    if (!parsed.ok) return jsonResponse(res, 400, parsed.body ?? { error: parsed.error });
-    const raw = JSON.parse(rawBody) as Record<string, unknown>;
-    const {
-      contextGraphId,
-      quads,
-      privateQuads,
-      accessPolicy,
-      allowedPeers,
-      subGraphName,
-      onChainContextGraphId,
-    } = parsed.value;
-    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
-      agent,
-      contextGraphId,
-      res,
-      writePreflightContextGraphOpts,
-    );
-    if (!resolvedContextGraphId) return;
-    const publishControls = resolveFinalizedPublishOptions(ctx, raw);
-    if (publishControls === null) return;
-    const {
-      clearSharedMemoryAfter: _ignoredClearSharedMemoryAfter,
-      ...directPublishControls
-    } = publishControls;
-    const verifiedOnChainContextGraphId = await verifyDirectPublishOnChainContextGraphId(
-      agent,
-      resolvedContextGraphId,
-      onChainContextGraphId,
-      res,
-    );
-    if (verifiedOnChainContextGraphId === null) return;
-    try {
-      const pub: any = await agent.publish(resolvedContextGraphId, quads, privateQuads, {
-        accessPolicy,
-        allowedPeers,
-        subGraphName,
-        ...(verifiedOnChainContextGraphId !== undefined
-          ? { onChainContextGraphId: verifiedOnChainContextGraphId }
-          : {}),
-        ...directPublishControls,
-      });
-      const { httpStatus, reason } = classifyVmPublish(pub);
-      if (httpStatus === 200) {
-        recordActivityAndNotify(ctx, {
-          contextGraphId: resolvedContextGraphId,
-          kind: "published",
-          actorAgentAddress: requestAgentAddress,
-          subGraphName,
-        });
-      }
-      const chain = pub?.onChainResult;
-      const kaManifest = Array.isArray(pub?.kaManifest) ? pub.kaManifest : [];
-      return jsonResponse(res, httpStatus, {
-        ...pub,
-        mode: "direct",
-        kaId: pub?.kaId != null ? String(pub.kaId) : pub?.kaId,
-        status: pub?.status,
-        kas: kaManifest.map((ka: any) => ({
-          tokenId: String(ka.tokenId),
-          rootEntity: ka.rootEntity,
-        })),
-        ...(chain?.txHash ? { txHash: chain.txHash } : {}),
-        ...(chain?.blockNumber !== undefined ? { blockNumber: chain.blockNumber } : {}),
-        ...(chain?.batchId !== undefined ? { batchId: String(chain.batchId) } : {}),
-        ...(chain?.publisherAddress ? { publisherAddress: chain.publisherAddress } : {}),
-        ...(typeof pub?.contextGraphError === "string" ? { contextGraphError: pub.contextGraphError } : {}),
-        ...(reason ? { error: reason } : {}),
-      });
-    } catch (e: any) {
-      if (isPayloadTooLargeError(e)) {
-        return jsonResponse(res, 413, payloadTooLargeResponseBody(e));
-      }
-      if (e?.code === "OVERSIZED_RDF_LITERAL") {
-        return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
-      }
-      // Transient KA-number-floor reconcile failure (rate-limited RPC) -> 503.
-      if (respondIfReconcileUnavailable(res, e)) return;
-      // A transient chain-RPC transport exhaustion on the direct explicit-quads
-      // mint is retryable (503/504), not a hard 500 — parity with /vm/publish
-      // and /api/context-graph/register. Code-keyed, so on-chain reverts stay 500.
-      if (respondIfChainRpcTransportError(res, e)) return;
-      return jsonResponse(res, 500, { error: e?.message ?? String(e) });
-    }
+    return jsonResponse(res, 404, {
+      code: "DIRECT_PUBLISH_ROUTE_REMOVED",
+      error:
+        "POST /api/knowledge-assets/publish has been removed. Publish named knowledge assets via POST /api/knowledge-assets/:name/vm/publish after create, wm/write, wm/finalize, and swm/share.",
+    });
   }
 
   // ── POST /api/knowledge-assets — create KA + open WM draft (atomic shortcut) ──

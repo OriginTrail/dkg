@@ -247,29 +247,8 @@ describe('ApiClient', () => {
       expect(body).toEqual({ to: 'peer1', text: 'hello' });
     });
 
-    it('publish() sends explicit quads to the direct publish route', async () => {
-      const expected = { kaId: 'kc1', status: 'tentative', kas: [] };
-      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: expected });
-      globalThis.fetch = fetch;
-      const quads = [{ subject: 'urn:s', predicate: 'urn:p', object: '"v"', graph: 'urn:g' }];
-      const privateQuads = [{ subject: 'urn:s', predicate: 'urn:secret', object: '"secret"', graph: 'urn:g' }];
-      const result = await client.publish('test-contextGraph', quads, privateQuads, {
-        accessPolicy: 'allowList',
-        allowedPeers: ['12D3peer1'],
-        publishEpochs: 7,
-        publisherNodeIdentityIdOverride: 0n,
-      });
-      expect(result.kaId).toBe('kc1');
-
-      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/knowledge-assets/publish`);
-      const body = JSON.parse(calls[0].opts.body as string);
-      expect(body.contextGraphId).toBe('test-contextGraph');
-      expect(body.quads).toHaveLength(1);
-      expect(body.privateQuads).toHaveLength(1);
-      expect(body.accessPolicy).toBe('allowList');
-      expect(body.allowedPeers).toEqual(['12D3peer1']);
-      expect(body.publishEpochs).toBe(7);
-      expect(body.publisherNodeIdentityIdOverride).toBe('0');
+    it('does not expose the retired direct explicit-quads publish helper', () => {
+      expect((client as any).publish).toBeUndefined();
     });
 
     it('createKnowledgeAsset() forwards finalize:false for a draft-only write', async () => {

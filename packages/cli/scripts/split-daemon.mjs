@@ -42,9 +42,6 @@ if (!existsSync(OUT)) mkdirSync(OUT, { recursive: true });
 const TYPES_HEADER = `// daemon/types.ts
 //
 // Pure type/interface declarations used across the daemon sub-modules.
-// Kept intentionally lean — \`PublishQuad\` / \`PublishRequestBody\` /
-// \`PublishAccessPolicy\` deliberately stay in \`./http-utils.ts\` because
-// the body parser is their only semantic consumer.
 
 import type { CatchupJobResult } from '../catchup-runner.js';
 `;
@@ -115,27 +112,6 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import type { DkgConfig } from '../config.js';
-
-// Co-located here because the body parser is their only semantic
-// consumer; moving them to \`./types.ts\` would just add an import
-// cycle with no real benefit.
-export interface PublishQuad {
-  subject: string;
-  predicate: string;
-  object: string;
-  graph: string;
-}
-
-export type PublishAccessPolicy = 'public' | 'ownerOnly' | 'allowList';
-
-export interface PublishRequestBody {
-  contextGraphId: string;
-  quads: PublishQuad[];
-  privateQuads?: PublishQuad[];
-  accessPolicy?: PublishAccessPolicy;
-  allowedPeers?: string[];
-  subGraphName?: string;
-}
 
 import type { CorsAllowlist } from './state.js';
 `;

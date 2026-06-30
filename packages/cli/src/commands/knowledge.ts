@@ -30,7 +30,6 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
-import { parsePositiveIntegerOption, parsePositiveMsOption } from '../publisher-runner.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
@@ -60,7 +59,6 @@ import {
   getCliVersion,
   parseOptionalVerifyTimeoutOption,
   loadStructuredFile,
-  loadQuadsFromInput,
   resolveDaemonEntryPoint,
   probeHostForApiHost,
   selectedDkgHomeForEnv,
@@ -104,90 +102,6 @@ import {
 } from '../cli-supervisor.js';
 
 export function registerKnowledgeCommands(program: Command): void {
-// ─── dkg publish <context-graph> ─────────────────────────────────────
-
-program
-  .command('publish <context-graph>')
-  .description('Publish triples to a context graph from an RDF file or inline')
-  .option('-f, --file <path>', 'RDF file (.nq, .nt, .ttl, .trig, .jsonld, .json)')
-  .option('--private-file <path>', 'RDF file with private triples (encrypted, access-controlled)')
-  .option('--format <fmt>', 'Explicit RDF format (nquads|ntriples|turtle|trig|json|jsonld)')
-  .option('-t, --triples <json>', 'Inline JSON array of {subject, predicate, object} triples')
-  .option('-s, --subject <uri>', 'Subject URI for simple publish')
-  .option('-p, --predicate <uri>', 'Predicate URI for simple publish')
-  .option('-o, --object <value>', 'Object value for simple publish')
-  .option('--access-policy <policy>', 'Access policy for private triples (public|ownerOnly|allowList)')
-  .option('--allowed-peer <peerId>', 'Peer ID allowed when using allowList policy', (v, prev: string[] = []) => [...prev, v], [])
-  .option('--publish-epochs <count>', 'On-chain publish lifetime in epochs (default: 12; PCA-funded publishes may coerce to PCA lock duration)')
-  .option('--publisher-node-identity-id <id>', 'Override the publisherNodeIdentityId for THIS publish only (RFC §4 attribution; pass `0` for an unattributed publish)')
-  .action(async (contextGraph: string, opts: ActionOpts) => {
-    try {
-      const client = await ApiClient.connect();
-      const defaultGraph = `did:dkg:context-graph:${contextGraph}`;
-      const quads = await loadQuadsFromInput(opts, defaultGraph);
-
-      let privateQuads: Array<{ subject: string; predicate: string; object: string; graph: string }> | undefined;
-      if (opts.privateFile) {
-        const rdfParser = await import('../rdf-parser.js');
-        const { readFile } = await import('node:fs/promises');
-        const raw = await readFile(opts.privateFile, 'utf-8');
-        const format = opts.format ?? rdfParser.detectFormat(opts.privateFile);
-        const parsedPrivateQuads = await rdfParser.parseRdf(raw, format, defaultGraph);
-        privateQuads = parsedPrivateQuads;
-        console.log(`Parsed ${parsedPrivateQuads.length} private quad(s) from ${opts.privateFile} (${format})`);
-      }
-
-      const accessPolicy = opts.accessPolicy as ('public' | 'ownerOnly' | 'allowList' | undefined);
-      const allowedPeers = (opts.allowedPeer as string[] | undefined)?.map((p) => p.trim()).filter(Boolean) ?? [];
-      if (accessPolicy && !['public', 'ownerOnly', 'allowList'].includes(accessPolicy)) {
-        console.error('Invalid --access-policy. Use one of: public, ownerOnly, allowList');
-        process.exit(1);
-      }
-      if (accessPolicy === 'allowList' && allowedPeers.length === 0) {
-        console.error('When --access-policy allowList is used, provide at least one --allowed-peer');
-        process.exit(1);
-      }
-      if (accessPolicy !== 'allowList' && allowedPeers.length > 0) {
-        console.error('--allowed-peer can only be used with --access-policy allowList');
-        process.exit(1);
-      }
-
-      const publishEpochs = opts.publishEpochs !== undefined
-        ? parsePositiveIntegerOption(String(opts.publishEpochs), '--publish-epochs')
-        : undefined;
-      let publisherNodeIdentityIdOverride: bigint | undefined;
-      if (opts.publisherNodeIdentityId !== undefined) {
-        const raw = String(opts.publisherNodeIdentityId);
-        if (!/^\d+$/.test(raw)) {
-          console.error('--publisher-node-identity-id must be a non-negative integer (use `0` for unattributed)');
-          process.exit(1);
-        }
-        publisherNodeIdentityIdOverride = BigInt(raw);
-      }
-      const result = await client.publish(contextGraph, quads, privateQuads, {
-        accessPolicy,
-        allowedPeers,
-        publishEpochs,
-        publisherNodeIdentityIdOverride,
-      });
-      console.log(`Published to context graph "${contextGraph}":`);
-      console.log(`  Status:    ${result.status}`);
-      console.log(`  KC ID:     ${result.kaId}`);
-      if (result.txHash) {
-        console.log(`  TX hash:   ${result.txHash}`);
-        console.log(`  Block:     ${result.blockNumber}`);
-        console.log(`  Batch ID:  ${result.batchId}`);
-        console.log(`  Publisher: ${result.publisherAddress}`);
-      }
-      for (const ka of result.kas) {
-        console.log(`  KA: ${ka.rootEntity} (token ${ka.tokenId})`);
-      }
-    } catch (err) {
-      console.error(toErrorMessage(err));
-      process.exit(1);
-    }
-  });
-
 // ─── dkg verify <batchId> ──────────────────────────────────────────
 
 program
