@@ -19,6 +19,7 @@ import {
   convictionDiscountBps,
   EligibilityVerdictBanner,
   SponsorshipHandshake,
+  DeviceConfirmProgress,
 } from '../src/ui/components/Pca/index.js';
 import {
   healthForSnapshot,
@@ -197,6 +198,39 @@ describe('WalletRow', () => {
     const copy = container.querySelector('.v10-pca-copy-btn')!;
     expect(copy.getAttribute('aria-label')).toContain(addr);
     await unmount();
+  });
+});
+
+describe('DeviceConfirmProgress', () => {
+  it('uses status for normal progress and alert for failures, with visible N/M copy and tx links', async () => {
+    const { container, unmount } = await render(
+      React.createElement(DeviceConfirmProgress, {
+        currentLabel: 'Confirm on your device (2 of 3)',
+        blockExplorerUrl: 'https://explorer.example',
+        steps: [
+          { id: '1', label: 'Approve exact TRAC allowance', state: 'confirmed', txHash: '0xabc' },
+          { id: '2', label: 'Approve wallet on PCA #7', state: 'active' },
+        ],
+      }),
+    );
+    const status = container.querySelector('.v10-pca-device-progress')!;
+    expect(status.getAttribute('role')).toBe('status');
+    expect(status.getAttribute('aria-live')).toBe('polite');
+    expect(container.textContent).toContain('Confirm on your device (2 of 3)');
+    expect(container.textContent).toContain('Verify the amount and contract address on the device');
+    expect(container.querySelector('a')?.getAttribute('href')).toBe('https://explorer.example/tx/0xabc');
+    await unmount();
+
+    const failed = await render(
+      React.createElement(DeviceConfirmProgress, {
+        steps: [{ id: 'fail', label: 'Approve wallet on PCA #7', state: 'failed', error: 'User rejected' }],
+      }),
+    );
+    const alert = failed.container.querySelector('.v10-pca-device-progress')!;
+    expect(alert.getAttribute('role')).toBe('alert');
+    expect(alert.getAttribute('aria-live')).toBe('assertive');
+    expect(failed.container.textContent).toContain('User rejected');
+    await failed.unmount();
   });
 });
 

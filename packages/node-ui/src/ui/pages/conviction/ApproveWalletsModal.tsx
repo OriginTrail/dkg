@@ -10,12 +10,25 @@ import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
 import { resolveWalletBinding, planSelfCoverage } from '../../pca/walletBinding.js';
 import { PcaModalShell } from './PcaModalShell.js';
 import {
+  describeWalletTxError,
+  WalletReceiptRevertedError,
+  WalletReceiptWaitError,
+  WalletTxStepError,
+} from '../../web3/walletTxError.js';
+import {
+  WalletOwnerActionAbortError,
+  WalletOwnerActionUnavailableError,
+} from '../../web3/walletOwnerActionSubmitter.js';
+import {
   AddressCrux,
+  DeviceConfirmProgress,
   WalletRow,
   SponsorshipHandshake,
   CopyButton,
+  type DeviceConfirmStep,
   type WalletRowTone,
 } from '../../components/Pca/index.js';
+import { useWalletStore } from '../../stores/wallet.js';
 
 type RowStatus = 'pending' | 'approved' | 'submitted' | 'skipped' | 'sponsored' | 'stranded' | 'conflict' | 'cap' | 'error' | 'unverified';
 interface Row {
@@ -26,6 +39,36 @@ interface Row {
 }
 
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
+const sameAddress = (a?: string | null, b?: string | null) =>
+  !!a && !!b && a.toLowerCase() === b.toLowerCase();
+
+function walletBatchAbortMessage(err: unknown): string | null {
+  if (
+    err instanceof WalletOwnerActionAbortError ||
+    err instanceof WalletOwnerActionUnavailableError
+  ) {
+    return err.message;
+  }
+  if (err instanceof WalletReceiptWaitError) {
+    return `${describeWalletTxError(err, err.txStep ?? 'action').message} Stop here and verify before continuing.`;
+  }
+  if (err instanceof WalletReceiptRevertedError) {
+    return describeWalletTxError(err, 'action').message;
+  }
+  const info = describeWalletTxError(
+    err,
+    err instanceof WalletTxStepError ? err.txStep : 'action',
+  );
+  if (
+    info.kind === 'rejected' ||
+    info.kind === 'insufficient_funds' ||
+    info.kind === 'rpc_timeout' ||
+    info.kind === 'unknown'
+  ) {
+    return info.message;
+  }
+  return null;
+}
 
 const ROW_LABEL: Record<RowStatus, string> = {
   pending: 'approving…',
@@ -95,7 +138,7 @@ export function ApproveWalletsModal({
   seedAgentsResolved?: boolean;
   /**
    * Self-coverage — set when this is the post-create self-coverage of THIS node's
-   * own wallets. Each wallet is binding-probed PER-ROW just before its register: a wallet on a
+   * own wallets. Each wallet is binding-probed at run start before any owner write: a wallet on a
    * PCA the node OWNS is deregistered-first; a wallet on a PCA the node CAN'T own (a sponsor's)
    * is SKIPPED (already discounted free), never burning a register. Distinct from `deregisterFrom`
    * (renew's single old account) — here the old account varies per wallet.
@@ -104,12 +147,13 @@ export function ApproveWalletsModal({
 }) {
   const { data: wb } = useFetch(fetchWalletsBalances, [], 0);
   const { data: snapshot } = useFetch(() => fetchPca(accountId), [accountId]);
-  const owner = useOwnerActionSubmitter(accountId); // owner-action seam (P0: daemon submitter)
+  const owner = useOwnerActionSubmitter({ accountId });
   // Renew — the OLD account's owner-action submitter (free the wallet there first).
-  // Same daemon submitter today; keyed separately for the future wallet-owned signing branch.
-  const deregisterOwner = useOwnerActionSubmitter(deregisterFrom);
+  // Resolved separately because the old PCA can have a different owner/signing branch.
+  const deregisterOwner = useOwnerActionSubmitter({ accountId: deregisterFrom });
   const nodeWallets = wb?.wallets ?? [];
   const ownerWallet = nodeWallets[0]; // the daemon EOA — what it can deregister-from
+  const connectedWallet = useWalletStore((s) => s.address);
   const agentCount = snapshot?.agentCount ?? 0;
   const cap = Math.max(0, 100 - agentCount);
 
@@ -121,7 +165,11 @@ export function ApproveWalletsModal({
   const [running, setRunning] = useState(false);
   const [done, setDone] = useState(false);
   const [aborted, setAborted] = useState<string | null>(null);
+  const [deviceSteps, setDeviceSteps] = useState<DeviceConfirmStep[]>([]);
+  const [deviceLabel, setDeviceLabel] = useState<string | undefined>(undefined);
   const stopRef = useRef(false);
+  const devicePromptIndexRef = useRef(0);
+  const devicePromptTotalRef = useRef(0);
 
   const parsed = useMemo(() => {
     const seen = new Set<string>();
@@ -146,6 +194,44 @@ export function ApproveWalletsModal({
   );
   const addresses = mode === 'self' ? selfSelected : parsed.valid;
   const overCap = addresses.length > cap;
+  const walletManaged =
+    !!snapshot?.owner &&
+    !!connectedWallet &&
+    !sameAddress(snapshot.owner, ownerWallet) &&
+    sameAddress(snapshot.owner, connectedWallet);
+
+  const runOwnerWrite = async <T extends { txHash?: string }>(
+    label: string,
+    write: () => Promise<T>,
+  ): Promise<T> => {
+    if (!walletManaged) return write();
+    const index = devicePromptIndexRef.current + 1;
+    devicePromptIndexRef.current = index;
+    const total = Math.max(devicePromptTotalRef.current, index);
+    const id = `${index}-${label}`;
+    setDeviceLabel(`Confirm on your device (${index} of ${total})`);
+    setDeviceSteps((steps) => [...steps, { id, label, state: 'active' }]);
+    try {
+      const result = await write();
+      setDeviceSteps((steps) =>
+        steps.map((step) =>
+          step.id === id
+            ? { ...step, state: 'confirmed', txHash: result.txHash }
+            : step,
+        ),
+      );
+      return result;
+    } catch (err) {
+      setDeviceSteps((steps) =>
+        steps.map((step) =>
+          step.id === id
+            ? { ...step, state: 'failed', error: (err as Error)?.message ?? 'Action failed.' }
+            : step,
+        ),
+      );
+      throw err;
+    }
+  };
 
   const run = async () => {
     // U1 — do NOT hard-block on the raw count > cap: already-approved-here addresses
@@ -159,6 +245,28 @@ export function ApproveWalletsModal({
     setAborted(null);
     setOrder(addresses);
     setRows(Object.fromEntries(addresses.map((a) => [a, { address: a, status: 'pending' as RowStatus }])));
+    devicePromptIndexRef.current = 0;
+    devicePromptTotalRef.current = 0;
+    setDeviceLabel(undefined);
+    setDeviceSteps([]);
+
+    const plannedSelfCoverage = new Map<string, ReturnType<typeof planSelfCoverage>>();
+    if (selfCoverage && mode === 'self') {
+      for (const addr of addresses) {
+        plannedSelfCoverage.set(addr, planSelfCoverage(await resolveWalletBinding(addr, ownerWallet)));
+      }
+    }
+    devicePromptTotalRef.current = walletManaged
+      ? addresses.reduce((total, addr) => {
+          if (deregisterFrom) return total + 2;
+          if (selfCoverage && mode === 'self') {
+            const plan = plannedSelfCoverage.get(addr);
+            if (plan?.kind === 'skipSponsored' || plan?.kind === 'conflictSponsorDead') return total;
+            if (plan?.kind === 'deregisterThenRegister') return total + 2;
+          }
+          return total + 1;
+        }, 0)
+      : 0;
 
     // W1/U1 — set `current` AND sweep every still-'pending' (not-yet-processed) row to
     // `status` before a loop `break`, so a break never leaves later rows on "approving…".
@@ -186,18 +294,25 @@ export function ApproveWalletsModal({
       try {
         // Renew (deregister-first, #1344): expiry doesn't clear `agentToAccountId`, so a seeded
         // old-PCA wallet is still bound there and registerAgent(newId) would revert
-        // AgentAlreadyRegistered. Free it from the OLD account FIRST. Best-effort — an already-free
-        // wallet (AgentNotRegistered) or a transient failure just falls through to the register,
-        // whose AgentAlreadyRegistered handling below surfaces a still-bound wallet as a conflict
-        // (pointing at the old account) for recovery.
+        // AgentAlreadyRegistered. Free it from the OLD account FIRST. Daemon/transient failures
+        // still fall through to register for the old recovery path, but wallet-signing aborts/rejects
+        // stop the batch immediately so the UI never opens another prompt after the user declined.
         if (deregisterFrom) {
-          await deregisterOwner.deregisterAgent(deregisterFrom, addr).catch(() => {});
+          try {
+            await runOwnerWrite(
+              `Deregister ${addr} from PCA #${deregisterFrom}`,
+              () => deregisterOwner.deregisterAgent(deregisterFrom, addr),
+            );
+            strandedFrom = deregisterFrom;
+          } catch (err) {
+            if (walletManaged && walletBatchAbortMessage(err)) throw err;
+          }
         } else if (selfCoverage && mode === 'self') {
           // Honesty/safety gate on mode==='self': the mode radios stay enabled, so running this
           // self-coverage logic on THIRD-PARTY (sponsor-mode) addresses would mis-classify them.
           // The per-wallet classification lives in the planner (walletBinding.ts); this loop just
           // EXECUTES the plan. (Old account varies per wallet, unlike renew's deregisterFrom.)
-          const plan = planSelfCoverage(await resolveWalletBinding(addr, ownerWallet));
+          const plan = plannedSelfCoverage.get(addr) ?? planSelfCoverage(await resolveWalletBinding(addr, ownerWallet));
           if (plan.kind === 'skipSponsored') {
             // Bound to a LIVE sponsor PCA → already discounted free; don't burn a register/conflict.
             setRows((r) => ({
@@ -220,12 +335,24 @@ export function ApproveWalletsModal({
             // (off old, not on new) with a retry, not a generic error. A FAILED deregister leaves
             // the wallet on old → register conflicts → the AgentAlreadyRegistered handling below
             // recovers it.
-            try { await owner.deregisterAgent(plan.prevAccountId, addr); strandedFrom = plan.prevAccountId; }
-            catch { /* still bound to old — not stranded; register's conflict path recovers */ }
+            try {
+              await runOwnerWrite(
+                `Deregister ${addr} from PCA #${plan.prevAccountId}`,
+                () => owner.deregisterAgent(plan.prevAccountId, addr),
+              );
+              strandedFrom = plan.prevAccountId;
+            }
+            catch (err) {
+              if (walletManaged && walletBatchAbortMessage(err)) throw err;
+              /* still bound to old — not stranded; register's conflict path recovers */
+            }
           }
           // plan.kind === 'register' (unbound / inconclusive) → fall through to register.
         }
-        const res = await owner.registerAgent(accountId, addr);
+        const res = await runOwnerWrite(
+          `Approve ${addr} on PCA #${accountId}`,
+          () => owner.registerAgent(accountId, addr),
+        );
         setRows((r) => ({
           ...r,
           [addr]: { address: addr, status: res.registered ? 'approved' : 'submitted', txHash: res.txHash },
@@ -239,6 +366,12 @@ export function ApproveWalletsModal({
           status: 'stranded',
           message: `Removed from PCA #${strandedFrom}, not yet on #${accountId} — retry to finish.`,
         });
+        const walletAbort = walletManaged ? walletBatchAbortMessage(err) : null;
+        if (walletAbort) {
+          setAborted(walletAbort);
+          setRows((r) => markRemaining(r, strandedFrom ? strandRow() : { address: addr, status: 'error', message: walletAbort }, 'error', 'aborted'));
+          break;
+        }
         // 403 → owner-gate failure: abort the WHOLE operation. W1 — sweep the later
         // not-yet-processed rows too, else they stay stuck on "approving…".
         if (err instanceof HttpError && err.status === 403) {
@@ -315,6 +448,7 @@ export function ApproveWalletsModal({
       onClose={onClose}
       testId="pca-approve-modal"
       title={`Approve publishing wallets — PCA #${accountId}`}
+      dismissDisabled={running && walletManaged}
     >
       <div className="v10-modal-body">
         {/* Mode */}
@@ -410,6 +544,13 @@ export function ApproveWalletsModal({
           <div className="v10-modal-error" role="alert">{aborted}</div>
         )}
 
+        {deviceSteps.length > 0 && (
+          <DeviceConfirmProgress
+            steps={deviceSteps}
+            currentLabel={deviceLabel ?? 'Confirm on your device'}
+          />
+        )}
+
         {/* Per-row results */}
         {showResults && (
           <div className="v10-pca-approve-results" role="status" aria-live="polite">
@@ -468,7 +609,7 @@ export function ApproveWalletsModal({
       </div>
 
       <div className="v10-modal-footer">
-        <button type="button" className="v10-modal-btn" onClick={onClose}>
+        <button type="button" className="v10-modal-btn" onClick={onClose} disabled={running && walletManaged}>
           {done ? 'Done' : 'Cancel'}
         </button>
         {running ? (

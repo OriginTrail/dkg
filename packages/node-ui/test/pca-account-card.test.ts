@@ -135,7 +135,7 @@ describe('PcaAccountCard', () => {
     await unmount();
   });
 
-  it('disables "Approve wallets" when the owner is NOT the node primary wallet (§8A)', async () => {
+  it('disables "Approve wallets" when the owner is not manageable by this browser', async () => {
     const onApproveWallets = vi.fn();
     const enabled = await render(
       React.createElement(PcaAccountCard, { account: acct({ ownerIsPrimaryWallet: true }), onApproveWallets }),
@@ -153,8 +153,59 @@ describe('PcaAccountCard', () => {
       (b) => b.textContent === 'Approve wallets',
     )!;
     expect(approveBtn.disabled).toBe(true);
-    expect(approveBtn.getAttribute('title')?.toLowerCase()).toContain('owner-only');
+    expect(approveBtn.getAttribute('title')?.toLowerCase()).toContain('connect owner wallet');
     await disabled.unmount();
+  });
+
+  it('enables wallet-managed owner controls and states that the connected wallet signs', async () => {
+    const onApproveWallets = vi.fn();
+    const account = acct({
+      classification: 'unknown',
+      ownerIsPrimaryWallet: false,
+      ownerMode: 'wallet',
+      connectedWallet: '0xCdA7000000000000000000000000000000001F9B',
+      walletWrongNetwork: false,
+      approvedCount: 1,
+      snapshot: snap({ owner: '0xCdA7000000000000000000000000000000001F9B' }),
+    });
+    const { container, unmount } = await render(
+      React.createElement(PcaAccountCard, { account, onApproveWallets }),
+    );
+    expect(container.querySelector('[data-owner-mode="wallet"]')).toBeTruthy();
+    expect(container.textContent).toContain('wallet-managed');
+    expect(container.textContent).toContain('connected wallet');
+    const approveBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Approve wallets',
+    )!;
+    expect(approveBtn.disabled).toBe(false);
+    expect(approveBtn.getAttribute('title')).toContain('Connected wallet will sign');
+    await unmount();
+  });
+
+  it('disables wallet-managed writes on the wrong network and offers a switch prompt', async () => {
+    const onSwitchNetwork = vi.fn();
+    const account = acct({
+      classification: 'unknown',
+      ownerIsPrimaryWallet: false,
+      ownerMode: 'wallet',
+      connectedWallet: '0xCdA7000000000000000000000000000000001F9B',
+      walletWrongNetwork: true,
+      approvedCount: 1,
+      snapshot: snap({ owner: '0xCdA7000000000000000000000000000000001F9B' }),
+    });
+    const { container, unmount } = await render(
+      React.createElement(PcaAccountCard, { account, onApproveWallets: vi.fn(), onSwitchNetwork }),
+    );
+    expect(container.textContent).toContain('Wrong network');
+    const approveBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Approve wallets',
+    )!;
+    expect(approveBtn.disabled).toBe(true);
+    Array.from(container.querySelectorAll('button'))
+      .find((b) => b.textContent === 'Switch network')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(onSwitchNetwork).toHaveBeenCalled();
+    await unmount();
   });
 
   it('approved card surfaces the round-robin "N of M approved" footgun + copy-unapproved', async () => {

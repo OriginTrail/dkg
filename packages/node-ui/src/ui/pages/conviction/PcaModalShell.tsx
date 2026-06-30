@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import { useModalDismiss } from '../../components/Modals/useModalDismiss.js';
 
 /**
@@ -14,14 +14,19 @@ export function PcaModalShell({
   subtitle,
   testId,
   children,
+  dismissDisabled = false,
 }: {
   onClose: () => void;
   title: string;
   subtitle?: string;
   testId?: string;
   children: React.ReactNode;
+  dismissDisabled?: boolean;
 }) {
-  const { dialogRef, onBackdropClick } = useModalDismiss(true, onClose);
+  const handleClose = useCallback(() => {
+    if (!dismissDisabled) onClose();
+  }, [dismissDisabled, onClose]);
+  const { dialogRef, onBackdropClick } = useModalDismiss(true, handleClose);
   const headingRef = useRef<HTMLHeadingElement | null>(null);
   useEffect(() => {
     // F4/L7: useModalDismiss (called above, so its effect runs first) focuses the
@@ -45,10 +50,11 @@ export function PcaModalShell({
         <button
           type="button"
           className="v10-modal-close"
-          onClick={onClose}
-          aria-label="Close dialog"
-          title="Close (Esc)"
-          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
+          onClick={handleClose}
+          aria-label={dismissDisabled ? 'Close disabled while signing' : 'Close dialog'}
+          title={dismissDisabled ? 'Finish or reject the wallet prompt first' : 'Close (Esc)'}
+          disabled={dismissDisabled}
+          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: dismissDisabled ? 'not-allowed' : 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1, opacity: dismissDisabled ? 0.45 : 1 }}
         >
           ×
         </button>

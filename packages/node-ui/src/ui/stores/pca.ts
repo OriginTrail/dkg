@@ -26,7 +26,7 @@ const PERSIST_DEBOUNCE_MS = 150;
  * page reload can still reconcile against the chain before allowing a retry.
  */
 export interface PcaCreatePending {
-  /** The owner EOA the PCA was being minted to (the daemon's `wallets[0]`). */
+  /** The owner EOA the PCA was being minted to. */
   ownerEoa: string;
   /** `Date.now()` at submit, so stale markers can be surfaced/aged out. */
   submittedAt: number;
@@ -34,11 +34,26 @@ export interface PcaCreatePending {
   txHash?: string;
 }
 
+/**
+ * Marker for an in-flight top-up whose confirmation was lost. Unlike create,
+ * top-up mints no account id, so recovery is anchored to the broadcast txHash.
+ */
+export interface PcaTopUpPending {
+  accountId: string;
+  ownerEoa: string;
+  submittedAt: number;
+  txHash: string;
+  tokens?: string;
+  previousTopUpBufferTrac?: string;
+}
+
 interface PcaState {
   /** Tracked account ids (deduped, insertion-ordered). */
   trackedIds: string[];
   /** The single in-flight create marker, or null. */
   createPending: PcaCreatePending | null;
+  /** In-flight top-up markers keyed by PCA account id. */
+  topUpPending: Record<string, PcaTopUpPending>;
   /**
    * T3 — whether the current `createPending` marker was actually WRITTEN to
    * localStorage (false when storage is disabled/full). The reconcile screen reads
@@ -51,6 +66,8 @@ interface PcaState {
   isTracked: (id: string) => boolean;
   setCreatePending: (marker: PcaCreatePending) => void;
   clearCreatePending: () => void;
+  setTopUpPending: (marker: PcaTopUpPending) => void;
+  clearTopUpPending: (accountId: string) => void;
   /**
    * P1 — atomically finalize a confirmed create: clear the marker AND track the new
    * id in ONE synchronous write (persistNow). The split trackAccount+clearCreatePending
@@ -63,11 +80,17 @@ interface PcaState {
 interface PersistedPca {
   trackedIds?: unknown;
   createPending?: unknown;
+  topUpPending?: unknown;
 }
 
-const DEFAULTS: { trackedIds: string[]; createPending: PcaCreatePending | null } = {
+const DEFAULTS: {
+  trackedIds: string[];
+  createPending: PcaCreatePending | null;
+  topUpPending: Record<string, PcaTopUpPending>;
+} = {
   trackedIds: [],
   createPending: null,
+  topUpPending: {},
 };
 
 // Account ids are non-negative integer strings (the daemon's accountId is a
@@ -102,7 +125,35 @@ function sanitizeCreatePending(value: unknown): PcaCreatePending | null {
   };
 }
 
-function loadPersisted(): { trackedIds: string[]; createPending: PcaCreatePending | null } {
+function sanitizeTopUpPending(value: unknown): Record<string, PcaTopUpPending> {
+  if (value == null || typeof value !== 'object') return {};
+  const out: Record<string, PcaTopUpPending> = {};
+  for (const [accountId, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (!isValidAccountId(accountId) || raw == null || typeof raw !== 'object') continue;
+    const v = raw as Record<string, unknown>;
+    if (v.accountId !== accountId) continue;
+    if (typeof v.ownerEoa !== 'string' || v.ownerEoa.length === 0) continue;
+    if (typeof v.txHash !== 'string' || v.txHash.length === 0) continue;
+    if (typeof v.submittedAt !== 'number' || !Number.isFinite(v.submittedAt)) continue;
+    out[accountId] = {
+      accountId,
+      ownerEoa: v.ownerEoa,
+      txHash: v.txHash,
+      submittedAt: v.submittedAt,
+      ...(typeof v.tokens === 'string' ? { tokens: v.tokens } : {}),
+      ...(typeof v.previousTopUpBufferTrac === 'string'
+        ? { previousTopUpBufferTrac: v.previousTopUpBufferTrac }
+        : {}),
+    };
+  }
+  return out;
+}
+
+function loadPersisted(): {
+  trackedIds: string[];
+  createPending: PcaCreatePending | null;
+  topUpPending: Record<string, PcaTopUpPending>;
+} {
   try {
     const raw = localStorage.getItem(PCA_STORAGE_KEY);
     if (!raw) return { ...DEFAULTS };
@@ -110,6 +161,7 @@ function loadPersisted(): { trackedIds: string[]; createPending: PcaCreatePendin
     return {
       trackedIds: sanitizeTrackedIds(parsed.trackedIds),
       createPending: sanitizeCreatePending(parsed.createPending),
+      topUpPending: sanitizeTopUpPending(parsed.topUpPending),
     };
   } catch {
     return { ...DEFAULTS };
@@ -157,6 +209,7 @@ function snapshot(state: PcaState): PersistedPca {
   return {
     trackedIds: state.trackedIds,
     createPending: state.createPending,
+    topUpPending: state.topUpPending,
   };
 }
 
@@ -165,6 +218,7 @@ const initial = loadPersisted();
 export const usePcaStore = create<PcaState>((set, get) => ({
   trackedIds: initial.trackedIds,
   createPending: initial.createPending,
+  topUpPending: initial.topUpPending,
   // A loaded marker came FROM localStorage, so it's persisted by definition.
   createPendingPersisted: initial.createPending != null,
 
@@ -189,6 +243,25 @@ export const usePcaStore = create<PcaState>((set, get) => ({
   },
   clearCreatePending: () => {
     set({ createPending: null, createPendingPersisted: false });
+    persist(snapshot(get()));
+  },
+  setTopUpPending: (marker) => {
+    if (!isValidAccountId(marker.accountId)) return;
+    set((s) => ({
+      topUpPending: {
+        ...s.topUpPending,
+        [marker.accountId]: marker,
+      },
+    }));
+    persistNow(snapshot(get()));
+  },
+  clearTopUpPending: (accountId) => {
+    set((s) => {
+      if (!s.topUpPending[accountId]) return s;
+      const next = { ...s.topUpPending };
+      delete next[accountId];
+      return { topUpPending: next };
+    });
     persist(snapshot(get()));
   },
   finishCreate: (id) => {

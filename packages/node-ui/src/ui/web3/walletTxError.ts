@@ -41,7 +41,46 @@ export class WalletReceiptRevertedError extends Error {
   }
 }
 
+/**
+ * Thrown after a wallet returned a transaction hash but receipt polling failed.
+ * The tx may still mine, so callers can use `txHash` for reconcile instead of
+ * losing the broadcast action hash behind an RPC/timeout error.
+ */
+export class WalletReceiptWaitError extends Error {
+  readonly txHash?: string;
+  readonly txStep?: WalletTxStep;
+  readonly cause?: unknown;
+
+  constructor(txHash?: string, cause?: unknown, txStep?: WalletTxStep) {
+    const reason = cause instanceof Error && cause.message ? `: ${cause.message}` : '';
+    super(`Transaction broadcast but receipt polling failed${reason}`);
+    this.name = 'WalletReceiptWaitError';
+    this.txHash = txHash;
+    this.txStep = txStep;
+    this.cause = cause;
+  }
+}
+
+/**
+ * Thrown when a wallet rejects/fails before returning a tx hash. The UI still
+ * needs to know whether the failing prompt was the ERC-20 approve or the PCA
+ * owner action to produce correct recovery copy.
+ */
+export class WalletTxStepError extends Error {
+  readonly txStep: WalletTxStep;
+  readonly cause?: unknown;
+
+  constructor(txStep: WalletTxStep, cause: unknown) {
+    const reason = cause instanceof Error && cause.message ? `: ${cause.message}` : '';
+    super(`Wallet transaction failed during ${txStep}${reason}`);
+    this.name = 'WalletTxStepError';
+    this.txStep = txStep;
+    this.cause = cause;
+  }
+}
+
 function walk<T>(err: unknown, pred: (e: unknown) => e is T): T | undefined {
+  if (err instanceof WalletTxStepError) return walk(err.cause, pred);
   if (err instanceof BaseError) {
     const found = err.walk((e) => pred(e));
     return (found as T) ?? undefined;
@@ -50,6 +89,7 @@ function walk<T>(err: unknown, pred: (e: unknown) => e is T): T | undefined {
 }
 
 function looksLike(err: unknown, needles: string[]): boolean {
+  if (err instanceof WalletTxStepError) return looksLike(err.cause, needles);
   const hay = (
     (err instanceof Error ? `${err.message} ${(err as { details?: string }).details ?? ''}` : String(err)) ?? ''
   ).toLowerCase();
@@ -62,6 +102,8 @@ function looksLike(err: unknown, needles: string[]): boolean {
  * approval" (§8g) rather than "nothing changed".
  */
 export function describeWalletTxError(err: unknown, step: WalletTxStep): WalletTxErrorInfo {
+  const effectiveStep = err instanceof WalletTxStepError ? err.txStep : step;
+  const rootErr = err instanceof WalletTxStepError ? err.cause : err;
   // Reverted receipt (mined-but-reverted) — never a success.
   if (err instanceof WalletReceiptRevertedError) {
     return {
@@ -71,12 +113,20 @@ export function describeWalletTxError(err: unknown, step: WalletTxStep): WalletT
     };
   }
 
+  if (err instanceof WalletReceiptWaitError && looksLike(err, ['timed out', 'timeout', 'took too long', 'request timed out'])) {
+    return {
+      kind: 'rpc_timeout',
+      recoverable: true,
+      message: 'The network didn’t confirm in time — the transaction may still be processing. Re-check before retrying.',
+    };
+  }
+
   // User rejected in the wallet (EIP-1193 code 4001 / viem UserRejectedRequestError).
   const rejected =
     walk(err, (e): e is UserRejectedRequestError => e instanceof UserRejectedRequestError) ??
-    ((err as { code?: number })?.code === 4001 ? (err as UserRejectedRequestError) : undefined);
+    ((rootErr as { code?: number })?.code === 4001 ? (rootErr as UserRejectedRequestError) : undefined);
   if (rejected) {
-    return step === 'approve'
+    return effectiveStep === 'approve'
       ? { kind: 'rejected', recoverable: true, message: 'You rejected the TRAC approval in your wallet. Nothing was committed.' }
       : {
           kind: 'rejected',

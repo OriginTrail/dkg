@@ -17,9 +17,14 @@ const mocks = vi.hoisted(() => ({
   pcaSettle: vi.fn(),
   pcaRemoveAgent: vi.fn(),
   registerContextGraph: vi.fn(),
+  listPcaContracts: vi.fn(),
+  publicClientFor: vi.fn(),
   // The renew path renders the real CreatePcaModal → the §3b picker + B1 probe.
   pcaAgentAccount: vi.fn(),
   listDesignatableNodes: vi.fn(),
+  walletOwnerActionSubmitter: vi.fn(),
+  walletTopUp: vi.fn(),
+  walletDeregisterAgent: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', async (orig) => {
@@ -27,11 +32,33 @@ vi.mock('../src/ui/api.js', async (orig) => {
   return { ...actual, ...mocks };
 });
 
+vi.mock('../src/ui/web3/clients.js', () => ({
+  publicClientFor: mocks.publicClientFor,
+}));
+
+vi.mock('../src/ui/web3/walletOwnerActionSubmitter.js', async (orig) => {
+  const actual = await orig<typeof import('../src/ui/web3/walletOwnerActionSubmitter.js')>();
+  return {
+    ...actual,
+    walletOwnerActionSubmitter: mocks.walletOwnerActionSubmitter,
+  };
+});
+
 const { ConvictionDetailView } = await import('../src/ui/pages/conviction/ConvictionDetailView.js');
 const { useAgentsStore } = await import('../src/ui/stores/agents.js');
+const { usePcaStore } = await import('../src/ui/stores/pca.js');
+const { useWalletStore } = await import('../src/ui/stores/wallet.js');
 const { HttpError } = await import('../src/ui/api.js');
+const { WalletTxStepError } = await import('../src/ui/web3/walletTxError.js');
 
 const W0 = '0x9A3f000000000000000000000000000000000E41D';
+const CONNECTED_OWNER = '0x' + 'd'.repeat(40);
+const CONTRACTS = {
+  nft: `0x${'11'.repeat(20)}`,
+  token: `0x${'22'.repeat(20)}`,
+  chainId: 'base:84532',
+  rpcUrls: ['https://rpc.example'],
+};
 
 function snap(over: Record<string, unknown> = {}) {
   return {
@@ -77,6 +104,21 @@ beforeEach(() => {
   document.body.innerHTML = '';
   vi.clearAllMocks();
   useAgentsStore.getState().setNodeStatus({ blockExplorerUrl: null });
+  usePcaStore.setState({ trackedIds: [], createPending: null, topUpPending: {}, createPendingPersisted: false });
+  useWalletStore.setState({
+    provider: null,
+    providerInfo: null,
+    address: null,
+    chainId: null,
+    expectedChainId: null,
+    bootstrap: null,
+  });
+  mocks.listPcaContracts.mockResolvedValue(CONTRACTS);
+  mocks.publicClientFor.mockReturnValue({
+    getTransactionReceipt: vi.fn(async () => {
+      throw new Error('receipt pending');
+    }),
+  });
   mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [] });
   mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
     key ? { ...snap(), probedKey: { key, registered: key.toLowerCase() === W0.toLowerCase() } } : snap(),
@@ -86,6 +128,13 @@ beforeEach(() => {
   // Renew → real CreatePcaModal: stub the picker list + B1 probe (no real fetch).
   mocks.pcaAgentAccount.mockResolvedValue({ agent: '', accountId: null });
   mocks.listDesignatableNodes.mockResolvedValue({ nodes: [], total: 0, nextStart: null });
+  mocks.walletOwnerActionSubmitter.mockReturnValue({
+    create: vi.fn(),
+    registerAgent: vi.fn(),
+    deregisterAgent: mocks.walletDeregisterAgent,
+    topUp: mocks.walletTopUp,
+    settle: vi.fn(),
+  });
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
@@ -167,7 +216,7 @@ describe('ConvictionDetailView §8A owner-gating', () => {
   it('shows "can’t confirm ownership" + Retry (not a false non-owner) when the wallets fetch errors (L3)', async () => {
     mocks.fetchWalletsBalances.mockRejectedValue(new Error('balances down'));
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
-    await waitForText(container, 'can’t confirm ownership');
+    await waitForText(container, "can't confirm ownership");
     expect(container.textContent).not.toContain('isn’t the owner');
     expect(Array.from(container.querySelectorAll('button')).some((b) => b.textContent === 'Retry')).toBe(true);
     await unmount();
@@ -296,6 +345,57 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     expect(warn.textContent).toContain('0xabc');
     expect(warn.textContent).toContain('a second top-up would lock additional TRAC');
     expect(container.textContent).not.toContain('temporarily unavailable');
+    await unmount();
+  });
+
+  it('M9 — pending top-up polls the stored exact hash and does not expose manual clear/retry', async () => {
+    const getTransactionReceipt = vi.fn(async ({ hash }: { hash: string }) => {
+      expect(hash).toBe('0xpendingtopup');
+      return { status: 'success' };
+    });
+    mocks.publicClientFor.mockReturnValue({ getTransactionReceipt });
+    usePcaStore.setState({
+      topUpPending: {
+        '7': {
+          accountId: '7',
+          ownerEoa: W0,
+          submittedAt: Date.now(),
+          txHash: '0xpendingtopup',
+          tokens: '100',
+          previousTopUpBufferTrac: '12500.0',
+        },
+      },
+    });
+    mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Top-up confirmed on-chain.');
+    expect(getTransactionReceipt).toHaveBeenCalledWith({ hash: '0xpendingtopup' });
+    expect(container.textContent).not.toContain('Clear after verifying');
+    expect(usePcaStore.getState().topUpPending['7']).toBeUndefined();
+    await unmount();
+  });
+
+  it('wallet top-up action rejection after approval uses step-aware allowance copy', async () => {
+    useWalletStore.setState({
+      provider: { request: vi.fn() } as any,
+      providerInfo: null,
+      address: CONNECTED_OWNER as `0x${string}`,
+      chainId: 84532,
+      expectedChainId: 84532,
+      bootstrap: CONTRACTS,
+    });
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockResolvedValue(snap({ owner: CONNECTED_OWNER }));
+    mocks.walletTopUp.mockRejectedValue(
+      new WalletTxStepError('action', Object.assign(new Error('user rejected'), { code: 4001 })),
+    );
+
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Connected owner wallet will sign');
+    setInputValue(container.querySelector('input[aria-label="Top-up amount in TRAC"]') as HTMLInputElement, '100');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await act(async () => { btn(container, '[data-testid="pca-topup-btn"]').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await waitForText(container, 'The TRAC allowance is set');
     await unmount();
   });
 

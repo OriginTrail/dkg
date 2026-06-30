@@ -4,6 +4,7 @@ import { ContractFunctionRevertedError, UserRejectedRequestError } from 'viem';
 import {
   describeWalletTxError,
   WalletReceiptRevertedError,
+  WalletReceiptWaitError,
 } from '../src/ui/web3/walletTxError.js';
 
 function revert(errorName: string): ContractFunctionRevertedError {
@@ -58,6 +59,14 @@ describe('describeWalletTxError', () => {
 
   it('RPC/confirmation timeout → rpc_timeout, recoverable (may still be processing)', () => {
     const info = describeWalletTxError(new Error('The request timed out.'), 'action');
+    expect(info.kind).toBe('rpc_timeout');
+    expect(info.recoverable).toBe(true);
+  });
+
+  it('receipt wait timeout keeps the broadcast tx hash and maps to rpc_timeout', () => {
+    const err = new WalletReceiptWaitError('0xabc', new Error('request timed out'));
+    const info = describeWalletTxError(err, 'action');
+    expect(err.txHash).toBe('0xabc');
     expect(info.kind).toBe('rpc_timeout');
     expect(info.recoverable).toBe(true);
   });

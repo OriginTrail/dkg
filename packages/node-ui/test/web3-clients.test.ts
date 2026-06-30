@@ -38,12 +38,14 @@ describe('synthesizeChain', () => {
 });
 
 describe('publicClientFor', () => {
-  it('returns a client pinned to the synthesized chain and caches per id', () => {
+  it('returns a client pinned to the synthesized chain and caches per id + RPC URL set', () => {
     const a = publicClientFor('base:84532', ['https://rpc.example']);
     expect(a.chain?.id).toBe(84532);
     const b = publicClientFor('84532', ['https://rpc.example']); // same numeric id → cache hit
     expect(b).toBe(a);
-    const c = publicClientFor('100', ['https://rpc.gnosis']); // different id → new client
+    const c = publicClientFor('base:84532', ['https://rpc.other']); // same chain, different RPC → new client
     expect(c).not.toBe(a);
+    const d = publicClientFor('100', ['https://rpc.gnosis']); // different id → new client
+    expect(d).not.toBe(a);
   });
 });

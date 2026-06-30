@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   fetchWalletsBalances: vi.fn(),
   pcaAgentAccount: vi.fn(),
   fetchMyPcas: vi.fn(),
+  listPcaContracts: vi.fn(),
+  publicClientFor: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', async (orig) => {
@@ -24,8 +26,13 @@ vi.mock('../src/ui/api.js', async (orig) => {
     fetchWalletsBalances: mocks.fetchWalletsBalances,
     pcaAgentAccount: mocks.pcaAgentAccount,
     fetchMyPcas: mocks.fetchMyPcas,
+    listPcaContracts: mocks.listPcaContracts,
   };
 });
+
+vi.mock('../src/ui/web3/clients.js', () => ({
+  publicClientFor: mocks.publicClientFor,
+}));
 
 let approveProps: any = null;
 vi.mock('../src/ui/pages/conviction/CreatePcaModal.js', () => ({
@@ -50,6 +57,14 @@ vi.mock('../src/ui/pages/conviction/ApproveWalletsModal.js', () => ({
 const { ConvictionOverview } = await import('../src/ui/pages/conviction/ConvictionOverview.js');
 const { useAgentsStore } = await import('../src/ui/stores/agents.js');
 const { usePcaStore } = await import('../src/ui/stores/pca.js');
+const { useWalletStore } = await import('../src/ui/stores/wallet.js');
+
+const CONTRACTS = {
+  nft: `0x${'11'.repeat(20)}`,
+  token: `0x${'22'.repeat(20)}`,
+  chainId: 'base:84532',
+  rpcUrls: ['https://rpc.example'],
+};
 
 async function render(node: React.ReactElement) {
   const container = document.createElement('div');
@@ -77,11 +92,23 @@ beforeEach(() => {
   vi.clearAllMocks();
   approveProps = null;
   usePcaStore.setState({ trackedIds: [], createPending: null });
+  useWalletStore.setState({
+    provider: null,
+    providerInfo: null,
+    address: null,
+    chainId: null,
+    expectedChainId: null,
+    bootstrap: null,
+  });
   useAgentsStore.getState().setNodeStatus({ nodeRole: 'core', blockExplorerUrl: null });
   mocks.fetchPca.mockResolvedValue({ accountId: '0', owner: '0xowner' });
   mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [], balances: [], chainId: '84532', rpcUrl: null });
   mocks.pcaAgentAccount.mockResolvedValue({ agent: '', accountId: null });
   mocks.fetchMyPcas.mockResolvedValue({ accounts: [] });
+  mocks.listPcaContracts.mockResolvedValue(CONTRACTS);
+  mocks.publicClientFor.mockReturnValue({
+    readContract: vi.fn(async () => 0n),
+  });
 });
 afterEach(() => { document.body.innerHTML = ''; });
 

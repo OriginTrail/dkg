@@ -40,18 +40,22 @@ export function synthesizeChain(chainId: string | number, rpcUrls: string[]): Ch
   });
 }
 
-const publicCache = new Map<number, PublicClient>();
+const publicCache = new Map<string, PublicClient>();
+
+function publicClientCacheKey(chainId: string | number, rpcUrls: string[]): string {
+  return `${numericChainId(chainId)}:${rpcUrls.join('|')}`;
+}
 
 /**
- * A read client for the bootstrap chain (cached per chain id). Transport tuning ported from
+ * A read client for the bootstrap chain (cached per chain id + RPC URL set). Transport tuning ported from
  * staking-ui: capped batching (public RPCs throttle/blackhole uncapped batches), an explicit
  * per-attempt timeout, and a per-endpoint retry budget SCALED TO THE POOL — a multi-RPC chain
  * gets retryCount:0 (resilience IS the next endpoint) while a single-endpoint chain keeps
  * retryCount:2 as its only resiliency budget.
  */
 export function publicClientFor(chainId: string | number, rpcUrls: string[]): PublicClient {
-  const id = numericChainId(chainId);
-  const cached = publicCache.get(id);
+  const key = publicClientCacheKey(chainId, rpcUrls);
+  const cached = publicCache.get(key);
   if (cached) return cached;
   const chain = synthesizeChain(chainId, rpcUrls);
   const multiRpc = rpcUrls.length > 1;
@@ -67,7 +71,7 @@ export function publicClientFor(chainId: string | number, rpcUrls: string[]): Pu
     { retryCount: 1, retryDelay: 250 },
   );
   const client = createPublicClient({ chain, transport });
-  publicCache.set(id, client);
+  publicCache.set(key, client);
   return client;
 }
 

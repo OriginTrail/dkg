@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   fetchWalletsBalances: vi.fn(),
   pcaAgentAccount: vi.fn(),
   fetchMyPcas: vi.fn(),
+  listPcaContracts: vi.fn(),
+  publicClientFor: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', async (orig) => {
@@ -23,16 +25,30 @@ vi.mock('../src/ui/api.js', async (orig) => {
     fetchWalletsBalances: mocks.fetchWalletsBalances,
     pcaAgentAccount: mocks.pcaAgentAccount,
     fetchMyPcas: mocks.fetchMyPcas,
+    listPcaContracts: mocks.listPcaContracts,
   };
 });
+
+vi.mock('../src/ui/web3/clients.js', () => ({
+  publicClientFor: mocks.publicClientFor,
+}));
 
 const { HttpError } = await import('../src/ui/api.js');
 const { PublishingConvictionPage } = await import('../src/ui/pages/PublishingConviction.js');
 const { ConvictionOverview } = await import('../src/ui/pages/conviction/ConvictionOverview.js');
 const { usePcaStore } = await import('../src/ui/stores/pca.js');
 const { useAgentsStore } = await import('../src/ui/stores/agents.js');
+const { useWalletStore, _resetWalletModuleStateForTesting } = await import('../src/ui/stores/wallet.js');
+const { _resetDiscoveryForTesting } = await import('../src/ui/web3/eip6963.js');
 
 const WALLET0 = '0x9A3f000000000000000000000000000000000E41D';
+const HW = '0xCdA7000000000000000000000000000000001F9B';
+const CONTRACTS = {
+  nft: `0x${'11'.repeat(20)}`,
+  token: `0x${'22'.repeat(20)}`,
+  chainId: 'base:84532',
+  rpcUrls: ['https://rpc.example'],
+};
 
 function snapFixture(id: string) {
   return {
@@ -88,15 +104,41 @@ beforeEach(() => {
   document.body.innerHTML = '';
   localStorage.clear();
   vi.clearAllMocks();
+  _resetWalletModuleStateForTesting();
+  _resetDiscoveryForTesting();
   usePcaStore.setState({ trackedIds: [], createPending: null });
   useAgentsStore.getState().setNodeStatus({ nodeRole: 'core', blockExplorerUrl: null });
+  useWalletStore.setState({
+    discovered: [],
+    unsupported: [],
+    provider: null,
+    providerInfo: null,
+    address: null,
+    chainId: null,
+    expectedChainId: null,
+    bootstrap: null,
+  });
   // GAP-1 discovery defaults: nothing discovered (deterministic; no real fetch). Tests
   // that exercise the discovered strip / auto-track override these.
+  mocks.fetchWalletsBalances.mockResolvedValue({
+    wallets: [],
+    balances: [],
+    chainId: '84532',
+    rpcUrl: null,
+  });
   mocks.pcaAgentAccount.mockResolvedValue({ agent: '', accountId: null });
   mocks.fetchMyPcas.mockResolvedValue({ accounts: [] });
+  mocks.listPcaContracts.mockResolvedValue(CONTRACTS);
+  mocks.publicClientFor.mockReturnValue({
+    readContract: vi.fn(async ({ functionName }: { functionName: string }) => (
+      functionName === 'balanceOf' ? 0n : 0n
+    )),
+  });
 });
 afterEach(() => {
   document.body.innerHTML = '';
+  _resetWalletModuleStateForTesting();
+  _resetDiscoveryForTesting();
 });
 
 describe('PublishingConvictionPage — deployment (503) gate', () => {
@@ -175,6 +217,37 @@ describe('ConvictionOverview — S1 discovery', () => {
     await waitForText(container, 'What is a Publishing Conviction Account');
     // The tier ladder is present (estimated caption).
     expect(container.textContent?.toLowerCase()).toContain('estimated');
+    await unmount();
+  });
+
+  it('discovers untracked PCAs owned by the connected wallet via ERC721Enumerable', async () => {
+    const readContract = vi.fn(async ({ functionName }: { functionName: string }) => {
+      if (functionName === 'balanceOf') return 1n;
+      if (functionName === 'tokenOfOwnerByIndex') return 12n;
+      throw new Error(`unexpected ${functionName}`);
+    });
+    mocks.publicClientFor.mockReturnValue({ readContract });
+    useWalletStore.setState({
+      provider: { request: vi.fn() } as any,
+      providerInfo: null,
+      address: HW as `0x${string}`,
+      chainId: 84532,
+      expectedChainId: 84532,
+      bootstrap: CONTRACTS,
+    });
+
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'connected wallet 0xCdA7…1F9B owns this account');
+    expect(readContract).toHaveBeenCalledWith(expect.objectContaining({
+      address: CONTRACTS.nft,
+      functionName: 'balanceOf',
+      args: [HW],
+    }));
+    expect(readContract).toHaveBeenCalledWith(expect.objectContaining({
+      address: CONTRACTS.nft,
+      functionName: 'tokenOfOwnerByIndex',
+      args: [HW, 0n],
+    }));
     await unmount();
   });
 
