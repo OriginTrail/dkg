@@ -1,5 +1,6 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { LiftResolvedPublishSlice } from './async-lift-publish-options.js';
+import { normalizeLiftPublishInput } from './async-lift-publish-input.js';
 import type {
   LiftJobValidationMetadata,
   LiftPublishRequestMetadata,
@@ -19,7 +20,7 @@ export interface ValidatedLiftPublishPayload {
 }
 
 export function validateLiftPublishPayload(input: LiftValidationInput): ValidatedLiftPublishPayload {
-  const metadata = resolveLiftPublishRequestMetadata(input.request, input.metadata);
+  const { metadata } = normalizeLiftPublishInput(input, 'Lift validation');
   const authorityProofRef = metadata.authority.proofRef.trim();
   if (authorityProofRef.length === 0) {
     throw new Error('Lift validation requires a non-empty authority proof reference');
@@ -63,22 +64,6 @@ export function validateLiftPublishPayload(input: LiftValidationInput): Validate
       priorVersion,
     },
     resolved,
-  };
-}
-
-function resolveLiftPublishRequestMetadata(
-  request: LiftPublishSnapshotRequest,
-  metadata: LiftPublishRequestMetadata | undefined,
-): LiftPublishRequestMetadata {
-  if (metadata) return metadata;
-  const raw = request as LiftRequest;
-  if (!raw.authority || !raw.scope || !raw.transitionType) {
-    throw new Error('Lift validation requires request metadata for non-raw snapshot requests');
-  }
-  return {
-    scope: raw.scope,
-    transitionType: raw.transitionType,
-    authority: raw.authority,
   };
 }
 

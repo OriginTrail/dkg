@@ -128,7 +128,7 @@ describe('knowledge-assets publish routes — transport-status mapping (#1329)',
   });
 
   describe('POST /api/knowledge-assets/batch-rejections/report', () => {
-    it('preserves an explicit rejectedBy override', async () => {
+    it('accepts an explicit rejectedBy only when it matches the request identity', async () => {
       const { agent, calls } = batchRejectionAgent({
         peerId: 'local-peer',
         resolveAgentByToken: () => undefined,
@@ -142,7 +142,7 @@ describe('knowledge-assets publish routes — transport-status mapping (#1329)',
           batchId: 'batch-1',
           verifyResult: FAILED_VERIFY_RESULT,
           rejectedBy: {
-            agentAddress: '0x00000000000000000000000000000000000000ee',
+            agentAddress: '0x00000000000000000000000000000000000000AA',
             peerId: 'explicit-peer',
           },
         },
@@ -153,10 +153,37 @@ describe('knowledge-assets publish routes — transport-status mapping (#1329)',
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
       expect(body.record.rejectedBy).toEqual({
-        agentAddress: '0x00000000000000000000000000000000000000ee',
-        peerId: 'explicit-peer',
+        agentAddress: '0x00000000000000000000000000000000000000aa',
+        peerId: 'local-peer',
       });
       expect(calls.map((call) => call.opts)).toEqual([{}, {}, {}, {}]);
+    });
+
+    it('rejects a mismatched explicit rejectedBy before writing lifecycle state', async () => {
+      const { agent, calls } = batchRejectionAgent({
+        peerId: 'local-peer',
+        resolveAgentByToken: () => undefined,
+      });
+      const { res, done } = runKaCtx(
+        'POST',
+        '/api/knowledge-assets/batch-rejections/report',
+        agent,
+        {
+          contextGraphId: 'cg-1',
+          batchId: 'batch-spoof',
+          verifyResult: FAILED_VERIFY_RESULT,
+          rejectedBy: {
+            agentAddress: '0x00000000000000000000000000000000000000ee',
+            peerId: 'explicit-peer',
+          },
+        },
+        { requestAgentAddress: '0x00000000000000000000000000000000000000aa' },
+      );
+
+      await done;
+      expect(res.statusCode).toBe(403);
+      expect(JSON.parse(res.body).code).toBe('REJECTED_BY_AGENT_MISMATCH');
+      expect(calls).toEqual([]);
     });
 
     it('uses the authenticated agent-token identity and storage lane', async () => {

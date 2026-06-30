@@ -271,4 +271,41 @@ describe('reportBatchRejectionWithLifecycle', () => {
     expect(objectFor('rejectedByAgent')).toBe('"0xMember \\"quoted\\"\\nnext\\\\tail"');
     expect(objectFor('rejectedByPeer')).toBe('"peer \\"A\\"\\nB\\\\C"');
   });
+
+  it('returns the structured rejection record when lifecycle sharing fails', async () => {
+    const calls: string[] = [];
+    const agent = {
+      peerId: 'peer-1',
+      assertion: {
+        async create() {
+          calls.push('create');
+        },
+        async write() {
+          calls.push('write');
+        },
+        async finalize() {
+          calls.push('finalize');
+        },
+        async promote() {
+          calls.push('promote');
+          throw new Error('share failed');
+        },
+      },
+    };
+
+    const result = await reportBatchRejectionWithLifecycle(agent, {
+      contextGraphId: 'agent/lu8',
+      batchId: 'batch-7',
+      verifyResult,
+      rejectedBy: { agentAddress: '0xMember', peerId: 'memberPeer' },
+      agentAddress: '0xLane',
+    });
+
+    expect(calls).toEqual(['create', 'write', 'finalize', 'promote']);
+    expect(result.gossiped).toBe(false);
+    expect(result.gossipError).toContain('share failed');
+    expect(result.record.contextGraphId).toBe('agent/lu8');
+    expect(result.record.rejectedBy).toEqual({ agentAddress: '0xMember', peerId: 'memberPeer' });
+    expect(result.assertionName).toBe(batchRejectionAssertionName(result.record));
+  });
 });

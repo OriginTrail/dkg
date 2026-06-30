@@ -390,6 +390,25 @@ function resolveBatchRejectionReporterIdentity(
   return ctx.agent.peerId ? { agentAddress, peerId: ctx.agent.peerId } : { agentAddress };
 }
 
+function parseExplicitBatchRejectionReporterIdentity(
+  raw: unknown,
+): { agentAddress: string; peerId?: string } | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("rejectedBy must be an object with agentAddress");
+  }
+  const record = raw as Record<string, unknown>;
+  if (typeof record.agentAddress !== "string" || record.agentAddress.trim().length === 0) {
+    throw new Error("rejectedBy.agentAddress must be a non-empty string");
+  }
+  return {
+    agentAddress: record.agentAddress,
+    ...(typeof record.peerId === "string" && record.peerId.trim().length > 0
+      ? { peerId: record.peerId }
+      : {}),
+  };
+}
+
 async function resolveFinalizeStorageLane(
   agent: RequestContext["agent"],
   contextGraphId: string,
@@ -695,10 +714,28 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       });
     }
 
-    const rejectedBy = parsed.rejectedBy ?? resolveBatchRejectionReporterIdentity(
+    const derivedRejectedBy = resolveBatchRejectionReporterIdentity(
       ctx,
       writePreflightCallerAgentAddress,
     );
+    let explicitRejectedBy: { agentAddress: string; peerId?: string } | undefined;
+    try {
+      explicitRejectedBy = parseExplicitBatchRejectionReporterIdentity(parsed.rejectedBy);
+    } catch (err: any) {
+      return jsonResponse(res, 400, {
+        error: err?.message ?? String(err),
+      });
+    }
+    if (
+      explicitRejectedBy &&
+      !isSameAgentAddress(explicitRejectedBy.agentAddress, derivedRejectedBy.agentAddress)
+    ) {
+      return jsonResponse(res, 403, {
+        error: "rejectedBy.agentAddress must match the authenticated rejecting agent",
+        code: "REJECTED_BY_AGENT_MISMATCH",
+      });
+    }
+    const rejectedBy = derivedRejectedBy;
 
     try {
       const result = await reportBatchRejectionWithLifecycle(agent, {

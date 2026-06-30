@@ -13,8 +13,8 @@ import type {
   LiftPublishRequestMetadata,
   LiftPublishSnapshotRequest,
   LiftTransitionType,
-  LiftRequest,
 } from './lift-job.js';
+import { normalizeLiftPublishInput } from './async-lift-publish-input.js';
 
 export interface LiftResolvedPublishSlice {
   /**
@@ -119,7 +119,7 @@ export interface AsyncPreparedPublishPayload {
  * fields on PublishOptions today.
  */
 export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): PublishOptions {
-  const metadata = resolveLiftPublishRequestMetadata(input.request, input.metadata);
+  const { metadata } = normalizeLiftPublishInput(input, 'Lift publish mapping');
   const authorityProofRef = normalizeAuthorityProofRef(input.validation.authorityProofRef);
   if (authorityProofRef.length === 0) {
     throw new Error('Lift publish mapping requires a non-empty authorityProofRef');
@@ -258,7 +258,7 @@ function decodeSealField(
 }
 
 export function prepareAsyncPublishPayload(input: LiftPublishMappingInput): AsyncPreparedPublishPayload {
-  const metadata = resolveLiftPublishRequestMetadata(input.request, input.metadata);
+  const { metadata } = normalizeLiftPublishInput(input, 'Lift publish mapping');
   const publishOptions = mapLiftRequestToPublishOptions(input);
   const authorityProofRef = normalizeAuthorityProofRef(input.validation.authorityProofRef);
 
@@ -277,22 +277,6 @@ export function prepareAsyncPublishPayload(input: LiftPublishMappingInput): Asyn
 
 function normalizeAuthorityProofRef(value: string): string {
   return value.trim();
-}
-
-function resolveLiftPublishRequestMetadata(
-  request: LiftPublishSnapshotRequest,
-  metadata: LiftPublishRequestMetadata | undefined,
-): LiftPublishRequestMetadata {
-  if (metadata) return metadata;
-  const raw = request as LiftRequest;
-  if (!raw.authority || !raw.scope || !raw.transitionType) {
-    throw new Error('Lift publish mapping requires request metadata for non-raw snapshot requests');
-  }
-  return {
-    scope: raw.scope,
-    transitionType: raw.transitionType,
-    authority: raw.authority,
-  };
 }
 
 function normalizePriorVersion(value: string | undefined): string | undefined {
