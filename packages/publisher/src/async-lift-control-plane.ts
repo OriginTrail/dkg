@@ -311,11 +311,22 @@ function rootTail(value: string): string {
 function slugPart(value: string): string {
   // Slugs are operator-facing labels, so normalize aggressively for stable,
   // shell-friendly output without affecting canonical identifiers elsewhere.
-  const normalized = value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
+  let normalized = '';
+  let previousWasDash = false;
+  for (const ch of value.trim().toLowerCase()) {
+    const code = ch.charCodeAt(0);
+    const isAsciiAlnum =
+      (code >= 48 && code <= 57)
+      || (code >= 97 && code <= 122);
+    if (isAsciiAlnum) {
+      normalized += ch;
+      previousWasDash = false;
+    } else if (!previousWasDash && normalized.length > 0) {
+      normalized += '-';
+      previousWasDash = true;
+    }
+  }
+  if (previousWasDash) normalized = normalized.slice(0, -1);
   return normalized || 'unknown';
 }
 
