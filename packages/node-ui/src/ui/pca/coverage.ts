@@ -36,7 +36,12 @@ export function isPcaDead(
 
 /** The account has budget capacity (top-up buffer OR per-epoch allowance). The coarse
  *  P0 proxy — NOT the precise mid-epoch `remainingAllowance` (that's P2/#1349). */
-export function hasPcaBudget(snap: Pick<PcaSnapshot, 'topUpBuffer' | 'baseEpochAllowance'>): boolean {
+export function hasPcaBudget(
+  snap: Pick<PcaSnapshot, 'topUpBuffer' | 'baseEpochAllowance' | 'remainingAllowance'>,
+): boolean {
+  if (snap.remainingAllowance !== undefined) {
+    return bigGt0(snap.topUpBuffer) || bigGt0(snap.remainingAllowance);
+  }
   return bigGt0(snap.topUpBuffer) || bigGt0(snap.baseEpochAllowance);
 }
 
@@ -46,7 +51,7 @@ export function hasPcaBudget(snap: Pick<PcaSnapshot, 'topUpBuffer' | 'baseEpochA
  * eligibility breakdown (dead vs out-of-budget) reuses the SAME rules.
  */
 export function isPcaSpendable(
-  snap: Pick<PcaSnapshot, 'expiresAtTimestamp' | 'fullySwept' | 'topUpBuffer' | 'baseEpochAllowance'>,
+  snap: Pick<PcaSnapshot, 'expiresAtTimestamp' | 'fullySwept' | 'topUpBuffer' | 'baseEpochAllowance' | 'remainingAllowance'>,
   nowSec?: number,
 ): boolean {
   return !isPcaDead(snap, nowSec) && hasPcaBudget(snap);

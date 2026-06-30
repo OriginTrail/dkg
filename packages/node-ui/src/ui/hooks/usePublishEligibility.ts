@@ -121,7 +121,7 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
           // Fast-path: the accounts this node TRACKS (the common case; renders without
           // a GAP-3 round-trip when the wallet is covered by a tracked PCA).
           for (const id of trackedIds) {
-            const snap = await fetchPca(id, w).catch(() => null);
+            const snap = await fetchPca(id, w, { extended: true }).catch(() => null);
             // C1/#9 — a REJECTED probe (`null`) is "couldn't read", NOT a confirmed
             // not-registered. Distinguish them: a failed probe is inconclusive (→
             // neutral verdict), never a definitive fall-through DANGER at spend time.
@@ -165,7 +165,7 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
               probeError = true; // couldn't confirm there's no untracked coverage (#9)
             } else if (acct.accountId != null && !trackedIds.includes(acct.accountId)) {
               const id = acct.accountId;
-              const snap = await fetchPca(id, w).catch(() => null);
+              const snap = await fetchPca(id, w, { extended: true }).catch(() => null);
               if (snap === null) {
                 probeError = true;
               } else {

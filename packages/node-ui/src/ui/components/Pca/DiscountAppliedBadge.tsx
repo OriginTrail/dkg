@@ -49,6 +49,9 @@ export function DiscountAppliedBadge({
   const bps = convictionDiscountBps(convictionCostCovered);
   if (convictionCostCovered == null || bps == null) return null;
   const pct = (bps / 100).toFixed(bps % 100 === 0 ? 0 : 1);
+  const attribution = convictionCostCovered.accountId
+    ? `via PCA #${convictionCostCovered.accountId}`
+    : 'across multiple PCAs';
   return (
     <span
       className={['badge', 'badge-success', 'v10-pca-discount-applied', className]
@@ -58,7 +61,7 @@ export function DiscountAppliedBadge({
       role="status"
     >
       <span aria-hidden="true">◉ </span>
-      Discount applied — −{pct}% via PCA #{convictionCostCovered.accountId}
+      Discount applied — −{pct}% {attribution}
     </span>
   );
 }

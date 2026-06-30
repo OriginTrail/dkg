@@ -48,6 +48,8 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
   const { data: wb, loading: walletsLoading, error: walletsError, refresh: refreshWallets } = useFetch(fetchWalletsBalances, [], 0);
   const wallets = wb?.wallets ?? [];
   const balances = wb?.balances ?? [];
+  const walletsBodyError = typeof wb?.error === 'string' && wb.error.length > 0 ? wb.error : null;
+  const walletsReadError = walletsError || walletsBodyError;
   const chainId = wb?.chainId ?? null;
   const gasSymbol = nativeGasSymbol(chainId);
   const faucet = isTestnetChain(chainId) ? faucetUrl(chainId) : undefined;
@@ -93,7 +95,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
     try {
       const rows = await Promise.all(
         wallets.map((w) =>
-          fetchPca(id, w)
+          fetchPca(id, w, { extended: true })
             .then((snap): ProbeRow => {
               // #1344 — single canonical classifier (reads snap.probedKey): S2
               // adapterSupported===false → registered null (neutral "unknown" row, not a
@@ -147,7 +149,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
                 sponsored". Empty copy shows ONLY when loaded AND truly zero. */}
             {walletsLoading && !wb ? (
               <p className="v10-pca-handshake-empty" role="status">Loading your wallets…</p>
-            ) : walletsError && wallets.length === 0 ? (
+            ) : walletsReadError && wallets.length === 0 ? (
               <p className="v10-modal-error" role="alert">
                 Couldn’t load your wallets.{' '}
                 <button type="button" className="v10-pca-card-btn" onClick={() => refreshWallets()}>Retry</button>
@@ -204,7 +206,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
 
         {/* Handshake packet — only once wallets have loaded, so its own
             wallets-empty half can't become a false-empty during the fetch. */}
-        {wb && <SponsorshipHandshake wallets={wallets} accountId={probed?.accountId} role="edge" />}
+        {wb && !walletsReadError && <SponsorshipHandshake wallets={wallets} accountId={probed?.accountId} role="edge" />}
 
         {/* Approval tracker */}
         <section className="v10-pca-detail-section">

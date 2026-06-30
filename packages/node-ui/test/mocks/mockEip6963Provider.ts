@@ -21,6 +21,8 @@ export interface MockProviderOptions {
   handlers?: Record<string, (params?: unknown) => Promise<unknown> | unknown>;
 }
 
+let mockProviderSequence = 0;
+
 class UserRejected extends Error {
   readonly code = 4001;
   constructor(method: string) {
@@ -42,8 +44,9 @@ export class MockEip6963Provider implements Eip1193Provider {
     this.opts = opts;
     this.accounts = opts.accounts ?? ['0x1111111111111111111111111111111111111111'];
     this.chainId = opts.chainId ?? 84532;
+    mockProviderSequence += 1;
     this.info = {
-      uuid: `mock-${opts.rdns ?? 'io.mock'}-${Math.random().toString(36).slice(2, 8)}`,
+      uuid: `mock-${opts.rdns ?? 'io.mock'}-${mockProviderSequence.toString(36)}`,
       name: opts.name ?? 'Mock Wallet',
       icon: 'data:,',
       rdns: opts.rdns ?? 'io.mock',

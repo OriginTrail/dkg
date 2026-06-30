@@ -86,14 +86,14 @@ async function resolveAccount(accountId: string, wallets: string[]): Promise<Res
   };
   let snapshot: PcaSnapshot;
   try {
-    snapshot = await fetchPca(accountId);
+    snapshot = await fetchPca(accountId, undefined, { extended: true });
   } catch (err) {
     return { ...blank, error: err, notFound: err instanceof HttpError && err.status === 404 };
   }
 
   const walletProbes: PcaWalletProbe[] = await Promise.all(
     wallets.map((wallet) =>
-      fetchPca(accountId, wallet)
+      fetchPca(accountId, wallet, { extended: true })
         // S2/#9 (via shared classifyCoverage, #1344 — reads s.probedKey) —
         // adapterSupported===false (the adapter couldn't answer) → registered null
         // (couldn't determine), NOT not-registered → probesInconclusive (H2 path),

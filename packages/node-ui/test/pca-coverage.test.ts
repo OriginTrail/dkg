@@ -38,6 +38,19 @@ describe('isPcaSpendable', () => {
   it('baseEpochAllowance-only → true (the capstone L2 case)', () => {
     expect(isPcaSpendable(makePcaSnapshot({ topUpBuffer: '0', baseEpochAllowance: '1', expiresAtTimestamp: FUTURE }))).toBe(true);
   });
+
+  it('remainingAllowance=0 overrides nominal baseEpochAllowance for extended snapshots', () => {
+    expect(
+      isPcaSpendable(
+        makePcaSnapshot({
+          topUpBuffer: '0',
+          baseEpochAllowance: '1',
+          remainingAllowance: '0',
+          expiresAtTimestamp: FUTURE,
+        }),
+      ),
+    ).toBe(false);
+  });
   it('healthy + both budgets → true', () => {
     expect(isPcaSpendable(makePcaSnapshot({ expiresAtTimestamp: FUTURE }))).toBe(true);
   });

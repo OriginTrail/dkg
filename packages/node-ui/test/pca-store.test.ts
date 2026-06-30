@@ -7,7 +7,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const PCA_KEY = 'dkg-pca';
+const PCA_SCOPE = '84532:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const OTHER_PCA_SCOPE = '31337:0xcccccccccccccccccccccccccccccccccccccccc:0xdddddddddddddddddddddddddddddddddddddddd';
+const PCA_KEY = `dkg-pca:${PCA_SCOPE}`;
 const DEBOUNCE_WAIT_MS = 150 + 30;
 
 async function loadFreshStore(): Promise<typeof import('../src/ui/stores/pca.js')> {
@@ -20,6 +22,10 @@ const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, 
 describe('usePcaStore (dkg-pca localStorage persistence)', () => {
   beforeEach(() => localStorage.clear());
   afterEach(() => localStorage.clear());
+
+  function setScope(usePcaStore: Awaited<ReturnType<typeof loadFreshStore>>['usePcaStore']) {
+    usePcaStore.getState().setScope(PCA_SCOPE);
+  }
 
   it('defaults to an empty tracked set and no pending create', async () => {
     const { usePcaStore } = await loadFreshStore();
@@ -37,6 +43,7 @@ describe('usePcaStore (dkg-pca localStorage persistence)', () => {
       }),
     );
     const { usePcaStore } = await loadFreshStore();
+    setScope(usePcaStore);
     const s = usePcaStore.getState();
     expect(s.trackedIds).toEqual(['1', '5']);
     expect(s.createPending).toEqual({ ownerEoa: '0xowner', submittedAt: 1000, txHash: '0xdead' });
@@ -51,6 +58,7 @@ describe('usePcaStore (dkg-pca localStorage persistence)', () => {
       }),
     );
     const { usePcaStore } = await loadFreshStore();
+    setScope(usePcaStore);
     const s = usePcaStore.getState();
     expect(s.trackedIds).toEqual(['1', '9']);
     expect(s.createPending).toBeNull();
@@ -59,11 +67,13 @@ describe('usePcaStore (dkg-pca localStorage persistence)', () => {
   it('ignores corrupted JSON and falls back to defaults', async () => {
     localStorage.setItem(PCA_KEY, '{not json');
     const { usePcaStore } = await loadFreshStore();
+    setScope(usePcaStore);
     expect(usePcaStore.getState().trackedIds).toEqual([]);
   });
 
   it('trackAccount adds, dedupes, and persists (debounced)', async () => {
     const { usePcaStore } = await loadFreshStore();
+    setScope(usePcaStore);
     const spy = vi.spyOn(localStorage, 'setItem');
 
     usePcaStore.getState().trackAccount('3');
@@ -82,6 +92,7 @@ describe('usePcaStore (dkg-pca localStorage persistence)', () => {
 
   it('trackAccount rejects an invalid (non-numeric) id', async () => {
     const { usePcaStore } = await loadFreshStore();
+    setScope(usePcaStore);
     usePcaStore.getState().trackAccount('0xabc');
     usePcaStore.getState().trackAccount('');
     expect(usePcaStore.getState().trackedIds).toEqual([]);
@@ -90,6 +101,7 @@ describe('usePcaStore (dkg-pca localStorage persistence)', () => {
   it('untrackAccount removes the id and persists', async () => {
     localStorage.setItem(PCA_KEY, JSON.stringify({ trackedIds: ['1', '2', '3'] }));
     const { usePcaStore } = await loadFreshStore();
+    setScope(usePcaStore);
     usePcaStore.getState().untrackAccount('2');
     expect(usePcaStore.getState().trackedIds).toEqual(['1', '3']); // in-memory sanity
     // Q1 — the removal must actually PERSIST (the debounced write), not just live in
@@ -97,11 +109,13 @@ describe('usePcaStore (dkg-pca localStorage persistence)', () => {
     await wait(DEBOUNCE_WAIT_MS);
     expect(JSON.parse(localStorage.getItem(PCA_KEY)!).trackedIds).toEqual(['1', '3']);
     const reloaded = await loadFreshStore();
+    setScope(reloaded.usePcaStore);
     expect(reloaded.usePcaStore.getState().trackedIds).toEqual(['1', '3']);
   });
 
   it('drives the create-pending lifecycle and persists each transition', async () => {
     const { usePcaStore } = await loadFreshStore();
+    setScope(usePcaStore);
     const marker = { ownerEoa: '0xowner', submittedAt: 12345, txHash: '0xbeef' };
     usePcaStore.getState().setCreatePending(marker);
     expect(usePcaStore.getState().createPending).toEqual(marker);
@@ -119,15 +133,41 @@ describe('usePcaStore (dkg-pca localStorage persistence)', () => {
 
   it('round-trips a tracked id into the next module load', async () => {
     const first = await loadFreshStore();
+    setScope(first.usePcaStore);
     first.usePcaStore.getState().trackAccount('11');
     await wait(DEBOUNCE_WAIT_MS);
 
     const reloaded = await loadFreshStore();
+    setScope(reloaded.usePcaStore);
     expect(reloaded.usePcaStore.getState().trackedIds).toEqual(['11']);
+  });
+
+  it('scopes tracked ids and create-pending markers by PCA chain/deployment key', async () => {
+    const first = await loadFreshStore();
+    setScope(first.usePcaStore);
+    first.usePcaStore.getState().trackAccount('7');
+    first.usePcaStore.getState().setCreatePending({ ownerEoa: '0xowner', submittedAt: 1, txHash: '0xdead' });
+    await wait(DEBOUNCE_WAIT_MS);
+
+    first.usePcaStore.getState().setScope(OTHER_PCA_SCOPE);
+    expect(first.usePcaStore.getState().trackedIds).toEqual([]);
+    expect(first.usePcaStore.getState().createPending).toBeNull();
+
+    first.usePcaStore.getState().trackAccount('9');
+    await wait(DEBOUNCE_WAIT_MS);
+
+    first.usePcaStore.getState().setScope(PCA_SCOPE);
+    expect(first.usePcaStore.getState().trackedIds).toEqual(['7']);
+    expect(first.usePcaStore.getState().createPending?.txHash).toBe('0xdead');
+
+    first.usePcaStore.getState().setScope(OTHER_PCA_SCOPE);
+    expect(first.usePcaStore.getState().trackedIds).toEqual(['9']);
+    expect(first.usePcaStore.getState().createPending).toBeNull();
   });
 
   it('silently swallows localStorage.setItem failures (private mode, quota)', async () => {
     const { usePcaStore } = await loadFreshStore();
+    setScope(usePcaStore);
     const spy = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
       throw new Error('quota');
     });

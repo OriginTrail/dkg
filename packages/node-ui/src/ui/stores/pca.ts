@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import type { PcaContracts } from '../api.js';
 
 // Persisted Publishing Conviction Account (PCA) state.
 //
@@ -18,8 +19,22 @@ import { create } from 'zustand';
 // loader and a debounced writer (NOT the zustand persist middleware), so the
 // persistence is testable the same way (`vi.resetModules()` + a fresh import).
 
-const PCA_STORAGE_KEY = 'dkg-pca';
+const PCA_STORAGE_PREFIX = 'dkg-pca';
 const PERSIST_DEBOUNCE_MS = 150;
+
+export function pcaStorageScopeForContracts(
+  contracts: Pick<PcaContracts, 'chainId' | 'nft' | 'token'>,
+): string {
+  return [
+    String(contracts.chainId).toLowerCase(),
+    contracts.nft.toLowerCase(),
+    contracts.token.toLowerCase(),
+  ].join(':');
+}
+
+function storageKey(scopeKey: string | null): string | null {
+  return scopeKey ? `${PCA_STORAGE_PREFIX}:${scopeKey}` : null;
+}
 
 /**
  * Marker for an in-flight Create whose confirmation was lost. Persisted so a
@@ -48,6 +63,8 @@ export interface PcaTopUpPending {
 }
 
 interface PcaState {
+  /** Current chain/deployment scope for persisted PCA ids and pending markers. */
+  scopeKey: string | null;
   /** Tracked account ids (deduped, insertion-ordered). */
   trackedIds: string[];
   /** The single in-flight create marker, or null. */
@@ -61,10 +78,11 @@ interface PcaState {
    */
   createPendingPersisted: boolean;
 
+  setScope: (scopeKey: string | null) => void;
   trackAccount: (id: string) => void;
   untrackAccount: (id: string) => void;
   isTracked: (id: string) => boolean;
-  setCreatePending: (marker: PcaCreatePending) => void;
+  setCreatePending: (marker: PcaCreatePending) => boolean;
   clearCreatePending: () => void;
   setTopUpPending: (marker: PcaTopUpPending) => void;
   clearTopUpPending: (accountId: string) => void;
@@ -149,13 +167,15 @@ function sanitizeTopUpPending(value: unknown): Record<string, PcaTopUpPending> {
   return out;
 }
 
-function loadPersisted(): {
+function loadPersisted(scopeKey: string | null): {
   trackedIds: string[];
   createPending: PcaCreatePending | null;
   topUpPending: Record<string, PcaTopUpPending>;
 } {
+  const key = storageKey(scopeKey);
+  if (!key) return { ...DEFAULTS };
   try {
-    const raw = localStorage.getItem(PCA_STORAGE_KEY);
+    const raw = localStorage.getItem(key);
     if (!raw) return { ...DEFAULTS };
     const parsed = JSON.parse(raw) as PersistedPca;
     return {
@@ -169,12 +189,13 @@ function loadPersisted(): {
 }
 
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
-function persist(state: PersistedPca): void {
+function persist(key: string | null, state: PersistedPca): void {
+  if (!key) return;
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = setTimeout(() => {
     persistTimer = null;
     try {
-      localStorage.setItem(PCA_STORAGE_KEY, JSON.stringify(state));
+      localStorage.setItem(key, JSON.stringify(state));
     } catch {
       // localStorage may be unavailable (private mode, quota); silently skip.
     }
@@ -189,13 +210,14 @@ function persist(state: PersistedPca): void {
  * marker fails toward DANGER, so `setCreatePending` must write NOW. Cancels any
  * queued debounced write so it subsumes (no lost-update / double-write).
  */
-function persistNow(state: PersistedPca): boolean {
+function persistNow(key: string | null, state: PersistedPca): boolean {
   if (persistTimer) {
     clearTimeout(persistTimer);
     persistTimer = null;
   }
+  if (!key) return false;
   try {
-    localStorage.setItem(PCA_STORAGE_KEY, JSON.stringify(state));
+    localStorage.setItem(key, JSON.stringify(state));
     return true;
   } catch {
     // T3 — localStorage may be unavailable (private mode, quota). Report the FAILURE
@@ -213,25 +235,41 @@ function snapshot(state: PcaState): PersistedPca {
   };
 }
 
-const initial = loadPersisted();
+const initial = loadPersisted(null);
 
 export const usePcaStore = create<PcaState>((set, get) => ({
+  scopeKey: null,
   trackedIds: initial.trackedIds,
   createPending: initial.createPending,
   topUpPending: initial.topUpPending,
   // A loaded marker came FROM localStorage, so it's persisted by definition.
   createPendingPersisted: initial.createPending != null,
 
+  setScope: (scopeKey) => {
+    if (get().scopeKey === scopeKey) return;
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
+    const loaded = loadPersisted(scopeKey);
+    set({
+      scopeKey,
+      trackedIds: loaded.trackedIds,
+      createPending: loaded.createPending,
+      topUpPending: loaded.topUpPending,
+      createPendingPersisted: loaded.createPending != null,
+    });
+  },
   trackAccount: (id) => {
     if (!isValidAccountId(id)) return;
     set((s) => (s.trackedIds.includes(id) ? s : { trackedIds: [...s.trackedIds, id] }));
-    persist(snapshot(get()));
+    persist(storageKey(get().scopeKey), snapshot(get()));
   },
   untrackAccount: (id) => {
     set((s) =>
       s.trackedIds.includes(id) ? { trackedIds: s.trackedIds.filter((x) => x !== id) } : s,
     );
-    persist(snapshot(get()));
+    persist(storageKey(get().scopeKey), snapshot(get()));
   },
   isTracked: (id) => get().trackedIds.includes(id),
   setCreatePending: (marker) => {
@@ -239,11 +277,13 @@ export const usePcaStore = create<PcaState>((set, get) => ({
     // C2 — write synchronously: this is the double-mint guard; it must survive a
     // crash/refresh inside the debounce window before the create POST resolves.
     // T3 — record whether the write actually succeeded (false in a no-storage env).
-    set({ createPendingPersisted: persistNow(snapshot(get())) });
+    const persisted = persistNow(storageKey(get().scopeKey), snapshot(get()));
+    set({ createPendingPersisted: persisted });
+    return persisted;
   },
   clearCreatePending: () => {
     set({ createPending: null, createPendingPersisted: false });
-    persist(snapshot(get()));
+    persist(storageKey(get().scopeKey), snapshot(get()));
   },
   setTopUpPending: (marker) => {
     if (!isValidAccountId(marker.accountId)) return;
@@ -253,7 +293,7 @@ export const usePcaStore = create<PcaState>((set, get) => ({
         [marker.accountId]: marker,
       },
     }));
-    persistNow(snapshot(get()));
+    persistNow(storageKey(get().scopeKey), snapshot(get()));
   },
   clearTopUpPending: (accountId) => {
     set((s) => {
@@ -262,7 +302,7 @@ export const usePcaStore = create<PcaState>((set, get) => ({
       delete next[accountId];
       return { topUpPending: next };
     });
-    persist(snapshot(get()));
+    persist(storageKey(get().scopeKey), snapshot(get()));
   },
   finishCreate: (id) => {
     // P1 — clear the marker AND track the id in ONE set(), then write synchronously
@@ -273,6 +313,6 @@ export const usePcaStore = create<PcaState>((set, get) => ({
       trackedIds:
         isValidAccountId(id) && !s.trackedIds.includes(id) ? [...s.trackedIds, id] : s.trackedIds,
     }));
-    persistNow(snapshot(get()));
+    persistNow(storageKey(get().scopeKey), snapshot(get()));
   },
 }));

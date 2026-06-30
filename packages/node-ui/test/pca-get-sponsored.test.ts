@@ -259,6 +259,20 @@ describe('GetSponsoredPanel', () => {
     await unmount();
   });
 
+  it('shows an error + Retry when wallet balances resolve with an error body', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [],
+      balances: [],
+      error: 'RPC timeout',
+      chainId: '84532',
+      rpcUrl: null,
+    });
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
+    await waitForText(container, 'Couldn’t load your wallets');
+    expect(container.textContent).not.toContain('No operational wallets detected');
+    await unmount();
+  });
+
   // GAP-3 discovery (#1344) — S6 surfaces the sponsoring PCA found on-chain (untracked
   // by definition) and pre-fills the manual check WITHOUT auto-tracking (guardrail b).
   it('GAP-3 — discovers + surfaces the sponsoring PCA, pre-fills the check, never auto-tracks', async () => {

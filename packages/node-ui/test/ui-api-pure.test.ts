@@ -471,11 +471,33 @@ describe('UI API tests', () => {
       const r = await publishAssertionsToVm('cg-1', [{ name: 'a' }, { name: 'b' }]);
 
       expect(r.convictionCostCovered).toBeDefined();
-      expect(r.convictionCostCovered!.accountId).toBe('7'); // first drawing item names the account
-      expect(r.convictionCostCovered!.epoch).toBe(1284);
+      expect(r.convictionCostCovered!.accountId).toBe('7');
+      expect(r.convictionCostCovered!.epoch).toBeUndefined(); // mixed epochs are not attributed to the first event
       expect(r.convictionCostCovered!.baseCost).toBe('3000'); // 1000 + 2000
       expect(r.convictionCostCovered!.discountedCost).toBe('2200'); // 700 + 1500
       expect(r.convictionCostCovered!.drawnFromEpoch).toBe('2200'); // 700 + 1500
+    });
+
+    it('publishAssertionsToVm omits single-PCA attribution for mixed-account batch discounts', async () => {
+      responseOverrides.push({
+        match: (url, method) => method === 'POST' && url.includes('/api/knowledge-assets/a/vm/publish'),
+        status: 200,
+        body: { kaId: '0xa', status: 'confirmed', txHash: '0xtxa', convictionCostCovered: { accountId: '7', epoch: 1284, baseCost: '1000', discountedCost: '700', drawnFromEpoch: '700', drawnFromTopUp: '0' } },
+      });
+      responseOverrides.push({
+        match: (url, method) => method === 'POST' && url.includes('/api/knowledge-assets/b/vm/publish'),
+        status: 200,
+        body: { kaId: '0xb', status: 'confirmed', txHash: '0xtxb', convictionCostCovered: { accountId: '8', epoch: 1284, baseCost: '2000', discountedCost: '1000', drawnFromEpoch: '1000', drawnFromTopUp: '0' } },
+      });
+
+      const r = await publishAssertionsToVm('cg-1', [{ name: 'a' }, { name: 'b' }]);
+
+      expect(r.convictionCostCovered).toBeDefined();
+      expect(r.convictionCostCovered!.accountId).toBeUndefined();
+      expect(r.convictionCostCovered!.epoch).toBe(1284);
+      expect(r.convictionCostCovered!.baseCost).toBe('3000');
+      expect(r.convictionCostCovered!.discountedCost).toBe('1700');
+      expect(r.convictionCostCovered!.drawnFromEpoch).toBe('1700');
     });
 
     it('publishAssertionsToVm collects each per-KA failure into failures[] (named) and keeps going', async () => {

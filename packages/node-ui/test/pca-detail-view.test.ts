@@ -59,6 +59,7 @@ const CONTRACTS = {
   chainId: 'base:84532',
   rpcUrls: ['https://rpc.example'],
 };
+const PCA_SCOPE = 'base:84532:0x1111111111111111111111111111111111111111:0x2222222222222222222222222222222222222222';
 
 function snap(over: Record<string, unknown> = {}) {
   return {
@@ -104,7 +105,8 @@ beforeEach(() => {
   document.body.innerHTML = '';
   vi.clearAllMocks();
   useAgentsStore.getState().setNodeStatus({ blockExplorerUrl: null });
-  usePcaStore.setState({ trackedIds: [], createPending: null, topUpPending: {}, createPendingPersisted: false });
+  usePcaStore.setState({ scopeKey: null, trackedIds: [], createPending: null, topUpPending: {}, createPendingPersisted: false });
+  usePcaStore.getState().setScope(PCA_SCOPE);
   useWalletStore.setState({
     provider: null,
     providerInfo: null,
@@ -136,7 +138,12 @@ beforeEach(() => {
     settle: vi.fn(),
   });
 });
-afterEach(() => { document.body.innerHTML = ''; });
+afterEach(() => {
+  document.body.innerHTML = '';
+  localStorage.clear();
+  usePcaStore.getState().setScope(null);
+  usePcaStore.setState({ scopeKey: null, trackedIds: [], createPending: null, topUpPending: {}, createPendingPersisted: false });
+});
 
 describe('ConvictionDetailView §8A owner-gating', () => {
   it('enables owner actions + settle when owner == wallets[0]', async () => {
@@ -515,6 +522,16 @@ describe('ConvictionDetailView B3 — live approved-wallet table', () => {
     await waitForText(container, 'This node’s wallets:');
     expect(container.textContent).toContain('not the full list'); // degrade caveat
     expect(container.textContent).not.toContain(EXTERNAL.slice(0, 10)); // the stale wallet is NOT shown
+    await unmount();
+  });
+
+  it('A — stale account snapshot (different accountId) does NOT render owner actions under the route id', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockResolvedValue(snap({ accountId: '999', owner: EXTERNAL }));
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Couldn’t load PCA #7');
+    expect(container.textContent).not.toContain(EXTERNAL.slice(0, 10));
+    expect(container.querySelector('[data-testid="pca-topup-submit"]')).toBeNull();
     await unmount();
   });
 });

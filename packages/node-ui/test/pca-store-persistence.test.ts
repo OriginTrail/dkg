@@ -9,7 +9,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const PCA_KEY = 'dkg-pca';
+const PCA_SCOPE = '84532:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const PCA_KEY = `dkg-pca:${PCA_SCOPE}`;
 const DEBOUNCE_WAIT_MS = 150 + 30;
 
 async function loadFreshStore(): Promise<typeof import('../src/ui/stores/pca.js')> {
@@ -23,8 +24,13 @@ describe('usePcaStore (dkg-pca persistence — double-mint marker durability)', 
   beforeEach(() => localStorage.clear());
   afterEach(() => localStorage.clear());
 
+  function setScope(usePcaStore: Awaited<ReturnType<typeof loadFreshStore>>['usePcaStore']) {
+    usePcaStore.getState().setScope(PCA_SCOPE);
+  }
+
   it('setCreatePending writes localStorage SYNCHRONOUSLY (no timer advance)', async () => {
     const { usePcaStore } = await loadFreshStore();
+    setScope(usePcaStore);
     const spy = vi.spyOn(localStorage, 'setItem');
 
     usePcaStore.getState().setCreatePending({ ownerEoa: '0xabc', submittedAt: 1 });
@@ -40,6 +46,7 @@ describe('usePcaStore (dkg-pca persistence — double-mint marker durability)', 
 
   it('trackAccount stays DEBOUNCED (not synchronous)', async () => {
     const { usePcaStore } = await loadFreshStore();
+    setScope(usePcaStore);
     const spy = vi.spyOn(localStorage, 'setItem');
 
     usePcaStore.getState().trackAccount('5');
@@ -53,9 +60,11 @@ describe('usePcaStore (dkg-pca persistence — double-mint marker durability)', 
 
   it('the create-pending marker survives a reload happening INSIDE the debounce window', async () => {
     const { usePcaStore } = await loadFreshStore();
+    setScope(usePcaStore);
     usePcaStore.getState().setCreatePending({ ownerEoa: '0xabc', submittedAt: 1, txHash: '0xdead' });
     // Do NOT advance timers — simulate a crash/refresh immediately after submit.
     const reloaded = await loadFreshStore();
+    setScope(reloaded.usePcaStore);
     const marker = reloaded.usePcaStore.getState().createPending;
     expect(marker?.ownerEoa).toBe('0xabc');
     expect(marker?.txHash).toBe('0xdead');
@@ -63,6 +72,7 @@ describe('usePcaStore (dkg-pca persistence — double-mint marker durability)', 
 
   it('persistNow subsumes a queued debounced write (no stale-marker double-write)', async () => {
     const { usePcaStore } = await loadFreshStore();
+    setScope(usePcaStore);
     const spy = vi.spyOn(localStorage, 'setItem');
 
     usePcaStore.getState().trackAccount('5'); // queues a debounced write
@@ -83,6 +93,7 @@ describe('usePcaStore (dkg-pca persistence — double-mint marker durability)', 
   // can't resurrect the stale marker (→ reconcile → double-mint) OR lose the id.
   it('finishCreate clears the marker AND tracks the id synchronously (P1)', async () => {
     const { usePcaStore } = await loadFreshStore();
+    setScope(usePcaStore);
     usePcaStore.getState().setCreatePending({ ownerEoa: '0xabc', submittedAt: 1, txHash: '0xdead' });
 
     usePcaStore.getState().finishCreate('7'); // no timer advance
@@ -97,6 +108,7 @@ describe('usePcaStore (dkg-pca persistence — double-mint marker durability)', 
 
     // A subsequent reload resumes the FORM (no stale marker), with the id tracked.
     const reloaded = await loadFreshStore();
+    setScope(reloaded.usePcaStore);
     expect(reloaded.usePcaStore.getState().createPending).toBeNull();
     expect(reloaded.usePcaStore.getState().trackedIds).toContain('7');
   });
@@ -106,6 +118,7 @@ describe('usePcaStore (dkg-pca persistence — double-mint marker durability)', 
   // screen can warn it won't survive a refresh (vs falsely claiming it's saved).
   it('setCreatePending: storage failure → marker in memory but createPendingPersisted=false (T3)', async () => {
     const { usePcaStore } = await loadFreshStore();
+    setScope(usePcaStore);
     const spy = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
       throw new Error('quota');
     });
@@ -117,6 +130,7 @@ describe('usePcaStore (dkg-pca persistence — double-mint marker durability)', 
 
   it('setCreatePending: storage OK → createPendingPersisted=true (T3)', async () => {
     const { usePcaStore } = await loadFreshStore();
+    setScope(usePcaStore);
     usePcaStore.getState().setCreatePending({ ownerEoa: '0xabc', submittedAt: 1 });
     expect(usePcaStore.getState().createPendingPersisted).toBe(true);
     expect(JSON.parse(localStorage.getItem(PCA_KEY)!).createPending.ownerEoa).toBe('0xabc');

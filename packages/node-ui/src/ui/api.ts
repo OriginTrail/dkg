@@ -1113,6 +1113,8 @@ export async function publishAssertionsToVm(
   let aggDrawnEpoch = 0n;
   let aggDrawnTopUp = 0n;
   let firstCovered: ConvictionCostCovered | undefined;
+  let sameCoveredAccount = true;
+  let sameCoveredEpoch = true;
   for (const a of items) {
     try {
       const res = await knowledgeAssetPublishWithSeal(
@@ -1138,7 +1140,12 @@ export async function publishAssertionsToVm(
           aggDiscounted += BigInt(cc.discountedCost);
           aggDrawnEpoch += BigInt(cc.drawnFromEpoch);
           aggDrawnTopUp += BigInt(cc.drawnFromTopUp);
-          if (!firstCovered) firstCovered = cc;
+          if (!firstCovered) {
+            firstCovered = cc;
+          } else {
+            if (cc.accountId !== firstCovered.accountId) sameCoveredAccount = false;
+            if (cc.epoch !== firstCovered.epoch) sameCoveredEpoch = false;
+          }
         } catch {
           // skip an un-parseable per-item event; never let it break the batch accounting.
         }
@@ -1153,8 +1160,8 @@ export async function publishAssertionsToVm(
   }
   const convictionCostCovered: ConvictionCostCovered | undefined = firstCovered
     ? {
-        accountId: firstCovered.accountId,
-        epoch: firstCovered.epoch,
+        ...(sameCoveredAccount && firstCovered.accountId ? { accountId: firstCovered.accountId } : {}),
+        ...(sameCoveredEpoch && firstCovered.epoch != null ? { epoch: firstCovered.epoch } : {}),
         baseCost: aggBase.toString(),
         discountedCost: aggDiscounted.toString(),
         drawnFromEpoch: aggDrawnEpoch.toString(),
@@ -2113,8 +2120,8 @@ export function fileUrl(hash: string, contentType?: string): string {
  * strings; `epoch` is a JSON number (uint40, fits safely in Number).
  */
 export interface ConvictionCostCovered {
-  accountId: string;
-  epoch: number;
+  accountId?: string;
+  epoch?: number;
   baseCost: string;
   discountedCost: string;
   drawnFromEpoch: string;
