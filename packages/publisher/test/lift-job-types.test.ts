@@ -7,8 +7,10 @@ import type {
   LiftJobFailedFromBroadcast,
   LiftJobFailedFromIncluded,
   LiftJobFinalized,
+  LiftJobRequest,
   LiftRequest,
-  KnowledgeAssetVmPublishLiftRequest,
+  KnowledgeAssetVmPublishJobRequest,
+  RawLiftJobRequest,
   RawLiftRequest,
 } from '../src/lift-job.js';
 import {
@@ -21,29 +23,18 @@ import {
   createLiftJobFailureMetadata,
 } from '../src/lift-job.js';
 
+function rawJobRequest(request: RawLiftRequest): RawLiftJobRequest {
+  return { jobType: 'lift', lift: request };
+}
+
 describe('LiftJob request and record types', () => {
   it('defines immutable request and job field groups', () => {
     expect(LIFT_TRANSITION_TYPES).toEqual(['CREATE', 'MUTATE', 'REVOKE']);
     expect(LIFT_AUTHORITY_TYPES).toEqual(['owner', 'multisig', 'quorum', 'capability']);
     expect(LIFT_REQUEST_IMMUTABLE_FIELDS).toEqual([
       'jobType',
+      'lift',
       'knowledgeAssetVmPublish',
-      'swmId',
-      'shareOperationId',
-      'roots',
-      'contextGraphId',
-      'namespace',
-      'scope',
-      'transitionType',
-      'authority',
-      'priorVersion',
-      'subGraphName',
-      'accessPolicy',
-      'allowedPeers',
-      'entityProofs',
-      'publishEpochs',
-      'publisherNodeIdentityIdOverride',
-      'seal',
     ]);
     expect(LIFT_JOB_IMMUTABLE_FIELDS).toEqual([
       'jobId',
@@ -91,17 +82,17 @@ describe('LiftJob request and record types', () => {
     const accepted: LiftJobAccepted = {
       jobId: 'job-1',
       jobSlug: 'music-social/person-profile/create/op-1/rihana',
-      request,
+      request: rawJobRequest(request),
       status: 'accepted',
       timestamps: { acceptedAt: 1, updatedAt: 1 },
       retries: { retryCount: 0, maxRetries: 10 },
     };
 
-    expect(accepted.request.authority.proofRef).toBe('proof:namespace:aloha');
+    expect(accepted.request.lift.authority.proofRef).toBe('proof:namespace:aloha');
     expect(accepted.retries.maxRetries).toBe(10);
   });
 
-  it('models raw lift and KA VM publish requests as exclusive variants', () => {
+  it('models raw lift requests and persisted job payloads as exclusive variants', () => {
     const raw: RawLiftRequest = {
       swmId: 'ws-1',
       shareOperationId: 'op-1',
@@ -112,8 +103,11 @@ describe('LiftJob request and record types', () => {
       transitionType: 'CREATE',
       authority: { type: 'owner', proofRef: 'proof:namespace:aloha' },
     };
-    const ka: KnowledgeAssetVmPublishLiftRequest = {
-      ...raw,
+    const rawJob: RawLiftJobRequest = {
+      jobType: 'lift',
+      lift: raw,
+    };
+    const ka: KnowledgeAssetVmPublishJobRequest = {
       jobType: 'knowledge-asset-vm-publish',
       knowledgeAssetVmPublish: {
         contextGraphId: 'music-social',
@@ -138,12 +132,13 @@ describe('LiftJob request and record types', () => {
     };
 
     expectTypeOf(raw).toMatchTypeOf<LiftRequest>();
-    expectTypeOf(ka).toMatchTypeOf<LiftRequest>();
+    expectTypeOf(rawJob).toMatchTypeOf<LiftJobRequest>();
+    expectTypeOf(ka).toMatchTypeOf<LiftJobRequest>();
 
-    // @ts-expect-error Raw lift jobs cannot carry a named-KA publish sidecar.
-    const invalidRaw: RawLiftRequest = { ...raw, knowledgeAssetVmPublish: ka.knowledgeAssetVmPublish };
-    // @ts-expect-error KA publish jobs must carry the named-KA publish payload.
-    const invalidKa: KnowledgeAssetVmPublishLiftRequest = { ...raw, jobType: 'knowledge-asset-vm-publish' };
+    // @ts-expect-error Raw persisted jobs must carry their raw lift payload under `lift`.
+    const invalidRaw: RawLiftJobRequest = { jobType: 'lift', knowledgeAssetVmPublish: ka.knowledgeAssetVmPublish };
+    // @ts-expect-error KA publish jobs cannot carry raw lift placeholder fields.
+    const invalidKa: KnowledgeAssetVmPublishJobRequest = { jobType: 'knowledge-asset-vm-publish', lift: raw };
     expect(invalidRaw).toBeDefined();
     expect(invalidKa).toBeDefined();
   });
@@ -152,7 +147,7 @@ describe('LiftJob request and record types', () => {
     const job: LiftJobBroadcast = {
       jobId: 'job-2',
       jobSlug: 'music-social/person-profile/mutate/op-2/rihana',
-      request: {
+      request: rawJobRequest({
         swmId: 'ws-2',
         shareOperationId: 'op-2',
         roots: ['urn:local:/rihana'],
@@ -162,7 +157,7 @@ describe('LiftJob request and record types', () => {
         transitionType: 'MUTATE',
         authority: { type: 'quorum', proofRef: 'proof:quorum:1' },
         priorVersion: 'did:dkg:mock:31337/0x123/42',
-      },
+      }),
       status: 'broadcast',
       timestamps: { acceptedAt: 1, claimedAt: 2, validatedAt: 3, broadcastAt: 4, updatedAt: 4 },
       retries: { retryCount: 1, maxRetries: 3, lastRetryReason: 'startup recovery' },
@@ -186,7 +181,7 @@ describe('LiftJob request and record types', () => {
     const finalized: LiftJobFinalized = {
       jobId: 'job-3',
       jobSlug: 'music-social/person-profile/create/op-3/rihana',
-      request: {
+      request: rawJobRequest({
         swmId: 'ws-3',
         shareOperationId: 'op-3',
         roots: ['urn:local:/rihana'],
@@ -195,7 +190,7 @@ describe('LiftJob request and record types', () => {
         scope: 'person-profile',
         transitionType: 'CREATE',
         authority: { type: 'owner', proofRef: 'proof:owner:1' },
-      },
+      }),
       status: 'finalized',
       timestamps: {
         acceptedAt: 1,
@@ -266,7 +261,7 @@ describe('LiftJob request and record types', () => {
     const failed: LiftJobFailedFromIncluded = {
       jobId: 'job-5',
       jobSlug: 'music-social/person-profile/create/op-5/rihana',
-      request: {
+      request: rawJobRequest({
         swmId: 'ws-5',
         shareOperationId: 'op-5',
         roots: ['urn:local:/rihana'],
@@ -275,7 +270,7 @@ describe('LiftJob request and record types', () => {
         scope: 'person-profile',
         transitionType: 'CREATE',
         authority: { type: 'owner', proofRef: 'proof:owner:5' },
-      },
+      }),
       status: 'failed',
       timestamps: { acceptedAt: 1, broadcastAt: 2, includedAt: 3, failedAt: 4, updatedAt: 4 },
       retries: { retryCount: 0, maxRetries: 3 },
@@ -326,6 +321,7 @@ describe('LiftJob request and record types', () => {
       transitionType: 'CREATE',
       authority: { type: 'owner', proofRef: 'proof:owner:x' },
     };
+    const baseJobRequest = rawJobRequest(baseRequest);
 
     const baseValidation = {
       canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
@@ -339,7 +335,7 @@ describe('LiftJob request and record types', () => {
     const invalidMissingValidation: LiftJobFailed = {
       jobId: 'job-invalid-1',
       jobSlug: 'music-social/person-profile/create/op-x/rihana',
-      request: baseRequest,
+      request: baseJobRequest,
       status: 'failed',
       timestamps: { acceptedAt: 1, broadcastAt: 2, failedAt: 3, updatedAt: 3 },
       retries: { retryCount: 0, maxRetries: 3 },
@@ -361,7 +357,7 @@ describe('LiftJob request and record types', () => {
     const invalidRecoveryState: LiftJobFailed = {
       jobId: 'job-invalid-2',
       jobSlug: 'music-social/person-profile/create/op-x/rihana',
-      request: baseRequest,
+      request: baseJobRequest,
       status: 'failed',
       timestamps: { acceptedAt: 1, broadcastAt: 2, includedAt: 3, failedAt: 4, updatedAt: 4 },
       retries: { retryCount: 0, maxRetries: 3 },
@@ -390,7 +386,7 @@ describe('LiftJob request and record types', () => {
     const invalidMissingTxHash: LiftJobFailed = {
       jobId: 'job-invalid-3',
       jobSlug: 'music-social/person-profile/create/op-x/rihana',
-      request: baseRequest,
+      request: baseJobRequest,
       status: 'failed',
       timestamps: { acceptedAt: 1, broadcastAt: 2, includedAt: 3, failedAt: 4, updatedAt: 4 },
       retries: { retryCount: 0, maxRetries: 3 },

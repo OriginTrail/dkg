@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DKGAgent, type DKGAgentConfig } from '../src/index.js';
 import { OxigraphStore, SharedMemoryLiteralBlobStore, type TripleStore } from '@origintrail-official/dkg-storage';
-import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
+import { TripleStoreAsyncLiftPublisher, type LiftJob, type LiftRequest } from '@origintrail-official/dkg-publisher';
 import { DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, buildAuthorAttestationTypedData, contextGraphDataGraphUri } from '@origintrail-official/dkg-core';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
@@ -63,6 +63,14 @@ afterEach(async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+function expectRawLiftRequest(job: LiftJob | null): LiftRequest {
+  expect(job?.request.jobType).toBe('lift');
+  if (!job || job.request.jobType !== 'lift') {
+    throw new Error('Expected a raw lift job');
+  }
+  return job.request.lift;
+}
 
 describe('publishJsonLd', () => {
   it('uses the override store for agent writes and helper bookkeeping', async () => {
@@ -274,9 +282,10 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    expect(job?.request.roots).toEqual([root]);
-    expect(job?.request.accessPolicy).toBe('allowList');
-    expect(job?.request.allowedPeers).toEqual(['peer-a']);
+    const request = expectRawLiftRequest(job);
+    expect(request.roots).toEqual([root]);
+    expect(request.accessPolicy).toBe('allowList');
+    expect(request.allowedPeers).toEqual(['peer-a']);
     // Keep this resilient to control-plane tuning (defaults changed in main).
     expect(job?.retries.maxRetries).toBeGreaterThan(0);
 
@@ -318,8 +327,9 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    expect(job?.request.roots).toEqual([root]);
-    expect(job?.request.accessPolicy).toBe('ownerOnly');
+    const request = expectRawLiftRequest(job);
+    expect(request.roots).toEqual([root]);
+    expect(request.accessPolicy).toBe('ownerOnly');
 
     const publicAnchor = await store.query(
       `ASK { GRAPH <did:dkg:context-graph:async-bare-private/_shared_memory> { <${root}> <http://dkg.io/ontology/privateDataAnchor> "true" } }`,
@@ -438,7 +448,7 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    const seal = job?.request.seal;
+    const seal = expectRawLiftRequest(job).seal;
     expect(seal).toBeDefined();
     expect(seal?.authorAddress.toLowerCase()).toBe(tenant.agentAddress.toLowerCase());
     expect(seal?.authorAddress.toLowerCase()).not.toBe(
@@ -547,7 +557,7 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    const seal = job?.request.seal;
+    const seal = expectRawLiftRequest(job).seal;
     expect(seal).toBeDefined();
     expect(seal?.merkleRoot).toMatch(/^0x[0-9a-f]{64}$/i);
     expect(seal?.authorAddress).toMatch(/^0x[0-9a-f]{40}$/i);
@@ -585,7 +595,7 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    expect(job?.request.seal).toBeUndefined();
+    expect(expectRawLiftRequest(job).seal).toBeUndefined();
   }, 30_000);
 
   // OT-RFC-43 §F2 — backstop: the WM/SWM write is committed BEFORE seal-building and
@@ -624,7 +634,7 @@ describe('publishJsonLd', () => {
     expect(job).not.toBeNull();
     // Sealless: the lift carries no seal, so the publisher stages WM/SWM without an
     // on-chain VM anchor (exactly the prior always-sealless async behaviour).
-    expect(job?.request.seal).toBeUndefined();
+    expect(expectRawLiftRequest(job).seal).toBeUndefined();
   }, 30_000);
 
   // OT-RFC-43 §F2 — the sealless backstop is ONLY for the implicit machine-capture
@@ -682,8 +692,9 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    expect(job?.request.seal).toBeDefined();
-    expect(job?.request.seal?.merkleRoot).toMatch(/^0x[0-9a-f]{64}$/i);
+    const request = expectRawLiftRequest(job);
+    expect(request.seal).toBeDefined();
+    expect(request.seal?.merkleRoot).toMatch(/^0x[0-9a-f]{64}$/i);
   }, 30_000);
 
   // OT-RFC-43 §F2 — the EPCIS/Kafka capture shape (private-only) earns a seal too:
@@ -707,7 +718,7 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    expect(job?.request.seal).toBeDefined();
+    expect(expectRawLiftRequest(job).seal).toBeDefined();
   }, 30_000);
 
   // OT-RFC-43 §F2 — disk-externalized public snapshots still resolve into the seal's
@@ -751,8 +762,9 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    expect(job?.request.seal).toBeDefined();
-    expect(job?.request.seal?.merkleRoot).toMatch(/^0x[0-9a-f]{64}$/i);
+    const request = expectRawLiftRequest(job);
+    expect(request.seal).toBeDefined();
+    expect(request.seal?.merkleRoot).toMatch(/^0x[0-9a-f]{64}$/i);
   }, 30_000);
 
   it('async publish accepts preSignedAuthorAttestation and threads it byte-for-byte into LiftRequest.seal', async () => {
@@ -795,7 +807,7 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    const seal = job?.request.seal;
+    const seal = expectRawLiftRequest(job).seal;
     expect(seal).toBeDefined();
     expect(seal?.merkleRoot).toBe('0x' + 'ab'.repeat(32));
     expect(seal?.authorAddress.toLowerCase()).toBe(customAuthor.toLowerCase());
@@ -892,7 +904,7 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    const seal = job?.request.seal;
+    const seal = expectRawLiftRequest(job).seal;
     expect(seal).toBeDefined();
     expect(seal?.authorAddress.toLowerCase()).toBe(selfSov.agentAddress.toLowerCase());
     // §F2 — reservedKaId is allocated in the self-sovereign author's namespace and
@@ -1057,8 +1069,9 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    expect(job?.request.priorVersion).toBe('did:dkg:mock:31337/0xabc/7');
-    expect(job?.request.transitionType).toBe('MUTATE');
+    const request = expectRawLiftRequest(job);
+    expect(request.priorVersion).toBe('did:dkg:mock:31337/0xabc/7');
+    expect(request.transitionType).toBe('MUTATE');
   }, 15_000);
 
   it('async publish threads opts.entityProofs into LiftRequest.entityProofs', async () => {
@@ -1085,7 +1098,7 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    expect(job?.request.entityProofs).toBe(true);
+    expect(expectRawLiftRequest(job).entityProofs).toBe(true);
   }, 15_000);
 
   it('async publish threads opts.publisherNodeIdentityIdOverride (bigint) into LiftRequest (stringified)', async () => {
@@ -1112,7 +1125,7 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    expect(job?.request.publisherNodeIdentityIdOverride).toBe('42');
+    expect(expectRawLiftRequest(job).publisherNodeIdentityIdOverride).toBe('42');
   }, 15_000);
 
   it('async publish preserves publisherNodeIdentityIdOverride === 0n (mode d "no attribution")', async () => {
@@ -1139,7 +1152,7 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    expect(job?.request.publisherNodeIdentityIdOverride).toBe('0');
+    expect(expectRawLiftRequest(job).publisherNodeIdentityIdOverride).toBe('0');
   }, 15_000);
 
   it('async publish enqueues sealless when no signer is available (sync parity)', async () => {
@@ -1168,7 +1181,7 @@ describe('publishJsonLd', () => {
 
       const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
       const job = await asyncPublisher.getStatus(captureID);
-      expect(job?.request.seal).toBeUndefined();
+      expect(expectRawLiftRequest(job).seal).toBeUndefined();
     } finally {
       publisher.publisherFallbackAuthorAddress = original;
     }
@@ -1247,7 +1260,7 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    expect(job?.request.seal).toBeUndefined();
+    expect(expectRawLiftRequest(job).seal).toBeUndefined();
   }, 15_000);
 
   it('async publish seal reflects subtracted set when canonical root already confirmed (codex PR #455 #3)', async () => {
@@ -1290,7 +1303,7 @@ describe('publishJsonLd', () => {
     // undefined (short-circuit at `dkg-agent.ts` post-subtraction).
     // If subtraction is removed from the agent pipeline, the seal
     // would be present here.
-    expect(job?.request.seal).toBeUndefined();
+    expect(expectRawLiftRequest(job).seal).toBeUndefined();
   }, 20_000);
 
   it('async publish records and resolves subGraphName for staged public and private data', async () => {
@@ -1321,7 +1334,8 @@ describe('publishJsonLd', () => {
 
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
-    expect(job?.request.subGraphName).toBe('research');
-    expect(job?.request.roots).toContain(root);
+    const request = expectRawLiftRequest(job);
+    expect(request.subGraphName).toBe('research');
+    expect(request.roots).toContain(root);
   }, 15000);
 });

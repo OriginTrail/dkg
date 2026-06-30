@@ -757,7 +757,7 @@ export function createKnowledgeAssetVmPublishExecutor(agent: any) {
       ) {
         throw firstErr;
       }
-      const defaultAgentAddress = agent.getDefaultAgentAddress();
+      const defaultAgentAddress = request.agentAddress ?? agent.getDefaultAgentAddress();
       await agent.ensureRegisteredForPublish(request.contextGraphId, {
         ...(defaultAgentAddress ? { callerAgentAddress: defaultAgentAddress } : {}),
       });

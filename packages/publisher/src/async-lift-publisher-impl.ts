@@ -13,9 +13,9 @@ import {
   type LiftJobInclusionMetadata,
   type LiftJobFinalizationMetadata,
   type LiftJobRecoveryMetadata,
+  type LiftJobRequest,
   type LiftJobState,
   type KnowledgeAssetVmPublishRequest,
-  type LiftRequest,
   type RawLiftRequest,
 } from './lift-job.js';
 import type {
@@ -46,12 +46,14 @@ import {
   STATUS_PREDICATE,
   compareAcceptedJobs,
   createKnowledgeAssetVmPublishLiftRequest,
+  createKnowledgeAssetVmPublishJobRequest,
+  createRawLiftJobRequest,
   createJobSlug,
   expectBindings,
   getRecoveryTxHash,
-  isKnowledgeAssetVmPublishLiftRequest,
+  isKnowledgeAssetVmPublishJobRequest,
   isFailedJob,
-  isRawLiftRequest,
+  rawLiftRequestFromJobRequest,
   jobSubject,
   literal,
   parseIntegerLiteral,
@@ -97,7 +99,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     process: (claimed, walletId) => this.processRawLift(claimed, walletId),
     recoverInterrupted: (job) => this.recoverRawLiftInterrupted(job),
     canRetryFailedRecovery: (job) =>
-      isRawLiftRequest(job.request) &&
+      rawLiftRequestFromJobRequest(job.request) !== null &&
       job.failure.resolution === 'retry_recovery' &&
       'broadcast' in job &&
       Boolean(job.broadcast),
@@ -136,10 +138,11 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
     const now = this.now();
     const jobId = this.idGenerator();
+    const jobRequest = createRawLiftJobRequest(request);
     const job: LiftJobAccepted = {
       jobId,
-      jobSlug: createJobSlug(request),
-      request,
+      jobSlug: createJobSlug(jobRequest),
+      request: jobRequest,
       status: 'accepted',
       timestamps: { acceptedAt: now, updatedAt: now },
       retries: { retryCount: 0, maxRetries: this.maxRetries },
@@ -174,13 +177,13 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
           existing.job.jobId,
         );
       }
-      const liftRequest = createKnowledgeAssetVmPublishLiftRequest(request);
+      const jobRequest = createKnowledgeAssetVmPublishJobRequest(request);
       const now = this.now();
       const jobId = this.idGenerator();
       const job: LiftJobAccepted = {
         jobId,
-        jobSlug: createJobSlug(liftRequest),
-        request: liftRequest,
+        jobSlug: createJobSlug(jobRequest),
+        request: jobRequest,
         status: 'accepted',
         timestamps: { acceptedAt: now, updatedAt: now },
         retries: { retryCount: 0, maxRetries: this.maxRetries },
@@ -201,7 +204,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   // that lands in `<cg>/_private` after `processNext` completes. The
   // source-IRI anchor stamped by `agent.publishAsync` stays in place for
   // legacy joins; this is purely additive.
-  private async stampCanonicalAnchorsInWorkspace(request: LiftRequest): Promise<void> {
+  private async stampCanonicalAnchorsInWorkspace(request: RawLiftRequest): Promise<void> {
     if (!request.roots || request.roots.length === 0) return;
     const privateStore = new PrivateContentStore(this.store, this.graphManager);
     const swmGraph = this.graphManager.sharedMemoryUri(request.contextGraphId, request.subGraphName);
@@ -303,14 +306,18 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   }
 
   private async inspectRawLiftPreparedPayload(job: LiftJob): Promise<AsyncPreparedPublishPayload | null> {
+    const request = rawLiftRequestFromJobRequest(job.request);
+    if (!request) {
+      throw new Error(`LiftJob ${job.jobId} is not a raw lift job`);
+    }
     const resolved = await resolveLiftWorkspaceSlice({
       store: this.store,
       graphManager: this.graphManager,
-      request: job.request,
+      request,
       publicSnapshotStore: this.publicSnapshotStore,
     });
     const validated = validateLiftPublishPayload({
-      request: job.request,
+      request,
       resolved: {
         ...resolved,
         ...this.resolvedSliceOverrides,
@@ -319,14 +326,14 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     const subtracted = await subtractFinalizedExactQuads({
       store: this.store,
       graphManager: this.graphManager,
-      request: job.request,
+      request,
       validation: validated.validation,
       resolved: validated.resolved,
     });
 
     return {
       ...prepareAsyncPublishPayload({
-        request: job.request,
+        request,
         validation: validated.validation,
         resolved: subtracted.resolved,
       }),
@@ -351,14 +358,18 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       if (!this.publishExecutor) {
         throw new Error('Async lift publisher processNext requires a configured publishExecutor');
       }
+      const request = rawLiftRequestFromJobRequest(claimed.request);
+      if (!request) {
+        throw new Error(`LiftJob ${claimed.jobId} is not a raw lift job`);
+      }
       const resolved = await resolveLiftWorkspaceSlice({
         store: this.store,
         graphManager: this.graphManager,
-        request: claimed.request,
+        request,
         publicSnapshotStore: this.publicSnapshotStore,
       });
       const validated = validateLiftPublishPayload({
-        request: claimed.request,
+        request,
         resolved: {
           ...resolved,
           ...this.resolvedSliceOverrides,
@@ -373,7 +384,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       const subtracted = await subtractFinalizedExactQuads({
         store: this.store,
         graphManager: this.graphManager,
-        request: claimed.request,
+        request,
         validation: validated.validation,
         resolved: validated.resolved,
       });
@@ -383,7 +394,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       }
 
       const prepared = prepareAsyncPublishPayload({
-        request: claimed.request,
+        request,
         validation: validated.validation,
         resolved: subtracted.resolved,
       });
@@ -405,10 +416,11 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (!this.knowledgeAssetVmPublishExecutor) {
       throw new Error('Async knowledge asset VM publish requires a configured knowledgeAssetVmPublishExecutor');
     }
-    if (!isKnowledgeAssetVmPublishLiftRequest(claimed.request)) {
+    if (!isKnowledgeAssetVmPublishJobRequest(claimed.request)) {
       throw new Error(`LiftJob ${claimed.jobId} is not a knowledge asset VM publish job`);
     }
     const request = claimed.request.knowledgeAssetVmPublish;
+    const snapshotRequest = createKnowledgeAssetVmPublishLiftRequest(request);
 
     let validated!: ReturnType<typeof validateLiftPublishPayload>;
     let prepared!: AsyncPreparedPublishPayload;
@@ -416,11 +428,11 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       const resolved = await resolveLiftWorkspaceSlice({
         store: this.store,
         graphManager: this.graphManager,
-        request: claimed.request,
+        request: snapshotRequest,
         publicSnapshotStore: this.publicSnapshotStore,
       });
       validated = validateLiftPublishPayload({
-        request: claimed.request,
+        request: snapshotRequest,
         resolved: {
           ...resolved,
           ...this.resolvedSliceOverrides,
@@ -430,7 +442,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         validation: validated.validation,
       });
       prepared = prepareAsyncPublishPayload({
-        request: claimed.request,
+        request: snapshotRequest,
         validation: validated.validation,
         resolved: validated.resolved,
       });
@@ -442,7 +454,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       const publishResult = await this.knowledgeAssetVmPublishExecutor({
         walletId,
         request,
-        liftRequest: claimed.request,
+        liftRequest: snapshotRequest,
         validation: validated.validation,
         resolved: validated.resolved,
         publishOptions: prepared.publishOptions,
@@ -511,7 +523,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       if (isFailedJob(job)) {
         if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) continue;
       }
-      if (!isKnowledgeAssetVmPublishLiftRequest(job.request)) continue;
+      if (!isKnowledgeAssetVmPublishJobRequest(job.request)) continue;
       const publish = job.request.knowledgeAssetVmPublish;
       const sameName = publish.contextGraphId === request.contextGraphId
         && publish.name === request.name
@@ -523,7 +535,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   }
 
   private async reacceptRetryableFailedKnowledgeAssetVmPublishJob(job: PersistedFailedJob): Promise<LiftJobAccepted> {
-    if (!isKnowledgeAssetVmPublishLiftRequest(job.request)) {
+    if (!isKnowledgeAssetVmPublishJobRequest(job.request)) {
       throw new Error(`LiftJob ${job.jobId} is not a knowledge asset VM publish job`);
     }
     if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) {
@@ -1231,14 +1243,16 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private async promoteFinalizedPrivateStaging(job: LiftJob): Promise<void> {
     if (job.status !== 'finalized' || !job.validation) return;
     if (!this.jobHandlerFor(job.request).shouldPromoteFinalizedPrivateStaging(job)) return;
+    const request = rawLiftRequestFromJobRequest(job.request);
+    if (!request) return;
 
     const privateStore = new PrivateContentStore(this.store, this.graphManager);
-    for (const sourceRoot of job.request.roots) {
+    for (const sourceRoot of request.roots) {
       const staged = await privateStore.getPrivateTriplesForOperation(
-        job.request.contextGraphId,
-        job.request.shareOperationId,
+        request.contextGraphId,
+        request.shareOperationId,
         sourceRoot,
-        job.request.subGraphName,
+        request.subGraphName,
       );
       if (staged.length === 0) continue;
 
@@ -1251,23 +1265,23 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       const commitmentRoot = computePrivateRootV10(canonicalQuads);
       const commitmentId = commitmentRoot ? Buffer.from(commitmentRoot).toString('hex') : undefined;
       await privateStore.storePrivateTriples(
-        job.request.contextGraphId,
+        request.contextGraphId,
         canonicalRoot,
         canonicalQuads,
-        job.request.subGraphName,
+        request.subGraphName,
         commitmentId,
       );
       await privateStore.deletePrivateTriplesForOperation(
-        job.request.contextGraphId,
-        job.request.shareOperationId,
+        request.contextGraphId,
+        request.shareOperationId,
         sourceRoot,
-        job.request.subGraphName,
+        request.subGraphName,
       );
     }
   }
 
-  private jobHandlerFor(request: LiftRequest): AsyncLiftJobHandler {
-    if (isKnowledgeAssetVmPublishLiftRequest(request)) {
+  private jobHandlerFor(request: LiftJobRequest): AsyncLiftJobHandler {
+    if (isKnowledgeAssetVmPublishJobRequest(request)) {
       return this.knowledgeAssetVmPublishJobHandler;
     }
     return this.rawLiftJobHandler;
