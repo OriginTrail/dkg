@@ -1,17 +1,39 @@
-import React, { useId, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useState } from 'react';
+import type { Address } from 'viem';
 import { useAgentsStore } from '../../stores/agents.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { usePcaStore } from '../../stores/pca.js';
-import { usePcaOverview } from '../../hooks/usePcaOverview.js';
+import { isWrongNetwork, useWalletStore } from '../../stores/wallet.js';
+import { usePcaOverview, type ResolvedPcaAccount } from '../../hooks/usePcaOverview.js';
 import { useDiscoveredPcas, type DiscoveredPca } from '../../hooks/useDiscoveredPcas.js';
-import { DiscountTierLadder, truncateAddress } from '../../components/Pca/index.js';
+import { listPcaContracts, type PcaContracts } from '../../api.js';
+import { publicClientFor } from '../../web3/clients.js';
+import { publishingConvictionNftAbi } from '../../web3/pcaContract.js';
+import { DiscountTierLadder, WalletConnectControl, truncateAddress } from '../../components/Pca/index.js';
 import { EmptyState } from '../../components/ContextGraphPrimitives.js';
-import { PcaAccountCard } from './PcaAccountCard.js';
+import { PcaAccountCard, type PcaAccountOwnerMode } from './PcaAccountCard.js';
 import { CreatePcaModal } from './CreatePcaModal.js';
 import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 import { GetSponsoredPanel } from './GetSponsoredPanel.js';
 
 type ViewFilter = 'owned' | 'approved';
+type WalletBootstrapStatus = 'idle' | 'loading' | 'ready' | 'error';
+
+type OverviewAccount = ResolvedPcaAccount & {
+  ownerMode: PcaAccountOwnerMode;
+  primaryWallet?: string;
+  connectedWallet: string | null;
+  walletWrongNetwork: boolean;
+};
+
+const eq = (a?: string | null, b?: string | null) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+
+function ownerModeFor(owner: string | undefined, primaryWallet: string | undefined, connectedWallet: string | null): PcaAccountOwnerMode {
+  if (!owner) return 'unknown';
+  if (eq(owner, primaryWallet)) return 'daemon';
+  if (connectedWallet && eq(owner, connectedWallet) && !eq(owner, primaryWallet)) return 'wallet';
+  return 'external';
+}
 
 /**
  * S1 Conviction Overview + S7 role-adaptive landing (UX §5.1/§5.7). Role only
@@ -36,8 +58,101 @@ export function ConvictionOverview() {
   const openTab = useTabsStore((s) => s.openTab);
   const trackAccount = usePcaStore((s) => s.trackAccount);
   const untrackAccount = usePcaStore((s) => s.untrackAccount);
-  const overview = usePcaOverview();
+  const setWalletBootstrap = useWalletStore((s) => s.setBootstrap);
+  const initWallet = useWalletStore((s) => s.initWallet);
+  const walletBootstrap = useWalletStore((s) => s.bootstrap);
+  const connectedWallet = useWalletStore((s) => s.address);
+  const wrongNetwork = useWalletStore((s) => isWrongNetwork(s));
+  const switchToExpectedChain = useWalletStore((s) => s.switchToExpectedChain);
+  const [bootstrapState, setBootstrapState] = useState<{
+    status: WalletBootstrapStatus;
+    error: string | null;
+  }>({ status: 'idle', error: null });
+  const [walletDiscovery, setWalletDiscovery] = useState<{
+    loading: boolean;
+    error: string | null;
+    ids: string[];
+  }>({ loading: false, error: null, ids: [] });
+  const [bootstrapNonce, setBootstrapNonce] = useState(0);
+  const [walletDiscoveryNonce, setWalletDiscoveryNonce] = useState(0);
+  const overview = usePcaOverview(30_000, walletDiscovery.ids);
   const { accounts, loading, covered, refresh, walletsInconclusive } = overview;
+  const primaryWallet = overview.wallets[0];
+
+  useEffect(() => {
+    let cancelled = false;
+    async function bootstrapWalletLayer() {
+      setBootstrapState({ status: 'loading', error: null });
+      try {
+        const contracts = await listPcaContracts();
+        if (cancelled) return;
+        setWalletBootstrap(contracts);
+        initWallet();
+        setBootstrapState({ status: 'ready', error: null });
+      } catch (err) {
+        if (cancelled) return;
+        setBootstrapState({
+          status: 'error',
+          error: (err as Error)?.message ?? 'Could not bootstrap wallet contract reads.',
+        });
+        initWallet();
+      }
+    }
+    void bootstrapWalletLayer();
+    return () => {
+      cancelled = true;
+    };
+  }, [bootstrapNonce, initWallet, setWalletBootstrap]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function discoverConnectedWalletPcas(contracts: PcaContracts, wallet: `0x${string}`) {
+      setWalletDiscovery((prev) => ({ ...prev, loading: true, error: null }));
+      try {
+        if (!contracts.rpcUrls?.length) throw new Error('No PCA RPC endpoints were provided.');
+        const client = publicClientFor(contracts.chainId, contracts.rpcUrls);
+        const nft = contracts.nft as Address;
+        const owner = wallet as Address;
+        const balance = await client.readContract({
+          address: nft,
+          abi: publishingConvictionNftAbi,
+          functionName: 'balanceOf',
+          args: [owner],
+        });
+        const ids: string[] = [];
+        const count = typeof balance === 'bigint' ? balance : BigInt(String(balance));
+        for (let i = 0n; i < count; i += 1n) {
+          const tokenId = await client.readContract({
+            address: nft,
+            abi: publishingConvictionNftAbi,
+            functionName: 'tokenOfOwnerByIndex',
+            args: [owner, i],
+          });
+          ids.push((typeof tokenId === 'bigint' ? tokenId : BigInt(String(tokenId))).toString());
+        }
+        if (cancelled) return;
+        setWalletDiscovery({ loading: false, error: null, ids });
+      } catch (err) {
+        if (cancelled) return;
+        setWalletDiscovery({
+          loading: false,
+          error: (err as Error)?.message ?? 'Could not read connected-wallet PCAs.',
+          ids: [],
+        });
+      }
+    }
+
+    if (!connectedWallet || !walletBootstrap) {
+      setWalletDiscovery({ loading: false, error: null, ids: [] });
+      return () => {
+        cancelled = true;
+      };
+    }
+    void discoverConnectedWalletPcas(walletBootstrap, connectedWallet);
+    return () => {
+      cancelled = true;
+    };
+  }, [connectedWallet, walletBootstrap, walletDiscoveryNonce]);
   // GAP-1 — PCAs this node relates to on-chain (owned + agent-on) beyond the locally
   // tracked set. Agent-on auto-tracks (edge self-heal); the rest surface in the strip.
   // `ownedError` = the enumeration failed retryably (#9 — don't assert "you own none").
@@ -55,11 +170,52 @@ export function ConvictionOverview() {
   const [approve, setApprove] = useState<{ accountId: string; mode: 'self' | 'sponsor'; selfCoverage?: boolean } | null>(null);
   const [sponsoredOpen, setSponsoredOpen] = useState(false);
 
-  const owned = useMemo(() => accounts.filter((a) => a.classification === 'owned'), [accounts]);
-  const others = useMemo(() => accounts.filter((a) => a.classification !== 'owned'), [accounts]);
+  const enhancedAccounts = useMemo<OverviewAccount[]>(
+    () =>
+      accounts.map((account) => {
+        const ownerMode = ownerModeFor(account.snapshot?.owner, primaryWallet, connectedWallet);
+        return {
+          ...account,
+          ownerMode,
+          primaryWallet,
+          connectedWallet,
+          walletWrongNetwork: ownerMode === 'wallet' && wrongNetwork,
+        };
+      }),
+    [accounts, connectedWallet, primaryWallet, wrongNetwork],
+  );
+
+  const daemonOwned = useMemo(
+    () => enhancedAccounts.filter((a) => a.ownerMode === 'daemon'),
+    [enhancedAccounts],
+  );
+  const walletOwned = useMemo(
+    () => enhancedAccounts.filter((a) => a.ownerMode === 'wallet'),
+    [enhancedAccounts],
+  );
+  const trackedExternal = useMemo(
+    () =>
+      enhancedAccounts.filter(
+        (a) => a.ownerMode === 'external' && a.snapshot && a.approvedCount === 0,
+      ),
+    [enhancedAccounts],
+  );
+  const approved = useMemo(
+    () =>
+      enhancedAccounts.filter(
+        (a) => (a.ownerMode !== 'daemon' && a.ownerMode !== 'wallet' && a.approvedCount > 0) || (!a.snapshot && !a.notFound),
+      ),
+    [enhancedAccounts],
+  );
 
   const onManage = (id: string) => openTab({ id: `conviction:${id}`, label: `PCA #${id}`, closable: true });
-  const visible = filter === 'owned' ? owned : others;
+  const visible = filter === 'owned' ? [...daemonOwned, ...walletOwned, ...trackedExternal] : approved;
+
+  const retryWalletBootstrap = useCallback(() => setBootstrapNonce((n) => n + 1), []);
+  const retryWalletDiscovery = useCallback(() => setWalletDiscoveryNonce((n) => n + 1), []);
+  const switchNetwork = useCallback(() => {
+    void switchToExpectedChain();
+  }, [switchToExpectedChain]);
 
   return (
     <div className="v10-pca-overview" data-testid="pca-landing">
@@ -70,7 +226,7 @@ export function ConvictionOverview() {
         </div>
         <p className="v10-pca-overview-explainer">
           {role === 'edge'
-            ? "Edge nodes don’t own a Publishing Conviction Account (PCA) — there’s no staked identity to set as primary node. A core node can sponsor your publishes by approving your operational wallet(s) on its PCA. You still pay your own gas."
+            ? "Edge nodes usually start by getting sponsored: a core node approves your operational wallet(s), and you still pay your own gas. You can also create a PCA by choosing a staked primary node; getting sponsored is the free path."
             : "A Publishing Conviction Account (PCA) lets you lock TRAC up front, publish at a discount, and sponsor other nodes. The discount applies to the wallet that SIGNS the publish (on-chain msg.sender) — not a peerId, admin wallet, or author identity."}
         </p>
       </header>
@@ -118,6 +274,9 @@ export function ConvictionOverview() {
             Approved for me
           </button>
         </div>
+        <div className="v10-pca-overview-wallet">
+          <WalletConnectControl />
+        </div>
         {role === 'edge' ? (
           // Sub-PR 1 (§5.6/§5.1) — edge can now create too: Get sponsored stays the
           // PRIMARY/recommended-free CTA; Create is an available SECONDARY alongside it.
@@ -157,19 +316,58 @@ export function ConvictionOverview() {
         </div>
       ) : visible.length > 0 ? (
         <>
-          <div className="v10-pca-card-grid">
-            {visible.map((account) => (
-              <PcaAccountCard
-                key={account.accountId}
-                account={account}
+          {filter === 'owned' ? (
+            <div className="v10-pca-owned-groups">
+              <AccountGroup
+                title="This node (hot wallet)"
+                description="Daemon-owned PCAs. Owner writes use the node daemon."
+                accounts={daemonOwned}
                 blockExplorerUrl={blockExplorerUrl}
                 onManage={onManage}
                 onApproveWallets={(id) => setApprove({ accountId: id, mode: 'sponsor' })}
                 onRemove={untrackAccount}
                 onRetry={() => refresh()}
+                onSwitchNetwork={switchNetwork}
               />
-            ))}
-          </div>
+              <AccountGroup
+                title={connectedWallet ? `${truncateAddress(connectedWallet)} (connected)` : 'Connected wallet'}
+                description="Wallet-managed PCAs. Owner writes are signed by the connected wallet."
+                accounts={walletOwned}
+                blockExplorerUrl={blockExplorerUrl}
+                onManage={onManage}
+                onApproveWallets={(id) => setApprove({ accountId: id, mode: 'sponsor' })}
+                onRemove={untrackAccount}
+                onRetry={() => refresh()}
+                onSwitchNetwork={switchNetwork}
+              />
+              <AccountGroup
+                title="Tracked (external - connect to manage)"
+                description="Read-only until the owner wallet is connected. Reads still work."
+                accounts={trackedExternal}
+                blockExplorerUrl={blockExplorerUrl}
+                onManage={onManage}
+                onApproveWallets={(id) => setApprove({ accountId: id, mode: 'sponsor' })}
+                onRemove={untrackAccount}
+                onRetry={() => refresh()}
+                onSwitchNetwork={switchNetwork}
+              />
+            </div>
+          ) : (
+            <div className="v10-pca-card-grid">
+              {approved.map((account) => (
+                <PcaAccountCard
+                  key={account.accountId}
+                  account={account}
+                  blockExplorerUrl={blockExplorerUrl}
+                  onManage={onManage}
+                  onApproveWallets={(id) => setApprove({ accountId: id, mode: 'sponsor' })}
+                  onRemove={untrackAccount}
+                  onRetry={() => refresh()}
+                  onSwitchNetwork={switchNetwork}
+                />
+              ))}
+            </div>
+          )}
           {filter === 'approved' && (
             <p className="v10-pca-overview-caveat">
               ⓘ The chain exposes how many wallets are approved, not the full list. Wallets you
@@ -197,6 +395,30 @@ export function ConvictionOverview() {
             <button type="button" className="v10-pca-card-btn" onClick={() => refreshDiscovered()}>Retry</button>
           </p>
         </section>
+      )}
+
+      {bootstrapState.status === 'error' && (
+        <section className="v10-pca-discovered" data-testid="pca-wallet-bootstrap-error" role="status">
+          <p className="v10-pca-overview-caveat">
+            ⓘ Couldn’t load wallet contract bootstrap, so connected-wallet PCA discovery is paused.{' '}
+            <button type="button" className="v10-pca-card-btn" onClick={retryWalletBootstrap}>Retry</button>
+          </p>
+        </section>
+      )}
+
+      {walletDiscovery.error && (
+        <section className="v10-pca-discovered" data-testid="pca-wallet-discovery-error" role="status">
+          <p className="v10-pca-overview-caveat">
+            ⓘ Couldn’t read PCAs owned by the connected wallet. Existing tracked PCAs are still shown.{' '}
+            <button type="button" className="v10-pca-card-btn" onClick={retryWalletDiscovery}>Retry</button>
+          </p>
+        </section>
+      )}
+
+      {walletDiscovery.loading && connectedWallet && (
+        <p className="v10-pca-overview-caveat" role="status">
+          Reading PCAs owned by {truncateAddress(connectedWallet)}...
+        </p>
       )}
 
       <DiscoveredStrip items={discoveredUntracked} onTrack={trackAccount} onManage={onManage} />
@@ -249,7 +471,7 @@ function DiscoveredStrip({
     <section className="v10-pca-discovered" data-testid="pca-discovered-strip">
       <h3 className="v10-pca-discovered-title">Discovered — not tracked here</h3>
       <p className="v10-pca-overview-caveat">
-        ⓘ Found on-chain for this node’s wallets. Track to show them in the grid above.
+        ⓘ Found on-chain for this node’s wallets or the connected wallet. Track to show them in the grid above.
       </p>
       {items.map((d) => {
         const bps = d.basics?.discountBps;
@@ -284,6 +506,53 @@ function DiscoveredStrip({
           </div>
         );
       })}
+    </section>
+  );
+}
+
+function AccountGroup({
+  title,
+  description,
+  accounts,
+  blockExplorerUrl,
+  onManage,
+  onApproveWallets,
+  onRemove,
+  onRetry,
+  onSwitchNetwork,
+}: {
+  title: string;
+  description: string;
+  accounts: OverviewAccount[];
+  blockExplorerUrl?: string | null;
+  onManage?: (id: string) => void;
+  onApproveWallets?: (id: string) => void;
+  onRemove?: (id: string) => void;
+  onRetry?: (id: string) => void;
+  onSwitchNetwork?: () => void;
+}) {
+  if (accounts.length === 0) return null;
+  return (
+    <section className="v10-pca-account-group">
+      <div className="v10-pca-account-group-head">
+        <h3 className="v10-pca-account-group-title">{title}</h3>
+        <span className="v10-pca-account-group-count">{accounts.length}</span>
+      </div>
+      <p className="v10-pca-overview-caveat">{description}</p>
+      <div className="v10-pca-card-grid">
+        {accounts.map((account) => (
+          <PcaAccountCard
+            key={account.accountId}
+            account={account}
+            blockExplorerUrl={blockExplorerUrl}
+            onManage={onManage}
+            onApproveWallets={onApproveWallets}
+            onRemove={onRemove}
+            onRetry={onRetry}
+            onSwitchNetwork={onSwitchNetwork}
+          />
+        ))}
+      </div>
     </section>
   );
 }

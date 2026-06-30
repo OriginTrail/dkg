@@ -27,6 +27,22 @@ export interface ShardingTableNode {
   stake: bigint;
 }
 
+/** Browser-bootstrap contract addresses + chain params (sub-PR #2 HW signing).
+ *  The minimal set the in-browser viem layer needs to submit owner-actions
+ *  direct-to-contract: `nft` = DKGPublishingConvictionNFT (all wallet-signed
+ *  writes + ERC721Enumerable discovery + the mint-Transfer accountId parse),
+ *  `token` = TRAC ERC-20 (the approve pre-step). Addresses EIP-55 checksummed.
+ *  `chainId` is AS-IS (may be the compound `base:84532` form — the FE extracts
+ *  the numeric tail for viem's Chain.id). `rpcUrls` feeds the viem transport.
+ *  Logic/Hub/ShardingTable are intentionally excluded (no browser action
+ *  touches them; the picker is daemon-served). */
+export interface PcaContracts {
+  nft: string;
+  token: string;
+  chainId: string;
+  rpcUrls: string[];
+}
+
 export interface ConvictionReader {
   getConvictionAgentAccountId(agent: string): Promise<bigint>;
   convictionAccountCanCover(accountId: bigint, baseCost: bigint): Promise<boolean>;
@@ -40,6 +56,9 @@ export interface ConvictionReader {
    *  bypasses the cache (M4: the create-revert recovery + picker Retry). Optional,
    *  same rationale as above (facade typeof-guard / optional ChainAdapter decl). */
   listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
+  /** Browser-bootstrap contract addresses + chain params for the HW signing
+   *  layer (sub-PR #2). Optional, same rationale as the other PCA reads. */
+  getPublishingConvictionContracts?(): Promise<PcaContracts>;
 }
 
 export interface IdentityProof {
@@ -947,6 +966,15 @@ export interface ChainAdapter {
    * (mock-chain tests can omit it).
    */
   listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
+
+  /**
+   * Browser-bootstrap contract addresses + chain params for the sub-PR #2 HW
+   * signing layer: { nft, token, chainId, rpcUrls } (EIP-55, chainId AS-IS).
+   * The minimal set the in-browser viem layer needs — no Hub/logic/ShardingTable
+   * (those aren't touched by any browser owner-action). Optional for the same
+   * reason as the other PCA reads.
+   */
+  getPublishingConvictionContracts?(): Promise<PcaContracts>;
 
   /**
    * Returns the V10 NFT-backed PCA's `lockDurationEpochs` for the given

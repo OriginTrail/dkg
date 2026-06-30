@@ -26,6 +26,7 @@ import type {
   VerifyACKIdentityResult,
   PcaAccountRelation,
   ShardingTableNode,
+  PcaContracts,
 } from './chain-adapter.js';
 import {
   NoEligibleContextGraphError,
@@ -709,6 +710,17 @@ export class MockChainAdapter implements ChainAdapter {
       { nodeId: '0x6e6f64652d32', identityId: 57n, ask: 2_000_000_000_000_000_000n, stake: 180_000n * 10n ** 18n },
       { nodeId: '0x6e6f64652d33', identityId: 61n, ask: 1_500_000_000_000_000_000n, stake: 500_000n * 10n ** 18n },
     ];
+  }
+
+  /** Browser-bootstrap parity (sub-PR #2) — fixed checksummed addresses + the
+   *  mock chainId + rpcUrls. */
+  async getPublishingConvictionContracts(): Promise<PcaContracts> {
+    return {
+      nft: ethers.getAddress('0x' + '11'.repeat(20)),
+      token: ethers.getAddress('0x' + '22'.repeat(20)),
+      chainId: this.chainId,
+      rpcUrls: this.getRpcUrls(),
+    };
   }
 
   /** Mirrors `agentToAccountId`; `0n` for unregistered → publisher SDK

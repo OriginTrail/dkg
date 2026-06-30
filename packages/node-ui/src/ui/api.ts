@@ -1839,9 +1839,37 @@ export const listDesignatableNodes = (opts?: { fresh?: boolean }) =>
     `/api/pca/designatable-nodes${opts?.fresh ? '?fresh=1' : ''}`,
   );
 
+/**
+ * Resolved PCA contract addresses + chain — the bootstrap the in-browser wallet (web3) layer needs.
+ * The daemon resolves these via its Hub config (the browser does NOT re-resolve the Hub). Minimal
+ * set: the NFT wrapper (every wallet-signed write + the ERC721Enumerable owned-PCA walk + the mint
+ * `Transfer` accountId decode all target it), the TRAC token (approve/allowance), the chain id, and
+ * the RPC endpoints for a viem publicClient. `nativeCurrency` is NOT here — the browser derives the
+ * gas symbol from `nativeGasSymbol(chainId)`.
+ */
+export interface PcaContracts {
+  /** DKGPublishingConvictionNFT address (EIP-55). */
+  nft: string;
+  /** TRAC ERC-20 address (EIP-55) — `approve`/`allowance`. */
+  token: string;
+  /** Chain id; may be the compound `"slug:chainId"` form (e.g. `"base:84532"`) — extract the numeric
+   *  tail for the viem `Chain.id`. */
+  chainId: string | number;
+  /** RPC endpoints for the viem publicClient (reads + receipt polling). */
+  rpcUrls: string[];
+}
+
+/**
+ * Bootstrap the in-browser web3 layer (contract addresses + chain). `GET` is permissionless. A node
+ * without the PCA contract deployed 503s `FEATURE_UNAVAILABLE` (same family as the other PCA routes →
+ * a clean "unavailable" state); an address-read failure 503s `CONTRACTS_READ_FAILED` (retryable).
+ */
+export const listPcaContracts = () => getJson<PcaContracts>('/api/pca/contracts');
+
 /** Normalized, terminology-disciplined PCA error code (UI branches on this). */
 export type PcaErrorCode =
   | 'FEATURE_UNAVAILABLE'
+  | 'CONTRACTS_READ_FAILED'
   | 'InvalidAmount'
   | 'PrimaryNodeNotInShardingTable'
   | 'ZeroPrimaryNode'

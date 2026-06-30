@@ -15,12 +15,18 @@ const mocks = vi.hoisted(() => ({
   fetchWalletsBalances: vi.fn(),
   fetchContextGraphs: vi.fn(),
   listPcaAgents: vi.fn(),
+  listPcaContracts: vi.fn(),
+  publicClientFor: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', async (orig) => {
   const actual = await orig<typeof import('../src/ui/api.js')>();
   return { ...actual, ...mocks };
 });
+
+vi.mock('../src/ui/web3/clients.js', () => ({
+  publicClientFor: mocks.publicClientFor,
+}));
 
 // Capture the props the chain hands each modal (isolate the chain from modal internals).
 let createProps: any = null;
@@ -48,10 +54,17 @@ vi.mock('../src/ui/pages/conviction/ApproveWalletsModal.js', () => ({
 
 const { ConvictionDetailView } = await import('../src/ui/pages/conviction/ConvictionDetailView.js');
 const { useAgentsStore } = await import('../src/ui/stores/agents.js');
+const { useWalletStore } = await import('../src/ui/stores/wallet.js');
 
 const W0 = '0x9A3f000000000000000000000000000000000E41D';
 const OLD_AGENT_A = '0xAAa0000000000000000000000000000000000001';
 const OLD_AGENT_B = '0xBbB0000000000000000000000000000000000002';
+const CONTRACTS = {
+  nft: `0x${'11'.repeat(20)}`,
+  token: `0x${'22'.repeat(20)}`,
+  chainId: 'base:84532',
+  rpcUrls: ['https://rpc.example'],
+};
 
 function snap(over: Record<string, unknown> = {}) {
   return {
@@ -86,6 +99,20 @@ beforeEach(() => {
   createProps = null;
   approveProps = null;
   useAgentsStore.getState().setNodeStatus({ blockExplorerUrl: null });
+  useWalletStore.setState({
+    provider: null,
+    providerInfo: null,
+    address: null,
+    chainId: null,
+    expectedChainId: null,
+    bootstrap: null,
+  });
+  mocks.listPcaContracts.mockResolvedValue(CONTRACTS);
+  mocks.publicClientFor.mockReturnValue({
+    getTransactionReceipt: vi.fn(async () => {
+      throw new Error('receipt pending');
+    }),
+  });
   mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [] });
   mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
     key ? { ...snap(), probedKey: { key, registered: true } } : snap(),

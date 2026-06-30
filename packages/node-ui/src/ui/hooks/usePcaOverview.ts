@@ -243,14 +243,21 @@ const EMPTY_ACCOUNTS: ResolvedPcaAccount[] = [];
  * tracked-id set (M2) so the always-mounted bell + a visible page don't double
  * the probe load. Skips all work when nothing is tracked.
  */
-export function usePcaOverview(intervalMs = 30_000): PcaOverview {
+export function usePcaOverview(intervalMs = 30_000, extraIds: string[] = []): PcaOverview {
   const trackedIds = usePcaStore((s) => s.trackedIds);
-  const idsKey = trackedIds.join(',');
+  const extraIdsKey = extraIds.join(',');
+  const ids = useMemo(
+    () => [...trackedIds, ...extraIds.filter((id) => !trackedIds.includes(id))],
+    // trackedIds / extraIds are represented by stable string keys for the poller.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [trackedIds.join(','), extraIdsKey],
+  );
+  const idsKey = ids.join(',');
   const [, force] = useReducer((c: number) => c + 1, 0);
 
   useEffect(
-    () => subscribeOverview(idsKey, trackedIds, intervalMs, force),
-    // trackedIds is derived from idsKey; intervalMs rarely changes.
+    () => subscribeOverview(idsKey, ids, intervalMs, force),
+    // ids is derived from idsKey; intervalMs rarely changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [idsKey, intervalMs],
   );

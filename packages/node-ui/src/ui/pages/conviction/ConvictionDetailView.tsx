@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useFetch } from '../../hooks.js';
 import {
   fetchPca,
@@ -6,6 +6,7 @@ import {
   fetchContextGraphs,
   registerContextGraph,
   listPcaAgents,
+  listPcaContracts,
   describePcaError,
   isRpcTransportError,
   HttpError,
@@ -14,15 +15,29 @@ import {
 import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
 import { useAgentsStore } from '../../stores/agents.js';
 import { useTabsStore } from '../../stores/tabs.js';
+import { isWrongNetwork, useWalletStore } from '../../stores/wallet.js';
+import { usePcaStore } from '../../stores/pca.js';
+import { publicClientFor } from '../../web3/clients.js';
+import {
+  describeWalletTxError,
+  WalletReceiptRevertedError,
+  WalletReceiptWaitError,
+  WalletTxStepError,
+} from '../../web3/walletTxError.js';
 import { formatTrac } from '../../lib/formatTrac.js';
 import {
   HealthChip,
   WalletRow,
   PcaAgentList,
   AddressCrux,
+  WalletConnectControl,
+  WalletPill,
+  DeviceConfirmProgress,
   formatWeiToTrac,
   formatRelativeExpiry,
+  type DeviceConfirmStep,
 } from '../../components/Pca/index.js';
+import type { WalletTxProgressEvent } from '../../web3/walletOwnerActionSubmitter.js';
 import { healthForSnapshot } from '../../pca/health.js';
 import { StatStrip } from '../../components/ContextGraphPrimitives.js';
 import { ApproveWalletsModal } from './ApproveWalletsModal.js';
@@ -30,6 +45,28 @@ import { CreatePcaModal } from './CreatePcaModal.js';
 
 const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
+type DetailOwnerMode = 'daemon' | 'wallet' | 'external' | 'unknown';
+
+function detailOwnerMode(owner: string, primaryWallet?: string, connectedWallet?: string | null): DetailOwnerMode {
+  if (eq(owner, primaryWallet)) return 'daemon';
+  if (connectedWallet && eq(owner, connectedWallet) && !eq(owner, primaryWallet)) return 'wallet';
+  return 'external';
+}
+
+type DetailDeviceAction = 'topup' | 'remove';
+
+function initialDetailDeviceSteps(action: DetailDeviceAction): DeviceConfirmStep[] {
+  return action === 'topup'
+    ? [
+        { id: 'approve', label: 'Approve exact TRAC allowance', state: 'pending' },
+        { id: 'action', label: 'Sign top-up', state: 'pending' },
+        { id: 'confirm', label: 'Confirm on-chain receipt', state: 'pending' },
+      ]
+    : [
+        { id: 'action', label: 'Sign remove wallet', state: 'pending' },
+        { id: 'confirm', label: 'Confirm on-chain receipt', state: 'pending' },
+      ];
+}
 
 /**
  * M7 — CG-bind goes through `POST /api/context-graph/register` whose classifier
@@ -79,11 +116,10 @@ interface ActionState {
 const IDLE: ActionState = { busy: false, error: null, result: null };
 
 /**
- * S3 PCA Detail (Manage). Owner actions (top-up / approve / deregister / bind)
- * are pre-disabled unless the owner is this node's PRIMARY operational wallet
- * (§8A — the only key the daemon signs owner writes with); Settlement and the
- * probe stay enabled for everyone (permissionless). Every write surfaces its
- * txHash + a "still pending… verify here" escape.
+ * S3 PCA Detail (Manage). Owner actions are enabled for the daemon-owned branch
+ * and for the connected-wallet-owned branch on the right network; external PCAs
+ * remain read-only. Settlement and the probe stay enabled for everyone
+ * (permissionless). Every write surfaces its txHash + a pending/verify escape.
  */
 export function ConvictionDetailView({ accountId }: { accountId: string }) {
   // GAP-4/5 — the S3 detail view opts into the EXTENDED snapshot (remainingAllowance /
@@ -94,11 +130,34 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
   const { data: wb, error: wbError, refresh: refreshWallets } = useFetch(fetchWalletsBalances, [], 0);
   const nodeStatus = useAgentsStore((s) => s.nodeStatus) as { blockExplorerUrl?: string | null } | null;
   const explorer = nodeStatus?.blockExplorerUrl ?? null;
+  const connectedWallet = useWalletStore((s) => s.address);
+  const walletWrongNetwork = useWalletStore((s) => isWrongNetwork(s));
+  const switchToExpectedChain = useWalletStore((s) => s.switchToExpectedChain);
+  const setWalletBootstrap = useWalletStore((s) => s.setBootstrap);
+  const initWallet = useWalletStore((s) => s.initWallet);
   const wallets = wb?.wallets ?? [];
   // L3: a transient balances blip (wb null + error) must NOT reclassify
   // owned→not-owner and flicker the owner controls into a definitive "you're not
   // the owner" — show "can't confirm" instead and keep the retry.
   const walletsUnknown = !wb && !!wbError;
+
+  useEffect(() => {
+    let cancelled = false;
+    void listPcaContracts()
+      .then((contracts) => {
+        if (!cancelled) setWalletBootstrap(contracts);
+      })
+      .catch(() => {
+        // Detail reads still work through the daemon. Wallet writes fail closed
+        // through the owner-action resolver until bootstrap succeeds.
+      })
+      .finally(() => {
+        if (!cancelled) initWallet();
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [initWallet, setWalletBootstrap]);
 
   if (loading && !snapshot) return <div className="lazy-spinner">Loading PCA #{accountId}…</div>;
   if (error || !snapshot) {
@@ -114,13 +173,29 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
     );
   }
 
-  const ownerIsPrimary = !walletsUnknown && eq(wallets[0], snapshot.owner);
+  const ownerMode: DetailOwnerMode = walletsUnknown
+    ? 'unknown'
+    : detailOwnerMode(snapshot.owner, wallets[0], connectedWallet);
+  const ownerIsPrimary = ownerMode === 'daemon';
+  const ownerWritesEnabled = ownerMode === 'daemon' || (ownerMode === 'wallet' && !walletWrongNetwork);
   const ownerInPool = wallets.some((w) => eq(w, snapshot.owner));
   const ownerOnlyReason = walletsUnknown
     ? `Couldn’t load this node’s wallets — can’t confirm ownership of PCA #${accountId}.`
     : ownerInPool
       ? `Owner-only — PCA #${accountId} is owned by ${snapshot.owner}, not this node’s primary operational wallet, so node-UI can’t sign for it.`
       : `Owner-only — this node isn’t the owner of PCA #${accountId}.`;
+
+  const ownerGateReason = walletsUnknown
+    ? `Couldn't load this node's wallets - can't confirm ownership of PCA #${accountId}.`
+    : ownerMode === 'wallet' && walletWrongNetwork
+      ? `Wrong network - switch the connected wallet to this node's PCA network to manage PCA #${accountId}.`
+      : ownerMode === 'wallet'
+        ? `Connected wallet ${snapshot.owner} owns PCA #${accountId}; device-signed owner actions are enabled.`
+        : ownerInPool
+          ? `Owner-only - PCA #${accountId} is owned by ${snapshot.owner}, not this node's primary operational wallet, so node-UI can't sign for it.`
+          : connectedWallet
+            ? `Owner-only - connected as ${connectedWallet}; switch to ${snapshot.owner} to manage PCA #${accountId}.`
+            : `Owner-only - connect ${snapshot.owner} to manage PCA #${accountId}.`;
 
   return (
     <DetailBody
@@ -129,30 +204,128 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
       wallets={wallets}
       ownerTrac={wb?.balances?.find((b) => eq(b.address, snapshot.owner))?.trac}
       explorer={explorer}
-      ownerIsPrimary={ownerIsPrimary}
-      ownerOnlyReason={ownerOnlyReason}
+      ownerMode={ownerMode}
+      ownerWritesEnabled={ownerWritesEnabled}
+      walletWrongNetwork={walletWrongNetwork}
+      connectedWallet={connectedWallet}
+      ownerOnlyReason={ownerGateReason}
       walletsUnknown={walletsUnknown}
       onRetryWallets={refreshWallets}
+      onSwitchNetwork={() => void switchToExpectedChain()}
       refresh={refresh}
     />
   );
 }
 
 function DetailBody({
-  accountId, snapshot, wallets, ownerTrac, explorer, ownerIsPrimary, ownerOnlyReason, walletsUnknown, onRetryWallets, refresh,
+  accountId,
+  snapshot,
+  wallets,
+  ownerTrac,
+  explorer,
+  ownerMode,
+  ownerWritesEnabled,
+  walletWrongNetwork,
+  connectedWallet,
+  ownerOnlyReason,
+  walletsUnknown,
+  onRetryWallets,
+  onSwitchNetwork,
+  refresh,
 }: {
   accountId: string;
   snapshot: PcaSnapshot;
   wallets: string[];
   ownerTrac?: string;
   explorer: string | null;
-  ownerIsPrimary: boolean;
+  ownerMode: DetailOwnerMode;
+  ownerWritesEnabled: boolean;
+  walletWrongNetwork: boolean;
+  connectedWallet?: string | null;
   ownerOnlyReason: string;
   walletsUnknown: boolean;
   onRetryWallets: () => void;
+  onSwitchNetwork: () => void;
   refresh: () => void;
 }) {
-  const owner = useOwnerActionSubmitter(accountId); // owner-action seam (P0: daemon submitter)
+  const deviceActionRef = useRef<DetailDeviceAction | null>(null);
+  const [deviceSteps, setDeviceSteps] = useState<DeviceConfirmStep[]>([]);
+  const [deviceLabel, setDeviceLabel] = useState('Confirm on your device');
+  const onWalletProgress = (event: WalletTxProgressEvent) => {
+    const action = deviceActionRef.current ?? 'topup';
+    setDeviceLabel(() => {
+      if (event.step === 'approve') {
+        if (event.state === 'skipped' || event.state === 'confirmed') return 'Allowance ready — continue to the owner action';
+        if (event.state === 'failed') return 'Wallet transaction failed';
+        return 'Confirm on your device (1 of 2): approve TRAC';
+      }
+      if (event.state === 'active') return action === 'topup'
+        ? 'Confirm on your device (2 of 2): top up'
+        : 'Confirm on your device: remove wallet';
+      if (event.state === 'submitted') return 'Waiting for on-chain confirmation';
+      if (event.state === 'confirmed') return 'Transaction confirmed on-chain';
+      return 'Wallet transaction failed';
+    });
+    setDeviceSteps((prev) => {
+      const next = (prev.length ? prev : initialDetailDeviceSteps(action)).map((s) => ({ ...s }));
+      const approve = next.find((s) => s.id === 'approve');
+      const actionStep = next.find((s) => s.id === 'action')!;
+      const confirm = next.find((s) => s.id === 'confirm')!;
+      if (event.step === 'approve') {
+        if (!approve) return next;
+        if (event.state === 'skipped') {
+          approve.state = 'confirmed';
+          approve.label = 'TRAC allowance already sufficient';
+        } else if (event.state === 'active' || event.state === 'submitted') {
+          approve.state = 'active';
+          approve.txHash = event.txHash;
+        } else if (event.state === 'confirmed') {
+          approve.state = 'confirmed';
+          approve.txHash = event.txHash;
+        } else if (event.state === 'failed') {
+          approve.state = 'failed';
+          approve.txHash = event.txHash;
+          approve.error = describeWalletTxError(event.error, 'approve').message;
+        }
+        return next;
+      }
+      if (event.state === 'active') {
+        if (approve?.state === 'pending') approve.state = 'confirmed';
+        actionStep.state = 'active';
+      } else if (event.state === 'submitted') {
+        if (approve?.state === 'pending') approve.state = 'confirmed';
+        actionStep.state = 'confirmed';
+        actionStep.txHash = event.txHash;
+        confirm.state = 'active';
+      } else if (event.state === 'confirmed') {
+        if (approve?.state === 'pending') approve.state = 'confirmed';
+        actionStep.state = 'confirmed';
+        actionStep.txHash = event.txHash;
+        confirm.state = 'confirmed';
+        confirm.txHash = event.txHash;
+      } else if (event.state === 'failed') {
+        actionStep.state = 'failed';
+        actionStep.txHash = event.txHash;
+        actionStep.error = describeWalletTxError(event.error, 'action').message;
+      }
+      return next;
+    });
+  };
+  const owner = useOwnerActionSubmitter({
+    accountId,
+    onWalletProgress: ownerMode === 'wallet' ? onWalletProgress : undefined,
+  });
+  const ownerIsPrimary = ownerMode === 'daemon';
+  const bindOwnerEnabled = ownerMode === 'daemon';
+  const bindOwnerTitle = bindOwnerEnabled
+    ? undefined
+    : ownerMode === 'wallet'
+      ? 'Context-graph binding from a connected wallet is not available yet; bind from the node hot owner.'
+      : ownerOnlyReason;
+  const topUpPending = usePcaStore((s) => s.topUpPending[accountId] ?? null);
+  const setTopUpPending = usePcaStore((s) => s.setTopUpPending);
+  const clearTopUpPending = usePcaStore((s) => s.clearTopUpPending);
+  const walletBootstrap = useWalletStore((s) => s.bootstrap);
   const [topUp, setTopUp] = useState('');
   const [fund, setFund] = useState<ActionState>(IDLE);
   const [settle, setSettle] = useState<ActionState>(IDLE);
@@ -172,6 +345,45 @@ function DetailBody({
     { newAccountId: string; seedBulk: string; agentsResolved: boolean } | null
   >(null);
   const openTab = useTabsStore((s) => s.openTab);
+
+  useEffect(() => {
+    if (!topUpPending || !walletBootstrap?.rpcUrls?.length) return undefined;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      try {
+        const client = publicClientFor(walletBootstrap.chainId, walletBootstrap.rpcUrls);
+        const receipt = await client.getTransactionReceipt({
+          hash: topUpPending.txHash as `0x${string}`,
+        });
+        if (cancelled) return;
+        clearTopUpPending(accountId);
+        if (receipt.status === 'success') {
+          setFund({
+            busy: false,
+            error: null,
+            warning: null,
+            result: { txHash: topUpPending.txHash, message: 'Top-up confirmed on-chain.' },
+          });
+          refresh();
+        } else {
+          setFund({
+            busy: false,
+            error: 'The pending top-up transaction reverted on-chain.',
+            warning: null,
+            result: null,
+          });
+        }
+      } catch {
+        if (!cancelled) timer = setTimeout(poll, 5_000);
+      }
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [accountId, clearTopUpPending, refresh, topUpPending, walletBootstrap]);
 
   // After the renewal mint, chain into Approve seeded with the OLD account's agents.
   // Approvals don't carry over AND expiry doesn't free them (gate-HIGH), so the chained
@@ -214,12 +426,20 @@ function DetailBody({
   }>;
   const bindable = cgs.filter((cg) => !cg.onChainId);
   const health = healthForSnapshot(snapshot);
-  const ownerTitle = ownerIsPrimary ? undefined : ownerOnlyReason;
+  const ownerTitle = ownerWritesEnabled ? undefined : ownerOnlyReason;
 
   const runFund = async () => {
+    if (ownerMode === 'wallet') {
+      deviceActionRef.current = 'topup';
+      setDeviceSteps(initialDetailDeviceSteps('topup'));
+      setDeviceLabel('Confirm on your device (1 of 2): approve TRAC');
+    } else {
+      setDeviceSteps([]);
+    }
     setFund({ busy: true, error: null, result: null, warning: null });
     try {
       const res = await owner.topUp(accountId, topUp.trim());
+      clearTopUpPending(accountId);
       setFund({ busy: false, error: null, result: { txHash: res.txHash, message: `Added ${formatTrac(res.addedTokens)} TRAC.` } });
       setTopUp('');
       refresh();
@@ -231,6 +451,14 @@ function DetailBody({
       if (err instanceof HttpError && err.status === 504) {
         const txHash = (err.body as { txHash?: string } | undefined)?.txHash;
         if (txHash) {
+          setTopUpPending({
+            accountId,
+            ownerEoa: snapshot.owner,
+            submittedAt: Date.now(),
+            txHash,
+            tokens: topUp.trim(),
+            previousTopUpBufferTrac: snapshot.topUpBufferTrac,
+          });
           setFund({
             busy: false,
             error: null,
@@ -243,6 +471,40 @@ function DetailBody({
           });
           return;
         }
+      }
+      if (err instanceof WalletReceiptWaitError && err.txStep === 'action' && err.txHash) {
+        setTopUpPending({
+          accountId,
+          ownerEoa: snapshot.owner,
+          submittedAt: Date.now(),
+          txHash: err.txHash,
+          tokens: topUp.trim(),
+          previousTopUpBufferTrac: snapshot.topUpBufferTrac,
+        });
+        setFund({
+          busy: false,
+          error: null,
+          result: null,
+          warning: {
+            txHash: err.txHash,
+            message:
+              'Your top-up was submitted but we lost confirmation - it may already be on-chain. This exact transaction is being checked; do not add again until it resolves.',
+          },
+        });
+        return;
+      }
+      if (ownerMode === 'wallet') {
+        const info = describeWalletTxError(
+          err,
+          err instanceof WalletTxStepError ? err.txStep : err instanceof WalletReceiptWaitError ? err.txStep ?? 'action' : 'action',
+        );
+        setFund({
+          busy: false,
+          error: info.message,
+          result: null,
+          warning: err instanceof WalletReceiptRevertedError ? null : undefined,
+        });
+        return;
       }
       setFund({ busy: false, error: describePcaError(err, { accountId })?.message ?? (err as Error)?.message ?? 'Top-up failed.', result: null });
     }
@@ -302,6 +564,13 @@ function DetailBody({
     }
   };
   const runRemove = async (addr: string) => {
+    if (ownerMode === 'wallet') {
+      deviceActionRef.current = 'remove';
+      setDeviceSteps(initialDetailDeviceSteps('remove'));
+      setDeviceLabel('Confirm on your device: remove wallet');
+    } else {
+      setDeviceSteps([]);
+    }
     setRemoveState({ busy: true, error: null, result: null });
     try {
       await owner.deregisterAgent(accountId, addr);
@@ -315,6 +584,17 @@ function DetailBody({
   };
 
   const pct = (snapshot.discountBps / 100).toFixed(snapshot.discountBps % 100 === 0 ? 0 : 1);
+  const walletSurfaceCopy = connectedWallet
+    ? ownerMode === 'wallet'
+      ? walletWrongNetwork
+        ? 'Owner wallet matches; switch network before signing owner actions.'
+        : 'Connected owner wallet will sign top-up, approve, remove, and renewal actions.'
+      : ownerMode === 'daemon'
+        ? 'Connected wallet is available for wallet-owned PCAs; this account uses the node daemon for owner actions.'
+        : `Connected as ${connectedWallet}; switch to ${snapshot.owner} to manage owner actions.`
+    : ownerMode === 'external'
+      ? 'Connect the PCA owner wallet to manage this account. Provider metadata is display-only.'
+      : 'Connect a wallet to view and manage wallet-owned PCAs from this tab.';
 
   return (
     <div className="v10-pca-detail" data-testid="pca-detail">
@@ -326,7 +606,20 @@ function DetailBody({
         <HealthChip state={health} />
       </div>
 
-      {!ownerIsPrimary && (
+      <div className="v10-modal-tip" role="status">
+        {walletSurfaceCopy}
+        {connectedWallet ? <WalletPill /> : <WalletConnectControl />}
+      </div>
+
+      {deviceSteps.length > 0 && (
+        <DeviceConfirmProgress
+          steps={deviceSteps}
+          currentLabel={deviceLabel}
+          blockExplorerUrl={explorer}
+        />
+      )}
+
+      {!ownerWritesEnabled && (
         <div className="v10-modal-warning" role="status">
           ⓘ {ownerOnlyReason}{' '}
           {walletsUnknown ? (
@@ -390,7 +683,7 @@ function DetailBody({
             value={topUp}
             onChange={(e) => setTopUp(e.target.value)}
             placeholder="Top up (TRAC)"
-            disabled={!ownerIsPrimary || fund.busy}
+            disabled={!ownerWritesEnabled || fund.busy || !!topUpPending}
             aria-label="Top-up amount in TRAC"
           />
           <button
@@ -398,13 +691,21 @@ function DetailBody({
             className="v10-pca-card-btn primary"
             data-testid="pca-topup-btn"
             onClick={runFund}
-            disabled={!ownerIsPrimary || fund.busy || !/^\d+(\.\d+)?$/.test(topUp.trim()) || Number(topUp.trim()) <= 0}
+            disabled={!ownerWritesEnabled || fund.busy || !!topUpPending || !/^\d+(\.\d+)?$/.test(topUp.trim()) || Number(topUp.trim()) <= 0}
             title={ownerTitle}
           >
             {fund.busy ? 'Adding…' : 'Add funds'}
           </button>
         </div>
         <ActionFeedback state={fund} explorer={explorer} onRecheck={refresh} />
+        {topUpPending && (
+          <p className="v10-pca-create-warn" data-testid="pca-topup-pending" role="alert">
+            Top-up transaction <code>{topUpPending.txHash}</code> is pending confirmation. The top-up
+            button is disabled while this exact receipt is checked; adding again could lock more TRAC.
+            {' '}
+            <button type="button" className="v10-pca-card-btn" onClick={refresh}>Recheck account</button>
+          </p>
+        )}
       </section>
 
       {/* Settlement (permissionless) */}
@@ -447,7 +748,7 @@ function DetailBody({
               <PcaAgentList
                 agents={agentsForThis.agents}
                 nodeWallets={wallets}
-                ownerIsPrimary={ownerIsPrimary}
+                ownerIsPrimary={ownerWritesEnabled}
                 ownerTitle={ownerTitle}
                 confirmRemove={confirmRemove}
                 onAskRemove={(a) => setConfirmRemove(a)}
@@ -473,7 +774,7 @@ function DetailBody({
                   key={w}
                   accountId={accountId}
                   wallet={w}
-                  ownerIsPrimary={ownerIsPrimary}
+                  ownerIsPrimary={ownerWritesEnabled}
                   ownerTitle={ownerTitle}
                   confirming={confirmRemove === w}
                   onAskRemove={() => setConfirmRemove(w)}
@@ -499,7 +800,7 @@ function DetailBody({
           type="button"
           className="v10-pca-card-btn primary"
           onClick={() => setApproveOpen(true)}
-          disabled={!ownerIsPrimary}
+          disabled={!ownerWritesEnabled}
           title={ownerTitle}
         >
           + Approve publishing wallet
@@ -525,7 +826,7 @@ function DetailBody({
               className="v10-form-select"
               value={bindCg}
               onChange={(e) => setBindCg(e.target.value)}
-              disabled={!ownerIsPrimary || bind.busy}
+              disabled={!bindOwnerEnabled || bind.busy}
               aria-label="Context graph to bind"
             >
               <option value="">Select a context graph…</option>
@@ -537,8 +838,8 @@ function DetailBody({
               type="button"
               className="v10-pca-card-btn"
               onClick={runBind}
-              disabled={!ownerIsPrimary || bind.busy || !bindCg}
-              title={ownerTitle}
+              disabled={!bindOwnerEnabled || bind.busy || !bindCg}
+              title={bindOwnerTitle}
             >
               {bind.busy ? 'Binding…' : 'Bind context graph'}
             </button>
@@ -564,7 +865,7 @@ function DetailBody({
           className={`v10-pca-card-btn${health === 'expiring' || health === 'expired' ? ' primary' : ''}`}
           data-testid="pca-renew-btn"
           onClick={() => setRenewOpen(true)}
-          disabled={!ownerIsPrimary}
+          disabled={!ownerWritesEnabled}
           title={ownerTitle}
         >
           Renew — create a replacement PCA
@@ -597,6 +898,7 @@ function DetailBody({
             primaryNodeUnknown: snapshot.primaryNode == null,
           }}
           replacingAccountId={accountId}
+          initialOwnerKey={ownerMode === 'wallet' ? 'hardware' : 'hot'}
           onClose={() => setRenewOpen(false)}
           onApproveOwnWallets={onRenewSuccess}
           onManage={(newId) => { setRenewOpen(false); openTab({ id: `conviction:${newId}`, label: `PCA #${newId}`, closable: true }); }}

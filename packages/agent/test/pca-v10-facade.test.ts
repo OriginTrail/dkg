@@ -134,4 +134,17 @@ describe('DKGAgent V10 PCA facade', () => {
     const none = await makeAgent(new NoChainAdapter());
     expect(await none.listDesignatableNodes({ fresh: true })).toBeNull();
   });
+
+  it('getPublishingConvictionContracts delegates to the adapter; null when unsupported (sub-PR #2)', async () => {
+    const chain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    const agent = await makeAgent(chain);
+    const c = await agent.getPublishingConvictionContracts();
+    expect(c).not.toBeNull();
+    expect(c!.chainId).toBe('mock:31337');
+    expect(c!.nft).toBe(ethers.getAddress(c!.nft)); // EIP-55 surfaced through the facade
+    expect(Array.isArray(c!.rpcUrls)).toBe(true);
+
+    const none = await makeAgent(new NoChainAdapter());
+    expect(await none.getPublishingConvictionContracts()).toBeNull();
+  });
 });

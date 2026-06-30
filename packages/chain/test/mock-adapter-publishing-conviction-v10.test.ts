@@ -184,6 +184,16 @@ describe('MockChainAdapter — V10 conviction agent register/deregister', () => 
     }
   });
 
+  it('getPublishingConvictionContracts — checksummed nft/token + chainId + rpcUrls (sub-PR #2 parity)', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const c = await mock.getPublishingConvictionContracts();
+    expect(c.nft).toBe(ethers.getAddress(c.nft));   // EIP-55
+    expect(c.token).toBe(ethers.getAddress(c.token));
+    expect(c.nft).not.toBe(c.token);
+    expect(c.chainId).toBe('mock:31337');
+    expect(Array.isArray(c.rpcUrls)).toBe(true);
+  });
+
   it('toShardingTableNode normalizes both ethers Result shapes — named object + positional tuple (R6)', () => {
     // Named-object shape (the ABI names the struct outputs today).
     expect(toShardingTableNode({ nodeId: '0xab', identityId: 7n, ask: 1n, stake: 2n } as any))

@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   fetchWalletsBalances: vi.fn(),
   pcaAgentAccount: vi.fn(),
   fetchMyPcas: vi.fn(),
+  listPcaContracts: vi.fn(),
+  publicClientFor: vi.fn(),
 }));
 
 vi.mock('../src/ui/api.js', async (orig) => {
@@ -24,8 +26,13 @@ vi.mock('../src/ui/api.js', async (orig) => {
     fetchWalletsBalances: mocks.fetchWalletsBalances,
     pcaAgentAccount: mocks.pcaAgentAccount,
     fetchMyPcas: mocks.fetchMyPcas,
+    listPcaContracts: mocks.listPcaContracts,
   };
 });
+
+vi.mock('../src/ui/web3/clients.js', () => ({
+  publicClientFor: mocks.publicClientFor,
+}));
 
 let approveProps: any = null;
 vi.mock('../src/ui/pages/conviction/CreatePcaModal.js', () => ({
@@ -50,6 +57,15 @@ vi.mock('../src/ui/pages/conviction/ApproveWalletsModal.js', () => ({
 const { ConvictionOverview } = await import('../src/ui/pages/conviction/ConvictionOverview.js');
 const { useAgentsStore } = await import('../src/ui/stores/agents.js');
 const { usePcaStore } = await import('../src/ui/stores/pca.js');
+const { useWalletStore } = await import('../src/ui/stores/wallet.js');
+
+const CONTRACTS = {
+  nft: `0x${'11'.repeat(20)}`,
+  token: `0x${'22'.repeat(20)}`,
+  chainId: 'base:84532',
+  rpcUrls: ['https://rpc.example'],
+};
+const CONNECTED_OWNER = `0x${'33'.repeat(20)}`;
 
 async function render(node: React.ReactElement) {
   const container = document.createElement('div');
@@ -77,11 +93,23 @@ beforeEach(() => {
   vi.clearAllMocks();
   approveProps = null;
   usePcaStore.setState({ trackedIds: [], createPending: null });
+  useWalletStore.setState({
+    provider: null,
+    providerInfo: null,
+    address: null,
+    chainId: null,
+    expectedChainId: null,
+    bootstrap: null,
+  });
   useAgentsStore.getState().setNodeStatus({ nodeRole: 'core', blockExplorerUrl: null });
   mocks.fetchPca.mockResolvedValue({ accountId: '0', owner: '0xowner' });
   mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [], balances: [], chainId: '84532', rpcUrl: null });
   mocks.pcaAgentAccount.mockResolvedValue({ agent: '', accountId: null });
   mocks.fetchMyPcas.mockResolvedValue({ accounts: [] });
+  mocks.listPcaContracts.mockResolvedValue(CONTRACTS);
+  mocks.publicClientFor.mockReturnValue({
+    readContract: vi.fn(async () => 0n),
+  });
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
@@ -94,6 +122,51 @@ describe('ConvictionOverview — create→self-coverage wiring', () => {
     await click(container.querySelector('[data-testid="mock-create-approve-own"]')!);
     await waitForText(container, 'id=8');
     expect(approveProps).toMatchObject({ accountId: '8', initialMode: 'self', selfCoverage: true });
+    await unmount();
+  });
+
+  it('renders connected-wallet ERC721 discoveries as wallet-managed owned cards, not strip rows', async () => {
+    useWalletStore.setState({
+      provider: { request: vi.fn() } as any,
+      providerInfo: { uuid: 'mock', name: 'Mock Wallet', icon: 'data:,', rdns: 'mock.wallet' },
+      address: CONNECTED_OWNER as `0x${string}`,
+      chainId: 84532,
+      expectedChainId: 84532,
+      bootstrap: CONTRACTS,
+    });
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [`0x${'44'.repeat(20)}`], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.publicClientFor.mockReturnValue({
+      readContract: vi.fn(async ({ functionName }: { functionName: string }) => {
+        if (functionName === 'balanceOf') return 1n;
+        if (functionName === 'tokenOfOwnerByIndex') return 7n;
+        return 0n;
+      }),
+    });
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => ({
+      accountId: id,
+      owner: CONNECTED_OWNER,
+      committedTRAC: '0',
+      committedTRACTrac: '50000.0',
+      baseEpochAllowance: '1',
+      topUpBuffer: '0',
+      topUpBufferTrac: '0',
+      createdAtEpoch: 1,
+      expiresAtEpoch: 2,
+      createdAtTimestamp: 1,
+      expiresAtTimestamp: 9_999_999_999,
+      discountBps: 500,
+      agentCount: 0,
+      lastSettledWindow: 0,
+      fullySwept: false,
+      ...(key ? { probedKey: { key, registered: false, adapterSupported: true } } : {}),
+    }));
+
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'wallet-managed');
+
+    const card = container.querySelector('[data-testid="pca-account-card"][data-owner-mode="wallet"]');
+    expect(card?.textContent).toContain('PCA #7');
+    expect(container.querySelector('[data-testid="pca-discovered-strip"]')).toBeNull();
     await unmount();
   });
 });

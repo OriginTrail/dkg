@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
+    "test:e2e:hw-mock": "playwright test --config playwright.hw-mock.config.ts",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:ui": "playwright test --ui",
     "benchmark:stage5": "tsx scripts/stage5-scale-benchmark.mts",
@@ -30,6 +31,7 @@
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
     "shiki": "^4.0.2",
+    "viem": "^2.48.4",
     "zod": "^3.25.76",
     "zustand": "^5.0.12"
   },

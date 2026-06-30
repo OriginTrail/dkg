@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import { useFetch } from '../../hooks.js';
 import {
   fetchWalletsBalances,
@@ -9,13 +9,29 @@ import {
   type CreatePcaResult,
   type PcaSnapshot,
 } from '../../api.js';
-import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
+import { useOwnerActionSubmitter, type OwnerKey } from '../../pca/ownerActions.js';
 import { probeWalletBindings, selfCoverageOutlook } from '../../pca/walletBinding.js';
 import { useDesignatableNodes } from '../../hooks/useDesignatableNodes.js';
 import { usePrimaryNodeSelection } from '../../hooks/usePrimaryNodeSelection.js';
 import { useAgentsStore } from '../../stores/agents.js';
 import { usePcaStore } from '../../stores/pca.js';
-import { DiscountTierLadder, discountTierForTrac, WalletRow, PrimaryNodePicker } from '../../components/Pca/index.js';
+import { useWalletStore, isWrongNetwork } from '../../stores/wallet.js';
+import {
+  describeWalletTxError,
+  WalletReceiptRevertedError,
+  WalletReceiptWaitError,
+} from '../../web3/walletTxError.js';
+import type { WalletTxProgressEvent } from '../../web3/walletOwnerActionSubmitter.js';
+import {
+  DeviceConfirmProgress,
+  DiscountTierLadder,
+  WalletConnectControl,
+  WalletPill,
+  WalletRow,
+  discountTierForTrac,
+  PrimaryNodePicker,
+  type DeviceConfirmStep,
+} from '../../components/Pca/index.js';
 import { PcaModalShell } from './PcaModalShell.js';
 import { formatTrac } from '../../lib/formatTrac.js';
 
@@ -28,9 +44,17 @@ function pctFromBps(bps: number): string {
 
 const AMOUNT_RE = /^\d+(\.\d+)?$/;
 
+function initialHardwareCreateSteps(): DeviceConfirmStep[] {
+  return [
+    { id: 'approve', label: 'Approve exact TRAC allowance', state: 'pending' },
+    { id: 'create', label: 'Sign Create PCA', state: 'pending' },
+    { id: 'confirm', label: 'Confirm on-chain receipt', state: 'pending' },
+  ];
+}
+
 /**
- * S2 — Create PCA (single-page, 3 sections; DRIFT-1/2). Commitment + live tier
- * ladder, primary-node prefill, review (owner ≠ coverage), then Create →
+ * S2 — Create PCA (single-page, 4 sections for HW owner-key selection; DRIFT-1/2).
+ * Owner key, commitment + live tier ladder, primary-node prefill, review (owner ≠ coverage), then Create →
  * read-back real discountBps → self-coverage success (#11). Guards the
  * double-mint footgun: a 504 `{code:'TIMEOUT', txHash}` persists a create-pending
  * marker and enters reconcile-before-retry (Retry disabled). The marker is
@@ -43,6 +67,7 @@ export function CreatePcaModal({
   onGetSponsored,
   seed,
   replacingAccountId,
+  initialOwnerKey,
 }: {
   onClose: () => void;
   onApproveOwnWallets: (accountId: string) => void;
@@ -56,6 +81,8 @@ export function CreatePcaModal({
   seed?: { tokens?: string; primaryNode?: string; primaryNodeUnknown?: boolean };
   /** S2b renew — the account being replaced; non-null drives the honest renew copy. */
   replacingAccountId?: string;
+  /** S2b/HW renew — default owner key for the replacement create. */
+  initialOwnerKey?: OwnerKey;
 }) {
   const nodeStatus = useAgentsStore((s) => s.nodeStatus) as
     | { nodeRole?: string; hasIdentity?: boolean; identityId?: string; blockExplorerUrl?: string | null }
@@ -78,7 +105,73 @@ export function CreatePcaModal({
   const ownerTracNum = ownerTrac != null ? Number(ownerTrac) : NaN;
   const walletsKey = wallets.join(',');
 
-  const owner = useOwnerActionSubmitter(); // owner-action seam (P0: daemon submitter)
+  const [ownerKey, setOwnerKey] = useState<OwnerKey>(initialOwnerKey ?? 'hot');
+  const walletAddress = useWalletStore((s) => s.address);
+  const walletProvider = useWalletStore((s) => s.provider);
+  const walletBootstrap = useWalletStore((s) => s.bootstrap);
+  const walletExpectedChainId = useWalletStore((s) => s.expectedChainId);
+  const walletChainId = useWalletStore((s) => s.chainId);
+  const walletWrongNetwork = useWalletStore((s) => isWrongNetwork(s));
+  const hardwareSelected = ownerKey === 'hardware';
+  const [hardwareCreateSteps, setHardwareCreateSteps] = useState<DeviceConfirmStep[]>([]);
+  const [hardwareCreateLabel, setHardwareCreateLabel] = useState<string>('Confirm on your device');
+  const onWalletProgress = useCallback((event: WalletTxProgressEvent) => {
+    setHardwareCreateLabel(() => {
+      if (event.step === 'approve') {
+        if (event.state === 'skipped' || event.state === 'confirmed') return 'Allowance ready — continue to Create PCA';
+        if (event.state === 'failed') return 'Wallet transaction failed';
+        return 'Confirm on your device (1 of 2): approve TRAC';
+      }
+      if (event.state === 'active') return 'Confirm on your device (2 of 2): Create PCA';
+      if (event.state === 'submitted') return 'Waiting for on-chain confirmation';
+      if (event.state === 'confirmed') return 'Create confirmed on-chain';
+      return 'Wallet transaction failed';
+    });
+    setHardwareCreateSteps((prev) => {
+      const next = (prev.length ? prev : initialHardwareCreateSteps()).map((s) => ({ ...s }));
+      const approve = next[0]!;
+      const create = next[1]!;
+      const confirm = next[2]!;
+      if (event.step === 'approve') {
+        if (event.state === 'skipped') {
+          approve.state = 'confirmed';
+          approve.label = 'TRAC allowance already sufficient';
+        } else if (event.state === 'active' || event.state === 'submitted') {
+          approve.state = 'active';
+          approve.txHash = event.txHash;
+        } else if (event.state === 'confirmed') {
+          approve.state = 'confirmed';
+          approve.txHash = event.txHash;
+        } else if (event.state === 'failed') {
+          approve.state = 'failed';
+          approve.txHash = event.txHash;
+          approve.error = describeWalletTxError(event.error, 'approve').message;
+        }
+      } else {
+        if (event.state === 'active') {
+          if (approve.state === 'pending') approve.state = 'confirmed';
+          create.state = 'active';
+        } else if (event.state === 'submitted') {
+          if (approve.state === 'pending') approve.state = 'confirmed';
+          create.state = 'confirmed';
+          create.txHash = event.txHash;
+          confirm.state = 'active';
+        } else if (event.state === 'confirmed') {
+          if (approve.state === 'pending') approve.state = 'confirmed';
+          create.state = 'confirmed';
+          create.txHash = event.txHash;
+          confirm.state = 'confirmed';
+          confirm.txHash = event.txHash;
+        } else if (event.state === 'failed') {
+          create.state = 'failed';
+          create.txHash = event.txHash;
+          create.error = describeWalletTxError(event.error, 'action').message;
+        }
+      }
+      return next;
+    });
+  }, []);
+  const owner = useOwnerActionSubmitter({ ownerKey, onWalletProgress });
   const finishCreate = usePcaStore((s) => s.finishCreate);
   const setCreatePending = usePcaStore((s) => s.setCreatePending);
   const clearCreatePending = usePcaStore((s) => s.clearCreatePending);
@@ -105,9 +198,16 @@ export function CreatePcaModal({
   // sponsor's PCA, the new account would discount none of this node's own publishes (a loud
   // informed-consent warning — NOT a hard block; a node may create purely to sponsor others).
   // The per-wallet deregister-first then runs in the self-coverage loop (ApproveWalletsModal).
+  const bindingSigners = useMemo(
+    () => [
+      { address: ownerWallet, kind: 'daemon' as const },
+      ...(hardwareSelected ? [{ address: walletAddress, kind: 'wallet' as const }] : []),
+    ],
+    [hardwareSelected, ownerWallet, walletAddress],
+  );
   const { data: bindings } = useFetch(
-    () => (formActive ? probeWalletBindings(wallets, ownerWallet) : Promise.resolve([])),
-    [walletsKey, ownerWallet, formActive],
+    () => (formActive ? probeWalletBindings(wallets, bindingSigners) : Promise.resolve([])),
+    [walletsKey, ownerWallet, walletAddress, hardwareSelected, formActive],
     0,
   );
   const b1 = useMemo(() => selfCoverageOutlook(bindings ?? []), [bindings]);
@@ -129,26 +229,69 @@ export function CreatePcaModal({
 
   const amountNum = AMOUNT_RE.test(tokens.trim()) ? Number(tokens.trim()) : NaN;
   const amountValid = Number.isFinite(amountNum) && amountNum > 0;
-  const insufficient = amountValid && Number.isFinite(ownerTracNum) && amountNum > ownerTracNum;
+  const insufficient = ownerKey !== 'hardware' && amountValid && Number.isFinite(ownerTracNum) && amountNum > ownerTracNum;
   const belowMinTier = amountValid && amountNum < 25_000;
   const estTier = useMemo(() => discountTierForTrac(amountValid ? amountNum : null), [amountNum, amountValid]);
   const primaryValid = /^\d+$/.test(primaryNode.trim()) && Number(primaryNode.trim()) > 0;
+  const hardwareReady =
+    !!walletProvider &&
+    !!walletAddress &&
+    !!walletBootstrap &&
+    walletExpectedChainId != null &&
+    walletChainId === walletExpectedChainId;
+  const hardwarePrimaryLive =
+    !hardwareSelected || stakedNodes.some((n) => String(n.identityId) === primaryNode.trim());
+  const createOwnerAddress = hardwareSelected ? walletAddress ?? undefined : ownerWallet;
   // Don't allow submit until the owner wallet has loaded — the durable double-mint
   // marker is keyed on `ownerWallet`, so submitting before wallets resolve would skip
   // persisting it (the in-session reconcile would still fire, but the refresh-survival
   // guarantee wouldn't). Cheap belt-and-suspenders.
   const canSubmit =
-    amountValid && !insufficient && primaryValid && !!ownerWallet && !statusUnknown && phase === 'form';
+    amountValid &&
+    !insufficient &&
+    primaryValid &&
+    !!createOwnerAddress &&
+    !statusUnknown &&
+    phase === 'form' &&
+    (!hardwareSelected || (hardwareReady && hardwarePrimaryLive));
+  const hardwareDismissDisabled = hardwareSelected && phase === 'creating';
+
+  const hardwareReadiness = !walletAddress
+    ? 'Connect the owner wallet before choosing the hardware path.'
+    : walletWrongNetwork
+      ? "Switch the connected wallet to this node's PCA network before signing."
+      : !walletBootstrap
+        ? 'PCA contract addresses are still loading for wallet signing.'
+        : null;
 
   const handleCreate = async () => {
+    if (hardwareSelected) {
+      if (!hardwareReady) {
+        setError(hardwareReadiness ?? 'Connect the owner wallet before signing.');
+        return;
+      }
+      if (!hardwarePrimaryLive) {
+        onPrimaryNodeRejected();
+        refreshNodes();
+        setError('The selected primary node is no longer in the live staked-node list. Pick another staked node before signing.');
+        return;
+      }
+    }
     setPhase('creating');
     setError(null);
+    if (hardwareSelected) {
+      setHardwareCreateSteps(initialHardwareCreateSteps());
+      setHardwareCreateLabel('Confirm on your device (1 of 2): approve TRAC');
+    } else {
+      setHardwareCreateSteps([]);
+      setHardwareCreateLabel('Confirm on your device');
+    }
     // Set the double-mint guard at SUBMIT — before the await — so an ambiguous
     // failure (network drop / 500 / timeout, or the browser closing) AFTER the
     // tx may have broadcast can never silently fall back to a retryable form and
     // mint a second fund-locking PCA. Cleared only on success or a
     // definitely-pre-broadcast error below.
-    if (ownerWallet) setCreatePending({ ownerEoa: ownerWallet, submittedAt: Date.now() });
+    if (createOwnerAddress) setCreatePending({ ownerEoa: createOwnerAddress, submittedAt: Date.now() });
     try {
       const res = await owner.create({ tokens: tokens.trim(), primaryNode: primaryNode.trim() });
       // P1 — atomically clear the marker + track the id in one synchronous write so a
@@ -177,6 +320,42 @@ export function CreatePcaModal({
         setPhase('form');
         return;
       }
+      if (err instanceof WalletReceiptWaitError) {
+        if (err.txStep === 'action' && err.txHash) {
+          setPendingTxHash(err.txHash);
+          if (createOwnerAddress) {
+            setCreatePending({ ownerEoa: createOwnerAddress, submittedAt: Date.now(), txHash: err.txHash });
+          }
+          setPhase('reconcile');
+          return;
+        }
+        clearCreatePending();
+        const info = describeWalletTxError(err, 'approve');
+        setError(`${info.message} Retry will re-check the allowance before asking you to sign again.`);
+        setPhase('form');
+        return;
+      }
+      if (err instanceof WalletReceiptRevertedError) {
+        clearCreatePending();
+        setError(describeWalletTxError(err, 'action').message);
+        setPhase('form');
+        return;
+      }
+      if (hardwareSelected) {
+        clearCreatePending();
+        const info = describeWalletTxError(err, 'action');
+        if (info.kind === 'revert' && info.revertName === 'PrimaryNodeNotInShardingTable') {
+          onPrimaryNodeRejected();
+          refreshNodes();
+        }
+        setError(
+          info.kind === 'rejected'
+            ? 'The TRAC allowance is set, but account not created because you rejected the Create PCA signature. Retry to finish (no new approval needed).'
+            : info.message,
+        );
+        setPhase('form');
+        return;
+      }
       // ANY ambiguous failure (504 timeout, 500, transport RPC_* 503/504, or a
       // non-HttpError network drop) → the tx MAY have broadcast. Fail toward
       // reconcile: keep the submit-time marker, enriching it with the broadcast
@@ -186,7 +365,7 @@ export function CreatePcaModal({
         const body = (err.body ?? {}) as { txHash?: string };
         if (body.txHash) {
           setPendingTxHash(body.txHash);
-          if (ownerWallet) setCreatePending({ ownerEoa: ownerWallet, submittedAt: Date.now(), txHash: body.txHash });
+          if (createOwnerAddress) setCreatePending({ ownerEoa: createOwnerAddress, submittedAt: Date.now(), txHash: body.txHash });
         }
       }
       setPhase('reconcile');
@@ -196,6 +375,7 @@ export function CreatePcaModal({
   // ----- Reconcile (double-mint guard) -----
   if (phase === 'reconcile') {
     const txUrl = explorer && pendingTxHash ? `${explorer}/tx/${pendingTxHash}` : undefined;
+    const pendingOwner = createPending?.ownerEoa ?? createOwnerAddress ?? ownerWallet;
     return (
       <PcaModalShell onClose={onClose} testId="pca-create-modal" title="Confirm before retrying">
         <div className="v10-modal-body">
@@ -218,14 +398,14 @@ export function CreatePcaModal({
             {createPendingPersisted ? (
               <p>
                 A “create-pending” marker is saved, so this guard survives a refresh. Verify on the
-                explorer whether a PCA was minted to <code>{ownerWallet ?? 'your owner wallet'}</code>:
+                explorer whether a PCA was minted to <code>{pendingOwner ?? 'your owner wallet'}</code>:
               </p>
             ) : (
               <p className="v10-pca-create-warn" role="alert">
                 ⚠ This browser blocked saving the safety marker (storage disabled or full), so this
                 guard will <strong>NOT</strong> survive a refresh. Do not create again until you’ve
                 verified on the explorer whether a PCA was minted to{' '}
-                <code>{ownerWallet ?? 'your owner wallet'}</code>:
+                <code>{pendingOwner ?? 'your owner wallet'}</code>:
               </p>
             )}
             <ul className="v10-pca-create-recon-actions">
@@ -324,16 +504,90 @@ export function CreatePcaModal({
     );
   }
 
-  // ----- Form (3 sections, single page) -----
+  // ----- Form (4 sections, single page) -----
   return (
     <PcaModalShell
       onClose={onClose}
       testId="pca-create-modal"
       title={replacingAccountId ? `Renew — new PCA to replace #${replacingAccountId}` : 'Create a Publishing Conviction Account'}
       subtitle={replacingAccountId ? 'Re-mint a fresh account seeded from the expiring one.' : 'Lock TRAC up front to publish at a discount.'}
+      dismissDisabled={hardwareDismissDisabled}
     >
       <div className="v10-modal-body">
         {error && <div className="v10-modal-error" role="alert">{error}</div>}
+        {hardwareSelected && phase === 'creating' && (
+          <div className="v10-modal-warning" role="status" data-testid="pca-create-hw-lock">
+            Finish or reject the prompt in your wallet. Closing, backdrop click, and Esc are disabled while the
+            approve-to-create sequence is in flight.
+          </div>
+        )}
+        {hardwareSelected && phase === 'creating' && (
+          <DeviceConfirmProgress
+            steps={hardwareCreateSteps.length ? hardwareCreateSteps : initialHardwareCreateSteps()}
+            currentLabel={hardwareCreateLabel}
+            blockExplorerUrl={explorer}
+          />
+        )}
+
+        {/* Section 1 — Owner key (H-D). Hardware is recommended but not verifiable; hot stays daemon-signed. */}
+        <section className="v10-pca-create-section" data-testid="pca-create-owner-key">
+          <h3 className="v10-pca-create-section-title">1 · Owner key</h3>
+          <div className="v10-pca-owner-key-grid" role="radiogroup" aria-label="PCA owner key">
+            <label className={`v10-pca-owner-key-card${ownerKey === 'hardware' ? ' selected' : ''}`}>
+              <input
+                type="radio"
+                name="pca-owner-key"
+                value="hardware"
+                checked={ownerKey === 'hardware'}
+                onChange={() => setOwnerKey('hardware')}
+                disabled={phase === 'creating'}
+              />
+              <span>
+                <strong>Hardware wallet (recommended)</strong>
+                <small>
+                  If your browser wallet is backed by a device, verify the amount and contract there.
+                  The app cannot verify hardware backing from provider metadata.
+                </small>
+              </span>
+            </label>
+            <label className={`v10-pca-owner-key-card${ownerKey === 'hot' ? ' selected' : ''}`}>
+              <input
+                type="radio"
+                name="pca-owner-key"
+                value="hot"
+                checked={ownerKey === 'hot'}
+                onChange={() => setOwnerKey('hot')}
+                disabled={phase === 'creating'}
+              />
+              <span>
+                <strong>This node&apos;s hot wallet</strong>
+                <small>No connected browser wallet is required. The daemon signs with this node&apos;s primary operational wallet.</small>
+              </span>
+            </label>
+          </div>
+          {hardwareSelected ? (
+            <div className="v10-pca-owner-key-readiness">
+              <WalletConnectControl />
+              {hardwareReadiness && (
+                <p className="v10-pca-create-warn" role="status" data-testid="pca-create-hw-readiness">
+                  {hardwareReadiness}
+                </p>
+              )}
+            </div>
+          ) : ownerWallet ? (
+            <div className="v10-pca-create-owner">
+              <span className="v10-pca-card-owner-lbl">Hot owner</span>
+              <WalletRow address={ownerWallet} />
+            </div>
+          ) : null}
+          <div className="v10-modal-tip">
+            Getting sponsored is the free path: another PCA owner can approve this node&apos;s publishing wallets
+            without you locking TRAC.{' '}
+            <button type="button" className="v10-pca-card-btn" data-testid="pca-create-owner-get-sponsored" onClick={onGetSponsored}>
+              Get sponsored
+            </button>
+          </div>
+        </section>
 
         {/* Sub-PR 1 (§5.2 Step 1) — NON-BLOCKING explainer for a node without its own staked
             identity (edge / no-identity). Create is NOT gated; this just surfaces the free
@@ -403,9 +657,9 @@ export function CreatePcaModal({
           </div>
         )}
 
-        {/* Section 1 — Commitment */}
+        {/* Section 2 — Commitment */}
         <section className="v10-pca-create-section">
-          <h3 className="v10-pca-create-section-title">1 · Commitment</h3>
+          <h3 className="v10-pca-create-section-title">2 · Commitment</h3>
           <div className="v10-form-group">
             <label className="v10-form-label" htmlFor="pca-create-tokens">Commit amount (TRAC)</label>
             <input
@@ -420,7 +674,7 @@ export function CreatePcaModal({
               autoComplete="off"
             />
           </div>
-          {ownerTrac != null && (
+          {ownerKey !== 'hardware' && ownerTrac != null && (
             <p className="v10-pca-create-balance">
               Owner wallet balance: {formatTrac(ownerTrac)} TRAC
               {insufficient && <span className="v10-pca-create-err"> — exceeds balance</span>}
@@ -434,9 +688,9 @@ export function CreatePcaModal({
           <DiscountTierLadder committedTrac={amountValid ? amountNum : null} />
         </section>
 
-        {/* Section 2 — Primary node (§3b: the always-visible, REQUIRED staked-node picker) */}
+        {/* Section 3 — Primary node (§3b: the always-visible, REQUIRED staked-node picker) */}
         <section className="v10-pca-create-section">
-          <h3 className="v10-pca-create-section-title">2 · Primary node</h3>
+          <h3 className="v10-pca-create-section-title">3 · Primary node</h3>
           {/* S2b renew (LOW) — the old account's primary node couldn't be read, so the picker
               fell back to THIS node. Surface it rather than silently defaulting. */}
           {replacingAccountId && seed?.primaryNodeUnknown && (
@@ -458,18 +712,21 @@ export function CreatePcaModal({
           />
         </section>
 
-        {/* Section 3 — Review */}
+        {/* Section 4 — Review */}
         <section className="v10-pca-create-section">
-          <h3 className="v10-pca-create-section-title">3 · Review</h3>
+          <h3 className="v10-pca-create-section-title">4 · Review</h3>
           <div className="v10-pca-create-review">
             <div><span>Commit</span><strong>{amountValid ? `${formatTrac(tokens)} TRAC` : '—'}</strong></div>
             <div><span>Discount (estimated)</span><strong>{pctFromBps(estTier.bps)}</strong></div>
             <div><span>Primary node</span><strong>{primaryValid ? `#${primaryNode.trim()}` : '—'}</strong></div>
           </div>
-          {ownerWallet && (
+          {createOwnerAddress && (
             <div className="v10-pca-create-owner">
               <span className="v10-pca-card-owner-lbl">Owner</span>
-              <WalletRow address={ownerWallet} />
+              <WalletRow
+                address={createOwnerAddress}
+                status={hardwareSelected ? 'connected wallet' : 'hot wallet'}
+              />
             </div>
           )}
           <p className="v10-pca-create-owner-note">
@@ -484,7 +741,16 @@ export function CreatePcaModal({
       </div>
 
       <div className="v10-modal-footer">
-        <button type="button" className="v10-modal-btn" onClick={onClose}>Cancel</button>
+        <button
+          type="button"
+          className="v10-modal-btn"
+          onClick={() => {
+            if (!hardwareDismissDisabled) onClose();
+          }}
+          disabled={hardwareDismissDisabled}
+        >
+          Cancel
+        </button>
         <button
           type="button"
           className="v10-modal-btn primary"
