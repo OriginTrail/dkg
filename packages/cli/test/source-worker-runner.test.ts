@@ -134,8 +134,8 @@ export const namedHandler = {
     });
     expect(jobRes.status).toBe(200);
     const jobBody: any = await jobRes.json();
-    expect(jobBody.job.request.contextGraphId).toBe(CG);
     expect(jobBody.job.request.jobType).toBe('knowledge-asset-vm-publish');
+    expect(jobBody.job.request.knowledgeAssetVmPublish.contextGraphId).toBe(CG);
     expect(jobBody.job.request.knowledgeAssetVmPublish.name).toBe(processed.name);
     expect(jobBody.job.request.knowledgeAssetVmPublish.shareOperationId).toBe(processed.shareOperationId);
     expect(jobBody.job.request.knowledgeAssetVmPublish.intentKey).toBe(processed.intentKey);

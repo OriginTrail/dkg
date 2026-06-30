@@ -41,10 +41,15 @@ export interface KafkaPluginCtx {
 
 export interface KafkaJobStatus {
   status: string;
-  request?: { contextGraphId?: string; subGraphName?: string };
+  request?: unknown;
   timestamps: { acceptedAt: number; finalizedAt?: number };
   finalization?: { ual?: string };
   failure?: { message?: string };
+}
+
+interface KafkaJobScope {
+  contextGraphId?: string;
+  subGraphName?: string;
 }
 
 export interface CreateHandlerOptions {
@@ -211,18 +216,19 @@ async function handleGetCapture(
       message: err instanceof Error ? err.message : String(err),
     });
   }
+  const jobScope = resolveJobRequestScope(job?.request);
   const subGraphName = resolvePublishSubGraphName(opts);
   if (
     !job ||
-    job.request?.contextGraphId !== cgId ||
-    (job.request?.subGraphName ?? undefined) !== subGraphName
+    jobScope.contextGraphId !== cgId ||
+    (jobScope.subGraphName ?? undefined) !== subGraphName
   ) {
     return jsonResponse(ctx.res, 404, { error: 'CaptureNotFound' });
   }
   return jsonResponse(ctx.res, 200, {
     captureID,
     state: job.status,
-    contextGraphId: job.request?.contextGraphId ?? null,
+    contextGraphId: jobScope.contextGraphId ?? null,
     ual: job.finalization?.ual ?? null,
     receivedAt: new Date(job.timestamps.acceptedAt).toISOString(),
     finalizedAt: job.timestamps.finalizedAt
@@ -402,6 +408,36 @@ function unwrapBindingValue(v: unknown): string | undefined {
 function resolvePublishSubGraphName(opts: CreateHandlerOptions): string | undefined {
   const subGraphName = opts.publishOptions?.subGraphName;
   return typeof subGraphName === 'string' ? subGraphName : undefined;
+}
+
+function resolveJobRequestScope(request: unknown): KafkaJobScope {
+  if (!isRecord(request)) return {};
+
+  const direct = scopeFromRecord(request);
+  if (direct.contextGraphId) return direct;
+
+  if (isRecord(request.lift)) {
+    const lift = scopeFromRecord(request.lift);
+    if (lift.contextGraphId) return lift;
+  }
+
+  if (isRecord(request.knowledgeAssetVmPublish)) {
+    const kaVmPublish = scopeFromRecord(request.knowledgeAssetVmPublish);
+    if (kaVmPublish.contextGraphId) return kaVmPublish;
+  }
+
+  return {};
+}
+
+function scopeFromRecord(record: Record<string, unknown>): KafkaJobScope {
+  return {
+    contextGraphId: typeof record.contextGraphId === 'string' ? record.contextGraphId : undefined,
+    subGraphName: typeof record.subGraphName === 'string' ? record.subGraphName : undefined,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
 function stripTrailingSlash(p: string): string {
