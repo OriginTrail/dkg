@@ -5,7 +5,7 @@
 // pins the extracted pure functions so the surfaces can't re-diverge.
 
 import { describe, expect, it } from 'vitest';
-import { bigGt0, isPcaSpendable, normalizeProbeRegistered, classifyCoverage } from '../src/ui/pca/coverage.js';
+import { bigGt0, pcaBudgetState, isPcaSpendable, normalizeProbeRegistered, classifyCoverage } from '../src/ui/pca/coverage.js';
 import { makePcaSnapshot } from '../src/ui/mocks/pca.js';
 
 const FUTURE = Math.floor(Date.now() / 1000) + 60 * 86_400;
@@ -51,6 +51,26 @@ describe('isPcaSpendable', () => {
       ),
     ).toBe(false);
   });
+  it('missing remainingAllowance on a requested extended snapshot is unknown, not baseEpochAllowance-funded', () => {
+    const snap = makePcaSnapshot({
+      topUpBuffer: '0',
+      baseEpochAllowance: '1',
+      extendedRequested: true,
+      expiresAtTimestamp: FUTURE,
+    });
+    expect(pcaBudgetState(snap)).toBeNull();
+    expect(isPcaSpendable(snap)).toBe(false);
+  });
+  it('positive topUpBuffer stays spendable even when a requested extended allowance read is missing', () => {
+    const snap = makePcaSnapshot({
+      topUpBuffer: '1',
+      baseEpochAllowance: '0',
+      extendedRequested: true,
+      expiresAtTimestamp: FUTURE,
+    });
+    expect(pcaBudgetState(snap)).toBe(true);
+    expect(isPcaSpendable(snap)).toBe(true);
+  });
   it('healthy + both budgets → true', () => {
     expect(isPcaSpendable(makePcaSnapshot({ expiresAtTimestamp: FUTURE }))).toBe(true);
   });
@@ -81,6 +101,18 @@ describe('classifyCoverage (discriminated union — facets ONLY on uncovered)', 
   it('registered + spendable → { outcome: covers, registered: true } (no dead/hasBudget facets)', () => {
     const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: FUTURE, probedKey: { key: '0x', registered: true } }));
     expect(c).toEqual({ outcome: 'covers', registered: true });
+  });
+  it('registered + requested extended budget missing → inconclusive, not covers', () => {
+    const c = classifyCoverage(
+      makePcaSnapshot({
+        topUpBuffer: '0',
+        baseEpochAllowance: '1',
+        extendedRequested: true,
+        expiresAtTimestamp: FUTURE,
+        probedKey: { key: '0x', registered: true },
+      }),
+    );
+    expect(c).toEqual({ outcome: 'inconclusive', registered: null });
   });
   it('registered + expired → uncovered, dead:true (the reviewer’s example facet)', () => {
     const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: PAST, probedKey: { key: '0x', registered: true } }));

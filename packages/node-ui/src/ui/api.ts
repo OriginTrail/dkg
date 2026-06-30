@@ -1638,10 +1638,10 @@ export interface PcaProbedKey {
  *
  * The EXTENDED group (`primaryNode`, `lastPrimaryNodeChangeEpoch`,
  * `remainingAllowance`(+Trac), `currentEpoch`) is GAP-4/5, only serialized when
- * the GET route is called with `{ extended: true }` (P2 — the S3 budget
- * widget). The default non-extended snapshot (all of P0's S1/S5 polling) leaves
- * them `undefined`, so they're typed optional now to keep the api.ts signature
- * stable when P2 lands.
+ * the GET route is called with `{ extended: true }`. They are optional because
+ * the daemon can fail-soft an extended chain read and still return the core
+ * snapshot. `extendedRequested` is a client-side marker added by `fetchPca` so
+ * coverage code can tell "not requested" from "requested but unavailable".
  */
 export interface PcaSnapshot {
   accountId: string;
@@ -1671,6 +1671,8 @@ export interface PcaSnapshot {
   remainingAllowanceTrac?: string;
   /** The current protocol epoch index (resolves the lock-period readout). */
   currentEpoch?: number;
+  /** Client-side only: this snapshot came from a `fetchPca(..., { extended:true })` read. */
+  extendedRequested?: boolean;
 }
 
 export interface CreatePcaResult {
@@ -1718,9 +1720,10 @@ export interface PcaSettleResult {
  * (the result lands on `snapshot.probedKey`). `GET` is permissionless.
  *
  * `opts.extended` (`?extended=1`) requests the GAP-4/5 extended fields
- * (primaryNode / remainingAllowance / currentEpoch). It is a P2 concern (the S3
- * budget widget) — P0's S1/S5 polling loops NEVER set it, to avoid read
- * amplification.
+ * (primaryNode / remainingAllowance / currentEpoch). The returned snapshot is
+ * marked with `extendedRequested` because the daemon may fail-soft and omit the
+ * optional fields; spend-time coverage must then become inconclusive instead of
+ * falling back to nominal `baseEpochAllowance`.
  */
 export const fetchPca = (
   accountId: string,
@@ -1731,7 +1734,8 @@ export const fetchPca = (
   if (key) params.set('key', key);
   if (opts?.extended) params.set('extended', '1');
   const qs = params.toString();
-  return getJson<PcaSnapshot>(`/api/pca/${encodeURIComponent(accountId)}${qs ? `?${qs}` : ''}`);
+  return getJson<PcaSnapshot>(`/api/pca/${encodeURIComponent(accountId)}${qs ? `?${qs}` : ''}`)
+    .then((snap) => (opts?.extended ? { ...snap, extendedRequested: true } : snap));
 };
 
 /** Create a PCA (commit TRAC for a publishing discount). Owner = the daemon EOA. */

@@ -202,12 +202,19 @@ describe('PublishEligibilityChip (S5)', () => {
     await unmount();
   });
 
-  // L2 revert guard — a FRESH funded PCA holds its budget in baseEpochAllowance
-  // (per-epoch cap) with topUpBuffer=0; the topUpBuffer-only proxy false-DANGERed
-  // it on the live capstone. Coarse proxy: any budget capacity ⇒ GREEN.
-  it('GREEN for a funded PCA whose budget is in baseEpochAllowance, topUpBuffer=0 (L2 revert guard)', async () => {
+  // L2 revert guard — a FRESH funded PCA can hold its budget in the per-epoch
+  // allowance with topUpBuffer=0; the topUpBuffer-only proxy false-DANGERed it
+  // on the live capstone. On S5's extended path, that budget must be confirmed
+  // through remainingAllowance, not guessed from nominal baseEpochAllowance.
+  it('GREEN for a funded PCA whose current-epoch remainingAllowance is positive, topUpBuffer=0 (L2 revert guard)', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('100'));
-    const funded = makePcaSnapshot({ topUpBuffer: '0', topUpBufferTrac: '0', baseEpochAllowance: '850000000000000000000' });
+    const funded = makePcaSnapshot({
+      topUpBuffer: '0',
+      topUpBufferTrac: '0',
+      baseEpochAllowance: '850000000000000000000',
+      remainingAllowance: '850000000000000000000',
+      extendedRequested: true,
+    });
     mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
       key ? { ...funded, probedKey: { key, registered: true } } : funded,
     );
@@ -215,6 +222,24 @@ describe('PublishEligibilityChip (S5)', () => {
     await waitForText(container, 'Funded by PCA #7'); // NOT a false out-of-budget DANGER
     expect(container.textContent).not.toContain('Publish will fail');
     expect(container.textContent).not.toContain('No PCA discount');
+    await unmount();
+  });
+
+  it('does not show GREEN when an extended allowance read fail-softs without remainingAllowance', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('100'));
+    const failSoft = makePcaSnapshot({
+      topUpBuffer: '0',
+      topUpBufferTrac: '0',
+      baseEpochAllowance: '850000000000000000000',
+      extendedRequested: true,
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...failSoft, probedKey: { key, registered: true } } : failSoft,
+    );
+    const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
+    await waitForText(container, 'PCA status unknown');
+    expect(container.textContent).not.toContain('Funded by PCA #7');
+    expect(container.textContent).not.toContain('Publish will fail');
     await unmount();
   });
 

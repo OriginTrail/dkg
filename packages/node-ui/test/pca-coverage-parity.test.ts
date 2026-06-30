@@ -157,6 +157,22 @@ const SCENARIOS: Scenario[] = [
     s6: { wait: 'the chain lookup failed', ready: false, notText: ['0 of 1'] },
   },
   {
+    name: 'requested extended budget missing → inconclusive (never base-allowance GREEN)',
+    snapOver: {
+      expiresAtTimestamp: FUTURE,
+      topUpBuffer: '0',
+      topUpBufferTrac: '0',
+      baseEpochAllowance: '850000000000000000000',
+      extendedRequested: true,
+    },
+    probe: { key: W0, registered: true },
+    expected: { outcome: 'inconclusive', registered: null },
+    overview: { registered: null, approvedCount: 0, inconclusive: true, covered: false, bestBps: null },
+    s5Verdict: 'unknown',
+    s5Wait: 'PCA status unknown',
+    s6: { wait: 'the chain lookup failed', ready: false, notText: ['0 of 1', 'Ready'] },
+  },
+  {
     name: 'zero-budget approved → uncovered (hasBudget:false)',
     snapOver: { expiresAtTimestamp: FUTURE, topUpBuffer: '0', topUpBufferTrac: '0', baseEpochAllowance: '0' },
     probe: { key: W0, registered: true },

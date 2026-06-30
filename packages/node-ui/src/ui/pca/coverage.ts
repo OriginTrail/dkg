@@ -1,9 +1,7 @@
 // Shared PCA coverage primitives (#1344 — ends the coverage-drift class that
 // recurred across C1/O4/Q2/S2/U2/V3). PURE leaf rules consumed by every surface
 // (usePublishEligibility / usePcaOverview / GetSponsoredPanel); each surface keeps
-// its own iteration / aggregation / verdict logic. Behavior is byte-identical to
-// the previously-inlined copies. NOT the precise mid-epoch `remainingAllowance`
-// check — that's the P2 extended snapshot (#1349).
+// its own iteration / aggregation / verdict logic.
 
 import { isPcaExpired } from './health.js';
 import type { PcaSnapshot, PcaProbedKey } from '../api.js';
@@ -34,15 +32,26 @@ export function isPcaDead(
   return isPcaExpired(snap, nowSec) || !!snap.fullySwept;
 }
 
-/** The account has budget capacity (top-up buffer OR per-epoch allowance). The coarse
- *  P0 proxy — NOT the precise mid-epoch `remainingAllowance` (that's P2/#1349). */
+/**
+ * Account budget state. Non-extended reads use the coarse `baseEpochAllowance`
+ * proxy. Extended reads use precise `remainingAllowance` when top-up is empty;
+ * if the daemon fail-softed the extended read and omitted it, the budget is
+ * unknown and callers must not claim coverage.
+ */
+export function pcaBudgetState(
+  snap: Pick<PcaSnapshot, 'topUpBuffer' | 'baseEpochAllowance' | 'remainingAllowance' | 'extendedRequested'>,
+): boolean | null {
+  if (bigGt0(snap.topUpBuffer)) return true;
+  if (snap.remainingAllowance !== undefined) return bigGt0(snap.remainingAllowance);
+  if (snap.extendedRequested) return null;
+  return bigGt0(snap.baseEpochAllowance);
+}
+
+/** The account has confirmed budget capacity. Unknown extended-read budget -> false. */
 export function hasPcaBudget(
-  snap: Pick<PcaSnapshot, 'topUpBuffer' | 'baseEpochAllowance' | 'remainingAllowance'>,
+  snap: Pick<PcaSnapshot, 'topUpBuffer' | 'baseEpochAllowance' | 'remainingAllowance' | 'extendedRequested'>,
 ): boolean {
-  if (snap.remainingAllowance !== undefined) {
-    return bigGt0(snap.topUpBuffer) || bigGt0(snap.remainingAllowance);
-  }
-  return bigGt0(snap.topUpBuffer) || bigGt0(snap.baseEpochAllowance);
+  return pcaBudgetState(snap) === true;
 }
 
 /**
@@ -51,7 +60,7 @@ export function hasPcaBudget(
  * eligibility breakdown (dead vs out-of-budget) reuses the SAME rules.
  */
 export function isPcaSpendable(
-  snap: Pick<PcaSnapshot, 'expiresAtTimestamp' | 'fullySwept' | 'topUpBuffer' | 'baseEpochAllowance' | 'remainingAllowance'>,
+  snap: Pick<PcaSnapshot, 'expiresAtTimestamp' | 'fullySwept' | 'topUpBuffer' | 'baseEpochAllowance' | 'remainingAllowance' | 'extendedRequested'>,
   nowSec?: number,
 ): boolean {
   return !isPcaDead(snap, nowSec) && hasPcaBudget(snap);
@@ -102,7 +111,9 @@ export function classifyCoverage(snap: PcaSnapshot, nowSec?: number): PcaCoverag
   if (registered === null) return { outcome: 'inconclusive', registered: null };
   if (registered === false) return { outcome: 'unregistered', registered: false };
   const dead = isPcaDead(snap, nowSec);
-  const hasBudget = hasPcaBudget(snap);
+  const budget = pcaBudgetState(snap);
+  if (budget === null) return { outcome: 'inconclusive', registered: null };
+  const hasBudget = budget;
   if (!dead && hasBudget) return { outcome: 'covers', registered: true };
   return { outcome: 'uncovered', registered: true, dead, hasBudget };
 }
